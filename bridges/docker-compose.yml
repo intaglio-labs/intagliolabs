@@ -19,7 +19,10 @@
 #
 # Data lives OUTSIDE the repo, under ~/.hazlie/matrix/* (0700), because it holds
 # session cookies and message content. Only this compose file and the templated
-# configs are committed.
+# configs are committed. HAZLIE_MATRIX (bridges/.env, gitignored) names that
+# tree, and every volume below uses compose's `:?` required form: unset, the
+# variable would otherwise substitute as an empty string and the stack would
+# silently mount its data at filesystem root instead of failing.
 
 name: hazlie-bridges
 
@@ -33,16 +36,16 @@ services:
     ports:
       - "127.0.0.1:8008:8008"
     volumes:
-      - ${HAZLIE_MATRIX}/synapse:/data
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/synapse:/data
       # Each bridge's registration.yaml, mounted read-only from that bridge's own
       # data dir so synapse always sees the CURRENT tokens (no stale copies).
       # homeserver.yaml lists these paths under app_service_config_files.
-      - ${HAZLIE_MATRIX}/meta/registration.yaml:/registrations/meta.yaml:ro
-      - ${HAZLIE_MATRIX}/instagram/registration.yaml:/registrations/instagram.yaml:ro
-      - ${HAZLIE_MATRIX}/twitter/registration.yaml:/registrations/twitter.yaml:ro
-      - ${HAZLIE_MATRIX}/telegram/registration.yaml:/registrations/telegram.yaml:ro
-      - ${HAZLIE_MATRIX}/discord/registration.yaml:/registrations/discord.yaml:ro
-      - ${HAZLIE_MATRIX}/slack/registration.yaml:/registrations/slack.yaml:ro
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/meta/registration.yaml:/registrations/meta.yaml:ro
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/instagram/registration.yaml:/registrations/instagram.yaml:ro
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/twitter/registration.yaml:/registrations/twitter.yaml:ro
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/telegram/registration.yaml:/registrations/telegram.yaml:ro
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/discord/registration.yaml:/registrations/discord.yaml:ro
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/slack/registration.yaml:/registrations/slack.yaml:ro
     environment:
       - SYNAPSE_CONFIG_DIR=/data
       - SYNAPSE_CONFIG_PATH=/data/homeserver.yaml
@@ -56,7 +59,7 @@ services:
     depends_on:
       - synapse
     volumes:
-      - ${HAZLIE_MATRIX}/meta:/data
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/meta:/data
     networks:
       - bus
 
@@ -67,7 +70,7 @@ services:
     depends_on:
       - synapse
     volumes:
-      - ${HAZLIE_MATRIX}/instagram:/data
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/instagram:/data
     networks:
       - bus
 
@@ -82,7 +85,7 @@ services:
     depends_on:
       - synapse
     volumes:
-      - ${HAZLIE_MATRIX}/twitter:/data
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/twitter:/data
     networks:
       - bus
 
@@ -101,7 +104,7 @@ services:
   # the only mechanism by which a bridge could act as the owner. The enforced
   # version of this paragraph is checkBridgeHardening() in
   # connectors/lib/checks.mjs: it FAILS when backfill is off and WARNs when
-  # double puppeting is on, across every config in ${HAZLIE_MATRIX}. Trust that
+  # double puppeting is on, across every config in ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}. Trust that
   # over this comment.
   #
   # Owner
@@ -116,7 +119,7 @@ services:
     depends_on:
       - synapse
     volumes:
-      - ${HAZLIE_MATRIX}/telegram:/data
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/telegram:/data
     networks:
       - bus
 
@@ -127,7 +130,7 @@ services:
     depends_on:
       - synapse
     volumes:
-      - ${HAZLIE_MATRIX}/discord:/data
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/discord:/data
     networks:
       - bus
 
@@ -138,7 +141,7 @@ services:
     depends_on:
       - synapse
     volumes:
-      - ${HAZLIE_MATRIX}/slack:/data
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/slack:/data
     networks:
       - bus
 

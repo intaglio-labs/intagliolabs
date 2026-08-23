@@ -72,21 +72,48 @@ function send(res, status, body, type = 'text/html; charset=utf-8', { csp = null
   res.end(body);
 }
 
+// Over the limit this stops BUFFERING but keeps DRAINING to 'end' and rejects
+// there, so the 413 the caller writes goes out on a live, reusable socket.
+// The obvious `reject + req.destroy()` is wrong: destroy kills the socket
+// synchronously while reject only schedules a microtask, so the response was
+// written to a socket that was already gone and the client saw ECONNRESET
+// instead of a status code (ui/server/hermes.mjs documents the same trap on
+// its readJson). Past a hard multiple of the cap the sender is not a form
+// that mis-sized, and hanging up is the honest answer.
+const HARD_CAP_MULTIPLE = 8;
+
 function readBody(req, limit = 8 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
-    const chunks = [];
+    let over = false;
+    let settled = false;
+    let chunks = [];
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
     req.on('data', (c) => {
       size += c.length;
+      if (over) {
+        if (size > limit * HARD_CAP_MULTIPLE) {
+          finish(reject, new Error('body too large'));
+          req.destroy();
+        }
+        return;
+      }
       if (size > limit) {
-        reject(new Error('body too large'));
-        req.destroy();
+        over = true;
+        chunks = []; // not going to be parsed; stop holding it
         return;
       }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', reject);
+    req.on('end', () => {
+      if (over) finish(reject, new Error('body too large'));
+      else finish(resolve, Buffer.concat(chunks).toString('utf8'));
+    });
+    req.on('error', (error) => finish(reject, error));
   });
 }
 
@@ -267,8 +294,14 @@ async function handleRequest(req, res) {
     // dead weight -- it is what makes the review surface survive a CSP change
     // or a browser that refuses the nonce.
     const wantsJson = /application\/json/u.test(req.headers['content-type'] ?? '');
+    let raw = '';
     try {
-      const raw = await readBody(req);
+      raw = await readBody(req);
+    } catch {
+      send(res, 413, 'Too large.', 'text/plain; charset=utf-8');
+      return;
+    }
+    try {
       if (wantsJson) {
         const parsed = JSON.parse(raw);
         claimId = Number(parsed?.claim_id);
@@ -279,8 +312,10 @@ async function handleRequest(req, res) {
         choice = form.get('action') ?? '';
       }
     } catch {
-      send(res, 413, 'Too large.', 'text/plain; charset=utf-8');
-      return;
+      // Malformed JSON from the page's fetch — the caller's bug, not a size
+      // problem. Leave the fields invalid so the "bad decision" 400 below
+      // answers; this used to share the readBody catch and mislabel a parse
+      // failure 413 "Too large.".
     }
     // Only the two the page offers. `retract` exists in the schema for an
     // accepted claim the owner later changes their mind about, and it is not
