@@ -362,6 +362,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       if event.window === self.widgetWindow { return }
       // Onboarding covers the screen and owns its own dismissal.
       if self.onboardingPanel?.isVisible == true { return }
+      // A SCREENSHOT IS NOT AN OUTSIDE CLICK.
+      //
+      // ⇧⌘4 drags a selection, and that mouse-down reaches this global monitor
+      // like any other — so the popup being photographed closed the instant the
+      // capture began, and the shot came back empty. Someone could not send a
+      // picture of the thing they were asking about.
+      //
+      // screencaptureui backs the ⇧⌘4 and ⇧⌘5 gestures — the two that involve a
+      // mouse — and runs only while a capture is in progress, so its presence
+      // answers "is the owner photographing this right now" exactly rather than
+      // guessing. (The `screencapture` CLI does NOT go through it, which is worth
+      // knowing before testing this from a terminal and concluding it is dead.)
+      let capturing = NSWorkspace.shared.runningApplications.contains {
+        $0.bundleIdentifier == "com.apple.screencaptureui"
+      }
+      if capturing { return }
       open.orderOut(nil)
     }
     if let l = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: { e in
@@ -782,9 +798,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // "allow" turned into "denied" without anything appearing: the prompt was
   // there the whole time, underneath.
   //
-  // Proven rather than reasoned: a minimal Developer-ID-signed app with NO
-  // windows, asking for Contacts the same way, goes straight from notDetermined
-  // to authorized on this machine. The only material difference was the scrim.
+  // This paragraph used to say that was PROVEN — that a minimal signed app with
+  // no windows went straight to authorized, leaving the scrim as the only
+  // difference. That test was run from a terminal, and a process launched from
+  // a shell inherits the terminal's TCC grants, so it proved nothing. The
+  // prompts were actually blocked by a missing hardened-runtime entitlement
+  // (widget/Hazlie.entitlements). Lowering the scrim is still right — a
+  // full-screen window at .floating really does cover a level-0 dialog — but it
+  // was not the cause, and the fix for the cause is not here.
   //
   // So the scrim drops to .normal for the length of the ask and goes back after.
   // Lowering rather than hiding: the flow keeps its place, and a scrim that
@@ -792,6 +813,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   func yieldForPrompt(_ yield: Bool) {
     guard let p = onboardingPanel, p.isVisible else { return }
     p.level = yield ? .normal : .floating
+  }
+
+  // GET OUT OF SETTINGS' WAY, and stay out.
+  //
+  // Full Disk Access is granted in System Settings, which is an ordinary
+  // level-0 window — so the full-screen scrim buried it, and the owner was
+  // told to go somewhere they could not reach. Lowering alone is not enough
+  // here: two windows at .normal still order against each other, and the
+  // scrim was in front. It goes to the BACK for the length of the visit and
+  // comes forward again when the helper card closes.
+  func yieldForSettings(_ yield: Bool) {
+    guard let p = onboardingPanel, p.isVisible else { return }
+    if yield {
+      // BELOW normal, not at it. Lowering to .normal was not enough: dragging
+      // the app out of the helper card activates this app, and AppKit brings
+      // its windows forward — so the scrim landed back on top of Settings
+      // mid-drag, over the list the app was being dropped onto. A level under
+      // .normal cannot win that race no matter who activates.
+      p.level = NSWindow.Level(rawValue: NSWindow.Level.normal.rawValue - 1)
+      p.orderBack(nil)
+    } else {
+      p.level = .floating
+      p.orderFrontRegardless()
+    }
   }
 
   func setupProgress(_ payload: [String: Any]) {

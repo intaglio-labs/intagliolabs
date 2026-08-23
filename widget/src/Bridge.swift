@@ -35,6 +35,10 @@ protocol BridgeDelegate: AnyObject {
   /// Drop the onboarding scrim below ordinary windows so a system prompt can be
   /// seen, and put it back afterwards.
   func yieldForPrompt(_ yield: Bool)
+  // Like yieldForPrompt, but for System Settings rather than a transient
+  // dialog: it also pushes the scrim BEHIND, because Settings is a window the
+  // owner works in for a while rather than answers and dismisses.
+  func yieldForSettings(_ yield: Bool)
 }
 
 final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, URLSessionTaskDelegate {
@@ -664,7 +668,17 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // already waiting. Without it the owner has to press +, walk a file
       // picker to Applications, and find the app themselves — which is the
       // copy-paste problem wearing different clothes.
+      // Get the scrim out of the way FIRST. It is full-screen at .floating, so
+      // System Settings — an ordinary level-0 window — came up UNDERNEATH it:
+      // "opens in the background with no way to get to it", and the step got
+      // skipped, and Messages and Notes then read nothing.
+      delegate?.yieldForSettings(true)
       Permissions.primeFullDisk()
+      // And the part Settings will not do: the app, on screen, draggable onto
+      // the list. See FullDiskHelper.
+      FullDiskHelper.shared.begin { [weak self] in
+        self?.delegate?.yieldForSettings(false)
+      }
       reply(webView, id, ["state": "ok"])
 
     case "revealApp":
