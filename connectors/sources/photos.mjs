@@ -7,9 +7,15 @@
 // snapshot pattern copies the whole database first — measured at ~2 s for
 // chat.db's 1 GB. Photos.sqlite is 3.2 GB here, so a copy per scan would cost
 // ~7 s and 3.2 GB of writes every pass. A persistent read-only connection
-// gets a consistent view through WAL snapshot isolation at zero copy cost
-// (verified in ops/PROBES.md), which is what the courier already does with
-// chat.db for the same reason.
+// reads at zero copy cost; under WAL each STATEMENT gets snapshot isolation
+// (storeReader.mjs mode b), and the scan below runs its asset, name and face
+// queries as three separate statements with no wrapping transaction — so the
+// scan as a whole is NOT one snapshot, and the faces/names reads can see a
+// later WAL epoch than the asset batch. That drift is acceptable here: each
+// statement is still internally coherent — never a torn read — and the
+// faces/names merely reflect a slightly newer library state for the same
+// asset PKs. The mode trade-off is recorded in ops/PROBES.md; the retired
+// courier made the same call for its chat.db poll loop.
 //
 // FULL DISK ACCESS: same rule as every other Apple store — TCC attributes the
 // grant to the responsible process, so this only works spawned by launchd

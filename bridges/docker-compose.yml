@@ -104,7 +104,7 @@ services:
   # the only mechanism by which a bridge could act as the owner. The enforced
   # version of this paragraph is checkBridgeHardening() in
   # connectors/lib/checks.mjs: it FAILS when backfill is off and WARNs when
-  # double puppeting is on, across every config in ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}. Trust that
+  # double puppeting is on, across every config in ${HAZLIE_MATRIX}. Trust that
   # over this comment.
   #
   # Owner

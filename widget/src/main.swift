@@ -36,9 +36,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   private var skyPanel: PopupPanel?
   private var onboardingPanel: PopupPanel?
   private var earWeb: WKWebView?
-  // A message submitted on the widget bar before the chat page is alive;
-  // handed over in the chatReady handshake.
-  private var pendingUtterance: String?
+  // Messages submitted (typed or spoken) before the chat page is alive, in
+  // arrival order. The chatReady handshake takes the first; the bridge pulls
+  // each of the rest after the previous ask settles, so every queued message
+  // stays its own ask — never glued into one.
+  private var pendingUtterances: [String] = []
   // A voice failure raised before the chat page is alive; same handshake.
   private var pendingVoiceNote: String?
 
@@ -47,9 +49,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     installEditMenu()
 
     // Self-contained install: on a fresh Mac the local backend isn't set up,
-    // so stand it up from the bundle. No-ops on any machine that already has
-    // it (the owner's repo-based setup, or a prior run), and runs off the main
-    // thread so it never delays the UI.
+    // so stand it up from the bundle. On a machine that already has it (the
+    // owner's repo-based setup, or a prior run) this only regenerates a
+    // missing secret file, and it runs off the main thread so it never
+    // delays the UI.
     Provision.ensureBackend()
 
     // The second half of the self-move (Bridge "moveToApplications"): the
@@ -371,23 +374,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // __hzIncoming is defined late. Probe for it: a not-yet-loaded page
       // answers false and the message falls back to the chatReady handshake,
       // instead of a ReferenceError swallowed by the nil completion handler.
-      // Appending (not assigning) keeps a message already waiting on the
-      // handshake from being clobbered by this one.
+      // Queued (not string-joined) so a message already waiting on the
+      // handshake and this one each stay their own ask — and a queued voice
+      // transcript keeps its exact text for the bridge's voice-turn match.
       let js = "window.__hzIncoming ? (window.__hzIncoming(\(jsString(utterance))), true) : false"
       web.evaluateJavaScript(js) { [weak self] result, _ in
         guard let self, (result as? Bool) != true else { return }
-        self.pendingUtterance = self.pendingUtterance.map { "\($0)\n\(utterance)" } ?? utterance
+        self.pendingUtterances.append(utterance)
       }
     } else {
-      pendingUtterance = utterance
+      pendingUtterances.append(utterance)
     }
     openChat()
   }
 
+  // Pops ONE queued message per call — the chatReady handshake and the
+  // bridge's after-ask drain each take the next in line.
   func takePendingUtterance() -> String {
-    let u = pendingUtterance ?? ""
-    pendingUtterance = nil
-    return u
+    guard !pendingUtterances.isEmpty else { return "" }
+    return pendingUtterances.removeFirst()
   }
 
   func takePendingVoiceNote() -> String {

@@ -75,13 +75,28 @@ test('malformed JSON is a 400 bad decision, not a 413', async () => {
   assert.deepEqual(await res.json(), { error: 'bad decision' });
 });
 
-test('the bridge channel also answers over-limit bodies instead of resetting', async () => {
+test('the bridge channel answers over-limit bodies 413, not a reset or "bad json"', async () => {
   // Past its 64 KB limit but under the hard cap. readBody rejects before
   // bridgeApiResponse runs, so no bearer is needed and no bridge is touched.
+  // 413, not 400: one try used to wrap readBody and JSON.parse together, so
+  // an over-limit cookie paste was diagnosed as malformed JSON — the same
+  // mislabel the memory route fixed, in mirror image.
   const res = await fetch(`http://127.0.0.1:${port}/api/bridge/cookies`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: '{"p":"' + 'x'.repeat(100 * 1024) + '"}',
+  });
+  assert.equal(res.status, 413);
+  assert.deepEqual(await res.json(), { error: 'too large' });
+});
+
+test('malformed JSON on the bridge channel is still 400 bad json', async () => {
+  // The size/parse unbundling must not sweep parse failures into the 413.
+  // Parse fails before bridgeApiResponse runs, so no bearer is needed.
+  const res = await fetch(`http://127.0.0.1:${port}/api/bridge/cookies`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{not json',
   });
   assert.equal(res.status, 400);
   assert.deepEqual(await res.json(), { error: 'bad json' });

@@ -5,10 +5,14 @@ import Foundation
 // with no repo, no Homebrew, and no network. See widget/build.sh for what the
 // bundle carries.
 //
-// SAFE BY DEFAULT. This no-ops the moment the connect agent already exists in
-// ~/Library/LaunchAgents — which is true on the owner's repo-based setup and
-// after any prior provision — so it never clobbers a working machine. It only
-// does anything on a genuinely fresh install.
+// SAFE BY DEFAULT. Once the connect agent exists in ~/Library/LaunchAgents —
+// true on the owner's repo-based setup and after any prior provision — the
+// whole copy-and-bootstrap path is skipped, so it never clobbers a working
+// machine. The one thing every launch still ensures is the secret files
+// (ensureSecrets): generation is per-file and only-if-missing, so installs
+// provisioned by a build that predates llama-api-key.txt gain the key on
+// upgrade instead of crash-looping forever, and a healthy machine sees a
+// no-op.
 enum Provision {
   private static let fm = FileManager.default
   private static var home: URL { fm.homeDirectoryForCurrentUser }
@@ -32,7 +36,14 @@ enum Provision {
     DispatchQueue.global(qos: .utility).async {
       let connectPlist = launchAgents.appendingPathComponent("com.hazlie.connect.plist")
       guard !fm.fileExists(atPath: connectPlist.path) else {
-        return // already provisioned (owner's setup or a previous run)
+        // Already provisioned (owner's setup or a previous run) — but still
+        // heal a missing secret: installs provisioned by a build that only
+        // wrote hermes-token.txt have this plist yet lack llama-api-key.txt,
+        // leaving hermes and llama-server crash-looping under KeepAlive.
+        // Existing files are never touched, so this is a no-op when healthy.
+        do { try ensureSecrets() }
+        catch { NSLog("Intaglio Labs: secret provisioning failed: \(error)") }
+        return
       }
       guard fm.fileExists(atPath: backend.appendingPathComponent("connect/server.mjs").path) else {
         NSLog("Intaglio Labs: no bundled backend — a dev build without it, skipping provision")
@@ -105,27 +116,7 @@ enum Provision {
       cloneTree(voiceSrc, voiceDst)
     }
 
-    // The two 64-hex secrets hermes refuses to start without, 0600, if they
-    // aren't already there: the hermes bearer, and the llama API key (hermes
-    // reads that key at startup, and the rendered llama plist passes
-    // --api-key-file pointing at the same path — with it missing, both
-    // agents crash-loop on a fresh Mac). The repo-based setup gets them from
-    // ops/setup-llm.sh, which a downloaded app never runs.
-    for name in ["hermes-token.txt", "llama-api-key.txt"] {
-      let secretFile = hazlie.appendingPathComponent("secrets/\(name)")
-      if !fm.fileExists(atPath: secretFile.path) {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        // Checked: on failure the array would stay all zeros and the file
-        // would hold a predictable credential. Abort provisioning instead.
-        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
-          throw NSError(domain: "Provision", code: 1, userInfo: [
-            NSLocalizedDescriptionKey: "SecRandomCopyBytes failed generating \(name)"])
-        }
-        let token = bytes.map { String(format: "%02x", $0) }.joined()
-        try token.write(to: secretFile, atomically: true, encoding: .utf8)
-        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: secretFile.path)
-      }
-    }
+    try ensureSecrets()
 
     // Render each plist (@HOME@ → home, @REPO@ → the bundle's backend), write
     // it 0644, and bootstrap. Wait for hermes to answer /health before the
@@ -144,6 +135,33 @@ enum Provision {
       if label == "com.hazlie.hermes" { waitForHermes() }
     }
     NSLog("Intaglio Labs: provisioned backend from the app bundle")
+  }
+
+  // The two 64-hex secrets hermes refuses to start without, 0600, generated
+  // whenever either is missing — on first provision and on every later
+  // launch of an already-provisioned machine: the hermes bearer, and the
+  // llama API key (hermes reads that key at startup, and the rendered llama
+  // plist passes --api-key-file pointing at the same path — with it missing,
+  // both agents crash-loop). The repo-based setup gets them from
+  // ops/setup-llm.sh, which a downloaded app never runs. Existing files are
+  // left alone.
+  private static func ensureSecrets() throws {
+    try mkdir(hazlie.appendingPathComponent("secrets"), 0o700)
+    for name in ["hermes-token.txt", "llama-api-key.txt"] {
+      let secretFile = hazlie.appendingPathComponent("secrets/\(name)")
+      if !fm.fileExists(atPath: secretFile.path) {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        // Checked: on failure the array would stay all zeros and the file
+        // would hold a predictable credential. Abort provisioning instead.
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+          throw NSError(domain: "Provision", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "SecRandomCopyBytes failed generating \(name)"])
+        }
+        let token = bytes.map { String(format: "%02x", $0) }.joined()
+        try token.write(to: secretFile, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: secretFile.path)
+      }
+    }
   }
 
   private static func mkdir(_ url: URL, _ mode: Int) throws {

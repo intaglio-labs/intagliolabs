@@ -152,19 +152,11 @@ test('a missing or non-numeric ZMESSAGEDATE is NaN, not epoch zero', () => {
   }
 });
 
-// THE CAPPED-SCAN TIE. ZMESSAGEDATE is whole seconds, so the scan cap can cut
-// a batch mid-second. The cursor is the max delivered date and the next scan
-// is strict `>`, so without the one-second rewind on a capped scan the tied
-// rows that did not fit under the LIMIT fell below the floor forever — silent
-// loss, the same class files.mjs documents for its mtime cursor. This runs the
-// real source against a synthetic store: 4999 distinct seconds, then three
-// messages tied on one second, 5002 total against the 5000 cap.
-test('a capped scan re-offers the boundary second instead of dropping the tie', async (t) => {
-  const home = mkdtempSync(join(tmpdir(), 'wa-cursor-'));
-  t.after(() => rmSync(home, { recursive: true, force: true }));
+// Cursor-test scaffolding: a synthetic store with the measured schema, and a
+// run context that records deliveries and cursors in memory.
+function createSyntheticStore(home) {
   const storePath = chatStoragePath(home);
   mkdirSync(dirname(storePath), { recursive: true });
-
   const db = new DatabaseSync(storePath);
   db.exec(`
     CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
@@ -176,16 +168,16 @@ test('a capped scan re-offers the boundary second instead of dropping the tie', 
     );
     INSERT INTO ZWACHATSESSION VALUES (1, '18085550100@s.whatsapp.net', 'Sam');
   `);
-  const ins = db.prepare(
+  return db;
+}
+
+function messageInserter(db) {
+  return db.prepare(
     `INSERT INTO ZWAMESSAGE VALUES (?, ?, 0, ?, '18085550100@s.whatsapp.net', ?, 0, 0, NULL, 1)`
   );
-  const TIE_SECOND = 999_999;
-  db.exec('BEGIN');
-  for (let i = 0; i < 4999; i += 1) ins.run(i + 1, `msg ${i}`, 1000 + i, `S${i}`);
-  for (let i = 0; i < 3; i += 1) ins.run(5000 + i, `tied ${i}`, TIE_SECOND, `TIE${i}`);
-  db.exec('COMMIT');
-  db.close();
+}
 
+function runContext(home) {
   const cursors = new Map();
   const delivered = new Set();
   const ctx = {
@@ -204,7 +196,30 @@ test('a capped scan re-offers the boundary second instead of dropping the tie', 
       return { inserted: rows.length, updated: 0, unchanged: 0 };
     },
   };
+  return { ctx, cursors, delivered };
+}
 
+// THE CAPPED-SCAN TIE. ZMESSAGEDATE is whole seconds, so the scan cap can cut
+// a batch mid-second. The cursor is the max delivered date and the next scan
+// is strict `>`, so without the one-second rewind on a capped scan the tied
+// rows that did not fit under the LIMIT fell below the floor forever — silent
+// loss, the same class files.mjs documents for its mtime cursor. This runs the
+// real source against a synthetic store: 4999 distinct seconds, then three
+// messages tied on one second, 5002 total against the 5000 cap.
+test('a capped scan re-offers the boundary second instead of dropping the tie', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'wa-cursor-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+
+  const db = createSyntheticStore(home);
+  const ins = messageInserter(db);
+  const TIE_SECOND = 999_999;
+  db.exec('BEGIN');
+  for (let i = 0; i < 4999; i += 1) ins.run(i + 1, `msg ${i}`, 1000 + i, `S${i}`);
+  for (let i = 0; i < 3; i += 1) ins.run(5000 + i, `tied ${i}`, TIE_SECOND, `TIE${i}`);
+  db.exec('COMMIT');
+  db.close();
+
+  const { ctx, cursors, delivered } = runContext(home);
   const source = createWhatsappSource({ home });
   await source.run(ctx); // capped at 5000, mid-tie
   await source.run(ctx); // the rewound cursor re-offers the boundary second
@@ -215,4 +230,41 @@ test('a capped scan re-offers the boundary second instead of dropping the tie', 
     String(TIE_SECOND),
     'an uncapped scan advances to the max date as before'
   );
+});
+
+// THE BATCH-WIDE TIE. When every row of a capped batch shares one second, the
+// one-second rewind re-selects the identical batch on every pass: the cursor
+// never advances, the tie remainder never lands, and every message after the
+// tie second is unreachable — a livelock, not just a loss. The escape is the
+// uncapped refetch of the boundary second, so this pins two things the rewind
+// alone cannot deliver: the cursor ADVANCES past the tie second on the first
+// pass, and messages after it still arrive on the next.
+test('a batch-wide tie finishes the second and advances instead of livelocking', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'wa-tie-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+
+  const db = createSyntheticStore(home);
+  const ins = messageInserter(db);
+  const TIE_SECOND = 500_000;
+  db.exec('BEGIN');
+  // One more tied message than the 5000 cap, then five later ones.
+  for (let i = 0; i < 5001; i += 1) ins.run(i + 1, `tied ${i}`, TIE_SECOND, `T${i}`);
+  for (let i = 0; i < 5; i += 1) ins.run(6000 + i, `later ${i}`, 500_100 + i, `L${i}`);
+  db.exec('COMMIT');
+  db.close();
+
+  const { ctx, cursors, delivered } = runContext(home);
+  const source = createWhatsappSource({ home });
+
+  await source.run(ctx); // capped, and the whole batch is one second
+  assert.equal(delivered.size, 5001, 'the uncapped refetch lands the whole tie second in one pass');
+  assert.equal(
+    cursors.get('whatsapp:max-date'),
+    String(TIE_SECOND),
+    'the cursor advances past the finished second — pinned below it is the livelock'
+  );
+
+  await source.run(ctx); // progress: the messages after the tie second land
+  assert.equal(delivered.size, 5006, 'messages after the tie second are reachable');
+  assert.equal(cursors.get('whatsapp:max-date'), String(500_104));
 });

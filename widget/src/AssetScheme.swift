@@ -97,24 +97,38 @@ final class AssetSchemeHandler: NSObject, WKURLSchemeHandler {
     readQueue.async {
       var offset: UInt64 = 0
       var withdrawn = false
+      // Each read is clamped to the bytes still owed, so a file that grew
+      // since the size snapshot (a re-provision rewriting a model under the
+      // open handle) can never push WebKit more bytes than the
+      // Content-Length above promised.
       while !withdrawn, offset < size,
-            let chunk = try? handle.read(upToCount: AssetSchemeHandler.chunkBytes),
+            let chunk = try? handle.read(
+              upToCount: Int(min(UInt64(AssetSchemeHandler.chunkBytes), size - offset))),
             !chunk.isEmpty {
         offset += UInt64(chunk.count)
         DispatchQueue.main.sync {
           if self.live.contains(taskId) { task.didReceive(chunk) } else { withdrawn = true }
         }
       }
+      // Grow direction of the changed-mid-read guard: every promised byte
+      // was read, yet the file holds more — the delivery is a torn mix of
+      // old and new content, so it must not finish as success.
+      var grew = false
+      if !withdrawn, offset >= size,
+         let probe = try? handle.read(upToCount: 1), !probe.isEmpty {
+        grew = true
+      }
       try? handle.close()
       let delivered = offset
       DispatchQueue.main.sync {
         guard self.live.remove(taskId) != nil else { return }
-        if delivered >= size {
+        if delivered >= size, !grew {
           task.didFinish()
         } else {
-          // Short read: the promised Content-Length cannot be met (the file
-          // shrank or the disk failed mid-read), so fail rather than hand
-          // the page a silently truncated model.
+          // The promised Content-Length cannot be met honestly: the file
+          // shrank (short read), grew past the snapshot, or the disk failed
+          // mid-read. Fail rather than hand the page a silently truncated —
+          // or torn — model as success.
           task.didFailWithError(NSError(
             domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost,
             userInfo: [NSLocalizedDescriptionKey: "asset read failed at \(path)"]))

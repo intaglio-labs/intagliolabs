@@ -125,6 +125,16 @@ test('the FDA page names the stable binary', () => {
   assert.match(renderHelpPage('imessage', { token: 'TOK' }), /~\/\.hazlie\/bin\/node/u);
 });
 
+// Help prose is authored with inline markup in `body` and `after` alike —
+// linkedin.after carries <em>Connected On</em>. This page used to escape
+// `after`, so the user read a literal "<em>Connected On</em>" on the LinkedIn
+// help page while the same markup rendered fine one paragraph up.
+test('after paragraphs render their markup instead of showing it', () => {
+  const html = renderHelpPage('linkedin', { token: 'TOK' });
+  assert.ok(html.includes('<em>Connected On</em>'), 'after markup must render as markup');
+  assert.ok(!html.includes('&lt;em&gt;'), 'no escaped tag may reach the reader as text');
+});
+
 // --- the prototype-chain route that killed the server ----------------------
 
 test('help topics resolve by own-property only — /help/constructor cannot crash the server', () => {

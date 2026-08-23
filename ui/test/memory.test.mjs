@@ -566,17 +566,39 @@ test('a client cancel aborts the in-flight llama call, not just the reply', asyn
   }
 });
 
-test('an upstream llama error answers 502 with the status named', async () => {
-  // The !ok branch also cancels the unread error body before answering (same
+test('an upstream llama error answers 502 and releases the pinned connection', async () => {
+  // Two properties, and the second is the one that could regress silently:
+  // the !ok branch must cancel the unread error body BEFORE answering (same
   // reason as proxyLlama: undici cannot release a keep-alive connection to
-  // the single-slot llama-server while a body sits unconsumed). The wire
-  // contract pinned here is the 502.
+  // the single-slot llama-server while a body sits unconsumed). The error
+  // body here is padded past undici's buffering, because a body small enough
+  // to buffer whole is released even unread and would hide the regression.
+  // The wire contract is the 502 with the status named; the discriminator is
+  // the first upstream socket's fate — with the cancel it is freed (torn
+  // down, or drained and reused for the second ask); without it, it sits
+  // pinned to the unread body and neither happens.
+  let llamaConnections = 0;
+  let firstSocket = null;
+  let firstSocketRequests = 0;
+  let sawFreed;
+  const firstSocketFreed = new Promise((r) => { sawFreed = r; });
   const llama = createServer((req, res) => {
+    if (req.socket === firstSocket) {
+      firstSocketRequests += 1;
+      if (firstSocketRequests === 2) sawFreed('reused');
+    }
     req.resume();
     req.on('end', () => {
       res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end('{"error":"loading model"}');
+      res.end(`{"error":"loading model","padding":"${'x'.repeat(1 << 20)}"}`);
     });
+  });
+  llama.on('connection', (socket) => {
+    llamaConnections += 1;
+    if (llamaConnections === 1) {
+      firstSocket = socket;
+      socket.on('close', () => sawFreed('closed'));
+    }
   });
   await new Promise((r) => llama.listen(0, '127.0.0.1', r));
 
@@ -591,14 +613,22 @@ test('an upstream llama error answers 502 with the status named', async () => {
     bearerToken: TOKEN,
   });
   try {
-    const res = await fetch(`http://127.0.0.1:${server.port}/vault/ask`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({ utterance: 'how do you get to work?' }),
-    });
-    assert.equal(res.status, 502);
-    assert.match((await res.json()).error, /llama-server returned 503/u);
+    for (const attempt of [1, 2]) {
+      const res = await fetch(`http://127.0.0.1:${server.port}/vault/ask`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ utterance: 'how do you get to work?' }),
+      });
+      assert.equal(res.status, 502, `ask ${attempt}`);
+      assert.match((await res.json()).error, /llama-server returned 503/u, `ask ${attempt}`);
+    }
+    const outcome = await Promise.race([
+      firstSocketFreed,
+      new Promise((r) => setTimeout(r, 3000, 'pinned')),
+    ]);
+    assert.notEqual(outcome, 'pinned', 'the unread error body must not pin the keep-alive socket');
   } finally {
+    llama.closeAllConnections?.();
     await server.close();
     await new Promise((r) => llama.close(r));
     rmSync(dir, { recursive: true, force: true });

@@ -149,9 +149,12 @@ ways). Cloud LLM calls carrying corpus data remain forbidden in all forms; the
 cloud lane still answers 501.
 
 The connectors track adds a top-level `connectors/` package (its own deps, its own
-daemon) and a `courier` daemon for the iMessage lane. Hermes remains the sole
-writer *and sole deleter* of the context DB; connectors write through `POST
-/ingest` and request retention through bearer-only `/admin/*` routes. Courier never
-holds a context-DB handle. Commands are accepted only from the pinned Messages
-self-thread and only with an explicit `hz` / `hazlie:` prefix; content from any
-other sender is data, never instructions.
+daemon). Hermes remains the sole writer *and sole deleter* of the context DB;
+connectors write through `POST /ingest` and request retention through bearer-only
+`/admin/*` routes. (This paragraph used to also describe a `courier` daemon for
+the iMessage lane — no context-DB handle, commands accepted only from the pinned
+Messages self-thread with an explicit `hz` / `hazlie:` prefix. Its send/listen
+lanes were retired 2026-08-21 and its code is not in this repository; the ledger's
+scope note says the same of its send path. What survives here is the ingest-side
+pinned-thread reader, `connectors/lib/pinnedThread.mjs`, which keeps Hazlie's own
+old thread excluded from the corpus.)

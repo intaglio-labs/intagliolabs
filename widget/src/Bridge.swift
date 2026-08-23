@@ -149,11 +149,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   }()
 
   private var askTask: URLSessionDataTask?
-  // The transcript (not typed text) still waiting for its ask; the ask that
-  // carries this exact text also hands its answer back to the ear page for
-  // speech. Matched by text rather than a bare flag: the chat page drops an
-  // incoming transcript while a typed ask is busy, and a flag would then
-  // hand the TYPED question's answer to the speaker.
+  // The transcript (not typed text) still waiting for its ask, matched by
+  // TEXT: the ear page posts the transcript and the chat page posts the ask
+  // with no shared id between them, so identical text (both sides trim and
+  // cap the same way) is the only join. Lifecycle: set on voiceTranscript,
+  // consumed by the ask that matches it, and cleared by the next TYPED
+  // message (openChatWith) — typing supersedes a spoken turn, so a
+  // transcript the busy chat page silently dropped can never claim a later
+  // identical typed ask. A non-matching ask leaves it alone, because the
+  // transcript may still be queued behind that ask (load-time messages are
+  // delivered one ask at a time).
   private var pendingVoiceUtterance: String?
 
   // The only external destinations this app will hand to the OS. Opening
@@ -235,7 +240,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "openChatWith":
       let utterance = String((payload["utterance"] as? String ?? "")
         .trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
-      if !utterance.isEmpty { delegate?.openChat(with: utterance) }
+      if !utterance.isEmpty {
+        // A typed message supersedes any voice turn still waiting: without
+        // this, a transcript the busy chat page dropped would linger and
+        // could claim a later typed ask with the same words for the speaker.
+        pendingVoiceUtterance = nil
+        delegate?.openChat(with: utterance)
+      }
       reply(webView, id, ["state": "ok"])
     case "chatReady":
       reply(webView, id, [
@@ -463,11 +474,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "ask":
       let utterance = String((payload["utterance"] as? String ?? "")
         .trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
-      // Consume the pending transcript now: this ask either IS the voice
-      // turn (same text, both sides trim and cap identically) or superseded
-      // it, and a superseded transcript must never claim a later answer.
+      // The voice turn is the ask carrying the transcript's exact text.
+      // Consume it only on a match: a non-matching ask may be a load-time
+      // message queued AHEAD of the transcript, whose own ask is still
+      // coming — clearing here would silence it. Typed messages clear the
+      // transcript at openChatWith instead.
       let voiceTurn = pendingVoiceUtterance == utterance
-      pendingVoiceUtterance = nil
+      if voiceTurn { pendingVoiceUtterance = nil }
       ask(utterance) { [weak self] data in
         guard let self else { return }
         self.reply(webView, id, data)
@@ -475,6 +488,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
            let text = data["text"] as? String, data["state"] as? String == "ok" {
           self.delegate?.speakAnswer(text)
         }
+        // This ask settled; if a load-time message is queued behind it,
+        // hand the page the next one as its OWN ask.
+        self.deliverNextQueued(to: webView)
       }
     case "cancel":
       askTask?.cancel()
@@ -576,6 +592,24 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     else { return }
     DispatchQueue.main.async {
       webView.evaluateJavaScript("window.__hzDispatch(\(s))", completionHandler: nil)
+    }
+  }
+
+  // Messages that arrived before chat.js finished loading queue one by one
+  // (main.swift). chatReady hands the page the first; each settled ask pulls
+  // the next through __hzIncoming, so every queued message becomes its own
+  // ask. The page is idle by then: reply()'s evaluateJavaScript resolved the
+  // ask's promise, whose continuation drops chat.js's busy flag before this
+  // later evaluateJavaScript runs.
+  private func deliverNextQueued(to webView: WKWebView) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self,
+            let next = self.delegate?.takePendingUtterance(), !next.isEmpty,
+            let json = try? JSONSerialization.data(withJSONObject: [next]),
+            let arr = String(data: json, encoding: .utf8)
+      else { return }
+      webView.evaluateJavaScript(
+        "window.__hzIncoming && window.__hzIncoming(\(arr)[0])", completionHandler: nil)
     }
   }
 

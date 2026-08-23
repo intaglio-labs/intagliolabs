@@ -82,6 +82,79 @@ test('a failed unlink surfaces instead of reporting a clean delete', (t) => {
   assert.equal(dropCachedDistillates([H], root), 1, 'and succeeds once the dir is writable again');
 });
 
+test('the ingest mode is best-effort: the same damage skips instead of throwing', (t) => {
+  // Same broken directory as above, opposite contract. strict: false is
+  // insertRows' mode on the /ingest hot path, where a throw would refuse NEW
+  // rows over an OLD row's residue and 500 every batch until an operator
+  // repaired the directory.
+  const root = tempRoot(t);
+  const H = '4'.repeat(64);
+  const key = cacheKey({ promptSha: SHA_A, model: 'm1', contentHash: H });
+  putCached(key, 'x', root);
+  const modelDir = dirname(join(root, key));
+  chmodSync(modelDir, 0o500);
+  try {
+    assert.equal(dropCachedDistillates([H], root, { strict: false }), 0, 'no throw, nothing dropped');
+    assert.equal(readCached(key, root), 'x', 'the residue survives for a strict pass to surface');
+  } finally {
+    chmodSync(modelDir, 0o700);
+  }
+  assert.equal(dropCachedDistillates([H], root), 1, 'the strict pass gets it once the dir is repaired');
+});
+
+test('/ingest commits a content-changed redelivery even when the cache dir is damaged', async (t) => {
+  // The route-level consequence of the split, pinned where it bit: with the
+  // drop strict inside insertRows' transaction, an unwritable model dir threw
+  // out of the open BEGIN, the batch rolled back, hermes answered 500, and
+  // the connector retried the same batch against the same broken directory —
+  // indefinitely. The batch must commit; the residue is the accepted cost.
+  const root = tempRoot(t);
+  overrideRoot(t, root);
+  const dir = mkdtempSync(join(tmpdir(), 'hermes-cache-ingest-test-'));
+  const server = await start({
+    port: 0,
+    dbPath: join(dir, 'context.db'),
+    llamaApiKey: 'd'.repeat(64),
+    bearerToken: TOKEN,
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const post = (path, body) =>
+    fetch(base + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify(body),
+    });
+  let modelDir;
+  try {
+    await post('/ingest', [{ ts: 1, source: 'imessage', entity_id: 'i:1', text: 'i am vegetarian' }]);
+    const reader = new DatabaseSync(join(dir, 'context.db'), { readOnly: true });
+    const oldHash = reader
+      .prepare("SELECT content_hash FROM context WHERE entity_id = 'i:1'")
+      .get().content_hash;
+    reader.close();
+    const key = cacheKey({ promptSha: SHA_A, model: 'm', contentHash: oldHash });
+    putCached(key, 'x');
+    modelDir = dirname(join(root, key));
+    chmodSync(modelDir, 0o500);
+
+    const res = await post('/ingest', [
+      { ts: 1, source: 'imessage', entity_id: 'i:1', text: 'i eat fish now' },
+    ]);
+    assert.equal(res.status, 200, 'a damaged cache dir must not fail the batch');
+    assert.deepEqual(await res.json(), { inserted: 0, updated: 1, unchanged: 0 });
+
+    const check = new DatabaseSync(join(dir, 'context.db'), { readOnly: true });
+    const row = check.prepare("SELECT text FROM context WHERE entity_id = 'i:1'").get();
+    check.close();
+    assert.equal(row.text, 'i eat fish now', 'the update committed despite the unwritable cache');
+    assert.equal(readCached(key), 'x', 'the residue survives; the deletion routes stay strict about it');
+  } finally {
+    if (modelDir !== undefined) chmodSync(modelDir, 0o700);
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a content-changing upsert drops the old answer; an unchanged redelivery keeps it', (t) => {
   const root = tempRoot(t);
   overrideRoot(t, root);

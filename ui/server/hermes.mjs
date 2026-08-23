@@ -1014,7 +1014,15 @@ export function insertRows(db, rows) {
       ins.run(r.ts, r.source, r.speaker, r.text, r.metaJson, r.entityId, r.contentHash, changedAt);
       counts.inserted += 1;
     }
-    dropCachedDistillates(staleCache);
+    // Best-effort (strict: false), unlike the admin deletion routes. A route
+    // that answered "deleted" must not have left a quote on disk, so there a
+    // failed unlink throws and the transaction rolls back. Here the failure
+    // mode inverts: throwing would refuse NEW rows over residue of a row the
+    // store still holds, turning one damaged cache directory into a 500 on
+    // every batch carrying a content-changed redelivery — retried by the
+    // connector forever. The cache logs the residue once per process, and the
+    // next strict deletion route over the same hash surfaces it.
+    dropCachedDistillates(staleCache, undefined, { strict: false });
     db.exec('COMMIT');
   } catch (e) {
     db.exec('ROLLBACK');

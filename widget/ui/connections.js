@@ -463,7 +463,7 @@ function showTileTip(row, label) {
 }
 function hideTileTip() { if (tileTip) tileTip.classList.remove('on'); }
 
-function card(src) {
+function card(src, keep) {
   // Square tiles, four to a row. The old compact rows ruled out a 3-column
   // grid because every connection had to stay visible at once; at four
   // columns nine sources take three rows, so the constraint still holds.
@@ -479,7 +479,9 @@ function card(src) {
   // "Discord"s). aria-label names the tile for a screen reader and draws
   // nothing; showTileTip owns the visible hover label.
   row.setAttribute('aria-label', src.label);
-  // Stamped so a strip kept open across refresh() can find its rebuilt tile.
+  // Stamped so a strip and its tile can find each other by id across a
+  // refresh() rebuild — refresh() hands a kept strip to the tile that
+  // replaced its owner, and toggle() judges ownership by it.
   row.dataset.id = src.id;
 
   const mark = document.createElement('span');
@@ -571,10 +573,11 @@ function card(src) {
     } else if (src.connected) {
       // CONNECTED: one line naming what's connected, and a + to add another
       // account (owner). Mail carries the address in its id; the local stores
-      // are one-per-Mac, so they just say "connected". "add account" re-runs
-      // whatever external setup connects this source — which only some have,
-      // so the + shows only where a second account is actually reachable
-      // (mail, granola, oura, notion), never on the one-Mac FDA stores.
+      // are one-per-Mac, so they just say "connected". "add account" opens
+      // the hint's url — the external page where a second account is set
+      // up — so the + shows only where the hint HAS a url (mail, granola,
+      // notion), never on the one-Mac FDA stores. Oura's whole flow is
+      // ops/oura-auth.mjs with no URL to reopen, so it gets no + either.
       const acct = document.createElement('span');
       acct.className = 'acct';
       acct.textContent = src.id.startsWith('mail:')
@@ -867,8 +870,12 @@ function card(src) {
 
   const toggle = () => {
     // One strip at a time, by construction now: the host holds exactly one
-    // child, so opening a tile evicts whatever was there.
-    const wasOpen = tip.parentNode === hintHost;
+    // child, so opening a tile evicts whatever was there. Ownership is
+    // judged by id, not node identity: after a refresh() rebuild the open
+    // strip can be an OLD tile's node adopted by this one (end of card()),
+    // and the first tap on an open tile must close it, never relaunch it.
+    const open = hintHost.querySelector('.hint');
+    const wasOpen = open !== null && open.dataset.id === src.id;
     hintHost.replaceChildren();
     for (const r of grid.querySelectorAll('.row')) r.classList.remove('open');
     if (!wasOpen) {
@@ -895,6 +902,23 @@ function card(src) {
   row.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
   });
+  // A strip kept open across refresh() is handed to the tile that replaced
+  // its owner. Holding typed login input it is adopted AS-IS — wiping a
+  // half-typed cookie paste, token, or phone code is the exact loss the keep
+  // exists to prevent — and toggle()'s id check closes it on the next tap.
+  // Otherwise it is re-rendered from THIS tile's fresh src, so the panel
+  // cannot keep describing a state the dot no longer shows. The shelf was
+  // just rebuilt from the same status, so renderBridge's connected-repaint
+  // would be a loop here, not news — hence the pre-set flag.
+  if (keep) {
+    const typed = [...keep.querySelectorAll('textarea, input')].some((b) => b.value.trim());
+    if (!typed) {
+      hintHost.replaceChildren(tip);
+      if (src.action === 'bridge') { refreshedOnConnect = true; openBridge(); }
+      else renderTip();
+    }
+    row.classList.add('open');
+  }
   return row;
   // (grid id kept for the container; it renders rows now)
 }
@@ -913,17 +937,16 @@ async function refresh() {
     // code), and coming back fires the focus listener below; renderBridge
     // also calls refresh() on a freshly connected status. Wiping the host on
     // either path destroyed the open panel mid-login. The shelf still
-    // rebuilds; the open strip is kept and its tile on the rebuilt grid is
-    // re-marked open.
+    // rebuilds; the kept strip is handed to its rebuilt tile, which adopts
+    // it (end of card()): re-rendered from the fresh payload unless it holds
+    // typed login input, and re-marked open. A strip whose source left the
+    // payload closes with the tiles that could own it.
     const keep = hintHost.querySelector('.hint');
-    if (!keep) hintHost.replaceChildren(); // the strips belonged to the old tiles
     const shown = data.sources.filter((s) => !HIDDEN_CONNECTORS.has(kindOf(s.id)));
-    grid.replaceChildren(...orderSources(shown).map(card));
-    if (keep) {
-      for (const r of grid.querySelectorAll('.row')) {
-        r.classList.toggle('open', r.dataset.id === keep.dataset.id);
-      }
-    }
+    const kept = keep && shown.some((s) => s.id === keep.dataset.id) ? keep : null;
+    if (!kept) hintHost.replaceChildren(); // strips of old tiles, or of a source now gone
+    grid.replaceChildren(...orderSources(shown)
+      .map((s) => card(s, kept && kept.dataset.id === s.id ? kept : null)));
   } catch {
     notice.textContent = NOTICES.error;
     notice.hidden = false;

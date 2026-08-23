@@ -228,8 +228,18 @@ async function handleRequest(req, res) {
     const subpath = url.pathname === '/api/bridge' ? '' : url.pathname.slice('/api/bridge/'.length);
     let body = {};
     if (req.method === 'POST') {
+      // Size and parse failures answered apart, like /c/<token>/memory below:
+      // one try around both used to diagnose an over-limit cookie paste as
+      // "bad json". The 413 body is JSON because this channel's errors all are.
+      let raw = '';
       try {
-        body = JSON.parse(await readBody(req, 64 * 1024) || '{}');
+        raw = await readBody(req, 64 * 1024);
+      } catch {
+        send(res, 413, JSON.stringify({ error: 'too large' }), 'application/json; charset=utf-8');
+        return;
+      }
+      try {
+        body = JSON.parse(raw || '{}');
       } catch {
         send(res, 400, JSON.stringify({ error: 'bad json' }), 'application/json; charset=utf-8');
         return;

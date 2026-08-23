@@ -404,9 +404,16 @@ free list), `journal_mode = DELETE` (no `-wal`/`-shm` sidecar holding the same
 text at a mode nothing asserts), and `temp_store = MEMORY`. Because
 `secure_delete` only applies to pages freed *after* it is enabled, opening a
 database at `user_version` 0 also runs a one-time `VACUUM` to rewrite existing
-pages. The schema is now at `user_version = 2`: opening a v1 database migrates
-it in place (adds `entity_id` and `content_hash`, creates the partial UNIQUE
-index) with existing rows preserved; their `entity_id` stays `NULL`.
+pages. The schema is now at `user_version = 6`: opening an older database
+migrates it in place, version by version, with existing rows preserved. In
+brief — v2 added `entity_id` and `content_hash` plus the partial UNIQUE index
+that turns redelivery into an upsert (pre-v2 rows keep a `NULL` `entity_id`);
+v3 added the `store_changed_at` ingestion cursor and FTS5 secure-delete on
+both indexes; v4 rebuilt `claim_fts` with the porter stemmer; v5 rescoped
+entity uniqueness to `(source, entity_id)`; v6 added the
+`context_source_ts (source, ts, entity_id)` index for per-source time-range
+reads. The version-history comment above `SCHEMA_VERSION` in
+`ui/server/hermes.mjs` is the authoritative list.
 
 ## Not provided
 

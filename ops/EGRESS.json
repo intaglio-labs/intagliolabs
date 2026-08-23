@@ -98,12 +98,13 @@
     {
       "host": "cloud.ouraring.com",
       "kind": "user-browser-link",
-      "component": "ops/oura-auth.mjs; widget/src/Bridge.swift openExternal allowlist; widget/ui/connections.js + connector-tile.js help links",
+      "component": "ops/oura-auth.mjs; widget/src/Bridge.swift openExternal allowlist",
       "direction": "none",
-      "purpose": "the OAuth consent URL ops/oura-auth.mjs opens in the owner's browser, plus help links to Oura's app-registration and token pages",
+      "purpose": "the OAuth consent URL ops/oura-auth.mjs opens in the owner's browser; the same script's instructions name the app-registration page (cloud.ouraring.com/oauth/applications) where the owner registers their app by hand",
       "credential": "none -- this process opens no socket here; token exchange and refresh POST to api.ouraring.com (its own entry above)",
       "decision": "n/a",
-      "evidence": "ops/oura-auth.mjs:28 AUTHORIZE_URL; widget/src/Bridge.swift:164"
+      "evidence": "ops/oura-auth.mjs:28 AUTHORIZE_URL; widget/src/Bridge.swift allowedExternal",
+      "note": "No widget help link reaches this host any more: the oura hints in widget/ui/connections.js and connector-tile.js are text-only ('there is no settings URL to link'), so the /oauth/applications entry in Bridge.swift's allowedExternal is currently referenced by no UI call site."
     },
     {
       "host": "oauth2.googleapis.com",
@@ -173,7 +174,7 @@
       "purpose": "Slack DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
       "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
-      "evidence": "connect/lib/bridge.mjs; bridges/docker-compose.yml:135"
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.slack; bridges/docker-compose.yml image dock.mau.dev/mautrix/slack"
     },
     {
       "host": "discord.com",
@@ -183,7 +184,7 @@
       "purpose": "Discord DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
       "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
-      "evidence": "connect/lib/bridge.mjs; bridges/docker-compose.yml:124"
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.discord; bridges/docker-compose.yml image dock.mau.dev/mautrix/discord"
     },
     {
       "host": "web.telegram.org",
@@ -193,7 +194,7 @@
       "purpose": "Telegram DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
       "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
-      "evidence": "connect/lib/bridge.mjs; bridges/docker-compose.yml:113"
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.telegram; bridges/docker-compose.yml image dock.mau.dev/mautrix/telegram"
     },
     {
       "host": "facebook.com",
@@ -202,7 +203,7 @@
       "direction": "bidirectional",
       "purpose": "the Messenger login page (www.facebook.com/login/) inside the isolated login WKWebView; session cookies are harvested for the local bridge",
       "credential": "none stored -- the owner types their login into Meta's own page; the harvested session cookies go only to the local bridge",
-      "decision": "User-enabled login flow: the webview opens only when the user starts a Messenger or Instagram login from the widget, and its non-persistent data store is discarded on teardown",
+      "decision": "User-enabled login flow: the webview opens only when the user starts a web login from a widget bridge tile -- the trigger is not platform-gated, so an X login opens the window too and BridgeLogin.swift's suffix fence then refuses x.com -- and its non-persistent data store is discarded on teardown",
       "evidence": "widget/src/BridgeLogin.swift:53 allowedSuffixes",
       "note": "The fence is a suffix match (BridgeLogin.swift:226): any subdomain of facebook.com, instagram.com, messenger.com or meta.com is loadable during login, everything else is refused. This is the widget process's own webview, a separate path from the bridge container's session on www.facebook.com above."
     },
@@ -213,7 +214,7 @@
       "direction": "bidirectional",
       "purpose": "the Instagram login page (www.instagram.com/accounts/login/) inside the isolated login WKWebView; session cookies are harvested for the local bridge",
       "credential": "none stored -- the owner types their login into Meta's own page; the harvested session cookies go only to the local bridge",
-      "decision": "User-enabled login flow: the webview opens only when the user starts a Messenger or Instagram login from the widget, and its non-persistent data store is discarded on teardown",
+      "decision": "User-enabled login flow: the webview opens only when the user starts a web login from a widget bridge tile -- the trigger is not platform-gated, so an X login opens the window too and BridgeLogin.swift's suffix fence then refuses x.com -- and its non-persistent data store is discarded on teardown",
       "evidence": "widget/src/BridgeLogin.swift:53 allowedSuffixes"
     },
     {
@@ -223,7 +224,7 @@
       "direction": "bidirectional",
       "purpose": "allowed in the isolated login WKWebView because Meta's login can bounce across its own properties (account center, 2FA)",
       "credential": "none stored -- the owner types their login into Meta's own page; the harvested session cookies go only to the local bridge",
-      "decision": "User-enabled login flow: the webview opens only when the user starts a Messenger or Instagram login from the widget, and its non-persistent data store is discarded on teardown",
+      "decision": "User-enabled login flow: the webview opens only when the user starts a web login from a widget bridge tile -- the trigger is not platform-gated, so an X login opens the window too and BridgeLogin.swift's suffix fence then refuses x.com -- and its non-persistent data store is discarded on teardown",
       "evidence": "widget/src/BridgeLogin.swift:53 allowedSuffixes"
     },
     {
@@ -233,7 +234,7 @@
       "direction": "bidirectional",
       "purpose": "allowed in the isolated login WKWebView because Meta's login can bounce across its own properties (account center, 2FA)",
       "credential": "none stored -- the owner types their login into Meta's own page; the harvested session cookies go only to the local bridge",
-      "decision": "User-enabled login flow: the webview opens only when the user starts a Messenger or Instagram login from the widget, and its non-persistent data store is discarded on teardown",
+      "decision": "User-enabled login flow: the webview opens only when the user starts a web login from a widget bridge tile -- the trigger is not platform-gated, so an X login opens the window too and BridgeLogin.swift's suffix fence then refuses x.com -- and its non-persistent data store is discarded on teardown",
       "evidence": "widget/src/BridgeLogin.swift:53 allowedSuffixes"
     },
     {
@@ -244,7 +245,7 @@
       "purpose": "Synapse homeserver image",
       "credential": "none",
       "decision": "implied by the bridge decisions above; never enumerated as egress before this file",
-      "evidence": "bridges/docker-compose.yml:28 ghcr.io/element-hq/synapse:v1.140.0"
+      "evidence": "bridges/docker-compose.yml image ghcr.io/element-hq/synapse:v1.140.0"
     },
     {
       "host": "dock.mau.dev",
@@ -254,7 +255,7 @@
       "purpose": "all six mautrix bridge images",
       "credential": "none",
       "decision": "implied by the bridge decisions above; never enumerated as egress before this file",
-      "evidence": "bridges/docker-compose.yml:53,64,79,113,124,135",
+      "evidence": "bridges/docker-compose.yml, the six image: dock.mau.dev/... lines",
       "note": "telegram, discord and slack are pinned to :latest, a MUTABLE tag, on containers that receive the owner's live session cookies. meta/instagram/twitter are pinned to a version tag. None are pinned by digest."
     },
     {
@@ -298,7 +299,7 @@
       "purpose": "send the owner to their own app-passwords page",
       "credential": "none -- this process opens no socket here",
       "decision": "n/a",
-      "evidence": "widget/src/Bridge.swift:161"
+      "evidence": "widget/src/Bridge.swift allowedExternal https://myaccount.google.com/apppasswords"
     },
     {
       "host": "granola.ai",
@@ -308,7 +309,7 @@
       "purpose": "send the owner to Granola to fetch an API key",
       "credential": "none -- this process opens no socket here",
       "decision": "n/a",
-      "evidence": "widget/src/Bridge.swift:162"
+      "evidence": "widget/src/Bridge.swift allowedExternal https://granola.ai"
     },
     {
       "host": "www.notion.so",
@@ -318,7 +319,7 @@
       "purpose": "send the owner to their Notion integrations page",
       "credential": "none -- this process opens no socket here",
       "decision": "n/a",
-      "evidence": "widget/src/Bridge.swift:164"
+      "evidence": "widget/src/Bridge.swift allowedExternal https://www.notion.so/my-integrations"
     },
     {
       "host": "accounts.google.com",
@@ -348,8 +349,8 @@
       "purpose": "mautrix authentication docs, linked from the bridge login panel so the owner can find their Discord token / Slack xoxc+xoxd tokens",
       "credential": "none -- handed to the owner's browser, this process opens no socket",
       "decision": "n/a",
-      "evidence": "widget/ui/connections.js:364-374 BRIDGE_HELP; widget/src/Bridge.swift:167-168",
-      "note": "Added by the ledger tripwire on the commit that introduced it, which is the point of the tripwire. FOUND AT THE SAME TIME, and since fixed: this host was missing from Bridge.swift's allowedExternal, an exact-match allowlist (openExternal, Bridge.swift:476), so both links failed with 'url not in allowlist'. Both URLs are now in the allowlist (Bridge.swift:167-168)."
+      "evidence": "widget/ui/connections.js BRIDGE_HELP; widget/src/Bridge.swift allowedExternal",
+      "note": "Added by the ledger tripwire on the commit that introduced it, which is the point of the tripwire. FOUND AT THE SAME TIME, and since fixed: this host was missing from Bridge.swift's allowedExternal, an exact-match allowlist (Bridge.swift's case \"openExternal\" handler), so both links failed with 'url not in allowlist'. Both URLs are now in allowedExternal."
     },
     {
       "host": "brew.sh",
