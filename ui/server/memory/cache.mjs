@@ -79,26 +79,49 @@ export function putCached(key, value, root = cacheRoot()) {
 // is a path-traversal primitive the moment that assumption slips. Hex-ish or
 // it does not become a path.
 export function dropCachedDistillates(contentHashes, root = cacheRoot()) {
-  const hashes = [...new Set(contentHashes)].filter(
-    (h) => typeof h === 'string' && /^[a-zA-Z0-9]{8,128}$/u.test(h)
+  const hashes = new Set(
+    [...contentHashes].filter((h) => typeof h === 'string' && /^[a-zA-Z0-9]{8,128}$/u.test(h))
   );
-  if (hashes.length === 0 || !existsSync(root)) return 0;
+  if (hashes.size === 0 || !existsSync(root)) return 0;
+  // Intersect each directory LISTING with the hash set rather than probing
+  // every candidate hash against every prompt/model directory. A purge hands
+  // this function every deleted row's hash — hundreds of thousands on a big
+  // source — while the cache holds a few hundred files, so probing was
+  // O(hashes x dirs) sync unlinks of guaranteed misses inside the caller's
+  // open transaction.
   let dropped = 0;
   for (const sha of readdirSync(root)) {
     const shaDir = join(root, sha);
     let models;
     try {
       models = readdirSync(shaDir);
-    } catch {
-      continue;
+    } catch (error) {
+      // A stray non-directory at this level, or a concurrent removal. An
+      // unreadable DIRECTORY is not skippable — its files may be quote-bearing
+      // derivatives this function is on the hook to delete.
+      if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') continue;
+      throw error;
     }
     for (const model of models) {
-      for (const hash of hashes) {
+      const modelDir = join(shaDir, model);
+      let files;
+      try {
+        files = readdirSync(modelDir);
+      } catch (error) {
+        if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') continue;
+        throw error;
+      }
+      for (const file of files) {
+        if (!file.endsWith('.json') || !hashes.has(file.slice(0, -'.json'.length))) continue;
         try {
-          unlinkSync(join(shaDir, model, `${hash}.json`));
+          unlinkSync(join(modelDir, file));
           dropped += 1;
-        } catch {
-          // ENOENT: this row was never distilled under this prompt/model.
+        } catch (error) {
+          // Only "already gone" is success. Anything else (EACCES, EPERM, …)
+          // means a quote-bearing file survived a delete that was about to
+          // report success — throw, so the admin route's transaction rolls
+          // back instead of lying.
+          if (error?.code !== 'ENOENT') throw error;
         }
       }
     }

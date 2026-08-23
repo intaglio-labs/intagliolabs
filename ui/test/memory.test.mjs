@@ -483,6 +483,128 @@ test('the compose path sends a REAL bearer key to llama, not the getter', async 
   }
 });
 
+// Seed one accepted claim into a fresh file-backed db so /vault/ask must
+// compose — an empty corpus abstains before ever reaching llama. Used by the
+// upstream-failure tests below; the compose test above seeds inline because
+// it also asserts on the claim it builds.
+function seedAcceptedClaim(dbPath) {
+  const db = openDb(dbPath);
+  insertRows(db, {
+    ts: 1_700_000_000_000,
+    source: 'imessage',
+    entity_id: 'imessage:train',
+    text: 'i always take the 7am train on weekdays',
+  });
+  const row = db.prepare("SELECT id FROM context WHERE entity_id = 'imessage:train'").get();
+  applyMemoryBatch(db, {
+    run: RUN,
+    claims: [
+      {
+        kind: 'fact',
+        text: 'Austin takes the 7am train on weekdays.',
+        source: { context_id: Number(row.id), quote: 'take the 7am train' },
+      },
+    ],
+  });
+  const claimId = Number(db.prepare('SELECT max(id) AS id FROM claim').get().id);
+  db.prepare("INSERT INTO claim_decision(claim_id, action, actor, created_at) VALUES (?, 'accept', 'owner', ?)")
+    .run(claimId, 1_700_000_000_000);
+  db.close();
+}
+
+test('a client cancel aborts the in-flight llama call, not just the reply', async () => {
+  // The widget's Cancel is a socket teardown, and the route must turn it into
+  // an abort on the llama call. The regression this pins: the abort listener
+  // was once attached to req 'close' — which has ALREADY fired by the time
+  // readJson() has consumed the body — so the abort never ran and the
+  // single-slot llama-server kept generating into a socket nobody read, with
+  // the next question queued behind it.
+  let sawAsk;
+  const asked = new Promise((r) => { sawAsk = r; });
+  let sawTeardown;
+  const upstreamTornDown = new Promise((r) => { sawTeardown = r; });
+  const llama = createServer((req, res) => {
+    req.resume();
+    sawAsk();
+    // Never answer. If hermes aborts the call, this connection is destroyed
+    // and 'close' fires; if it does not, the race below times out.
+    res.on('close', () => sawTeardown());
+  });
+  await new Promise((r) => llama.listen(0, '127.0.0.1', r));
+
+  const dir = mkdtempSync(join(tmpdir(), 'hermes-cancel-test-'));
+  const dbPath = join(dir, 'context.db');
+  seedAcceptedClaim(dbPath);
+  const server = await start({
+    port: 0,
+    dbPath,
+    llamaApiKey: 'd'.repeat(64),
+    llamaBaseUrl: `http://127.0.0.1:${llama.address().port}`,
+    bearerToken: TOKEN,
+  });
+  try {
+    const cancel = new AbortController();
+    const asking = fetch(`http://127.0.0.1:${server.port}/vault/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ utterance: 'how do you get to work?' }),
+      signal: cancel.signal,
+    }).catch(() => null);
+    await asked;
+    cancel.abort();
+    await asking;
+    const outcome = await Promise.race([
+      upstreamTornDown.then(() => 'aborted'),
+      new Promise((r) => setTimeout(r, 3000, 'still generating')),
+    ]);
+    assert.equal(outcome, 'aborted', 'client teardown must abort the upstream llama call');
+  } finally {
+    llama.closeAllConnections?.();
+    await new Promise((r) => llama.close(r));
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an upstream llama error answers 502 with the status named', async () => {
+  // The !ok branch also cancels the unread error body before answering (same
+  // reason as proxyLlama: undici cannot release a keep-alive connection to
+  // the single-slot llama-server while a body sits unconsumed). The wire
+  // contract pinned here is the 502.
+  const llama = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end('{"error":"loading model"}');
+    });
+  });
+  await new Promise((r) => llama.listen(0, '127.0.0.1', r));
+
+  const dir = mkdtempSync(join(tmpdir(), 'hermes-upstream-error-test-'));
+  const dbPath = join(dir, 'context.db');
+  seedAcceptedClaim(dbPath);
+  const server = await start({
+    port: 0,
+    dbPath,
+    llamaApiKey: 'd'.repeat(64),
+    llamaBaseUrl: `http://127.0.0.1:${llama.address().port}`,
+    bearerToken: TOKEN,
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/vault/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ utterance: 'how do you get to work?' }),
+    });
+    assert.equal(res.status, 502);
+    assert.match((await res.json()).error, /llama-server returned 503/u);
+  } finally {
+    await server.close();
+    await new Promise((r) => llama.close(r));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the abstain path never reaches llama, pinned by pointing it at a dead port', async () => {
   // The spend-nothing property, pinned against regression rather than trusted
   // to stay true. llama is aimed at a closed port: if the route called it at

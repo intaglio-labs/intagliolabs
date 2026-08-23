@@ -8,9 +8,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { openDb, insertRows, start } from '../server/hermes.mjs';
@@ -63,6 +63,23 @@ test('a hash that could be a path never becomes one', (t) => {
     assert.equal(dropCachedDistillates([bad], root), 0, JSON.stringify(bad));
   }
   assert.equal(dropCachedDistillates(['h'.repeat(64)], join(root, 'missing')), 0, 'missing root is 0, not a throw');
+});
+
+test('a failed unlink surfaces instead of reporting a clean delete', (t) => {
+  // The catch used to swallow EVERY error under an ENOENT comment. A cache
+  // subdirectory that lost its write bit (EACCES) meant the quote-bearing
+  // file stayed on disk while the admin route answered success — the exact
+  // opposite of "deleted means deleted". Only "already gone" is ignorable;
+  // anything else throws so the caller's transaction rolls back.
+  const root = tempRoot(t);
+  const H = '3'.repeat(64);
+  const key = cacheKey({ promptSha: SHA_A, model: 'm1', contentHash: H });
+  putCached(key, 'x', root);
+  const modelDir = dirname(join(root, key));
+  chmodSync(modelDir, 0o500);
+  assert.throws(() => dropCachedDistillates([H], root), /EACCES|EPERM/u);
+  chmodSync(modelDir, 0o700);
+  assert.equal(dropCachedDistillates([H], root), 1, 'and succeeds once the dir is writable again');
 });
 
 test('a content-changing upsert drops the old answer; an unchanged redelivery keeps it', (t) => {

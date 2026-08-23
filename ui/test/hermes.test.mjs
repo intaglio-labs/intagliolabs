@@ -221,7 +221,7 @@ test('storage is hardened so deleted text does not survive in the free list', ()
       String(db.prepare('PRAGMA journal_mode').get().journal_mode).toLowerCase(),
       'delete'
     );
-    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 5);
+    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 6);
   } finally {
     db.close();
     rmSync(sandbox, { recursive: true, force: true });
@@ -235,7 +235,7 @@ test('in-memory databases are hardened too, minus what SQLite will not allow', (
   const db = openDb(':memory:');
   try {
     assert.equal(Number(db.prepare('PRAGMA secure_delete').get().secure_delete), 1);
-    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 5);
+    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 6);
   } finally {
     db.close();
   }
@@ -840,7 +840,7 @@ CREATE TRIGGER IF NOT EXISTS context_au AFTER UPDATE ON context BEGIN
 END;
 `;
 
-test('a v1 database migrates in place to v5 with its rows preserved', () => {
+test('a v1 database migrates in place to v6 with its rows preserved', () => {
   const sandbox = mkdtempSync(join(tmpdir(), 'hermes-migrate-test-'));
   const dbPath = join(sandbox, 'context.db');
   try {
@@ -854,7 +854,7 @@ test('a v1 database migrates in place to v5 with its rows preserved', () => {
 
     const db = openDb(dbPath);
     try {
-      assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 5);
+      assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 6);
       const columns = db
         .prepare("SELECT name FROM pragma_table_info('context')")
         .all()
@@ -891,6 +891,11 @@ test('a v1 database migrates in place to v5 with its rows preserved', () => {
         .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'context_changed'")
         .get();
       assert.ok(cursorIndex, 'the cursor index exists on the migrated file');
+      const sourceTsIndex = db
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'context_source_ts'")
+        .get();
+      assert.ok(sourceTsIndex, 'the per-source time index exists on the migrated file');
+      assert.match(sourceTsIndex.sql, /\(source, ts, entity_id\)/);
       // ...and the upsert machinery works on the migrated file.
       const entityRow = {
         ts: 1700000001000,
@@ -948,6 +953,83 @@ test('every admin route refuses the browser channel with a 403', async () => {
     assert.equal(res.status, 403, path);
     assert.match((await res.json()).error, /bearer-only/);
   }
+});
+
+// --- people routes ---------------------------------------------------------
+// Phase 1's /people/* handlers read the whole corpus into a people map and
+// WRITE the owner's merge decisions — bearer-only, exactly like /admin. The
+// admin gate above has a test whose only job is to prove the 403 fires; the
+// people gate gets the same, so a dispatch reorder or a loosened check cannot
+// silently hand these routes to the browser channel.
+
+test('every people route refuses the browser channel with a 403', async () => {
+  const attempts = [
+    ['POST', '/people/init', { days: 0 }],
+    ['GET', '/people/review?days=0', undefined],
+    ['GET', '/people/map', undefined],
+    ['POST', '/people/decide', { verdict: 'skip', a: 'x', b: 'y' }],
+  ];
+  for (const [method, path, body] of attempts) {
+    // An allowlisted Origin — a caller authorize() ACCEPTS as the browser
+    // channel. The refusal under test is capability, not authentication.
+    const res = await fetch(base + path, {
+      method,
+      headers: {
+        Origin: ALLOWED_ORIGIN,
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    assert.equal(res.status, 403, path);
+    assert.match((await res.json()).error, /bearer-only/);
+    // A bearer token does not rescue the request: an Origin header makes it
+    // the browser channel (authorize() reads Origin first), and the browser
+    // channel is not entitled here no matter what else it carries.
+    const both = await fetch(base + path, {
+      method,
+      headers: {
+        Origin: ALLOWED_ORIGIN,
+        Authorization: `Bearer ${TEST_BEARER_TOKEN}`,
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    assert.equal(both.status, 403, `${path} with bearer+Origin`);
+  }
+});
+
+test('people routes reject unknown fields, and the bearer channel answers', async (t) => {
+  // Point HOME at a sandbox for the duration: the people handlers read
+  // ~/.hazlie per request (owner config, connectors state, resolutions
+  // store), and a test must not read or create anything under the real one.
+  const home = mkdtempSync(join(tmpdir(), 'hermes-people-home-'));
+  const prevHome = process.env.HOME;
+  t.after(() => {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+  process.env.HOME = home;
+
+  // {day: 30} (a typo for days) must 400, not silently build the all-time
+  // map — the same closed-field discipline as every other write route.
+  const typo = await post('/people/init', { day: 30 });
+  assert.equal(typo.status, 400);
+  assert.match((await typo.json()).error, /unknown field "day"/);
+
+  const decideTypo = await post('/people/decide', { verdict: 'skip', a: 'x', b: 'y', note: 'hm' });
+  assert.equal(decideTypo.status, 400);
+  assert.match((await decideTypo.json()).error, /unknown field "note"/);
+
+  // And the gate guards capability, not the feature: the bearer channel gets
+  // a real review answer.
+  const res = await fetch(base + '/people/review?days=0', {
+    headers: { Authorization: `Bearer ${TEST_BEARER_TOKEN}` },
+  });
+  assert.equal(res.status, 200);
+  const out = await res.json();
+  assert.equal(typeof out.people, 'number');
+  assert.ok(Array.isArray(out.pairs));
 });
 
 test('admin operations validate source against the closed allowlist', async () => {
