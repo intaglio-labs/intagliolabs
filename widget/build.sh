@@ -55,7 +55,9 @@ cp -R ../ui/server "$BE/ui/server"
 cp -R ../ui/scripts "$BE/ui/scripts"
 cp -R ../prompts "$BE/prompts"
 cp -R ../connectors "$BE/connectors"
-cp -R ../common "$BE/common"
+# (No common/: it did not cross to this repo and nothing bundled imports it —
+# verified zero `../common` / `/common/` references in connect/connectors/
+# ui-server. Copying a nonexistent dir hard-fails the build under set -e.)
 # Runtime doesn't need the test trees.
 find "$BE" -type d -name test -prune -exec rm -rf {} + 2>/dev/null || true
 
