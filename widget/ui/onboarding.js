@@ -33,6 +33,7 @@ function showScreen(n) {
   screens[n]?.classList.add('entering');
   if (String(n) === '2') runDemo();
   if (String(n) === 'model') { clearDemo(); loadSetup(); }
+  if (String(n) === 'data') { refreshBack(); startPermPolling(); } else { stopPermPolling(); }
   if (String(n) === '3') { clearDemo(); runHome(); }
   // The scrim gets out of the way of the real widget only on the last scene.
   document.body.classList.toggle('spotlight', String(n) === '3');
@@ -408,49 +409,48 @@ function renderChoices() {
       tag.textContent = 'suits this Mac';
       b.appendChild(tag);
     }
-    b.addEventListener('click', () => selectModel(t.id));
+    b.addEventListener('click', () => startModel(t.id));
     b.dataset.tier = t.id;
     modelChoices.appendChild(b);
   }
   renderSelection();
 }
 
-// SELECTING IS NOT STARTING. Clicking a card marks it; the download button is
-// what spends the gigabytes. Clicking the selected card again clears it, so
-// there is a way back out of the choice without leaving the screen.
+// A click IS the choice. The size is on the card, so the press is informed, and
+// an extra confirm step for something you can cancel from the very next frame
+// is ceremony. The chosen card stays marked while it runs.
 let selectedTier = null;
-const modelGo = document.getElementById('modelGo');
-
-function selectModel(id) {
-  selectedTier = selectedTier === id ? null : id;
-  renderSelection();
-}
 
 function renderSelection() {
-  const tiers = (setupState && setupState.tiers) || [];
   for (const el of modelChoices.querySelectorAll('.ob-choice')) {
     const on = el.dataset.tier === selectedTier;
     el.classList.toggle('sel', on);
     el.setAttribute('aria-pressed', on ? 'true' : 'false');
   }
-  const t = tiers.find((x) => x.id === selectedTier);
-  modelGo.hidden = !t;
-  if (t) modelGo.textContent = `download ${fmtGB(t.bytes)}`;
 }
 
-modelGo.addEventListener('click', () => {
-  if (selectedTier) startModel(selectedTier);
-});
-
 function startModel(tier) {
+  selectedTier = tier;
+  renderSelection();
   modelErr.hidden = true;
   modelChoices.hidden = true;
-  modelGo.hidden = true;
   modelProg.hidden = false;
   modelBar.style.width = '0%';
   modelLabel.textContent = 'starting…';
+  downloading = true;
   hzPost('modelDownload', { tier }).catch(() => {});
+  // MOVE ON. A multi-gigabyte download is not something to watch, and the next
+  // screen is work the owner can do WHILE it runs — which is the whole reason
+  // setup comes before the demo now. The fetch is native and lives in the app,
+  // not in this page, so leaving the screen does not touch it, and a
+  // notification finds them wherever they are when it lands.
+  clearTimeout(autoAdvance);
+  autoAdvance = setTimeout(() => {
+    if (currentScreen === 'model' && !modelDone) showScreen('data');
+  }, 5000);
 }
+let autoAdvance = null;
+let downloading = false;
 
 // Native pushes every state change through here — progress, the install step
 // after the bytes land, and both endings.
@@ -469,20 +469,25 @@ window.__hzSetup = (d) => {
   }
   if (d.phase === 'ready') {
     modelDone = true;
+    downloading = false;
+    refreshBack();
     modelBar.style.width = '100%';
     modelLabel.textContent = 'ready';
     const cancel = document.getElementById('modelCancel');
     if (cancel) cancel.hidden = true;
-    // Do not yank the screen out from under them mid-read; move on shortly.
+    // May well arrive after the flow has moved on — that is expected, and the
+    // notification is what actually delivers the news. Only advance if the
+    // owner is still sitting on this screen watching it.
     setTimeout(() => { if (currentScreen === 'model') showScreen('data'); }, 1200);
     return;
   }
   if (d.phase === 'failed') {
+    downloading = false;
+    refreshBack();
     modelProg.hidden = true;
     modelChoices.hidden = false;
     const btn = document.getElementById('modelCancel');
     if (btn) { btn.disabled = false; btn.hidden = false; btn.textContent = 'cancel'; }
-    renderSelection();
     if (d.error !== 'cancelled') {
       modelErr.hidden = false;
       modelErr.textContent = d.error || 'that did not work';
@@ -525,12 +530,21 @@ const PERM_LABEL = {
 function paintPerms(map) {
   for (const row of permsEl.querySelectorAll('.ob-perm')) {
     const which = row.dataset.which;
-    if (which === 'fda') continue;
     const st = (map && map[which]) || 'undetermined';
     const btn = row.querySelector('button');
-    row.classList.toggle('on', st === 'granted');
+    const on = st === 'granted';
+    row.classList.toggle('on', on);
+    if (which === 'fda') {
+      // No prompt exists for this one, so the button is a door to Settings
+      // rather than a request — and once it is on there is nothing to press.
+      btn.textContent = on ? 'on' : 'open settings';
+      btn.disabled = on;
+      const help = document.getElementById('fdaHelp');
+      if (on && help) help.open = false;
+      continue;
+    }
     btn.textContent = PERM_LABEL[st] || 'allow';
-    btn.disabled = st === 'granted';
+    btn.disabled = on;
   }
 }
 
@@ -556,13 +570,50 @@ permsEl.addEventListener('click', async (e) => {
 
 let lastPerms = null;
 
+// Back to the download — only offered while there IS one, because a back
+// button to a finished screen is a dead end wearing an arrow.
+const dataBack = document.getElementById('dataBack');
+dataBack.addEventListener('click', () => showScreen('model'));
+function refreshBack() {
+  dataBack.hidden = !(downloading && !modelDone);
+}
+
+// LIVE PERMISSION POLLING, which is what makes this feel like it is watching.
+//
+// Full Disk Access has no query API and no callback, so the only way to know is
+// to keep trying the read — and the only honest moment to say "on" is when it
+// actually works. Polling while this screen is up means the row turns green a
+// second or so after the switch is flipped in Settings, with no "press check
+// when you're done" and no way to be told you granted something you did not.
+//
+// The same poll covers Contacts, Calendar and Photos, which can also be changed
+// in Settings behind our back.
+let permTimer = null;
+function startPermPolling() {
+  stopPermPolling();
+  permTimer = setInterval(async () => {
+    if (currentScreen !== 'data') return;
+    const res = await hzPost('permissionState').catch(() => null);
+    if (!res || !res.permissions) return;
+    const before = JSON.stringify(lastPerms);
+    lastPerms = res.permissions;
+    if (JSON.stringify(lastPerms) !== before) paintPerms(lastPerms);
+  }, 1500);
+}
+function stopPermPolling() {
+  if (permTimer) clearInterval(permTimer);
+  permTimer = null;
+}
+
 document.getElementById('fdaOpen').addEventListener('click', () => {
   hzPost('openFullDiskAccess').catch(() => {});
   const help = document.getElementById('fdaHelp');
   if (help) help.open = true;
 });
 document.getElementById('fdaReveal').addEventListener('click', () => {
-  hzPost('revealNode').catch(() => {});
+  // The app, not node. What needs the grant changed when the reader became a
+  // child of this process — see Connectors.swift.
+  hzPost('revealApp').catch(() => {});
 });
 
 document.getElementById('dataCheck').addEventListener('click', async () => {

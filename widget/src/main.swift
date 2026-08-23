@@ -299,7 +299,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // Ordering out rather than closing: these panels are kept lazily
   // (isReleasedWhenClosed is false) so they survive hidden and reopen with
   // their state, which is the behaviour the gear toggle depends on.
+  // CLICK OUTSIDE TO DISMISS.
+  //
+  // These are borderless non-activating panels with no chrome, so there is no
+  // close button and no window edge to click past — the only ways out were the
+  // toggle that opened it and ESC. Every other transient surface on the Mac
+  // closes when you look away from it, and one that does not feels stuck.
+  //
+  // Two monitors, because one cannot see both worlds: the LOCAL one sees clicks
+  // delivered to this app (the widget itself, another popup), the GLOBAL one
+  // sees clicks that went to any other application. The local monitor must
+  // return the event rather than swallow it, or the click that dismisses would
+  // also be the click that never reaches the button it landed on.
+  private var dismissMonitors: [Any] = []
+
+  private func watchForOutsideClicks() {
+    guard dismissMonitors.isEmpty else { return }
+    let handle: (NSEvent) -> Void = { [weak self] event in
+      guard let self else { return }
+      guard let open = self.edgePanels.compactMap({ $0 }).first(where: { $0.isVisible }) else { return }
+      // A click INSIDE the popup is the popup being used.
+      if event.window === open { return }
+      // A click on the widget is a toggle or another opener; those already
+      // manage each other, and dismissing here would fight them.
+      if event.window === self.widgetWindow { return }
+      // Onboarding covers the screen and owns its own dismissal.
+      if self.onboardingPanel?.isVisible == true { return }
+      open.orderOut(nil)
+    }
+    if let l = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: { e in
+      handle(e); return e // never swallow: the click still belongs to whatever it hit
+    }) { dismissMonitors.append(l) }
+    if let g = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: handle) {
+      dismissMonitors.append(g)
+    }
+  }
+
   private func present(_ panel: PopupPanel) {
+    watchForOutsideClicks()
     for other in edgePanels where other !== panel {
       if other?.isVisible == true { other?.orderOut(nil) }
     }

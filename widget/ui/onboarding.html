@@ -112,12 +112,6 @@ one click: intaglio labs moves itself and reopens from its real home.</p>
 nothing you ask ever leaves.</p>
 
     <div class="ob-choices" id="modelChoices"></div>
-    <!-- Choosing and starting are two acts. A click used to begin a 5 GB
-         download immediately, which makes the cards a minefield rather than a
-         choice — you cannot look at the second option without committing to the
-         first. Selection is now visible and reversible, and this is the button
-         that spends the bandwidth. -->
-    <button class="ob-cta" id="modelGo" hidden>download</button>
 
     <div class="ob-prog" id="modelProg" hidden>
       <div class="ob-prog-bar"><span id="modelBar"></span></div>
@@ -136,6 +130,7 @@ nothing you ask ever leaves.</p>
        asks for it. That split is macOS', not ours, so the screen shows it
        honestly rather than flattening everything into one scary permission. -->
   <div class="ob-screen ob-setup" id="screenData" hidden>
+    <button class="ob-back" id="dataBack" hidden>← the download</button>
     <p class="ob-tagline">what may i read?</p>
     <p class="ob-home-note ob-setup-note">turn on as much or as little as you like. you can change any of it later.
 everything is read on this Mac and stays here.</p>
@@ -165,7 +160,7 @@ everything is read on this Mac and stays here.</p>
       <ol class="ob-steps">
         <li><span class="ob-step-n">1</span><span>press <b>+</b> in the list that opened</span></li>
         <li><span class="ob-step-n">2</span><span>choose <b>Intaglio Labs</b> from Applications</span>
-          <button class="ob-replay ob-copy" id="fdaReveal">show me</button></li>
+          <button class="ob-replay ob-copy" id="fdaReveal">show me the app</button></li>
       </ol>
     </details>
 

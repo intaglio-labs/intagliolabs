@@ -71,14 +71,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     // flow — a skipped step must stay reachable.
                     "setupState", "modelDownload", "modelCancel",
                     "openFullDiskAccess", "revealNode", "startSources",
-                   "permissionState", "requestPermission"],
+                   "permissionState", "requestPermission", "revealApp"],
     "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
                    "widgetSpot",
                    // The setup scenes: choosing and fetching the answer model,
                    // and turning on the first data source.
                    "setupState", "modelDownload", "modelCancel",
                    "openFullDiskAccess", "revealNode", "startSources",
-                    "permissionState", "requestPermission"],
+                    "permissionState", "requestPermission", "revealApp"],
     // people.html includes connector-tile.js as well as people.js (check the
     // script tags, not the file's own comment about being shared), so the People
     // popup renders connector tiles and needs the bridge verbs too. Writing this
@@ -594,6 +594,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           guard let self else { return }
           if let failure {
             self.delegate?.setupProgress(["phase": "failed", "error": failure, "tier": tier])
+            if failure != "cancelled" {
+              ModelSetup.notify(title: "Setup didn’t finish", body: failure)
+            }
             return
           }
           // The weights exist now, so the agent that needs them can. Installed
@@ -622,11 +625,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
             // says "checking" forever is the one state that is never true.
             if Provision.waitForLlama() {
               self.delegate?.setupProgress(["phase": "ready", "tier": tier])
+              ModelSetup.notify(
+                title: "Hazlie can answer now",
+                body: "The model finished downloading and is ready.")
             } else {
+              let why = "The model is saved but didn’t start. Reopen the app to try again."
               self.delegate?.setupProgress([
-                "phase": "failed", "tier": tier,
-                "error": "the model is saved but did not start — reopen the app to try again",
+                "phase": "failed", "tier": tier, "error": why,
               ])
+              ModelSetup.notify(title: "Setup didn’t finish", body: why)
             }
           }
         }
@@ -648,11 +655,19 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": "ok"])
 
     case "openFullDiskAccess":
-      // Straight to the pane. The list is long and the row is not obvious.
-      if let url = URL(string:
-        "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
-        NSWorkspace.shared.open(url)
-      }
+      // Touch a protected path FIRST, then open the pane. macOS lists an app
+      // under Full Disk Access once it has attempted a protected read, so the
+      // failed attempt is what puts "Intaglio Labs" in the list with a switch
+      // already waiting. Without it the owner has to press +, walk a file
+      // picker to Applications, and find the app themselves — which is the
+      // copy-paste problem wearing different clothes.
+      Permissions.primeFullDisk()
+      reply(webView, id, ["state": "ok"])
+
+    case "revealApp":
+      // The fallback when the row does not appear: this app, selected in
+      // Finder, ready to be dragged straight onto the list.
+      NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
       reply(webView, id, ["state": "ok"])
 
     case "startSources":

@@ -20,6 +20,7 @@
 // matches the constant below.
 import Foundation
 import CryptoKit
+import UserNotifications
 
 struct ModelTier {
   let id: String            // "4b" | "8b"
@@ -57,6 +58,26 @@ enum ModelSetup {
   // Same rule as setup-llm.sh: 8B above 8 GiB, 4B at or below it.
   static var recommended: String {
     ProcessInfo.processInfo.physicalMemory > 8 * 1024 * 1024 * 1024 ? "8b" : "4b"
+  }
+
+  /// The download outlives its screen — onboarding moves on after a few
+  /// seconds and the fetch keeps going — so the ending has to find the owner
+  /// wherever they are. A notification is the only thing that does.
+  ///
+  /// Requested lazily, at the moment there is something worth saying, rather
+  /// than at launch: an app that asks to send notifications before it has ever
+  /// had news is asking on spec.
+  static func notify(title: String, body: String) {
+    let center = UNUserNotificationCenter.current()
+    center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+      guard granted else { return }
+      let content = UNMutableNotificationContent()
+      content.title = title
+      content.body = body
+      let req = UNNotificationRequest(
+        identifier: "hazlie.model.\(UUID().uuidString)", content: content, trigger: nil)
+      center.add(req, withCompletionHandler: nil)
+    }
   }
 
   private static let fm = FileManager.default

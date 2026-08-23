@@ -12,6 +12,7 @@
 // Under launchd it was node asking, and an app cannot request a prompt on behalf
 // of a binary it does not own.
 import Foundation
+import AppKit
 import Contacts
 import EventKit
 import Photos
@@ -73,7 +74,48 @@ enum Permissions {
     }
   }
 
+  // MARK: Full Disk Access
+
+  /// FDA has no query API, so the only honest test is to attempt a protected
+  /// read and see what happens. `chat.db` is what the Messages connector opens,
+  /// so this asks the exact question that matters rather than a proxy for it.
+  ///
+  /// AND THE ATTEMPT IS THE POINT, not just the answer. macOS adds an app to the
+  /// Full Disk Access list the first time it touches a protected path — so this
+  /// failing is what makes "Intaglio Labs" appear there, already listed, with a
+  /// switch to flip. Without it the owner has to press +, walk a file picker to
+  /// Applications, and find the app themselves.
+  static func fullDisk() -> Status {
+    let db = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Library/Messages/chat.db")
+    guard FileManager.default.fileExists(atPath: db.path) else {
+      // No Messages history on this Mac: nothing to read, so nothing to grant.
+      // Reported as granted rather than denied — a screen that demands a
+      // permission which would buy nothing is just a wall.
+      return .granted
+    }
+    guard let handle = try? FileHandle(forReadingFrom: db) else { return .denied }
+    defer { try? handle.close() }
+    // Opening can succeed where reading is refused; read a byte to be sure.
+    return (try? handle.read(upToCount: 1)) != nil ? .granted : .denied
+  }
+
+  /// Nudge macOS into listing this app under Full Disk Access, then open the
+  /// pane so the row is on screen with its switch off.
+  static func primeFullDisk() {
+    _ = fullDisk()
+    if let url = URL(string:
+      "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+      NSWorkspace.shared.open(url)
+    }
+  }
+
   static var all: [String: String] {
-    ["contacts": contacts().rawValue, "calendar": calendar().rawValue, "photos": photos().rawValue]
+    [
+      "contacts": contacts().rawValue,
+      "calendar": calendar().rawValue,
+      "photos": photos().rawValue,
+      "fda": fullDisk().rawValue,
+    ]
   }
 }
