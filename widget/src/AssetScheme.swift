@@ -16,6 +16,13 @@ final class AssetSchemeHandler: NSObject, WKURLSchemeHandler {
   // frontend, which served them from ui/public/): these come from the
   // provisioned tree; everything else is page code from the bundle.
   private let provisionedPrefixes = ["/models/", "/vendor/", "/workers/", "/voice/"]
+  // Chunked delivery state: ids of the tasks still owed bytes. Touched only
+  // on the main thread — start/stop run there, and the read queue reaches it
+  // inside main.sync — so no lock. A task stop(_:) has withdrawn must never
+  // be called into again (WebKit raises), hence the membership checks.
+  private var live = Set<ObjectIdentifier>()
+  private let readQueue = DispatchQueue(label: "hazlie.asset-read", qos: .userInitiated)
+  private static let chunkBytes = 4 * 1024 * 1024
 
   override init() {
     bundleRoot = Bundle.main.resourceURL!.appendingPathComponent("ui")
@@ -52,26 +59,73 @@ final class AssetSchemeHandler: NSObject, WKURLSchemeHandler {
     let root = provisionedPrefixes.contains(where: { path.hasPrefix($0) })
       ? provisionedRoot : bundleRoot
     let file = root.appendingPathComponent(String(path.dropFirst())).standardizedFileURL
-    // Never serve outside the chosen root, whatever the path spells.
-    guard file.path.hasPrefix(root.standardizedFileURL.path),
-          let data = try? Data(contentsOf: file) else {
+    // Never serve outside the chosen root, whatever the path spells. The
+    // comparison must stop at a path separator: a bare hasPrefix would also
+    // accept a SIBLING of the root ("…/models/voice-evil" for root
+    // "…/models/voice").
+    let rootPath = root.standardizedFileURL.path
+    var isDir: ObjCBool = false
+    guard file.path == rootPath || file.path.hasPrefix(rootPath + "/"),
+          FileManager.default.fileExists(atPath: file.path, isDirectory: &isDir),
+          !isDir.boolValue,
+          let handle = try? FileHandle(forReadingFrom: file) else {
       dbg("asset MISS: \(path)")
       task.didFailWithError(NSError(
         domain: NSURLErrorDomain, code: NSURLErrorFileDoesNotExist,
         userInfo: [NSLocalizedDescriptionKey: "no asset at \(path)"]))
       return
     }
+    let size = (try? handle.seekToEnd()) ?? 0
+    try? handle.seek(toOffset: 0)
     let response = HTTPURLResponse(
       url: url, statusCode: 200, httpVersion: "HTTP/1.1",
       headerFields: [
         "Content-Type": mimeType(for: file.pathExtension),
-        "Content-Length": String(data.count),
+        "Content-Length": String(size),
         "Cache-Control": "no-store",
       ])!
     task.didReceive(response)
-    task.didReceive(data)
-    task.didFinish()
+    // The bytes move OFF the main thread, in chunks. start(_:) runs on the
+    // main thread and this handler serves the voice model files (up to
+    // 325MB); one whole-file Data(contentsOf:) here froze the entire app —
+    // widget, chat and settings share this process — for the read, while
+    // doubling peak memory. Each chunk hops back to the main thread
+    // (WKURLSchemeTask must be driven where start ran); main.sync bounds the
+    // buffer to one chunk and paces the read to the delivery.
+    let taskId = ObjectIdentifier(task)
+    live.insert(taskId)
+    readQueue.async {
+      var offset: UInt64 = 0
+      var withdrawn = false
+      while !withdrawn, offset < size,
+            let chunk = try? handle.read(upToCount: AssetSchemeHandler.chunkBytes),
+            !chunk.isEmpty {
+        offset += UInt64(chunk.count)
+        DispatchQueue.main.sync {
+          if self.live.contains(taskId) { task.didReceive(chunk) } else { withdrawn = true }
+        }
+      }
+      try? handle.close()
+      let delivered = offset
+      DispatchQueue.main.sync {
+        guard self.live.remove(taskId) != nil else { return }
+        if delivered >= size {
+          task.didFinish()
+        } else {
+          // Short read: the promised Content-Length cannot be met (the file
+          // shrank or the disk failed mid-read), so fail rather than hand
+          // the page a silently truncated model.
+          task.didFailWithError(NSError(
+            domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost,
+            userInfo: [NSLocalizedDescriptionKey: "asset read failed at \(path)"]))
+        }
+      }
+    }
   }
 
-  func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
+  // Withdraws a task mid-stream (page torn down, fetch aborted); the
+  // in-flight read notices on its next chunk and stops.
+  func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {
+    live.remove(ObjectIdentifier(task))
+  }
 }

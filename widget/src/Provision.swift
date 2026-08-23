@@ -105,14 +105,26 @@ enum Provision {
       cloneTree(voiceSrc, voiceDst)
     }
 
-    // The hermes bearer, 0600, if it isn't already there.
-    let tokenFile = hazlie.appendingPathComponent("secrets/hermes-token.txt")
-    if !fm.fileExists(atPath: tokenFile.path) {
-      var bytes = [UInt8](repeating: 0, count: 32)
-      _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-      let token = bytes.map { String(format: "%02x", $0) }.joined()
-      try token.write(to: tokenFile, atomically: true, encoding: .utf8)
-      try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tokenFile.path)
+    // The two 64-hex secrets hermes refuses to start without, 0600, if they
+    // aren't already there: the hermes bearer, and the llama API key (hermes
+    // reads that key at startup, and the rendered llama plist passes
+    // --api-key-file pointing at the same path — with it missing, both
+    // agents crash-loop on a fresh Mac). The repo-based setup gets them from
+    // ops/setup-llm.sh, which a downloaded app never runs.
+    for name in ["hermes-token.txt", "llama-api-key.txt"] {
+      let secretFile = hazlie.appendingPathComponent("secrets/\(name)")
+      if !fm.fileExists(atPath: secretFile.path) {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        // Checked: on failure the array would stay all zeros and the file
+        // would hold a predictable credential. Abort provisioning instead.
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+          throw NSError(domain: "Provision", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "SecRandomCopyBytes failed generating \(name)"])
+        }
+        let token = bytes.map { String(format: "%02x", $0) }.joined()
+        try token.write(to: secretFile, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: secretFile.path)
+      }
     }
 
     // Render each plist (@HOME@ → home, @REPO@ → the bundle's backend), write

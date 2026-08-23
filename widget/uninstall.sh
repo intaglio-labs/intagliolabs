@@ -11,8 +11,8 @@
 # What this touches, and only this:
 #   1. Every com.hazlie.* launchd agent in this user's domain (stopped and
 #      its plist removed).
-#   2. The Hazlie widget process and Hazlie.app in ~/Applications and
-#      /Applications.
+#   2. The Hazlie widget process and the app bundle — 'Intaglio Labs.app'
+#      (or a pre-rename 'Hazlie.app') in ~/Applications and /Applications.
 #   3. ~/.hazlie — the database, secrets, models, logs, caches. This is the
 #      irreversible one: there are no backups by design, and nobody has a
 #      copy (see the privacy policy). Hence the typed confirmation.
@@ -62,11 +62,23 @@ else
 fi
 
 # ── 2. the app ───────────────────────────────────────────────────────────────
+# Both names: build.sh installs '/Applications/Intaglio Labs.app' (and the
+# in-app self-move copies to the same name); 'Hazlie.app' is the pre-rename
+# install. One path per line — 'Intaglio Labs.app' contains a space, so a
+# space-joined list would word-split into two wrong rm targets.
+NL='
+'
 APPS=""
-for a in "$HOME/Applications/Hazlie.app" "/Applications/Hazlie.app"; do
-  [ -d "$a" ] && APPS="$APPS $a"
+for a in "$HOME/Applications/Hazlie.app" "/Applications/Hazlie.app" \
+         "$HOME/Applications/Intaglio Labs.app" "/Applications/Intaglio Labs.app"; do
+  [ -d "$a" ] && APPS="$APPS$a$NL"
 done
-[ -n "$APPS" ] && say "  app bundles to remove:$APPS" || say "  app bundles: none found"
+if [ -n "$APPS" ]; then
+  say "  app bundles to remove:"
+  printf '%s' "$APPS" | while IFS= read -r a; do say "    $a"; done
+else
+  say "  app bundles: none found"
+fi
 
 # ── 3. the data ──────────────────────────────────────────────────────────────
 if [ -d "$HZ_HOME" ]; then
@@ -107,7 +119,7 @@ for label in $FOUND_AGENTS; do
 done
 
 pgrep -x Hazlie >/dev/null 2>&1 && act "quit the Hazlie widget" pkill -x Hazlie
-for a in $APPS; do
+printf '%s' "$APPS" | while IFS= read -r a; do
   act "remove $a" rm -rf "$a"
 done
 
@@ -117,11 +129,12 @@ fi
 
 # The self-move step (onboarding screen 0) can leave a stale app copy behind
 # and records where in HazlieStaleCopyPath. Remove the copy it names — but
-# only if it actually names a Hazlie.app, so a corrupted default can never
-# aim this rm at something else — then drop the app's whole defaults domain.
+# only if it actually names one of our app bundles, so a corrupted default
+# can never aim this rm at something else — then drop the whole defaults
+# domain.
 STALE=$(defaults read com.hazlie.widget HazlieStaleCopyPath 2>/dev/null || true)
 case "$STALE" in
-  */Hazlie.app) [ -d "$STALE" ] && act "remove stale self-move copy $STALE" rm -rf "$STALE" ;;
+  */Hazlie.app|*"/Intaglio Labs.app") [ -d "$STALE" ] && act "remove stale self-move copy $STALE" rm -rf "$STALE" ;;
 esac
 act "remove com.hazlie.widget preferences" defaults delete com.hazlie.widget 2>/dev/null
 

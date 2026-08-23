@@ -149,9 +149,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   }()
 
   private var askTask: URLSessionDataTask?
-  // Set when a transcript (not typed text) opened the current ask; the
-  // answer is then also handed back to the ear page for speech.
-  private var voiceTurnPending = false
+  // The transcript (not typed text) still waiting for its ask; the ask that
+  // carries this exact text also hands its answer back to the ear page for
+  // speech. Matched by text rather than a bare flag: the chat page drops an
+  // incoming transcript while a typed ask is busy, and a flag would then
+  // hand the TYPED question's answer to the speaker.
+  private var pendingVoiceUtterance: String?
 
   // The only external destinations this app will hand to the OS. Opening
   // one launches the default browser (or System Settings) — the app itself
@@ -161,7 +164,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
     "https://myaccount.google.com/apppasswords",
     "https://granola.ai",
-    "https://cloud.ouraring.com/personal-access-tokens",
+    "https://cloud.ouraring.com/oauth/applications",
     "https://www.notion.so/my-integrations",
     // The bridge token how-to links, for the Discord/Slack guided login flows.
     "https://docs.mau.fi/bridges/go/discord/authentication.html",
@@ -247,7 +250,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       let utterance = String((payload["utterance"] as? String ?? "")
         .trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
       if !utterance.isEmpty {
-        voiceTurnPending = true
+        pendingVoiceUtterance = utterance
         delegate?.voiceTranscript(utterance)
       }
       reply(webView, id, ["state": "ok"])
@@ -460,14 +463,17 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "ask":
       let utterance = String((payload["utterance"] as? String ?? "")
         .trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
+      // Consume the pending transcript now: this ask either IS the voice
+      // turn (same text, both sides trim and cap identically) or superseded
+      // it, and a superseded transcript must never claim a later answer.
+      let voiceTurn = pendingVoiceUtterance == utterance
+      pendingVoiceUtterance = nil
       ask(utterance) { [weak self] data in
         guard let self else { return }
         self.reply(webView, id, data)
-        if self.voiceTurnPending {
-          self.voiceTurnPending = false
-          if let text = data["text"] as? String, data["state"] as? String == "ok" {
-            self.delegate?.speakAnswer(text)
-          }
+        if voiceTurn,
+           let text = data["text"] as? String, data["state"] as? String == "ok" {
+          self.delegate?.speakAnswer(text)
         }
       }
     case "cancel":
@@ -592,7 +598,21 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     _ method: String, _ base: URL, _ path: String,
     bearer: String?, json: [String: Any]? = nil, timeout: TimeInterval? = nil
   ) -> URLRequest {
-    var req = URLRequest(url: base.appendingPathComponent(path))
+    // The path may carry a query ("people/review?days=365"). It cannot ride
+    // appendingPathComponent whole — that percent-encodes the '?', hermes
+    // then sees one literal path component and 404s — so split it here and
+    // let URLComponents keep '?' a delimiter, the way bridgeCall builds its
+    // URLs.
+    let url: URL
+    if let q = path.firstIndex(of: "?") {
+      var comps = URLComponents(
+        url: base.appendingPathComponent(String(path[..<q])), resolvingAgainstBaseURL: false)!
+      comps.query = String(path[path.index(after: q)...])
+      url = comps.url!
+    } else {
+      url = base.appendingPathComponent(path)
+    }
+    var req = URLRequest(url: url)
     req.httpMethod = method
     if let t = timeout { req.timeoutInterval = t }
     if let b = bearer { req.setValue("Bearer \(b)", forHTTPHeaderField: "Authorization") }

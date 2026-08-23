@@ -366,12 +366,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   }
 
   func openChat(with utterance: String) {
-    let alreadyAlive = chatPanel != nil
-    if alreadyAlive, let web = chatWeb,
-       let json = try? JSONSerialization.data(withJSONObject: [utterance]),
-       let arr = String(data: json, encoding: .utf8) {
-      // Page is long since loaded; hand the message straight over.
-      web.evaluateJavaScript("window.__hzIncoming(\(arr)[0])", completionHandler: nil)
+    if chatPanel != nil, let web = chatWeb {
+      // The panel existing does not mean chat.js has finished loading —
+      // __hzIncoming is defined late. Probe for it: a not-yet-loaded page
+      // answers false and the message falls back to the chatReady handshake,
+      // instead of a ReferenceError swallowed by the nil completion handler.
+      // Appending (not assigning) keeps a message already waiting on the
+      // handshake from being clobbered by this one.
+      let js = "window.__hzIncoming ? (window.__hzIncoming(\(jsString(utterance))), true) : false"
+      web.evaluateJavaScript(js) { [weak self] result, _ in
+        guard let self, (result as? Bool) != true else { return }
+        self.pendingUtterance = self.pendingUtterance.map { "\($0)\n\(utterance)" } ?? utterance
+      }
     } else {
       pendingUtterance = utterance
     }
