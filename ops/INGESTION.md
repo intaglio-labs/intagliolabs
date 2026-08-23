@@ -39,7 +39,7 @@ channels and one gate:
 | Channel | How | Who uses it |
 |---|---|---|
 | **bearer** | **No `Origin` header**, plus `Authorization: Bearer <token>` | curl, launchd, the connectors |
-| **browser** | An `Origin` header that is present and allowlisted | the Expo page |
+| **browser** | An `Origin` header that is present and allowlisted | nothing in the shipped product today — the widget is a native bearer client; the default allowlist still admits the deleted Expo app's dev origins (`DEFAULT_ALLOWED_ORIGINS` in `ui/server/hermes.mjs`) |
 
 The `/admin/*` lifecycle routes accept **only the bearer channel** — the browser
 channel gets a 403 that says so (see the Lifecycle section below).
@@ -175,8 +175,19 @@ sources and a human can read provenance off the id:
 | `mail` | `mail:<Message-ID>` | Message-ID normalized: trimmed, enclosing `<>` stripped, host part lowercased. Fallback when absent: `mail:<account>:<folder>:<uidvalidity>:<uid>`. |
 | `granola` | `granola:<note_id>` | |
 | `health` | `health:<metric>:<YYYY-MM-DD>` and `health:workout:<start_iso>` | One row per metric per completed local day; upsert lands corrections. |
+| `notes` | `notes:<note_id>` | Apple Notes primary key. |
+| `photos` | `photos:<uuid>` | Photos library asset UUID. |
+| `notion` | `notion:<page_id>` | |
+| `files` | `files:<absolute path>` | The path is the identity. |
+| `whatsapp` | `whatsapp:<stanza_id>` | |
+| `linkedin` | `linkedin:conn:<slug>` and `linkedin:msg:<sha8>` | Export seed: slug from the profile URL (hash fallback); messages keyed by a hash over conversation/date/sender/content. |
 | `hazlie_digest` | `hazlie_digest:<date>` | Reruns replace the day's digest. |
 | `seed` | (none) | Dev fixtures stay unkeyed; re-seeding inserts again by design. |
+
+This table went stale once already (it was missing six live sources when the
+2026-08-22 audit read it). The list a doc cannot drift from is hermes' own
+`KNOWN_SOURCES` (`ui/server/hermes.mjs`); the per-source row shapes live in
+[`CONNECTORS.md`](CONNECTORS.md)'s source registry.
 
 Verified round trip (2026-08-19): first delivery of a two-row entity batch →
 `{"inserted":2,"updated":0,"unchanged":0}`; the identical batch again →

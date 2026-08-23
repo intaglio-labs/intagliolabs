@@ -1,7 +1,8 @@
 # Connectors — contract and runbook
 
 The connectors tier is the set of pollers that read the owner's own data —
-Apple's on-disk stores and three approved remote endpoints — and write it into
+Apple's on-disk stores and the approved remote endpoints enumerated in
+[`EGRESS.json`](EGRESS.json) — and write it into
 the household context store through Hermes. This document is the contract:
 what each source writes, how identity and deletion work, how the Oura
 connector authenticates, and the operational runbook (Full Disk Access, logs,
@@ -18,15 +19,17 @@ The connectors daemon (`connectors/daemon.mjs`, launchd label
 `com.hazlie.connectors`) is **loopback-only: it opens no listener of any
 kind.** Its sockets are outbound only:
 
-| Direction | Endpoint | Purpose |
-|---|---|---|
-| loopback out | Hermes `127.0.0.1:8789` | `POST /ingest`, `/admin/*` |
-| HTTPS out | `public-api.granola.ai` | Granola REST fetch-back |
-| HTTPS out | `api.ouraring.com` | Oura API v2 polling (see below) |
-| HTTPS out | `api.notion.com` | Notion API v1 (search + block children) |
-| IMAP/TLS out | `imap.gmail.com:993` | mail fetch |
+- **loopback out** to Hermes (`127.0.0.1:8789`): `POST /ingest`, `/admin/*` —
+  the only place corpus rows go.
+- **outbound HTTPS/IMAPS** to the approved remote endpoints (Granola, Oura,
+  Notion, Gmail IMAP, Google Calendar + its OAuth host), **enumerated in
+  [`EGRESS.json`](EGRESS.json) and nowhere else** — this table used to restate
+  the hosts and drifted (it omitted the two Google Calendar hosts while the
+  connector reached them), which is exactly the failure the ledger ends. Read
+  the ledger for what is reachable; the tripwire is
+  `connectors/test/egress.test.mjs`.
 
-The `files` connector adds **no** row to this table: it reads the local
+The `files` connector adds **no** egress path: it reads the local
 mirrors that iCloud Drive, Box and Dropbox already maintain on disk and opens
 no socket at all.
 
@@ -66,6 +69,8 @@ live in [`INGESTION.md`](INGESTION.md). What each connector puts in a row:
 | `photos` | `photos:<uuid>` | caption / scene description | time, place, faces, album |
 | `notion` | `notion:<page_id>` | title + the page's text blocks, ≤20k chars | url, parent type, block count, `truncated` |
 | `files` | `files:<absolute path>` | filename + folder trail; file contents when local, small and text | `store`, `folder`, `ext`, `bytes`, **`online_only`**, `has_content` |
+| `whatsapp` | `whatsapp:<stanza_id>` | one message's text, from WhatsApp Desktop's local store | `stanza_id`, `is_from_me`, `is_group`, `chat_handle`, `chat_name`?, `sender_handle`? |
+| `linkedin` | `linkedin:conn:<slug>` · `linkedin:msg:<sha8>` | connection: name — position at company (+ connected date); message: content, ≤4000 chars | connection: name, url, email, company, position; message: conversation id, from/to, subject |
 | `hazlie_digest` | `hazlie_digest:<date>` | the delivered digest text | composition facts |
 | `seed` | (none) | dev fixtures | — |
 
@@ -91,6 +96,8 @@ row text.
 | `mail` | per-folder IMAP `UID` cursor + `UIDVALIDITY` guard | a `UIDVALIDITY` change invalidates the cursor for that folder; re-scan |
 | `granola` | `updated_after` timestamp, rewound 60 s | the skew absorbs clock drift; upsert makes the overlap free |
 | `health` (Oura) | last completed poll day + **trailing 7-day re-poll** | Oura corrects daily summaries retroactively; the re-poll window catches corrections, and upsert lands them as `updated`/`unchanged` |
+| `whatsapp` | `ZMESSAGEDATE` high-water mark (Apple-epoch seconds) | reads a snapshot of WhatsApp Desktop's store; freshness is bounded by when the app last ran, and the store **prunes** — never reconcile by absence (see `PROBES.md`) |
+| `linkedin` | export files' mtimes | file-based, no API: scans only when a CSV in `~/.hazlie/imports/linkedin/` is newer than last seen; `--backfill` re-reads both files |
 
 **Window reconciliation (calendar, and any future scanned-window source):**
 upserts cannot express deletion. After each successful window scan the
@@ -286,8 +293,9 @@ Stated once, so "private" is not assumed to mean more than it delivers:
   through Messages transit Apple's servers and sync to every device on the
   Apple ID; a digest derived from health and calendar data lands on all of
   them. The privacy boundary of this system is the Apple ID, not this Mac.
-- Egress is the closed set in the Network posture table above; anything new
-  requires an owner decision recorded in `ui/AGENTS.md` first.
+- Egress is the closed set enumerated in [`EGRESS.json`](EGRESS.json); a new
+  path lands as a ledger entry with a real `decision`, in the same commit as
+  the code that opens it, enforced by `connectors/test/egress.test.mjs`.
 
 ## Doctor
 

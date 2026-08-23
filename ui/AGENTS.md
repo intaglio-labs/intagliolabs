@@ -1,15 +1,17 @@
-# Expo HAS CHANGED
+# Scope — the Hazlie assistant track
 
-Read the exact versioned docs at https://docs.expo.dev/versions/v57.0.0/ before writing any code.
+(Amended for the public tree: this file used to open with an Expo-versions
+header and a scope exemption citing the root CLAUDE.md that governed the
+diarization experiments. Neither the Expo app, the experiments, nor a root
+CLAUDE.md/AGENTS.md is in this repository — they stayed on the private side —
+so the rules that still bind are inlined below rather than cited.)
 
-# Scope exemption from the root CLAUDE.md
-
-The root CLAUDE.md governs the diarization experiments and lists "web server, API,
-RAG" as do-not-build. ui/ is a sanctioned separate track (the Hazlie assistant): its
+ui/ is a sanctioned separate track (the Hazlie assistant): its
 local context server (server/hermes.mjs) and retrieval into the LLM prompt exist by
 explicit owner direction — they satisfy the requirement that the interaction
-layer query a locally served database of ingested context. The experiments' hard
-rules that DO still bind here: no speaker enrollment or voiceprints (speaker labels
+layer query a locally served database of ingested context. Two hard
+rules inherited from the diarization experiments still bind here: no speaker
+enrollment or voiceprints (speaker labels
 in the context DB are ingestion-supplied text, never audio-derived), and no
 fabricated results.
 
@@ -28,8 +30,10 @@ temporarily absent.** Owner-approved on 2026-08-12:
   route returns a context row to a browser or to the courier**; exactly one
   bearer-only review route returns a quote, to the owner, about their own
   corpus.
-- `askHazlie` has no `contextSnippets` parameter. Passing corpus text on a model
-  call is now a thrown error rather than a policy someone has to remember.
+- The Expo app's `askHazlie` (deleted with that app) had its `contextSnippets`
+  parameter removed first: passing corpus text on a model call became a thrown
+  error rather than a policy someone had to remember. The policy outlives the
+  function.
 - Retrieval returns server-side in the **sealed reader**, which owns the only
   database handle, holds no cloud credential, and returns **speech, not rows**.
   **Amended 2026-08-22 — read this before citing the line above.** The sealed
@@ -64,8 +68,9 @@ server-side tool loop. `POST /lane/cloud/...` currently answers 501 and the clie
 throws rather than falling back, so nothing has been widened yet.
 
 **Get this exemption text updated before the first commit that opens a non-loopback
-socket** — not after. Root AGENTS.md asks for disagreements to be flagged rather
-than routed around, and a provider key arriving without a recorded decision is
+socket** — not after. Disagreements get flagged rather than routed around (a
+convention this repo keeps from the private repo's root AGENTS.md), and a
+provider key arriving without a recorded decision is
 exactly that kind of silent routing-around.
 
 ## Egress policy — amended 2026-08-19, superseded 2026-08-22

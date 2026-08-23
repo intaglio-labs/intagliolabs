@@ -19,20 +19,25 @@ rather than silently reconciled. Consequence for the hermes branch:
 face is actually removed — that shrink belongs to a separate, coordinated
 commit over there, not to this directory.
 
-## Requirement on /vault/ask (MEMORY-PLAN Days 7–9, not yet built)
+## The /vault/ask contract (shipped)
 
-The chat view targets `POST /vault/ask` on hermes. Whoever builds it:
+The chat view targets `POST /vault/ask` on hermes. The route exists: it is
+served by the in-process sealed reader (`handleVaultAsk` in
+`ui/server/hermes.mjs`; see ui/AGENTS.md "Where retrieval lives now" for how
+it landed there). The two requirements this widget put on the route are both
+honored, and `widget/test/vault-ask-contract.test.mjs` pins them:
 
-- **It must accept the bearer channel.** This widget is a native URLSession
+- **It accepts the bearer channel.** This widget is a native URLSession
   client: it sends NO Origin header and authenticates with
-  `Authorization: Bearer` from `~/.hazlie/secrets/hermes-token.txt`. Do not
-  gate the route on `channel === 'browser'`.
-- **Honor client-disconnect aborts** (`req` close → AbortSignal on the llama
-  call, per VOICE-PLAN §3.6): the send button becomes a working Cancel.
+  `Authorization: Bearer` from `~/.hazlie/secrets/hermes-token.txt`. The
+  route is not gated on `channel === 'browser'`.
+- **Client-disconnect aborts:** the handler wires the connection's close to
+  an AbortController on the loopback llama call, so the send button is a
+  working Cancel.
 
-Until the route exists, a send renders the fixed string "vault isn't ready on
-this machine yet" (404), and status/identity failures render their own fixed
-strings. The widget never fabricates an answer.
+If hermes is down or answers with the wrong identity, a send renders fixed
+strings ("vault isn't ready on this machine yet" on 404; status/identity
+failures render their own). The widget never fabricates an answer.
 
 ## Architecture
 
@@ -101,5 +106,6 @@ HAZLIE_CONNECT_PORT=8790 ~/Applications/Hazlie.app/Contents/MacOS/Hazlie
   onscreen=nil) shows in CGWindowList alongside the widget window. Origin
   not yet identified; invisible in practice.
 
-Not yet verified: popup interactions (need a human click), chat round trip
-(needs /vault/ask to exist).
+Not yet verified: popup interactions (need a human click), a live chat round
+trip against the running service (the /vault/ask contract is covered by
+`widget/test/vault-ask-contract.test.mjs`).
