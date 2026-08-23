@@ -3,8 +3,13 @@
 # by hand, an ad-hoc signature. No Xcode project, no SwiftPM, no third-party
 # code — the same shape as the ops/setup-*.sh scripts.
 #
-#   widget/build.sh            build + install to ~/Applications/Hazlie.app
+#   widget/build.sh            build + install to /Applications/Intaglio Labs.app
 #   widget/build.sh --run      ...and (re)launch it
+#
+# (This header said ~/Applications/Hazlie.app until 2026-08-23. Both halves had
+# been false since the bundle was renamed and the install moved -- see DEST at
+# the foot of this file, which also removes the old ~/Applications copies. Rule
+# 2: the code is what shipped, so the sentence is what gets fixed.)
 set -eu
 cd "$(dirname "$0")"
 
