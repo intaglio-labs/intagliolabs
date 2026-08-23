@@ -1,0 +1,187 @@
+// The Photos connector: the owner's photo library → hermes.
+//
+// PERSONAL ROLE ONLY. It is the owner's library on the owner's Mac; the Mini
+// has an empty one under a different Apple account.
+//
+// NO SNAPSHOT, unlike the iMessage connector, and the reason is size. The
+// snapshot pattern copies the whole database first — measured at ~2 s for
+// chat.db's 1 GB. Photos.sqlite is 3.2 GB here, so a copy per scan would cost
+// ~7 s and 3.2 GB of writes every pass. A persistent read-only connection
+// gets a consistent view through WAL snapshot isolation at zero copy cost
+// (verified in ops/PROBES.md), which is what the courier already does with
+// chat.db for the same reason.
+//
+// FULL DISK ACCESS: same rule as every other Apple store — TCC attributes the
+// grant to the responsible process, so this only works spawned by launchd
+// from ~/.hazlie/bin/node.
+//
+// FACES: IDENTITY ONLY. Read under the consent decision in CLAUDE.md (Austin,
+// 2026-08-20). This takes the cluster a face belongs to and the owner's own
+// name for it — enough to answer "who was I with in San Francisco" — and
+// takes NONE of Apple's inferred attributes (age, gender, ethnicity, hair,
+// expression, gaze). See lib/peopleRows.mjs for why: they answer none of the
+// questions this corpus exists for, and ZETHNICITYTYPE has no published code
+// mapping, so storing it means meaningless integers or an invented label
+// about a real person — which never-fabricate forbids.
+//
+// LOG POLICY: counts only. Never a filename, never a caption, never OCR text,
+// never a coordinate.
+
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { assetToRow } from '../lib/photoRows.mjs';
+import { groupPeopleByAsset, peopleMeta, peopleText, personNames } from '../lib/peopleRows.mjs';
+
+const DEFAULT_BACKFILL_DAYS = 365;
+// One pass is bounded: the library here holds 88,775 assets, and decoding OCR
+// spawns a plutil per photo. The cursor advances, so the remainder arrives on
+// later passes rather than being lost.
+const MAX_ASSETS_PER_SCAN = 2000;
+const CURSOR_KEY = 'photos:max-created';
+const APPLE_EPOCH_MS = 978307200000;
+
+export function libraryPath(home) {
+  return join(home, 'Pictures', 'Photos Library.photoslibrary', 'database', 'Photos.sqlite');
+}
+
+// Core Data stores SECONDS since 2001. The cursor is kept in those same
+// seconds so it compares directly against ZDATECREATED without a conversion
+// at query time — the place an off-by-31000-years bug would hide.
+export function scanFloorSeconds({ storedCursor, backfill, nowMs, backfillDays }) {
+  if (!backfill && typeof storedCursor === 'string' && /^-?\d+(\.\d+)?$/u.test(storedCursor)) {
+    return { seconds: Number(storedCursor), reason: 'cursor' };
+  }
+  const floorMs = nowMs - backfillDays * 86_400_000;
+  return { seconds: (floorMs - APPLE_EPOCH_MS) / 1000, reason: backfill ? 'backfill' : 'no-cursor' };
+}
+
+export function createPhotosSource({ home } = {}) {
+  return {
+    name: 'photos',
+
+    // Not pre-checked, same as calendar and imessage: under TCC a stat can
+    // pass where the later open is denied. The run is the honest probe.
+    needs() {
+      return [];
+    },
+
+    async run(ctx) {
+      const resolvedHome = home ?? ctx.home ?? (await import('node:os')).homedir();
+      const path = libraryPath(resolvedHome);
+
+      let db;
+      const rows = [];
+      let skipped = 0;
+      let maxCreated = null;
+      let withPeople = 0;
+      try {
+        db = new DatabaseSync(path, { readOnly: true });
+        const floor = scanFloorSeconds({
+          storedCursor: ctx.state.getCursor(CURSOR_KEY),
+          backfill: Boolean(ctx.backfill),
+          nowMs: ctx.now(),
+          backfillDays: ctx.config?.photos?.backfillDays ?? DEFAULT_BACKFILL_DAYS,
+        });
+
+        // OCR IS NOT READ, and the reason is measured rather than assumed —
+        // see connectors/lib/ocrPlist.mjs. Apple's recognized text is not in
+        // the plist's <string> elements; those are 26 class names, identical
+        // in every photo. The text lives in a ~25 KB <data> blob that is not
+        // a plist. A first attempt "worked" by extracting those class names,
+        // producing the SAME 214 characters for all 8 sampled photos — which
+        // shipped would have put one boilerplate string in all 88,775 rows
+        // and made every future search match everything.
+        const stmt = db.prepare(
+          `SELECT a.Z_PK, a.ZUUID, a.ZDATECREATED, a.ZKIND, a.ZKINDSUBTYPE, a.ZLATITUDE, a.ZLONGITUDE,
+                  a.ZFAVORITE, a.ZWIDTH, a.ZHEIGHT, a.ZDURATION, a.ZTRASHEDSTATE, a.ZFILENAME,
+                  b.ZTITLE, b.ZASSETDESCRIPTION
+           FROM ZASSET a
+           LEFT JOIN ZADDITIONALASSETATTRIBUTES b ON b.ZASSET = a.Z_PK
+           WHERE a.ZDATECREATED > ? AND a.ZTRASHEDSTATE = 0
+           ORDER BY a.ZDATECREATED ASC
+           LIMIT ?`
+        );
+        const assets = stmt.all(floor.seconds, MAX_ASSETS_PER_SCAN);
+
+        // Faces are fetched for THIS BATCH's assets only, not the whole
+        // library: 83,181 detections joined per-row would be a round trip per
+        // photo, and loading them all would be most of the table for 2,000
+        // photos' worth of answers.
+        let peopleByAsset = new Map();
+        if (assets.length > 0) {
+          const pks = assets.map((a) => Number(a.Z_PK)).filter(Number.isFinite);
+          const holes = pks.map(() => '?').join(',');
+          const names = personNames(
+            db.prepare('SELECT Z_PK, ZFULLNAME FROM ZPERSON WHERE ZFULLNAME IS NOT NULL').all()
+          );
+          const faces = db
+            .prepare(
+              `SELECT ZASSETFORFACE, ZPERSONFORFACE FROM ZDETECTEDFACE
+               WHERE ZASSETFORFACE IN (${holes})`
+            )
+            .all(...pks);
+          peopleByAsset = groupPeopleByAsset(faces, { names });
+        }
+
+        for (const asset of assets) {
+          const created = Number(asset.ZDATECREATED);
+          if (Number.isFinite(created) && (maxCreated === null || created > maxCreated)) {
+            maxCreated = created;
+          }
+          const row = assetToRow(asset, { ocr: null });
+          if (row === null) {
+            skipped += 1;
+            continue;
+          }
+          const bucket = peopleByAsset.get(Number(asset.Z_PK));
+          const pMeta = peopleMeta(bucket);
+          if (Object.keys(pMeta).length > 0) {
+            row.meta = { ...row.meta, ...pMeta };
+            // Names join the TEXT too: text is what a later search matches,
+            // so a name buried only in meta would not be findable.
+            const withWho = peopleText(bucket);
+            if (withWho) row.text = `${row.text}\n${withWho}`;
+            withPeople += 1;
+          }
+          rows.push(row);
+        }
+
+        ctx.log.info('photos_scan', {
+          connector: 'photos',
+          backfill: Boolean(ctx.backfill),
+          floorReason: floor.reason,
+          examined: assets.length,
+          rows: rows.length,
+          withPeople,
+          skipped,
+          capped: assets.length >= MAX_ASSETS_PER_SCAN,
+        });
+      } finally {
+        try {
+          db?.close();
+        } catch {}
+      }
+
+      const totals =
+        rows.length > 0 ? await ingestAll(ctx, rows) : { inserted: 0, updated: 0, unchanged: 0 };
+
+      // Cursor advances only after the batch is in hermes; written first, an
+      // ingest failure would be skipped permanently and invisibly.
+      if (maxCreated !== null) ctx.state.setCursor(CURSOR_KEY, String(maxCreated));
+      return { ...totals, skipped, withPeople };
+    },
+  };
+}
+
+async function ingestAll(ctx, rows, batchSize = 250) {
+  const totals = { inserted: 0, updated: 0, unchanged: 0 };
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const t = await ctx.ingest(rows.slice(i, i + batchSize));
+    totals.inserted += t.inserted ?? t.ingested ?? 0;
+    totals.updated += t.updated ?? 0;
+    totals.unchanged += t.unchanged ?? 0;
+  }
+  return totals;
+}
+
+export default createPhotosSource();

@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'">
+<link rel="stylesheet" href="palette.css">
+</head>
+<body class="onboarding">
+  <!-- Screen 0 — shown ONLY when the app is not running from /Applications
+       (a fresh download runs from ~/Downloads or a mounted DMG). One button
+       that performs the move itself and relaunches; onboarding then reopens
+       from the app's real home and this screen no longer qualifies. Not a
+       Finder tutorial on purpose. -->
+  <div class="ob-screen" id="screen0" hidden>
+    <p class="ob-tagline">first — let me move into Applications</p>
+    <p class="ob-home-note ob-move-note">apps that live in Downloads get lost, and macOS trusts them less.
+one click: intaglio labs moves itself and reopens from its real home.</p>
+    <button class="ob-cta" id="moveGo">move to Applications</button>
+    <button class="ob-replay" id="moveSkip">skip for now</button>
+  </div>
+
+  <!-- Screen 1 of 3 (Terminal Palette.dc.html §07). The canvas draws this
+       inside a fake macOS menu bar; that is the mockup showing it as a
+       desktop screenshot, not chrome to build. -->
+  <div class="ob-screen" id="screen">
+    <!-- Asleep, exactly as the widget rests: shut eyes, slow breathing, dream
+         bubbles. The same `idle` state, not a copy of it — one face can only
+         mean one thing, and "hello" is what wakes it. -->
+    <div class="ob-orb">
+      <span class="orb idle">
+        <span class="orb-body">
+          <span class="orb-layer la"><span class="orb-blob ba"></span></span>
+          <span class="orb-layer lb"><span class="orb-blob bb"></span></span>
+          <span class="orb-layer lc"><span class="orb-blob bc"></span></span>
+          <span class="orb-hl"></span>
+          <span class="blush bl"></span>
+          <span class="blush br"></span>
+        </span>
+        <span class="face">
+          <span class="eye el"></span>
+          <span class="eye er"></span>
+        </span>
+        <span class="zzz z1"><i>z</i></span>
+        <span class="zzz z2"><i>z</i></span>
+      </span>
+    </div>
+    <p class="ob-tagline">personalized &amp; private AI</p>
+    <button class="ob-cta" id="cta">wake</button>
+  </div>
+
+  <!-- Screen 2 of 3 (§08). Half demo, half rehearsal: the line types
+       itself, then the send bounces and waits — the user presses it, and the
+       orb swallows the bubble. The input is drawn, not real; the send is the
+       one control that is briefly, deliberately theirs. -->
+  <div class="ob-screen ob-demo" id="screen2" hidden>
+    <div class="ob-conv">
+      <div class="ob-stage">
+        <!-- Two wrappers so the exit flight is one axis per layer, one
+             unbroken curve each — the same structure that made the message's
+             flight smooth. They cannot be the .ob-orb or the .orb: the orb
+             is mid-gulp when the flight starts and the gulp owns its
+             transform. -->
+        <div class="ob-pipe" id="demoPipe"><div class="ob-pipe-y">
+        <div class="ob-orb">
+          <span class="orb listening" id="demoOrb">
+            <span class="orb-body">
+              <span class="orb-layer la"><span class="orb-blob ba"></span></span>
+              <span class="orb-layer lb"><span class="orb-blob bb"></span></span>
+              <span class="orb-layer lc"><span class="orb-blob bc"></span></span>
+              <span class="orb-hl"></span>
+              <span class="blush bl"></span>
+              <span class="blush br"></span>
+            </span>
+            <span class="face">
+              <span class="eye el"></span>
+              <span class="eye er"></span>
+            </span>
+          </span>
+        </div>
+        </div></div>
+      </div>
+      <div class="ob-log" id="demoLog"></div>
+    </div>
+    <div class="ob-bar">
+      <div class="ob-input">
+        <span id="demoText"></span>
+        <span class="ob-caret"></span>
+        <span class="ob-ph" id="demoPlaceholder" hidden>Message…</span>
+      </div>
+      <button class="ob-send" id="demoSend" title="Send">↑</button>
+    </div>
+  </div>
+
+  <!-- Screen 3 of 3. NOT the canvas's §09 any more — that scene offered the
+       connectors, which settings already does properly. This one answers the
+       question the whole flow leaves behind: where did the thing I have been
+       talking to actually go?
+
+       There is no orb drawn on this screen on purpose. The REAL widget is
+       lifted above the scrim for the length of the scene (main.swift
+       spotlightWidget), so the orb being pointed at is the live one, in the
+       corner it will be in from now on. -->
+  <div class="ob-screen ob-home" id="screen3" hidden>
+    <!-- Positioned at run time over the widget's real rectangle. -->
+    <div class="ob-spot" id="homeSpot" aria-hidden="true">
+      <span class="ob-spot-ring"></span>
+    </div>
+    <div class="ob-card" id="homeCard">
+      <!-- One line. "that's me, down here" sat above this and said the same
+           thing twice — the ring around the real widget already points, so
+           the words only have to name what is being pointed at. -->
+      <p class="ob-home-note ob-home-lead">i live on your desktop now</p>
+      <button class="ob-cta ob-cta-sm" id="homeDone">lets go</button>
+    </div>
+  </div>
+
+  <script src="bridge.js"></script>
+  <script src="onboarding.js"></script>
+</body>
+</html>

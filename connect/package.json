@@ -1,0 +1,11 @@
+{
+  "name": "hazlie-connect",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Loopback-only connect page for onboarding. Mac-only by design: OAuth redirect rules make localhost the only URL providers accept.",
+  "scripts": {
+    "test": "node --test 'test/*.test.mjs'",
+    "start": "node server.mjs --print-url"
+  }
+}

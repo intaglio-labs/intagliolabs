@@ -1,0 +1,161 @@
+// Retrieval over ACCEPTED claims. Deliberately boring.
+//
+// No embeddings, no graph, no importance score, no access-frequency
+// reinforcement, no multiplicative ranking formula. FTS5 plus recency, because
+// the accepted-claim set is small enough that a boring method is measurable and
+// debuggable, and a clever one would be neither. When the set outgrows this,
+// replace it on evidence — not because ranking is fun to write.
+//
+// TWO PROPERTIES THIS MODULE HAS THAT MATTER MORE THAN RELEVANCE:
+//
+//   1. IT NEVER RETURNS A QUOTE. The row a claim came from is the owner's
+//      verbatim words, and the caller downstream is a Messages reply that
+//      transits Apple's servers to every device on the Apple ID. The quote is
+//      not omitted by the caller's good manners; it is not in the SELECT. To
+//      see a receipt you open the review page, which is local.
+//   2. IT ABSTAINS. A question with no accepted support returns nothing and
+//      says so. An answer composed from zero claims is a guess wearing the
+//      costume of a memory, and it is worse than silence — the whole point of
+//      the accept step is that Hazlie only says what the owner confirmed.
+//
+// `match` is an FTS5 expression that the CALLER has already sanitised with
+// hermes' ftsQuery(). It is not sanitised here, and this module does not import
+// hermes to do it, because hermes imports this one. Pass raw user text in and
+// you have handed an FTS5 injection to the query planner.
+
+// A claim older than this is not evidence about the present. It is not deleted
+// and not hidden from the review page — it simply stops being offered as an
+// answer to "what do I do about X now". Two years is generous on purpose: the
+// facts this system is for (allergies, a train, not drinking) do not expire.
+export const RECENCY_HORIZON_MS = 730 * 86_400_000;
+
+export const DEFAULT_RECALL_LIMIT = 8;
+export const MAX_RECALL_LIMIT = 25;
+
+// Field by field, never `SELECT *` and never `c.*`. A widened table must not be
+// able to silently widen what reaches Messages — which is exactly how a quote
+// would arrive here one day without anybody deciding it should.
+const FIELDS =
+  'c.id, c.kind, c.text, c.observed_at, c.created_at, s.source, x.ts AS source_ts';
+
+function recentRows(db, limit) {
+  return db
+    .prepare(
+      `SELECT ${FIELDS} FROM v_claim_accepted c ` +
+        'JOIN claim_source s ON s.claim_id = c.id ' +
+        'LEFT JOIN context x ON x.id = s.context_id ' +
+        'ORDER BY COALESCE(c.observed_at, c.created_at) DESC, c.id DESC LIMIT ?'
+    )
+    .all(limit);
+}
+
+export function recallClaims(db, { match = null, limit = DEFAULT_RECALL_LIMIT, now = Date.now() } = {}) {
+  const capped = Math.max(1, Math.min(Number(limit) || DEFAULT_RECALL_LIMIT, MAX_RECALL_LIMIT));
+
+  // No search terms is not an error and not "everything". It is the most recent
+  // accepted claims, which is what `hz memory` style questions want.
+  const rows =
+    match === null
+      ? recentRows(db, capped)
+      : db
+          .prepare(
+            // RELEVANCE PICKS THE SET, RECENCY ORDERS IT. Two different jobs
+            // that were one ORDER BY until 2026-08-21, and collapsing them
+            // silently broke retrieval at scale.
+            //
+            // The recency rule is still here and still load-bearing: when two
+            // accepted claims disagree — "I'm vegetarian" and, later, "I eat
+            // fish now" — the newer one is the answer, and v1 resolves that by
+            // ordering rather than by asking a model to reconcile them. That
+            // is what the OUTER order by does.
+            //
+            // What it must not also decide is WHICH claims are in the window.
+            // ftsQuery ORs every word of the question, stopwords included, so
+            // a question matches a large fraction of the store; sorting those
+            // hits by date and taking the first N is then almost independent of
+            // the question. Measured on the L5 coverage run (675 claims):
+            // "When do I fly to Honolulu?" matched 331 claims, the single claim
+            // mentioning Honolulu ranked 209th by date, and it could never
+            // enter a top-25 window. The system abstained on data it held.
+            //
+            // bm25 fixes the stopword problem for free: a term appearing in
+            // most documents carries almost no weight, so a claim matching only
+            // "do" and "to" ranks below one matching "Honolulu".
+            //
+            // The header of this file says to replace this on evidence rather
+            // than because ranking is fun to write. This is that evidence.
+            `SELECT id, kind, text, observed_at, created_at, source, source_ts FROM (` +
+              `SELECT ${FIELDS}, bm25(claim_fts) AS rank FROM claim_fts f ` +
+              'JOIN v_claim_accepted c ON c.id = f.rowid ' +
+              'JOIN claim_source s ON s.claim_id = c.id ' +
+              'LEFT JOIN context x ON x.id = s.context_id ' +
+              'WHERE claim_fts MATCH ? ' +
+              // bm25 returns a NEGATIVE score, more negative = better match,
+              // so ASC is best-first.
+              'ORDER BY rank ASC LIMIT ?' +
+              ') ORDER BY COALESCE(observed_at, created_at) DESC, id DESC'
+          )
+          .all(match, capped);
+
+  // TOP-UP, and it is the difference between a memory system that works and
+  // one that is technically correct.
+  //
+  // Lexical search misses constantly on real questions. Two measured cases from
+  // the Days 7-9 gate, and note they fail differently:
+  //
+  //   "any allergies?"       matched NOTHING against a claim reading "allergic
+  //                          to penicillin" -- those words do not share a stem,
+  //                          and porter does not fix it.
+  //   "how do you get to work?"  matched the WRONG TWO claims and never
+  //                          surfaced "Austin takes the 7am train on weekdays".
+  //
+  // A fallback that only fires on zero results fixes the first and not the
+  // second, which is why this tops up unconditionally: take the search hits,
+  // then fill the remaining slots with the most recent accepted claims that are
+  // not already there. The composer decides relevance -- it can read, and a
+  // keyword cannot.
+  //
+  // This is affordable precisely because the set is small and human-curated:
+  // every row in it was read and accepted by the owner one at a time. It would
+  // be reckless over thousands of claims. Revisit it then, with a measurement
+  // rather than a hunch.
+  //
+  // Abstention survives, and means something stronger than before: not "no
+  // keyword matched" but "there is nothing accepted here at all". A question
+  // the notes genuinely do not cover is refused by the composer, which is the
+  // layer that can actually read them -- verified in the gate, where "what's my
+  // favourite film?" abstained with all seven claims in front of it.
+  const matched = rows.length;
+  if (match !== null && rows.length < capped) {
+    const seen = new Set(rows.map((r) => Number(r.id)));
+    for (const extra of recentRows(db, capped)) {
+      if (seen.has(Number(extra.id))) continue;
+      rows.push(extra);
+      if (rows.length >= capped) break;
+    }
+  }
+
+  const horizon = now - RECENCY_HORIZON_MS;
+  const claims = rows.map((r) => ({
+    id: Number(r.id),
+    kind: r.kind,
+    text: r.text,
+    // The two dates a Messages answer is allowed to carry: when the thing was
+    // observed, and which kind of source it came from. Never the row.
+    observed_at: r.observed_at === null ? null : Number(r.observed_at),
+    source: r.source,
+    stale: Number(r.observed_at ?? r.created_at) < horizon,
+  }));
+
+  return { claims, abstain: claims.length === 0, matched };
+}
+
+// The shape a composer is handed. Flat, labelled, and explicitly NOT prose the
+// model can mistake for its own instructions — see prompts/answer_from_claims.md
+// for the envelope those go in.
+export function groundingLines(claims) {
+  return claims.map((c, i) => {
+    const when = c.observed_at === null ? 'undated' : new Date(c.observed_at).toISOString().slice(0, 10);
+    return `[${i + 1}] (${c.kind}, ${c.source}, ${when}${c.stale ? ', OLD' : ''}) ${c.text}`;
+  });
+}

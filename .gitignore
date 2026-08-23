@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Build output
+widget/build/
+widget/voice/public/
+widget/voice/node_modules/
+dist/
+
+# Runtime state and secrets never belong in the repo. Everything this system
+# stores lives under ~/.hazlie (0700), outside any checkout, by design.
+.env
+.env*.local
+*.log
+
+# macOS
+.DS_Store

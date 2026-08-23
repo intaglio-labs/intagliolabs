@@ -1,0 +1,325 @@
+/* ORB STATE ANIMATIONS — THE SHARED SOURCE. Do not edit the copies.
+ *
+ * The widget and the landing page draw the same orb at different sizes, and
+ * for a while they drew it from two hand-ported reimplementations: every
+ * change the owner asked for got made twice, by two people, and they drifted
+ * — the widget grew a pop and a concussion the page had never heard of.
+ *
+ * This file is the one copy of the states (jackpot, pop, dazed). It is
+ * INJECTED into widget/ui/palette.css and site/index.html by
+ * tools/sync-orb.mjs, between the BEGIN/END markers. Edit here, run the
+ * script, both move.
+ *
+ * SIZING: every px is expressed against --ou, the orb unit — the orb's size
+ * divided by 42, the widget's. The widget sets --ou: 1; the 150px landing
+ * hero sets 3.571. Percentages, opacities, rotations and durations need no
+ * scaling and are written plainly.
+ *
+ * The markup contract both sides must satisfy: .orb > .orb-body, .face >
+ * .eye.el/.eye.er, .eye > svg.swirl, .burst, .orb-badge, and layers
+ * .orb-layer.la/.lb/.lc each holding an .orb-blob.
+ */
+/* ---------------- jackpot ----------------
+   Hammer the orb and it pays out. Six taps inside 1.4s trips it; widget.js
+   owns the counting, the arming interlock and the sound, and everything the
+   payout looks like is here.
+
+   Written AFTER every state block on purpose. `.orb.jackpot` is two classes,
+   the same weight as `.orb.idle`, so source order is the only thing that
+   makes it win — keep it last.
+
+   Reduce Motion does NOT suppress this, and that is deliberate. The setting
+   exists for motion nobody asked for; a jackpot is six deliberate taps and
+   the reward for them, which is the same reasoning that already exempts the
+   press-squash. It cannot start on its own and it stops on its own. */
+@keyframes jack-spaz {
+  0%   { transform: translate(0, 0) rotate(0deg) scale(1, 1); }
+  9%   { transform: translate(calc(var(--ou) * -3px), calc(var(--ou) * 2px)) rotate(-13deg) scale(1.20, 0.84); }
+  20%  { transform: translate(calc(var(--ou) * 3px), calc(var(--ou) * -3px)) rotate(12deg) scale(0.84, 1.22); }
+  31%  { transform: translate(calc(var(--ou) * -2px), calc(var(--ou) * -3px)) rotate(-16deg) scale(1.24, 0.82); }
+  43%  { transform: translate(calc(var(--ou) * 4px), calc(var(--ou) * 2px)) rotate(9deg) scale(0.88, 1.18); }
+  55%  { transform: translate(calc(var(--ou) * -4px), calc(var(--ou) * 1px)) rotate(-11deg) scale(1.18, 0.86); }
+  67%  { transform: translate(calc(var(--ou) * 2px), calc(var(--ou) * -2px)) rotate(15deg) scale(0.86, 1.20); }
+  80%  { transform: translate(calc(var(--ou) * -1px), calc(var(--ou) * 3px)) rotate(-8deg) scale(1.14, 0.90); }
+  91%  { transform: translate(calc(var(--ou) * 3px), calc(var(--ou) * -1px)) rotate(6deg) scale(0.92, 1.12); }
+  100% { transform: translate(0, 0) rotate(0deg) scale(1, 1); }
+}
+/* The strobe is opacity on the BODY, not a filter and not a background swap:
+   both of those re-rasterize the gradient every frame, and this runs at 7Hz.
+   Dropping the body's opacity lets the wallpaper through, which is what makes
+   it read as flashing rather than as dimming. */
+@keyframes jack-strobe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.42; }
+}
+/* Reels. The eye spins and squashes flat twice a turn — a fruit-machine drum
+   seen edge-on, at the size of an eye. */
+@keyframes jack-reel {
+  0%   { transform: rotate(0deg) scaleY(1); }
+  25%  { transform: rotate(90deg) scaleY(0.2); }
+  50%  { transform: rotate(180deg) scaleY(1); }
+  75%  { transform: rotate(270deg) scaleY(0.2); }
+  100% { transform: rotate(360deg) scaleY(1); }
+}
+/* The dream bubbles get a second job: coins off the top of the machine. They
+   are the only two loose elements the orb already owns, and they already sit
+   outside the silhouette, so nothing new has to be spawned into a 98px-tall
+   window that would clip it. */
+@keyframes jack-spark {
+  0%   { opacity: 0; transform: translate(0, 0) scale(0.4) rotate(0deg); }
+  15%  { opacity: 1; }
+  100% { opacity: 0; transform: translate(var(--jx), var(--jy)) scale(1.5) rotate(var(--jr)); }
+}
+@keyframes jack-badge {
+  from { transform: scale(1) rotate(-9deg); }
+  to   { transform: scale(1.5) rotate(9deg); }
+}
+.orb.jackpot { animation: jack-spaz 0.42s linear infinite; }
+.orb.jackpot .orb-body { animation: jack-strobe 0.14s steps(2, end) infinite; }
+/* The innards at full tilt. Same animations the other states tune, wound
+   down to a blur — nothing new to keep in sync. */
+.orb.jackpot .orb-layer.la { animation-duration: 0.42s; }
+.orb.jackpot .orb-layer.lb { animation-duration: 0.3s; }
+.orb.jackpot .orb-layer.lc { animation-duration: 0.55s; }
+.orb.jackpot .orb-blob.ba { animation-duration: 0.26s; }
+.orb.jackpot .orb-blob.bb { animation-duration: 0.2s; animation-delay: 0.05s; }
+.orb.jackpot .orb-blob.bc { animation-duration: 0.32s; animation-delay: 0.1s; }
+.orb.jackpot .face { gap: calc(var(--ou) * 6px); animation: none; }
+.orb.jackpot .eye {
+  width: calc(var(--ou) * 11px); height: calc(var(--ou) * 13px);
+  box-sizing: content-box;
+  background: radial-gradient(ellipse at 50% 45%, #1a1917 0%, #141412 78%, #141412 100%);
+  border: 0; border-radius: 50%;
+  overflow: visible;
+  animation: jack-reel 0.3s linear infinite;
+}
+/* The shut-eye ring is a pseudo-element, so opening the eyes has to take it
+   away — same reason `.orb.waking` does. */
+.orb.jackpot .eye::before { display: none; }
+/* Counter-spun, so the two reels never line up and the face never resolves
+   into anything symmetrical enough to read as a face. */
+.orb.jackpot .eye.er { animation-direction: reverse; animation-duration: 0.26s; }
+.orb.jackpot .zzz {
+  display: flex;
+  --jx: calc(var(--ou) * 15px); --jy: calc(var(--ou) * -16px); --jr: 220deg;
+  animation: jack-spark 0.5s ease-out infinite;
+}
+.orb.jackpot .zzz.z2 { --jx: calc(var(--ou) * -13px); --jy: calc(var(--ou) * -12px); --jr: -260deg; animation-duration: 0.62s; animation-delay: 0.12s; }
+/* The badge is already a counter in a hazelnut disc at the top right of the
+   orb. During a payout it counts the taps, which is exactly what the number
+   on a machine is doing. */
+.orb.jackpot .orb-badge { display: flex; animation: jack-badge 0.15s ease-in-out infinite alternate; }
+
+/* ---------------- 69, and the concussion ----------------
+   The swell has a ceiling, and the ceiling is a joke: the badge counts every
+   tap and at SIXTY-NINE the orb bursts. What follows is not a reset — the
+   orb comes back CONCUSSED, staggering with stars going round its head, and
+   sleeps it off over about five seconds. Animal Crossing's dizzy, not a
+   crash: nothing is broken, the thing you hit just needs a minute.
+
+   Written after the jackpot block for the same reason the jackpot is written
+   after the states — these are all two-class selectors and source order is
+   the only thing that decides. */
+.burst {
+  position: absolute; inset: calc(var(--ou) * -6px);
+  border-radius: 50%;
+  border: calc(var(--ou) * 3px) solid rgba(229, 214, 187, 0.9);
+  opacity: 0;
+  pointer-events: none;
+}
+/* THE BURST — one continuous morph, not a stack of poses.
+ *
+ * The first version trembled: it rotated -3, +3, -2, +1 degrees across five
+ * keyframes to read as "straining". At 0.5s that is a shiver every 90ms with
+ * a velocity reversal at each one, and the eye reads reversals as GLITCHES,
+ * not effort. Same lesson the message's flight taught — position continuous
+ * is not enough, speed has to be continuous too.
+ *
+ * So it is squash and stretch instead, on one axis pair, through four stops
+ * that never reverse direction:
+ *
+ *   anticipation  gathers slightly IN, which is what makes the rise read as
+ *                 powered rather than as a size change
+ *   stretch       up and out, accelerating
+ *   taut          the top of the arc, briefly, where the skin is tightest
+ *   burst         outward and gone — the orb BECOMES the shockwave
+ *
+ * It expands to nothing rather than collapsing to nothing: a balloon throws
+ * its skin outward, and the old collapse to scale(0.03) was both wrong and
+ * the single biggest jump in the whole animation.
+ *
+ * Every stop carries its own timing function so the curve is smooth THROUGH
+ * the keyframes rather than easing in and out of each one. */
+@keyframes pop-body {
+  0% {
+    transform: scale(1, 1); opacity: 1;
+    animation-timing-function: cubic-bezier(0.4, 0, 0.6, 1);
+  }
+  16% {
+    transform: scale(0.94, 0.91); opacity: 1;
+    animation-timing-function: cubic-bezier(0.2, 0, 0.4, 1);
+  }
+  46% {
+    transform: scale(1.18, 1.23); opacity: 1;
+    animation-timing-function: cubic-bezier(0.3, 0, 0.5, 1);
+  }
+  62% {
+    transform: scale(1.34, 1.32); opacity: 1;
+    animation-timing-function: cubic-bezier(0.55, 0, 0.85, 0.35);
+  }
+  78% { opacity: 1; }
+  100% { transform: scale(2.5, 2.5); opacity: 0; }
+}
+/* The white-out rides the highlight already inside the body. Opacity only —
+   1 is the ceiling, and the old keyframe asked for 3, which clamps and made
+   the ramp land early and hard. */
+@keyframes pop-flash {
+  0%, 40% { opacity: 1; transform: scale(1); }
+  62% { opacity: 1; transform: scale(1.9); }
+  80% { opacity: 0; transform: scale(2.6); }
+  100% { opacity: 0; }
+}
+/* Two shockwaves, both leaving at the burst: the second thinner, later and
+   faster, which is what makes it a bang with an echo rather than a ripple.
+   Both fade IN over a real interval now — the old 5% ramp was a pop-in. */
+@keyframes pop-ring {
+  0%, 56% { opacity: 0; transform: scale(0.6); border-width: calc(var(--ou) * 3px); }
+  70% { opacity: 0.95; }
+  100% { opacity: 0; transform: scale(3.2); border-width: calc(var(--ou) * 0.5px); }
+}
+@keyframes pop-ring2 {
+  0%, 62% { opacity: 0; transform: scale(0.55); border-width: calc(var(--ou) * 1.5px); }
+  76% { opacity: 0.8; }
+  100% { opacity: 0; transform: scale(4); border-width: calc(var(--ou) * 0.5px); }
+}
+.orb.pop { animation: pop-body 0.62s linear forwards; }
+.orb.pop .orb-hl { animation: pop-flash 0.62s cubic-bezier(0.4, 0, 0.5, 1) forwards; }
+.orb.pop .burst { animation: pop-ring 0.95s cubic-bezier(0.15, 0.75, 0.35, 1) forwards; }
+.orb.pop .burst::after {
+  content: ''; position: absolute; inset: 0;
+  border-radius: 50%;
+  border: calc(var(--ou) * 1.5px) solid rgba(229, 214, 187, 0.85);
+  animation: pop-ring2 1s cubic-bezier(0.15, 0.75, 0.35, 1) forwards;
+}
+.orb.pop .face, .orb.pop .orb-badge { opacity: 0; }
+.orb.pop .zzz { display: none; }
+/* The whole shelf jolts when it goes — widget.js flips this on at the bang
+   and off half a second later. Decaying, so it reads as an impact absorbed
+   rather than a wobble. */
+@keyframes quake {
+  0% { transform: translate(0, 0); }
+  15% { transform: translate(calc(var(--ou) * -5px), calc(var(--ou) * 2px)); }
+  32% { transform: translate(calc(var(--ou) * 4px), calc(var(--ou) * -2px)); }
+  52% { transform: translate(calc(var(--ou) * -3px), calc(var(--ou) * 1px)); }
+  72% { transform: translate(calc(var(--ou) * 2px), 0); }
+  88% { transform: translate(calc(var(--ou) * -1px), 0); }
+  100% { transform: translate(0, 0); }
+}
+.panel.quake { animation: quake 0.45s cubic-bezier(0.25, 0.6, 0.4, 1); }
+
+/* Concussed: smaller than it was (deflated), listing side to side, unable to
+   hold still. Slow on purpose — everything else this orb does is quick, and
+   the contrast is the joke. */
+@keyframes daze-sway {
+  0%, 100% { transform: rotate(-8deg) translate(calc(var(--ou) * -1px), calc(var(--ou) * 1px)) scale(0.92); }
+  25% { transform: rotate(3deg) translate(calc(var(--ou) * 1px), calc(var(--ou) * 2px)) scale(0.9); }
+  50% { transform: rotate(8deg) translate(calc(var(--ou) * 1px), 0) scale(0.92); }
+  75% { transform: rotate(-2deg) translate(calc(var(--ou) * -1px), calc(var(--ou) * 2px)) scale(0.9); }
+}
+/* THE REFORM — the seam between the burst and the concussion.
+ *
+ * The burst ends invisible at scale(2.5) and the sway used to start, in the
+ * very next frame it painted, at scale(0.92) with full opacity. Nothing
+ * connected those two states: the orb simply reappeared, small and solid,
+ * mid-loop. However good either half was, the join was a cut.
+ *
+ * So it comes BACK. It gathers in from nothing, overshoots slightly (the
+ * skin still has momentum), sags under it, and settles — and its last
+ * keyframe is EXACTLY daze-sway's 0% pose, which is what makes the handover
+ * invisible. That is the whole trick: two animations on one element, the
+ * loop delayed by the reform's length, and the reform ending precisely where
+ * the loop begins. Get that pose wrong by a degree and the seam is back. */
+@keyframes daze-reform {
+  0% {
+    opacity: 0;
+    transform: rotate(16deg) scale(0.18);
+    animation-timing-function: cubic-bezier(0.2, 0.9, 0.4, 1);
+  }
+  40% {
+    opacity: 1;
+    transform: rotate(-7deg) scale(1.05);
+    animation-timing-function: cubic-bezier(0.4, 0, 0.4, 1);
+  }
+  70% {
+    transform: rotate(3deg) scale(0.87);
+    animation-timing-function: cubic-bezier(0.3, 0, 0.3, 1);
+  }
+  100% {
+    opacity: 1;
+    /* daze-sway's 0%, to the value. */
+    transform: rotate(-8deg) translate(calc(var(--ou) * -1px), calc(var(--ou) * 1px)) scale(0.92);
+  }
+}
+/* The body's dim arrives with the reform rather than snapping on with the
+   class — it was 0.9 from the first frame, which is a step in the middle of
+   a fade. */
+@keyframes daze-settle {
+  from { opacity: 1; }
+  to { opacity: 0.9; }
+}
+/* And the face fades up: swirl eyes appearing at full strength on a body
+   still gathering itself read as two separate events. */
+@keyframes daze-face-in {
+  0% { opacity: 0; }
+  45% { opacity: 0; }
+  100% { opacity: 1; }
+}
+.orb.dazed {
+  /* The loop waits out the reform, and starts from the pose the reform
+     leaves behind. */
+  animation:
+    daze-reform 0.62s both,
+    daze-sway 2.6s ease-in-out 0.62s infinite;
+}
+.orb.dazed .orb-body { animation: daze-settle 0.62s ease-out both; }
+.orb.dazed .orb-layer, .orb.dazed .orb-blob { animation-duration: 6s; }
+.orb.dazed .zzz, .orb.dazed .orb-badge { display: none; }
+/* SWIRL EYES — a real Archimedean spiral, inline SVG in widget.html. The
+   first pass approximated one from CSS border arcs and the owner rightly
+   called it mud: an actual spiral has continuously growing radius, and no
+   pile of ring fragments reads as one. The CSP bars every IMAGE (data: URIs
+   included) but inline markup is not a fetch, so the eye holds a generated
+   r = b·θ path — starting in the middle, unwinding outward, 2.3 turns.
+   Spinning still helps (it is how dizzy moves), counter-rotated so nobody
+   is steering. */
+.orb.dazed .face { gap: calc(var(--ou) * 6px); animation: daze-face-in 0.62s ease-out both; }
+.orb.dazed .eye {
+  position: relative;
+  width: calc(var(--ou) * 13px); height: calc(var(--ou) * 13px);
+  background: none; border: 0; border-radius: 0;
+  overflow: visible;
+  transform: none;
+  animation: daze-swirl 1.3s linear infinite;
+}
+.orb.dazed .eye.er { animation-direction: reverse; }
+@keyframes daze-swirl { to { transform: rotate(360deg); } }
+/* The idle state's shut-eye ring is a ::before; without this a spiral wears
+   an eyelid. */
+.orb.dazed .eye::before, .orb.dazed .eye::after { content: none; }
+.eye .swirl { display: none; }
+.orb.dazed .eye .swirl { display: block; width: 100%; height: 100%; }
+.swirl path {
+  fill: none;
+  stroke: rgba(20, 20, 18, 0.9);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* NO STARS, NO Z'S. Circling stars were the first draft of the concussion
+   and the owner cut them: the swirl eyes already say dizzy, and orbiting
+   glyphs at this size read as clutter round a 42px face rather than as a
+   cartoon. The z's are cut from the whole sequence for the same reason —
+   they mean ASLEEP, and a knocked-out orb wearing sleep marks says two
+   different things at once. The burst carries itself on the rings, the
+   flash and the quake. */

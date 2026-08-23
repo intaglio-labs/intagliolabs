@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- The ONE page with a loosened CSP, quarantined here on purpose: the voice
+     stack needs wasm ('wasm-unsafe-eval'), module workers, and ORT's loader
+     ('unsafe-eval'). 'self' is the hazlie-asset:// origin, served natively
+     from the app bundle and ~/.hazlie/models/voice — connect-src 'self'
+     covers model fetches and reaches no network. Every visible page keeps
+     default-src 'none'. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; connect-src 'self' blob: data:; media-src 'self' blob:">
+</head>
+<body class="ear">
+  <script src="bridge.js"></script>
+  <script type="module" src="ear-main.js"></script>
+</body>
+</html>

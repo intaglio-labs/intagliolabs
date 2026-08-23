@@ -1,0 +1,13 @@
+{
+  "name": "hazlie-voice-build",
+  "private": true,
+  "description": "Owner-run provisioning for the widget's voice stack: bundles the Kokoro TTS worker and vendors the STT/TTS models. These are BUILD-TIME deps only — the widget app itself has zero dependencies and the runtime never fetches. Versions pinned to the frontend branch's lockfile-era ranges so the model-vendoring hashes keep matching.",
+  "type": "module",
+  "engines": { "node": ">=22.13" },
+  "devDependencies": {
+    "@huggingface/transformers": "^3.8.1",
+    "@moonshine-ai/moonshine-js": "^0.1.29",
+    "esbuild": "^0.28.2",
+    "kokoro-js": "^1.2.1"
+  }
+}

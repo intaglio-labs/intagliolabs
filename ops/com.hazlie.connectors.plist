@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Keeps the connectors daemon resident: the pollers that read the Apple stores
+  and the approved remote endpoints and write rows into Hermes via
+  POST /ingest. The daemon opens NO listener of any kind — it is loopback-out
+  to Hermes plus outbound HTTPS/IMAP to the approved endpoints, and nothing
+  else (the HAE LAN listener was removed with the Oura swap; see
+  ops/CONNECTORS.md).
+
+  This checked-in file is a TEMPLATE: launchd expands no variables, so @HOME@
+  and @REPO@ are placeholders that ops/setup-connectors.sh substitutes when it
+  installs the rendered copy into ~/Library/LaunchAgents/. Do not bootstrap
+  this file directly.
+
+  THE INTERPRETER PATH IS THE WHOLE MECHANISM. This agent reads chat.db, the
+  Calendar store, and AddressBook, which sit behind Full Disk Access — and TCC
+  attributes that grant to the RESPONSIBLE PROCESS. Only when launchd spawns
+  ~/.hazlie/bin/node directly is that binary the responsible process; the same
+  binary spawned from a shell is denied (verified on this machine 2026-08-19:
+  identical reads PASS under launchd and are EPERM'd from a terminal). Do not
+  wrap the command in a shell script or another node — the wrapper would
+  become the responsible process and the grant would silently stop applying.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hazlie.connectors</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@HOME@/.hazlie/bin/node</string>
+    <string>@REPO@/connectors/daemon.mjs</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- KeepAlive restarts on any exit; a daemon dying against a broken source
+       (or a Hermes that is down) must not hot-loop against it. 60 seconds is
+       the floor launchd enforces between spawns. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>Umask</key>
+  <integer>63</integer>
+
+  <key>StandardOutPath</key>
+  <string>@HOME@/.hazlie/logs/connectors.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>@HOME@/.hazlie/logs/connectors.err.log</string>
+</dict>
+</plist>

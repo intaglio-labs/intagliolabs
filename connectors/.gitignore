@@ -1,0 +1,2 @@
+# Installed dependencies are regenerable from package-lock.json (npm ci).
+node_modules/

@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Keeps Hermes resident across logins/reboots, serving the household context
+  store (sole writer, sole deleter) on 127.0.0.1:8789 (the canonical port
+  since 2026-08-20; an unrelated dev server holds 8787 on the owner's Mac).
+
+  This checked-in file is a TEMPLATE: launchd expands no variables, so @HOME@
+  and @REPO@ are placeholders that ops/setup-connectors.sh substitutes when it
+  installs the rendered copy into ~/Library/LaunchAgents/. Do not bootstrap
+  this file directly.
+
+  The interpreter is the STABLE binary at ~/.hazlie/bin/node, not the Homebrew
+  one. Hermes itself needs no TCC grant, but a KeepAlive process launched from
+  /opt/homebrew/bin/node dies mid-flight when a brew upgrade deletes the
+  Cellar payload underneath it; the stable copy changes only on an explicit
+  setup-connectors.sh run with the replace flag, and using one binary for
+  every hazlie agent keeps the audit surface to a single file.
+
+  Hermes refuses to start until ops/setup-llm.sh has generated both secrets
+  (llama-api-key.txt and hermes-token.txt) — under KeepAlive that refusal
+  would loop, so setup-connectors.sh gates on those files existing before it
+  bootstraps this agent, and its health wait catches the other startup
+  failure: some unrelated local process already holding :8789.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hazlie.hermes</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@HOME@/.hazlie/bin/node</string>
+    <string>@REPO@/ui/server/hermes.mjs</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>Umask</key>
+  <integer>63</integer>
+
+  <key>StandardOutPath</key>
+  <string>@HOME@/.hazlie/logs/hermes.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>@HOME@/.hazlie/logs/hermes.err.log</string>
+
+  <!-- KeepAlive restarts on any exit, so a persistent failure becomes a hot
+       loop without this: a process that cannot start — a missing secret, a
+       corrupt config, a port already held — respawns as fast as launchd will
+       allow, burning CPU and filling the log while looking, in `launchctl
+       list`, like a running service. Added 2026-08-22; connectors has had it
+       since it was written. 60 seconds is the floor launchd enforces. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+</dict>
+</plist>

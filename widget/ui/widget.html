@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'">
+<link rel="stylesheet" href="palette.css">
+<link rel="stylesheet" href="widget-people.css">
+</head>
+<body class="widget">
+  <div class="panel" id="panel">
+    <div class="wbar">
+      <input id="winput" type="text" placeholder="…" autocomplete="off" spellcheck="false" writingsuggestions="false">
+      <button class="send" id="wsend" title="Send">↑</button>
+      <!-- Two layers on purpose: the button owns the press-squash and the
+           inner span owns the resting jelly. CSS transform is a single
+           property, so one element cannot carry both — the animation would
+           simply win and the squash would never appear. -->
+      <button class="orb-btn" id="orb" title="intaglio labs">
+        <!-- .orb carries the animation and does NOT clip; .orb-body clips the
+             blobs. The face, the z's and the badge are siblings of the body so
+             they can sit outside the silhouette. -->
+        <span class="orb idle">
+          <span class="orb-body">
+            <span class="orb-layer la"><span class="orb-blob ba"></span></span>
+            <span class="orb-layer lb"><span class="orb-blob bb"></span></span>
+            <span class="orb-layer lc"><span class="orb-blob bc"></span></span>
+            <span class="orb-hl"></span>
+            <span class="blush bl"></span>
+            <span class="blush br"></span>
+          </span>
+          <span class="face">
+            <!-- Each eye carries a real Archimedean spiral as inline SVG —
+                 hidden in every state except concussed. Inline because the
+                 CSP ('default-src none') bars every image INCLUDING data:
+                 URIs, but markup already in the DOM is not a fetch. The path
+                 is generated (r = b·θ, 2.3 turns), not hand-drawn. -->
+            <span class="eye el"><svg class="swirl" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.2 12.1 L12.3 12.2 L12.3 12.4 L12.3 12.5 L12.3 12.7 L12.1 12.9 L11.9 13.0 L11.6 13.1 L11.3 13.1 L11.0 13.1 L10.7 12.9 L10.4 12.6 L10.1 12.3 L10.0 11.9 L9.9 11.4 L10.0 10.9 L10.2 10.4 L10.5 9.9 L10.9 9.5 L11.5 9.2 L12.1 9.0 L12.8 9.0 L13.5 9.1 L14.2 9.4 L14.8 9.9 L15.3 10.5 L15.7 11.2 L16.0 12.0 L16.0 12.9 L15.8 13.8 L15.4 14.7 L14.8 15.5 L14.1 16.2 L13.2 16.6 L12.1 16.9 L11.0 17.0 L9.9 16.8 L8.8 16.3 L7.9 15.6 L7.1 14.7 L6.5 13.6 L6.1 12.3 L6.1 11.0 L6.3 9.7 L6.8 8.4 L7.6 7.3 L8.7 6.3 L10.0 5.6 L11.4 5.2 L12.9 5.1 L14.5 5.3 L16.0 5.9 L17.3 6.8 L18.4 8.0 L19.3 9.5 L19.8 11.1 L19.9 12.8 L19.7 14.6 L19.0 16.3 L18.0 17.8 L16.7 19.1 L15.1 20.1 L13.3 20.7 L11.4 20.9 L9.4 20.7 L7.5 20.0"/></svg></span>
+            <span class="eye er"><svg class="swirl" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.2 12.1 L12.3 12.2 L12.3 12.4 L12.3 12.5 L12.3 12.7 L12.1 12.9 L11.9 13.0 L11.6 13.1 L11.3 13.1 L11.0 13.1 L10.7 12.9 L10.4 12.6 L10.1 12.3 L10.0 11.9 L9.9 11.4 L10.0 10.9 L10.2 10.4 L10.5 9.9 L10.9 9.5 L11.5 9.2 L12.1 9.0 L12.8 9.0 L13.5 9.1 L14.2 9.4 L14.8 9.9 L15.3 10.5 L15.7 11.2 L16.0 12.0 L16.0 12.9 L15.8 13.8 L15.4 14.7 L14.8 15.5 L14.1 16.2 L13.2 16.6 L12.1 16.9 L11.0 17.0 L9.9 16.8 L8.8 16.3 L7.9 15.6 L7.1 14.7 L6.5 13.6 L6.1 12.3 L6.1 11.0 L6.3 9.7 L6.8 8.4 L7.6 7.3 L8.7 6.3 L10.0 5.6 L11.4 5.2 L12.9 5.1 L14.5 5.3 L16.0 5.9 L17.3 6.8 L18.4 8.0 L19.3 9.5 L19.8 11.1 L19.9 12.8 L19.7 14.6 L19.0 16.3 L18.0 17.8 L16.7 19.1 L15.1 20.1 L13.3 20.7 L11.4 20.9 L9.4 20.7 L7.5 20.0"/></svg></span>
+          </span>
+          <span class="zzz z1"><i>z</i></span>
+          <span class="zzz z2"><i>z</i></span>
+          <span class="orb-badge">1</span>
+          <!-- The pop's shockwave and the concussion's orbiting stars. Both
+               live outside .orb-body so they can draw past the silhouette,
+               same as the face and the z's. Inert until their state class
+               turns up. -->
+          <span class="burst"></span>
+        </span>
+      </button>
+      <button class="bar-min" id="wmin" title="Collapse">›</button>
+    </div>
+    <!-- Second row: the people button and the settings gear, right-aligned. -->
+    <div class="gear-row">
+      <!-- People: the door into the who's-who / person-index feature. Reuses
+           the gear's pill styling so the two read as a pair; the glyph is two
+           figures. -->
+      <button class="gear" id="people" title="People">
+        <!-- Person x globe, from the Terminal Palette design: a person set in a
+             location pin — your people, out in the world. currentColor tint. -->
+        <svg viewBox="0 0 44 44" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 38c8-8.5 12-14.6 12-20a12 12 0 1 0-24 0c0 5.4 4 11.5 12 20z"/>
+          <circle cx="22" cy="15" r="3.8" fill="currentColor" stroke="none"/>
+          <path d="M15.5 25c1.2-3.5 3.6-5.2 6.5-5.2s5.3 1.7 6.5 5.2" fill="currentColor" stroke="none"/>
+        </svg>
+      </button>
+      <!-- Constellation: the people-map as a star-field. Same pill as the
+           others; a globe glyph — your network, mapped. Opens skyPanel. -->
+      <button class="gear" id="globe" title="Constellation">
+        <svg viewBox="0 0 44 44" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="22" cy="22" r="15"/>
+          <ellipse cx="22" cy="22" rx="6" ry="15"/>
+          <line x1="7" y1="22" x2="37" y2="22"/>
+          <line x1="9.5" y1="15" x2="34.5" y2="15"/>
+          <line x1="9.5" y1="29" x2="34.5" y2="29"/>
+        </svg>
+      </button>
+      <button class="gear" id="gear" title="Settings">
+        <!-- Settings gear, from the Terminal Palette design (person x globe
+             set). currentColor so it inherits the button's tint. -->
+        <svg viewBox="0 0 44 44" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M 33.95 18.35 L 38.69 18.76 A 17 17 0 0 1 38.69 25.24 L 33.95 25.65 A 12.5 12.5 0 0 1 33.04 27.87 L 36.09 31.51 A 17 17 0 0 1 31.51 36.09 L 27.87 33.04 A 12.5 12.5 0 0 1 25.65 33.95 L 25.24 38.69 A 17 17 0 0 1 18.76 38.69 L 18.35 33.95 A 12.5 12.5 0 0 1 16.13 33.04 L 12.49 36.09 A 17 17 0 0 1 7.91 31.51 L 10.96 27.87 A 12.5 12.5 0 0 1 10.05 25.65 L 5.31 25.24 A 17 17 0 0 1 5.31 18.76 L 10.05 18.35 A 12.5 12.5 0 0 1 10.96 16.13 L 7.91 12.49 A 17 17 0 0 1 12.49 7.91 L 16.13 10.96 A 12.5 12.5 0 0 1 18.35 10.05 L 18.76 5.31 A 17 17 0 0 1 25.24 5.31 L 25.65 10.05 A 12.5 12.5 0 0 1 27.87 10.96 L 31.51 7.91 A 17 17 0 0 1 36.09 12.49 L 33.04 16.13 A 12.5 12.5 0 0 1 33.95 18.35 Z"/>
+          <circle cx="22" cy="22" r="6.5"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+  <script src="bridge.js"></script>
+  <script src="widget.js"></script>
+  <!-- Drives the orb's --tod-* gradient from the clock, blending continuously
+       between the five time-of-day moods (palette.css defines them as bands). -->
+  <script src="orb-tod.js"></script>
+</body>
+</html>

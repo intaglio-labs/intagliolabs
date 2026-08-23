@@ -1,0 +1,311 @@
+/* The People intro popup. Same terminal palette as the rest (via palette.css
+   vars), but scoped under body.people so it can never touch the shared
+   connections/settings styles. A separate stylesheet rather than inline, so the
+   page keeps its strict CSP (style-src 'self'). */
+
+body.people {
+  margin: 0;
+  background: transparent;
+  font-family: var(--mono);
+  color: var(--fg);
+}
+
+body.people .win {
+  position: relative;
+  /* A row, like settings: the hint strip is a SIDE panel on the left, the main
+     column on the right. The popup is pinned to the widget's right edge by
+     native placement, so growing width (extraWidth) opens the panel leftward. */
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 12px;
+  border-radius: 16px;
+  background: rgba(20, 20, 18, 0.72);
+  border: 1px solid rgba(234, 234, 234, 0.10);
+  box-shadow: inset 0 1px 0 rgba(234, 234, 234, 0.08);
+  padding: 18px 20px 14px;
+}
+
+.people-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.p-title {
+  margin: 4px 0 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+}
+
+.p-body {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--secondary);
+}
+
+.p-stay {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--hazelnut);
+}
+
+.p-ok {
+  margin-top: 8px;
+  align-self: flex-start;
+  min-height: 38px;
+  padding: 8px 24px;
+  border-radius: 999px;
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--bg);
+  background: linear-gradient(180deg, #e5d6bb 0%, var(--hazelnut) 100%);
+}
+.p-ok:hover { filter: brightness(1.06); }
+
+/* Deep-search: the explainer line, its link, and the initialize button. */
+body.people .p-explain {
+  margin: 12px 0 0;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+body.people .p-explain b { color: var(--secondary); font-weight: 600; }
+body.people .p-explain a { color: var(--hazelnut); text-decoration: underline; cursor: pointer; }
+body.people .p-init {
+  margin-top: 10px;
+  align-self: flex-start;
+  min-height: 40px;
+  padding: 9px 26px;
+  border-radius: 999px;
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--bg);
+  background: linear-gradient(180deg, #e5d6bb 0%, var(--hazelnut) 100%);
+}
+body.people .p-init:hover { filter: brightness(1.06); }
+body.people .p-init:disabled { opacity: 0.7; cursor: default; filter: none; }
+body.people .p-specs {
+  margin-top: 10px;
+  align-self: flex-start;
+  font-size: 12px;
+  color: var(--secondary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+body.people .p-specs:hover { color: var(--hazelnut); }
+
+/* Timeframe: a label over a dropdown. Tight to the connectors bar above it. */
+body.people .p-param {
+  margin-top: -4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+body.people .p-param-label {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+body.people .p-select {
+  align-self: flex-start;
+  min-width: 130px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: rgba(10, 10, 10, 0.5);
+  border: 1px solid rgba(234, 234, 234, 0.14);
+  border-radius: 9px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+body.people .p-select:focus { outline: none; border-color: rgba(197, 165, 109, 0.5); }
+body.people .p-what {
+  margin: 6px 0 2px;
+  padding-left: 16px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--secondary);
+}
+
+body.people .close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+}
+
+/* The constellation moved to its own popup window (people-sky.html /
+   people-sky.css), reached from the globe pin on the widget rather than a
+   button here; its styles left with it. */
+
+/* ---------------- review mode ---------------- */
+/* Replaces the setup column after "initialize search": one "same person?" card
+   at a time, in the main width. Same palette as the rest. */
+body.people .people-review {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+body.people .rv-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+body.people .rv-prog { color: var(--hazelnut); }
+
+body.people .rv-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 12px 14px;
+  border-radius: 12px;
+  background: rgba(10, 10, 10, 0.4);
+  border: 1px solid rgba(234, 234, 234, 0.10);
+}
+body.people .rv-q {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+/* The two candidates, stacked, with a divider glyph between them. */
+body.people .rv-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+body.people .rv-p {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 9px;
+  border-radius: 9px;
+  background: rgba(234, 234, 234, 0.04);
+}
+body.people .rv-name { font-size: 13px; color: var(--fg); }
+body.people .rv-meta { font-size: 10.5px; color: var(--muted); }
+body.people .rv-vs {
+  align-self: center;
+  font-size: 12px;
+  color: var(--secondary);
+  line-height: 1;
+}
+body.people .rv-why {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--secondary);
+}
+
+body.people .rv-actions {
+  display: flex;
+  gap: 8px;
+}
+body.people .rv-btn {
+  flex: 1 1 auto;
+  min-height: 34px;
+  padding: 7px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(234, 234, 234, 0.14);
+  background: rgba(20, 20, 18, 0.6);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--fg);
+}
+body.people .rv-btn:hover { filter: brightness(1.1); }
+body.people .rv-btn:disabled { opacity: 0.5; cursor: default; }
+/* "same" is the affirmative, gets the gradient fill; the others stay quiet. */
+body.people .rv-yes {
+  border: 0;
+  font-weight: 600;
+  color: var(--bg);
+  background: linear-gradient(180deg, #e5d6bb 0%, var(--hazelnut) 100%);
+}
+body.people .rv-skip { flex: 0 0 auto; color: var(--muted); }
+
+body.people .rv-done {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+body.people .rv-done b { font-size: 15px; color: var(--fg); }
+body.people .rv-done p { margin: 0; font-size: 12px; color: var(--secondary); }
+body.people .rv-done .rv-next { color: var(--muted); }
+body.people .rv-done .p-init { margin-top: 8px; }
+
+/* The shared tile's hover tooltip (connector-tile.js). Same styling the
+   settings shelf gives it (palette.css scopes that to body.connections), so the
+   hover label reads identically on the People bar. */
+body.people .tile-tip {
+  position: fixed; z-index: 40;
+  padding: 3px 8px;
+  font-size: 11px; white-space: nowrap;
+  color: var(--hazelnut-light);
+  background: rgba(20, 20, 18, 0.96);
+  border: 1px solid rgba(234, 234, 234, 0.14);
+  border-radius: 7px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  opacity: 0; transition: opacity 0.12s ease;
+}
+body.people .tile-tip.on { opacity: 1; }
+
+/* The connections bar reuses the global .list/.row tiles, but .list carries
+   negative margins tuned for the settings shelf's shadow-bleed clip. Reset them
+   here and give the tile shadows their own room, so the bar sits cleanly inside
+   the popup and scrolls horizontally when there are more sources than fit. */
+body.people .list {
+  /* Sit right under the "connectors" label — negative margin cancels the
+     column's flex gap; the small padding is just shadow room for the tiles. */
+  margin: -12px 0 0;
+  padding: 6px 2px 4px;
+  max-width: 100%;
+}
+
+/* The connector's flow, as a left SIDE PANEL (same as settings). Hidden until a
+   tile is clicked (global .hint-host:empty { display:none }); when a hint opens,
+   people.js posts extraWidth and the popup grows left to reveal it. */
+/* The side panel folds open like a page turning, hinged on its right edge
+   (where it meets the main column), instead of the old hard slide-in that read
+   as glitchy. A short 3D rotateY with a soft settle. */
+@keyframes hz-fold-in {
+  from { transform: perspective(700px) rotateY(-82deg); opacity: 0; }
+  60%  { opacity: 1; }
+  to   { transform: perspective(700px) rotateY(0deg); opacity: 1; }
+}
+body.people .hint-host:not(:empty) {
+  transform-origin: right center;
+  animation: hz-fold-in 0.34s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  body.people .hint-host:not(:empty) { animation: none; }
+}
+body.people .hint-host {
+  position: relative; /* anchors the corner × */
+  flex: 0 0 236px;
+  /* Size to its OWN content, capped — no align-self:stretch, which let a tall
+     panel drag the whole popup up past the screen (top clipped) and leave the
+     shorter main column with dead space below. Overflow scrolls if it's taller. */
+  align-self: flex-start;
+  max-height: 300px;
+  overflow-y: auto;
+}

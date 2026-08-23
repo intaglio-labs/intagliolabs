@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Keeps WhatsApp Desktop running so its local store stays fresh.
+
+  THE ROOT CAUSE this fixes: the whatsapp connector reads WhatsApp Desktop's
+  ChatStorage.sqlite, and that file ONLY updates while the app is open. When the
+  app is closed the store freezes — the connector keeps running and keeps
+  succeeding against a file that no longer changes, so nothing looks wrong while
+  new messages silently never arrive. Measured once at 66 days behind.
+
+  The connector cannot fix this (it cannot make WhatsApp sync); the watchdog can
+  only NOTICE it. This agent prevents it, by making sure the app is running.
+
+  `open -gj` launches it HIDDEN and in the BACKGROUND (-g: don't bring to front,
+  -j: launch hidden), so it syncs without stealing focus or cluttering the dock
+  view. Re-run on an interval so a manual quit self-heals within the window;
+  `open` on an already-running app is a harmless no-op.
+
+  Launched by BUNDLE ID (-b net.whatsapp.WhatsApp), not by name: the installed
+  bundle is "‎WhatsApp.app" with an invisible U+200E mark before the W, so
+  `open -a WhatsApp` fails to resolve it. The bundle id is stable and has no
+  such trap.
+
+  Not wrapped in a shell: the interpreter is /usr/bin/open directly, one arg
+  vector, nothing to escape.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hazlie.whatsapp-keepalive</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/open</string>
+    <string>-gj</string>
+    <string>-b</string>
+    <string>net.whatsapp.WhatsApp</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>14400</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>@HOME@/.hazlie/logs/whatsapp-keepalive.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/.hazlie/logs/whatsapp-keepalive.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,8 @@
+# Machine-local absolute path (contains the owner's home dir).
+.env
+# Nothing runtime should ever land in the repo, but belt-and-suspenders: no
+# generated configs, registrations, or session data.
+*/config.yaml
+*/registration.yaml
+*.db
+data/

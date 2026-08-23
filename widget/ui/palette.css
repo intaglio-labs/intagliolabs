@@ -1,0 +1,2244 @@
+/* Terminal Palette v0.2 — transcribed from connect/lib/page.mjs:30-42.
+   One background, one foreground, one accent. Dark only; there is
+   deliberately no light theme. Nothing here is ever fetched: the font stack
+   is the system-mono ladder, same reasoning as the connect page.
+
+   ONE ADDITION, pending owner sign-off: --status-ok. The owner's mockups
+   show a green status dot and cursor; v0.2 contains no green. Sampled from
+   the mockups; replace with the exact value from the Terminal Palette
+   .dc.html export when it lands. */
+:root {
+  color-scheme: dark;
+  --bg: #141412;            /* char — soft black */
+  --fg: #eaeaea;            /* signal */
+  --hairline: #1c1c1c;      /* gray-900 */
+  --disabled: #3a3a3a;      /* gray-700 */
+  --muted: #5c5c5c;         /* gray-500 — muted labels */
+  --secondary: #8a8a8a;     /* gray-300 — secondary text */
+  --hazelnut: #c5a56d;      /* warm accent */
+  --hazelnut-light: #e5d6bb;/* gradient end */
+  --status-ok: #33ff66;     /* "phosphor" — the canvas's accent, read from
+                               Terminal Palette.dc.html (accentColor default);
+                               replaces the sampled placeholder */
+  --status-bad: #ff5347;    /* the only alarm colour in the widget. Kept at
+                               phosphor's saturation so it reads as the same
+                               instrument rather than a browser default red,
+                               and deliberately far enough from --hazelnut
+                               (#c5a56d) that a warm accent is never mistaken
+                               for a warning. Used ONLY for a connector that
+                               is set up and failing — see .row .dot.bad. */
+  --glass: rgba(234, 234, 234, 0.04);
+  --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: var(--mono);
+  color: var(--fg);
+  background: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+  overflow: hidden;
+}
+::selection { background: var(--hazelnut); color: var(--bg); }
+button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+
+/* ---------------- squish ----------------
+   Press feedback: wider and shorter under the thumb, then a spring back that
+   overshoots a little before settling.
+
+   VOLUME IS PRESERVED, and that is the whole trick — 1.10 x 0.91 = 1.001, so
+   the shape keeps its area and reads as squeezed rather than resized. Change
+   one number and the other has to move with it.
+
+   Deliberately NOT gated on prefers-reduced-motion (owner, 2026-08-21). This
+   is feedback about the user's own finger, not ambient decoration — the same
+   reason a pressed-state highlight is never suppressed. Reduce Motion still
+   stills the orb's resting jelly and the thinking dots; it just does not take
+   away the sense that a button is a physical thing. */
+.send, .gear, .orb-btn, .close, .row, .bar-min, .switch {
+  transition: transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.send:active, .gear:active, .orb-btn:active,
+.close:active, .row:active, .bar-min:active, .switch:active {
+  transform: scale(1.10, 0.91);
+}
+
+/* ---------------- widget (transparent desktop panel) ---------------- */
+/* 12px of headroom, not 6: the orb's resting jelly bounce lifts it 8px at the
+   peak and stretches it taller still, and at 6px the top of the orb clipped
+   flat against the window edge twice a cycle. */
+/* 16px at the bottom is the gear's shadow (0 4px 12px): the window is cut
+   to content, so any shadow past the last row needs bought room or the edge
+   slices it flat. widgetBase in main.swift carries the matching +16. */
+body.widget { display: flex; flex-direction: column; align-items: center; padding: 12px 6px 16px; }
+/* No container: every control sits directly on the wallpaper carrying its
+   own surface. */
+.panel { width: 100%; }
+.cursor { color: var(--status-ok); font-weight: 700; }
+/* The always-present message bar — the chat entry point lives on the
+   desktop itself. */
+.wbar { display: flex; gap: 8px; align-items: center; justify-content: flex-end; position: relative; }
+/* The orb — ported verbatim from Terminal Palette.dc.html §08 (SCREEN /
+   ORB), scaled 180px → 42px (blurs and inset shadows scaled with it).
+   Anatomy from the canvas: a gradient body, three counter-rotating blurred
+   blob layers on separate drift phases, and a static top-left highlight.
+
+   ONE DELIBERATE DEPARTURE FROM THE CANVAS (2026-08-21, owner): the canvas
+   warps the body at rest. Here the resting orb is a plain circle and warping
+   is what ARMING looks like. The canvas is a still image of one moment; this
+   is a control, and shape is the only state it can show — a permanently
+   wobbling blob made armed and idle read the same from across the room. */
+@keyframes orb-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+@keyframes orb-spin-rev { 0% { transform: rotate(0deg); } 100% { transform: rotate(-360deg); } }
+@keyframes orb-drift { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.45); } }
+@keyframes orb-breathe {
+  0%, 100% { transform: scale(1) translateY(0) rotate(0deg); }
+  33% { transform: scale(1.04) translateY(-3px) rotate(1.5deg); }
+  66% { transform: scale(0.985) translateY(2px) rotate(-1.5deg); }
+}
+@keyframes orb-warp {
+  0%, 100% { border-radius: 50%; }
+  15% { border-radius: 38% 62% 68% 32% / 58% 40% 60% 42%; }
+  35% { border-radius: 64% 36% 34% 66% / 44% 62% 38% 56%; }
+  55% { border-radius: 34% 66% 60% 40% / 62% 38% 58% 42%; }
+  75% { border-radius: 58% 42% 40% 60% / 40% 58% 42% 60%; }
+}
+/* The resting bounce, ported verbatim from Terminal Palette.dc.html (v-jelly).
+   Squash and stretch: the orb compresses on the way down and stretches on the
+   way up, overshooting on a back-ease so it lands like something with weight.
+   Transform only — the border-radius stays 50% throughout, so the OUTLINE is
+   still untouched at rest and warping remains the armed signal. */
+/* Face keyframes, scaled from the canvas. Pixel travel is x0.3 (140px orb
+   -> 42px); rotations and scale factors are scale-free and unchanged. */
+@keyframes eye-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1px); }
+}
+@keyframes eye-blink {
+  0%, 90%, 100% { transform: scaleY(1); }
+  93% { transform: scaleY(0.08); }
+  96% { transform: scaleY(1); }
+}
+/* A small, CONTINUOUS tremor. Two earlier passes both missed: the canvas's
+   own version moved 3 degrees and 2% of scale, which at 10px was under a
+   third of a pixel and read as nothing at all; the correction over-shot into
+   holding still for most of a cycle and then convulsing — squint to 55%,
+   snap past full, settle, flick — which reads as SPURTS, not a twitch.
+   A twitch is small and it never stops. So: under a degree and a half of
+   rotation, 2% of scale, on a smooth loop with no dead stretch anywhere.
+
+   The base scale is 1, not 0.78. That 0.78 came from the canvas and left the
+   right eye permanently 22% smaller than the left — a lopsided face at rest,
+   which is not what a twitch is. Both eyes are the same size now; only one
+   of them moves. */
+@keyframes eye-twitch {
+  0%, 100% { transform: rotate(-9deg) scale(1); }
+  22% { transform: rotate(-10.4deg) scale(0.975); }
+  45% { transform: rotate(-7.8deg) scale(1.015); }
+  68% { transform: rotate(-10deg) scale(0.985); }
+  86% { transform: rotate(-8.4deg) scale(1.008); }
+}
+@keyframes eye-yap {
+  0%, 100% { transform: translateY(0) scaleY(1) scaleX(1); }
+  10% { transform: translateY(-3px) scaleY(1.5) scaleX(0.85); }
+  20% { transform: translateY(1px) scaleY(0.5) scaleX(1.25); }
+  32% { transform: translateY(-2.4px) scaleY(1.4) scaleX(0.9); }
+  44% { transform: translateY(1.2px) scaleY(0.6) scaleX(1.2); }
+  56% { transform: translateY(-3.6px) scaleY(1.6) scaleX(0.8); }
+  68% { transform: translateY(0.3px) scaleY(0.75) scaleX(1.15); }
+  80% { transform: translateY(-1.8px) scaleY(1.3) scaleX(0.9); }
+  90% { transform: translateY(0.6px) scaleY(0.8) scaleX(1.1); }
+}
+@keyframes eye-yap-sway {
+  0%, 100% { transform: rotate(0deg) translateX(0); }
+  20% { transform: rotate(6deg) translateX(0.6px); }
+  40% { transform: rotate(-4deg) translateX(-0.6px); }
+  60% { transform: rotate(5deg) translateX(0.3px); }
+  80% { transform: rotate(-5deg) translateX(-0.3px); }
+}
+@keyframes badge-pop {
+  0%, 100% { transform: scale(1) rotate(0deg); }
+  8% { transform: scale(1.2) rotate(-8deg); }
+  16% { transform: scale(0.95) rotate(5deg); }
+  24% { transform: scale(1) rotate(0deg); }
+}
+/* The dream bubble: swells in, drifts up, then bursts. The per-keyframe
+   timing functions are what sell it — an ease-in on the last leg makes the
+   blow-out accelerate, where a single ease across the whole cycle just looks
+   like the bubble growing. */
+@keyframes zzz-pop {
+  0% { opacity: 0; transform: translate(0, var(--zzz-lift)) scale(0.35); animation-timing-function: ease-out; }
+  18% { opacity: 0.95; transform: translate(calc(var(--zzz-dx) * 0.2), 0) scale(1); animation-timing-function: linear; }
+  84% { opacity: 0.95; transform: translate(var(--zzz-dx), var(--zzz-dy)) scale(1.06); animation-timing-function: ease-in; }
+  100% { opacity: 0; transform: translate(calc(var(--zzz-dx) * 1.1), calc(var(--zzz-dy) * 1.2)) scale(1.9); }
+}
+@keyframes orb-jelly {
+  0%, 100% { transform: scale(1, 1) translateY(0); }
+  30% { transform: scale(1.14, 0.86) translateY(4px); }
+  50% { transform: scale(0.88, 1.12) translateY(-8px); }
+  70% { transform: scale(1.06, 0.94) translateY(2px); }
+}
+/* The hit target and the press-squash. Sized here; the inner .orb fills it. */
+.orb-btn {
+  width: 42px; height: 42px; flex: 0 0 auto;
+  padding: 0; border-radius: 50%;
+  cursor: pointer;
+  /* THE SWELL lives here, on the button, and not on .orb — because .orb is
+     already running jack-spaz, and transform is one property: a growth
+     written into those keyframes would be read once at animation start and
+     never again, so every tap after the first would do nothing. On a
+     separate element the two transforms compose (nested), and the squish
+     transition this button already has turns each step into a smooth ease
+     rather than a jump. Identity at rest. */
+  transform: scale(var(--jgrow, 1));
+}
+/* The press-squash has to carry the swell too, or pressing a swollen orb
+   snaps it back to 42px for the length of the press. */
+.orb-btn:active {
+  transform: scale(calc(1.10 * var(--jgrow, 1)), calc(0.91 * var(--jgrow, 1)));
+}
+.orb {
+  display: block; position: relative;
+  width: 100%; height: 100%;
+  /* THE ORB UNIT: this orb's size over 42, the widget's. Every px in the
+     shared state animations (§ORB-STATES) is written against it, so one
+     block serves this 42px orb, onboarding's 120px one and the landing
+     page's 150px hero — instead of three hand-scaled copies that drift. */
+  --ou: 1;
+  /* Visible, not hidden: the face, the z's and the badge are siblings of
+     .orb-body and have to be able to sit outside the silhouette. The blobs
+     are still clipped — .orb-body does that. */
+  overflow: visible;
+  /* Slightly off-round rather than a true 50%: a perfect circle reads
+     machined, a hair out of true reads as something soft holding its own
+     shape. orb-warp-active begins and ends on these exact values so the
+     armed morph still grows out of the resting silhouette with no jump. */
+  border-radius: 49% 51% 52% 48% / 51% 49% 51% 49%;
+  /* Hue drifts with the time of day (Terminal Palette.dc.html §09). Same
+     silhouette, different mood — analogous shifts off the hazelnut/green
+     axis, never leaving the family. The band is a class widget.js puts here;
+     these are the power-hour values, which double as the fallback if the
+     clock is somehow unreadable. */
+  --tod-grad: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 45%, var(--status-ok) 100%);
+  --tod-mid: #c5a56d;
+  --tod-far: var(--status-ok);
+  --tod-glow: rgba(51, 255, 102, 0.10);
+  --tod-glow-armed: rgba(51, 255, 102, 0.30);
+  /* The catchlight. Cream in four of the five bands, exactly as the canvas
+     draws it — but it is a variable because it sits top-left, which is where
+     a 160deg gradient puts its FIRST stop. When that stop is not warm, a
+     cream specular stops reading as light on the surface and starts reading
+     as a cream disc pasted over it. */
+  --tod-light: #f2e8d4;
+  cursor: pointer;
+}
+/* The clipped body: gradient, blobs, highlight and blush all live in here so
+   they curve away with the silhouette. */
+.orb-body {
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  overflow: hidden;
+  background: var(--tod-grad);
+  box-shadow:
+    0 0 16px var(--tod-glow),
+    inset -3px -3px 8px rgba(0, 0, 0, 0.18),
+    inset 3px 3px 7px rgba(255, 255, 255, 0.30);
+  transition: box-shadow .4s ease;
+}
+.blush {
+  position: absolute; top: 58%;
+  width: 7px; height: 4px; border-radius: 50%;
+  background: rgba(197, 165, 109, 0.55);
+  filter: blur(1px);
+}
+.blush.bl { left: 12%; }
+.blush.br { right: 12%; }
+/* Armed or speaking: the silhouette actually churns. orb-warp's gentle idle
+   deviation was nearly invisible at 42px, so the active state gets its own
+   keyframes with roughly double the excursion and a much shorter cycle — at
+   this size the shape has to move a lot to read as moving at all.
+
+   Both warps begin and end at border-radius 50%, so the morph grows out of the
+   resting circle with no jump at the handover: the circle is the animation's
+   first frame. */
+@keyframes orb-warp-active {
+  0%, 100% { border-radius: 49% 51% 52% 48% / 51% 49% 51% 49%; }
+  12% { border-radius: 30% 70% 74% 26% / 66% 32% 68% 34%; }
+  28% { border-radius: 72% 28% 26% 74% / 34% 72% 28% 66%; }
+  44% { border-radius: 26% 74% 68% 32% / 72% 28% 70% 30%; }
+  60% { border-radius: 66% 34% 30% 70% / 28% 68% 32% 72%; }
+  78% { border-radius: 36% 64% 70% 30% / 62% 36% 64% 38%; }
+}
+/* ---------------- the face (Terminal Palette.dc.html §05) ----------------
+   Four states, one class each, mutually exclusive. Every pixel value here is
+   the canvas's own scaled by 0.3 — its orb is 140px, this one is 42px —
+   EXCEPT the z bubbles and the badge, which carry text: at a true 0.3 the z
+   would be a 4.5px glyph and the badge digit 3.9px, both illegible, so those
+   two sit proportionally larger than the canvas draws them.
+   Rotations, scale factors and opacities are scale-free and are verbatim. */
+.face {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  gap: 5px;
+  pointer-events: none;
+}
+/* Open eyes: soft dark ellipses, tilted slightly toward each other. */
+.eye {
+  width: 10px; height: 12px; flex: 0 0 auto;
+  border-radius: 50%;
+  /* FULLY OPAQUE, NO FILTER — and both of those are the fix, not styling.
+     The canvas draws a 32px eye with a soft translucent rim and a 0.3px blur.
+     Ported to a 10px eye, that rim and that blur are a third of the size and
+     the same softness, and WebKit renders the result differently depending on
+     what is behind it: over the orb's dark right half nothing shows, over its
+     near-white left half the left eye read as out of focus. Scaling the blur
+     down to 0.1px was not enough — a sub-pixel filter still puts the element
+     on its own rasterized layer. There is nothing a blur buys at this size,
+     so the eye is now a flat opaque ellipse with an ordinary antialiased
+     edge, which renders identically wherever it sits. */
+  background: radial-gradient(ellipse at 50% 45%, #1a1917 0%, #141412 78%, #141412 100%);
+}
+.eye.el { transform: rotate(9deg); }
+.eye.er { transform: rotate(-9deg); }
+
+/* IDLE — asleep. The canvas changed this one: the resting orb no longer
+   jelly-bounces, it breathes slowly with its eyes shut and drifts z's. The
+   jelly moved to notification, where the bounce reads as being nudged awake. */
+.orb.idle { animation: orb-breathe 7s ease-in-out infinite; }
+.orb.idle .face { gap: 3px; animation: eye-bob 3.5s ease-in-out infinite; }
+/* Closed eyes are arcs — a whole ring, clipped to its top half.
+   NOT a top border. `border-top` on a rounded box tapers into the side
+   borders, and WebKit draws that taper whether the sides are transparent or
+   zero-width: two thin horns curving down past each eye, which read as a
+   second line underneath. There is no border-only way out of it, because the
+   taper IS the corner join. So the arc is drawn as a complete ellipse with a
+   uniform border all the way round, and the parent clips off everything below
+   the halfway line. Uniform stroke, flat ends, nothing under it.
+
+   The window is exactly half the ring's height, so the outer curve is the
+   same one the old ellipse had — this changes how it is drawn, not how it
+   looks. --lid-h/--lid-t carry the ring to the pseudo-element; the visible
+   height must be restated wherever they are, because `body.onboarding .orb
+   .eye` sets width/height at higher specificity than this rule.
+
+   Keep --lid-t well under half of --lid-h. At exactly half the ring has no
+   hole left and the crescent closes into a filled lump with a one-pixel bite
+   out of its underside, which is what the old 9-on-20 was doing behind the
+   taper. */
+.orb.idle .eye {
+  position: relative;
+  width: 13px; height: 4px;
+  --lid-h: 8px; --lid-t: 2.5px;
+  background: none; filter: none; transform: none;
+  border: 0; border-radius: 0;
+  overflow: hidden;
+}
+.orb.idle .eye::before {
+  content: '';
+  position: absolute; left: 0; right: 0; top: 0;
+  height: var(--lid-h);
+  border: var(--lid-t) solid rgba(20, 20, 18, 0.9);
+  border-radius: 50%;
+}
+
+/* NOTIFICATION — awake and nudged. Eyes open and perk toward the badge. No
+   trigger yet: widget.js exposes the state, production wires it later. */
+.orb.notify { animation: orb-jelly 2.8s cubic-bezier(0.68, -0.55, 0.265, 1.55) infinite; }
+.orb.notify .face { gap: 5px; transform: translate(2px, -1.5px); }
+
+/* LISTENING — fully present. The body goes STILL, which is the whole point:
+   after a breathing idle and a bouncing notification, stillness reads as
+   attention. The blobs speed up underneath instead. */
+.orb.listening { animation: none; }
+/* THE THINKING FACE. The gaze goes up and away from the bar, and the right
+   eye is 80% of the left and never quite settles.
+
+   The asymmetry is the whole tell: a face with two matched open eyes is just
+   awake, and this state has to be readable as thinking from across a room.
+   It is width and height, NOT a transform, because the twitch already owns
+   the transform — stacking a base scale under an animated one is exactly
+   what made an earlier attempt read as a lopsided face rather than a
+   thinking one. */
+.orb.listening .face { transform: translate(-1.5px, -1.5px); }
+.orb.listening .eye.er {
+  width: 8px; height: 9.5px;
+  animation: eye-twitch 2.6s ease-in-out infinite;
+}
+.orb.listening .orb-layer.la { animation-duration: 3s; }
+.orb.listening .orb-layer.lb { animation-duration: 2.4s; }
+.orb.listening .orb-blob.ba { animation-duration: 1.6s; }
+.orb.listening .orb-blob.bb { animation-duration: 1.25s; animation-delay: 0.4s; }
+
+/* TALKING — the eyes bounce with the voice. */
+.orb.talking .face {
+  animation: eye-yap 0.9s ease-in-out infinite, eye-yap-sway 1.6s ease-in-out infinite;
+}
+.orb.talking .eye { width: 9px; height: 11px; animation: eye-blink 4.6s ease-in-out infinite; }
+
+/* WAKING — the one-shot on click. Crouch, leap, and a couple of settling
+   bounces: startled awake rather than politely notified.
+
+   It fires from the click itself, not from the voice stack. Arming has to go
+   out to native, into the ear page, load models and speak a greeting before
+   anything comes back — and if voice is not provisioned, nothing comes back
+   at all. Tapping a sleeping orb has to do something immediately either way.
+
+   Placed after the four state rules on purpose: same specificity, so source
+   order is what lets it beat whichever state is underneath. */
+/* The crouch and the leap are held back from what looks best in isolation,
+   because the press-squash on .orb-btn is running at the same time — the same
+   click starts both — and the two transforms multiply. At a 1.22 crouch the
+   pair reached 312.3px against a 312px window; at 1.14 the worst frame lands
+   at 311.3, and the leap clears the top by 4px instead of 0.2. */
+@keyframes orb-wake {
+  0% { transform: scale(1, 1) translateY(0); }
+  18% { transform: scale(1.14, 0.84) translateY(5px); }
+  42% { transform: scale(0.86, 1.20) translateY(-7px); }
+  62% { transform: scale(1.10, 0.92) translateY(2px); }
+  78% { transform: scale(0.95, 1.06) translateY(-3px); }
+  90% { transform: scale(1.04, 0.97) translateY(1px); }
+  100% { transform: scale(1, 1) translateY(0); }
+}
+.orb.waking { animation: orb-wake 0.72s cubic-bezier(0.34, 1.56, 0.64, 1); }
+/* Awake means awake: eyes open on the first frame and the z's go at once,
+   even while the state underneath is still idle. */
+.orb.waking .eye {
+  width: 10px; height: 12px;
+  box-sizing: content-box;
+  background: radial-gradient(ellipse at 50% 45%, #1a1917 0%, #141412 78%, #141412 100%);
+  border: none; border-radius: 50%;
+  overflow: visible;
+}
+/* The sleeping ring is a pseudo-element now, so opening the eyes has to take
+   it away explicitly — the state underneath is still idle. */
+.orb.waking .eye::before { display: none; }
+.orb.waking .eye.el { transform: rotate(9deg); }
+.orb.waking .eye.er { transform: rotate(-9deg); }
+.orb.waking .face { gap: 5px; animation: none; }
+
+/* ORB-STATES:BEGIN — generated by tools/sync-orb.mjs, do not edit */
+/* ORB STATE ANIMATIONS — THE SHARED SOURCE. Do not edit the copies.
+ *
+ * The widget and the landing page draw the same orb at different sizes, and
+ * for a while they drew it from two hand-ported reimplementations: every
+ * change the owner asked for got made twice, by two people, and they drifted
+ * — the widget grew a pop and a concussion the page had never heard of.
+ *
+ * This file is the one copy of the states (jackpot, pop, dazed). It is
+ * INJECTED into widget/ui/palette.css and site/index.html by
+ * tools/sync-orb.mjs, between the BEGIN/END markers. Edit here, run the
+ * script, both move.
+ *
+ * SIZING: every px is expressed against --ou, the orb unit — the orb's size
+ * divided by 42, the widget's. The widget sets --ou: 1; the 150px landing
+ * hero sets 3.571. Percentages, opacities, rotations and durations need no
+ * scaling and are written plainly.
+ *
+ * The markup contract both sides must satisfy: .orb > .orb-body, .face >
+ * .eye.el/.eye.er, .eye > svg.swirl, .burst, .orb-badge, and layers
+ * .orb-layer.la/.lb/.lc each holding an .orb-blob.
+ */
+/* ---------------- jackpot ----------------
+   Hammer the orb and it pays out. Six taps inside 1.4s trips it; widget.js
+   owns the counting, the arming interlock and the sound, and everything the
+   payout looks like is here.
+
+   Written AFTER every state block on purpose. `.orb.jackpot` is two classes,
+   the same weight as `.orb.idle`, so source order is the only thing that
+   makes it win — keep it last.
+
+   Reduce Motion does NOT suppress this, and that is deliberate. The setting
+   exists for motion nobody asked for; a jackpot is six deliberate taps and
+   the reward for them, which is the same reasoning that already exempts the
+   press-squash. It cannot start on its own and it stops on its own. */
+@keyframes jack-spaz {
+  0%   { transform: translate(0, 0) rotate(0deg) scale(1, 1); }
+  9%   { transform: translate(calc(var(--ou) * -3px), calc(var(--ou) * 2px)) rotate(-13deg) scale(1.20, 0.84); }
+  20%  { transform: translate(calc(var(--ou) * 3px), calc(var(--ou) * -3px)) rotate(12deg) scale(0.84, 1.22); }
+  31%  { transform: translate(calc(var(--ou) * -2px), calc(var(--ou) * -3px)) rotate(-16deg) scale(1.24, 0.82); }
+  43%  { transform: translate(calc(var(--ou) * 4px), calc(var(--ou) * 2px)) rotate(9deg) scale(0.88, 1.18); }
+  55%  { transform: translate(calc(var(--ou) * -4px), calc(var(--ou) * 1px)) rotate(-11deg) scale(1.18, 0.86); }
+  67%  { transform: translate(calc(var(--ou) * 2px), calc(var(--ou) * -2px)) rotate(15deg) scale(0.86, 1.20); }
+  80%  { transform: translate(calc(var(--ou) * -1px), calc(var(--ou) * 3px)) rotate(-8deg) scale(1.14, 0.90); }
+  91%  { transform: translate(calc(var(--ou) * 3px), calc(var(--ou) * -1px)) rotate(6deg) scale(0.92, 1.12); }
+  100% { transform: translate(0, 0) rotate(0deg) scale(1, 1); }
+}
+/* The strobe is opacity on the BODY, not a filter and not a background swap:
+   both of those re-rasterize the gradient every frame, and this runs at 7Hz.
+   Dropping the body's opacity lets the wallpaper through, which is what makes
+   it read as flashing rather than as dimming. */
+@keyframes jack-strobe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.42; }
+}
+/* Reels. The eye spins and squashes flat twice a turn — a fruit-machine drum
+   seen edge-on, at the size of an eye. */
+@keyframes jack-reel {
+  0%   { transform: rotate(0deg) scaleY(1); }
+  25%  { transform: rotate(90deg) scaleY(0.2); }
+  50%  { transform: rotate(180deg) scaleY(1); }
+  75%  { transform: rotate(270deg) scaleY(0.2); }
+  100% { transform: rotate(360deg) scaleY(1); }
+}
+/* The dream bubbles get a second job: coins off the top of the machine. They
+   are the only two loose elements the orb already owns, and they already sit
+   outside the silhouette, so nothing new has to be spawned into a 98px-tall
+   window that would clip it. */
+@keyframes jack-spark {
+  0%   { opacity: 0; transform: translate(0, 0) scale(0.4) rotate(0deg); }
+  15%  { opacity: 1; }
+  100% { opacity: 0; transform: translate(var(--jx), var(--jy)) scale(1.5) rotate(var(--jr)); }
+}
+@keyframes jack-badge {
+  from { transform: scale(1) rotate(-9deg); }
+  to   { transform: scale(1.5) rotate(9deg); }
+}
+.orb.jackpot { animation: jack-spaz 0.42s linear infinite; }
+.orb.jackpot .orb-body { animation: jack-strobe 0.14s steps(2, end) infinite; }
+/* The innards at full tilt. Same animations the other states tune, wound
+   down to a blur — nothing new to keep in sync. */
+.orb.jackpot .orb-layer.la { animation-duration: 0.42s; }
+.orb.jackpot .orb-layer.lb { animation-duration: 0.3s; }
+.orb.jackpot .orb-layer.lc { animation-duration: 0.55s; }
+.orb.jackpot .orb-blob.ba { animation-duration: 0.26s; }
+.orb.jackpot .orb-blob.bb { animation-duration: 0.2s; animation-delay: 0.05s; }
+.orb.jackpot .orb-blob.bc { animation-duration: 0.32s; animation-delay: 0.1s; }
+.orb.jackpot .face { gap: calc(var(--ou) * 6px); animation: none; }
+.orb.jackpot .eye {
+  width: calc(var(--ou) * 11px); height: calc(var(--ou) * 13px);
+  box-sizing: content-box;
+  background: radial-gradient(ellipse at 50% 45%, #1a1917 0%, #141412 78%, #141412 100%);
+  border: 0; border-radius: 50%;
+  overflow: visible;
+  animation: jack-reel 0.3s linear infinite;
+}
+/* The shut-eye ring is a pseudo-element, so opening the eyes has to take it
+   away — same reason `.orb.waking` does. */
+.orb.jackpot .eye::before { display: none; }
+/* Counter-spun, so the two reels never line up and the face never resolves
+   into anything symmetrical enough to read as a face. */
+.orb.jackpot .eye.er { animation-direction: reverse; animation-duration: 0.26s; }
+.orb.jackpot .zzz {
+  display: flex;
+  --jx: calc(var(--ou) * 15px); --jy: calc(var(--ou) * -16px); --jr: 220deg;
+  animation: jack-spark 0.5s ease-out infinite;
+}
+.orb.jackpot .zzz.z2 { --jx: calc(var(--ou) * -13px); --jy: calc(var(--ou) * -12px); --jr: -260deg; animation-duration: 0.62s; animation-delay: 0.12s; }
+/* The badge is already a counter in a hazelnut disc at the top right of the
+   orb. During a payout it counts the taps, which is exactly what the number
+   on a machine is doing. */
+.orb.jackpot .orb-badge { display: flex; animation: jack-badge 0.15s ease-in-out infinite alternate; }
+
+/* ---------------- 69, and the concussion ----------------
+   The swell has a ceiling, and the ceiling is a joke: the badge counts every
+   tap and at SIXTY-NINE the orb bursts. What follows is not a reset — the
+   orb comes back CONCUSSED, staggering with stars going round its head, and
+   sleeps it off over about five seconds. Animal Crossing's dizzy, not a
+   crash: nothing is broken, the thing you hit just needs a minute.
+
+   Written after the jackpot block for the same reason the jackpot is written
+   after the states — these are all two-class selectors and source order is
+   the only thing that decides. */
+.burst {
+  position: absolute; inset: calc(var(--ou) * -6px);
+  border-radius: 50%;
+  border: calc(var(--ou) * 3px) solid rgba(229, 214, 187, 0.9);
+  opacity: 0;
+  pointer-events: none;
+}
+/* THE BURST — one continuous morph, not a stack of poses.
+ *
+ * The first version trembled: it rotated -3, +3, -2, +1 degrees across five
+ * keyframes to read as "straining". At 0.5s that is a shiver every 90ms with
+ * a velocity reversal at each one, and the eye reads reversals as GLITCHES,
+ * not effort. Same lesson the message's flight taught — position continuous
+ * is not enough, speed has to be continuous too.
+ *
+ * So it is squash and stretch instead, on one axis pair, through four stops
+ * that never reverse direction:
+ *
+ *   anticipation  gathers slightly IN, which is what makes the rise read as
+ *                 powered rather than as a size change
+ *   stretch       up and out, accelerating
+ *   taut          the top of the arc, briefly, where the skin is tightest
+ *   burst         outward and gone — the orb BECOMES the shockwave
+ *
+ * It expands to nothing rather than collapsing to nothing: a balloon throws
+ * its skin outward, and the old collapse to scale(0.03) was both wrong and
+ * the single biggest jump in the whole animation.
+ *
+ * Every stop carries its own timing function so the curve is smooth THROUGH
+ * the keyframes rather than easing in and out of each one. */
+@keyframes pop-body {
+  0% {
+    transform: scale(1, 1); opacity: 1;
+    animation-timing-function: cubic-bezier(0.4, 0, 0.6, 1);
+  }
+  16% {
+    transform: scale(0.94, 0.91); opacity: 1;
+    animation-timing-function: cubic-bezier(0.2, 0, 0.4, 1);
+  }
+  46% {
+    transform: scale(1.18, 1.23); opacity: 1;
+    animation-timing-function: cubic-bezier(0.3, 0, 0.5, 1);
+  }
+  62% {
+    transform: scale(1.34, 1.32); opacity: 1;
+    animation-timing-function: cubic-bezier(0.55, 0, 0.85, 0.35);
+  }
+  78% { opacity: 1; }
+  100% { transform: scale(2.5, 2.5); opacity: 0; }
+}
+/* The white-out rides the highlight already inside the body. Opacity only —
+   1 is the ceiling, and the old keyframe asked for 3, which clamps and made
+   the ramp land early and hard. */
+@keyframes pop-flash {
+  0%, 40% { opacity: 1; transform: scale(1); }
+  62% { opacity: 1; transform: scale(1.9); }
+  80% { opacity: 0; transform: scale(2.6); }
+  100% { opacity: 0; }
+}
+/* Two shockwaves, both leaving at the burst: the second thinner, later and
+   faster, which is what makes it a bang with an echo rather than a ripple.
+   Both fade IN over a real interval now — the old 5% ramp was a pop-in. */
+@keyframes pop-ring {
+  0%, 56% { opacity: 0; transform: scale(0.6); border-width: calc(var(--ou) * 3px); }
+  70% { opacity: 0.95; }
+  100% { opacity: 0; transform: scale(3.2); border-width: calc(var(--ou) * 0.5px); }
+}
+@keyframes pop-ring2 {
+  0%, 62% { opacity: 0; transform: scale(0.55); border-width: calc(var(--ou) * 1.5px); }
+  76% { opacity: 0.8; }
+  100% { opacity: 0; transform: scale(4); border-width: calc(var(--ou) * 0.5px); }
+}
+.orb.pop { animation: pop-body 0.62s linear forwards; }
+.orb.pop .orb-hl { animation: pop-flash 0.62s cubic-bezier(0.4, 0, 0.5, 1) forwards; }
+.orb.pop .burst { animation: pop-ring 0.95s cubic-bezier(0.15, 0.75, 0.35, 1) forwards; }
+.orb.pop .burst::after {
+  content: ''; position: absolute; inset: 0;
+  border-radius: 50%;
+  border: calc(var(--ou) * 1.5px) solid rgba(229, 214, 187, 0.85);
+  animation: pop-ring2 1s cubic-bezier(0.15, 0.75, 0.35, 1) forwards;
+}
+.orb.pop .face, .orb.pop .orb-badge { opacity: 0; }
+.orb.pop .zzz { display: none; }
+/* The whole shelf jolts when it goes — widget.js flips this on at the bang
+   and off half a second later. Decaying, so it reads as an impact absorbed
+   rather than a wobble. */
+@keyframes quake {
+  0% { transform: translate(0, 0); }
+  15% { transform: translate(calc(var(--ou) * -5px), calc(var(--ou) * 2px)); }
+  32% { transform: translate(calc(var(--ou) * 4px), calc(var(--ou) * -2px)); }
+  52% { transform: translate(calc(var(--ou) * -3px), calc(var(--ou) * 1px)); }
+  72% { transform: translate(calc(var(--ou) * 2px), 0); }
+  88% { transform: translate(calc(var(--ou) * -1px), 0); }
+  100% { transform: translate(0, 0); }
+}
+.panel.quake { animation: quake 0.45s cubic-bezier(0.25, 0.6, 0.4, 1); }
+
+/* Concussed: smaller than it was (deflated), listing side to side, unable to
+   hold still. Slow on purpose — everything else this orb does is quick, and
+   the contrast is the joke. */
+@keyframes daze-sway {
+  0%, 100% { transform: rotate(-8deg) translate(calc(var(--ou) * -1px), calc(var(--ou) * 1px)) scale(0.92); }
+  25% { transform: rotate(3deg) translate(calc(var(--ou) * 1px), calc(var(--ou) * 2px)) scale(0.9); }
+  50% { transform: rotate(8deg) translate(calc(var(--ou) * 1px), 0) scale(0.92); }
+  75% { transform: rotate(-2deg) translate(calc(var(--ou) * -1px), calc(var(--ou) * 2px)) scale(0.9); }
+}
+/* THE REFORM — the seam between the burst and the concussion.
+ *
+ * The burst ends invisible at scale(2.5) and the sway used to start, in the
+ * very next frame it painted, at scale(0.92) with full opacity. Nothing
+ * connected those two states: the orb simply reappeared, small and solid,
+ * mid-loop. However good either half was, the join was a cut.
+ *
+ * So it comes BACK. It gathers in from nothing, overshoots slightly (the
+ * skin still has momentum), sags under it, and settles — and its last
+ * keyframe is EXACTLY daze-sway's 0% pose, which is what makes the handover
+ * invisible. That is the whole trick: two animations on one element, the
+ * loop delayed by the reform's length, and the reform ending precisely where
+ * the loop begins. Get that pose wrong by a degree and the seam is back. */
+@keyframes daze-reform {
+  0% {
+    opacity: 0;
+    transform: rotate(16deg) scale(0.18);
+    animation-timing-function: cubic-bezier(0.2, 0.9, 0.4, 1);
+  }
+  40% {
+    opacity: 1;
+    transform: rotate(-7deg) scale(1.05);
+    animation-timing-function: cubic-bezier(0.4, 0, 0.4, 1);
+  }
+  70% {
+    transform: rotate(3deg) scale(0.87);
+    animation-timing-function: cubic-bezier(0.3, 0, 0.3, 1);
+  }
+  100% {
+    opacity: 1;
+    /* daze-sway's 0%, to the value. */
+    transform: rotate(-8deg) translate(calc(var(--ou) * -1px), calc(var(--ou) * 1px)) scale(0.92);
+  }
+}
+/* The body's dim arrives with the reform rather than snapping on with the
+   class — it was 0.9 from the first frame, which is a step in the middle of
+   a fade. */
+@keyframes daze-settle {
+  from { opacity: 1; }
+  to { opacity: 0.9; }
+}
+/* And the face fades up: swirl eyes appearing at full strength on a body
+   still gathering itself read as two separate events. */
+@keyframes daze-face-in {
+  0% { opacity: 0; }
+  45% { opacity: 0; }
+  100% { opacity: 1; }
+}
+.orb.dazed {
+  /* The loop waits out the reform, and starts from the pose the reform
+     leaves behind. */
+  animation:
+    daze-reform 0.62s both,
+    daze-sway 2.6s ease-in-out 0.62s infinite;
+}
+.orb.dazed .orb-body { animation: daze-settle 0.62s ease-out both; }
+.orb.dazed .orb-layer, .orb.dazed .orb-blob { animation-duration: 6s; }
+.orb.dazed .zzz, .orb.dazed .orb-badge { display: none; }
+/* SWIRL EYES — a real Archimedean spiral, inline SVG in widget.html. The
+   first pass approximated one from CSS border arcs and the owner rightly
+   called it mud: an actual spiral has continuously growing radius, and no
+   pile of ring fragments reads as one. The CSP bars every IMAGE (data: URIs
+   included) but inline markup is not a fetch, so the eye holds a generated
+   r = b·θ path — starting in the middle, unwinding outward, 2.3 turns.
+   Spinning still helps (it is how dizzy moves), counter-rotated so nobody
+   is steering. */
+.orb.dazed .face { gap: calc(var(--ou) * 6px); animation: daze-face-in 0.62s ease-out both; }
+/* BOTH eyes, by class, so neither the base .eye.er tilt (transform: rotate)
+   nor a lingering single-class state (.orb.listening .eye.er sizing) can win
+   the cascade and leave the right eye a different size or unspun (owner saw
+   exactly that). Same size, same spin, only the DIRECTION differs. */
+.orb.dazed .eye.el,
+.orb.dazed .eye.er {
+  position: relative;
+  width: calc(var(--ou) * 13px); height: calc(var(--ou) * 13px);
+  background: none; border: 0; border-radius: 0;
+  overflow: visible;
+  transform: none;
+  animation: daze-swirl 1.3s linear infinite;
+}
+.orb.dazed .eye.er { animation-direction: reverse; }
+@keyframes daze-swirl { to { transform: rotate(360deg); } }
+/* The idle state's shut-eye ring is a ::before; without this a spiral wears
+   an eyelid. */
+.orb.dazed .eye::before, .orb.dazed .eye::after { content: none; }
+.eye .swirl { display: none; }
+.orb.dazed .eye .swirl { display: block; width: 100%; height: 100%; }
+.swirl path {
+  fill: none;
+  stroke: rgba(20, 20, 18, 0.9);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* NO STARS, NO Z'S. Circling stars were the first draft of the concussion
+   and the owner cut them: the swirl eyes already say dizzy, and orbiting
+   glyphs at this size read as clutter round a 42px face rather than as a
+   cartoon. The z's are cut from the whole sequence for the same reason —
+   they mean ASLEEP, and a knocked-out orb wearing sleep marks says two
+   different things at once. The burst carries itself on the rings, the
+   flash and the quake. */
+/* ORB-STATES:END */
+
+/* The badge, notification only. Larger than a 0.3 scaling would give, because
+   the digit has to stay readable at this size. */
+.orb-badge {
+  position: absolute; top: -3px; right: -2px;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: linear-gradient(180deg, #e5d6bb, #c5a56d);
+  color: #141412; font-size: 9px; font-weight: 700; line-height: 1;
+  display: none; align-items: center; justify-content: center;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4);
+  animation: badge-pop 3s ease-in-out infinite;
+}
+.orb.notify .orb-badge { display: flex; }
+
+/* The z's, idle only: each rides up and POPS at the top rather than fading out. The pop is the last sixth of the
+   cycle — the bubble stays put and blows out fast while its opacity drops,
+   which reads as bursting rather than shrinking away. */
+.zzz {
+  /* The drift, in vars: the widget's orb is 42px and onboarding's is 120, and
+     one keyframe reading these serves both. */
+  --zzz-dx: 5px; --zzz-dy: -10px; --zzz-lift: 3px;
+  position: absolute;
+  display: none; align-items: center; justify-content: center;
+  opacity: 0;
+}
+/* NO VESSEL. There was a disc, then a disc with a dyed band round it, and
+   both answered the same question the wrong way round. The question is real —
+   the widget floats over arbitrary wallpaper and a bare cream letter vanishes
+   against snow — but a surface is not the only way to give a letter an edge.
+   Its own shadow is, and it costs no geometry: no ring to fit the glyph
+   inside, nothing to keep centred, nothing that has to be undone anywhere
+   else.
+
+   Three stops, three jobs: a tight black ring that separates the glyph from
+   anything bright behind it, a soft one just outside so the ring does not
+   read as a sticker outline, and a wide faint one that puts the letter above
+   a photo rather than on it.
+
+   Trina, and lowercase in the markup on purpose — Trina's lowercase ARE
+   display capitals, so `z` draws the Z. Regular weight: Trina ships one, and
+   asking for bold gets a synthesised one that goes muddy at this size.
+
+   The boxes below keep their sizes even though nothing is painted in them any
+   more. They are what centres each letter where its disc used to sit, so the
+   z's still drift from the two points they always drifted from. */
+.zzz i {
+  font-family: 'Trina', var(--mono);
+  font-style: normal; font-weight: 400; line-height: 1;
+  color: var(--hazelnut-light);
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.95),
+    0 0 3px rgba(0, 0, 0, 0.9),
+    0 0 10px rgba(0, 0, 0, 0.55);
+}
+.zzz.z1 { top: -6px; right: 1px; width: 13px; height: 13px; }
+.zzz.z1 i { font-size: 13px; }
+.zzz.z2 { top: 3px; right: -5px; width: 10px; height: 10px; }
+.zzz.z2 i { font-size: 10px; }
+.orb.idle .zzz { display: flex; animation: zzz-pop 2.8s ease-out infinite; }
+.orb.idle .zzz.z2 { animation-delay: 1.4s; }
+/* Concussed outranks asleep. The orb KEEPS .idle through the daze, and the
+   rule above ties the dazed hide at three classes — so source order decided,
+   and the z's floated over the swirl eyes (owner screenshot, 2026-08-22).
+   This restatement must FOLLOW .orb.idle .zzz to win the tie. */
+.orb.dazed .zzz { display: none; }
+/* ---------------- the undaze — concussion into sleep ----------------
+   The way back out, with the same seam discipline as the way in: dazed
+   ends exactly on daze-sway's 0% pose (widget.js sizes DAZE_MS so the
+   loop completes whole cycles) and undaze-right's FIRST keyframe is that
+   pose. The orb rights itself with a small overshoot — momentum, same as
+   the reform — while the eye BOX closes over the still-spinning spiral.
+   The idle slit is the box's final size, so the eyelid IS the clip:
+   nothing crossfades, the eye just shuts on the dizziness. The lids fade
+   up only once the box is nearly slit-shaped (before that they would
+   render unclipped as full rings), and the z's stay away until the class
+   comes off — zzz-pop starts from opacity 0, so sleep resumes on a fade,
+   not a pop. Placement is load-bearing, same as the dazed hide above:
+   .orb.undaze .zzz must follow .orb.idle .zzz to win the display tie. */
+@keyframes undaze-right {
+  0% {
+    transform: rotate(-8deg) translate(calc(var(--ou) * -1px), calc(var(--ou) * 1px)) scale(0.92);
+    animation-timing-function: cubic-bezier(0.3, 0, 0.3, 1);
+  }
+  62% {
+    transform: rotate(1.5deg) scale(1.03);
+    animation-timing-function: cubic-bezier(0.3, 0, 0.25, 1);
+  }
+  100% { transform: none; }
+}
+@keyframes undaze-undim { from { opacity: 0.9; } to { opacity: 1; } }
+@keyframes undaze-eye-close {
+  0% { width: calc(var(--ou) * 13px); height: calc(var(--ou) * 13px); }
+  60%, 100% { width: 13px; height: 4px; }
+}
+@keyframes undaze-swirl-fade { to { opacity: 0; } }
+@keyframes undaze-lid-in { from { opacity: 0; } to { opacity: 1; } }
+.orb.undaze { animation: undaze-right 0.9s both; }
+.orb.undaze .orb-body { animation: undaze-undim 0.9s ease-out both; }
+/* idle's own rules dress the eye (slit box, crescent ::before, overflow
+   hidden) — undaze only drives the box through the close and times the
+   parts. */
+.orb.undaze .eye { animation: undaze-eye-close 0.9s cubic-bezier(0.55, 0, 0.2, 1) both; }
+.orb.undaze .eye::before { animation: undaze-lid-in 0.35s ease-out 0.5s both; }
+.orb.undaze .eye .swirl {
+  display: block;
+  position: absolute; left: 50%; top: 50%;
+  width: calc(var(--ou) * 13px); height: calc(var(--ou) * 13px);
+  margin-left: calc(var(--ou) * -6.5px); margin-top: calc(var(--ou) * -6.5px);
+  animation: daze-swirl 1.3s linear infinite, undaze-swirl-fade 0.55s ease-in both;
+}
+/* reverse the SPIN only — reversing the fade would hold the spiral at full
+   strength and blink it out at the end. */
+.orb.undaze .eye.er .swirl { animation-direction: reverse, normal; }
+.orb.undaze .zzz, .orb.undaze .orb-badge { display: none; }
+/* Has to come AFTER the idle rule above, not with the rest of the waking
+   block: same specificity, so whichever is written last wins, and up there
+   the z's stayed on screen through the whole wake. */
+.orb.waking .zzz { display: none; }
+
+.orb.talking {
+  animation: orb-breathe 3.2s ease-in-out infinite, orb-warp-active 2.6s ease-in-out infinite;
+  /* The armed glow follows the day too, just louder — otherwise arming at
+     dusk would snap the orb back to midday green. */
+  box-shadow:
+    0 0 22px var(--tod-glow-armed),
+    inset -3px -3px 8px rgba(0, 0, 0, 0.18),
+    inset 3px 3px 7px rgba(255, 255, 255, 0.30);
+}
+
+/* ---------------- time of day ----------------
+   Five moods, verbatim from the canvas §09. Hours are this file's own
+   judgement — the canvas names the moods but not the clock. Night wraps
+   midnight, so it is the fallback rather than a range.
+     early morning  05–09  reflective · cool lavender-grey, pre-dawn quiet
+     late morning   09–12  energetic · bright cream into fresh spring green
+     power hour     12–17  peak focus · the brand gradient at full saturation
+     happy hour     17–21  warm · hazelnut ripens into golden-hour amber
+     night          21–05  relaxed, creative · deep magenta afterglow */
+.orb.tod-early {
+  --tod-grad: linear-gradient(160deg, #e8e2f0 0%, #cbb8d6 40%, #9a8fb8 100%);
+  --tod-mid: #cbb8d6; --tod-far: #9a8fb8;
+  --tod-glow: rgba(154, 143, 184, 0.18);
+  --tod-glow-armed: rgba(154, 143, 184, 0.38);
+}
+/* Four stops, not three, and the purple is HELD to 30% before it turns —
+   that flat run is what makes it read as purple becoming green rather than a
+   muddy blend the whole way down. The glow stays on --tod-far: the mood is
+   named for where it lands. */
+.orb.tod-late {
+  --tod-grad: linear-gradient(160deg, #b294c9 0%, #b294c9 30%, #a8bfa0 62%, #7fc46a 100%);
+  --tod-mid: #a8bfa0; --tod-far: #7fc46a;
+  /* The one band whose first stop is cool. A cream catchlight sat directly on
+     the purple and erased it; a pale lilac lights the same surface instead. */
+  --tod-light: #efe7f6;
+  --tod-glow: rgba(127, 196, 106, 0.22);
+  --tod-glow-armed: rgba(127, 196, 106, 0.42);
+}
+.orb.tod-power {
+  --tod-grad: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 45%, var(--status-ok) 100%);
+  --tod-mid: #c5a56d; --tod-far: var(--status-ok);
+  --tod-glow: rgba(51, 255, 102, 0.10);
+  --tod-glow-armed: rgba(51, 255, 102, 0.30);
+}
+.orb.tod-happy {
+  --tod-grad: linear-gradient(160deg, #f5d9a8 0%, #e0a35c 45%, #c56d4a 100%);
+  --tod-mid: #e0a35c; --tod-far: #c56d4a;
+  --tod-glow: rgba(224, 163, 92, 0.25);
+  --tod-glow-armed: rgba(224, 163, 92, 0.45);
+}
+/* The one band that goes DARKER than the wallpaper it sits on. The glow is
+   carrying most of the read here, which is why it is the strongest of the
+   five. */
+.orb.tod-night {
+  --tod-grad: linear-gradient(160deg, #6e3a5c 0%, #48243e 45%, #1e0f1a 100%);
+  --tod-mid: #48243e; --tod-far: #6e3a5c;
+  --tod-glow: rgba(110, 58, 92, 0.28);
+  --tod-glow-armed: rgba(110, 58, 92, 0.5);
+}
+/* Reduce Motion, and this rule used to be WRONG. It said `animation: none` on
+   both .orb and .orb.talking, which killed the morph outright — on a machine
+   with Reduce Motion enabled the orb looked identical armed and idle, which is
+   the one thing it must never do. The state has to survive the setting.
+   (Found the hard way: the owner's Mac has Reduce Motion on, and this rule,
+   added for accessibility, silently removed the feature it was meant to make
+   accessible.)
+   What Reduce Motion is actually for is large-area movement that triggers
+   vestibular symptoms. A 42px disc changing outline is not that; a thing that
+   scales, drifts and spins is closer. So the morph STAYS and the travel goes:
+   no breathing, no blob spin, no drift — just the outline, slowly. */
+/* `body.motion-anyway` is the per-app override: Reduce Motion is a SYSTEM
+   accessibility setting and this app has no business asking anyone to turn it
+   off globally, but opting one app back in is the ordinary escape hatch. With
+   the class absent — the default, and what a first launch always gets — every
+   rule below applies and the widget is well-behaved. */
+@media (prefers-reduced-motion: reduce) {
+  body:not(.motion-anyway) .orb { animation: none; }
+  body:not(.motion-anyway) .orb.talking { animation: orb-warp-active 5s ease-in-out infinite; }
+  body:not(.motion-anyway) .orb-layer,
+  body:not(.motion-anyway) .orb-blob { animation: none !important; }
+  /* The face follows the same rule as the body: everything it says is said by
+     SHAPE, which survives, and everything that merely travels is dropped.
+     Shut eyes still mean asleep, the z's still sit there in their bubbles, the
+     badge still shows its count — none of them drift, bounce or pop. Without
+     this the face was the one part of the widget that ignored the setting. */
+  body:not(.motion-anyway) .face,
+  body:not(.motion-anyway) .eye,
+  body:not(.motion-anyway) .zzz,
+  body:not(.motion-anyway) .orb-badge { animation: none !important; }
+  /* A jackpot is the one thing here that overrides all of this, and it does
+     it from JS rather than from another dozen !important lines: widget.js
+     hangs `motion-anyway` on the body for the length of the payout and takes
+     it off again afterwards. Every rule in this block is written
+     `body:not(.motion-anyway)`, so the whole block simply stops applying,
+     and the payout needs no restatement at all. See §jackpot. */
+  /* zzz-pop is what makes the bubbles visible at all — they start at opacity
+     0 — so a still frame has to be supplied in its place. */
+  body:not(.motion-anyway) .orb.idle .zzz { opacity: 0.95; }
+  body:not(.motion-anyway) .orb.idle .zzz.z2 { opacity: 0.7; }
+}
+.orb-layer { position: absolute; inset: -30%; display: block; }
+.orb-layer.la { animation: orb-spin 4.5s linear infinite; }
+.orb-layer.lb { animation: orb-spin-rev 3.5s linear infinite; }
+.orb-layer.lc { animation: orb-spin 6s linear infinite; }
+.orb-blob { position: absolute; display: block; }
+.orb-blob.ba {
+  width: 75%; height: 75%; top: 0; left: 8%;
+  background: radial-gradient(circle, var(--tod-light) 0%, color-mix(in srgb, var(--tod-light) 40%, transparent) 40%, transparent 70%);
+  filter: blur(3.5px);
+  animation: orb-drift 2.25s ease-in-out infinite;
+}
+/* Both blobs read from the time-of-day vars: leaving them on the fixed green
+   and hazelnut made the orb's body drift while its innards stayed at midday,
+   which showed up as a green cast under the lavender and magenta bands. */
+.orb-blob.bb {
+  width: 80%; height: 80%; bottom: 0; right: 5%;
+  background: radial-gradient(circle, var(--tod-far) 0%, var(--tod-glow) 45%, transparent 72%);
+  filter: blur(4px); mix-blend-mode: screen;
+  animation: orb-drift 1.75s ease-in-out infinite 0.6s;
+}
+.orb-blob.bc {
+  width: 70%; height: 70%; top: 12%; right: 0;
+  background: radial-gradient(circle, var(--tod-mid) 0%, rgba(197, 165, 109, 0.4) 45%, transparent 72%);
+  filter: blur(3.5px); mix-blend-mode: soft-light;
+  animation: orb-drift 2.75s ease-in-out infinite 1.2s;
+}
+.orb-hl {
+  position: absolute; inset: 0; display: block;
+  background: radial-gradient(circle at 32% 26%, rgba(255, 255, 255, 0.5) 0%, rgba(255, 255, 255, 0.12) 30%, transparent 55%);
+}
+/* Canvas "talking" timings, for when the orb gets a function. */
+.orb.talking .orb-layer.la { animation-duration: 1.25s; }
+.orb.talking .orb-layer.lb { animation-duration: 1s; }
+.orb.talking .orb-layer.lc { animation-duration: 1.5s; }
+.orb.talking .orb-blob.ba { animation-duration: 0.7s; }
+.orb.talking .orb-blob.bb { animation-duration: 0.55s; animation-delay: 0.2s; }
+.orb.talking .orb-blob.bc { animation-duration: 0.8s; animation-delay: 0.35s; }
+/* The bar rests collapsed: the pill tucks behind the send button with a
+   sliver peeking out its left edge. Clicking the sliver focuses it, and
+   focus (or a draft in it) slides the pill out to full width. */
+.wbar input {
+  flex: 1; height: 44px; min-width: 0;
+  max-width: 58px; margin-right: -30px;
+  padding: 0 16px;
+  font: inherit; font-size: 13px;
+  color: var(--fg);
+  background: rgba(20, 20, 18, 0.9);
+  border: 1px solid rgba(197, 165, 109, 0.28);
+  border-radius: 999px;
+  outline: none;
+  /* Inflated like everything else, just gently — a text field that bulges as
+     hard as the send button stops reading as somewhere you can type. */
+  box-shadow:
+    inset 0 2px 3px rgba(234, 234, 234, 0.10),
+    inset 0 -3px 7px rgba(0, 0, 0, 0.55),
+    0 4px 16px rgba(0, 0, 0, 0.35);
+  -webkit-user-select: text; user-select: text; cursor: text;
+  transition: max-width 0.3s ease, margin-right 0.3s ease, margin-left 0.3s ease;
+}
+.wbar input.open {
+  /* 12px left inset: half the collapse vessel hangs off the pill's border,
+     and the window edge would clip it without this room. */
+  max-width: 640px; margin-right: 0; margin-left: 12px;
+}
+/* Collapse arrow: straddles the open pill's left border, pointing the way
+   the bar retracts. Shown by JS while open (syncBar), not by a sibling
+   selector. */
+.bar-min {
+  /* The › in its ring vessel, straddling the pill's left border. */
+  position: absolute; left: 0; top: 50%; transform: translateY(-50%); z-index: 3;
+  width: 24px; height: 24px; border-radius: 50%;
+  border: 1px solid rgba(197, 165, 109, 0.35);
+  background: rgba(20, 20, 18, 0.9);
+  color: var(--hazelnut-light); font-size: 14px; line-height: 1;
+  display: none; align-items: center; justify-content: center;
+  padding-bottom: 2px; /* optical centering for the › glyph */
+}
+.bar-min:hover { border-color: rgba(197, 165, 109, 0.6); }
+/* Text clears the arrow: the vessel reaches 12px into the pill. */
+.wbar input.open { padding-left: 20px; }
+.wbar input::placeholder { color: var(--muted); }
+.wbar input:focus { border-color: rgba(197, 165, 109, 0.55); }
+/* The way into settings, and the only one — the trinket shelf that used to
+   carry connector status was showing the same thing the popup already did.
+   Deliberately subordinate: smaller than the send button and the orb, in the
+   same dark-scrim-and-hazelnut-edge vessel as every other small control, so
+   it reads as a door rather than an action. */
+/* Second row, right-aligned. The 7px inset is (42 - 28) / 2 — half the
+   difference between the orb and the gear — which centres the gear on the
+   orb's axis so the two read as a column: the orb is the thing, the gear is
+   its settings. Move either size and this number moves with them. */
+.gear-row { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; padding-right: 7px; }
+.gear {
+  /* 28 against the orb's 42: subordinate on purpose. */
+  width: 28px; height: 28px; flex: 0 0 auto;
+  border-radius: 48% 52% 51% 49% / 52% 48% 50% 50%;
+  border: 1px solid rgba(197, 165, 109, 0.35);
+  background: radial-gradient(circle at 36% 28%, #34322c 0%, #1e1c19 55%, #121110 100%);
+  box-shadow:
+    inset 0 2px 3px rgba(234, 234, 234, 0.16),
+    inset 0 -3px 7px rgba(0, 0, 0, 0.6),
+    0 4px 12px rgba(0, 0, 0, 0.4);
+  color: var(--hazelnut-light);
+  display: flex; align-items: center; justify-content: center;
+}
+.gear:hover { border-color: rgba(197, 165, 109, 0.7); }
+.gear svg { width: 15px; height: 15px; }
+
+/* The gear's nudge — the handoff out of onboarding. The same jelly the
+   notify orb and the demo send use (this app's one gesture for "this wants
+   you"), with a spotlight scaled for a 28px control. */
+@keyframes gear-spotlight {
+  0%, 100% { box-shadow: 0 0 10px 2px rgba(229, 214, 187, 0.30), 0 0 0 0 rgba(229, 214, 187, 0.14); }
+  50% { box-shadow: 0 0 24px 6px rgba(229, 214, 187, 0.60), 0 0 0 8px rgba(229, 214, 187, 0.05); }
+}
+.gear.nudge {
+  animation:
+    orb-jelly 2.8s cubic-bezier(0.68, -0.55, 0.265, 1.55) infinite,
+    gear-spotlight 2.8s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Same trade as the send nudge: the bounce stills, the ask survives as
+     light held at its bright end. */
+  body:not(.motion-anyway) .gear.nudge {
+    animation: none;
+    box-shadow: 0 0 20px 5px rgba(229, 214, 187, 0.5), 0 0 0 6px rgba(229, 214, 187, 0.06);
+  }
+}
+/* ---------------- popup shells (transparent windows) ---------------- */
+.win {
+  height: 100%;
+  display: flex; flex-direction: column;
+  background: var(--bg);
+  border: 1px solid rgba(234, 234, 234, 0.08);
+  border-radius: 20px;
+  overflow: hidden;
+  position: relative;
+}
+.close {
+  position: absolute; top: 8px; right: 0; z-index: 2;
+  width: 28px; height: 28px; border-radius: 50%;
+  border: 1px solid rgba(197, 165, 109, 0.35);
+  background: rgba(20, 20, 18, 0.7);
+  color: var(--hazelnut-light); font-size: 13px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.close:hover { border-color: rgba(197, 165, 109, 0.6); }
+
+/* ---------------- connections ---------------- */
+/* Content packs to the BOTTOM. The panel is a fixed 312x500 anchored above
+   the widget (main.swift), and the connector grid only fills about half of
+   it — top-aligned, that left ~250px of dead transparent window yawning
+   between the last row and the message bar. Nothing here can resize the
+   window, but flex-end closes the gap for free. */
+body.connections .win {
+  padding: 14px 20px 14px;
+  /* A unifying CARD, matching the People popup: the hint side panel and the
+     shelf read as one connected surface over the glass, instead of each
+     floating on it separately. */
+  background: rgba(20, 20, 18, 0.72);
+  border: 1px solid rgba(234, 234, 234, 0.10);
+  border-radius: 16px;
+  box-shadow: inset 0 1px 0 rgba(234, 234, 234, 0.08);
+  /* A row, not a column: the hint strip is a SIDE section on the left and
+     the shelf keeps the right, pinned to the widget by native placement.
+     flex-end on both axes hugs everything to the bottom-right corner —
+     content-shaped windows grow up and left, never push down. */
+  flex-direction: row; align-items: flex-end; justify-content: flex-end;
+  gap: 12px;
+}
+/* The column the window used to be: everything except the hint strip.
+   flex 1 1 REQUIRED: with shrink 0 this column sizes to the shelf's
+   max-content — thirteen tiles end to end — and drags every settings card
+   out to that width, shoving the strip off the window's left edge. Grow
+   and shrink pin it to the space the window actually has, which is what
+   the old single-column .win gave it for free.
+   max-height + scroll is the DYNAMIC CONSTRAINT for big scales: native
+   caps the window at the room above the widget (popupCeiling), and at
+   160% the content can want more than that cap — bottom-anchored, the
+   overflow used to leave the shelf cut off past the top edge. Scrolling
+   inside the column means everything is always reachable on any screen. */
+body.connections .conn-main {
+  display: flex; flex-direction: column;
+  flex: 1 1 auto; min-width: 0;
+  /* overflow-x MUST be explicit: setting only overflow-y: auto promotes the
+     unset overflow-x from visible to auto (the CSS "one axis clipped forces
+     the other to auto" rule), which let the whole settings column scroll
+     sideways. Only the .list shelf inside it is meant to scroll horizontally. */
+  max-height: 100%; overflow-y: auto; overflow-x: hidden;
+}
+/* Bottom-anchoring WITHOUT justify-content: flex-end — on a scrollable
+   flex column, flex-end makes overflow past the start edge unreachable
+   (you cannot scroll up to it). An auto top margin on the first child
+   anchors identically when content is short and scrolls honestly when
+   it is tall. */
+/* No bottom-anchor: the window now fits the content (see fitConnections in
+   connections.js), so content flows from the top with no dead space above it. */
+body.connections .glow { display: none; }
+.glow {
+  position: absolute; top: -40px; right: -20px; width: 340px; height: 280px;
+  background: radial-gradient(ellipse at 70% 20%, rgba(229, 214, 187, 0.10), transparent 65%);
+  pointer-events: none;
+}
+/* Titles the tile grid. The popup is "settings" now, so the connectors need
+   their own heading to say which part of it they are.
+   Cream, not grey, and carrying its own shadow: this window is transparent,
+   so the heading is the one piece of text with no surface behind it — at
+   --secondary on a bright wallpaper it all but disappeared. */
+.eyebrow {
+  font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--hazelnut-light); font-weight: 700;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), 0 2px 12px rgba(0, 0, 0, 0.8);
+  margin: 0 0 8px 2px;
+}
+h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
+/* Four squares to a row. The popup's content box is 272px (312 less the
+   20px side padding), so 4 x 62 + 3 x 8 = 272 exactly — change one and the
+   other has to move. Nine connectors land in three rows, which still clears
+   the standing constraint that every connection be visible at once. */
+/* ONE ROW, scrolling sideways. Four columns of 62px tiles took three rows
+   and half the popup for a list nobody reads top-to-bottom — connectors are
+   a shelf, not a table. Small, icon-only, in a deliberate order (the most
+   personal sources first; see CONNECTOR_ORDER in connections.js), and the
+   row scrolls rather than wrapping so the shelf never changes height.
+   min-height: 0 stays load-bearing for the same reason it was: a flex item
+   will not shrink below its content, and without it this row pushes the
+   settings rows out of the window instead of scrolling. */
+.list {
+  display: flex; align-items: flex-start;
+  gap: 6px;
+  overflow-x: auto; overflow-y: hidden;
+  min-height: 0; flex: 0 0 auto;
+  /* The scroller CLIPS (overflow-x for the scroll, overflow-y to keep the
+     row one line), and the tiles wear a 0 4px 14px drop shadow. Two things
+     make that soft instead of a hard rectangle:
+     1. PADDING past the shadow's reach (blur 14 + offset 4 = ~18 below,
+        ~14 to the sides) with a little headroom, so top/bottom shadows fade
+        fully inside the clip; negative margins hand the space back so the
+        shelf's neighbours don't move. Change padding and margin together.
+     2. A MASK that fades the left/right edges to transparent — when the row
+        overflows, tiles scroll off through a soft gradient instead of a
+        hard cut at the viewport edge. Horizontal-only, so it never touches
+        the top/bottom shadows. */
+  padding: 22px 22px;
+  margin: -22px -22px -18px;
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 22px, #000 calc(100% - 22px), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 22px, #000 calc(100% - 22px), transparent 100%);
+  scrollbar-width: thin;
+}
+/* The hint no longer lives IN the row — a full-width strip cannot be a cell
+   of a horizontal shelf. It renders below, in its own host. */
+/* 236px wide; the +12px .win gap makes the 248 the page posts as
+   extraWidth (connections.js) — change one, change both. Scrolls on its own
+   if a hand-hold outgrows the window rather than growing it. Its height is
+   set by connections.js to match .conn-main exactly, so with both columns
+   bottom-anchored the panel's TOP lines up with the CONNECTIONS eyebrow. */
+.hint-host {
+  flex: 0 0 236px; max-height: 100%; overflow-y: auto;
+  position: relative;
+  display: flex; flex-direction: column; align-items: stretch;
+  /* Bottom-aligned so the pop-up sits in-line to the LEFT of the connectors
+     shelf (which lives at the bottom of the settings column now), not floating
+     up by the settings header. */
+  justify-content: flex-end;
+  /* Hinged on the right edge — the side it meets the main column on — so it
+     unfolds outward like a page. */
+  transform-origin: right center;
+}
+/* Delightful open: a book page folding out from underneath the main panel
+   (owner). Hinged on the right edge, it swings from nearly edge-on (tucked
+   behind the column) to flat, with a soft settle. Runs every time the host
+   goes from empty (display:none) to filled, i.e. each time a tile opens. */
+@keyframes hint-book-open {
+  0%   { transform: perspective(900px) rotateY(-80deg); opacity: 0; }
+  55%  { opacity: 1; }
+  100% { transform: perspective(900px) rotateY(0deg); opacity: 1; }
+}
+.hint-host:not(:empty) {
+  animation: hint-book-open 0.34s cubic-bezier(0.22, 0.72, 0.24, 1) both;
+}
+.hint-host:empty { display: none; }
+/* The panel's own close. Same gesture as pressing the tile again, one
+   predictable place. */
+.hint-x {
+  position: absolute; top: 5px; right: 5px; z-index: 2;
+  width: 20px; height: 20px; padding: 0;
+  border: none; border-radius: 50%;
+  background: rgba(234, 234, 234, 0.08);
+  color: var(--secondary);
+  font: inherit; font-size: 12px; line-height: 1;
+  cursor: pointer;
+}
+.hint-x:hover { color: var(--fg); background: rgba(234, 234, 234, 0.16); }
+/* The strip's title row leaves room for the x. */
+.hint-host .hint b { padding-right: 24px; }
+/* A square tile, not a row: the icon carries the identity and the name sits
+   under it, because at 62px there is no room for both side by side. */
+.row {
+  position: relative;
+  width: 40px; height: 40px; flex: 0 0 auto;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 6px;
+  padding: 6px 4px;
+  border-radius: 15px 14px 15px 14px;
+  background: radial-gradient(circle at 34% 24%, #33312c 0%, #1f1d1a 58%, #131211 100%);
+  border: 1px solid rgba(234, 234, 234, 0.10);
+  box-shadow:
+    inset 0 2px 3px rgba(234, 234, 234, 0.14),
+    inset 0 -4px 8px rgba(0, 0, 0, 0.55),
+    0 4px 14px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+.row:hover { border-color: rgba(197, 165, 109, 0.4); }
+.row.open { border-color: rgba(197, 165, 109, 0.55); }
+.row .mark {
+  width: 22px; height: 22px; flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--hazelnut-light);
+}
+.row .mark svg { width: 20px; height: 20px; }
+/* Long names (a mail address) get the middle eaten rather than the end, so
+   the domain still identifies which account it is. */
+/* No label on the tile any more — at 40px a name is two illegible letters
+   and an ellipsis. The full label leads the hint strip, which is where it
+   was already readable, and the tile keeps a title attribute for hover. */
+.row .name { display: none; }
+/* Status rides the tile's top-right corner, the same corner the charms use. */
+.row .dot {
+  position: absolute; top: 4px; right: 4px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--muted);
+}
+.row .dot.on { background: var(--status-ok); }
+.row .dot.off { background: transparent; border: 1px solid var(--disabled); }
+/* `bad` = set up and not working, as distinct from `off` = never linked. It is
+   the only thing on this shelf that asks for attention, so it is the only thing
+   that is allowed to pulse; the halo carries it at 6px, where fill alone reads
+   as just another coloured dot at arm's length across a desk.
+
+   ORDERING IS LOAD-BEARING: this sits ABOVE `.row.logging-in .dot` on purpose.
+   The two selectors have identical specificity, so the later one wins, which
+   keeps the login spinner in charge of the dot while a bridge is connecting.
+   Moving this below that rule would leave a broken tile stuck mid-spin. */
+.row .dot.bad {
+  background: var(--status-bad);
+  box-shadow: 0 0 0 3px rgba(255, 83, 71, 0.22);
+  animation: dot-bad 2.4s ease-in-out infinite;
+}
+@keyframes dot-bad {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(255, 83, 71, 0.22); }
+  50%      { box-shadow: 0 0 0 5px rgba(255, 83, 71, 0.05); }
+}
+/* Reduce Motion is ON for this owner, so the resting state has to carry the
+   whole signal: what SHAPE says survives, what merely travels is dropped
+   (widget/README § motion). The halo stays, the breathing goes. */
+@media (prefers-reduced-motion: reduce) {
+  .row .dot.bad { animation: none; }
+}
+/* While a social bridge's login window is opening, the tile's status dot
+   becomes a spinner in place — the owner's ask, instead of opening the hint
+   panel to a transitional "opening login…". Grows to a ring so the spin
+   reads at this size. */
+.row.logging-in .dot {
+  width: 12px; height: 12px; top: 3px; right: 3px;
+  background: none;
+  border: 2px solid rgba(234, 234, 234, 0.22);
+  border-top-color: var(--hazelnut-light);
+  animation: tile-spin 0.7s linear infinite;
+}
+@keyframes tile-spin { to { transform: rotate(360deg); } }
+/* The whole tile is the hint affordance now — a 14px ring inside a 62px
+   square was a needlessly small target — so the ⓘ is gone. */
+.row .info { display: none; }
+/* display:contents dissolves the wrapper so the tile AND its hint are both
+   grid items — the hint can then span the full width and land on the line
+   directly under the tile that opened it, instead of inside a 62px cell. */
+.rowwrap { display: contents; }
+.hint {
+  grid-column: 1 / -1;
+  font-size: 10.5px; line-height: 1.55; color: var(--secondary);
+  background: rgba(20, 20, 18, 0.95);
+  border: 1px solid rgba(197, 165, 109, 0.25);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin: -2px 0 2px;
+}
+/* The full label, for the tiles whose name had to be truncated to fit. */
+.hint b { display: block; color: var(--hazelnut-light); font-size: 11px; margin-bottom: 3px; }
+.hint a { color: var(--hazelnut); text-decoration: underline; cursor: pointer; }
+/* Bounded and scrollable for the same reason as everything else here: it is
+   an error string from elsewhere, so its length is not this file's to assume,
+   and it sits in the same column as the grid — an unbounded one squeezes the
+   connectors to nothing. */
+.notice {
+  color: var(--muted); font-size: 12px; margin-top: 8px;
+  max-height: 30%; overflow-y: auto; flex: 0 0 auto;
+  overflow-wrap: anywhere;
+}
+/* Settings sit below the connector list, above the footer, on the same row
+   vessel so the popup reads as one surface rather than two. */
+/* Each setting is its own vessel, so they need air between them — flush,
+   four bordered cards read as one striped block and the eye stops finding
+   the boundaries. The gap is also what separates them from the shelf above,
+   together with the rule. */
+.settings:not(:empty) {
+  margin-top: 12px; padding-top: 12px;
+  border-top: 1px solid rgba(234, 234, 234, 0.08);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.setting {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: rgba(20, 20, 18, 0.88);
+  border: 1px solid rgba(234, 234, 234, 0.10);
+}
+.setting-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+/* The connectors intro (its banner and promo pulse) was yeeted 2026-08-22 —
+   see connections.js; the hint hand-holds below are the only guidance now. */
+/* The hand-hold: a connector's first press opens the tall version of its
+   hint — why it is worth connecting, the privacy line, then the how. */
+.hint.hold { padding: 10px 12px; }
+.hint.hold .why { display: block; color: var(--fg); margin-bottom: 6px; }
+/* The connected-account line: who's linked, in cream, above the + add button. */
+.hint.hold .acct { display: block; color: var(--fg); font-size: 11px; margin: 2px 0 4px; }
+.hint.hold .add-acct { font-size: 11px; }
+.hint.hold .stay {
+  display: block; color: var(--hazelnut); font-size: 10px;
+  margin-top: 7px;
+}
+/* The broken block. It sits FIRST in the panel — above the why and the how —
+   because it is the only thing here the owner has to act on, and a connector
+   that has stopped working should not have to be read past an explanation of
+   what the connector is for. Tinted rather than outlined so it separates from
+   the hand-hold text without adding a second box inside a 236px column. */
+.hint.hold .broken {
+  display: block;
+  margin: 4px 0 8px;
+  padding: 7px 9px;
+  border-left: 2px solid var(--status-bad);
+  border-radius: 0 4px 4px 0;
+  background: rgba(255, 83, 71, 0.10);
+  color: var(--secondary);
+  font-size: 10px; line-height: 1.55;
+}
+.hint.hold .broken b {
+  display: block; color: var(--status-bad); font-weight: 600;
+  margin-bottom: 2px;
+}
+/* The one failure with somewhere to send them gets a button. Sized off
+   .setting-action so the two read as the same control. */
+.hint.hold .broken-fix {
+  display: block; margin-top: 7px;
+  padding: 4px 10px;
+  border: 1px solid var(--status-bad); border-radius: 999px;
+  background: transparent; color: var(--status-bad);
+  font: inherit; font-size: 10px; letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.hint.hold .broken-fix:hover { background: rgba(255, 83, 71, 0.14); }
+/* The bridge login's pieces inside a hold strip: the bot conversation and
+   the paste box. The transcript is capped and scrolls — a login exchange is
+   a few lines, an old one can be long, and the popup must not grow to fit
+   history. */
+.hint.hold .blog {
+  max-height: 110px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 4px;
+  margin: 6px 0;
+  font-size: 10px; line-height: 1.5; color: var(--secondary);
+}
+.hint.hold .bline.you { color: var(--hazelnut-light); }
+.hint.hold .bpaste {
+  display: block; width: 100%;
+  min-height: 44px; margin: 6px 0 2px;
+  padding: 6px 8px;
+  font: inherit; font-size: 10px;
+  color: var(--fg);
+  background: rgba(20, 20, 18, 0.95);
+  border: 1px solid rgba(197, 165, 109, 0.3);
+  border-radius: 8px;
+  resize: vertical;
+}
+.hint.hold .hold-ok + .bpaste { margin-top: 8px; }
+/* Single-line reply for the token/phone bridge flows (a phone number or a
+   code is one short line, not a multi-line paste). Same skin as .bpaste. */
+.hint.hold .binput {
+  display: block; width: 100%; box-sizing: border-box;
+  height: 30px; margin: 6px 0 2px;
+  padding: 0 8px;
+  font: inherit; font-size: 11px;
+  color: var(--fg);
+  background: rgba(20, 20, 18, 0.95);
+  border: 1px solid rgba(197, 165, 109, 0.3);
+  border-radius: 8px;
+}
+.hint.hold .hold-ok + .binput { margin-top: 8px; }
+.hint.hold .hold-ok {
+  display: inline-block; margin-top: 8px;
+  height: 22px; padding: 0 12px;
+  border: 1px solid rgba(197, 165, 109, 0.4); border-radius: 999px;
+  background: rgba(20, 20, 18, 0.9); color: var(--hazelnut-light);
+  font-size: 10px; letter-spacing: 0.1em;
+}
+/* A setting that holds a NUMBER rather than a yes/no. It stacks instead of
+   sitting in a row: a full-width track under the label, because a slider
+   squeezed into the space a 34px switch occupies has no usable travel in a
+   312px popup. */
+.setting.setting-col { flex-direction: column; align-items: stretch; gap: 6px; }
+.setting-head { display: flex; align-items: baseline; gap: 8px; }
+.setting-head .setting-name { flex: 1; }
+/* The live read-out. Tabular so the row does not jitter as the number
+   changes under the thumb — the whole point of it is to be watched while
+   dragging. */
+.setting-value {
+  font-size: 11px; font-weight: 700; color: var(--hazelnut-light);
+  font-variant-numeric: tabular-nums;
+}
+.setting-range {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 18px;
+  background: none; cursor: ew-resize;
+}
+.setting-range::-webkit-slider-runnable-track {
+  height: 4px; border-radius: 999px;
+  background: rgba(234, 234, 234, 0.14);
+  border: 1px solid rgba(234, 234, 234, 0.08);
+}
+/* Same hazelnut gradient as the send button and the CTA — this is the one
+   control in the popup you push around, so it gets the accent. The negative
+   margin centres a 14px thumb on a 4px track; -webkit-slider-thumb has no
+   transform box of its own to do it with. */
+.setting-range::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px; border-radius: 50%;
+  margin-top: -6px;
+  background: linear-gradient(180deg, #e5d6bb, #c5a56d);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+}
+.setting-range:active::-webkit-slider-thumb { transform: scale(1.15); }
+/* The scale ticks, so the ends of the travel say what they are. */
+.setting-ticks {
+  display: flex; justify-content: space-between;
+  font-size: 9px; color: var(--muted); margin-top: -2px;
+}
+.setting-name { font-weight: 700; font-size: 12px; }
+.setting-note { font-size: 10px; line-height: 1.4; color: var(--muted); }
+/* The switch borrows the connector dot's palette: off is a hollow ring,
+   on is phosphor — the same two states the charms already teach. */
+.switch {
+  position: relative; flex: 0 0 auto;
+  width: 34px; height: 18px; border-radius: 999px;
+  border: 1px solid var(--disabled);
+  background: rgba(10, 10, 9, 0.8);
+  /* transform is restated here on purpose: this rule sits after the shared
+     squish block, so a transition list without it would silently drop the
+     press-squash on this one control. */
+  transition: transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              border-color 0.18s ease, background 0.18s ease;
+}
+.switch .knob {
+  position: absolute; top: 2px; left: 2px;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--muted);
+  transition: transform 0.18s ease, background 0.18s ease;
+}
+.switch.on { border-color: var(--status-ok); background: rgba(51, 255, 102, 0.10); }
+.switch.on .knob { transform: translateX(16px); background: var(--status-ok); }
+.switch:hover { border-color: rgba(197, 165, 109, 0.6); }
+/* The one control that must not animate itself while it is off: with Reduce
+   Motion on and the override not yet taken, the knob jumps rather than
+   slides. */
+/* Under Reduce Motion the knob JUMPS rather than sliding — it would be a bad
+   joke for the animation toggle to animate itself while animations are off.
+   But the press-squash is kept: it is feedback about the finger, not a state
+   change playing out on its own. A blanket `transition: none` here took the
+   squash with it, which is why the transform is restated. */
+@media (prefers-reduced-motion: reduce) {
+  body:not(.motion-anyway) .switch {
+    transition: transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  body:not(.motion-anyway) .switch .knob { transition: none; }
+}
+/* The header beneath the "settings" eyebrow, matching the People tab's title
+   scale (17px) rather than the page-default 26px h1, so the two tabs read the
+   same. Cream with the same shadow the eyebrow carries — this window is
+   transparent, so headings need their own contrast off the wallpaper. */
+body.connections .conn-title {
+  font-size: 17px; font-weight: 600; letter-spacing: -0.01em;
+  margin: 0 0 8px; color: var(--fg);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), 0 2px 12px rgba(0, 0, 0, 0.8);
+}
+/* "settings" eyebrow on the left, the close ring on the right, one row at the
+   very top of the panel (owner: X inline with settings, top-right corner). */
+body.connections .conn-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 10px;
+}
+body.connections .conn-head .eyebrow { margin: 0 0 0 2px; }
+body.connections .close { position: static; flex: 0 0 auto; }
+/* The connectors title sits under the settings controls now, so it needs a
+   little air above it to read as a new section rather than a caption. */
+body.connections .conn-title { margin-top: 14px; }
+
+/* ---------------- chat ---------------- */
+/* Messages on the home screen: the window is fully transparent — the
+   wallpaper IS the background. Only the floating pieces (header text,
+   bubbles, input) carry their own surfaces, opaque enough to read over
+   any wallpaper. */
+body.chat .win {
+  background: transparent;
+  border: none;
+}
+
+.chat-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 20px 10px;
+  font-weight: 700; font-size: 15px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), 0 2px 14px rgba(0, 0, 0, 0.75);
+}
+body.chat .close { position: static; }
+.msg.pending { cursor: pointer; }
+.chat-log {
+  /* Same min-height: 0 as the connector grid, and the same reason — a flex
+     item will not shrink below its content on its own, so a long answer
+     grew the column instead of scrolling inside it. */
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 20px;
+}
+/* Conversation grows from the bottom: the latest message sits directly on
+   the message bar, iMessage-style. The flexed spacer soaks up the empty
+   height above; once content overflows, it collapses and scrolling is
+   normal. */
+.chat-log::before { content: ''; flex: 1 0 auto; }
+.msg {
+  /* Wide bubbles stop just short of the × riding the right edge. */
+  max-width: calc(100% - 36px);
+  padding: 12px 16px;
+  border-radius: 12px;
+  font-size: 13px; line-height: 1.55;
+  -webkit-user-select: text; user-select: text; cursor: text;
+  /* `anywhere`, not `break-word`: break-word will not break inside a long
+     unbroken token if the line has any other opportunity, so a bare URL or a
+     long address still widened the bubble past its max. */
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.msg {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+.msg.user {
+  align-self: flex-end;
+  background: rgba(26, 26, 24, 0.92);
+  border: 1px solid rgba(234, 234, 234, 0.10);
+}
+.msg.assistant {
+  /* Stretched, not content-sized — but stopping just short of the ×'s
+     column (× is 22px wide at a 6px inset), not at the widget edge. */
+  align-self: stretch;
+  max-width: none;
+  margin-right: 28px;
+  background: rgba(44, 38, 27, 0.94);
+  border: 1px solid rgba(197, 165, 109, 0.38);
+}
+/* The thinking state: three dots that travel, iMessage-style.
+
+   Replaces a blinking green underscore. The cursor read as a terminal prompt
+   waiting for INPUT — the opposite of what it meant, which is that Hazlie is
+   busy and the person should wait. Dots are the gesture everyone already
+   knows, and they carry the one bit that matters (something is coming) without
+   implying a text field. */
+/* NO BUBBLE WHILE THINKING. The dots sit directly on the desktop: a
+   chrome-less wait reads as the app breathing, where an empty brown box reads
+   as a message that arrived broken. Every property here is undone by removing
+   .pending, so the bubble materialises around the answer the moment it lands.
+   Content-sized too — an invisible full-width box would be a huge click
+   target, and the bubble is still the cancel affordance. */
+/* The dots keep the assistant's brown surface rather than sitting bare on the
+   desktop. Chrome-less read as "nothing is happening" against a busy
+   wallpaper; the bubble is what makes the wait legible — and it is the same
+   surface the answer arrives in, so nothing jumps at the handover. Content
+   sized, so it is a small pill rather than a full-width empty box. */
+.msg.assistant.pending {
+  align-self: flex-start;
+  max-width: max-content;
+  padding: 10px 14px;
+}
+.msg.assistant.pending .typing {
+  display: inline-flex; align-items: center; gap: 4px;
+  /* Matches a line of body text, so the bubble does not resize when the real
+     answer replaces the dots. */
+  height: 1.35em;
+}
+/* Bigger and brighter than the first pass: at 7px and 0.3 opacity they read
+   as three specks of dust on the wallpaper rather than a deliberate signal. */
+.msg.assistant.pending .typing i {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--hazelnut-light);
+  opacity: .45;
+  animation: typing 1.3s ease-in-out infinite;
+}
+.msg.assistant.pending .typing i:nth-child(2) { animation-delay: .16s; }
+.msg.assistant.pending .typing i:nth-child(3) { animation-delay: .32s; }
+@keyframes typing {
+  0%, 65%, 100% { opacity: .45; transform: translateY(0) scale(.85); }
+  32%           { opacity: 1;   transform: translateY(-4px) scale(1); }
+}
+/* A looping animation next to text is exactly what this setting is for. The
+   dots still say "working" — they just stop moving. */
+@media (prefers-reduced-motion: reduce) {
+  body:not(.motion-anyway) .msg.assistant.pending .typing i { animation: none; opacity: .7; }
+}
+.msg .srcs { display: block; margin-top: 8px; font-size: 11px; color: var(--muted); }
+.msg .srcs .why {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 13px; height: 13px; margin-left: 7px;
+  border: 1px solid var(--disabled); border-radius: 50%;
+  font-size: 9px; color: var(--muted);
+  vertical-align: middle; cursor: pointer;
+}
+.msg .src-hint {
+  display: block; margin-top: 6px;
+  font-size: 11px; line-height: 1.5; color: var(--secondary);
+}
+/* display:block above would otherwise defeat the hidden attribute. */
+.msg .src-hint[hidden] { display: none; }
+/* The fold ×: rides the bottom edge of the log, level with the newest
+   message; pressing it hides the log (body.folded), leaving the head. */
+.fold {
+  /* Right-flush with the bubbles' 6px inset; JS drives `top` to sit on
+     the newest message's bottom line. */
+  position: absolute; right: 6px; bottom: 20px; z-index: 2;
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 1px solid rgba(197, 165, 109, 0.35);
+  background: rgba(20, 20, 18, 0.7);
+  color: var(--hazelnut-light); font-size: 11px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.fold:hover { border-color: rgba(197, 165, 109, 0.6); }
+/* The × only exists while there are visible messages to close. */
+body.folded .fold, .chat-log:empty + .fold { display: none; }
+body.folded .chat-log { visibility: hidden; }
+/* Bubbles run to a 6px right inset — the same inset the widget's own
+   content keeps, and native aligns the two windows' right edges, so
+   user messages sit flush with the widget below. */
+body.chat .chat-log { padding-right: 6px; }
+/* Inflated, not flat. The light and shade live INSIDE the shape — bright
+   where light lands top-left, warm and dark where the surface curves away
+   at the bottom — so it reads as something with air in it rather than a
+   disc with a gradient painted on. */
+.send {
+  width: 44px; height: 44px; flex: 0 0 auto;
+  border-radius: 49% 51% 52% 48% / 51% 49% 51% 49%;
+  background: radial-gradient(circle at 34% 26%, #f7efe1 0%, #e5d6bb 42%, #c9ab76 100%);
+  box-shadow:
+    inset 3px 4px 9px rgba(255, 255, 255, 0.65),
+    inset -3px -5px 10px rgba(138, 106, 55, 0.45),
+    0 5px 14px rgba(0, 0, 0, 0.4);
+  color: var(--bg); font-size: 17px; font-weight: 700;
+}
+.send:disabled { opacity: 0.4; cursor: default; }
+/* Chat's close lives in the footer, right of send, deliberately smaller. */
+body.chat .close {
+  position: static;
+  width: 30px; height: 30px; flex: 0 0 auto;
+}
+
+/* ---------------- onboarding ----------------
+   A centred, opaque window rather than a transparent overlay: this is the one
+   screen that has the machine's full attention, and it should read as a place
+   rather than as something floating on the desktop. */
+/* A scrim over the whole display, not a panel on it. The window is the full
+   screen frame and this is the dim; the orb, the copy and the buttons float
+   on top of the desktop rather than inside a box. Opaque enough to read
+   against a bright wallpaper, sheer enough that what is behind stays legible
+   as context. */
+body.onboarding {
+  display: flex; justify-content: center;
+  /* The scroll lives HERE, on the full-window box, and not on .ob-screen —
+     see below for what that cost. `safe` for the same reason .ob-screen uses
+     it: centring inside a scroller puts the overflow on both sides and the
+     start edge cannot be reached. */
+  align-items: safe center;
+  overflow-y: auto;
+  background: rgba(10, 10, 9, 0.76);
+}
+.ob-screen {
+  display: flex; flex-direction: column; align-items: center;
+  /* `safe center`, not `center`. Centring inside a scroll container puts the
+     overflow on BOTH sides, and the start edge of a scroller cannot be
+     scrolled to — so the moment the content is taller than the window the top
+     of it is cut off and unreachable, which is exactly the orb losing its
+     head on the welcome screen. `safe` falls back to flex-start the instant
+     it would overflow, and behaves as plain centring the rest of the time. */
+  justify-content: safe center;
+  gap: 36px;
+  /* Vertical padding is not spacing — it is CLEARANCE. The orb throws a 50px
+     glow and floats its z's outside its own box, and both live in whatever
+     the nearest clipping ancestor is. */
+  padding: 56px 48px;
+  text-align: center;
+}
+/* NO OVERFLOW ON THIS ELEMENT. It had `max-height: 100%; overflow-y: auto` so
+   that onboarding — the one window here that cannot grow, because it IS the
+   screen — could still reach the bottom of a tall scene. That worked, and it
+   also made this element a clipping box whose top edge sits exactly on the
+   orb's top edge, because the orb is the first child and there was no
+   vertical padding. The orb's glow was then cut off flat, which reads as the
+   orb itself having its head sliced off.
+   The scroll moved up to body.onboarding, which is the full window: same
+   guarantee, and its edges are nowhere near anything that paints outside
+   itself. */
+/* An explicit display on the element defeats the hidden attribute, so a
+   hidden screen would keep laying out — both of them side by side, in fact.
+   The attribute selector outranks the class rules that set display. */
+.ob-screen[hidden] { display: none; }
+/* SCENE CHANGE. Screen 2 to screen 3 was a hard cut followed by a dead beat:
+   both screens toggled `hidden` in the same frame, so the orb teleported from
+   the middle of one layout to the top of another, and then nothing happened
+   for another 420ms while the reply waited to be spat out.
+   Out and in rather than a true crossfade — the two screens are the same
+   element type in the same place, so overlapping them would put two orbs on
+   screen at once, which is worse than a beat of scrim. The scale is tiny on
+   purpose: enough to give the fade a direction (the old scene recedes, the
+   new one settles forward) without reading as a zoom. */
+@keyframes ob-leave {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.985); }
+}
+@keyframes ob-enter {
+  from { opacity: 0; transform: scale(1.015); }
+  to { opacity: 1; transform: scale(1); }
+}
+.ob-screen.leaving {
+  animation: ob-leave 300ms ease-in forwards;
+  pointer-events: none; /* it is on its way out; nothing on it is clickable */
+}
+.ob-screen.entering { animation: ob-enter 380ms cubic-bezier(0.2, 0.9, 0.3, 1) both; }
+/* The orb at 120px, per the canvas. Everything inside it is sized in px for a
+   42px widget orb, so each of those has to be restated here — a plain
+   width/height on the shell would leave 10px eyes on a 120px face. Values are
+   the canvas's own at this size, not the 42px ones scaled up. */
+.ob-orb { width: 120px; height: 120px; }
+body.onboarding .orb { width: 120px; height: 120px; --ou: 2.857; }
+body.onboarding .orb-body {
+  box-shadow:
+    0 0 50px var(--tod-glow),
+    inset -10px -10px 24px rgba(0, 0, 0, 0.18),
+    inset 9px 9px 20px rgba(255, 255, 255, 0.30);
+}
+body.onboarding .blush { width: 19px; height: 10px; filter: blur(3px); }
+/* `.orb .` in front of these two is deliberate, not noise: `.orb.greet .face`
+   is three classes and `body.onboarding .face` is only two plus a type, so
+   without it the state rule wins and a 120px face keeps the widget's 5px eye
+   gap. */
+body.onboarding .orb .eye { width: 26px; height: 33px; }
+/* The thinking face at 120px. `body.onboarding .orb .eye` is (0,3,1) and the
+   state rule is (0,3,0), so without this the demo orb thinks with two matched
+   eyes. */
+body.onboarding .orb.listening .eye.er { width: 21px; height: 26px; }
+body.onboarding .orb .face { gap: 13px; }
+/* The idle face at 120px. The state rules are (0,3,0) and these are (0,3,1),
+   so they win — but only because of the `.orb` in the middle; without it a
+   sleeping face three times the size would keep the widget's 13px eyes. */
+body.onboarding .orb.idle .eye {
+  width: 37px; height: 10px;
+  --lid-h: 20px; --lid-t: 7px;
+}
+body.onboarding .orb.idle .face { gap: 9px; }
+/* The dream bubbles scale too, and so does how far they drift before they
+   pop — the travel lives in vars precisely so one keyframe serves both
+   sizes. Deliberately smaller than a true 2.86x: the z's are decoration on
+   this screen, and at full scale they crowd the face. */
+/* Onboarding's z's are the canvas's §05 exactly: bare cream and hazelnut
+   letters that rise and fade out, NOT the widget's bubbles. The widget keeps
+   its bubbles for a reason that does not apply here — it floats over whatever
+   wallpaper is up, and bare cream text vanished against snow. This screen
+   brings its own dark scrim, so nothing needs a surface to sit on and the
+   canvas's own version works as drawn. Sizes and offsets are 140px scaled by
+   0.857 to the 120px orb. */
+@keyframes zz-float {
+  0% { opacity: 0; transform: translate(0, 3px) scale(0.7); }
+  30% { opacity: 1; }
+  100% { opacity: 0; transform: translate(7px, -12px) scale(1.1); }
+}
+body.onboarding .orb.idle .zzz {
+  width: auto; height: auto;
+  animation: zz-float 2.6s ease-out infinite;
+}
+body.onboarding .orb.idle .zzz.z1 { top: -12px; right: 12px; }
+body.onboarding .orb.idle .zzz.z1 i { font-size: 16px; color: var(--hazelnut-light); }
+body.onboarding .orb.idle .zzz.z2 { top: -2px; right: 2px; animation-delay: 1.3s; }
+body.onboarding .orb.idle .zzz.z2 i { font-size: 11px; color: var(--hazelnut); }
+body.onboarding .orb-blob.ba { filter: blur(10px); }
+body.onboarding .orb-blob.bb { filter: blur(11px); }
+body.onboarding .orb-blob.bc { filter: blur(10px); }
+
+/* The one line of copy on the screen, so it carries rather than captions.
+   The canvas draws it at 14px in --secondary grey, which reads as a footnote
+   under a 120px orb and all but vanishes against the scrim; this is the same
+   words at statement weight. The shadow is the chat header's — text floating
+   with no surface behind it needs its own edge to stay legible over whatever
+   wallpaper is showing through. */
+/* In Trina (see §trina): the tagline is the app introducing itself, which is
+   the one moment on this screen that is not a terminal reporting. Lighter and
+   larger than the mono version — Trina ships Regular only, so 500 would be a
+   synthesised bold, and a marker face reads a size smaller than a grotesque
+   at the same px. */
+.ob-tagline.ob-trina { font-size: 25px; font-weight: 400; letter-spacing: 0; }
+.ob-tagline {
+  font-size: 20px; font-weight: 500;
+  line-height: 1.5; letter-spacing: 0.015em;
+  color: var(--fg);
+  max-width: 44ch;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), 0 2px 18px rgba(0, 0, 0, 0.55);
+}
+/* The one hazelnut-gradient action in the app outside the send button; the
+   send button is 44px round, this is a pill, so they do not compete. */
+.ob-cta {
+  border-radius: 999px;
+  padding: 13px 36px;
+  font-size: 14px; font-weight: 600;
+  color: var(--bg);
+  background: linear-gradient(180deg, #e5d6bb, #c5a56d);
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.4);
+  transition: transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.15s ease;
+}
+.ob-cta:hover { filter: brightness(1.06); }
+.ob-cta:active { transform: scale(1.06, 0.94); }
+
+/* A settings row whose control acts instead of holding a value. Same vessel as
+   the close ring and the label pills, so it reads as one family. */
+.setting-action {
+  flex: 0 0 auto;
+  height: 22px; padding: 0 12px;
+  border: 1px solid rgba(197, 165, 109, 0.4);
+  border-radius: 999px;
+  background: rgba(20, 20, 18, 0.9);
+  color: var(--hazelnut-light);
+  font-size: 10px; letter-spacing: 0.1em;
+  transition: transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.15s ease;
+}
+.setting-action:hover { border-color: rgba(197, 165, 109, 0.75); }
+.setting-action:active { transform: scale(1.10, 0.91); }
+
+/* ---------------- onboarding screen 2: the chat demo ----------------
+   It plays itself: the message types, sends, and the bubble is swallowed by
+   the orb. Keyframes are the canvas's, with one change — see suck-up. */
+@keyframes cursor-blink { 0%, 45% { opacity: 1; } 50%, 95% { opacity: 0; } 100% { opacity: 1; } }
+@keyframes btn-squish {
+  0%, 100% { transform: scale(1); }
+  25% { transform: scale(0.82, 0.86); }
+  55% { transform: scale(1.12, 0.92); }
+  75% { transform: scale(0.96, 1.05); }
+}
+@keyframes orb-gulp {
+  0%, 100% { transform: scale(1); }
+  35% { transform: scale(1.18, 0.82); }
+  65% { transform: scale(0.9, 1.12); }
+  85% { transform: scale(1.04, 0.97); }
+}
+/* Straight to the orb, on three nested layers — and the layering IS the
+   smoothness, not an indulgence. The previous pass animated one element
+   through four stitched keyframe segments with four different easings, plus a
+   blur that changed at every step. Two compounding kinds of rough: velocity
+   jumps at every segment boundary (position was continuous, speed was not),
+   and filter cannot be composited, so WebKit re-rasterized the bubble every
+   frame of the flight.
+
+   Now each layer animates ONE thing on ONE unbroken curve, transform and
+   opacity only, so the whole flight is composited and the velocity never
+   has a corner:
+
+     .ob-fly    x        accelerating — slow start, fast arrival
+     .ob-fly-y  y        leads early, eases home
+     .ob-msg    swallow  scale + rotate, held big until late; opacity at the end
+
+   The bow falls out of the split: y running on an earlier curve than x IS the
+   arc, with no waypoints to stitch. The destination is still measured at run
+   time (bubble centre to orb centre, in --suck-x/--suck-y) so it lands in the
+   mouth at any window size and any line length — the canvas hardcodes
+   translate(-260px, -235px), true only for its own frame and sentence. */
+.ob-fly { align-self: flex-end; max-width: 70%; }
+.ob-fly, .ob-fly-y, .ob-fly .ob-msg { will-change: transform; }
+.ob-fly .ob-msg { max-width: none; }
+.ob-fly.suck { animation: fly-x 1.1s cubic-bezier(0.55, 0, 0.85, 0.55) forwards; }
+.ob-fly.suck .ob-fly-y { animation: fly-y 1.1s cubic-bezier(0.3, 0.35, 0.55, 1) forwards; }
+.ob-fly.suck .ob-msg { animation: fly-swallow 1.1s cubic-bezier(0.65, 0, 0.85, 0.45) forwards; }
+@keyframes fly-x { from { transform: translateX(0); } to { transform: translateX(var(--suck-x)); } }
+@keyframes fly-y { from { transform: translateY(0); } to { transform: translateY(var(--suck-y)); } }
+/* Scale rides an accelerating curve, so the bubble stays near full size for
+   most of the trip and collapses at the mouth — swallowed at the end, not
+   shrinking all the way there. Opacity holds solid and goes only in the final
+   stretch; transform interpolates 0 -> 100 in one segment because the middle
+   keyframe deliberately does not mention it. */
+@keyframes fly-swallow {
+  0% { transform: scale(1) rotate(0deg); opacity: 1; }
+  82% { opacity: 1; }
+  100% { transform: scale(0.02) rotate(-10deg); opacity: 0; }
+}
+
+/* align-items: stretch is restated because .ob-screen sets center, and this
+   screen's rows are full-width — without it the input bar and the transcript
+   shrink to their own content and sit in a narrow column. */
+/* Capped rather than filling: on a full-screen scrim an uncapped column puts
+   the orb at the top of the display and the input bar at the very bottom,
+   with the conversation stretched across the whole width. 860x620 is the
+   canvas's own content box. */
+.ob-demo {
+  width: min(860px, 100%); height: min(620px, 100%);
+  display: flex; flex-direction: column; align-items: stretch;
+  padding: 8px 48px 32px; gap: 0;
+}
+/* The column the bubbles align themselves within; align-self needs a flex
+   parent to mean anything. */
+.ob-log { display: flex; flex-direction: column; gap: 14px; }
+/* Orb and transcript share this column; the orb takes the slack so it stays
+   centred while messages stack up from the bottom towards it. */
+.ob-conv {
+  flex: 1; display: flex; flex-direction: column;
+  justify-content: flex-end; gap: 14px;
+  padding: 40px 0 20px;
+}
+.ob-stage { flex: 1; display: flex; align-items: center; justify-content: center; }
+.ob-msg {
+  max-width: 70%;
+  border-radius: 16px;
+  padding: 12px 18px;
+  font-size: 14px; line-height: 1.6;
+  text-align: left;
+}
+.ob-msg.user {
+  align-self: flex-end;
+  background: rgba(197, 165, 109, 0.12);
+  border: 1px solid rgba(197, 165, 109, 0.30);
+  color: var(--hazelnut-light);
+}
+.ob-bar { display: flex; align-items: center; gap: 16px; padding-top: 18px; }
+/* A drawn input, not a real one: nothing is typed here, the demo types it.
+   Everything in the bar is the canvas's size x1.3 — at the canvas's own
+   measurements it sat too quietly under a 120px orb on a full-screen scrim,
+   where it is the only thing asking to be looked at. */
+.ob-input {
+  flex: 1; min-height: 60px;
+  border-radius: 999px;
+  background: rgba(20, 20, 18, 0.9);
+  border: 1px solid rgba(197, 165, 109, 0.28);
+  display: flex; align-items: center;
+  padding: 13px 26px;
+  font-size: 18px; color: var(--fg); line-height: 1.5;
+  text-align: left;
+}
+/* Trina, the accent face. Used in exactly three places, and the list is the
+   rule: `people` inside the typed onboarding line, the welcome tagline, and
+   the z's off a sleeping orb (§the z's, which sets it directly rather than
+   through this class because it is not an onboarding element).
+
+   What those three have in common is that none of them is the terminal
+   reporting — two are a person talking and one is a cartoon. Everything that
+   states a fact stays mono. Whole sentences in Trina read as a different
+   app, so it is a highlighter: onboarding.js decides which RUN of characters
+   gets the class, never the whole line.
+
+   NOT bundled. Trina is a user-installed face on the owner's machine
+   (~/Library/Fonts/trina.ttf); vendoring the file into ui/ would ship a font
+   binary of unknown licence and need font-src added to every page's CSP. The
+   fallback is the ordinary stack, so a machine without it loses the flourish
+   and nothing else. */
+.ob-trina { font-family: 'Trina', var(--mono); }
+
+.ob-caret {
+  display: inline-block; flex-shrink: 0;
+  width: 4px; height: 23px; margin-left: 4px;
+  background: var(--tod-far, var(--status-ok));
+  animation: cursor-blink 1.1s step-end infinite;
+}
+.ob-ph { color: var(--muted); margin-left: 5px; }
+.ob-send {
+  width: 60px; height: 60px; flex-shrink: 0;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #e5d6bb, #c5a56d);
+  color: var(--bg); font-size: 21px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.ob-send.sending { animation: btn-squish 0.55s cubic-bezier(0.68, -0.55, 0.265, 1.55); }
+/* Waiting to be pressed: the notify orb's own bounce, borrowed exactly.
+   It is this app's one gesture for "this wants you", and here the thing
+   that wants you is the send.
+
+   Plus a spotlight, because the bounce alone is easy to miss on a screen
+   where a 120px orb is breathing overhead. Two shadows on one keyframe: a
+   soft halo that swells, and a ring that pushes outward behind it. Both are
+   box-shadow, so they compose with the bounce's transform rather than
+   fighting it — one element, two animations, no shared property. */
+@keyframes send-spotlight {
+  0%, 100% {
+    box-shadow: 0 0 20px 3px rgba(229, 214, 187, 0.30), 0 0 0 0 rgba(229, 214, 187, 0.16);
+  }
+  50% {
+    box-shadow: 0 0 46px 10px rgba(229, 214, 187, 0.62), 0 0 0 13px rgba(229, 214, 187, 0.05);
+  }
+}
+.ob-send.nudge {
+  animation:
+    orb-jelly 2.8s cubic-bezier(0.68, -0.55, 0.265, 1.55) infinite,
+    send-spotlight 2.8s ease-in-out infinite;
+}
+.orb.gulp { animation: orb-gulp 0.9s ease-in-out; }
+
+/* ---------------- the pipe: scene 2's exit ----------------
+   The orb is Hazlie, and Hazlie is about to live in the bottom-right corner
+   — so it TRAVELS there: sucked into an invisible pipe, vanishing exactly
+   where the real widget surfaces a beat later (scene 3's spotlight). The
+   reveal becomes causal — the thing you talked to went THERE — instead of a
+   dissolve to a scene that happens to point at a corner.
+
+   Same discipline as the message's flight, which took three tries to learn:
+   one axis per layer, one unbroken curve each, transform and opacity only.
+   x accelerates (slow start, fast arrival), y leads early and eases home —
+   the bow falls out of the split. The orb's own layer holds near-full size
+   until late, then collapses with a small twist and only THEN drops its
+   opacity: swallowed at the mouth of the pipe, not fading en route. The
+   gulp is still running on the .orb inside when this starts, and stays —
+   an orb sucked away mid-gulp is carrying the message with it. */
+.ob-pipe, .ob-pipe-y, .ob-pipe .ob-orb { will-change: transform; }
+.ob-pipe.suck { animation: fly-x 0.8s cubic-bezier(0.6, 0, 0.9, 0.6) forwards; }
+.ob-pipe.suck .ob-pipe-y { animation: fly-y 0.8s cubic-bezier(0.3, 0.35, 0.55, 1) forwards; }
+.ob-pipe.suck .ob-orb { animation: pipe-swallow 0.8s cubic-bezier(0.7, 0, 0.85, 0.5) forwards; }
+@keyframes pipe-swallow {
+  0% { transform: scale(1) rotate(0deg); opacity: 1; }
+  55% { transform: scale(0.82) rotate(-4deg); opacity: 1; }
+  88% { opacity: 1; }
+  100% { transform: scale(0.05) rotate(-14deg); opacity: 0; }
+}
+/* The bar leaves WITH the message, not after it: this starts ~140ms into the
+   send, while the bubble is still in the air, so the screen empties as one
+   motion. Separate from clear-out because the log must NOT fade then — the
+   flying bubble lives in the log, and fading it would dim the very thing
+   being watched. */
+.ob-demo.bar-out .ob-bar { animation: ob-leave 420ms ease-in forwards; }
+/* And the log follows later, once the bubble has been swallowed. The orb
+   must not inherit either of these, which is why they name their targets
+   rather than putting `leaving` on the whole screen. */
+.ob-demo.clear-out .ob-log { animation: ob-leave 350ms ease-in forwards; }
+
+/* Footer controls appear only once the demo has played out. */
+.ob-foot { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 4px 0 2px; min-height: 34px; }
+.ob-foot[hidden] { display: none; }
+.ob-replay {
+  border: 1px solid rgba(234, 234, 234, 0.16);
+  border-radius: 999px;
+  padding: 8px 20px;
+  font-size: 12px; color: var(--secondary);
+  transition: transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.15s ease;
+}
+.ob-replay:hover { border-color: rgba(234, 234, 234, 0.4); color: var(--fg); }
+.ob-replay:active { transform: scale(1.08, 0.93); }
+/* Reduce Motion: the demo is the content, so it still plays — but the orb's
+   ambient churn stays off, matching the widget. */
+@media (prefers-reduced-motion: reduce) {
+  body:not(.motion-anyway) .ob-caret { animation: none; }
+  /* The nudge is an infinite attention loop — exactly what the setting is
+     for. The ask survives as LIGHT rather than movement: the spotlight holds
+     at its bright end instead of pulsing, so the button is still obviously
+     the thing to press. */
+  body:not(.motion-anyway) .ob-send.nudge {
+    animation: none;
+    box-shadow: 0 0 40px 8px rgba(229, 214, 187, 0.5), 0 0 0 10px rgba(229, 214, 187, 0.06);
+  }
+}
+/* The screen-2 footer's continue: the same pill as screen 1's, one size down,
+   because by then it is a step rather than the invitation. */
+.ob-cta-sm { padding: 8px 22px; font-size: 12px; }
+
+/* ---------------- onboarding screen 3: where it lives ----------------
+   The scene that replaced "your turn". That one offered the connectors, which
+   settings already does properly and with the real instructions; this one
+   answers the question the rest of the flow leaves behind — the app has been
+   an orb in the middle of the screen, and it is about to become a strip in
+   the corner that sits UNDER every window.
+
+   Nothing here draws a widget. Native lifts the real one above the scrim for
+   the length of the scene, so what is being pointed at is the live thing in
+   the corner it will occupy from now on. That is also why this screen is
+   absolutely positioned rather than a centred column: its two elements are
+   placed against a rectangle measured from the actual window. */
+.ob-home {
+  position: absolute; inset: 0;
+  display: block;
+  padding: 0;
+}
+/* On this scene only, the dim comes off the widget — it is above the scrim
+   now, and dimming everything else is the whole point. */
+.ob-spot {
+  position: absolute;
+  border-radius: 18px;
+  pointer-events: none;
+}
+/* The ring is drawn UNDER the raised widget, so only the part outside it is
+   visible — which is exactly the halo wanted, with no need to know the
+   widget's shape. */
+.ob-spot-ring {
+  position: absolute; inset: -10px;
+  border-radius: 26px;
+  border: 2px solid rgba(229, 214, 187, 0.8);
+  box-shadow: 0 0 34px 8px rgba(229, 214, 187, 0.22);
+  animation: spot-pulse 2.4s ease-in-out infinite;
+}
+@keyframes spot-pulse {
+  0%, 100% { opacity: 0.5; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.035); }
+}
+/* The one loop on this screen. Reduce Motion keeps the ring at its bright
+   end: the ask survives as light, the same trade the send nudge makes. */
+@media (prefers-reduced-motion: reduce) {
+  body:not(.motion-anyway) .ob-spot-ring {
+    animation: none;
+    opacity: 1;
+    box-shadow: 0 0 40px 10px rgba(229, 214, 187, 0.3);
+  }
+}
+/* Screen 0's note reuses the home-note text treatment but sits centred in a
+   flowing column, not in the absolute card. white-space honours the line
+   break in the markup. */
+.ob-move-note { max-width: 52ch; white-space: pre-line; text-align: center; }
+
+/* Above the ring and sharing its right edge, so the eye runs down the copy
+   straight into the thing being pointed at. Positioned by onboarding.js. */
+.ob-card {
+  position: absolute;
+  max-width: min(400px, 46vw);
+  display: flex; flex-direction: column; align-items: flex-end;
+  gap: 10px;
+  text-align: right;
+}
+/* The scene's only line, so it carries the weight the dropped title used to.
+   Bigger and brighter than a note, still short of a headline — the ring is
+   the loud element here, not the type. */
+.ob-home-lead {
+  font-size: 19px; font-weight: 500;
+  color: var(--fg);
+  line-height: 1.45;
+}
+.ob-home-note {
+  font-size: 13px; line-height: 1.6;
+  color: rgba(234, 234, 234, 0.82);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.92), 0 2px 14px rgba(0, 0, 0, 0.6);
+}
+kbd {
+  font: inherit; font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  border: 1px solid rgba(197, 165, 109, 0.4);
+  background: rgba(20, 20, 18, 0.85);
+  color: var(--hazelnut-light);
+}
+.ob-card .ob-cta-sm { margin-top: 6px; }
+
+/* The hover label for a connector tile (see showTileTip in connections.js —
+   WKWebView draws no native title tooltips, so this is the only place the
+   service name appears on the 40px shelf). */
+body.connections .tile-tip {
+  position: fixed; z-index: 40;
+  padding: 3px 8px;
+  font-size: 11px; white-space: nowrap;
+  color: var(--hazelnut-light);
+  background: rgba(20, 20, 18, 0.96);
+  border: 1px solid rgba(234, 234, 234, 0.14);
+  border-radius: 7px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  opacity: 0; transition: opacity 0.12s ease;
+}
+body.connections .tile-tip.on { opacity: 1; }

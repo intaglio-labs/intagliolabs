@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Keeps the connect server resident: the loopback-only onboarding and review
+  pages on 127.0.0.1:8788, reached through tokened /c/<token> links.
+
+  This checked-in file is a TEMPLATE: launchd expands no variables, so @HOME@
+  and @REPO@ are placeholders that ops/setup-connectors.sh substitutes when it
+  installs the rendered copy into ~/Library/LaunchAgents/. Do not bootstrap
+  this file directly.
+
+  History: until 2026-08-20 this agent existed only as a hand-written file in
+  ~/Library/LaunchAgents, with no template in the repo — unmanaged and
+  unrecoverable from git, and carrying a HAZLIE_HERMES_URL that had already
+  gone stale once (8790, the retired tunnel port). It is templated now, and
+  carries no environment: the server's own default hermes address is the
+  canonical 8789.
+
+  KeepAlive, like the other agents: a dead connect server turns every link
+  in the owner's Messages history into a dead end.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hazlie.connect</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@HOME@/.hazlie/bin/node</string>
+    <string>@REPO@/connect/server.mjs</string>
+    <string>--port</string>
+    <string>8788</string>
+    <string>--print-url</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>Umask</key>
+  <integer>63</integer>
+
+  <key>StandardOutPath</key>
+  <string>@HOME@/.hazlie/logs/connect.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>@HOME@/.hazlie/logs/connect.err.log</string>
+
+  <!-- KeepAlive restarts on any exit, so a persistent failure becomes a hot
+       loop without this: a process that cannot start — a missing secret, a
+       corrupt config, a port already held — respawns as fast as launchd will
+       allow, burning CPU and filling the log while looking, in `launchctl
+       list`, like a running service. Added 2026-08-22; connectors has had it
+       since it was written. 60 seconds is the floor launchd enforces. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+</dict>
+</plist>

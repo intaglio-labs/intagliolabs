@@ -1,0 +1,553 @@
+// The calendar connector: scans Apple's Calendar store for the occurrences
+// inside a rolling window and delivers one row per occurrence to hermes.
+//
+// Read mode is snapshotStore() — a measured decision, not a preference
+// (ops/PROBES.md "per-consumer Apple-store read mode"): the store is small
+// (~thousands of rows), so a Backup-API snapshot per scan costs well under a
+// second, and the scan then reads a frozen private copy no Apple daemon is
+// writing under us. Do not switch this to a persistent reader without
+// re-measuring.
+//
+// We read Apple's OWN materialized occurrences (OccurrenceCache) rather than
+// expanding RRULEs ourselves: re-implementing iCalendar recurrence expansion
+// is exactly the kind of quiet divergence that puts a meeting in the digest
+// on the wrong day. Apple already did the expansion; we copy its answer.
+//
+// Identity (the PROBES.md decision, measured on this macOS 27 seed):
+//   entity_id = calendar:<CalendarItem.unique_identifier>:<occurrence epoch s>
+// unique_identifier is the iCalendar/CalDAV UID (stable across device syncs
+// and account resyncs; the local-row UUID was rejected because an account
+// remove/re-add can reissue it). The suffix is OccurrenceCache.occurrence_date
+// — the occurrence's SLOT in the series (iCalendar RECURRENCE-ID analogue) —
+// rendered as Unix epoch seconds. occurrence_start_date is the actual,
+// possibly moved, start: it belongs in meta, never in the id.
+//
+// This source is CURSOR-FREE: every pass rescans the whole window and the
+// entity upsert absorbs the overlap (redelivery lands as `unchanged`).
+// Upserts cannot express absence, so after each FULLY successful scan the
+// pass reconciles: fetch the entity ids hermes holds for the scanned window
+// (ids + timestamps only — corpus text never crosses back), diff against what
+// the scan observed, delete the difference. A rescheduled occurrence moves
+// instead of duplicating; a cancelled event cannot haunt tomorrow's digest.
+// Reconciliation NEVER runs outside the scanned window, and never after a
+// partial scan — a failed read aborting before the diff is what stands
+// between "hermes was down for a minute" and a mass delete.
+import { existsSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { APPLE_EPOCH_MS, appleAbsoluteSecondsToEpochMs } from '../lib/appleTime.mjs';
+import { planReconcile } from '../lib/reconcile.mjs';
+import {
+  createGcalClient,
+  defaultGcalClientIdPath,
+  defaultGcalClientSecretPath,
+  defaultGcalTokensPath,
+} from '../lib/gcalClient.mjs';
+import { eventsToRows } from '../lib/gcalRows.mjs';
+import { snapshotStore } from '../lib/storeReader.mjs';
+
+const DAY_MS = 86_400_000;
+
+// Scan windows around "now": steady state looks a week back (late edits to
+// just-passed events still land) and a month ahead (the digest's planning
+// horizon); backfill widens both for a first run or a purge recovery.
+const STEADY_WINDOW = Object.freeze({ backMs: 7 * DAY_MS, aheadMs: 30 * DAY_MS });
+const BACKFILL_WINDOW = Object.freeze({ backMs: 90 * DAY_MS, aheadMs: 60 * DAY_MS });
+
+// The SQL prefilter selects on the RAW occurrence start, but the row's `ts`
+// (and therefore the reconciliation window) is the all-day-adjusted start —
+// local midnight can sit up to a day and a timezone offset away from the raw
+// instant Apple stored. The prefilter therefore over-fetches by this slack
+// and the precise ts ∈ [from, to] cut happens in JS, so the set of rows the
+// scan observed and the set of rows reconciliation may delete are computed
+// from the SAME boundary. Without the slack, an occurrence whose raw start
+// falls just outside the window while its ts falls inside would be invisible
+// to the scan but visible to the diff — and wrongly deleted.
+const WINDOW_SLACK_MS = 2 * DAY_MS;
+
+// The tables and columns one scan reads, probed via PRAGMA before any query.
+// This machine runs a macOS prerelease seed: Apple-store schemas are probed,
+// never assumed, and drift fails loudly naming exactly what moved instead of
+// as an opaque SQL error. CalendarItem.rrule is optional by contract — when
+// the column exists and is populated the value rides along in meta.
+const REQUIRED_COLUMNS = Object.freeze({
+  Calendar: Object.freeze(['title']),
+  CalendarItem: Object.freeze(['summary', 'all_day', 'unique_identifier']),
+  OccurrenceCache: Object.freeze([
+    'event_id',
+    'calendar_id',
+    'occurrence_date',
+    'occurrence_start_date',
+    'occurrence_end_date',
+  ]),
+});
+
+// Store resolution order, probed on this machine (ops/PROBES.md): modern
+// macOS keeps the truth in the group container; the pre-container path is the
+// legacy fallback.
+export function storeCandidatePaths(home = homedir()) {
+  return [
+    join(home, 'Library', 'Group Containers', 'group.com.apple.calendar', 'Calendar.sqlitedb'),
+    join(home, 'Library', 'Calendars', 'Calendar.sqlitedb'),
+  ];
+}
+
+export function scanWindow(nowMs, backfill = false) {
+  const { backMs, aheadMs } = backfill ? BACKFILL_WINDOW : STEADY_WINDOW;
+  return { fromTs: nowMs - backMs, toTs: nowMs + aheadMs };
+}
+
+function statusError(status, message) {
+  return Object.assign(new Error(message), { status });
+}
+
+function epochMsToAppleSeconds(ms) {
+  return (ms - APPLE_EPOCH_MS) / 1000;
+}
+
+// --- local-day arithmetic (all-day rows) ---------------------------------------
+//
+// All-day rows get ts/start_ms/end_ms pinned to LOCAL day boundaries plus
+// all_day:true — a PINNED cross-agent contract: the digest computes
+// meeting-hours from start_ms/end_ms and uses the flag to EXCLUDE all-day
+// rows, so a birthday must never read as a 24-hour meeting. Date#setHours /
+// setDate do the boundary math so a DST-shifted 23/25-hour day still lands on
+// a real midnight.
+
+function floorLocalMidnight(ms) {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function nextLocalMidnight(localMidnightMs) {
+  const d = new Date(localMidnightMs);
+  d.setDate(d.getDate() + 1);
+  return d.getTime();
+}
+
+// --- humanized text -------------------------------------------------------------
+//
+// A fixed locale, the process's local timezone: the text is for the household
+// digest reader, and a stable format also keeps the content hash stable so a
+// rescan lands as `unchanged` rather than churning on formatting.
+const fmtDay = new Intl.DateTimeFormat('en-US', {
+  weekday: 'short',
+  year: 'numeric',
+  month: 'short',
+  day: 'numeric',
+});
+const fmtTime = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' });
+
+function humanSpan({ allDay, startMs, endMs }) {
+  if (allDay) {
+    const lastDayMs = floorLocalMidnight(endMs - 1);
+    return lastDayMs > startMs
+      ? `all day ${fmtDay.format(startMs)} – ${fmtDay.format(lastDayMs)}`
+      : `all day ${fmtDay.format(startMs)}`;
+  }
+  if (floorLocalMidnight(startMs) === floorLocalMidnight(endMs)) {
+    return `${fmtDay.format(startMs)}, ${fmtTime.format(startMs)}–${fmtTime.format(endMs)}`;
+  }
+  return `${fmtDay.format(startMs)}, ${fmtTime.format(startMs)} – ${fmtDay.format(endMs)}, ${fmtTime.format(endMs)}`;
+}
+
+// --- the source -----------------------------------------------------------------
+
+export function createCalendarSource({ candidates = storeCandidatePaths() } = {}) {
+  // Snapshot whichever candidate store works, trying them in order. "Exists
+  // but cannot be opened" and "does not exist" both mean trying the next
+  // path: under TCC even stat can lie about what a later open will be
+  // allowed to do, so attempting the snapshot IS the readability test.
+  async function takeSnapshot(cacheDir) {
+    const attempts = [];
+    for (const path of candidates) {
+      try {
+        return { snapshotPath: await snapshotStore(path, cacheDir), storePath: path };
+      } catch (error) {
+        attempts.push(`${path} (${error?.message ?? error})`);
+      }
+    }
+    throw statusError(
+      403,
+      `calendar store is not readable at any candidate path: ${attempts.join('; ')}. ` +
+        'If the store exists, this is Full Disk Access attribution: the read only works when ' +
+        'launchd spawns the granted binary ~/.hazlie/bin/node directly — see the FDA runbook ' +
+        'in ops/CONNECTORS.md.'
+    );
+  }
+
+  // PRAGMA-probe every table the scan touches before touching it. Returns
+  // whether the optional rrule column exists.
+  function probeSchema(db, storePath) {
+    let hasRrule = false;
+    for (const [table, needed] of Object.entries(REQUIRED_COLUMNS)) {
+      // Table names come from our own constant above, never from input, so
+      // interpolation into PRAGMA is safe (PRAGMA takes no ? params).
+      const columns = db.prepare(`PRAGMA table_info(${JSON.stringify(table)})`).all();
+      if (columns.length === 0) {
+        throw statusError(
+          500,
+          `calendar store schema drift (macOS seed?): required table "${table}" is missing ` +
+            `from ${storePath}; re-probe with ops/probes/probe-calendar-contacts.mjs`
+        );
+      }
+      const names = new Set(columns.map((c) => String(c.name)));
+      for (const column of needed) {
+        if (!names.has(column)) {
+          throw statusError(
+            500,
+            `calendar store schema drift (macOS seed?): required column "${table}.${column}" ` +
+              `is missing from ${storePath}; re-probe with ops/probes/probe-calendar-contacts.mjs`
+          );
+        }
+      }
+      if (table === 'CalendarItem') hasRrule = names.has('rrule');
+    }
+    return hasRrule;
+  }
+
+  function readOccurrences(db, { fromTs, toTs, hasRrule }) {
+    const stmt = db.prepare(
+      'SELECT oc.occurrence_date AS occurrenceDate, ' +
+        'oc.occurrence_start_date AS occurrenceStart, ' +
+        'oc.occurrence_end_date AS occurrenceEnd, ' +
+        'ci.summary AS summary, ci.all_day AS allDay, ci.unique_identifier AS uid, ' +
+        (hasRrule ? 'ci.rrule AS rrule, ' : '') +
+        'cal.title AS calendarTitle ' +
+        'FROM OccurrenceCache oc ' +
+        'JOIN CalendarItem ci ON ci.ROWID = oc.event_id ' +
+        'JOIN Calendar cal ON cal.ROWID = oc.calendar_id ' +
+        'WHERE oc.occurrence_start_date >= ? AND oc.occurrence_start_date <= ? ' +
+        'ORDER BY oc.occurrence_date, oc.event_id'
+    );
+    return stmt.all(
+      epochMsToAppleSeconds(fromTs - WINDOW_SLACK_MS),
+      epochMsToAppleSeconds(toTs + WINDOW_SLACK_MS)
+    );
+  }
+
+  function buildRows(raw, { fromTs, toTs }) {
+    const byId = new Map();
+    let skipped = 0;
+    for (const occ of raw) {
+      // A row without a UID cannot carry a stable identity, and a row
+      // without a start cannot be placed; both are store corruption we
+      // count and step past rather than let one bad row starve the window.
+      if (typeof occ.uid !== 'string' || occ.uid.length === 0 || occ.occurrenceStart === null) {
+        skipped += 1;
+        continue;
+      }
+      const rawStartMs = appleAbsoluteSecondsToEpochMs(occ.occurrenceStart);
+      const rawEndMs =
+        occ.occurrenceEnd === null ? rawStartMs : appleAbsoluteSecondsToEpochMs(occ.occurrenceEnd);
+      const allDay = Boolean(occ.allDay);
+      let startMs = rawStartMs;
+      let endMs = rawEndMs;
+      if (allDay) {
+        startMs = floorLocalMidnight(rawStartMs);
+        const endFloor = floorLocalMidnight(rawEndMs);
+        endMs = endFloor === rawEndMs ? rawEndMs : nextLocalMidnight(endFloor);
+        if (endMs <= startMs) endMs = nextLocalMidnight(startMs);
+      }
+      // ts is the (all-day-adjusted) start: the precise window cut happens
+      // HERE, on ts, so the scan and the reconciliation diff agree on which
+      // rows the window holds (see WINDOW_SLACK_MS above).
+      if (startMs < fromTs || startMs > toTs) continue;
+      // The id suffix is the occurrence SLOT (occurrence_date), not the
+      // actual start — falling back to the start only if the slot is null.
+      const slotSeconds = Math.floor(
+        appleAbsoluteSecondsToEpochMs(occ.occurrenceDate ?? occ.occurrenceStart) / 1000
+      );
+      const entityId = `calendar:${occ.uid}:${slotSeconds}`;
+      // A recurring master and a detached exception can share a UID; the
+      // slot suffix splits every real case (measured in ops/PROBES.md). If a
+      // seed ever emits two cache rows for one slot anyway, keeping the
+      // first (the ORDER BY makes it deterministic) beats letting one batch
+      // fight itself with an insert-then-update on the same id.
+      if (byId.has(entityId)) {
+        skipped += 1;
+        continue;
+      }
+      const summary = typeof occ.summary === 'string' && occ.summary.length > 0 ? occ.summary : '(untitled)';
+      const calendarTitle =
+        typeof occ.calendarTitle === 'string' && occ.calendarTitle.length > 0
+          ? occ.calendarTitle
+          : '(untitled calendar)';
+      const meta = {
+        event_uid: occ.uid,
+        start_ms: startMs,
+        end_ms: endMs,
+        calendar: calendarTitle,
+        all_day: allDay,
+      };
+      if (typeof occ.rrule === 'string' && occ.rrule.length > 0) meta.rrule = occ.rrule;
+      byId.set(entityId, {
+        ts: startMs,
+        source: 'calendar',
+        entity_id: entityId,
+        text: `"${summary}" ${humanSpan({ allDay, startMs, endMs })} (${calendarTitle})`,
+        meta,
+      });
+    }
+    return { rows: [...byId.values()], skipped };
+  }
+
+  // Google backend. Shares the window, the ingest call and the reconciliation
+  // with the local one; only the source of the occurrences differs. Google
+  // expands recurrences server-side (singleEvents=true), so unlike the local
+  // store there is no dependence on a lazily-populated cache.
+  async function runGoogleBackend(ctx, window) {
+    const client = (ctx.gcalClientFactory ?? createGcalClient)({ fetchImpl: ctx.fetchImpl });
+
+    const calendars = await client.listCalendars();
+    // `selected` is what the owner has ticked; deselected calendars are ones
+    // they have chosen not to look at, and ingesting them would put work on
+    // the audit that they do not consider theirs.
+    //
+    // `!== false` IS CORRECT, and stays. The 2026-08-22 audit flagged this as
+    // inverted, reasoning that Google documents `selected` as defaulting to
+    // false, so an omitted field ought to mean unticked. Measured against the
+    // owner's real account before changing it:
+    //
+    //   7 calendars returned by calendarList
+    //   1 with `selected: true`
+    //   0 with `selected: false`
+    //   6 with the field ABSENT
+    //
+    // and all 7 have rows in the live store (255 of them). So the API omits
+    // the field for calendars that are plainly in use, and `=== true` would
+    // have cut ingestion from seven calendars to one — then handed
+    // reconciliation six calendars' worth of suddenly-unobserved entities to
+    // delete. The documented default and the served payload disagree; the
+    // payload is what runs.
+    //
+    // If deselection ever needs to be honoured, the signal has to come from
+    // somewhere that actually carries it, not from the absence of this field.
+    const active = calendars.filter((c) => c.selected !== false && c.deleted !== true);
+
+    const rows = [];
+    let skipped = 0;
+    // One calendar failing must not take the others down. Without this, a
+    // single calendar the owner lost access to threw out of the whole pass on
+    // EVERY poll — no rows ingested, no reconciliation, no recovery, and the
+    // only symptom a repeating error. Calendar ingestion could freeze
+    // indefinitely on one stale share.
+    const failed = [];
+    for (const calendar of active) {
+      try {
+        const events = await client.listEvents({
+          calendarId: calendar.id,
+          timeMinMs: window.fromTs,
+          timeMaxMs: window.toTs,
+        });
+        const mapped = eventsToRows(events, {
+          calendarTitle: calendar.summary,
+          fallbackZone: calendar.timeZone,
+        });
+        rows.push(...mapped.rows);
+        skipped += mapped.skipped;
+      } catch (error) {
+        // No calendar id, summary or title in the log — that names the owner's
+        // calendars and their sharers (log policy, connectors/AGENTS.md).
+        failed.push(calendar.id);
+        ctx.log.warn('calendar_list_failed', {
+          connector: 'calendar',
+          backend: 'google',
+          error: String(error?.message ?? error).slice(0, 120),
+        });
+      }
+    }
+
+    // Two calendars can hold the same meeting (an invite the owner also put
+    // on a personal calendar); the entity id is the same, so dedupe before
+    // ingest rather than letting one batch insert-then-update itself.
+    const byId = new Map();
+    for (const row of rows) {
+      if (byId.has(row.entity_id)) {
+        skipped += 1;
+        continue;
+      }
+      byId.set(row.entity_id, row);
+    }
+    const deduped = [...byId.values()];
+
+    if (skipped > 0) {
+      ctx.log.warn('calendar_rows_skipped', { connector: 'calendar', count: skipped });
+    }
+
+    const totals = await ctx.ingest(deduped);
+
+    const observed = new Set(deduped.map((row) => row.entity_id));
+    const held = await ctx.admin.entities({
+      source: 'calendar',
+      fromTs: window.fromTs,
+      toTs: window.toTs,
+    });
+    // The floor, not a bare diff — see lib/reconcile.mjs. A Google pass can
+    // return an empty page for reasons that are not "the calendar is empty":
+    // an expired token surfacing as 200, a `selected` filter change, a
+    // calendar the owner unshared. Without this, any of those deleted the
+    // whole window and logged it as a successful cleanup.
+    // A PARTIAL SCAN MAY NOT RECONCILE. Skipping a failed calendar keeps the
+    // pass alive, but its events are then unobserved — and unobserved is
+    // exactly what reconciliation deletes. Continuing past a failure without
+    // this check would trade a frozen connector for a quiet deletion of the
+    // rows belonging to whichever calendar broke.
+    const plan =
+      failed.length > 0
+        ? { stale: [], refuse: `${failed.length} calendar(s) failed; window not fully observed` }
+        : planReconcile({ observedIds: observed, held });
+    let deleted = 0;
+    if (plan.refuse) {
+      ctx.log.warn('calendar_reconcile_refused', {
+        connector: 'calendar',
+        backend: 'google',
+        held: held.length,
+        wouldDelete: plan.stale.length,
+        reason: plan.refuse,
+      });
+    } else if (plan.stale.length > 0) {
+      deleted = (await ctx.admin.deleteEntities({ source: 'calendar', entityIds: plan.stale }))
+        .deleted;
+    }
+
+    // Counts and window facts only — never a summary, a title or a time span
+    // (log policy, connectors/AGENTS.md).
+    ctx.log.info('calendar_scan', {
+      connector: 'calendar',
+      backend: 'google',
+      backfill: Boolean(ctx.backfill),
+      windowFromTs: window.fromTs,
+      windowToTs: window.toTs,
+      calendars: active.length,
+      rows: deduped.length,
+      skipped,
+      deleted,
+    });
+    return { ...totals, deleted };
+  }
+
+  return {
+    name: 'calendar',
+
+    // Store readability is deliberately NOT pre-checked for the local
+    // backend: FDA attributes per spawner, so a needs()-time stat can pass in
+    // a context where the run's open would be denied (and vice versa). The
+    // run itself is the honest probe and fails loudly with the runbook.
+    //
+    // The Google backend DOES have a real prerequisite, and it is worth
+    // gating: without tokens the run would fail mid-flight after opening a
+    // socket, instead of waiting quietly at the gate.
+    needs({ config, tokensPath, clientIdPath, clientSecretPath } = {}) {
+      if (config?.calendar?.backend !== 'google') return [];
+      const missing = [];
+      const tokens = tokensPath ?? defaultGcalTokensPath();
+      if (!existsSync(tokens)) {
+        missing.push(
+          `gcal tokens file missing at ${tokens}: run \`node ops/gcal-auth.mjs\` (browser consent)`
+        );
+      }
+      for (const [path, label] of [
+        [clientIdPath ?? defaultGcalClientIdPath(), 'gcal client id'],
+        [clientSecretPath ?? defaultGcalClientSecretPath(), 'gcal client secret'],
+      ]) {
+        if (!existsSync(path)) {
+          missing.push(`${label} file missing at ${path}: run \`node ops/gcal-auth.mjs --help\``);
+        }
+      }
+      return missing;
+    },
+
+    async run(ctx) {
+      const window = scanWindow(ctx.now(), Boolean(ctx.backfill));
+
+      // Two backends, one at a time, never both. Both write `source:
+      // 'calendar'` rows, and the reconciliation below deletes every held
+      // entity in the window this pass did not observe — so running both
+      // would have each delete the other's rows on alternate passes.
+      // `calendar.backend` is the switch; there is deliberately no merge.
+      if (ctx.config?.calendar?.backend === 'google') {
+        return runGoogleBackend(ctx, window);
+      }
+
+      const cacheDir = join(ctx.cacheDir, 'calendar');
+      const { snapshotPath, storePath } = await takeSnapshot(cacheDir);
+
+      let rows;
+      let skipped;
+      let db;
+      try {
+        // The snapshot is our own private 0600 copy, not a live Apple store,
+        // so a plain read-only open is the whole story here.
+        db = new DatabaseSync(snapshotPath, { readOnly: true });
+        const hasRrule = probeSchema(db, storePath);
+        ({ rows, skipped } = buildRows(readOccurrences(db, { ...window, hasRrule }), window));
+      } finally {
+        try {
+          db?.close();
+        } catch {}
+        // The snapshot has served its scan; a lingering ~copy of the
+        // household calendar in the cache dir is a liability, not a cache.
+        rmSync(snapshotPath, { force: true });
+      }
+      if (skipped > 0) {
+        ctx.log.warn('calendar_rows_skipped', { connector: 'calendar', count: skipped });
+      }
+
+      const totals = await ctx.ingest(rows);
+
+      // Reconciliation — reached ONLY when the snapshot, the scan, and every
+      // ingest batch above succeeded (anything thrown has already aborted the
+      // pass), and confined to exactly the window the scan covered.
+      const observed = new Set(rows.map((row) => row.entity_id));
+      const held = await ctx.admin.entities({
+        source: 'calendar',
+        fromTs: window.fromTs,
+        toTs: window.toTs,
+      });
+      // Same floor as the Google path — a local store snapshot can also come
+      // back empty while succeeding (an unmounted volume, a permissions
+      // change), and the diff cannot tell that from a cleared calendar.
+      const plan = planReconcile({ observedIds: observed, held });
+      let deleted = 0;
+      if (plan.refuse) {
+        ctx.log.warn('calendar_reconcile_refused', {
+          connector: 'calendar',
+          backend: 'local',
+          held: held.length,
+          wouldDelete: plan.stale.length,
+          reason: plan.refuse,
+        });
+      } else if (plan.stale.length > 0) {
+        deleted = (await ctx.admin.deleteEntities({ source: 'calendar', entityIds: plan.stale }))
+          .deleted;
+      }
+
+      // Counts and window facts only — never a summary, a title, or a time
+      // span string (log policy, connectors/AGENTS.md).
+      ctx.log.info('calendar_scan', {
+        connector: 'calendar',
+        backfill: Boolean(ctx.backfill),
+        windowFromTs: window.fromTs,
+        windowToTs: window.toTs,
+        occurrences: rows.length,
+        inserted: totals.inserted,
+        updated: totals.updated,
+        unchanged: totals.unchanged,
+        deleted,
+      });
+
+      // The daemon records this run (recordRun) from the counts we return.
+      return {
+        ingested: totals.inserted,
+        updated: totals.updated,
+        unchanged: totals.unchanged,
+        deleted,
+      };
+    },
+  };
+}
+
+export default createCalendarSource();

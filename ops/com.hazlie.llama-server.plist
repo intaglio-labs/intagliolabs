@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Keeps llama-server resident across logins/reboots, serving the local LLM
+  tier on 127.0.0.1:8080.
+
+  This checked-in file is a TEMPLATE: launchd cannot expand $HOME inside
+  ProgramArguments, so every user path holds an @HOME@ placeholder that
+  ops/setup-llm.sh substitutes when it installs the rendered copy into
+  ~/Library/LaunchAgents/. Do not bootstrap this file directly.
+
+  Flags, against llama-server build 10360, checked 2026-08-11. (An XML comment
+  cannot contain a double hyphen, so flags are named bare here.)
+    model.gguf         a symlink kept by setup-llm.sh, so swapping models never
+                       touches this file.
+    jinja              model chat template via the jinja engine. Default-enabled
+                       in this build; stated explicitly because the JSON-schema
+                       envelope depends on it.
+    offline            forces the model cache and refuses all outbound network.
+                       The model is a local file, so the only thing this can
+                       break is a behavior we never want a corpus-adjacent
+                       process to have. Probed against build 10360, 2026-08-20.
+    no-slots           the /slots monitoring endpoint reports each slot's state
+                       and can expose prompt content to anything that can reach
+                       the port. Nothing consumes it; off. (slot-save-path,
+                       which persists slot KV to disk, stays UNSET; setup-llm.sh
+                       fails closed if it or its env equivalent ever appears.)
+    reasoning off      Qwen3-8B is a HYBRID-thinking model (the plan's
+                       non-thinking "Qwen3-8B-Instruct-2507" does not exist;
+                       see setup-llm.sh). Without this, thinking mode multiplies
+                       response time roughly 10x.
+    ctx-size 32768     raised from 8192 on 2026-08-21: the 8K window capped how
+                       much retrieved context reached the model at answer time
+                       (L5 run 1: 39/60 answers hit a data gap the store could
+                       have served). 32768 is Qwen3-8B's native window; anything
+                       higher needs YaRN RoPE scaling, which degrades short
+                       prompts. Do not raise further without changing models.
+    cache-type-k q8_0  quantize the KV cache to 8-bit; with cache-type-v below,
+    cache-type-v q8_0  32K of context costs ~2.4 GB instead of ~4.8, keeping the
+                       whole server near 7 GB resident on a 24 GB machine.
+    flash-attn on      a quantized V cache requires flash attention. Build 10360
+                       defaults fa to auto, which would pick it anyway, but the
+                       V cache silently depends on that choice, so it is pinned
+                       rather than inherited.
+    cors-origins       exact Expo web origin on localhost:8081. An arbitrary
+                       page on a different localhost port is not trusted merely
+                       because it is local. Build 10360 advertises a comma-
+                       separated list but emits that whole list as one invalid
+                       Access-Control-Allow-Origin value, so keep this singular.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hazlie.llama-server</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/llama-server</string>
+    <string>-m</string>
+    <string>@HOME@/.hazlie/models/model.gguf</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8080</string>
+    <string>--ctx-size</string>
+    <string>32768</string>
+    <string>--cache-type-k</string>
+    <string>q8_0</string>
+    <string>--cache-type-v</string>
+    <string>q8_0</string>
+    <string>--flash-attn</string>
+    <string>on</string>
+    <!-- Auto parallelism created four 8K slots on an 8 GB M2 and exhausted
+         unified GPU memory before the first token. Hazlie serves one household
+         turn at a time, so one slot is both sufficient and deterministic. -->
+    <string>--parallel</string>
+    <string>1</string>
+    <string>--batch-size</string>
+    <string>512</string>
+    <string>--ubatch-size</string>
+    <string>128</string>
+    <string>--jinja</string>
+    <string>--reasoning</string>
+    <string>off</string>
+    <string>--offline</string>
+    <string>--no-slots</string>
+    <!-- CORS governs which browser origins may read responses; it does not
+         prevent a drive-by no-CORS POST. Authentication makes the direct
+         llama port fail closed, while Hermes owns the key and proxy. -->
+    <string>--api-key-file</string>
+    <string>@HOME@/.hazlie/secrets/llama-api-key.txt</string>
+    <string>--cors-origins</string>
+    <string>http://localhost:8081</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>Umask</key>
+  <integer>63</integer>
+
+  <key>StandardOutPath</key>
+  <string>@HOME@/.hazlie/logs/llama-server.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>@HOME@/.hazlie/logs/llama-server.err.log</string>
+
+  <!-- KeepAlive restarts on any exit, so a persistent failure becomes a hot
+       loop without this: a process that cannot start — a missing secret, a
+       corrupt config, a port already held — respawns as fast as launchd will
+       allow, burning CPU and filling the log while looking, in `launchctl
+       list`, like a running service. Added 2026-08-22; connectors has had it
+       since it was written. 60 seconds is the floor launchd enforces. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+</dict>
+</plist>

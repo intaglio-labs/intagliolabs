@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- One entitlement, for the one thing this app captures. Required once the
+       hardened runtime is on: under runtime protection the microphone is
+       refused outright without it, TCC prompt or no TCC prompt.
+
+       Nothing else is requested. No network client entitlement (the app is not
+       sandboxed, and its only sockets are loopback), no file access, no
+       camera. -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+</dict>
+</plist>
