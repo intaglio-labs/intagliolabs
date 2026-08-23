@@ -175,6 +175,26 @@ cp ../ops/com.hazlie.connect.plist ../ops/com.hazlie.hermes.plist \
 IDENTITY="${HAZLIE_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
   | awk '/Apple Development|Developer ID Application/ {print $2; exit}')}"
 
+# THE PROVISIONING PROFILE, embedded before signing.
+#
+# A development-signed Mac app carries one or it is not validly signed for any
+# machine: `spctl -a` says rejected, and macOS will not present a privacy prompt
+# to an app it rejects — it records a denial instead, silently, which is exactly
+# how the Contacts/Calendar/Photos prompts came to "fail" without ever being
+# shown. The profile names this team, this bundle id and the Macs allowed to run
+# it, and lives at Contents/embedded.provisionprofile by convention.
+#
+# Absent is not fatal: an ad-hoc or unprofiled build still runs for whoever
+# built it. It just cannot be handed to anyone, and cannot earn a TCC prompt.
+PROFILE="signing/mac-dev.provisionprofile"
+if [ -f "$PROFILE" ]; then
+  cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
+  echo "embedded $PROFILE"
+else
+  echo "NOTE: no $PROFILE — this build cannot be notarized and will not be" >&2
+  echo "      shown privacy prompts. See ops/SIGNING.md." >&2
+fi
+
 if [ -n "$IDENTITY" ]; then
   # INSIDE-OUT: the bundled node runtime is nested Mach-O and must carry its
   # own Developer ID signature (with JIT entitlements for V8) BEFORE the app

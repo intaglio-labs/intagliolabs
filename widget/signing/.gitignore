@@ -1,0 +1,13 @@
+# NOTHING IN HERE GOES TO GIT.
+#
+# This directory holds signing material: a private key, a certificate signing
+# request, and a provisioning profile. The repository is PUBLIC (CLAUDE.md rule
+# 6), and a leaked signing key is worse than a leaked secret — it is not a
+# credential to something, it is the identity ITSELF. Anyone holding it can sign
+# software as this developer, and the only remedy is revoking the certificate
+# and invalidating every build ever signed with it.
+#
+# Ignored wholesale rather than by extension: the next file added here will be
+# sensitive too, and an allowlist is the wrong default for a folder like this.
+*
+!.gitignore
