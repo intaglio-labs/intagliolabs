@@ -6,8 +6,26 @@
 import AppKit
 import WebKit
 
-final class WidgetWindow: NSWindow {
+// A NON-ACTIVATING PANEL, not a plain window — and this is the fix the note
+// below predicted.
+//
+// The popups are .nonactivatingPanel and take key when presented. AppKit then
+// swallows the next click on any window that is NOT key purely to activate it,
+// so switching between chat, connections and people cost TWO clicks: one
+// consumed by activation, one that finally hit the button. It read as the app
+// ignoring you.
+//
+// The comment under this class already worked out the answer while rejecting a
+// different one: overriding acceptsFirstMouse on the webview changed mouse
+// routing app-wide, and "the move is making WidgetWindow a .nonactivatingPanel
+// like the popups already are — clicks reach a nonactivating panel without an
+// activation step to swallow them." That is what this is. The style mask is set
+// where the window is built; the class just has to be a panel to accept it.
+final class WidgetWindow: NSPanel {
   override var canBecomeKey: Bool { true }
+  // A desktop widget must never steal main-window status from the work behind
+  // it. Key (so the message bar can be typed in) but never main.
+  override var canBecomeMain: Bool { false }
 }
 
 // NOT HERE: a WKWebView subclass returning true from acceptsFirstMouse.

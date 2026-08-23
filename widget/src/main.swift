@@ -70,7 +70,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     let scale = Bridge.scale
     let w = WidgetWindow(
       contentRect: NSRect(origin: .zero, size: Self.scaled(Self.widgetBase, scale)),
-      styleMask: [.borderless], backing: .buffered, defer: false)
+      // .nonactivatingPanel so a click lands on what it hit rather than being
+      // spent activating the window first — see WidgetWindow in Windows.swift.
+      styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    w.isFloatingPanel = false
+    w.hidesOnDeactivate = false
     w.isOpaque = false
     w.backgroundColor = .clear
     // Elements float on the wallpaper; a window shadow would draw one blob

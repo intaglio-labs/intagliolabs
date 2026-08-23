@@ -1084,14 +1084,27 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
   0%, 100% { box-shadow: 0 0 10px 2px rgba(229, 214, 187, 0.30), 0 0 0 0 rgba(229, 214, 187, 0.14); }
   50% { box-shadow: 0 0 24px 6px rgba(229, 214, 187, 0.60), 0 0 0 8px rgba(229, 214, 187, 0.05); }
 }
+/* Waiting to be pressed — the same outward ring the send button uses, for the
+   same reason: a control that squashes and jumps is a target that moves while
+   you aim at it. One gesture for "this wants you" across the app, and it is
+   now the ping rather than the bounce. */
 .gear.nudge {
-  animation:
-    orb-jelly 2.8s cubic-bezier(0.68, -0.55, 0.265, 1.55) infinite,
-    gear-spotlight 2.8s ease-in-out infinite;
+  position: relative;
+  animation: gear-spotlight 2.8s ease-in-out infinite;
+}
+.gear.nudge::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  border: 2px solid rgba(229, 214, 187, 0.7);
+  animation: send-ping 2.8s cubic-bezier(0.2, 0.6, 0.35, 1) infinite;
+  pointer-events: none;
 }
 @media (prefers-reduced-motion: reduce) {
   /* Same trade as the send nudge: the bounce stills, the ask survives as
      light held at its bright end. */
+  body:not(.motion-anyway) .gear.nudge::after { animation: none; opacity: 0.5; transform: scale(1.2); }
   body:not(.motion-anyway) .gear.nudge {
     animation: none;
     box-shadow: 0 0 20px 5px rgba(229, 214, 187, 0.5), 0 0 0 6px rgba(229, 214, 187, 0.06);
@@ -2362,3 +2375,54 @@ body.connections .tile-tip.on { opacity: 1; }
   body:not(.motion-anyway) .ob-choice { transition: none; }
   body:not(.motion-anyway) .ob-prog-bar span { transition: none; }
 }
+
+/* ---------------- onboarding legibility ----------------
+   The scrim is a dimmed desktop, so its lightness is whatever wallpaper is
+   behind it — and --muted (#5c5c5c) was chosen against the widget's solid
+   #141412, not against that. On the setup screens, which carry the most text
+   in the flow, small print was landing near 2:1 and the choice descriptions
+   were effectively invisible.
+
+   Two fixes, in this order: give the content a surface of its own so contrast
+   stops depending on the wallpaper at all, then raise the small text against
+   that known surface rather than against a guess. */
+.ob-setup {
+  background: rgba(14, 13, 12, 0.93);
+  border: 1px solid rgba(234, 234, 234, 0.10);
+  border-radius: 22px;
+  padding: 40px 44px 36px;
+  gap: 22px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+  /* The scrim behind stays visible at the edges; this is a card ON it. */
+  margin: 40px auto;
+  max-width: 620px;
+}
+/* Small print, now against a known ground. */
+.ob-setup .ob-setup-note { color: #b3ada1; }
+.ob-setup .ob-choice-why { color: #a8a296; }
+.ob-setup .ob-prog-label { color: #b3ada1; }
+.ob-setup .ob-status { color: #b3ada1; }
+.ob-setup .ob-path { color: #cfc8ba; background: rgba(0, 0, 0, 0.45); }
+.ob-setup .ob-steps li { color: #ddd7cb; }
+.ob-setup .ob-choice { background: rgba(255, 255, 255, 0.045); }
+.ob-setup .ob-choice:hover { background: rgba(255, 255, 255, 0.085); }
+/* The skip is a real option, so it must be readable rather than hidden. */
+.ob-setup .ob-replay { color: #9d978b; }
+.ob-setup .ob-replay:hover { color: #ddd7cb; }
+
+/* The rest of the flow sits directly on the scrim and had the same problem in
+   a milder form: the tagline is large enough to carry, the note under it is
+   not. */
+.ob-home-note { color: #b3ada1; }
+.ob-tagline { text-shadow: 0 2px 18px rgba(0, 0, 0, 0.55); }
+/* The paste route, kept but demoted: dragging is the gesture macOS designed
+   for this list, and a path in a box is what you offer when that fails. */
+.ob-alt { flex: 1 1 100%; margin-top: 4px; }
+.ob-alt summary {
+  cursor: default; font-size: 12px; color: #9d978b;
+  list-style: none; padding: 2px 0;
+}
+.ob-alt summary::-webkit-details-marker { display: none; }
+.ob-alt summary::before { content: '▸ '; }
+.ob-alt[open] summary::before { content: '▾ '; }
+.ob-alt summary:hover { color: #ddd7cb; }

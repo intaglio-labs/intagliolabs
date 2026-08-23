@@ -70,13 +70,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     // Same setup controls, reachable from the gear after the
                     // flow — a skipped step must stay reachable.
                     "setupState", "modelDownload", "modelCancel",
-                    "openFullDiskAccess", "startSources"],
+                    "openFullDiskAccess", "revealNode", "startSources"],
     "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
                    "widgetSpot",
                    // The setup scenes: choosing and fetching the answer model,
                    // and turning on the first data source.
                    "setupState", "modelDownload", "modelCancel",
-                   "openFullDiskAccess", "startSources"],
+                   "openFullDiskAccess", "revealNode", "startSources"],
     // people.html includes connector-tile.js as well as people.js (check the
     // script tags, not the file's own comment about being shared), so the People
     // popup renders connector tiles and needs the bridge verbs too. Writing this
@@ -599,12 +599,33 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           // restart the app" is not finished.
           self.delegate?.setupProgress(["phase": "installing", "tier": tier])
           DispatchQueue.global(qos: .utility).async {
+            // THE RUNTIME BEFORE THE AGENT. provision() no-ops on an
+            // already-set-up machine, so a binary the bundle gained later never
+            // came out -- and installing an agent that points at a missing
+            // binary just parks it at exit 78 while this screen waits forever.
+            guard Provision.ensureLlamaRuntime() else {
+              self.delegate?.setupProgress([
+                "phase": "failed", "tier": tier,
+                "error": "the model is saved, but the engine that runs it is missing",
+              ])
+              return
+            }
             Provision.installAgent("com.hazlie.llama-server")
             Provision.kickstart("com.hazlie.llama-server")
             // hermes holds the llama base URL open; restart it so the first ask
             // after setup does not meet a proxy pointed at nothing.
             Provision.kickstart("com.hazlie.hermes")
-            self.delegate?.setupProgress(["phase": "ready", "tier": tier])
+            // REACH AN ENDING. Loading several GB of weights takes a while, so
+            // wait -- but bounded, and then say which way it went. A screen that
+            // says "checking" forever is the one state that is never true.
+            if Provision.waitForLlama() {
+              self.delegate?.setupProgress(["phase": "ready", "tier": tier])
+            } else {
+              self.delegate?.setupProgress([
+                "phase": "failed", "tier": tier,
+                "error": "the model is saved but did not start — reopen the app to try again",
+              ])
+            }
           }
         }
       )
@@ -612,6 +633,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
 
     case "modelCancel":
       ModelSetup.cancel()
+      reply(webView, id, ["state": "ok"])
+
+    case "revealNode":
+      // Finder, with the file already selected, so the grant is a DRAG rather
+      // than a path someone has to paste into a ⇧⌘G sheet. Dragging onto the
+      // Full Disk Access list is the gesture macOS actually designed for this;
+      // the paste was us working around not knowing that.
+      let node = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".hazlie/bin/node")
+      NSWorkspace.shared.activateFileViewerSelecting([node])
       reply(webView, id, ["state": "ok"])
 
     case "openFullDiskAccess":

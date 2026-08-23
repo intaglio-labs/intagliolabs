@@ -460,6 +460,9 @@ const dataStatus = document.getElementById('dataStatus');
 document.getElementById('fdaOpen').addEventListener('click', () => {
   hzPost('openFullDiskAccess').catch(() => {});
 });
+document.getElementById('fdaReveal').addEventListener('click', () => {
+  hzPost('revealNode').catch(() => {});
+});
 document.getElementById('fdaCopy').addEventListener('click', async () => {
   const path = document.getElementById('nodePath').textContent;
   try {

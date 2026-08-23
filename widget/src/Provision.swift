@@ -143,21 +143,22 @@ enum Provision {
     // Render each plist (@HOME@ → home, @REPO@ → the bundle's backend), write
     // it 0644, and bootstrap. Wait for hermes to answer /health before the
     // rest, so connectors don't write into a database still opening.
-    let llamaBinary = hazlie.appendingPathComponent("bin/llama-server")
+    // What llama-server needs is WEIGHTS, and the check used to be for the
+    // BINARY. That was right while the two shipped together: the runtime was
+    // bundled only when the build machine also had a model. Now the runtime
+    // always ships and the model is downloaded in onboarding, so the binary is
+    // always present and the old condition passed on a machine with nothing to
+    // load — the agent registered, launchd started it, and it died on a missing
+    // model instead of a missing binary. Same wasted background item, one exit
+    // code further along.
+    //
+    // The honest question is whether this agent can do its job, and the answer
+    // is the model.gguf link. Onboarding installs the agent itself the moment a
+    // download lands, which is when it becomes true.
+    let modelLink = hazlie.appendingPathComponent("models/model.gguf")
     for label in agentsInOrder {
-      // DO NOT REGISTER AN AGENT THAT CANNOT RUN.
-      //
-      // llama-server is bundled only when the machine that built the app had a
-      // model to bundle, so on a plain build there is no binary. Registering it
-      // anyway cost twice: macOS counted another background item and told the
-      // owner about it, and launchd then retried a binary that does not exist,
-      // parking the agent at exit 78 forever. A background item a person is
-      // asked to approve should at minimum be one that does something.
-      //
-      // Setting up the model later installs this agent itself, which is the
-      // right moment for it to appear.
-      if label == "com.hazlie.llama-server" && !fm.fileExists(atPath: llamaBinary.path) {
-        NSLog("Intaglio Labs: no local model bundled — skipping the llama agent")
+      if label == "com.hazlie.llama-server" && !fm.fileExists(atPath: modelLink.path) {
+        NSLog("Intaglio Labs: no model yet — skipping the llama agent until one is chosen")
         continue
       }
       installAgent(label)
@@ -191,6 +192,61 @@ enum Provision {
     try? p.run()
     p.waitUntilExit()
     if p.terminationStatus != 0 { try? fm.copyItem(at: src, to: dst) }
+  }
+
+  /// Copy the llama runtime out of the bundle to the stable ~/.hazlie paths.
+  ///
+  /// Separate from provision() because the two happen at different times and
+  /// that gap was a bug. provision() no-ops once a machine is set up, so a
+  /// binary the bundle gained LATER never came out: the plist was installed
+  /// pointing at ~/.hazlie/bin/llama-server, nothing was there, and launchd
+  /// parked the agent at exit 78 (EX_CONFIG) while onboarding sat on "checking
+  /// it arrived intact" waiting for a service that could not spawn.
+  ///
+  /// Idempotent, and returns whether the binary is in place afterwards so the
+  /// caller can refuse to install an agent that could only fail.
+  @discardableResult
+  static func ensureLlamaRuntime() -> Bool {
+    let src = backend.appendingPathComponent("llama/bin/llama-server")
+    let dst = hazlie.appendingPathComponent("bin/llama-server")
+    guard fm.fileExists(atPath: src.path) else { return fm.fileExists(atPath: dst.path) }
+    if !fm.fileExists(atPath: dst.path) {
+      try? mkdir(hazlie.appendingPathComponent("bin"), 0o700)
+      try? fm.copyItem(at: src, to: dst)
+      try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dst.path)
+    }
+    // Its dylibs share ~/.hazlie/lib with libnode; the binary's
+    // @loader_path/../lib rpath finds them there.
+    let libSrc = backend.appendingPathComponent("llama/lib")
+    if let libs = try? fm.contentsOfDirectory(at: libSrc, includingPropertiesForKeys: nil) {
+      try? mkdir(hazlie.appendingPathComponent("lib"), 0o700)
+      for lib in libs {
+        let to = hazlie.appendingPathComponent("lib/\(lib.lastPathComponent)")
+        if !fm.fileExists(atPath: to.path) { try? fm.copyItem(at: lib, to: to) }
+      }
+    }
+    return fm.fileExists(atPath: dst.path)
+  }
+
+  /// Wait briefly for llama-server to answer. Bounded on purpose: a caller
+  /// showing a person a progress screen must reach an ending, and "still
+  /// checking" forever is the one outcome that is never true.
+  static func waitForLlama(seconds: Int = 40) -> Bool {
+    guard let url = URL(string: "http://127.0.0.1:8080/health") else { return false }
+    for _ in 0..<seconds {
+      var req = URLRequest(url: url)
+      req.timeoutInterval = 2
+      let sem = DispatchSemaphore(value: 0)
+      var ok = false
+      URLSession.shared.dataTask(with: req) { _, response, _ in
+        ok = (response as? HTTPURLResponse)?.statusCode == 200
+        sem.signal()
+      }.resume()
+      _ = sem.wait(timeout: .now() + 3)
+      if ok { return true }
+      Thread.sleep(forTimeInterval: 1)
+    }
+    return false
   }
 
   /// Render one agent's plist (@HOME@ → home, @REPO@ → the bundle's backend),
