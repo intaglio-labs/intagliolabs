@@ -105,14 +105,28 @@ enum Provision {
       cloneTree(voiceSrc, voiceDst)
     }
 
-    // The hermes bearer, 0600, if it isn't already there.
-    let tokenFile = hazlie.appendingPathComponent("secrets/hermes-token.txt")
-    if !fm.fileExists(atPath: tokenFile.path) {
+    // BOTH owner-only secrets, 0600, each left alone if already there.
+    //
+    // The llama key used to be missing here, and hermes would not start without
+    // it: readLlamaApiKey() throws at boot, so a fresh install died with
+    // "llama API key file is missing; run ops/setup-llm.sh" -- pointing at a
+    // script a downloaded app does not have. Everything downstream went with it,
+    // because hermes is the database. Found on a genuinely fresh Mac: the widget
+    // came up, connect came up, and hermes sat at exit status 1.
+    //
+    // Generating it here is safe in both directions. setup-llm.sh preserves an
+    // existing key when it runs (it stamps the active one and only regenerates
+    // when absent), and llama-server is handed the same file whenever it does
+    // arrive -- bundled at build time, or installed later. The key is required
+    // for hermes to BOOT, not just to reach a model, so it cannot wait for one.
+    for name in ["hermes-token.txt", "llama-api-key.txt"] {
+      let file = hazlie.appendingPathComponent("secrets/\(name)")
+      guard !fm.fileExists(atPath: file.path) else { continue }
       var bytes = [UInt8](repeating: 0, count: 32)
       _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-      let token = bytes.map { String(format: "%02x", $0) }.joined()
-      try token.write(to: tokenFile, atomically: true, encoding: .utf8)
-      try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tokenFile.path)
+      let secret = bytes.map { String(format: "%02x", $0) }.joined()
+      try secret.write(to: file, atomically: true, encoding: .utf8)
+      try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }
 
     // Render each plist (@HOME@ → home, @REPO@ → the bundle's backend), write
