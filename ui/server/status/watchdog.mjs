@@ -73,12 +73,6 @@ export const LABEL = Object.freeze({
   linkedin: 'your linkedin messages',
 });
 
-function ago(ms) {
-  const h = Math.floor(ms / 3600000);
-  if (h < 48) return `${h} hours`;
-  return `${Math.floor(h / 24)} days`;
-}
-
 // TWO DIFFERENT SIGNALS, and using the wrong one silently disables the check.
 //
 // For a connector THIS machine runs, freshness is the last successful run in
@@ -164,27 +158,4 @@ export function evaluate({ lastSeen, now, previous = {}, staleAfter = STALE_AFTE
     if (!isStale && was === 'stale') recovered.push({ source });
   }
   return { state, newlyStale, recovered };
-}
-
-export function renderAlerts({ newlyStale, recovered }) {
-  const messages = [];
-  for (const { source, age } of newlyStale) {
-    const remedy = REMEDY[source];
-    const label = LABEL[source] ?? source;
-    messages.push({
-      kind: 'text',
-      body: `heads up — i haven't seen ${label} in ${ago(age)}.${remedy ? ` ${remedy}.` : ''}`,
-    });
-  }
-  for (const { source } of recovered) {
-    // "i can see X again" rather than "X are flowing again": the labels are a
-    // mix of plural ("your messages") and singular ("your calendar"), and one
-    // template cannot agree with both. Making the verb agree with "i" sides-
-    // steps it entirely.
-    messages.push({
-      kind: 'text',
-      body: `ok — i can see ${LABEL[source] ?? source} again.`,
-    });
-  }
-  return messages;
 }

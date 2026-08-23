@@ -83,14 +83,37 @@ export function createPhotosSource({ home } = {}) {
           backfillDays: ctx.config?.photos?.backfillDays ?? DEFAULT_BACKFILL_DAYS,
         });
 
-        // OCR IS NOT READ, and the reason is measured rather than assumed —
-        // see connectors/lib/ocrPlist.mjs. Apple's recognized text is not in
-        // the plist's <string> elements; those are 26 class names, identical
-        // in every photo. The text lives in a ~25 KB <data> blob that is not
-        // a plist. A first attempt "worked" by extracting those class names,
-        // producing the SAME 214 characters for all 8 sampled photos — which
-        // shipped would have put one boilerplate string in all 88,775 rows
-        // and made every future search match everything.
+        // OCR IS NOT READ, and the reason is measured rather than assumed.
+        // This used to point at connectors/lib/ocrPlist.mjs, a decoder the
+        // connector never called; the code is deleted and its finding moved
+        // here, next to the decision it justifies. Measured 2026-08-20 on a
+        // real 88,775-asset library:
+        //
+        //   - the blob in ZCHARACTERRECOGNITIONATTRIBUTES.ZCHARACTER-
+        //     RECOGNITIONDATA IS a binary plist (magic `bplist00`), readable
+        //     with plutil — no dependency needed. That part was right;
+        //   - `plutil -convert json` REFUSES it: the archive embeds <data>
+        //     elements and JSON cannot represent them ("Invalid object in
+        //     plist for JSON format"). xml1 converts the same blob happily.
+        //     The failure reads as "no text in any photo" rather than as a
+        //     format error, which is the kind of wrong mistaken for an empty
+        //     library;
+        //   - but the recognized text is NOT in the plist's <string>
+        //     elements. Those are 26 NSKeyedArchiver class names, identical
+        //     in every photo. Collecting them returned the SAME 214
+        //     characters for all 8 sampled blobs, whose sizes ranged 3.6 KB
+        //     to 26.7 KB;
+        //   - the text sits in a ~25 KB <data> element that is not itself a
+        //     plist (magic 103bdee9…) — protobuf, or a Vision encoding.
+        //
+        // So reading it means decoding an undocumented binary format, not
+        // unwrapping a plist: real work, not the afternoon it looked like.
+        //
+        // The trap worth remembering: the first version LOOKED like it
+        // worked. It returned text, for every photo, with no errors. Only
+        // comparing hashes across photos revealed every "decode" was the same
+        // string — which shipped would have put one boilerplate string in all
+        // 88,775 rows and made every future search match everything.
         const stmt = db.prepare(
           `SELECT a.Z_PK, a.ZUUID, a.ZDATECREATED, a.ZKIND, a.ZKINDSUBTYPE, a.ZLATITUDE, a.ZLONGITUDE,
                   a.ZFAVORITE, a.ZWIDTH, a.ZHEIGHT, a.ZDURATION, a.ZTRASHEDSTATE, a.ZFILENAME,
