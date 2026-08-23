@@ -107,9 +107,17 @@ of what gets recorded, not permission to read it.
 
 ## Running things
 
-    node --test "connectors/test/*.test.mjs" "ui/test/*.test.mjs" "connect/test/*.test.mjs"
+    node --test "connectors/test/*.test.mjs" "ui/test/*.test.mjs" \
+                "connect/test/*.test.mjs" "widget/test/*.test.mjs"
     node connectors/doctor.mjs          # preflight; --json for machine output
     npm install                          # in connectors/ — imapflow et al.
+
+`widget/test/` was missing from that line until 2026-08-23, and README.md had it
+all along — so the suite that checks the app's contract with hermes, and the two
+that check its bridge compartments and its CSP, ran only for whoever read the
+other file. A test nobody runs is a test that does not exist. It is hermetic and
+needs no Swift toolchain: every file there is a source scan or starts its own
+hermes on port 0.
 
 Two things that will waste your time otherwise:
 
