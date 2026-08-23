@@ -156,6 +156,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       self?.widgetWeb.evaluateJavaScript("window.__hzWake && window.__hzWake()")
     }
 
+    // DIAGNOSTIC PROBE, off unless HAZLIE_TCC_PROBE=1.
+    //
+    // Isolates WHEN the permission is asked from everything else about the app.
+    // A minimal signed app asking for Contacts at launch is granted on this
+    // machine; the same request from this app, made later from a webview
+    // message handler, is denied without a prompt. Entitlements, the
+    // provisioning profile, notarization, the window level and the activation
+    // policy have all been ruled out by testing. This asks at launch instead,
+    // leaving only the calling context as the difference.
+    if ProcessInfo.processInfo.environment["HAZLIE_TCC_PROBE"] == "1" {
+      Permissions.request("contacts") { status in
+        let out = FileManager.default.homeDirectoryForCurrentUser
+          .appendingPathComponent(".hazlie/logs/tcc-probe.txt")
+        try? "launch-time contacts request -> \(status.rawValue)\n"
+          .write(to: out, atomically: true, encoding: .utf8)
+        NSLog("Intaglio Labs: TCC probe -> \(status.rawValue)")
+      }
+    }
+
     // The connectors daemon runs as a child of this app so its file access is
     // attributed to the app rather than to node — see Connectors.swift. Any
     // launchd agent from an older install is retired first, or the two would
@@ -745,6 +764,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // Download progress, straight into whichever setup surface is open. The
   // onboarding panel owns the flow; the connections popup shows the same
   // controls afterwards, so both get it and whichever is not there ignores it.
+  // GET OUT OF THE PROMPT'S WAY.
+  //
+  // The onboarding scrim is full-screen at .floating (level 3). A TCC prompt is
+  // an ORDINARY window at level 0, so it opened behind the scrim — invisible,
+  // unanswerable, and eventually recorded as a refusal. That is why every
+  // "allow" turned into "denied" without anything appearing: the prompt was
+  // there the whole time, underneath.
+  //
+  // Proven rather than reasoned: a minimal Developer-ID-signed app with NO
+  // windows, asking for Contacts the same way, goes straight from notDetermined
+  // to authorized on this machine. The only material difference was the scrim.
+  //
+  // So the scrim drops to .normal for the length of the ask and goes back after.
+  // Lowering rather than hiding: the flow keeps its place, and a scrim that
+  // vanished and reappeared would read as a flicker.
+  func yieldForPrompt(_ yield: Bool) {
+    guard let p = onboardingPanel, p.isVisible else { return }
+    p.level = yield ? .normal : .floating
+  }
+
   func setupProgress(_ payload: [String: Any]) {
     guard JSONSerialization.isValidJSONObject(payload),
           let data = try? JSONSerialization.data(withJSONObject: payload),

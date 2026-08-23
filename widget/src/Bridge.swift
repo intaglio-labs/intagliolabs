@@ -32,6 +32,9 @@ protocol BridgeDelegate: AnyObject {
   func spotlightWidget(_ on: Bool)
   func openOnboarding()
   func setupProgress(_ payload: [String: Any])
+  /// Drop the onboarding scrim below ordinary windows so a system prompt can be
+  /// seen, and put it back afterwards.
+  func yieldForPrompt(_ yield: Bool)
 }
 
 final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, URLSessionTaskDelegate {
@@ -694,8 +697,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // nothing — the page reads the returned status and offers Settings when
       // it comes back denied.
       let which = String((payload["which"] as? String ?? "").prefix(16))
+      // The scrim is full-screen and above ordinary windows; a TCC prompt is an
+      // ordinary window. Drop out of its way, or it opens underneath and the
+      // owner refuses something they never saw.
+      delegate?.yieldForPrompt(true)
       Permissions.request(which) { [weak self] status in
         guard let self else { return }
+        self.delegate?.yieldForPrompt(false)
         // Granted mid-flow means the reader can suddenly see more; nudge it so
         // the owner does not wait for the next poll to see anything happen.
         if status == .granted { Connectors.shared.start() }
