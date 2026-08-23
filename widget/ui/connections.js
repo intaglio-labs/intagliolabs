@@ -299,7 +299,7 @@ hzPost('prefs')
 // One sentence per source on how to connect it. Links open in the default
 // browser via the native bridge — the webview itself can navigate nowhere.
 const FDA_HINT = {
-  text: 'Grant Full Disk Access to ~/.hazlie/bin/node in System Settings → Privacy & Security.',
+  text: 'Switch on Intaglio Labs under System Settings → Privacy & Security → Full Disk Access.',
   url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles',
   link: 'Open System Settings',
 };

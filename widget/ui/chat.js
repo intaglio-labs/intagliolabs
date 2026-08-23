@@ -15,11 +15,11 @@ const log = document.getElementById('log');
 // in an error is an invitation to go editing it. What IS actionable is whether
 // to wait, reopen, or reinstall, so each line says which.
 const FAILURES = {
-  notready: "Hazlie's memory isn't ready yet — give it a moment and try again",
-  auth: 'Hazlie could not unlock its own memory. Quitting and reopening usually fixes it.',
-  identity: 'something else is using the port Hazlie needs',
-  down: "Hazlie's memory isn't running — quit and reopen to restart it",
-  error: 'something went wrong on Hazlie’s side',
+  notready: "memory isn't ready yet — give it a moment and try again",
+  auth: 'Intaglio Labs could not unlock its own memory. Quitting and reopening usually fixes it.',
+  identity: 'something else is using the port this app needs',
+  down: "memory isn't running — quit and reopen to restart it",
+  error: 'something went wrong on this app’s side',
 };
 
 let busy = false;

@@ -121,8 +121,15 @@ test('the help page links back to the tokened page, not to bare /', () => {
 
 // The instructions name a path the owner pastes into System Settings. If this
 // drifts from ops/setup-connectors.sh, the grant lands on the wrong binary.
-test('the FDA page names the stable binary', () => {
-  assert.match(renderHelpPage('imessage', { token: 'TOK' }), /~\/\.hazlie\/bin\/node/u);
+test('the FDA page names the APP, not the binary underneath it', () => {
+  // This asserted ~/.hazlie/bin/node, and that was right while the reader was a
+  // launchd agent responsible for itself. It is a child of the app now, so macOS
+  // attributes the grant to Intaglio Labs — naming node would send someone to
+  // switch on a permission that does nothing.
+  const page = renderHelpPage('imessage', { token: 'TOK' });
+  assert.match(page, /Intaglio Labs/u);
+  assert.doesNotMatch(page, /~\/\.hazlie\/bin\/node/u,
+    'a path into a hidden directory is not an instruction anyone can follow');
 });
 
 // --- the prototype-chain route that killed the server ----------------------

@@ -27,7 +27,7 @@ const post = (type, payload) => hzPost(type, payload).catch(() => {});
 // them: it SPEAKS the greeting, then LISTENS with the mic open, then SPEAKS
 // the answer. This used to report one `talking` boolean, set at arm and
 // cleared at disarm, so the entire session looked the same — including the
-// stretch where the owner is the one talking and Hazlie is only listening.
+// stretch where the owner is the one talking and Intaglio Labs is only listening.
 // `talking` still rides along so an older native that reads only the boolean
 // keeps its current behaviour.
 const orb = (state) => post('orbState', { state, talking: state !== 'idle' });
@@ -46,7 +46,7 @@ function disarm() {
 }
 
 // The greeting: "hey" on every arm, spoken BEFORE the microphone opens so
-// Moonshine can't transcribe Hazlie's own hello as the owner's utterance.
+// Moonshine can't transcribe Intaglio Labs's own hello as the owner's utterance.
 // A nicety, not a gate — if TTS isn't ready the arm proceeds silently.
 async function speakGreeting() {
   try {
@@ -67,7 +67,7 @@ async function speakGreeting() {
 
 async function arm() {
   armed = true;
-  // The greeting is Hazlie speaking, so the orb genuinely is talking here.
+  // The greeting is Intaglio Labs speaking, so the orb genuinely is talking here.
   orb('talking');
   await speakGreeting();
   if (!armed) return; // cancelled during the greeting

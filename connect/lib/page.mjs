@@ -258,12 +258,12 @@ export function renderConnectPage(items, { banner = null, token = null } = {}) {
 // the two drift, the runbook is right and this is the bug.
 const HELP = {
   fda: {
-    title: 'Give Hazlie permission to read',
+    title: 'Give Intaglio Labs permission to read',
     body: [
-      'macOS keeps Messages, Photos and Notes behind Full Disk Access. The grant goes to one specific file, and Hazlie keeps its own copy of it so a Homebrew upgrade cannot quietly invalidate it.',
+      'macOS keeps Messages, Photos and Notes behind Full Disk Access. Switch on Intaglio Labs and everything it reads on this Mac is covered by that one grant.',
       'Open System Settings → Privacy &amp; Security → Full Disk Access. Press +, then ⌘⇧G, and paste this path:',
     ],
-    code: '~/.hazlie/bin/node',
+    code: 'Intaglio Labs',
     after: [
       'Toggle it on. That is the whole grant — one file, once.',
       'If this page still shows a cross afterwards, that is expected and not a failure: macOS ties the permission to whatever started the program, so a page you launched from a terminal will be refused even when the grant is real. The background service that does the actual reading has it.',
@@ -284,7 +284,7 @@ const HELP = {
   notion: {
     title: 'Connect Notion',
     body: [
-      'Notion integrations start with access to <em>nothing</em>. You create one, then share individual pages or databases with it — so Hazlie sees exactly what you hand it and not a page more.',
+      'Notion integrations start with access to <em>nothing</em>. You create one, then share individual pages or databases with it — so Intaglio Labs sees exactly what you hand it and not a page more.',
       'Create an internal integration at notion.so/my-integrations, copy its token, then save it to this Mac:',
     ],
     code: '(umask 077; pbpaste > ~/.hazlie/secrets/notion-api-key.txt)',
@@ -296,7 +296,7 @@ const HELP = {
     title: 'Connect WhatsApp',
     body: [
       'No bridge and no login here — WhatsApp Desktop already keeps your history on this Mac. Install WhatsApp from the Mac App Store, open it, and link it to your phone (WhatsApp on your phone → Settings → Linked Devices → Link a Device, then scan the code).',
-      'That is all. Hazlie reads the local store the app keeps; nothing new leaves this machine.',
+      'That is all. Intaglio Labs reads the local store the app keeps; nothing new leaves this machine.',
     ],
     code: null,
     after: [
@@ -307,7 +307,7 @@ const HELP = {
     title: 'Import your LinkedIn connections',
     body: [
       'No login and no API — LinkedIn hands you the file. Go to linkedin.com → Settings → Data privacy → <em>Get a copy of your data</em>, pick Connections (and Messages if you want DM history), and download the archive when it arrives.',
-      'Then put the CSVs where Hazlie looks:',
+      'Then put the CSVs where Intaglio Labs looks:',
     ],
     code: 'mkdir -p ~/.hazlie/imports/linkedin && cp ~/Downloads/Connections.csv ~/Downloads/messages.csv ~/.hazlie/imports/linkedin/ 2>/dev/null; true',
     after: [
@@ -317,7 +317,7 @@ const HELP = {
   files: {
     title: 'Your cloud folders',
     body: [
-      'Hazlie reads the iCloud Drive, Box and Dropbox folders this Mac already syncs. There is no account to connect and nothing leaves the machine — if the folders are there, it can read them.',
+      'Intaglio Labs reads the iCloud Drive, Box and Dropbox folders this Mac already syncs. There is no account to connect and nothing leaves the machine — if the folders are there, it can read them.',
       'It records what your files are called and where they live. It does <em>not</em> download files that are stored online-only: on this Mac that would pull tens of gigabytes through your iCloud account, so it never opens them.',
     ],
     code: null,

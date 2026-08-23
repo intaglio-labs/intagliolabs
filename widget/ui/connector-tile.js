@@ -97,7 +97,7 @@ function hzConnectorTile(src, { onOpen } = {}) {
 const HZ_KIND = (id) => (id.startsWith('mail:') ? 'mail' : id);
 
 const HZ_FDA_HINT = {
-  text: 'Grant Full Disk Access to ~/.hazlie/bin/node in System Settings → Privacy & Security.',
+  text: 'Switch on Intaglio Labs under System Settings → Privacy & Security → Full Disk Access.',
   url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles',
   link: 'Open System Settings',
 };
