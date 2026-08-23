@@ -78,7 +78,25 @@ xcrun notarytool store-credentials hazlie-notary \
   --apple-id <apple-id> --team-id 5K43Q6FF67 --password <app-specific-password>
 ```
 
-`release.sh` then signs, notarizes, staples, and builds the DMG.
+`release.sh` then signs, notarizes, staples, and builds the DMG. Verified
+end to end 2026-08-23: app and DMG both Accepted, stapled, and
+`spctl -a` reports `accepted / source=Notarized Developer ID`.
+
+## Back up the identity, because it cannot be re-issued
+
+The certificate is public; the PRIVATE KEY is not, and Apple never had it. Lose
+the key and the certificate is dead weight — it cannot be re-downloaded into a
+working identity, only revoked and replaced, against a limit of about five.
+
+Export both together, once:
+
+```sh
+security export -k ~/Library/Keychains/login.keychain-db \
+  -t identities -f pkcs12 -o ~/Desktop/DeveloperID-backup.p12
+```
+
+Keep that .p12 somewhere durable and out of this repository. The downloaded
+`.cer` is not a backup — it is the half Apple can give you again.
 
 ## widget/signing/ never goes to git
 

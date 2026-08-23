@@ -12,20 +12,5 @@
   <key>com.apple.security.device.audio-input</key>
   <true/>
 
-  <!-- THE TWO THE PROVISIONING PROFILE ASSERTS, and no more.
-       A signed app's entitlements must be a SUBSET of the embedded profile's,
-       so these mirror it exactly: anything extra makes codesign refuse, and
-       anything missing makes the profile pointless.
-
-       They exist because a development-signed Mac app with no profile is not
-       validly signed FOR A MACHINE — Gatekeeper rejects it, and macOS then
-       declines to show it a privacy prompt at all, recording a denial instead.
-       That is what stopped the Contacts, Calendar and Photos prompts from ever
-       appearing: not the code asking for them, but the app having no standing
-       to ask. -->
-  <key>com.apple.application-identifier</key>
-  <string>5K43Q6FF67.com.hazlie.widget</string>
-  <key>com.apple.developer.team-identifier</key>
-  <string>5K43Q6FF67</string>
 </dict>
 </plist>

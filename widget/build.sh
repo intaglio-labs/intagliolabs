@@ -186,14 +186,54 @@ IDENTITY="${HAZLIE_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/
 #
 # Absent is not fatal: an ad-hoc or unprofiled build still runs for whoever
 # built it. It just cannot be handed to anyone, and cannot earn a TCC prompt.
+# TWO SIGNING MODES, AND THEY ARE NOT COMPATIBLE.
+#
+#   Apple Development  -> embed a provisioning profile, and carry the two
+#                         identifier entitlements it asserts. Runs only on the
+#                         Macs the profile lists. Without the profile the app is
+#                         not validly signed for ANY machine, and macOS quietly
+#                         refuses it privacy prompts.
+#   Developer ID       -> NO profile, and NOT those entitlements. A Developer ID
+#                         app is signed for everyone, so a per-machine profile is
+#                         meaningless and application-identifier is invalid
+#                         without one; codesign rejects the combination.
+#
+# release.sh sets HAZLIE_SIGN_IDENTITY to the Developer ID hash and calls this
+# script, so the mode has to be decided HERE from the identity actually in use
+# rather than assumed. Getting this wrong produces a bundle that signs fine and
+# is refused at launch, which is a slow way to find out.
+ENTS="Hazlie.entitlements"
 PROFILE="signing/mac-dev.provisionprofile"
-if [ -f "$PROFILE" ]; then
-  cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
-  echo "embedded $PROFILE"
-else
-  echo "NOTE: no $PROFILE — this build cannot be notarized and will not be" >&2
-  echo "      shown privacy prompts. See ops/SIGNING.md." >&2
-fi
+IDENTITY_NAME="$(security find-identity -v -p codesigning 2>/dev/null | grep -F "$IDENTITY" | head -1)"
+case "$IDENTITY_NAME" in
+  *"Developer ID"*)
+    rm -f "$APP/Contents/embedded.provisionprofile"
+    echo "signing for distribution: no provisioning profile, base entitlements"
+    ;;
+  *)
+    if [ -f "$PROFILE" ]; then
+      cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
+      # The identifier entitlements are only valid alongside the profile that
+      # asserts them, so they are added here rather than living in the file.
+      ENTS="build/dev.entitlements"
+      python3 - "$PROFILE" "$ENTS" <<'PYEOF'
+import plistlib, subprocess, sys
+raw = subprocess.run(["security", "cms", "-D", "-i", sys.argv[1]],
+                     capture_output=True).stdout
+ents = plistlib.loads(raw).get("Entitlements", {})
+base = plistlib.load(open("Hazlie.entitlements", "rb"))
+for k in ("com.apple.application-identifier", "com.apple.developer.team-identifier"):
+    if k in ents:
+        base[k] = ents[k]
+plistlib.dump(base, open(sys.argv[2], "wb"))
+PYEOF
+      echo "embedded $PROFILE (development build)"
+    else
+      echo "NOTE: no $PROFILE — this build is not valid for any machine and" >&2
+      echo "      macOS will not show it privacy prompts. See ops/SIGNING.md." >&2
+    fi
+    ;;
+esac
 
 if [ -n "$IDENTITY" ]; then
   # INSIDE-OUT: the bundled node runtime is nested Mach-O and must carry its
@@ -219,7 +259,7 @@ if [ -n "$IDENTITY" ]; then
       -s "$IDENTITY" "$BE/llama/bin/llama-server"
   fi
   codesign --force --options runtime \
-    --entitlements Hazlie.entitlements \
+    --entitlements "$ENTS" \
     -s "$IDENTITY" "$APP"
   echo "signed with $IDENTITY (hardened runtime, audio-input entitlement)"
 else
