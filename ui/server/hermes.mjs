@@ -47,6 +47,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { recallClaims, groundingLines } from './memory/retrieve.mjs';
 import { episodicContext } from './memory/episodic.mjs';
+import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch } from './people/search.mjs';
 import { loadOwner } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
@@ -1960,6 +1961,57 @@ const PRIVATE_RESPONSE_HEADERS = Object.freeze({
   'X-Content-Type-Options': 'nosniff',
 });
 
+// WHAT THE OWNER IS WAITING FOR, in numbers rather than a spinner.
+//
+// Ingesting is fast and finishing it looks like nothing happened: the rows are
+// there, and the app still cannot answer, because answers come from CLAIMS and
+// claims come from a distillation pass over the owner's own rows. Reporting only
+// `rows` made a half-built memory look like a finished one — the state everybody
+// hit was "it has full access and knows nothing", with no way to tell whether it
+// was broken or busy.
+//
+// `done` counts rows already distilled; `pending` re-runs the real selector at
+// the live watermark, so it is the actual remaining work rather than an estimate
+// from a row count that includes everything the selector excludes. Counts only:
+// no text crosses this boundary.
+function memoryProgress(db) {
+  try {
+    const claims = Number(db.prepare('SELECT count(*) AS n FROM claim').get()?.n ?? 0);
+    const runs = db
+      .prepare(
+        "SELECT count(*) AS n, " +
+          "coalesce(sum(rows_in), 0) AS done, " +
+          "coalesce(max(through_changed_at), 0) AS cursor " +
+          "FROM distill_run WHERE status = 'complete'"
+      )
+      .get();
+    const running = Number(
+      db.prepare("SELECT count(*) AS n FROM distill_run WHERE status = 'running'").get()?.n ?? 0
+    );
+    // A wide window so this is "everything still to read", not "this month's".
+    const pending = selectRows(db, {
+      sinceChangedAt: Number(runs?.cursor ?? 0),
+      fromDays: 3650,
+      limit: 100000,
+    }).length;
+    const done = Number(runs?.done ?? 0);
+    return {
+      claims,
+      runs: Number(runs?.n ?? 0),
+      done,
+      pending,
+      total: done + pending,
+      running: running > 0,
+      // The one field the UI branches on, so the wording lives in one place.
+      state: pending > 0 ? 'reading' : done > 0 ? 'ready' : 'idle',
+    };
+  } catch {
+    // Never let a progress read break /stats — this endpoint is also the health
+    // check the widget uses to decide the backend is up at all.
+    return null;
+  }
+}
+
 function send(res, status, body, extraHeaders = {}) {
   res.writeHead(status, {
     ...PRIVATE_RESPONSE_HEADERS,
@@ -2308,7 +2360,7 @@ function handle(db, req, res, cors, url, policy) {
 
   if (req.method === 'GET' && url.pathname === '/stats') {
     const { n } = db.prepare('SELECT count(*) AS n FROM context').get();
-    send(res, 200, { rows: Number(n) }, cors);
+    send(res, 200, { rows: Number(n), memory: memoryProgress(db) }, cors);
     return;
   }
 

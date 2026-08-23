@@ -109,7 +109,55 @@ test('stats requires authentication and reports the row count', async () => {
   assert.equal((await fetch(`${base}/stats`)).status, 401);
   const res = await authedGet('/stats');
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { rows: 0 });
+  assert.deepEqual(await res.json(), {
+    rows: 0,
+    // Ingesting rows and being able to ANSWER about them are different things,
+    // and reporting only the first is what made a half-built memory look
+    // finished — full database, zero claims, every question abstaining, and no
+    // way to tell busy from broken. An empty store is 'idle': nothing read and
+    // nothing waiting, so there is no progress to claim.
+    memory: {
+      claims: 0, runs: 0, done: 0, pending: 0, total: 0, running: false, state: 'idle',
+    },
+  });
+});
+
+test('stats reports work still to do as "reading", not as an empty memory', async () => {
+  // Its OWN store and server: this test writes a row, and the suite above asserts
+  // an empty one. Sharing the database would make the pair order-dependent.
+  const progressDb = join(dir, 'progress.db');
+  const srv = await start({
+    port: 0,
+    dbPath: progressDb,
+    llamaApiKey: TEST_LLAMA_KEY,
+    bearerToken: TEST_BEARER_TOKEN,
+    allowedOrigins: ALLOWED_ORIGIN,
+  });
+  try {
+    // One owner-authored note, nothing distilled — the exact state somebody is in
+    // right after granting access, and the one the UI has to be able to name.
+    const store = new DatabaseSync(progressDb);
+    const now = Date.now();
+    store
+      .prepare(
+        'INSERT INTO context(ts, source, speaker, text, meta, store_changed_at) ' +
+          "VALUES (?, 'notes', 'me', 'a note the owner wrote', '{}', ?)"
+      )
+      .run(now, now);
+    store.close();
+
+    const res = await fetch(`http://127.0.0.1:${srv.port}/stats`, {
+      headers: { Authorization: `Bearer ${TEST_BEARER_TOKEN}` },
+    });
+    const body = await res.json();
+    assert.equal(body.rows, 1);
+    assert.equal(body.memory.done, 0);
+    assert.equal(body.memory.pending, 1, 'a row nobody has read yet is pending');
+    assert.equal(body.memory.total, 1);
+    assert.equal(body.memory.state, 'reading', 'pending work is "reading", never "idle"');
+  } finally {
+    await srv.close();
+  }
 });
 
 // --- the new authorization rule -------------------------------------------

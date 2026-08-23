@@ -77,15 +77,17 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     // Same setup controls, reachable from the gear after the
                     // flow — a skipped step must stay reachable.
                     "setupState", "modelDownload", "modelCancel",
-                    "openFullDiskAccess", "revealNode", "startSources",
-                   "permissionState", "requestPermission", "revealApp"],
+                    "openFullDiskAccess", "startSources",
+                   "permissionState", "requestPermission"],
     "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
                    "widgetSpot",
                    // The setup scenes: choosing and fetching the answer model,
                    // and turning on the first data source.
                    "setupState", "modelDownload", "modelCancel",
-                   "openFullDiskAccess", "revealNode", "startSources",
-                    "permissionState", "requestPermission", "revealApp"],
+                   "openFullDiskAccess", "startSources",
+                    "permissionState", "requestPermission",
+                    // Which scene is up, remembered so a restart resumes on it.
+                    "onboardingStep"],
     // people.html includes connector-tile.js as well as people.js (check the
     // script tags, not the file's own comment about being shared), so the People
     // popup renders connector tiles and needs the bridge verbs too. Writing this
@@ -136,6 +138,22 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   static var onboarded: Bool {
     get { UserDefaults.standard.bool(forKey: onboardedDefaultsKey) }
     set { UserDefaults.standard.set(newValue, forKey: onboardedDefaultsKey) }
+  }
+
+  // WHICH SCENE THE FLOW WAS ON, so a restart resumes rather than rewinds.
+  //
+  // Granting Full Disk Access to a running app makes macOS offer "Quit &
+  // Reopen" — and taking it dropped the owner back on the welcome screen, to
+  // walk the whole flow again, having just done the hardest step in it. The
+  // page reports each scene as it opens; a first-run launch resumes on the
+  // last one reported, and finishing clears it.
+  static let stepDefaultsKey = "HazlieOnboardingStep"
+  static var onboardingStep: String? {
+    get { UserDefaults.standard.string(forKey: stepDefaultsKey) }
+    set {
+      if let v = newValue { UserDefaults.standard.set(v, forKey: stepDefaultsKey) }
+      else { UserDefaults.standard.removeObject(forKey: stepDefaultsKey) }
+    }
   }
 
   // Interface sounds. Unlike Reduce Motion there is no system setting to
@@ -411,6 +429,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // Only the flow finishing sets this. Dismissing with Escape closes the
       // window without sending it, so a flow backed out of returns next time.
       Bridge.onboarded = true
+      // Nothing left to resume; a replay from settings starts at the welcome.
+      Bridge.onboardingStep = nil
       // ...and the handoff arms: the gear will nudge until settings opens.
       Bridge.connectorsIntroDone = false
       reply(webView, id, ["state": "ok"])
@@ -582,9 +602,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         },
       ]
       state["model"] = ModelSetup.installed?.id ?? ""
-      rows { n in
+      rows { n, memory in
         var out = state
         out["rows"] = n
+        if let memory { out["memory"] = memory }
         self.reply(webView, id, out)
       }
 
@@ -651,14 +672,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       ModelSetup.cancel()
       reply(webView, id, ["state": "ok"])
 
-    case "revealNode":
-      // Finder, with the file already selected, so the grant is a DRAG rather
-      // than a path someone has to paste into a ⇧⌘G sheet. Dragging onto the
-      // Full Disk Access list is the gesture macOS actually designed for this;
-      // the paste was us working around not knowing that.
-      let node = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".hazlie/bin/node")
-      NSWorkspace.shared.activateFileViewerSelecting([node])
+    case "onboardingStep":
+      // Fire-and-forget from showScreen(). Bounded because it is a UserDefaults
+      // key written from a webview message, and an unbounded string there is a
+      // disk write the page controls the size of.
+      if let step = payload["step"] as? String, step.count <= 16 {
+        Bridge.onboardingStep = step
+      }
       reply(webView, id, ["state": "ok"])
 
     case "openFullDiskAccess":
@@ -681,12 +701,6 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
       reply(webView, id, ["state": "ok"])
 
-    case "revealApp":
-      // The fallback when the row does not appear: this app, selected in
-      // Finder, ready to be dragged straight onto the list.
-      NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
-      reply(webView, id, ["state": "ok"])
-
     case "startSources":
       // Write the connectors config if it is not there, then (re)start the
       // daemon. There is no list of sources to choose: the daemon runs every
@@ -699,6 +713,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // reader inherits this app's permissions instead of needing its own.
       Provision.retireConnectorsAgent()
       Connectors.shared.start()
+      Distiller.shared.start()
       reply(webView, id, ["state": ok ? "ok" : "error"])
 
     case "permissionState":
@@ -845,17 +860,25 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// hermes' own row count, or 0 when it cannot be reached. Used as the honest
   /// answer to "is any of my data actually in here yet" -- a number that only
   /// moves when a connector really read something and really wrote it.
-  private func rows(_ done: @escaping (Int) -> Void) {
-    guard let tok = bearerToken() else { done(0); return }
+  /// Row count AND how far the memory is through reading them.
+  ///
+  /// The count alone was misleading in the way that mattered: rows arrive fast,
+  /// and the app still cannot answer until those rows are DISTILLED into claims.
+  /// Reporting only "found 18,440 things" while every question abstained is what
+  /// produced "it has full access and knows nothing". /stats carries both numbers
+  /// now; this passes the second one through untouched.
+  private func rows(_ done: @escaping (Int, [String: Any]?) -> Void) {
+    guard let tok = bearerToken() else { done(0, nil); return }
     let req = request("GET", hermesBase, "stats", bearer: tok, timeout: 4)
     URLSession.shared.dataTask(with: req) { data, _, _ in
       var n = 0
+      var memory: [String: Any]?
       if let data,
-         let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-         let v = obj["rows"] as? Int {
-        n = v
+         let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        n = obj["rows"] as? Int ?? 0
+        memory = obj["memory"] as? [String: Any]
       }
-      DispatchQueue.main.async { done(n) }
+      DispatchQueue.main.async { done(n, memory) }
     }.resume()
   }
 

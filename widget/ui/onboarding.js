@@ -37,7 +37,21 @@ function showScreen(n) {
   if (String(n) === '3') { clearDemo(); runHome(); }
   // The scrim gets out of the way of the real widget only on the last scene.
   document.body.classList.toggle('spotlight', String(n) === '3');
+  // Remember where we are. Granting Full Disk Access makes macOS offer "Quit &
+  // Reopen", and taking it used to restart the flow from the welcome — the whole
+  // thing again, right after the hardest step in it. Fire-and-forget: a failed
+  // write costs a resume, never the flow.
+  hzPost('onboardingStep', { step: String(n) }).catch(() => {});
 }
+
+// Called by native INSTEAD of __hzOnboardingReset when the app is launching back
+// into a flow it was already in, rather than replaying one from settings.
+window.__hzOnboardingResume = (step) => {
+  if (!step || !(step in screens)) { showScreen(needsMove ? 0 : 1); return; }
+  clearDemo();
+  demoArmed = false;
+  showScreen(step);
+};
 
 // Reopening from settings reuses the same panel AND the same loaded page, so
 // the flow would otherwise resume on whatever screen it was abandoned on.
@@ -574,8 +588,6 @@ function paintPerms(map) {
       // rather than a request — and once it is on there is nothing to press.
       btn.textContent = on ? 'on' : 'open settings';
       btn.disabled = on;
-      const help = document.getElementById('fdaHelp');
-      if (on && help) help.open = false;
       continue;
     }
     btn.textContent = PERM_LABEL[st] || 'allow';
@@ -656,14 +668,11 @@ function stopPermPolling() {
 }
 
 document.getElementById('fdaOpen').addEventListener('click', () => {
+  // Everything this used to explain in a disclosure triangle — which row to find,
+  // what to press if it is missing — is now ON SCREEN beside System Settings, as
+  // a card holding the app itself. Written steps describing a window the reader
+  // is already looking at are worse than the window.
   hzPost('openFullDiskAccess').catch(() => {});
-  const help = document.getElementById('fdaHelp');
-  if (help) help.open = true;
-});
-document.getElementById('fdaReveal').addEventListener('click', () => {
-  // The app, not node. What needs the grant changed when the reader became a
-  // child of this process — see Connectors.swift.
-  hzPost('revealApp').catch(() => {});
 });
 
 document.getElementById('dataCheck').addEventListener('click', async () => {
@@ -680,7 +689,17 @@ document.getElementById('dataCheck').addEventListener('click', async () => {
     if (rows === 0) dataStatus.textContent = 'having a look…';
   }
   if (rows > 0) {
-    dataStatus.textContent = `found ${rows.toLocaleString()} things so far`;
+    // FINDING IS NOT KNOWING, and saying only the first is how this went wrong.
+    //
+    // Rows arrive in seconds; they are answerable only once the local model has
+    // read them into claims, which takes a while and used to happen nowhere at
+    // all. "found 18,440 things" followed by an app that answers nothing is the
+    // most confusing thing this flow could say, so it says both numbers.
+    const st2 = await hzPost('setupState').catch(() => null);
+    const mem = (st2 && st2.memory) || null;
+    dataStatus.textContent = mem && mem.pending > 0
+      ? `found ${rows.toLocaleString()} things — now reading them`
+      : `found ${rows.toLocaleString()} things so far`;
     setTimeout(() => { if (currentScreen === 'data') showScreen(2); }, 1400);
   } else {
     dataStatus.textContent = "nothing yet — that's fine, i'll keep looking as you go.";

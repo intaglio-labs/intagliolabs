@@ -192,6 +192,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     DispatchQueue.global(qos: .utility).async {
       Provision.retireConnectorsAgent()
       DispatchQueue.main.async { Connectors.shared.start() }
+      // Reading the sources is only half of it. Nothing was turning those rows
+      // into anything answerable, so every question abstained on a full
+      // database — see Distiller.swift.
+      DispatchQueue.main.async { Distiller.shared.start() }
     }
 
     // First launch shows the welcome flow. Only completing it sets the flag,
@@ -199,7 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // demand regardless.
     if !Bridge.onboarded {
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-        self?.openOnboarding()
+        self?.openOnboarding(resume: true)
       }
     }
 
@@ -421,7 +425,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   //
   // hasShadow off: makePanel turns it on for popovers, and a shadow around a
   // full-screen rectangle is a dark band down the edge of the display.
-  func openOnboarding() {
+  // BridgeDelegate requires the no-argument form, and Swift will not accept a
+  // defaulted parameter as the witness for it. So this is the protocol's
+  // entry point — the gear replaying the flow — and it never resumes.
+  func openOnboarding() { openOnboarding(resume: false) }
+
+  func openOnboarding(resume: Bool) {
     // Opening the flow IS pretending this is a fresh install — the owner's
     // rule: replay behaves like the first time, every time. So the flag
     // drops, and only FINISHING sets it back; escape mid-replay and the flow
@@ -477,8 +486,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // abandoned on rather than on the welcome. Guarded because on the very
     // first open the page has not finished loading yet — which is harmless,
     // since a freshly loaded page already starts on screen 1.
-    (p.contentView as? WKWebView)?
-      .evaluateJavaScript("window.__hzOnboardingReset && window.__hzOnboardingReset()")
+    // RESUME OR REWIND, and they are different intentions.
+    //
+    // Reopening from settings is a replay and starts at the welcome. A launch
+    // mid-flow is a CONTINUATION — macOS offers "Quit & Reopen" the moment Full
+    // Disk Access is granted, and taking it used to throw away every step
+    // already done and start again from the welcome, immediately after the
+    // hardest step in the flow. Guarded because on the very first open the page
+    // has not loaded yet, which is harmless: a fresh page starts on screen 1.
+    let web = p.contentView as? WKWebView
+    if resume, let step = Bridge.onboardingStep,
+       let json = String(data: (try? JSONSerialization.data(withJSONObject: [step])) ?? Data(),
+                         encoding: .utf8) {
+      web?.evaluateJavaScript(
+        "window.__hzOnboardingResume && window.__hzOnboardingResume(\(json)[0])")
+    } else {
+      web?.evaluateJavaScript("window.__hzOnboardingReset && window.__hzOnboardingReset()")
+    }
     NSApp.activate(ignoringOtherApps: true)
     p.makeKeyAndOrderFront(nil)
   }
@@ -979,6 +1003,7 @@ extension AppDelegate {
   // for it, holding a database handle and a set of cursors open.
   func applicationWillTerminate(_ notification: Notification) {
     Connectors.shared.stop()
+    Distiller.shared.stop()
   }
 }
 

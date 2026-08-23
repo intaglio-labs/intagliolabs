@@ -2489,3 +2489,75 @@ body.connections .tile-tip.on { opacity: 1; }
 .ob-back:hover { color: #ddd7cb; }
 /* The tag on a model you already have, as opposed to one we suggest. */
 .ob-setup .ob-choice-tag.on { background: #6fc78d; color: #10231a; }
+
+/* MEMORY PROGRESS, in the settings popup.
+   ─────────────────────────────────────────────────────────────────────────────
+   The one surface that answers "it has all my data, why does it know nothing".
+   Deliberately quiet: this is a background process the owner did not ask to
+   watch, so it reads as a status line rather than a task bar demanding
+   attention. It hides itself entirely when there is nothing to report. */
+.mem {
+  margin: 10px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: var(--glass);
+}
+.mem-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mem-label {
+  font-size: 12px;
+  color: var(--fg);
+}
+.mem-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--secondary);
+  /* Digits that change every few seconds must not reflow the row around them. */
+  font-variant-numeric: tabular-nums;
+}
+.mem-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--status-ok);
+  flex: none;
+}
+.mem.busy .mem-dot {
+  background: var(--hazelnut);
+  animation: mem-pulse 1.6s ease-in-out infinite;
+}
+.mem-bar {
+  margin-top: 8px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(234, 234, 234, 0.08);
+  overflow: hidden;
+}
+.mem-bar > span {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: var(--hazelnut);
+  transition: width 600ms ease;
+}
+.mem:not(.busy) .mem-bar > span { background: var(--status-ok); }
+.mem-note {
+  margin: 7px 0 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+@keyframes mem-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.3; }
+}
+/* A pulse that will not stop is exactly what Reduce Motion is asking about. */
+@media (prefers-reduced-motion: reduce) {
+  .mem.busy .mem-dot { animation: none; }
+  .mem-bar > span { transition: none; }
+}
