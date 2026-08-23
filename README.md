@@ -1,1 +1,1 @@
-# intagliolabs
+# intaglio labs - personalized & private AI
