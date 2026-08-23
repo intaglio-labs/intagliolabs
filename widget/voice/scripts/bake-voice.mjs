@@ -4,7 +4,13 @@ import { fileURLToPath } from 'node:url';
 import { KokoroTTS } from 'kokoro-js';
 // CANNED_LINES: { [name]: exact spoken text } -- the deterministic tier's
 // fixed lines. Names become /voice/<name>.wav, so they must be filename-safe.
-import { CANNED_LINES } from '../intents/catalog.mjs';
+// Path fixed 2026-08-22: this read '../intents/catalog.mjs', which resolves to
+// widget/voice/intents/catalog.mjs — a directory that has never existed. The
+// catalog lives in ui/. CANNED_LINES is used at :23 and the script exits early
+// without it, so this file could not run at all; nothing caught it because
+// nothing imports bake-voice, and `node --check` parses imports without
+// resolving them.
+import { CANNED_LINES } from '../../../ui/intents/catalog.mjs';
 import { encodeWavPcm16 } from '../lib/wav.mjs';
 
 // Pre-bake every fixed deterministic line with the same model and voice the

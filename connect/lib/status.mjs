@@ -84,23 +84,6 @@ function ouraState(home) {
   }
 }
 
-// Which machine this is. Read from the same connectors config the daemon
-// uses, so the page and the daemon can never disagree about what this box is
-// for. Defaults to `hazlie` — the single-machine setup that already exists,
-// which an unset role must not silently turn into a reader-only install.
-const KNOWN_ROLES = new Set(['full', 'courier', 'personal', 'hazlie']);
-
-export function readRole({ home = homedir() } = {}) {
-  try {
-    const raw = JSON.parse(
-      readFileSync(join(home, '.hazlie', 'connectors', 'config.json'), 'utf8')
-    );
-    return KNOWN_ROLES.has(raw?.role) ? raw.role : 'hazlie';
-  } catch {
-    return 'hazlie';
-  }
-}
-
 // BROKEN vs NOT SET UP. `connected: false` covers two situations the owner
 // experiences completely differently, and until 2026-08-22 the shelf drew both
 // as the same hollow dot: a source they have simply never linked (four bridges
@@ -207,7 +190,7 @@ function notionRow(home) {
 }
 
 // The owner's Mac after the 2026-08-20 change: it runs every connector, so
-// every source belongs on one page. No role renders a link row — hermes is
+// every source belongs on one page. No link row is rendered at all — hermes is
 // local now, and nothing crosses a network except the finished digest.
 function whatsappRow(home) {
   // Local-store connector, so "connected" is: does WhatsApp Desktop's store
@@ -283,7 +266,7 @@ function fullStatus(home) {
     }),
     contactsRow(home),
     filesRow(home),
-    ...hazlieStatus(home),
+    ...cloudAccountRows(home),
     notionRow(home),
     linkedinRow(home),
     whatsappRow(home),
@@ -291,41 +274,11 @@ function fullStatus(home) {
   ];
 }
 
-// The personal Mac has ONE job: read the owner's messages and ship them to
-// the Mini. One row, no OAuth, no app passwords — the other sources belong
-// to the other machine, and rendering them here would be four dead buttons.
-//
-// There is no link row any more. It named `ops/tunnel.sh`, retired 2026-08-20
-// along with the tunnel itself: hermes is local, and the only thing that still
-// crosses to the Mini is the finished digest, over the one-shot ssh call in
-// a one-shot send rather than a resident forward. The row was also
-// the page's one dead button — its `action: 'tunnel'` named a help topic that
-// never existed, so pressing it 404'd.
-function personalStatus(home) {
-  const canRead = canReadSqlite(join(home, 'Library', 'Messages', 'chat.db'));
-  return [
-    {
-      id: 'imessage',
-      label: 'Messages',
-      connected: canRead,
-      detail: canRead
-        ? 'reading your message history'
-        : 'needs Full Disk Access for ~/.hazlie/bin/node',
-      action: canRead ? null : 'fda',
-      caveat: canRead
-        ? null
-        : 'If this page was started from a shell rather than launchd, the grant may exist and simply not apply here.',
-    },
-  ];
-}
-
-export function readStatus({ home = homedir(), role = readRole({ home }) } = {}) {
-  if (role === 'full') return fullStatus(home);
-  if (role === 'personal') return personalStatus(home);
-  // `courier` reads nothing: the Mini holds the mic and Hazlie's Apple ID, and
-  // none of the owner's corpus. An empty list is the honest page for it.
-  if (role === 'courier') return [];
-  return hazlieStatus(home);
+export function readStatus({ home = homedir() } = {}) {
+  // Every source, always. This used to branch on a `role` naming which machine
+  // this was in a two-machine split; that split and the roles are gone with it,
+  // so there is one page and it shows everything this install can connect.
+  return fullStatus(home);
 }
 
 // Which calendar backend is configured. The row has to follow it: checking
@@ -363,7 +316,7 @@ function calendarRow(home) {
   });
 }
 
-function hazlieStatus(home) {
+function cloudAccountRows(home) {
   return [
     calendarRow(home),
     // One row per configured mailbox rather than a single "Gmail" row: each

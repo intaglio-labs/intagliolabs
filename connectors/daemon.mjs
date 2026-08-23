@@ -122,68 +122,14 @@ export function disableMarkerPath(name, home = homedir()) {
 // would turn "poll hourly" into "poll at the default" without anyone
 // noticing until the bill or the gap.
 
-// Which machine this is. Two-machine setup: `hazlie` runs on the Mac Mini
-// under its OWN Apple ID and does everything except read the owner's
-// messages; `personal` runs on the owner's Mac and does nothing BUT that,
-// shipping rows to the Mini's hermes over the network.
-//
-// `personal` predates the 2026-08-20 move and no machine is configured for it
-// today. It is kept in ROLES rather than removed for the reason the next
-// comment gives: a config that predates a role list must not be silently
-// repurposed by shortening it. Note the SSH tunnel it once shipped through is
-// gone; hermes is local, so nothing tunnels anywhere.
-//
-// The default is `hazlie`, because that is the single-machine setup that
-// already exists — an unset role must not silently switch a working install
-// into reading-only mode.
-export const ROLES = Object.freeze(['full', 'courier', 'hazlie', 'personal']);
-// Unchanged on purpose. Adding roles must not silently repurpose an install
-// whose config predates them, and the Mini cannot be reconfigured from here.
-export const DEFAULT_ROLE = 'hazlie';
-
-// The whole point of the role: a machine only runs the connectors it is the
-// right machine for. Without this the MacBook would poll Oura and Google
-// alongside the Mini, doubling every API call and racing on cursors.
-// Owner decision 2026-08-20: ALL processing moves to the owner's Mac, and the
-// Mini keeps only the two things that are physically its own — the 24/7 mic
-// and Hazlie's Apple ID. The corpora end up on separate machines rather than
-// merged on one, which is a better answer to the open question of whether the
-// two corpora may ever share a store than the source allowlist that was
-// declined earlier: they are not on the same box, so they cannot meet.
-// (The always-on capture side of that setup was dropped in 2026-08 and is not
-// part of this repo. The roles below outlive it — see ROLES.)
-export const ROLE_SOURCES = Object.freeze({
-  // The owner's Mac. Everything: its own stores AND the cloud APIs, which are
-  // reachable from here exactly as well as from the Mini.
-  full: Object.freeze([
-    'imessage',
-    'photos',
-    'notes',
-    'calendar',
-    'mail',
-    'granola',
-    'oura',
-    'contacts',
-    'notion',
-    'files',
-    'linkedin',
-    'whatsapp',
-  ]),
-  // Hazlie's Mac. No connectors at all: it captures audio (the rig, not this
-  // daemon) and speaks as Hazlie. It holds none of the owner's corpus.
-  courier: Object.freeze([]),
-
-  // The earlier two-machine split, kept so an install that predates the change
-  // keeps behaving as configured until its role is set deliberately.
-  hazlie: Object.freeze(['calendar', 'mail', 'granola', 'oura', 'contacts']),
-  personal: Object.freeze(['imessage', 'photos', 'notes', 'whatsapp']),
-});
-
-export function sourcesForRole(role) {
-  return ROLE_SOURCES[role] ?? ROLE_SOURCES[DEFAULT_ROLE];
-}
 
 const TOP_KEYS = Object.freeze([
+  // Accepted and ignored. The role machinery (which machine runs which
+  // connectors, for a two-machine split that no longer exists) was removed
+  // 2026-08-22; every install now runs every source it has credentials for.
+  // The KEY stays allowed because assertClosedKeys throws on unknown keys, and
+  // an install whose config still says `role` must keep booting rather than
+  // die on startup over a field that no longer does anything.
   'role',
   'selfName',
   // The owner's own email addresses beyond the mail-connector accounts —
@@ -270,9 +216,6 @@ function assertPositiveInt(value, where, { min = 1, max = Number.MAX_SAFE_INTEGE
 
 export function validateConfig(raw) {
   assertClosedKeys(raw, TOP_KEYS, 'the top level');
-  if (raw.role !== undefined && !ROLES.includes(raw.role)) {
-    throw configError(`"role" must be one of: ${ROLES.join(', ')}`);
-  }
   if (raw.selfName !== undefined && (typeof raw.selfName !== 'string' || raw.selfName.length === 0)) {
     throw configError('"selfName" must be a non-empty string');
   }
@@ -726,20 +669,12 @@ if (isMain) {
     }
 
     const state = openStateDb();
-    // Filtered by role, not merely loaded. Without this the personal Mac
-    // would poll Oura and Google alongside the Mini — doubling every API
-    // call and racing on the same cursors — which is the whole reason the
-    // role exists. sourcesForRole was defined and unit-tested before it was
-    // ever called from here; the test passed while the daemon ignored it.
-    const role = config.role ?? DEFAULT_ROLE;
-    const allowed = sourcesForRole(role);
-    const discovered = await loadSources();
-    const sources = discovered.filter((s) => allowed.includes(s.name));
-    log.info('daemon_role', {
-      role,
-      running: sources.map((s) => s.name),
-      skipped: discovered.map((s) => s.name).filter((n) => !allowed.includes(n)),
-    });
+    // Every source that was discovered runs. This used to be filtered by a
+    // `role` naming which machine ran which connectors; that split is gone and
+    // the filter with it. Sources are still gated individually by config and by
+    // whether their credentials exist.
+    const sources = await loadSources();
+    log.info('sources_loaded', { running: sources.map((s) => s.name) });
     const ingestOpts = {
       baseUrl: process.env.HAZLIE_HERMES_URL ?? config.hermesUrl ?? DEFAULT_HERMES_BASE_URL,
       tokenFile: defaultHermesTokenPath(),

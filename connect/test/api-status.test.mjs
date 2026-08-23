@@ -29,7 +29,6 @@ test('a valid bearer gets the same truth the page renders', (t) => {
   const home = fakeHome(t);
   const { status, body } = statusResponse({ authorization: `Bearer ${TOKEN}`, home });
   assert.equal(status, 200);
-  assert.equal(body.role, 'hazlie');
   assert.deepEqual(body.sources, readStatus({ home }));
   assert.ok(body.sources.every((s) => typeof s.connected === 'boolean'));
 });
@@ -127,7 +126,6 @@ test('the route is reachable above the /c/ gate and end-to-end correct', async (
   const ok = await fetchStatus({ headers: { authorization: `Bearer ${TOKEN}` } });
   assert.equal(ok.status, 200, `expected 200, got ${ok.status}: ${ok.body}`);
   const parsed = JSON.parse(ok.body);
-  assert.equal(parsed.role, 'hazlie');
   assert.ok(Array.isArray(parsed.sources) && parsed.sources.length > 0);
 
   // A real Origin header on the wire, not just the unit-level shape.

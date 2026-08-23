@@ -19,7 +19,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readToken } from './memory.mjs';
-import { readRole, readStatus } from './status.mjs';
+import {  readStatus } from './status.mjs';
 
 const BEARER_RE = /^Bearer ([0-9a-f]{64})$/u;
 const TOKEN_RE = /^[0-9a-f]{64}$/u;
@@ -59,6 +59,5 @@ export function statusResponse({ origin, authorization, home = homedir() } = {})
     // One response for missing, malformed and wrong — a probe learns nothing.
     return { status: 401, body: { error: 'unauthorized' } };
   }
-  const role = readRole({ home });
-  return { status: 200, body: { role, sources: readStatus({ home, role }) } };
+  return { status: 200, body: { sources: readStatus({ home }) } };
 }
