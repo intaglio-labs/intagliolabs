@@ -147,9 +147,11 @@ export const DEFAULT_ROLE = 'hazlie';
 // Owner decision 2026-08-20: ALL processing moves to the owner's Mac, and the
 // Mini keeps only the two things that are physically its own — the 24/7 mic
 // and Hazlie's Apple ID. The corpora end up on separate machines rather than
-// merged on one, which is a better answer to the question CLAUDE.md flags
-// than the source allowlist that was declined earlier: household audio never
-// meets the personal corpus because they are not on the same box.
+// merged on one, which is a better answer to the open question of whether the
+// two corpora may ever share a store than the source allowlist that was
+// declined earlier: they are not on the same box, so they cannot meet.
+// (The always-on capture side of that setup was dropped in 2026-08 and is not
+// part of this repo. The roles below outlive it — see ROLES.)
 export const ROLE_SOURCES = Object.freeze({
   // The owner's Mac. Everything: its own stores AND the cloud APIs, which are
   // reachable from here exactly as well as from the Mini.
@@ -672,7 +674,7 @@ export function createDaemon({
         maintainHour: config.retention?.maintainHour ?? '03:30',
       });
       if (sources.length === 0) {
-        log.warn('no_sources', { detail: 'connectors/sources/ is empty; Phase 4 has not landed' });
+        log.warn('no_sources', { detail: 'connectors/sources/ is empty; every source is disabled or missing' });
       }
     },
     stop() {

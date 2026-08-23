@@ -1,7 +1,7 @@
 // Probe: what do the Calendar and AddressBook stores look like on THIS macOS?
 //
 // This machine runs a macOS 27 prerelease seed, so Apple-store schemas are
-// probed, never assumed (plan §Machine facts). Two decisions ride on the
+// probed, never assumed (measured, not assumed). Two decisions ride on the
 // answers:
 //
 //   1. The calendar entity_id. The registry says

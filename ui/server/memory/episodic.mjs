@@ -4,7 +4,7 @@
 // WHY THIS EXISTS, measured before designed: the L5 coverage run graded 39 of
 // 60 answers "the store held the answer and no read path could serve it", and
 // seven of twenty questions were unanswerable at every tier for that one
-// reason (results/EXPERIMENT_L5_COVERAGE.md). "When do I fly", "my worst
+// reason (measured in the L5 coverage run; that write-up is not in this repo). "When do I fly", "my worst
 // night", "photos last weekend" are not durable facts and are not averages —
 // they are rows, and until this module nothing was allowed to read a row.
 //

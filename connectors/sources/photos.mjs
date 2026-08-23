@@ -15,8 +15,8 @@
 // grant to the responsible process, so this only works spawned by launchd
 // from ~/.hazlie/bin/node.
 //
-// FACES: IDENTITY ONLY. Read under the consent decision in CLAUDE.md (Austin,
-// 2026-08-20). This takes the cluster a face belongs to and the owner's own
+// FACES: IDENTITY ONLY. Read under the owner's consent decision of 2026-08-20
+// (recorded in the private repo's CLAUDE.md, which is not part of this repo). This takes the cluster a face belongs to and the owner's own
 // name for it — enough to answer "who was I with in San Francisco" — and
 // takes NONE of Apple's inferred attributes (age, gender, ethnicity, hair,
 // expression, gaze). See lib/peopleRows.mjs for why: they answer none of the

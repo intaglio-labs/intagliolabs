@@ -1,7 +1,7 @@
 // Tests for the episodic shelf.
 //
 // The regression set is the seven questions the L5 coverage run graded
-// "data gap at every tier" (results/EXPERIMENT_L5_COVERAGE.md): a flight in
+// "data gap at every tier" (the L5 coverage run; write-up not in this repo): a flight in
 // calendar, sleep in oura, photos last weekend, and friends. Each gets a
 // fixture proving the router picks the right window and sources and that the
 // selected rows + computed lines actually carry the answer.

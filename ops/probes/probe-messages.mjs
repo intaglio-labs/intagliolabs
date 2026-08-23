@@ -1,17 +1,19 @@
 // Probe: which chat in chat.db is the owner's Messages self-thread?
 //
-// The courier accepts commands ONLY from a pinned self-thread (plan §Phase 6),
-// so before any courier code exists we need to know whether such a thread
-// exists on this machine, what its stable identifiers are (chat guid vs
-// chat_identifier), and how AppleScript should target it. This probe is the
-// READ half of that question: it enumerates candidate self-threads —
+// Originally written for the courier's command lane, which is retired: the
+// app no longer sends or listens on iMessage, and nothing here targets
+// Messages.app with AppleScript any more. The probe survives because its
+// answer moved to the INGEST side. connectors/lib/pinnedThread.mjs must know
+// which thread is the assistant's own conversation with the owner so it can
+// EXCLUDE it from the corpus — a machine that once had a pinned thread will
+// otherwise ingest the assistant's old messages as the owner's words. This
+// probe is how you find that thread's identifiers on a given machine.
+//
+// It enumerates candidate self-threads —
 // single-participant chats whose sole participant handle is one of the account
 // owner's OWN handles (harvested from chat.account_login and
 // message.destination_caller_id, which both name identities this Mac sends and
-// receives as). The SEND half (an osascript nonce plus is_from_me correlation)
-// triggers a one-time macOS Automation consent prompt, so it is a scheduled
-// interactive step, not something a headless probe may spring on the owner:
-// `--send` below is deliberately a stub that says so.
+// receives as).
 //
 // Prints chat guids, identifiers, participant/message counts, and ISO
 // timestamps only — NEVER message text. The identifiers of a self-thread are
@@ -24,8 +26,8 @@
 //     -- ~/.hazlie/bin/node /path/to/ops/probes/probe-messages.mjs
 //   (poll <out> for the RESULT line, then: launchctl remove com.hazlie.probe-messages)
 //
-// No TTY assumed. Exit: 0 PASS · 2 BLOCKED (no FDA in this launch context, or
-// --send) · 1 FAIL.
+// No TTY assumed. Exit: 0 PASS · 2 BLOCKED (no FDA in this launch context)
+// · 1 FAIL.
 
 import { DatabaseSync } from 'node:sqlite';
 import { homedir } from 'node:os';
@@ -48,21 +50,6 @@ function appleDateToIso(raw) {
   return new Date(ms).toISOString();
 }
 
-if (process.argv[2] === '--send') {
-  // The send test posts a nonce into the owner's Messages and fires the macOS
-  // Automation consent prompt for the controlling binary the first time it
-  // runs. That prompt must be answered by the human at a moment they chose, so
-  // the interactive step is scheduled separately (see the PENDING row in
-  // ops/PROBES.md) rather than implemented here.
-  block(
-    'messages send test',
-    'not implemented in this probe by design: sending requires the one-time macOS ' +
-      'Automation consent prompt for osascript control of Messages.app, an interactive ' +
-      'human step scheduled separately in ops/PROBES.md'
-  );
-  console.log('RESULT probe-messages: BLOCKED');
-  process.exit(2);
-}
 
 const chatDbPath = join(homedir(), 'Library', 'Messages', 'chat.db');
 let db;

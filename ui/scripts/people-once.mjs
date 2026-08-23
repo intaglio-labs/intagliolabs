@@ -1,5 +1,6 @@
-// Dump the people graph once, read-only, for eyeballing and for the mentor
-// experiment's Arm A to build on. Counts, names, channels and dormancy — the
+// Dump the people graph once, read-only, for eyeballing and for debugging what
+// the people surface actually holds. (Written for an experiment arm that was
+// never carried into this repo; the diagnostic use is why it survived.) Counts, names, channels and dormancy — the
 // owner's own graph, printed locally, never sent anywhere.
 //
 //   node ui/scripts/people-once.mjs                 top 40 by relationship depth

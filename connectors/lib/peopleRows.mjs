@@ -11,7 +11,10 @@
 // and an invented label about a real person is precisely what this repo's
 // never-fabricate rule forbids.
 //
-// Read under the consent decision in CLAUDE.md (Austin, 2026-08-20).
+// Read under the owner's consent decision of 2026-08-20: identity only, never
+// Apple's inferred attributes. That decision was recorded in the private
+// repo's CLAUDE.md, which did not cross into this one — restated here so the
+// rule travels with the code that obeys it.
 //
 // What IS read: the cluster a face belongs to, and the owner's own name for
 // that cluster where they typed one. 93 of 27,000 clusters are named, and
