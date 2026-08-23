@@ -158,13 +158,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
 
     // DIAGNOSTIC PROBE, off unless HAZLIE_TCC_PROBE=1.
     //
-    // Isolates WHEN the permission is asked from everything else about the app.
-    // A minimal signed app asking for Contacts at launch is granted on this
-    // machine; the same request from this app, made later from a webview
-    // message handler, is denied without a prompt. Entitlements, the
-    // provisioning profile, notarization, the window level and the activation
-    // policy have all been ruled out by testing. This asks at launch instead,
-    // leaving only the calling context as the difference.
+    // Asks for Contacts at launch and writes the answer to a file, so a
+    // signing change can be verified without clicking through onboarding.
+    //
+    // It exists because this took far too long to diagnose, and the comment
+    // that used to sit here recorded the WRONG answer: it said entitlements
+    // had "been ruled out by testing" and blamed the webview calling context.
+    // Entitlements were the whole cause — under the hardened runtime tccd will
+    // not display a prompt for a service whose entitlement is missing, and the
+    // app carried only audio-input. See widget/Hazlie.entitlements.
+    //
+    // The testing that "ruled it out" was invalid: the probe was run from a
+    // terminal, and a process launched from a shell inherits THAT app's TCC
+    // grants, so it reported success no matter what the bundle contained.
+    // Launch it with `open -a` and read tccd, never from a shell:
+    //   open -a "Intaglio Labs" --env HAZLIE_TCC_PROBE=1
+    //   /usr/bin/log stream --predicate 'process == "tccd"'
+    // A missing entitlement shows up there as `Policy disallows prompt`.
     if ProcessInfo.processInfo.environment["HAZLIE_TCC_PROBE"] == "1" {
       Permissions.request("contacts") { status in
         let out = FileManager.default.homeDirectoryForCurrentUser

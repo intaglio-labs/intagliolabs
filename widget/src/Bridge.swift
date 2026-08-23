@@ -660,7 +660,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "openFullDiskAccess":
       // Touch a protected path FIRST, then open the pane. macOS lists an app
       // under Full Disk Access once it has attempted a protected read, so the
-      // failed attempt is what puts "Intaglio Labs" in the list with a switch
+      // failed attempt is what puts "intaglio labs" in the list with a switch
       // already waiting. Without it the owner has to press +, walk a file
       // picker to Applications, and find the app themselves — which is the
       // copy-paste problem wearing different clothes.

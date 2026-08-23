@@ -178,21 +178,27 @@ IDENTITY="${HAZLIE_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/
 # THE PROVISIONING PROFILE, embedded before signing.
 #
 # A development-signed Mac app carries one or it is not validly signed for any
-# machine: `spctl -a` says rejected, and macOS will not present a privacy prompt
-# to an app it rejects — it records a denial instead, silently, which is exactly
-# how the Contacts/Calendar/Photos prompts came to "fail" without ever being
-# shown. The profile names this team, this bundle id and the Macs allowed to run
-# it, and lives at Contents/embedded.provisionprofile by convention.
+# machine, and `spctl -a` says rejected. The profile names this team, this bundle
+# id and the Macs allowed to run it, and lives at
+# Contents/embedded.provisionprofile by convention.
+#
+# This comment used to go on to blame the missing profile for the silent
+# Contacts/Calendar/Photos prompt failure. That was the wrong diagnosis, and it is
+# corrected here rather than deleted because it sent the search in the wrong
+# direction for days. The app that would not prompt HAD a valid profile and both
+# identifier entitlements. What it lacked was the per-service hardened-runtime
+# entitlements — see Hazlie.entitlements, which now carries all four and quotes
+# tccd's own refusal. A profile is what lets you hand the app to someone else; it
+# is not what earns a TCC prompt.
 #
 # Absent is not fatal: an ad-hoc or unprofiled build still runs for whoever
-# built it. It just cannot be handed to anyone, and cannot earn a TCC prompt.
+# built it. It just cannot be handed to anyone.
 # TWO SIGNING MODES, AND THEY ARE NOT COMPATIBLE.
 #
 #   Apple Development  -> embed a provisioning profile, and carry the two
 #                         identifier entitlements it asserts. Runs only on the
 #                         Macs the profile lists. Without the profile the app is
-#                         not validly signed for ANY machine, and macOS quietly
-#                         refuses it privacy prompts.
+#                         not validly signed for ANY machine.
 #   Developer ID       -> NO profile, and NOT those entitlements. A Developer ID
 #                         app is signed for everyone, so a per-machine profile is
 #                         meaningless and application-identifier is invalid
@@ -229,8 +235,8 @@ plistlib.dump(base, open(sys.argv[2], "wb"))
 PYEOF
       echo "embedded $PROFILE (development build)"
     else
-      echo "NOTE: no $PROFILE — this build is not valid for any machine and" >&2
-      echo "      macOS will not show it privacy prompts. See ops/SIGNING.md." >&2
+      echo "NOTE: no $PROFILE — this build runs only for whoever built" >&2
+      echo "      it, and cannot be handed to anyone. See ops/SIGNING.md." >&2
     fi
     ;;
 esac
@@ -261,7 +267,7 @@ if [ -n "$IDENTITY" ]; then
   codesign --force --options runtime \
     --entitlements "$ENTS" \
     -s "$IDENTITY" "$APP"
-  echo "signed with $IDENTITY (hardened runtime, audio-input entitlement)"
+  echo "signed with $IDENTITY (hardened runtime, $ENTS)"
 else
   codesign --force -s - "$APP"
   echo "WARNING: no code-signing identity found; signed ad-hoc." >&2

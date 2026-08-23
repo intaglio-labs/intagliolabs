@@ -16,7 +16,7 @@ const log = document.getElementById('log');
 // to wait, reopen, or reinstall, so each line says which.
 const FAILURES = {
   notready: "memory isn't ready yet — give it a moment and try again",
-  auth: 'Intaglio Labs could not unlock its own memory. Quitting and reopening usually fixes it.',
+  auth: 'intaglio labs could not unlock its own memory. Quitting and reopening usually fixes it.',
   identity: 'something else is using the port this app needs',
   down: "memory isn't running — quit and reopen to restart it",
   error: 'something went wrong on this app’s side',

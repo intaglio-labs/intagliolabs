@@ -124,10 +124,10 @@ test('the help page links back to the tokened page, not to bare /', () => {
 test('the FDA page names the APP, not the binary underneath it', () => {
   // This asserted ~/.hazlie/bin/node, and that was right while the reader was a
   // launchd agent responsible for itself. It is a child of the app now, so macOS
-  // attributes the grant to Intaglio Labs — naming node would send someone to
+  // attributes the grant to intaglio labs — naming node would send someone to
   // switch on a permission that does nothing.
   const page = renderHelpPage('imessage', { token: 'TOK' });
-  assert.match(page, /Intaglio Labs/u);
+  assert.match(page, /intaglio labs/u);
   assert.doesNotMatch(page, /~\/\.hazlie\/bin\/node/u,
     'a path into a hidden directory is not an instruction anyone can follow');
 });

@@ -2,13 +2,42 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- One entitlement, for the one thing this app captures. Required once the
-       hardened runtime is on: under runtime protection the microphone is
-       refused outright without it, TCC prompt or no TCC prompt.
+  <!-- One entitlement per TCC service this app touches. These are NOT optional
+       decoration: with the hardened runtime on, tccd refuses to even DISPLAY the
+       consent prompt for a service whose entitlement is missing. It says so in
+       its own log:
 
-       Nothing else is requested. No network client entitlement (the app is not
-       sandboxed, and its only sockets are loopback), no file access, no
-       camera. -->
+         Prompting policy for hardened runtime; service: kTCCServiceAddressBook
+         requires entitlement com.apple.security.personal-information.addressbook
+         but it is missing
+         Policy disallows prompt for Sub:{...}
+
+       The failure is silent and looks nothing like a permissions bug. Contacts
+       returns denied instantly; Calendar returns false with NO error and leaves
+       the status at notDetermined, as though the user had been asked and had
+       said nothing. Nobody is ever asked. Running the same binary from a
+       terminal HIDES this completely, because a process launched from a shell
+       inherits the terminal's own grants and reports success.
+
+       So the list below has to track the code. If a new store is touched in
+       src/Permissions.swift and its key is not here, the feature does not
+       degrade — it dies without asking, on every machine.
+
+         CNContactStore   -> personal-information.addressbook
+         EKEventStore     -> personal-information.calendars
+         PHPhotoLibrary   -> personal-information.photos-library
+         mic capture      -> device.audio-input
+
+       Not requested, because nothing calls them: camera, location, Apple Events.
+       Also no network-client entitlement — the app is not sandboxed and its only
+       sockets are loopback. Full Disk Access appears nowhere here on purpose: it
+       has no entitlement and no prompt at all, and is granted only in Settings. -->
+  <key>com.apple.security.personal-information.addressbook</key>
+  <true/>
+  <key>com.apple.security.personal-information.calendars</key>
+  <true/>
+  <key>com.apple.security.personal-information.photos-library</key>
+  <true/>
   <key>com.apple.security.device.audio-input</key>
   <true/>
 

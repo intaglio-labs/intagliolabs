@@ -104,6 +104,12 @@ enum Permissions {
       // and TCC records nothing — so the UI said "denied" for a permission the
       // owner was never asked about, and the diagnostic showed the status still
       // sitting at notDetermined afterwards. Held in a static for the duration.
+      //
+      // A SECOND cause produces this EXACT symptom, so do not stop at this one:
+      // if the matching hardened-runtime entitlement is missing, tccd refuses to
+      // display the dialog and the completion fires false with the status
+      // unmoved, indistinguishably. Check widget/Hazlie.entitlements before
+      // suspecting lifetime again.
       contactStore = CNContactStore()
       contactStore?.requestAccess(for: .contacts) { ok, _ in
         contactStore = nil
@@ -144,7 +150,7 @@ enum Permissions {
   ///
   /// AND THE ATTEMPT IS THE POINT, not just the answer. macOS adds an app to the
   /// Full Disk Access list the first time it touches a protected path — so this
-  /// failing is what makes "Intaglio Labs" appear there, already listed, with a
+  /// failing is what makes "intaglio labs" appear there, already listed, with a
   /// switch to flip. Without it the owner has to press +, walk a file picker to
   /// Applications, and find the app themselves.
   static func fullDisk() -> Status {

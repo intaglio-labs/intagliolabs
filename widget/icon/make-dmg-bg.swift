@@ -68,7 +68,7 @@ func draw(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor, 
 
 // The one instruction, plus the fine print under it — in the site's ladder.
 draw("Intaglio Labs, Inc.", size: 26, weight: .medium, color: NSColor(white: 0.92, alpha: 1), y: 74)
-draw("drag Intaglio Labs into Applications", size: 30, weight: .semibold,
+draw("drag intaglio labs into Applications", size: 30, weight: .semibold,
      color: NSColor(red: 0.898, green: 0.839, blue: 0.733, alpha: 1), y: 620)  // #e5d6bb
 
 // The arrow, between where the two icons will sit (icon centers at x=150/450

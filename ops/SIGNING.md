@@ -15,15 +15,25 @@ conflating them wastes a day.
 ## Why a development build needs a profile
 
 A development-signed Mac app with no `Contents/embedded.provisionprofile` is not
-validly signed **for any machine**. It runs for whoever built it and little else,
-and the failure mode is quiet rather than loud: macOS declines to show it privacy
-prompts and records a denial instead. That is what a permission that "does not
-work" usually is.
+validly signed **for any machine**. It runs for whoever built it and little else.
 
 The profile names the team, the bundle id, and the Macs allowed to run the build.
-The entitlements you sign with must be a SUBSET of the ones the profile asserts —
-`Hazlie.entitlements` mirrors it exactly, and adding an entitlement the profile
-does not carry makes `codesign` refuse.
+It asserts three keys — `application-identifier`, `team-identifier` and
+`keychain-access-groups` — and `build.sh` copies the first two out of it into the
+signing entitlements, because those two are only valid alongside the profile that
+asserts them.
+
+The hardened-runtime resource entitlements in `Hazlie.entitlements`
+(`personal-information.*`, `device.audio-input`) are NOT profile-restricted and do
+not appear in the profile at all. Signing with them is fine in either mode.
+
+> An earlier version of this file said the missing profile was why privacy prompts
+> never appeared. **That was wrong.** The app that would not prompt had a valid
+> profile. The cause was the missing hardened-runtime entitlements above: with the
+> hardened runtime on, `tccd` refuses to *display* the consent dialog for a service
+> whose entitlement is absent, logging `Policy disallows prompt`. `Hazlie.entitlements`
+> carries the full mechanism. A profile lets you hand the app to someone else; it is
+> not what earns a TCC prompt.
 
 ### Setting one up (no Xcode required)
 

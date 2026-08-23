@@ -12,13 +12,13 @@
        are also the sentence a person reads in the system prompt, so each says
        what is read and where it goes rather than restating the API name. -->
   <key>NSContactsUsageDescription</key>
-  <string>Intaglio Labs reads your contacts so it knows who the people in your messages are. Everything stays on this Mac.</string>
+  <string>intaglio labs reads your contacts so it knows who the people in your messages are. Everything stays on this Mac.</string>
   <key>NSCalendarsUsageDescription</key>
-  <string>Intaglio Labs reads your calendar so it can answer questions about your time. Everything stays on this Mac.</string>
+  <string>intaglio labs reads your calendar so it can answer questions about your time. Everything stays on this Mac.</string>
   <key>NSCalendarsFullAccessUsageDescription</key>
-  <string>Intaglio Labs reads your calendar so it can answer questions about your time. Everything stays on this Mac.</string>
+  <string>intaglio labs reads your calendar so it can answer questions about your time. Everything stays on this Mac.</string>
   <key>NSPhotoLibraryUsageDescription</key>
-  <string>Intaglio Labs reads your photo library so it can answer questions about where you were and who you were with. Everything stays on this Mac.</string>
+  <string>intaglio labs reads your photo library so it can answer questions about where you were and who you were with. Everything stays on this Mac.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>intaglio labs listens only while the orb is armed; speech is transcribed on this Mac and never leaves it.</string>
   <key>CFBundleName</key>              <string>intaglio labs</string>
