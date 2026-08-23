@@ -124,7 +124,18 @@ enum Provision {
       guard !fm.fileExists(atPath: file.path) else { continue }
       var bytes = [UInt8](repeating: 0, count: 32)
       _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-      let secret = bytes.map { String(format: "%02x", $0) }.joined()
+      // TRAILING NEWLINE, and it is not cosmetic. ops/setup-llm.sh validates both
+      // of these files with `wc -l` -- which counts NEWLINES, not lines -- because
+      // it writes them itself with `openssl rand -hex 32 >`, which leaves one. A
+      // file holding the same 64 hex characters with no newline counts as 0 and is
+      // rejected: "is not one generated 256-bit hex key".
+      //
+      // So a machine provisioned by the app could not afterwards run setup-llm.sh
+      // to add a model -- it bailed on the key the app had just written. hermes
+      // itself never noticed, because it trims. Matching the script's exact bytes
+      // is what makes the two provisioning paths interoperable, which they have to
+      // be: the app provisions first, and setup-llm.sh runs later to add the model.
+      let secret = bytes.map { String(format: "%02x", $0) }.joined() + "\n"
       try secret.write(to: file, atomically: true, encoding: .utf8)
       try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }
