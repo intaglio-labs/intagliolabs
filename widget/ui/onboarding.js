@@ -4,22 +4,35 @@
 // (§09, "your turn") is the answer coming back. The only thing the viewer has
 // to do is send the message on screen 2; everything else advances itself.
 
+// 'model' and 'data' sit between the demo and the home reveal: the flow now
+// ends with a machine that can actually do something, rather than with a tour.
+// Keyed by name rather than by number because they are steps, not a countdown,
+// and either can be skipped without renumbering the rest.
 const screens = {
   0: document.getElementById('screen0'),
   1: document.getElementById('screen'),
   2: document.getElementById('screen2'),
+  model: document.getElementById('screenModel'),
+  data: document.getElementById('screenData'),
   3: document.getElementById('screen3'),
 };
 // Both orbs read the same time-of-day band as the widget (bridge.js).
 for (const el of document.querySelectorAll('.orb')) hzApplyTimeOfDay(el);
 
+// Which screen is up. The setup steps finish asynchronously — a download can
+// land while the owner has already moved on — so they check this before
+// advancing rather than yanking whatever is on screen.
+let currentScreen = 1;
+
 function showScreen(n) {
+  currentScreen = n;
   for (const [k, el] of Object.entries(screens)) {
     el.hidden = String(n) !== k;
     el.classList.remove('leaving', 'entering');
   }
   screens[n]?.classList.add('entering');
   if (String(n) === '2') runDemo();
+  if (String(n) === 'model') { clearDemo(); loadSetup(); }
   if (String(n) === '3') { clearDemo(); runHome(); }
   // The scrim gets out of the way of the real widget only on the last scene.
   document.body.classList.toggle('spotlight', String(n) === '3');
@@ -253,7 +266,10 @@ function demoSendNow() {
         pipe.classList.add('suck');
       });
   });
-  at(1960, () => showScreen(3));
+  // The pipe used to land on the home reveal. Setup goes in between, so the
+  // flow ends with a machine that can do something rather than a tour of one
+  // that cannot.
+  at(1960, () => showScreen('model'));
 }
 demoSend.addEventListener('click', demoSendNow);
 
@@ -337,3 +353,161 @@ document.addEventListener('keydown', (e) => {
 });
 
 hzApplyPrefs();
+
+// ---------------- setup: the model, then one real data source ----------------
+//
+// These two run after the demo and before the home reveal. The order is
+// deliberate: the model is the slow one, so it starts downloading while the
+// owner reads the next screen, and by the time they finish granting Full Disk
+// Access it has usually landed.
+//
+// Both are genuinely skippable. Everything except answering questions works
+// with no model, and the app is honest-but-empty with no sources — a setup step
+// that cannot be refused is a demand, not a choice, and this one is asking for
+// gigabytes and access to a person's messages.
+
+const fmtGB = (b) => `${(b / 1e9).toFixed(1)} GB`;
+
+const modelChoices = document.getElementById('modelChoices');
+const modelProg = document.getElementById('modelProg');
+const modelBar = document.getElementById('modelBar');
+const modelLabel = document.getElementById('modelLabel');
+const modelErr = document.getElementById('modelErr');
+let setupState = null;
+let modelDone = false;
+
+function renderChoices() {
+  modelChoices.replaceChildren();
+  if (!setupState) return;
+  for (const t of setupState.tiers || []) {
+    const b = document.createElement('button');
+    b.className = 'ob-choice' + (t.id === setupState.recommended ? ' rec' : '');
+    const head = document.createElement('b');
+    head.textContent = t.label;
+    const size = document.createElement('span');
+    size.className = 'ob-choice-size';
+    size.textContent = fmtGB(t.bytes);
+    const why = document.createElement('span');
+    why.className = 'ob-choice-why';
+    why.textContent = t.detail;
+    b.append(head, size, why);
+    if (t.id === setupState.recommended) {
+      const tag = document.createElement('span');
+      tag.className = 'ob-choice-tag';
+      tag.textContent = 'suits this Mac';
+      b.appendChild(tag);
+    }
+    b.addEventListener('click', () => startModel(t.id));
+    modelChoices.appendChild(b);
+  }
+}
+
+function startModel(tier) {
+  modelErr.hidden = true;
+  modelChoices.hidden = true;
+  modelProg.hidden = false;
+  modelBar.style.width = '0%';
+  modelLabel.textContent = 'starting…';
+  hzPost('modelDownload', { tier }).catch(() => {});
+}
+
+// Native pushes every state change through here — progress, the install step
+// after the bytes land, and both endings.
+window.__hzSetup = (d) => {
+  if (!d || typeof d !== 'object') return;
+  if (d.phase === 'downloading') {
+    const pct = d.total > 0 ? Math.min(100, (d.got / d.total) * 100) : 0;
+    modelBar.style.width = `${pct}%`;
+    modelLabel.textContent = `${fmtGB(d.got)} of ${fmtGB(d.total)}`;
+    return;
+  }
+  if (d.phase === 'installing') {
+    modelBar.style.width = '100%';
+    modelLabel.textContent = 'checking it arrived intact…';
+    return;
+  }
+  if (d.phase === 'ready') {
+    modelDone = true;
+    modelBar.style.width = '100%';
+    modelLabel.textContent = 'ready';
+    const cancel = document.getElementById('modelCancel');
+    if (cancel) cancel.hidden = true;
+    // Do not yank the screen out from under them mid-read; move on shortly.
+    setTimeout(() => { if (currentScreen === 'model') showScreen('data'); }, 1200);
+    return;
+  }
+  if (d.phase === 'failed') {
+    modelProg.hidden = true;
+    modelChoices.hidden = false;
+    if (d.error !== 'cancelled') {
+      modelErr.hidden = false;
+      modelErr.textContent = d.error || 'that did not work';
+    }
+  }
+};
+
+document.getElementById('modelCancel').addEventListener('click', () => {
+  hzPost('modelCancel').catch(() => {});
+  modelProg.hidden = true;
+  modelChoices.hidden = false;
+});
+document.getElementById('modelSkip').addEventListener('click', () => showScreen('data'));
+
+// ---- the data screen -------------------------------------------------------
+
+const dataStatus = document.getElementById('dataStatus');
+
+document.getElementById('fdaOpen').addEventListener('click', () => {
+  hzPost('openFullDiskAccess').catch(() => {});
+});
+document.getElementById('fdaCopy').addEventListener('click', async () => {
+  const path = document.getElementById('nodePath').textContent;
+  try {
+    await navigator.clipboard.writeText(path);
+    const b = document.getElementById('fdaCopy');
+    b.textContent = 'copied';
+    setTimeout(() => { b.textContent = 'copy'; }, 1600);
+  } catch { /* the path is on screen either way */ }
+});
+
+document.getElementById('dataCheck').addEventListener('click', async () => {
+  dataStatus.textContent = 'starting the readers…';
+  await hzPost('startSources').catch(() => {});
+  // Connectors stagger their first runs, so give the first source a moment to
+  // land rows before asking. The ROW COUNT is the check: it only moves when
+  // something was really read and really written.
+  let rows = 0;
+  for (let i = 0; i < 12 && rows === 0; i += 1) {
+    await new Promise((r) => setTimeout(r, 2500));
+    const st = await hzPost('setupState').catch(() => null);
+    rows = (st && st.rows) || 0;
+    if (rows === 0) dataStatus.textContent = 'waiting for the first read…';
+  }
+  if (rows > 0) {
+    dataStatus.textContent = `${rows.toLocaleString()} things read so far — you're set`;
+    setTimeout(() => { if (currentScreen === 'data') showScreen(3); }, 1600);
+  } else {
+    dataStatus.textContent =
+      'nothing yet. if you just granted access, macOS sometimes needs the app reopened.';
+  }
+});
+document.getElementById('dataSkip').addEventListener('click', () => showScreen(3));
+
+// Loaded once, when the flow reaches the setup screens.
+async function loadSetup() {
+  setupState = await hzPost('setupState').catch(() => null);
+  if (!setupState) return;
+  document.getElementById('nodePath').textContent = setupState.nodePath || '';
+  if (setupState.model) {
+    // Already has one — say so instead of offering the download again.
+    modelDone = true;
+    modelChoices.hidden = true;
+    modelProg.hidden = false;
+    modelBar.style.width = '100%';
+    modelLabel.textContent = 'already set up';
+    const c = document.getElementById('modelCancel');
+    if (c) c.hidden = true;
+  } else {
+    renderChoices();
+  }
+}

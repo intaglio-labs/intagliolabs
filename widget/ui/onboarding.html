@@ -101,6 +101,57 @@ one click: intaglio labs moves itself and reopens from its real home.</p>
        lifted above the scrim for the length of the scene (main.swift
        spotlightWidget), so the orb being pointed at is the live one, in the
        corner it will be in from now on. -->
+  <!-- Screen A: the answer model. The ONE asset this app fetches rather than
+       ships — build.sh explains the split. Two tiers, sizes stated up front
+       because a multi-gigabyte download announced after the fact is a betrayal,
+       and a skip that is a real option rather than a dark pattern: everything
+       except answering questions works without it. -->
+  <div class="ob-screen ob-setup" id="screenModel" hidden>
+    <p class="ob-tagline">how should i think?</p>
+    <p class="ob-home-note ob-setup-note">answers are generated on this Mac, by a model that lives here.
+nothing you ask ever leaves.</p>
+
+    <div class="ob-choices" id="modelChoices"></div>
+
+    <div class="ob-prog" id="modelProg" hidden>
+      <div class="ob-prog-bar"><span id="modelBar"></span></div>
+      <p class="ob-prog-label" id="modelLabel">starting…</p>
+      <button class="ob-replay" id="modelCancel">cancel</button>
+    </div>
+
+    <p class="ob-err" id="modelErr" hidden></p>
+    <button class="ob-replay" id="modelSkip">skip — set this up later</button>
+  </div>
+
+  <!-- Screen B: one real data source. The app is an empty room until something
+       is in it, so onboarding does not end before at least offering to fill it.
+       Full Disk Access is the whole ask: Messages, Notes, Contacts and Photos
+       all need NO credentials, so one grant lights up four sources at once.
+       Verification is the row count, not a permission check — macOS gives this
+       process no honest answer about a grant that attaches to a different
+       binary. -->
+  <div class="ob-screen ob-setup" id="screenData" hidden>
+    <p class="ob-tagline">what should i remember?</p>
+    <p class="ob-home-note ob-setup-note">one permission turns on messages, notes, contacts and photos together.
+they are read on this Mac and stay on it.</p>
+
+    <ol class="ob-steps">
+      <li><span class="ob-step-n">1</span>
+        <span>open <b>Full Disk Access</b> and press <b>+</b></span>
+        <button class="ob-cta ob-cta-sm" id="fdaOpen">open settings</button></li>
+      <li><span class="ob-step-n">2</span>
+        <span>press <b>⇧⌘G</b>, paste this, and choose <b>node</b></span>
+        <code class="ob-path" id="nodePath">…</code>
+        <button class="ob-replay ob-copy" id="fdaCopy">copy</button></li>
+      <li><span class="ob-step-n">3</span>
+        <span>come back and check</span>
+        <button class="ob-cta ob-cta-sm" id="dataCheck">check</button></li>
+    </ol>
+
+    <p class="ob-status" id="dataStatus"></p>
+    <button class="ob-replay" id="dataSkip">skip — connect sources later</button>
+  </div>
+
   <div class="ob-screen ob-home" id="screen3" hidden>
     <!-- Positioned at run time over the widget's real rectangle. -->
     <div class="ob-spot" id="homeSpot" aria-hidden="true">

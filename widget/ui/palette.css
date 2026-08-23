@@ -2267,3 +2267,98 @@ body.connections .tile-tip {
   opacity: 0; transition: opacity 0.12s ease;
 }
 body.connections .tile-tip.on { opacity: 1; }
+
+/* ---------------- onboarding: the two setup scenes ----------------
+   Same scrim and the same centred column as the rest of the flow. These
+   screens carry more to read than the others, so the type sizes step down
+   rather than the column getting wider — a scene that has to be scanned is
+   already the wrong shape for a welcome flow. */
+.ob-setup { max-width: 620px; }
+.ob-setup-note { margin-bottom: 22px; white-space: pre-line; }
+
+/* The model choice. Two cards, the recommended one marked — a size this large
+   should never be a surprise, so the gigabytes sit next to the label rather
+   than behind a confirm. */
+.ob-choices { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+.ob-choice {
+  position: relative;
+  flex: 1 1 220px; max-width: 260px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+  padding: 16px 18px 18px;
+  border-radius: 14px;
+  border: 1px solid rgba(234, 234, 234, 0.14);
+  background: rgba(255, 255, 255, 0.03);
+  text-align: left;
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+.ob-choice:hover { border-color: rgba(229, 214, 187, 0.5); background: rgba(255, 255, 255, 0.06); }
+.ob-choice:active { transform: scale(0.99); }
+.ob-choice.rec { border-color: rgba(229, 214, 187, 0.42); }
+.ob-choice b { font-size: 16px; color: var(--fg); }
+.ob-choice-size {
+  font-family: var(--mono, ui-monospace, Menlo, monospace);
+  font-size: 13px; color: #c5a56d; font-variant-numeric: tabular-nums;
+}
+.ob-choice-why { font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+.ob-choice-tag {
+  position: absolute; top: -9px; right: 14px;
+  font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 999px;
+  background: #c5a56d; color: #14140f;
+}
+
+/* Download progress. A real bar, because the only honest thing to show for a
+   multi-gigabyte fetch is how much of it is done. */
+.ob-prog { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.ob-prog-bar {
+  width: 320px; height: 6px; border-radius: 999px;
+  background: rgba(234, 234, 234, 0.12); overflow: hidden;
+}
+.ob-prog-bar span {
+  display: block; height: 100%; width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #c5a56d, #e5d6bb);
+  transition: width 240ms ease;
+}
+.ob-prog-label {
+  font-family: var(--mono, ui-monospace, Menlo, monospace);
+  font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.ob-err { color: #e07a63; font-size: 13px; margin-top: 12px; }
+
+/* The three steps of the Full Disk Access grant. Numbered because this one IS
+   a sequence — the only place in this flow where order is load-bearing. */
+.ob-steps {
+  list-style: none; margin: 0 0 18px; padding: 0;
+  display: flex; flex-direction: column; gap: 14px;
+  text-align: left;
+}
+.ob-steps li {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: 14px; color: var(--fg);
+}
+.ob-step-n {
+  flex: 0 0 auto;
+  width: 22px; height: 22px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(229, 214, 187, 0.14); color: #e5d6bb;
+  font-family: var(--mono, ui-monospace, Menlo, monospace); font-size: 12px;
+}
+.ob-steps b { color: #e5d6bb; font-weight: 600; }
+.ob-path {
+  flex: 1 1 100%;
+  font-family: var(--mono, ui-monospace, Menlo, monospace);
+  font-size: 12px; color: var(--muted);
+  background: rgba(0, 0, 0, 0.28); padding: 7px 10px; border-radius: 8px;
+  overflow-x: auto; white-space: nowrap;
+  user-select: all; /* one click selects the whole path */
+}
+.ob-copy { padding: 4px 10px; font-size: 12px; }
+.ob-status {
+  min-height: 20px; font-size: 13px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+@media (prefers-reduced-motion: reduce) {
+  body:not(.motion-anyway) .ob-choice { transition: none; }
+  body:not(.motion-anyway) .ob-prog-bar span { transition: none; }
+}

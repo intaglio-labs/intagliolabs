@@ -665,6 +665,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // Push the Reduce Motion override into every live page so the orb and the
   // thinking dots change the moment the switch is flipped, rather than at the
   // next launch. Pages that have not loaded yet pick it up from `prefs`.
+  // Download progress, straight into whichever setup surface is open. The
+  // onboarding panel owns the flow; the connections popup shows the same
+  // controls afterwards, so both get it and whichever is not there ignores it.
+  func setupProgress(_ payload: [String: Any]) {
+    guard JSONSerialization.isValidJSONObject(payload),
+          let data = try? JSONSerialization.data(withJSONObject: payload),
+          let json = String(data: data, encoding: .utf8) else { return }
+    let js = "window.__hzSetup && window.__hzSetup(\(json))"
+    eval(onboardingPanel?.contentView as? WKWebView, js)
+    eval(connectionsPanel?.contentView as? WKWebView, js)
+  }
+
   func motionAnywayChanged(_ on: Bool) {
     let js = "window.__hzMotion && window.__hzMotion(\(on))"
     widgetWeb?.evaluateJavaScript(js)

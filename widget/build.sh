@@ -16,8 +16,12 @@ cd "$(dirname "$0")"
 mkdir -p build
 # Pin the target: swiftc's default is the SDK's OS, which can be NEWER than
 # the running system — LaunchServices then refuses the app with -10825.
-swiftc -O -target "$(uname -m)-apple-macos13.0" \
-  -o build/Hazlie src/main.swift src/Windows.swift src/Bridge.swift src/AssetScheme.swift src/BridgeLogin.swift src/Provision.swift
+# src/*.swift, not a hand-kept list. The list was explicit and a new file
+# (ModelSetup.swift) was simply absent from it, so the build failed with
+# "cannot find 'ModelSetup' in scope" -- which reads like a missing import
+# rather than a missing argument. There is no case where a file in src/ should
+# not be compiled, so there is nothing for the list to express.
+swiftc -O -target "$(uname -m)-apple-macos13.0" -o build/Hazlie src/*.swift
 
 APP="build/Intaglio Labs.app"
 rm -rf "$APP"
@@ -90,14 +94,34 @@ fi
 # model on APFS — instant copy-on-write, no multi-GB copy per build.
 # Guarded so a plain `git clone && ./build.sh` (no llama.cpp, no provisioned
 # model) still builds a working app — just without the bundled "ask".
-MODEL_SRC="$HOME/.hazlie/models/model.gguf"
-if command -v llama-server >/dev/null 2>&1 && [ -f "$MODEL_SRC" ]; then
+# THE RUNTIME SHIPS. THE WEIGHTS DO NOT.
+#
+# Both used to be bundled, and the app was 5.3 GB — 4.7 GB of it one .gguf.
+# That is a 39x download for a capability plenty of installs will not use, paid
+# by everyone including someone who only wants their calendar searchable.
+#
+# The split is not a preference, it follows what each thing costs to obtain:
+#
+#   llama runtime (~30 MB)  bundled. It is small, and building it otherwise
+#                           means Homebrew and a toolchain on the owner's Mac.
+#   voice models (~496 MB)  bundled. They CANNOT be produced on a user's
+#                           machine: setup-voice.sh needs npm and esbuild to
+#                           bundle the Kokoro worker, and sharp breaks the
+#                           install on a current node even on a dev box.
+#   the .gguf (2.5-4.7 GB)  DOWNLOADED, chosen in onboarding. One file, one
+#                           declared host (huggingface.co, already in
+#                           ops/EGRESS.json as model-asset), no toolchain — and
+#                           it is the one with a real choice in it, since 4B and
+#                           8B suit different amounts of RAM.
+#
+# This does not weaken "nothing leaves the box": a setup-time fetch the owner
+# asked for is a different act from a runtime call, and the runtime still has no
+# network fallback of any kind. It fails closed exactly as before.
+if command -v llama-server >/dev/null 2>&1; then
   python3 bundle-llama.py "$BE/llama"
-  mkdir -p "$BE/models"
-  cp -c "$MODEL_SRC" "$BE/models/model.gguf" 2>/dev/null || cp "$MODEL_SRC" "$BE/models/model.gguf"
 else
-  echo "WARNING: llama-server and/or $MODEL_SRC not found — 'ask' will NOT be bundled." >&2
-  echo "         For the self-contained build: brew install llama.cpp + provision the model." >&2
+  echo "NOTE: llama-server not on PATH — the runtime will not be bundled." >&2
+  echo "      brew install llama.cpp before building for distribution." >&2
 fi
 
 # VOICE MODELS (ear STT + speak TTS), so voice works offline out of the box the

@@ -160,16 +160,7 @@ enum Provision {
         NSLog("Intaglio Labs: no local model bundled — skipping the llama agent")
         continue
       }
-      let template = backend.appendingPathComponent("agents/\(label).plist")
-      guard var text = try? String(contentsOf: template, encoding: .utf8) else { continue }
-      text = text.replacingOccurrences(of: "@HOME@", with: home.path)
-      text = text.replacingOccurrences(of: "@REPO@", with: backend.path)
-      // The llama plist hard-codes Homebrew's binary; point it at the copy.
-      text = text.replacingOccurrences(of: brewLlama, with: hazlie.appendingPathComponent("bin/llama-server").path)
-      let dst = launchAgents.appendingPathComponent("\(label).plist")
-      try text.write(to: dst, atomically: true, encoding: .utf8)
-      try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: dst.path)
-      bootstrap(dst)
+      installAgent(label)
       if label == "com.hazlie.hermes" { waitForHermes() }
     }
     NSLog("Intaglio Labs: provisioned backend from the app bundle")
@@ -200,6 +191,44 @@ enum Provision {
     try? p.run()
     p.waitUntilExit()
     if p.terminationStatus != 0 { try? fm.copyItem(at: src, to: dst) }
+  }
+
+  /// Render one agent's plist (@HOME@ → home, @REPO@ → the bundle's backend),
+  /// write it 0644, and bootstrap it.
+  ///
+  /// Reachable on its own because agents do not all become installable at the
+  /// same moment. llama-server is skipped at first run when there are no
+  /// weights, and turns real later when onboarding finishes downloading a
+  /// model — at which point this is what makes it exist, rather than asking the
+  /// owner to relaunch the app.
+  @discardableResult
+  static func installAgent(_ label: String) -> Bool {
+    let template = backend.appendingPathComponent("agents/\(label).plist")
+    guard var text = try? String(contentsOf: template, encoding: .utf8) else { return false }
+    text = text.replacingOccurrences(of: "@HOME@", with: home.path)
+    text = text.replacingOccurrences(of: "@REPO@", with: backend.path)
+    // The llama plist hard-codes Homebrew's binary; point it at the copy.
+    text = text.replacingOccurrences(of: brewLlama, with: hazlie.appendingPathComponent("bin/llama-server").path)
+    let dst = launchAgents.appendingPathComponent("\(label).plist")
+    do {
+      try mkdir(launchAgents, 0o755)
+      try text.write(to: dst, atomically: true, encoding: .utf8)
+    } catch {
+      return false
+    }
+    try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: dst.path)
+    bootstrap(dst)
+    return true
+  }
+
+  /// Stop an agent and start it again from its current plist — what a changed
+  /// model or key requires, and what setup-llm.sh does at the same point.
+  static func kickstart(_ label: String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    p.arguments = ["kickstart", "-k", "gui/\(getuid())/\(label)"]
+    try? p.run()
+    p.waitUntilExit()
   }
 
   private static func bootstrap(_ plist: URL) {

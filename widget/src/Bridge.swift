@@ -31,6 +31,7 @@ protocol BridgeDelegate: AnyObject {
   func widgetSpot() -> [String: Double]
   func spotlightWidget(_ on: Bool)
   func openOnboarding()
+  func setupProgress(_ payload: [String: Any])
 }
 
 final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, URLSessionTaskDelegate {
@@ -65,9 +66,17 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
                     "status", "setMotion", "setScale", "setSounds", "openOnboarding",
-                    "markHandheld"],
+                    "markHandheld",
+                    // Same setup controls, reachable from the gear after the
+                    // flow — a skipped step must stay reachable.
+                    "setupState", "modelDownload", "modelCancel",
+                    "openFullDiskAccess", "startSources"],
     "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
-                   "widgetSpot"],
+                   "widgetSpot",
+                   // The setup scenes: choosing and fetching the answer model,
+                   // and turning on the first data source.
+                   "setupState", "modelDownload", "modelCancel",
+                   "openFullDiskAccess", "startSources"],
     // people.html includes connector-tile.js as well as people.js (check the
     // script tags, not the file's own comment about being shared), so the People
     // popup renders connector tiles and needs the bridge verbs too. Writing this
@@ -540,6 +549,93 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           }
         }
       }
+    // ---- setup: what onboarding needs to know and do ----------------------
+    case "setupState":
+      // Everything the setup scenes render from, in one round trip. Deliberately
+      // says what IS rather than what SHOULD BE: the model tier is read off the
+      // symlink, voice from the presence of the tree the ear actually loads, and
+      // "is any data flowing" from hermes' own row count rather than from a
+      // permission check. macOS gives no honest answer about Full Disk Access
+      // from this process anyway — FDA attributes per resolved binary, and the
+      // binary that matters is the node launchd spawns, not this app. The rows
+      // are the probe, the same way each connector's run() is its own probe.
+      let voiceDir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".hazlie/models/voice/models")
+      var state: [String: Any] = [
+        "state": "ok",
+        "voice": FileManager.default.fileExists(atPath: voiceDir.path),
+        "downloading": ModelSetup.isDownloading,
+        "recommended": ModelSetup.recommended,
+        "nodePath": FileManager.default.homeDirectoryForCurrentUser
+          .appendingPathComponent(".hazlie/bin/node").path,
+        "tiers": ModelSetup.tiers.map { t in
+          ["id": t.id, "label": t.label, "detail": t.detail, "bytes": t.bytes]
+        },
+      ]
+      state["model"] = ModelSetup.installed?.id ?? ""
+      rows { n in
+        var out = state
+        out["rows"] = n
+        self.reply(webView, id, out)
+      }
+
+    case "modelDownload":
+      let tier = String((payload["tier"] as? String ?? "").prefix(8))
+      ModelSetup.download(
+        tierId: tier,
+        progress: { [weak self] got, total in
+          self?.delegate?.setupProgress([
+            "phase": "downloading", "got": got, "total": total, "tier": tier,
+          ])
+        },
+        done: { [weak self] failure in
+          guard let self else { return }
+          if let failure {
+            self.delegate?.setupProgress(["phase": "failed", "error": failure, "tier": tier])
+            return
+          }
+          // The weights exist now, so the agent that needs them can. Installed
+          // here rather than at next launch, because "downloaded but you must
+          // restart the app" is not finished.
+          self.delegate?.setupProgress(["phase": "installing", "tier": tier])
+          DispatchQueue.global(qos: .utility).async {
+            Provision.installAgent("com.hazlie.llama-server")
+            Provision.kickstart("com.hazlie.llama-server")
+            // hermes holds the llama base URL open; restart it so the first ask
+            // after setup does not meet a proxy pointed at nothing.
+            Provision.kickstart("com.hazlie.hermes")
+            self.delegate?.setupProgress(["phase": "ready", "tier": tier])
+          }
+        }
+      )
+      reply(webView, id, ["state": "ok"])
+
+    case "modelCancel":
+      ModelSetup.cancel()
+      reply(webView, id, ["state": "ok"])
+
+    case "openFullDiskAccess":
+      // Straight to the pane. The list is long and the row is not obvious.
+      if let url = URL(string:
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+        NSWorkspace.shared.open(url)
+      }
+      reply(webView, id, ["state": "ok"])
+
+    case "startSources":
+      // Write the connectors config if it is not there, then (re)start the
+      // daemon. There is no list of sources to choose: the daemon runs every
+      // connector it has credentials for and each one's needs() gates it, so
+      // the local Apple stores turn on together the moment Full Disk Access
+      // lands. The config is what makes the daemon boot AT ALL -- without it
+      // the agent parks at exit 1 -- so writing it is the whole action.
+      let ok = writeConnectorsConfigIfMissing()
+      DispatchQueue.global(qos: .utility).async {
+        Provision.installAgent("com.hazlie.connectors")
+        Provision.kickstart("com.hazlie.connectors")
+      }
+      reply(webView, id, ["state": ok ? "ok" : "error"])
+
     case "ask":
       let utterance = String((payload["utterance"] as? String ?? "")
         .trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
@@ -653,6 +749,54 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     else { return }
     DispatchQueue.main.async {
       webView.evaluateJavaScript("window.__hzDispatch(\(s))", completionHandler: nil)
+    }
+  }
+
+  // MARK: setup helpers
+
+  /// hermes' own row count, or 0 when it cannot be reached. Used as the honest
+  /// answer to "is any of my data actually in here yet" -- a number that only
+  /// moves when a connector really read something and really wrote it.
+  private func rows(_ done: @escaping (Int) -> Void) {
+    guard let tok = bearerToken() else { done(0); return }
+    let req = request("GET", hermesBase, "stats", bearer: tok, timeout: 4)
+    URLSession.shared.dataTask(with: req) { data, _, _ in
+      var n = 0
+      if let data,
+         let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+         let v = obj["rows"] as? Int {
+        n = v
+      }
+      DispatchQueue.main.async { done(n) }
+    }.resume()
+  }
+
+  /// The connectors daemon refuses to start without ~/.hazlie/connectors/config.json
+  /// and says so; on a fresh install nothing writes it, so the agent parks at
+  /// exit 1 forever and no data ever arrives. This writes the minimum valid one.
+  ///
+  /// Deliberately almost empty. There is no "enabled sources" list to fill in --
+  /// every install runs every connector it has credentials for, and each source's
+  /// needs() decides whether it can run this pass. So the file's job here is to
+  /// exist and to parse; every key in it is an override nobody has asked for yet.
+  ///
+  /// Held to the same file standard as a secret (0600 inside the 0700 tree),
+  /// because daemon.mjs checks: it is the file whose silent replacement would
+  /// redirect what gets polled.
+  @discardableResult
+  private func writeConnectorsConfigIfMissing() -> Bool {
+    let fm = FileManager.default
+    let dir = fm.homeDirectoryForCurrentUser.appendingPathComponent(".hazlie/connectors")
+    let file = dir.appendingPathComponent("config.json")
+    if fm.fileExists(atPath: file.path) { return true }
+    do {
+      try fm.createDirectory(at: dir, withIntermediateDirectories: true,
+                             attributes: [.posixPermissions: 0o700])
+      try "{}\n".write(to: file, atomically: true, encoding: .utf8)
+      try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+      return true
+    } catch {
+      return false
     }
   }
 
