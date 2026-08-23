@@ -403,10 +403,13 @@ function renderChoices() {
     why.className = 'ob-choice-why';
     why.textContent = t.detail;
     b.append(head, size, why);
-    if (t.id === setupState.recommended) {
+    // One tag per card, and installed outranks recommended: what you HAVE is
+    // more useful to know than what we would have suggested.
+    const installed = setupState.model && t.id === setupState.model;
+    if (installed || t.id === setupState.recommended) {
       const tag = document.createElement('span');
-      tag.className = 'ob-choice-tag';
-      tag.textContent = 'suits this Mac';
+      tag.className = 'ob-choice-tag' + (installed ? ' on' : '');
+      tag.textContent = installed ? 'installed' : 'suits this Mac';
       b.appendChild(tag);
     }
     b.addEventListener('click', () => startModel(t.id));
@@ -429,12 +432,35 @@ function renderSelection() {
   }
 }
 
+// The screen has exactly two states and ONE function decides which is up.
+//
+// They used to be toggled from five places, and the states drifted apart: a
+// capture during testing caught the cards AND the progress bar on screen
+// together, showing "starting…" forever under a set of buttons that implied
+// nothing had started. Two booleans in five hands is how that happens.
+function showModelPhase(phase) {
+  const busy = phase === 'busy';
+  modelChoices.hidden = busy;
+  modelProg.hidden = !busy;
+  const cancel = document.getElementById('modelCancel');
+  if (cancel) {
+    cancel.hidden = !busy;
+    cancel.disabled = false;
+    cancel.textContent = 'cancel';
+  }
+}
+
 function startModel(tier) {
+  // Already the installed one: nothing to fetch, and pretending to download
+  // 5 GB that are already here would be a lie with a progress bar on it.
+  if (setupState && setupState.model === tier) {
+    showScreen('data');
+    return;
+  }
   selectedTier = tier;
   renderSelection();
   modelErr.hidden = true;
-  modelChoices.hidden = true;
-  modelProg.hidden = false;
+  showModelPhase('busy');
   modelBar.style.width = '0%';
   modelLabel.textContent = 'fetching…';
   downloading = true;
@@ -446,7 +472,10 @@ function startModel(tier) {
   // notification finds them wherever they are when it lands.
   clearTimeout(autoAdvance);
   autoAdvance = setTimeout(() => {
-    if (currentScreen === 'model' && !modelDone) showScreen('data');
+    // Gated on the SCREEN, not on whether a model exists. It used to check
+    // !modelDone, which loadSetup() sets true for an already-installed model —
+    // so on any Mac that already had one the screen never advanced at all.
+    if (currentScreen === 'model') showScreen('data');
   }, 5000);
 }
 let autoAdvance = null;
@@ -484,10 +513,7 @@ window.__hzSetup = (d) => {
   if (d.phase === 'failed') {
     downloading = false;
     refreshBack();
-    modelProg.hidden = true;
-    modelChoices.hidden = false;
-    const btn = document.getElementById('modelCancel');
-    if (btn) { btn.disabled = false; btn.hidden = false; btn.textContent = 'cancel'; }
+    showModelPhase('choose');
     if (d.error !== 'cancelled') {
       modelErr.hidden = false;
       modelErr.textContent = d.error || 'that did not work';
@@ -521,10 +547,19 @@ document.getElementById('modelSkip').addEventListener('click', () => showScreen(
 const dataStatus = document.getElementById('dataStatus');
 const permsEl = document.getElementById('perms');
 
+// "denied" covers two very different situations and the label has to as well.
+//
+// A person who saw a prompt and said no should be sent to Settings. A person
+// who saw NOTHING — because macOS declined to show the prompt at all — is being
+// told they refused something they were never asked, which is the one message
+// this app must never send. The two are told apart by whether the status was
+// still undetermined when we asked: if it was, and it came back denied, no
+// prompt was displayed.
 const PERM_LABEL = {
   granted: 'on',
   denied: 'open settings',
   undetermined: 'allow',
+  unasked: 'turn on in settings',
 };
 
 function paintPerms(map) {
@@ -561,11 +596,21 @@ permsEl.addEventListener('click', async (e) => {
     return;
   }
   btn.disabled = true;
+  const before = (lastPerms && lastPerms[which]) || 'undetermined';
   const res = await hzPost('requestPermission', { which }).catch(() => null);
   const map = {};
-  if (res && res.which) map[res.which] = res.status;
-  paintPerms({ ...(lastPerms || {}), ...map });
+  if (res && res.which) {
+    // Never asked, yet refused: macOS did not display the prompt. Say that,
+    // rather than implying a decision the owner never made.
+    map[res.which] =
+      before === 'undetermined' && res.status === 'denied' ? 'unasked' : res.status;
+  }
   lastPerms = { ...(lastPerms || {}), ...map };
+  paintPerms(lastPerms);
+  if (map[which] === 'unasked') {
+    dataStatus.textContent =
+      "macOS didn't show the prompt for that one — you can switch it on in Settings.";
+  }
 });
 
 let lastPerms = null;
@@ -595,9 +640,14 @@ function startPermPolling() {
     if (currentScreen !== 'data') return;
     const res = await hzPost('permissionState').catch(() => null);
     if (!res || !res.permissions) return;
-    const before = JSON.stringify(lastPerms);
-    lastPerms = res.permissions;
-    if (JSON.stringify(lastPerms) !== before) paintPerms(lastPerms);
+    const prev = lastPerms || {};
+    const next = { ...res.permissions };
+    // Keep the more precise word: the poll only ever reports denied, and
+    // downgrading "we were never asked" to "you said no" loses the truth.
+    for (const k of Object.keys(next)) {
+      if (prev[k] === 'unasked' && next[k] === 'denied') next[k] = 'unasked';
+    }
+    if (JSON.stringify(next) !== JSON.stringify(prev)) { lastPerms = next; paintPerms(next); }
   }, 1500);
 }
 function stopPermPolling() {
@@ -646,16 +696,18 @@ async function loadSetup() {
   const perms = await hzPost('permissionState').catch(() => null);
   lastPerms = (perms && perms.permissions) || null;
   paintPerms(lastPerms);
-  if (setupState.model) {
-    // Already has one — say so instead of offering the download again.
-    modelDone = true;
-    modelChoices.hidden = true;
-    modelProg.hidden = false;
-    modelBar.style.width = '100%';
-    modelLabel.textContent = 'already here';
-    const c = document.getElementById('modelCancel');
-    if (c) c.hidden = true;
-  } else {
-    renderChoices();
-  }
+  // ALWAYS SHOW THE CHOICES. An installed model marks its card; it does not
+  // replace the screen.
+  //
+  // This used to hide the cards entirely and say "already here", which turned
+  // the one screen where a person picks how the thing thinks into a dead end:
+  // no way to move up to the bigger model, no way to move down to the smaller
+  // one on a Mac that was struggling, and no way to even see what the options
+  // were. Having one already is a reason to mark it, not a reason to take the
+  // menu away.
+  // What is installed is a FACT ABOUT THE CARDS, not a statement that this
+  // step is finished — conflating the two is what froze the screen.
+  selectedTier = setupState.model || null;
+  renderChoices();
+  showModelPhase('choose');
 }

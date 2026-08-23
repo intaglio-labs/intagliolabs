@@ -20,6 +20,10 @@ import Photos
 enum Permissions {
   enum Status: String { case granted, denied, undetermined }
 
+  // Held only while a request is in flight; see the comment at their use.
+  private static var contactStore: CNContactStore?
+  private static var eventStore: EKEventStore?
+
   // EVERY "PARTIAL YES" IS A YES.
   //
   // Recent macOS added narrower grants — Contacts can come back .limited,
@@ -67,8 +71,18 @@ enum Permissions {
   /// prompt nobody sees is a prompt nobody answers, which TCC eventually
   /// records as a refusal.
   private static func comeForward() {
+    // TRIED AND REJECTED: raising the activation policy to .regular around the
+    // request. The theory was that a TCC prompt is app-modal and needs a normal
+    // app presence to attach to, which this LSUIElement app with only
+    // borderless panels does not have. It made no difference — contacts went
+    // from notDetermined (0) straight to denied (2) with nothing displayed,
+    // exactly as before — so the Dock icon it flashed bought nothing and the
+    // change is not kept. Recorded because the theory is a reasonable one to
+    // have again.
     NSApp.activate(ignoringOtherApps: true)
   }
+
+
 
   /// Ask for one, by name. The completion carries the status AFTER the prompt.
   ///
@@ -82,14 +96,35 @@ enum Permissions {
     switch which {
     case "contacts":
       guard contacts() == .undetermined else { finish(contacts()); return }
-      CNContactStore().requestAccess(for: .contacts) { ok, _ in finish(ok ? .granted : .denied) }
+      // THE STORE MUST OUTLIVE THE REQUEST.
+      //
+      // This was `CNContactStore().requestAccess(...)`, which creates a
+      // temporary that is released the instant the call returns. The request
+      // dies with it: the completion fires with false, no prompt is ever shown,
+      // and TCC records nothing — so the UI said "denied" for a permission the
+      // owner was never asked about, and the diagnostic showed the status still
+      // sitting at notDetermined afterwards. Held in a static for the duration.
+      contactStore = CNContactStore()
+      contactStore?.requestAccess(for: .contacts) { ok, _ in
+        contactStore = nil
+        finish(ok ? .granted : .denied)
+      }
     case "calendar":
       guard calendar() == .undetermined else { finish(calendar()); return }
-      let store = EKEventStore()
+      // Same lifetime rule. This one captured its store in the closure, which
+      // usually survives — but "usually" is not a guarantee worth relying on
+      // twice in one file.
+      eventStore = EKEventStore()
       if #available(macOS 14.0, *) {
-        store.requestFullAccessToEvents { ok, _ in finish(ok ? .granted : .denied) }
+        eventStore?.requestFullAccessToEvents { ok, _ in
+          eventStore = nil
+          finish(ok ? .granted : .denied)
+        }
       } else {
-        store.requestAccess(to: .event) { ok, _ in finish(ok ? .granted : .denied) }
+        eventStore?.requestAccess(to: .event) { ok, _ in
+          eventStore = nil
+          finish(ok ? .granted : .denied)
+        }
       }
     case "photos":
       guard photos() == .undetermined else { finish(photos()); return }
@@ -160,6 +195,34 @@ enum Permissions {
       }
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { raise() }
+  }
+
+  /// The raw authorization values, written where a person can read them.
+  ///
+  /// A permission that will not grant is nearly impossible to debug from the
+  /// outside: TCC.db is itself protected, the system log is quiet about
+  /// in-process denials, and the UI can only say "denied" without saying which
+  /// kind. This records what each API actually returned, so the next person
+  /// looking at "it just says open settings" has a fact to start from instead
+  /// of a guess.
+  static func writeDiagnostic() {
+    let logs = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".hazlie/logs")
+    try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true,
+                                             attributes: [.posixPermissions: 0o700])
+    let payload: [String: Any] = [
+      "contacts_raw": CNContactStore.authorizationStatus(for: .contacts).rawValue,
+      "calendar_raw": EKEventStore.authorizationStatus(for: .event).rawValue,
+      "photos_raw": PHPhotoLibrary.authorizationStatus(for: .readWrite).rawValue,
+      "mapped": all,
+      "bundle": Bundle.main.bundleIdentifier ?? "?",
+      "path": Bundle.main.bundleURL.path,
+      "active": NSApp.isActive,
+      "at": ISO8601DateFormatter().string(from: Date()),
+    ]
+    guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted])
+    else { return }
+    try? data.write(to: logs.appendingPathComponent("permissions.json"))
   }
 
   static var all: [String: String] {

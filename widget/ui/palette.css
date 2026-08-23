@@ -2293,6 +2293,21 @@ body.connections .tile-tip.on { opacity: 1; }
    should never be a surprise, so the gigabytes sit next to the label rather
    than behind a confirm. */
 .ob-choices { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+
+/* [hidden] LOSES TO A CLASS THAT SETS display, and both of these set it.
+ *
+ * The UA stylesheet's `[hidden] { display: none }` is one attribute selector;
+ * `.ob-prog { display: flex }` is a class, which wins — so `el.hidden = true`
+ * changed the property and nothing on screen. The model screen showed its cards
+ * AND its progress bar at once, stuck on "starting…" under buttons implying
+ * nothing had started, and the auto-advance looked broken when it was the
+ * hiding that was.
+ *
+ * This file already knew: `.ob-screen[hidden] { display: none }` exists a few
+ * hundred lines up for exactly this reason. The knowledge just did not travel
+ * to the rules added later, which is its own kind of lesson.
+ */
+.ob-prog[hidden], .ob-choices[hidden], .ob-perms[hidden] { display: none; }
 .ob-choice {
   position: relative;
   flex: 1 1 220px; max-width: 260px;
@@ -2472,3 +2487,5 @@ body.connections .tile-tip.on { opacity: 1; }
   padding: 2px 0; margin-bottom: -8px;
 }
 .ob-back:hover { color: #ddd7cb; }
+/* The tag on a model you already have, as opposed to one we suggest. */
+.ob-setup .ob-choice-tag.on { background: #6fc78d; color: #10231a; }

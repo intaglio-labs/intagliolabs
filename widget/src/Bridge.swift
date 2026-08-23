@@ -685,6 +685,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": ok ? "ok" : "error"])
 
     case "permissionState":
+      Permissions.writeDiagnostic()
       reply(webView, id, ["state": "ok", "permissions": Permissions.all])
 
     case "requestPermission":

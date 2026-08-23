@@ -85,6 +85,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // widget never covers work. Fallback if icon stacking misbehaves on a
     // future OS: kCGDesktopWindowLevel + 1.
     w.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
+    // Capturable. The widget lives BELOW every normal window on purpose — it
+    // must never cover the owner's work — but that same depth put it beneath
+    // what ⇧⌘4-space will offer, so there was no way to screenshot the app to
+    // show somebody. sharingType is what the window server consults for
+    // capture; .readWrite is the default but it is set explicitly here because
+    // the level makes this window look like desktop furniture and the intent
+    // should be written down rather than inferred.
+    w.sharingType = .readWrite
     // Every Space, stays put through Mission Control, never in the Cmd-` cycle.
     w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
     w.contentView = widgetWeb

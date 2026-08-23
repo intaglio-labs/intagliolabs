@@ -46,6 +46,19 @@ final class WidgetWindow: NSPanel {
 
 final class PopupPanel: NSPanel {
   override var canBecomeKey: Bool { true }
+  // SCREENSHOTTABLE.
+  //
+  // ⇧⌘4 then space asks the window server for pickable windows, and it skips
+  // anything that does not behave like a real window — a borderless
+  // non-activating panel that also refuses to become main reads as chrome, so
+  // hovering over onboarding selected the desktop behind it instead. Someone
+  // could not send a screenshot of the thing they were being asked about.
+  //
+  // canBecomeMain is what the picker looks at. Saying yes costs nothing here:
+  // these panels are modal-ish surfaces the owner is already looking at, and
+  // unlike the widget (which must never take main from the work behind it)
+  // there is no work behind a full-screen onboarding scrim.
+  override var canBecomeMain: Bool { true }
   // AppKit constrains a window's frame so it cannot cover the menu bar. That
   // is right for a document window and wrong for onboarding, which is a scrim
   // over the WHOLE display — constrained, it was handed back the visibleFrame
