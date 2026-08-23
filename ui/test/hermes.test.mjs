@@ -41,6 +41,13 @@ let admin;
 let adminBase;
 let adminDbPath;
 
+// allowedOrigins is passed EXPLICITLY, and that is the point rather than
+// boilerplate. DEFAULT_ALLOWED_ORIGINS is empty as of 2026-08-23, so a server
+// started without this line trusts no browser origin at all -- which is the
+// correct posture for a real install and the wrong one for the suite below,
+// which deliberately exercises the browser channel. Naming it here means a test
+// that uses ALLOWED_ORIGIN is testing a capability somebody switched on, not one
+// it inherited from a default that outlived the app it was written for.
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), 'hermes-test-'));
   hermes = await start({
@@ -48,6 +55,7 @@ before(async () => {
     dbPath: join(dir, 'context.db'),
     llamaApiKey: TEST_LLAMA_KEY,
     bearerToken: TEST_BEARER_TOKEN,
+    allowedOrigins: ALLOWED_ORIGIN,
   });
   base = `http://127.0.0.1:${hermes.port}`;
   adminDbPath = join(dir, 'admin.db');
@@ -56,6 +64,7 @@ before(async () => {
     dbPath: adminDbPath,
     llamaApiKey: TEST_LLAMA_KEY,
     bearerToken: TEST_BEARER_TOKEN,
+    allowedOrigins: ALLOWED_ORIGIN,
   });
   adminBase = `http://127.0.0.1:${admin.port}`;
 });
@@ -299,8 +308,9 @@ test('secret loader rejects a symlink, a bad shape, and a missing file', {
   }
 });
 
-test('CORS allowlist defaults to exact Expo origins and accepts configuration', () => {
-  assert.deepEqual([...parseAllowedOrigins()], [...DEFAULT_ALLOWED_ORIGINS]);
+test('CORS allowlist defaults to EMPTY and accepts configuration', () => {
+  assert.deepEqual([...parseAllowedOrigins()], []);
+  assert.deepEqual([...DEFAULT_ALLOWED_ORIGINS], []);
   assert.deepEqual(
     [...parseAllowedOrigins('http://localhost:9090, https://console.example')],
     ['http://localhost:9090', 'https://console.example']
@@ -309,6 +319,48 @@ test('CORS allowlist defaults to exact Expo origins and accepts configuration', 
     () => parseAllowedOrigins('http://localhost:8081/not-an-origin'),
     /must be HTTP\(S\) origins/
   );
+});
+
+// The guard that has to FIRE, not merely pass on a tree that is already correct.
+// Before 2026-08-23 a default install trusted http://localhost:8081 with no token,
+// because the Expo dev app needed it -- and that app was deleted without the
+// exemption being withdrawn. This test is what makes putting it back a red suite:
+// a server configured with nothing must refuse the exact Origin that used to be
+// a free pass, while the bearer channel keeps working through the same server.
+test('a default server trusts NO browser origin, and still serves the bearer channel', async () => {
+  const bare = await start({
+    port: 0,
+    dbPath: ':memory:',
+    llamaApiKey: TEST_LLAMA_KEY,
+    bearerToken: TEST_BEARER_TOKEN,
+  });
+  try {
+    const bareBase = `http://127.0.0.1:${bare.port}`;
+
+    // The retired Expo origin: no longer a caller, no longer trusted.
+    for (const origin of ['http://localhost:8081', 'http://127.0.0.1:8081']) {
+      const res = await fetch(`${bareBase}/stats`, { headers: { Origin: origin } });
+      assert.equal(res.status, 401, `${origin} must not authorize by Origin alone`);
+      const cors = await fetch(`${bareBase}/stats`, { headers: { Origin: origin } });
+      assert.equal(
+        cors.headers.get('access-control-allow-origin'),
+        null,
+        `${origin} must not be reflected`
+      );
+    }
+
+    // An Origin-less bearer caller is unaffected -- this is how the widget,
+    // connect, the connectors daemon and the CLIs all arrive.
+    const ok = await fetch(`${bareBase}/stats`, {
+      headers: { Authorization: `Bearer ${TEST_BEARER_TOKEN}` },
+    });
+    assert.equal(ok.status, 200, 'the bearer channel must survive an empty allowlist');
+
+    // And /health stays the one unauthenticated route.
+    assert.equal((await fetch(`${bareBase}/health`)).status, 200);
+  } finally {
+    await bare.close();
+  }
 });
 
 test('a configured CORS origin replaces rather than widens the defaults', async () => {

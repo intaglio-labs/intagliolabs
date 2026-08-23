@@ -19,6 +19,11 @@ rather than silently reconciled. Consequence for the hermes branch:
 face is actually removed — that shrink belongs to a separate, coordinated
 commit over there, not to this directory.
 
+**Done, 2026-08-23.** `DEFAULT_ALLOWED_ORIGINS` is now empty; see
+`ui/server/hermes.mjs`. The shrink mattered more than "dead config" suggests —
+the entry was not merely unused, it was an unauthenticated channel that any
+other process holding port 8081 would have inherited.
+
 ## Requirement on /vault/ask (MEMORY-PLAN Days 7–9, not yet built)
 
 The chat view targets `POST /vault/ask` on hermes. Whoever builds it:

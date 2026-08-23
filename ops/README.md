@@ -87,8 +87,15 @@ is no way to hand browser JavaScript a `0600` file, and inlining one through
 `EXPO_PUBLIC_*` would ship it in the bundle — so the page never gets one. See
 `authorize()` in `ui/server/hermes.mjs` for the residual gap this does not close.
 
-Hermes' default browser allowlist is Expo at `http://localhost:8081` and
-`http://127.0.0.1:8081`; set `HERMES_ALLOWED_ORIGINS` to replace that list.
+**Hermes' default browser allowlist is EMPTY** (changed 2026-08-23). No browser
+origin is trusted unless `HERMES_ALLOWED_ORIGINS` names one, so on a default
+install `authorize()` has exactly one channel: no `Origin`, plus the bearer token.
+It used to default to Expo at `http://localhost:8081` / `http://127.0.0.1:8081`,
+which was correct while the Expo web face existed and became a free pass for
+whatever else held that port once the widget replaced it. Every real caller — the
+widget's native URLSession, `connect`, the connectors daemon, the `ui/scripts`
+CLIs — already arrives Origin-less with the token, so nothing in the product
+needed the browser channel.
 `HERMES_LLAMA_URL` may move the upstream only to another HTTP loopback origin,
 `HERMES_LLAMA_API_KEY_FILE` may point Hermes at another owner-only key file, and
 `HERMES_TOKEN_FILE` does the same for the bearer token.
@@ -165,11 +172,14 @@ Nothing latency-related has been measured on this machine yet. Specifically:
   memory on the target 8 GB M2 before the first token.
 - **8B behavior remains untested on a sufficiently large host.** On this target,
   setup verifies a real generated token rather than trusting `/health` alone.
-- **Exact browser origin** is limited to Expo at `http://localhost:8081` for
-  llama-server and to the two documented port-8081 loopback spellings for
-  Hermes. Use `localhost` for the normal path. If development moves, replace
-  the exact origin in the llama-server plist and configure
-  `HERMES_ALLOWED_ORIGINS`; do not fall back to wildcard CORS for convenience.
+- **Exact browser origin.** Hermes now trusts none by default (above). The
+  llama-server plist still carries `--cors-origins http://localhost:8081`, which
+  is the same dead Expo origin — left alone here because the browser never
+  connects to port 8080 (it goes through Hermes' `/lane/local` proxy) and the
+  direct port additionally requires the API key, so the stale entry grants
+  nothing on its own. Worth shrinking on the next pass through that plist. If
+  development moves, configure `HERMES_ALLOWED_ORIGINS`; do not fall back to
+  wildcard CORS for convenience.
 - **Kokoro voice file:** the product's `localOnly` preflight primes the vendored
   voice before listening and fails closed if it is unavailable. Product use
   therefore has no first-utterance network fetch. See

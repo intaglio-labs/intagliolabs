@@ -57,12 +57,13 @@ sending one — and that store feeds what the assistant says. The token is what
 makes an Origin-less caller legitimate rather than merely unidentified.
 
 **The residual gap, stated plainly so "authenticated" does not imply more than it
-delivers:** a same-machine process running as a *different* uid can send
-`Origin: http://localhost:8081` and reach the browser channel without knowing the
-token. That is strictly smaller than what it replaces (which needed no forgery at
-all, and additionally admitted any web page the household happened to have open),
-and `~/.hazlie` is `0700` so such a process cannot read the database directly
-instead. A process running as *your own user* is out of scope by construction: it
+delivers:** a same-machine process running as a *different* uid can send an
+allowlisted `Origin` and reach the browser channel without knowing the token.
+**Closed by default since 2026-08-23** — the allowlist is empty unless someone
+sets `HERMES_ALLOWED_ORIGINS`, so a default install has no Origin to forge. It is
+still described here because naming any origin brings it back, which is a trade
+worth making deliberately and not worth inheriting. `~/.hazlie` is `0700` so such
+a process cannot read the database directly instead. A process running as *your own user* is out of scope by construction: it
 can read the token file and the database, and no server-side check changes that.
 The machine is still the security boundary.
 
@@ -80,8 +81,9 @@ rejected (verified). That is deliberate: `text/plain` is CORS-safelisted, and
 accepting it would let any web page the household visits fire a no-preflight POST
 into the context store.
 
-The browser allowlist defaults to `http://localhost:8081` and
-`http://127.0.0.1:8081`; `HERMES_ALLOWED_ORIGINS` replaces the list.
+The browser allowlist **defaults to empty**: an `Origin` authorizes nothing
+unless `HERMES_ALLOWED_ORIGINS` names it. Ingest callers use the bearer channel,
+which is unaffected.
 
 ## Row schema
 
