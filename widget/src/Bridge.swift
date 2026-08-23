@@ -35,6 +35,66 @@ protocol BridgeDelegate: AnyObject {
 
 final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, URLSessionTaskDelegate {
 
+  // WHICH PAGE MAY ASK FOR WHAT.
+  //
+  // Every webview registers this same Bridge under the same handler name, so
+  // until this table existed the dispatch switched on the message type alone and
+  // any page could call anything: onboarding could start a bridge login, the
+  // connections popup could ask a question, and any of them could post a
+  // voiceTranscript for an utterance the microphone never heard.
+  //
+  // Nothing exploited that -- the pages are local, every one carries a CSP, and
+  // the only innerHTML writes escape properly -- so this is a compartment, not a
+  // patch. The reason to build it anyway is the blast radius: the day a page does
+  // render something untrusted, the answer should be "it could call three things"
+  // rather than "it could call everything". The check is cheap because the
+  // message already arrives with its webView.
+  //
+  // Derived from what each page actually calls (grep hzPost across widget/ui);
+  // `markHandheld` has no caller today and is listed under connections because
+  // that is the surface it is about. A case missing from every list here is a
+  // test failure, not a silent 404 -- see widget/test/bridge-capabilities.test.mjs.
+  static let sharedActions: Set<String> = [
+    // bridge.js is loaded by every page, so these two are everyone's.
+    "prefs", "fitContent",
+  ]
+  static let pageCapabilities: [String: Set<String>] = [
+    "widget": ["drag", "openChat", "openChatWith", "openConnections", "openPeople",
+               "openSky", "voiceArm"],
+    "chat": ["ask", "cancel", "chatReady", "close"],
+    "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
+                    "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
+                    "status", "setMotion", "setScale", "setSounds", "openOnboarding",
+                    "markHandheld"],
+    "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
+                   "widgetSpot"],
+    // people.html includes connector-tile.js as well as people.js (check the
+    // script tags, not the file's own comment about being shared), so the People
+    // popup renders connector tiles and needs the bridge verbs too. Writing this
+    // map from the wrong file cost one broken popup in review.
+    "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
+               "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
+               "openExternal"],
+    "people-sky": ["close", "peopleMap"],
+    "ear": ["orbState", "voiceError", "voiceTranscript"],
+  ]
+
+  // Set by the factories in Windows.swift at creation. ObjectIdentifier rather
+  // than the URL: the page's own address is a thing the page influences, and
+  // identity here should come from the code that made the view.
+  private var pageOf: [ObjectIdentifier: String] = [:]
+
+  func register(_ webView: WKWebView, as page: String) {
+    pageOf[ObjectIdentifier(webView)] = page
+  }
+
+  private func allows(_ webView: WKWebView, _ type: String) -> Bool {
+    if Bridge.sharedActions.contains(type) { return true }
+    guard let page = pageOf[ObjectIdentifier(webView)],
+          let allowed = Bridge.pageCapabilities[page] else { return false }
+    return allowed.contains(type)
+  }
+
   // The faces the widget page knows how to wear. Allow-listed here rather
   // than passed through, because this string is interpolated into JavaScript
   // on the other side — an unrecognised value must never reach it.
@@ -223,6 +283,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           let webView = message.webView
     else { dbg("DROPPED message: \(String(describing: message.body).prefix(120))"); return }
     dbg("recv \(type)")
+    // Fail closed: an unregistered view, or a page asking for something outside
+    // its compartment, gets an error rather than the action.
+    guard allows(webView, type) else {
+      let page = pageOf[ObjectIdentifier(webView)] ?? "unregistered"
+      dbg("REFUSED \(type) from \(page)")
+      reply(webView, id, ["state": "error", "error": "action not available to this surface"])
+      return
+    }
     let payload = body["payload"] as? [String: Any] ?? [:]
 
     switch type {
@@ -442,9 +510,24 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           self.reply(webView, id, begin) // begin failed → pass the notice back
           return
         }
+        // The web-login policy comes from the server's platform table. A
+        // platform with no host list cannot be linked this way at all — Discord
+        // and Slack want a pasted token, Telegram a phone code — so say so and
+        // let the page offer the manual path, instead of opening a window whose
+        // first navigation the fence would cancel and whose cookie poll could
+        // never fire. That blank window was the bug.
+        let allowedHosts = (begin["allowedHosts"] as? [String])?.filter { !$0.isEmpty } ?? []
+        let sessionCookie = begin["sessionCookie"] as? String ?? ""
+        guard !allowedHosts.isEmpty, !sessionCookie.isEmpty else {
+          self.reply(webView, id, ["state": "manual", "transcript": begin["transcript"] ?? []])
+          return
+        }
         let label = begin["label"] as? String ?? p
         DispatchQueue.main.async {
-          BridgeLogin.present(label: label, loginUrl: loginUrl, cookieDomain: cookieDomain) { cookiesJSON in
+          BridgeLogin.present(
+            label: label, loginUrl: loginUrl, cookieDomain: cookieDomain,
+            sessionCookie: sessionCookie, allowedHosts: allowedHosts
+          ) { cookiesJSON in
             guard let cookiesJSON else {
               self.reply(webView, id, ["state": "cancelled"])
               return

@@ -21,6 +21,27 @@ import { join } from 'node:path';
 
 const matrixDir = (home) => join(home, '.hazlie', 'matrix');
 
+// THE WEB-LOGIN POLICY LIVES HERE AND ONLY HERE (added 2026-08-23).
+//
+// `webLogin` says whether a platform can be linked by driving its real login
+// page in an embedded webview and harvesting session cookies -- and, when it
+// can, which hosts that flow may navigate to and which cookie means "logged
+// in". BridgeLogin.swift ENFORCES this; it no longer authors it.
+//
+// It used to author it: allowedSuffixes was hardcoded to Meta's four hosts in
+// Swift while this table advertised a loginUrl for six platforms, and
+// connector-tile.js fired the web login for any bridge tile without checking.
+// So X, Discord, Slack and Telegram opened a branded window, had their first
+// navigation cancelled by a fence that had never heard of them, and sat blank
+// until the owner closed it -- no error, and a cookie poll that could never
+// fire. Two copies of one decision, four platforms out of date.
+//
+// Note WHY the four are absent rather than merely unlisted: Discord and Slack
+// are token logins (`login-token` -- you paste the account token the bot asks
+// for) and Telegram logs in by phone. None of the three can consume harvested
+// cookies at all, so the right answer is not a wider fence, it is not offering
+// the flow. Their `loginUrl` stays as the page a person opens themselves.
+//
 // The platforms this page can link, and everything that differs between
 // them. `initial` is the first command that starts login: Messenger lists four
 // flows so we pick `facebook` (cookies from an existing session — the low-risk
@@ -44,6 +65,9 @@ export const PLATFORMS = Object.freeze({
     // the stable defaults.
     loginUrl: 'https://www.facebook.com/login/',
     cookieDomain: 'facebook.com',
+    // Meta's login bounces across its own properties (account center, 2FA),
+    // so the flow needs all three; `c_user` appearing means the session is up.
+    webLogin: { allowedHosts: ['facebook.com', 'messenger.com', 'meta.com'], sessionCookie: 'c_user' },
   },
   instagram: {
     id: 'instagram',
@@ -56,6 +80,8 @@ export const PLATFORMS = Object.freeze({
     site: 'instagram.com',
     loginUrl: 'https://www.instagram.com/accounts/login/',
     cookieDomain: 'instagram.com',
+    // Instagram's login can hand off to Meta's account center mid-flow.
+    webLogin: { allowedHosts: ['instagram.com', 'facebook.com', 'meta.com'], sessionCookie: 'sessionid' },
   },
   // Owner-gated in SOCIAL-BRIDGES-PLAN.md ("accept the account risk");
   // Austin said go, 2026-08-22. mautrix-twitter, same megabridge family —
@@ -71,6 +97,10 @@ export const PLATFORMS = Object.freeze({
     site: 'x.com',
     loginUrl: 'https://x.com/login',
     cookieDomain: 'x.com',
+    // twitter.com still redirects to x.com and some flows land there first.
+    // auth_token is the session cookie; the bridge also wants ct0, which the
+    // whole-domain harvest picks up alongside it.
+    webLogin: { allowedHosts: ['x.com', 'twitter.com'], sessionCookie: 'auth_token' },
   },
   // Telegram, Discord, Slack (owner asked, 2026-08-22). Telegram logs in by
   // PHONE (the bot sends a code to the Telegram app), not cookies — so it
@@ -89,6 +119,8 @@ export const PLATFORMS = Object.freeze({
     site: 'telegram.org',
     loginUrl: 'https://web.telegram.org/',
     cookieDomain: null,
+    // Phone login: the bot sends a code to the Telegram app. No cookie flow.
+    webLogin: null,
   },
   discord: {
     id: 'discord',
@@ -101,6 +133,8 @@ export const PLATFORMS = Object.freeze({
     site: 'discord.com',
     loginUrl: 'https://discord.com/login',
     cookieDomain: 'discord.com',
+    // Token login (`login-token`). Cookies are not what this bridge wants.
+    webLogin: null,
   },
   slack: {
     id: 'slack',
@@ -113,6 +147,8 @@ export const PLATFORMS = Object.freeze({
     site: 'slack.com',
     loginUrl: 'https://slack.com/signin',
     cookieDomain: 'slack.com',
+    // Token login (`login-token`). Cookies are not what this bridge wants.
+    webLogin: null,
   },
 });
 

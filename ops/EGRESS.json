@@ -37,11 +37,13 @@
     "when the code was extracted for open source: six hosts reached only by the",
     "marketing site (a separate artifact), and the outbound iMessage lane, which",
     "was the courier's send path and is not here. A ledger that over-declares is",
-    "as misleading as one that under-declares \u2014 it invites a reader to believe a",
-    "capability exists."
+    "as misleading as one that under-declares — it invites a reader to believe a",
+    "capability exists.",
+    "",
+    "2026-08-23. The login-webview kind was DEFINED here and had ZERO entries, while the in-app login had been navigating Meta's hosts since it shipped. The tripwire could not see them: allowedSuffixes was a Swift array of BARE host strings ('instagram.com'), and the scan matches https?://host. So a host list that is a fence rather than a URL is invisible to it -- worth knowing, because a fence is exactly a list of places the code can go. The five entries added here close that, and connect/test/bridgePolicy.test.mjs now asserts each platform's loginUrl is inside its own fence."
   ],
   "version": 1,
-  "last_reviewed": "2026-08-22",
+  "last_reviewed": "2026-08-23",
   "_kinds": {
     "api": "the daemon or server opens this socket itself, on a timer or on demand",
     "bridge": "a local container holds a standing authenticated session to this platform",
@@ -65,24 +67,14 @@
   ],
   "paths": [
     {
-      "host": "imap.gmail.com",
+      "host": "api.notion.com",
       "kind": "api",
-      "component": "connectors/sources/mail.mjs",
+      "component": "connectors/lib/notionClient.mjs",
       "direction": "inbound-fetch",
-      "purpose": "fetch the owner's own mailbox down to this Mac",
-      "credential": "gmail app password",
-      "decision": "ui/AGENTS.md egress policy, 2026-08-19",
-      "evidence": "connectors/sources/mail.mjs:32 DEFAULT_HOST"
-    },
-    {
-      "host": "public-api.granola.ai",
-      "kind": "api",
-      "component": "connectors/lib/granolaClient.mjs",
-      "direction": "inbound-fetch",
-      "purpose": "fetch back transcripts and summaries Granola already holds",
-      "credential": "granola api key",
-      "decision": "ui/AGENTS.md egress policy, 2026-08-19. REST endpoints only -- the MCP query_* tools run inference server-side and are NOT approved",
-      "evidence": "connectors/lib/granolaClient.mjs"
+      "purpose": "fetch the owner's own Notion pages",
+      "credential": "notion internal integration token",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
+      "evidence": "connectors/lib/notionClient.mjs:18 NOTION_BASE_URL"
     },
     {
       "host": "api.ouraring.com",
@@ -105,6 +97,16 @@
       "evidence": "connectors/lib/ouraClient.mjs"
     },
     {
+      "host": "imap.gmail.com",
+      "kind": "api",
+      "component": "connectors/sources/mail.mjs",
+      "direction": "inbound-fetch",
+      "purpose": "fetch the owner's own mailbox down to this Mac",
+      "credential": "gmail app password",
+      "decision": "ui/AGENTS.md egress policy, 2026-08-19",
+      "evidence": "connectors/sources/mail.mjs:32 DEFAULT_HOST"
+    },
+    {
       "host": "oauth2.googleapis.com",
       "kind": "api",
       "component": "connectors/lib/gcalClient.mjs",
@@ -113,6 +115,16 @@
       "credential": "google refresh token",
       "decision": "ui/AGENTS.md egress policy, amended 2026-08-19",
       "evidence": "connectors/lib/gcalClient.mjs"
+    },
+    {
+      "host": "public-api.granola.ai",
+      "kind": "api",
+      "component": "connectors/lib/granolaClient.mjs",
+      "direction": "inbound-fetch",
+      "purpose": "fetch back transcripts and summaries Granola already holds",
+      "credential": "granola api key",
+      "decision": "ui/AGENTS.md egress policy, 2026-08-19. REST endpoints only -- the MCP query_* tools run inference server-side and are NOT approved",
+      "evidence": "connectors/lib/granolaClient.mjs"
     },
     {
       "host": "www.googleapis.com",
@@ -125,14 +137,34 @@
       "evidence": "connectors/lib/gcalClient.mjs"
     },
     {
-      "host": "api.notion.com",
-      "kind": "api",
-      "component": "connectors/lib/notionClient.mjs",
-      "direction": "inbound-fetch",
-      "purpose": "fetch the owner's own Notion pages",
-      "credential": "notion internal integration token",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
-      "evidence": "connectors/lib/notionClient.mjs:18 NOTION_BASE_URL"
+      "host": "discord.com",
+      "kind": "bridge",
+      "component": "bridges/ mautrix-discord + connect/lib/bridge.mjs",
+      "direction": "bidirectional",
+      "purpose": "Discord DMs through a local Matrix bridge",
+      "credential": "harvested session tokens",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
+      "evidence": "connect/lib/bridge.mjs; bridges/docker-compose.yml:107"
+    },
+    {
+      "host": "slack.com",
+      "kind": "bridge",
+      "component": "bridges/ mautrix-slack + connect/lib/bridge.mjs",
+      "direction": "bidirectional",
+      "purpose": "Slack DMs through a local Matrix bridge",
+      "credential": "harvested session tokens",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
+      "evidence": "connect/lib/bridge.mjs; bridges/docker-compose.yml:118"
+    },
+    {
+      "host": "web.telegram.org",
+      "kind": "bridge",
+      "component": "bridges/ mautrix-telegram + connect/lib/bridge.mjs",
+      "direction": "bidirectional",
+      "purpose": "Telegram DMs through a local Matrix bridge",
+      "credential": "harvested session tokens",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
+      "evidence": "connect/lib/bridge.mjs; bridges/docker-compose.yml:96"
     },
     {
       "host": "www.facebook.com",
@@ -142,7 +174,8 @@
       "purpose": "Messenger DMs through a local Matrix bridge",
       "credential": "harvested session cookies (full account bearers)",
       "decision": "SOCIAL-BRIDGES-PLAN.md, owner-requested 2026-08-21, 'accept the account risk'",
-      "evidence": "connect/lib/bridge.mjs PLATFORMS.messenger; bridges/docker-compose.yml"
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.messenger; bridges/docker-compose.yml",
+      "note": "The bare domain is declared separately under login-webview: the embedded login navigates the apex and its subdomains, not just this www host."
     },
     {
       "host": "www.instagram.com",
@@ -152,7 +185,8 @@
       "purpose": "Instagram DMs through a local Matrix bridge",
       "credential": "harvested session cookies (full account bearers)",
       "decision": "SOCIAL-BRIDGES-PLAN.md, owner-requested 2026-08-21",
-      "evidence": "connect/lib/bridge.mjs PLATFORMS.instagram; bridges/docker-compose.yml"
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.instagram; bridges/docker-compose.yml",
+      "note": "The bare domain is declared separately under login-webview: the embedded login navigates the apex and its subdomains, not just this www host."
     },
     {
       "host": "x.com",
@@ -162,69 +196,58 @@
       "purpose": "X/Twitter DMs through a local Matrix bridge",
       "credential": "harvested auth_token + ct0 cookies (full account bearers)",
       "decision": "SOCIAL-BRIDGES-PLAN.md:112, owner decision 2026-08-21, in scope; shipped 2026-08-22",
-      "evidence": "connect/lib/bridge.mjs PLATFORMS.twitter; bridges/docker-compose.yml"
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.twitter; bridges/docker-compose.yml",
+      "note": "ALSO reached as a login-webview: the in-app login loads x.com/login and harvests auth_token + ct0. Same host, two capabilities."
     },
     {
-      "host": "slack.com",
-      "kind": "bridge",
-      "component": "bridges/ mautrix-slack + connect/lib/bridge.mjs",
-      "direction": "bidirectional",
-      "purpose": "Slack DMs through a local Matrix bridge",
-      "credential": "harvested session tokens",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
-      "evidence": "connect/lib/bridge.mjs; bridges/docker-compose.yml:118"
+      "host": "facebook.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift (fence from connect/lib/bridge.mjs)",
+      "direction": "outbound",
+      "purpose": "Messenger cookie login, and the host Instagram's login hands off to",
+      "credential": "the owner types their own password into the platform's real page; session cookies are harvested from the isolated non-persistent store",
+      "decision": "owner decision 2026-08-21 (SOCIAL-BRIDGES-PLAN.md) covers the cookie login itself; these hosts are the navigation fence that flow runs inside, declared 2026-08-23 when the fence moved out of BridgeLogin.swift into connect/lib/bridge.mjs PLATFORMS.webLogin",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.*.webLogin.allowedHosts; enforced in widget/src/BridgeLogin.swift decidePolicyFor; asserted in connect/test/bridgePolicy.test.mjs"
     },
     {
-      "host": "discord.com",
-      "kind": "bridge",
-      "component": "bridges/ mautrix-discord + connect/lib/bridge.mjs",
-      "direction": "bidirectional",
-      "purpose": "Discord DMs through a local Matrix bridge",
-      "credential": "harvested session tokens",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
-      "evidence": "connect/lib/bridge.mjs; bridges/docker-compose.yml:107"
+      "host": "instagram.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift (fence from connect/lib/bridge.mjs)",
+      "direction": "outbound",
+      "purpose": "Instagram cookie login",
+      "credential": "the owner types their own password into the platform's real page; session cookies are harvested from the isolated non-persistent store",
+      "decision": "owner decision 2026-08-21 (SOCIAL-BRIDGES-PLAN.md) covers the cookie login itself; these hosts are the navigation fence that flow runs inside, declared 2026-08-23 when the fence moved out of BridgeLogin.swift into connect/lib/bridge.mjs PLATFORMS.webLogin",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.*.webLogin.allowedHosts; enforced in widget/src/BridgeLogin.swift decidePolicyFor; asserted in connect/test/bridgePolicy.test.mjs"
     },
     {
-      "host": "web.telegram.org",
-      "kind": "bridge",
-      "component": "bridges/ mautrix-telegram + connect/lib/bridge.mjs",
-      "direction": "bidirectional",
-      "purpose": "Telegram DMs through a local Matrix bridge",
-      "credential": "harvested session tokens",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
-      "evidence": "connect/lib/bridge.mjs; bridges/docker-compose.yml:96"
+      "host": "messenger.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift (fence from connect/lib/bridge.mjs)",
+      "direction": "outbound",
+      "purpose": "Messenger cookie login can land here mid-flow",
+      "credential": "the owner types their own password into the platform's real page; session cookies are harvested from the isolated non-persistent store",
+      "decision": "owner decision 2026-08-21 (SOCIAL-BRIDGES-PLAN.md) covers the cookie login itself; these hosts are the navigation fence that flow runs inside, declared 2026-08-23 when the fence moved out of BridgeLogin.swift into connect/lib/bridge.mjs PLATFORMS.webLogin",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.*.webLogin.allowedHosts; enforced in widget/src/BridgeLogin.swift decidePolicyFor; asserted in connect/test/bridgePolicy.test.mjs"
     },
     {
-      "host": "ghcr.io",
-      "kind": "registry",
-      "component": "bridges/docker-compose.yml",
-      "direction": "pull",
-      "purpose": "Synapse homeserver image",
-      "credential": "none",
-      "decision": "implied by the bridge decisions above; never enumerated as egress before this file",
-      "evidence": "bridges/docker-compose.yml:28 ghcr.io/element-hq/synapse:v1.140.0"
+      "host": "meta.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift (fence from connect/lib/bridge.mjs)",
+      "direction": "outbound",
+      "purpose": "Meta account center / 2FA step inside the Messenger and Instagram logins",
+      "credential": "the owner types their own password into the platform's real page; session cookies are harvested from the isolated non-persistent store",
+      "decision": "owner decision 2026-08-21 (SOCIAL-BRIDGES-PLAN.md) covers the cookie login itself; these hosts are the navigation fence that flow runs inside, declared 2026-08-23 when the fence moved out of BridgeLogin.swift into connect/lib/bridge.mjs PLATFORMS.webLogin",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.*.webLogin.allowedHosts; enforced in widget/src/BridgeLogin.swift decidePolicyFor; asserted in connect/test/bridgePolicy.test.mjs"
     },
     {
-      "host": "dock.mau.dev",
-      "kind": "registry",
-      "component": "bridges/docker-compose.yml",
-      "direction": "pull",
-      "purpose": "all six mautrix bridge images",
-      "credential": "none",
-      "decision": "implied by the bridge decisions above; never enumerated as egress before this file",
-      "evidence": "bridges/docker-compose.yml:53,64,79,96,107,118",
-      "note": "telegram, discord and slack are pinned to :latest, a MUTABLE tag, on containers that receive the owner's live session cookies. meta/instagram/twitter are pinned to a version tag. None are pinned by digest."
-    },
-    {
-      "host": "huggingface.co",
-      "kind": "model-asset",
-      "component": "widget/voice/scripts/fetch-models.mjs (build), ops/setup-llm.sh (setup)",
-      "direction": "inbound-fetch",
-      "purpose": "download the Kokoro voice and llama model weights",
-      "credential": "HF_TOKEN for gated repos",
-      "decision": "Build/setup-time model download, not reachable from the running app. Model weights are hundreds of megabytes and are fetched rather than committed. Was UNRECORDED for the same reason as the sources above.",
-      "evidence": "widget/voice/scripts/fetch-models.mjs; ops/setup-llm.sh",
-      "note": "Until 4128ae2c this was ALSO a RUNTIME path in the shipped app: widget/ui/ear-main.js called createVoice() without localOnly, so a missing vendored voice file fell through to kokoro-js's hardcoded huggingface.co fetch. Fixed in source; the notarized DMG still carries the old behaviour until re-cut."
+      "host": "twitter.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift (fence from connect/lib/bridge.mjs)",
+      "direction": "outbound",
+      "purpose": "X cookie login; twitter.com still redirects to x.com and some flows land there first",
+      "credential": "the owner types their own password into the platform's real page; session cookies are harvested from the isolated non-persistent store",
+      "decision": "owner decision 2026-08-21 (SOCIAL-BRIDGES-PLAN.md) covers the cookie login itself; these hosts are the navigation fence that flow runs inside, declared 2026-08-23 when the fence moved out of BridgeLogin.swift into connect/lib/bridge.mjs PLATFORMS.webLogin",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.*.webLogin.allowedHosts; enforced in widget/src/BridgeLogin.swift decidePolicyFor; asserted in connect/test/bridgePolicy.test.mjs"
     },
     {
       "host": "cdn.jsdelivr.net",
@@ -249,34 +272,36 @@
       "note": "build-time only; not reachable from the shipped app"
     },
     {
-      "host": "myaccount.google.com",
-      "kind": "user-browser-link",
-      "component": "widget/src/Bridge.swift openExternal allowlist, connect/lib/page.mjs",
-      "direction": "none",
-      "purpose": "send the owner to their own app-passwords page",
-      "credential": "none -- this process opens no socket here",
-      "decision": "n/a",
-      "evidence": "widget/src/Bridge.swift:161"
+      "host": "huggingface.co",
+      "kind": "model-asset",
+      "component": "widget/voice/scripts/fetch-models.mjs (build), ops/setup-llm.sh (setup)",
+      "direction": "inbound-fetch",
+      "purpose": "download the Kokoro voice and llama model weights",
+      "credential": "HF_TOKEN for gated repos",
+      "decision": "Build/setup-time model download, not reachable from the running app. Model weights are hundreds of megabytes and are fetched rather than committed. Was UNRECORDED for the same reason as the sources above.",
+      "evidence": "widget/voice/scripts/fetch-models.mjs; ops/setup-llm.sh",
+      "note": "Until 4128ae2c this was ALSO a RUNTIME path in the shipped app: widget/ui/ear-main.js called createVoice() without localOnly, so a missing vendored voice file fell through to kokoro-js's hardcoded huggingface.co fetch. Fixed in source; the notarized DMG still carries the old behaviour until re-cut."
     },
     {
-      "host": "granola.ai",
-      "kind": "user-browser-link",
-      "component": "widget/src/Bridge.swift openExternal allowlist",
-      "direction": "none",
-      "purpose": "send the owner to Granola to fetch an API key",
-      "credential": "none -- this process opens no socket here",
-      "decision": "n/a",
-      "evidence": "widget/src/Bridge.swift:162"
+      "host": "dock.mau.dev",
+      "kind": "registry",
+      "component": "bridges/docker-compose.yml",
+      "direction": "pull",
+      "purpose": "all six mautrix bridge images",
+      "credential": "none",
+      "decision": "implied by the bridge decisions above; never enumerated as egress before this file",
+      "evidence": "bridges/docker-compose.yml:53,64,79,96,107,118",
+      "note": "telegram, discord and slack are pinned to :latest, a MUTABLE tag, on containers that receive the owner's live session cookies. meta/instagram/twitter are pinned to a version tag. None are pinned by digest."
     },
     {
-      "host": "www.notion.so",
-      "kind": "user-browser-link",
-      "component": "widget/src/Bridge.swift openExternal allowlist",
-      "direction": "none",
-      "purpose": "send the owner to their Notion integrations page",
-      "credential": "none -- this process opens no socket here",
-      "decision": "n/a",
-      "evidence": "widget/src/Bridge.swift:164"
+      "host": "ghcr.io",
+      "kind": "registry",
+      "component": "bridges/docker-compose.yml",
+      "direction": "pull",
+      "purpose": "Synapse homeserver image",
+      "credential": "none",
+      "decision": "implied by the bridge decisions above; never enumerated as egress before this file",
+      "evidence": "bridges/docker-compose.yml:28 ghcr.io/element-hq/synapse:v1.140.0"
     },
     {
       "host": "accounts.google.com",
@@ -287,6 +312,16 @@
       "credential": "none -- this process opens no socket here",
       "decision": "n/a",
       "evidence": "ops/gcal-auth.mjs"
+    },
+    {
+      "host": "brew.sh",
+      "kind": "user-browser-link",
+      "component": "ops/setup-llm.sh",
+      "direction": "none",
+      "purpose": "named inside an error message telling the operator where to get Homebrew",
+      "credential": "none -- this is a string printed to stderr, not a call",
+      "decision": "n/a",
+      "evidence": "ops/setup-llm.sh:117"
     },
     {
       "host": "console.cloud.google.com",
@@ -310,14 +345,34 @@
       "note": "Added by the ledger tripwire on the commit that introduced it, which is the point of the tripwire. FOUND AT THE SAME TIME: this host is NOT in Bridge.swift's allowedExternal, and openExternal is an exact-match allowlist (Bridge.swift:471), so both links currently fail with 'url not in allowlist'. Adding them to the allowlist is what makes them work."
     },
     {
-      "host": "brew.sh",
+      "host": "granola.ai",
       "kind": "user-browser-link",
-      "component": "ops/setup-llm.sh",
+      "component": "widget/src/Bridge.swift openExternal allowlist",
       "direction": "none",
-      "purpose": "named inside an error message telling the operator where to get Homebrew",
-      "credential": "none -- this is a string printed to stderr, not a call",
+      "purpose": "send the owner to Granola to fetch an API key",
+      "credential": "none -- this process opens no socket here",
       "decision": "n/a",
-      "evidence": "ops/setup-llm.sh:117"
+      "evidence": "widget/src/Bridge.swift:162"
+    },
+    {
+      "host": "myaccount.google.com",
+      "kind": "user-browser-link",
+      "component": "widget/src/Bridge.swift openExternal allowlist, connect/lib/page.mjs",
+      "direction": "none",
+      "purpose": "send the owner to their own app-passwords page",
+      "credential": "none -- this process opens no socket here",
+      "decision": "n/a",
+      "evidence": "widget/src/Bridge.swift:161"
+    },
+    {
+      "host": "www.notion.so",
+      "kind": "user-browser-link",
+      "component": "widget/src/Bridge.swift openExternal allowlist",
+      "direction": "none",
+      "purpose": "send the owner to their Notion integrations page",
+      "credential": "none -- this process opens no socket here",
+      "decision": "n/a",
+      "evidence": "widget/src/Bridge.swift:164"
     }
   ],
   "_loopback": [

@@ -142,6 +142,9 @@ const HZ_NOTICES = {
   auth: 'token mismatch — status unknown',
   noroute: 'connect service predates /api/status — status unknown',
   error: 'status unavailable',
+  // The server said this platform has no cookie flow, so there is no embedded
+  // login to open — its bridge wants a pasted token or a phone code instead.
+  manual: 'this one links with a token, not a browser login — use the steps below.',
 };
 
 function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
@@ -191,11 +194,28 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
     why.textContent = HZ_WHY[HZ_KIND(src.id)] || HZ_WHY_FALLBACK;
     tip.appendChild(why);
 
+    // WHETHER THERE IS AN EMBEDDED LOGIN AT ALL IS THE SERVER'S CALL.
+    //
+    // `manual` means the platform's bridge takes a pasted token (Discord, Slack)
+    // or a phone code (Telegram) rather than cookies, so there is nothing for a
+    // webview to do. This tile used to fire bridgeWebLogin for EVERY bridge
+    // connector with no gate — connections.js had a BRIDGE_FLOW table and this
+    // file had nothing, despite the comment above claiming a connector opens the
+    // same flow on every surface — and the native fence then cancelled the
+    // navigation, leaving a blank branded window with no error. Reading the
+    // server's answer means the decision lives in one place instead of three.
+    const manual = data && data.state === 'manual';
     if (data && data.connected) {
       tip.append(`linked as ${data.name || 'you'}`);
-    } else if (data && data.state !== 'ok' && data.state !== 'cancelled' && !data.transcript) {
+    } else if (data && data.state !== 'ok' && data.state !== 'cancelled' && !manual && !data.transcript) {
       tip.append(HZ_NOTICES[data.state] || data.error || HZ_NOTICES.error);
     } else {
+      if (manual) {
+        const note = document.createElement('span');
+        note.className = 'why';
+        note.textContent = HZ_NOTICES.manual;
+        tip.appendChild(note);
+      } else {
       const login = document.createElement('button');
       login.className = 'hold-ok';
       login.textContent = `log in to ${src.label}`;
@@ -207,6 +227,7 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
           .catch(() => { login.disabled = false; login.textContent = `log in to ${src.label}`; });
       });
       tip.appendChild(login);
+      }
 
       if (data && data.state === 'cancelled') {
         const note = document.createElement('span');
@@ -226,9 +247,13 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
         tip.appendChild(log);
       }
       const adv = document.createElement('details');
+      // Not "advanced" when it is the only way in — open it and say so.
+      if (manual) adv.open = true;
       const sum = document.createElement('summary');
       sum.className = 'why';
-      sum.textContent = 'having trouble? paste cookies manually';
+      sum.textContent = manual
+        ? `link ${src.label} step by step`
+        : 'having trouble? paste cookies manually';
       sum.addEventListener('click', (e) => e.stopPropagation());
       adv.appendChild(sum);
       const begin = document.createElement('button');
@@ -243,7 +268,9 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
       });
       const paste = document.createElement('textarea');
       paste.className = 'bpaste';
-      paste.placeholder = 'paste cookies (JSON or Copy-as-cURL)';
+      paste.placeholder = manual
+        ? 'paste what the bot asks for'
+        : 'paste cookies (JSON or Copy-as-cURL)';
       paste.setAttribute('spellcheck', 'false');
       const send = document.createElement('button');
       send.className = 'hold-ok';

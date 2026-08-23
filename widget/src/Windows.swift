@@ -91,6 +91,8 @@ func makeEarWebView(bridge: Bridge) -> WKWebView {
   web.navigationDelegate = bridge
   web.uiDelegate = bridge
   web.setValue(false, forKey: "drawsBackground")
+  // Identity for the bridge's capability check (Bridge.pageCapabilities).
+  bridge.register(web, as: "ear")
   web.load(URLRequest(url: URL(string: "\(AssetSchemeHandler.scheme)://app/ear.html")!))
   return web
 }
@@ -119,6 +121,9 @@ func makeWebView(bridge: Bridge, page: String) -> WKWebView {
   guard let ui = Bundle.main.resourceURL?.appendingPathComponent("ui") else {
     fatalError("widget bundle has no Resources/ui")
   }
+  // Identity for the bridge's capability check (Bridge.pageCapabilities). The
+  // page name is the one the caller asked for, not one read back off the view.
+  bridge.register(web, as: page)
   web.loadFileURL(ui.appendingPathComponent("\(page).html"), allowingReadAccessTo: ui)
   return web
 }

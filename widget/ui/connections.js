@@ -357,6 +357,13 @@ const CONNECT_PAGE = new Set(['mail', 'oura', 'notion', 'granola']);
 // phone flows drive a guided conversation with the bridge bot instead (begin
 // sends the login command; the bot prompts; the input sends what it asked for
 // — a token, a phone number, then the code — through the same relay).
+// The flow shapes the HELP TEXT (a token and a phone code want different
+// wording). It no longer decides whether an embedded login is possible — the
+// server does, by returning allowedHosts for the platforms that have a cookie
+// flow, and bridgeWebLogin answering `manual` for the ones that do not. This
+// table and the native fence used to be two independent copies of that
+// decision and they disagreed about X, which had a login button here and no
+// matching host in the fence, so the window opened blank.
 const BRIDGE_FLOW = {
   twitter: 'cookie', messenger: 'cookie', instagram: 'cookie',
   discord: 'token', slack: 'token', telegram: 'phone',
@@ -724,9 +731,10 @@ function card(src) {
         openBridgeLogin();
       });
       tip.appendChild(add);
-    } else if (data && data.state !== 'ok' && data.state !== 'cancelled' && !data.transcript) {
+    } else if (data && data.state !== 'ok' && data.state !== 'cancelled'
+               && data.state !== 'manual' && !data.transcript) {
       tip.append(NOTICES[data.state] || data.error || NOTICES.error);
-    } else if (flow === 'cookie') {
+    } else if (flow === 'cookie' && !(data && data.state === 'manual')) {
       // PRIMARY, Beeper-style: one button opens the platform's real login page
       // in a Hazlie-framed window; native harvests the session cookies. No
       // devtools, no paste. See ops/WIDGET-WEBVIEW-LOGIN-SPEC.md.

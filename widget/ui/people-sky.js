@@ -93,7 +93,7 @@
     const open = expanded === p.key;
     return (
       `<div class="pl-row${open ? ' open' : ''}" data-key="${esc(p.key)}">` +
-        `<span class="pl-dot" style="background:${warmDot(p.warm)}"></span>` +
+        `<span class="pl-dot" data-warm="${esc(warmDot(p.warm))}"></span>` +
         `<div class="pl-main">` +
           `<div class="pl-nameline">` +
             `<span class="pl-name">${esc(p.name)}</span>` +
@@ -106,10 +106,32 @@
     );
   }
 
+  // THE DOT COLOUR HAS TO BE SET THROUGH THE CSSOM, NOT AS AN ATTRIBUTE.
+  //
+  // This used to render the warmth colour as an inline style attribute on the
+  // dot, and the page's own CSP silently threw it away: people-sky.html ships
+  // `style-src 'self'` with no 'unsafe-inline', which blocks style ATTRIBUTES,
+  // and .pl-dot carries no background in people-sky.css -- so every warmth dot
+  // computed to rgba(0,0,0,0) and the whole warm/cold signal of this list was
+  // invisible. Verified in a real engine: the styled dot and an unstyled one had
+  // identical computed backgrounds while the attribute sat in the DOM, with only
+  // a console line ("The action has been blocked") to say so -- inside a native
+  // app with no devtools open, that is no signal at all.
+  //
+  // CSP governs the parsed attribute, not element.style, so assigning after
+  // insertion applies normally and needs no 'unsafe-inline'. The colour rides in
+  // on data-warm, which is an ordinary attribute and not a style.
+  function paintDots(root) {
+    for (const dot of root.querySelectorAll('.pl-dot[data-warm]')) {
+      dot.style.background = dot.getAttribute('data-warm');
+    }
+  }
+
   function render() {
     const rows = filtered().sort(SORTS[sortEl.value] || SORTS.recent);
     const shown = rows.slice(0, CAP);
     listEl.innerHTML = shown.map(rowHtml).join('') || '<div class="pl-empty">no one matches</div>';
+    paintDots(listEl);
     // The count lives in the search placeholder (shown while the box is empty),
     // and reflects the current filtered result — "search your people (42)…".
     searchEl.placeholder = `search your people (${rows.length})…`;
