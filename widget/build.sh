@@ -77,10 +77,42 @@ if [ -n "$LIBREF" ]; then
   install_name_tool -change "$LIBREF" "@executable_path/../lib/$LIBNAME" "$BE/node/bin/node"
 fi
 
+# LLAMA RUNTIME + MODEL, so the local "ask" model works offline on a fresh Mac.
+# The portable llama-server + its dylibs (bundle-llama.py rewrites the install
+# names; Metal GPU inference verified) and the ~4.7GB gguf. cp -c clones the
+# model on APFS — instant copy-on-write, no multi-GB copy per build.
+# Guarded so a plain `git clone && ./build.sh` (no llama.cpp, no provisioned
+# model) still builds a working app — just without the bundled "ask".
+MODEL_SRC="$HOME/.hazlie/models/model.gguf"
+if command -v llama-server >/dev/null 2>&1 && [ -f "$MODEL_SRC" ]; then
+  python3 bundle-llama.py "$BE/llama"
+  mkdir -p "$BE/models"
+  cp -c "$MODEL_SRC" "$BE/models/model.gguf" 2>/dev/null || cp "$MODEL_SRC" "$BE/models/model.gguf"
+else
+  echo "WARNING: llama-server and/or $MODEL_SRC not found — 'ask' will NOT be bundled." >&2
+  echo "         For the self-contained build: brew install llama.cpp + provision the model." >&2
+fi
+
+# VOICE MODELS (ear STT + speak TTS), so voice works offline out of the box the
+# same way ask does. ~495MB — Moonshine tiny + Silero VAD + onnxruntime-web for
+# the ear, Kokoro-82M for the voice — normally produced by voice/setup-voice.sh
+# into ~/.hazlie/models/voice, which AssetScheme.swift serves to the ear page.
+# The runtime fails CLOSED without these (no HuggingFace fallback at runtime), so
+# a fresh Mac has no voice unless they ship. Cloned in (cp -c -R: instant on
+# APFS); provision clones them back out to ~/.hazlie/models/voice on first run.
+VOICE_SRC="$HOME/.hazlie/models/voice"
+if [ -d "$VOICE_SRC" ]; then
+  cp -c -R "$VOICE_SRC" "$BE/voice-models" 2>/dev/null || cp -R "$VOICE_SRC" "$BE/voice-models"
+else
+  echo "WARNING: no voice models at $VOICE_SRC — run voice/setup-voice.sh." >&2
+  echo "         This build will have NO voice on a fresh machine." >&2
+fi
+
 # Plist templates (@HOME@/@REPO@ placeholders) — provision renders them:
 # @REPO@ -> this backend dir, @HOME@ -> the user's home.
 mkdir -p "$BE/agents"
-cp ../ops/com.hazlie.connect.plist ../ops/com.hazlie.hermes.plist ../ops/com.hazlie.connectors.plist "$BE/agents/"
+cp ../ops/com.hazlie.connect.plist ../ops/com.hazlie.hermes.plist \
+   ../ops/com.hazlie.connectors.plist ../ops/com.hazlie.llama-server.plist "$BE/agents/"
 
 # SIGNING, AND WHY IT IS NOT AD-HOC ANY MORE.
 #
@@ -123,6 +155,18 @@ if [ -n "$IDENTITY" ]; then
   codesign --force --options runtime \
     --entitlements node.entitlements \
     -s "$IDENTITY" "$BE/node/bin/node"
+  # The llama runtime (only when it was bundled above): every dylib first, then
+  # the server with the same JIT + Metal entitlements node uses (V8 and Metal
+  # both need allow-jit / allow-unsigned-executable-memory; disable-library-
+  # validation lets the rewritten dylibs load).
+  if [ -f "$BE/llama/bin/llama-server" ]; then
+    for dylib in "$BE/llama/lib/"*.dylib; do
+      [ -f "$dylib" ] && codesign --force --options runtime -s "$IDENTITY" "$dylib"
+    done
+    codesign --force --options runtime \
+      --entitlements node.entitlements \
+      -s "$IDENTITY" "$BE/llama/bin/llama-server"
+  fi
   codesign --force --options runtime \
     --entitlements Hazlie.entitlements \
     -s "$IDENTITY" "$APP"
