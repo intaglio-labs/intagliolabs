@@ -311,8 +311,9 @@ const HINTS = {
           url: 'https://myaccount.google.com/apppasswords', link: 'Google app passwords' },
   granola: { text: 'Copy your API key from Granola settings into ~/.hazlie/secrets/granola-api-key.txt.',
              url: 'https://granola.ai', link: 'granola.ai' },
-  oura: { text: 'Create a personal access token on Oura cloud and store it via the connect page.',
-          url: 'https://cloud.ouraring.com/personal-access-tokens', link: 'cloud.ouraring.com' },
+  // OAuth2 since Oura retired personal access tokens (Dec 2025); the whole
+  // flow is the auth script, so there is no settings URL to link.
+  oura: { text: 'Run ops/oura-auth.mjs in the repo and approve the scopes in your browser.' },
   notion: { text: 'Create an internal integration and store its token in ~/.hazlie/secrets/notion-api-key.txt.',
             url: 'https://www.notion.so/my-integrations', link: 'notion.so/my-integrations' },
 };
@@ -478,6 +479,8 @@ function card(src) {
   // "Discord"s). aria-label names the tile for a screen reader and draws
   // nothing; showTileTip owns the visible hover label.
   row.setAttribute('aria-label', src.label);
+  // Stamped so a strip kept open across refresh() can find its rebuilt tile.
+  row.dataset.id = src.id;
 
   const mark = document.createElement('span');
   mark.className = 'mark';
@@ -516,6 +519,7 @@ function card(src) {
   // because a horizontal shelf has nowhere to put a full-width strip.
   const tip = document.createElement('div');
   tip.className = 'hint';
+  tip.dataset.id = src.id;
 
   // ONE panel, the same every time. There used to be two — a tall
   // first-press hand-hold with a "got it" button, then a compact strip on
@@ -904,9 +908,22 @@ async function refresh() {
       return;
     }
     notice.hidden = true;
-    hintHost.replaceChildren(); // the strips belonged to the old tiles
+    // An OPEN strip survives the refresh. The cookie-paste and token/phone
+    // login flows require leaving the popup (to copy cookies, a token, or a
+    // code), and coming back fires the focus listener below; renderBridge
+    // also calls refresh() on a freshly connected status. Wiping the host on
+    // either path destroyed the open panel mid-login. The shelf still
+    // rebuilds; the open strip is kept and its tile on the rebuilt grid is
+    // re-marked open.
+    const keep = hintHost.querySelector('.hint');
+    if (!keep) hintHost.replaceChildren(); // the strips belonged to the old tiles
     const shown = data.sources.filter((s) => !HIDDEN_CONNECTORS.has(kindOf(s.id)));
     grid.replaceChildren(...orderSources(shown).map(card));
+    if (keep) {
+      for (const r of grid.querySelectorAll('.row')) {
+        r.classList.toggle('open', r.dataset.id === keep.dataset.id);
+      }
+    }
   } catch {
     notice.textContent = NOTICES.error;
     notice.hidden = false;

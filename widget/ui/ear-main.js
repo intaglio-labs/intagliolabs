@@ -14,6 +14,7 @@ const UNPROVISIONED =
 
 let ear = null;
 let voice = null;
+let voicePending = null;
 let armed = false;
 let silenceTimer = null;
 
@@ -40,21 +41,51 @@ function disarm() {
   orb('idle');
 }
 
+// One init path for both speakers. localOnly, same posture as the ear below:
+// a missing vendored voice model fails closed (silent), never falls back to
+// huggingface.co. The worker's own header says the product sends this; it
+// did not, so a fresh install with no provisioned model phoned home for the
+// voice — an egress path that contradicts the local-only claim. On a
+// provisioned machine the model is present and nothing changes.
+// `voice` is KEPT only once init resolves. A rejected init used to leave the
+// instance latched: every later speak skipped init and posted into a dead
+// worker, whose error replies went nowhere — answers were never spoken and
+// the UNPROVISIONED catch below could never fire. A failed init is destroyed
+// and rethrown (the caller's catch reports), so the next speak retries with
+// a fresh instance; worker errors after init reach the chat via onError.
+async function ensureVoice() {
+  if (voice) return;
+  if (!voicePending) {
+    voicePending = (async () => {
+      const v = createVoice(
+        {
+          onError: (err) => {
+            if (voice !== v) return; // init failures are the caller's catch
+            const raw = String(err);
+            const provisioning = /module script|Failed to fetch|Load failed|fetch/iu.test(raw);
+            post('voiceError', { message: provisioning ? UNPROVISIONED : raw });
+          },
+        },
+        { localOnly: true }
+      );
+      try {
+        await v.init?.();
+      } catch (err) {
+        try { v.destroy?.(); } catch {}
+        throw err;
+      }
+      voice = v;
+    })().finally(() => { voicePending = null; });
+  }
+  return voicePending;
+}
+
 // The greeting: "hey" on every arm, spoken BEFORE the microphone opens so
 // Moonshine can't transcribe Hazlie's own hello as the owner's utterance.
 // A nicety, not a gate — if TTS isn't ready the arm proceeds silently.
 async function speakGreeting() {
   try {
-    if (!voice) {
-      // localOnly, same posture as the ear below: a missing vendored voice
-      // model fails closed (silent), never falls back to huggingface.co. The
-      // worker's own header says the product sends this; it did not, so a
-      // fresh install with no provisioned model phoned home for the voice —
-      // an egress path that contradicts the local-only claim. On a
-      // provisioned machine the model is present and nothing changes.
-      voice = createVoice({}, { localOnly: true });
-      await voice.init?.();
-    }
+    await ensureVoice();
     voice.sayText('hey');
     await new Promise((r) => setTimeout(r, 700)); // let the word finish
   } catch {}
@@ -109,16 +140,7 @@ window.__earSpeak = async (text) => {
   const t = String(text ?? '').trim();
   if (!t) return;
   try {
-    if (!voice) {
-      // localOnly, same posture as the ear below: a missing vendored voice
-      // model fails closed (silent), never falls back to huggingface.co. The
-      // worker's own header says the product sends this; it did not, so a
-      // fresh install with no provisioned model phoned home for the voice —
-      // an egress path that contradicts the local-only claim. On a
-      // provisioned machine the model is present and nothing changes.
-      voice = createVoice({}, { localOnly: true });
-      await voice.init?.();
-    }
+    await ensureVoice();
     orb('talking');
     voice.sayText(t);
   } catch {

@@ -93,7 +93,7 @@
     const open = expanded === p.key;
     return (
       `<div class="pl-row${open ? ' open' : ''}" data-key="${esc(p.key)}">` +
-        `<span class="pl-dot" style="background:${warmDot(p.warm)}"></span>` +
+        `<span class="pl-dot"></span>` +
         `<div class="pl-main">` +
           `<div class="pl-nameline">` +
             `<span class="pl-name">${esc(p.name)}</span>` +
@@ -110,6 +110,10 @@
     const rows = filtered().sort(SORTS[sortEl.value] || SORTS.recent);
     const shown = rows.slice(0, CAP);
     listEl.innerHTML = shown.map(rowHtml).join('') || '<div class="pl-empty">no one matches</div>';
+    // The page CSP (style-src 'self', no 'unsafe-inline') refuses markup-borne
+    // style attributes; the dot color has to be written through the CSSOM.
+    const dots = listEl.querySelectorAll('.pl-dot');
+    shown.forEach((p, i) => { if (dots[i]) dots[i].style.background = warmDot(p.warm); });
     // The count lives in the search placeholder (shown while the box is empty),
     // and reflects the current filtered result — "search your people (42)…".
     searchEl.placeholder = `search your people (${rows.length})…`;

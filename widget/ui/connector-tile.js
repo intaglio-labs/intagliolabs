@@ -109,8 +109,9 @@ const HZ_HINTS = {
           url: 'https://myaccount.google.com/apppasswords', link: 'Google app passwords' },
   granola: { text: 'Copy your API key from Granola settings into ~/.hazlie/secrets/granola-api-key.txt.',
              url: 'https://granola.ai', link: 'granola.ai' },
-  oura: { text: 'Create a personal access token on Oura cloud and store it via the connect page.',
-          url: 'https://cloud.ouraring.com/personal-access-tokens', link: 'cloud.ouraring.com' },
+  // OAuth2 since Oura retired personal access tokens (Dec 2025); the whole
+  // flow is the auth script, so there is no settings URL to link.
+  oura: { text: 'Run ops/oura-auth.mjs in the repo and approve the scopes in your browser.' },
   notion: { text: 'Create an internal integration and store its token in ~/.hazlie/secrets/notion-api-key.txt.',
             url: 'https://www.notion.so/my-integrations', link: 'notion.so/my-integrations' },
 };
