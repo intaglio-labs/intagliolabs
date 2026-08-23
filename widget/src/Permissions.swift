@@ -20,28 +20,54 @@ import Photos
 enum Permissions {
   enum Status: String { case granted, denied, undetermined }
 
+  // EVERY "PARTIAL YES" IS A YES.
+  //
+  // Recent macOS added narrower grants — Contacts can come back .limited,
+  // Calendar .fullAccess or .writeOnly — and a switch that only accepted
+  // .authorized read every one of them as a refusal. The UI then offered
+  // "open settings" for a permission the owner had just granted, which is the
+  // worst possible answer: it says the thing you did did not work.
+  //
+  // Written as: notDetermined means ask, denied and restricted mean denied,
+  // and ANYTHING ELSE means we got something, so treat it as granted and let
+  // the read find out what it actually covers.
   static func contacts() -> Status {
-    switch CNContactStore.authorizationStatus(for: .contacts) {
-    case .authorized: return .granted
+    let st = CNContactStore.authorizationStatus(for: .contacts)
+    switch st {
     case .notDetermined: return .undetermined
-    default: return .denied
+    case .denied, .restricted: return .denied
+    default: return .granted
     }
   }
 
   static func calendar() -> Status {
-    switch EKEventStore.authorizationStatus(for: .event) {
-    case .authorized, .fullAccess: return .granted
+    let st = EKEventStore.authorizationStatus(for: .event)
+    switch st {
     case .notDetermined: return .undetermined
-    default: return .denied
+    case .denied, .restricted: return .denied
+    default: return .granted
     }
   }
 
   static func photos() -> Status {
-    switch PHPhotoLibrary.authorizationStatus(for: .readWrite) {
-    case .authorized, .limited: return .granted
+    let st = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    switch st {
     case .notDetermined: return .undetermined
-    default: return .denied
+    case .denied, .restricted: return .denied
+    default: return .granted
     }
+  }
+
+  /// Bring this app forward before asking.
+  ///
+  /// It is LSUIElement with non-activating panels, so it is frequently not the
+  /// active app even while the owner is looking straight at it. A TCC prompt
+  /// belongs to the requesting app and is presented in ITS context — from an
+  /// inactive accessory app it can open behind whatever is in front, and a
+  /// prompt nobody sees is a prompt nobody answers, which TCC eventually
+  /// records as a refusal.
+  private static func comeForward() {
+    NSApp.activate(ignoringOtherApps: true)
   }
 
   /// Ask for one, by name. The completion carries the status AFTER the prompt.
@@ -52,6 +78,7 @@ enum Permissions {
   /// than pretending another press will do something.
   static func request(_ which: String, done: @escaping (Status) -> Void) {
     let finish: (Status) -> Void = { s in DispatchQueue.main.async { done(s) } }
+    comeForward()
     switch which {
     case "contacts":
       guard contacts() == .undetermined else { finish(contacts()); return }
@@ -104,10 +131,35 @@ enum Permissions {
   /// pane so the row is on screen with its switch off.
   static func primeFullDisk() {
     _ = fullDisk()
-    if let url = URL(string:
-      "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
-      NSWorkspace.shared.open(url)
+    openSettings("com.apple.preference.security?Privacy_AllFiles")
+  }
+
+  /// Open a System Settings pane AND put it in front.
+  ///
+  /// NSWorkspace.open on an x-apple.systempreferences: URL launches Settings but
+  /// does not reliably raise it — from an accessory app that just activated
+  /// itself, it opened behind the widget with no Dock icon to click and no way
+  /// back to it. Opening the pane and then explicitly activating the Settings
+  /// application is what actually puts it where the owner is looking.
+  static func openSettings(_ pane: String) {
+    guard let url = URL(string: "x-apple.systempreferences:\(pane)") else { return }
+    NSWorkspace.shared.open(url)
+    // Settings takes a moment to come up on a cold launch; try a few times
+    // rather than once, and stop as soon as it is frontmost.
+    var attempt = 0
+    func raise() {
+      attempt += 1
+      let running = NSRunningApplication.runningApplications(
+        withBundleIdentifier: "com.apple.systempreferences")
+      if let app = running.first {
+        app.activate(options: [.activateAllWindows])
+        if app.isActive { return }
+      }
+      if attempt < 12 {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { raise() }
+      }
     }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { raise() }
   }
 
   static var all: [String: String] {

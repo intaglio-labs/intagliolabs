@@ -108,8 +108,8 @@ one click: intaglio labs moves itself and reopens from its real home.</p>
        except answering questions works without it. -->
   <div class="ob-screen ob-setup" id="screenModel" hidden>
     <p class="ob-tagline">how should i think?</p>
-    <p class="ob-home-note ob-setup-note">answers are generated on this Mac, by a model that lives here.
-nothing you ask ever leaves.</p>
+    <p class="ob-home-note ob-setup-note">i answer using a model that lives on this Mac. pick one and i'll fetch it —
+you can carry on while it downloads.</p>
 
     <div class="ob-choices" id="modelChoices"></div>
 
@@ -120,7 +120,7 @@ nothing you ask ever leaves.</p>
     </div>
 
     <p class="ob-err" id="modelErr" hidden></p>
-    <button class="ob-replay" id="modelSkip">skip — set this up later</button>
+    <button class="ob-replay" id="modelSkip">not now</button>
   </div>
 
   <!-- Screen B: what it may read, one source at a time.
@@ -131,42 +131,42 @@ nothing you ask ever leaves.</p>
        honestly rather than flattening everything into one scary permission. -->
   <div class="ob-screen ob-setup" id="screenData" hidden>
     <button class="ob-back" id="dataBack" hidden>← the download</button>
-    <p class="ob-tagline">what may i read?</p>
-    <p class="ob-home-note ob-setup-note">turn on as much or as little as you like. you can change any of it later.
-everything is read on this Mac and stays here.</p>
+    <p class="ob-tagline">what should i know about?</p>
+    <p class="ob-home-note ob-setup-note">pick as few or as many as you like — you can change your mind whenever.
+none of it leaves this Mac.</p>
 
     <div class="ob-perms" id="perms">
       <div class="ob-perm" data-which="contacts">
-        <div class="ob-perm-t"><b>Contacts</b><span>so it knows who people are</span></div>
+        <div class="ob-perm-t"><b>Contacts</b><span>so i know who people are when they come up</span></div>
         <button class="ob-cta ob-cta-sm">allow</button>
       </div>
       <div class="ob-perm" data-which="calendar">
-        <div class="ob-perm-t"><b>Calendar</b><span>so it can answer about your time</span></div>
+        <div class="ob-perm-t"><b>Calendar</b><span>so i can answer about where your time goes</span></div>
         <button class="ob-cta ob-cta-sm">allow</button>
       </div>
       <div class="ob-perm" data-which="photos">
-        <div class="ob-perm-t"><b>Photos</b><span>where you were, who with</span></div>
+        <div class="ob-perm-t"><b>Photos</b><span>so i can remember where you were, and who with</span></div>
         <button class="ob-cta ob-cta-sm">allow</button>
       </div>
       <div class="ob-perm ob-perm-fda" data-which="fda">
         <div class="ob-perm-t"><b>Messages &amp; Notes</b>
-          <span>no system prompt exists for these — macOS asks for Full Disk Access instead</span></div>
+          <span>these two have no switch of their own — macOS only offers Full Disk Access for them</span></div>
         <button class="ob-cta ob-cta-sm" id="fdaOpen">open settings</button>
       </div>
     </div>
 
     <details class="ob-alt" id="fdaHelp">
-      <summary>how to add it in Settings</summary>
+      <summary>what to do in Settings</summary>
       <ol class="ob-steps">
-        <li><span class="ob-step-n">1</span><span>press <b>+</b> in the list that opened</span></li>
-        <li><span class="ob-step-n">2</span><span>choose <b>Intaglio Labs</b> from Applications</span>
+        <li><span class="ob-step-n">1</span><span>find <b>Intaglio Labs</b> in the list and switch it on</span></li>
+        <li><span class="ob-step-n">2</span><span>not there? press <b>+</b> and add it</span>
           <button class="ob-replay ob-copy" id="fdaReveal">show me the app</button></li>
       </ol>
     </details>
 
-    <button class="ob-cta" id="dataCheck">done — start reading</button>
+    <button class="ob-cta" id="dataCheck">that's everything</button>
     <p class="ob-status" id="dataStatus"></p>
-    <button class="ob-replay" id="dataSkip">skip — connect sources later</button>
+    <button class="ob-replay" id="dataSkip">not now</button>
   </div>
 
   <div class="ob-screen ob-home" id="screen3" hidden>

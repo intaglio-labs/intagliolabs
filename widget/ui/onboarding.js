@@ -436,7 +436,7 @@ function startModel(tier) {
   modelChoices.hidden = true;
   modelProg.hidden = false;
   modelBar.style.width = '0%';
-  modelLabel.textContent = 'starting…';
+  modelLabel.textContent = 'fetching…';
   downloading = true;
   hzPost('modelDownload', { tier }).catch(() => {});
   // MOVE ON. A multi-gigabyte download is not something to watch, and the next
@@ -464,7 +464,7 @@ window.__hzSetup = (d) => {
   }
   if (d.phase === 'installing') {
     modelBar.style.width = '100%';
-    modelLabel.textContent = 'checking it arrived intact…';
+    modelLabel.textContent = 'making sure it arrived intact…';
     return;
   }
   if (d.phase === 'ready') {
@@ -617,7 +617,7 @@ document.getElementById('fdaReveal').addEventListener('click', () => {
 });
 
 document.getElementById('dataCheck').addEventListener('click', async () => {
-  dataStatus.textContent = 'starting…';
+  dataStatus.textContent = 'having a look…';
   await hzPost('startSources').catch(() => {});
   // The ROW COUNT is the check: it only moves when something was really read
   // and really written. macOS gives this process no honest answer about a
@@ -627,13 +627,13 @@ document.getElementById('dataCheck').addEventListener('click', async () => {
     await new Promise((r) => setTimeout(r, 2500));
     const st = await hzPost('setupState').catch(() => null);
     rows = (st && st.rows) || 0;
-    if (rows === 0) dataStatus.textContent = 'waiting for the first read…';
+    if (rows === 0) dataStatus.textContent = 'having a look…';
   }
   if (rows > 0) {
-    dataStatus.textContent = `${rows.toLocaleString()} things read so far`;
+    dataStatus.textContent = `found ${rows.toLocaleString()} things so far`;
     setTimeout(() => { if (currentScreen === 'data') showScreen(2); }, 1400);
   } else {
-    dataStatus.textContent = "nothing yet — that's fine, it'll pick things up as it goes.";
+    dataStatus.textContent = "nothing yet — that's fine, i'll keep looking as you go.";
     setTimeout(() => { if (currentScreen === 'data') showScreen(2); }, 2600);
   }
 });
@@ -652,7 +652,7 @@ async function loadSetup() {
     modelChoices.hidden = true;
     modelProg.hidden = false;
     modelBar.style.width = '100%';
-    modelLabel.textContent = 'already set up';
+    modelLabel.textContent = 'already here';
     const c = document.getElementById('modelCancel');
     if (c) c.hidden = true;
   } else {
