@@ -457,6 +457,76 @@ WHERE (
   ORDER BY d.created_at DESC, d.id DESC
   LIMIT 1
 ) = 'accept';
+
+/* SUBJECTIVE ENERGY RATINGS -- how a day or a conversation actually FELT.
+   No migration branch: SCHEMA runs with IF NOT EXISTS before migrate() on
+   every open, so a new table needs no version bump (same as the claim tables).
+
+   Why this table exists at all. vault/digest.mjs already computes five
+   objective series over this corpus -- sleep, steps, meetings, messages,
+   late-night hours -- and every one of them is descriptive. It can say "you
+   slept less this week". It cannot say "meetings drain you", because nothing
+   in this database records how anything felt. The features are the easy half
+   and they are worthless alone: without a label there is nothing to correlate
+   them against, and a label is the one input that cannot be backfilled later
+   because it decays. Rating how last Tuesday felt is materially worse data
+   than rating today.
+
+   source CHECK (source IN ('user')) IS THE POINT OF THIS TABLE, not
+   boilerplate. The sibling project states the rule in prose -- never use LLM
+   output as ground truth -- and prose is what a future session helpfully
+   routes around when the ratings column looks sparse and a model could
+   plausibly estimate it. One inferred score voids every correlation computed
+   over the column, and nothing downstream can tell which rows were guessed.
+   The CHECK makes the write fail instead. When a second legitimate source of
+   real subjective data appears (a watch prompt, an imported journal) it is
+   added here deliberately, with its own value, in a commit that says why.
+
+   BOTH SCOPES, because day alone cannot attribute. A bad day tells you the
+   day was bad; it does not tell you which of the day's six conversations did
+   it. The paired CHECK ties context_id to scope so a conversation rating
+   cannot arrive without its conversation, and a day rating cannot smuggle one
+   in.
+
+   APPEND-ONLY, like claim_decision: a changed mind appends and the latest
+   wins (see v_energy_rating_current). Overwriting a rating would silently
+   rewrite the history a correlation was computed over. */
+CREATE TABLE IF NOT EXISTS energy_rating(
+  id         INTEGER PRIMARY KEY,
+  scope      TEXT NOT NULL CHECK (scope IN ('day','conversation')),
+  day        TEXT NOT NULL CHECK (day GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  zone       TEXT NOT NULL,
+  context_id INTEGER REFERENCES context(id) ON DELETE CASCADE,
+  score      INTEGER NOT NULL CHECK (score BETWEEN 1 AND 5),
+  source     TEXT NOT NULL CHECK (source IN ('user')),
+  note       TEXT,
+  created_at INTEGER NOT NULL,
+  CHECK ((scope = 'conversation') = (context_id IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS energy_rating_day ON energy_rating(scope, day, id);
+CREATE TRIGGER IF NOT EXISTS energy_rating_no_update
+BEFORE UPDATE ON energy_rating BEGIN
+  SELECT RAISE(ABORT, 'energy_rating is append-only: change your mind by appending another rating, the latest wins');
+END;
+CREATE TRIGGER IF NOT EXISTS energy_rating_no_replace
+BEFORE INSERT ON energy_rating
+WHEN new.id IS NOT NULL AND EXISTS (SELECT 1 FROM energy_rating WHERE id = new.id)
+BEGIN
+  SELECT RAISE(ABORT, 'energy_rating is append-only: an explicit id colliding with an existing row is a REPLACE in disguise');
+END;
+
+/* The current rating for each day: the latest one appended. Conversation
+   ratings are excluded -- they key on context_id, not on the day, and mixing
+   them here would double-count a day that also has per-conversation scores. */
+CREATE VIEW IF NOT EXISTS v_energy_rating_current AS
+SELECT r.* FROM energy_rating r
+WHERE r.scope = 'day'
+  AND r.id = (
+    SELECT r2.id FROM energy_rating r2
+    WHERE r2.scope = 'day' AND r2.day = r.day
+    ORDER BY r2.created_at DESC, r2.id DESC
+    LIMIT 1
+  );
 `;
 
 // Bumped only when a migration must run at open. Version history:
