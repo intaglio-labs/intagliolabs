@@ -68,11 +68,33 @@ const ROOTS_ELSEWHERE = Object.freeze({
   site: 'the marketing site, a separate artifact with its own egress hosts',
 });
 
-// Floors, set below today's measured numbers -- 147 files and 24 hosts on
-// 2026-08-23 -- so ordinary deletion does not turn the suite red, but far enough
-// above zero that a collapsed walk cannot pass. A smoke alarm, not a budget: if a
-// legitimate change drops the repo under one, lower it deliberately and say why in
-// the same commit.
+// Floors, set below today's measured numbers so ordinary deletion does not turn
+// the suite red, but far enough above zero that a collapsed walk cannot pass. A
+// smoke alarm, not a budget: if a legitimate change drops the repo under one,
+// lower it deliberately and say why in the same commit.
+//
+// PER ROOT, NOT JUST IN TOTAL, and the distinction is the whole point. An
+// aggregate floor of 100 against 148 files lets an entire root go dark without
+// failing, because the others carry the total: `bridges` contributes exactly ONE
+// scanned file, so a traversal or read failure there leaves ~147 files and every
+// host still found, and the suite stays green having lost all bridge coverage.
+// That is precisely the unplugged-tripwire condition this test exists to catch,
+// one level down -- caught in review of the commit that added the aggregate floor,
+// which is a fair illustration that a floor is only as good as the thing it is a
+// floor ON.
+//
+// Measured 2026-08-23: connectors 45, connect 12, ui 26, widget 48, bridges 1,
+// ops 16 = 148 files, 24 hosts. Each floor below sits under its measurement with
+// room for ordinary deletion; bridges is 1 because it IS 1, and a root whose real
+// content is a single compose file has no headroom to give.
+const MIN_FILES_PER_ROOT = Object.freeze({
+  connectors: 30,
+  connect: 8,
+  ui: 15,
+  widget: 30,
+  bridges: 1,
+  ops: 10,
+});
 const MIN_FILES_SCANNED = 100;
 const MIN_HOSTS_FOUND = 10;
 
@@ -201,6 +223,26 @@ test('the scan actually reached the source', () => {
     `ROOTS_ELSEWHERE says ${arrived.join(', ')} is not in this repo, but it is. ` +
       `Move it into ROOTS in this same commit -- otherwise it is product source ` +
       `that no egress scan ever reads.`
+  );
+
+  // Per root FIRST, because the aggregate cannot see a single root going dark.
+  const starved = [];
+  for (const root of ROOTS) {
+    const floor = MIN_FILES_PER_ROOT[root];
+    assert.ok(
+      floor !== undefined,
+      `${root} is in ROOTS with no entry in MIN_FILES_PER_ROOT. Add one -- an ` +
+        `unfloored root is a root that can silently contribute nothing.`
+    );
+    const count = walk(join(REPO, root)).length;
+    if (count < floor) starved.push(`${root}: ${count} files, floor ${floor}`);
+  }
+  assert.deepEqual(
+    starved,
+    [],
+    `a scan root came back under its floor:\n  ${starved.join('\n  ')}\n` +
+      `Either that directory shrank legitimately (lower its floor and say why) or ` +
+      `the walk stopped reaching it, which the aggregate floor below cannot see.`
   );
 
   const files = scannedFiles();

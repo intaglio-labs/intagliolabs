@@ -515,15 +515,25 @@ BEGIN
   SELECT RAISE(ABORT, 'energy_rating is append-only: an explicit id colliding with an existing row is a REPLACE in disguise');
 END;
 
-/* The current rating for each day: the latest one appended. Conversation
+/* The current rating for each rated day: the latest one appended. Conversation
    ratings are excluded -- they key on context_id, not on the day, and mixing
-   them here would double-count a day that also has per-conversation scores. */
+   them here would double-count a day that also has per-conversation scores.
+
+   PARTITIONED BY (day, zone), NOT BY day ALONE. A day string is only a day
+   once you know the zone it was recorded in: '2027-01-14' in America/Chicago
+   and the same label recorded in Asia/Tokyo are different six-hour-offset
+   intervals, and collapsing them on the label would let one silently
+   overwrite the other after the owner travels. The zone travels with the
+   rating for the same reason the quote travels with a claim -- the reading is
+   meaningless without what it was read against. vault/energy.mjs recomputes
+   each rating's features over ITS OWN interval rather than over a window in
+   whatever zone the analysis happens to run in. */
 CREATE VIEW IF NOT EXISTS v_energy_rating_current AS
 SELECT r.* FROM energy_rating r
 WHERE r.scope = 'day'
   AND r.id = (
     SELECT r2.id FROM energy_rating r2
-    WHERE r2.scope = 'day' AND r2.day = r.day
+    WHERE r2.scope = 'day' AND r2.day = r.day AND r2.zone = r.zone
     ORDER BY r2.created_at DESC, r2.id DESC
     LIMIT 1
   );

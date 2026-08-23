@@ -76,14 +76,28 @@ export function recordRating(db, { scope = 'day', day, zone, contextId = null, s
   return { scope, day: key, zone: tz, contextId, score };
 }
 
-// day -> score, latest append winning. Reads the view so the "latest wins"
-// rule lives in one place.
-export function currentDayRatings(db) {
-  const out = new Map();
-  for (const r of db.prepare('SELECT day, score FROM v_energy_rating_current ORDER BY day').all()) {
-    out.set(String(r.day), Number(r.score));
-  }
-  return out;
+// THE CURRENT RATINGS, EACH CARRYING ITS ZONE. Reads the view so the "latest
+// append wins" rule lives in one place.
+//
+// The zone is returned, not discarded, and that is a correctness requirement
+// rather than tidiness. A day string is only a day once you know the zone it was
+// recorded in: rate a day in America/Chicago, fly to Asia/Tokyo, and running the
+// analysis there would pair that score against a UTC interval six hours off the
+// one the owner was actually rating. The score is real data about a specific
+// stretch of time, and the (day, zone) pair is what identifies that stretch.
+export function currentRatings(db) {
+  return db
+    .prepare('SELECT day, zone, score FROM v_energy_rating_current ORDER BY day, zone')
+    .all()
+    .map((r) => ({ day: String(r.day), zone: String(r.zone), score: Number(r.score) }));
+}
+
+// Which day LABELS have a rating, in any zone. This is the right question for
+// "should I ask about this day again?" -- the answer is no regardless of which
+// zone the owner was in when they answered -- and the wrong one for pairing
+// features, which needs the interval.
+export function ratedDayLabels(db) {
+  return new Set(currentRatings(db).map((r) => r.day));
 }
 
 // The objective side, per local day rather than aggregated over the window --
@@ -98,6 +112,68 @@ function wallHour(ms, zone) {
   return Number(parts.find((p) => p.type === 'hour')?.value ?? NaN);
 }
 
+// The next calendar label, by pure arithmetic on the label itself. Correct in
+// every zone because it never touches an instant -- '2027-02-28' is followed by
+// '2027-03-01' whatever the offset, and localDayStart() resolves each label to
+// its real instant afterwards.
+function nextDayLabel(key) {
+  const [y, m, d] = key.split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d) + 86_400_000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${t.getUTCFullYear()}-${pad(t.getUTCMonth() + 1)}-${pad(t.getUTCDate())}`;
+}
+
+// The exact UTC half-open interval a (day, zone) pair denotes. Derived rather
+// than stored: localDayStart() already resolves a label in a zone, including
+// across a DST transition, so the boundaries are recoverable from what the
+// rating records and cannot drift from it.
+export function dayInterval(day, zone) {
+  if (!DAY_RE.test(day)) throw new Error(`dayInterval: day must be YYYY-MM-DD, got ${JSON.stringify(day)}`);
+  return { startMs: localDayStart(day, zone), endMs: localDayStart(nextDayLabel(day), zone) };
+}
+
+// Features over one explicit interval, in one explicit zone. Every feature path
+// goes through here, so a rating's features and a window's features are computed
+// by the same code against the same definitions.
+export function featuresForInterval(db, { startMs, endMs, zone }) {
+  const out = { messages: 0, lateNight: 0, meetings: 0 };
+  const placeholders = COMMS_SOURCES.map(() => '?').join(', ');
+  for (const row of db
+    .prepare(`SELECT ts FROM context WHERE source IN (${placeholders}) AND ts >= ? AND ts < ?`)
+    .all(...COMMS_SOURCES, startMs, endMs)) {
+    const ts = Number(row.ts);
+    if (!Number.isFinite(ts)) continue;
+    out.messages += 1;
+    if (isLateNightHour(wallHour(ts, zone))) out.lateNight += 1;
+  }
+  for (const row of db
+    .prepare("SELECT meta FROM context WHERE source = 'calendar'")
+    .all()) {
+    let meta;
+    try {
+      meta = JSON.parse(String(row.meta ?? 'null'));
+    } catch {
+      continue;
+    }
+    const startedAt = meta === null ? NaN : Number(meta.start_ms);
+    if (!Number.isFinite(startedAt)) continue;
+    if (startedAt >= startMs && startedAt < endMs) out.meetings += 1;
+  }
+  return out;
+}
+
+// Features for exactly what a rating was rating.
+export function featuresForRating(db, { day, zone }) {
+  const { startMs, endMs } = dayInterval(day, zone);
+  return { day, zone, ...featuresForInterval(db, { startMs, endMs, zone }) };
+}
+
+// The `days` complete local days ending yesterday, oldest first -- same window
+// convention as the digest, so the two never disagree about whether today counts
+// (it does not; it is not over). Used for LISTING days, not for pairing: the
+// window is in one analysis zone by construction, which is the right frame for
+// "which days exist to ask about" and the wrong one for "what was this rating
+// rating".
 export function dayFeatures(db, { days = 30, zone, now = Date.now() } = {}) {
   if (!Number.isInteger(days) || days < 1 || days > 366) {
     throw new Error('dayFeatures: {days} must be an integer between 1 and 366');
@@ -105,64 +181,23 @@ export function dayFeatures(db, { days = 30, zone, now = Date.now() } = {}) {
   if (!Number.isFinite(now)) throw new Error('dayFeatures: {now} must be epoch milliseconds');
   const tz = zone ?? systemZone();
 
-  // The `days` complete local days ending yesterday, oldest first -- same
-  // window convention as the digest, so the two never disagree about whether
-  // today counts (it does not; it is not over).
-  const todayKey = localDayKey(now, tz);
-  const todayStart = localDayStart(todayKey, tz);
-  const keys = [];
-  let cursor = todayStart;
+  const labels = [];
+  let cursor = localDayStart(localDayKey(now, tz), tz);
   for (let i = 0; i < days; i += 1) {
-    const key = localDayKey(cursor - 1, tz);
-    keys.unshift({ key, startMs: localDayStart(key, tz) });
-    cursor = keys[0].startMs;
-  }
-  for (let i = 0; i < keys.length; i += 1) {
-    keys[i].endMs = i + 1 < keys.length ? keys[i + 1].startMs : todayStart;
+    const label = localDayKey(cursor - 1, tz);
+    labels.unshift(label);
+    cursor = localDayStart(label, tz);
   }
 
-  const blank = () => ({ messages: 0, lateNight: 0, meetings: 0 });
-  const perDay = new Map(keys.map((d) => [d.key, blank()]));
-  const windowStart = keys[0].startMs;
-  const windowEnd = todayStart;
-  const bucket = (ms) => {
-    const d = keys.find((k) => ms >= k.startMs && ms < k.endMs);
-    return d === undefined ? null : perDay.get(d.key);
-  };
-
-  const commsPlaceholders = COMMS_SOURCES.map(() => '?').join(', ');
-  for (const row of db
-    .prepare(`SELECT ts FROM context WHERE source IN (${commsPlaceholders}) AND ts >= ? AND ts < ?`)
-    .all(...COMMS_SOURCES, windowStart, windowEnd)) {
-    const ts = Number(row.ts);
-    if (!Number.isFinite(ts)) continue;
-    const b = bucket(ts);
-    if (b === null) continue;
-    b.messages += 1;
-    if (isLateNightHour(wallHour(ts, tz))) b.lateNight += 1;
-  }
-
-  for (const row of db.prepare("SELECT meta FROM context WHERE source = 'calendar'").all()) {
-    let meta;
-    try {
-      meta = JSON.parse(String(row.meta ?? 'null'));
-    } catch {
-      continue;
-    }
-    const startMs = meta === null ? NaN : Number(meta.start_ms);
-    if (!Number.isFinite(startMs)) continue;
-    const b = bucket(startMs);
-    if (b !== null) b.meetings += 1;
-  }
-
-  return keys.map((d) => ({ day: d.key, ...perDay.get(d.key) }));
+  return labels.map((day) => featuresForRating(db, { day, zone: tz }));
 }
 
 // Days that have features but no rating -- what the interface should ask for
 // next. Newest first: recall decays, so the most recent unrated day is the one
-// worth asking about.
+// worth asking about. Compared on the LABEL, because a day already answered in
+// another zone should not be asked again.
 export function pendingDays(db, { days = 30, zone, now = Date.now() } = {}) {
-  const rated = currentDayRatings(db);
+  const rated = ratedDayLabels(db);
   return dayFeatures(db, { days, zone, now })
     .filter((d) => !rated.has(d.day))
     .reverse()
@@ -196,10 +231,31 @@ export const FEATURES = Object.freeze(['messages', 'lateNight', 'meetings']);
 
 // The attribution, or an honest refusal. Never both, and never a number with a
 // caveat attached -- a caveat is what gets dropped when the value is rendered.
+//
+// PAIRS EACH RATING WITH ITS OWN INTERVAL. The obvious implementation builds one
+// window of features in the analysis zone and joins on the day string, and it is
+// wrong: a score recorded in America/Chicago would be correlated against
+// whatever six-hour-offset stretch that same label denotes wherever the analysis
+// happens to run. Every rating therefore carries its zone and its features are
+// recomputed over dayInterval(day, zone) -- so travelling changes nothing about
+// what an existing rating means.
+//
+// `days` bounds how far back to look, in the analysis zone, which is only a
+// cutoff on which ratings to include. It does not decide any rating's boundaries.
 export function correlate(db, { days = 30, zone, now = Date.now() } = {}) {
-  const rated = currentDayRatings(db);
-  const features = dayFeatures(db, { days, zone, now });
-  const paired = features.filter((d) => rated.has(d.day));
+  if (!Number.isInteger(days) || days < 1 || days > 366) {
+    throw new Error('correlate: {days} must be an integer between 1 and 366');
+  }
+  const tz = zone ?? systemZone();
+  const horizon = localDayStart(localDayKey(now, tz), tz) - days * 86_400_000;
+
+  const paired = currentRatings(db)
+    .map((r) => ({ ...r, ...dayInterval(r.day, r.zone) }))
+    .filter((r) => r.endMs > horizon && r.startMs <= now)
+    .map((r) => ({
+      ...r,
+      ...featuresForInterval(db, { startMs: r.startMs, endMs: r.endMs, zone: r.zone }),
+    }));
 
   if (paired.length < MIN_RATINGS) {
     return {
@@ -209,14 +265,22 @@ export function correlate(db, { days = 30, zone, now = Date.now() } = {}) {
       need: MIN_RATINGS,
       // What to do about it, because "not enough data" with no next step is
       // where a feature goes to die.
-      pending: pendingDays(db, { days, zone, now }).slice(0, 7),
+      pending: pendingDays(db, { days, zone: tz, now }).slice(0, 7),
     };
   }
 
-  const scores = paired.map((d) => rated.get(d.day));
+  const scores = paired.map((r) => r.score);
   const correlations = {};
   for (const key of FEATURES) {
-    correlations[key] = pearson(paired.map((d) => d[key]), scores);
+    correlations[key] = pearson(paired.map((r) => r[key]), scores);
   }
-  return { ok: true, n: paired.length, days, correlations };
+  // zones is reported because a series spanning two of them is a fact about the
+  // data a reader should see, not a detail to smooth over.
+  return {
+    ok: true,
+    n: paired.length,
+    days,
+    zones: [...new Set(paired.map((r) => r.zone))].sort(),
+    correlations,
+  };
 }

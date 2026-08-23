@@ -12,7 +12,8 @@ import { openDb, insertRows } from '../server/hermes.mjs';
 import { localDayKey } from '../server/vault/digest.mjs';
 import {
   MIN_RATINGS, SCORE_MIN, SCORE_MAX, FEATURES,
-  recordRating, currentDayRatings, dayFeatures, pendingDays, correlate,
+  recordRating, currentRatings, ratedDayLabels, dayInterval, featuresForInterval,
+  dayFeatures, pendingDays, correlate,
 } from '../server/vault/energy.mjs';
 
 const ZONE = 'America/Chicago';
@@ -21,6 +22,10 @@ const NOW = Date.UTC(2027, 0, 15, 12, 0, 0);
 const DAY = 86_400_000;
 
 const dayBefore = (n) => localDayKey(NOW - n * DAY, ZONE);
+
+// The score currently standing for a (day, zone) pair.
+const scoreFor = (db, day, zone = ZONE) =>
+  currentRatings(db).find((r) => r.day === day && r.zone === zone)?.score;
 
 // ------------------------------------------------------------ the guard rails
 
@@ -61,7 +66,7 @@ test('a rating is append-only: a changed mind appends and the latest wins', () =
   );
 
   assert.equal(db.prepare('SELECT count(*) AS n FROM energy_rating').get().n, 2, 'both are kept');
-  assert.equal(currentDayRatings(db).get(dayBefore(1)), 5, 'the latest append wins');
+  assert.equal(scoreFor(db, dayBefore(1)), 5, 'the latest append wins');
   db.close();
 });
 
@@ -196,7 +201,7 @@ test('features and ratings agree about which day a row belongs to', () => {
   assert.equal(row.lateNight, 1, '03:00 is late-night by the digest definition');
 
   recordRating(db, { day: target, zone: ZONE, score: 2, now: NOW });
-  assert.equal(currentDayRatings(db).get(target), 2, 'the rating keys on the same day string');
+  assert.equal(scoreFor(db, target), 2, 'the rating keys on the same day string');
   db.close();
 });
 
@@ -220,9 +225,83 @@ test('pendingDays asks about the most recent unrated day first', () => {
 
 test('an empty store yields no ratings and a clean refusal', () => {
   const db = openDb(':memory:');
-  assert.equal(currentDayRatings(db).size, 0);
+  assert.equal(currentRatings(db).length, 0);
+  assert.equal(ratedDayLabels(db).size, 0);
   const out = correlate(db, { days: 7, zone: ZONE, now: NOW });
   assert.equal(out.ok, false);
   assert.equal(out.have, 0);
+  db.close();
+});
+
+
+// ------------------------------------------------- the zone, which is the day
+
+// FOUND IN REVIEW OF THE COMMIT THAT ADDED THIS MODULE (Codex, P2). The first
+// implementation read only `day` and `score` out of the view and paired them
+// against features recomputed in whatever zone the analysis ran in. A day string
+// is not a day: '2027-01-14' in America/Chicago and the same label in Asia/Tokyo
+// are intervals fourteen hours apart. So a rating survived travel as a label and
+// silently changed which stretch of time it referred to.
+test('a rating is correlated against the interval it was actually rating', () => {
+  const db = openDb(':memory:');
+  const day = dayBefore(2);
+
+  // 22:30 Chicago on the target day. In Tokyo that instant is the NEXT
+  // afternoon, so a zone-blind pairing files this message on the wrong day.
+  const chicagoLate = new Date(`${day}T22:30:00-06:00`).getTime();
+  insertRows(db, [{ ts: chicagoLate, source: 'imessage', entity_id: 'i:tz', text: 'up late' }]);
+
+  const chicago = dayInterval(day, 'America/Chicago');
+  const tokyo = dayInterval(day, 'Asia/Tokyo');
+  assert.notEqual(chicago.startMs, tokyo.startMs, 'the same label is a different interval per zone');
+
+  const inChicago = featuresForInterval(db, { ...chicago, zone: 'America/Chicago' });
+  const inTokyo = featuresForInterval(db, { ...tokyo, zone: 'Asia/Tokyo' });
+  assert.equal(inChicago.messages, 1, 'the message falls inside the Chicago day');
+  assert.equal(inChicago.lateNight, 1, '22:30 local is late-night');
+  assert.equal(inTokyo.messages, 0, 'and outside the Tokyo day with the same label');
+  db.close();
+});
+
+test('the same day label in two zones is two ratings, not one overwriting the other', () => {
+  const db = openDb(':memory:');
+  const day = dayBefore(3);
+  recordRating(db, { day, zone: 'America/Chicago', score: 2, now: NOW });
+  recordRating(db, { day, zone: 'Asia/Tokyo', score: 5, now: NOW + 1000 });
+
+  const current = currentRatings(db);
+  assert.equal(current.length, 2, 'the view partitions by (day, zone), not by day');
+  assert.equal(scoreFor(db, day, 'America/Chicago'), 2, 'the Chicago rating stands');
+  assert.equal(scoreFor(db, day, 'Asia/Tokyo'), 5, 'and so does the Tokyo one');
+
+  // For "ask again?" the label is the right key -- the day was answered.
+  assert.deepEqual([...ratedDayLabels(db)], [day]);
+  db.close();
+});
+
+test('travelling does not change what an existing rating means', () => {
+  const db = openDb(':memory:');
+  // Every rating recorded in Chicago, and enough of them to clear the floor.
+  for (let i = 1; i <= MIN_RATINGS; i += 1) {
+    const late = i % 5;
+    insertRows(db, Array.from({ length: late }, (_, k) => ({
+      ts: new Date(`${dayBefore(i)}T23:00:00-06:00`).getTime() + k * 1000,
+      source: 'imessage',
+      entity_id: `i:${i}:${k}`,
+      text: 'late',
+    })));
+    recordRating(db, { day: dayBefore(i), zone: 'America/Chicago', score: Math.max(1, 5 - late), now: NOW });
+  }
+
+  // The analysis then runs from two different places. The pairing is anchored to
+  // each rating's own zone, so the answer must be identical.
+  const home = correlate(db, { days: 60, zone: 'America/Chicago', now: NOW });
+  const away = correlate(db, { days: 60, zone: 'Asia/Tokyo', now: NOW });
+
+  assert.equal(home.ok, true);
+  assert.equal(away.ok, true);
+  assert.equal(home.n, away.n, 'the same ratings are included either way');
+  assert.deepEqual(home.correlations, away.correlations, 'and produce the same numbers');
+  assert.deepEqual(home.zones, ['America/Chicago'], 'the zones the data was recorded in are reported');
   db.close();
 });
