@@ -87,7 +87,24 @@ services:
       - bus
 
   # Telegram, Discord, Slack — same bus, same posture (no host port, cookie/
-  # token login from the connect page, presence off, no backfill). Owner
+  # token login from the connect page, double puppeting off, history backfill
+  # ON).
+  #
+  # This line read "presence off, no backfill" until 2026-08-22. Both halves
+  # were wrong and are corrected rather than deleted, because a stale posture
+  # comment is worse than none — it gets quoted as authority. Backfill was
+  # reversed by owner decision the same day ("all connections should pull bulk
+  # messages"); a bridge that starts empty is a memory that starts empty.
+  # `presence` is not a key these images keep at all — they drop it on the
+  # config rewrite they do at startup, so it was a no-op being copied around.
+  # What actually holds the line is double_puppet.secrets being empty, which is
+  # the only mechanism by which a bridge could act as the owner. The enforced
+  # version of this paragraph is checkBridgeHardening() in
+  # connectors/lib/checks.mjs: it FAILS when backfill is off and WARNs when
+  # double puppeting is on, across every config in ${HAZLIE_MATRIX}. Trust that
+  # over this comment.
+  #
+  # Owner
   # asked for all three, 2026-08-22. Telegram additionally needs an
   # api_id/api_hash from my.telegram.org/apps in
   # ~/.hazlie/matrix/telegram/config.yaml before its login works — the
