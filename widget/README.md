@@ -52,14 +52,14 @@ strings. The widget never fabricates an answer.
   FDA grants belong to launchd's `~/.hazlie/bin/node`, and a wrapper that
   became the responsible process would silently break them.
 - **`src/Bridge.swift` is the egress choke point.** The only two reachable
-  URLs are `http://127.0.0.1:8789` (hermes) and `http://127.0.0.1:8788`
+  URLs are `http://127.0.0.1:51789` (hermes) and `http://127.0.0.1:51788`
   (connect; `HAZLIE_CONNECT_PORT` overrides the port only, for a dev
   instance). Redirects are refused. The webviews load `file://` resources
   only — `default-src 'none'` CSP plus a navigation delegate that cancels
   every non-file navigation — so a page cannot make a network request at
   all. Audit = read this directory; there is nothing else.
 - **Identity before trust:** every chat send preflights `GET /health` on
-  8789 and requires the exact body `{"ok":true}` (the port-8787 lesson:
+  51789 and requires the exact body `{"ok":true}` (the port-8787 lesson:
   liveness is not identity).
 - **Status** comes from connect's `GET /api/status` (bearer-only; added on
   this branch), which reuses the connect page's `readStatus()` in-process so
@@ -97,7 +97,7 @@ HAZLIE_CONNECT_PORT=8790 ~/Applications/Hazlie.app/Contents/MacOS/Hazlie
 - Window level -2147483602 (= desktopIcon+1) confirmed via CGWindowList;
   stays below normal windows, survives relaunch with position.
 - `footprint`: 20 MB phys (llama-server running alongside).
-- `lsof`: only 127.0.0.1:8788/8789 sockets, ever; grep audit: two loopback
+- `lsof`: only 127.0.0.1:51788/51789 sockets, ever; grep audit: two loopback
   URL literals, nothing else.
 - /api/status round trip against a dev connect on 8790: dots match
   readStatus() truth row-for-row (FDA rows show the documented

@@ -10,10 +10,10 @@ below keeps the browser surface loopback-only too.
 
 | Port | Process | Started by | Stays up? |
 |------|---------|-----------|-----------|
-| 8080 | Authenticated `llama-server` (Qwen3 Q4_K_M selected for host RAM, `--jinja --reasoning off`) | `launchd`, label `com.hazlie.llama-server` | Yes — `KeepAlive`, survives reboots |
-| 8789 (the canonical port since 2026-08-20 — an unrelated dev server commonly holds 8787 and answers 200 there, which made defaulted callers reach a stranger; per-machine override: `HAZLIE_HERMES_URL` or config `hermesUrl` for its callers. NOT `HERMES_PORT` in the plist — the plist carries no `EnvironmentVariables` block, and `install_agent` rewrites the file from the template on every run, so a hand-edit is reverted the next time setup runs) | `hermes.mjs` — local context DB plus the browser's authenticated streaming LLM proxy. Every route but `/health` requires an authorized caller | `launchd`, label `com.hazlie.hermes` (installed by `ops/setup-connectors.sh`; `npm run hermes` in `ui/` remains the pre-setup dev fallback — not both at once, the port is one) | Yes — `KeepAlive`, survives reboots |
+| 51780 | Authenticated `llama-server` (Qwen3 Q4_K_M selected for host RAM, `--jinja --reasoning off`) | `launchd`, label `com.hazlie.llama-server` | Yes — `KeepAlive`, survives reboots |
+| 51789 (the canonical port since 2026-08-20 — an unrelated dev server commonly holds 8787 and answers 200 there, which made defaulted callers reach a stranger; per-machine override: `HAZLIE_HERMES_URL` or config `hermesUrl` for its callers. NOT `HERMES_PORT` in the plist — the plist carries no `EnvironmentVariables` block, and `install_agent` rewrites the file from the template on every run, so a hand-edit is reverted the next time setup runs) | `hermes.mjs` — local context DB plus the browser's authenticated streaming LLM proxy. Every route but `/health` requires an authorized caller | `launchd`, label `com.hazlie.hermes` (installed by `ops/setup-connectors.sh`; `npm run hermes` in `ui/` remains the pre-setup dev fallback — not both at once, the port is one) | Yes — `KeepAlive`, survives reboots |
 | — | connectors daemon — **loopback-only, no listener**: outbound pollers writing via `POST /ingest`, run under the FDA-granted stable binary `~/.hazlie/bin/node` | `launchd`, label `com.hazlie.connectors` (installed by `ops/setup-connectors.sh`) | Yes — `KeepAlive`, `ThrottleInterval` 60 |
-| 8788 | `connect/server.mjs` — the loopback onboarding page and the widget's `/api/*` read | `launchd`, label `com.hazlie.connect` (installed by `ops/setup-connectors.sh`) | Yes — `KeepAlive`, `ThrottleInterval` 60 |
+| 51788 | `connect/server.mjs` — the loopback onboarding page and the widget's `/api/*` read | `launchd`, label `com.hazlie.connect` (installed by `ops/setup-connectors.sh`) | Yes — `KeepAlive`, `ThrottleInterval` 60 |
 | — | `whatsapp-keepalive` | **nothing installs it.** `ops/com.hazlie.whatsapp-keepalive.plist` exists and is loaded on the owner's machine, but no setup script renders `@HOME@` or bootstraps it — it was loaded by hand. Either add it to `setup-connectors.sh` or delete the plist. | Loaded, unmanaged |
 
 The connector contract (source/entity-id registry, cursor semantics, the Oura
@@ -71,8 +71,8 @@ per-session start — they are resident. Useful spells:
 
 ## Local trust boundary
 
-The browser never connects to port 8080 and never receives an API key. It sends
-JSON to Hermes at `http://localhost:8789/lane/local/v1/chat/completions`; Hermes
+The browser never connects to port 51780 and never receives an API key. It sends
+JSON to Hermes at `http://localhost:51789/lane/local/v1/chat/completions`; Hermes
 reads the owner-only key file and streams the authenticated loopback llama
 response back. The direct llama port rejects unauthenticated inference requests,
 including drive-by `no-cors` POSTs that CORS alone cannot prevent. Do not copy
@@ -175,7 +175,7 @@ Nothing latency-related has been measured on this machine yet. Specifically:
 - **Exact browser origin.** Hermes now trusts none by default (above). The
   llama-server plist still carries `--cors-origins http://localhost:8081`, which
   is the same dead Expo origin — left alone here because the browser never
-  connects to port 8080 (it goes through Hermes' `/lane/local` proxy) and the
+  connects to port 51780 (it goes through Hermes' `/lane/local` proxy) and the
   direct port additionally requires the API key, so the stale entry grants
   nothing on its own. Worth shrinking on the next pass through that plist. If
   development moves, configure `HERMES_ALLOWED_ORIGINS`; do not fall back to

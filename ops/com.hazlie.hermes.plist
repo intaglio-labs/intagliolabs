@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Keeps Hermes resident across logins/reboots, serving the household context
-  store (sole writer, sole deleter) on 127.0.0.1:8789 (the canonical port
+  store (sole writer, sole deleter) on 127.0.0.1:51789 (the canonical port
   since 2026-08-20; an unrelated dev server holds 8787 on the owner's Mac).
 
   This checked-in file is a TEMPLATE: launchd expands no variables, so @HOME@
@@ -21,7 +21,7 @@
   (llama-api-key.txt and hermes-token.txt) — under KeepAlive that refusal
   would loop, so setup-connectors.sh gates on those files existing before it
   bootstraps this agent, and its health wait catches the other startup
-  failure: some unrelated local process already holding :8789.
+  failure: some unrelated local process already holding :51789.
 -->
 <plist version="1.0">
 <dict>
@@ -30,7 +30,7 @@
 
   <!-- Attribute this background item to the APP, not to the program it runs.
        Without this key macOS names the item after the executable, so a person
-       who installed one app was told that "node" had added background items --
+       who installed one app was told that "node" had added background items —
        four separate times, once per agent, naming something they never
        installed. With it, Login Items groups all of them under Intaglio Labs
        and the notification says the app's name.

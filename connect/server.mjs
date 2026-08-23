@@ -13,7 +13,7 @@
 //   3. No CORS headers, ever. A cross-origin page may be able to POST here
 //      blind, but it can never read a response it is not granted.
 //
-// Usage:  node connect/server.mjs [--port 8788] [--print-url]
+// Usage:  node connect/server.mjs [--port 51788] [--print-url]
 
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
@@ -31,7 +31,7 @@ import { sameOrigin } from './lib/origin.mjs';
 import { statusResponse } from './lib/statusApi.mjs';
 import { mintToken, validateToken } from './lib/tokens.mjs';
 
-const DEFAULT_PORT = 8788;
+const DEFAULT_PORT = 51788;
 const argv = process.argv.slice(2);
 const portFlag = argv.indexOf('--port');
 const PORT = portFlag !== -1 ? Number(argv[portFlag + 1]) : DEFAULT_PORT;

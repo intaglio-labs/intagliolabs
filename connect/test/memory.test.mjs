@@ -153,6 +153,6 @@ test('the bearer token must be a regular owner-only file', () => {
 });
 
 test('the hermes base follows the same env var everything else reads', () => {
-  assert.equal(hermesBase({}), 'http://127.0.0.1:8789');
+  assert.equal(hermesBase({}), 'http://127.0.0.1:51789');
   assert.equal(hermesBase({ HAZLIE_HERMES_URL: 'http://127.0.0.1:9999/' }), 'http://127.0.0.1:9999');
 });

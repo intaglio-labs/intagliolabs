@@ -18,10 +18,10 @@
 // serialization, turning every redelivery into a spurious update).
 import { readHermesTokenFile, defaultHermesTokenPath } from './secrets.mjs';
 
-// 8789 is the canonical hermes port (moved 2026-08-20; an unrelated dev
+// 51789 is the canonical hermes port (moved 2026-08-20; an unrelated dev
 // server holds 8787 on the owner's Mac). Must match hermes.mjs and
 // ops/setup-connectors.sh.
-export const DEFAULT_HERMES_BASE_URL = 'http://127.0.0.1:8789';
+export const DEFAULT_HERMES_BASE_URL = 'http://127.0.0.1:51789';
 
 // Hermes caps request bodies at 1 MiB. Staying at half that (and ≤200 rows)
 // leaves headroom for rows that serialize larger than they were measured
@@ -106,7 +106,7 @@ async function request({ baseUrl, fetchImpl, backoffMs }, method, path, token, b
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         // canonicalLoopbackBase proves the ORIGIN is loopback; it cannot prove
         // where a reply sends us next. Without this, a 307 from whatever holds
-        // :8789 forwards the batch -- corpus rows and the bearer both -- to a
+        // :51789 forwards the batch -- corpus rows and the bearer both -- to a
         // host of its choosing, and the loopback check above would have passed
         // on the way out. Same reasoning and same spelling as
         // ui/server/hermes.mjs' llama call.

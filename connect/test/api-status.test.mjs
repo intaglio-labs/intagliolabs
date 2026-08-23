@@ -35,7 +35,7 @@ test('a valid bearer gets the same truth the page renders', (t) => {
 
 test('any Origin header is refused, even with a valid bearer', (t) => {
   const home = fakeHome(t);
-  for (const origin of ['http://localhost:8788', 'null', 'https://evil.example']) {
+  for (const origin of ['http://localhost:51788', 'null', 'https://evil.example']) {
     const { status } = statusResponse({ origin, authorization: `Bearer ${TOKEN}`, home });
     assert.equal(status, 403, `origin ${origin} must be refused`);
   }

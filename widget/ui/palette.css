@@ -2426,3 +2426,41 @@ body.connections .tile-tip.on { opacity: 1; }
 .ob-alt summary::before { content: '▸ '; }
 .ob-alt[open] summary::before { content: '▾ '; }
 .ob-alt summary:hover { color: #ddd7cb; }
+/* The selected model. Visible enough to be obvious at a glance, and clearly
+   reversible — pressing it again clears it. */
+.ob-setup .ob-choice.sel {
+  border-color: #c5a56d;
+  background: rgba(197, 165, 109, 0.13);
+  box-shadow: 0 0 0 1px rgba(197, 165, 109, 0.5) inset;
+}
+.ob-setup .ob-choice.sel b { color: #f0e6d2; }
+
+/* The permission rows. One line each, its own button, its own state — so a
+   person can turn on exactly what they want instead of facing one all-or-
+   nothing ask. The odd one out is marked as such rather than hidden: Messages
+   and Notes genuinely have no system prompt, and pretending they behave like
+   the others would be the lie. */
+.ob-perms { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+.ob-perm {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(234, 234, 234, 0.10);
+  background: rgba(255, 255, 255, 0.035);
+  text-align: left;
+}
+.ob-perm-t { display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-width: 0; }
+.ob-perm-t b { color: #f0e6d2; font-size: 14px; font-weight: 600; }
+.ob-perm-t span { color: #a8a296; font-size: 12.5px; line-height: 1.4; }
+.ob-perm button { flex: 0 0 auto; }
+.ob-perm.on {
+  border-color: rgba(120, 190, 140, 0.45);
+  background: rgba(120, 190, 140, 0.10);
+}
+.ob-perm.on button {
+  background: none; border: 1px solid rgba(120, 190, 140, 0.5);
+  color: #8fd3a6; opacity: 1;
+}
+/* Full Disk Access is a different kind of thing and reads as one. */
+.ob-perm-fda { border-style: dashed; }
+.ob-perm-fda .ob-perm-t span { color: #b8a179; }

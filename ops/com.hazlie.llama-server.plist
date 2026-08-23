@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Keeps llama-server resident across logins/reboots, serving the local LLM
-  tier on 127.0.0.1:8080.
+  tier on 127.0.0.1:51780.
 
   This checked-in file is a TEMPLATE: launchd cannot expand $HOME inside
   ProgramArguments, so every user path holds an @HOME@ placeholder that
@@ -55,7 +55,7 @@
 
   <!-- Attribute this background item to the APP, not to the program it runs.
        Without this key macOS names the item after the executable, so a person
-       who installed one app was told that "node" had added background items --
+       who installed one app was told that "node" had added background items —
        four separate times, once per agent, naming something they never
        installed. With it, Login Items groups all of them under Intaglio Labs
        and the notification says the app's name.
@@ -74,7 +74,7 @@
     <string>--host</string>
     <string>127.0.0.1</string>
     <string>--port</string>
-    <string>8080</string>
+    <string>51780</string>
     <string>--ctx-size</string>
     <string>32768</string>
     <string>--cache-type-k</string>

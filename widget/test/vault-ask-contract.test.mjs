@@ -16,7 +16,7 @@
 // touching llama.
 // HERMETIC BY DEFAULT — changed 2026-08-22, and the reason matters.
 //
-// This file used to resolve BASE to the REAL launchd hermes on :8789 and read
+// This file used to resolve BASE to the REAL launchd hermes on :51789 and read
 // the owner's actual bearer out of ~/.hazlie/secrets. Running the widget suite
 // therefore ran the full retrieve→compose path over the production context.db
 // (339k rows of the owner's mail, messages and calendar), spent a real model
@@ -51,7 +51,7 @@ const TEST_BEARER = 'c'.repeat(64);
 const TEST_LLAMA_KEY = 'a'.repeat(64);
 
 let HOST = '127.0.0.1';
-let PORT = 8789;
+let PORT = 51789;
 let hermes = null;
 let llamaStub = null;
 let tmp = null;
@@ -85,7 +85,7 @@ function startLlamaStub() {
 
 before(async () => {
   if (LIVE_MODE) {
-    const base = process.env.HERMES_BASE ?? 'http://127.0.0.1:8789';
+    const base = process.env.HERMES_BASE ?? 'http://127.0.0.1:51789';
     ({ hostname: HOST, port: PORT } = new URL(base));
     return;
   }
@@ -133,7 +133,7 @@ function post(path, { body, headers = {}, timeout = 10_000 } = {}) {
   });
 }
 
-// Identity first — the port-8787 lesson. If 8789 isn't answering as hermes,
+// Identity first — the port-8787 lesson. If 51789 isn't answering as hermes,
 // every test below would be exercising a stranger.
 async function hermesReady() {
   try {

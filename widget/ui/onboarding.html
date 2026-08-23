@@ -112,6 +112,12 @@ one click: intaglio labs moves itself and reopens from its real home.</p>
 nothing you ask ever leaves.</p>
 
     <div class="ob-choices" id="modelChoices"></div>
+    <!-- Choosing and starting are two acts. A click used to begin a 5 GB
+         download immediately, which makes the cards a minefield rather than a
+         choice — you cannot look at the second option without committing to the
+         first. Selection is now visible and reversible, and this is the button
+         that spends the bandwidth. -->
+    <button class="ob-cta" id="modelGo" hidden>download</button>
 
     <div class="ob-prog" id="modelProg" hidden>
       <div class="ob-prog-bar"><span id="modelBar"></span></div>
@@ -123,35 +129,47 @@ nothing you ask ever leaves.</p>
     <button class="ob-replay" id="modelSkip">skip — set this up later</button>
   </div>
 
-  <!-- Screen B: one real data source. The app is an empty room until something
-       is in it, so onboarding does not end before at least offering to fill it.
-       Full Disk Access is the whole ask: Messages, Notes, Contacts and Photos
-       all need NO credentials, so one grant lights up four sources at once.
-       Verification is the row count, not a permission check — macOS gives this
-       process no honest answer about a grant that attaches to a different
-       binary. -->
+  <!-- Screen B: what it may read, one source at a time.
+       Contacts, Calendar and Photos each have a real system prompt: one click,
+       in context, naming this app. Messages and Notes have none — they are
+       SQLite stores under ~/Library, so they need Full Disk Access, and no API
+       asks for it. That split is macOS', not ours, so the screen shows it
+       honestly rather than flattening everything into one scary permission. -->
   <div class="ob-screen ob-setup" id="screenData" hidden>
-    <p class="ob-tagline">what should i remember?</p>
-    <p class="ob-home-note ob-setup-note">one permission turns on messages, notes, contacts and photos together.
-they are read on this Mac and stay on it.</p>
+    <p class="ob-tagline">what may i read?</p>
+    <p class="ob-home-note ob-setup-note">turn on as much or as little as you like. you can change any of it later.
+everything is read on this Mac and stays here.</p>
 
-    <ol class="ob-steps">
-      <li><span class="ob-step-n">1</span>
-        <span>open <b>Full Disk Access</b> and press <b>+</b></span>
-        <button class="ob-cta ob-cta-sm" id="fdaOpen">open settings</button></li>
-      <li><span class="ob-step-n">2</span>
-        <span>drag <b>node</b> from the Finder window onto that list</span>
-        <button class="ob-cta ob-cta-sm" id="fdaReveal">show me node</button>
-        <details class="ob-alt">
-          <summary>or paste the path instead</summary>
-          <code class="ob-path" id="nodePath">…</code>
-          <button class="ob-replay ob-copy" id="fdaCopy">copy</button>
-        </details></li>
-      <li><span class="ob-step-n">3</span>
-        <span>come back and check</span>
-        <button class="ob-cta ob-cta-sm" id="dataCheck">check</button></li>
-    </ol>
+    <div class="ob-perms" id="perms">
+      <div class="ob-perm" data-which="contacts">
+        <div class="ob-perm-t"><b>Contacts</b><span>so it knows who people are</span></div>
+        <button class="ob-cta ob-cta-sm">allow</button>
+      </div>
+      <div class="ob-perm" data-which="calendar">
+        <div class="ob-perm-t"><b>Calendar</b><span>so it can answer about your time</span></div>
+        <button class="ob-cta ob-cta-sm">allow</button>
+      </div>
+      <div class="ob-perm" data-which="photos">
+        <div class="ob-perm-t"><b>Photos</b><span>where you were, who with</span></div>
+        <button class="ob-cta ob-cta-sm">allow</button>
+      </div>
+      <div class="ob-perm ob-perm-fda" data-which="fda">
+        <div class="ob-perm-t"><b>Messages &amp; Notes</b>
+          <span>no system prompt exists for these — macOS asks for Full Disk Access instead</span></div>
+        <button class="ob-cta ob-cta-sm" id="fdaOpen">open settings</button>
+      </div>
+    </div>
 
+    <details class="ob-alt" id="fdaHelp">
+      <summary>how to add it in Settings</summary>
+      <ol class="ob-steps">
+        <li><span class="ob-step-n">1</span><span>press <b>+</b> in the list that opened</span></li>
+        <li><span class="ob-step-n">2</span><span>choose <b>Intaglio Labs</b> from Applications</span>
+          <button class="ob-replay ob-copy" id="fdaReveal">show me</button></li>
+      </ol>
+    </details>
+
+    <button class="ob-cta" id="dataCheck">done — start reading</button>
     <p class="ob-status" id="dataStatus"></p>
     <button class="ob-replay" id="dataSkip">skip — connect sources later</button>
   </div>

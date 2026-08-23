@@ -22,7 +22,7 @@ runs, not paraphrased.
 ## Endpoint
 
 ```
-POST http://localhost:8789/ingest
+POST http://localhost:51789/ingest
 ```
 
 `HERMES_PORT` moves the port; `HERMES_DB` moves the database file;
@@ -216,7 +216,7 @@ whoever asks.
 ```bash
 TOKEN=$(cat ~/.hazlie/secrets/hermes-token.txt)
 
-curl -X POST http://localhost:8789/ingest \
+curl -X POST http://localhost:51789/ingest \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $TOKEN" \
   -d '[
@@ -230,7 +230,7 @@ curl -X POST http://localhost:8789/ingest \
 Without the header, verified:
 
 ```bash
-curl -X POST http://localhost:8789/ingest \
+curl -X POST http://localhost:51789/ingest \
   -H 'Content-Type: application/json' \
   -d '{"source":"x","text":"y"}'
 # {"error":"unauthorized"}     [401]

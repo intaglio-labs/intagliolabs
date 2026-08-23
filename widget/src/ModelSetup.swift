@@ -84,10 +84,30 @@ enum ModelSetup {
 
   private static var task: URLSessionDownloadTask?
   private static var driver: Driver?
+  /// Set by cancel(), checked by the work that has no URLSessionTask to cancel.
+  private static var cancelled = false
+  private static let lock = NSLock()
 
-  static var isDownloading: Bool { task != nil }
+  static var isDownloading: Bool { task != nil || busy }
+  private static var busy = false
 
+  private static var isCancelled: Bool {
+    lock.lock(); defer { lock.unlock() }
+    return cancelled
+  }
+
+  /// CANCEL HAS TO REACH THE WORK THAT IS NOT A DOWNLOAD.
+  ///
+  /// This used to cancel the URLSessionTask and nothing else, which meant it did
+  /// nothing at all on the path that matters most: a file already on disk is
+  /// never downloaded, it is HASHED, and hashing several GB takes long enough
+  /// that cancel is exactly what a person reaches for. There was no task to
+  /// cancel, so the button moved the screen back and the work carried on and
+  /// then relinked the model underneath them.
   static func cancel() {
+    lock.lock()
+    cancelled = true
+    lock.unlock()
     task?.cancel()
     task = nil
     driver = nil
@@ -101,8 +121,10 @@ enum ModelSetup {
     progress: @escaping (Int64, Int64) -> Void,
     done: @escaping (String?) -> Void
   ) {
-    guard task == nil else { done("a download is already running"); return }
+    guard !isDownloading else { done("a download is already running"); return }
     guard let tier = tiers.first(where: { $0.id == tierId }) else { done("unknown model"); return }
+    lock.lock(); cancelled = false; lock.unlock()
+    busy = true
     do {
       try fm.createDirectory(at: modelDir, withIntermediateDirectories: true,
                              attributes: [.posixPermissions: 0o700])
@@ -115,7 +137,8 @@ enum ModelSetup {
       DispatchQueue.main.async {
         task = nil
         driver = nil
-        done(reason)
+        busy = false
+        done(isCancelled ? "cancelled" : reason)
       }
     }
 
@@ -133,7 +156,9 @@ enum ModelSetup {
        size == tier.bytes {
       DispatchQueue.global(qos: .utility).async {
         DispatchQueue.main.async { progress(tier.bytes, tier.bytes) }
-        if digest(of: existing) == tier.sha256 {
+        let sum = digest(of: existing)
+        guard !isCancelled else { finish("cancelled"); return }
+        if sum == tier.sha256 {
           // Relink only; the bytes are already correct and already here.
           do {
             try link(tier)
@@ -196,6 +221,9 @@ enum ModelSetup {
     defer { try? handle.close() }
     var hasher = SHA256()
     while let chunk = try? handle.read(upToCount: 4 * 1024 * 1024), !chunk.isEmpty {
+      // Checked per chunk rather than once at the end: hashing 5 GB takes long
+      // enough that a cancel arriving halfway through must be felt in seconds.
+      if isCancelled { return nil }
       hasher.update(data: chunk)
     }
     return hasher.finalize().map { String(format: "%02x", $0) }.joined()

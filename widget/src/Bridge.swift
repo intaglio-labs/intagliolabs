@@ -70,13 +70,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     // Same setup controls, reachable from the gear after the
                     // flow — a skipped step must stay reachable.
                     "setupState", "modelDownload", "modelCancel",
-                    "openFullDiskAccess", "revealNode", "startSources"],
+                    "openFullDiskAccess", "revealNode", "startSources",
+                   "permissionState", "requestPermission"],
     "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
                    "widgetSpot",
                    // The setup scenes: choosing and fetching the answer model,
                    // and turning on the first data source.
                    "setupState", "modelDownload", "modelCancel",
-                   "openFullDiskAccess", "revealNode", "startSources"],
+                   "openFullDiskAccess", "revealNode", "startSources",
+                    "permissionState", "requestPermission"],
     // people.html includes connector-tile.js as well as people.js (check the
     // script tags, not the file's own comment about being shared), so the People
     // popup renders connector tiles and needs the bridge verbs too. Writing this
@@ -199,12 +201,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   weak var delegate: BridgeDelegate?
 
   // The ONLY two places this process may talk to.
-  private let hermesBase = URL(string: "http://127.0.0.1:8789")!
+  private let hermesBase = URL(string: "http://127.0.0.1:51789")!
   private let connectBase: URL = {
     // Dev override for the port ONLY — the host is not configurable. Lets a
     // second connect instance (e.g. --port 8790 from a worktree) serve the
     // widget without touching the launchd one.
-    var port = 8788
+    var port = 51788
     if let s = ProcessInfo.processInfo.environment["HAZLIE_CONNECT_PORT"],
        let p = Int(s), (1024...65535).contains(p) { port = p }
     return URL(string: "http://127.0.0.1:\(port)")!
@@ -661,11 +663,28 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // lands. The config is what makes the daemon boot AT ALL -- without it
       // the agent parks at exit 1 -- so writing it is the whole action.
       let ok = writeConnectorsConfigIfMissing()
-      DispatchQueue.global(qos: .utility).async {
-        Provision.installAgent("com.hazlie.connectors")
-        Provision.kickstart("com.hazlie.connectors")
-      }
+      // Started as a CHILD of this app, not bootstrapped into launchd, so the
+      // reader inherits this app's permissions instead of needing its own.
+      Provision.retireConnectorsAgent()
+      Connectors.shared.start()
       reply(webView, id, ["state": ok ? "ok" : "error"])
+
+    case "permissionState":
+      reply(webView, id, ["state": "ok", "permissions": Permissions.all])
+
+    case "requestPermission":
+      // A real system prompt, in context, naming this app. macOS shows it once
+      // per app per permission and remembers a refusal, so a second press does
+      // nothing — the page reads the returned status and offers Settings when
+      // it comes back denied.
+      let which = String((payload["which"] as? String ?? "").prefix(16))
+      Permissions.request(which) { [weak self] status in
+        guard let self else { return }
+        // Granted mid-flow means the reader can suddenly see more; nudge it so
+        // the owner does not wait for the next poll to see anything happen.
+        if status == .granted { Connectors.shared.start() }
+        self.reply(webView, id, ["state": "ok", "which": which, "status": status.rawValue])
+      }
 
     case "ask":
       let utterance = String((payload["utterance"] as? String ?? "")

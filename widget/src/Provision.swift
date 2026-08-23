@@ -21,7 +21,32 @@ enum Provision {
 
   // Bootstrapped in this order: hermes migrates and opens its DB first, then
   // connect, then connectors last so their first /ingest hits a ready server.
-  private static let agentsInOrder = ["com.hazlie.hermes", "com.hazlie.llama-server", "com.hazlie.connect", "com.hazlie.connectors"]
+  // CONNECTORS IS NOT HERE ANY MORE, and its absence is the point.
+  //
+  // It runs as a child of this app instead (Connectors.swift), because macOS
+  // attributes a TCC grant to the RESPONSIBLE process: spawned by launchd, node
+  // was responsible for itself and Full Disk Access had to be granted to
+  // ~/.hazlie/bin/node — a unix binary, found through a file picker, listed in
+  // System Settings under a name nobody installed. Spawned by the app, the app
+  // is responsible, so the grant is one row called Intaglio Labs and the same
+  // inheritance covers the Contacts, Calendar and Photos prompts.
+  private static let agentsInOrder = ["com.hazlie.hermes", "com.hazlie.llama-server", "com.hazlie.connect"]
+
+  /// Remove a connectors agent left behind by an older install. Without this it
+  /// keeps running under launchd — responsible for itself, needing its own FDA,
+  /// and racing the app's child for the same cursors and caches.
+  static func retireConnectorsAgent() {
+    let label = "com.hazlie.connectors"
+    let plist = launchAgents.appendingPathComponent("\(label).plist")
+    guard fm.fileExists(atPath: plist.path) else { return }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    p.arguments = ["bootout", "gui/\(getuid())/\(label)"]
+    try? p.run()
+    p.waitUntilExit()
+    try? fm.removeItem(at: plist)
+    NSLog("Intaglio Labs: retired the connectors launchd agent; it runs as a child now")
+  }
   // The llama plist hard-codes Homebrew's binary path; provision points it at
   // the stable copy instead.
   private static let brewLlama = "/opt/homebrew/bin/llama-server"
@@ -232,7 +257,7 @@ enum Provision {
   /// showing a person a progress screen must reach an ending, and "still
   /// checking" forever is the one outcome that is never true.
   static func waitForLlama(seconds: Int = 40) -> Bool {
-    guard let url = URL(string: "http://127.0.0.1:8080/health") else { return false }
+    guard let url = URL(string: "http://127.0.0.1:51780/health") else { return false }
     for _ in 0..<seconds {
       var req = URLRequest(url: url)
       req.timeoutInterval = 2
@@ -299,7 +324,7 @@ enum Provision {
   // has migrated. Poll it briefly; proceed regardless (connectors retry) so a
   // slow start never wedges provisioning.
   private static func waitForHermes() {
-    guard let url = URL(string: "http://127.0.0.1:8789/health") else { return }
+    guard let url = URL(string: "http://127.0.0.1:51789/health") else { return }
     let deadline = Date().addingTimeInterval(15)
     while Date() < deadline {
       let sem = DispatchSemaphore(value: 0)

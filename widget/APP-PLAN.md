@@ -12,7 +12,7 @@ would eventually close.
   identity. `build.sh` installs to `~/Applications`.
 - The app is a **pure client by design** (README: never spawns services,
   holds no TCC grants beyond mic, must never gain a launchd plist). All
-  substance lives outside it: hermes :8789, connect :8788, the connectors
+  substance lives outside it: hermes :51789, connect :51788, the connectors
   daemon, llama-server, listen, watchdog — six `com.hazlie.*` launchd
   agents running under `~/.hazlie/bin/node`, provisioned by
   `ops/setup-connectors.sh`, `ops/setup-llm.sh` and

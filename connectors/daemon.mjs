@@ -5,7 +5,7 @@
 //
 // NETWORK POSTURE — LOOPBACK-ONLY, STATED PLAINLY: this process opens NO
 // listener of any kind. Its sockets are outbound only: loopback HTTP to
-// hermes (HAZLIE_HERMES_URL, then config "hermesUrl", default 127.0.0.1:8789
+// hermes (HAZLIE_HERMES_URL, then config "hermesUrl", default 127.0.0.1:51789
 // — the canonical port since 2026-08-20; an unrelated dev server squats 8787
 // on the machine — an unrelated dev server commonly holds 8787), and outbound HTTPS to the
 // approved endpoints in
@@ -219,7 +219,7 @@ export function validateConfig(raw) {
   if (raw.selfName !== undefined && (typeof raw.selfName !== 'string' || raw.selfName.length === 0)) {
     throw configError('"selfName" must be a non-empty string');
   }
-  // The per-machine hermes address, for Macs where the canonical port (8789)
+  // The per-machine hermes address, for Macs where the canonical port (51789)
   // is taken by something else.
   // Env still wins — the launchd plists set HAZLIE_HERMES_URL explicitly —
   // but hand-run `node run.mjs <source>` reads its target from here instead
@@ -229,7 +229,7 @@ export function validateConfig(raw) {
     try {
       canonicalLoopbackBase(raw.hermesUrl);
     } catch {
-      throw configError('"hermesUrl" must be an HTTP loopback origin, e.g. "http://127.0.0.1:8789"');
+      throw configError('"hermesUrl" must be an HTTP loopback origin, e.g. "http://127.0.0.1:51789"');
     }
   }
   if (raw.intervals !== undefined) {

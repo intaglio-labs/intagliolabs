@@ -101,7 +101,7 @@ let hermesBase;
 let llamaBase;
 try {
   hermesBase = canonicalLoopbackBase(
-    process.env.HAZLIE_HERMES_URL ?? 'http://127.0.0.1:8789',
+    process.env.HAZLIE_HERMES_URL ?? 'http://127.0.0.1:51789',
     'HAZLIE_HERMES_URL'
   );
   llamaBase = canonicalLoopbackBase(

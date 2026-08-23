@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Keeps the connect server resident: the loopback-only onboarding and review
-  pages on 127.0.0.1:8788, reached through tokened /c/<token> links.
+  pages on 127.0.0.1:51788, reached through tokened /c/<token> links.
 
   This checked-in file is a TEMPLATE: launchd expands no variables, so @HOME@
   and @REPO@ are placeholders that ops/setup-connectors.sh substitutes when it
@@ -14,7 +14,7 @@
   unrecoverable from git, and carrying a HAZLIE_HERMES_URL that had already
   gone stale once (8790, the retired tunnel port). It is templated now, and
   carries no environment: the server's own default hermes address is the
-  canonical 8789.
+  canonical 51789.
 
   KeepAlive, like the other agents: a dead connect server turns every link
   in the owner's Messages history into a dead end.
@@ -26,7 +26,7 @@
 
   <!-- Attribute this background item to the APP, not to the program it runs.
        Without this key macOS names the item after the executable, so a person
-       who installed one app was told that "node" had added background items --
+       who installed one app was told that "node" had added background items —
        four separate times, once per agent, naming something they never
        installed. With it, Login Items groups all of them under Intaglio Labs
        and the notification says the app's name.
@@ -42,7 +42,7 @@
     <string>@HOME@/.hazlie/bin/node</string>
     <string>@REPO@/connect/server.mjs</string>
     <string>--port</string>
-    <string>8788</string>
+    <string>51788</string>
     <string>--print-url</string>
   </array>
 

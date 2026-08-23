@@ -20,7 +20,7 @@ kind.** Its sockets are outbound only:
 
 | Direction | Endpoint | Purpose |
 |---|---|---|
-| loopback out | Hermes `127.0.0.1:8789` | `POST /ingest`, `/admin/*` |
+| loopback out | Hermes `127.0.0.1:51789` | `POST /ingest`, `/admin/*` |
 | HTTPS out | `public-api.granola.ai` | Granola REST fetch-back |
 | HTTPS out | `api.ouraring.com` | Oura API v2 polling (see below) |
 | HTTPS out | `api.notion.com` | Notion API v1 (search + block children) |

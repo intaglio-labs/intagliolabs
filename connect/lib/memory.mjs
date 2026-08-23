@@ -23,7 +23,7 @@ import { lstatSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-export const DEFAULT_HERMES_BASE = 'http://127.0.0.1:8789';
+export const DEFAULT_HERMES_BASE = 'http://127.0.0.1:51789';
 
 export function hermesBase(env = process.env) {
   return String(env.HAZLIE_HERMES_URL ?? DEFAULT_HERMES_BASE).replace(/\/+$/u, '');

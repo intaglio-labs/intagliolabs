@@ -148,6 +148,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       self?.widgetWeb.evaluateJavaScript("window.__hzWake && window.__hzWake()")
     }
 
+    // The connectors daemon runs as a child of this app so its file access is
+    // attributed to the app rather than to node — see Connectors.swift. Any
+    // launchd agent from an older install is retired first, or the two would
+    // race for the same cursors.
+    DispatchQueue.global(qos: .utility).async {
+      Provision.retireConnectorsAgent()
+      DispatchQueue.main.async { Connectors.shared.start() }
+    }
+
     // First launch shows the welcome flow. Only completing it sets the flag,
     // so a dismissed flow comes back — and the settings button reopens it on
     // demand regardless.
@@ -223,6 +232,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     p.isFloatingPanel = false
     p.hidesOnDeactivate = false
     p.isReleasedWhenClosed = false
+    // Take key only for a control that genuinely needs typing. Without this the
+    // popup grabs key on open and the widget behind it needs a click to get it
+    // back — see present().
+    p.becomesKeyOnlyIfNeeded = true
     p.appearance = NSAppearance(named: .darkAqua) // design is dark-only
     if glass {
       let effect = glassContent(for: web, cornerRadius: 20)
@@ -291,8 +304,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       if other?.isVisible == true { other?.orderOut(nil) }
     }
     place(panel)
+    // Frontmost, yes — a popup behind another app's window is not presented.
     NSApp.activate(ignoringOtherApps: true)
-    panel.makeKeyAndOrderFront(nil)
+    // orderFront, NOT makeKeyAndOrderFront, and this is the two-click fix.
+    //
+    // makeKeyAndOrderFront handed key to the popup. The widget then was not
+    // key, so AppKit spent the next click on it activating rather than
+    // clicking, and switching between chat, connections and people cost two
+    // presses: one eaten, one that landed. Making the widget a nonactivating
+    // panel was not enough on its own — something still had to stop TAKING key
+    // from it.
+    //
+    // becomesKeyOnlyIfNeeded (set at construction) is the AppKit answer: the
+    // panel takes key only when a control that needs typing is clicked. Every
+    // one of these surfaces is buttons except people-sky's search field, and
+    // that field still focuses on click because AppKit asks the view whether it
+    // needs key rather than guessing.
+    panel.orderFront(nil)
   }
 
   // Onboarding is not a window in the way the others are: it covers the whole
@@ -804,6 +832,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     let js = "window.__hzSounds && window.__hzSounds(\(on))"
     widgetWeb?.evaluateJavaScript(js)
     chatWeb?.evaluateJavaScript(js)
+  }
+}
+
+extension AppDelegate {
+  // The child dies with us rather than outliving the app that is responsible
+  // for it, holding a database handle and a set of cursors open.
+  func applicationWillTerminate(_ notification: Notification) {
+    Connectors.shared.stop()
   }
 }
 

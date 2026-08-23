@@ -10,7 +10,7 @@
 // the page is an embodiment that forgets on reload; this process does not.
 //
 // Run it from ui/:  npm run hermes        (node server/hermes.mjs)
-// The app expects it at http://localhost:8789 (override: EXPO_PUBLIC_HERMES_URL
+// The app expects it at http://localhost:51789 (override: EXPO_PUBLIC_HERMES_URL
 // client-side, HERMES_PORT here). Context defaults to the private path
 // ~/.hazlie/context/context.db; HERMES_DB moves it. HERMES_ALLOWED_ORIGINS is a
 // comma-separated exact CORS allowlist (default: EMPTY -- no browser origin is
@@ -88,7 +88,7 @@ export function defaultHermesTokenPath(home = homedir()) {
 
 export const DEFAULT_LLAMA_API_KEY_PATH = defaultLlamaApiKeyPath();
 export const DEFAULT_HERMES_TOKEN_PATH = defaultHermesTokenPath();
-export const DEFAULT_LLAMA_BASE_URL = 'http://127.0.0.1:8080';
+export const DEFAULT_LLAMA_BASE_URL = 'http://127.0.0.1:51780';
 
 // EMPTY BY DEFAULT since 2026-08-23, and the reason is the whole point of the
 // browser channel having existed at all.
@@ -2468,13 +2468,13 @@ async function handlePeople(db, req, res, cors, url) {
 // instead of the sentence naming the fix. Two secrets to provision now, so the
 // path is twice as easy to land on.
 export async function start({
-  // 8789, not 8787: the canonical port moved on 2026-08-20 (MEMORY-PLAN Day 0)
+  // 51789, not 8787: the canonical port moved on 2026-08-20 (MEMORY-PLAN Day 0)
   // because an unrelated dev server holds 8787 on the owner's Mac and answers
   // 200 there, which made every defaulted caller reach a stranger. One number,
   // set here and echoed by DEFAULT_HERMES_BASE_URL in connectors/lib/
   // ingestClient.mjs and the probe in ops/setup-connectors.sh — change all
   // three together or not at all.
-  port = Number(process.env.HERMES_PORT ?? 8789),
+  port = Number(process.env.HERMES_PORT ?? 51789),
   dbPath,
   allowedOrigins = process.env.HERMES_ALLOWED_ORIGINS,
   llamaBaseUrl = process.env.HERMES_LLAMA_URL ?? DEFAULT_LLAMA_BASE_URL,

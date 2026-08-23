@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs the local LLM tier: llama-server binary, the model weights, and the
-# launchd agent that keeps it resident on 127.0.0.1:8080.
+# launchd agent that keeps it resident on 127.0.0.1:51780.
 #
 # Idempotent — every step checks before acting, so re-running after a partial
 # failure (or after a model/plist change) is the intended recovery path.
@@ -85,8 +85,8 @@ ACTIVE_MODEL_STAMP="$MODEL_DIR/active-model.txt"
 LABEL="com.hazlie.llama-server"
 PLIST_SRC="$SCRIPT_DIR/$LABEL.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/$LABEL.plist"
-HEALTH_URL="http://127.0.0.1:8080/health"
-INFERENCE_URL="http://127.0.0.1:8080/v1/chat/completions"
+HEALTH_URL="http://127.0.0.1:51780/health"
+INFERENCE_URL="http://127.0.0.1:51780/v1/chat/completions"
 
 VERIFY=0
 for arg in "$@"; do

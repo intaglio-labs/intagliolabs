@@ -269,7 +269,11 @@ function demoSendNow() {
   // The pipe used to land on the home reveal. Setup goes in between, so the
   // flow ends with a machine that can do something rather than a tour of one
   // that cannot.
-  at(1960, () => showScreen('model'));
+  // The flight lands the orb in the corner, and the widget surfaces there a
+  // beat later — so this has to be the LAST thing before the reveal. It used to
+  // fire with two setup steps still to come, which told the owner "i live down
+  // here now" and then asked them for two more things.
+  at(1960, () => showScreen(3));
 }
 demoSend.addEventListener('click', demoSendNow);
 
@@ -320,9 +324,16 @@ window.addEventListener('resize', () => {
 document.getElementById('homeDone').addEventListener('click', () => finish());
 
 // ---------------- flow ----------------
+// Welcome -> SETUP -> demo -> flight -> home.
+//
+// Setup used to sit between the demo and the reveal, which put two more asks
+// after the orb had already flown to the corner saying "i live down here now".
+// Moving it earlier fixes that and buys something: a multi-gigabyte download
+// starts here and runs underneath the demo, so by the time the demo is over it
+// has usually landed.
 document.getElementById('cta').addEventListener('click', () => {
   hzSfx.wake();
-  showScreen(2);
+  showScreen('model');
 });
 
 function finish({ then } = {}) {
@@ -397,14 +408,44 @@ function renderChoices() {
       tag.textContent = 'suits this Mac';
       b.appendChild(tag);
     }
-    b.addEventListener('click', () => startModel(t.id));
+    b.addEventListener('click', () => selectModel(t.id));
+    b.dataset.tier = t.id;
     modelChoices.appendChild(b);
   }
+  renderSelection();
 }
+
+// SELECTING IS NOT STARTING. Clicking a card marks it; the download button is
+// what spends the gigabytes. Clicking the selected card again clears it, so
+// there is a way back out of the choice without leaving the screen.
+let selectedTier = null;
+const modelGo = document.getElementById('modelGo');
+
+function selectModel(id) {
+  selectedTier = selectedTier === id ? null : id;
+  renderSelection();
+}
+
+function renderSelection() {
+  const tiers = (setupState && setupState.tiers) || [];
+  for (const el of modelChoices.querySelectorAll('.ob-choice')) {
+    const on = el.dataset.tier === selectedTier;
+    el.classList.toggle('sel', on);
+    el.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+  const t = tiers.find((x) => x.id === selectedTier);
+  modelGo.hidden = !t;
+  if (t) modelGo.textContent = `download ${fmtGB(t.bytes)}`;
+}
+
+modelGo.addEventListener('click', () => {
+  if (selectedTier) startModel(selectedTier);
+});
 
 function startModel(tier) {
   modelErr.hidden = true;
   modelChoices.hidden = true;
+  modelGo.hidden = true;
   modelProg.hidden = false;
   modelBar.style.width = '0%';
   modelLabel.textContent = 'starting…';
@@ -439,6 +480,9 @@ window.__hzSetup = (d) => {
   if (d.phase === 'failed') {
     modelProg.hidden = true;
     modelChoices.hidden = false;
+    const btn = document.getElementById('modelCancel');
+    if (btn) { btn.disabled = false; btn.hidden = false; btn.textContent = 'cancel'; }
+    renderSelection();
     if (d.error !== 'cancelled') {
       modelErr.hidden = false;
       modelErr.textContent = d.error || 'that did not work';
@@ -447,60 +491,110 @@ window.__hzSetup = (d) => {
 };
 
 document.getElementById('modelCancel').addEventListener('click', () => {
+  const btn = document.getElementById('modelCancel');
+  btn.disabled = true;
+  btn.textContent = 'stopping…';
   hzPost('modelCancel').catch(() => {});
-  modelProg.hidden = true;
-  modelChoices.hidden = false;
+  // Native answers with a 'failed' phase carrying "cancelled", which restores
+  // the choices below. Not restored here: doing both would race, and a button
+  // that clears the screen before the work has actually stopped is the lie this
+  // whole change is about.
 });
 document.getElementById('modelSkip').addEventListener('click', () => showScreen('data'));
 
 // ---- the data screen -------------------------------------------------------
+//
+// Three of these are real system prompts and one is not, and the screen says so
+// rather than pretending otherwise. Contacts, Calendar and Photos have APIs;
+// Messages and Notes are SQLite files under ~/Library with no API at all, so
+// macOS only offers Full Disk Access for them.
+//
+// The prompts land on THIS APP, which works because the reader is now a child of
+// it and inherits its identity. Under launchd it was node asking, and no app can
+// request a prompt for a binary it does not own.
 
 const dataStatus = document.getElementById('dataStatus');
+const permsEl = document.getElementById('perms');
+
+const PERM_LABEL = {
+  granted: 'on',
+  denied: 'open settings',
+  undetermined: 'allow',
+};
+
+function paintPerms(map) {
+  for (const row of permsEl.querySelectorAll('.ob-perm')) {
+    const which = row.dataset.which;
+    if (which === 'fda') continue;
+    const st = (map && map[which]) || 'undetermined';
+    const btn = row.querySelector('button');
+    row.classList.toggle('on', st === 'granted');
+    btn.textContent = PERM_LABEL[st] || 'allow';
+    btn.disabled = st === 'granted';
+  }
+}
+
+permsEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  const row = e.target.closest('.ob-perm');
+  if (!btn || !row) return;
+  const which = row.dataset.which;
+  if (which === 'fda') return; // its own handler below
+  // macOS shows a prompt once and remembers a refusal, so a previously denied
+  // permission cannot be re-asked from here — Settings is the only way back.
+  if (btn.textContent === 'open settings') {
+    hzPost('openFullDiskAccess').catch(() => {});
+    return;
+  }
+  btn.disabled = true;
+  const res = await hzPost('requestPermission', { which }).catch(() => null);
+  const map = {};
+  if (res && res.which) map[res.which] = res.status;
+  paintPerms({ ...(lastPerms || {}), ...map });
+  lastPerms = { ...(lastPerms || {}), ...map };
+});
+
+let lastPerms = null;
 
 document.getElementById('fdaOpen').addEventListener('click', () => {
   hzPost('openFullDiskAccess').catch(() => {});
+  const help = document.getElementById('fdaHelp');
+  if (help) help.open = true;
 });
 document.getElementById('fdaReveal').addEventListener('click', () => {
   hzPost('revealNode').catch(() => {});
 });
-document.getElementById('fdaCopy').addEventListener('click', async () => {
-  const path = document.getElementById('nodePath').textContent;
-  try {
-    await navigator.clipboard.writeText(path);
-    const b = document.getElementById('fdaCopy');
-    b.textContent = 'copied';
-    setTimeout(() => { b.textContent = 'copy'; }, 1600);
-  } catch { /* the path is on screen either way */ }
-});
 
 document.getElementById('dataCheck').addEventListener('click', async () => {
-  dataStatus.textContent = 'starting the readers…';
+  dataStatus.textContent = 'starting…';
   await hzPost('startSources').catch(() => {});
-  // Connectors stagger their first runs, so give the first source a moment to
-  // land rows before asking. The ROW COUNT is the check: it only moves when
-  // something was really read and really written.
+  // The ROW COUNT is the check: it only moves when something was really read
+  // and really written. macOS gives this process no honest answer about a
+  // grant, so we do not ask it — we look at what arrived.
   let rows = 0;
-  for (let i = 0; i < 12 && rows === 0; i += 1) {
+  for (let i = 0; i < 10 && rows === 0; i += 1) {
     await new Promise((r) => setTimeout(r, 2500));
     const st = await hzPost('setupState').catch(() => null);
     rows = (st && st.rows) || 0;
     if (rows === 0) dataStatus.textContent = 'waiting for the first read…';
   }
   if (rows > 0) {
-    dataStatus.textContent = `${rows.toLocaleString()} things read so far — you're set`;
-    setTimeout(() => { if (currentScreen === 'data') showScreen(3); }, 1600);
+    dataStatus.textContent = `${rows.toLocaleString()} things read so far`;
+    setTimeout(() => { if (currentScreen === 'data') showScreen(2); }, 1400);
   } else {
-    dataStatus.textContent =
-      'nothing yet. if you just granted access, macOS sometimes needs the app reopened.';
+    dataStatus.textContent = "nothing yet — that's fine, it'll pick things up as it goes.";
+    setTimeout(() => { if (currentScreen === 'data') showScreen(2); }, 2600);
   }
 });
-document.getElementById('dataSkip').addEventListener('click', () => showScreen(3));
+document.getElementById('dataSkip').addEventListener('click', () => showScreen(2));
 
 // Loaded once, when the flow reaches the setup screens.
 async function loadSetup() {
   setupState = await hzPost('setupState').catch(() => null);
   if (!setupState) return;
-  document.getElementById('nodePath').textContent = setupState.nodePath || '';
+  const perms = await hzPost('permissionState').catch(() => null);
+  lastPerms = (perms && perms.permissions) || null;
+  paintPerms(lastPerms);
   if (setupState.model) {
     // Already has one — say so instead of offering the download again.
     modelDone = true;
