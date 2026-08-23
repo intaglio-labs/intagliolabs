@@ -34,7 +34,17 @@ export const MAX_CLAIMS_PER_RUN = 100;
 
 // Requested from llama-server when the build supports it. Kept minimal on
 // purpose: every field the model can emit is a field somebody has to validate,
-// and `subject`, `observed_at`, `p_claim` and every id are assigned by code.
+// and `subject`, `observed_at` and every id are assigned by code.
+//
+// `p` IS asked for, as of prompt v2, and is the one field here the model is
+// trusted to originate. Rationale, from the sibling project's Experiment A:
+// thresholding the model's OWN reported probability was worth about 23 precision
+// points (69.9% -> 93.3% at 0.65) and it is a query-time parameter rather than a
+// better prompt -- so it is a knob you can only reach for if you asked for the
+// number. Nothing treats it as calibrated; it orders the review queue.
+//
+// It is `required`, deliberately. Optional confidence is confidence the model
+// omits on exactly the rows where it is least sure.
 export const CLAIM_SCHEMA = Object.freeze({
   name: 'distilled_claims',
   strict: true,
@@ -49,11 +59,12 @@ export const CLAIM_SCHEMA = Object.freeze({
         items: {
           type: 'object',
           additionalProperties: false,
-          required: ['kind', 'text', 'quote'],
+          required: ['kind', 'text', 'quote', 'p'],
           properties: {
             kind: { enum: [...CLAIM_KINDS] },
             text: { type: 'string', minLength: 1, maxLength: 400 },
             quote: { type: 'string', minLength: 1, maxLength: 400 },
+            p: { type: 'number', minimum: 0, maximum: 1 },
           },
         },
       },
@@ -179,9 +190,19 @@ export function validateRowClaims(row, claims) {
       continue;
     }
     seen.add(key);
+    // A malformed or absent `p` does NOT drop the claim. The grammar makes it
+    // required so a compliant model always sends one, but a build without
+    // grammar support, an older cached answer, or a model that ignores the
+    // schema would otherwise lose claims that are perfectly good apart from a
+    // missing number -- trading real memory for a sorting hint. Unusable
+    // becomes null, which reads as "unranked" downstream and sorts last.
+    const p = typeof claim.p === 'number' && Number.isFinite(claim.p) && claim.p >= 0 && claim.p <= 1
+      ? claim.p
+      : null;
     kept.push({
       kind: claim.kind,
       text: claim.text.trim(),
+      p_claim: p,
       source: { context_id: Number(row.id), quote: claim.quote, content_hash: row.content_hash },
     });
   }

@@ -1283,7 +1283,20 @@ export function pendingClaims(db, { limit = PENDING_CAP } = {}) {
         'JOIN distill_run r ON r.id = c.run_id ' +
         'LEFT JOIN context x ON x.id = s.context_id ' +
         'WHERE NOT EXISTS (SELECT 1 FROM claim_decision d WHERE d.claim_id = c.id) ' +
-        'ORDER BY c.id DESC LIMIT ?'
+        // CONFIDENCE FIRST, then newest. The queue used to be c.id DESC alone,
+        // which is arrival order -- fine at a hundred claims and useless at the
+        // scale this corpus reaches, where the reader's attention runs out long
+        // before the queue does. Ordering by the model's own p_claim front-loads
+        // the claims most likely to be accepted and lets the doubtful tail sit
+        // pending instead of demanding attention. That is the whole reason
+        // prompt v2 asks for the number.
+        //
+        // NULLS LAST because an unranked claim is UNKNOWN, not low: rows
+        // distilled before v2 carry NULL. They sink below ranked claims rather
+        // than being lost, and they largely disappear on their own -- cacheKey()
+        // includes promptSha, so the v2 prompt invalidates every cached answer
+        // and a re-run assigns them a p.
+        'ORDER BY c.p_claim DESC NULLS LAST, c.id DESC LIMIT ?'
     )
     .all(Math.min(limit, PENDING_CAP) + 1);
   const more = rows.length > Math.min(limit, PENDING_CAP);

@@ -1,4 +1,4 @@
-# Claim distillation — v1
+# Claim distillation — v2
 
 You are reading **one message or note written by the owner of this system**. Decide
 whether it states something durable about them, and if so, say what — in their
@@ -156,7 +156,8 @@ Row: `can't do thursday mornings, i've got physio every week now`
 ```
 {"claims": [{"kind": "constraint",
              "text": "Austin cannot do Thursday mornings; he has weekly physio.",
-             "quote": "can't do thursday mornings"}]}
+             "quote": "can't do thursday mornings",
+             "p": 0.92}]}
 ```
 Recurring, stated outright, still true in six months. Note the quote is the
 shortest span that carries it, not the whole message.
@@ -165,8 +166,41 @@ Row: `i'm allergic to penicillin so tell them that`
 ```
 {"claims": [{"kind": "fact",
              "text": "Austin is allergic to penicillin.",
-             "quote": "i'm allergic to penicillin"}]}
+             "quote": "i'm allergic to penicillin",
+             "p": 0.97}]}
 ```
+
+## How sure are you
+
+Every claim carries `p` — a number from 0 to 1 saying how confident you are that
+this really is a durable claim about the owner and that you have read it right.
+
+**This is not a formality and it is not always 0.9.** It is the field that
+decides what a human looks at first. A run where every claim says 0.95 is a run
+that has told the reader nothing.
+
+Use the range:
+
+- **0.9–1.0** — the row says it outright, in the owner's own voice, and it
+  plainly survives six months. `"i'm allergic to penicillin"`.
+- **0.7–0.9** — clearly a claim, with one thing you had to decide. A pronoun you
+  resolved, a date you read as recurring, a plan you judged committed rather
+  than idle.
+- **0.5–0.7** — you think there is a claim here but a careful reader might
+  disagree. Borderline durability, or a reading that depends on context you were
+  not given.
+- **Below 0.5** — you are reaching. Prefer `{"claims": []}`: an empty answer is
+  never penalised, and a claim you do not believe wastes the reader's attention,
+  which is the scarcest thing in this system.
+
+Judge each claim on its own. Two claims from one row often deserve different
+numbers, and giving them the same number because they arrived together is the
+most common way to make this field useless.
+
+You are not being asked for a calibrated probability and nothing here will treat
+it as one — it is used to **order** what a human reviews. Being honestly
+uncertain costs you nothing; being uniformly confident costs the reader
+everything.
 
 ## Output
 
@@ -175,7 +209,8 @@ One JSON object, nothing else — no prose, no code fence, no explanation:
 ```
 {"claims": [{"kind": "fact" | "preference" | "constraint" | "plan" | "commitment",
              "text": "<one self-contained sentence a stranger could read alone>",
-             "quote": "<exact span copied from the row>"}]}
+             "quote": "<exact span copied from the row>",
+             "p": <number between 0 and 1>}]}
 ```
 
 `text` must stand on its own. "He's allergic to it" is useless six months from

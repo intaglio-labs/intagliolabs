@@ -116,15 +116,36 @@ test('the same claim twice from one row lands once', () => {
 test('a surviving claim carries the receipt and nothing the model invented', () => {
   const { kept } = validateRowClaims(ROW, [
     // The model is handed extra fields to see whether any of them survive.
+    // p_claim is in here on purpose: it is a REAL column, and since prompt v2
+    // the validator populates it -- but only from `p`. A model that writes
+    // straight to the column name must still be ignored, or it could assert its
+    // own confidence past the range check.
     { ...claim(), id: 99, subject: 'someone-else', observed_at: 1, p_claim: 0.99 },
   ]);
   assert.deepEqual(kept, [
     {
       kind: 'fact',
       text: 'Austin is allergic to penicillin.',
+      p_claim: null,
       source: { context_id: 42, quote: "i'm allergic to penicillin", content_hash: 'h'.repeat(64) },
     },
   ]);
+});
+
+test('p is read from `p`, clamped to 0..1, and never fatal when absent', () => {
+  const one = (over) => validateRowClaims(ROW, [{ ...claim(), ...over }]).kept[0];
+
+  assert.equal(one({ p: 0.82 }).p_claim, 0.82, 'a valid p is carried through');
+  assert.equal(one({ p: 0 }).p_claim, 0, 'zero is a real confidence, not a missing one');
+  assert.equal(one({ p: 1 }).p_claim, 1);
+
+  // Out of range, wrong type, or absent -> null. The claim SURVIVES: losing a
+  // good claim over a missing sorting hint would trade memory for tidiness.
+  for (const bad of [-0.1, 1.5, '0.9', null, undefined, NaN, Infinity, {}]) {
+    const k = one({ p: bad });
+    assert.ok(k !== undefined, `p=${JSON.stringify(bad)} must not drop the claim`);
+    assert.equal(k.p_claim, null, `p=${JSON.stringify(bad)} reads as unranked`);
+  }
 });
 
 test('injection text in an owner-sent row cannot become control flow', () => {
@@ -158,7 +179,7 @@ test('injection text in an owner-sent row cannot become control flow', () => {
   assert.equal(dropped.length, 0);
   for (const k of kept) {
     assert.ok(row.text.includes(k.source.quote), 'every kept quote is a real span');
-    assert.deepEqual(Object.keys(k).sort(), ['kind', 'source', 'text']);
+    assert.deepEqual(Object.keys(k).sort(), ['kind', 'p_claim', 'source', 'text']);
   }
 });
 
@@ -200,11 +221,17 @@ test('a blank or non-string speaker adds no prefix and no stray colon', () => {
   }
 });
 
-test('the schema lets the model emit nothing but kind, text and quote', () => {
+test('the schema lets the model emit nothing but kind, text, quote and p', () => {
   const item = CLAIM_SCHEMA.schema.properties.claims.items;
-  assert.deepEqual(Object.keys(item.properties).sort(), ['kind', 'quote', 'text']);
+  assert.deepEqual(Object.keys(item.properties).sort(), ['kind', 'p', 'quote', 'text']);
   assert.equal(item.additionalProperties, false);
   assert.equal(CLAIM_SCHEMA.schema.properties.claims.maxItems, MAX_CLAIMS_PER_ROW);
+
+  // p is REQUIRED, not optional. An optional confidence is one the model omits
+  // on exactly the rows where it is least sure -- which is where the number is
+  // worth the most.
+  assert.deepEqual([...item.required].sort(), ['kind', 'p', 'quote', 'text']);
+  assert.deepEqual(item.properties.p, { type: 'number', minimum: 0, maximum: 1 });
 });
 
 test('the cache key changes when the prompt, the model or the row changes', () => {

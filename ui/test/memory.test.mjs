@@ -22,6 +22,7 @@ import {
   insertRows,
   applyMemoryBatch,
   orphanClaimCount,
+  pendingClaims,
   start,
 } from '../server/hermes.mjs';
 
@@ -552,4 +553,49 @@ test('files and notion are admissible sources, as their corpus rows always impli
     await server.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+// THE REVIEW QUEUE'S ORDER, which is the entire reason prompt v2 asks the model
+// for a confidence. It used to be arrival order (c.id DESC) -- fine at a hundred
+// claims and useless against a corpus this size, where the reader's attention
+// runs out long before the queue does.
+test('the pending queue is ordered by confidence, then newest', () => {
+  const db = openDb(':memory:');
+  const rows = insertRows(db, Array.from({ length: 5 }, (_, i) => ({
+    ts: 1_700_000_000_000 + i * 1000,
+    source: 'notes',
+    entity_id: `n:${i}`,
+    text: `row ${i} says i am allergic to penicillin`,
+  }))) && db.prepare('SELECT id, content_hash FROM context ORDER BY id').all();
+
+  // Inserted in an order that is neither the id order nor the p order, so a
+  // passing test cannot be an accident of insertion sequence.
+  const ps = [0.55, null, 0.95, 0.7, null];
+  applyMemoryBatch(db, {
+    run: { ...RUN, rows_in: rows.length },
+    claims: rows.map((row, i) => ({
+      kind: 'fact',
+      text: `claim ${i}`,
+      p_claim: ps[i],
+      source: { context_id: Number(row.id), quote: 'allergic to penicillin', content_hash: row.content_hash },
+    })),
+  });
+
+  const { claims } = pendingClaims(db, { limit: 10 });
+  assert.deepEqual(
+    claims.map((c) => c.text),
+    ['claim 2', 'claim 3', 'claim 0', 'claim 4', 'claim 1'],
+    'confidence descending, then newest-first among the unranked'
+  );
+
+  // The unranked rows sort last but are NOT lost -- they are UNKNOWN, not low.
+  // Pre-v2 claims carry NULL and must still be reviewable.
+  assert.deepEqual(
+    claims.filter((c) => c.p_claim === null).map((c) => c.text),
+    ['claim 4', 'claim 1'],
+    'NULLs sink below every ranked claim, in newest-first order'
+  );
+  assert.equal(claims.length, 5, 'nothing is dropped for lacking a confidence');
+  db.close();
 });
