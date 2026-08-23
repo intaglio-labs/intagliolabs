@@ -19,49 +19,43 @@ ctx.fill(CGRect(x: 0, y: 0, width: W, height: H))
 ctx.setFillColor(NSColor(red: 0.11, green: 0.11, blue: 0.11, alpha: 1).cgColor)    // #1c1c1c
 ctx.fill(CGRect(x: 0, y: 148, width: W, height: 2))
 
-// THE LABEL BAND, and the arithmetic that forced it.
+// THE LABEL PLATES, and the arithmetic that forced them.
 //
-// Finder draws icon names in the SYSTEM appearance, which this image cannot
-// know: near-white in dark mode, near-black in light. Measured on the shipped
-// background (#141412): 13.5:1 in dark mode, and 1.14:1 in light — the names of
-// both icons simply absent for anyone not in dark mode.
+// Finder draws icon names in the SYSTEM appearance, which a background image
+// cannot know. Measured on the shipped DMG: both names render at 13.5:1 against
+// #141412 in dark mode and 1.14:1 in light. Not hard to read — absent, for
+// everyone who has not turned dark mode on.
 //
-// One colour cannot fix that at AA. For white label text to reach 4.5:1 the
-// background must be no lighter than luminance 0.121; for black text to reach
-// 4.5:1 it must be no darker than 0.175. The window is empty — there is no such
-// colour, and no amount of taste produces one.
+// No single colour fixes that at AA, and the arithmetic says so rather than
+// taste: white label text needs a background no lighter than luminance 0.121 to
+// reach 4.5:1, black text needs one no darker than 0.175. The window is empty.
+// At 3:1 — the bar written for small bold text, which is what an icon label is —
+// the window is 0.100 to 0.206, and #80664a sits at 0.146, almost exactly
+// centred. Centred deliberately: a colour tuned to favour one appearance only
+// moves the unreadable case rather than removing it.
 //
-// At 3:1 the window exists (0.100 to 0.206), and icon labels are the small-bold
-// case that bar is written for. #80664a sits at luminance 0.146, almost exactly
-// centred: 3.92:1 against dark-mode text and 3.92:1 against light-mode text.
-// Balanced on purpose — a band tuned to favour one appearance just moves the
-// unreadable case rather than removing it.
-//
-// Drawn only where the names sit, with a soft vertical fade so it reads as a
-// shelf the icons stand on rather than a rectangle stuck to the artwork.
-// Sized from where Finder actually puts the names, not from where they look
-// like they should go: measured off a mounted DMG, the label text occupies
-// roughly y 550-580 in this coordinate space. The band is wider than that on
-// both sides so the fade never overlaps a glyph — the ends of a fade are the
-// weakest contrast in the whole image, and putting text there would undo the
-// point of having it.
-let bandTop: CGFloat = 462, bandBottom: CGFloat = 648
-let band = NSColor(red: 128/255, green: 102/255, blue: 74/255, alpha: 1)   // #80664a
-
-// Painted as a stack of 1px rows with a ramped alpha rather than a CGGradient.
-// The gradient version silently produced nothing — CGGradient's initialiser is
-// failable, and `if let` on a nil result is indistinguishable from success in a
-// script whose only output is a PNG. Rows cannot fail, and the fade is explicit.
-let rows = Int(bandBottom - bandTop)
-for i in 0..<rows {
-  let t = CGFloat(i) / CGFloat(rows - 1)          // 0 at the top, 1 at the bottom
-  // Full strength across the middle, easing out over the top and bottom fifth.
-  let a: CGFloat
-  if t < 0.12 { a = t / 0.12 }
-  else if t > 0.88 { a = (1 - t) / 0.12 }
-  else { a = 1 }
-  ctx.setFillColor(band.withAlphaComponent(a).cgColor)
-  ctx.fill(CGRect(x: 0, y: bandTop + CGFloat(i), width: W, height: 1))
+// TWO PLATES RATHER THAN A BAND. The first version ran the colour the full width
+// of the window, which worked and looked like a stripe — it also ran under the
+// instruction line, which is text this file draws and can already colour for
+// itself. Contrast is only needed where Finder writes, so that is the only place
+// it goes: one plate under each icon's name, rounded, faded at the edges so it
+// reads as a shadow the name sits on rather than a box.
+let plateColor = NSColor(red: 128/255, green: 102/255, blue: 74/255, alpha: 1)  // #80664a
+let plateTop: CGFloat = 543, plateBottom: CGFloat = 596
+// Icon centres, matching the arrow's own geometry below.
+for cx in [CGFloat(300), CGFloat(900)] {
+  let halfW: CGFloat = 148
+  let rows = Int(plateBottom - plateTop)
+  for i in 0..<rows {
+    let t = CGFloat(i) / CGFloat(rows - 1)
+    // Soft top and bottom edge only; the sides are rounded by the inset below.
+    let vertical: CGFloat = t < 0.16 ? t / 0.16 : (t > 0.84 ? (1 - t) / 0.16 : 1)
+    // Pull the ends in near the top and bottom so the corners read as rounded.
+    let inset = halfW * (1 - vertical) * 0.28
+    ctx.setFillColor(plateColor.withAlphaComponent(vertical).cgColor)
+    ctx.fill(CGRect(x: cx - halfW + inset, y: plateTop + CGFloat(i),
+                    width: (halfW - inset) * 2, height: 1))
+  }
 }
 
 func draw(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor, y: CGFloat, tracking: CGFloat = 0) {
