@@ -473,10 +473,9 @@ WHERE (
    than rating today.
 
    source CHECK (source IN ('user')) IS THE POINT OF THIS TABLE, not
-   boilerplate. The sibling project states the rule in prose -- never use LLM
-   output as ground truth -- and prose is what a future session helpfully
-   routes around when the ratings column looks sparse and a model could
-   plausibly estimate it. One inferred score voids every correlation computed
+   boilerplate. Elsewhere the rule is stated in prose -- never use LLM output as
+   ground truth -- and prose is what a future session helpfully routes around
+   when the ratings column looks sparse and a model could plausibly estimate it. One inferred score voids every correlation computed
    over the column, and nothing downstream can tell which rows were guessed.
    The CHECK makes the write fail instead. When a second legitimate source of
    real subjective data appears (a watch prompt, an imported journal) it is

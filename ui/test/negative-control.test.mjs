@@ -5,15 +5,14 @@
 // something cannot tell you it has nothing, and the failure is invisible: the
 // owner sees a confident answer and no sign that it rested on nothing.
 //
-// WHY THIS FILE EXISTS, from the sibling project's bill. The rig's linker
-// scored every one of 7,347 claims against a planted decoy goal and linked all
-// 7,347 -- a link rate of 1.00 -- because a ranking cannot say "no match", it
-// can only say "least bad". The two fixes that followed were worse: both set
-// the score floor ABOVE the maximum signal ever observed, so the linker
-// admitted nothing at all while reporting a perfect decoy rate. Three numbers,
-// all of which read as success, none of which were. The only thing that ever
-// caught it was planting something that SHOULD NOT match and measuring how
-// often it did.
+// WHY THIS FILE EXISTS, paid for elsewhere. A claim-to-goal linker once matched
+// EVERY claim in a corpus to a planted decoy -- a link rate of 1.00 -- because a
+// ranking cannot say "no match", it can only say "least bad". The two fixes that
+// followed were worse: both set the score floor ABOVE the maximum signal ever
+// observed, so the linker admitted nothing at all while reporting a perfect
+// decoy rate. Three numbers, all of which read as success, none of which were.
+// The only thing that ever caught it was planting something that SHOULD NOT
+// match and measuring how often it did.
 //
 // prompts/answer_from_claims.md makes the strongest claim in this system --
 // "if the notes do not answer the question, say so plainly and stop". These
@@ -146,12 +145,12 @@ test('every unanswerable question still receives a full window of claims', () =>
 // it cannot fix a raw COUNT, because a ranking function does not change how many
 // rows matched.
 //
-// Same shape as the sibling project's vector failure and worth putting beside
-// it: there, no threshold separated "gym" (+2.39) from "photosynthesis" (+2.37).
-// Here the separation is not merely absent but inverted. The lesson is not
-// "lexical good, vectors bad" -- it is that any scalar you did not deliberately
-// build to be zero will be nonzero on garbage, and the only way to find out is
-// to plant garbage and look.
+// Same shape as a vector-retrieval failure measured elsewhere, and worth putting
+// beside it: there, no threshold separated a real query from a nonsense one once
+// everything had a cosine similarity. Here the separation is not merely absent
+// but inverted. The lesson is not "lexical good, vectors bad" -- it is that any
+// scalar you did not deliberately build to be zero will be nonzero on garbage,
+// and the only way to find out is to plant garbage and look.
 //
 // A usable anchor is buildable -- count hits from content words only, ignoring
 // the stopwords ftsQuery ORs in -- but that changes retrieval semantics and is

@@ -63,8 +63,47 @@ function pagesFromHtml() {
   return pages;
 }
 
+// Calls do not all spell themselves `hzPost('x')`, and assuming they did made
+// the first version of this file pass VACUOUSLY for the ear page: ear-main.js
+// contains zero literal hzPost calls, because it wraps it as
+// `const post = (type, payload) => hzPost(type, payload)` and calls post('orbState').
+// So the page with the microphone was the one page whose compartment nothing
+// checked. Caught by asking why its call set was empty, which is the question
+// the floor below now asks automatically.
+//
+// Three shapes are resolved, and anything left unresolved is REPORTED rather
+// than skipped — a call this scanner cannot read is a capability it cannot
+// verify, and silence there is what produced the hole.
+function scanCalls(text) {
+  const calls = new Set();
+  const unresolved = [];
+
+  // Local aliases that forward to hzPost: `const post = (a, b) => hzPost(a, b)`.
+  const aliases = new Set(['hzPost']);
+  for (const m of text.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=[^;\n]*?=>\s*hzPost\(/gu)) {
+    aliases.add(m[1]);
+  }
+  const aliasGroup = [...aliases].join('|');
+
+  // 1. A literal first argument, through hzPost or any alias of it.
+  for (const m of text.matchAll(new RegExp(`\\b(?:${aliasGroup})\\(\\s*'([A-Za-z]+)'`, 'gu'))) {
+    calls.add(m[1]);
+  }
+  // 2. The settings rows carry their action as `message: 'setSounds'` and are
+  //    dispatched through a variable, so the literal never sits next to a call.
+  for (const m of text.matchAll(/message:\s*'([A-Za-z]+)'/gu)) calls.add(m[1]);
+  // 3. Anything else — a non-literal first argument this scanner cannot follow.
+  for (const m of text.matchAll(new RegExp(`\\b(?:${aliasGroup})\\(\\s*([A-Za-z_$][\\w$]*)`, 'gu'))) {
+    // The alias declarations themselves forward a parameter; not a call site.
+    if (aliases.has(m[1]) || /^(type|payload)$/u.test(m[1])) continue;
+    unresolved.push(m[1]);
+  }
+  return { calls, unresolved };
+}
+
 function callsIn(scripts) {
   const calls = new Set();
+  const unresolved = new Set();
   for (const script of scripts) {
     let text;
     try {
@@ -72,12 +111,11 @@ function callsIn(scripts) {
     } catch {
       continue; // a script served from elsewhere; nothing to read here
     }
-    for (const m of text.matchAll(/hzPost\(\s*'([A-Za-z]+)'/gu)) calls.add(m[1]);
-    // The settings rows carry their action as `message: 'setSounds'` and are
-    // dispatched dynamically, so the literal never appears next to hzPost.
-    for (const m of text.matchAll(/message:\s*'([A-Za-z]+)'/gu)) calls.add(m[1]);
+    const found = scanCalls(text);
+    for (const c of found.calls) calls.add(c);
+    for (const u of found.unresolved) unresolved.add(`${script}: ${u}`);
   }
-  return calls;
+  return { calls, unresolved };
 }
 
 const pageScripts = pagesFromHtml();
@@ -91,7 +129,7 @@ test('every page can call everything it actually calls', () => {
       `ui/${page}.html exists but Bridge.pageCapabilities has no entry for "${page}" — ` +
         `every message from it would be refused.`
     );
-    for (const call of callsIn(scripts)) {
+    for (const call of callsIn(scripts).calls) {
       if (!dispatchCases.has(call)) continue; // handled below, separately
       if (sharedActions.has(call) || allowed.has(call)) continue;
       denied.push(`${page} calls ${call}`);
@@ -102,6 +140,65 @@ test('every page can call everything it actually calls', () => {
     [],
     `a page calls an action its compartment forbids, so the button silently ` +
       `errors:\n  ${denied.join('\n  ')}`
+  );
+});
+
+// Scripts every page loads (bridge.js) say nothing about any ONE page, so the
+// floor below must not count them. The first version did, and that made the
+// floor vacuous: bridge.js contributes prefs and fitContent to every page, so no
+// page could ever reach zero and the check could never fire. Found by trying to
+// make it fire and watching it stay green — which is the only way to find out.
+const sharedScripts = (() => {
+  const lists = [...pageScripts.values()];
+  if (lists.length === 0) return new Set();
+  return new Set(lists[0].filter((sc) => lists.every((l) => l.includes(sc))));
+})();
+
+const ownScripts = (scripts) => scripts.filter((sc) => !sharedScripts.has(sc));
+
+test('every page yields at least one readable call of its own', () => {
+  // THE FLOOR, and this file needed one for the same reason the egress tripwire
+  // did: a scanner that reads nothing passes everything. The ear page proved it
+  // — its calls go through a wrapper, the scanner saw none, and its compartment
+  // was unverified while the suite stayed green. Counted over the page's OWN
+  // scripts, so a shared file cannot prop the number up.
+  const silent = [];
+  for (const [page, scripts] of pageScripts) {
+    if (callsIn(ownScripts(scripts)).calls.size === 0) silent.push(page);
+  }
+  assert.deepEqual(
+    silent,
+    [],
+    `these pages yielded no readable bridge calls of their own, so their ` +
+      `compartment is ` +
+      `asserted against nothing:\n  ${silent.join('\n  ')}\n` +
+      `Either they genuinely call nothing (say so here) or the scanner cannot ` +
+      `read how they call — which is the bug this test exists to prevent.`
+  );
+});
+
+test('no page calls the bridge in a way this scanner cannot read', () => {
+  // A dynamic first argument means a capability nobody can check statically.
+  // onboarding.js has one — `hzPost(then)` inside finish({ then }) — and it is
+  // dead: finish() is only ever called with no argument, so `then` is always
+  // undefined and the call never fires. It is listed rather than ignored,
+  // because the next one might not be dead.
+  const KNOWN_DYNAMIC = new Set([
+    'onboarding.js: then', // dead: finish() is only called with no argument
+    'connections.js: message', // resolved via the `message: 'setX'` literals above
+  ]);
+  const surprises = [];
+  for (const [page, scripts] of pageScripts) {
+    for (const u of callsIn(scripts).unresolved) {
+      if (!KNOWN_DYNAMIC.has(u)) surprises.push(`${page} → ${u}`);
+    }
+  }
+  assert.deepEqual(
+    surprises,
+    [],
+    `a bridge call is made through a variable this scanner cannot resolve, so ` +
+      `the capability map cannot be checked against it:\n  ${surprises.join('\n  ')}\n` +
+      `Either make the call site literal, or add it to KNOWN_DYNAMIC with why it is safe.`
   );
 });
 

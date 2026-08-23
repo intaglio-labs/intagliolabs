@@ -37,11 +37,12 @@ export const MAX_CLAIMS_PER_RUN = 100;
 // and `subject`, `observed_at` and every id are assigned by code.
 //
 // `p` IS asked for, as of prompt v2, and is the one field here the model is
-// trusted to originate. Rationale, from the sibling project's Experiment A:
-// thresholding the model's OWN reported probability was worth about 23 precision
-// points (69.9% -> 93.3% at 0.65) and it is a query-time parameter rather than a
-// better prompt -- so it is a knob you can only reach for if you asked for the
-// number. Nothing treats it as calibrated; it orders the review queue.
+// trusted to originate. The rationale is measured, on another corpus and not
+// reproducible here: thresholding a model's OWN reported probability bought a
+// large precision gain over taking every claim it emitted, and it is a
+// query-time parameter rather than a better prompt -- so it is a knob you can
+// only reach for if you asked for the number. Nothing treats it as calibrated;
+// it orders the review queue.
 //
 // It is `required`, deliberately. Optional confidence is confidence the model
 // omits on exactly the rows where it is least sure.

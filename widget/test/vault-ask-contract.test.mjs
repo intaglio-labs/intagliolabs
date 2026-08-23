@@ -275,10 +275,10 @@ test('LIVE: a real answer is buffered JSON of exactly {text, sources, usedRows}'
 // LIVE, which needs HZ_CONTRACT_LIVE=1 and a real model. On a normal run the
 // contract was unasserted on every path.
 //
-// This is the seam worth guarding, because both of the sibling project's
-// escaped crashes lived in it: the suite stopped at the retrieval call and the
-// renderer downstream read two fields the query never selected. Nothing was
-// wrong with the tests; they were short.
+// This is the seam worth guarding: it is where escaped crashes live. A suite
+// that stops at the retrieval call leaves the renderer downstream free to read
+// fields the query never selected, and that failure reaches a person rather than
+// a test. Nothing is wrong with such tests; they are short.
 //
 // What depends on the shape here, concretely:
 //   Bridge.swift  obj["sources"] as? [String] ?? []   -- a wrong element type

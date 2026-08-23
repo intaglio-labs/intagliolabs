@@ -7,11 +7,11 @@
 // other input: what the owner says the day was actually like. Together they
 // support an attribution; separately neither does.
 //
-// THE ORDER MATTERS AND IT COST THE SIBLING PROJECT REAL TIME. The rig built
-// the feature side first and ended up with 1,452 computed features and zero
-// ratings -- every correlation withheld, nothing to withhold them from. The
-// features were never the scarce input. The label is, and it decays: rating how
-// last Tuesday felt is worse data than rating today, so the cost of building
+// THE ORDER MATTERS, AND BUILDING IT THE OTHER WAY ROUND COSTS REAL TIME. Do
+// the feature side first and you end up with a full table of computed features
+// and no ratings -- every correlation withheld, nothing to withhold them from.
+// The features were never the scarce input. The label is, and it decays: rating
+// how last Tuesday felt is worse data than rating today, so the cost of building
 // this late is paid in data quality that cannot be recovered afterwards.
 //
 // Zero dependencies, node built-ins only, and it works over any node:sqlite
@@ -27,7 +27,7 @@ import { isLateNightHour, localDayKey, localDayStart } from './digest.mjs';
 // Not a statistical ceremony -- a guard against the specific failure that a
 // correlation over three points is a lie that LOOKS like a product. It renders
 // as "meetings drain you", reads as a finding, and is noise. Ported from the
-// rig, which set the same floor for the same reason after watching a two-point
+// same floor was set elsewhere for the same reason, after watching a two-point
 // "trend" render as confidently as a real one. Raise it on evidence; do not
 // lower it to make an early screen look populated.
 export const MIN_RATINGS = 14;
