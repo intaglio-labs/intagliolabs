@@ -9,8 +9,13 @@ import { createEar } from './lib/ear.js';
 import { createVoice } from './lib/voice.js';
 
 const SILENCE_DISARM_MS = 12_000;
+// NO REPO PATHS IN FRONT OF A PERSON. This used to read "run
+// widget/voice/setup-voice.sh" -- a path inside a source tree a downloaded app
+// does not have, naming a script its owner cannot run. Voice is now something
+// you turn on from onboarding or the gear, so the message points at the door
+// that actually exists.
 const UNPROVISIONED =
-  "voice isn't provisioned on this machine yet — run widget/voice/setup-voice.sh";
+  'voice isn’t set up yet — open the gear and choose Set up voice';
 
 let ear = null;
 let voice = null;

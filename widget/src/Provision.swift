@@ -132,7 +132,23 @@ enum Provision {
     // Render each plist (@HOME@ → home, @REPO@ → the bundle's backend), write
     // it 0644, and bootstrap. Wait for hermes to answer /health before the
     // rest, so connectors don't write into a database still opening.
+    let llamaBinary = hazlie.appendingPathComponent("bin/llama-server")
     for label in agentsInOrder {
+      // DO NOT REGISTER AN AGENT THAT CANNOT RUN.
+      //
+      // llama-server is bundled only when the machine that built the app had a
+      // model to bundle, so on a plain build there is no binary. Registering it
+      // anyway cost twice: macOS counted another background item and told the
+      // owner about it, and launchd then retried a binary that does not exist,
+      // parking the agent at exit 78 forever. A background item a person is
+      // asked to approve should at minimum be one that does something.
+      //
+      // Setting up the model later installs this agent itself, which is the
+      // right moment for it to appear.
+      if label == "com.hazlie.llama-server" && !fm.fileExists(atPath: llamaBinary.path) {
+        NSLog("Intaglio Labs: no local model bundled — skipping the llama agent")
+        continue
+      }
       let template = backend.appendingPathComponent("agents/\(label).plist")
       guard var text = try? String(contentsOf: template, encoding: .utf8) else { continue }
       text = text.replacingOccurrences(of: "@HOME@", with: home.path)

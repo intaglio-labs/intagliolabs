@@ -6,12 +6,20 @@ const log = document.getElementById('log');
 
 // Fixed strings for every non-answer state. The widget renders what the
 // vault said or a named failure — never a fabricated answer.
+// Fixed strings for every non-answer state. The widget renders what the vault
+// said or a named failure -- never a fabricated answer.
+//
+// WRITTEN FOR THE PERSON READING THEM, not for whoever wrote the service. These
+// used to name a secrets path, a port number and the service's internal name;
+// none of those is actionable by someone who installed an app, and a file path
+// in an error is an invitation to go editing it. What IS actionable is whether
+// to wait, reopen, or reinstall, so each line says which.
 const FAILURES = {
-  notready: "vault isn't ready on this machine yet",
-  auth: 'token mismatch — re-check ~/.hazlie/secrets/hermes-token.txt',
-  identity: "8789 isn't answering as hermes",
-  down: 'hermes unreachable',
-  error: 'something went wrong on the vault side',
+  notready: "Hazlie's memory isn't ready yet — give it a moment and try again",
+  auth: 'Hazlie could not unlock its own memory. Quitting and reopening usually fixes it.',
+  identity: 'something else is using the port Hazlie needs',
+  down: "Hazlie's memory isn't running — quit and reopen to restart it",
+  error: 'something went wrong on Hazlie’s side',
 };
 
 let busy = false;
@@ -30,6 +38,7 @@ function bubble(cls, text) {
 async function send(utterance) {
   utterance = String(utterance ?? '').trim().slice(0, 2000);
   if (!utterance || busy) return;
+  clearNote();
   bubble('user', utterance);
   const pending = bubble('assistant pending', '');
   // Three dots rather than a CSS pseudo-element, because the answer arrives by
@@ -95,10 +104,39 @@ async function send(utterance) {
 window.__hzIncoming = send;
 // Voice failures arrive as fixed strings from the ear page — rendered, never
 // invented here.
+// A NOTE REPLACES THE LAST NOTE. It does not stack.
+//
+// This used to call bubble() straight through, so every press of WAKE on a
+// machine without voice appended another identical line: three presses, three
+// copies of the same sentence filling the window. A note is a statement about
+// the CURRENT state of the app, not an event in the conversation -- there is
+// only ever one true answer to "why did nothing happen", so there should only
+// ever be one line saying it.
+//
+// Kept distinct from real messages: an assistant ANSWER is part of the log and
+// must never be silently replaced, so notes carry their own class and only
+// ever overwrite each other.
+let noteEl = null;
 window.__hzVoiceNote = (message) => {
   const m = String(message ?? '').trim();
-  if (m) bubble('assistant', m);
+  if (!m) return;
+  if (noteEl && noteEl.isConnected) {
+    if (noteEl.textContent === m) return; // identical: nothing changed, say nothing
+    noteEl.textContent = m;
+    if (document.body.classList.contains('folded')) setFolded(false);
+    log.scrollTop = log.scrollHeight;
+    placeFold();
+    return;
+  }
+  noteEl = bubble('assistant note', m);
 };
+
+// A real message clears the note: it was about why nothing happened, and
+// something just did.
+function clearNote() {
+  if (noteEl && noteEl.isConnected) noteEl.remove();
+  noteEl = null;
+}
 hzPost('chatReady').then((d) => {
   if (typeof d.pending === 'string' && d.pending.length > 0) send(d.pending);
   if (typeof d.note === 'string' && d.note.length > 0) window.__hzVoiceNote(d.note);

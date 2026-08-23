@@ -267,7 +267,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     panel.setFrame(placedFrame(panel.frame.size), display: false)
   }
 
+  // Every popup this app opens along the widget's edge. Onboarding is not in
+  // the list: it is a full-screen scrim that deliberately covers everything,
+  // and it closes the others itself when it opens.
+  private var edgePanels: [PopupPanel?] { [chatPanel, connectionsPanel, peoplePanel, skyPanel] }
+
+  // ONE AT A TIME. Opening any popup closes the others first.
+  //
+  // They are all placed against the same edge of the widget, so two open at
+  // once do not sit side by side -- they overlap, and the one underneath is
+  // both unreachable and still listening. It was possible to stack chat,
+  // connections, people and the sky view into one pile.
+  //
+  // Ordering out rather than closing: these panels are kept lazily
+  // (isReleasedWhenClosed is false) so they survive hidden and reopen with
+  // their state, which is the behaviour the gear toggle depends on.
   private func present(_ panel: PopupPanel) {
+    for other in edgePanels where other !== panel {
+      if other?.isVisible == true { other?.orderOut(nil) }
+    }
     place(panel)
     NSApp.activate(ignoringOtherApps: true)
     panel.makeKeyAndOrderFront(nil)
@@ -291,6 +309,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // Replay is a fresh install, so the hand-holds rewind with it: every
     // connector walks the user through again on its next first press.
     Bridge.handheld = []
+    // The flow covers the display, so nothing may be left open underneath it —
+    // a popup under the scrim is unreachable and still live.
+    for other in edgePanels where other?.isVisible == true { other?.orderOut(nil) }
     // The widget LEAVES for the flow's duration. It used to sit under the
     // scrim, faintly visible through the dim — which made scene 3's reveal a
     // "notice the thing you half-saw" instead of a meeting. Hidden here,

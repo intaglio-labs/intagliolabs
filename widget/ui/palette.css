@@ -2046,6 +2046,7 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
 }
 .ob-ph { color: var(--muted); margin-left: 5px; }
 .ob-send {
+  position: relative; /* anchors the nudge ring below */
   width: 60px; height: 60px; flex-shrink: 0;
   border-radius: 50%;
   background: linear-gradient(180deg, #e5d6bb, #c5a56d);
@@ -2053,27 +2054,50 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
   display: flex; align-items: center; justify-content: center;
 }
 .ob-send.sending { animation: btn-squish 0.55s cubic-bezier(0.68, -0.55, 0.265, 1.55); }
-/* Waiting to be pressed: the notify orb's own bounce, borrowed exactly.
-   It is this app's one gesture for "this wants you", and here the thing
-   that wants you is the send.
 
-   Plus a spotlight, because the bounce alone is easy to miss on a screen
-   where a 120px orb is breathing overhead. Two shadows on one keyframe: a
-   soft halo that swells, and a ring that pushes outward behind it. Both are
-   box-shadow, so they compose with the bounce's transform rather than
-   fighting it — one element, two animations, no shared property. */
+/* WAITING TO BE PRESSED — a ring that travels outward, not a bounce.
+ *
+ * This used to run orb-jelly: the notify orb's squash-and-stretch, borrowed on
+ * the grounds that it is the app's one gesture for "this wants you". On a 42px
+ * orb that reads as alive. On a 60px button that a person is being asked to
+ * click, the same curve squashes the control to 114/86 and throws it 8px up and
+ * down — the target moves while you aim at it, and a control that deforms reads
+ * as broken rather than eager.
+ *
+ * A ping does the job better and is quieter: a ring starts at the button's own
+ * edge and expands away, fading. The motion travels OUTWARD from the target, so
+ * the eye is led back down it to the source — the same reason a radar sweep or a
+ * dropped-pin ripple works. The button itself never moves, so it stays a
+ * pressable thing at a fixed place.
+ *
+ * The halo swell stays: it is what carries on a screen where a 120px orb is
+ * breathing overhead. Ring on a pseudo-element, halo on the element, so the two
+ * never share a property and cannot fight.
+ */
 @keyframes send-spotlight {
   0%, 100% {
-    box-shadow: 0 0 20px 3px rgba(229, 214, 187, 0.30), 0 0 0 0 rgba(229, 214, 187, 0.16);
+    box-shadow: 0 0 20px 3px rgba(229, 214, 187, 0.30);
   }
   50% {
-    box-shadow: 0 0 46px 10px rgba(229, 214, 187, 0.62), 0 0 0 13px rgba(229, 214, 187, 0.05);
+    box-shadow: 0 0 46px 10px rgba(229, 214, 187, 0.62);
   }
 }
+@keyframes send-ping {
+  0%   { transform: scale(1);    opacity: 0.55; }
+  70%  { opacity: 0; }
+  100% { transform: scale(1.85); opacity: 0; }
+}
 .ob-send.nudge {
-  animation:
-    orb-jelly 2.8s cubic-bezier(0.68, -0.55, 0.265, 1.55) infinite,
-    send-spotlight 2.8s ease-in-out infinite;
+  animation: send-spotlight 2.8s ease-in-out infinite;
+}
+.ob-send.nudge::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(229, 214, 187, 0.75);
+  animation: send-ping 2.8s cubic-bezier(0.2, 0.6, 0.35, 1) infinite;
+  pointer-events: none; /* the ring must never eat the click it is advertising */
 }
 .orb.gulp { animation: orb-gulp 0.9s ease-in-out; }
 
@@ -2133,6 +2157,7 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
      for. The ask survives as LIGHT rather than movement: the spotlight holds
      at its bright end instead of pulsing, so the button is still obviously
      the thing to press. */
+  body:not(.motion-anyway) .ob-send.nudge::after { animation: none; opacity: 0.5; transform: scale(1.25); }
   body:not(.motion-anyway) .ob-send.nudge {
     animation: none;
     box-shadow: 0 0 40px 8px rgba(229, 214, 187, 0.5), 0 0 0 10px rgba(229, 214, 187, 0.06);

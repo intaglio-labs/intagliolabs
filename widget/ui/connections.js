@@ -303,17 +303,26 @@ const FDA_HINT = {
   url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles',
   link: 'Open System Settings',
 };
+// WRITTEN FOR SOMEBODY WHO INSTALLED AN APP. These used to name repo scripts
+// (ops/gcal-auth.mjs) and secret file paths (~/.hazlie/secrets/*.txt) — neither
+// of which exists for a person who downloaded this, and a secrets path in a
+// tooltip is an invitation to go editing one by hand. Every one of them now
+// points at the connect page, which is the door that actually opens.
+//
+// NOTE: this table is duplicated in connections.js and connector-tile.js. Both
+// copies were corrected together; if you change one, change the other, or move
+// it to a shared module.
 const HINTS = {
   imessage: FDA_HINT, photos: FDA_HINT, notes: FDA_HINT,
   files: { text: 'Sign in to iCloud Drive, Box, or Dropbox on this Mac — any one of them counts.' },
-  calendar: { text: 'Run ops/gcal-auth.mjs in the repo and approve read-only calendar access.' },
+  calendar: { text: 'Connect your Google account on the connect page and approve read-only calendar access.' },
   mail: { text: 'Create a 16-letter Google app password, then paste it on the connect page.',
           url: 'https://myaccount.google.com/apppasswords', link: 'Google app passwords' },
-  granola: { text: 'Copy your API key from Granola settings into ~/.hazlie/secrets/granola-api-key.txt.',
+  granola: { text: 'Copy your API key from Granola settings, then paste it on the connect page.',
              url: 'https://granola.ai', link: 'granola.ai' },
   oura: { text: 'Create a personal access token on Oura cloud and store it via the connect page.',
           url: 'https://cloud.ouraring.com/personal-access-tokens', link: 'cloud.ouraring.com' },
-  notion: { text: 'Create an internal integration and store its token in ~/.hazlie/secrets/notion-api-key.txt.',
+  notion: { text: 'Create an internal integration, then paste its token on the connect page.',
             url: 'https://www.notion.so/my-integrations', link: 'notion.so/my-integrations' },
 };
 function hintFor(id) {
