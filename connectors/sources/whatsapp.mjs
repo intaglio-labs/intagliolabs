@@ -77,6 +77,7 @@ export function createWhatsappSource({ home } = {}) {
       let skipped = 0;
       let maxDate = null;
       let newestSeen = null;
+      let capped = false;
       try {
         // The snapshot attempt IS the readability test.
         snapshotPath = await snapshotStore(srcPath, cacheDir);
@@ -101,6 +102,7 @@ export function createWhatsappSource({ home } = {}) {
         );
         const floorSec = Number.isFinite(floor.seconds) ? floor.seconds : -1e12;
         const dbRows = stmt.all(floorSec, MAX_MESSAGES_PER_SCAN);
+        capped = dbRows.length >= MAX_MESSAGES_PER_SCAN;
 
         for (const r of dbRows) {
           if (maxDate === null || r.ZMESSAGEDATE > maxDate) maxDate = r.ZMESSAGEDATE;
@@ -135,7 +137,7 @@ export function createWhatsappSource({ home } = {}) {
           examined: dbRows.length,
           rows: rows.length,
           skipped,
-          capped: dbRows.length >= MAX_MESSAGES_PER_SCAN,
+          capped,
           // Days since the newest message anywhere in the store. The one signal
           // that separates "quiet" from "the app has not synced" — a count, not
           // a date, so no identifier leaks.
@@ -154,7 +156,15 @@ export function createWhatsappSource({ home } = {}) {
       const totals =
         rows.length > 0 ? await ingestAll(ctx, rows) : { inserted: 0, updated: 0, unchanged: 0 };
       // Cursor advances only after the batch is safely in hermes.
-      if (maxDate !== null) ctx.state.setCursor(CURSOR_KEY, String(maxDate));
+      //
+      // ZMESSAGEDATE is whole seconds (ops/PROBES.md), so a capped scan can
+      // cut a batch mid-second: rows tied at maxDate that fell past the LIMIT
+      // would sit below the strict `>` forever. On a capped scan the cursor
+      // rewinds one second so the boundary tie is re-offered next pass —
+      // already-delivered rows come back as `unchanged`, which the upsert
+      // makes cheap, and the ones that did not fit finally land. Same call
+      // files.mjs (nextFileCursor) makes for its mtime cursor.
+      if (maxDate !== null) ctx.state.setCursor(CURSOR_KEY, String(capped ? maxDate - 1 : maxDate));
       return { ...totals, skipped };
     },
   };

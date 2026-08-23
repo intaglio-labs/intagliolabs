@@ -29,6 +29,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { runChecks } from './lib/checks.mjs';
 import {
   DEFAULT_HERMES_BASE_URL,
   adminDeleteEntities,
@@ -178,6 +179,11 @@ const GRANOLA_KEYS = Object.freeze(['includeTranscripts']);
 const OURA_KEYS = Object.freeze(['backfillDays']);
 const PHOTOS_KEYS = Object.freeze(['backfillDays']);
 const NOTION_KEYS = Object.freeze([]);
+// Empty on purpose: the linkedin connector reads no config yet, so any key
+// inside a `"linkedin"` section is a misspelling or an expectation the
+// daemon cannot meet — it must fail loudly, not validate cleanly and do
+// nothing (the failure the header describes).
+const LINKEDIN_KEYS = Object.freeze([]);
 // `roots` overrides the discovered cloud folders; `materializeDataless` is the
 // opt-in that lets the walk OPEN online-only files. It defaults false and the
 // validator states the cost, because turning it on on this Mac would pull
@@ -316,6 +322,9 @@ export function validateConfig(raw) {
   }
   if (raw.notion !== undefined) {
     assertClosedKeys(raw.notion, NOTION_KEYS, '"notion"');
+  }
+  if (raw.linkedin !== undefined) {
+    assertClosedKeys(raw.linkedin, LINKEDIN_KEYS, '"linkedin"');
   }
   if (raw.files !== undefined) {
     assertClosedKeys(raw.files, FILES_KEYS, '"files"');
@@ -639,33 +648,26 @@ if (isMain) {
 
     // Startup preflight lives in lib/checks.mjs (owned by doctor's author;
     // contract: runChecks() → [{name, status: PASS|WARN|FAIL, detail, fix}],
-    // never throws). Its absence is tolerated with a warning — the module
-    // lands from a concurrent work stream — but when present, a FAIL is
-    // fatal: in that module's own semantics WARN means "not provisioned yet,
-    // disabled by design" and FAIL means broken, and a daemon that polls past
-    // a broken foundation buries the symptom in per-source noise.
-    let checks = null;
-    try {
-      checks = await import('./lib/checks.mjs');
-    } catch (error) {
-      if (error?.code === 'ERR_MODULE_NOT_FOUND' && String(error?.message).includes('checks.mjs')) {
-        log.warn('checks_missing', { detail: 'lib/checks.mjs not present; startup checks skipped' });
-      } else {
-        throw error;
-      }
+    // never throws). Imported STATICALLY, like run.mjs imports
+    // verifyHermesIdentity: a missing or broken checks.mjs used to be
+    // tolerated with a warning (written while the module was landing from a
+    // concurrent work stream), which let a partial deploy start the one
+    // process with Full Disk Access with the entire preflight — hermes
+    // identity gate included — silently skipped. Now that is a loud startup
+    // failure, per the refuse-loudly rule below. A FAIL is fatal: in that
+    // module's own semantics WARN means "not provisioned yet, disabled by
+    // design" and FAIL means broken, and a daemon that polls past a broken
+    // foundation buries the symptom in per-source noise.
+    const results = await runChecks();
+    for (const r of results) {
+      if (r.status === 'WARN') log.warn('startup_check', { name: r.name, detail: r.detail });
+      if (r.status === 'FAIL') log.error('startup_check', { name: r.name, detail: r.detail, fix: r.fix });
     }
-    if (typeof checks?.runChecks === 'function') {
-      const results = await checks.runChecks();
-      for (const r of results) {
-        if (r.status === 'WARN') log.warn('startup_check', { name: r.name, detail: r.detail });
-        if (r.status === 'FAIL') log.error('startup_check', { name: r.name, detail: r.detail, fix: r.fix });
-      }
-      const failed = results.filter((r) => r.status === 'FAIL');
-      if (failed.length > 0) {
-        throw new Error(
-          `startup checks failed: ${failed.map((r) => r.name).join(', ')} — run \`npm run doctor\` for the fixes`
-        );
-      }
+    const failed = results.filter((r) => r.status === 'FAIL');
+    if (failed.length > 0) {
+      throw new Error(
+        `startup checks failed: ${failed.map((r) => r.name).join(', ')} — run \`npm run doctor\` for the fixes`
+      );
     }
 
     const state = openStateDb();

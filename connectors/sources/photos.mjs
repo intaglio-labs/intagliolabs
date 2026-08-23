@@ -28,7 +28,7 @@
 // never a coordinate.
 
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { openPersistentReader } from '../lib/storeReader.mjs';
 import { assetToRow } from '../lib/photoRows.mjs';
 import { groupPeopleByAsset, peopleMeta, peopleText, personNames } from '../lib/peopleRows.mjs';
 
@@ -75,7 +75,10 @@ export function createPhotosSource({ home } = {}) {
       let maxCreated = null;
       let withPeople = 0;
       try {
-        db = new DatabaseSync(path, { readOnly: true });
+        // Mode (b) of lib/storeReader.mjs — the sanctioned persistent-reader
+        // entry point, whose wrapper explains the missing--shm failure a raw
+        // open reports cryptically.
+        db = openPersistentReader(path);
         const floor = scanFloorSeconds({
           storedCursor: ctx.state.getCursor(CURSOR_KEY),
           backfill: Boolean(ctx.backfill),

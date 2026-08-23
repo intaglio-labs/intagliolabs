@@ -63,7 +63,16 @@ export function isInsideIdleWindow(maintainHour = DEFAULT_MAINTAIN_HOUR, nowMs =
   if (!match) return false;
   const start = new Date(nowMs);
   start.setHours(Number(match[1]), Number(match[2]), 0, 0);
-  const startMs = start.getTime();
+  let startMs = start.getTime();
+  if (nowMs < startMs) {
+    // The window straddles midnight for any maintainHour from 23:01 on, and
+    // a timer firing just after 00:00 sees TODAY's occurrence in the future
+    // — the open window is yesterday's. Previous day by date fields, not a
+    // flat 24h, for the DST reasoning written at msUntilIdleWindow.
+    start.setDate(start.getDate() - 1);
+    start.setHours(Number(match[1]), Number(match[2]), 0, 0);
+    startMs = start.getTime();
+  }
   return nowMs >= startMs && nowMs < startMs + 3_600_000;
 }
 
