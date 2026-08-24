@@ -37,11 +37,11 @@
     "SCOPE. This ledger describes THIS repository. One entry was removed when the",
     "code was extracted for open source: the outbound iMessage lane, which was the",
     "courier's send path and is not here. A ledger that over-declares is as",
-    "misleading as one that under-declares — it invites a reader to believe a",
+    "misleading as one that under-declares \u2014 it invites a reader to believe a",
     "capability exists.",
     "",
-    "2026-08-24. The marketing site MOVED INTO this repository, at site/, so the six",
-    "hosts it reaches are declared again below under kind `website`. They were",
+    "2026-08-24. The marketing site MOVED INTO this repository, at site/. It reaches",
+    "SEVEN hosts, six of them declared below under kind `website`. The seventh is huggingface.co, which already had an entry as a `model-asset` -- one host, two contexts, so filtering by kind alone under-counts the site. They were",
     "removed on 2026-08-22 when site/ was a separate artifact; that sentence is now",
     "false and has been rewritten rather than left standing. connectors/test/",
     "egress.test.mjs promoted `site` out of ROOTS_ELSEWHERE and into ROOTS in the",
@@ -82,7 +82,7 @@
       "direction": "inbound-fetch",
       "purpose": "fetch the owner's own Notion pages",
       "credential": "notion internal integration token",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
       "evidence": "connectors/lib/notionClient.mjs:18 NOTION_BASE_URL"
     },
     {
@@ -142,7 +142,7 @@
       "direction": "bidirectional",
       "purpose": "Discord DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
       "evidence": "connect/lib/bridge.mjs PLATFORMS.discord; bridges/docker-compose.yml image dock.mau.dev/mautrix/discord"
     },
     {
@@ -152,7 +152,7 @@
       "direction": "bidirectional",
       "purpose": "Slack DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
       "evidence": "connect/lib/bridge.mjs PLATFORMS.slack; bridges/docker-compose.yml image dock.mau.dev/mautrix/slack"
     },
     {
@@ -162,7 +162,7 @@
       "direction": "bidirectional",
       "purpose": "Telegram DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
       "evidence": "connect/lib/bridge.mjs PLATFORMS.telegram; bridges/docker-compose.yml image dock.mau.dev/mautrix/telegram"
     },
     {
@@ -278,7 +278,7 @@
       "purpose": "download the Kokoro voice and llama model weights",
       "credential": "HF_TOKEN for gated repos",
       "decision": "Build/setup-time model download, not reachable from the running app. Model weights are hundreds of megabytes and are fetched rather than committed. Was UNRECORDED for the same reason as the sources above.",
-      "evidence": "widget/voice/scripts/fetch-models.mjs; ops/setup-llm.sh",
+      "evidence": "widget/voice/scripts/fetch-models.mjs; ops/setup-llm.sh (the app fetching weights) AND site/notices/index.html:314,318,334 (links the notices page hands the visitor). Two contexts, one host: the kind names the larger exposure, and this line is why filtering by kind alone under-counts the site.",
       "note": "Until 4128ae2c this was ALSO a RUNTIME path in the shipped app: widget/ui/ear-main.js called createVoice() without localOnly, so a missing vendored voice file fell through to kokoro-js's hardcoded huggingface.co fetch. Fixed in source; the notarized DMG still carries the old behaviour until re-cut."
     },
     {
@@ -392,7 +392,7 @@
       "purpose": "the IBM Plex Mono stylesheet the landing page links",
       "credential": "none",
       "decision": "Public marketing site. The visitor's browser loads this, not any Hazlie process; it carries no credential and sees only that someone opened the page.",
-      "evidence": "site/index.html:11 <link href=\"https://fonts.googleapis.com/css2?family=IBM+Plex+Mono…\" rel=\"stylesheet\">"
+      "evidence": "site/index.html:11 <link href=\"https://fonts.googleapis.com/css2?family=IBM+Plex+Mono\u2026\" rel=\"stylesheet\">"
     },
     {
       "host": "fonts.gstatic.com",
@@ -422,7 +422,7 @@
       "purpose": "the two builder credits in the page footer",
       "credential": "none",
       "decision": "Public marketing site. A link the visitor may click; nothing is fetched unless they do. No credential, no automatic request.",
-      "evidence": "site/index.html:349 built by <a href=\"https://www.linkedin.com/in/…\">"
+      "evidence": "site/index.html:349 built by <a href=\"https://www.linkedin.com/in/\u2026\">"
     },
     {
       "host": "github.com",
@@ -432,7 +432,7 @@
       "purpose": "upstream project links in the third-party notices page",
       "credential": "none",
       "decision": "Public marketing site. A link the visitor may click; nothing is fetched unless they do. No credential, no automatic request.",
-      "evidence": "site/notices/index.html:321,329 moonshine and silero-vad repository links"
+      "evidence": "site/notices/index.html:321,329 (moonshine and silero-vad repository links) and site/index.html:347 (the download button, which points at this project's own releases)"
     },
     {
       "host": "www.apache.org",

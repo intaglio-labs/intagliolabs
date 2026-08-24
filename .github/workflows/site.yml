@@ -41,6 +41,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Nothing here pushes, and the default leaves the job's token sitting in
+          # .git/config for every later step to read.
+          persist-credentials: false
 
       # THE CHECKS RUN BEFORE THE DEPLOY, not after, so a broken page is never
       # published and then noticed.
@@ -97,11 +101,25 @@ jobs:
             echo "FIREBASE_SERVICE_ACCOUNT is not set — see site/DEPLOY.md for how to create it."
             exit 1
           fi
-          printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
-          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          # INSTALL FIRST, THEN WRITE THE KEY. `npm install` runs install scripts
+          # from a dependency tree of its own; with the key already on disk, any
+          # one of them could read it. The window is not zero either way — the
+          # deploy tool is handed the credential by design — but it does not need
+          # to be open during the install as well.
+          #
           # Pinned: an unpinned deploy tool is an unreviewed change to the thing
-          # that publishes the site.
+          # that publishes the site. The pin covers the top level only; npm
+          # re-resolves the tree beneath it.
           npm install --no-fund --no-audit --global firebase-tools@15.11.0
+
+          # And removed on the way out, whatever happened. The runner is
+          # ephemeral, but a key left readable for the rest of the job is a key
+          # every later step can read, and steps get added.
+          trap 'rm -f "$RUNNER_TEMP/sa.json"' EXIT
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
+          chmod 600 "$RUNNER_TEMP/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+
           firebase deploy --only hosting --non-interactive \
             --project hazlie-prod \
             --message "${GITHUB_SHA::7} ${GITHUB_EVENT_NAME}"
