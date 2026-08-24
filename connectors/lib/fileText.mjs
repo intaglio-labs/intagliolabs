@@ -11,7 +11,7 @@
 // nothing, and until one is here they ingest as metadata rows like any other
 // online-only file, with has_content:false saying so.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 
 export const TEXT_EXTS = Object.freeze(['md', 'markdown', 'txt', 'tex', 'csv', 'tsv']);
 export const MAX_CONTENT_BYTES = 256 * 1024;
@@ -66,12 +66,24 @@ export function extractText(path, ext, { maxBytes = MAX_CONTENT_BYTES } = {}) {
   const readable = TEXT_EXTS.includes(ext) || ext === 'rtf';
   if (!readable) return null;
 
+  // Size gate BEFORE the read: readFileSync would otherwise buffer a
+  // multi-GB data-dump .csv in full just to discard it against the cap.
+  let size;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return null;
+  }
+  if (size === 0 || size > maxBytes) return null;
+
   let buf;
   try {
     buf = readFileSync(path);
   } catch {
     return null;
   }
+  // Re-checked on the bytes actually read: the file can grow between stat
+  // and read.
   if (buf.length === 0 || buf.length > maxBytes) return null;
   if (!looksLikeText(buf)) return null;
 

@@ -15,6 +15,7 @@
 // the point). All reads of the bridge's own database are read-only.
 
 import { DatabaseSync } from 'node:sqlite';
+import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -351,7 +352,11 @@ export async function relay(platformId, text, { home = homedir(), waitMs = 9000 
   const before = await readTranscript(creds, roomId, 1);
   const sinceTs = before.length ? before[before.length - 1].ts : 0;
 
-  const txn = `hz${Date.now()}`;
+  // Unique per send, not just per millisecond: Matrix treats a repeated
+  // txnId as a retransmission and silently drops the second message, and two
+  // relays can overlap here (the widget's /api/bridge channel and the form
+  // POST hit this same module).
+  const txn = `hz${Date.now()}-${randomBytes(4).toString('hex')}`;
   await mx(creds, 'PUT', `/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${txn}`, {
     msgtype: 'm.text',
     body: text,

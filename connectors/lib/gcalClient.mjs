@@ -75,27 +75,41 @@ export function createGcalClient({
   const clientId = () => readSecretLine(clientIdPath, { label: 'gcal client id' });
   const clientSecret = () => readSecretLine(clientSecretPath, { label: 'gcal client secret' });
 
-  let tokens = readSecretJson(tokensPath, {
-    label: 'gcal tokens',
-    setupHint: 'run `node ops/gcal-auth.mjs` (browser consent)',
-    requiredKeys: ['access_token', 'refresh_token'],
-  });
+  function readTokens() {
+    return readSecretJson(tokensPath, {
+      label: 'gcal tokens',
+      setupHint: 'run `node ops/gcal-auth.mjs` (browser consent)',
+      requiredKeys: ['access_token', 'refresh_token'],
+    });
+  }
 
-  function expiresAt() {
+  function expiresAt(tokens) {
     if (!Number.isFinite(tokens.expires_in) || !Number.isFinite(tokens.obtained_at)) return 0;
     return tokens.obtained_at + tokens.expires_in * 1000;
   }
 
-  async function doRefresh() {
+  async function doRefresh(staleAccessToken) {
+    // Re-read before spending the refresh token, mirroring ouraClient: if
+    // another process (an ops/gcal-auth.mjs re-auth) rotated the pair since
+    // our caller read it, the pair on disk is the live one, and refreshing
+    // from what we remember would write the stale grant back over it.
+    const current = readTokens();
+    if (current.access_token !== staleAccessToken && Date.now() < expiresAt(current) - EXPIRY_SKEW_MS) {
+      return current;
+    }
     const res = await fetchImpl(TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'refresh_token',
-        refresh_token: tokens.refresh_token,
+        refresh_token: current.refresh_token,
         client_id: clientId(),
         client_secret: clientSecret(),
       }),
+      // A 307/308 would re-POST this body — client_secret and refresh token —
+      // to wherever the reply points. The token endpoint never legitimately
+      // redirects; same rule as lib/ingestClient.mjs.
+      redirect: 'error',
     });
     if (!res.ok) {
       const body = await res.text();
@@ -115,27 +129,26 @@ export function createGcalClient({
       throw new Error('Google token refresh response is missing access_token');
     }
     const next = {
-      ...tokens,
+      ...current,
       access_token: payload.access_token,
       // Google usually omits refresh_token on refresh; keeping the existing
       // one is correct, and taking a new one when offered is required.
-      refresh_token: payload.refresh_token ?? tokens.refresh_token,
-      expires_in: payload.expires_in ?? tokens.expires_in,
-      scope: payload.scope ?? tokens.scope,
+      refresh_token: payload.refresh_token ?? current.refresh_token,
+      expires_in: payload.expires_in ?? current.expires_in,
+      scope: payload.scope ?? current.scope,
       obtained_at: Date.now(),
     };
     // Persist BEFORE the new token is used anywhere.
     writeTokensAtomically(tokensPath, next);
-    tokens = next;
     return next;
   }
 
   // One in-flight refresh per client: concurrent callers share it rather than
   // racing to rotate the same grant.
   let refreshInFlight = null;
-  function refreshTokens() {
+  function refreshTokens(staleAccessToken) {
     if (!refreshInFlight) {
-      refreshInFlight = doRefresh().finally(() => {
+      refreshInFlight = doRefresh(staleAccessToken).finally(() => {
         refreshInFlight = null;
       });
     }
@@ -143,19 +156,22 @@ export function createGcalClient({
   }
 
   async function accessToken() {
-    if (Date.now() >= expiresAt() - EXPIRY_SKEW_MS) return (await refreshTokens()).access_token;
+    const tokens = readTokens();
+    if (Date.now() >= expiresAt(tokens) - EXPIRY_SKEW_MS) {
+      return (await refreshTokens(tokens.access_token)).access_token;
+    }
     return tokens.access_token;
   }
 
   async function apiGet(path, params, { name = path } = {}) {
     let token = await accessToken();
     const url = `${API_BASE}${path}?${new URLSearchParams(params)}`;
-    let res = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` } });
+    let res = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` }, redirect: 'error' });
     if (res.status === 401) {
       // Reactive refresh, ONCE. A second 401 on a freshly rotated token is not
       // an expiry problem and refreshing again cannot fix it.
-      token = (await refreshTokens()).access_token;
-      res = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` } });
+      token = (await refreshTokens(token)).access_token;
+      res = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` }, redirect: 'error' });
       if (res.status === 401) {
         throw statusError(
           401,

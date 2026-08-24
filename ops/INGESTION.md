@@ -39,7 +39,7 @@ channels and one gate:
 | Channel | How | Who uses it |
 |---|---|---|
 | **bearer** | **No `Origin` header**, plus `Authorization: Bearer <token>` | curl, launchd, the connectors |
-| **browser** | An `Origin` header that is present and allowlisted | the Expo page |
+| **browser** | An `Origin` header that is present and allowlisted | nothing in the shipped product today — the widget is a native bearer client; the default allowlist still admits the deleted Expo app's dev origins (`DEFAULT_ALLOWED_ORIGINS` in `ui/server/hermes.mjs`) |
 
 The `/admin/*` lifecycle routes accept **only the bearer channel** — the browser
 channel gets a 403 that says so (see the Lifecycle section below).
@@ -177,8 +177,19 @@ sources and a human can read provenance off the id:
 | `mail` | `mail:<Message-ID>` | Message-ID normalized: trimmed, enclosing `<>` stripped, host part lowercased. Fallback when absent: `mail:<account>:<folder>:<uidvalidity>:<uid>`. |
 | `granola` | `granola:<note_id>` | |
 | `health` | `health:<metric>:<YYYY-MM-DD>` and `health:workout:<start_iso>` | One row per metric per completed local day; upsert lands corrections. |
+| `notes` | `notes:<note_id>` | Apple Notes primary key. |
+| `photos` | `photos:<uuid>` | Photos library asset UUID. |
+| `notion` | `notion:<page_id>` | |
+| `files` | `files:<absolute path>` | The path is the identity. |
+| `whatsapp` | `whatsapp:<stanza_id>` | |
+| `linkedin` | `linkedin:conn:<slug>` and `linkedin:msg:<sha8>` | Export seed: slug from the profile URL (hash fallback); messages keyed by a hash over conversation/date/sender/content. |
 | `hazlie_digest` | `hazlie_digest:<date>` | Reruns replace the day's digest. |
 | `seed` | (none) | Dev fixtures stay unkeyed; re-seeding inserts again by design. |
+
+This table went stale once already (it was missing six live sources when the
+2026-08-22 audit read it). The list a doc cannot drift from is hermes' own
+`KNOWN_SOURCES` (`ui/server/hermes.mjs`); the per-source row shapes live in
+[`CONNECTORS.md`](CONNECTORS.md)'s source registry.
 
 Verified round trip (2026-08-19): first delivery of a two-row entity batch →
 `{"inserted":2,"updated":0,"unchanged":0}`; the identical batch again →
@@ -395,9 +406,16 @@ free list), `journal_mode = DELETE` (no `-wal`/`-shm` sidecar holding the same
 text at a mode nothing asserts), and `temp_store = MEMORY`. Because
 `secure_delete` only applies to pages freed *after* it is enabled, opening a
 database at `user_version` 0 also runs a one-time `VACUUM` to rewrite existing
-pages. The schema is now at `user_version = 2`: opening a v1 database migrates
-it in place (adds `entity_id` and `content_hash`, creates the partial UNIQUE
-index) with existing rows preserved; their `entity_id` stays `NULL`.
+pages. The schema is now at `user_version = 6`: opening an older database
+migrates it in place, version by version, with existing rows preserved. In
+brief — v2 added `entity_id` and `content_hash` plus the partial UNIQUE index
+that turns redelivery into an upsert (pre-v2 rows keep a `NULL` `entity_id`);
+v3 added the `store_changed_at` ingestion cursor and FTS5 secure-delete on
+both indexes; v4 rebuilt `claim_fts` with the porter stemmer; v5 rescoped
+entity uniqueness to `(source, entity_id)`; v6 added the
+`context_source_ts (source, ts, entity_id)` index for per-source time-range
+reads. The version-history comment above `SCHEMA_VERSION` in
+`ui/server/hermes.mjs` is the authoritative list.
 
 ## Not provided
 

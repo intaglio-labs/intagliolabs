@@ -155,6 +155,9 @@ export function createGranolaClient({
           method: 'GET', // read-only by construction: nothing here can write to Granola
           headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
           signal: controller.signal,
+          // This request carries the bearer; a redirect would carry it
+          // onward, past the egress ledger. Same rule as lib/ingestClient.mjs.
+          redirect: 'error',
         });
       } catch (error) {
         if (controller.signal.aborted) {
@@ -173,7 +176,11 @@ export function createGranolaClient({
         if (attempt >= MAX_429_RETRIES) {
           throw statusError(429, `granola kept answering 429 after ${MAX_429_RETRIES} waits: ${path}`);
         }
-        const waitMs = parseRetryAfterMs(res.headers?.get?.('retry-after'), now()) ?? 1000;
+        // Clamped like notionClient.mjs: a malformed or hostile Retry-After
+        // ('99999999', an HTTP-date years out) would otherwise hold this
+        // await for that long — and the schedule only re-arms a source when
+        // run() returns, so the granola connector would never come back.
+        const waitMs = Math.min(parseRetryAfterMs(res.headers?.get?.('retry-after'), now()) ?? 1000, 60_000);
         await sleep(waitMs);
         continue;
       }

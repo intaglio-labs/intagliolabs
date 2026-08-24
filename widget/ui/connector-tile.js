@@ -118,8 +118,11 @@ const HZ_HINTS = {
           url: 'https://myaccount.google.com/apppasswords', link: 'Google app passwords' },
   granola: { text: 'Copy your API key from Granola settings, then paste it on the connect page.',
              url: 'https://granola.ai', link: 'granola.ai' },
-  oura: { text: 'Create a personal access token on Oura cloud and store it via the connect page.',
-          url: 'https://cloud.ouraring.com/personal-access-tokens', link: 'cloud.ouraring.com' },
+  // OAuth2 since Oura retired personal access tokens in Dec 2025: the PAT
+  // page this used to link is a dead end, and there is no settings page to
+  // send anyone to instead, so this one is text-only — the connect page
+  // carries the whole flow.
+  oura: { text: 'Connect your Oura account on the connect page and approve the scopes in your browser.' },
   notion: { text: 'Create an internal integration, then paste its token on the connect page.',
             url: 'https://www.notion.so/my-integrations', link: 'notion.so/my-integrations' },
 };

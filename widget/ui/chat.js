@@ -56,7 +56,12 @@ async function send(utterance, { echo = true } = {}) {
   for (let i = 0; i < 3; i += 1) typing.appendChild(document.createElement('i'));
   pending.appendChild(typing);
   pending.title = 'Cancel';
-  pending.addEventListener('click', () => { if (busy) hzPost('cancel'); });
+  // Gated on THIS bubble still being pending, not just on busy: the listener
+  // outlives the ask, so a click on a settled bubble during a later ask must
+  // not cancel that unrelated ask.
+  pending.addEventListener('click', () => {
+    if (busy && pending.classList.contains('pending')) hzPost('cancel');
+  });
   busy = true;
   let data;
   try {

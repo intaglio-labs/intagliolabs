@@ -2,7 +2,10 @@
 
 Plan only (owner request, 2026-08-21). Nothing here is built. Companion to
 `site/DEPLOY.md`, whose "download for mac button is inert" item this plan
-would eventually close.
+would eventually close. (A note for readers of the public tree: `site/` — the
+marketing-site artifact — and the CLAUDE.md and README passages this plan
+cites stayed in the private repo; the load-bearing content of each citation
+is stated where it is used.)
 
 ## What we are starting from (all true today)
 
@@ -20,7 +23,7 @@ would eventually close.
 - FDA attribution belongs to launchd's `~/.hazlie/bin/node`. A wrapper app
   that spawned the services itself would silently break those grants —
   this constraint shapes the whole plan.
-- CLAUDE.md's standing flag: the prototype's speaker-identity and privacy
+- The private repo's CLAUDE.md standing flag: the prototype's speaker-identity and privacy
   decisions were made for one user and must be revisited "before this
   leaves the house or acquires a second user." A downloadable app IS that
   moment.
@@ -139,8 +142,9 @@ about.
 
 ## Phase 4 — the gate that is not engineering
 
-Per CLAUDE.md, before a second user: the BIPA/CIPA review the README
-prices at "two hours with a defense litigator, cheaper than the dev kit."
+Per the private repo's CLAUDE.md, before a second user: the BIPA/CIPA review
+its README priced at "two hours with a defense litigator, cheaper than the
+dev kit."
 Concretely for the download build: speaker enrollment/persistent identity
 defaults OFF for non-owner users, retention defaults ON, and the
 /privacy page (currently a blank shell) written to describe what the

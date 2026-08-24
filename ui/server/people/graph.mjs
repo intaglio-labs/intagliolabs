@@ -282,7 +282,7 @@ export function buildGraph(
           identifiers: new Set(),
           channels: new Set(),
           firstSeen: sig.ts,
-          lastSeen: sig.ts,
+          lastSeen: null,
           lastFromThem: null,
           sent: 0,
           received: 0,
@@ -298,13 +298,16 @@ export function buildGraph(
       if (spine.idToName.has(sig.id)) p.names.add(spine.idToName.get(sig.id));
       // A calendar event is co-attendance, not contact — and it can be in the
       // FUTURE, which produced negative dormancy on the first live run. So
-      // firstSeen/lastSeen span everything, but the DORMANCY clock only ticks
-      // on real received messages that have actually happened (ts <= now). A
-      // meeting on the calendar is not them reaching out.
+      // firstSeen spans everything, but lastSeen and the DORMANCY clock only
+      // tick on signals that have actually happened (ts <= now). lastSeen is
+      // seeded null above for the same reason: the SELECT has no ORDER BY, so
+      // an unguarded seed let a future event stick as lastSeen whenever it
+      // happened to be the person's first row scanned. A meeting on the
+      // calendar is not them reaching out.
       const isMessage = sig.channel !== 'calendar' && !sig.linkedin;
       if (Number.isFinite(sig.ts)) {
         if (sig.ts < p.firstSeen) p.firstSeen = sig.ts;
-        if (sig.ts <= now && sig.ts > p.lastSeen) p.lastSeen = sig.ts;
+        if (sig.ts <= now && (p.lastSeen === null || sig.ts > p.lastSeen)) p.lastSeen = sig.ts;
         if (isMessage && !sig.fromMe && sig.ts <= now && (p.lastFromThem === null || sig.ts > p.lastFromThem)) {
           p.lastFromThem = sig.ts;
         }
@@ -351,7 +354,9 @@ export function buildGraph(
         // The dormancy clock the whole build was for: days since THEY last
         // reached the owner (not since the owner last pinged them).
         dormancyDays: p.lastFromThem === null ? null : Math.floor((now - p.lastFromThem) / DAY),
-        relationshipDays: Math.floor((p.lastSeen - p.firstSeen) / DAY),
+        // 0, not negative nonsense, for a person whose only signals are still
+        // in the future (lastSeen null).
+        relationshipDays: p.lastSeen === null ? 0 : Math.floor((p.lastSeen - p.firstSeen) / DAY),
         linkedin: p.linkedin,
         content: p.content,
       };

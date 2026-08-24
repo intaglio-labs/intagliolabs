@@ -350,12 +350,16 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
         skipped += mapped.skipped;
       } catch (error) {
         // No calendar id, summary or title in the log — that names the owner's
-        // calendars and their sharers (log policy, connectors/AGENTS.md).
+        // calendars and their sharers (log policy, connectors/AGENTS.md). The
+        // error MESSAGE is off-limits for the same reason: gcalClient labels
+        // each request with the calendar id, which for Google is an email
+        // address, and can echo the provider's response body. The HTTP status
+        // is the structured fact, and it is enough to act on.
         failed.push(calendar.id);
         ctx.log.warn('calendar_list_failed', {
           connector: 'calendar',
           backend: 'google',
-          error: String(error?.message ?? error).slice(0, 120),
+          status: error?.status ?? null,
         });
       }
     }

@@ -18,11 +18,13 @@
 // runtime assets no code path ever loads, so it is deliberately not copied.
 
 import { build } from 'esbuild';
+import { createHash } from 'node:crypto';
 import {
   copyFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   statSync,
 } from 'node:fs';
 import path from 'node:path';
@@ -69,6 +71,15 @@ for (const [out, meta] of Object.entries(result.metafile.outputs)) {
   console.log(`  ${path.relative(UI, path.resolve(out))}  ${fmt(meta.bytes)}`);
 }
 
+// Same size is not same file: same-named ort assets differ across versions by
+// content (see header), and a size-matched stale binary next to a new loader
+// is exactly the mixed pair that fails at session creation with no version
+// hint. "up to date" therefore means same bytes — the size check ahead of
+// each call is just the cheap short-circuit before hashing a few tens of MB.
+const sameContent = (a, b) =>
+  createHash('sha256').update(readFileSync(a)).digest('hex') ===
+  createHash('sha256').update(readFileSync(b)).digest('hex');
+
 // --- runtime assets ---------------------------------------------------------
 
 // Only the ort-wasm-* files are runtime assets the bundles fetch at model-load
@@ -95,7 +106,7 @@ for (const { pkg, src, dst } of assetSets) {
     const from = path.join(src, f);
     const to = path.join(dst, f);
     const size = statSync(from).size;
-    const had = existsSync(to) && statSync(to).size === size;
+    const had = existsSync(to) && statSync(to).size === size && sameContent(from, to);
     if (!had) copyFileSync(from, to);
     console.log(
       `  ${path.relative(UI, to)}  ${fmt(size)}  ${had ? 'up to date' : 'copied'}  (${pkg})`,
@@ -127,7 +138,7 @@ for (const { pkg, from, to } of VENDOR) {
   }
   mkdirSync(path.dirname(to), { recursive: true });
   const size = statSync(from).size;
-  const had = existsSync(to) && statSync(to).size === size;
+  const had = existsSync(to) && statSync(to).size === size && sameContent(from, to);
   if (!had) copyFileSync(from, to);
   console.log(
     `  ${path.relative(UI, to)}  ${fmt(size)}  ${had ? 'up to date' : 'copied'}  (${pkg})`,

@@ -1,6 +1,7 @@
 # bridges/ — continuous social DMs via a local Matrix bus
 
-This is Lane 1 of `SOCIAL-BRIDGES-PLAN.md`: the Beeper trick, run entirely on
+This is Lane 1 of the social-bridges plan (`SOCIAL-BRIDGES-PLAN.md`, a plan
+file that stayed in the private repo): the Beeper trick, run entirely on
 this Mac. A tiny Matrix homeserver is an aggregation bus; one bridge per platform
 speaks that platform's own client protocol as the owner's linked session and
 relays DMs into Matrix; one hazlie connector reads Matrix. Nothing federates,
@@ -14,6 +15,13 @@ inbound-fetch-of-your-own-data posture as the IMAP and Oura pollers.
 | `hazlie-synapse` | `ghcr.io/element-hq/synapse:v1.140.0` | the homeserver / bus | `127.0.0.1:8008` only |
 | `hazlie-meta` | `dock.mau.dev/mautrix/meta:v26.08` | Facebook **Messenger** | none (internal) |
 | `hazlie-instagram` | `dock.mau.dev/mautrix/meta:ig-v26.08` | **Instagram** DMs | none (internal) |
+| `hazlie-twitter` | `dock.mau.dev/mautrix/twitter:v26.08` | **X/Twitter** DMs | none (internal) |
+| `hazlie-telegram` | `dock.mau.dev/mautrix/telegram:latest` | **Telegram** | none (internal) |
+| `hazlie-discord` | `dock.mau.dev/mautrix/discord:latest` | **Discord** DMs | none (internal) |
+| `hazlie-slack` | `dock.mau.dev/mautrix/slack:latest` | **Slack** DMs | none (internal) |
+
+(`telegram`, `discord` and `slack` ride a mutable `:latest` tag — see "Root
+cause worth fixing" below.)
 
 **Why two Meta bridges:** mautrix split them in July 2026 when Meta dropped the
 shared Instagram/Messenger API; the v26.08 `meta` binary is Messenger-only, the
@@ -196,5 +204,7 @@ bulk-automation Meta actually hunts — but sessions get invalidated periodicall
   (`source: 'messenger' | 'instagram'`), joined through the contacts spine.
   Built AFTER first login, against real bridged messages (the project's
   probe-then-build discipline), the same way the WhatsApp connector was.
-- **LinkedIn** (`mautrix-linkedin`) and **X** (`mautrix-twitter`) — same bus,
-  added only behind the explicit "I accept the account risk" gate in the plan.
+- **LinkedIn** (`mautrix-linkedin`) — same bus, added only behind the explicit
+  "I accept the account risk" gate in the plan. (X shipped 2026-08-22:
+  `mautrix-twitter` is in the compose file above and `connect/lib/bridge.mjs`
+  drives its login.)

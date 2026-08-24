@@ -1,5 +1,13 @@
 # Widget spec: native social-bridge login (Messenger / Instagram)
 
+> **Status: SHIPPED.** The widget half this spec asked for is implemented:
+> `bridgeStatus` / `bridgeBegin` / `bridgeCookies` are message handlers in
+> `widget/src/Bridge.swift`, and `widget/ui/connections.js` renders the login
+> panel and drives them (plus the `bridgeWebLogin` orchestrator from
+> `WIDGET-WEBVIEW-LOGIN-SPEC.md`, which superseded the paste box as the
+> primary path). Kept for the contract and rationale; the imperatives below
+> are the original, pre-build ask.
+
 **Owner ask:** linking Messenger/Instagram must happen **inside the widget**, no
 browser. The backend for this is built and live; this spec is the widget half.
 
@@ -29,10 +37,10 @@ present · 404 unknown platform · 502 bridge error.
 
 ## What the widget needs (this task)
 
-The connections popup (`widget/ui/connections.js`) already renders Messenger and
-Instagram tiles from `/api/status` (they carry `action: 'bridge'`). Today a tap
-shows the WHY hint. Instead, for `src.action === 'bridge'` a tap should open a
-**login panel** in the same popup:
+The connections popup (`widget/ui/connections.js`) renders Messenger and
+Instagram tiles from `/api/status` (they carry `action: 'bridge'`). Before this
+spec shipped, a tap only showed the WHY hint; now, for `src.action === 'bridge'`,
+a tap opens a **login panel** in the same popup:
 
 1. On open: `bridgeStatus(p)` → if `connected`, show "linked as <name>"; else show
    the transcript + a **Begin login** button and a **cookie paste box**.

@@ -1,5 +1,14 @@
 # Widget spec: Beeper-style in-app login for the social bridges
 
+> **Status: SHIPPED.** The orchestrator this spec asked for exists:
+> `bridgeWebLogin` in `widget/src/Bridge.swift`, with the isolated login
+> webview in `widget/src/BridgeLogin.swift` (non-persistent data store,
+> navigation fenced to the Meta login hosts, torn down after harvest). The
+> posture decision in the ⚠️ section below was made and shipped; the webview's
+> reachable hosts are recorded in `ops/EGRESS.json` as its `login-webview`
+> entries. Kept for the contract and rationale; the imperatives below are the
+> original, pre-build ask.
+
 **Owner ask:** the cookie/devtools flow is too technical ("so my mom can do
 it"). Instagram has **no** email/password option (cookies only — I probed it), so
 the mom-friendly answer is Beeper's: open the platform's **real login page inside

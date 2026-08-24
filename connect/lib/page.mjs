@@ -18,8 +18,11 @@
 // it happens to be installed and nothing is fetched when it is not.
 
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-// Applied to every interpolation without exception. None of today's values are
-// attacker-controlled, but "none of them are, today" is how injection arrives.
+// Applied to every interpolation, with ONE exception: HELP `body` paragraphs
+// in renderHelpPage are trusted static HTML authored in this file and are
+// interpolated raw (see the note on HELP). None of today's values are
+// attacker-controlled, but "none of them are, today" is how injection arrives
+// — so nothing dynamic may ever join that exception.
 export function escapeHtml(value) {
   return String(value).replace(/[&<>"']/gu, (c) => ESCAPES[c]);
 }
@@ -261,6 +264,14 @@ export function renderConnectPage(items, { banner = null, token = null } = {}) {
 //
 // Every step here is the runbook in ops/CONNECTORS.md, not a paraphrase — if
 // the two drift, the runbook is right and this is the bug.
+//
+// `body` and `after` paragraphs are interpolated as RAW HTML — help prose
+// deliberately carries inline markup like <em> and pre-encoded entities —
+// while `code` goes through escapeHtml, because shell text is full of `>` and
+// `&&` that HTML would swallow. The rule is about provenance, not the field:
+// every string here must stay static text authored in this file, and a
+// runtime value (an account name, a path from config) must never be spliced
+// into one.
 const HELP = {
   fda: {
     title: 'Give intaglio labs permission to read',
@@ -377,7 +388,7 @@ export function renderHelpPage(id, { token = null } = {}) {
   </div>
   ${topic.body.map((p) => `<p class="sub">${p}</p>`).join('')}
   ${topic.code ? `<pre class="code">${escapeHtml(topic.code)}</pre>` : ''}
-  ${(topic.after ?? []).map((p) => `<p class="sub">${escapeHtml(p)}</p>`).join('')}
+  ${(topic.after ?? []).map((p) => `<p class="sub">${p}</p>`).join('')}
   <p class="foot"><a class="cta secondary" href="${escapeHtml(back)}">Back</a></p>
 </div></div></body></html>`;
 }

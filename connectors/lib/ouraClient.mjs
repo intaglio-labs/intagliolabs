@@ -71,8 +71,12 @@ function statusError(status, message) {
 // pair we are replacing in case the NEW pair turns out unusable (the old
 // refresh token is dead either way, but .prev makes the failure diagnosable).
 // 0o600 at creation cannot be widened by umask (umask only clears bits).
+// PID-suffixed like gcalClient.mjs: a fixed `.tmp` name is shared state
+// between the daemon's timer refresh and an ops/oura-auth.mjs re-auth, and
+// an interleave destroys the live pair AND the .prev backup — which for
+// Oura's single-use refresh tokens means browser consent again.
 function writeTokensAtomically(path, tokens) {
-  const tmp = `${path}.tmp`;
+  const tmp = `${path}.tmp-${process.pid}`;
   writeFileSync(tmp, JSON.stringify(tokens, null, 2) + '\n', { mode: 0o600 });
   if (existsSync(path)) renameSync(path, `${path}.prev`);
   renameSync(tmp, path);
@@ -156,6 +160,10 @@ export function createOuraClient({
         client_id: clientId,
         client_secret: clientSecret,
       }).toString(),
+      // A 307/308 would re-POST this body — client_secret and the single-use
+      // refresh token — to wherever the reply points. The token endpoint
+      // never legitimately redirects; same rule as lib/ingestClient.mjs.
+      redirect: 'error',
     });
     let payload;
     try {
@@ -242,16 +250,19 @@ export function createOuraClient({
       // The placeholder, never a real token: the sandbox requires the
       // header to exist but accepts any string (see OURA_SANDBOX_AUTH), and
       // an endpoint that needs no credential should never see one.
-      return expectOk(await fetchImpl(url, { headers: { Authorization: OURA_SANDBOX_AUTH } }), name);
+      return expectOk(
+        await fetchImpl(url, { headers: { Authorization: OURA_SANDBOX_AUTH }, redirect: 'error' }),
+        name
+      );
     }
     let token = await accessToken();
-    let res = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` } });
+    let res = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` }, redirect: 'error' });
     if (res.status === 401) {
       // Reactive refresh, ONCE: the proactive path can miss (expires_in
       // null, revocation, clock skew beyond the slack). A second 401 with a
       // freshly-rotated token means refreshing cannot fix it.
       token = (await refreshTokens(token)).access_token;
-      res = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` } });
+      res = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` }, redirect: 'error' });
       if (res.status === 401) {
         throw statusError(
           401,

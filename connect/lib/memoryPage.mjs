@@ -248,7 +248,14 @@ function keyboardScript(base) {
       if (action === 'accept') acc -= 1; else rej -= 1;
       last = null;
       paintCounts();
-      card.querySelector('.prov').innerHTML += '<br>\u26a0 not recorded \u2014 ' + String(e.message).slice(0, 80);
+      // As text nodes, never innerHTML: e.message is the server's response
+      // body — on a 502 that is hermes' error string passed through verbatim,
+      // and JSON.stringify does not encode '<'. Nothing dynamic on this page
+      // may parse as markup.
+      card.querySelector('.prov').append(
+        document.createElement('br'),
+        '\u26a0 not recorded \u2014 ' + String(e.message).slice(0, 80)
+      );
       show();
     }
   };

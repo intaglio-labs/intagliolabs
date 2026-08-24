@@ -118,7 +118,7 @@ function openSearchDetails() {
   for (const line of [
     'maps every person you have talked to, across all connected sources',
     `within your timeframe — ${TIME_LABEL[searchDays] || searchDays + ' days'}`,
-    'runs entirely on this mac — nothing is uploaded',
+    'the map is built on this mac; no cloud model sees it',
     'builds your private people-map; searching it for specifics comes next',
   ]) {
     const li = document.createElement('li');
@@ -128,7 +128,7 @@ function openSearchDetails() {
   tip.appendChild(ul);
   const stay = document.createElement('span');
   stay.className = 'stay';
-  stay.textContent = 'everything stored locally, data never leaves this machine';
+  stay.textContent = 'everything stored locally — no cloud model ever sees it';
   tip.appendChild(stay);
   phint.appendChild(tip);
   addHintClose();
