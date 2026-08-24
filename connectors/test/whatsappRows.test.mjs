@@ -1,10 +1,16 @@
-// Tests for the WhatsApp row mapper. Fixtures mirror the measured schema:
+// Tests for the WhatsApp row mapper, plus the source's capped-scan cursor
+// rule (run against a synthetic store). Fixtures mirror the measured schema:
 // Apple-epoch-second dates, phone JIDs at @s.whatsapp.net, group JIDs at
 // @g.us, group events with ZGROUPEVENTTYPE, sender via ZFROMJID (1:1) or a
 // resolved group member.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { chatStoragePath, createWhatsappSource } from '../sources/whatsapp.mjs';
 import {
   appleSecondsToMs,
   jidToHandle,
@@ -144,4 +150,121 @@ test('a missing or non-numeric ZMESSAGEDATE is NaN, not epoch zero', () => {
   for (const bad of [null, undefined, '', 'nope', {}, NaN]) {
     assert.equal(Number.isNaN(appleSecondsToMs(bad)), true, JSON.stringify(bad));
   }
+});
+
+// Cursor-test scaffolding: a synthetic store with the measured schema, and a
+// run context that records deliveries and cursors in memory.
+function createSyntheticStore(home) {
+  const storePath = chatStoragePath(home);
+  mkdirSync(dirname(storePath), { recursive: true });
+  const db = new DatabaseSync(storePath);
+  db.exec(`
+    CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT);
+    CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT, ZCONTACTNAME TEXT, ZFIRSTNAME TEXT);
+    CREATE TABLE ZWAMESSAGE (
+      Z_PK INTEGER PRIMARY KEY, ZTEXT TEXT, ZISFROMME INTEGER, ZMESSAGEDATE INTEGER,
+      ZFROMJID TEXT, ZSTANZAID TEXT, ZMESSAGETYPE INTEGER, ZGROUPEVENTTYPE INTEGER,
+      ZGROUPMEMBER INTEGER, ZCHATSESSION INTEGER
+    );
+    INSERT INTO ZWACHATSESSION VALUES (1, '18085550100@s.whatsapp.net', 'Sam');
+  `);
+  return db;
+}
+
+function messageInserter(db) {
+  return db.prepare(
+    `INSERT INTO ZWAMESSAGE VALUES (?, ?, 0, ?, '18085550100@s.whatsapp.net', ?, 0, 0, NULL, 1)`
+  );
+}
+
+function runContext(home) {
+  const cursors = new Map();
+  const delivered = new Set();
+  const ctx = {
+    home,
+    cacheDir: join(home, 'cache'),
+    backfill: false,
+    config: { selfName: 'me' },
+    now: () => Date.now(),
+    log: { info() {}, warn() {} },
+    state: {
+      getCursor: (k) => cursors.get(k),
+      setCursor: (k, v) => cursors.set(k, v),
+    },
+    ingest: async (rows) => {
+      for (const r of rows) delivered.add(r.entity_id);
+      return { inserted: rows.length, updated: 0, unchanged: 0 };
+    },
+  };
+  return { ctx, cursors, delivered };
+}
+
+// THE CAPPED-SCAN TIE. ZMESSAGEDATE is whole seconds, so the scan cap can cut
+// a batch mid-second. The cursor is the max delivered date and the next scan
+// is strict `>`, so without the one-second rewind on a capped scan the tied
+// rows that did not fit under the LIMIT fell below the floor forever — silent
+// loss, the same class files.mjs documents for its mtime cursor. This runs the
+// real source against a synthetic store: 4999 distinct seconds, then three
+// messages tied on one second, 5002 total against the 5000 cap.
+test('a capped scan re-offers the boundary second instead of dropping the tie', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'wa-cursor-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+
+  const db = createSyntheticStore(home);
+  const ins = messageInserter(db);
+  const TIE_SECOND = 999_999;
+  db.exec('BEGIN');
+  for (let i = 0; i < 4999; i += 1) ins.run(i + 1, `msg ${i}`, 1000 + i, `S${i}`);
+  for (let i = 0; i < 3; i += 1) ins.run(5000 + i, `tied ${i}`, TIE_SECOND, `TIE${i}`);
+  db.exec('COMMIT');
+  db.close();
+
+  const { ctx, cursors, delivered } = runContext(home);
+  const source = createWhatsappSource({ home });
+  await source.run(ctx); // capped at 5000, mid-tie
+  await source.run(ctx); // the rewound cursor re-offers the boundary second
+
+  assert.equal(delivered.size, 5002, 'every message lands, including the tie past the cap');
+  assert.equal(
+    cursors.get('whatsapp:max-date'),
+    String(TIE_SECOND),
+    'an uncapped scan advances to the max date as before'
+  );
+});
+
+// THE BATCH-WIDE TIE. When every row of a capped batch shares one second, the
+// one-second rewind re-selects the identical batch on every pass: the cursor
+// never advances, the tie remainder never lands, and every message after the
+// tie second is unreachable — a livelock, not just a loss. The escape is the
+// uncapped refetch of the boundary second, so this pins two things the rewind
+// alone cannot deliver: the cursor ADVANCES past the tie second on the first
+// pass, and messages after it still arrive on the next.
+test('a batch-wide tie finishes the second and advances instead of livelocking', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'wa-tie-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+
+  const db = createSyntheticStore(home);
+  const ins = messageInserter(db);
+  const TIE_SECOND = 500_000;
+  db.exec('BEGIN');
+  // One more tied message than the 5000 cap, then five later ones.
+  for (let i = 0; i < 5001; i += 1) ins.run(i + 1, `tied ${i}`, TIE_SECOND, `T${i}`);
+  for (let i = 0; i < 5; i += 1) ins.run(6000 + i, `later ${i}`, 500_100 + i, `L${i}`);
+  db.exec('COMMIT');
+  db.close();
+
+  const { ctx, cursors, delivered } = runContext(home);
+  const source = createWhatsappSource({ home });
+
+  await source.run(ctx); // capped, and the whole batch is one second
+  assert.equal(delivered.size, 5001, 'the uncapped refetch lands the whole tie second in one pass');
+  assert.equal(
+    cursors.get('whatsapp:max-date'),
+    String(TIE_SECOND),
+    'the cursor advances past the finished second — pinned below it is the livelock'
+  );
+
+  await source.run(ctx); // progress: the messages after the tie second land
+  assert.equal(delivered.size, 5006, 'messages after the tie second are reachable');
+  assert.equal(cursors.get('whatsapp:max-date'), String(500_104));
 });

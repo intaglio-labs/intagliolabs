@@ -63,6 +63,9 @@ export function createNotionClient({
         ...(body ? { 'content-type': 'application/json' } : {}),
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
+      // This request carries the integration token; a redirect would carry it
+      // onward, past the egress ledger. Same rule as lib/ingestClient.mjs.
+      redirect: 'error',
     });
 
     if (res.status === 429) {
@@ -123,7 +126,10 @@ export function createNotionClient({
     async blockChildren(blockId, { startCursor = null, pageSize = MAX_PAGE_SIZE } = {}) {
       const q = new URLSearchParams({ page_size: String(pageSize) });
       if (startCursor) q.set('start_cursor', startCursor);
-      return request(`/blocks/${blockId}/children?${q}`);
+      // blockId is remote data (a /search response id); encoded so a crafted
+      // value with '/' segments cannot address a different route — same
+      // handling as granolaClient's remote-supplied path segments.
+      return request(`/blocks/${encodeURIComponent(blockId)}/children?${q}`);
     },
 
     // Cheap auth probe for doctor: succeeds or throws with a status.

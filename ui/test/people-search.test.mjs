@@ -22,6 +22,16 @@ test('intent fires on need language, not on episodic stat questions', () => {
   assert.equal(detectPersonSearch('when do i fly to honolulu'), null);
 });
 
+test("the fundrais stem matches its real continuations (it was dead behind a word boundary)", () => {
+  // 'fundrais' inside \b(...)\b could never match: every real word continues
+  // it with a word character ('fundraise', 'fundraising', 'fundraiser'), so
+  // the trailing boundary always failed and fundraising questions fell
+  // through to the claim path. The stem is open ('fundrais\w*') now.
+  assert.equal(detectPersonSearch('who helped with fundraising last year?')?.kind, 'investor');
+  assert.equal(detectPersonSearch('who should i talk to about my fundraise')?.kind, 'investor');
+  assert.equal(detectPersonSearch('any fundraiser contacts i know?')?.kind, 'investor');
+});
+
 test('answerPersonSearch returns a ranked list or null on a non-match', () => {
   const ctx = openDb(':memory:');
   const spine = new DatabaseSync(':memory:');

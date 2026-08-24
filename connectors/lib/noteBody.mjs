@@ -104,7 +104,13 @@ export function decodeNoteBody(blob, { maxChars = 20000 } = {}) {
 
   let buf;
   try {
-    buf = gunzipSync(gz);
+    // Bounded like every other step in this parser: gzip reaches ~1000:1, so
+    // without a ceiling a corrupt or hostile ZDATA of a few tens of MB
+    // expands to tens of GB and kills the daemon before the maxChars cap
+    // below ever runs — and the cursor would re-decode the same blob every
+    // pass. 8 MiB is far above any real note; overflow throws
+    // ERR_BUFFER_TOO_LARGE, which the catch turns into the null skip.
+    buf = gunzipSync(gz, { maxOutputLength: 8 * 1024 * 1024 });
   } catch {
     return null;
   }

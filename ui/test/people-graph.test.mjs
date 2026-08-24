@@ -63,6 +63,34 @@ test('dormancy is days since THEY last messaged, and future events do not count'
   assert.equal(sam.metInPerson, 1);
 });
 
+test('lastSeen ignores future events regardless of row scan order', () => {
+  // The seed used to take the FIRST scanned signal's ts unguarded, while
+  // every later update applied ts <= now — and the feeding SELECT has no
+  // ORDER BY, so a person whose future meeting happened to scan first kept a
+  // future lastSeen and rendered as freshly active on the map. The future row
+  // is inserted FIRST here to pin the guard on the seed itself.
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW + 30 * DAY, source: 'calendar', entity_id: 'c:1', text: 'sync', meta: { attendees: [{ email: 'sam@work.com', name: 'Sam Lee' }] } },
+    { ts: NOW - 100 * DAY, source: 'imessage', entity_id: 'i:1', text: 'x', meta: { chat_handle: '+18085550100', is_from_me: false } },
+    { ts: NOW - 3 * DAY, source: 'imessage', entity_id: 'i:2', text: 'y', meta: { chat_handle: '+18085550100', is_from_me: true } },
+  ]);
+  const spine = spineDb([['+18085550100', 'Sam Lee', 'phone'], ['sam@work.com', 'Sam Lee', 'email']]);
+  const sam = buildGraph(ctx, spine, { now: NOW }).find((p) => p.name === 'Sam Lee');
+  assert.equal(sam.lastSeen, NOW - 3 * DAY, 'the newest PAST signal, not the future meeting');
+  assert.equal(sam.relationshipDays, 97, 'relationship span ends at the last real contact');
+
+  // A person whose ONLY signal is still in the future has not been seen yet:
+  // null, not a future timestamp the map would clamp to "seen today".
+  const ctx2 = openDb(':memory:');
+  insertRows(ctx2, [
+    { ts: NOW + 10 * DAY, source: 'calendar', entity_id: 'c:9', text: 'intro', meta: { attendees: [{ email: 'jo@x.com', name: 'Jo Ito' }] } },
+  ]);
+  const jo = buildGraph(ctx2, spineDb([['jo@x.com', 'Jo Ito', 'email']]), { now: NOW }).find((p) => p.name === 'Jo Ito');
+  assert.equal(jo.lastSeen, null);
+  assert.equal(jo.relationshipDays, 0);
+});
+
 test('calendar co-attendance merges by attendee email and counts meetings', () => {
   const ctx = openDb(':memory:');
   insertRows(ctx, [

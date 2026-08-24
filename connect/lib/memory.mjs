@@ -25,8 +25,37 @@ import { join } from 'node:path';
 
 export const DEFAULT_HERMES_BASE = 'http://127.0.0.1:51789';
 
+// The bearer below authorizes hermes' /admin/* routes, so the base it rides
+// to must be a loopback origin — the same refusal connectors/lib/
+// ingestClient.mjs and this package's bridge.mjs (assertLoopbackBase) already
+// make. HAZLIE_HERMES_URL has gone stale once before (the connect plist
+// carried the retired 8790 tunnel port); a stale or mis-set value must throw
+// here, not deliver the admin credential to whatever host it names. The throw
+// surfaces as the review page's honest "could not reach its own store".
 export function hermesBase(env = process.env) {
-  return String(env.HAZLIE_HERMES_URL ?? DEFAULT_HERMES_BASE).replace(/\/+$/u, '');
+  let url;
+  try {
+    url = new URL(String(env.HAZLIE_HERMES_URL ?? DEFAULT_HERMES_BASE));
+  } catch {
+    throw new Error('hermes base must be an HTTP loopback origin');
+  }
+  const loopback =
+    url.hostname === '127.0.0.1' ||
+    url.hostname === 'localhost' ||
+    url.hostname === '[::1]' ||
+    url.hostname === '::1';
+  if (
+    url.protocol !== 'http:' ||
+    !loopback ||
+    url.username ||
+    url.password ||
+    url.pathname !== '/' ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error('hermes base must be an HTTP loopback origin');
+  }
+  return url.origin;
 }
 
 // Read the bearer token with the same discipline the secret loaders use: a

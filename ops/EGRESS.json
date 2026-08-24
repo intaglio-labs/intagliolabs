@@ -21,6 +21,7 @@
     "four times before this file existed.",
     "",
     "ADDING A PATH: add it here, in the same commit as the code, with a real",
+    "`decision` -- and if no real decision exists, write UNRECORDED rather than",
     "inventing one -- never-fabricate binds this file too.",
     "",
     "WHAT THIS FILE DOES NOT DO: it records what the code CAN reach. It is not",
@@ -87,16 +88,6 @@
       "evidence": "connectors/lib/ouraClient.mjs"
     },
     {
-      "host": "cloud.ouraring.com",
-      "kind": "api",
-      "component": "connectors/lib/ouraClient.mjs",
-      "direction": "outbound-send",
-      "purpose": "oauth2 token exchange and refresh",
-      "credential": "oura refresh token",
-      "decision": "ui/AGENTS.md egress policy, amended 2026-08-19",
-      "evidence": "connectors/lib/ouraClient.mjs"
-    },
-    {
       "host": "imap.gmail.com",
       "kind": "api",
       "component": "connectors/sources/mail.mjs",
@@ -144,7 +135,7 @@
       "purpose": "Discord DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
       "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
-      "evidence": "connect/lib/bridge.mjs; bridges/docker-compose.yml:107"
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.discord; bridges/docker-compose.yml image dock.mau.dev/mautrix/discord"
     },
     {
       "host": "slack.com",
@@ -154,7 +145,7 @@
       "purpose": "Slack DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
       "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
-      "evidence": "connect/lib/bridge.mjs; bridges/docker-compose.yml:118"
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.slack; bridges/docker-compose.yml image dock.mau.dev/mautrix/slack"
     },
     {
       "host": "web.telegram.org",
@@ -164,7 +155,7 @@
       "purpose": "Telegram DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
       "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
-      "evidence": "connect/lib/bridge.mjs; bridges/docker-compose.yml:96"
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.telegram; bridges/docker-compose.yml image dock.mau.dev/mautrix/telegram"
     },
     {
       "host": "www.facebook.com",
@@ -290,7 +281,7 @@
       "purpose": "all six mautrix bridge images",
       "credential": "none",
       "decision": "implied by the bridge decisions above; never enumerated as egress before this file",
-      "evidence": "bridges/docker-compose.yml:53,64,79,96,107,118",
+      "evidence": "bridges/docker-compose.yml, the six image: dock.mau.dev/... lines",
       "note": "telegram, discord and slack are pinned to :latest, a MUTABLE tag, on containers that receive the owner's live session cookies. meta/instagram/twitter are pinned to a version tag. None are pinned by digest."
     },
     {
@@ -301,7 +292,7 @@
       "purpose": "Synapse homeserver image",
       "credential": "none",
       "decision": "implied by the bridge decisions above; never enumerated as egress before this file",
-      "evidence": "bridges/docker-compose.yml:28 ghcr.io/element-hq/synapse:v1.140.0"
+      "evidence": "bridges/docker-compose.yml image ghcr.io/element-hq/synapse:v1.140.0"
     },
     {
       "host": "accounts.google.com",
@@ -324,6 +315,17 @@
       "evidence": "ops/setup-llm.sh:117"
     },
     {
+      "host": "cloud.ouraring.com",
+      "kind": "user-browser-link",
+      "component": "ops/oura-auth.mjs; widget/src/Bridge.swift openExternal allowlist",
+      "direction": "none",
+      "purpose": "the OAuth consent URL ops/oura-auth.mjs opens in the owner's browser, the app-registration page (cloud.ouraring.com/oauth/applications) the same script's instructions tell the owner to fill in by hand, and the Oura help link in the widget's openExternal allowlist",
+      "credential": "none -- this process opens no socket here",
+      "decision": "n/a",
+      "evidence": "ops/oura-auth.mjs AUTHORIZE_URL; widget/src/Bridge.swift allowedExternal",
+      "note": "The token exchange and refresh do NOT run here: connectors/lib/ouraClient.mjs posts them to api.ouraring.com (OURA_TOKEN_URL), which is its own entry above. An earlier revision of this file declared this host `api`, component connectors/lib/ouraClient.mjs, carrying the oura refresh token -- no code in this repo has ever sent a credential to it."
+    },
+    {
       "host": "console.cloud.google.com",
       "kind": "user-browser-link",
       "component": "ops/gcal-auth.mjs",
@@ -341,8 +343,8 @@
       "purpose": "mautrix authentication docs, linked from the bridge login panel so the owner can find their Discord token / Slack xoxc+xoxd tokens",
       "credential": "none -- handed to the owner's browser, this process opens no socket",
       "decision": "n/a",
-      "evidence": "widget/ui/connections.js:340,346",
-      "note": "Added by the ledger tripwire on the commit that introduced it, which is the point of the tripwire. FOUND AT THE SAME TIME: this host is NOT in Bridge.swift's allowedExternal, and openExternal is an exact-match allowlist (Bridge.swift:471), so both links currently fail with 'url not in allowlist'. Adding them to the allowlist is what makes them work."
+      "evidence": "widget/ui/connections.js BRIDGE_HELP; widget/src/Bridge.swift allowedExternal",
+      "note": "Added by the ledger tripwire on the commit that introduced it, which is the point of the tripwire. FOUND AT THE SAME TIME, and since fixed: this host was missing from Bridge.swift's allowedExternal, an exact-match allowlist (Bridge.swift's case \"openExternal\" handler), so both links failed with 'url not in allowlist'. Both URLs are now in allowedExternal."
     },
     {
       "host": "granola.ai",
@@ -352,7 +354,7 @@
       "purpose": "send the owner to Granola to fetch an API key",
       "credential": "none -- this process opens no socket here",
       "decision": "n/a",
-      "evidence": "widget/src/Bridge.swift:162"
+      "evidence": "widget/src/Bridge.swift allowedExternal https://granola.ai"
     },
     {
       "host": "myaccount.google.com",
@@ -362,7 +364,7 @@
       "purpose": "send the owner to their own app-passwords page",
       "credential": "none -- this process opens no socket here",
       "decision": "n/a",
-      "evidence": "widget/src/Bridge.swift:161"
+      "evidence": "widget/src/Bridge.swift allowedExternal https://myaccount.google.com/apppasswords"
     },
     {
       "host": "www.notion.so",
@@ -372,7 +374,7 @@
       "purpose": "send the owner to their Notion integrations page",
       "credential": "none -- this process opens no socket here",
       "decision": "n/a",
-      "evidence": "widget/src/Bridge.swift:164"
+      "evidence": "widget/src/Bridge.swift allowedExternal https://www.notion.so/my-integrations"
     }
   ],
   "_loopback": [

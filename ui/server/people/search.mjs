@@ -53,7 +53,7 @@ const RECONNECT_NEED = Object.freeze({
 // questions).
 export function detectPersonSearch(question) {
   const q = String(question ?? '').toLowerCase();
-  const investor = /\b(investor|investors|\bvc\b|\bvcs\b|angel|angels|fundrais|raising|raise money|check size|back my|backed me)\b/u.test(q);
+  const investor = /\b(investor|investors|\bvc\b|\bvcs\b|angel|angels|fundrais\w*|raising|raise money|check size|back my|backed me)\b/u.test(q);
   const mentor = /\b(mentor|mentors|advisor|advisors|advice from|guidance)\b/u.test(q);
   const reconnect = /\b(reconnect|lost touch|fallen out of touch|reach out to|reach back|who should i|who have i dropped|dropped the ball|introduce me|intro me|who do i know)\b/u.test(q);
   // investor/mentor are ROLES — a person by definition — so they need no

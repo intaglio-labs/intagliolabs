@@ -245,9 +245,17 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   }()
 
   private var askTask: URLSessionDataTask?
-  // Set when a transcript (not typed text) opened the current ask; the
-  // answer is then also handed back to the ear page for speech.
-  private var voiceTurnPending = false
+  // The transcript (not typed text) still waiting for its ask, matched by
+  // TEXT: the ear page posts the transcript and the chat page posts the ask
+  // with no shared id between them, so identical text (both sides trim and
+  // cap the same way) is the only join. Lifecycle: set on voiceTranscript,
+  // consumed by the ask that matches it, and cleared by the next TYPED
+  // message (openChatWith) — typing supersedes a spoken turn, so a
+  // transcript the busy chat page silently dropped can never claim a later
+  // identical typed ask. A non-matching ask leaves it alone, because the
+  // transcript may still be queued behind that ask (load-time messages are
+  // delivered one ask at a time).
+  private var pendingVoiceUtterance: String?
 
   // The only external destinations this app will hand to the OS. Opening
   // one launches the default browser (or System Settings) — the app itself
@@ -257,7 +265,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
     "https://myaccount.google.com/apppasswords",
     "https://granola.ai",
-    "https://cloud.ouraring.com/personal-access-tokens",
+    "https://cloud.ouraring.com/oauth/applications",
     "https://www.notion.so/my-integrations",
     // The bridge token how-to links, for the Discord/Slack guided login flows.
     "https://docs.mau.fi/bridges/go/discord/authentication.html",
@@ -336,7 +344,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "openChatWith":
       let utterance = String((payload["utterance"] as? String ?? "")
         .trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
-      if !utterance.isEmpty { delegate?.openChat(with: utterance) }
+      if !utterance.isEmpty {
+        // A typed message supersedes any voice turn still waiting: without
+        // this, a transcript the busy chat page dropped would linger and
+        // could claim a later typed ask with the same words for the speaker.
+        pendingVoiceUtterance = nil
+        delegate?.openChat(with: utterance)
+      }
       reply(webView, id, ["state": "ok"])
     case "chatReady":
       reply(webView, id, [
@@ -351,7 +365,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       let utterance = String((payload["utterance"] as? String ?? "")
         .trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
       if !utterance.isEmpty {
-        voiceTurnPending = true
+        pendingVoiceUtterance = utterance
         delegate?.voiceTranscript(utterance)
       }
       reply(webView, id, ["state": "ok"])
@@ -742,6 +756,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "ask":
       let utterance = String((payload["utterance"] as? String ?? "")
         .trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
+      // The voice turn is the ask carrying the transcript's exact text.
+      // Consume it only on a match: a non-matching ask may be a load-time
+      // message queued AHEAD of the transcript, whose own ask is still
+      // coming — clearing here would silence it. Typed messages clear the
+      // transcript at openChatWith instead.
+      let voiceTurn = pendingVoiceUtterance == utterance
+      if voiceTurn { pendingVoiceUtterance = nil }
       ask(utterance) { [weak self] data in
         guard let self else { return }
         // AN ABSTENTION IS NOT ALWAYS THE SAME ANSWER.
@@ -755,10 +776,17 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // Attached HERE rather than in hermes' answer, whose shape is exactly
         // {text, sources, usedRows} and is pinned by a contract test. Costs a
         // loopback GET, and only when the answer came back empty-handed.
+        //
+        // TWO REPLY PATHS, so everything that has to happen once per settled ask
+        // happens on both of them: speaking a voice turn, and handing the page
+        // the next queued message. Neither may sit after this closure's last
+        // statement — the guard below returns, and the enrichment path replies
+        // from a nested callback long after that line would have run.
         let sourceless = (data["sources"] as? [Any])?.isEmpty ?? true
         guard sourceless, data["state"] as? String == "ok" else {
           self.reply(webView, id, data)
-          self.speakIfVoiceTurn(data)
+          self.speakIfVoiceTurn(data, voiceTurn: voiceTurn)
+          self.deliverNextQueued(to: webView)
           return
         }
         // Two questions on an empty answer, and they are different questions:
@@ -771,7 +799,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
             if let memory { out["memory"] = memory }
             if let claim { out["confirm"] = claim }
             self.reply(webView, id, out)
-            self.speakIfVoiceTurn(out)
+            self.speakIfVoiceTurn(out, voiceTurn: voiceTurn)
+            // This ask settled; if a load-time message is queued behind it,
+            // hand the page the next one as its OWN ask. After the reply, never
+            // before it: reply()'s evaluateJavaScript is what resolves the ask's
+            // promise and drops chat.js's busy flag, and a message handed over
+            // while that flag is still set is dropped on the floor.
+            self.deliverNextQueued(to: webView)
           }
         }
       }
@@ -913,22 +947,20 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
 
   // MARK: setup helpers
 
-  /// hermes' own row count, or 0 when it cannot be reached. Used as the honest
-  /// answer to "is any of my data actually in here yet" -- a number that only
-  /// moves when a connector really read something and really wrote it.
-  /// Row count AND how far the memory is through reading them.
-  ///
-  /// The count alone was misleading in the way that mattered: rows arrive fast,
-  /// and the app still cannot answer until those rows are DISTILLED into claims.
-  /// Reporting only "found 18,440 things" while every question abstained is what
-  /// produced "it has full access and knows nothing". /stats carries both numbers
-  /// now; this passes the second one through untouched.
   /// Speak the answer if this turn began with the voice. Pulled out of the ask
   /// handler when that grew a second reply path: the two must not be able to
   /// disagree about whether the turn was spoken.
-  private func speakIfVoiceTurn(_ data: [String: Any]) {
-    guard voiceTurnPending else { return }
-    voiceTurnPending = false
+  ///
+  /// The provenance is PASSED IN, not read from a stored flag. A process-global
+  /// "a voice turn is pending" latch belongs to whichever ask settles next, and
+  /// that is not necessarily the transcript's own: chat.js drops incoming
+  /// messages while busy, so a transcript spoken during a typed composition is
+  /// discarded and the latch stays armed until the TYPED question's answer
+  /// arrives -- which then gets read aloud. Carrying the flag with the utterance
+  /// (matched at the ask, see pendingVoiceUtterance) is what makes speaking
+  /// impossible on any turn but the spoken one.
+  private func speakIfVoiceTurn(_ data: [String: Any], voiceTurn: Bool) {
+    guard voiceTurn else { return }
     guard let text = data["text"] as? String, data["state"] as? String == "ok" else { return }
     delegate?.speakAnswer(text)
   }
@@ -965,6 +997,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     }.resume()
   }
 
+  /// hermes' own row count, or 0 when it cannot be reached. Used as the honest
+  /// answer to "is any of my data actually in here yet" -- a number that only
+  /// moves when a connector really read something and really wrote it.
+  /// Row count AND how far the memory is through reading them.
+  ///
+  /// The count alone was misleading in the way that mattered: rows arrive fast,
+  /// and the app still cannot answer until those rows are DISTILLED into claims.
+  /// Reporting only "found 18,440 things" while every question abstained is what
+  /// produced "it has full access and knows nothing". /stats carries both numbers
+  /// now; this passes the second one through untouched.
   private func rows(_ done: @escaping (Int, [String: Any]?) -> Void) {
     guard let tok = bearerToken() else { done(0, nil); return }
     let req = request("GET", hermesBase, "stats", bearer: tok, timeout: 4)
@@ -1009,6 +1051,24 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     }
   }
 
+  // Messages that arrived before chat.js finished loading queue one by one
+  // (main.swift). chatReady hands the page the first; each settled ask pulls
+  // the next through __hzIncoming, so every queued message becomes its own
+  // ask. The page is idle by then: reply()'s evaluateJavaScript resolved the
+  // ask's promise, whose continuation drops chat.js's busy flag before this
+  // later evaluateJavaScript runs.
+  private func deliverNextQueued(to webView: WKWebView) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self,
+            let next = self.delegate?.takePendingUtterance(), !next.isEmpty,
+            let json = try? JSONSerialization.data(withJSONObject: [next]),
+            let arr = String(data: json, encoding: .utf8)
+      else { return }
+      webView.evaluateJavaScript(
+        "window.__hzIncoming && window.__hzIncoming(\(arr)[0])", completionHandler: nil)
+    }
+  }
+
   // MARK: auth
 
   // Re-read per request, matching hermes' own semantics: rotation needs no
@@ -1028,7 +1088,21 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     _ method: String, _ base: URL, _ path: String,
     bearer: String?, json: [String: Any]? = nil, timeout: TimeInterval? = nil
   ) -> URLRequest {
-    var req = URLRequest(url: base.appendingPathComponent(path))
+    // The path may carry a query ("people/review?days=365"). It cannot ride
+    // appendingPathComponent whole — that percent-encodes the '?', hermes
+    // then sees one literal path component and 404s — so split it here and
+    // let URLComponents keep '?' a delimiter, the way bridgeCall builds its
+    // URLs.
+    let url: URL
+    if let q = path.firstIndex(of: "?") {
+      var comps = URLComponents(
+        url: base.appendingPathComponent(String(path[..<q])), resolvingAgainstBaseURL: false)!
+      comps.query = String(path[path.index(after: q)...])
+      url = comps.url!
+    } else {
+      url = base.appendingPathComponent(path)
+    }
+    var req = URLRequest(url: url)
     req.httpMethod = method
     if let t = timeout { req.timeoutInterval = t }
     if let b = bearer { req.setValue("Bearer \(b)", forHTTPHeaderField: "Authorization") }

@@ -163,7 +163,6 @@ export function createMailSource() {
     async run(ctx) {
       const { state, ingest, config, log, now, backfill } = ctx;
       const accounts = resolveAccounts(config);
-      const since = new Date(now() - (accounts[0]?.backfillDays ?? DEFAULT_BACKFILL_DAYS) * 86_400_000);
 
       let inserted = 0;
       let updated = 0;
@@ -180,6 +179,12 @@ export function createMailSource() {
           skippedAccounts += 1;
           continue;
         }
+        // The first-scan date bound comes from THIS account's backfillDays.
+        // resolveAccounts merges the per-account override in; computing one
+        // shared date from accounts[0] silently applied its window to every
+        // other mailbox, and the UID cursor then advanced past the difference
+        // permanently.
+        const since = new Date(now() - (account.backfillDays ?? DEFAULT_BACKFILL_DAYS) * 86_400_000);
         const client = new ImapFlow({
           host: account.host,
           port: account.port,

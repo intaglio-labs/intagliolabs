@@ -62,7 +62,10 @@ function readSecret(path, label) {
 }
 
 function writeTokensAtomically(tokens) {
-  const tmp = `${TOKENS_FILE}.tmp`;
+  // PID-suffixed like gcalClient.mjs: the daemon's timer refresh writes the
+  // same path, and a shared `.tmp` name interleaving with it destroys the
+  // live pair and the .prev backup.
+  const tmp = `${TOKENS_FILE}.tmp-${process.pid}`;
   writeFileSync(tmp, JSON.stringify(tokens, null, 2) + '\n', { mode: 0o600 });
   if (existsSync(TOKENS_FILE)) renameSync(TOKENS_FILE, `${TOKENS_FILE}.prev`);
   renameSync(tmp, TOKENS_FILE);

@@ -152,12 +152,22 @@ export function recallClaims(db, { match = null, limit = DEFAULT_RECALL_LIMIT, n
   return { claims, abstain: claims.length === 0, matched };
 }
 
+// The owner's LOCAL calendar day, same arithmetic as episodic.mjs's
+// localDate. Claim lines and episodic lines merge into ONE numbered envelope
+// in handleVaultAsk, and episodic dates are local — rendering these in UTC
+// dated anything observed after 14:00 Honolulu time on the NEXT day, handing
+// the model two dating conventions in one list.
+function localDay(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 // The shape a composer is handed. Flat, labelled, and explicitly NOT prose the
 // model can mistake for its own instructions — see prompts/answer_from_claims.md
 // for the envelope those go in.
 export function groundingLines(claims) {
   return claims.map((c, i) => {
-    const when = c.observed_at === null ? 'undated' : new Date(c.observed_at).toISOString().slice(0, 10);
+    const when = c.observed_at === null ? 'undated' : localDay(c.observed_at);
     return `[${i + 1}] (${c.kind}, ${c.source}, ${when}${c.stale ? ', OLD' : ''}) ${c.text}`;
   });
 }

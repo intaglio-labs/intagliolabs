@@ -63,7 +63,7 @@ being replaced by a package manager.
 ## Tests
 
 ```sh
-(cd connectors && npm ci && npm test)   # also checks no native module landed
+(cd connectors && npm ci && npm test)   # the no-native-module check runs in ops/setup-connectors.sh, not here
 (cd connect && npm test)
 (cd ui && npm test)
 node --test 'widget/test/*.test.mjs'

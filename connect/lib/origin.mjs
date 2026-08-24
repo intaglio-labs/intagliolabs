@@ -7,13 +7,16 @@
 // Sec-Fetch-Site is the primary signal: the browser sets it, a page cannot
 // forge it, and it states the relationship directly. Origin only corroborates.
 //
-// WHY ORIGIN ALONE WAS WRONG, learned the hard way: the server sends
+// WHY ORIGIN ALONE WAS WRONG, learned the hard way: the server used to send
 // `Referrer-Policy: no-referrer`, and under that policy browsers serialize the
 // Origin of a *navigational* form POST as the string "null". So the hardening
 // header broke the hardening check — every real submission was refused while
 // curl with a hand-written Origin sailed through, which is exactly the wrong
-// way round for a test to pass. A literal "null" is therefore accepted, but
-// only when Sec-Fetch-Site independently says same-origin.
+// way round for a test to pass. The server now sends `Referrer-Policy:
+// same-origin` (connect/server.mjs, which records the move), so real
+// submissions carry a real Origin again — but a literal "null" is still
+// accepted for browsers and privacy extensions that strip Origin to "null",
+// and only when Sec-Fetch-Site independently says same-origin.
 //
 // This lives in lib/ rather than server.mjs so a test can import it without
 // starting a listener.

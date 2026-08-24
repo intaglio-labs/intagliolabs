@@ -183,3 +183,35 @@ test('the hermes base follows the same env var everything else reads', () => {
   assert.equal(hermesBase({}), 'http://127.0.0.1:51789');
   assert.equal(hermesBase({ HAZLIE_HERMES_URL: 'http://127.0.0.1:9999/' }), 'http://127.0.0.1:9999');
 });
+
+test('the hermes base refuses anything that is not an HTTP loopback origin', () => {
+  // The bearer this module attaches authorizes hermes' /admin/* routes. A
+  // stale or mis-set HAZLIE_HERMES_URL (the plist has carried one before —
+  // the retired 8790 tunnel port) must throw here, not deliver the admin
+  // credential to whatever host it names. Same refusal as
+  // connectors/lib/ingestClient.mjs and bridge.mjs's assertLoopbackBase.
+  for (const bad of [
+    'https://127.0.0.1:8789', // wrong scheme
+    'http://hazlie.example:8789', // off-box host
+    'http://192.168.1.20:8789', // LAN is off-box too
+    'http://127.0.0.1:8789/admin', // a path smuggled into the base
+    'http://user:pw@127.0.0.1:8789', // credentials
+    'not a url',
+  ]) {
+    assert.throws(() => hermesBase({ HAZLIE_HERMES_URL: bad }), /loopback/u, bad);
+  }
+  assert.equal(hermesBase({ HAZLIE_HERMES_URL: 'http://localhost:8789' }), 'http://localhost:8789');
+  assert.equal(hermesBase({ HAZLIE_HERMES_URL: 'http://[::1]:8789' }), 'http://[::1]:8789');
+});
+
+test('the script renders server error text as a text node, never as markup', () => {
+  // The failure notice carries e.message — connect's 502 body, which passes
+  // hermes' error string through verbatim, and JSON.stringify does not encode
+  // '<'. The page's whole posture is that every interpolation is escaped, so
+  // the one dynamic insertion in the keyboard layer must not go through
+  // innerHTML. (The counts line still assigns innerHTML, but only from
+  // Number() results and its own static tags.)
+  const html = page({}, { nonce: 'N' });
+  const script = html.slice(html.indexOf('<script'), html.indexOf('</script>'));
+  assert.ok(!script.includes('innerHTML +='), 'the error path must not append via innerHTML');
+});

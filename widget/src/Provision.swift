@@ -5,10 +5,14 @@ import Foundation
 // with no repo, no Homebrew, and no network. See widget/build.sh for what the
 // bundle carries.
 //
-// SAFE BY DEFAULT. This no-ops the moment the connect agent already exists in
-// ~/Library/LaunchAgents — which is true on the owner's repo-based setup and
-// after any prior provision — so it never clobbers a working machine. It only
-// does anything on a genuinely fresh install.
+// SAFE BY DEFAULT. Once the connect agent exists in ~/Library/LaunchAgents —
+// true on the owner's repo-based setup and after any prior provision — the
+// whole copy-and-bootstrap path is skipped, so it never clobbers a working
+// machine. The one thing every launch still ensures is the secret files
+// (ensureSecrets): generation is per-file and only-if-missing, so installs
+// provisioned by a build that predates llama-api-key.txt gain the key on
+// upgrade instead of crash-looping forever, and a healthy machine sees a
+// no-op.
 enum Provision {
   private static let fm = FileManager.default
   private static var home: URL { fm.homeDirectoryForCurrentUser }
@@ -58,7 +62,14 @@ enum Provision {
     DispatchQueue.global(qos: .utility).async {
       let connectPlist = launchAgents.appendingPathComponent("com.hazlie.connect.plist")
       guard !fm.fileExists(atPath: connectPlist.path) else {
-        return // already provisioned (owner's setup or a previous run)
+        // Already provisioned (owner's setup or a previous run) — but still
+        // heal a missing secret: installs provisioned by a build that only
+        // wrote hermes-token.txt have this plist yet lack llama-api-key.txt,
+        // leaving hermes and llama-server crash-looping under KeepAlive.
+        // Existing files are never touched, so this is a no-op when healthy.
+        do { try ensureSecrets() }
+        catch { NSLog("Intaglio Labs: secret provisioning failed: \(error)") }
+        return
       }
       guard fm.fileExists(atPath: backend.appendingPathComponent("connect/server.mjs").path) else {
         NSLog("Intaglio Labs: no bundled backend — a dev build without it, skipping provision")
@@ -131,40 +142,10 @@ enum Provision {
       cloneTree(voiceSrc, voiceDst)
     }
 
-    // BOTH owner-only secrets, 0600, each left alone if already there.
-    //
-    // The llama key used to be missing here, and hermes would not start without
-    // it: readLlamaApiKey() throws at boot, so a fresh install died with
-    // "llama API key file is missing; run ops/setup-llm.sh" -- pointing at a
-    // script a downloaded app does not have. Everything downstream went with it,
-    // because hermes is the database. Found on a genuinely fresh Mac: the widget
-    // came up, connect came up, and hermes sat at exit status 1.
-    //
-    // Generating it here is safe in both directions. setup-llm.sh preserves an
-    // existing key when it runs (it stamps the active one and only regenerates
-    // when absent), and llama-server is handed the same file whenever it does
-    // arrive -- bundled at build time, or installed later. The key is required
-    // for hermes to BOOT, not just to reach a model, so it cannot wait for one.
-    for name in ["hermes-token.txt", "llama-api-key.txt"] {
-      let file = hazlie.appendingPathComponent("secrets/\(name)")
-      guard !fm.fileExists(atPath: file.path) else { continue }
-      var bytes = [UInt8](repeating: 0, count: 32)
-      _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-      // TRAILING NEWLINE, and it is not cosmetic. ops/setup-llm.sh validates both
-      // of these files with `wc -l` -- which counts NEWLINES, not lines -- because
-      // it writes them itself with `openssl rand -hex 32 >`, which leaves one. A
-      // file holding the same 64 hex characters with no newline counts as 0 and is
-      // rejected: "is not one generated 256-bit hex key".
-      //
-      // So a machine provisioned by the app could not afterwards run setup-llm.sh
-      // to add a model -- it bailed on the key the app had just written. hermes
-      // itself never noticed, because it trims. Matching the script's exact bytes
-      // is what makes the two provisioning paths interoperable, which they have to
-      // be: the app provisions first, and setup-llm.sh runs later to add the model.
-      let secret = bytes.map { String(format: "%02x", $0) }.joined() + "\n"
-      try secret.write(to: file, atomically: true, encoding: .utf8)
-      try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-    }
+    // BOTH owner-only secrets, 0600, each left alone if already there. The body
+    // lives in ensureSecrets() because ensureBackend() has to run it on an
+    // already-provisioned launch too, which never reaches provision().
+    try ensureSecrets()
 
     // Render each plist (@HOME@ → home, @REPO@ → the bundle's backend), write
     // it 0644, and bootstrap. Wait for hermes to answer /health before the
@@ -191,6 +172,60 @@ enum Provision {
       if label == "com.hazlie.hermes" { waitForHermes() }
     }
     NSLog("Intaglio Labs: provisioned backend from the app bundle")
+  }
+
+  // BOTH owner-only secrets, 0600, each left alone if already there.
+  //
+  // The llama key used to be missing here, and hermes would not start without
+  // it: readLlamaApiKey() throws at boot, so a fresh install died with
+  // "llama API key file is missing; run ops/setup-llm.sh" -- pointing at a
+  // script a downloaded app does not have. Everything downstream went with it,
+  // because hermes is the database. Found on a genuinely fresh Mac: the widget
+  // came up, connect came up, and hermes sat at exit status 1.
+  //
+  // Generating it here is safe in both directions. setup-llm.sh preserves an
+  // existing key when it runs (it stamps the active one and only regenerates
+  // when absent), and llama-server is handed the same file whenever it does
+  // arrive -- bundled at build time, or installed later. The key is required
+  // for hermes to BOOT, not just to reach a model, so it cannot wait for one.
+  //
+  // Which is why this is a function rather than a few lines inside provision():
+  // provision() is skipped the moment the connect agent exists, so a machine
+  // provisioned by a build that only wrote hermes-token.txt would never gain
+  // the llama key and would crash-loop under KeepAlive forever. ensureBackend()
+  // calls this on EVERY launch, including that already-provisioned one, and
+  // per-file "leave it alone if it exists" keeps a healthy machine a no-op.
+  private static func ensureSecrets() throws {
+    try mkdir(hazlie.appendingPathComponent("secrets"), 0o700)
+    for name in ["hermes-token.txt", "llama-api-key.txt"] {
+      let file = hazlie.appendingPathComponent("secrets/\(name)")
+      guard !fm.fileExists(atPath: file.path) else { continue }
+      var bytes = [UInt8](repeating: 0, count: 32)
+      // CHECKED, and it has to be. On failure the array stays all zeros and this
+      // writes 64 hex zeros -- a syntactically valid, fully predictable credential
+      // that hermes' validateHexKey accepts, guarding the corpus-admin surface
+      // with a known value. Every other generator in this tree fails closed
+      // (openssl under set -e, node randomBytes throws); this one fails open, on
+      // the most privileged credential. Abort provisioning instead.
+      guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+        throw NSError(domain: "Provision", code: 1, userInfo: [
+          NSLocalizedDescriptionKey: "SecRandomCopyBytes failed generating \(name)"])
+      }
+      // TRAILING NEWLINE, and it is not cosmetic. ops/setup-llm.sh validates both
+      // of these files with `wc -l` -- which counts NEWLINES, not lines -- because
+      // it writes them itself with `openssl rand -hex 32 >`, which leaves one. A
+      // file holding the same 64 hex characters with no newline counts as 0 and is
+      // rejected: "is not one generated 256-bit hex key".
+      //
+      // So a machine provisioned by the app could not afterwards run setup-llm.sh
+      // to add a model -- it bailed on the key the app had just written. hermes
+      // itself never noticed, because it trims. Matching the script's exact bytes
+      // is what makes the two provisioning paths interoperable, which they have to
+      // be: the app provisions first, and setup-llm.sh runs later to add the model.
+      let secret = bytes.map { String(format: "%02x", $0) }.joined() + "\n"
+      try secret.write(to: file, atomically: true, encoding: .utf8)
+      try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
   }
 
   private static func mkdir(_ url: URL, _ mode: Int) throws {
