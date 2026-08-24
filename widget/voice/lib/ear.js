@@ -142,6 +142,11 @@ export function createEar(callbacks = {}, options = {}) {
   let gen = 0; // bumped by stop()/destroy() so an in-flight start() stands down
   let transcriber = null;
   let stream = null;
+  // The conditioning graph, kept so stop() can tear it down. Separate from
+  // `stream`, which stays the RAW capture: track.onended, ecVerified and the
+  // cleanup in releaseMic all belong to the real microphone, not to a synthetic
+  // stream that would never report the mic going away.
+  let shaper = null;
   const tracker = createUtteranceTracker();
   let turnActive = false;
   // Set on a genuine VAD speech onset, cleared when a turn finalizes. Gates
@@ -277,6 +282,14 @@ export function createEar(callbacks = {}, options = {}) {
       });
       stream = null;
     }
+    if (shaper) {
+      // An AudioContext left open holds the audio hardware awake. Closing it is
+      // what makes SLEEP actually mean asleep.
+      try {
+        shaper.close();
+      } catch {}
+      shaper = null;
+    }
   }
 
   async function start() {
@@ -367,7 +380,9 @@ export function createEar(callbacks = {}, options = {}) {
           false
         );
       }
-      transcriber.attachStream(stream);
+      const shaped = conditioned(stream);
+      shaper = shaped.ctx;
+      transcriber.attachStream(shaped.stream);
       await transcriber.start();
       if (stale()) return false;
       if (track.readyState !== 'live') {
@@ -432,3 +447,52 @@ export function createEar(callbacks = {}, options = {}) {
 }
 
 export default createEar;
+
+// SIGNAL CONDITIONING, ahead of recognition rather than after it.
+//
+// The capture constraints already ask the browser for echo cancellation, noise
+// suppression and auto gain — which is most of what a conditioning chain is for,
+// and it runs in the OS where it can see the far end. What none of them target is
+// the band BELOW speech: desk thumps, chair creaks, HVAC, the mic's own handling
+// noise. WebRTC's noise suppressor is tuned for stationary broadband hiss and
+// leaves that rumble largely alone, and it reaches the recognizer as energy that
+// is not speech.
+//
+// So one high-pass at 50 Hz, second order. Male speech fundamentals start around
+// 85 Hz and the filter is 12 dB/octave, so at 85 Hz it is already nearly
+// transparent — this removes what nobody says and keeps everything anybody does.
+//
+// WHY IT CAN GO HERE AT ALL: moonshine-js takes audio only as a MediaStream (see
+// the header), and a MediaStreamAudioDestinationNode IS a MediaStream. The graph
+// slots in without touching the library. The raw capture stream is kept separate
+// and untouched — it is what reports the mic disappearing, and what stop() has to
+// release.
+//
+// Degrades to the raw stream on any failure. A missing filter costs a little
+// accuracy in a noisy room; a throw here costs the whole ear.
+export function conditioned(raw) {
+  try {
+    const Ctx = globalThis.AudioContext || globalThis.webkitAudioContext;
+    if (!Ctx || typeof globalThis.MediaStreamAudioDestinationNode !== 'function') {
+      return { stream: raw, ctx: null };
+    }
+    const ctx = new Ctx();
+    const src = ctx.createMediaStreamSource(raw);
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 50;
+    // Butterworth: the flattest passband of the one-parameter biquads, which is
+    // what "do not colour the speech" means here.
+    hp.Q.value = Math.SQRT1_2;
+    const dest = ctx.createMediaStreamDestination();
+    src.connect(hp).connect(dest);
+    // PURE, and the context comes back with the stream rather than being stashed
+    // in a closure variable this function cannot see. Assigning `shaper` from here
+    // was a ReferenceError — module scope cannot reach the factory's locals — and
+    // the try/catch below swallowed it into a silent fall back to the raw stream.
+    // The filter would have shipped as a no-op that looked installed.
+    return { stream: dest.stream, ctx };
+  } catch {
+    return { stream: raw, ctx: null };
+  }
+}
