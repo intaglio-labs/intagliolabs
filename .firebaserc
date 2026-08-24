@@ -1,0 +1,14 @@
+{
+  "projects": {
+    "default": "hazlie-prod"
+  },
+  "targets": {
+    "hazlie-prod": {
+      "hosting": {
+        "intaglio": [
+          "intaglio-landing"
+        ]
+      }
+    }
+  }
+}

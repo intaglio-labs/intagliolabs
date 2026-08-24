@@ -15,3 +15,6 @@ dist/
 
 # macOS
 .DS_Store
+
+# Firebase Hosting deploy cache — local, regenerated on every deploy.
+.firebase/
