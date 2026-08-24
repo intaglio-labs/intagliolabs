@@ -1,4 +1,4 @@
-# Push to deploy: main -> Firebase Hosting (target `intaglio`).
+# Push to deploy: main -> Firebase Hosting (the project's default site).
 #
 # The site is four hand-written HTML pages and a vendored font. There is no build
 # step and this workflow deliberately does not invent one — it deploys `site/` as
@@ -101,7 +101,7 @@ jobs:
           export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
           # Pinned: an unpinned deploy tool is an unreviewed change to the thing
           # that publishes the site.
-          npm install --no-fund --no-audit --global firebase-tools@13.29.1
-          firebase deploy --only hosting:intaglio --non-interactive \
+          npm install --no-fund --no-audit --global firebase-tools@15.11.0
+          firebase deploy --only hosting --non-interactive \
             --project hazlie-prod \
             --message "${GITHUB_SHA::7} ${GITHUB_EVENT_NAME}"

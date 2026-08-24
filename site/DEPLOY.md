@@ -7,7 +7,7 @@ hosting changed.
 ## How it deploys
 
 Push to `main`. `.github/workflows/site.yml` runs `firebase deploy --only
-hosting:intaglio` for any push that touches `site/`, the hosting config, or the
+hosting` for any push that touches `site/`, the hosting config, or the
 workflow — and nowhere else, because the app and the backend share this
 repository and change constantly, and redeploying identical HTML on each of those
 commits only makes the deployment history unreadable. It can also be run by hand
@@ -23,7 +23,7 @@ that step was skipped, which is the failure a pipeline exists to remove.
 
 Still works by hand, unchanged, when that is what you want:
 
-    firebase deploy --only hosting:intaglio
+    firebase deploy --only hosting
 
 ### The one thing to set up
 
@@ -99,29 +99,51 @@ with an `@font-face` block in `index.html`.
 The mono fallback is kept in the stack on purpose, so a visitor who blocks the
 font still gets readable z's rather than tofu.
 
-## Domain — still pending
+## Domain — connected, and mid-move
 
-The site is live on its Firebase Hosting URL for the `intaglio-landing` site as
-soon as the workflow runs. Links inside the pages are root-relative, which is
-correct for a domain root and is what `cleanUrls` expects.
+**intaglio.io is live on Firebase Hosting.** It is `Connected` as a custom domain
+and serving, verified 2026-08-24 (`HTTP/2 200`, HSTS, Firebase cache headers).
 
-intaglio.io's apex is host-routed by an external HTTPS load balancer living in a
-**separate GCP project that this project does not own**. Two consequences:
+~~intaglio.io's apex is host-routed by an external HTTPS load balancer in a
+separate GCP project that this project does not own... the planned swap needs
+access granted from that account.~~ Struck rather than deleted, because this file
+asserted it for three days and the next reader deserves to see which way it
+resolved. Whatever was true on 2026-08-21, the apex reaches Hosting now.
 
-1. The planned swap needs access granted from that account. It cannot be done
-   from the hosting project alone.
-2. That project also serves an unrelated product whose `in.` and `cdn.`
-   subdomains are frozen into third-party HTML. **Those must not move**, whatever
-   happens to the apex.
+### Where it points, and where it is going
 
-When the apex is available it is a Hosting custom-domain add on
-`intaglio-landing` plus the DNS records the console prints. Nothing inside the
-pages changes: they already assume a domain root.
+The domain is attached to the **`intaglio-landing`** site. This repository now
+deploys the project's **default** site, `hazlie-prod` — so until the domain moves,
+`intaglio.io` still serves the older release that was pushed by hand on 2026-08-23,
+and this repository's deploys land on `hazlie-prod.web.app`.
 
-A ready-to-deploy nginx bundle (Dockerfile, an 8080 conf, index.html) was staged
-for Cloud Run as an alternative. If it is used, note it was built before
-`privacy/`, `terms/` and `notices/` existed: the conf has to serve those
-directory pages too, so copy the whole `site/` tree, not just `index.html`.
+Moving it is a console operation. The CLI has no custom-domain commands
+(`hosting:sites:*` creates, deletes and lists sites and nothing else), so it is
+not automatable from here:
+
+1. Hosting → `intaglio-landing` → Domains → remove **intaglio.io**.
+2. Hosting → `hazlie-prod` → Add custom domain → **intaglio.io**.
+3. Wait for the certificate. Firebase re-provisions on the new site; the DNS
+   records do not change, but there is a window where the apex serves a
+   certificate warning or the old content. **Do this when a short gap is
+   acceptable.**
+4. Only then delete `intaglio-landing` (`firebase hosting:sites:delete
+   intaglio-landing --project hazlie-prod`). **Deleting it while the domain is
+   still attached takes intaglio.io down.**
+
+### The .web.app URLs
+
+Firebase Hosting has **no host-based redirect** — `redirects` in `firebase.json`
+match on path only, so `hazlie-prod.web.app` cannot be 301'd to `intaglio.io`
+from config. The options, none of them free:
+
+- Leave it. Both hosts serve the same pages; search engines get a `canonical`
+  hint if one is added to the pages.
+- A few lines of JavaScript in `index.html` that redirect when `location.host` is
+  not the canonical one. It is client-side, so it does not help a crawler that
+  does not run scripts, and it puts logic in a page that currently has none.
+
+Not chosen here, because it is a preference rather than a defect.
 
 *(The owning account and project name are deliberately not written here. This
 repository is public, and they are a third party's infrastructure rather than
