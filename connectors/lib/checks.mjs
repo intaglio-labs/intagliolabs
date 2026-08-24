@@ -45,8 +45,11 @@ function result(name, status, detail, fix = null) {
 
 // --- stable binary ------------------------------------------------------------
 
-// The FDA grant attaches to the file at ~/.hazlie/bin/node, so every result
-// below only attests production behaviour when THIS process is that file. The
+// The FDA grant attaches to the RESPONSIBLE process. In production that is
+// Intaglio Labs.app: the daemon runs as a child of the app (Connectors.swift), so
+// macOS asks whether the APP holds the grant, and the row a person switches on in
+// System Settings is "intaglio labs" — never node, which nobody installed and
+// nobody should be asked to trust with their whole disk. The
 // version stamp (written by ops/setup-connectors.sh next to the binary) is how
 // a later run notices that someone swapped the binary underneath the grant.
 function checkStableBinary(home) {
@@ -478,20 +481,21 @@ async function checkHermesStats(env, home, config) {
 //
 // THE CAVEAT THAT MAKES SHELL RUNS LOOK BROKEN: macOS attributes a Full Disk
 // Access grant to the RESPONSIBLE PROCESS, and for anything spawned from a
-// shell that is the terminal app, not ~/.hazlie/bin/node. Verified on this
-// machine (2026-08-19): the granted binary reads chat.db when launchd spawns
-// it and is DENIED when a shell does — same file, same binary, same grant.
+// shell that is the terminal app, not the app this daemon belongs to. Verified on
+// this machine (2026-08-19): the same binary reads chat.db when spawned by
+// something that holds the grant and is DENIED when a shell spawns it.
 // So these probes only PASS under launchd; a dev shell will see FAILs that
 // production will not, and the fix text says so instead of sending anyone off
 // to re-grant a permission that is already granted.
 
 const FDA_SHELL_CAVEAT =
-  'if the grant exists (System Settings > Privacy & Security > Full Disk Access > ~/.hazlie/bin/node), ' +
+  'if the grant exists (System Settings > Privacy & Security > Full Disk Access > "intaglio labs"), ' +
   'this FAIL is expected from a dev shell — TCC attributes the grant to the responsible process, ' +
-  'so only a launchd-spawned run proves anything: ' +
+  'so only a run spawned by something that holds it proves anything: ' +
   'launchctl submit -l com.hazlie.doctor -o /tmp/doctor.out -e /tmp/doctor.err -- ' +
   '~/.hazlie/bin/node <repo>/connectors/doctor.mjs --json  (then launchctl remove com.hazlie.doctor). ' +
-  'If it fails THERE too, grant FDA to the stable binary; ops/CONNECTORS.md has the runbook.';
+  'If it fails there too, switch on "intaglio labs" under Full Disk Access — the app opens that pane ' +
+  'for you and puts itself on screen as a draggable icon; ops/CONNECTORS.md has the runbook.';
 
 const DENIED_CODES = new Set(['EPERM', 'EACCES']);
 

@@ -609,8 +609,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         "voice": FileManager.default.fileExists(atPath: voiceDir.path),
         "downloading": ModelSetup.isDownloading,
         "recommended": ModelSetup.recommended,
-        "nodePath": FileManager.default.homeDirectoryForCurrentUser
-          .appendingPathComponent(".hazlie/bin/node").path,
+        // nodePath was here and is deliberately gone. No page ever read it, and a
+        // payload that carries the path to a unix binary is one render away from
+        // putting "node" in front of somebody again — which is the whole thing this
+        // app spent a day removing. The daemon is a child of the app; the app is what
+        // holds the grants and the app is what the UI names.
         "tiers": ModelSetup.tiers.map { t in
           ["id": t.id, "label": t.label, "detail": t.detail, "bytes": t.bytes]
         },
