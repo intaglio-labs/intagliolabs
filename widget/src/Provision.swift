@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 // First-run provisioning for a DOWNLOADED app: stand up the local backend
 // (hermes, connect, connectors) from the code and node bundled inside the app,
@@ -32,6 +33,22 @@ enum Provision {
   // inheritance covers the Contacts, Calendar and Photos prompts.
   private static let agentsInOrder = ["com.hazlie.hermes", "com.hazlie.llama-server", "com.hazlie.connect"]
 
+  // WHATSAPP GOES STALE WITHOUT THIS, silently and completely.
+  //
+  // The WhatsApp connector reads the desktop app's LOCAL store, and that store
+  // only syncs while WhatsApp is running. Nobody leaves it running, so the
+  // rows simply stop being recent — with nothing to point at, because the
+  // connector keeps succeeding and keeps reading the same old messages.
+  // Measured on the owner's Mac before this shipped: the newest iMessage row
+  // was 3 hours old and the newest WhatsApp row was 1,805 hours old.
+  //
+  // The agent opens WhatsApp hidden and in the background every four hours
+  // (`open -gj`), which is enough for it to sync. It is separate from
+  // agentsInOrder because it is CONDITIONAL: an agent that launches an app
+  // nobody installed would fail every four hours and log it forever.
+  private static let whatsappAgent = "com.hazlie.whatsapp-keepalive"
+  private static let whatsappBundleId = "net.whatsapp.WhatsApp"
+
   /// Remove a connectors agent left behind by an older install. Without this it
   /// keeps running under launchd — responsible for itself, needing its own FDA,
   /// and racing the app's child for the same cursors and caches.
@@ -53,6 +70,30 @@ enum Provision {
 
   // Call once at launch. Runs off the main thread — copying node and booting
   // launchd agents should not block the UI coming up.
+  /// Install the WhatsApp keepalive. Idempotent, and called on EVERY launch.
+  ///
+  /// Separate from provision() for the reason spelled out on the llama runtime
+  /// below: provision() no-ops the moment a machine is set up, so anything the
+  /// bundle gains LATER never reaches an existing install. This agent is exactly
+  /// that case — it did not exist when this Mac was provisioned, and putting it
+  /// inside provision() would have shipped a fix that only new installs got.
+  static func ensureWhatsAppKeepalive() {
+    DispatchQueue.global(qos: .utility).async {
+      // Gated on the app, not the connector: the agent's only job is to launch
+      // WhatsApp, so WhatsApp's absence is what makes it pointless. Without the
+      // gate it would fail every four hours and log it forever.
+      guard NSWorkspace.shared
+        .urlForApplication(withBundleIdentifier: whatsappBundleId) != nil else { return }
+      let plist = launchAgents.appendingPathComponent("\(whatsappAgent).plist")
+      guard !fm.fileExists(atPath: plist.path) else { return }
+      guard fm.fileExists(
+        atPath: backend.appendingPathComponent("agents/\(whatsappAgent).plist").path
+      ) else { return }
+      installAgent(whatsappAgent)
+      NSLog("Intaglio Labs: installed the WhatsApp keepalive")
+    }
+  }
+
   static func ensureBackend() {
     DispatchQueue.global(qos: .utility).async {
       let connectPlist = launchAgents.appendingPathComponent("com.hazlie.connect.plist")

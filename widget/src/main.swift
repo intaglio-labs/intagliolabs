@@ -51,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // it (the owner's repo-based setup, or a prior run), and runs off the main
     // thread so it never delays the UI.
     Provision.ensureBackend()
+    Provision.ensureWhatsAppKeepalive()
 
     // The second half of the self-move (Bridge "moveToApplications"): the
     // old instance could not delete the bundle it was running from, so it
