@@ -17,7 +17,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
 
   // Height carries 16px of bottom padding for the gear's drop shadow —
   // body.widget in palette.css buys the same room; change both together.
-  private static let widgetBase = NSSize(width: 312, height: 114)
+  //
+  // ...and, since 2026-08-24, `cloudSlot` of empty room ABOVE the bar for the
+  // orb's dream cloud (.dream in palette.css). It has to be reserved in the
+  // WINDOW, not just in the page: the window is cut to content and anything
+  // drawn past its edge is clipped flat, so a bubble that appears above the
+  // orb has nowhere to appear unless the room is already there.
+  //
+  // GROWING THIS DOES NOT MOVE THE BAR. pinnedFrame keeps origin.y (AppKit
+  // measures from the bottom) and the page lays out from the top, so extra
+  // height is added above the content and the whole widget stays put. That is
+  // the only reason a permanent reservation is affordable.
+  //
+  // WHAT IT COSTS, so nobody has to rediscover it: the widget's window is one
+  // rectangle, and the page's own drag handler answers anywhere that is not a
+  // control. So this band is 64pt of desktop that grabs the widget instead of
+  // the wallpaper, whether or not the cloud is up. That is a bigger version of
+  // what the bar row already does (the collapsed pill is 58px of a 312px row),
+  // not a new behaviour — but if it ever reads as the widget having an
+  // invisible edge, the fix is to grow the window only while the cloud is up,
+  // the way fitPopup already resizes the popups.
+  private static let cloudSlot: CGFloat = 76
+  private static let widgetBase = NSSize(width: 312, height: 114 + cloudSlot)
   private static let chatBase = NSSize(width: 420, height: 560)
   // Height is a low FLOOR now, not a reservation: the connections page reports
   // its real content height (hzAutoFit on .conn-main), so the card fits snugly
@@ -729,7 +750,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // does not know by how much; a fraction of innerWidth survives that.
   func widgetSpot() -> [String: Double] {
     guard let panel = onboardingPanel else { return [:] }
-    let w = widgetWindow.frame
+    var w = widgetWindow.frame
+    // The dream cloud's reserved band is empty almost all of the time, and a
+    // spotlight that includes it rings a rectangle whose top half is nothing.
+    // The onboarding scene is pointing at the BAR, so the highlight stops
+    // where the bar starts. Scaled, because the window is.
+    let slot = Self.cloudSlot * CGFloat(Bridge.scale)
+    if w.height > slot { w.size.height -= slot }
     let p = panel.frame
     guard p.width > 0, p.height > 0 else { return [:] }
     return [

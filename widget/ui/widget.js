@@ -61,19 +61,24 @@ orbEl.addEventListener('animationend', (e) => {
 // The line is a hardcoded string on purpose. It has to land on the same frame
 // as the tap — anything that asks hermes, or the model, for a sentence spends
 // a round trip proving it has nothing to say.
+//
+// It is drawn as a dream cloud over the orb's head (palette.css §.dream). That
+// needed room the window did not have: see main.swift's cloudSlot, which
+// reserves it above the bar.
 const VOICE_TEASE = true;
 const TEASE_TEXT = 'hey, voice things coming soon';
 const TEASE_MS = 2400;
-const toastEl = document.getElementById('wtoast');
+const dreamEl = document.getElementById('wdream');
+const dreamText = document.getElementById('wdreamtext');
 let teaseTimer = null;
 function showTease() {
-  toastEl.textContent = TEASE_TEXT;
-  toastEl.classList.add('on');
+  dreamText.textContent = TEASE_TEXT;
+  dreamEl.classList.add('on');
   clearTimeout(teaseTimer);
   // Re-tapping restarts the dwell rather than stacking timers, so a second
   // tap reads as "yes, still coming soon" instead of cutting the line short.
   teaseTimer = setTimeout(() => {
-    toastEl.classList.remove('on');
+    dreamEl.classList.remove('on');
     teaseTimer = null;
   }, TEASE_MS);
 }
@@ -81,7 +86,7 @@ function hideTease() {
   if (!teaseTimer) return;
   clearTimeout(teaseTimer);
   teaseTimer = null;
-  toastEl.classList.remove('on');
+  dreamEl.classList.remove('on');
 }
 
 // ---------------- jackpot ----------------
@@ -221,7 +226,7 @@ function bumpJackpot(count) {
   setSwell(1 + Math.min(count - SPAM_TRIP, POP_AT - SPAM_TRIP) * SWELL_PER_TAP);
   if (!jackpotOn) {
     jackpotOn = true;
-    hideTease(); // the payout is the joke now; the tease line would sit through it
+    hideTease(); // the payout is the joke now; the cloud would hang through it
     jackpotStarted = Date.now();
     orbEl.classList.remove('waking');
     orbEl.classList.add('jackpot');
@@ -372,7 +377,7 @@ winput.addEventListener('input', () => { hideTease(); syncChatGlyph(); });
 // of the two paths wins the race, and it feels quicker besides.
 chatBtn.addEventListener('pointerdown', (e) => {
   e.preventDefault(); // or the button takes focus off the input on the way down
-  hideTease();        // the toast sits over the pill; touching the bar clears it
+  hideTease();        // reaching for the bar means the line has been read
   if (winput.value.trim()) {
     // Focus stays in the pill, so the next message can be typed straight away.
     submitFromWidget();

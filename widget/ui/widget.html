@@ -9,6 +9,42 @@
 </head>
 <body class="widget">
   <div class="panel" id="panel">
+    <!-- What the orb says while voice is teased rather than armed: a dream
+         cloud over its head, tail puffs trailing down to its crown.
+         IT NEEDS ROOM IN THE WINDOW, NOT JUST IN THE PAGE. The widget window
+         is cut to content and clips anything past its edge, so main.swift's
+         widgetBase carries `cloudSlot` (76px) of empty height above the bar
+         for this. The window grows upward from a pinned bottom edge, so that
+         reservation does not move the bar — see the note there.
+         ONE PATH, NOT A PILE OF CIRCLES: overlapping circles would each draw
+         their own outline through the middle of the cloud. The scalloped
+         silhouette is a single closed path of arcs — bumps over the top left
+         to right, dips along the bottom right to left, all sweep-flag 1 so
+         every one of them bulges outward. Each radius is sized from its chord
+         and the bump depth it wants (r = (s² + (d/2)²) / 2s), which is why
+         they are all different numbers rather than one tidy value.
+         Inline SVG because the CSP here is `default-src 'none'`, which bars
+         every image INCLUDING data: URIs. Markup in the DOM is not a fetch. -->
+    <div class="dream" id="wdream">
+      <svg class="dream-svg" viewBox="0 0 280 82" aria-hidden="true">
+        <path class="dream-body" d="M 12 38
+          A 13 13 0 0 1 28 22
+          A 42 42 0 0 1 82 14
+          A 52 52 0 0 1 146 14
+          A 48 48 0 0 1 204 20
+          A 33 33 0 0 1 248 30
+          A 10 10 0 0 1 264 40
+          A 45 45 0 0 1 216 46
+          A 60 60 0 0 1 160 46
+          A 60 60 0 0 1 104 46
+          A 52 52 0 0 1 52 46
+          A 38 38 0 0 1 12 38 Z"/>
+        <!-- The thought trail, descending toward the orb's crown. -->
+        <circle class="dream-body" cx="238" cy="62" r="6"/>
+        <circle class="dream-body" cx="252" cy="74" r="3.5"/>
+      </svg>
+      <span class="dream-text" id="wdreamtext" role="status" aria-live="polite"></span>
+    </div>
     <div class="wbar">
       <input id="winput" type="text" placeholder="" autocomplete="off" spellcheck="false" writingsuggestions="false">
       <!-- The bar's one button. It is the chat glyph, the collapse control and
@@ -73,13 +109,6 @@
           <span class="burst"></span>
         </span>
       </button>
-      <!-- What the orb says while voice is teased rather than armed. It sits
-           OVER the pill's row instead of above the orb because the widget
-           window is a fixed 312x114 (main.swift widgetBase) — there is no
-           headroom above the bar to draw into, and anything drawn there would
-           be clipped flat by the window edge. pointer-events:none so it never
-           swallows a click meant for the bar underneath. -->
-      <div class="wtoast" id="wtoast" role="status" aria-live="polite"></div>
     </div>
     <!-- Second row: the people button and the settings gear, right-aligned. -->
     <div class="gear-row">

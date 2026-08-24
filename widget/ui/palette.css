@@ -1096,30 +1096,70 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 .wchat.ready .wc-bubble { opacity: 0; transform: translateY(-3px); }
 .wchat.ready .wc-arrow { opacity: 1; transform: translateY(0); }
 
-/* The orb's tease line, drawn over the pill's row. Right-stopped at 50px so it
-   clears the orb (42) plus the flex gap (8); left-stopped at 12 to line up
-   with the open pill's inset. */
-.wtoast {
-  position: absolute; left: 12px; right: 50px; top: 50%;
-  transform: translateY(-50%);
-  height: 44px; border-radius: 999px;
-  display: flex; align-items: center; justify-content: center;
-  padding: 0 14px;
-  font: inherit; font-size: 12.5px; letter-spacing: 0.2px;
-  color: var(--hazelnut-light);
-  background: rgba(20, 20, 18, 0.94);
-  border: 1px solid rgba(197, 165, 109, 0.34);
-  box-shadow:
-    inset 0 2px 3px rgba(234, 234, 234, 0.10),
-    inset 0 -3px 7px rgba(0, 0, 0, 0.55),
-    0 4px 16px rgba(0, 0, 0, 0.45);
-  /* The bar underneath stays clickable through it. */
+/* The orb's dream cloud. Its 76px of room is reserved in the WINDOW, by
+   main.swift's cloudSlot — a page cannot draw past a window edge, and this
+   window is cut to content. The slot is there whether or not the cloud is up,
+   which is why this row is laid out as empty space rather than as a box.
+   The svg is right-aligned and hangs 6px INTO the bar's row: the trailing
+   puffs are meant to reach the orb's crown, and a tail that stops short of it
+   reads as a separate object floating nearby rather than as its thought. */
+.dream {
+  height: 76px; width: 100%;
+  display: flex; justify-content: flex-end; align-items: flex-end;
+  position: relative;
+  /* The band is invisible when the cloud is down, so nothing in it should
+     answer a cursor — a drag started here is the widget's own drag, exactly
+     as it is anywhere else on this window that is not a control. */
   pointer-events: none;
+  /* Down by default, and out of the accessibility tree with it — visibility,
+     not opacity alone, or a screen reader reads a cloud nobody can see. The
+     delay on visibility is what lets the fade OUT finish before the element
+     is taken away.
+     It arrives the way a thought does, swelling up FROM the orb: the origin
+     is the tail's tip (88% across, on the bottom edge), which is the point
+     that touches the orb's crown. Both the silhouette and the line ride this
+     one transform, or they would each scale about their own box and drift
+     apart on the way up. */
+  transform: scale(0.86); transform-origin: 88% 100%;
   opacity: 0; visibility: hidden;
-  z-index: 4;
-  transition: opacity 0.16s ease, visibility 0s linear 0.16s;
+  transition: opacity 0.22s ease, transform 0.26s cubic-bezier(0.34, 1.56, 0.64, 1),
+              visibility 0s linear 0.22s;
 }
-.wtoast.on { opacity: 1; visibility: visible; transition-delay: 0s, 0s; }
+.dream.on {
+  transform: scale(1);
+  opacity: 1; visibility: visible;
+  transition: opacity 0.22s ease, transform 0.26s cubic-bezier(0.34, 1.56, 0.64, 1),
+              visibility 0s linear 0s;
+}
+.dream-svg {
+  display: block; width: 280px; height: 82px; flex: 0 0 auto;
+  margin-right: 8px; margin-bottom: -6px;
+  /* The cloud carries its own shadow. filter, not box-shadow: the element is
+     a rectangle and the cloud is not, and a box shadow would draw the
+     rectangle. */
+  filter: drop-shadow(0 5px 14px rgba(0, 0, 0, 0.5));
+}
+.dream-body {
+  fill: rgba(20, 20, 18, 0.94);
+  stroke: rgba(197, 165, 109, 0.34);
+  stroke-width: 1.5;
+}
+/* The line itself: HTML over the SVG rather than <text> inside it, so it
+   wraps and inherits the mono face instead of being scaled as picture.
+   The box IS the cloud's interior, converted out of viewBox units: the svg's
+   right edge sits 8px off this row's right edge and its bottom 6px below it,
+   so viewBox x=246 lands at 34 + 8 = 42px from the right, and viewBox y=48
+   lands at 34 - 6 = 28px up from the bottom. 216 x 40 is the interior that
+   leaves — the tail puffs live in the margin to its right. */
+.dream-text {
+  position: absolute; right: 42px; bottom: 28px;
+  width: 216px; height: 40px;
+  display: flex; align-items: center; justify-content: center;
+  text-align: center;
+  font: inherit; font-size: 11px; line-height: 1.25; letter-spacing: 0.2px;
+  color: var(--hazelnut-light);
+  pointer-events: none;
+}
 
 .wbar input:focus { border-color: rgba(197, 165, 109, 0.55); }
 /* The way into settings, and the only one — the trinket shelf that used to
