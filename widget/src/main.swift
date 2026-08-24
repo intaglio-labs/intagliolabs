@@ -220,6 +220,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // into anything answerable, so every question abstained on a full
       // database — see Distiller.swift.
       DispatchQueue.main.async { Distiller.shared.start() }
+      // And notice the grant arriving later. Granting Full Disk Access makes
+      // macOS offer "Quit & Reopen"; this app does not need either half of that
+      // offer, but the daemon just started above does need respawning. See
+      // FullDiskWatch for why that is the only thing that happens.
+      DispatchQueue.main.async { FullDiskWatch.begin() }
     }
 
     // First launch shows the welcome flow. Only completing it sets the flag,

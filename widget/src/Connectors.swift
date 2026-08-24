@@ -93,6 +93,28 @@ final class Connectors {
     }
   }
 
+  /// Respawn the daemon so it picks up a permission granted since it started.
+  ///
+  /// Full Disk Access attaches to the RESPONSIBLE process — this app — but the
+  /// child evaluates it when it opens a file, and its startup preflight ran once
+  /// at spawn. So a daemon that started before the switch moved is carrying a
+  /// denial it has no reason to re-examine.
+  ///
+  /// Terminating IS the restart: the termination handler above respawns, and
+  /// throttles. Deliberately NOT stop() — that sets `stopping` for the process
+  /// lifetime, because it exists for quitting, and calling it here would retire
+  /// the daemon until the app was relaunched. Which is the very restart this
+  /// exists to make unnecessary.
+  func restart() {
+    guard !stopping else { return }
+    guard let p = process, p.isRunning else {
+      start() // not up: nothing to replace, and start() is idempotent
+      return
+    }
+    NSLog("Intaglio Labs: respawning connectors to pick up a new grant")
+    p.terminate()
+  }
+
   /// Called on quit. Terminate rather than leave an orphan holding cursors and
   /// a cache open — the daemon's own shutdown path closes them.
   func stop() {

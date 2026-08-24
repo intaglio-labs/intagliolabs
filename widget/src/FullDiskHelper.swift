@@ -87,6 +87,11 @@ final class FullDiskHelper {
   }
 
   private func showGranted() {
+    // The daemon started before the switch moved and is holding a denial it will
+    // not re-examine. Respawn it HERE rather than waiting for the app to be
+    // reactivated: the owner is looking at this card, and the point of the card
+    // is that the work is already done by the time it goes green.
+    FullDiskWatch.check()
     titleLabel?.stringValue = "that's it \u{2014} thank you"
     statusLabel?.stringValue = "Messages and Notes are readable"
     statusLabel?.textColor = Palette.ok
