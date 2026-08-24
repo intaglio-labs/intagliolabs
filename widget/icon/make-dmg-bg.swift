@@ -1,7 +1,10 @@
 // The DMG window background: soft black, one instruction in mono, an arrow
 // from the app to the Applications folder. Rendered at 2x (1200x800) and
-// stamped 144dpi by release.sh so Finder draws it crisp on retina at a
-// 600x400 point window.
+// The canvas below is 1200x800 POINTS — 2x the 600x400 point window — but the
+// file this writes is not necessarily 1200x800 PIXELS: NSImage renders at the
+// screen's backing scale, so a retina Mac produces 2400x1600. release.sh
+// therefore derives the dpi from the pixels it actually finds rather than
+// hardcoding one, and refuses to build if the result is not 600pt wide.
 //
 //   swift widget/icon/make-dmg-bg.swift <out.png>
 import AppKit
@@ -19,44 +22,24 @@ ctx.fill(CGRect(x: 0, y: 0, width: W, height: H))
 ctx.setFillColor(NSColor(red: 0.11, green: 0.11, blue: 0.11, alpha: 1).cgColor)    // #1c1c1c
 ctx.fill(CGRect(x: 0, y: 148, width: W, height: 2))
 
-// THE LABEL PLATES, and the arithmetic that forced them.
+// NO BACKING BEHIND THE ICON NAMES, and the trade is recorded rather than hidden.
 //
 // Finder draws icon names in the SYSTEM appearance, which a background image
 // cannot know. Measured on the shipped DMG: both names render at 13.5:1 against
-// #141412 in dark mode and 1.14:1 in light. Not hard to read — absent, for
-// everyone who has not turned dark mode on.
+// #141412 in dark mode and 1.14:1 in light — faint to absent for anyone who has
+// not turned dark mode on.
 //
-// No single colour fixes that at AA, and the arithmetic says so rather than
-// taste: white label text needs a background no lighter than luminance 0.121 to
-// reach 4.5:1, black text needs one no darker than 0.175. The window is empty.
-// At 3:1 — the bar written for small bold text, which is what an icon label is —
-// the window is 0.100 to 0.206, and #80664a sits at 0.146, almost exactly
-// centred. Centred deliberately: a colour tuned to favour one appearance only
-// moves the unreadable case rather than removing it.
+// An earlier version solved that with a rounded #80664a plate under each name,
+// sized and placed to sit exactly where Finder writes. It worked only while the
+// icons landed where the art expected: when the AppleScript positions were
+// silently ignored, the plates stayed put and shipped as two brown lozenges
+// floating in an empty window. Removed, on the owner's call.
 //
-// TWO PLATES RATHER THAN A BAND. The first version ran the colour the full width
-// of the window, which worked and looked like a stripe — it also ran under the
-// instruction line, which is text this file draws and can already colour for
-// itself. Contrast is only needed where Finder writes, so that is the only place
-// it goes: one plate under each icon's name, rounded, faded at the edges so it
-// reads as a shadow the name sits on rather than a box.
-let plateColor = NSColor(red: 128/255, green: 102/255, blue: 74/255, alpha: 1)  // #80664a
-let plateTop: CGFloat = 543, plateBottom: CGFloat = 596
-// Icon centres, matching the arrow's own geometry below.
-for cx in [CGFloat(300), CGFloat(900)] {
-  let halfW: CGFloat = 148
-  let rows = Int(plateBottom - plateTop)
-  for i in 0..<rows {
-    let t = CGFloat(i) / CGFloat(rows - 1)
-    // Soft top and bottom edge only; the sides are rounded by the inset below.
-    let vertical: CGFloat = t < 0.16 ? t / 0.16 : (t > 0.84 ? (1 - t) / 0.16 : 1)
-    // Pull the ends in near the top and bottom so the corners read as rounded.
-    let inset = halfW * (1 - vertical) * 0.28
-    ctx.setFillColor(plateColor.withAlphaComponent(vertical).cgColor)
-    ctx.fill(CGRect(x: cx - halfW + inset, y: plateTop + CGFloat(i),
-                    width: (halfW - inset) * 2, height: 1))
-  }
-}
+// What makes that acceptable is that the names are not load-bearing. The
+// instruction is drawn BELOW by this file, in a colour it chooses and can
+// guarantee; the arrow gives the direction; and an app icon beside the
+// Applications folder is legible without a caption. A faint label under a
+// picture of the thing it names costs a light-mode visitor nothing.
 
 func draw(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor, y: CGFloat, tracking: CGFloat = 0) {
   let font = NSFont.monospacedSystemFont(ofSize: size, weight: weight)
