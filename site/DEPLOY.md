@@ -78,30 +78,31 @@ Two checks run before the deploy, and either one fails the run:
 
 ## The download button
 
-`site/index.html` links to:
+One link, to one place:
 
     https://github.com/intaglio-labs/privateAndPersonalizedOS/releases/latest/download/IntaglioLabs.dmg
 
-GitHub resolves `latest` at request time, so **publishing a release is publishing
-the download** — the site does not change and nobody has to remember to update a
-link. The asset name is deliberately unversioned so the permalink keeps working
-across versions; the version lives in the release tag, the DMG's volume name and
-the app's Info.plist.
+GitHub resolves `latest` at request time, so publishing a release is publishing
+the download. The site does not change between versions and there is nothing to
+remember. The asset name is unversioned so that permalink keeps working; the
+version lives in the release tag, the DMG volume name and Info.plist.
 
-Both legacy paths follow it. `firebase.json` 301s `/Hazlie.dmg` **and**
-`/intagliolabs.dmg` to that permalink, because both are loose in other people's
-bookmarks and messages, and both used to point at a self-hosted object.
+**There are no redirects.** An earlier pass added three — `/download`,
+`/Hazlie.dmg` and `/intagliolabs.dmg`, all pointing at that same URL — and they
+were removed on 2026-08-24 after checking which had ever been real:
 
-~~`site/index.html` links `/intagliolabs.dmg` directly.~~ Struck rather than
-deleted, because the uncertainty this file recorded on 2026-08-23 — whether the
-DMG was really served from Cloud Storage behind a redirect, at a size Firebase
-Hosting will not serve — is now **resolved by removal** rather than answered.
-Hosting serves no binary at all; the artifact lives on the release that produced
-it, and nothing here has a size limit to argue with. The self-hosted object can
-be deleted from the bucket.
+- `/intagliolabs.dmg` never was. It came from a `firebase.json` in this repository
+  that did not match what was deployed.
+- `/Hazlie.dmg` was already a legacy alias, redirecting to `/download`.
+- `/download` was the live button target for about a day, on a site with no
+  users yet.
+
+Three config entries preserving one day-old URL on a pre-launch page is not
+caution, it is clutter — and it made a four-page static site look like it had a
+routing layer. If a real link turns up in the wild, one entry brings it back.
 
 New releases: `widget/release.sh`, then attach the DMG to a GitHub release as
-`IntaglioLabs.dmg`. The site needs no redeploy for a new version.
+`IntaglioLabs.dmg`. No site deploy is needed for a new version.
 
 ## Trina — settled 2026-08-21
 
