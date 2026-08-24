@@ -30,6 +30,34 @@ connector, FDA runbook, log/backup policy, security boundary) is in
 attribution caveat in CONNECTORS.md before trusting `fda-*` rows from a
 shell).
 
+## Which copy the daemons run
+
+The plists name a **path**, never a commit. Whatever sits at that path when a
+daemon restarts is what runs — under the Full Disk Access grant, against real
+iMessage, mail and photos. So the path matters as much as the code.
+
+Point it at a checkout you work in and the running app silently becomes
+whatever branch was last checked out. Nothing announces this; you find out by
+noticing something behave oddly. On a machine where the checkout is shared
+between people or sessions, "what is my app running" stops having an answer.
+
+`ops/promote.sh` installs a copy that has no branch to switch:
+
+    ops/promote.sh              # install origin/main to ~/.hazlie/app
+    ops/promote.sh v1.2         # or any commit-ish
+    bash ~/.hazlie/app/ops/setup-connectors.sh   # repoint the agents at it
+
+The source is `git archive <commit>`, not a copy of the working tree, so the
+installed copy cannot contain an uncommitted edit or a stray file. It records
+what it is in `~/.hazlie/app/.installed-commit`, which is the answer to "what
+is actually running" — a question that otherwise takes archaeology.
+
+Running `setup-connectors.sh` straight from a clone still works and is the
+right thing for a machine that only ever tracks `main`. Promote when the
+checkout is somewhere you also *develop*: `install_agent` substitutes `@REPO@`
+with wherever setup was run from, so running it from a feature branch is how a
+dev tree becomes production without anyone deciding that it should.
+
 ## Order to start things
 
 1. **Once per machine:** `bash ops/setup-llm.sh --verify` — installs llama.cpp
