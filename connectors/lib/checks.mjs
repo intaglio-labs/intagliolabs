@@ -767,7 +767,7 @@ function backfillState(text) {
 
 // [topKey, childKey, wanted, severity].
 //
-// BACKFILL IS WANTED **ON**. Owner decision, Austin, 2026-08-22, explicitly:
+// BACKFILL IS WANTED **ON**. Owner decision, 2026-08-22, explicitly:
 // "all connections should pull bulk messages". This reverses what
 // bridges/README.md § "Privacy hardening" set, and the reasoning it overrode is
 // kept here rather than deleted, because it is the kind of thing a future

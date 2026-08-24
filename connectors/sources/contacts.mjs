@@ -3,7 +3,8 @@
 // THIS CONNECTOR WRITES NO CORPUS. It maps to hermes source null in the
 // daemon: its whole output is the `contact_ids` table in the local state.db,
 // which query-time joins read so the same human stops surfacing three times —
-// once as +1808…, once as ay@…, once as "Austin Yoshino" in a meeting. It is
+// once as a phone number, once as an email local-part, once as a full name in
+// a meeting. It is
 // deliberately a lookup table and not a person schema: rows are
 // (identifier, displayName, kind∈{phone,email}), resolution happens at query
 // time, and the spine must never become the project.

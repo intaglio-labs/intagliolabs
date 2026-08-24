@@ -109,7 +109,7 @@ export function recallClaims(db, { match = null, limit = DEFAULT_RECALL_LIMIT, n
   //                          to penicillin" -- those words do not share a stem,
   //                          and porter does not fix it.
   //   "how do you get to work?"  matched the WRONG TWO claims and never
-  //                          surfaced "Austin takes the 7am train on weekdays".
+  //                          surfaced "the owner takes the 7am train on weekdays".
   //
   // A fallback that only fires on zero results fixes the first and not the
   // second, which is why this tops up unconditionally: take the search hits,

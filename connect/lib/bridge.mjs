@@ -85,7 +85,7 @@ export const PLATFORMS = Object.freeze({
     webLogin: { allowedHosts: ['instagram.com', 'facebook.com', 'meta.com'], sessionCookie: 'sessionid' },
   },
   // Owner-gated in SOCIAL-BRIDGES-PLAN.md ("accept the account risk");
-  // Austin said go, 2026-08-22. mautrix-twitter, same megabridge family —
+  // Owner said go, 2026-08-22. mautrix-twitter, same megabridge family —
   // the cookie flow wants auth_token + ct0 from a logged-in x.com session.
   twitter: {
     id: 'twitter',

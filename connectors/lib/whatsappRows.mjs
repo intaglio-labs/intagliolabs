@@ -57,7 +57,7 @@ export function jidToHandle(jid) {
 
 export function isRealMessage(row) {
   // NON-EMPTY ZTEXT IS THE WHOLE TEST. ZGROUPEVENTTYPE was assumed to flag
-  // group events ("Austin added Sam") and it does NOT on this WhatsApp
+  // group events ("<person> added <person>") and it does NOT on this WhatsApp
   // version — value 2 is the ordinary value on real messages, so keying off
   // it dropped 3,561 of 3,563 rows on the first live run (measured, not
   // guessed). Media rows carry no ZTEXT and a caption-less photo is not a
