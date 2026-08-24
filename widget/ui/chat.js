@@ -67,6 +67,22 @@ async function send(utterance) {
   if (data.state === 'ok') {
     hzSfx.receive();
     pending.textContent = data.text;
+    // AN EMPTY ANSWER WHILE STILL READING IS A DIFFERENT ANSWER.
+    //
+    // Answers come from claims the local model has distilled out of the rows,
+    // and that takes a while after connecting. Left alone, the reply is "nothing
+    // in what i've got covers that" over a database that is 99% unread — which
+    // reads as broken rather than busy, and is the single most confusing thing
+    // this app can say. Native attaches the reading state to a sourceless
+    // answer; this is where it becomes a sentence.
+    const mem = data.memory;
+    if (mem && mem.state === 'reading' && mem.total > 0) {
+      const note = document.createElement('span');
+      note.className = 'srcs';
+      note.textContent =
+        `still reading — ${mem.done.toLocaleString()} of ${mem.total.toLocaleString()} so far`;
+      pending.appendChild(note);
+    }
     if (Array.isArray(data.sources) && data.sources.length > 0) {
       const srcs = document.createElement('span');
       srcs.className = 'srcs';

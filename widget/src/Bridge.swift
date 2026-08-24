@@ -744,12 +744,28 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         .trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
       ask(utterance) { [weak self] data in
         guard let self else { return }
-        self.reply(webView, id, data)
-        if self.voiceTurnPending {
-          self.voiceTurnPending = false
-          if let text = data["text"] as? String, data["state"] as? String == "ok" {
-            self.delegate?.speakAnswer(text)
-          }
+        // AN ABSTENTION IS NOT ALWAYS THE SAME ANSWER.
+        //
+        // "nothing in what i've got covers that" means one thing when the memory
+        // has read everything and quite another while it is still reading — and
+        // the second is the case somebody hits right after connecting, when the
+        // app looks broken rather than busy. So a sourceless answer carries the
+        // reading state with it and the page can say which one this is.
+        //
+        // Attached HERE rather than in hermes' answer, whose shape is exactly
+        // {text, sources, usedRows} and is pinned by a contract test. Costs a
+        // loopback GET, and only when the answer came back empty-handed.
+        let sourceless = (data["sources"] as? [Any])?.isEmpty ?? true
+        guard sourceless, data["state"] as? String == "ok" else {
+          self.reply(webView, id, data)
+          self.speakIfVoiceTurn(data)
+          return
+        }
+        self.rows { _, memory in
+          var out = data
+          if let memory { out["memory"] = memory }
+          self.reply(webView, id, out)
+          self.speakIfVoiceTurn(out)
         }
       }
     case "cancel":
@@ -867,6 +883,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// Reporting only "found 18,440 things" while every question abstained is what
   /// produced "it has full access and knows nothing". /stats carries both numbers
   /// now; this passes the second one through untouched.
+  /// Speak the answer if this turn began with the voice. Pulled out of the ask
+  /// handler when that grew a second reply path: the two must not be able to
+  /// disagree about whether the turn was spoken.
+  private func speakIfVoiceTurn(_ data: [String: Any]) {
+    guard voiceTurnPending else { return }
+    voiceTurnPending = false
+    guard let text = data["text"] as? String, data["state"] as? String == "ok" else { return }
+    delegate?.speakAnswer(text)
+  }
+
   private func rows(_ done: @escaping (Int, [String: Any]?) -> Void) {
     guard let tok = bearerToken() else { done(0, nil); return }
     let req = request("GET", hermesBase, "stats", bearer: tok, timeout: 4)
