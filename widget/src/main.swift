@@ -99,6 +99,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     w.isFloatingPanel = false
     w.hidesOnDeactivate = false
+    // THE OTHER HALF OF THE TWO-CLICK FIX, and it was only ever applied to the
+    // popups. present() stopped them TAKING key from the widget (orderFront
+    // rather than makeKeyAndOrderFront, plus this same flag in makePanel), which
+    // fixed going widget -> popup. Coming BACK still cost a click: type in a
+    // popup's field, or open one that legitimately takes key, and the widget is
+    // no longer key -- so the next click on it was spent making it key again
+    // instead of pressing what it hit.
+    //
+    // Same answer, same reasoning as the popups: take key only when a control
+    // that actually needs typing is clicked. The widget's message bar keeps
+    // working, because AppKit asks the view whether it needs key rather than
+    // guessing -- exactly as people-sky's search field does inside a panel that
+    // has carried this flag all along.
+    w.becomesKeyOnlyIfNeeded = true
     w.isOpaque = false
     w.backgroundColor = .clear
     // Elements float on the wallpaper; a window shadow would draw one blob
