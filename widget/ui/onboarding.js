@@ -344,6 +344,13 @@ function runHome() {
 window.addEventListener('resize', () => {
   if (!screens[3].hidden) runHome();
 });
+// ...and native calls this after it re-stretches the scrim for a screen change.
+// `resize` alone is not enough: the widget itself moves to the new corner in the
+// same beat, so the measurements have to be taken again even when this window's
+// own size happens to come out unchanged.
+window.__hzRehome = () => {
+  if (!screens[3].hidden) runHome();
+};
 document.getElementById('homeDone').addEventListener('click', () => finish());
 
 // ---------------- flow ----------------
@@ -689,12 +696,25 @@ document.getElementById('dataCheck').addEventListener('click', async () => {
   // The ROW COUNT is the check: it only moves when something was really read
   // and really written. macOS gives this process no honest answer about a
   // grant, so we do not ask it — we look at what arrived.
+  // PATIENCE IS FREE HERE, because this stops the moment anything arrives.
+  //
+  // The ceiling was 10 tries -- 25 seconds -- in front of a first pass whose
+  // length depends on how much history there is to read. Usually rows land in
+  // the first second or two and none of this matters; when they do not, 25
+  // seconds was long enough to feel broken and too short to actually wait, so
+  // the flow moved on and said "nothing yet" about a machine that was working.
+  // A longer ceiling costs the common case nothing at all, since the loop exits
+  // on the first non-zero count.
   let rows = 0;
-  for (let i = 0; i < 10 && rows === 0; i += 1) {
+  for (let i = 0; i < 24 && rows === 0; i += 1) {
     await new Promise((r) => setTimeout(r, 2500));
     const st = await hzPost('setupState').catch(() => null);
     rows = (st && st.rows) || 0;
-    if (rows === 0) dataStatus.textContent = 'having a look…';
+    // After the first handful of tries, say that it is still going rather than
+    // repeating one word at someone watching an ellipsis not change.
+    if (rows === 0) {
+      dataStatus.textContent = i < 6 ? 'having a look…' : 'still looking — a big library takes a minute…';
+    }
   }
   if (rows > 0) {
     // FINDING IS NOT KNOWING, and saying only the first is how this went wrong.
