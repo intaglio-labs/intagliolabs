@@ -222,6 +222,14 @@ function fitConnections() {
 }
 new MutationObserver(fitConnections).observe(document.querySelector('.win'), {
   childList: true, subtree: true, characterData: true,
+  // Attributes too. This page shows and hides whole blocks by toggling `hidden`
+  // — the memory row and `notice` both — and that changes the column's height
+  // without touching childList or text. Without this the window kept the height
+  // it measured while the block was still hidden, which is a popup that fits its
+  // content exactly except when it does not. `style` is left out on purpose: the
+  // only inline style here is a progress bar's width, which never changes height
+  // and would re-measure every few seconds for nothing.
+  attributes: true, attributeFilter: ['hidden', 'class'],
 });
 window.addEventListener('resize', fitConnections);
 fitConnections();
@@ -950,7 +958,7 @@ function paintMemory(m) {
     const pct = m.total > 0 ? Math.round((m.done / m.total) * 100) : 0;
     mem.hidden = false;
     mem.classList.add('busy');
-    memLabel.textContent = 'reading what you connected';
+    memLabel.textContent = 'reading';
     memCount.textContent = `${m.done.toLocaleString()} of ${m.total.toLocaleString()}`;
     memBar.style.width = `${Math.max(pct, 2)}%`;
     // Says what it BUYS, so waiting has a point rather than being a bar.
@@ -962,10 +970,10 @@ function paintMemory(m) {
   if (m.state === 'ready') {
     mem.hidden = false;
     mem.classList.remove('busy');
-    memLabel.textContent = 'up to date';
+    memLabel.textContent = 'memory';
     memCount.textContent = '';
     memBar.style.width = '100%';
-    memNote.textContent = `${m.claims.toLocaleString()} things learned — ask me anything about them`;
+    memNote.textContent = `up to date — ${m.claims.toLocaleString()} things learned`;
     return;
   }
   // Nothing read and nothing pending: there is no progress to report, and a bar

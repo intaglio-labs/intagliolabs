@@ -437,6 +437,20 @@ function hzAutoFit(scroller) {
   };
   new MutationObserver(schedule).observe(scroller, {
     childList: true, subtree: true, characterData: true,
+    // ATTRIBUTES TOO, or a revealed element never resizes its window.
+    //
+    // Showing something by removing `hidden` changes the page's height without
+    // touching childList or text, so the observer stayed silent and the popup
+    // kept the height it measured while the element was still hidden — content
+    // taller than the window, and a scrollbar in a popup that is supposed to fit
+    // itself. True of the memory row and of `notice`, which has always toggled
+    // `hidden` the same way.
+    //
+    // Filtered deliberately: `style` is excluded because the only inline style
+    // in these pages is a progress bar's width, which repaints every few seconds
+    // and never changes the height. Watching it would re-measure on a timer for
+    // no reason.
+    attributes: true, attributeFilter: ['hidden', 'class'],
   });
   window.addEventListener('resize', schedule);
   schedule();

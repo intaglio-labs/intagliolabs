@@ -2493,65 +2493,44 @@ body.connections .tile-tip.on { opacity: 1; }
 /* MEMORY PROGRESS, in the settings popup.
    ─────────────────────────────────────────────────────────────────────────────
    The one surface that answers "it has all my data, why does it know nothing".
-   Deliberately quiet: this is a background process the owner did not ask to
-   watch, so it reads as a status line rather than a task bar demanding
-   attention. It hides itself entirely when there is nothing to report. */
-.mem {
-  margin: 10px 0 4px;
-  padding: 10px 12px;
-  border: 1px solid var(--hairline);
-  border-radius: 12px;
-  background: var(--glass);
-}
-.mem-top {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.mem-label {
-  font-size: 12px;
-  color: var(--fg);
-}
-.mem-count {
-  margin-left: auto;
-  font-size: 11px;
-  color: var(--secondary);
-  /* Digits that change every few seconds must not reflow the row around them. */
-  font-variant-numeric: tabular-nums;
-}
+   Built on .setting/.setting-col rather than a parallel card style: it sits in a
+   column with sounds, size and onboarding, and a box that was ALMOST those reads
+   as a mistake rather than a distinction. Only the parts those primitives do not
+   have — the state dot and the bar — are defined here.
+   It hides itself entirely when there is nothing to report; a progress bar parked
+   at 100% forever is furniture. */
+/* margin, not gap: this card sits OUTSIDE .settings (whose children are replaced
+   wholesale by connections.js, so a static child there would be wiped) and so it
+   does not inherit that column's 8px gap. Matching the number keeps it in the
+   same rhythm as the rows above it. */
+.mem { gap: 6px; margin-top: 8px; }
+/* Baseline-aligned with the label beside it, not centred on the row: .setting-head
+   aligns on the baseline, and a circle centred on a text baseline sits low. */
 .mem-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+  width: 7px; height: 7px; border-radius: 50%;
   background: var(--status-ok);
-  flex: none;
+  flex: 0 0 auto;
+  transform: translateY(-1px);
 }
 .mem.busy .mem-dot {
   background: var(--hazelnut);
   animation: mem-pulse 1.6s ease-in-out infinite;
 }
+/* The count must never wrap. It is two numbers and the word "of"; broken across
+   lines it reads as two separate facts. */
+.mem .setting-value { white-space: nowrap; flex: 0 0 auto; }
 .mem-bar {
-  margin-top: 8px;
-  height: 3px;
-  border-radius: 2px;
+  height: 3px; border-radius: 2px;
   background: rgba(234, 234, 234, 0.08);
   overflow: hidden;
 }
 .mem-bar > span {
-  display: block;
-  height: 100%;
-  width: 0;
+  display: block; height: 100%; width: 0;
   border-radius: 2px;
   background: var(--hazelnut);
   transition: width 600ms ease;
 }
 .mem:not(.busy) .mem-bar > span { background: var(--status-ok); }
-.mem-note {
-  margin: 7px 0 0;
-  font-size: 11px;
-  line-height: 1.35;
-  color: var(--muted);
-}
 @keyframes mem-pulse {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.3; }
@@ -2561,3 +2540,31 @@ body.connections .tile-tip.on { opacity: 1; }
   .mem.busy .mem-dot { animation: none; }
   .mem-bar > span { transition: none; }
 }
+
+/* SCROLLBARS, for the places where content genuinely cannot fit.
+   ─────────────────────────────────────────────────────────────────────────────
+   A popup is capped by the room between it and the widget it hangs off, so a
+   tall settings column really does scroll — that part is correct. What was wrong
+   is what it looked like: macOS's default overlay bar is a bright light-mode
+   element, and against this palette it read as a foreign object stuck to the
+   panel rather than part of it. (It is also why a screenshot of the panel looked
+   like it had a stray white bar down one side.)
+   Narrow, transparent-tracked, and only as visible as it needs to be. Firefox
+   gets the same intent through the standard properties; WebKit is what actually
+   renders here. */
+.conn-main, .hint-host, .list, #log, .mem-note {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(234, 234, 234, 0.16) transparent;
+}
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(234, 234, 234, 0.14);
+  border-radius: 4px;
+  /* Inset from the edge so the thumb reads as floating in the panel rather than
+     welded to its border. */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: rgba(234, 234, 234, 0.26); background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }
