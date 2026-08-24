@@ -53,6 +53,20 @@ enum Permissions {
     }
   }
 
+  // .readWrite READS. It looks like more than this app needs -- nothing here
+  // adds, edits or deletes a photo -- but PHAccessLevel has exactly two cases,
+  // AddOnly and ReadWrite, and AddOnly is write-only. There is no read-only
+  // level to ask for, so this is the minimum that can see anything. (Tried
+  // narrowing it to a `.read` that does not exist; the SDK header is the
+  // authority and says otherwise.)
+  //
+  // Worth knowing what this grant does and does not buy. The photos CONNECTOR
+  // does not use PhotoKit at all -- it reads Photos.sqlite, which is Full Disk
+  // Access -- because PhotoKit has no people API: there is no PHPerson, no
+  // PHFace, and no title or description on PHAsset (checked against the SDK
+  // headers, not remembered). Face and person names are most of why photos are
+  // worth reading here, so that connector cannot move to PhotoKit the way
+  // calendar and contacts did without losing the feature. See photos.mjs.
   static func photos() -> Status {
     let st = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     switch st {

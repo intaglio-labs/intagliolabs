@@ -128,7 +128,14 @@ you can carry on while it downloads.</p>
        in context, naming this app. Messages and Notes have none — they are
        SQLite stores under ~/Library, so they need Full Disk Access, and no API
        asks for it. That split is macOS', not ours, so the screen shows it
-       honestly rather than flattening everything into one scary permission. -->
+       honestly rather than flattening everything into one scary permission.
+
+       Photos straddles it, which is why its two halves are listed apart. The
+       library's dates and places come through PhotoKit on its own switch; the
+       FACES do not, because PhotoKit has no people API — no PHPerson, no
+       PHFace — so who was in a photo is read from the store and costs the disk
+       grant. Contacts and Calendar used to be in that position too and are not
+       any more; photos cannot follow them until Apple ships the API. -->
   <div class="ob-screen ob-setup" id="screenData" hidden>
     <button class="ob-back" id="dataBack" hidden>← the download</button>
     <p class="ob-tagline">what should i know about?</p>
@@ -145,12 +152,16 @@ none of it leaves this Mac.</p>
         <button class="ob-cta ob-cta-sm">allow</button>
       </div>
       <div class="ob-perm" data-which="photos">
-        <div class="ob-perm-t"><b>Photos</b><span>so i can remember where you were, and who with</span></div>
+        <!-- "and who with" used to be here, and this switch cannot deliver it.
+             Faces and person names live in the Photos store, not in PhotoKit,
+             which has no people API at all — so the who is under the disk grant
+             below and this row promises only what it can keep. -->
+        <div class="ob-perm-t"><b>Photos</b><span>so i can remember where you were, and when</span></div>
         <button class="ob-cta ob-cta-sm">allow</button>
       </div>
       <div class="ob-perm ob-perm-fda" data-which="fda">
-        <div class="ob-perm-t"><b>Messages &amp; Notes</b>
-          <span>these two have no switch of their own — macOS only offers Full Disk Access for them</span></div>
+        <div class="ob-perm-t"><b>Messages, Notes &amp; who's in your photos</b>
+          <span>these have no switch of their own — macOS only offers Full Disk Access for them</span></div>
         <button class="ob-cta ob-cta-sm" id="fdaOpen">open settings</button>
       </div>
     </div>

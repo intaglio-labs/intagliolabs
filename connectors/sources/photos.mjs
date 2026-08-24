@@ -1,4 +1,18 @@
 // The Photos connector: the owner's photo library → hermes.
+// WHY THIS ONE STILL READS THE STORE, when calendar and contacts stopped.
+//
+// It is not an oversight and it is not next on a list. Calendar and contacts
+// moved to EventKit and the Contacts framework because those frameworks return
+// the same data for a far narrower grant. PhotoKit does not: there is no
+// PHPerson, no PHFace, and no title or description on PHAsset -- verified
+// against the SDK headers, which mention none of them. Faces joined to person
+// names are most of the value here ("who was I with"), and a PhotoKit backend
+// would drop them silently while looking like an improvement.
+//
+// So photos sits with iMessage and notes: Full Disk Access is what its data
+// actually costs. If that ever changes -- a public people API -- this is the
+// file to revisit, and the onboarding copy that groups it under the disk grant
+// has to move back at the same time.
 //
 // PERSONAL ROLE ONLY. It is the owner's library on the owner's Mac; the Mini
 // has an empty one under a different Apple account.
