@@ -289,7 +289,9 @@ function syncBar() {
   const open = !barMinimized && (document.activeElement === winput || winput.value.length > 0);
   if (open && !barWasOpen) hzSfx.expand();
   barWasOpen = open;
-  winput.placeholder = open ? 'Message…' : '…';
+  // Collapsed, the glyph in .wchat says 'chat' instead — so no placeholder
+  // text at all, or the two would stack on top of each other.
+  winput.placeholder = open ? 'Message…' : '';
   winput.classList.toggle('open', open);
   document.getElementById('wmin').style.display = open ? 'flex' : 'none';
 }

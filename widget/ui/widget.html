@@ -10,7 +10,21 @@
 <body class="widget">
   <div class="panel" id="panel">
     <div class="wbar">
-      <input id="winput" type="text" placeholder="…" autocomplete="off" spellcheck="false" writingsuggestions="false">
+      <input id="winput" type="text" placeholder="" autocomplete="off" spellcheck="false" writingsuggestions="false">
+      <!-- The collapsed pill's glyph: a speech bubble, replacing the bare "…"
+           it used to show as placeholder text (2026-08-24, owner). It cannot
+           BE the placeholder — that attribute holds text, not markup — so it
+           is a sibling drawn over the pill, and it cannot be a background
+           image either: the CSP here is `default-src 'none'`, which bars
+           every image including data: URIs. Inline SVG is markup already in
+           the DOM, so it is not a fetch. Same trick as the eye swirls below.
+           aria-hidden and pointer-events:none — the input underneath is the
+           real control, and a click has to reach it. -->
+      <span class="wchat" aria-hidden="true">
+        <svg viewBox="0 0 44 44" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 10 H32 A6 6 0 0 1 38 16 V24 A6 6 0 0 1 32 30 H20 L13 36 V30 H12 A6 6 0 0 1 6 24 V16 A6 6 0 0 1 12 10 Z"/>
+        </svg>
+      </span>
       <!-- No send button. Enter submits; the pill tucks under the orb, which
            is the only round thing on the bar now. (2026-08-24, owner.) -->
       <!-- Two layers on purpose: the button owns the press-squash and the

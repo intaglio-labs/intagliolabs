@@ -1039,7 +1039,16 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 .wbar input.open {
   /* 12px left inset: half the collapse vessel hangs off the pill's border,
      and the window edge would clip it without this room. */
-  max-width: 640px; margin-right: 0; margin-left: 12px;
+  max-width: 640px; margin-left: 12px;
+  /* margin-right stays -18px, so the orb keeps its 10px bite on the pill's
+     right end when the bar is open too (2026-08-24, owner). It used to snap
+     back to 0 here, which detached the orb and left it floating a gap away
+     the moment you clicked in.
+     28px of right padding is what that costs: the caret and any long line
+     have to stop before the orb's edge, or text slides under a solid circle
+     and is simply gone. 16px elsewhere, 28 here = the 16 plus the 10px bite
+     plus a 2px breath. */
+  padding-right: 28px;
 }
 /* Collapse arrow: straddles the open pill's left border, pointing the way
    the bar retracts. Shown by JS while open (syncBar), not by a sibling
@@ -1058,6 +1067,33 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 /* Text clears the arrow: the vessel reaches 12px into the pill. */
 .wbar input.open { padding-left: 20px; }
 .wbar input::placeholder { color: var(--muted); }
+
+/* The collapsed pill's speech-bubble glyph. Absolutely placed rather than
+   flowed, because it has to sit ON the pill and the pill is an <input>, which
+   cannot have children.
+   WHERE 66px COMES FROM, so the next person can re-derive it instead of
+   nudging: .wbar is flex, gap 8, justify-content flex-end, and the pill
+   carries margin-right -18px. So the orb owns the rightmost 42px, and the
+   pill's right end sits 10px INSIDE it (8 - 18 = -10). The sliver of pill the
+   orb does not cover therefore runs from 42px to 90px off the right edge, and
+   its centre is 66px. translate(50%) puts the glyph's own centre on that
+   line. Change the pill's margin or the orb's size and this moves with them,
+   which is why the arithmetic is written down rather than the answer. */
+.wchat {
+  position: absolute; right: 66px; top: 50%;
+  transform: translate(50%, -50%);
+  width: 19px; height: 19px;
+  color: var(--muted);
+  /* The input beneath is the control. Clicks pass straight through. */
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.wchat svg { display: block; width: 100%; height: 100%; }
+/* Open, the pill is a text field and the glyph would sit in the middle of the
+   sentence. It goes; the "Message…" placeholder takes over. Sibling selector,
+   so the glyph must stay AFTER the input in the markup. */
+.wbar input.open ~ .wchat { opacity: 0; }
+
 .wbar input:focus { border-color: rgba(197, 165, 109, 0.55); }
 /* The way into settings, and the only one — the trinket shelf that used to
    carry connector status was showing the same thing the popup already did.
