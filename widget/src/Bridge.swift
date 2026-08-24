@@ -69,7 +69,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   static let pageCapabilities: [String: Set<String>] = [
     "widget": ["drag", "openChat", "openChatWith", "openConnections", "openPeople",
                "openSky", "voiceArm"],
-    "chat": ["ask", "cancel", "chatReady", "close"],
+    "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
                     "status", "setMotion", "setScale", "setSounds", "openOnboarding",
@@ -761,13 +761,42 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           self.speakIfVoiceTurn(data)
           return
         }
+        // Two questions on an empty answer, and they are different questions:
+        // /stats says whether the memory is still READING, and suggest says whether
+        // something already read would have answered this if anyone had confirmed
+        // it. The second is the one worth acting on, so it wins when both are true.
         self.rows { _, memory in
-          var out = data
-          if let memory { out["memory"] = memory }
-          self.reply(webView, id, out)
-          self.speakIfVoiceTurn(out)
+          self.suggestion(for: utterance) { claim in
+            var out = data
+            if let memory { out["memory"] = memory }
+            if let claim { out["confirm"] = claim }
+            self.reply(webView, id, out)
+            self.speakIfVoiceTurn(out)
+          }
         }
       }
+    case "decideClaim":
+      // Accept or reject ONE claim, from the chat bubble that raised it. The
+      // owner is the actor on the record either way — nothing here decides
+      // anything on its own, it only carries a press to hermes.
+      let claimId = payload["id"] as? Int ?? -1
+      let action = String((payload["action"] as? String ?? "").prefix(8))
+      guard claimId > 0, action == "accept" || action == "reject" else {
+        reply(webView, id, ["state": "error", "error": "bad decision"])
+        break
+      }
+      guard let tok = bearerToken() else {
+        reply(webView, id, ["state": "error", "error": "no token"])
+        break
+      }
+      let dreq = request("POST", hermesBase, "admin/memory/decide", bearer: tok,
+                         json: ["claim_id": claimId, "action": action], timeout: 6)
+      URLSession.shared.dataTask(with: dreq) { [weak self] _, response, _ in
+        let ok = (response as? HTTPURLResponse)?.statusCode == 200
+        DispatchQueue.main.async {
+          self?.reply(webView, id, ["state": ok ? "ok" : "error"])
+        }
+      }.resume()
     case "cancel":
       askTask?.cancel()
       reply(webView, id, ["state": "ok"])
@@ -902,6 +931,38 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     voiceTurnPending = false
     guard let text = data["text"] as? String, data["state"] as? String == "ok" else { return }
     delegate?.speakAnswer(text)
+  }
+
+  /// The proposed claim that would have answered this question, if any.
+  ///
+  /// Only ever called when the answer came back with no sources, so it costs a
+  /// loopback GET on exactly the turns that had nothing to show anyway. Failure
+  /// is silent by design: a suggestion that does not arrive leaves an ordinary
+  /// abstention, which is what the turn already was.
+  private func suggestion(for question: String, done: @escaping ([String: Any]?) -> Void) {
+    guard let tok = bearerToken(), !question.isEmpty,
+          // A query string, so URLComponents rather than the request() helper:
+          // that appends a PATH component and would escape the "?" into the path.
+          var comps = URLComponents(url: hermesBase.appendingPathComponent("admin/memory/suggest"),
+                                    resolvingAgainstBaseURL: false) else { done(nil); return }
+    comps.queryItems = [
+      URLQueryItem(name: "q", value: question),
+      URLQueryItem(name: "limit", value: "1"),
+    ]
+    guard let url = comps.url else { done(nil); return }
+    var req = URLRequest(url: url)
+    req.httpMethod = "GET"
+    req.timeoutInterval = 4
+    req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization")
+    URLSession.shared.dataTask(with: req) { data, _, _ in
+      var first: [String: Any]?
+      if let data,
+         let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+         let claims = obj["claims"] as? [[String: Any]] {
+        first = claims.first
+      }
+      DispatchQueue.main.async { done(first) }
+    }.resume()
   }
 
   private func rows(_ done: @escaping (Int, [String: Any]?) -> Void) {

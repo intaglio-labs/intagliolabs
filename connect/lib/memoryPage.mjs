@@ -17,6 +17,7 @@
 // Same palette and the same no-external-requests posture as the connect page;
 // this file borrows both from page.mjs rather than restating them.
 
+import { groupClaims } from '../../ui/server/memory/group.mjs';
 import { escapeHtml } from './page.mjs';
 
 const C = {
@@ -114,8 +115,18 @@ function claimItem(claim, base, index) {
     claim.current_hash === null ||
     claim.current_hash === undefined ||
     claim.current_hash !== claim.snapshot_hash;
-  return `<li data-id="${escapeHtml(String(claim.id))}" data-i="${index}">
-    <p class="kind">${escapeHtml(claim.kind)}</p>
+  // The ids this card decides for. One for an ordinary claim; several when the
+  // same thing was distilled from several rows — see ui/server/memory/group.mjs.
+  const ids = Array.isArray(claim.group_ids) && claim.group_ids.length > 0
+    ? claim.group_ids
+    : [claim.id];
+  const extra = ids.length - 1;
+  return `<li data-id="${escapeHtml(String(claim.id))}" data-ids="${escapeHtml(ids.join(','))}" data-i="${index}">
+    <p class="kind">${escapeHtml(claim.kind)}${
+      extra > 0
+        ? ` &middot; said ${escapeHtml(String(ids.length))} times`
+        : ''
+    }</p>
     <p class="claim">${escapeHtml(claim.text)}</p>
     <blockquote class="quote">${escapeHtml(claim.quote)}</blockquote>
     <p class="prov">from ${escapeHtml(SOURCE_LABEL[claim.source] ?? claim.source)} on ${escapeHtml(
@@ -130,11 +141,13 @@ function claimItem(claim, base, index) {
     <div class="actions">
       <form method="post" action="${escapeHtml(base)}/memory">
         <input type="hidden" name="claim_id" value="${escapeHtml(String(claim.id))}">
+        <input type="hidden" name="claim_ids" value="${escapeHtml(ids.join(','))}">
         <input type="hidden" name="action" value="accept">
         <button type="submit">Accept</button>
       </form>
       <form method="post" action="${escapeHtml(base)}/memory">
         <input type="hidden" name="claim_id" value="${escapeHtml(String(claim.id))}">
+        <input type="hidden" name="claim_ids" value="${escapeHtml(ids.join(','))}">
         <input type="hidden" name="action" value="reject">
         <button class="reject" type="submit">Reject</button>
       </form>
@@ -204,11 +217,13 @@ function keyboardScript(base) {
     if (progress) progress.textContent = 'all ' + total + ' decided. reload for more.';
   };
 
-  const post = async (id, action) => {
+  // ids is the whole group the card stands for, so a keyboard decision covers
+  // exactly what the button on the same card would have.
+  const post = async (id, ids, action) => {
     const res = await fetch('${base}/memory', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ claim_id: Number(id), action }),
+      body: JSON.stringify({ claim_id: Number(id), claim_ids: ids || String(id), action }),
     });
     if (!res.ok) throw new Error(await res.text());
   };
@@ -217,13 +232,14 @@ function keyboardScript(base) {
     const card = cards[at];
     if (!card || card.classList.contains('done')) return;
     const id = card.dataset.id;
+    const ids = card.dataset.ids;
     card.classList.add('done');
     done += 1;
     if (action === 'accept') acc += 1; else rej += 1;
-    last = { id, action, card };
+    last = { id, ids, action, card };
     paintCounts();
     next();
-    try { await post(id, action); }
+    try { await post(id, ids, action); }
     catch (e) {
       // Put it back rather than pretending. A card that vanished without the
       // decision landing is the one failure the owner cannot see.
@@ -246,12 +262,12 @@ function keyboardScript(base) {
     else if (k === 'k' || k === 'arrowup') { e.preventDefault(); at = Math.max(at - 1, 0); show(); }
     else if (k === 'u' && last) {
       e.preventDefault();
-      const { id, action, card } = last;
+      const { id, ids, action, card } = last;
       const opposite = action === 'accept' ? 'reject' : 'accept';
       // Append the opposite decision. Nothing is rewritten -- claim_decision
       // is append-only and the latest one wins, so undo is another decision
       // rather than an erasure.
-      post(id, opposite).then(() => {
+      post(id, ids, opposite).then(() => {
         card.classList.remove('done');
         done -= 1;
         if (action === 'accept') acc -= 1; else rej -= 1;
@@ -284,7 +300,7 @@ export function renderMemoryPage(
     ? `<p class="empty">intaglio labs could not reach its own store: ${escapeHtml(error)}</p>`
     : claims.length === 0
       ? `<p class="empty">Nothing to review.<br>An empty queue is the normal state — most messages say nothing durable, and the distiller is meant to return nothing for them.</p>`
-      : `<ul id="q">${claims.map((c, i) => claimItem(c, base, i)).join('')}</ul>`;
+      : `<ul id="q">${grouped(claims).map((c, i) => claimItem(c, base, i)).join('')}</ul>`;
 
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -325,4 +341,12 @@ export function renderMemoryPage(
       ? `<script nonce="${escapeHtml(nonce)}">${keyboardScript(base)}</script>`
       : ''
   }</body></html>`;
+}
+
+// Fold repeats into one card. The same fact distilled from four messages about
+// one evening is four cards asking one question, and it is most of what makes the
+// queue feel endless. The lead claim carries the ids of the rest so a single press
+// decides them all — each still recorded individually.
+function grouped(claims) {
+  return groupClaims(claims).map((g) => ({ ...g.lead, group_ids: g.ids }));
 }

@@ -35,11 +35,14 @@ function bubble(cls, text) {
   return el;
 }
 
-async function send(utterance) {
+// `echo` is false when the question is being asked AGAIN on the owner's behalf —
+// after confirming a claim that would have answered it. The question is already
+// on screen; repeating the bubble would make it look like they asked twice.
+async function send(utterance, { echo = true } = {}) {
   utterance = String(utterance ?? '').trim().slice(0, 2000);
   if (!utterance || busy) return;
   clearNote();
-  bubble('user', utterance);
+  if (echo) bubble('user', utterance);
   const pending = bubble('assistant pending', '');
   // Three dots rather than a CSS pseudo-element, because the answer arrives by
   // assigning textContent — which wipes children, so the indicator removes
@@ -75,6 +78,21 @@ async function send(utterance) {
     // reads as broken rather than busy, and is the single most confusing thing
     // this app can say. Native attaches the reading state to a sourceless
     // answer; this is where it becomes a sentence.
+    // ASK AT THE POINT OF USE.
+    //
+    // Something already read WOULD have answered this, if anyone had confirmed
+    // it. That is worth one question here, with the thing that needed it still on
+    // screen — and it is the alternative to a queue of a hundred confirmations
+    // nobody works through. One claim, its own words, and the quote it came from.
+    //
+    // Nothing is accepted by showing it. The press is the decision, and a reject
+    // is remembered so the same claim is never raised again.
+    const confirm = data.confirm;
+    if (confirm && typeof confirm.text === 'string' && Number.isInteger(confirm.id)) {
+      pending.appendChild(confirmCard(confirm, utterance));
+      log.scrollTop = log.scrollHeight;
+      return;
+    }
     const mem = data.memory;
     if (mem && mem.state === 'reading' && mem.total > 0) {
       const note = document.createElement('span');
@@ -191,3 +209,59 @@ document.addEventListener('keydown', (e) => {
 hzAutoFit(document.getElementById('log'));
 
 hzApplyPrefs();
+
+// The point-of-use confirmation card. Deliberately small: a claim, the words it
+// came from, and two buttons. No confidence number and no source chip — this is a
+// yes/no about one sentence, and everything else is decoration on a decision.
+function confirmCard(claim, utterance) {
+  const box = document.createElement('span');
+  box.className = 'confirm';
+
+  const lead = document.createElement('span');
+  lead.className = 'confirm-lead';
+  lead.textContent = 'i think i read this — is it right?';
+
+  const text = document.createElement('span');
+  text.className = 'confirm-text';
+  text.textContent = claim.text;
+
+  box.append(lead, text);
+
+  // THE QUOTE IS THE POINT, same as the review page. A claim without the words it
+  // came from cannot be judged, only guessed at.
+  if (typeof claim.quote === 'string' && claim.quote.trim()) {
+    const q = document.createElement('span');
+    q.className = 'confirm-quote';
+    q.textContent = `“${claim.quote.trim()}”`;
+    box.appendChild(q);
+  }
+
+  const row = document.createElement('span');
+  row.className = 'confirm-row';
+  const decide = (action, label) => {
+    const b = document.createElement('button');
+    b.className = action === 'accept' ? 'confirm-yes' : 'confirm-no';
+    b.textContent = label;
+    b.addEventListener('click', async () => {
+      for (const el of row.querySelectorAll('button')) el.disabled = true;
+      const res = await hzPost('decideClaim', { id: claim.id, action }).catch(() => null);
+      if (!res || res.state !== 'ok') {
+        lead.textContent = "couldn't save that — try again";
+        for (const el of row.querySelectorAll('button')) el.disabled = false;
+        return;
+      }
+      box.classList.add('done');
+      row.remove();
+      lead.textContent = action === 'accept' ? 'got it — i will remember that' : 'ok, forgotten';
+      // Accepted means the question that raised it can now be answered, so answer
+      // it. Rejecting leaves the abstention standing, which was already true.
+      if (action === 'accept' && typeof utterance === 'string' && utterance) {
+        send(utterance, { echo: false });
+      }
+    });
+    return b;
+  };
+  row.append(decide('accept', 'yes'), decide('reject', 'no'));
+  box.appendChild(row);
+  return box;
+}

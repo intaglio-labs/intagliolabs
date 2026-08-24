@@ -18,7 +18,7 @@ import { readToken, hermesBase } from '../lib/memory.mjs';
 const CLAIM = Object.freeze({
   id: 12,
   kind: 'preference',
-  text: 'Austin would rather do mornings than evenings.',
+  text: 'The owner would rather do mornings than evenings.',
   quote: "i'd rather do mornings",
   snapshot_hash: 'abc',
   current_hash: 'abc',
@@ -35,7 +35,7 @@ const page = (over = {}, opts = {}) =>
 
 test('the claim is shown with its exact quote and its provenance', () => {
   const html = page();
-  assert.ok(html.includes('Austin would rather do mornings than evenings.'));
+  assert.ok(html.includes('The owner would rather do mornings than evenings.'));
   assert.ok(html.includes('i&#39;d rather do mornings'), 'the quote is present, escaped');
   assert.ok(html.includes('a message you sent'), 'the source is named in plain words');
   assert.ok(html.includes('2023-11-14'), 'and dated');
@@ -87,12 +87,39 @@ test('a claim whose row has drifted says so instead of showing a false receipt',
 });
 
 test('every claim gets its own accept and reject, and there is no bulk action', () => {
-  const html = page({ claims: [CLAIM, { ...CLAIM, id: 13 }] });
+  // DIFFERENT claims, which is the invariant this test is actually about. It used
+  // two identical ones, which now fold into a single card by design — see the
+  // grouping test below — and that would have made this pass or fail for the
+  // wrong reason.
+  const html = page({
+    claims: [CLAIM, { ...CLAIM, id: 13, text: 'The owner takes the train to work.' }],
+  });
   assert.equal((html.match(/name="claim_id"/gu) ?? []).length, 4, 'two forms per claim');
   assert.equal((html.match(/value="accept"/gu) ?? []).length, 2);
   assert.equal((html.match(/value="reject"/gu) ?? []).length, 2);
   // A button that accepts forty claims accepts the one wrong claim too.
   assert.ok(!/accept[- ]all/iu.test(html), 'no bulk accept');
+});
+
+// GROUPING IS NOT A BULK ACTION, and the difference is the whole justification.
+//
+// A bulk accept decides claims the owner never read. A group is ONE claim, read
+// once, that happened to be distilled from several rows saying the same thing —
+// four messages about one evening produce four identical sentences, and asking
+// four times gets one decision's worth of information at four times the cost.
+// The card still shows the text and its quote; what it does not do is show them
+// again, three more times.
+test('repeats fold into one card that decides for all of them', () => {
+  const html = page({
+    claims: [CLAIM, { ...CLAIM, id: 13 }, { ...CLAIM, id: 14 }],
+  });
+  assert.equal((html.match(/<li /gu) ?? []).length, 1, 'three identical claims, one card');
+  assert.ok(html.includes('said 3 times'), 'and it says how many it stands for');
+  assert.ok(
+    html.includes('name="claim_ids" value="12,13,14"'),
+    'the press carries every id, so each decision is still recorded individually'
+  );
+  assert.ok(!/accept[- ]all/iu.test(html), 'still no bulk accept');
 });
 
 test('the keyboard layer is enhancement, and the forms survive without it', () => {

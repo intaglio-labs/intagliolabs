@@ -93,6 +93,18 @@ function readBody(req, limit = 8 * 1024) {
 // Renders the queue, or an honest failure. A page that cannot reach hermes
 // says so; it never renders an empty queue, because "nothing to review" and
 // "the store is unreachable" are opposite facts that look identical.
+// "12,15,19" → [12, 15, 19]. Anything that is not a positive integer is dropped
+// rather than failing the whole decision: one malformed id must not cost the
+// owner the reading they just did.
+function idList(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return [];
+  return raw
+    .split(',')
+    .map((n) => Number(n.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0)
+    .slice(0, 50);
+}
+
 async function memoryPage(token, opts = {}) {
   // A fresh nonce per response. The review page is the ONLY page here that
   // runs script, and it runs exactly the one block below its own nonce --
@@ -248,7 +260,7 @@ async function handleRequest(req, res) {
   if (!validateToken(token)) {
     // Same response for wrong, expired and revoked — a probe learns nothing
     // about which tokens ever existed.
-    send(res, 404, 'This link is not valid. Ask Hazlie for a new one.', 'text/plain; charset=utf-8');
+    send(res, 404, 'This link is not valid. Open the app and ask for a new one.', 'text/plain; charset=utf-8');
     return;
   }
 
@@ -262,6 +274,10 @@ async function handleRequest(req, res) {
     }
     let claimId = NaN;
     let choice = '';
+    // A GROUP decision. The queue merges claims that say the same thing, so one
+    // reading answers for all of them — see ui/server/memory/group.mjs. Empty
+    // for a single card, which is still the common case.
+    let ids = [];
     // Two callers, one handler: the page's fetch (fast, no reload) and the
     // plain <form> that still works with scripting off. The form path is not
     // dead weight -- it is what makes the review surface survive a CSP change
@@ -273,10 +289,12 @@ async function handleRequest(req, res) {
         const parsed = JSON.parse(raw);
         claimId = Number(parsed?.claim_id);
         choice = typeof parsed?.action === 'string' ? parsed.action : '';
+        ids = idList(parsed?.claim_ids);
       } else {
         const form = new URLSearchParams(raw);
         claimId = Number(form.get('claim_id'));
         choice = form.get('action') ?? '';
+        ids = idList(form.get('claim_ids'));
       }
     } catch {
       send(res, 413, 'Too large.', 'text/plain; charset=utf-8');
@@ -294,7 +312,12 @@ async function handleRequest(req, res) {
       return;
     }
     try {
-      await decide(claimId, choice);
+      // The group's ids if the card carried any, else the one it names. Each
+      // decision is its own row in claim_decision — grouping is a reading
+      // convenience, and the record still says what was decided about every
+      // individual claim.
+      const targets = ids.length > 0 ? ids : [claimId];
+      for (const target of targets) await decide(target, choice);
       if (wantsJson) {
         send(res, 200, JSON.stringify({ ok: true, claim_id: claimId, action: choice }), 'application/json; charset=utf-8');
         return;

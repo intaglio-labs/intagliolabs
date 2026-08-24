@@ -45,7 +45,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { recallClaims, groundingLines } from './memory/retrieve.mjs';
+import { recallClaims, groundingLines, pendingForQuery } from './memory/retrieve.mjs';
 import { episodicContext } from './memory/episodic.mjs';
 import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch } from './people/search.mjs';
@@ -1281,6 +1281,19 @@ function parseTsParam(params, name, fallback) {
 // What must NOT happen is this text reaching Messages. `hz memory` returns
 // counts only; quotes never transit Apple's servers to every device on the
 // Apple ID. That boundary lives in the courier, not here.
+// THE QUEUE IS NOT EVERYTHING PROPOSED, and that is the point.
+//
+// A claim the model itself is unsure about is not worth a person's attention up
+// front. Below this floor a claim is not queued, not counted as waiting, and
+// never nags — it simply sits, and it can still surface later at the point of
+// use, when a real question has just matched it and the decision is worth making.
+// Nothing is deleted and nothing is auto-accepted; the difference is only whether
+// the owner is ASKED, and when.
+//
+// NULL is not low. A claim distilled before the prompt asked for a number carries
+// no p, which is unknown rather than doubtful, so it stays in the queue.
+export const REVIEW_FLOOR = 0.5;
+
 export function pendingClaims(db, { limit = PENDING_CAP } = {}) {
   const rows = db
     .prepare(
@@ -1293,6 +1306,9 @@ export function pendingClaims(db, { limit = PENDING_CAP } = {}) {
         'JOIN distill_run r ON r.id = c.run_id ' +
         'LEFT JOIN context x ON x.id = s.context_id ' +
         'WHERE NOT EXISTS (SELECT 1 FROM claim_decision d WHERE d.claim_id = c.id) ' +
+        // The floor — see REVIEW_FLOOR. Doubtful claims wait for a question
+        // rather than for the owner.
+        'AND (c.p_claim IS NULL OR c.p_claim >= ' + REVIEW_FLOOR + ') ' +
         // CONFIDENCE FIRST, then newest. The queue used to be c.id DESC alone,
         // which is arrival order -- fine at a hundred claims and useless at the
         // scale this corpus reaches, where the reader's attention runs out long
@@ -1325,6 +1341,15 @@ export function claimCounts(db) {
     proposed: one(
       'SELECT count(*) AS n FROM claim c WHERE NOT EXISTS ' +
         '(SELECT 1 FROM claim_decision d WHERE d.claim_id = c.id)'
+    ),
+    // Of those, the ones actually being ASKED about. `proposed` is the honest
+    // total and stays; `queued` is what the owner is on the hook for, and the
+    // difference between them is the doubtful tail waiting for a question.
+    queued: one(
+      'SELECT count(*) AS n FROM claim c WHERE NOT EXISTS ' +
+        '(SELECT 1 FROM claim_decision d WHERE d.claim_id = c.id) ' +
+        'AND (c.p_claim IS NULL OR c.p_claim >= ?)',
+      REVIEW_FLOOR
     ),
     accepted: one('SELECT count(*) AS n FROM v_claim_accepted'),
     rejected: one(
@@ -1599,6 +1624,33 @@ async function handleAdmin(db, req, res, cors, url, channel) {
   // recallClaims does not select one. That is the boundary: the owner's
   // verbatim words never transit Apple's servers, and the guarantee lives in
   // the SQL rather than in the courier remembering to strip a field.
+  // WHAT WOULD HAVE ANSWERED THIS, HAD ANYONE CONFIRMED IT.
+  //
+  // The review queue asks about everything up front, which is a chore nobody
+  // finishes; this is the other door. Given a question that found nothing
+  // accepted, it returns the PROPOSED claim that would have answered it — one
+  // decision, at the moment it pays off, with the question still on screen.
+  //
+  // Read-only and decides nothing. It also skips anything already decided, so a
+  // rejected claim is never raised again.
+  if (req.method === 'GET' && url.pathname === '/admin/memory/suggest') {
+    for (const key of url.searchParams.keys()) {
+      if (!RECALL_PARAMS.includes(key)) {
+        throw badRequest(`unknown query parameter ${JSON.stringify(key)}`);
+      }
+    }
+    const q = url.searchParams.get('q') ?? '';
+    // Same hardening as recall: raw user text must never reach MATCH.
+    const match = q.trim().length === 0 ? null : ftsQuery(q);
+    send(
+      res,
+      200,
+      { claims: pendingForQuery(db, { match, question: q, limit: clampLimit(url.searchParams.get('limit'), 1, 5) }) },
+      cors
+    );
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/admin/memory/recall') {
     for (const key of url.searchParams.keys()) {
       if (!RECALL_PARAMS.includes(key)) {
@@ -1989,9 +2041,12 @@ function memoryProgress(db) {
       db
         .prepare(
           'SELECT count(*) AS n FROM claim c WHERE NOT EXISTS (' +
-            'SELECT 1 FROM claim_decision d WHERE d.claim_id = c.id)'
+            'SELECT 1 FROM claim_decision d WHERE d.claim_id = c.id) ' +
+            // The floor, so the number the UI leads with is what the owner is
+            // actually being asked about — see REVIEW_FLOOR.
+            'AND (c.p_claim IS NULL OR c.p_claim >= ?)'
         )
-        .get()?.n ?? 0
+        .get(REVIEW_FLOOR)?.n ?? 0
     );
     const accepted = Number(
       db.prepare('SELECT count(*) AS n FROM v_claim_accepted').get()?.n ?? 0
