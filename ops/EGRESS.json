@@ -41,7 +41,7 @@
     "capability exists.",
     "",
     "2026-08-24. The marketing site MOVED INTO this repository, at site/. It reaches",
-    "SEVEN hosts, six of them declared below under kind `website`. The seventh is huggingface.co, which already had an entry as a `model-asset` -- one host, two contexts, so filtering by kind alone under-counts the site. They were",
+    "EIGHT hosts, seven of them declared below under kind `website`. The seventh is huggingface.co, which already had an entry as a `model-asset` -- one host, two contexts, so filtering by kind alone under-counts the site. They were",
     "removed on 2026-08-22 when site/ was a separate artifact; that sentence is now",
     "false and has been rewritten rather than left standing. connectors/test/",
     "egress.test.mjs promoted `site` out of ROOTS_ELSEWHERE and into ROOTS in the",
@@ -278,7 +278,7 @@
       "purpose": "download the Kokoro voice and llama model weights",
       "credential": "HF_TOKEN for gated repos",
       "decision": "Build/setup-time model download, not reachable from the running app. Model weights are hundreds of megabytes and are fetched rather than committed. Was UNRECORDED for the same reason as the sources above.",
-      "evidence": "widget/voice/scripts/fetch-models.mjs; ops/setup-llm.sh (the app fetching weights) AND site/notices/index.html:314,318,334 (links the notices page hands the visitor). Two contexts, one host: the kind names the larger exposure, and this line is why filtering by kind alone under-counts the site.",
+      "evidence": "widget/src/ModelSetup.swift:33 -- the APP downloads the answer model itself (URLSessionDownloadTask), which is the largest of these and was the one the privacy policy denied; widget/voice/scripts/fetch-models.mjs and ops/setup-llm.sh (scripts the owner runs); site/notices/index.html:314,318,334 (links the notices page hands the visitor). Three contexts, one host -- filtering by kind alone under-counts both the site and the app.",
       "note": "Until 4128ae2c this was ALSO a RUNTIME path in the shipped app: widget/ui/ear-main.js called createVoice() without localOnly, so a missing vendored voice file fell through to kokoro-js's hardcoded huggingface.co fetch. Fixed in source; the notarized DMG still carries the old behaviour until re-cut."
     },
     {
@@ -443,6 +443,16 @@
       "credential": "none",
       "decision": "Public marketing site. A link the visitor may click; nothing is fetched unless they do. No credential, no automatic request.",
       "evidence": "site/notices/index.html:111,303 http://www.apache.org/licenses/LICENSE-2.0"
+    },
+    {
+      "host": "mau.fi",
+      "kind": "website",
+      "component": "site/privacy/index.html",
+      "direction": "outbound",
+      "purpose": "mautrix project homepage",
+      "credential": null,
+      "decision": "allowed",
+      "evidence": "site/privacy/index.html -- \u00a76 links the mautrix project when naming the bridges that reach the chat platforms, so the reader can see whose software runs on their Mac"
     }
   ],
   "_loopback": [
