@@ -305,7 +305,7 @@ const homeCard = document.getElementById('homeCard');
 // If the bridge cannot say where the widget is, put the ring where the widget
 // is pinned anyway. A scene that points at roughly the right corner is worth
 // more than one that does not appear.
-const HOME_FALLBACK = { x: 0.78, y: 0.86, w: 0.20, h: 0.10 };
+const HOME_FALLBACK = { x: 0.78, y: 0.86, w: 0.20, h: 0.10, clearY: 0.83 };
 
 function placeHome(spot) {
   const s = spot && typeof spot.x === 'number' ? spot : HOME_FALLBACK;
@@ -321,7 +321,15 @@ function placeHome(spot) {
   // straight down the copy into the thing being pointed at. Clamped off the
   // top so it cannot slide under the menu bar on a short display.
   homeCard.style.right = `${Math.max(24, w - (left + width))}px`;
-  homeCard.style.bottom = `${Math.max(24, h - top + 26)}px`;
+  // Cleared against the WINDOW's top (clearY), not the ring's. The widget
+  // reserves an empty band above its bar, the ring deliberately excludes it,
+  // and for this scene the widget window sits above this page -- so a card
+  // placed against the ring lands inside that invisible band and the button
+  // stops receiving clicks. See widgetSpot() in main.swift. Falls back to the
+  // ring's top for a bridge that predates clearY, which is the old behaviour
+  // rather than a broken one.
+  const clearTop = typeof s.clearY === 'number' ? s.clearY * h : top;
+  homeCard.style.bottom = `${Math.max(24, h - clearTop + 26)}px`;
 }
 
 function runHome() {

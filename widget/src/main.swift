@@ -770,6 +770,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       "y": Double((p.maxY - w.maxY) / p.height),
       "w": Double(w.width / p.width),
       "h": Double(w.height / p.height),
+      // THE TOP OF THE WHOLE WINDOW, not of the ring above.
+      //
+      // `y` is deliberately the top of the BAR: the slot subtracted above is
+      // empty most of the time and ringing it would circle a rectangle whose
+      // top half is nothing. But the WINDOW still owns that band, and for the
+      // length of this scene the window sits one level ABOVE the onboarding
+      // panel (see spotlightWidget) -- so the empty band takes clicks that
+      // never reach the page under it.
+      //
+      // The card was placed 26pt above `y` and the slot is 76pt, which put the
+      // "lets go" button roughly 50pt INSIDE that window. It rendered, it
+      // highlighted, and clicking it did nothing, because the click was landing
+      // on the widget. This is the line the card has to clear instead, and it
+      // only became a distinct line when the cloud slot was added (main.swift's
+      // header, 2026-08-24) -- before that the two tops were the same and 26pt
+      // was clear air.
+      "clearY": Double((p.maxY - widgetWindow.frame.maxY) / p.height),
     ]
   }
 
