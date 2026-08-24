@@ -9,6 +9,12 @@
 
 // The always-present message bar IS the chat entry point: submitting
 // opens the chat window with the message already sent.
+// ENTER IS THE ONLY SEND PATH. The ↑ button that used to sit between the pill
+// and the orb was removed (2026-08-24, owner); the pill now tucks under the
+// orb instead. Deliberately NOT rehomed onto the orb's click: that click is
+// the tap-to-arm voice control below, and one control cannot mean both "speak
+// this turn" and "send what I typed" without picking for the user which one a
+// tap meant.
 const winput = document.getElementById('winput');
 function submitFromWidget() {
   const utterance = winput.value.trim().slice(0, 2000);
@@ -17,10 +23,11 @@ function submitFromWidget() {
   hzSfx.send();
   hzPost('openChatWith', { utterance });
 }
-document.getElementById('wsend').addEventListener('click', submitFromWidget);
 // The orb is the tap-to-arm voice control (VOICE-PLAN rev 3 §2): one tap
 // arms exactly one spoken turn, a second tap cancels. Native relays state
 // back so the orb runs its .talking timings while armed or speaking.
+// IN v1 THE TAP ONLY TEASES — see VOICE_TEASE below for why and for the one
+// line that hands the orb back to voice.
 // The button is the hit target and carries the press-squash; the inner span
 // is the orb itself and carries the resting jelly and the armed warp, so
 // `talking` goes on the inner one.
@@ -41,15 +48,58 @@ orbEl.addEventListener('animationend', (e) => {
   if (e.animationName === 'orb-wake') orbEl.classList.remove('waking');
 });
 
+// ---------------- voice, teased rather than armed ----------------
+// VOICE IS NOT SHIPPING IN v1 (owner, 2026-08-24). Not because it is missing —
+// the whole stack is here and works: widget/voice, the ear page, native's
+// `voiceArm` bridge case, the models. It is simply not good enough yet, and a
+// first impression made by a bad voice turn is worse than no voice turn.
+//
+// So the tap says a line and stops. NOTHING IN THE VOICE STACK WAS REMOVED:
+// flip VOICE_TEASE to false and the tap posts `voiceArm` exactly as it did,
+// which is the whole point of it being one constant rather than a deletion.
+//
+// The line is a hardcoded string on purpose. It has to land on the same frame
+// as the tap — anything that asks hermes, or the model, for a sentence spends
+// a round trip proving it has nothing to say.
+//
+// It is drawn as a dream cloud over the orb's head (palette.css §.dream). That
+// needed room the window did not have: see main.swift's cloudSlot, which
+// reserves it above the bar.
+const VOICE_TEASE = true;
+const TEASE_TEXT = 'voice things coming soon';
+const TEASE_MS = 2400;
+const dreamEl = document.getElementById('wdream');
+const dreamText = document.getElementById('wdreamtext');
+let teaseTimer = null;
+function showTease() {
+  dreamText.textContent = TEASE_TEXT;
+  dreamEl.classList.add('on');
+  clearTimeout(teaseTimer);
+  // Re-tapping restarts the dwell rather than stacking timers, so a second
+  // tap reads as "yes, still coming soon" instead of cutting the line short.
+  teaseTimer = setTimeout(() => {
+    dreamEl.classList.remove('on');
+    teaseTimer = null;
+  }, TEASE_MS);
+}
+function hideTease() {
+  if (!teaseTimer) return;
+  clearTimeout(teaseTimer);
+  teaseTimer = null;
+  dreamEl.classList.remove('on');
+}
+
 // ---------------- jackpot ----------------
 // Hammer the orb and it pays out. The look is palette.css §jackpot; what is
 // here is the counting, the sound, and the one thing that actually needed
 // solving — voice.
 //
-// THE INTERLOCK. `voiceArm` is a toggle: one tap arms a spoken turn, the next
-// cancels it. Left alone, a dozen taps is a dozen toggles, and every odd one
-// starts the greeting over — which is what spamming the orb used to sound
-// like.
+// THE INTERLOCK. Dormant while VOICE_TEASE is on — a tease posts nothing, so
+// there is nothing to double-toggle — but kept intact, because it is the
+// reasoning that has to hold the day voice is armed again.
+// `voiceArm` is a toggle: one tap arms a spoken turn, the next cancels it.
+// Left alone, a dozen taps is a dozen toggles, and every odd one starts the
+// greeting over — which is what spamming the orb used to sound like.
 //
 // So a BURST IS ONE TAP. The first one arms, exactly as a deliberate tap
 // does, and every tap after it inside the burst posts nothing at all. One
@@ -176,6 +226,7 @@ function bumpJackpot(count) {
   setSwell(1 + Math.min(count - SPAM_TRIP, POP_AT - SPAM_TRIP) * SWELL_PER_TAP);
   if (!jackpotOn) {
     jackpotOn = true;
+    hideTease(); // the payout is the joke now; the cloud would hang through it
     jackpotStarted = Date.now();
     orbEl.classList.remove('waking');
     orbEl.classList.add('jackpot');
@@ -208,9 +259,11 @@ function orbTap() {
   burstTimer = setTimeout(endBurst, BURST_END);
 
   if (burst === 1) {
-    // An ordinary tap, unchanged: wake, arm, greet.
+    // An ordinary tap: wake, then either tease or arm. The wake animation and
+    // its tone run either way — the orb still has to answer the finger.
     hzSfx.wake();
     wakeOrb();
+    if (VOICE_TEASE) { showTease(); return; }
     hzPost('voiceArm');
     return;
   }
@@ -266,47 +319,81 @@ window.__hzWake = hzApplyTimeOfDay(orbEl);
 winput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitFromWidget();
 });
-// Collapsed, the pill shows a bare ellipsis; the real placeholder only
-// reads once a click has focused it and slid the bar out. Expansion is
-// click-driven — hover proved twitchy. Focus also surfaces the chat
-// window, so the conversation is on screen before the first keystroke.
+// Collapsed, the pill is a sliver carrying the .wchat glyph; the real
+// placeholder only reads once a click has focused it and slid the bar out.
+// Expansion is click-driven — hover proved twitchy. Focus also surfaces the
+// chat window, so the conversation is on screen before the first keystroke.
 // A class, not :focus — the widget lives in a nonactivating panel, where
 // WebKit fires focus/blur events but does not reliably apply the :focus
-// pseudo-class. The minimize badge overrides everything, draft included:
-// the bar stays collapsed until the sliver is clicked again.
+// pseudo-class. barMinimized overrides everything, draft included: the bar
+// stays collapsed until the glyph or the sliver is clicked again.
 let barMinimized = false;
 // The bar is an <input>, so the delegated button squish never sees it. The
 // tone is tied to the OPENING rather than to a click: the sliver, a focus
 // from anywhere, and a restored draft all open it, and only the transition
 // should sound — syncBar runs on every focus and blur.
 let barWasOpen = false;
+const chatBtn = document.getElementById('wchat');
+let barOpen = false;
 function syncBar() {
   const open = !barMinimized && (document.activeElement === winput || winput.value.length > 0);
   if (open && !barWasOpen) hzSfx.expand();
   barWasOpen = open;
-  winput.placeholder = open ? 'Message…' : '…';
+  barOpen = open;
+  // Collapsed, the glyph in .wchat says 'chat' instead — so no placeholder
+  // text at all, or the two would stack on top of each other.
+  winput.placeholder = open ? 'Message…' : '';
   winput.classList.toggle('open', open);
-  document.getElementById('wmin').style.display = open ? 'flex' : 'none';
+  syncChatGlyph();
 }
-winput.addEventListener('focus', () => { barMinimized = false; syncBar(); });
+// The glyph's third face. Gated on there being something to SEND rather than
+// on the bar being open, so a collapsed pill holding a draft still offers the
+// arrow — pressing it is then the shortest path to the thing you already
+// typed. trim(), because submitFromWidget trims too and an arrow that does
+// nothing when pressed is worse than no arrow.
+function syncChatGlyph() {
+  const ready = winput.value.trim().length > 0;
+  chatBtn.classList.toggle('ready', ready);
+  chatBtn.title = ready ? 'Send' : (barOpen ? 'Collapse' : 'Chat');
+}
+winput.addEventListener('focus', () => { barMinimized = false; hideTease(); syncBar(); });
 // NOT on focus: the native openChat makes the chat panel key, which yanks
 // focus off this input mid-click and the bar snaps shut before a keystroke
 // lands. Until the bridge can order the chat front without focusing it,
 // the chat appears on send instead.
 winput.addEventListener('blur', syncBar);
-// POINTERDOWN, not click. The collapse arrow is only rendered while the bar
-// is open, and pressing it blurs the input — which runs syncBar, which sets
-// the arrow to display:none. On the press. So by the time the button came up
-// again there was nothing under the cursor to receive a click, and whether
-// the bar collapsed depended on which of the two paths happened to win.
-// Acting on the press means the button cannot be taken away mid-gesture, and
-// it feels quicker besides.
-document.getElementById('wmin').addEventListener('pointerdown', (e) => {
-  e.preventDefault(); // or the input takes focus back on the way up
-  barMinimized = true;
-  winput.blur();
+// Every keystroke, not just Enter: the glyph has to flip to the arrow on the
+// first character and back on the last backspace. `input` rather than
+// `keydown` so a paste and a native delete count too.
+winput.addEventListener('input', () => { hideTease(); syncChatGlyph(); });
+
+// The glyph is the bar's only button, and it reads its meaning off the bar:
+//   text in the pill -> send it
+//   bar open, empty  -> collapse it   (what the › badge used to do)
+//   bar collapsed    -> open it
+// POINTERDOWN, not click, and the reason survives the ›'s removal: pressing
+// the button while the input has focus blurs the input, which runs syncBar
+// mid-gesture. Acting on the press means the outcome cannot depend on which
+// of the two paths wins the race, and it feels quicker besides.
+chatBtn.addEventListener('pointerdown', (e) => {
+  e.preventDefault(); // or the button takes focus off the input on the way down
+  hideTease();        // reaching for the bar means the line has been read
+  if (winput.value.trim()) {
+    // Focus stays in the pill, so the next message can be typed straight away.
+    submitFromWidget();
+    syncChatGlyph();
+    return;
+  }
+  if (barOpen) {
+    barMinimized = true;
+    winput.blur();
+  } else {
+    barMinimized = false;
+    winput.focus();
+  }
   syncBar();
 });
+syncChatGlyph();
 
 // The gear is the only way into settings now — connectors, their status, and
 // the motion switch all live behind it.

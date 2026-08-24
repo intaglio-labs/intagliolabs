@@ -9,9 +9,57 @@
 </head>
 <body class="widget">
   <div class="panel" id="panel">
+    <!-- What the orb says while voice is teased rather than armed: a message
+         bubble over its head, with two puffs trailing down to its crown so it
+         reads as the orb's thought rather than as a notification the app is
+         showing about it.
+         IT NEEDS ROOM IN THE WINDOW, NOT JUST IN THE PAGE. The widget window
+         is cut to content and clips anything past its edge, so main.swift's
+         widgetBase carries `cloudSlot` (76px) of empty height above the bar
+         for this. The window grows upward from a pinned bottom edge, so that
+         reservation does not move the bar — see the note there.
+         The body was a scalloped cloud until 2026-08-24 (owner): the puffs
+         are the part that says "thought", and the scallops on top of them
+         were costume. A plain message outline says the same thing quieter.
+         Inline SVG because the CSP here is `default-src 'none'`, which bars
+         every image INCLUDING data: URIs. Markup in the DOM is not a fetch. -->
+    <div class="dream" id="wdream">
+      <svg class="dream-svg" viewBox="0 0 280 82" aria-hidden="true">
+        <rect class="dream-body" x="56" y="4" width="216" height="48" rx="18" ry="18"/>
+        <!-- The thought trail, descending toward the orb's crown. -->
+        <circle class="dream-body" cx="238" cy="62" r="6"/>
+        <circle class="dream-body" cx="252" cy="74" r="3.5"/>
+      </svg>
+      <span class="dream-text" id="wdreamtext" role="status" aria-live="polite"></span>
+    </div>
     <div class="wbar">
-      <input id="winput" type="text" placeholder="…" autocomplete="off" spellcheck="false" writingsuggestions="false">
-      <button class="send" id="wsend" title="Send">↑</button>
+      <input id="winput" type="text" placeholder="" autocomplete="off" spellcheck="false" writingsuggestions="false">
+      <!-- The bar's one button. It is the chat glyph, the collapse control and
+           the send key, and which of those it means is read off the bar's own
+           state rather than off three separate controls (2026-08-24, owner):
+           collapsed it opens the pill, open-and-empty it collapses it again,
+           and the moment there is text to send it becomes an up arrow. The ›
+           badge that used to do the collapsing is gone with it — it lived on
+           the pill's far LEFT, which is the opposite end from everything else
+           you touch on this bar.
+           WHY IT IS A SIBLING AND NOT INSIDE THE PILL: the pill is an <input>,
+           which cannot have children. And the glyph cannot be a background
+           image either — the CSP here is `default-src 'none'`, which bars every
+           image INCLUDING data: URIs. Inline SVG is markup already in the DOM,
+           so it is not a fetch. Same trick as the eye swirls below. -->
+      <button class="wchat" id="wchat" type="button" title="Chat">
+        <svg class="wc-bubble" viewBox="0 0 44 44" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 10 H32 A6 6 0 0 1 38 16 V24 A6 6 0 0 1 32 30 H20 L13 36 V30 H12 A6 6 0 0 1 6 24 V16 A6 6 0 0 1 12 10 Z"/>
+        </svg>
+        <svg class="wc-arrow" viewBox="0 0 44 44" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M22 36 V10"/>
+          <path d="M10 22 L22 10 L34 22"/>
+        </svg>
+      </button>
+      <!-- The standalone ↑ button that used to sit here is gone (2026-08-24,
+           owner): sending is now the .wchat glyph's third face, and Enter
+           still submits. The pill tucks under the orb, which is the only
+           round thing left on the bar. -->
       <!-- Two layers on purpose: the button owns the press-squash and the
            inner span owns the resting jelly. CSS transform is a single
            property, so one element cannot carry both — the animation would
@@ -48,7 +96,6 @@
           <span class="burst"></span>
         </span>
       </button>
-      <button class="bar-min" id="wmin" title="Collapse">›</button>
     </div>
     <!-- Second row: the people button and the settings gear, right-aligned. -->
     <div class="gear-row">

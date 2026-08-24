@@ -57,11 +57,11 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
    reason a pressed-state highlight is never suppressed. Reduce Motion still
    stills the orb's resting jelly and the thinking dots; it just does not take
    away the sense that a button is a physical thing. */
-.send, .gear, .orb-btn, .close, .row, .bar-min, .switch {
+.gear, .orb-btn, .close, .row, .wchat, .switch {
   transition: transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
-.send:active, .gear:active, .orb-btn:active,
-.close:active, .row:active, .bar-min:active, .switch:active {
+.gear:active, .orb-btn:active,
+.close:active, .row:active, .wchat:active, .switch:active {
   transform: scale(1.10, 0.91);
 }
 
@@ -1006,12 +1006,20 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 .orb.talking .orb-blob.ba { animation-duration: 0.7s; }
 .orb.talking .orb-blob.bb { animation-duration: 0.55s; animation-delay: 0.2s; }
 .orb.talking .orb-blob.bc { animation-duration: 0.8s; animation-delay: 0.35s; }
-/* The bar rests collapsed: the pill tucks behind the send button with a
-   sliver peeking out its left edge. Clicking the sliver focuses it, and
-   focus (or a draft in it) slides the pill out to full width. */
+/* The bar rests collapsed: the pill tucks behind THE ORB with a sliver
+   peeking out its left edge. Clicking the sliver focuses it, and focus (or a
+   draft in it) slides the pill out to full width.
+   It used to tuck behind a separate ↑ send button, which sat between the
+   pill and the orb; that button is gone (2026-08-24, owner) and the pill
+   attaches to the orb instead.
+   -18px, not the -30px the send button had, and the difference is the whole
+   point: 8px flex gap minus 18 leaves a 10px overlap. The orb is a 42px
+   CIRCLE with a face at its centre, so 10px hides only the thin crescent at
+   its left edge — enough to read as attached, while 22px (the old depth
+   against a flat 44px button) would have buried half the face. */
 .wbar input {
   flex: 1; height: 44px; min-width: 0;
-  max-width: 58px; margin-right: -30px;
+  max-width: 58px; margin-right: -18px;
   padding: 0 16px;
   font: inherit; font-size: 13px;
   color: var(--fg);
@@ -1020,7 +1028,7 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
   border-radius: 999px;
   outline: none;
   /* Inflated like everything else, just gently — a text field that bulges as
-     hard as the send button stops reading as somewhere you can type. */
+     hard as the orb does stops reading as somewhere you can type. */
   box-shadow:
     inset 0 2px 3px rgba(234, 234, 234, 0.10),
     inset 0 -3px 7px rgba(0, 0, 0, 0.55),
@@ -1029,27 +1037,133 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
   transition: max-width 0.3s ease, margin-right 0.3s ease, margin-left 0.3s ease;
 }
 .wbar input.open {
-  /* 12px left inset: half the collapse vessel hangs off the pill's border,
-     and the window edge would clip it without this room. */
-  max-width: 640px; margin-right: 0; margin-left: 12px;
+  /* 12px left inset. It was bought for the collapse vessel that used to
+     straddle this border; that is gone, and the inset stays because the pill's
+     own drop shadow (0 4px 16px) needs more room at the window edge than
+     body.widget's 6px of padding gives it. */
+  max-width: 640px; margin-left: 12px;
+  /* margin-right stays -18px, so the orb keeps its 10px bite on the pill's
+     right end when the bar is open too (2026-08-24, owner). It used to snap
+     back to 0 here, which detached the orb and left it floating a gap away
+     the moment you clicked in.
+     Right padding is what that costs, and it now has to clear the .wchat
+     glyph rather than just the orb: the glyph's box runs 56.5px to 75.5px off
+     the bar's right edge (derivation above .wchat) and the pill's right edge
+     sits at 32px, so the caret must stop 48px short of it. 50 is that plus a
+     2px breath. It was 28 while only the orb's 10px bite was in the way.
+     The 20px of LEFT padding, and the ›-shaped hole it cleared, went with the
+     collapse arrow. */
+  padding-right: 50px;
 }
-/* Collapse arrow: straddles the open pill's left border, pointing the way
-   the bar retracts. Shown by JS while open (syncBar), not by a sibling
-   selector. */
-.bar-min {
-  /* The › in its ring vessel, straddling the pill's left border. */
-  position: absolute; left: 0; top: 50%; transform: translateY(-50%); z-index: 3;
-  width: 24px; height: 24px; border-radius: 50%;
-  border: 1px solid rgba(197, 165, 109, 0.35);
-  background: rgba(20, 20, 18, 0.9);
-  color: var(--hazelnut-light); font-size: 14px; line-height: 1;
-  display: none; align-items: center; justify-content: center;
-  padding-bottom: 2px; /* optical centering for the › glyph */
-}
-.bar-min:hover { border-color: rgba(197, 165, 109, 0.6); }
-/* Text clears the arrow: the vessel reaches 12px into the pill. */
-.wbar input.open { padding-left: 20px; }
 .wbar input::placeholder { color: var(--muted); }
+
+/* The bar's one button, drawn ON the pill rather than in it — the pill is an
+   <input> and cannot have children.
+   IT DOES NOT MOVE BETWEEN STATES, and that is the point: collapsed it is the
+   chat glyph sitting on the visible sliver, open it is the send/collapse
+   control sitting at the pill's right end. Same pixel, three meanings, no
+   travel.
+   WHERE 66px COMES FROM, so the next person can re-derive it instead of
+   nudging: .wbar is flex, gap 8, justify-content flex-end, and the pill
+   carries margin-right -18px. So the orb owns the rightmost 42px, and the
+   pill's right end sits 10px INSIDE it (8 - 18 = -10). The sliver of pill the
+   orb does not cover therefore runs from 42px to 90px off the right edge, and
+   its centre is 66px. translate(50%) puts the glyph's own centre on that
+   line. Change the pill's margin or the orb's size and this moves with them,
+   which is why the arithmetic is written down rather than the answer. */
+.wchat {
+  position: absolute; right: 66px; top: 50%;
+  transform: translate(50%, -50%);
+  width: 19px; height: 19px; z-index: 3;
+  padding: 0; border: none; background: none;
+  color: var(--muted);
+  transition: color 0.18s ease, transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+/* The press-squash in the shared rule above is a bare scale(), which would
+   throw away the centring translate this button rides on. Restated with both. */
+.wchat:active { transform: translate(50%, -50%) scale(1.10, 0.91); }
+.wchat:hover { color: var(--hazelnut-light); }
+/* Armed to send: the arrow is an action, not a label, so it stops being muted. */
+.wchat.ready { color: var(--hazelnut-light); }
+/* The two faces are stacked, not swapped in markup, so the change is a
+   crossfade rather than a reflow. The bubble is the resting face; .ready
+   turns the arrow up. */
+.wchat svg {
+  position: absolute; inset: 0; display: block; width: 100%; height: 100%;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.wchat .wc-arrow { opacity: 0; transform: translateY(3px); }
+.wchat.ready .wc-bubble { opacity: 0; transform: translateY(-3px); }
+.wchat.ready .wc-arrow { opacity: 1; transform: translateY(0); }
+
+/* The orb's thought bubble. Its 76px of room is reserved in the WINDOW, by
+   main.swift's cloudSlot — a page cannot draw past a window edge, and this
+   window is cut to content. The slot is there whether or not the bubble is
+   up, which is why this row is laid out as empty space rather than as a box.
+   The svg is right-aligned and hangs 6px INTO the bar's row: the trailing
+   puffs are meant to reach the orb's crown, and a tail that stops short of it
+   reads as a separate object floating nearby rather than as its thought. */
+.dream {
+  height: 76px; width: 100%;
+  display: flex; justify-content: flex-end; align-items: flex-end;
+  position: relative;
+  /* The band is invisible when the bubble is down, so nothing in it should
+     answer a cursor — a drag started here is the widget's own drag, exactly
+     as it is anywhere else on this window that is not a control. */
+  pointer-events: none;
+  /* Down by default, and out of the accessibility tree with it — visibility,
+     not opacity alone, or a screen reader reads a bubble nobody can see. The
+     delay on visibility is what lets the fade OUT finish before the element
+     is taken away.
+     It arrives the way a thought does, swelling up FROM the orb: the origin
+     is the tail's tip (88% across, on the bottom edge), which is the point
+     that touches the orb's crown. Both the silhouette and the line ride this
+     one transform, or they would each scale about their own box and drift
+     apart on the way up. */
+  transform: scale(0.86); transform-origin: 88% 100%;
+  opacity: 0; visibility: hidden;
+  transition: opacity 0.22s ease, transform 0.26s cubic-bezier(0.34, 1.56, 0.64, 1),
+              visibility 0s linear 0.22s;
+}
+.dream.on {
+  transform: scale(1);
+  opacity: 1; visibility: visible;
+  transition: opacity 0.22s ease, transform 0.26s cubic-bezier(0.34, 1.56, 0.64, 1),
+              visibility 0s linear 0s;
+}
+.dream-svg {
+  display: block; width: 280px; height: 82px; flex: 0 0 auto;
+  margin-right: 8px; margin-bottom: -6px;
+  /* The shadow follows the drawn shape. filter, not box-shadow: the element
+     is a 280x82 rectangle and the bubble-plus-puffs inside it is not, and a
+     box shadow would draw the element. */
+  filter: drop-shadow(0 5px 14px rgba(0, 0, 0, 0.5));
+}
+.dream-body {
+  fill: rgba(20, 20, 18, 0.94);
+  stroke: rgba(197, 165, 109, 0.34);
+  stroke-width: 1.5;
+}
+/* The line itself: HTML over the SVG rather than <text> inside it, so it
+   wraps and inherits the mono face instead of being scaled as picture.
+   The box IS the bubble's interior, converted out of viewBox units: the svg's
+   right edge sits 8px off this row's right edge and its bottom 6px below it,
+   so viewBox x=250 lands at 30 + 8 = 38px from the right, and viewBox y=48
+   lands at 34 - 6 = 28px up from the bottom. 172 x 40 is the interior that
+   leaves — 26px of padding inside a rect that runs x 56..272, centred on its
+   midline at x=164. The bubble is cut to the one line it will ever hold, so
+   changing TEASE_TEXT means changing the rect's width and this box together
+   or the copy sits off-centre in a balloon. */
+.dream-text {
+  position: absolute; right: 38px; bottom: 28px;
+  width: 172px; height: 40px;
+  display: flex; align-items: center; justify-content: center;
+  text-align: center;
+  font: inherit; font-size: 11px; line-height: 1.25; letter-spacing: 0.2px;
+  color: var(--hazelnut-light);
+  pointer-events: none;
+}
+
 .wbar input:focus { border-color: rgba(197, 165, 109, 0.55); }
 /* The way into settings, and the only one — the trinket shelf that used to
    carry connector status was showing the same thing the popup already did.
@@ -1727,21 +1841,11 @@ body.folded .chat-log { visibility: hidden; }
    content keeps, and native aligns the two windows' right edges, so
    user messages sit flush with the widget below. */
 body.chat .chat-log { padding-right: 6px; }
-/* Inflated, not flat. The light and shade live INSIDE the shape — bright
-   where light lands top-left, warm and dark where the surface curves away
-   at the bottom — so it reads as something with air in it rather than a
-   disc with a gradient painted on. */
-.send {
-  width: 44px; height: 44px; flex: 0 0 auto;
-  border-radius: 49% 51% 52% 48% / 51% 49% 51% 49%;
-  background: radial-gradient(circle at 34% 26%, #f7efe1 0%, #e5d6bb 42%, #c9ab76 100%);
-  box-shadow:
-    inset 3px 4px 9px rgba(255, 255, 255, 0.65),
-    inset -3px -5px 10px rgba(138, 106, 55, 0.45),
-    0 5px 14px rgba(0, 0, 0, 0.4);
-  color: var(--bg); font-size: 17px; font-weight: 700;
-}
-.send:disabled { opacity: 0.4; cursor: default; }
+/* The .send button and its :disabled state lived here — the inflated cream
+   disc with the ↑. Removed 2026-08-24 with the button itself (owner: attach
+   the pill to the orb, drop the arrow). Nothing carries class="send" now;
+   onboarding's ↑ is .ob-send, which is styled independently below. In git
+   history if it is ever wanted back. */
 /* Chat's close lives in the footer, right of send, deliberately smaller. */
 body.chat .close {
   position: static;
