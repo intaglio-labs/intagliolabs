@@ -1096,10 +1096,10 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 .wchat.ready .wc-bubble { opacity: 0; transform: translateY(-3px); }
 .wchat.ready .wc-arrow { opacity: 1; transform: translateY(0); }
 
-/* The orb's dream cloud. Its 76px of room is reserved in the WINDOW, by
+/* The orb's thought bubble. Its 76px of room is reserved in the WINDOW, by
    main.swift's cloudSlot — a page cannot draw past a window edge, and this
-   window is cut to content. The slot is there whether or not the cloud is up,
-   which is why this row is laid out as empty space rather than as a box.
+   window is cut to content. The slot is there whether or not the bubble is
+   up, which is why this row is laid out as empty space rather than as a box.
    The svg is right-aligned and hangs 6px INTO the bar's row: the trailing
    puffs are meant to reach the orb's crown, and a tail that stops short of it
    reads as a separate object floating nearby rather than as its thought. */
@@ -1107,12 +1107,12 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
   height: 76px; width: 100%;
   display: flex; justify-content: flex-end; align-items: flex-end;
   position: relative;
-  /* The band is invisible when the cloud is down, so nothing in it should
+  /* The band is invisible when the bubble is down, so nothing in it should
      answer a cursor — a drag started here is the widget's own drag, exactly
      as it is anywhere else on this window that is not a control. */
   pointer-events: none;
   /* Down by default, and out of the accessibility tree with it — visibility,
-     not opacity alone, or a screen reader reads a cloud nobody can see. The
+     not opacity alone, or a screen reader reads a bubble nobody can see. The
      delay on visibility is what lets the fade OUT finish before the element
      is taken away.
      It arrives the way a thought does, swelling up FROM the orb: the origin
@@ -1134,9 +1134,9 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 .dream-svg {
   display: block; width: 280px; height: 82px; flex: 0 0 auto;
   margin-right: 8px; margin-bottom: -6px;
-  /* The cloud carries its own shadow. filter, not box-shadow: the element is
-     a rectangle and the cloud is not, and a box shadow would draw the
-     rectangle. */
+  /* The shadow follows the drawn shape. filter, not box-shadow: the element
+     is a 280x82 rectangle and the bubble-plus-puffs inside it is not, and a
+     box shadow would draw the element. */
   filter: drop-shadow(0 5px 14px rgba(0, 0, 0, 0.5));
 }
 .dream-body {
@@ -1146,7 +1146,7 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 }
 /* The line itself: HTML over the SVG rather than <text> inside it, so it
    wraps and inherits the mono face instead of being scaled as picture.
-   The box IS the cloud's interior, converted out of viewBox units: the svg's
+   The box IS the bubble's interior, converted out of viewBox units: the svg's
    right edge sits 8px off this row's right edge and its bottom 6px below it,
    so viewBox x=246 lands at 34 + 8 = 42px from the right, and viewBox y=48
    lands at 34 - 6 = 28px up from the bottom. 216 x 40 is the interior that
