@@ -57,11 +57,11 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
    reason a pressed-state highlight is never suppressed. Reduce Motion still
    stills the orb's resting jelly and the thinking dots; it just does not take
    away the sense that a button is a physical thing. */
-.gear, .orb-btn, .close, .row, .bar-min, .switch {
+.gear, .orb-btn, .close, .row, .wchat, .switch {
   transition: transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 .gear:active, .orb-btn:active,
-.close:active, .row:active, .bar-min:active, .switch:active {
+.close:active, .row:active, .wchat:active, .switch:active {
   transform: scale(1.10, 0.91);
 }
 
@@ -1037,40 +1037,32 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
   transition: max-width 0.3s ease, margin-right 0.3s ease, margin-left 0.3s ease;
 }
 .wbar input.open {
-  /* 12px left inset: half the collapse vessel hangs off the pill's border,
-     and the window edge would clip it without this room. */
+  /* 12px left inset. It was bought for the collapse vessel that used to
+     straddle this border; that is gone, and the inset stays because the pill's
+     own drop shadow (0 4px 16px) needs more room at the window edge than
+     body.widget's 6px of padding gives it. */
   max-width: 640px; margin-left: 12px;
   /* margin-right stays -18px, so the orb keeps its 10px bite on the pill's
      right end when the bar is open too (2026-08-24, owner). It used to snap
      back to 0 here, which detached the orb and left it floating a gap away
      the moment you clicked in.
-     28px of right padding is what that costs: the caret and any long line
-     have to stop before the orb's edge, or text slides under a solid circle
-     and is simply gone. 16px elsewhere, 28 here = the 16 plus the 10px bite
-     plus a 2px breath. */
-  padding-right: 28px;
+     Right padding is what that costs, and it now has to clear the .wchat
+     glyph rather than just the orb: the glyph's box runs 56.5px to 75.5px off
+     the bar's right edge (derivation above .wchat) and the pill's right edge
+     sits at 32px, so the caret must stop 48px short of it. 50 is that plus a
+     2px breath. It was 28 while only the orb's 10px bite was in the way.
+     The 20px of LEFT padding, and the ›-shaped hole it cleared, went with the
+     collapse arrow. */
+  padding-right: 50px;
 }
-/* Collapse arrow: straddles the open pill's left border, pointing the way
-   the bar retracts. Shown by JS while open (syncBar), not by a sibling
-   selector. */
-.bar-min {
-  /* The › in its ring vessel, straddling the pill's left border. */
-  position: absolute; left: 0; top: 50%; transform: translateY(-50%); z-index: 3;
-  width: 24px; height: 24px; border-radius: 50%;
-  border: 1px solid rgba(197, 165, 109, 0.35);
-  background: rgba(20, 20, 18, 0.9);
-  color: var(--hazelnut-light); font-size: 14px; line-height: 1;
-  display: none; align-items: center; justify-content: center;
-  padding-bottom: 2px; /* optical centering for the › glyph */
-}
-.bar-min:hover { border-color: rgba(197, 165, 109, 0.6); }
-/* Text clears the arrow: the vessel reaches 12px into the pill. */
-.wbar input.open { padding-left: 20px; }
 .wbar input::placeholder { color: var(--muted); }
 
-/* The collapsed pill's speech-bubble glyph. Absolutely placed rather than
-   flowed, because it has to sit ON the pill and the pill is an <input>, which
-   cannot have children.
+/* The bar's one button, drawn ON the pill rather than in it — the pill is an
+   <input> and cannot have children.
+   IT DOES NOT MOVE BETWEEN STATES, and that is the point: collapsed it is the
+   chat glyph sitting on the visible sliver, open it is the send/collapse
+   control sitting at the pill's right end. Same pixel, three meanings, no
+   travel.
    WHERE 66px COMES FROM, so the next person can re-derive it instead of
    nudging: .wbar is flex, gap 8, justify-content flex-end, and the pill
    carries margin-right -18px. So the orb owns the rightmost 42px, and the
@@ -1082,17 +1074,52 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 .wchat {
   position: absolute; right: 66px; top: 50%;
   transform: translate(50%, -50%);
-  width: 19px; height: 19px;
+  width: 19px; height: 19px; z-index: 3;
+  padding: 0; border: none; background: none;
   color: var(--muted);
-  /* The input beneath is the control. Clicks pass straight through. */
-  pointer-events: none;
-  transition: opacity 0.18s ease;
+  transition: color 0.18s ease, transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
-.wchat svg { display: block; width: 100%; height: 100%; }
-/* Open, the pill is a text field and the glyph would sit in the middle of the
-   sentence. It goes; the "Message…" placeholder takes over. Sibling selector,
-   so the glyph must stay AFTER the input in the markup. */
-.wbar input.open ~ .wchat { opacity: 0; }
+/* The press-squash in the shared rule above is a bare scale(), which would
+   throw away the centring translate this button rides on. Restated with both. */
+.wchat:active { transform: translate(50%, -50%) scale(1.10, 0.91); }
+.wchat:hover { color: var(--hazelnut-light); }
+/* Armed to send: the arrow is an action, not a label, so it stops being muted. */
+.wchat.ready { color: var(--hazelnut-light); }
+/* The two faces are stacked, not swapped in markup, so the change is a
+   crossfade rather than a reflow. The bubble is the resting face; .ready
+   turns the arrow up. */
+.wchat svg {
+  position: absolute; inset: 0; display: block; width: 100%; height: 100%;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.wchat .wc-arrow { opacity: 0; transform: translateY(3px); }
+.wchat.ready .wc-bubble { opacity: 0; transform: translateY(-3px); }
+.wchat.ready .wc-arrow { opacity: 1; transform: translateY(0); }
+
+/* The orb's tease line, drawn over the pill's row. Right-stopped at 50px so it
+   clears the orb (42) plus the flex gap (8); left-stopped at 12 to line up
+   with the open pill's inset. */
+.wtoast {
+  position: absolute; left: 12px; right: 50px; top: 50%;
+  transform: translateY(-50%);
+  height: 44px; border-radius: 999px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 14px;
+  font: inherit; font-size: 12.5px; letter-spacing: 0.2px;
+  color: var(--hazelnut-light);
+  background: rgba(20, 20, 18, 0.94);
+  border: 1px solid rgba(197, 165, 109, 0.34);
+  box-shadow:
+    inset 0 2px 3px rgba(234, 234, 234, 0.10),
+    inset 0 -3px 7px rgba(0, 0, 0, 0.55),
+    0 4px 16px rgba(0, 0, 0, 0.45);
+  /* The bar underneath stays clickable through it. */
+  pointer-events: none;
+  opacity: 0; visibility: hidden;
+  z-index: 4;
+  transition: opacity 0.16s ease, visibility 0s linear 0.16s;
+}
+.wtoast.on { opacity: 1; visibility: visible; transition-delay: 0s, 0s; }
 
 .wbar input:focus { border-color: rgba(197, 165, 109, 0.55); }
 /* The way into settings, and the only one — the trinket shelf that used to
