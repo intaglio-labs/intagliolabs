@@ -59,13 +59,18 @@ final class AssetSchemeHandler: NSObject, WKURLSchemeHandler {
     let root = provisionedPrefixes.contains(where: { path.hasPrefix($0) })
       ? provisionedRoot : bundleRoot
     let file = root.appendingPathComponent(String(path.dropFirst())).standardizedFileURL
-    // Never serve outside the chosen root, whatever the path spells. The
-    // comparison must stop at a path separator: a bare hasPrefix would also
-    // accept a SIBLING of the root ("…/models/voice-evil" for root
-    // "…/models/voice").
-    let rootPath = root.standardizedFileURL.path
+    // Never serve outside the chosen root, whatever the path spells.
+    //
+    // The trailing separator is load-bearing. standardizedFileURL resolves `..`,
+    // so ordinary traversal lands outside the root and is refused here -- but a
+    // bare hasPrefix also accepts a SIBLING whose name merely starts with the
+    // root's: ~/.hazlie/models/voice is a prefix of ~/.hazlie/models/voice-x, so
+    // a path that climbs one level and re-enters a similarly-named directory
+    // would pass. Comparing against root + "/" makes the check mean containment
+    // rather than string prefix.
+    let fence = root.standardizedFileURL.path + "/"
     var isDir: ObjCBool = false
-    guard file.path == rootPath || file.path.hasPrefix(rootPath + "/"),
+    guard file.path.hasPrefix(fence),
           FileManager.default.fileExists(atPath: file.path, isDirectory: &isDir),
           !isDir.boolValue,
           let handle = try? FileHandle(forReadingFrom: file) else {

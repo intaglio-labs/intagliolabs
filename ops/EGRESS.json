@@ -197,47 +197,6 @@
       "evidence": "connect/lib/bridge.mjs PLATFORMS.telegram; bridges/docker-compose.yml image dock.mau.dev/mautrix/telegram"
     },
     {
-      "host": "facebook.com",
-      "kind": "login-webview",
-      "component": "widget/src/BridgeLogin.swift",
-      "direction": "bidirectional",
-      "purpose": "the Messenger login page (www.facebook.com/login/) inside the isolated login WKWebView; session cookies are harvested for the local bridge",
-      "credential": "none stored -- the owner types their login into Meta's own page; the harvested session cookies go only to the local bridge",
-      "decision": "User-enabled login flow: the webview opens only when the user starts a web login from a widget bridge tile -- the trigger is not platform-gated, so an X login opens the window too and BridgeLogin.swift's suffix fence then refuses x.com -- and its non-persistent data store is discarded on teardown",
-      "evidence": "widget/src/BridgeLogin.swift:53 allowedSuffixes",
-      "note": "The fence is a suffix match (BridgeLogin.swift:226): any subdomain of facebook.com, instagram.com, messenger.com or meta.com is loadable during login, everything else is refused. This is the widget process's own webview, a separate path from the bridge container's session on www.facebook.com above."
-    },
-    {
-      "host": "instagram.com",
-      "kind": "login-webview",
-      "component": "widget/src/BridgeLogin.swift",
-      "direction": "bidirectional",
-      "purpose": "the Instagram login page (www.instagram.com/accounts/login/) inside the isolated login WKWebView; session cookies are harvested for the local bridge",
-      "credential": "none stored -- the owner types their login into Meta's own page; the harvested session cookies go only to the local bridge",
-      "decision": "User-enabled login flow: the webview opens only when the user starts a web login from a widget bridge tile -- the trigger is not platform-gated, so an X login opens the window too and BridgeLogin.swift's suffix fence then refuses x.com -- and its non-persistent data store is discarded on teardown",
-      "evidence": "widget/src/BridgeLogin.swift:53 allowedSuffixes"
-    },
-    {
-      "host": "messenger.com",
-      "kind": "login-webview",
-      "component": "widget/src/BridgeLogin.swift",
-      "direction": "bidirectional",
-      "purpose": "allowed in the isolated login WKWebView because Meta's login can bounce across its own properties (account center, 2FA)",
-      "credential": "none stored -- the owner types their login into Meta's own page; the harvested session cookies go only to the local bridge",
-      "decision": "User-enabled login flow: the webview opens only when the user starts a web login from a widget bridge tile -- the trigger is not platform-gated, so an X login opens the window too and BridgeLogin.swift's suffix fence then refuses x.com -- and its non-persistent data store is discarded on teardown",
-      "evidence": "widget/src/BridgeLogin.swift:53 allowedSuffixes"
-    },
-    {
-      "host": "meta.com",
-      "kind": "login-webview",
-      "component": "widget/src/BridgeLogin.swift",
-      "direction": "bidirectional",
-      "purpose": "allowed in the isolated login WKWebView because Meta's login can bounce across its own properties (account center, 2FA)",
-      "credential": "none stored -- the owner types their login into Meta's own page; the harvested session cookies go only to the local bridge",
-      "decision": "User-enabled login flow: the webview opens only when the user starts a web login from a widget bridge tile -- the trigger is not platform-gated, so an X login opens the window too and BridgeLogin.swift's suffix fence then refuses x.com -- and its non-persistent data store is discarded on teardown",
-      "evidence": "widget/src/BridgeLogin.swift:53 allowedSuffixes"
-    },
-    {
       "host": "ghcr.io",
       "kind": "registry",
       "component": "bridges/docker-compose.yml",
