@@ -876,6 +876,102 @@ export function checkBridgeHardening(home) {
   );
 }
 
+// --- connect ------------------------------------------------------------------
+
+// The onboarding/link server the widget reads its connector list from. Nothing
+// probed it until now, and that gap is what let a real outage sit unexplained
+// for a day: the canonical ports moved on 2026-08-23 (connect 8788 -> 51788),
+// the launch agent on the machine was still the copy rendered BEFORE the move,
+// so connect went on answering on 8788 while Bridge.swift asked 51788. The only
+// thing on the whole machine that said anything was the widget, drawing
+// "connect service unreachable - status unknown" on every tile. hermes had
+// checkHermesHealth to name exactly that failure for its own port. connect had
+// nothing, so the doctor ran clean while half the app was dark.
+//
+// 401 IS THE PASS, and that is not a workaround. /api/status requires an
+// authorized caller (connect/server.mjs), so an UNAUTHENTICATED probe answered
+// 401 has proved two things at once: something holds the port, and that
+// something knows this route and guards it. That is as much identity as can be
+// had without spending the bearer, and this module's standing rule is to spend
+// it as rarely as possible (see checkHermesStats, which reads the token only
+// after the destination is settled). A 200 here would mean the route had
+// stopped authenticating - worse news than a dead port - so it fails loudly
+// instead of passing as "reachable".
+function connectBase(env) {
+  // The same override name the widget honours (Bridge.swift's connectBase), so
+  // a second connect on another port is diagnosed by the same knob that made
+  // it. Host is not configurable here for the same reason it is not there.
+  const port = Number(env.HAZLIE_CONNECT_PORT ?? 51788);
+  return `http://127.0.0.1:${port}`;
+}
+
+// The installed plist is a RENDERED COPY of the template, not a link to it.
+// Once written, the two drift independently and nothing re-reads the template
+// until setup runs again - which is the entire mechanism behind this failure,
+// and is invisible from inside the repo because the repo's own copy is correct.
+const CONNECT_STALE_AGENT_FIX =
+  'if this is ECONNREFUSED, suspect a launch agent that predates a port move: the installed plist is a ' +
+  'rendered COPY of ops/com.hazlie.connect.plist, so it keeps launching the old port forever. Confirm with ' +
+  "`grep -A1 -- --port ~/Library/LaunchAgents/com.hazlie.connect.plist` and `lsof -nP -iTCP -sTCP:LISTEN | grep node`. " +
+  'Re-render it with `bash ops/setup-connectors.sh` RUN FROM THE TREE THE AGENT LAUNCHES - setup substitutes ' +
+  '@REPO@ with wherever it is run, so running it from a dev checkout silently repoints production at a tree ' +
+  'someone may later git-checkout out from under it.';
+
+export async function checkConnectHealth(env, { fetchImpl = fetch } = {}) {
+  const name = 'connect-health';
+  const base = connectBase(env);
+  const offBox = loopbackProblem(base);
+  if (offBox) {
+    return result(name, FAIL, `connect URL ${base} ${offBox}`, 'HAZLIE_CONNECT_PORT must name a port on loopback');
+  }
+  let res;
+  try {
+    res = await fetchImpl(`${base}/api/status`, {
+      signal: AbortSignal.timeout(4000),
+      // Same reasoning as verifyHermesIdentity: without this a squatter answers
+      // 302 to a host it controls and borrows that host's status code.
+      redirect: 'error',
+    });
+  } catch (error) {
+    return result(
+      name,
+      FAIL,
+      `${base}/api/status unreachable (${error?.cause?.code ?? error?.name ?? error}) - ` +
+        'in this state the widget draws every connector as "status unknown"',
+      CONNECT_STALE_AGENT_FIX
+    );
+  }
+  if (res.status === 401) {
+    return result(name, PASS, `${base}/api/status is connect (401 to an unauthorized probe, as designed)`);
+  }
+  if (res.status === 404) {
+    // Bridge.swift maps this to the tile's `noroute` notice, which reads
+    // "connect service predates /api/status". That is one of two explanations
+    // and the less alarming one; the other is a stranger on the port.
+    return result(
+      name,
+      FAIL,
+      `${base}/api/status answered 404 - either a connect older than the route, or another process holds the port`,
+      `lsof -nP -iTCP:${new URL(base).port} -sTCP:LISTEN  # see who actually holds it`
+    );
+  }
+  if (res.status === 200) {
+    return result(
+      name,
+      FAIL,
+      `${base}/api/status answered 200 to a probe carrying NO bearer - the route is not authenticating`,
+      'connect/server.mjs must reject an unauthorized /api/status; an open route here is a live exposure of the ' +
+        'connector list, not a warning to get to later'
+    );
+  }
+  return result(
+    name,
+    FAIL,
+    `${base}/api/status answered ${res.status}`,
+    `lsof -nP -iTCP:${new URL(base).port} -sTCP:LISTEN  # confirm connect, not something else, holds the port`
+  );
+}
+
 export async function runChecks({ network = false, home = homedir(), env = process.env } = {}) {
   const config = readConfigLeniently(home);
   const checks = [
@@ -887,6 +983,7 @@ export async function runChecks({ network = false, home = homedir(), env = proce
     () => checkGmailSecret(home),
     () => checkHermesHealth(env, config),
     () => checkHermesStats(env, home, config),
+    () => checkConnectHealth(env),
     () => checkFdaImessage(home),
     () => checkFdaCalendar(home),
     () => checkFdaContacts(home),
