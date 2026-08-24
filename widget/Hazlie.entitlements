@@ -25,7 +25,8 @@
 
          CNContactStore   -> personal-information.addressbook
          EKEventStore     -> personal-information.calendars
-         PHPhotoLibrary   -> personal-information.photos-library
+         (PhotoKit is no longer used: photos are read from the store under
+          Full Disk Access, because PhotoKit has no people API. See Permissions.swift.)
          mic capture      -> device.audio-input
 
        Not requested, because nothing calls them: camera, location, Apple Events.
@@ -35,8 +36,6 @@
   <key>com.apple.security.personal-information.addressbook</key>
   <true/>
   <key>com.apple.security.personal-information.calendars</key>
-  <true/>
-  <key>com.apple.security.personal-information.photos-library</key>
   <true/>
   <key>com.apple.security.device.audio-input</key>
   <true/>

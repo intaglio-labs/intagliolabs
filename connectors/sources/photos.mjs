@@ -10,9 +10,17 @@
 // would drop them silently while looking like an improvement.
 //
 // So photos sits with iMessage and notes: Full Disk Access is what its data
-// actually costs. If that ever changes -- a public people API -- this is the
-// file to revisit, and the onboarding copy that groups it under the disk grant
-// has to move back at the same time.
+// actually costs, and as of 2026-08-24 that is the ONLY thing it costs. The app
+// used to also ask for the photo library through PhotoKit and then never use the
+// answer -- a second permission on the screen buying nothing, for data the disk
+// grant was already delivering. That ask is gone; verified by resetting the
+// Photos grant with FDA still in place and watching this connector open and
+// query the library normally.
+//
+// If that ever changes -- a public people API -- this is the file to revisit,
+// and Permissions.swift's photos() and the onboarding row have to come back with
+// it, so that photos can leave the disk grant rather than merely be asked for
+// twice.
 //
 // PERSONAL ROLE ONLY. It is the owner's library on the owner's Mac; the Mini
 // has an empty one under a different Apple account.
