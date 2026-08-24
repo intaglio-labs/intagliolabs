@@ -22,24 +22,37 @@ ctx.fill(CGRect(x: 0, y: 0, width: W, height: H))
 ctx.setFillColor(NSColor(red: 0.11, green: 0.11, blue: 0.11, alpha: 1).cgColor)    // #1c1c1c
 ctx.fill(CGRect(x: 0, y: 148, width: W, height: 2))
 
-// NO BACKING BEHIND THE ICON NAMES, and the trade is recorded rather than hidden.
+// THE FLOOR, and it is a contrast requirement wearing a design.
 //
 // Finder draws icon names in the SYSTEM appearance, which a background image
-// cannot know. Measured on the shipped DMG: both names render at 13.5:1 against
-// #141412 in dark mode and 1.14:1 in light — faint to absent for anyone who has
-// not turned dark mode on.
+// cannot know. Against #141412 they measure 18.4:1 in dark mode and 1.14:1 in
+// light — the light-mode case is black text on near-black, which is what shipped
+// and what it looked like.
 //
-// An earlier version solved that with a rounded #80664a plate under each name,
-// sized and placed to sit exactly where Finder writes. It worked only while the
-// icons landed where the art expected: when the AppleScript positions were
-// silently ignored, the plates stayed put and shipped as two brown lozenges
-// floating in an empty window. Removed, on the owner's call.
+// No single tone fixes that at AA against BOTH, unless it is chosen for it:
+// white text needs a background no lighter than luminance 0.121, black text one
+// no darker than 0.175. #8a7154 sits at 0.179 and lands 4.59:1 against white and
+// 4.57:1 against black — clearing 4.5:1 in both appearances, which is the only
+// way a background image can be correct for a setting it cannot read.
 //
-// What makes that acceptable is that the names are not load-bearing. The
-// instruction is drawn BELOW by this file, in a colour it chooses and can
-// guarantee; the arrow gives the direction; and an app icon beside the
-// Applications folder is legible without a caption. A faint label under a
-// picture of the thing it names costs a light-mode visitor nothing.
+// It is a FLOOR rather than a plate under each name. Two lozenges sized to the
+// labels only work while the icons land exactly where the art expects, and when
+// Finder ignored the positions once, they shipped as brown blobs in an empty
+// window. A full-width surface cannot be misaligned horizontally, and it reads
+// as something the icons stand on rather than something stuck behind them.
+let floorColor = NSColor(red: 138/255, green: 113/255, blue: 84/255, alpha: 1)  // #8a7154
+// It starts BELOW the arrow, not above it. Run high enough to cover the icons and
+// the floor swallows the arrow too — hazelnut on tan is the same contrast problem
+// one element further up. The fade begins under the icon bodies and is solid by
+// the time it reaches the names, which are the only thing here that needs it.
+let floorTop: CGFloat = 455, floorSolid: CGFloat = 545
+for yy in stride(from: floorTop, to: H, by: 1) {
+  let t = yy < floorSolid ? (yy - floorTop) / (floorSolid - floorTop) : 1
+  // ease-in-out so neither end of the fade shows a seam
+  let e = t * t * (3 - 2 * t)
+  ctx.setFillColor(floorColor.withAlphaComponent(e).cgColor)
+  ctx.fill(CGRect(x: 0, y: yy, width: W, height: 1))
+}
 
 func draw(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor, y: CGFloat, tracking: CGFloat = 0) {
   let font = NSFont.monospacedSystemFont(ofSize: size, weight: weight)
@@ -51,8 +64,10 @@ func draw(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor, 
 
 // The one instruction, plus the fine print under it — in the site's ladder.
 draw("Intaglio Labs, Inc.", size: 26, weight: .medium, color: NSColor(white: 0.92, alpha: 1), y: 74)
+// Dark, because this line sits ON the floor. Cream on #8a7154 is 1.9:1 — the same
+// mistake as the labels, one element down.
 draw("drag intaglio labs into Applications", size: 30, weight: .semibold,
-     color: NSColor(red: 0.898, green: 0.839, blue: 0.733, alpha: 1), y: 620)  // #e5d6bb
+     color: NSColor(red: 0.086, green: 0.075, blue: 0.06, alpha: 1), y: 620)  // #16130f
 
 // The arrow, between where the two icons will sit (icon centers at x=150/450
 // points -> 300/900 px, y=210 points -> 420 px). Hazelnut, hand-drawn feel.
