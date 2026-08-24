@@ -57,7 +57,7 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 //
 // Every entry here MUST exist -- see the floor test. A root that quietly stops
 // existing is coverage lost in silence, which is the failure this file had.
-const ROOTS = ['connectors', 'connect', 'ui', 'widget', 'bridges', 'ops'];
+const ROOTS = ['connectors', 'connect', 'ui', 'widget', 'bridges', 'ops', 'site'];
 
 // Roots that belong to the system but are NOT in this repository, recorded so
 // their absence is a decision rather than a typo. If one ever lands here it must
@@ -65,7 +65,6 @@ const ROOTS = ['connectors', 'connect', 'ui', 'widget', 'bridges', 'ops'];
 // precisely so it cannot arrive unscanned.
 const ROOTS_ELSEWHERE = Object.freeze({
   courier: 'the iMessage send lane; not extracted for open source',
-  site: 'the marketing site, a separate artifact with its own egress hosts',
 });
 
 // Floors, set below today's measured numbers so ordinary deletion does not turn
@@ -94,6 +93,10 @@ const MIN_FILES_PER_ROOT = Object.freeze({
   widget: 30,
   bridges: 1,
   ops: 10,
+  // Four pages and nothing generated. The site is hand-written HTML, so this
+  // floor is the page count minus one -- a deleted page is a deliberate act,
+  // a collapsed walk is not.
+  site: 3,
 });
 const MIN_FILES_SCANNED = 100;
 const MIN_HOSTS_FOUND = 10;

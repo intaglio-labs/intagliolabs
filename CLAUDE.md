@@ -33,7 +33,10 @@ Do not re-add these; their absence is a decision, not an oversight.
   it, the comment is stale — fix the comment.
 - **Any lane that sends messages or data between two machines** — no tunnel, no
   courier, no outbound iMessage. The app does not text its user.
-- **The website and deploy config.** They live in a separate private repo.
+- **The deploy config.** It lives in a separate private repo. The marketing
+  site itself moved HERE on 2026-08-24 and is `site/` — four hand-written
+  pages, no build step. The hosts it reaches are declared in `ops/EGRESS.json`
+  under kind `website` and scanned like any other root.
 - **Experiment code, results, and planning docs.**
 
 ## Rules that bind everything
