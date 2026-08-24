@@ -145,10 +145,23 @@ the owner's real data — with no integrity check and no log line saying the cod
 changed underneath it.
 
 So: **never point a plist at a working tree that anyone might `git checkout`.**
-Run production from a tree reserved for it, or better, from an immutable
-artifact. This is currently unsolved rather than solved; a startup assertion that
-`git rev-parse HEAD` matches a pinned value would at least make drift loud, and
-`connectors/lib/checks.mjs` already has the startup-gate machinery to hang it on.
+
+`ops/promote.sh` is the answer to this: it installs `git archive <commit>` to
+`~/.hazlie/app`, which is not a checkout and therefore has no branch to switch,
+and records what it installed in `.installed-commit`. Run
+`bash ~/.hazlie/app/ops/setup-connectors.sh` afterwards so the agents point
+there. Running setup straight from a clone is still correct on a machine that
+only ever tracks `main`; promote when the checkout is somewhere you also
+develop.
+
+This paragraph said the hazard was "currently unsolved" until 2026-08-24, and
+it had already cost a two-day outage by then: the daemons ran from a
+hand-maintained pinned worktree, nobody walked it forward, the canonical ports
+moved underneath it, and the widget showed every connector as unreachable with
+nothing on the machine naming the cause. The mitigation this paragraph used to
+propose — asserting `git rev-parse HEAD` against a pinned value at startup —
+would not have helped, because it presumes the running code is in a checkout at
+all. Not being one is the fix.
 
 ## Conventions
 
