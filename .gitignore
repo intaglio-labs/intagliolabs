@@ -16,7 +16,5 @@ dist/
 # macOS
 .DS_Store
 
-# Firebase Hosting deploy cache. The site moved to GitHub Pages on 2026-08-24
-# and firebase.json/.firebaserc are gone; this line stays only so a stale local
-# cache from before the move cannot be committed by someone who still has one.
+# Firebase Hosting deploy cache — local, regenerated on every deploy.
 .firebase/

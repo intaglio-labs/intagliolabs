@@ -6,40 +6,60 @@ hosting changed.
 
 ## How it deploys
 
-Push to `main`. That is the whole of it.
+Push to `main`. `.github/workflows/site.yml` runs `firebase deploy --only
+hosting:intaglio` for any push that touches `site/`, the hosting config, or the
+workflow — and nowhere else, because the app and the backend share this
+repository and change constantly, and redeploying identical HTML on each of those
+commits only makes the deployment history unreadable. It can also be run by hand
+from the Actions tab, which is what to do after a DNS change rather than pushing
+an empty commit.
 
-`.github/workflows/site.yml` publishes `site/` to GitHub Pages on any push that
-touches the site or the workflow, and nowhere else — the app and the backend
-share this repository and change constantly, and redeploying identical HTML on
-every one of those commits only makes the deployment history harder to read. The
-workflow can also be run by hand from the Actions tab, which is what to do after
-a DNS change rather than pushing an empty commit.
+The hosting is unchanged: `firebase.json` and `.firebaserc` at the repo root are
+still the whole config, `cleanUrls` is still on so `/privacy` resolves to
+`site/privacy/index.html`, and `DEPLOY.md` is still in the ignore list so this
+file is never published alongside the pages it describes. What changed is that
+nobody has to remember to run the deploy — the site went stale exactly whenever
+that step was skipped, which is the failure a pipeline exists to remove.
 
-There is no build step and the workflow deliberately does not invent one: it
-uploads the directory as it stands, so what is reviewed in a diff is exactly what
-is served.
+Still works by hand, unchanged, when that is what you want:
 
-**There is no secret to hold.** `deploy-pages` authenticates with the
-repository's own OIDC token. Nothing has to be stored, rotated, or kept out of
-the diff.
+    firebase deploy --only hosting:intaglio
+
+### The one thing to set up
+
+A repository secret named **`FIREBASE_SERVICE_ACCOUNT`**, containing the whole
+JSON key of a service account on `hazlie-prod` with the **Firebase Hosting Admin**
+role:
+
+    gcloud iam service-accounts create gh-deploy-site \
+        --project hazlie-prod --display-name "GitHub Actions — site deploy"
+
+    gcloud projects add-iam-policy-binding hazlie-prod \
+        --member "serviceAccount:gh-deploy-site@hazlie-prod.iam.gserviceaccount.com" \
+        --role roles/firebasehosting.admin
+
+    gcloud iam service-accounts keys create key.json \
+        --iam-account gh-deploy-site@hazlie-prod.iam.gserviceaccount.com
+
+Then paste the contents of `key.json` into Settings → Secrets and variables →
+Actions → New repository secret, and **delete `key.json`**. The workflow writes it
+to a file the runner discards and passes it by path; it is never echoed and never
+committed. Hosting Admin is the narrowest role that can deploy — not Editor, and
+not Owner.
+
+Until that secret exists the workflow fails on its own first line and says so,
+rather than half-deploying.
 
 ### What it refuses to publish
 
-Two checks run before anything is uploaded, and either one fails the deploy:
+Two checks run before the deploy, and either one fails the run:
 
-1. **Internal links.** Every reference in the site is relative, which is what
-   lets the pages work under a project-Pages path today and at an apex domain
-   later without an edit. A root-relative `href` reintroduced by hand would 404
-   under the path prefix — in production, silently. The check rejects it here.
+1. **Internal links.** Every reference is resolved the way Hosting serves it
+   (`cleanUrls` on), against the files that actually exist. A typo in a footer
+   link would otherwise ship and 404 for every visitor.
 2. **The download link.** It is an external permalink to the newest release; if
    it stops resolving, every visitor's download is broken and nothing on the page
    would show it.
-
-~~`firebase.json` and `.firebaserc` at the repo root are the whole config.~~
-Struck rather than deleted: Firebase Hosting needed a service-account secret, a
-second console, and a `firebase deploy` somebody had to remember to run. The site
-went stale whenever that last step was skipped, which is the failure a deploy
-pipeline exists to remove. Both files are gone.
 
 ## The download button
 
@@ -49,23 +69,24 @@ pipeline exists to remove. Both files are gone.
 
 GitHub resolves `latest` at request time, so **publishing a release is publishing
 the download** — the site does not change and nobody has to remember to update a
-link. The asset name is deliberately unversioned so that permalink keeps working;
-the version lives in the release tag, the DMG's volume name and the app's
-Info.plist.
+link. The asset name is deliberately unversioned so the permalink keeps working
+across versions; the version lives in the release tag, the DMG's volume name and
+the app's Info.plist.
 
-`widget/release.sh` builds, signs, notarizes and staples. Attach the DMG to a
-GitHub release as `IntaglioLabs.dmg` and the site is current.
+Both legacy paths follow it. `firebase.json` 301s `/Hazlie.dmg` **and**
+`/intagliolabs.dmg` to that permalink, because both are loose in other people's
+bookmarks and messages, and both used to point at a self-hosted object.
 
-~~`site/index.html` links `/intagliolabs.dmg` directly, and `firebase.json`
-redirects `/Hazlie.dmg` to the same object with a 301.~~ Both are gone with the
-hosting. The 301 is not reproduced: Pages serves static files and cannot rewrite,
-and it pointed at a self-hosted object that no longer exists anywhere, so
-preserving it would only turn a 404 into a redirect to a 404.
+~~`site/index.html` links `/intagliolabs.dmg` directly.~~ Struck rather than
+deleted, because the uncertainty this file recorded on 2026-08-23 — whether the
+DMG was really served from Cloud Storage behind a redirect, at a size Firebase
+Hosting will not serve — is now **resolved by removal** rather than answered.
+Hosting serves no binary at all; the artifact lives on the release that produced
+it, and nothing here has a size limit to argue with. The self-hosted object can
+be deleted from the bucket.
 
-The uncertainty this file recorded on 2026-08-23 — whether the DMG was really
-served from Cloud Storage behind a redirect, at a size Firebase Hosting would not
-serve — is **resolved by removal**. There is no self-hosted object and no size
-limit to argue with; the artifact lives on the release that produced it.
+New releases: `widget/release.sh`, then attach the DMG to a GitHub release as
+`IntaglioLabs.dmg`. The site needs no redeploy for a new version.
 
 ## Trina — settled 2026-08-21
 
@@ -78,22 +99,29 @@ with an `@font-face` block in `index.html`.
 The mono fallback is kept in the stack on purpose, so a visitor who blocks the
 font still gets readable z's rather than tofu.
 
-## Domain — still pending, and no longer blocking
+## Domain — still pending
 
-The site is live at its GitHub Pages URL as soon as Pages is enabled for this
-repository (Settings → Pages → Source: GitHub Actions). Because every internal
-link is relative, it works there under a path prefix with no edit — which is the
-difference between "pending" and "blocked".
+The site is live on its Firebase Hosting URL for the `intaglio-landing` site as
+soon as the workflow runs. Links inside the pages are root-relative, which is
+correct for a domain root and is what `cleanUrls` expects.
 
-intaglio.io's apex is host-routed by an external HTTPS load balancer in a
-**separate GCP project that this project does not own**, so pointing the apex
-here still needs access granted from that account. That project also serves an
-unrelated product whose `in.` and `cdn.` subdomains are frozen into third-party
-HTML; **those must not move**, whatever happens to the apex.
+intaglio.io's apex is host-routed by an external HTTPS load balancer living in a
+**separate GCP project that this project does not own**. Two consequences:
 
-When the apex is available: add a `CNAME` file containing the domain to `site/`,
-set it under Settings → Pages, and point DNS at GitHub. The relative links mean
-nothing inside the pages has to change.
+1. The planned swap needs access granted from that account. It cannot be done
+   from the hosting project alone.
+2. That project also serves an unrelated product whose `in.` and `cdn.`
+   subdomains are frozen into third-party HTML. **Those must not move**, whatever
+   happens to the apex.
+
+When the apex is available it is a Hosting custom-domain add on
+`intaglio-landing` plus the DNS records the console prints. Nothing inside the
+pages changes: they already assume a domain root.
+
+A ready-to-deploy nginx bundle (Dockerfile, an 8080 conf, index.html) was staged
+for Cloud Run as an alternative. If it is used, note it was built before
+`privacy/`, `terms/` and `notices/` existed: the conf has to serve those
+directory pages too, so copy the whole `site/` tree, not just `index.html`.
 
 *(The owning account and project name are deliberately not written here. This
 repository is public, and they are a third party's infrastructure rather than

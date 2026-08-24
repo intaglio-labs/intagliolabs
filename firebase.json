@@ -1,0 +1,28 @@
+{
+  "hosting": [
+    {
+      "target": "intaglio",
+      "public": "site",
+      "ignore": [
+        "firebase.json",
+        "**/.*",
+        "**/node_modules/**",
+        "**/DEPLOY.md"
+      ],
+      "cleanUrls": true,
+      "trailingSlash": false,
+      "redirects": [
+        {
+          "source": "/Hazlie.dmg",
+          "destination": "https://github.com/intaglio-labs/privateAndPersonalizedOS/releases/latest/download/IntaglioLabs.dmg",
+          "type": 301
+        },
+        {
+          "source": "/intagliolabs.dmg",
+          "destination": "https://github.com/intaglio-labs/privateAndPersonalizedOS/releases/latest/download/IntaglioLabs.dmg",
+          "type": 301
+        }
+      ]
+    }
+  ]
+}

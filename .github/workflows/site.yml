@@ -1,60 +1,52 @@
-# Push to deploy: main -> GitHub Pages.
+# Push to deploy: main -> Firebase Hosting (target `intaglio`).
 #
 # The site is four hand-written HTML pages and a vendored font. There is no build
-# step and this workflow deliberately does not invent one — it uploads `site/` as
+# step and this workflow deliberately does not invent one — it deploys `site/` as
 # it stands in the repository, so what is reviewed in a diff is exactly what is
 # served.
 #
-# WHY PAGES AND NOT FIREBASE. Firebase Hosting needed a service-account secret,
-# a second console to check, and a `firebase deploy` somebody had to remember to
-# run — the site went stale whenever that step was skipped, which is the failure
-# mode a deploy pipeline exists to remove. Pages needs no secret at all: the job
-# authenticates with the repository's own OIDC token.
+# WHAT THIS REPLACES: a `firebase deploy` run by hand from somebody's laptop. The
+# hosting is unchanged; the remembering is what is being removed.
+#
+# firebase-tools is invoked directly rather than through a marketplace action.
+# One fewer third party in the path that holds the deploy credential, and the
+# command in the log is the same one a person would type.
 name: site
 
 on:
   push:
     branches: [main]
-    # Only when the site or this workflow changes. The app and the backend share
-    # this repository and change constantly; redeploying identical HTML on every
-    # one of those commits is noise in the deployment history.
+    # Only when something that is actually served changes. The app and the
+    # backend share this repository and change constantly; redeploying identical
+    # HTML on each of those commits makes the deployment history unreadable.
     paths:
       - 'site/**'
+      - 'firebase.json'
+      - '.firebaserc'
       - '.github/workflows/site.yml'
-  # So a deploy can be re-run without an empty commit — after a DNS change, or to
-  # re-publish if a deployment was rolled back.
+  # So a deploy can be re-run without an empty commit.
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  # Required by deploy-pages: it exchanges an OIDC token rather than a stored
-  # credential, which is why this pipeline has no secret to leak or rotate.
-  id-token: write
 
-# Never let two deploys race. `cancel-in-progress: false` because a half-finished
-# Pages deployment is worse than a slightly delayed one — let the running deploy
-# land, then run the next.
+# Never let two deploys race: a half-finished hosting release is worse than a
+# slightly delayed one, so let the running deploy land before starting the next.
 concurrency:
-  group: pages
+  group: firebase-hosting
   cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
-      # A LINK CHECK, BEFORE ANYTHING IS PUBLISHED.
+      # THE CHECKS RUN BEFORE THE DEPLOY, not after, so a broken page is never
+      # published and then noticed.
       #
-      # Every internal reference in the site is relative, so the pages work at a
-      # project-Pages path today and at the apex later without an edit. That only
-      # holds while it stays true: one root-relative href reintroduced by hand
-      # 404s under the path prefix, and it 404s in production rather than here.
-      # This fails the deploy instead.
+      # Internal links resolve against `site/` the way Hosting serves them:
+      # `cleanUrls` is on, so `/privacy` is `site/privacy/index.html`.
       - name: check internal links
         run: |
           python3 - <<'EOF'
@@ -62,16 +54,20 @@ jobs:
           site = pathlib.Path('site')
           bad = []
           for f in site.rglob('*.html'):
-              s = f.read_text()
-              for ref in re.findall(r'(?:href|src)="([^"]+)"', s) + re.findall(r"url\('([^']+)'\)", s):
+              for ref in (re.findall(r'(?:href|src)="([^"]+)"', f.read_text())
+                          + re.findall(r"url\('([^']+)'\)", f.read_text())):
                   if ref.startswith(('http://', 'https://', 'mailto:', 'data:', '#')):
                       continue
-                  if ref.startswith('/'):
-                      bad.append(f'{f}: root-relative "{ref}" breaks under a path prefix')
+                  clean = ref.split('#')[0].split('?')[0]
+                  if not clean:
                       continue
-                  target = (f.parent / ref.split('#')[0].split('?')[0]).resolve()
+                  # cleanUrls: an extensionless path is that directory's index.
+                  base = site if clean.startswith('/') else f.parent
+                  target = (base / clean.lstrip('/')).resolve()
                   if target.is_dir():
                       target = target / 'index.html'
+                  elif not target.suffix:
+                      target = target.with_name(target.name) / 'index.html'
                   if not target.exists():
                       bad.append(f'{f}: "{ref}" resolves to nothing')
           for b in bad:
@@ -79,9 +75,9 @@ jobs:
           sys.exit(1 if bad else 0)
           EOF
 
-      # The download button is an external permalink to the newest release. If it
-      # ever 404s, every visitor's download is broken and nothing in the site
-      # itself would show it — so the deploy checks the real URL.
+      # The download is an external permalink to the newest release. If it stops
+      # resolving, every visitor's download is broken and nothing on the page
+      # would show it.
       - name: check the download link resolves
         run: |
           url=$(grep -ohE 'https://github.com/[^"]*/releases/latest/download/[^"]*' site/index.html | head -1)
@@ -90,9 +86,22 @@ jobs:
           echo "status: $code"
           [ "$code" = "200" ] || { echo "the download link does not resolve"; exit 1; }
 
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-      - id: deploy
-        uses: actions/deploy-pages@v4
+      # The credential never lands in the repository and never reaches a log:
+      # written to a file the runner discards, passed by path, and the deploy
+      # itself prints only what it changed.
+      - name: deploy
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then
+            echo "FIREBASE_SERVICE_ACCOUNT is not set — see site/DEPLOY.md for how to create it."
+            exit 1
+          fi
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          # Pinned: an unpinned deploy tool is an unreviewed change to the thing
+          # that publishes the site.
+          npm install --no-fund --no-audit --global firebase-tools@13.29.1
+          firebase deploy --only hosting:intaglio --non-interactive \
+            --project hazlie-prod \
+            --message "${GITHUB_SHA::7} ${GITHUB_EVENT_NAME}"
