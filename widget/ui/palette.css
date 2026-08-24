@@ -1148,12 +1148,15 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
    wraps and inherits the mono face instead of being scaled as picture.
    The box IS the bubble's interior, converted out of viewBox units: the svg's
    right edge sits 8px off this row's right edge and its bottom 6px below it,
-   so viewBox x=246 lands at 34 + 8 = 42px from the right, and viewBox y=48
-   lands at 34 - 6 = 28px up from the bottom. 216 x 40 is the interior that
-   leaves — the tail puffs live in the margin to its right. */
+   so viewBox x=250 lands at 30 + 8 = 38px from the right, and viewBox y=48
+   lands at 34 - 6 = 28px up from the bottom. 172 x 40 is the interior that
+   leaves — 26px of padding inside a rect that runs x 56..272, centred on its
+   midline at x=164. The bubble is cut to the one line it will ever hold, so
+   changing TEASE_TEXT means changing the rect's width and this box together
+   or the copy sits off-centre in a balloon. */
 .dream-text {
-  position: absolute; right: 42px; bottom: 28px;
-  width: 216px; height: 40px;
+  position: absolute; right: 38px; bottom: 28px;
+  width: 172px; height: 40px;
   display: flex; align-items: center; justify-content: center;
   text-align: center;
   font: inherit; font-size: 11px; line-height: 1.25; letter-spacing: 0.2px;

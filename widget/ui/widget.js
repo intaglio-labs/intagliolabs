@@ -66,7 +66,7 @@ orbEl.addEventListener('animationend', (e) => {
 // needed room the window did not have: see main.swift's cloudSlot, which
 // reserves it above the bar.
 const VOICE_TEASE = true;
-const TEASE_TEXT = 'hey, voice things coming soon';
+const TEASE_TEXT = 'voice things coming soon';
 const TEASE_MS = 2400;
 const dreamEl = document.getElementById('wdream');
 const dreamText = document.getElementById('wdreamtext');
