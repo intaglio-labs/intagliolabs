@@ -25,30 +25,45 @@ Still works by hand, unchanged, when that is what you want:
 
     firebase deploy --only hosting
 
-### The one thing to set up
+### The deploy credential — already set up
 
-A repository secret named **`FIREBASE_SERVICE_ACCOUNT`**, containing the whole
-JSON key of a service account on `hazlie-prod` with the **Firebase Hosting Admin**
-role:
+Done on 2026-08-24. Recorded because the next person will want to know what
+exists, not how to create it again.
+
+- Service account **`gh-deploy-site@hazlie-prod.iam.gserviceaccount.com`**,
+  holding exactly one role: `roles/firebasehosting.admin`. That is the narrowest
+  role that can deploy — not Editor, not Owner — and it was verified by deploying
+  as the service account rather than assumed from the docs.
+- One user-managed key, stored as the repository secret
+  **`FIREBASE_SERVICE_ACCOUNT`**. GitHub will not read a secret back out, so if it
+  is ever lost the fix is a new key and a `gcloud ... keys delete` on the old one,
+  not a recovery.
+
+`firebase init hosting:github` does all of this in one command and is the usual
+way. It was not used here for two reasons: it needs an interactive GitHub OAuth
+in a browser, and it writes its own pair of workflow files, which would sit
+alongside `site.yml` deploying the same site on overlapping triggers. The
+equivalent, non-interactively:
 
     gcloud iam service-accounts create gh-deploy-site \
         --project hazlie-prod --display-name "GitHub Actions — site deploy"
 
     gcloud projects add-iam-policy-binding hazlie-prod \
         --member "serviceAccount:gh-deploy-site@hazlie-prod.iam.gserviceaccount.com" \
-        --role roles/firebasehosting.admin
+        --role roles/firebasehosting.admin --condition=None
 
-    gcloud iam service-accounts keys create key.json \
+    KEY=$(mktemp -d)/key.json
+    gcloud iam service-accounts keys create "$KEY" \
         --iam-account gh-deploy-site@hazlie-prod.iam.gserviceaccount.com
+    gh secret set FIREBASE_SERVICE_ACCOUNT \
+        --repo intaglio-labs/privateAndPersonalizedOS < "$KEY"
+    rm -f "$KEY"
 
-Then paste the contents of `key.json` into Settings → Secrets and variables →
-Actions → New repository secret, and **delete `key.json`**. The workflow writes it
-to a file the runner discards and passes it by path; it is never echoed and never
-committed. Hosting Admin is the narrowest role that can deploy — not Editor, and
-not Owner.
-
-Until that secret exists the workflow fails on its own first line and says so,
-rather than half-deploying.
+**Delete the key file, and check `keys list` afterwards.** Removing the local copy
+does not remove the key from the service account — a key whose material nobody
+holds is still a credential that can be issued against. Verifying a permission by
+minting a second key leaves exactly that behind, which is why the check above ends
+with a delete.
 
 ### What it refuses to publish
 
@@ -99,37 +114,30 @@ with an `@font-face` block in `index.html`.
 The mono fallback is kept in the stack on purpose, so a visitor who blocks the
 font still gets readable z's rather than tofu.
 
-## Domain — connected, and mid-move
+## Domain — done
 
-**intaglio.io is live on Firebase Hosting.** It is `Connected` as a custom domain
-and serving, verified 2026-08-24 (`HTTP/2 200`, HSTS, Firebase cache headers).
+**intaglio.io is live on the default site.** Moved 2026-08-24 and verified from
+outside: `HTTP/2 200`, serving this repository's page, with the download button
+pointing at the GitHub release.
+
+The move: the domain was attached to a second site, `intaglio-landing`, which this
+repository did not deploy — so the apex served a release pushed by hand while
+deploys landed somewhere else. The domain now sits on `hazlie-prod`, the project's
+default site and the one `firebase.json` names, and `intaglio-landing` is deleted.
+One site, one deploy target, one URL.
 
 ~~intaglio.io's apex is host-routed by an external HTTPS load balancer in a
 separate GCP project that this project does not own... the planned swap needs
-access granted from that account.~~ Struck rather than deleted, because this file
-asserted it for three days and the next reader deserves to see which way it
-resolved. Whatever was true on 2026-08-21, the apex reaches Hosting now.
+access granted from that account.~~ Struck rather than deleted: this file asserted
+it for three days while the apex was in fact already connected to Firebase
+Hosting, and the next reader should be able to see which way it resolved.
 
-### Where it points, and where it is going
-
-The domain is attached to the **`intaglio-landing`** site. This repository now
-deploys the project's **default** site, `hazlie-prod` — so until the domain moves,
-`intaglio.io` still serves the older release that was pushed by hand on 2026-08-23,
-and this repository's deploys land on `hazlie-prod.web.app`.
-
-Moving it is a console operation. The CLI has no custom-domain commands
-(`hosting:sites:*` creates, deletes and lists sites and nothing else), so it is
-not automatable from here:
-
-1. Hosting → `intaglio-landing` → Domains → remove **intaglio.io**.
-2. Hosting → `hazlie-prod` → Add custom domain → **intaglio.io**.
-3. Wait for the certificate. Firebase re-provisions on the new site; the DNS
-   records do not change, but there is a window where the apex serves a
-   certificate warning or the old content. **Do this when a short gap is
-   acceptable.**
-4. Only then delete `intaglio-landing` (`firebase hosting:sites:delete
-   intaglio-landing --project hazlie-prod`). **Deleting it while the domain is
-   still attached takes intaglio.io down.**
+Custom domains are **console-only**. The CLI has no command for them —
+`hosting:sites:*` creates, deletes and lists sites and nothing else — so if the
+domain ever has to move again it is four manual steps, and two of them bite:
+the certificate is re-provisioned on the receiving site, so the apex serves a
+warning or stale content until it lands; and deleting a site while a domain is
+still attached takes that domain down.
 
 ### The .web.app URLs
 
