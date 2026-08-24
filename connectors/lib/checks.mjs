@@ -31,6 +31,7 @@ import { connect } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as sqlite from 'node:sqlite';
+import { helperAvailable } from './apple-data.mjs';
 
 const PASS = 'PASS';
 const WARN = 'WARN';
@@ -550,6 +551,22 @@ function fdaResult(name, store, r) {
   return result(name, FAIL, `${store}: ${r.detail}`, FDA_SHELL_CAVEAT);
 }
 
+// Calendar and Contacts stopped needing Full Disk Access when the helper landed
+// -- they reach the same data through EventKit and the Contacts framework, each
+// of which has its own far narrower TCC permission. Reporting a missing FDA
+// grant as THEIR problem is then just wrong: the grant buys those two sources
+// nothing, and the owner acting on the report would be widening a permission
+// for no reason. iMessage is not in this position and never will be; chat.db has
+// no framework in front of it.
+function fdaNotNeeded(name, api) {
+  return result(
+    name,
+    PASS,
+    `reached through ${api}, which needs no Full Disk Access`,
+    ''
+  );
+}
+
 function checkFdaImessage(home) {
   const p = join(home, 'Library', 'Messages', 'chat.db');
   return fdaResult('fda-imessage', p, realReadSqlite(p));
@@ -557,6 +574,7 @@ function checkFdaImessage(home) {
 
 function checkFdaCalendar(home) {
   const name = 'fda-calendar';
+  if (helperAvailable()) return fdaNotNeeded(name, 'EventKit');
   // Group Containers is where current macOS keeps the store; the legacy
   // ~/Library/Calendars path survives on upgraded systems. Probe in that
   // order and report the first path that exists — a denial counts as
@@ -580,6 +598,7 @@ function checkFdaCalendar(home) {
 
 function checkFdaContacts(home) {
   const name = 'fda-contacts';
+  if (helperAvailable()) return fdaNotNeeded(name, 'the Contacts framework');
   const base = join(home, 'Library', 'Application Support', 'AddressBook');
   const stores = [];
   const top = join(base, 'AddressBook-v22.abcddb');

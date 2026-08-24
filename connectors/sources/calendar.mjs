@@ -36,6 +36,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { readEvents, helperAvailable } from '../lib/apple-data.mjs';
 import { APPLE_EPOCH_MS, appleAbsoluteSecondsToEpochMs } from '../lib/appleTime.mjs';
 import { planReconcile } from '../lib/reconcile.mjs';
 import {
@@ -294,6 +295,73 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
     return { rows: [...byId.values()], skipped };
   }
 
+  // EventKit backend. The reason this exists is PERMISSION, not capability: the
+  // local backend below reads Calendar.sqlitedb directly, and that file is Full
+  // Disk Access -- every file the owner has, to read their calendar. EventKit
+  // has its own TCC permission scoped to exactly this data, and the app already
+  // asks for it by name. Node cannot call EventKit, so a helper binary does and
+  // answers in JSON (see lib/apple-data.mjs).
+  //
+  // Everything downstream is deliberately identical to the local path: the same
+  // buildRows(), the same window, the same reconciliation. The helper emits
+  // Apple absolute seconds, which is what the sqlite columns hold, so buildRows
+  // cannot tell which backend fed it -- which is the point. Two definitions of
+  // an entity id is how two backends stop agreeing about what is the same event.
+  //
+  // Like Google and unlike the local store, EventKit expands recurrences itself,
+  // so there is no dependence on a lazily-populated occurrence cache.
+  async function runEventKitBackend(ctx, window) {
+    const occurrences = await readEvents(window);
+    const { rows, skipped } = buildRows(occurrences, window);
+    if (skipped > 0) {
+      ctx.log.warn('calendar_rows_skipped', { connector: 'calendar', count: skipped });
+    }
+    const totals = await ctx.ingest(rows);
+
+    const observed = new Set(rows.map((row) => row.entity_id));
+    const held = await ctx.admin.entities({
+      source: 'calendar',
+      fromTs: window.fromTs,
+      toTs: window.toTs,
+    });
+    // Same floor as the other two backends: an empty read can mean a revoked
+    // grant or a calendar that failed to load, and the diff cannot tell either
+    // from a genuinely cleared calendar.
+    const plan = planReconcile({ observedIds: observed, held });
+    let deleted = 0;
+    if (plan.refuse) {
+      ctx.log.warn('calendar_reconcile_refused', {
+        connector: 'calendar',
+        backend: 'eventkit',
+        held: held.length,
+        wouldDelete: plan.stale.length,
+        reason: plan.refuse,
+      });
+    } else if (plan.stale.length > 0) {
+      deleted = (await ctx.admin.deleteEntities({ source: 'calendar', entityIds: plan.stale }))
+        .deleted;
+    }
+
+    ctx.log.info('calendar_scan', {
+      connector: 'calendar',
+      backend: 'eventkit',
+      backfill: Boolean(ctx.backfill),
+      windowFromTs: window.fromTs,
+      windowToTs: window.toTs,
+      occurrences: rows.length,
+      inserted: totals.inserted,
+      updated: totals.updated,
+      unchanged: totals.unchanged,
+      deleted,
+    });
+    return {
+      ingested: totals.inserted,
+      updated: totals.updated,
+      unchanged: totals.unchanged,
+      deleted,
+    };
+  }
+
   // Google backend. Shares the window, the ingest call and the reconciliation
   // with the local one; only the source of the occurrences differs. Google
   // expands recurrences server-side (singleEvents=true), so unlike the local
@@ -474,6 +542,15 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
       // `calendar.backend` is the switch; there is deliberately no merge.
       if (ctx.config?.calendar?.backend === 'google') {
         return runGoogleBackend(ctx, window);
+      }
+      // EventKit is PREFERRED over the sqlite path when the helper is present,
+      // because it is the same data for a far smaller grant -- so this is a
+      // default rather than an opt-in. `backend: 'local'` forces the old path
+      // for a machine where the helper cannot run; anything else falls through
+      // to it anyway when the helper is missing, which is what keeps a backend
+      // that has shipped for a while from disappearing under an upgrade.
+      if (ctx.config?.calendar?.backend !== 'local' && helperAvailable()) {
+        return runEventKitBackend(ctx, window);
       }
 
       const cacheDir = join(ctx.cacheDir, 'calendar');

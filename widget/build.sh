@@ -64,6 +64,14 @@ cp -R ../ui/server "$BE/ui/server"
 cp -R ../ui/scripts "$BE/ui/scripts"
 cp -R ../prompts "$BE/prompts"
 cp -R ../connectors "$BE/connectors"
+
+# The Calendar/Contacts helper. Node cannot call EventKit or the Contacts
+# framework, so without this both sources can only reach their data by reading
+# the backing sqlite stores -- which is Full Disk Access, a grant far larger than
+# either needs. Built as its own binary rather than folded into the app because
+# the connectors daemon spawns it per pass. See helpers/AppleData.swift.
+mkdir -p "$BE/helpers"
+swiftc -O -target "$(uname -m)-apple-macos13.0" -o "$BE/helpers/apple-data" helpers/AppleData.swift
 # (No common/: it did not cross to this repo and nothing bundled imports it —
 # verified zero `../common` / `/common/` references in connect/connectors/
 # ui-server. Copying a nonexistent dir hard-fails the build under set -e.)
@@ -263,6 +271,22 @@ if [ -n "$IDENTITY" ]; then
     codesign --force --options runtime \
       --entitlements node.entitlements \
       -s "$IDENTITY" "$BE/llama/bin/llama-server"
+  fi
+  # NO ENTITLEMENTS ON THE HELPER, and that is load-bearing rather than an
+  # omission. It was first signed with the app's, on the reasoning that it is the
+  # process actually calling EventKit and Contacts -- and macOS SIGKILLed it on
+  # every launch (exit 137, `taskgated-helper (ConfigurationProfiles)`). The
+  # personal-information.* entitlements are restricted: under an Apple
+  # Development identity they are only honoured alongside an embedded
+  # provisioning profile, and a bare Mach-O executable has nowhere to embed one
+  # the way an .app bundle does.
+  #
+  # It does not need them anyway. TCC attributes access to the RESPONSIBLE
+  # process, which for a child of the app is the app -- whose entitlements and
+  # whose grants are the ones that count. Signed plainly it reads the address
+  # book fine; signed with the entitlements it never got far enough to try.
+  if [ -f "$BE/helpers/apple-data" ]; then
+    codesign --force --options runtime -s "$IDENTITY" "$BE/helpers/apple-data"
   fi
   codesign --force --options runtime \
     --entitlements "$ENTS" \
