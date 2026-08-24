@@ -339,7 +339,7 @@ const hzSfx = {
 // Every button on every page squishes, from one listener rather than a call
 // at each site — except the few that have a tone of their own, which would
 // otherwise play both and muddy into one longer noise.
-const HZ_OWN_TONE = new Set(['wsend', 'orb', 'fold', 'close', 'demoSend']);
+const HZ_OWN_TONE = new Set(['orb', 'fold', 'close', 'demoSend']);
 document.addEventListener('pointerdown', (e) => {
   const hit = e.target.closest('button, [role="button"]');
   if (!hit || HZ_OWN_TONE.has(hit.id)) return;

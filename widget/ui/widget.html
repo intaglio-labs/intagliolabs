@@ -11,7 +11,8 @@
   <div class="panel" id="panel">
     <div class="wbar">
       <input id="winput" type="text" placeholder="…" autocomplete="off" spellcheck="false" writingsuggestions="false">
-      <button class="send" id="wsend" title="Send">↑</button>
+      <!-- No send button. Enter submits; the pill tucks under the orb, which
+           is the only round thing on the bar now. (2026-08-24, owner.) -->
       <!-- Two layers on purpose: the button owns the press-squash and the
            inner span owns the resting jelly. CSS transform is a single
            property, so one element cannot carry both — the animation would

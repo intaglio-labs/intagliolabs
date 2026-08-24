@@ -9,6 +9,12 @@
 
 // The always-present message bar IS the chat entry point: submitting
 // opens the chat window with the message already sent.
+// ENTER IS THE ONLY SEND PATH. The ↑ button that used to sit between the pill
+// and the orb was removed (2026-08-24, owner); the pill now tucks under the
+// orb instead. Deliberately NOT rehomed onto the orb's click: that click is
+// the tap-to-arm voice control below, and one control cannot mean both "speak
+// this turn" and "send what I typed" without picking for the user which one a
+// tap meant.
 const winput = document.getElementById('winput');
 function submitFromWidget() {
   const utterance = winput.value.trim().slice(0, 2000);
@@ -17,7 +23,6 @@ function submitFromWidget() {
   hzSfx.send();
   hzPost('openChatWith', { utterance });
 }
-document.getElementById('wsend').addEventListener('click', submitFromWidget);
 // The orb is the tap-to-arm voice control (VOICE-PLAN rev 3 §2): one tap
 // arms exactly one spoken turn, a second tap cancels. Native relays state
 // back so the orb runs its .talking timings while armed or speaking.
