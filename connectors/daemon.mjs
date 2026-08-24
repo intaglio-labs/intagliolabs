@@ -416,6 +416,24 @@ export function loadConfig(path = defaultConfigPath()) {
   return validateConfig(parsed);
 }
 
+// Split a preflight result list into what stops the daemon and what only stops
+// one source. Pure, so the policy can be tested without a TCC state to stand in
+// — which matters here specifically, because a process launched from a terminal
+// inherits the TERMINAL's Full Disk Access and reports a pass that says nothing
+// about the app. The rule cannot be verified by running this from a shell; it
+// can be verified from a fixture.
+//
+// The mapping is the naming convention: a check called `fda-<source>` is that
+// source's grant. Everything else is foundational and fatal.
+export function partitionChecks(results) {
+  const failed = (Array.isArray(results) ? results : []).filter((r) => r?.status === 'FAIL');
+  const isFda = (r) => typeof r.name === 'string' && r.name.startsWith('fda-');
+  return {
+    fatal: failed.filter((r) => !isFda(r)),
+    fdaBlocked: new Set(failed.filter(isFda).map((r) => r.name.slice(4))),
+  };
+}
+
 // --- sources ------------------------------------------------------------------
 //
 // The source contract: each connectors/sources/<name>.mjs default-exports
@@ -654,26 +672,62 @@ if (isMain) {
     // concurrent work stream), which let a partial deploy start the one
     // process with Full Disk Access with the entire preflight — hermes
     // identity gate included — silently skipped. Now that is a loud startup
-    // failure, per the refuse-loudly rule below. A FAIL is fatal: in that
-    // module's own semantics WARN means "not provisioned yet, disabled by
-    // design" and FAIL means broken, and a daemon that polls past a broken
-    // foundation buries the symptom in per-source noise.
+    // failure, per the refuse-loudly rule below.
+    //
+    // WHICH FAILURES ARE FATAL. A broken foundation is: hermes identity, the
+    // bridge hardening gate, the binary and the backup API. Poll past one of
+    // those and the symptom is buried in per-source noise, so they still stop
+    // the daemon dead.
+    //
+    // A MISSING FULL DISK ACCESS GRANT IS NOT THAT. It is one permission the
+    // owner has not given yet, and it is specific to the sources that read a
+    // protected sqlite store directly. Treating it as fatal meant three
+    // unchecked boxes took down `files`, `granola`, `linkedin`, `mail`,
+    // `notion`, `oura` and `whatsapp` as well — seven sources that touch nothing
+    // TCC protects and ingest fine without the grant. That is what shipped, and
+    // it is why a machine whose app reported `fda: granted` still ingested
+    // nothing: these checks run in the CHILD, which does not inherit the
+    // responsible-process attribution, so they failed and took everything with
+    // them.
+    //
+    // So an FDA failure is ADVISORY: it is logged by name and the daemon starts.
+    // It is deliberately not a disable either, for two reasons the sources
+    // already encode. calendar.mjs's own note is that "the run itself is the
+    // honest probe" — the grant attaches per spawning process, so a preflight
+    // stat can pass where the real open is denied and vice versa, which makes
+    // this check evidence and not a verdict. And calendar has a SECOND backend
+    // that needs no FDA at all: on a machine using Google Calendar, sitting the
+    // source out over a local-store check would have reproduced this very bug
+    // one level down. Sitting a source out would also cost the fix button — the
+    // connections panel raises "Open Full Disk Access" from a source's own
+    // broken/fix state, which a source that never ran never reports.
     const results = await runChecks();
     for (const r of results) {
       if (r.status === 'WARN') log.warn('startup_check', { name: r.name, detail: r.detail });
       if (r.status === 'FAIL') log.error('startup_check', { name: r.name, detail: r.detail, fix: r.fix });
     }
-    const failed = results.filter((r) => r.status === 'FAIL');
-    if (failed.length > 0) {
+    const { fatal, fdaBlocked } = partitionChecks(results);
+    if (fatal.length > 0) {
       throw new Error(
-        `startup checks failed: ${failed.map((r) => r.name).join(', ')} — run \`npm run doctor\` for the fixes`
+        `startup checks failed: ${fatal.map((r) => r.name).join(', ')} — run \`npm run doctor\` for the fixes`
       );
+    }
+    if (fdaBlocked.size > 0) {
+      // Loud, but not fatal, and not a disable: these sources still run and
+      // still probe for themselves. Named individually so the log says which
+      // grant is missing rather than "checks failed".
+      log.warn('fda_missing_sources_may_fail', {
+        sources: [...fdaBlocked],
+        fix: 'grant Full Disk Access to Intaglio Labs, then restart it',
+      });
     }
 
     const state = openStateDb();
-    // Every source that was discovered runs. This used to be filtered by a
-    // `role` naming which machine ran which connectors; that split is gone and
-    // the filter with it. Sources are still gated individually by config and by
+    // Every source that was discovered runs, INCLUDING one whose Full Disk Access
+    // check failed above — see the preflight note: that check is advisory, and
+    // each source probes for itself. This used to also be filtered by a `role`
+    // naming which machine ran which connectors; that split is gone and the
+    // filter with it. Sources are still gated individually by config and by
     // whether their credentials exist.
     const sources = await loadSources();
     log.info('sources_loaded', { running: sources.map((s) => s.name) });
