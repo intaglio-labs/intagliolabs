@@ -12,8 +12,14 @@
 //    delegate. The Bridge delegate refuses every non-file: URL and guards the
 //    chat/settings/onboarding webviews; loosening it would un-fence those. This
 //    login view gets its own delegate so that fence is untouched.
-//  * That delegate is SCOPED to Meta's login hosts and cancels navigation to
-//    anything else, so a redirect chain cannot wander off Meta.
+//  * That delegate is SCOPED to the platform's own login hosts and cancels
+//    navigation to anything else, so a redirect chain cannot wander off it.
+//    The host list and the session-cookie name arrive from the connect server's
+//    platform table (connect/lib/bridge.mjs) rather than being hardcoded here.
+//    They used to be hardcoded -- to Meta's four hosts and to `c_user` -- while
+//    that table advertised a login for six platforms, so X, Discord, Slack and
+//    Telegram got a blank window and a cookie poll that could never fire. The
+//    fence is still ENFORCED here; it is no longer AUTHORED here.
 //  * A NON-PERSISTENT data store, isolated from the app, discarded on teardown.
 //  * Torn down on success, cancel, AND window close — never left resident.
 //
@@ -42,27 +48,43 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
   private var blink: Timer?
   private var cursorOn = true
 
-  private init(label: String, cookieDomain: String, done: @escaping (String?) -> Void) {
+  private init(
+    label: String, cookieDomain: String, sessionCookie: String, allowedHosts: [String],
+    done: @escaping (String?) -> Void
+  ) {
     self.label = label
     self.cookieDomain = cookieDomain
-    // Which cookie means "logged in", by platform. Harvest is the whole domain
-    // regardless; this is only the signal to know the user is in.
-    self.sessionCookie = cookieDomain.contains("instagram") ? "sessionid" : "c_user"
-    // Meta's login can bounce across its own properties (account center, 2FA),
-    // so allow the Meta login hosts and refuse everything else.
-    self.allowedSuffixes = ["instagram.com", "facebook.com", "messenger.com", "meta.com"]
+    // Which cookie means "logged in", per the platform table. Harvest is the
+    // whole domain regardless; this is only the signal to know the user is in.
+    self.sessionCookie = sessionCookie
+    self.allowedSuffixes = allowedHosts
     self.done = done
   }
 
   // Present the login window. `done(json)` fires once with the cookie JSON on
   // success, or `done(nil)` on cancel/close. Main thread.
+  //
+  // REFUSES TO OPEN rather than opening something it cannot finish. Three ways
+  // that happens, and each of them used to produce a blank branded window:
+  // an unparseable URL, an empty host list (a platform whose bridge takes a
+  // token or a phone code, not cookies), or a login URL whose own host is not in
+  // the list. The last is not paranoia -- loginUrlFrom() prefers a "Login URL:"
+  // line out of the bridge bot's transcript, which is content from a container,
+  // so the URL is checked against the policy before it is ever loaded.
   static func present(
-    label: String, loginUrl: String, cookieDomain: String, done: @escaping (String?) -> Void
+    label: String, loginUrl: String, cookieDomain: String,
+    sessionCookie: String, allowedHosts: [String], done: @escaping (String?) -> Void
   ) {
-    guard let url = URL(string: loginUrl) else { done(nil); return }
+    guard let url = URL(string: loginUrl), let host = url.host, !allowedHosts.isEmpty,
+          !sessionCookie.isEmpty,
+          allowedHosts.contains(where: { host == $0 || host.hasSuffix("." + $0) })
+    else { done(nil); return }
     // Only one login window at a time; a second request supersedes the first.
     current?.finish(nil)
-    let ctl = BridgeLogin(label: label, cookieDomain: cookieDomain, done: done)
+    let ctl = BridgeLogin(
+      label: label, cookieDomain: cookieDomain,
+      sessionCookie: sessionCookie, allowedHosts: allowedHosts, done: done
+    )
     current = ctl
     ctl.show(url: url)
   }
@@ -211,8 +233,16 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     return host == cookieDomain || host.hasSuffix("." + cookieDomain)
   }
 
-  // Navigation fence: only Meta login hosts, and only http(s)/about. Everything
-  // else is cancelled so the login flow cannot be redirected off Meta.
+  // Navigation fence: only the platform's own login hosts, and only https/about.
+  // Everything else is cancelled so the login flow cannot be redirected off the
+  // platform.
+  //
+  // HTTPS ONLY. This delegate used to admit `http` as well, on the one webview in
+  // this app where a person types a password. It was never reachable -- Info.plist
+  // carries no NSAppTransportSecurity key, so default ATS refuses cleartext to a
+  // public host regardless of what this returns -- which is exactly why it is
+  // gone: dead permissiveness on a credential surface becomes live the day someone
+  // adds an unrelated ATS exception. The loopback bases do not come through here.
   func webView(
     _ webView: WKWebView,
     decidePolicyFor navigationAction: WKNavigationAction,
@@ -220,7 +250,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
   ) {
     guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
     if url.scheme == "about" { decisionHandler(.allow); return }
-    guard url.scheme == "https" || url.scheme == "http", let host = url.host else {
+    guard url.scheme == "https", let host = url.host else {
       decisionHandler(.cancel); return
     }
     let ok = allowedSuffixes.contains { host == $0 || host.hasSuffix("." + $0) }

@@ -24,13 +24,13 @@ import {
   DEFAULT_HERMES_TOKEN_PATH,
 } from '../server/hermes.mjs';
 
-// 8789, matching hermes' own default. This said 8787 until 2026-08-22, four
+// 51789, matching hermes' own default. This said 8787 until 2026-08-22, four
 // days after the canonical port moved -- so a bare `npm run seed:context` sent
 // the hermes bearer token to whatever else was listening on the old port, which
 // on many machines is an unrelated dev server that answers 200.
 // canonicalLoopbackBase then refuses to let HERMES_URL point off-box at all,
 // because the Authorization header below rides every seeding request.
-const PORT = Number(process.env.HERMES_PORT ?? 8789);
+const PORT = Number(process.env.HERMES_PORT ?? 51789);
 const BASE = canonicalLoopbackBase(
   process.env.HERMES_URL ?? `http://127.0.0.1:${PORT}`,
   'HERMES_URL'

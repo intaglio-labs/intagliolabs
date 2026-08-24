@@ -9,11 +9,17 @@ import { createEar } from './lib/ear.js';
 import { createVoice } from './lib/voice.js';
 
 const SILENCE_DISARM_MS = 12_000;
+// NO REPO PATHS IN FRONT OF A PERSON. This used to read "run
+// widget/voice/setup-voice.sh" -- a path inside a source tree a downloaded app
+// does not have, naming a script its owner cannot run. Voice is now something
+// you turn on from onboarding or the gear, so the message points at the door
+// that actually exists.
 const UNPROVISIONED =
-  "voice isn't provisioned on this machine yet — run widget/voice/setup-voice.sh";
+  'voice isn’t set up yet — open the gear and choose Set up voice';
 
 let ear = null;
 let voice = null;
+let voicePending = null;
 let armed = false;
 let silenceTimer = null;
 
@@ -22,7 +28,7 @@ const post = (type, payload) => hzPost(type, payload).catch(() => {});
 // them: it SPEAKS the greeting, then LISTENS with the mic open, then SPEAKS
 // the answer. This used to report one `talking` boolean, set at arm and
 // cleared at disarm, so the entire session looked the same — including the
-// stretch where the owner is the one talking and Hazlie is only listening.
+// stretch where the owner is the one talking and Intaglio Labs is only listening.
 // `talking` still rides along so an older native that reads only the boolean
 // keeps its current behaviour.
 const orb = (state) => post('orbState', { state, talking: state !== 'idle' });
@@ -40,21 +46,51 @@ function disarm() {
   orb('idle');
 }
 
+// One init path for both speakers. localOnly, same posture as the ear below:
+// a missing vendored voice model fails closed (silent), never falls back to
+// huggingface.co. The worker's own header says the product sends this; it
+// did not, so a fresh install with no provisioned model phoned home for the
+// voice — an egress path that contradicts the local-only claim. On a
+// provisioned machine the model is present and nothing changes.
+// `voice` is KEPT only once init resolves. A rejected init used to leave the
+// instance latched: every later speak skipped init and posted into a dead
+// worker, whose error replies went nowhere — answers were never spoken and
+// the UNPROVISIONED catch below could never fire. A failed init is destroyed
+// and rethrown (the caller's catch reports), so the next speak retries with
+// a fresh instance; worker errors after init reach the chat via onError.
+async function ensureVoice() {
+  if (voice) return;
+  if (!voicePending) {
+    voicePending = (async () => {
+      const v = createVoice(
+        {
+          onError: (err) => {
+            if (voice !== v) return; // init failures are the caller's catch
+            const raw = String(err);
+            const provisioning = /module script|Failed to fetch|Load failed|fetch/iu.test(raw);
+            post('voiceError', { message: provisioning ? UNPROVISIONED : raw });
+          },
+        },
+        { localOnly: true }
+      );
+      try {
+        await v.init?.();
+      } catch (err) {
+        try { v.destroy?.(); } catch {}
+        throw err;
+      }
+      voice = v;
+    })().finally(() => { voicePending = null; });
+  }
+  return voicePending;
+}
+
 // The greeting: "hey" on every arm, spoken BEFORE the microphone opens so
-// Moonshine can't transcribe Hazlie's own hello as the owner's utterance.
+// Moonshine can't transcribe Intaglio Labs's own hello as the owner's utterance.
 // A nicety, not a gate — if TTS isn't ready the arm proceeds silently.
 async function speakGreeting() {
   try {
-    if (!voice) {
-      // localOnly, same posture as the ear below: a missing vendored voice
-      // model fails closed (silent), never falls back to huggingface.co. The
-      // worker's own header says the product sends this; it did not, so a
-      // fresh install with no provisioned model phoned home for the voice —
-      // an egress path that contradicts the local-only claim. On a
-      // provisioned machine the model is present and nothing changes.
-      voice = createVoice({}, { localOnly: true });
-      await voice.init?.();
-    }
+    await ensureVoice();
     voice.sayText('hey');
     await new Promise((r) => setTimeout(r, 700)); // let the word finish
   } catch {}
@@ -62,7 +98,7 @@ async function speakGreeting() {
 
 async function arm() {
   armed = true;
-  // The greeting is Hazlie speaking, so the orb genuinely is talking here.
+  // The greeting is Intaglio Labs speaking, so the orb genuinely is talking here.
   orb('talking');
   await speakGreeting();
   if (!armed) return; // cancelled during the greeting
@@ -109,16 +145,7 @@ window.__earSpeak = async (text) => {
   const t = String(text ?? '').trim();
   if (!t) return;
   try {
-    if (!voice) {
-      // localOnly, same posture as the ear below: a missing vendored voice
-      // model fails closed (silent), never falls back to huggingface.co. The
-      // worker's own header says the product sends this; it did not, so a
-      // fresh install with no provisioned model phoned home for the voice —
-      // an egress path that contradicts the local-only claim. On a
-      // provisioned machine the model is present and nothing changes.
-      voice = createVoice({}, { localOnly: true });
-      await voice.init?.();
-    }
+    await ensureVoice();
     orb('talking');
     voice.sayText(t);
   } catch {

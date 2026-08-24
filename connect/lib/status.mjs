@@ -97,8 +97,13 @@ function ouraState(home) {
 // they act on. Absent `broken` is falsy, so every other row is unaffected.
 const FDA_FIX =
   'Open System Settings → Privacy & Security → Full Disk Access, then switch on ' +
-  '~/.hazlie/bin/node. If it is already listed, toggle it off and on again — macOS ' +
-  'ties the permission to that exact file, and a Node upgrade replaces it.';
+    // NAMES THE APP, NOT node. The reader is a CHILD of intaglio labs now
+    // rather than a launchd agent, and macOS attributes a grant to the
+    // RESPONSIBLE process — so the row to switch on is the app. Naming node
+    // sent people to grant a permission that does nothing, and asked them to
+    // trust a unix binary they never installed.
+    'intaglio labs. If it is already listed, toggle it off and on again — macOS ' +
+    'ties the permission to that exact app, and it is replaced on every update.';
 
 // One row per Apple store this machine reads. All three are Full Disk Access
 // territory, and TCC attributes the grant to the responsible process — so a
@@ -116,7 +121,7 @@ function localStoreRow({ id, label, path, reads }) {
     id,
     label,
     connected: ok,
-    detail: ok ? reads : 'needs Full Disk Access for ~/.hazlie/bin/node',
+    detail: ok ? reads : 'needs Full Disk Access',
     action: ok ? null : 'fda',
     broken: !ok,
     fix: ok ? null : FDA_FIX,
@@ -146,7 +151,7 @@ function contactsRow(home) {
     id: 'contacts',
     label: 'Contacts',
     connected: ok,
-    detail: ok ? 'names behind the numbers' : 'needs Full Disk Access for ~/.hazlie/bin/node',
+    detail: ok ? 'names behind the numbers' : 'needs Full Disk Access',
     action: ok ? null : 'fda',
     broken: !ok,
     fix: ok ? null : FDA_FIX,

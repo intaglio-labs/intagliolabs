@@ -17,7 +17,21 @@ NODE="$HOME/.hazlie/bin/node"
 [ -x "$NODE" ] || NODE="$(command -v node)"
 echo "using node: $NODE ($("$NODE" --version))"
 
-"$NODE" "$(command -v npm)" install --no-fund --no-audit
+# --ignore-scripts, and it is load-bearing rather than caution.
+#
+# kokoro-js depends on transformers.js, which depends on sharp -- a NATIVE
+# module. It has no prebuilt for this node, so its install script falls back to
+# building from source via node-gyp and dies: "Please add node-addon-api to your
+# dependencies". That took the whole install with it, so the voice stack could
+# not be built at all on a current node.
+#
+# Nothing here ever RUNS sharp: it is transformers.js' image path, and this is
+# an audio pipeline. esbuild only needs the transformers SOURCE to bundle the
+# Kokoro worker. So the fix is to skip install scripts, not to make sharp
+# compile. Optional deps stay ON, because esbuild ships its platform binary as
+# one (@esbuild/darwin-arm64) -- --omit=optional was tried first and removed the
+# very thing the build needs.
+"$NODE" "$(command -v npm)" install --no-fund --no-audit --ignore-scripts
 
 # The frontend scripts write to ./public relative to their package root.
 "$NODE" scripts/build-workers.mjs

@@ -121,8 +121,25 @@ test('the help page links back to the tokened page, not to bare /', () => {
 
 // The instructions name a path the owner pastes into System Settings. If this
 // drifts from ops/setup-connectors.sh, the grant lands on the wrong binary.
-test('the FDA page names the stable binary', () => {
-  assert.match(renderHelpPage('imessage', { token: 'TOK' }), /~\/\.hazlie\/bin\/node/u);
+test('the FDA page names the APP, not the binary underneath it', () => {
+  // This asserted ~/.hazlie/bin/node, and that was right while the reader was a
+  // launchd agent responsible for itself. It is a child of the app now, so macOS
+  // attributes the grant to intaglio labs — naming node would send someone to
+  // switch on a permission that does nothing.
+  const page = renderHelpPage('imessage', { token: 'TOK' });
+  assert.match(page, /intaglio labs/u);
+  assert.doesNotMatch(page, /~\/\.hazlie\/bin\/node/u,
+    'a path into a hidden directory is not an instruction anyone can follow');
+});
+
+// Help prose is authored with inline markup in `body` and `after` alike —
+// linkedin.after carries <em>Connected On</em>. This page used to escape
+// `after`, so the user read a literal "<em>Connected On</em>" on the LinkedIn
+// help page while the same markup rendered fine one paragraph up.
+test('after paragraphs render their markup instead of showing it', () => {
+  const html = renderHelpPage('linkedin', { token: 'TOK' });
+  assert.ok(html.includes('<em>Connected On</em>'), 'after markup must render as markup');
+  assert.ok(!html.includes('&lt;em&gt;'), 'no escaped tag may reach the reader as text');
 });
 
 // --- the prototype-chain route that killed the server ----------------------

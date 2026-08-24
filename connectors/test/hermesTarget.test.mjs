@@ -11,18 +11,18 @@ import { verifyHermesIdentity } from '../lib/checks.mjs';
 // gate in run.mjs; both are covered here.
 
 test('"hermesUrl" accepts an HTTP loopback origin', () => {
-  const config = { hermesUrl: 'http://127.0.0.1:8789' };
+  const config = { hermesUrl: 'http://127.0.0.1:51789' };
   assert.deepEqual(validateConfig(config), config);
 });
 
 test('"hermesUrl" refuses everything the ingest client would refuse', () => {
   // Each of these, if accepted, becomes the address corpus rows are sent to.
   for (const bad of [
-    'https://127.0.0.1:8789', // https implies a non-local trust model
-    'http://192.168.1.20:8789', // a LAN host is not loopback
-    'http://127.0.0.1:8789/ingest', // a path smuggles routing into config
-    'http://user:pw@127.0.0.1:8789', // credentials in a URL end up in logs
-    8789, // a bare port is a guess about the rest
+    'https://127.0.0.1:51789', // https implies a non-local trust model
+    'http://192.168.1.20:51789', // a LAN host is not loopback
+    'http://127.0.0.1:51789/ingest', // a path smuggles routing into config
+    'http://user:pw@127.0.0.1:51789', // credentials in a URL end up in logs
+    51789, // a bare port is a guess about the rest
     '',
   ]) {
     assert.throws(() => validateConfig({ hermesUrl: bad }), /hermesUrl/u, JSON.stringify(bad));

@@ -34,7 +34,18 @@ export const MAX_CLAIMS_PER_RUN = 100;
 
 // Requested from llama-server when the build supports it. Kept minimal on
 // purpose: every field the model can emit is a field somebody has to validate,
-// and `subject`, `observed_at`, `p_claim` and every id are assigned by code.
+// and `subject`, `observed_at` and every id are assigned by code.
+//
+// `p` IS asked for, as of prompt v2, and is the one field here the model is
+// trusted to originate. The rationale is measured, on another corpus and not
+// reproducible here: thresholding a model's OWN reported probability bought a
+// large precision gain over taking every claim it emitted, and it is a
+// query-time parameter rather than a better prompt -- so it is a knob you can
+// only reach for if you asked for the number. Nothing treats it as calibrated;
+// it orders the review queue.
+//
+// It is `required`, deliberately. Optional confidence is confidence the model
+// omits on exactly the rows where it is least sure.
 export const CLAIM_SCHEMA = Object.freeze({
   name: 'distilled_claims',
   strict: true,
@@ -49,11 +60,12 @@ export const CLAIM_SCHEMA = Object.freeze({
         items: {
           type: 'object',
           additionalProperties: false,
-          required: ['kind', 'text', 'quote'],
+          required: ['kind', 'text', 'quote', 'p'],
           properties: {
             kind: { enum: [...CLAIM_KINDS] },
             text: { type: 'string', minLength: 1, maxLength: 400 },
             quote: { type: 'string', minLength: 1, maxLength: 400 },
+            p: { type: 'number', minimum: 0, maximum: 1 },
           },
         },
       },
@@ -173,15 +185,42 @@ export function validateRowClaims(row, claims) {
       dropped.push({ reason: 'quote is not an exact span of the row' });
       continue;
     }
+    // THE SUBJECT IS THE OWNER, AND IT IS CHECKED HERE RATHER THAN ASKED FOR.
+    //
+    // Every claim in this table is about the same person — `subject` is the
+    // literal string 'owner' on all of them — so the sentence has to say so too.
+    // It did not: the prompt's worked examples used a placeholder NAME, the model
+    // read that as the owner's name, and 75 of 119 claims on a real machine
+    // opened with it. The evidence underneath them was the owner's own first
+    // person, so nothing downstream could catch it: a perfectly grounded claim
+    // about the wrong human being.
+    //
+    // The prompt now says to write "the owner". This is the enforcement, because
+    // a rule that lives only in a prompt is a request. A claim that will not name
+    // its subject correctly is dropped, and the drop is counted.
+    if (!/\bowner\b/iu.test(claim.text)) {
+      dropped.push({ reason: 'claim text does not name the owner as its subject' });
+      continue;
+    }
     const key = `${claim.kind} ${claim.text.trim()}`;
     if (seen.has(key)) {
       dropped.push({ reason: 'duplicate of another claim from the same row' });
       continue;
     }
     seen.add(key);
+    // A malformed or absent `p` does NOT drop the claim. The grammar makes it
+    // required so a compliant model always sends one, but a build without
+    // grammar support, an older cached answer, or a model that ignores the
+    // schema would otherwise lose claims that are perfectly good apart from a
+    // missing number -- trading real memory for a sorting hint. Unusable
+    // becomes null, which reads as "unranked" downstream and sorts last.
+    const p = typeof claim.p === 'number' && Number.isFinite(claim.p) && claim.p >= 0 && claim.p <= 1
+      ? claim.p
+      : null;
     kept.push({
       kind: claim.kind,
       text: claim.text.trim(),
+      p_claim: p,
       source: { context_id: Number(row.id), quote: claim.quote, content_hash: row.content_hash },
     });
   }

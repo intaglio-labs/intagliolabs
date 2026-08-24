@@ -19,20 +19,30 @@ rather than silently reconciled. Consequence for the hermes branch:
 face is actually removed — that shrink belongs to a separate, coordinated
 commit over there, not to this directory.
 
-## Requirement on /vault/ask (MEMORY-PLAN Days 7–9, not yet built)
+**Done, 2026-08-23.** `DEFAULT_ALLOWED_ORIGINS` is now empty; see
+`ui/server/hermes.mjs`. The shrink mattered more than "dead config" suggests —
+the entry was not merely unused, it was an unauthenticated channel that any
+other process holding port 8081 would have inherited.
 
-The chat view targets `POST /vault/ask` on hermes. Whoever builds it:
+## The /vault/ask contract (shipped)
 
-- **It must accept the bearer channel.** This widget is a native URLSession
+The chat view targets `POST /vault/ask` on hermes. The route exists: it is
+served by the in-process sealed reader (`handleVaultAsk` in
+`ui/server/hermes.mjs`; see ui/AGENTS.md "Where retrieval lives now" for how
+it landed there). The two requirements this widget put on the route are both
+honored, and `widget/test/vault-ask-contract.test.mjs` pins them:
+
+- **It accepts the bearer channel.** This widget is a native URLSession
   client: it sends NO Origin header and authenticates with
-  `Authorization: Bearer` from `~/.hazlie/secrets/hermes-token.txt`. Do not
-  gate the route on `channel === 'browser'`.
-- **Honor client-disconnect aborts** (`req` close → AbortSignal on the llama
-  call, per VOICE-PLAN §3.6): the send button becomes a working Cancel.
+  `Authorization: Bearer` from `~/.hazlie/secrets/hermes-token.txt`. The
+  route is not gated on `channel === 'browser'`.
+- **Client-disconnect aborts:** the handler wires the connection's close to
+  an AbortController on the loopback llama call, so the send button is a
+  working Cancel.
 
-Until the route exists, a send renders the fixed string "vault isn't ready on
-this machine yet" (404), and status/identity failures render their own fixed
-strings. The widget never fabricates an answer.
+If hermes is down or answers with the wrong identity, a send renders fixed
+strings ("vault isn't ready on this machine yet" on 404; status/identity
+failures render their own). The widget never fabricates an answer.
 
 ## Architecture
 
@@ -47,14 +57,14 @@ strings. The widget never fabricates an answer.
   FDA grants belong to launchd's `~/.hazlie/bin/node`, and a wrapper that
   became the responsible process would silently break them.
 - **`src/Bridge.swift` is the egress choke point.** The only two reachable
-  URLs are `http://127.0.0.1:8789` (hermes) and `http://127.0.0.1:8788`
+  URLs are `http://127.0.0.1:51789` (hermes) and `http://127.0.0.1:51788`
   (connect; `HAZLIE_CONNECT_PORT` overrides the port only, for a dev
   instance). Redirects are refused. The webviews load `file://` resources
   only — `default-src 'none'` CSP plus a navigation delegate that cancels
   every non-file navigation — so a page cannot make a network request at
   all. Audit = read this directory; there is nothing else.
 - **Identity before trust:** every chat send preflights `GET /health` on
-  8789 and requires the exact body `{"ok":true}` (the port-8787 lesson:
+  51789 and requires the exact body `{"ok":true}` (the port-8787 lesson:
   liveness is not identity).
 - **Status** comes from connect's `GET /api/status` (bearer-only; added on
   this branch), which reuses the connect page's `readStatus()` in-process so
@@ -92,7 +102,7 @@ HAZLIE_CONNECT_PORT=8790 ~/Applications/Hazlie.app/Contents/MacOS/Hazlie
 - Window level -2147483602 (= desktopIcon+1) confirmed via CGWindowList;
   stays below normal windows, survives relaunch with position.
 - `footprint`: 20 MB phys (llama-server running alongside).
-- `lsof`: only 127.0.0.1:8788/8789 sockets, ever; grep audit: two loopback
+- `lsof`: only 127.0.0.1:51788/51789 sockets, ever; grep audit: two loopback
   URL literals, nothing else.
 - /api/status round trip against a dev connect on 8790: dots match
   readStatus() truth row-for-row (FDA rows show the documented
@@ -101,5 +111,6 @@ HAZLIE_CONNECT_PORT=8790 ~/Applications/Hazlie.app/Contents/MacOS/Hazlie
   onscreen=nil) shows in CGWindowList alongside the widget window. Origin
   not yet identified; invisible in practice.
 
-Not yet verified: popup interactions (need a human click), chat round trip
-(needs /vault/ask to exist).
+Not yet verified: popup interactions (need a human click), a live chat round
+trip against the running service (the /vault/ask contract is covered by
+`widget/test/vault-ask-contract.test.mjs`).

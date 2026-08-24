@@ -30,7 +30,7 @@ SECRET_DIR="$HAZLIE/secrets"
 LOG_DIR="$HAZLIE/logs"
 STABLE_NODE="$BIN_DIR/node"
 NODE_VERSION_STAMP="$BIN_DIR/node.version"
-HERMES_HEALTH_URL="http://127.0.0.1:${HERMES_PORT:-8789}/health"  # hermes.mjs default port (canonical since 2026-08-20)
+HERMES_HEALTH_URL="http://127.0.0.1:${HERMES_PORT:-51789}/health"  # hermes.mjs default port (canonical since 2026-08-20)
 
 REPLACE_NODE=0
 for arg in "$@"; do
@@ -371,7 +371,7 @@ if [[ "$healthy" != 1 ]]; then
   echo "ERROR: no Hermes health answer after 15s." >&2
   echo "Check: launchctl print gui/$UID/com.hazlie.hermes" >&2
   echo "       tail -50 $LOG_DIR/hermes.err.log" >&2
-  echo "       lsof -nP -iTCP:${HERMES_PORT:-8789} -sTCP:LISTEN   # another process may hold the port" >&2
+  echo "       lsof -nP -iTCP:${HERMES_PORT:-51789} -sTCP:LISTEN   # another process may hold the port" >&2
   exit 1
 fi
 

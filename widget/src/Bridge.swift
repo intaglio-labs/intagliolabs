@@ -31,9 +31,89 @@ protocol BridgeDelegate: AnyObject {
   func widgetSpot() -> [String: Double]
   func spotlightWidget(_ on: Bool)
   func openOnboarding()
+  func setupProgress(_ payload: [String: Any])
+  /// Drop the onboarding scrim below ordinary windows so a system prompt can be
+  /// seen, and put it back afterwards.
+  func yieldForPrompt(_ yield: Bool)
+  // Like yieldForPrompt, but for System Settings rather than a transient
+  // dialog: it also pushes the scrim BEHIND, because Settings is a window the
+  // owner works in for a while rather than answers and dismisses.
+  func yieldForSettings(_ yield: Bool)
 }
 
 final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, URLSessionTaskDelegate {
+
+  // WHICH PAGE MAY ASK FOR WHAT.
+  //
+  // Every webview registers this same Bridge under the same handler name, so
+  // until this table existed the dispatch switched on the message type alone and
+  // any page could call anything: onboarding could start a bridge login, the
+  // connections popup could ask a question, and any of them could post a
+  // voiceTranscript for an utterance the microphone never heard.
+  //
+  // Nothing exploited that -- the pages are local, every one carries a CSP, and
+  // the only innerHTML writes escape properly -- so this is a compartment, not a
+  // patch. The reason to build it anyway is the blast radius: the day a page does
+  // render something untrusted, the answer should be "it could call three things"
+  // rather than "it could call everything". The check is cheap because the
+  // message already arrives with its webView.
+  //
+  // Derived from what each page actually calls (grep hzPost across widget/ui);
+  // `markHandheld` has no caller today and is listed under connections because
+  // that is the surface it is about. A case missing from every list here is a
+  // test failure, not a silent 404 -- see widget/test/bridge-capabilities.test.mjs.
+  static let sharedActions: Set<String> = [
+    // bridge.js is loaded by every page, so these two are everyone's.
+    "prefs", "fitContent",
+  ]
+  static let pageCapabilities: [String: Set<String>] = [
+    "widget": ["drag", "openChat", "openChatWith", "openConnections", "openPeople",
+               "openSky", "voiceArm"],
+    "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
+    "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
+                    "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
+                    "status", "setMotion", "setScale", "setSounds", "openOnboarding",
+                    "markHandheld",
+                    // Same setup controls, reachable from the gear after the
+                    // flow — a skipped step must stay reachable.
+                    "setupState", "modelDownload", "modelCancel",
+                    "openFullDiskAccess", "startSources",
+                   "permissionState", "requestPermission"],
+    "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
+                   "widgetSpot",
+                   // The setup scenes: choosing and fetching the answer model,
+                   // and turning on the first data source.
+                   "setupState", "modelDownload", "modelCancel",
+                   "openFullDiskAccess", "startSources",
+                    "permissionState", "requestPermission",
+                    // Which scene is up, remembered so a restart resumes on it.
+                    "onboardingStep"],
+    // people.html includes connector-tile.js as well as people.js (check the
+    // script tags, not the file's own comment about being shared), so the People
+    // popup renders connector tiles and needs the bridge verbs too. Writing this
+    // map from the wrong file cost one broken popup in review.
+    "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
+               "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
+               "openExternal"],
+    "people-sky": ["close", "peopleMap"],
+    "ear": ["orbState", "voiceError", "voiceTranscript"],
+  ]
+
+  // Set by the factories in Windows.swift at creation. ObjectIdentifier rather
+  // than the URL: the page's own address is a thing the page influences, and
+  // identity here should come from the code that made the view.
+  private var pageOf: [ObjectIdentifier: String] = [:]
+
+  func register(_ webView: WKWebView, as page: String) {
+    pageOf[ObjectIdentifier(webView)] = page
+  }
+
+  private func allows(_ webView: WKWebView, _ type: String) -> Bool {
+    if Bridge.sharedActions.contains(type) { return true }
+    guard let page = pageOf[ObjectIdentifier(webView)],
+          let allowed = Bridge.pageCapabilities[page] else { return false }
+    return allowed.contains(type)
+  }
 
   // The faces the widget page knows how to wear. Allow-listed here rather
   // than passed through, because this string is interpolated into JavaScript
@@ -58,6 +138,22 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   static var onboarded: Bool {
     get { UserDefaults.standard.bool(forKey: onboardedDefaultsKey) }
     set { UserDefaults.standard.set(newValue, forKey: onboardedDefaultsKey) }
+  }
+
+  // WHICH SCENE THE FLOW WAS ON, so a restart resumes rather than rewinds.
+  //
+  // Granting Full Disk Access to a running app makes macOS offer "Quit &
+  // Reopen" — and taking it dropped the owner back on the welcome screen, to
+  // walk the whole flow again, having just done the hardest step in it. The
+  // page reports each scene as it opens; a first-run launch resumes on the
+  // last one reported, and finishing clears it.
+  static let stepDefaultsKey = "HazlieOnboardingStep"
+  static var onboardingStep: String? {
+    get { UserDefaults.standard.string(forKey: stepDefaultsKey) }
+    set {
+      if let v = newValue { UserDefaults.standard.set(v, forKey: stepDefaultsKey) }
+      else { UserDefaults.standard.removeObject(forKey: stepDefaultsKey) }
+    }
   }
 
   // Interface sounds. Unlike Reduce Motion there is no system setting to
@@ -130,12 +226,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   weak var delegate: BridgeDelegate?
 
   // The ONLY two places this process may talk to.
-  private let hermesBase = URL(string: "http://127.0.0.1:8789")!
+  private let hermesBase = URL(string: "http://127.0.0.1:51789")!
   private let connectBase: URL = {
     // Dev override for the port ONLY — the host is not configurable. Lets a
     // second connect instance (e.g. --port 8790 from a worktree) serve the
     // widget without touching the launchd one.
-    var port = 8788
+    var port = 51788
     if let s = ProcessInfo.processInfo.environment["HAZLIE_CONNECT_PORT"],
        let p = Int(s), (1024...65535).contains(p) { port = p }
     return URL(string: "http://127.0.0.1:\(port)")!
@@ -149,9 +245,17 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   }()
 
   private var askTask: URLSessionDataTask?
-  // Set when a transcript (not typed text) opened the current ask; the
-  // answer is then also handed back to the ear page for speech.
-  private var voiceTurnPending = false
+  // The transcript (not typed text) still waiting for its ask, matched by
+  // TEXT: the ear page posts the transcript and the chat page posts the ask
+  // with no shared id between them, so identical text (both sides trim and
+  // cap the same way) is the only join. Lifecycle: set on voiceTranscript,
+  // consumed by the ask that matches it, and cleared by the next TYPED
+  // message (openChatWith) — typing supersedes a spoken turn, so a
+  // transcript the busy chat page silently dropped can never claim a later
+  // identical typed ask. A non-matching ask leaves it alone, because the
+  // transcript may still be queued behind that ask (load-time messages are
+  // delivered one ask at a time).
+  private var pendingVoiceUtterance: String?
 
   // The only external destinations this app will hand to the OS. Opening
   // one launches the default browser (or System Settings) — the app itself
@@ -161,7 +265,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
     "https://myaccount.google.com/apppasswords",
     "https://granola.ai",
-    "https://cloud.ouraring.com/personal-access-tokens",
+    "https://cloud.ouraring.com/oauth/applications",
     "https://www.notion.so/my-integrations",
     // The bridge token how-to links, for the Discord/Slack guided login flows.
     "https://docs.mau.fi/bridges/go/discord/authentication.html",
@@ -223,6 +327,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           let webView = message.webView
     else { dbg("DROPPED message: \(String(describing: message.body).prefix(120))"); return }
     dbg("recv \(type)")
+    // Fail closed: an unregistered view, or a page asking for something outside
+    // its compartment, gets an error rather than the action.
+    guard allows(webView, type) else {
+      let page = pageOf[ObjectIdentifier(webView)] ?? "unregistered"
+      dbg("REFUSED \(type) from \(page)")
+      reply(webView, id, ["state": "error", "error": "action not available to this surface"])
+      return
+    }
     let payload = body["payload"] as? [String: Any] ?? [:]
 
     switch type {
@@ -232,7 +344,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "openChatWith":
       let utterance = String((payload["utterance"] as? String ?? "")
         .trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
-      if !utterance.isEmpty { delegate?.openChat(with: utterance) }
+      if !utterance.isEmpty {
+        // A typed message supersedes any voice turn still waiting: without
+        // this, a transcript the busy chat page dropped would linger and
+        // could claim a later typed ask with the same words for the speaker.
+        pendingVoiceUtterance = nil
+        delegate?.openChat(with: utterance)
+      }
       reply(webView, id, ["state": "ok"])
     case "chatReady":
       reply(webView, id, [
@@ -247,7 +365,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       let utterance = String((payload["utterance"] as? String ?? "")
         .trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
       if !utterance.isEmpty {
-        voiceTurnPending = true
+        pendingVoiceUtterance = utterance
         delegate?.voiceTranscript(utterance)
       }
       reply(webView, id, ["state": "ok"])
@@ -325,6 +443,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // Only the flow finishing sets this. Dismissing with Escape closes the
       // window without sending it, so a flow backed out of returns next time.
       Bridge.onboarded = true
+      // Nothing left to resume; a replay from settings starts at the welcome.
+      Bridge.onboardingStep = nil
       // ...and the handoff arms: the gear will nudge until settings opens.
       Bridge.connectorsIntroDone = false
       reply(webView, id, ["state": "ok"])
@@ -442,9 +562,24 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           self.reply(webView, id, begin) // begin failed → pass the notice back
           return
         }
+        // The web-login policy comes from the server's platform table. A
+        // platform with no host list cannot be linked this way at all — Discord
+        // and Slack want a pasted token, Telegram a phone code — so say so and
+        // let the page offer the manual path, instead of opening a window whose
+        // first navigation the fence would cancel and whose cookie poll could
+        // never fire. That blank window was the bug.
+        let allowedHosts = (begin["allowedHosts"] as? [String])?.filter { !$0.isEmpty } ?? []
+        let sessionCookie = begin["sessionCookie"] as? String ?? ""
+        guard !allowedHosts.isEmpty, !sessionCookie.isEmpty else {
+          self.reply(webView, id, ["state": "manual", "transcript": begin["transcript"] ?? []])
+          return
+        }
         let label = begin["label"] as? String ?? p
         DispatchQueue.main.async {
-          BridgeLogin.present(label: label, loginUrl: loginUrl, cookieDomain: cookieDomain) { cookiesJSON in
+          BridgeLogin.present(
+            label: label, loginUrl: loginUrl, cookieDomain: cookieDomain,
+            sessionCookie: sessionCookie, allowedHosts: allowedHosts
+          ) { cookiesJSON in
             guard let cookiesJSON else {
               self.reply(webView, id, ["state": "cancelled"])
               return
@@ -457,19 +592,245 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           }
         }
       }
+    // ---- setup: what onboarding needs to know and do ----------------------
+    case "setupState":
+      // Everything the setup scenes render from, in one round trip. Deliberately
+      // says what IS rather than what SHOULD BE: the model tier is read off the
+      // symlink, voice from the presence of the tree the ear actually loads, and
+      // "is any data flowing" from hermes' own row count rather than from a
+      // permission check. macOS gives no honest answer about Full Disk Access
+      // from this process anyway — FDA attributes per resolved binary, and the
+      // binary that matters is the node launchd spawns, not this app. The rows
+      // are the probe, the same way each connector's run() is its own probe.
+      let voiceDir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".hazlie/models/voice/models")
+      var state: [String: Any] = [
+        "state": "ok",
+        "voice": FileManager.default.fileExists(atPath: voiceDir.path),
+        "downloading": ModelSetup.isDownloading,
+        "recommended": ModelSetup.recommended,
+        "nodePath": FileManager.default.homeDirectoryForCurrentUser
+          .appendingPathComponent(".hazlie/bin/node").path,
+        "tiers": ModelSetup.tiers.map { t in
+          ["id": t.id, "label": t.label, "detail": t.detail, "bytes": t.bytes]
+        },
+      ]
+      state["model"] = ModelSetup.installed?.id ?? ""
+      rows { n, memory in
+        var out = state
+        out["rows"] = n
+        if let memory { out["memory"] = memory }
+        self.reply(webView, id, out)
+      }
+
+    case "modelDownload":
+      let tier = String((payload["tier"] as? String ?? "").prefix(8))
+      ModelSetup.download(
+        tierId: tier,
+        progress: { [weak self] got, total in
+          self?.delegate?.setupProgress([
+            "phase": "downloading", "got": got, "total": total, "tier": tier,
+          ])
+        },
+        done: { [weak self] failure in
+          guard let self else { return }
+          if let failure {
+            self.delegate?.setupProgress(["phase": "failed", "error": failure, "tier": tier])
+            if failure != "cancelled" {
+              ModelSetup.notify(title: "Setup didn’t finish", body: failure)
+            }
+            return
+          }
+          // The weights exist now, so the agent that needs them can. Installed
+          // here rather than at next launch, because "downloaded but you must
+          // restart the app" is not finished.
+          self.delegate?.setupProgress(["phase": "installing", "tier": tier])
+          DispatchQueue.global(qos: .utility).async {
+            // THE RUNTIME BEFORE THE AGENT. provision() no-ops on an
+            // already-set-up machine, so a binary the bundle gained later never
+            // came out -- and installing an agent that points at a missing
+            // binary just parks it at exit 78 while this screen waits forever.
+            guard Provision.ensureLlamaRuntime() else {
+              self.delegate?.setupProgress([
+                "phase": "failed", "tier": tier,
+                "error": "the model is saved, but the engine that runs it is missing",
+              ])
+              return
+            }
+            Provision.installAgent("com.hazlie.llama-server")
+            Provision.kickstart("com.hazlie.llama-server")
+            // hermes holds the llama base URL open; restart it so the first ask
+            // after setup does not meet a proxy pointed at nothing.
+            Provision.kickstart("com.hazlie.hermes")
+            // REACH AN ENDING. Loading several GB of weights takes a while, so
+            // wait -- but bounded, and then say which way it went. A screen that
+            // says "checking" forever is the one state that is never true.
+            if Provision.waitForLlama() {
+              self.delegate?.setupProgress(["phase": "ready", "tier": tier])
+              ModelSetup.notify(
+                title: "Hazlie can answer now",
+                body: "The model finished downloading and is ready.")
+            } else {
+              let why = "The model is saved but didn’t start. Reopen the app to try again."
+              self.delegate?.setupProgress([
+                "phase": "failed", "tier": tier, "error": why,
+              ])
+              ModelSetup.notify(title: "Setup didn’t finish", body: why)
+            }
+          }
+        }
+      )
+      reply(webView, id, ["state": "ok"])
+
+    case "modelCancel":
+      ModelSetup.cancel()
+      reply(webView, id, ["state": "ok"])
+
+    case "onboardingStep":
+      // Fire-and-forget from showScreen(). Bounded because it is a UserDefaults
+      // key written from a webview message, and an unbounded string there is a
+      // disk write the page controls the size of.
+      if let step = payload["step"] as? String, step.count <= 16 {
+        Bridge.onboardingStep = step
+      }
+      reply(webView, id, ["state": "ok"])
+
+    case "openFullDiskAccess":
+      // Touch a protected path FIRST, then open the pane. macOS lists an app
+      // under Full Disk Access once it has attempted a protected read, so the
+      // failed attempt is what puts "intaglio labs" in the list with a switch
+      // already waiting. Without it the owner has to press +, walk a file
+      // picker to Applications, and find the app themselves — which is the
+      // copy-paste problem wearing different clothes.
+      // Get the scrim out of the way FIRST. It is full-screen at .floating, so
+      // System Settings — an ordinary level-0 window — came up UNDERNEATH it:
+      // "opens in the background with no way to get to it", and the step got
+      // skipped, and Messages and Notes then read nothing.
+      delegate?.yieldForSettings(true)
+      Permissions.primeFullDisk()
+      // And the part Settings will not do: the app, on screen, draggable onto
+      // the list. See FullDiskHelper.
+      FullDiskHelper.shared.begin { [weak self] in
+        self?.delegate?.yieldForSettings(false)
+      }
+      reply(webView, id, ["state": "ok"])
+
+    case "startSources":
+      // Write the connectors config if it is not there, then (re)start the
+      // daemon. There is no list of sources to choose: the daemon runs every
+      // connector it has credentials for and each one's needs() gates it, so
+      // the local Apple stores turn on together the moment Full Disk Access
+      // lands. The config is what makes the daemon boot AT ALL -- without it
+      // the agent parks at exit 1 -- so writing it is the whole action.
+      let ok = writeConnectorsConfigIfMissing()
+      // Started as a CHILD of this app, not bootstrapped into launchd, so the
+      // reader inherits this app's permissions instead of needing its own.
+      Provision.retireConnectorsAgent()
+      Connectors.shared.start()
+      Distiller.shared.start()
+      reply(webView, id, ["state": ok ? "ok" : "error"])
+
+    case "permissionState":
+      Permissions.writeDiagnostic()
+      reply(webView, id, ["state": "ok", "permissions": Permissions.all])
+
+    case "requestPermission":
+      // A real system prompt, in context, naming this app. macOS shows it once
+      // per app per permission and remembers a refusal, so a second press does
+      // nothing — the page reads the returned status and offers Settings when
+      // it comes back denied.
+      let which = String((payload["which"] as? String ?? "").prefix(16))
+      // The scrim is full-screen and above ordinary windows; a TCC prompt is an
+      // ordinary window. Drop out of its way, or it opens underneath and the
+      // owner refuses something they never saw.
+      delegate?.yieldForPrompt(true)
+      Permissions.request(which) { [weak self] status in
+        guard let self else { return }
+        self.delegate?.yieldForPrompt(false)
+        // Granted mid-flow means the reader can suddenly see more; nudge it so
+        // the owner does not wait for the next poll to see anything happen.
+        if status == .granted { Connectors.shared.start() }
+        self.reply(webView, id, ["state": "ok", "which": which, "status": status.rawValue])
+      }
+
     case "ask":
       let utterance = String((payload["utterance"] as? String ?? "")
         .trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
+      // The voice turn is the ask carrying the transcript's exact text.
+      // Consume it only on a match: a non-matching ask may be a load-time
+      // message queued AHEAD of the transcript, whose own ask is still
+      // coming — clearing here would silence it. Typed messages clear the
+      // transcript at openChatWith instead.
+      let voiceTurn = pendingVoiceUtterance == utterance
+      if voiceTurn { pendingVoiceUtterance = nil }
       ask(utterance) { [weak self] data in
         guard let self else { return }
-        self.reply(webView, id, data)
-        if self.voiceTurnPending {
-          self.voiceTurnPending = false
-          if let text = data["text"] as? String, data["state"] as? String == "ok" {
-            self.delegate?.speakAnswer(text)
+        // AN ABSTENTION IS NOT ALWAYS THE SAME ANSWER.
+        //
+        // "nothing in what i've got covers that" means one thing when the memory
+        // has read everything and quite another while it is still reading — and
+        // the second is the case somebody hits right after connecting, when the
+        // app looks broken rather than busy. So a sourceless answer carries the
+        // reading state with it and the page can say which one this is.
+        //
+        // Attached HERE rather than in hermes' answer, whose shape is exactly
+        // {text, sources, usedRows} and is pinned by a contract test. Costs a
+        // loopback GET, and only when the answer came back empty-handed.
+        //
+        // TWO REPLY PATHS, so everything that has to happen once per settled ask
+        // happens on both of them: speaking a voice turn, and handing the page
+        // the next queued message. Neither may sit after this closure's last
+        // statement — the guard below returns, and the enrichment path replies
+        // from a nested callback long after that line would have run.
+        let sourceless = (data["sources"] as? [Any])?.isEmpty ?? true
+        guard sourceless, data["state"] as? String == "ok" else {
+          self.reply(webView, id, data)
+          self.speakIfVoiceTurn(data, voiceTurn: voiceTurn)
+          self.deliverNextQueued(to: webView)
+          return
+        }
+        // Two questions on an empty answer, and they are different questions:
+        // /stats says whether the memory is still READING, and suggest says whether
+        // something already read would have answered this if anyone had confirmed
+        // it. The second is the one worth acting on, so it wins when both are true.
+        self.rows { _, memory in
+          self.suggestion(for: utterance) { claim in
+            var out = data
+            if let memory { out["memory"] = memory }
+            if let claim { out["confirm"] = claim }
+            self.reply(webView, id, out)
+            self.speakIfVoiceTurn(out, voiceTurn: voiceTurn)
+            // This ask settled; if a load-time message is queued behind it,
+            // hand the page the next one as its OWN ask. After the reply, never
+            // before it: reply()'s evaluateJavaScript is what resolves the ask's
+            // promise and drops chat.js's busy flag, and a message handed over
+            // while that flag is still set is dropped on the floor.
+            self.deliverNextQueued(to: webView)
           }
         }
       }
+    case "decideClaim":
+      // Accept or reject ONE claim, from the chat bubble that raised it. The
+      // owner is the actor on the record either way — nothing here decides
+      // anything on its own, it only carries a press to hermes.
+      let claimId = payload["id"] as? Int ?? -1
+      let action = String((payload["action"] as? String ?? "").prefix(8))
+      guard claimId > 0, action == "accept" || action == "reject" else {
+        reply(webView, id, ["state": "error", "error": "bad decision"])
+        break
+      }
+      guard let tok = bearerToken() else {
+        reply(webView, id, ["state": "error", "error": "no token"])
+        break
+      }
+      let dreq = request("POST", hermesBase, "admin/memory/decide", bearer: tok,
+                         json: ["claim_id": claimId, "action": action], timeout: 6)
+      URLSession.shared.dataTask(with: dreq) { [weak self] _, response, _ in
+        let ok = (response as? HTTPURLResponse)?.statusCode == 200
+        DispatchQueue.main.async {
+          self?.reply(webView, id, ["state": ok ? "ok" : "error"])
+        }
+      }.resume()
     case "cancel":
       askTask?.cancel()
       reply(webView, id, ["state": "ok"])
@@ -492,7 +853,18 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
          let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
          url.scheme == "http",
          url.host == "localhost" || url.host == "127.0.0.1" {
-        NSWorkspace.shared.open(url)
+        // An OPTIONAL sub-page, from a fixed list. The review queue lives at
+        // <link>/memory and there was no way to reach it — the root page does not
+        // link to it either — so 119 claims sat in a queue nobody knew about.
+        // An allowlist rather than a free path: this URL carries a live bearer
+        // token in it, and appending page-supplied text to a credential-bearing
+        // URL is how a token ends up somewhere it was never meant to go.
+        let page = payload["page"] as? String ?? ""
+        let allowed: Set<String> = ["memory"]
+        let target = allowed.contains(page)
+          ? url.appendingPathComponent(page)
+          : url
+        NSWorkspace.shared.open(target)
         reply(webView, id, ["state": "ok"])
       } else {
         reply(webView, id, ["state": "error", "error": "no connect link yet"])
@@ -573,6 +945,130 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     }
   }
 
+  // MARK: setup helpers
+
+  /// Speak the answer if this turn began with the voice. Pulled out of the ask
+  /// handler when that grew a second reply path: the two must not be able to
+  /// disagree about whether the turn was spoken.
+  ///
+  /// The provenance is PASSED IN, not read from a stored flag. A process-global
+  /// "a voice turn is pending" latch belongs to whichever ask settles next, and
+  /// that is not necessarily the transcript's own: chat.js drops incoming
+  /// messages while busy, so a transcript spoken during a typed composition is
+  /// discarded and the latch stays armed until the TYPED question's answer
+  /// arrives -- which then gets read aloud. Carrying the flag with the utterance
+  /// (matched at the ask, see pendingVoiceUtterance) is what makes speaking
+  /// impossible on any turn but the spoken one.
+  private func speakIfVoiceTurn(_ data: [String: Any], voiceTurn: Bool) {
+    guard voiceTurn else { return }
+    guard let text = data["text"] as? String, data["state"] as? String == "ok" else { return }
+    delegate?.speakAnswer(text)
+  }
+
+  /// The proposed claim that would have answered this question, if any.
+  ///
+  /// Only ever called when the answer came back with no sources, so it costs a
+  /// loopback GET on exactly the turns that had nothing to show anyway. Failure
+  /// is silent by design: a suggestion that does not arrive leaves an ordinary
+  /// abstention, which is what the turn already was.
+  private func suggestion(for question: String, done: @escaping ([String: Any]?) -> Void) {
+    guard let tok = bearerToken(), !question.isEmpty,
+          // A query string, so URLComponents rather than the request() helper:
+          // that appends a PATH component and would escape the "?" into the path.
+          var comps = URLComponents(url: hermesBase.appendingPathComponent("admin/memory/suggest"),
+                                    resolvingAgainstBaseURL: false) else { done(nil); return }
+    comps.queryItems = [
+      URLQueryItem(name: "q", value: question),
+      URLQueryItem(name: "limit", value: "1"),
+    ]
+    guard let url = comps.url else { done(nil); return }
+    var req = URLRequest(url: url)
+    req.httpMethod = "GET"
+    req.timeoutInterval = 4
+    req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization")
+    URLSession.shared.dataTask(with: req) { data, _, _ in
+      var first: [String: Any]?
+      if let data,
+         let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+         let claims = obj["claims"] as? [[String: Any]] {
+        first = claims.first
+      }
+      DispatchQueue.main.async { done(first) }
+    }.resume()
+  }
+
+  /// hermes' own row count, or 0 when it cannot be reached. Used as the honest
+  /// answer to "is any of my data actually in here yet" -- a number that only
+  /// moves when a connector really read something and really wrote it.
+  /// Row count AND how far the memory is through reading them.
+  ///
+  /// The count alone was misleading in the way that mattered: rows arrive fast,
+  /// and the app still cannot answer until those rows are DISTILLED into claims.
+  /// Reporting only "found 18,440 things" while every question abstained is what
+  /// produced "it has full access and knows nothing". /stats carries both numbers
+  /// now; this passes the second one through untouched.
+  private func rows(_ done: @escaping (Int, [String: Any]?) -> Void) {
+    guard let tok = bearerToken() else { done(0, nil); return }
+    let req = request("GET", hermesBase, "stats", bearer: tok, timeout: 4)
+    URLSession.shared.dataTask(with: req) { data, _, _ in
+      var n = 0
+      var memory: [String: Any]?
+      if let data,
+         let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        n = obj["rows"] as? Int ?? 0
+        memory = obj["memory"] as? [String: Any]
+      }
+      DispatchQueue.main.async { done(n, memory) }
+    }.resume()
+  }
+
+  /// The connectors daemon refuses to start without ~/.hazlie/connectors/config.json
+  /// and says so; on a fresh install nothing writes it, so the agent parks at
+  /// exit 1 forever and no data ever arrives. This writes the minimum valid one.
+  ///
+  /// Deliberately almost empty. There is no "enabled sources" list to fill in --
+  /// every install runs every connector it has credentials for, and each source's
+  /// needs() decides whether it can run this pass. So the file's job here is to
+  /// exist and to parse; every key in it is an override nobody has asked for yet.
+  ///
+  /// Held to the same file standard as a secret (0600 inside the 0700 tree),
+  /// because daemon.mjs checks: it is the file whose silent replacement would
+  /// redirect what gets polled.
+  @discardableResult
+  private func writeConnectorsConfigIfMissing() -> Bool {
+    let fm = FileManager.default
+    let dir = fm.homeDirectoryForCurrentUser.appendingPathComponent(".hazlie/connectors")
+    let file = dir.appendingPathComponent("config.json")
+    if fm.fileExists(atPath: file.path) { return true }
+    do {
+      try fm.createDirectory(at: dir, withIntermediateDirectories: true,
+                             attributes: [.posixPermissions: 0o700])
+      try "{}\n".write(to: file, atomically: true, encoding: .utf8)
+      try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // Messages that arrived before chat.js finished loading queue one by one
+  // (main.swift). chatReady hands the page the first; each settled ask pulls
+  // the next through __hzIncoming, so every queued message becomes its own
+  // ask. The page is idle by then: reply()'s evaluateJavaScript resolved the
+  // ask's promise, whose continuation drops chat.js's busy flag before this
+  // later evaluateJavaScript runs.
+  private func deliverNextQueued(to webView: WKWebView) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self,
+            let next = self.delegate?.takePendingUtterance(), !next.isEmpty,
+            let json = try? JSONSerialization.data(withJSONObject: [next]),
+            let arr = String(data: json, encoding: .utf8)
+      else { return }
+      webView.evaluateJavaScript(
+        "window.__hzIncoming && window.__hzIncoming(\(arr)[0])", completionHandler: nil)
+    }
+  }
+
   // MARK: auth
 
   // Re-read per request, matching hermes' own semantics: rotation needs no
@@ -592,7 +1088,21 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     _ method: String, _ base: URL, _ path: String,
     bearer: String?, json: [String: Any]? = nil, timeout: TimeInterval? = nil
   ) -> URLRequest {
-    var req = URLRequest(url: base.appendingPathComponent(path))
+    // The path may carry a query ("people/review?days=365"). It cannot ride
+    // appendingPathComponent whole — that percent-encodes the '?', hermes
+    // then sees one literal path component and 404s — so split it here and
+    // let URLComponents keep '?' a delimiter, the way bridgeCall builds its
+    // URLs.
+    let url: URL
+    if let q = path.firstIndex(of: "?") {
+      var comps = URLComponents(
+        url: base.appendingPathComponent(String(path[..<q])), resolvingAgainstBaseURL: false)!
+      comps.query = String(path[path.index(after: q)...])
+      url = comps.url!
+    } else {
+      url = base.appendingPathComponent(path)
+    }
+    var req = URLRequest(url: url)
     req.httpMethod = method
     if let t = timeout { req.timeoutInterval = t }
     if let b = bearer { req.setValue("Bearer \(b)", forHTTPHeaderField: "Authorization") }

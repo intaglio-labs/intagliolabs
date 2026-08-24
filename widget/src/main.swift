@@ -36,9 +36,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   private var skyPanel: PopupPanel?
   private var onboardingPanel: PopupPanel?
   private var earWeb: WKWebView?
-  // A message submitted on the widget bar before the chat page is alive;
-  // handed over in the chatReady handshake.
-  private var pendingUtterance: String?
+  // Messages submitted (typed or spoken) before the chat page is alive, in
+  // arrival order. The chatReady handshake takes the first; the bridge pulls
+  // each of the rest after the previous ask settles, so every queued message
+  // stays its own ask — never glued into one.
+  private var pendingUtterances: [String] = []
   // A voice failure raised before the chat page is alive; same handshake.
   private var pendingVoiceNote: String?
 
@@ -47,9 +49,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     installEditMenu()
 
     // Self-contained install: on a fresh Mac the local backend isn't set up,
-    // so stand it up from the bundle. No-ops on any machine that already has
-    // it (the owner's repo-based setup, or a prior run), and runs off the main
-    // thread so it never delays the UI.
+    // so stand it up from the bundle. On a machine that already has it (the
+    // owner's repo-based setup, or a prior run) this only regenerates a
+    // missing secret file, and it runs off the main thread so it never
+    // delays the UI.
     Provision.ensureBackend()
 
     // The second half of the self-move (Bridge "moveToApplications"): the
@@ -70,7 +73,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     let scale = Bridge.scale
     let w = WidgetWindow(
       contentRect: NSRect(origin: .zero, size: Self.scaled(Self.widgetBase, scale)),
-      styleMask: [.borderless], backing: .buffered, defer: false)
+      // .nonactivatingPanel so a click lands on what it hit rather than being
+      // spent activating the window first — see WidgetWindow in Windows.swift.
+      styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    w.isFloatingPanel = false
+    w.hidesOnDeactivate = false
     w.isOpaque = false
     w.backgroundColor = .clear
     // Elements float on the wallpaper; a window shadow would draw one blob
@@ -81,6 +88,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // widget never covers work. Fallback if icon stacking misbehaves on a
     // future OS: kCGDesktopWindowLevel + 1.
     w.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
+    // Capturable. The widget lives BELOW every normal window on purpose — it
+    // must never cover the owner's work — but that same depth put it beneath
+    // what ⇧⌘4-space will offer, so there was no way to screenshot the app to
+    // show somebody. sharingType is what the window server consults for
+    // capture; .readWrite is the default but it is set explicitly here because
+    // the level makes this window look like desktop furniture and the intent
+    // should be written down rather than inferred.
+    w.sharingType = .readWrite
     // Every Space, stays put through Mission Control, never in the Cmd-` cycle.
     w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
     w.contentView = widgetWeb
@@ -144,12 +159,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       self?.widgetWeb.evaluateJavaScript("window.__hzWake && window.__hzWake()")
     }
 
+    // DIAGNOSTIC PROBE, off unless HAZLIE_TCC_PROBE=1.
+    //
+    // Asks for Contacts at launch and writes the answer to a file, so a
+    // signing change can be verified without clicking through onboarding.
+    //
+    // It exists because this took far too long to diagnose, and the comment
+    // that used to sit here recorded the WRONG answer: it said entitlements
+    // had "been ruled out by testing" and blamed the webview calling context.
+    // Entitlements were the whole cause — under the hardened runtime tccd will
+    // not display a prompt for a service whose entitlement is missing, and the
+    // app carried only audio-input. See widget/Hazlie.entitlements.
+    //
+    // The testing that "ruled it out" was invalid: the probe was run from a
+    // terminal, and a process launched from a shell inherits THAT app's TCC
+    // grants, so it reported success no matter what the bundle contained.
+    // Launch it with `open -a` and read tccd, never from a shell:
+    //   open -a "Intaglio Labs" --env HAZLIE_TCC_PROBE=1
+    //   /usr/bin/log stream --predicate 'process == "tccd"'
+    // A missing entitlement shows up there as `Policy disallows prompt`.
+    if ProcessInfo.processInfo.environment["HAZLIE_TCC_PROBE"] == "1" {
+      Permissions.request("contacts") { status in
+        let out = FileManager.default.homeDirectoryForCurrentUser
+          .appendingPathComponent(".hazlie/logs/tcc-probe.txt")
+        try? "launch-time contacts request -> \(status.rawValue)\n"
+          .write(to: out, atomically: true, encoding: .utf8)
+        NSLog("Intaglio Labs: TCC probe -> \(status.rawValue)")
+      }
+    }
+
+    // The connectors daemon runs as a child of this app so its file access is
+    // attributed to the app rather than to node — see Connectors.swift. Any
+    // launchd agent from an older install is retired first, or the two would
+    // race for the same cursors.
+    DispatchQueue.global(qos: .utility).async {
+      Provision.retireConnectorsAgent()
+      DispatchQueue.main.async { Connectors.shared.start() }
+      // Reading the sources is only half of it. Nothing was turning those rows
+      // into anything answerable, so every question abstained on a full
+      // database — see Distiller.swift.
+      DispatchQueue.main.async { Distiller.shared.start() }
+    }
+
     // First launch shows the welcome flow. Only completing it sets the flag,
     // so a dismissed flow comes back — and the settings button reopens it on
     // demand regardless.
     if !Bridge.onboarded {
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-        self?.openOnboarding()
+        self?.openOnboarding(resume: true)
       }
     }
 
@@ -219,6 +276,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     p.isFloatingPanel = false
     p.hidesOnDeactivate = false
     p.isReleasedWhenClosed = false
+    // Take key only for a control that genuinely needs typing. Without this the
+    // popup grabs key on open and the widget behind it needs a click to get it
+    // back — see present().
+    p.becomesKeyOnlyIfNeeded = true
     p.appearance = NSAppearance(named: .darkAqua) // design is dark-only
     if glass {
       let effect = glassContent(for: web, cornerRadius: 20)
@@ -267,10 +328,96 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     panel.setFrame(placedFrame(panel.frame.size), display: false)
   }
 
+  // Every popup this app opens along the widget's edge. Onboarding is not in
+  // the list: it is a full-screen scrim that deliberately covers everything,
+  // and it closes the others itself when it opens.
+  private var edgePanels: [PopupPanel?] { [chatPanel, connectionsPanel, peoplePanel, skyPanel] }
+
+  // ONE AT A TIME. Opening any popup closes the others first.
+  //
+  // They are all placed against the same edge of the widget, so two open at
+  // once do not sit side by side -- they overlap, and the one underneath is
+  // both unreachable and still listening. It was possible to stack chat,
+  // connections, people and the sky view into one pile.
+  //
+  // Ordering out rather than closing: these panels are kept lazily
+  // (isReleasedWhenClosed is false) so they survive hidden and reopen with
+  // their state, which is the behaviour the gear toggle depends on.
+  // CLICK OUTSIDE TO DISMISS.
+  //
+  // These are borderless non-activating panels with no chrome, so there is no
+  // close button and no window edge to click past — the only ways out were the
+  // toggle that opened it and ESC. Every other transient surface on the Mac
+  // closes when you look away from it, and one that does not feels stuck.
+  //
+  // Two monitors, because one cannot see both worlds: the LOCAL one sees clicks
+  // delivered to this app (the widget itself, another popup), the GLOBAL one
+  // sees clicks that went to any other application. The local monitor must
+  // return the event rather than swallow it, or the click that dismisses would
+  // also be the click that never reaches the button it landed on.
+  private var dismissMonitors: [Any] = []
+
+  private func watchForOutsideClicks() {
+    guard dismissMonitors.isEmpty else { return }
+    let handle: (NSEvent) -> Void = { [weak self] event in
+      guard let self else { return }
+      guard let open = self.edgePanels.compactMap({ $0 }).first(where: { $0.isVisible }) else { return }
+      // A click INSIDE the popup is the popup being used.
+      if event.window === open { return }
+      // A click on the widget is a toggle or another opener; those already
+      // manage each other, and dismissing here would fight them.
+      if event.window === self.widgetWindow { return }
+      // Onboarding covers the screen and owns its own dismissal.
+      if self.onboardingPanel?.isVisible == true { return }
+      // A SCREENSHOT IS NOT AN OUTSIDE CLICK.
+      //
+      // ⇧⌘4 drags a selection, and that mouse-down reaches this global monitor
+      // like any other — so the popup being photographed closed the instant the
+      // capture began, and the shot came back empty. Someone could not send a
+      // picture of the thing they were asking about.
+      //
+      // screencaptureui backs the ⇧⌘4 and ⇧⌘5 gestures — the two that involve a
+      // mouse — and runs only while a capture is in progress, so its presence
+      // answers "is the owner photographing this right now" exactly rather than
+      // guessing. (The `screencapture` CLI does NOT go through it, which is worth
+      // knowing before testing this from a terminal and concluding it is dead.)
+      let capturing = NSWorkspace.shared.runningApplications.contains {
+        $0.bundleIdentifier == "com.apple.screencaptureui"
+      }
+      if capturing { return }
+      open.orderOut(nil)
+    }
+    if let l = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: { e in
+      handle(e); return e // never swallow: the click still belongs to whatever it hit
+    }) { dismissMonitors.append(l) }
+    if let g = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: handle) {
+      dismissMonitors.append(g)
+    }
+  }
+
   private func present(_ panel: PopupPanel) {
+    watchForOutsideClicks()
+    for other in edgePanels where other !== panel {
+      if other?.isVisible == true { other?.orderOut(nil) }
+    }
     place(panel)
+    // Frontmost, yes — a popup behind another app's window is not presented.
     NSApp.activate(ignoringOtherApps: true)
-    panel.makeKeyAndOrderFront(nil)
+    // orderFront, NOT makeKeyAndOrderFront, and this is the two-click fix.
+    //
+    // makeKeyAndOrderFront handed key to the popup. The widget then was not
+    // key, so AppKit spent the next click on it activating rather than
+    // clicking, and switching between chat, connections and people cost two
+    // presses: one eaten, one that landed. Making the widget a nonactivating
+    // panel was not enough on its own — something still had to stop TAKING key
+    // from it.
+    //
+    // becomesKeyOnlyIfNeeded (set at construction) is the AppKit answer: the
+    // panel takes key only when a control that needs typing is clicked. Every
+    // one of these surfaces is buttons except people-sky's search field, and
+    // that field still focuses on click because AppKit asks the view whether it
+    // needs key rather than guessing.
+    panel.orderFront(nil)
   }
 
   // Onboarding is not a window in the way the others are: it covers the whole
@@ -281,7 +428,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   //
   // hasShadow off: makePanel turns it on for popovers, and a shadow around a
   // full-screen rectangle is a dark band down the edge of the display.
-  func openOnboarding() {
+  // BridgeDelegate requires the no-argument form, and Swift will not accept a
+  // defaulted parameter as the witness for it. So this is the protocol's
+  // entry point — the gear replaying the flow — and it never resumes.
+  func openOnboarding() { openOnboarding(resume: false) }
+
+  func openOnboarding(resume: Bool) {
     // Opening the flow IS pretending this is a fresh install — the owner's
     // rule: replay behaves like the first time, every time. So the flag
     // drops, and only FINISHING sets it back; escape mid-replay and the flow
@@ -291,6 +443,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // Replay is a fresh install, so the hand-holds rewind with it: every
     // connector walks the user through again on its next first press.
     Bridge.handheld = []
+    // The flow covers the display, so nothing may be left open underneath it —
+    // a popup under the scrim is unreachable and still live.
+    for other in edgePanels where other?.isVisible == true { other?.orderOut(nil) }
     // The widget LEAVES for the flow's duration. It used to sit under the
     // scrim, faintly visible through the dim — which made scene 3's reveal a
     // "notice the thing you half-saw" instead of a meeting. Hidden here,
@@ -334,8 +489,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // abandoned on rather than on the welcome. Guarded because on the very
     // first open the page has not finished loading yet — which is harmless,
     // since a freshly loaded page already starts on screen 1.
-    (p.contentView as? WKWebView)?
-      .evaluateJavaScript("window.__hzOnboardingReset && window.__hzOnboardingReset()")
+    // RESUME OR REWIND, and they are different intentions.
+    //
+    // Reopening from settings is a replay and starts at the welcome. A launch
+    // mid-flow is a CONTINUATION — macOS offers "Quit & Reopen" the moment Full
+    // Disk Access is granted, and taking it used to throw away every step
+    // already done and start again from the welcome, immediately after the
+    // hardest step in the flow. Guarded because on the very first open the page
+    // has not loaded yet, which is harmless: a fresh page starts on screen 1.
+    let web = p.contentView as? WKWebView
+    if resume, let step = Bridge.onboardingStep,
+       let json = String(data: (try? JSONSerialization.data(withJSONObject: [step])) ?? Data(),
+                         encoding: .utf8) {
+      web?.evaluateJavaScript(
+        "window.__hzOnboardingResume && window.__hzOnboardingResume(\(json)[0])")
+    } else {
+      web?.evaluateJavaScript("window.__hzOnboardingReset && window.__hzOnboardingReset()")
+    }
     NSApp.activate(ignoringOtherApps: true)
     p.makeKeyAndOrderFront(nil)
   }
@@ -366,22 +536,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   }
 
   func openChat(with utterance: String) {
-    let alreadyAlive = chatPanel != nil
-    if alreadyAlive, let web = chatWeb,
-       let json = try? JSONSerialization.data(withJSONObject: [utterance]),
-       let arr = String(data: json, encoding: .utf8) {
-      // Page is long since loaded; hand the message straight over.
-      web.evaluateJavaScript("window.__hzIncoming(\(arr)[0])", completionHandler: nil)
+    if chatPanel != nil, let web = chatWeb {
+      // The panel existing does not mean chat.js has finished loading —
+      // __hzIncoming is defined late. Probe for it: a not-yet-loaded page
+      // answers false and the message falls back to the chatReady handshake,
+      // instead of a ReferenceError swallowed by the nil completion handler.
+      // Queued (not string-joined) so a message already waiting on the
+      // handshake and this one each stay their own ask — and a queued voice
+      // transcript keeps its exact text for the bridge's voice-turn match.
+      let js = "window.__hzIncoming ? (window.__hzIncoming(\(jsString(utterance))), true) : false"
+      web.evaluateJavaScript(js) { [weak self] result, _ in
+        guard let self, (result as? Bool) != true else { return }
+        self.pendingUtterances.append(utterance)
+      }
     } else {
-      pendingUtterance = utterance
+      pendingUtterances.append(utterance)
     }
     openChat()
   }
 
+  // Pops ONE queued message per call — the chatReady handshake and the
+  // bridge's after-ask drain each take the next in line.
   func takePendingUtterance() -> String {
-    let u = pendingUtterance ?? ""
-    pendingUtterance = nil
-    return u
+    guard !pendingUtterances.isEmpty else { return "" }
+    return pendingUtterances.removeFirst()
   }
 
   func takePendingVoiceNote() -> String {
@@ -644,6 +822,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // Push the Reduce Motion override into every live page so the orb and the
   // thinking dots change the moment the switch is flipped, rather than at the
   // next launch. Pages that have not loaded yet pick it up from `prefs`.
+  // Download progress, straight into whichever setup surface is open. The
+  // onboarding panel owns the flow; the connections popup shows the same
+  // controls afterwards, so both get it and whichever is not there ignores it.
+  // GET OUT OF THE PROMPT'S WAY.
+  //
+  // The onboarding scrim is full-screen at .floating (level 3). A TCC prompt is
+  // an ORDINARY window at level 0, so it opened behind the scrim — invisible,
+  // unanswerable, and eventually recorded as a refusal. That is why every
+  // "allow" turned into "denied" without anything appearing: the prompt was
+  // there the whole time, underneath.
+  //
+  // This paragraph used to say that was PROVEN — that a minimal signed app with
+  // no windows went straight to authorized, leaving the scrim as the only
+  // difference. That test was run from a terminal, and a process launched from
+  // a shell inherits the terminal's TCC grants, so it proved nothing. The
+  // prompts were actually blocked by a missing hardened-runtime entitlement
+  // (widget/Hazlie.entitlements). Lowering the scrim is still right — a
+  // full-screen window at .floating really does cover a level-0 dialog — but it
+  // was not the cause, and the fix for the cause is not here.
+  //
+  // So the scrim drops to .normal for the length of the ask and goes back after.
+  // Lowering rather than hiding: the flow keeps its place, and a scrim that
+  // vanished and reappeared would read as a flicker.
+  func yieldForPrompt(_ yield: Bool) {
+    guard let p = onboardingPanel, p.isVisible else { return }
+    p.level = yield ? .normal : .floating
+  }
+
+  // GET OUT OF SETTINGS' WAY, and stay out.
+  //
+  // Full Disk Access is granted in System Settings, which is an ordinary
+  // level-0 window — so the full-screen scrim buried it, and the owner was
+  // told to go somewhere they could not reach. Lowering alone is not enough
+  // here: two windows at .normal still order against each other, and the
+  // scrim was in front. It goes to the BACK for the length of the visit and
+  // comes forward again when the helper card closes.
+  func yieldForSettings(_ yield: Bool) {
+    guard let p = onboardingPanel, p.isVisible else { return }
+    if yield {
+      // BELOW normal, not at it. Lowering to .normal was not enough: dragging
+      // the app out of the helper card activates this app, and AppKit brings
+      // its windows forward — so the scrim landed back on top of Settings
+      // mid-drag, over the list the app was being dropped onto. A level under
+      // .normal cannot win that race no matter who activates.
+      p.level = NSWindow.Level(rawValue: NSWindow.Level.normal.rawValue - 1)
+      p.orderBack(nil)
+    } else {
+      p.level = .floating
+      p.orderFrontRegardless()
+    }
+  }
+
+  func setupProgress(_ payload: [String: Any]) {
+    guard JSONSerialization.isValidJSONObject(payload),
+          let data = try? JSONSerialization.data(withJSONObject: payload),
+          let json = String(data: data, encoding: .utf8) else { return }
+    let js = "window.__hzSetup && window.__hzSetup(\(json))"
+    eval(onboardingPanel?.contentView as? WKWebView, js)
+    eval(connectionsPanel?.contentView as? WKWebView, js)
+  }
+
   func motionAnywayChanged(_ on: Bool) {
     let js = "window.__hzMotion && window.__hzMotion(\(on))"
     widgetWeb?.evaluateJavaScript(js)
@@ -767,6 +1006,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     let js = "window.__hzSounds && window.__hzSounds(\(on))"
     widgetWeb?.evaluateJavaScript(js)
     chatWeb?.evaluateJavaScript(js)
+  }
+}
+
+extension AppDelegate {
+  // The child dies with us rather than outliving the app that is responsible
+  // for it, holding a database handle and a set of cursors open.
+  func applicationWillTerminate(_ notification: Notification) {
+    Connectors.shared.stop()
+    Distiller.shared.stop()
   }
 }
 

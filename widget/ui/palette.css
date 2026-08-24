@@ -1084,14 +1084,27 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
   0%, 100% { box-shadow: 0 0 10px 2px rgba(229, 214, 187, 0.30), 0 0 0 0 rgba(229, 214, 187, 0.14); }
   50% { box-shadow: 0 0 24px 6px rgba(229, 214, 187, 0.60), 0 0 0 8px rgba(229, 214, 187, 0.05); }
 }
+/* Waiting to be pressed — the same outward ring the send button uses, for the
+   same reason: a control that squashes and jumps is a target that moves while
+   you aim at it. One gesture for "this wants you" across the app, and it is
+   now the ping rather than the bounce. */
 .gear.nudge {
-  animation:
-    orb-jelly 2.8s cubic-bezier(0.68, -0.55, 0.265, 1.55) infinite,
-    gear-spotlight 2.8s ease-in-out infinite;
+  position: relative;
+  animation: gear-spotlight 2.8s ease-in-out infinite;
+}
+.gear.nudge::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  border: 2px solid rgba(229, 214, 187, 0.7);
+  animation: send-ping 2.8s cubic-bezier(0.2, 0.6, 0.35, 1) infinite;
+  pointer-events: none;
 }
 @media (prefers-reduced-motion: reduce) {
   /* Same trade as the send nudge: the bounce stills, the ask survives as
      light held at its bright end. */
+  body:not(.motion-anyway) .gear.nudge::after { animation: none; opacity: 0.5; transform: scale(1.2); }
   body:not(.motion-anyway) .gear.nudge {
     animation: none;
     box-shadow: 0 0 20px 5px rgba(229, 214, 187, 0.5), 0 0 0 6px rgba(229, 214, 187, 0.06);
@@ -2046,6 +2059,7 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
 }
 .ob-ph { color: var(--muted); margin-left: 5px; }
 .ob-send {
+  position: relative; /* anchors the nudge ring below */
   width: 60px; height: 60px; flex-shrink: 0;
   border-radius: 50%;
   background: linear-gradient(180deg, #e5d6bb, #c5a56d);
@@ -2053,27 +2067,50 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
   display: flex; align-items: center; justify-content: center;
 }
 .ob-send.sending { animation: btn-squish 0.55s cubic-bezier(0.68, -0.55, 0.265, 1.55); }
-/* Waiting to be pressed: the notify orb's own bounce, borrowed exactly.
-   It is this app's one gesture for "this wants you", and here the thing
-   that wants you is the send.
 
-   Plus a spotlight, because the bounce alone is easy to miss on a screen
-   where a 120px orb is breathing overhead. Two shadows on one keyframe: a
-   soft halo that swells, and a ring that pushes outward behind it. Both are
-   box-shadow, so they compose with the bounce's transform rather than
-   fighting it — one element, two animations, no shared property. */
+/* WAITING TO BE PRESSED — a ring that travels outward, not a bounce.
+ *
+ * This used to run orb-jelly: the notify orb's squash-and-stretch, borrowed on
+ * the grounds that it is the app's one gesture for "this wants you". On a 42px
+ * orb that reads as alive. On a 60px button that a person is being asked to
+ * click, the same curve squashes the control to 114/86 and throws it 8px up and
+ * down — the target moves while you aim at it, and a control that deforms reads
+ * as broken rather than eager.
+ *
+ * A ping does the job better and is quieter: a ring starts at the button's own
+ * edge and expands away, fading. The motion travels OUTWARD from the target, so
+ * the eye is led back down it to the source — the same reason a radar sweep or a
+ * dropped-pin ripple works. The button itself never moves, so it stays a
+ * pressable thing at a fixed place.
+ *
+ * The halo swell stays: it is what carries on a screen where a 120px orb is
+ * breathing overhead. Ring on a pseudo-element, halo on the element, so the two
+ * never share a property and cannot fight.
+ */
 @keyframes send-spotlight {
   0%, 100% {
-    box-shadow: 0 0 20px 3px rgba(229, 214, 187, 0.30), 0 0 0 0 rgba(229, 214, 187, 0.16);
+    box-shadow: 0 0 20px 3px rgba(229, 214, 187, 0.30);
   }
   50% {
-    box-shadow: 0 0 46px 10px rgba(229, 214, 187, 0.62), 0 0 0 13px rgba(229, 214, 187, 0.05);
+    box-shadow: 0 0 46px 10px rgba(229, 214, 187, 0.62);
   }
 }
+@keyframes send-ping {
+  0%   { transform: scale(1);    opacity: 0.55; }
+  70%  { opacity: 0; }
+  100% { transform: scale(1.85); opacity: 0; }
+}
 .ob-send.nudge {
-  animation:
-    orb-jelly 2.8s cubic-bezier(0.68, -0.55, 0.265, 1.55) infinite,
-    send-spotlight 2.8s ease-in-out infinite;
+  animation: send-spotlight 2.8s ease-in-out infinite;
+}
+.ob-send.nudge::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(229, 214, 187, 0.75);
+  animation: send-ping 2.8s cubic-bezier(0.2, 0.6, 0.35, 1) infinite;
+  pointer-events: none; /* the ring must never eat the click it is advertising */
 }
 .orb.gulp { animation: orb-gulp 0.9s ease-in-out; }
 
@@ -2133,6 +2170,7 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
      for. The ask survives as LIGHT rather than movement: the spotlight holds
      at its bright end instead of pulsing, so the button is still obviously
      the thing to press. */
+  body:not(.motion-anyway) .ob-send.nudge::after { animation: none; opacity: 0.5; transform: scale(1.25); }
   body:not(.motion-anyway) .ob-send.nudge {
     animation: none;
     box-shadow: 0 0 40px 8px rgba(229, 214, 187, 0.5), 0 0 0 10px rgba(229, 214, 187, 0.06);
@@ -2242,3 +2280,325 @@ body.connections .tile-tip {
   opacity: 0; transition: opacity 0.12s ease;
 }
 body.connections .tile-tip.on { opacity: 1; }
+
+/* ---------------- onboarding: the two setup scenes ----------------
+   Same scrim and the same centred column as the rest of the flow. These
+   screens carry more to read than the others, so the type sizes step down
+   rather than the column getting wider — a scene that has to be scanned is
+   already the wrong shape for a welcome flow. */
+.ob-setup { max-width: 620px; }
+.ob-setup-note { margin-bottom: 22px; white-space: pre-line; }
+
+/* The model choice. Two cards, the recommended one marked — a size this large
+   should never be a surprise, so the gigabytes sit next to the label rather
+   than behind a confirm. */
+.ob-choices { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+
+/* [hidden] LOSES TO A CLASS THAT SETS display, and both of these set it.
+ *
+ * The UA stylesheet's `[hidden] { display: none }` is one attribute selector;
+ * `.ob-prog { display: flex }` is a class, which wins — so `el.hidden = true`
+ * changed the property and nothing on screen. The model screen showed its cards
+ * AND its progress bar at once, stuck on "starting…" under buttons implying
+ * nothing had started, and the auto-advance looked broken when it was the
+ * hiding that was.
+ *
+ * This file already knew: `.ob-screen[hidden] { display: none }` exists a few
+ * hundred lines up for exactly this reason. The knowledge just did not travel
+ * to the rules added later, which is its own kind of lesson.
+ */
+.ob-prog[hidden], .ob-choices[hidden], .ob-perms[hidden] { display: none; }
+.ob-choice {
+  position: relative;
+  flex: 1 1 220px; max-width: 260px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+  padding: 16px 18px 18px;
+  border-radius: 14px;
+  border: 1px solid rgba(234, 234, 234, 0.14);
+  background: rgba(255, 255, 255, 0.03);
+  text-align: left;
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+.ob-choice:hover { border-color: rgba(229, 214, 187, 0.5); background: rgba(255, 255, 255, 0.06); }
+.ob-choice:active { transform: scale(0.99); }
+.ob-choice.rec { border-color: rgba(229, 214, 187, 0.42); }
+.ob-choice b { font-size: 16px; color: var(--fg); }
+.ob-choice-size {
+  font-family: var(--mono, ui-monospace, Menlo, monospace);
+  font-size: 13px; color: #c5a56d; font-variant-numeric: tabular-nums;
+}
+.ob-choice-why { font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+.ob-choice-tag {
+  position: absolute; top: -9px; right: 14px;
+  font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 999px;
+  background: #c5a56d; color: #14140f;
+}
+
+/* Download progress. A real bar, because the only honest thing to show for a
+   multi-gigabyte fetch is how much of it is done. */
+.ob-prog { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.ob-prog-bar {
+  width: 320px; height: 6px; border-radius: 999px;
+  background: rgba(234, 234, 234, 0.12); overflow: hidden;
+}
+.ob-prog-bar span {
+  display: block; height: 100%; width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #c5a56d, #e5d6bb);
+  transition: width 240ms ease;
+}
+.ob-prog-label {
+  font-family: var(--mono, ui-monospace, Menlo, monospace);
+  font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.ob-err { color: #e07a63; font-size: 13px; margin-top: 12px; }
+
+/* The three steps of the Full Disk Access grant. Numbered because this one IS
+   a sequence — the only place in this flow where order is load-bearing. */
+.ob-steps {
+  list-style: none; margin: 0 0 18px; padding: 0;
+  display: flex; flex-direction: column; gap: 14px;
+  text-align: left;
+}
+.ob-steps li {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: 14px; color: var(--fg);
+}
+.ob-step-n {
+  flex: 0 0 auto;
+  width: 22px; height: 22px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(229, 214, 187, 0.14); color: #e5d6bb;
+  font-family: var(--mono, ui-monospace, Menlo, monospace); font-size: 12px;
+}
+.ob-steps b { color: #e5d6bb; font-weight: 600; }
+.ob-path {
+  flex: 1 1 100%;
+  font-family: var(--mono, ui-monospace, Menlo, monospace);
+  font-size: 12px; color: var(--muted);
+  background: rgba(0, 0, 0, 0.28); padding: 7px 10px; border-radius: 8px;
+  overflow-x: auto; white-space: nowrap;
+  user-select: all; /* one click selects the whole path */
+}
+.ob-copy { padding: 4px 10px; font-size: 12px; }
+.ob-status {
+  min-height: 20px; font-size: 13px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+@media (prefers-reduced-motion: reduce) {
+  body:not(.motion-anyway) .ob-choice { transition: none; }
+  body:not(.motion-anyway) .ob-prog-bar span { transition: none; }
+}
+
+/* ---------------- onboarding legibility ----------------
+   The scrim is a dimmed desktop, so its lightness is whatever wallpaper is
+   behind it — and --muted (#5c5c5c) was chosen against the widget's solid
+   #141412, not against that. On the setup screens, which carry the most text
+   in the flow, small print was landing near 2:1 and the choice descriptions
+   were effectively invisible.
+
+   Two fixes, in this order: give the content a surface of its own so contrast
+   stops depending on the wallpaper at all, then raise the small text against
+   that known surface rather than against a guess. */
+.ob-setup {
+  background: rgba(14, 13, 12, 0.93);
+  border: 1px solid rgba(234, 234, 234, 0.10);
+  border-radius: 22px;
+  padding: 40px 44px 36px;
+  gap: 22px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+  /* The scrim behind stays visible at the edges; this is a card ON it. */
+  margin: 40px auto;
+  max-width: 620px;
+}
+/* Small print, now against a known ground. */
+.ob-setup .ob-setup-note { color: #b3ada1; }
+.ob-setup .ob-choice-why { color: #a8a296; }
+.ob-setup .ob-prog-label { color: #b3ada1; }
+.ob-setup .ob-status { color: #b3ada1; }
+.ob-setup .ob-path { color: #cfc8ba; background: rgba(0, 0, 0, 0.45); }
+.ob-setup .ob-steps li { color: #ddd7cb; }
+.ob-setup .ob-choice { background: rgba(255, 255, 255, 0.045); }
+.ob-setup .ob-choice:hover { background: rgba(255, 255, 255, 0.085); }
+/* The skip is a real option, so it must be readable rather than hidden. */
+.ob-setup .ob-replay { color: #9d978b; }
+.ob-setup .ob-replay:hover { color: #ddd7cb; }
+
+/* The rest of the flow sits directly on the scrim and had the same problem in
+   a milder form: the tagline is large enough to carry, the note under it is
+   not. */
+.ob-home-note { color: #b3ada1; }
+.ob-tagline { text-shadow: 0 2px 18px rgba(0, 0, 0, 0.55); }
+/* The paste route, kept but demoted: dragging is the gesture macOS designed
+   for this list, and a path in a box is what you offer when that fails. */
+.ob-alt { flex: 1 1 100%; margin-top: 4px; }
+.ob-alt summary {
+  cursor: default; font-size: 12px; color: #9d978b;
+  list-style: none; padding: 2px 0;
+}
+.ob-alt summary::-webkit-details-marker { display: none; }
+.ob-alt summary::before { content: '▸ '; }
+.ob-alt[open] summary::before { content: '▾ '; }
+.ob-alt summary:hover { color: #ddd7cb; }
+/* The selected model. Visible enough to be obvious at a glance, and clearly
+   reversible — pressing it again clears it. */
+.ob-setup .ob-choice.sel {
+  border-color: #c5a56d;
+  background: rgba(197, 165, 109, 0.13);
+  box-shadow: 0 0 0 1px rgba(197, 165, 109, 0.5) inset;
+}
+.ob-setup .ob-choice.sel b { color: #f0e6d2; }
+
+/* The permission rows. One line each, its own button, its own state — so a
+   person can turn on exactly what they want instead of facing one all-or-
+   nothing ask. The odd one out is marked as such rather than hidden: Messages
+   and Notes genuinely have no system prompt, and pretending they behave like
+   the others would be the lie. */
+.ob-perms { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+.ob-perm {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(234, 234, 234, 0.10);
+  background: rgba(255, 255, 255, 0.035);
+  text-align: left;
+}
+.ob-perm-t { display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-width: 0; }
+.ob-perm-t b { color: #f0e6d2; font-size: 14px; font-weight: 600; }
+.ob-perm-t span { color: #a8a296; font-size: 12.5px; line-height: 1.4; }
+.ob-perm button { flex: 0 0 auto; }
+.ob-perm.on {
+  border-color: rgba(120, 190, 140, 0.45);
+  background: rgba(120, 190, 140, 0.10);
+}
+.ob-perm.on button {
+  background: none; border: 1px solid rgba(120, 190, 140, 0.5);
+  color: #8fd3a6; opacity: 1;
+}
+/* Full Disk Access is a different kind of thing and reads as one. */
+.ob-perm-fda { border-style: dashed; }
+.ob-perm-fda .ob-perm-t span { color: #b8a179; }
+/* Back to a download still running. Top-left of the card, quiet — it is an
+   option for someone who wants to watch, not a step in the flow. */
+.ob-back {
+  align-self: flex-start;
+  font-size: 12.5px; color: #9d978b;
+  padding: 2px 0; margin-bottom: -8px;
+}
+.ob-back:hover { color: #ddd7cb; }
+/* The tag on a model you already have, as opposed to one we suggest. */
+.ob-setup .ob-choice-tag.on { background: #6fc78d; color: #10231a; }
+
+/* MEMORY PROGRESS, in the settings popup.
+   ─────────────────────────────────────────────────────────────────────────────
+   The one surface that answers "it has all my data, why does it know nothing".
+   Built on .setting/.setting-col rather than a parallel card style: it sits in a
+   column with sounds, size and onboarding, and a box that was ALMOST those reads
+   as a mistake rather than a distinction. Only the parts those primitives do not
+   have — the state dot and the bar — are defined here.
+   It hides itself entirely when there is nothing to report; a progress bar parked
+   at 100% forever is furniture. */
+/* margin, not gap: this card sits OUTSIDE .settings (whose children are replaced
+   wholesale by connections.js, so a static child there would be wiped) and so it
+   does not inherit that column's 8px gap. Matching the number keeps it in the
+   same rhythm as the rows above it. */
+.mem { gap: 6px; margin-top: 8px; }
+/* Baseline-aligned with the label beside it, not centred on the row: .setting-head
+   aligns on the baseline, and a circle centred on a text baseline sits low. */
+.mem-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--status-ok);
+  flex: 0 0 auto;
+  transform: translateY(-1px);
+}
+.mem.busy .mem-dot {
+  background: var(--hazelnut);
+  animation: mem-pulse 1.6s ease-in-out infinite;
+}
+/* The count must never wrap. It is two numbers and the word "of"; broken across
+   lines it reads as two separate facts. */
+.mem .setting-value { white-space: nowrap; flex: 0 0 auto; }
+.mem-bar {
+  height: 3px; border-radius: 2px;
+  background: rgba(234, 234, 234, 0.08);
+  overflow: hidden;
+}
+.mem-bar > span {
+  display: block; height: 100%; width: 0;
+  border-radius: 2px;
+  background: var(--hazelnut);
+  transition: width 600ms ease;
+}
+.mem:not(.busy) .mem-bar > span { background: var(--status-ok); }
+@keyframes mem-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.3; }
+}
+/* A pulse that will not stop is exactly what Reduce Motion is asking about. */
+@media (prefers-reduced-motion: reduce) {
+  .mem.busy .mem-dot { animation: none; }
+  .mem-bar > span { transition: none; }
+}
+
+/* SCROLLBARS, for the places where content genuinely cannot fit.
+   ─────────────────────────────────────────────────────────────────────────────
+   A popup is capped by the room between it and the widget it hangs off, so a
+   tall settings column really does scroll — that part is correct. What was wrong
+   is what it looked like: macOS's default overlay bar is a bright light-mode
+   element, and against this palette it read as a foreign object stuck to the
+   panel rather than part of it. (It is also why a screenshot of the panel looked
+   like it had a stray white bar down one side.)
+   Narrow, transparent-tracked, and only as visible as it needs to be. Firefox
+   gets the same intent through the standard properties; WebKit is what actually
+   renders here. */
+.conn-main, .hint-host, .list, #log, .mem-note {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(234, 234, 234, 0.16) transparent;
+}
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(234, 234, 234, 0.14);
+  border-radius: 4px;
+  /* Inset from the edge so the thumb reads as floating in the panel rather than
+     welded to its border. */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: rgba(234, 234, 234, 0.26); background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* The review button, in the memory row. Full-width and quiet: it is the one
+   actionable thing in the settings column, but it is a chore rather than an
+   invitation, so it should read as available rather than eager. */
+.mem-act { align-self: flex-start; margin-top: 2px; }
+
+/* THE POINT-OF-USE CONFIRMATION, in a chat bubble.
+   ─────────────────────────────────────────────────────────────────────────────
+   The alternative to a hundred-item review queue: one claim, asked where it was
+   needed. It sits inside the assistant bubble rather than floating over the log,
+   because it is part of that answer — the reason the answer was empty. */
+.confirm { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.confirm-lead { font-size: 11px; color: var(--muted); }
+.confirm-text { font-size: 12px; color: var(--fg); line-height: 1.45; }
+/* The words it came from. Same reason the review page shows a quote: a claim
+   without its evidence can only be guessed at, not judged. */
+.confirm-quote {
+  font-size: 11px; line-height: 1.4; color: var(--secondary);
+  border-left: 2px solid var(--hairline);
+  padding-left: 8px;
+}
+.confirm-row { display: flex; gap: 6px; margin-top: 2px; }
+.confirm-row button {
+  font: inherit; font-size: 11px;
+  padding: 3px 12px; border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: transparent; color: var(--secondary);
+  cursor: pointer;
+}
+.confirm-row button:hover:not(:disabled) { border-color: var(--secondary); color: var(--fg); }
+.confirm-row button:disabled { opacity: 0.4; cursor: default; }
+.confirm-yes { border-color: rgba(51, 255, 102, 0.35) !important; color: var(--status-ok) !important; }
+.confirm-yes:hover:not(:disabled) { background: rgba(51, 255, 102, 0.08) !important; }
+.confirm.done .confirm-text { opacity: 0.55; }

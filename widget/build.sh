@@ -3,16 +3,25 @@
 # by hand, an ad-hoc signature. No Xcode project, no SwiftPM, no third-party
 # code — the same shape as the ops/setup-*.sh scripts.
 #
-#   widget/build.sh            build + install to ~/Applications/Hazlie.app
+#   widget/build.sh            build + install to /Applications/Intaglio Labs.app
 #   widget/build.sh --run      ...and (re)launch it
+#
+# (This header said ~/Applications/Hazlie.app until 2026-08-23. Both halves had
+# been false since the bundle was renamed and the install moved -- see DEST at
+# the foot of this file, which also removes the old ~/Applications copies. Rule
+# 2: the code is what shipped, so the sentence is what gets fixed.)
 set -eu
 cd "$(dirname "$0")"
 
 mkdir -p build
 # Pin the target: swiftc's default is the SDK's OS, which can be NEWER than
 # the running system — LaunchServices then refuses the app with -10825.
-swiftc -O -target "$(uname -m)-apple-macos13.0" \
-  -o build/Hazlie src/main.swift src/Windows.swift src/Bridge.swift src/AssetScheme.swift src/BridgeLogin.swift src/Provision.swift
+# src/*.swift, not a hand-kept list. The list was explicit and a new file
+# (ModelSetup.swift) was simply absent from it, so the build failed with
+# "cannot find 'ModelSetup' in scope" -- which reads like a missing import
+# rather than a missing argument. There is no case where a file in src/ should
+# not be compiled, so there is nothing for the list to express.
+swiftc -O -target "$(uname -m)-apple-macos13.0" -o build/Hazlie src/*.swift
 
 APP="build/Intaglio Labs.app"
 rm -rf "$APP"
@@ -85,14 +94,34 @@ fi
 # model on APFS — instant copy-on-write, no multi-GB copy per build.
 # Guarded so a plain `git clone && ./build.sh` (no llama.cpp, no provisioned
 # model) still builds a working app — just without the bundled "ask".
-MODEL_SRC="$HOME/.hazlie/models/model.gguf"
-if command -v llama-server >/dev/null 2>&1 && [ -f "$MODEL_SRC" ]; then
+# THE RUNTIME SHIPS. THE WEIGHTS DO NOT.
+#
+# Both used to be bundled, and the app was 5.3 GB — 4.7 GB of it one .gguf.
+# That is a 39x download for a capability plenty of installs will not use, paid
+# by everyone including someone who only wants their calendar searchable.
+#
+# The split is not a preference, it follows what each thing costs to obtain:
+#
+#   llama runtime (~30 MB)  bundled. It is small, and building it otherwise
+#                           means Homebrew and a toolchain on the owner's Mac.
+#   voice models (~496 MB)  bundled. They CANNOT be produced on a user's
+#                           machine: setup-voice.sh needs npm and esbuild to
+#                           bundle the Kokoro worker, and sharp breaks the
+#                           install on a current node even on a dev box.
+#   the .gguf (2.5-4.7 GB)  DOWNLOADED, chosen in onboarding. One file, one
+#                           declared host (huggingface.co, already in
+#                           ops/EGRESS.json as model-asset), no toolchain — and
+#                           it is the one with a real choice in it, since 4B and
+#                           8B suit different amounts of RAM.
+#
+# This does not weaken "nothing leaves the box": a setup-time fetch the owner
+# asked for is a different act from a runtime call, and the runtime still has no
+# network fallback of any kind. It fails closed exactly as before.
+if command -v llama-server >/dev/null 2>&1; then
   python3 bundle-llama.py "$BE/llama"
-  mkdir -p "$BE/models"
-  cp -c "$MODEL_SRC" "$BE/models/model.gguf" 2>/dev/null || cp "$MODEL_SRC" "$BE/models/model.gguf"
 else
-  echo "WARNING: llama-server and/or $MODEL_SRC not found — 'ask' will NOT be bundled." >&2
-  echo "         For the self-contained build: brew install llama.cpp + provision the model." >&2
+  echo "NOTE: llama-server not on PATH — the runtime will not be bundled." >&2
+  echo "      brew install llama.cpp before building for distribution." >&2
 fi
 
 # VOICE MODELS (ear STT + speak TTS), so voice works offline out of the box the
@@ -146,6 +175,72 @@ cp ../ops/com.hazlie.connect.plist ../ops/com.hazlie.hermes.plist \
 IDENTITY="${HAZLIE_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
   | awk '/Apple Development|Developer ID Application/ {print $2; exit}')}"
 
+# THE PROVISIONING PROFILE, embedded before signing.
+#
+# A development-signed Mac app carries one or it is not validly signed for any
+# machine, and `spctl -a` says rejected. The profile names this team, this bundle
+# id and the Macs allowed to run it, and lives at
+# Contents/embedded.provisionprofile by convention.
+#
+# This comment used to go on to blame the missing profile for the silent
+# Contacts/Calendar/Photos prompt failure. That was the wrong diagnosis, and it is
+# corrected here rather than deleted because it sent the search in the wrong
+# direction for days. The app that would not prompt HAD a valid profile and both
+# identifier entitlements. What it lacked was the per-service hardened-runtime
+# entitlements — see Hazlie.entitlements, which now carries all four and quotes
+# tccd's own refusal. A profile is what lets you hand the app to someone else; it
+# is not what earns a TCC prompt.
+#
+# Absent is not fatal: an ad-hoc or unprofiled build still runs for whoever
+# built it. It just cannot be handed to anyone.
+# TWO SIGNING MODES, AND THEY ARE NOT COMPATIBLE.
+#
+#   Apple Development  -> embed a provisioning profile, and carry the two
+#                         identifier entitlements it asserts. Runs only on the
+#                         Macs the profile lists. Without the profile the app is
+#                         not validly signed for ANY machine.
+#   Developer ID       -> NO profile, and NOT those entitlements. A Developer ID
+#                         app is signed for everyone, so a per-machine profile is
+#                         meaningless and application-identifier is invalid
+#                         without one; codesign rejects the combination.
+#
+# release.sh sets HAZLIE_SIGN_IDENTITY to the Developer ID hash and calls this
+# script, so the mode has to be decided HERE from the identity actually in use
+# rather than assumed. Getting this wrong produces a bundle that signs fine and
+# is refused at launch, which is a slow way to find out.
+ENTS="Hazlie.entitlements"
+PROFILE="signing/mac-dev.provisionprofile"
+IDENTITY_NAME="$(security find-identity -v -p codesigning 2>/dev/null | grep -F "$IDENTITY" | head -1)"
+case "$IDENTITY_NAME" in
+  *"Developer ID"*)
+    rm -f "$APP/Contents/embedded.provisionprofile"
+    echo "signing for distribution: no provisioning profile, base entitlements"
+    ;;
+  *)
+    if [ -f "$PROFILE" ]; then
+      cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
+      # The identifier entitlements are only valid alongside the profile that
+      # asserts them, so they are added here rather than living in the file.
+      ENTS="build/dev.entitlements"
+      python3 - "$PROFILE" "$ENTS" <<'PYEOF'
+import plistlib, subprocess, sys
+raw = subprocess.run(["security", "cms", "-D", "-i", sys.argv[1]],
+                     capture_output=True).stdout
+ents = plistlib.loads(raw).get("Entitlements", {})
+base = plistlib.load(open("Hazlie.entitlements", "rb"))
+for k in ("com.apple.application-identifier", "com.apple.developer.team-identifier"):
+    if k in ents:
+        base[k] = ents[k]
+plistlib.dump(base, open(sys.argv[2], "wb"))
+PYEOF
+      echo "embedded $PROFILE (development build)"
+    else
+      echo "NOTE: no $PROFILE — this build runs only for whoever built" >&2
+      echo "      it, and cannot be handed to anyone. See ops/SIGNING.md." >&2
+    fi
+    ;;
+esac
+
 if [ -n "$IDENTITY" ]; then
   # INSIDE-OUT: the bundled node runtime is nested Mach-O and must carry its
   # own Developer ID signature (with JIT entitlements for V8) BEFORE the app
@@ -170,9 +265,9 @@ if [ -n "$IDENTITY" ]; then
       -s "$IDENTITY" "$BE/llama/bin/llama-server"
   fi
   codesign --force --options runtime \
-    --entitlements Hazlie.entitlements \
+    --entitlements "$ENTS" \
     -s "$IDENTITY" "$APP"
-  echo "signed with $IDENTITY (hardened runtime, audio-input entitlement)"
+  echo "signed with $IDENTITY (hardened runtime, $ENTS)"
 else
   codesign --force -s - "$APP"
   echo "WARNING: no code-signing identity found; signed ad-hoc." >&2

@@ -13,7 +13,7 @@
 //   3. No CORS headers, ever. A cross-origin page may be able to POST here
 //      blind, but it can never read a response it is not granted.
 //
-// Usage:  node connect/server.mjs [--port 8788] [--print-url]
+// Usage:  node connect/server.mjs [--port 51788] [--print-url]
 
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
@@ -31,7 +31,7 @@ import { sameOrigin } from './lib/origin.mjs';
 import { statusResponse } from './lib/statusApi.mjs';
 import { mintToken, validateToken } from './lib/tokens.mjs';
 
-const DEFAULT_PORT = 8788;
+const DEFAULT_PORT = 51788;
 const argv = process.argv.slice(2);
 const portFlag = argv.indexOf('--port');
 const PORT = portFlag !== -1 ? Number(argv[portFlag + 1]) : DEFAULT_PORT;
@@ -72,27 +72,66 @@ function send(res, status, body, type = 'text/html; charset=utf-8', { csp = null
   res.end(body);
 }
 
+// Over the limit this stops BUFFERING but keeps DRAINING to 'end' and rejects
+// there, so the 413 the caller writes goes out on a live, reusable socket.
+// The obvious `reject + req.destroy()` is wrong: destroy kills the socket
+// synchronously while reject only schedules a microtask, so the response was
+// written to a socket that was already gone and the client saw ECONNRESET
+// instead of a status code (ui/server/hermes.mjs documents the same trap on
+// its readJson). Past a hard multiple of the cap the sender is not a form
+// that mis-sized, and hanging up is the honest answer.
+const HARD_CAP_MULTIPLE = 8;
+
 function readBody(req, limit = 8 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
-    const chunks = [];
+    let over = false;
+    let settled = false;
+    let chunks = [];
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
     req.on('data', (c) => {
       size += c.length;
+      if (over) {
+        if (size > limit * HARD_CAP_MULTIPLE) {
+          finish(reject, new Error('body too large'));
+          req.destroy();
+        }
+        return;
+      }
       if (size > limit) {
-        reject(new Error('body too large'));
-        req.destroy();
+        over = true;
+        chunks = []; // not going to be parsed; stop holding it
         return;
       }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', reject);
+    req.on('end', () => {
+      if (over) finish(reject, new Error('body too large'));
+      else finish(resolve, Buffer.concat(chunks).toString('utf8'));
+    });
+    req.on('error', (error) => finish(reject, error));
   });
 }
 
 // Renders the queue, or an honest failure. A page that cannot reach hermes
 // says so; it never renders an empty queue, because "nothing to review" and
 // "the store is unreachable" are opposite facts that look identical.
+// "12,15,19" → [12, 15, 19]. Anything that is not a positive integer is dropped
+// rather than failing the whole decision: one malformed id must not cost the
+// owner the reading they just did.
+function idList(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return [];
+  return raw
+    .split(',')
+    .map((n) => Number(n.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0)
+    .slice(0, 50);
+}
+
 async function memoryPage(token, opts = {}) {
   // A fresh nonce per response. The review page is the ONLY page here that
   // runs script, and it runs exactly the one block below its own nonce --
@@ -201,8 +240,18 @@ async function handleRequest(req, res) {
     const subpath = url.pathname === '/api/bridge' ? '' : url.pathname.slice('/api/bridge/'.length);
     let body = {};
     if (req.method === 'POST') {
+      // Size and parse failures answered apart, like /c/<token>/memory below:
+      // one try around both used to diagnose an over-limit cookie paste as
+      // "bad json". The 413 body is JSON because this channel's errors all are.
+      let raw = '';
       try {
-        body = JSON.parse(await readBody(req, 64 * 1024) || '{}');
+        raw = await readBody(req, 64 * 1024);
+      } catch {
+        send(res, 413, JSON.stringify({ error: 'too large' }), 'application/json; charset=utf-8');
+        return;
+      }
+      try {
+        body = JSON.parse(raw || '{}');
       } catch {
         send(res, 400, JSON.stringify({ error: 'bad json' }), 'application/json; charset=utf-8');
         return;
@@ -248,7 +297,7 @@ async function handleRequest(req, res) {
   if (!validateToken(token)) {
     // Same response for wrong, expired and revoked — a probe learns nothing
     // about which tokens ever existed.
-    send(res, 404, 'This link is not valid. Ask Hazlie for a new one.', 'text/plain; charset=utf-8');
+    send(res, 404, 'This link is not valid. Open the app and ask for a new one.', 'text/plain; charset=utf-8');
     return;
   }
 
@@ -262,25 +311,39 @@ async function handleRequest(req, res) {
     }
     let claimId = NaN;
     let choice = '';
+    // A GROUP decision. The queue merges claims that say the same thing, so one
+    // reading answers for all of them — see ui/server/memory/group.mjs. Empty
+    // for a single card, which is still the common case.
+    let ids = [];
     // Two callers, one handler: the page's fetch (fast, no reload) and the
     // plain <form> that still works with scripting off. The form path is not
     // dead weight -- it is what makes the review surface survive a CSP change
     // or a browser that refuses the nonce.
     const wantsJson = /application\/json/u.test(req.headers['content-type'] ?? '');
+    let raw = '';
     try {
-      const raw = await readBody(req);
+      raw = await readBody(req);
+    } catch {
+      send(res, 413, 'Too large.', 'text/plain; charset=utf-8');
+      return;
+    }
+    try {
       if (wantsJson) {
         const parsed = JSON.parse(raw);
         claimId = Number(parsed?.claim_id);
         choice = typeof parsed?.action === 'string' ? parsed.action : '';
+        ids = idList(parsed?.claim_ids);
       } else {
         const form = new URLSearchParams(raw);
         claimId = Number(form.get('claim_id'));
         choice = form.get('action') ?? '';
+        ids = idList(form.get('claim_ids'));
       }
     } catch {
-      send(res, 413, 'Too large.', 'text/plain; charset=utf-8');
-      return;
+      // Malformed JSON from the page's fetch — the caller's bug, not a size
+      // problem. Leave the fields invalid so the "bad decision" 400 below
+      // answers; this used to share the readBody catch and mislabel a parse
+      // failure 413 "Too large.".
     }
     // Only the two the page offers. `retract` exists in the schema for an
     // accepted claim the owner later changes their mind about, and it is not
@@ -294,7 +357,12 @@ async function handleRequest(req, res) {
       return;
     }
     try {
-      await decide(claimId, choice);
+      // The group's ids if the card carried any, else the one it names. Each
+      // decision is its own row in claim_decision — grouping is a reading
+      // convenience, and the record still says what was decided about every
+      // individual claim.
+      const targets = ids.length > 0 ? ids : [claimId];
+      for (const target of targets) await decide(target, choice);
       if (wantsJson) {
         send(res, 200, JSON.stringify({ ok: true, claim_id: claimId, action: choice }), 'application/json; charset=utf-8');
         return;

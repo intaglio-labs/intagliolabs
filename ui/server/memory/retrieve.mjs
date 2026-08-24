@@ -27,6 +27,8 @@
 // and not hidden from the review page — it simply stops being offered as an
 // answer to "what do I do about X now". Two years is generous on purpose: the
 // facts this system is for (allergies, a train, not drinking) do not expire.
+import { tokens } from './group.mjs';
+
 export const RECENCY_HORIZON_MS = 730 * 86_400_000;
 
 export const DEFAULT_RECALL_LIMIT = 8;
@@ -150,12 +152,120 @@ export function recallClaims(db, { match = null, limit = DEFAULT_RECALL_LIMIT, n
   return { claims, abstain: claims.length === 0, matched };
 }
 
+// The owner's LOCAL calendar day, same arithmetic as episodic.mjs's
+// localDate. Claim lines and episodic lines merge into ONE numbered envelope
+// in handleVaultAsk, and episodic dates are local — rendering these in UTC
+// dated anything observed after 14:00 Honolulu time on the NEXT day, handing
+// the model two dating conventions in one list.
+function localDay(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 // The shape a composer is handed. Flat, labelled, and explicitly NOT prose the
 // model can mistake for its own instructions — see prompts/answer_from_claims.md
 // for the envelope those go in.
 export function groundingLines(claims) {
   return claims.map((c, i) => {
-    const when = c.observed_at === null ? 'undated' : new Date(c.observed_at).toISOString().slice(0, 10);
+    const when = c.observed_at === null ? 'undated' : localDay(c.observed_at);
     return `[${i + 1}] (${c.kind}, ${c.source}, ${when}${c.stale ? ', OLD' : ''}) ${c.text}`;
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ASK AT THE POINT OF USE.
+//
+// The review queue is the front door and it is a bad one: a hundred claims to
+// confirm back to back is a chore nobody finishes, and a backlog nobody clears
+// is a memory that never turns on. This is the other door. When a question finds
+// nothing accepted but a PROPOSED claim would have answered it, that is the
+// moment the decision is worth making — one claim, in context, with the question
+// that needed it on screen.
+//
+// Same bm25 match as recallClaims and deliberately so: this returns exactly what
+// the answer would have used had it been accepted, never a guess at what might
+// be interesting.
+//
+// It reads nothing that has been decided. A rejected claim stays rejected and is
+// never asked about again.
+// Words a question is made of rather than about. ftsQuery ORs every term,
+// stopwords included, so "what do i eat" matches any claim containing "what" —
+// which on a real corpus surfaced a claim about product development. Good enough
+// to RANK by (bm25 discounts common terms) and nowhere near good enough to decide
+// "this would have answered your question", which is what a confirmation card
+// asserts when it puts itself in front of somebody.
+const ASKING = new Set([
+  'what', 'whats', 'when', 'where', 'who', 'whom', 'whose', 'why', 'how',
+  'do', 'does', 'did', 'doing', 'done', 'can', 'could', 'would', 'should',
+  'will', 'shall', 'may', 'might', 'must', 'i', 'me', 'my', 'mine', 'myself',
+  'you', 'your', 'yours', 'we', 'us', 'our', 's', 't', 'm', 're', 'll', 've',
+  'know', 'tell', 'think', 'about', 'like', 'any', 'some', 'thing', 'things',
+  'stuff', 'ever', 'again', 'now', 'today', 'please', 'anything', 'something',
+]);
+
+// Crude suffix stripping, for the overlap check ONLY.
+//
+// "what do i eat" against "The owner eats fish" shares no literal token, and that
+// is the single most ordinary question shape there is. A real stemmer is not worth
+// a dependency here: this exists to decide whether two words are plausibly the
+// same word, and being slightly too generous costs a suggestion that shares a
+// stem but not a meaning — which the owner then answers "no" to, once.
+function stem(w) {
+  // Order matters, and 'es' is deliberately absent: it turned "lives" into "liv",
+  // which then failed to match "live". Plain 's' handles that case and the plural
+  // one, and 'ies' is kept because "flies"/"flying" both need to reach "fly".
+  // "flies" -> "fly" needs its own guard: the general "leave at least 3 letters"
+  // rule would keep it whole, and "when do i fly" is exactly the question this
+  // check exists to answer.
+  if (w.length >= 5 && w.endsWith('ies')) return `${w.slice(0, -3)}y`;
+  for (const suffix of ['ing', 'ed', 's']) {
+    if (w.length - suffix.length >= 3 && w.endsWith(suffix)) {
+      return w.slice(0, -suffix.length);
+    }
+  }
+  return w;
+}
+
+// The words that actually carry the question. Reuses the claim tokeniser (which
+// already drops "the owner is"), drops the interrogative scaffolding, and stems
+// what is left so word forms line up.
+function asking(text) {
+  return new Set(
+    tokens(text)
+      .filter((w) => !ASKING.has(w) && w.length > 2)
+      .map(stem)
+  );
+}
+
+// A suggestion has to EARN the interruption: at least one content word in common.
+// Without this every abstention showed a claim, and a claim that has nothing to do
+// with the question is worse than no claim — it is a wrong guess presented as a
+// memory, asked at the moment the owner is least able to check it.
+export function sharesContent(question, claimText) {
+  const q = asking(question);
+  if (q.size === 0) return false;
+  for (const w of asking(claimText)) if (q.has(w)) return true;
+  return false;
+}
+
+export function pendingForQuery(db, { match = null, limit = 1, question = null } = {}) {
+  if (match === null) return [];
+  const capped = Math.max(1, Math.min(Number(limit) || 1, 5));
+  const rows = db
+    .prepare(
+      'SELECT c.id, c.kind, c.text, c.p_claim, s.quote, s.source, ' +
+        'bm25(claim_fts) AS rank ' +
+        'FROM claim_fts f ' +
+        'JOIN claim c ON c.id = f.rowid ' +
+        'JOIN claim_source s ON s.claim_id = c.id ' +
+        'WHERE claim_fts MATCH ? ' +
+        'AND NOT EXISTS (SELECT 1 FROM claim_decision d WHERE d.claim_id = c.id) ' +
+        'ORDER BY rank ASC LIMIT ?'
+    )
+    .all(match, Math.max(capped, 8));
+  // Ranked by bm25, then filtered by whether it is about the same thing at all.
+  // Over-fetch first: the best-ranked hit is often the least relevant on a short
+  // question, and the one worth asking about can sit a few places down.
+  const useful = question === null ? rows : rows.filter((r) => sharesContent(question, r.text));
+  return useful.slice(0, capped);
 }

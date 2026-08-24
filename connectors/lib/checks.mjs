@@ -298,7 +298,7 @@ function hermesBase(env, config) {
   if (typeof config?.hermesUrl === 'string' && config.hermesUrl.length > 0) {
     return config.hermesUrl.replace(/\/+$/u, '');
   }
-  const port = Number(env.HERMES_PORT ?? 8789);
+  const port = Number(env.HERMES_PORT ?? 51789);
   return `http://127.0.0.1:${port}`;
 }
 
@@ -334,7 +334,7 @@ function loopbackProblem(base) {
 }
 
 const LOOPBACK_FIX =
-  'point HAZLIE_HERMES_URL (or config.json "hermesUrl") at the loopback hermes, e.g. http://127.0.0.1:8789';
+  'point HAZLIE_HERMES_URL (or config.json "hermesUrl") at the loopback hermes, e.g. http://127.0.0.1:51789';
 
 // This module is deliberately built-ins-only (see the header), so it cannot
 // import loadConfig from daemon.mjs. It re-reads the file leniently instead:
@@ -356,7 +356,7 @@ function readConfigLeniently(home) {
 // holds the port — at which point a caller that went on to POST would be
 // sending household rows at a stranger. (Observed for real on 2026-08-19: a
 // different local app serving HTML on :8787, which is why hermes moved to
-// :8789 on this Mac.) Exported so run.mjs can gate hand-runs on the same
+// :51789 on this Mac.) Exported so run.mjs can gate hand-runs on the same
 // probe the daemon's preflight uses.
 export async function verifyHermesIdentity(base, { fetchImpl = fetch } = {}) {
   const offBox = loopbackProblem(base);

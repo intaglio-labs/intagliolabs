@@ -5,10 +5,14 @@ import Foundation
 // with no repo, no Homebrew, and no network. See widget/build.sh for what the
 // bundle carries.
 //
-// SAFE BY DEFAULT. This no-ops the moment the connect agent already exists in
-// ~/Library/LaunchAgents — which is true on the owner's repo-based setup and
-// after any prior provision — so it never clobbers a working machine. It only
-// does anything on a genuinely fresh install.
+// SAFE BY DEFAULT. Once the connect agent exists in ~/Library/LaunchAgents —
+// true on the owner's repo-based setup and after any prior provision — the
+// whole copy-and-bootstrap path is skipped, so it never clobbers a working
+// machine. The one thing every launch still ensures is the secret files
+// (ensureSecrets): generation is per-file and only-if-missing, so installs
+// provisioned by a build that predates llama-api-key.txt gain the key on
+// upgrade instead of crash-looping forever, and a healthy machine sees a
+// no-op.
 enum Provision {
   private static let fm = FileManager.default
   private static var home: URL { fm.homeDirectoryForCurrentUser }
@@ -21,18 +25,51 @@ enum Provision {
 
   // Bootstrapped in this order: hermes migrates and opens its DB first, then
   // connect, then connectors last so their first /ingest hits a ready server.
-  private static let agentsInOrder = ["com.hazlie.hermes", "com.hazlie.llama-server", "com.hazlie.connect", "com.hazlie.connectors"]
+  // CONNECTORS IS NOT HERE ANY MORE, and its absence is the point.
+  //
+  // It runs as a child of this app instead (Connectors.swift), because macOS
+  // attributes a TCC grant to the RESPONSIBLE process: spawned by launchd, node
+  // was responsible for itself and Full Disk Access had to be granted to
+  // ~/.hazlie/bin/node — a unix binary, found through a file picker, listed in
+  // System Settings under a name nobody installed. Spawned by the app, the app
+  // is responsible, so the grant is one row called Intaglio Labs and the same
+  // inheritance covers the Contacts, Calendar and Photos prompts.
+  private static let agentsInOrder = ["com.hazlie.hermes", "com.hazlie.llama-server", "com.hazlie.connect"]
+
+  /// Remove a connectors agent left behind by an older install. Without this it
+  /// keeps running under launchd — responsible for itself, needing its own FDA,
+  /// and racing the app's child for the same cursors and caches.
+  static func retireConnectorsAgent() {
+    let label = "com.hazlie.connectors"
+    let plist = launchAgents.appendingPathComponent("\(label).plist")
+    guard fm.fileExists(atPath: plist.path) else { return }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    p.arguments = ["bootout", "gui/\(getuid())/\(label)"]
+    try? p.run()
+    p.waitUntilExit()
+    try? fm.removeItem(at: plist)
+    NSLog("Intaglio Labs: retired the connectors launchd agent; it runs as a child now")
+  }
   // The llama plist hard-codes Homebrew's binary path; provision points it at
   // the stable copy instead.
   private static let brewLlama = "/opt/homebrew/bin/llama-server"
 
   // Call once at launch. Runs off the main thread — copying node and booting
   // launchd agents should not block the UI coming up.
+
   static func ensureBackend() {
     DispatchQueue.global(qos: .utility).async {
       let connectPlist = launchAgents.appendingPathComponent("com.hazlie.connect.plist")
       guard !fm.fileExists(atPath: connectPlist.path) else {
-        return // already provisioned (owner's setup or a previous run)
+        // Already provisioned (owner's setup or a previous run) — but still
+        // heal a missing secret: installs provisioned by a build that only
+        // wrote hermes-token.txt have this plist yet lack llama-api-key.txt,
+        // leaving hermes and llama-server crash-looping under KeepAlive.
+        // Existing files are never touched, so this is a no-op when healthy.
+        do { try ensureSecrets() }
+        catch { NSLog("Intaglio Labs: secret provisioning failed: \(error)") }
+        return
       }
       guard fm.fileExists(atPath: backend.appendingPathComponent("connect/server.mjs").path) else {
         NSLog("Intaglio Labs: no bundled backend — a dev build without it, skipping provision")
@@ -105,33 +142,90 @@ enum Provision {
       cloneTree(voiceSrc, voiceDst)
     }
 
-    // The hermes bearer, 0600, if it isn't already there.
-    let tokenFile = hazlie.appendingPathComponent("secrets/hermes-token.txt")
-    if !fm.fileExists(atPath: tokenFile.path) {
-      var bytes = [UInt8](repeating: 0, count: 32)
-      _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-      let token = bytes.map { String(format: "%02x", $0) }.joined()
-      try token.write(to: tokenFile, atomically: true, encoding: .utf8)
-      try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tokenFile.path)
-    }
+    // BOTH owner-only secrets, 0600, each left alone if already there. The body
+    // lives in ensureSecrets() because ensureBackend() has to run it on an
+    // already-provisioned launch too, which never reaches provision().
+    try ensureSecrets()
 
     // Render each plist (@HOME@ → home, @REPO@ → the bundle's backend), write
     // it 0644, and bootstrap. Wait for hermes to answer /health before the
     // rest, so connectors don't write into a database still opening.
+    // What llama-server needs is WEIGHTS, and the check used to be for the
+    // BINARY. That was right while the two shipped together: the runtime was
+    // bundled only when the build machine also had a model. Now the runtime
+    // always ships and the model is downloaded in onboarding, so the binary is
+    // always present and the old condition passed on a machine with nothing to
+    // load — the agent registered, launchd started it, and it died on a missing
+    // model instead of a missing binary. Same wasted background item, one exit
+    // code further along.
+    //
+    // The honest question is whether this agent can do its job, and the answer
+    // is the model.gguf link. Onboarding installs the agent itself the moment a
+    // download lands, which is when it becomes true.
+    let modelLink = hazlie.appendingPathComponent("models/model.gguf")
     for label in agentsInOrder {
-      let template = backend.appendingPathComponent("agents/\(label).plist")
-      guard var text = try? String(contentsOf: template, encoding: .utf8) else { continue }
-      text = text.replacingOccurrences(of: "@HOME@", with: home.path)
-      text = text.replacingOccurrences(of: "@REPO@", with: backend.path)
-      // The llama plist hard-codes Homebrew's binary; point it at the copy.
-      text = text.replacingOccurrences(of: brewLlama, with: hazlie.appendingPathComponent("bin/llama-server").path)
-      let dst = launchAgents.appendingPathComponent("\(label).plist")
-      try text.write(to: dst, atomically: true, encoding: .utf8)
-      try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: dst.path)
-      bootstrap(dst)
+      if label == "com.hazlie.llama-server" && !fm.fileExists(atPath: modelLink.path) {
+        NSLog("Intaglio Labs: no model yet — skipping the llama agent until one is chosen")
+        continue
+      }
+      installAgent(label)
       if label == "com.hazlie.hermes" { waitForHermes() }
     }
     NSLog("Intaglio Labs: provisioned backend from the app bundle")
+  }
+
+  // BOTH owner-only secrets, 0600, each left alone if already there.
+  //
+  // The llama key used to be missing here, and hermes would not start without
+  // it: readLlamaApiKey() throws at boot, so a fresh install died with
+  // "llama API key file is missing; run ops/setup-llm.sh" -- pointing at a
+  // script a downloaded app does not have. Everything downstream went with it,
+  // because hermes is the database. Found on a genuinely fresh Mac: the widget
+  // came up, connect came up, and hermes sat at exit status 1.
+  //
+  // Generating it here is safe in both directions. setup-llm.sh preserves an
+  // existing key when it runs (it stamps the active one and only regenerates
+  // when absent), and llama-server is handed the same file whenever it does
+  // arrive -- bundled at build time, or installed later. The key is required
+  // for hermes to BOOT, not just to reach a model, so it cannot wait for one.
+  //
+  // Which is why this is a function rather than a few lines inside provision():
+  // provision() is skipped the moment the connect agent exists, so a machine
+  // provisioned by a build that only wrote hermes-token.txt would never gain
+  // the llama key and would crash-loop under KeepAlive forever. ensureBackend()
+  // calls this on EVERY launch, including that already-provisioned one, and
+  // per-file "leave it alone if it exists" keeps a healthy machine a no-op.
+  private static func ensureSecrets() throws {
+    try mkdir(hazlie.appendingPathComponent("secrets"), 0o700)
+    for name in ["hermes-token.txt", "llama-api-key.txt"] {
+      let file = hazlie.appendingPathComponent("secrets/\(name)")
+      guard !fm.fileExists(atPath: file.path) else { continue }
+      var bytes = [UInt8](repeating: 0, count: 32)
+      // CHECKED, and it has to be. On failure the array stays all zeros and this
+      // writes 64 hex zeros -- a syntactically valid, fully predictable credential
+      // that hermes' validateHexKey accepts, guarding the corpus-admin surface
+      // with a known value. Every other generator in this tree fails closed
+      // (openssl under set -e, node randomBytes throws); this one fails open, on
+      // the most privileged credential. Abort provisioning instead.
+      guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+        throw NSError(domain: "Provision", code: 1, userInfo: [
+          NSLocalizedDescriptionKey: "SecRandomCopyBytes failed generating \(name)"])
+      }
+      // TRAILING NEWLINE, and it is not cosmetic. ops/setup-llm.sh validates both
+      // of these files with `wc -l` -- which counts NEWLINES, not lines -- because
+      // it writes them itself with `openssl rand -hex 32 >`, which leaves one. A
+      // file holding the same 64 hex characters with no newline counts as 0 and is
+      // rejected: "is not one generated 256-bit hex key".
+      //
+      // So a machine provisioned by the app could not afterwards run setup-llm.sh
+      // to add a model -- it bailed on the key the app had just written. hermes
+      // itself never noticed, because it trims. Matching the script's exact bytes
+      // is what makes the two provisioning paths interoperable, which they have to
+      // be: the app provisions first, and setup-llm.sh runs later to add the model.
+      let secret = bytes.map { String(format: "%02x", $0) }.joined() + "\n"
+      try secret.write(to: file, atomically: true, encoding: .utf8)
+      try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
   }
 
   private static func mkdir(_ url: URL, _ mode: Int) throws {
@@ -161,6 +255,99 @@ enum Provision {
     if p.terminationStatus != 0 { try? fm.copyItem(at: src, to: dst) }
   }
 
+  /// Copy the llama runtime out of the bundle to the stable ~/.hazlie paths.
+  ///
+  /// Separate from provision() because the two happen at different times and
+  /// that gap was a bug. provision() no-ops once a machine is set up, so a
+  /// binary the bundle gained LATER never came out: the plist was installed
+  /// pointing at ~/.hazlie/bin/llama-server, nothing was there, and launchd
+  /// parked the agent at exit 78 (EX_CONFIG) while onboarding sat on "checking
+  /// it arrived intact" waiting for a service that could not spawn.
+  ///
+  /// Idempotent, and returns whether the binary is in place afterwards so the
+  /// caller can refuse to install an agent that could only fail.
+  @discardableResult
+  static func ensureLlamaRuntime() -> Bool {
+    let src = backend.appendingPathComponent("llama/bin/llama-server")
+    let dst = hazlie.appendingPathComponent("bin/llama-server")
+    guard fm.fileExists(atPath: src.path) else { return fm.fileExists(atPath: dst.path) }
+    if !fm.fileExists(atPath: dst.path) {
+      try? mkdir(hazlie.appendingPathComponent("bin"), 0o700)
+      try? fm.copyItem(at: src, to: dst)
+      try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dst.path)
+    }
+    // Its dylibs share ~/.hazlie/lib with libnode; the binary's
+    // @loader_path/../lib rpath finds them there.
+    let libSrc = backend.appendingPathComponent("llama/lib")
+    if let libs = try? fm.contentsOfDirectory(at: libSrc, includingPropertiesForKeys: nil) {
+      try? mkdir(hazlie.appendingPathComponent("lib"), 0o700)
+      for lib in libs {
+        let to = hazlie.appendingPathComponent("lib/\(lib.lastPathComponent)")
+        if !fm.fileExists(atPath: to.path) { try? fm.copyItem(at: lib, to: to) }
+      }
+    }
+    return fm.fileExists(atPath: dst.path)
+  }
+
+  /// Wait briefly for llama-server to answer. Bounded on purpose: a caller
+  /// showing a person a progress screen must reach an ending, and "still
+  /// checking" forever is the one outcome that is never true.
+  static func waitForLlama(seconds: Int = 40) -> Bool {
+    guard let url = URL(string: "http://127.0.0.1:51780/health") else { return false }
+    for _ in 0..<seconds {
+      var req = URLRequest(url: url)
+      req.timeoutInterval = 2
+      let sem = DispatchSemaphore(value: 0)
+      var ok = false
+      URLSession.shared.dataTask(with: req) { _, response, _ in
+        ok = (response as? HTTPURLResponse)?.statusCode == 200
+        sem.signal()
+      }.resume()
+      _ = sem.wait(timeout: .now() + 3)
+      if ok { return true }
+      Thread.sleep(forTimeInterval: 1)
+    }
+    return false
+  }
+
+  /// Render one agent's plist (@HOME@ → home, @REPO@ → the bundle's backend),
+  /// write it 0644, and bootstrap it.
+  ///
+  /// Reachable on its own because agents do not all become installable at the
+  /// same moment. llama-server is skipped at first run when there are no
+  /// weights, and turns real later when onboarding finishes downloading a
+  /// model — at which point this is what makes it exist, rather than asking the
+  /// owner to relaunch the app.
+  @discardableResult
+  static func installAgent(_ label: String) -> Bool {
+    let template = backend.appendingPathComponent("agents/\(label).plist")
+    guard var text = try? String(contentsOf: template, encoding: .utf8) else { return false }
+    text = text.replacingOccurrences(of: "@HOME@", with: home.path)
+    text = text.replacingOccurrences(of: "@REPO@", with: backend.path)
+    // The llama plist hard-codes Homebrew's binary; point it at the copy.
+    text = text.replacingOccurrences(of: brewLlama, with: hazlie.appendingPathComponent("bin/llama-server").path)
+    let dst = launchAgents.appendingPathComponent("\(label).plist")
+    do {
+      try mkdir(launchAgents, 0o755)
+      try text.write(to: dst, atomically: true, encoding: .utf8)
+    } catch {
+      return false
+    }
+    try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: dst.path)
+    bootstrap(dst)
+    return true
+  }
+
+  /// Stop an agent and start it again from its current plist — what a changed
+  /// model or key requires, and what setup-llm.sh does at the same point.
+  static func kickstart(_ label: String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    p.arguments = ["kickstart", "-k", "gui/\(getuid())/\(label)"]
+    try? p.run()
+    p.waitUntilExit()
+  }
+
   private static func bootstrap(_ plist: URL) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
@@ -173,7 +360,7 @@ enum Provision {
   // has migrated. Poll it briefly; proceed regardless (connectors retry) so a
   // slow start never wedges provisioning.
   private static func waitForHermes() {
-    guard let url = URL(string: "http://127.0.0.1:8789/health") else { return }
+    guard let url = URL(string: "http://127.0.0.1:51789/health") else { return }
     let deadline = Date().addingTimeInterval(15)
     while Date() < deadline {
       let sem = DispatchSemaphore(value: 0)

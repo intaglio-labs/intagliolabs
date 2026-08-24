@@ -271,13 +271,27 @@ test('the limit is capped so a question cannot ask for the whole store', () => {
   db.close();
 });
 
-test('grounding lines carry kind, source and date, and no quote', () => {
+test('grounding lines carry kind, source and date, and no quote', (t) => {
+  // Dates are the OWNER's calendar day, not UTC: claim lines merge with the
+  // episodic shelf's local-day lines into one numbered envelope, and the two
+  // must not disagree by a day for evening events. The zone is pinned so the
+  // assertions mean the same thing on any machine.
+  const prevTZ = process.env.TZ;
+  t.after(() => {
+    if (prevTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = prevTZ;
+  });
+  process.env.TZ = 'Pacific/Honolulu';
   const lines = groundingLines([
     { id: 1, kind: 'fact', text: 'Austin is vegetarian.', observed_at: 1_700_000_000_000, source: 'imessage', stale: false },
     { id: 2, kind: 'plan', text: 'Austin is moving in March.', observed_at: null, source: 'notes', stale: true },
+    // 2023-11-15T08:00Z is 22:00 on the 14th in Honolulu — the UTC rendering
+    // this test replaced dated it the 15th.
+    { id: 3, kind: 'fact', text: 'Dinner went well.', observed_at: Date.UTC(2023, 10, 15, 8, 0), source: 'imessage', stale: false },
   ]);
   assert.deepEqual(lines, [
     '[1] (fact, imessage, 2023-11-14) Austin is vegetarian.',
     '[2] (plan, notes, undated, OLD) Austin is moving in March.',
+    '[3] (fact, imessage, 2023-11-14) Dinner went well.',
   ]);
 });

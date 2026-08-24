@@ -4,26 +4,54 @@
 // (§09, "your turn") is the answer coming back. The only thing the viewer has
 // to do is send the message on screen 2; everything else advances itself.
 
+// 'model' and 'data' sit between the demo and the home reveal: the flow now
+// ends with a machine that can actually do something, rather than with a tour.
+// Keyed by name rather than by number because they are steps, not a countdown,
+// and either can be skipped without renumbering the rest.
 const screens = {
   0: document.getElementById('screen0'),
   1: document.getElementById('screen'),
   2: document.getElementById('screen2'),
+  model: document.getElementById('screenModel'),
+  data: document.getElementById('screenData'),
   3: document.getElementById('screen3'),
 };
 // Both orbs read the same time-of-day band as the widget (bridge.js).
 for (const el of document.querySelectorAll('.orb')) hzApplyTimeOfDay(el);
 
+// Which screen is up. The setup steps finish asynchronously — a download can
+// land while the owner has already moved on — so they check this before
+// advancing rather than yanking whatever is on screen.
+let currentScreen = 1;
+
 function showScreen(n) {
+  currentScreen = n;
   for (const [k, el] of Object.entries(screens)) {
     el.hidden = String(n) !== k;
     el.classList.remove('leaving', 'entering');
   }
   screens[n]?.classList.add('entering');
   if (String(n) === '2') runDemo();
+  if (String(n) === 'model') { clearDemo(); loadSetup(); }
+  if (String(n) === 'data') { refreshBack(); startPermPolling(); } else { stopPermPolling(); }
   if (String(n) === '3') { clearDemo(); runHome(); }
   // The scrim gets out of the way of the real widget only on the last scene.
   document.body.classList.toggle('spotlight', String(n) === '3');
+  // Remember where we are. Granting Full Disk Access makes macOS offer "Quit &
+  // Reopen", and taking it used to restart the flow from the welcome — the whole
+  // thing again, right after the hardest step in it. Fire-and-forget: a failed
+  // write costs a resume, never the flow.
+  hzPost('onboardingStep', { step: String(n) }).catch(() => {});
 }
+
+// Called by native INSTEAD of __hzOnboardingReset when the app is launching back
+// into a flow it was already in, rather than replaying one from settings.
+window.__hzOnboardingResume = (step) => {
+  if (!step || !(step in screens)) { showScreen(needsMove ? 0 : 1); return; }
+  clearDemo();
+  demoArmed = false;
+  showScreen(step);
+};
 
 // Reopening from settings reuses the same panel AND the same loaded page, so
 // the flow would otherwise resume on whatever screen it was abandoned on.
@@ -253,6 +281,13 @@ function demoSendNow() {
         pipe.classList.add('suck');
       });
   });
+  // The pipe used to land on the home reveal. Setup goes in between, so the
+  // flow ends with a machine that can do something rather than a tour of one
+  // that cannot.
+  // The flight lands the orb in the corner, and the widget surfaces there a
+  // beat later — so this has to be the LAST thing before the reveal. It used to
+  // fire with two setup steps still to come, which told the owner "i live down
+  // here now" and then asked them for two more things.
   at(1960, () => showScreen(3));
 }
 demoSend.addEventListener('click', demoSendNow);
@@ -304,9 +339,16 @@ window.addEventListener('resize', () => {
 document.getElementById('homeDone').addEventListener('click', () => finish());
 
 // ---------------- flow ----------------
+// Welcome -> SETUP -> demo -> flight -> home.
+//
+// Setup used to sit between the demo and the reveal, which put two more asks
+// after the orb had already flown to the corner saying "i live down here now".
+// Moving it earlier fixes that and buys something: a multi-gigabyte download
+// starts here and runs underneath the demo, so by the time the demo is over it
+// has usually landed.
 document.getElementById('cta').addEventListener('click', () => {
   hzSfx.wake();
-  showScreen(2);
+  showScreen('model');
 });
 
 function finish({ then } = {}) {
@@ -337,3 +379,354 @@ document.addEventListener('keydown', (e) => {
 });
 
 hzApplyPrefs();
+
+// ---------------- setup: the model, then one real data source ----------------
+//
+// These two run after the demo and before the home reveal. The order is
+// deliberate: the model is the slow one, so it starts downloading while the
+// owner reads the next screen, and by the time they finish granting Full Disk
+// Access it has usually landed.
+//
+// Both are genuinely skippable. Everything except answering questions works
+// with no model, and the app is honest-but-empty with no sources — a setup step
+// that cannot be refused is a demand, not a choice, and this one is asking for
+// gigabytes and access to a person's messages.
+
+const fmtGB = (b) => `${(b / 1e9).toFixed(1)} GB`;
+
+const modelChoices = document.getElementById('modelChoices');
+const modelProg = document.getElementById('modelProg');
+const modelBar = document.getElementById('modelBar');
+const modelLabel = document.getElementById('modelLabel');
+const modelErr = document.getElementById('modelErr');
+let setupState = null;
+let modelDone = false;
+
+function renderChoices() {
+  modelChoices.replaceChildren();
+  if (!setupState) return;
+  for (const t of setupState.tiers || []) {
+    const b = document.createElement('button');
+    b.className = 'ob-choice' + (t.id === setupState.recommended ? ' rec' : '');
+    const head = document.createElement('b');
+    head.textContent = t.label;
+    const size = document.createElement('span');
+    size.className = 'ob-choice-size';
+    size.textContent = fmtGB(t.bytes);
+    const why = document.createElement('span');
+    why.className = 'ob-choice-why';
+    why.textContent = t.detail;
+    b.append(head, size, why);
+    // One tag per card, and installed outranks recommended: what you HAVE is
+    // more useful to know than what we would have suggested.
+    const installed = setupState.model && t.id === setupState.model;
+    if (installed || t.id === setupState.recommended) {
+      const tag = document.createElement('span');
+      tag.className = 'ob-choice-tag' + (installed ? ' on' : '');
+      tag.textContent = installed ? 'installed' : 'suits this Mac';
+      b.appendChild(tag);
+    }
+    b.addEventListener('click', () => startModel(t.id));
+    b.dataset.tier = t.id;
+    modelChoices.appendChild(b);
+  }
+  renderSelection();
+}
+
+// A click IS the choice. The size is on the card, so the press is informed, and
+// an extra confirm step for something you can cancel from the very next frame
+// is ceremony. The chosen card stays marked while it runs.
+let selectedTier = null;
+
+function renderSelection() {
+  for (const el of modelChoices.querySelectorAll('.ob-choice')) {
+    const on = el.dataset.tier === selectedTier;
+    el.classList.toggle('sel', on);
+    el.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+}
+
+// The screen has exactly two states and ONE function decides which is up.
+//
+// They used to be toggled from five places, and the states drifted apart: a
+// capture during testing caught the cards AND the progress bar on screen
+// together, showing "starting…" forever under a set of buttons that implied
+// nothing had started. Two booleans in five hands is how that happens.
+function showModelPhase(phase) {
+  const busy = phase === 'busy';
+  modelChoices.hidden = busy;
+  modelProg.hidden = !busy;
+  const cancel = document.getElementById('modelCancel');
+  if (cancel) {
+    cancel.hidden = !busy;
+    cancel.disabled = false;
+    cancel.textContent = 'cancel';
+  }
+}
+
+function startModel(tier) {
+  // Already the installed one: nothing to fetch, and pretending to download
+  // 5 GB that are already here would be a lie with a progress bar on it.
+  if (setupState && setupState.model === tier) {
+    showScreen('data');
+    return;
+  }
+  selectedTier = tier;
+  renderSelection();
+  modelErr.hidden = true;
+  showModelPhase('busy');
+  modelBar.style.width = '0%';
+  modelLabel.textContent = 'fetching…';
+  downloading = true;
+  hzPost('modelDownload', { tier }).catch(() => {});
+  // MOVE ON. A multi-gigabyte download is not something to watch, and the next
+  // screen is work the owner can do WHILE it runs — which is the whole reason
+  // setup comes before the demo now. The fetch is native and lives in the app,
+  // not in this page, so leaving the screen does not touch it, and a
+  // notification finds them wherever they are when it lands.
+  clearTimeout(autoAdvance);
+  autoAdvance = setTimeout(() => {
+    // Gated on the SCREEN, not on whether a model exists. It used to check
+    // !modelDone, which loadSetup() sets true for an already-installed model —
+    // so on any Mac that already had one the screen never advanced at all.
+    if (currentScreen === 'model') showScreen('data');
+  }, 5000);
+}
+let autoAdvance = null;
+let downloading = false;
+
+// Native pushes every state change through here — progress, the install step
+// after the bytes land, and both endings.
+window.__hzSetup = (d) => {
+  if (!d || typeof d !== 'object') return;
+  if (d.phase === 'downloading') {
+    const pct = d.total > 0 ? Math.min(100, (d.got / d.total) * 100) : 0;
+    modelBar.style.width = `${pct}%`;
+    modelLabel.textContent = `${fmtGB(d.got)} of ${fmtGB(d.total)}`;
+    return;
+  }
+  if (d.phase === 'installing') {
+    modelBar.style.width = '100%';
+    modelLabel.textContent = 'making sure it arrived intact…';
+    return;
+  }
+  if (d.phase === 'ready') {
+    modelDone = true;
+    downloading = false;
+    refreshBack();
+    modelBar.style.width = '100%';
+    modelLabel.textContent = 'ready';
+    const cancel = document.getElementById('modelCancel');
+    if (cancel) cancel.hidden = true;
+    // May well arrive after the flow has moved on — that is expected, and the
+    // notification is what actually delivers the news. Only advance if the
+    // owner is still sitting on this screen watching it.
+    setTimeout(() => { if (currentScreen === 'model') showScreen('data'); }, 1200);
+    return;
+  }
+  if (d.phase === 'failed') {
+    downloading = false;
+    refreshBack();
+    showModelPhase('choose');
+    if (d.error !== 'cancelled') {
+      modelErr.hidden = false;
+      modelErr.textContent = d.error || 'that did not work';
+    }
+  }
+};
+
+document.getElementById('modelCancel').addEventListener('click', () => {
+  const btn = document.getElementById('modelCancel');
+  btn.disabled = true;
+  btn.textContent = 'stopping…';
+  hzPost('modelCancel').catch(() => {});
+  // Native answers with a 'failed' phase carrying "cancelled", which restores
+  // the choices below. Not restored here: doing both would race, and a button
+  // that clears the screen before the work has actually stopped is the lie this
+  // whole change is about.
+});
+document.getElementById('modelSkip').addEventListener('click', () => showScreen('data'));
+
+// ---- the data screen -------------------------------------------------------
+//
+// Three of these are real system prompts and one is not, and the screen says so
+// rather than pretending otherwise. Contacts, Calendar and Photos have APIs;
+// Messages and Notes are SQLite files under ~/Library with no API at all, so
+// macOS only offers Full Disk Access for them.
+//
+// The prompts land on THIS APP, which works because the reader is now a child of
+// it and inherits its identity. Under launchd it was node asking, and no app can
+// request a prompt for a binary it does not own.
+
+const dataStatus = document.getElementById('dataStatus');
+const permsEl = document.getElementById('perms');
+
+// "denied" covers two very different situations and the label has to as well.
+//
+// A person who saw a prompt and said no should be sent to Settings. A person
+// who saw NOTHING — because macOS declined to show the prompt at all — is being
+// told they refused something they were never asked, which is the one message
+// this app must never send. The two are told apart by whether the status was
+// still undetermined when we asked: if it was, and it came back denied, no
+// prompt was displayed.
+const PERM_LABEL = {
+  granted: 'on',
+  denied: 'open settings',
+  undetermined: 'allow',
+  unasked: 'turn on in settings',
+};
+
+function paintPerms(map) {
+  for (const row of permsEl.querySelectorAll('.ob-perm')) {
+    const which = row.dataset.which;
+    const st = (map && map[which]) || 'undetermined';
+    const btn = row.querySelector('button');
+    const on = st === 'granted';
+    row.classList.toggle('on', on);
+    if (which === 'fda') {
+      // No prompt exists for this one, so the button is a door to Settings
+      // rather than a request — and once it is on there is nothing to press.
+      btn.textContent = on ? 'on' : 'open settings';
+      btn.disabled = on;
+      continue;
+    }
+    btn.textContent = PERM_LABEL[st] || 'allow';
+    btn.disabled = on;
+  }
+}
+
+permsEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  const row = e.target.closest('.ob-perm');
+  if (!btn || !row) return;
+  const which = row.dataset.which;
+  if (which === 'fda') return; // its own handler below
+  // macOS shows a prompt once and remembers a refusal, so a previously denied
+  // permission cannot be re-asked from here — Settings is the only way back.
+  if (btn.textContent === 'open settings') {
+    hzPost('openFullDiskAccess').catch(() => {});
+    return;
+  }
+  btn.disabled = true;
+  const before = (lastPerms && lastPerms[which]) || 'undetermined';
+  const res = await hzPost('requestPermission', { which }).catch(() => null);
+  const map = {};
+  if (res && res.which) {
+    // Never asked, yet refused: macOS did not display the prompt. Say that,
+    // rather than implying a decision the owner never made.
+    map[res.which] =
+      before === 'undetermined' && res.status === 'denied' ? 'unasked' : res.status;
+  }
+  lastPerms = { ...(lastPerms || {}), ...map };
+  paintPerms(lastPerms);
+  if (map[which] === 'unasked') {
+    dataStatus.textContent =
+      "macOS didn't show the prompt for that one — you can switch it on in Settings.";
+  }
+});
+
+let lastPerms = null;
+
+// Back to the download — only offered while there IS one, because a back
+// button to a finished screen is a dead end wearing an arrow.
+const dataBack = document.getElementById('dataBack');
+dataBack.addEventListener('click', () => showScreen('model'));
+function refreshBack() {
+  dataBack.hidden = !(downloading && !modelDone);
+}
+
+// LIVE PERMISSION POLLING, which is what makes this feel like it is watching.
+//
+// Full Disk Access has no query API and no callback, so the only way to know is
+// to keep trying the read — and the only honest moment to say "on" is when it
+// actually works. Polling while this screen is up means the row turns green a
+// second or so after the switch is flipped in Settings, with no "press check
+// when you're done" and no way to be told you granted something you did not.
+//
+// The same poll covers Contacts, Calendar and Photos, which can also be changed
+// in Settings behind our back.
+let permTimer = null;
+function startPermPolling() {
+  stopPermPolling();
+  permTimer = setInterval(async () => {
+    if (currentScreen !== 'data') return;
+    const res = await hzPost('permissionState').catch(() => null);
+    if (!res || !res.permissions) return;
+    const prev = lastPerms || {};
+    const next = { ...res.permissions };
+    // Keep the more precise word: the poll only ever reports denied, and
+    // downgrading "we were never asked" to "you said no" loses the truth.
+    for (const k of Object.keys(next)) {
+      if (prev[k] === 'unasked' && next[k] === 'denied') next[k] = 'unasked';
+    }
+    if (JSON.stringify(next) !== JSON.stringify(prev)) { lastPerms = next; paintPerms(next); }
+  }, 1500);
+}
+function stopPermPolling() {
+  if (permTimer) clearInterval(permTimer);
+  permTimer = null;
+}
+
+document.getElementById('fdaOpen').addEventListener('click', () => {
+  // Everything this used to explain in a disclosure triangle — which row to find,
+  // what to press if it is missing — is now ON SCREEN beside System Settings, as
+  // a card holding the app itself. Written steps describing a window the reader
+  // is already looking at are worse than the window.
+  hzPost('openFullDiskAccess').catch(() => {});
+});
+
+document.getElementById('dataCheck').addEventListener('click', async () => {
+  dataStatus.textContent = 'having a look…';
+  await hzPost('startSources').catch(() => {});
+  // The ROW COUNT is the check: it only moves when something was really read
+  // and really written. macOS gives this process no honest answer about a
+  // grant, so we do not ask it — we look at what arrived.
+  let rows = 0;
+  for (let i = 0; i < 10 && rows === 0; i += 1) {
+    await new Promise((r) => setTimeout(r, 2500));
+    const st = await hzPost('setupState').catch(() => null);
+    rows = (st && st.rows) || 0;
+    if (rows === 0) dataStatus.textContent = 'having a look…';
+  }
+  if (rows > 0) {
+    // FINDING IS NOT KNOWING, and saying only the first is how this went wrong.
+    //
+    // Rows arrive in seconds; they are answerable only once the local model has
+    // read them into claims, which takes a while and used to happen nowhere at
+    // all. "found 18,440 things" followed by an app that answers nothing is the
+    // most confusing thing this flow could say, so it says both numbers.
+    const st2 = await hzPost('setupState').catch(() => null);
+    const mem = (st2 && st2.memory) || null;
+    dataStatus.textContent = mem && mem.pending > 0
+      ? `found ${rows.toLocaleString()} things — now reading them`
+      : `found ${rows.toLocaleString()} things so far`;
+    setTimeout(() => { if (currentScreen === 'data') showScreen(2); }, 1400);
+  } else {
+    dataStatus.textContent = "nothing yet — that's fine, i'll keep looking as you go.";
+    setTimeout(() => { if (currentScreen === 'data') showScreen(2); }, 2600);
+  }
+});
+document.getElementById('dataSkip').addEventListener('click', () => showScreen(2));
+
+// Loaded once, when the flow reaches the setup screens.
+async function loadSetup() {
+  setupState = await hzPost('setupState').catch(() => null);
+  if (!setupState) return;
+  const perms = await hzPost('permissionState').catch(() => null);
+  lastPerms = (perms && perms.permissions) || null;
+  paintPerms(lastPerms);
+  // ALWAYS SHOW THE CHOICES. An installed model marks its card; it does not
+  // replace the screen.
+  //
+  // This used to hide the cards entirely and say "already here", which turned
+  // the one screen where a person picks how the thing thinks into a dead end:
+  // no way to move up to the bigger model, no way to move down to the smaller
+  // one on a Mac that was struggling, and no way to even see what the options
+  // were. Having one already is a reason to mark it, not a reason to take the
+  // menu away.
+  // What is installed is a FACT ABOUT THE CARDS, not a statement that this
+  // step is finished — conflating the two is what froze the screen.
+  selectedTier = setupState.model || null;
+  renderChoices();
+  showModelPhase('choose');
+}

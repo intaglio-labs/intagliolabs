@@ -23,6 +23,21 @@
         <button class="close" id="close" title="Close">×</button>
       </div>
       <div class="settings" id="settings"></div>
+      <!-- THE ANSWER TO "why does it not know anything yet".
+           Reading the sources is fast; turning them into something answerable is
+           not, and it used to happen invisibly — in fact not at all. This is the
+           only place that says so. Hidden once there is nothing left to read,
+           because a progress bar parked at 100% is furniture. -->
+      <div class="setting setting-col mem" id="mem" hidden>
+        <div class="setting-head">
+          <span class="mem-dot" id="memDot"></span>
+          <span class="setting-name" id="memLabel">reading</span>
+          <span class="setting-value" id="memCount"></span>
+        </div>
+        <div class="mem-bar"><span id="memBar"></span></div>
+        <p class="setting-note" id="memNote"></p>
+        <button class="ob-replay mem-act" id="memAct" hidden>review them</button>
+      </div>
       <h2 class="conn-title">connectors</h2>
       <div class="list" id="grid"></div>
       <div class="notice" id="notice" hidden></div>

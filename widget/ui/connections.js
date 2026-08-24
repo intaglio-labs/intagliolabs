@@ -222,6 +222,14 @@ function fitConnections() {
 }
 new MutationObserver(fitConnections).observe(document.querySelector('.win'), {
   childList: true, subtree: true, characterData: true,
+  // Attributes too. This page shows and hides whole blocks by toggling `hidden`
+  // — the memory row and `notice` both — and that changes the column's height
+  // without touching childList or text. Without this the window kept the height
+  // it measured while the block was still hidden, which is a popup that fits its
+  // content exactly except when it does not. `style` is left out on purpose: the
+  // only inline style here is a progress bar's width, which never changes height
+  // and would re-measure every few seconds for nothing.
+  attributes: true, attributeFilter: ['hidden', 'class'],
 });
 window.addEventListener('resize', fitConnections);
 fitConnections();
@@ -299,21 +307,33 @@ hzPost('prefs')
 // One sentence per source on how to connect it. Links open in the default
 // browser via the native bridge — the webview itself can navigate nowhere.
 const FDA_HINT = {
-  text: 'Grant Full Disk Access to ~/.hazlie/bin/node in System Settings → Privacy & Security.',
+  text: 'Switch on intaglio labs under System Settings → Privacy & Security → Full Disk Access.',
   url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles',
   link: 'Open System Settings',
 };
+// WRITTEN FOR SOMEBODY WHO INSTALLED AN APP. These used to name repo scripts
+// (ops/gcal-auth.mjs) and secret file paths (~/.hazlie/secrets/*.txt) — neither
+// of which exists for a person who downloaded this, and a secrets path in a
+// tooltip is an invitation to go editing one by hand. Every one of them now
+// points at the connect page, which is the door that actually opens.
+//
+// NOTE: this table is duplicated in connections.js and connector-tile.js. Both
+// copies were corrected together; if you change one, change the other, or move
+// it to a shared module.
 const HINTS = {
   imessage: FDA_HINT, photos: FDA_HINT, notes: FDA_HINT,
   files: { text: 'Sign in to iCloud Drive, Box, or Dropbox on this Mac — any one of them counts.' },
-  calendar: { text: 'Run ops/gcal-auth.mjs in the repo and approve read-only calendar access.' },
+  calendar: { text: 'Connect your Google account on the connect page and approve read-only calendar access.' },
   mail: { text: 'Create a 16-letter Google app password, then paste it on the connect page.',
           url: 'https://myaccount.google.com/apppasswords', link: 'Google app passwords' },
-  granola: { text: 'Copy your API key from Granola settings into ~/.hazlie/secrets/granola-api-key.txt.',
+  granola: { text: 'Copy your API key from Granola settings, then paste it on the connect page.',
              url: 'https://granola.ai', link: 'granola.ai' },
-  oura: { text: 'Create a personal access token on Oura cloud and store it via the connect page.',
-          url: 'https://cloud.ouraring.com/personal-access-tokens', link: 'cloud.ouraring.com' },
-  notion: { text: 'Create an internal integration and store its token in ~/.hazlie/secrets/notion-api-key.txt.',
+  // OAuth2 since Oura retired personal access tokens in Dec 2025: the PAT
+  // page this used to link is a dead end, and there is no settings page to
+  // send anyone to instead, so this one is text-only — the connect page
+  // carries the whole flow.
+  oura: { text: 'Connect your Oura account on the connect page and approve the scopes in your browser.' },
+  notion: { text: 'Create an internal integration, then paste its token on the connect page.',
             url: 'https://www.notion.so/my-integrations', link: 'notion.so/my-integrations' },
 };
 function hintFor(id) {
@@ -357,6 +377,13 @@ const CONNECT_PAGE = new Set(['mail', 'oura', 'notion', 'granola']);
 // phone flows drive a guided conversation with the bridge bot instead (begin
 // sends the login command; the bot prompts; the input sends what it asked for
 // — a token, a phone number, then the code — through the same relay).
+// The flow shapes the HELP TEXT (a token and a phone code want different
+// wording). It no longer decides whether an embedded login is possible — the
+// server does, by returning allowedHosts for the platforms that have a cookie
+// flow, and bridgeWebLogin answering `manual` for the ones that do not. This
+// table and the native fence used to be two independent copies of that
+// decision and they disagreed about X, which had a login button here and no
+// matching host in the fence, so the window opened blank.
 const BRIDGE_FLOW = {
   twitter: 'cookie', messenger: 'cookie', instagram: 'cookie',
   discord: 'token', slack: 'token', telegram: 'phone',
@@ -462,7 +489,7 @@ function showTileTip(row, label) {
 }
 function hideTileTip() { if (tileTip) tileTip.classList.remove('on'); }
 
-function card(src) {
+function card(src, keep) {
   // Square tiles, four to a row. The old compact rows ruled out a 3-column
   // grid because every connection had to stay visible at once; at four
   // columns nine sources take three rows, so the constraint still holds.
@@ -478,6 +505,10 @@ function card(src) {
   // "Discord"s). aria-label names the tile for a screen reader and draws
   // nothing; showTileTip owns the visible hover label.
   row.setAttribute('aria-label', src.label);
+  // Stamped so a strip and its tile can find each other by id across a
+  // refresh() rebuild — refresh() hands a kept strip to the tile that
+  // replaced its owner, and toggle() judges ownership by it.
+  row.dataset.id = src.id;
 
   const mark = document.createElement('span');
   mark.className = 'mark';
@@ -516,6 +547,7 @@ function card(src) {
   // because a horizontal shelf has nowhere to put a full-width strip.
   const tip = document.createElement('div');
   tip.className = 'hint';
+  tip.dataset.id = src.id;
 
   // ONE panel, the same every time. There used to be two — a tall
   // first-press hand-hold with a "got it" button, then a compact strip on
@@ -567,10 +599,11 @@ function card(src) {
     } else if (src.connected) {
       // CONNECTED: one line naming what's connected, and a + to add another
       // account (owner). Mail carries the address in its id; the local stores
-      // are one-per-Mac, so they just say "connected". "add account" re-runs
-      // whatever external setup connects this source — which only some have,
-      // so the + shows only where a second account is actually reachable
-      // (mail, granola, oura, notion), never on the one-Mac FDA stores.
+      // are one-per-Mac, so they just say "connected". "add account" opens
+      // the hint's url — the external page where a second account is set
+      // up — so the + shows only where the hint HAS a url (mail, granola,
+      // notion), never on the one-Mac FDA stores. Oura's whole flow is
+      // ops/oura-auth.mjs with no URL to reopen, so it gets no + either.
       const acct = document.createElement('span');
       acct.className = 'acct';
       acct.textContent = src.id.startsWith('mail:')
@@ -724,9 +757,10 @@ function card(src) {
         openBridgeLogin();
       });
       tip.appendChild(add);
-    } else if (data && data.state !== 'ok' && data.state !== 'cancelled' && !data.transcript) {
+    } else if (data && data.state !== 'ok' && data.state !== 'cancelled'
+               && data.state !== 'manual' && !data.transcript) {
       tip.append(NOTICES[data.state] || data.error || NOTICES.error);
-    } else if (flow === 'cookie') {
+    } else if (flow === 'cookie' && !(data && data.state === 'manual')) {
       // PRIMARY, Beeper-style: one button opens the platform's real login page
       // in a Hazlie-framed window; native harvests the session cookies. No
       // devtools, no paste. See ops/WIDGET-WEBVIEW-LOGIN-SPEC.md.
@@ -863,8 +897,12 @@ function card(src) {
 
   const toggle = () => {
     // One strip at a time, by construction now: the host holds exactly one
-    // child, so opening a tile evicts whatever was there.
-    const wasOpen = tip.parentNode === hintHost;
+    // child, so opening a tile evicts whatever was there. Ownership is
+    // judged by id, not node identity: after a refresh() rebuild the open
+    // strip can be an OLD tile's node adopted by this one (end of card()),
+    // and the first tap on an open tile must close it, never relaunch it.
+    const open = hintHost.querySelector('.hint');
+    const wasOpen = open !== null && open.dataset.id === src.id;
     hintHost.replaceChildren();
     for (const r of grid.querySelectorAll('.row')) r.classList.remove('open');
     if (!wasOpen) {
@@ -891,6 +929,23 @@ function card(src) {
   row.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
   });
+  // A strip kept open across refresh() is handed to the tile that replaced
+  // its owner. Holding typed login input it is adopted AS-IS — wiping a
+  // half-typed cookie paste, token, or phone code is the exact loss the keep
+  // exists to prevent — and toggle()'s id check closes it on the next tap.
+  // Otherwise it is re-rendered from THIS tile's fresh src, so the panel
+  // cannot keep describing a state the dot no longer shows. The shelf was
+  // just rebuilt from the same status, so renderBridge's connected-repaint
+  // would be a loop here, not news — hence the pre-set flag.
+  if (keep) {
+    const typed = [...keep.querySelectorAll('textarea, input')].some((b) => b.value.trim());
+    if (!typed) {
+      hintHost.replaceChildren(tip);
+      if (src.action === 'bridge') { refreshedOnConnect = true; openBridge(); }
+      else renderTip();
+    }
+    row.classList.add('open');
+  }
   return row;
   // (grid id kept for the container; it renders rows now)
 }
@@ -904,18 +959,111 @@ async function refresh() {
       return;
     }
     notice.hidden = true;
-    hintHost.replaceChildren(); // the strips belonged to the old tiles
+    // An OPEN strip survives the refresh. The cookie-paste and token/phone
+    // login flows require leaving the popup (to copy cookies, a token, or a
+    // code), and coming back fires the focus listener below; renderBridge
+    // also calls refresh() on a freshly connected status. Wiping the host on
+    // either path destroyed the open panel mid-login. The shelf still
+    // rebuilds; the kept strip is handed to its rebuilt tile, which adopts
+    // it (end of card()): re-rendered from the fresh payload unless it holds
+    // typed login input, and re-marked open. A strip whose source left the
+    // payload closes with the tiles that could own it.
+    const keep = hintHost.querySelector('.hint');
     const shown = data.sources.filter((s) => !HIDDEN_CONNECTORS.has(kindOf(s.id)));
-    grid.replaceChildren(...orderSources(shown).map(card));
+    const kept = keep && shown.some((s) => s.id === keep.dataset.id) ? keep : null;
+    if (!kept) hintHost.replaceChildren(); // strips of old tiles, or of a source now gone
+    grid.replaceChildren(...orderSources(shown)
+      .map((s) => card(s, kept && kept.dataset.id === s.id ? kept : null)));
   } catch {
     notice.textContent = NOTICES.error;
     notice.hidden = false;
   }
 }
+// MEMORY PROGRESS — the difference between "found" and "understood".
+//
+// Sources land in `context` in seconds. Answers come from CLAIMS, which a local
+// model distils out of those rows one pass at a time, and until this shipped
+// nothing ran that step at all: a full database, zero claims, and every question
+// abstaining. Even now that it runs, it is slow enough that silence reads as
+// broken. So the numbers are on screen, and they are the real ones — `pending`
+// is the selector re-run at the live watermark, not an estimate.
+const mem = document.getElementById('mem');
+const memDot = document.getElementById('memDot');
+const memLabel = document.getElementById('memLabel');
+const memCount = document.getElementById('memCount');
+const memBar = document.getElementById('memBar');
+const memNote = document.getElementById('memNote');
+const memAct = document.getElementById('memAct');
+// The review queue is a page on the connect server, at <link>/memory. Native holds
+// the tokened URL and appends only names it recognises.
+if (memAct) {
+  memAct.addEventListener('click', () => {
+    hzPost('openConnectLink', { page: 'memory' }).catch(() => {});
+  });
+}
+
+function paintMemory(m) {
+  if (!m || !mem) { if (mem) mem.hidden = true; return; }
+  // WAITING ON YOU outranks waiting on the machine.
+  //
+  // A distilled claim is invisible to every question until it has been accepted —
+  // retrieve.mjs reads v_claim_accepted and nothing else. That is on purpose (a
+  // model's assertion is not ground truth) but it was silent: claims piled up in
+  // a queue with no route to it from anywhere in the app, and the answer to every
+  // question stayed "nothing in what i've got covers that".
+  if (m.state === 'review') {
+    mem.hidden = false;
+    mem.classList.remove('busy');
+    memLabel.textContent = 'waiting on you';
+    memCount.textContent = `${m.review.toLocaleString()}`;
+    memBar.style.width = m.total > 0 ? `${Math.round((m.done / m.total) * 100)}%` : '100%';
+    memNote.textContent = m.pending > 0
+      ? `${m.review.toLocaleString()} things to confirm before i can use them — still reading the rest`
+      : `${m.review.toLocaleString()} things to confirm before i can use them`;
+    memAct.hidden = false;
+    return;
+  }
+  memAct.hidden = true;
+  if (m.state === 'reading') {
+    const pct = m.total > 0 ? Math.round((m.done / m.total) * 100) : 0;
+    mem.hidden = false;
+    mem.classList.add('busy');
+    memLabel.textContent = 'reading';
+    memCount.textContent = `${m.done.toLocaleString()} of ${m.total.toLocaleString()}`;
+    memBar.style.width = `${Math.max(pct, 2)}%`;
+    // Says what it BUYS, so waiting has a point rather than being a bar.
+    memNote.textContent = m.claims > 0
+      ? `${m.claims.toLocaleString()} things learned so far — i can already answer about those`
+      : 'i can answer about anything i have read once this gets going';
+    return;
+  }
+  if (m.state === 'ready') {
+    mem.hidden = false;
+    mem.classList.remove('busy');
+    memLabel.textContent = 'memory';
+    memCount.textContent = '';
+    memBar.style.width = '100%';
+    memNote.textContent = `up to date — ${m.claims.toLocaleString()} things learned`;
+    return;
+  }
+  // Nothing read and nothing pending: there is no progress to report, and a bar
+  // at zero would imply work is happening when none is.
+  mem.hidden = true;
+}
+
+async function refreshMemory() {
+  const st = await hzPost('setupState').catch(() => null);
+  paintMemory(st && st.memory);
+}
+refreshMemory();
+// Slow poll: this moves on the order of a batch, not a frame.
+setInterval(refreshMemory, 5000);
+
 refresh();
 // The panel is hidden and re-shown, not reloaded — without this, a reopened
 // popup would show the status from its first open forever.
 window.addEventListener('focus', refresh);
+window.addEventListener('focus', refreshMemory);
 
 // The close must SURVIVE the chrome around it: the sound is best-effort (a
 // Web Audio throw must never eat the close). The dead-clicks bug itself was

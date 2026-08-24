@@ -48,10 +48,17 @@ spend most of its period copying, and write tens of gigabytes a day, for a loop
 that usually finds nothing.
 
 **Which mode a consumer uses is a per-store decision that should be
-re-measured, not inherited.** As of writing, every live consumer
-(`imessage`, `whatsapp`, `notes`, `calendar`, `contacts`) uses `snapshotStore`;
-`openPersistentReader` currently has no caller, and exists for the tight-loop
-case.
+re-measured, not inherited.** As of writing, `imessage`, `whatsapp`, `notes`,
+`calendar` and `contacts` use `snapshotStore`. `photos` uses
+`openPersistentReader`: its `Photos.sqlite` measured 3.2 GB on this machine,
+so a snapshot per scan would cost ~7 s and a 3.2 GB write every pass, while a
+persistent read-only connection reads at zero copy cost with WAL snapshot
+isolation **per statement, not per scan** — `photos` runs its asset, name and
+face queries as three separate statements outside any wrapping transaction,
+so a later statement can observe a newer WAL epoch than the one before it.
+Why that drift is acceptable there (the faces and names merely reflect a
+slightly newer library state for the same assets) is written in full in
+`connectors/sources/photos.mjs`'s header.
 
 ---
 

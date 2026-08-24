@@ -400,3 +400,57 @@ test('no readable store at any candidate path is a loud .status failure naming t
     return true;
   });
 });
+
+// LOG POLICY UNDER FAILURE (google backend). gcalClient labels every request
+// with the calendar id — for Google, an email address — and echoes response
+// bodies into thrown messages. The warn line for a failed calendar therefore
+// carries the HTTP status and nothing from the message, or the log would name
+// the owner's calendars and their sharers (connectors/AGENTS.md).
+test('a failed google calendar logs status only — never the id-bearing error message', async () => {
+  const boom = Object.assign(
+    new Error('Google events(person@gmail.com) failed: HTTP 404 {"error":"notFound"}'),
+    { status: 404 }
+  );
+  const logged = [];
+  const client = {
+    listCalendars: async () => [
+      { id: 'person@gmail.com', summary: 'Shared' },
+      { id: 'mine@gmail.com', summary: 'Mine' },
+    ],
+    listEvents: async ({ calendarId }) => {
+      if (calendarId === 'person@gmail.com') throw boom;
+      return [
+        {
+          id: 'ok@g',
+          iCalUID: 'ok@g',
+          summary: 'Sync',
+          start: { dateTime: '2026-08-18T09:00:00Z' },
+          end: { dateTime: '2026-08-18T10:00:00Z' },
+        },
+      ];
+    },
+  };
+  const ctx = {
+    config: { calendar: { backend: 'google' } },
+    now: () => NOW,
+    backfill: false,
+    log: {
+      info: (event, fields) => logged.push({ event, fields }),
+      warn: (event, fields) => logged.push({ event, fields }),
+    },
+    ingest: async (rows) => ({ ingested: rows.length, updated: 0, unchanged: 0 }),
+    admin: {
+      entities: async () => [],
+      deleteEntities: async ({ entityIds }) => ({ deleted: entityIds.length }),
+    },
+    gcalClientFactory: () => client,
+  };
+  await createCalendarSource().run(ctx);
+
+  const failure = logged.find((l) => l.event === 'calendar_list_failed');
+  assert.ok(failure, 'the failed calendar must still be reported');
+  assert.equal(failure.fields.status, 404, 'the HTTP status is the loggable fact');
+  const everything = JSON.stringify(logged);
+  assert.ok(!everything.includes('person@gmail.com'), 'no calendar id in any log line');
+  assert.ok(!everything.includes('notFound'), 'no response-body echo in any log line');
+});

@@ -45,8 +45,8 @@ answer and no sign that anything contradicted it.
 
 Notes:
 ```
-[1] (fact, imessage, 2026-08-15) Austin eats fish again as of last week.
-[2] (fact, imessage, 2026-01-30) Austin went vegetarian in January and does not eat meat.
+[1] (fact, imessage, 2026-08-15) The owner eats fish again as of last week.
+[2] (fact, imessage, 2026-01-30) The owner went vegetarian in January and does not eat meat.
 ```
 
 Question: `what do you eat these days?`
@@ -81,8 +81,8 @@ somebody already approved, and that is all that leaves this machine.
 
 Notes:
 ```
-[1] (fact, imessage, 2026-01-14) Austin went vegetarian in January and does not eat meat.
-[2] (constraint, notes, 2026-03-02) Austin cannot do Thursday mornings; he has weekly physio.
+[1] (fact, imessage, 2026-01-14) The owner went vegetarian in January and does not eat meat.
+[2] (constraint, notes, 2026-03-02) The owner cannot do Thursday mornings; he has weekly physio.
 ```
 
 Question: `can i book you thursday am?`
@@ -92,3 +92,11 @@ Question: `can i book you thursday am?`
 Question: `whats my favourite film?`
 
 > nothing in what i've got covers that.
+
+<!-- The example notes above read "The owner …" because that is what the store
+     actually contains. The distiller writes claims that way on purpose: it is not
+     told the owner's name and must not invent one. These examples once used a
+     name, and in the DISTILLER's prompt that single detail taught the model to
+     call the owner by it — 75 of 119 claims on a real machine. Here the name only
+     ever appeared on the input side, so the damage was smaller, but an example
+     that disagrees with the data is still an example that will be believed. -->

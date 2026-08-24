@@ -27,6 +27,19 @@
   <key>Label</key>
   <string>com.hazlie.connectors</string>
 
+  <!-- Attribute this background item to the APP, not to the program it runs.
+       Without this key macOS names the item after the executable, so a person
+       who installed one app was told that "node" had added background items —
+       four separate times, once per agent, naming something they never
+       installed. With it, Login Items groups all of them under intaglio labs
+       and the notification says the app's name.
+       Every agent here carries the same identifier ON PURPOSE: that is what
+       makes them one entry instead of four. -->
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>com.hazlie.widget</string>
+  </array>
+
   <key>ProgramArguments</key>
   <array>
     <string>@HOME@/.hazlie/bin/node</string>

@@ -16,7 +16,7 @@
 // touching llama.
 // HERMETIC BY DEFAULT — changed 2026-08-22, and the reason matters.
 //
-// This file used to resolve BASE to the REAL launchd hermes on :8789 and read
+// This file used to resolve BASE to the REAL launchd hermes on :51789 and read
 // the owner's actual bearer out of ~/.hazlie/secrets. Running the widget suite
 // therefore ran the full retrieve→compose path over the production context.db
 // (339k rows of the owner's mail, messages and calendar), spent a real model
@@ -51,7 +51,7 @@ const TEST_BEARER = 'c'.repeat(64);
 const TEST_LLAMA_KEY = 'a'.repeat(64);
 
 let HOST = '127.0.0.1';
-let PORT = 8789;
+let PORT = 51789;
 let hermes = null;
 let llamaStub = null;
 let tmp = null;
@@ -85,7 +85,7 @@ function startLlamaStub() {
 
 before(async () => {
   if (LIVE_MODE) {
-    const base = process.env.HERMES_BASE ?? 'http://127.0.0.1:8789';
+    const base = process.env.HERMES_BASE ?? 'http://127.0.0.1:51789';
     ({ hostname: HOST, port: PORT } = new URL(base));
     return;
   }
@@ -133,7 +133,7 @@ function post(path, { body, headers = {}, timeout = 10_000 } = {}) {
   });
 }
 
-// Identity first — the port-8787 lesson. If 8789 isn't answering as hermes,
+// Identity first — the port-8787 lesson. If 51789 isn't answering as hermes,
 // every test below would be exercising a stranger.
 async function hermesReady() {
   try {
@@ -265,3 +265,92 @@ test('LIVE: a real answer is buffered JSON of exactly {text, sources, usedRows}'
     assert.deepEqual(Object.keys(obj).sort(), ['sources', 'text', 'usedRows'],
       'no extra fields: anything beyond {text, sources, usedRows} is surface the boundary must then defend');
   });
+
+// ---------------------------------------------------------------------------
+// EVERY BRANCH, ONE SHAPE.
+//
+// /vault/ask does not have one exit. Sync-status, person-search, abstention and
+// the composed answer each build their own response object and return early, and
+// until now exactly one of those was shape-checked -- inside the test named
+// LIVE, which needs HZ_CONTRACT_LIVE=1 and a real model. On a normal run the
+// contract was unasserted on every path.
+//
+// This is the seam worth guarding: it is where escaped crashes live. A suite
+// that stops at the retrieval call leaves the renderer downstream free to read
+// fields the query never selected, and that failure reaches a person rather than
+// a test. Nothing is wrong with such tests; they are short.
+//
+// What depends on the shape here, concretely:
+//   Bridge.swift  obj["sources"] as? [String] ?? []   -- a wrong element type
+//                 does not throw, it silently yields [] and the citation
+//                 disappears with no error anywhere.
+//   chat.js       data.sources.join(' · ')            -- objects would render
+//                 as "[object Object]" in the panel.
+//   chat.js       pending.textContent = data.text     -- a missing text reads
+//                 as the literal string "undefined".
+//
+// None of those three fail loudly. That is the whole argument for asserting the
+// shape on every branch rather than the one the happy path takes.
+const ASK_KEYS = ['sources', 'text', 'usedRows'];
+
+function assertAskShape(res, label) {
+  assert.equal(res.status, 200, `${label}: ${res.body}`);
+  assert.match(res.headers['content-type'] ?? '', /application\/json/u, `${label}: JSON`);
+  const obj = JSON.parse(res.body);
+  assert.deepEqual(
+    Object.keys(obj).sort(),
+    ASK_KEYS,
+    `${label}: every branch returns exactly {text, sources, usedRows}`
+  );
+  assert.equal(typeof obj.text, 'string', `${label}: text is a string`);
+  assert.ok(obj.text.length > 0, `${label}: text is never empty -- chat.js renders it directly`);
+  assert.ok(Array.isArray(obj.sources), `${label}: sources is an array`);
+  assert.ok(
+    obj.sources.every((s) => typeof s === 'string'),
+    `${label}: sources are STRINGS -- Swift's [String] cast fails silently on objects`
+  );
+  assert.equal(typeof obj.usedRows, 'number', `${label}: usedRows is a number`);
+  assert.ok(Number.isFinite(obj.usedRows) && obj.usedRows >= 0, `${label}: usedRows is finite and >= 0`);
+  return obj;
+}
+
+const ask = (utterance) =>
+  post('/vault/ask', {
+    body: { utterance },
+    headers: { authorization: `Bearer ${token()}` },
+  });
+
+test('abstention returns the same shape as an answer, not a bare error', SKIP, async () => {
+  // On an empty store the abstain branch fires before a model is involved.
+  // It still has to look like every other answer to the panel rendering it.
+  const obj = assertAskShape(await ask('what is my favourite film?'), 'abstain');
+  assert.deepEqual(obj.sources, [], 'an abstention cites nothing');
+  assert.equal(obj.usedRows, 0, 'and rests on no rows');
+});
+
+test('the sync-status branch returns the ask shape', SKIP, async () => {
+  // Seeded through the sanctioned write path rather than a second database
+  // handle -- hermes is the sole writer and a test should not be the exception
+  // that proves it is not.
+  const ingest = await post('/ingest', {
+    body: [
+      { source: 'imessage', entity_id: 'w:1', ts: Date.now() - 3_600_000, text: 'morning', speaker: 'Austin' },
+      { source: 'imessage', entity_id: 'w:2', ts: Date.now() - 1_800_000, text: 'on my way', speaker: 'Austin' },
+    ],
+    headers: { authorization: `Bearer ${token()}` },
+  });
+  assert.equal(ingest.status, 200, `seed failed: ${ingest.body}`);
+
+  // Freshness questions are answered by code from timestamps -- no model, no
+  // claims. A distinct branch, and one a renderer sees just as often.
+  for (const q of ['am i up to date?', 'is anything behind?']) {
+    assertAskShape(await ask(q), `sync-status: ${q}`);
+  }
+});
+
+test('a long-but-legal utterance still returns the ask shape', SKIP, async () => {
+  // Just under the documented 2000-char client cap. The oversize test above
+  // proves it does not 500; this proves the in-bounds case still answers in
+  // contract rather than falling out of a branch that forgot a field.
+  assertAskShape(await ask('what did i say about '.repeat(90).slice(0, 1900)), 'long utterance');
+});

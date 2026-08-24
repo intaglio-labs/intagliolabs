@@ -57,6 +57,17 @@ export async function bridgeApiResponse({
         // has logged in there. loginUrl prefers the bot's own "Login URL:" line.
         loginUrl: loginUrlFrom(transcript, platform),
         cookieDomain: platform.cookieDomain,
+        // The web-login POLICY, from the platform table -- the hosts that flow
+        // may navigate to and the cookie that means "in". Null for the
+        // platforms whose bridge takes a token or a phone code instead of
+        // cookies, and the widget must not open a webview for those: an
+        // embedded login it cannot complete is a blank window with no error.
+        //
+        // Sent rather than hardcoded in Swift because it was hardcoded in Swift
+        // and drifted four platforms out of date. The widget enforces this; it
+        // does not decide it.
+        allowedHosts: platform.webLogin?.allowedHosts ?? null,
+        sessionCookie: platform.webLogin?.sessionCookie ?? null,
       },
     };
   };

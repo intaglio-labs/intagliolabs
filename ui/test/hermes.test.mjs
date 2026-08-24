@@ -41,6 +41,13 @@ let admin;
 let adminBase;
 let adminDbPath;
 
+// allowedOrigins is passed EXPLICITLY, and that is the point rather than
+// boilerplate. DEFAULT_ALLOWED_ORIGINS is empty as of 2026-08-23, so a server
+// started without this line trusts no browser origin at all -- which is the
+// correct posture for a real install and the wrong one for the suite below,
+// which deliberately exercises the browser channel. Naming it here means a test
+// that uses ALLOWED_ORIGIN is testing a capability somebody switched on, not one
+// it inherited from a default that outlived the app it was written for.
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), 'hermes-test-'));
   hermes = await start({
@@ -48,6 +55,7 @@ before(async () => {
     dbPath: join(dir, 'context.db'),
     llamaApiKey: TEST_LLAMA_KEY,
     bearerToken: TEST_BEARER_TOKEN,
+    allowedOrigins: ALLOWED_ORIGIN,
   });
   base = `http://127.0.0.1:${hermes.port}`;
   adminDbPath = join(dir, 'admin.db');
@@ -56,6 +64,7 @@ before(async () => {
     dbPath: adminDbPath,
     llamaApiKey: TEST_LLAMA_KEY,
     bearerToken: TEST_BEARER_TOKEN,
+    allowedOrigins: ALLOWED_ORIGIN,
   });
   adminBase = `http://127.0.0.1:${admin.port}`;
 });
@@ -100,7 +109,63 @@ test('stats requires authentication and reports the row count', async () => {
   assert.equal((await fetch(`${base}/stats`)).status, 401);
   const res = await authedGet('/stats');
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { rows: 0 });
+  assert.deepEqual(await res.json(), {
+    rows: 0,
+    // Ingesting rows and being able to ANSWER about them are different things,
+    // and reporting only the first is what made a half-built memory look
+    // finished — full database, zero claims, every question abstaining, and no
+    // way to tell busy from broken. An empty store is 'idle': nothing read and
+    // nothing waiting, so there is no progress to claim.
+    memory: {
+      claims: 0,
+      // Distilled is not accepted. v_claim_accepted needs a claim_decision, and
+      // retrieve.mjs reads that view and nothing else — so `review` is the count
+      // standing between a claim and an answer, and it is reported separately
+      // from `claims` because they were silently the same number for 119 claims.
+      accepted: 0,
+      review: 0,
+      runs: 0, done: 0, pending: 0, total: 0, running: false, state: 'idle',
+    },
+  });
+});
+
+test('stats reports work still to do as "reading", not as an empty memory', async () => {
+  // Its OWN store and server: this test writes a row, and the suite above asserts
+  // an empty one. Sharing the database would make the pair order-dependent.
+  const progressDb = join(dir, 'progress.db');
+  const srv = await start({
+    port: 0,
+    dbPath: progressDb,
+    llamaApiKey: TEST_LLAMA_KEY,
+    bearerToken: TEST_BEARER_TOKEN,
+    allowedOrigins: ALLOWED_ORIGIN,
+  });
+  try {
+    // One owner-authored note, nothing distilled — the exact state somebody is in
+    // right after granting access, and the one the UI has to be able to name.
+    const store = new DatabaseSync(progressDb);
+    const now = Date.now();
+    store
+      .prepare(
+        'INSERT INTO context(ts, source, speaker, text, meta, store_changed_at) ' +
+          "VALUES (?, 'notes', 'me', 'a note the owner wrote', '{}', ?)"
+      )
+      .run(now, now);
+    store.close();
+
+    const res = await fetch(`http://127.0.0.1:${srv.port}/stats`, {
+      headers: { Authorization: `Bearer ${TEST_BEARER_TOKEN}` },
+    });
+    const body = await res.json();
+    assert.equal(body.rows, 1);
+    assert.equal(body.memory.done, 0);
+    assert.equal(body.memory.pending, 1, 'a row nobody has read yet is pending');
+    assert.equal(body.memory.total, 1);
+    assert.equal(body.memory.state, 'reading', 'pending work is "reading", never "idle"');
+    assert.equal(body.memory.review, 0, 'nothing distilled yet, so nothing to review');
+  } finally {
+    await srv.close();
+  }
 });
 
 // --- the new authorization rule -------------------------------------------
@@ -221,7 +286,7 @@ test('storage is hardened so deleted text does not survive in the free list', ()
       String(db.prepare('PRAGMA journal_mode').get().journal_mode).toLowerCase(),
       'delete'
     );
-    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 5);
+    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 6);
   } finally {
     db.close();
     rmSync(sandbox, { recursive: true, force: true });
@@ -235,7 +300,7 @@ test('in-memory databases are hardened too, minus what SQLite will not allow', (
   const db = openDb(':memory:');
   try {
     assert.equal(Number(db.prepare('PRAGMA secure_delete').get().secure_delete), 1);
-    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 5);
+    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 6);
   } finally {
     db.close();
   }
@@ -299,8 +364,9 @@ test('secret loader rejects a symlink, a bad shape, and a missing file', {
   }
 });
 
-test('CORS allowlist defaults to exact Expo origins and accepts configuration', () => {
-  assert.deepEqual([...parseAllowedOrigins()], [...DEFAULT_ALLOWED_ORIGINS]);
+test('CORS allowlist defaults to EMPTY and accepts configuration', () => {
+  assert.deepEqual([...parseAllowedOrigins()], []);
+  assert.deepEqual([...DEFAULT_ALLOWED_ORIGINS], []);
   assert.deepEqual(
     [...parseAllowedOrigins('http://localhost:9090, https://console.example')],
     ['http://localhost:9090', 'https://console.example']
@@ -309,6 +375,48 @@ test('CORS allowlist defaults to exact Expo origins and accepts configuration', 
     () => parseAllowedOrigins('http://localhost:8081/not-an-origin'),
     /must be HTTP\(S\) origins/
   );
+});
+
+// The guard that has to FIRE, not merely pass on a tree that is already correct.
+// Before 2026-08-23 a default install trusted http://localhost:8081 with no token,
+// because the Expo dev app needed it -- and that app was deleted without the
+// exemption being withdrawn. This test is what makes putting it back a red suite:
+// a server configured with nothing must refuse the exact Origin that used to be
+// a free pass, while the bearer channel keeps working through the same server.
+test('a default server trusts NO browser origin, and still serves the bearer channel', async () => {
+  const bare = await start({
+    port: 0,
+    dbPath: ':memory:',
+    llamaApiKey: TEST_LLAMA_KEY,
+    bearerToken: TEST_BEARER_TOKEN,
+  });
+  try {
+    const bareBase = `http://127.0.0.1:${bare.port}`;
+
+    // The retired Expo origin: no longer a caller, no longer trusted.
+    for (const origin of ['http://localhost:8081', 'http://127.0.0.1:8081']) {
+      const res = await fetch(`${bareBase}/stats`, { headers: { Origin: origin } });
+      assert.equal(res.status, 401, `${origin} must not authorize by Origin alone`);
+      const cors = await fetch(`${bareBase}/stats`, { headers: { Origin: origin } });
+      assert.equal(
+        cors.headers.get('access-control-allow-origin'),
+        null,
+        `${origin} must not be reflected`
+      );
+    }
+
+    // An Origin-less bearer caller is unaffected -- this is how the widget,
+    // connect, the connectors daemon and the CLIs all arrive.
+    const ok = await fetch(`${bareBase}/stats`, {
+      headers: { Authorization: `Bearer ${TEST_BEARER_TOKEN}` },
+    });
+    assert.equal(ok.status, 200, 'the bearer channel must survive an empty allowlist');
+
+    // And /health stays the one unauthenticated route.
+    assert.equal((await fetch(`${bareBase}/health`)).status, 200);
+  } finally {
+    await bare.close();
+  }
 });
 
 test('a configured CORS origin replaces rather than widens the defaults', async () => {
@@ -840,7 +948,7 @@ CREATE TRIGGER IF NOT EXISTS context_au AFTER UPDATE ON context BEGIN
 END;
 `;
 
-test('a v1 database migrates in place to v5 with its rows preserved', () => {
+test('a v1 database migrates in place to v6 with its rows preserved', () => {
   const sandbox = mkdtempSync(join(tmpdir(), 'hermes-migrate-test-'));
   const dbPath = join(sandbox, 'context.db');
   try {
@@ -854,7 +962,7 @@ test('a v1 database migrates in place to v5 with its rows preserved', () => {
 
     const db = openDb(dbPath);
     try {
-      assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 5);
+      assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 6);
       const columns = db
         .prepare("SELECT name FROM pragma_table_info('context')")
         .all()
@@ -891,6 +999,11 @@ test('a v1 database migrates in place to v5 with its rows preserved', () => {
         .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'context_changed'")
         .get();
       assert.ok(cursorIndex, 'the cursor index exists on the migrated file');
+      const sourceTsIndex = db
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'context_source_ts'")
+        .get();
+      assert.ok(sourceTsIndex, 'the per-source time index exists on the migrated file');
+      assert.match(sourceTsIndex.sql, /\(source, ts, entity_id\)/);
       // ...and the upsert machinery works on the migrated file.
       const entityRow = {
         ts: 1700000001000,
@@ -948,6 +1061,83 @@ test('every admin route refuses the browser channel with a 403', async () => {
     assert.equal(res.status, 403, path);
     assert.match((await res.json()).error, /bearer-only/);
   }
+});
+
+// --- people routes ---------------------------------------------------------
+// Phase 1's /people/* handlers read the whole corpus into a people map and
+// WRITE the owner's merge decisions — bearer-only, exactly like /admin. The
+// admin gate above has a test whose only job is to prove the 403 fires; the
+// people gate gets the same, so a dispatch reorder or a loosened check cannot
+// silently hand these routes to the browser channel.
+
+test('every people route refuses the browser channel with a 403', async () => {
+  const attempts = [
+    ['POST', '/people/init', { days: 0 }],
+    ['GET', '/people/review?days=0', undefined],
+    ['GET', '/people/map', undefined],
+    ['POST', '/people/decide', { verdict: 'skip', a: 'x', b: 'y' }],
+  ];
+  for (const [method, path, body] of attempts) {
+    // An allowlisted Origin — a caller authorize() ACCEPTS as the browser
+    // channel. The refusal under test is capability, not authentication.
+    const res = await fetch(base + path, {
+      method,
+      headers: {
+        Origin: ALLOWED_ORIGIN,
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    assert.equal(res.status, 403, path);
+    assert.match((await res.json()).error, /bearer-only/);
+    // A bearer token does not rescue the request: an Origin header makes it
+    // the browser channel (authorize() reads Origin first), and the browser
+    // channel is not entitled here no matter what else it carries.
+    const both = await fetch(base + path, {
+      method,
+      headers: {
+        Origin: ALLOWED_ORIGIN,
+        Authorization: `Bearer ${TEST_BEARER_TOKEN}`,
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    assert.equal(both.status, 403, `${path} with bearer+Origin`);
+  }
+});
+
+test('people routes reject unknown fields, and the bearer channel answers', async (t) => {
+  // Point HOME at a sandbox for the duration: the people handlers read
+  // ~/.hazlie per request (owner config, connectors state, resolutions
+  // store), and a test must not read or create anything under the real one.
+  const home = mkdtempSync(join(tmpdir(), 'hermes-people-home-'));
+  const prevHome = process.env.HOME;
+  t.after(() => {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+  process.env.HOME = home;
+
+  // {day: 30} (a typo for days) must 400, not silently build the all-time
+  // map — the same closed-field discipline as every other write route.
+  const typo = await post('/people/init', { day: 30 });
+  assert.equal(typo.status, 400);
+  assert.match((await typo.json()).error, /unknown field "day"/);
+
+  const decideTypo = await post('/people/decide', { verdict: 'skip', a: 'x', b: 'y', note: 'hm' });
+  assert.equal(decideTypo.status, 400);
+  assert.match((await decideTypo.json()).error, /unknown field "note"/);
+
+  // And the gate guards capability, not the feature: the bearer channel gets
+  // a real review answer.
+  const res = await fetch(base + '/people/review?days=0', {
+    headers: { Authorization: `Bearer ${TEST_BEARER_TOKEN}` },
+  });
+  assert.equal(res.status, 200);
+  const out = await res.json();
+  assert.equal(typeof out.people, 'number');
+  assert.ok(Array.isArray(out.pairs));
 });
 
 test('admin operations validate source against the closed allowlist', async () => {

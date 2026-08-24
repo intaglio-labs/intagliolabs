@@ -18,8 +18,11 @@
 // it happens to be installed and nothing is fetched when it is not.
 
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-// Applied to every interpolation without exception. None of today's values are
-// attacker-controlled, but "none of them are, today" is how injection arrives.
+// Applied to every interpolation, with ONE exception: HELP `body` paragraphs
+// in renderHelpPage are trusted static HTML authored in this file and are
+// interpolated raw (see the note on HELP). None of today's values are
+// attacker-controlled, but "none of them are, today" is how injection arrives
+// — so nothing dynamic may ever join that exception.
 export function escapeHtml(value) {
   return String(value).replace(/[&<>"']/gu, (c) => ESCAPES[c]);
 }
@@ -227,12 +230,12 @@ export function renderConnectPage(items, { banner = null, token = null } = {}) {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Connect · Hazlie</title>
+<title>Connect · intaglio labs</title>
 <meta name="robots" content="noindex">
 <meta name="theme-color" content="${C.bg}">
 <style>${STYLE}</style></head>
 <body><div class="wrap"><div class="glow"></div><div class="inner">
-  <p class="brand">HAZLIE / CONNECT</p>
+  <p class="brand">INTAGLIO LABS / CONNECT</p>
   ${banner ? `<div class="banner">${escapeHtml(banner)}</div>` : ''}
   <div class="head">
     <h1>Connect your accounts</h1>
@@ -244,6 +247,11 @@ export function renderConnectPage(items, { banner = null, token = null } = {}) {
       ? '&rsaquo; all set — progress lands back in your texts'
       : `&rsaquo; ${remaining} left · progress lands back in your texts`
   }</p>
+      <!-- The review queue. It has always been served at /c/&lt;token&gt;/memory and
+           nothing has ever linked to it, so distilled claims piled up in a page
+           nobody could find — and every question kept answering "nothing in what
+           i've got covers that " while they sat there. -->
+      ${token === null ? '' : `<p class="foot"><a href="${escapeHtml(formBase)}/memory">&rsaquo; review what i have learned</a></p>`}
 </div></div></body></html>`;
 }
 
@@ -256,14 +264,22 @@ export function renderConnectPage(items, { banner = null, token = null } = {}) {
 //
 // Every step here is the runbook in ops/CONNECTORS.md, not a paraphrase — if
 // the two drift, the runbook is right and this is the bug.
+//
+// `body` and `after` paragraphs are interpolated as RAW HTML — help prose
+// deliberately carries inline markup like <em> and pre-encoded entities —
+// while `code` goes through escapeHtml, because shell text is full of `>` and
+// `&&` that HTML would swallow. The rule is about provenance, not the field:
+// every string here must stay static text authored in this file, and a
+// runtime value (an account name, a path from config) must never be spliced
+// into one.
 const HELP = {
   fda: {
-    title: 'Give Hazlie permission to read',
+    title: 'Give intaglio labs permission to read',
     body: [
-      'macOS keeps Messages, Photos and Notes behind Full Disk Access. The grant goes to one specific file, and Hazlie keeps its own copy of it so a Homebrew upgrade cannot quietly invalidate it.',
+      'macOS keeps Messages, Photos and Notes behind Full Disk Access. Switch on intaglio labs and everything it reads on this Mac is covered by that one grant.',
       'Open System Settings → Privacy &amp; Security → Full Disk Access. Press +, then ⌘⇧G, and paste this path:',
     ],
-    code: '~/.hazlie/bin/node',
+    code: 'intaglio labs',
     after: [
       'Toggle it on. That is the whole grant — one file, once.',
       'If this page still shows a cross afterwards, that is expected and not a failure: macOS ties the permission to whatever started the program, so a page you launched from a terminal will be refused even when the grant is real. The background service that does the actual reading has it.',
@@ -284,7 +300,7 @@ const HELP = {
   notion: {
     title: 'Connect Notion',
     body: [
-      'Notion integrations start with access to <em>nothing</em>. You create one, then share individual pages or databases with it — so Hazlie sees exactly what you hand it and not a page more.',
+      'Notion integrations start with access to <em>nothing</em>. You create one, then share individual pages or databases with it — so intaglio labs sees exactly what you hand it and not a page more.',
       'Create an internal integration at notion.so/my-integrations, copy its token, then save it to this Mac:',
     ],
     code: '(umask 077; pbpaste > ~/.hazlie/secrets/notion-api-key.txt)',
@@ -296,7 +312,7 @@ const HELP = {
     title: 'Connect WhatsApp',
     body: [
       'No bridge and no login here — WhatsApp Desktop already keeps your history on this Mac. Install WhatsApp from the Mac App Store, open it, and link it to your phone (WhatsApp on your phone → Settings → Linked Devices → Link a Device, then scan the code).',
-      'That is all. Hazlie reads the local store the app keeps; nothing new leaves this machine.',
+      'That is all. intaglio labs reads the local store the app keeps; nothing new leaves this machine.',
     ],
     code: null,
     after: [
@@ -307,7 +323,7 @@ const HELP = {
     title: 'Import your LinkedIn connections',
     body: [
       'No login and no API — LinkedIn hands you the file. Go to linkedin.com → Settings → Data privacy → <em>Get a copy of your data</em>, pick Connections (and Messages if you want DM history), and download the archive when it arrives.',
-      'Then put the CSVs where Hazlie looks:',
+      'Then put the CSVs where intaglio labs looks:',
     ],
     code: 'mkdir -p ~/.hazlie/imports/linkedin && cp ~/Downloads/Connections.csv ~/Downloads/messages.csv ~/.hazlie/imports/linkedin/ 2>/dev/null; true',
     after: [
@@ -317,7 +333,7 @@ const HELP = {
   files: {
     title: 'Your cloud folders',
     body: [
-      'Hazlie reads the iCloud Drive, Box and Dropbox folders this Mac already syncs. There is no account to connect and nothing leaves the machine — if the folders are there, it can read them.',
+      'intaglio labs reads the iCloud Drive, Box and Dropbox folders this Mac already syncs. There is no account to connect and nothing leaves the machine — if the folders are there, it can read them.',
       'It records what your files are called and where they live. It does <em>not</em> download files that are stored online-only: on this Mac that would pull tens of gigabytes through your iCloud account, so it never opens them.',
     ],
     code: null,
@@ -361,18 +377,18 @@ export function renderHelpPage(id, { token = null } = {}) {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>${escapeHtml(topic.title)} · Hazlie</title>
+<title>${escapeHtml(topic.title)} · intaglio labs</title>
 <meta name="robots" content="noindex">
 <meta name="theme-color" content="${C.bg}">
 <style>${STYLE}</style></head>
 <body><div class="wrap"><div class="glow"></div><div class="inner">
-  <p class="brand">HAZLIE / CONNECT</p>
+  <p class="brand">INTAGLIO LABS / CONNECT</p>
   <div class="head">
     <h1>${escapeHtml(topic.title)}</h1>
   </div>
   ${topic.body.map((p) => `<p class="sub">${p}</p>`).join('')}
   ${topic.code ? `<pre class="code">${escapeHtml(topic.code)}</pre>` : ''}
-  ${(topic.after ?? []).map((p) => `<p class="sub">${escapeHtml(p)}</p>`).join('')}
+  ${(topic.after ?? []).map((p) => `<p class="sub">${p}</p>`).join('')}
   <p class="foot"><a class="cta secondary" href="${escapeHtml(back)}">Back</a></p>
 </div></div></body></html>`;
 }

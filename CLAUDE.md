@@ -81,10 +81,18 @@ Some strings are load-bearing across a process boundary and cannot be
 - **`GET /health` returns exactly `{"ok":true}`.** The shipped, notarized app
   string-compares this body. Adding a field breaks installed copies. There is a
   comment saying so at the handler; believe it.
-- **The canonical hermes port is `8789`,** not 8787 — an unrelated dev server
-  commonly answers 200 on 8787, which once caused a row to be POSTed at a
-  stranger. Liveness is not identity: `verifyHermesIdentity` checks the exact
-  body before any row is sent.
+- **The canonical hermes port is `51789`** (connect `51788`, llama `51780`).
+  It was 8789, moved 2026-08-23, and the reasoning is the same one that moved it
+  off 8787 taken one step further: 8787 was chosen against, because an unrelated
+  dev server commonly answers 200 there and once caused a row to be POSTed at a
+  stranger — but 8788/8789 sit in the same neighbourhood, and llama was on
+  **8080**, which is the single most squatted port on a developer's machine.
+  The three now sit in the IANA dynamic range (49152–65535) where nothing is
+  registered, keeping their last two digits so a log line still reads as the
+  service you expect. Liveness is still not identity: `verifyHermesIdentity`
+  checks the exact `/health` body before any row is sent, and that is what
+  actually protects against a stranger — the port choice only makes the
+  collision rare instead of likely.
 
 ## Consent, stated precisely
 
@@ -107,9 +115,17 @@ of what gets recorded, not permission to read it.
 
 ## Running things
 
-    node --test "connectors/test/*.test.mjs" "ui/test/*.test.mjs" "connect/test/*.test.mjs"
+    node --test "connectors/test/*.test.mjs" "ui/test/*.test.mjs" \
+                "connect/test/*.test.mjs" "widget/test/*.test.mjs"
     node connectors/doctor.mjs          # preflight; --json for machine output
     npm install                          # in connectors/ — imapflow et al.
+
+`widget/test/` was missing from that line until 2026-08-23, and README.md had it
+all along — so the suite that checks the app's contract with hermes, and the two
+that check its bridge compartments and its CSP, ran only for whoever read the
+other file. A test nobody runs is a test that does not exist. It is hermetic and
+needs no Swift toolchain: every file there is a source scan or starts its own
+hermes on port 0.
 
 Two things that will waste your time otherwise:
 

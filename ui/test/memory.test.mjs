@@ -22,6 +22,7 @@ import {
   insertRows,
   applyMemoryBatch,
   orphanClaimCount,
+  pendingClaims,
   start,
 } from '../server/hermes.mjs';
 
@@ -483,6 +484,158 @@ test('the compose path sends a REAL bearer key to llama, not the getter', async 
   }
 });
 
+// Seed one accepted claim into a fresh file-backed db so /vault/ask must
+// compose — an empty corpus abstains before ever reaching llama. Used by the
+// upstream-failure tests below; the compose test above seeds inline because
+// it also asserts on the claim it builds.
+function seedAcceptedClaim(dbPath) {
+  const db = openDb(dbPath);
+  insertRows(db, {
+    ts: 1_700_000_000_000,
+    source: 'imessage',
+    entity_id: 'imessage:train',
+    text: 'i always take the 7am train on weekdays',
+  });
+  const row = db.prepare("SELECT id FROM context WHERE entity_id = 'imessage:train'").get();
+  applyMemoryBatch(db, {
+    run: RUN,
+    claims: [
+      {
+        kind: 'fact',
+        text: 'Austin takes the 7am train on weekdays.',
+        source: { context_id: Number(row.id), quote: 'take the 7am train' },
+      },
+    ],
+  });
+  const claimId = Number(db.prepare('SELECT max(id) AS id FROM claim').get().id);
+  db.prepare("INSERT INTO claim_decision(claim_id, action, actor, created_at) VALUES (?, 'accept', 'owner', ?)")
+    .run(claimId, 1_700_000_000_000);
+  db.close();
+}
+
+test('a client cancel aborts the in-flight llama call, not just the reply', async () => {
+  // The widget's Cancel is a socket teardown, and the route must turn it into
+  // an abort on the llama call. The regression this pins: the abort listener
+  // was once attached to req 'close' — which has ALREADY fired by the time
+  // readJson() has consumed the body — so the abort never ran and the
+  // single-slot llama-server kept generating into a socket nobody read, with
+  // the next question queued behind it.
+  let sawAsk;
+  const asked = new Promise((r) => { sawAsk = r; });
+  let sawTeardown;
+  const upstreamTornDown = new Promise((r) => { sawTeardown = r; });
+  const llama = createServer((req, res) => {
+    req.resume();
+    sawAsk();
+    // Never answer. If hermes aborts the call, this connection is destroyed
+    // and 'close' fires; if it does not, the race below times out.
+    res.on('close', () => sawTeardown());
+  });
+  await new Promise((r) => llama.listen(0, '127.0.0.1', r));
+
+  const dir = mkdtempSync(join(tmpdir(), 'hermes-cancel-test-'));
+  const dbPath = join(dir, 'context.db');
+  seedAcceptedClaim(dbPath);
+  const server = await start({
+    port: 0,
+    dbPath,
+    llamaApiKey: 'd'.repeat(64),
+    llamaBaseUrl: `http://127.0.0.1:${llama.address().port}`,
+    bearerToken: TOKEN,
+  });
+  try {
+    const cancel = new AbortController();
+    const asking = fetch(`http://127.0.0.1:${server.port}/vault/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ utterance: 'how do you get to work?' }),
+      signal: cancel.signal,
+    }).catch(() => null);
+    await asked;
+    cancel.abort();
+    await asking;
+    const outcome = await Promise.race([
+      upstreamTornDown.then(() => 'aborted'),
+      new Promise((r) => setTimeout(r, 3000, 'still generating')),
+    ]);
+    assert.equal(outcome, 'aborted', 'client teardown must abort the upstream llama call');
+  } finally {
+    llama.closeAllConnections?.();
+    await new Promise((r) => llama.close(r));
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an upstream llama error answers 502 and releases the pinned connection', async () => {
+  // Two properties, and the second is the one that could regress silently:
+  // the !ok branch must cancel the unread error body BEFORE answering (same
+  // reason as proxyLlama: undici cannot release a keep-alive connection to
+  // the single-slot llama-server while a body sits unconsumed). The error
+  // body here is padded past undici's buffering, because a body small enough
+  // to buffer whole is released even unread and would hide the regression.
+  // The wire contract is the 502 with the status named; the discriminator is
+  // the first upstream socket's fate — with the cancel it is freed (torn
+  // down, or drained and reused for the second ask); without it, it sits
+  // pinned to the unread body and neither happens.
+  let llamaConnections = 0;
+  let firstSocket = null;
+  let firstSocketRequests = 0;
+  let sawFreed;
+  const firstSocketFreed = new Promise((r) => { sawFreed = r; });
+  const llama = createServer((req, res) => {
+    if (req.socket === firstSocket) {
+      firstSocketRequests += 1;
+      if (firstSocketRequests === 2) sawFreed('reused');
+    }
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(`{"error":"loading model","padding":"${'x'.repeat(1 << 20)}"}`);
+    });
+  });
+  llama.on('connection', (socket) => {
+    llamaConnections += 1;
+    if (llamaConnections === 1) {
+      firstSocket = socket;
+      socket.on('close', () => sawFreed('closed'));
+    }
+  });
+  await new Promise((r) => llama.listen(0, '127.0.0.1', r));
+
+  const dir = mkdtempSync(join(tmpdir(), 'hermes-upstream-error-test-'));
+  const dbPath = join(dir, 'context.db');
+  seedAcceptedClaim(dbPath);
+  const server = await start({
+    port: 0,
+    dbPath,
+    llamaApiKey: 'd'.repeat(64),
+    llamaBaseUrl: `http://127.0.0.1:${llama.address().port}`,
+    bearerToken: TOKEN,
+  });
+  try {
+    for (const attempt of [1, 2]) {
+      const res = await fetch(`http://127.0.0.1:${server.port}/vault/ask`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ utterance: 'how do you get to work?' }),
+      });
+      assert.equal(res.status, 502, `ask ${attempt}`);
+      assert.match((await res.json()).error, /llama-server returned 503/u, `ask ${attempt}`);
+    }
+    const outcome = await Promise.race([
+      firstSocketFreed,
+      new Promise((r) => setTimeout(r, 3000, 'pinned')),
+    ]);
+    assert.notEqual(outcome, 'pinned', 'the unread error body must not pin the keep-alive socket');
+  } finally {
+    llama.closeAllConnections?.();
+    await server.close();
+    await new Promise((r) => llama.close(r));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the abstain path never reaches llama, pinned by pointing it at a dead port', async () => {
   // The spend-nothing property, pinned against regression rather than trusted
   // to stay true. llama is aimed at a closed port: if the route called it at
@@ -552,4 +705,49 @@ test('files and notion are admissible sources, as their corpus rows always impli
     await server.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+// THE REVIEW QUEUE'S ORDER, which is the entire reason prompt v2 asks the model
+// for a confidence. It used to be arrival order (c.id DESC) -- fine at a hundred
+// claims and useless against a corpus this size, where the reader's attention
+// runs out long before the queue does.
+test('the pending queue is ordered by confidence, then newest', () => {
+  const db = openDb(':memory:');
+  const rows = insertRows(db, Array.from({ length: 5 }, (_, i) => ({
+    ts: 1_700_000_000_000 + i * 1000,
+    source: 'notes',
+    entity_id: `n:${i}`,
+    text: `row ${i} says i am allergic to penicillin`,
+  }))) && db.prepare('SELECT id, content_hash FROM context ORDER BY id').all();
+
+  // Inserted in an order that is neither the id order nor the p order, so a
+  // passing test cannot be an accident of insertion sequence.
+  const ps = [0.55, null, 0.95, 0.7, null];
+  applyMemoryBatch(db, {
+    run: { ...RUN, rows_in: rows.length },
+    claims: rows.map((row, i) => ({
+      kind: 'fact',
+      text: `claim ${i}`,
+      p_claim: ps[i],
+      source: { context_id: Number(row.id), quote: 'allergic to penicillin', content_hash: row.content_hash },
+    })),
+  });
+
+  const { claims } = pendingClaims(db, { limit: 10 });
+  assert.deepEqual(
+    claims.map((c) => c.text),
+    ['claim 2', 'claim 3', 'claim 0', 'claim 4', 'claim 1'],
+    'confidence descending, then newest-first among the unranked'
+  );
+
+  // The unranked rows sort last but are NOT lost -- they are UNKNOWN, not low.
+  // Pre-v2 claims carry NULL and must still be reviewable.
+  assert.deepEqual(
+    claims.filter((c) => c.p_claim === null).map((c) => c.text),
+    ['claim 4', 'claim 1'],
+    'NULLs sink below every ranked claim, in newest-first order'
+  );
+  assert.equal(claims.length, 5, 'nothing is dropped for lacking a confidence');
+  db.close();
 });

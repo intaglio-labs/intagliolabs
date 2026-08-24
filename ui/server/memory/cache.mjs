@@ -70,35 +70,101 @@ export function putCached(key, value, root = cacheRoot()) {
   writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
 }
 
+// One line per process, not per batch: a damaged directory would otherwise
+// log on every ingest batch until repaired. No hashes and no row content in
+// the message — the root path and errno are enough to repair from.
+let residueLogged = false;
+function noteResidue(root, error) {
+  if (residueLogged) return;
+  residueLogged = true;
+  console.error(
+    `distill cache: best-effort drop left residue under ${root} (${error?.code ?? error}); ` +
+      'repair the directory — a strict deletion route will surface what remains'
+  );
+}
+
 // Unlink every cached answer derived from these content hashes, across every
 // prompt and model directory — an old prompt's answer about a deleted row is
 // exactly as much residue as the current prompt's.
+//
+// Two callers, two failure contracts, split by `strict`:
+//   * strict (the default) — the admin deletion routes. A failure that is not
+//     "already gone" means a quote-bearing file survived a delete that was
+//     about to report success; throw, so the route's transaction rolls back
+//     instead of lying.
+//   * strict: false — insertRows' upsert on the /ingest hot path, where the
+//     rollback rationale inverts: refusing NEW rows because an OLD row's
+//     residue could not be unlinked turns one damaged cache directory into a
+//     500 on every batch carrying a content-changed redelivery, retried by
+//     the connector forever. Best effort: drop what is droppable, log the
+//     residue once per process, let the batch commit. The residue is not
+//     forgotten — the next strict deletion route over the same hash surfaces
+//     it.
 //
 // The hash filter is not fussiness: these values normally come straight from
 // hermes' own content_hash column, but a filename assembled from caller input
 // is a path-traversal primitive the moment that assumption slips. Hex-ish or
 // it does not become a path.
-export function dropCachedDistillates(contentHashes, root = cacheRoot()) {
-  const hashes = [...new Set(contentHashes)].filter(
-    (h) => typeof h === 'string' && /^[a-zA-Z0-9]{8,128}$/u.test(h)
+export function dropCachedDistillates(contentHashes, root = cacheRoot(), { strict = true } = {}) {
+  const hashes = new Set(
+    [...contentHashes].filter((h) => typeof h === 'string' && /^[a-zA-Z0-9]{8,128}$/u.test(h))
   );
-  if (hashes.length === 0 || !existsSync(root)) return 0;
+  if (hashes.size === 0 || !existsSync(root)) return 0;
+  // Intersect each directory LISTING with the hash set rather than probing
+  // every candidate hash against every prompt/model directory. A purge hands
+  // this function every deleted row's hash — hundreds of thousands on a big
+  // source — while the cache holds a few hundred files, so probing was
+  // O(hashes x dirs) sync unlinks of guaranteed misses inside the caller's
+  // open transaction.
   let dropped = 0;
-  for (const sha of readdirSync(root)) {
+  let shas;
+  try {
+    shas = readdirSync(root);
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return 0;
+    if (strict) throw error;
+    noteResidue(root, error);
+    return 0;
+  }
+  for (const sha of shas) {
     const shaDir = join(root, sha);
     let models;
     try {
       models = readdirSync(shaDir);
-    } catch {
+    } catch (error) {
+      // A stray non-directory at this level, or a concurrent removal, is
+      // skippable. An unreadable DIRECTORY is not — its files may be
+      // quote-bearing derivatives — so strict callers throw, and the ingest
+      // path records the residue and moves on.
+      if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') continue;
+      if (strict) throw error;
+      noteResidue(root, error);
       continue;
     }
     for (const model of models) {
-      for (const hash of hashes) {
+      const modelDir = join(shaDir, model);
+      let files;
+      try {
+        files = readdirSync(modelDir);
+      } catch (error) {
+        if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') continue;
+        if (strict) throw error;
+        noteResidue(root, error);
+        continue;
+      }
+      for (const file of files) {
+        if (!file.endsWith('.json') || !hashes.has(file.slice(0, -'.json'.length))) continue;
         try {
-          unlinkSync(join(shaDir, model, `${hash}.json`));
+          unlinkSync(join(modelDir, file));
           dropped += 1;
-        } catch {
-          // ENOENT: this row was never distilled under this prompt/model.
+        } catch (error) {
+          // Only "already gone" is success. Anything else (EACCES, EPERM, …)
+          // means a quote-bearing file survived — strict callers throw so
+          // their transaction rolls back instead of lying; the ingest path
+          // records the residue and keeps the batch.
+          if (error?.code === 'ENOENT') continue;
+          if (strict) throw error;
+          noteResidue(root, error);
         }
       }
     }

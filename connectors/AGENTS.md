@@ -10,7 +10,7 @@ to reconstruct it before "simplifying" it away.
 **This daemon opens NO listener of any kind.** Its sockets are outbound only:
 
 - loopback HTTP to hermes — the only place corpus rows go. The address is
-  `HAZLIE_HERMES_URL`, then config `hermesUrl`, then `127.0.0.1:8789` — the
+  `HAZLIE_HERMES_URL`, then config `hermesUrl`, then `127.0.0.1:51789` — the
   canonical port since 2026-08-20, chosen because an unrelated dev server
   holds 8787 on the owner's Mac and answers 200 there
   (an unrelated dev server commonly holds 8787 and answers 200 there).
