@@ -37,9 +37,12 @@ Do not re-add these; their absence is a decision, not an oversight.
   the exclusion is withdrawn. The marketing site is `site/` — four
   hand-written pages, one vendored font subset, no build step — and the hosts
   it reaches are declared in `ops/EGRESS.json` under kind `website`, scanned
-  like any other root. Its deploy config is `firebase.json` and `.firebaserc`
-  at the repo root, with the runbook in `site/DEPLOY.md`. What is still NOT
-  here: the credentials to deploy with, and the domain's owning account.
+  like any other root. It deploys on push to `main` via
+  `.github/workflows/site.yml` (GitHub Pages), with the runbook in
+  `site/DEPLOY.md`. There are no deploy credentials to keep out any more — the
+  job authenticates with the repository's own OIDC token, so the exclusion that
+  used to cover them has nothing left to cover. What is still NOT here: the
+  domain's owning account.
 - **Experiment code, results, and planning docs.**
 
 ## Rules that bind everything

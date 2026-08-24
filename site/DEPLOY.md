@@ -1,73 +1,100 @@
 # Landing page — deploy
 
-How `site/` reaches intaglio.io, and what is still unsettled. Written
-2026-08-21, moved into this repository with the site on 2026-08-24.
+How `site/` reaches the web. Written 2026-08-21 for Firebase Hosting, moved into
+this repository with the site on 2026-08-24, rewritten the same day when the
+hosting changed.
 
 ## How it deploys
 
-`firebase.json` and `.firebaserc` at the repo root are the whole config.
-Hosting serves the `site/` directory as-is: `cleanUrls` on, so
-`/privacy` resolves to `site/privacy/index.html`, and `DEPLOY.md` is in
-the ignore list so this file is never published alongside the pages it
-describes.
+Push to `main`. That is the whole of it.
 
-    firebase deploy --only hosting:intaglio
+`.github/workflows/site.yml` publishes `site/` to GitHub Pages on any push that
+touches the site or the workflow, and nowhere else — the app and the backend
+share this repository and change constantly, and redeploying identical HTML on
+every one of those commits only makes the deployment history harder to read. The
+workflow can also be run by hand from the Actions tab, which is what to do after
+a DNS change rather than pushing an empty commit.
 
-## Trina — settled 2026-08-21
+There is no build step and the workflow deliberately does not invent one: it
+uploads the directory as it stands, so what is reviewed in a diff is exactly what
+is served.
 
-The sleeping orb's z's are set in **Trina**. The licence was confirmed by
-the owner, and the font is now vendored: subset to the single glyph the
-page uses (lowercase `z`, which in Trina draws the display capital),
-converted to woff2, and served from the site's own origin at
-`site/fonts/trina-z.woff2` — 576 bytes, with an `@font-face` block in
-`index.html`.
+**There is no secret to hold.** `deploy-pages` authenticates with the
+repository's own OIDC token. Nothing has to be stored, rotated, or kept out of
+the diff.
 
-The mono fallback is kept in the stack on purpose, so a visitor who
-blocks the font still gets readable z's rather than tofu.
+### What it refuses to publish
 
-~~Trina is a user-installed font on the owner's Mac and is not vendored;
-the licence is unknown, so deployed as-is every visitor gets mono z's.~~
-Struck rather than deleted because this file asserted it for three days
-after `index.html` recorded the opposite, and the next reader deserves to
-see which way it was resolved.
+Two checks run before anything is uploaded, and either one fails the deploy:
+
+1. **Internal links.** Every reference in the site is relative, which is what
+   lets the pages work under a project-Pages path today and at an apex domain
+   later without an edit. A root-relative `href` reintroduced by hand would 404
+   under the path prefix — in production, silently. The check rejects it here.
+2. **The download link.** It is an external permalink to the newest release; if
+   it stops resolving, every visitor's download is broken and nothing on the page
+   would show it.
+
+~~`firebase.json` and `.firebaserc` at the repo root are the whole config.~~
+Struck rather than deleted: Firebase Hosting needed a service-account secret, a
+second console, and a `firebase deploy` somebody had to remember to run. The site
+went stale whenever that last step was skipped, which is the failure a deploy
+pipeline exists to remove. Both files are gone.
 
 ## The download button
 
-`site/index.html` links `/intagliolabs.dmg` directly, and `firebase.json`
-redirects `/Hazlie.dmg` to the same object with a 301, so an older link
-still lands.
+`site/index.html` links to:
 
-**Confirm this before the next release.** On 2026-08-23 a separate
-session rebuilt the DMG from public `main` and reported serving it from
-Cloud Storage behind a redirect, at a size (~5.4 GB) that Firebase
-Hosting will not serve. If that is the live path, then the direct link in
-`index.html` and the redirect in `firebase.json` are both describing the
-older arrangement and need updating together. Not corrected here, because
-the arrangement cannot be verified from inside this repository and
-guessing at it would put a third wrong answer in a third file.
+    https://github.com/intaglio-labs/privateAndPersonalizedOS/releases/latest/download/IntaglioLabs.dmg
 
-New releases: `widget/release.sh`, then publish the DMG wherever the
-answer above turns out to be, and redeploy.
+GitHub resolves `latest` at request time, so **publishing a release is publishing
+the download** — the site does not change and nobody has to remember to update a
+link. The asset name is deliberately unversioned so that permalink keeps working;
+the version lives in the release tag, the DMG's volume name and the app's
+Info.plist.
 
-## Domain — still pending
+`widget/release.sh` builds, signs, notarizes and staples. Attach the DMG to a
+GitHub release as `IntaglioLabs.dmg` and the site is current.
 
-intaglio.io's apex is currently host-routed by an external HTTPS load
-balancer living in a **separate GCP project that this project does not
-own**. Two consequences:
+~~`site/index.html` links `/intagliolabs.dmg` directly, and `firebase.json`
+redirects `/Hazlie.dmg` to the same object with a 301.~~ Both are gone with the
+hosting. The 301 is not reproduced: Pages serves static files and cannot rewrite,
+and it pointed at a self-hosted object that no longer exists anywhere, so
+preserving it would only turn a 404 into a redirect to a 404.
 
-1. The planned swap needs access granted from that account. It cannot be
-   done from the hosting project alone.
-2. That project also serves an unrelated product whose `in.` and `cdn.`
-   subdomains are frozen into third-party HTML. **Those must not move**,
-   whatever happens to the apex.
+The uncertainty this file recorded on 2026-08-23 — whether the DMG was really
+served from Cloud Storage behind a redirect, at a size Firebase Hosting would not
+serve — is **resolved by removal**. There is no self-hosted object and no size
+limit to argue with; the artifact lives on the release that produced it.
 
-A ready-to-deploy nginx bundle (Dockerfile, an 8080 conf, index.html) was
-staged for Cloud Run as an alternative. If it is used, note it was built
-before `privacy/`, `terms/` and `notices/` existed: the conf has to serve
-those directory pages too, so copy the whole `site/` tree, not just
-`index.html`.
+## Trina — settled 2026-08-21
 
-*(The owning account and project name are deliberately not written here.
-This repository is public, and they are a third party's infrastructure
-rather than this project's — see rule 6 in `CLAUDE.md`. Whoever needs
-them has them.)*
+The sleeping orb's z's are set in **Trina**. The licence was confirmed by the
+owner, and the font is vendored: subset to the single glyph the page uses
+(lowercase `z`, which in Trina draws the display capital), converted to woff2,
+and served from the site's own origin at `site/fonts/trina-z.woff2` — 576 bytes,
+with an `@font-face` block in `index.html`.
+
+The mono fallback is kept in the stack on purpose, so a visitor who blocks the
+font still gets readable z's rather than tofu.
+
+## Domain — still pending, and no longer blocking
+
+The site is live at its GitHub Pages URL as soon as Pages is enabled for this
+repository (Settings → Pages → Source: GitHub Actions). Because every internal
+link is relative, it works there under a path prefix with no edit — which is the
+difference between "pending" and "blocked".
+
+intaglio.io's apex is host-routed by an external HTTPS load balancer in a
+**separate GCP project that this project does not own**, so pointing the apex
+here still needs access granted from that account. That project also serves an
+unrelated product whose `in.` and `cdn.` subdomains are frozen into third-party
+HTML; **those must not move**, whatever happens to the apex.
+
+When the apex is available: add a `CNAME` file containing the domain to `site/`,
+set it under Settings → Pages, and point DNS at GitHub. The relative links mean
+nothing inside the pages has to change.
+
+*(The owning account and project name are deliberately not written here. This
+repository is public, and they are a third party's infrastructure rather than
+this project's — see rule 6 in `CLAUDE.md`. Whoever needs them has them.)*
