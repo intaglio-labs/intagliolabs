@@ -185,6 +185,23 @@ export function validateRowClaims(row, claims) {
       dropped.push({ reason: 'quote is not an exact span of the row' });
       continue;
     }
+    // THE SUBJECT IS THE OWNER, AND IT IS CHECKED HERE RATHER THAN ASKED FOR.
+    //
+    // Every claim in this table is about the same person — `subject` is the
+    // literal string 'owner' on all of them — so the sentence has to say so too.
+    // It did not: the prompt's worked examples used a placeholder NAME, the model
+    // read that as the owner's name, and 75 of 119 claims on a real machine
+    // opened with it. The evidence underneath them was the owner's own first
+    // person, so nothing downstream could catch it: a perfectly grounded claim
+    // about the wrong human being.
+    //
+    // The prompt now says to write "the owner". This is the enforcement, because
+    // a rule that lives only in a prompt is a request. A claim that will not name
+    // its subject correctly is dropped, and the drop is counted.
+    if (!/\bowner\b/iu.test(claim.text)) {
+      dropped.push({ reason: 'claim text does not name the owner as its subject' });
+      continue;
+    }
     const key = `${claim.kind} ${claim.text.trim()}`;
     if (seen.has(key)) {
       dropped.push({ reason: 'duplicate of another claim from the same row' });
