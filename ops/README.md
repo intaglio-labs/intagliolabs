@@ -14,7 +14,14 @@ below keeps the browser surface loopback-only too.
 | 51789 (the canonical port since 2026-08-20 — an unrelated dev server commonly holds 8787 and answers 200 there, which made defaulted callers reach a stranger; per-machine override: `HAZLIE_HERMES_URL` or config `hermesUrl` for its callers. NOT `HERMES_PORT` in the plist — the plist carries no `EnvironmentVariables` block, and `install_agent` rewrites the file from the template on every run, so a hand-edit is reverted the next time setup runs) | `hermes.mjs` — local context DB plus the browser's authenticated streaming LLM proxy. Every route but `/health` requires an authorized caller | `launchd`, label `com.hazlie.hermes` (installed by `ops/setup-connectors.sh`; `npm run hermes` in `ui/` remains the pre-setup dev fallback — not both at once, the port is one) | Yes — `KeepAlive`, survives reboots |
 | — | connectors daemon — **loopback-only, no listener**: outbound pollers writing via `POST /ingest`, run under the FDA-granted stable binary `~/.hazlie/bin/node` | `launchd`, label `com.hazlie.connectors` (installed by `ops/setup-connectors.sh`) | Yes — `KeepAlive`, `ThrottleInterval` 60 |
 | 51788 | `connect/server.mjs` — the loopback onboarding page and the widget's `/api/*` read | `launchd`, label `com.hazlie.connect` (installed by `ops/setup-connectors.sh`) | Yes — `KeepAlive`, `ThrottleInterval` 60 |
-| — | `whatsapp-keepalive` — opens WhatsApp hidden (`open -gj`) every 4h so its local store syncs; the connector reads that store and has nothing fresh to read without it | `launchd`, label `com.hazlie.whatsapp-keepalive`. Installed by `ops/setup-connectors.sh` (gated on the connector) and by the app's `Provision.swift` (gated on WhatsApp being installed — an agent launching an app nobody has would fail every 4h forever) | `RunAtLoad` + `StartInterval` 14400 |
+| — | `whatsapp-keepalive` — **the app deliberately does not install this.** `ops/com.hazlie.whatsapp-keepalive.plist` opens WhatsApp hidden every 4h so its local store syncs, and `ops/setup-connectors.sh` installs it for a repo-based setup. It was wired into the app's provisioning on 2026-08-23 and removed the same day (Rishab, explicitly): an installed app launching a different app behind the owner's back, on a timer, is not a trade this makes for fresher rows. | not installed by the app | — |
+
+**Known consequence, accepted:** the WhatsApp connector reads the desktop app's local
+store, and that store only syncs while WhatsApp is running. Without the keepalive its
+rows go stale silently — the connector keeps succeeding and keeps reading the same old
+messages. Measured 2026-08-23 on the owner's Mac: newest iMessage row 3.4h old, newest
+WhatsApp row 1,805h old. If WhatsApp freshness matters, open WhatsApp; nothing here will
+open it for you.
 
 The connector contract (source/entity-id registry, cursor semantics, the Oura
 connector, FDA runbook, log/backup policy, security boundary) is in

@@ -143,8 +143,7 @@ fi
 # @REPO@ -> this backend dir, @HOME@ -> the user's home.
 mkdir -p "$BE/agents"
 cp ../ops/com.hazlie.connect.plist ../ops/com.hazlie.hermes.plist \
-   ../ops/com.hazlie.connectors.plist ../ops/com.hazlie.llama-server.plist \
-   ../ops/com.hazlie.whatsapp-keepalive.plist "$BE/agents/"
+   ../ops/com.hazlie.connectors.plist ../ops/com.hazlie.llama-server.plist "$BE/agents/"
 
 # SIGNING, AND WHY IT IS NOT AD-HOC ANY MORE.
 #
