@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#141412">
+<title>Intaglio Labs — private &amp; personalized AI</title>
+<meta name="description" content="Private &amp; personalized AI. Storage &amp; compute done locally so you, own you. From Intaglio Labs.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* Terminal Palette — implemented from the "Terminal-inspired brand palette"
+     design project, screens 10 (landing) and 11 (landing / mobile).
+     One background, one foreground, one accent. Dark only. */
+  :root {
+    --bg: #141412;        /* soft black (design default baseTone) */
+    --hairline: #1c1c1c;
+    --muted: #5c5c5c;
+    --secondary: #8a8a8a;
+    --fg: #eaeaea;
+    --accent: #33ff66;
+    --accent-glow: rgba(51, 255, 102, 0.10);
+    /* Time-of-day mood, bands and values verbatim from the widget
+       (widget/ui/palette.css + bridge.js). Power hour doubles as the
+       fallback before JS runs, same as the widget. */
+    --tod-grad: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 45%, var(--accent) 100%);
+    --tod-far: var(--accent);
+    --tod-glow: rgba(51, 255, 102, 0.10);
+    --tod-light: #f2e8d4;
+  }
+  body.tod-early {
+    --tod-grad: linear-gradient(160deg, #e8e2f0 0%, #cbb8d6 40%, #9a8fb8 100%);
+    --tod-far: #9a8fb8; --tod-glow: rgba(154, 143, 184, 0.18);
+  }
+  /* Four stops, purple held to 30% — purple becoming green, not a muddy
+     blend. Lilac catchlight: cream on the purple erased it. */
+  body.tod-late {
+    --tod-grad: linear-gradient(160deg, #b294c9 0%, #b294c9 30%, #a8bfa0 62%, #7fc46a 100%);
+    --tod-far: #7fc46a; --tod-glow: rgba(127, 196, 106, 0.22);
+    --tod-light: #efe7f6;
+  }
+  body.tod-happy {
+    --tod-grad: linear-gradient(160deg, #f5d9a8 0%, #e0a35c 45%, #c56d4a 100%);
+    --tod-far: #c56d4a; --tod-glow: rgba(224, 163, 92, 0.25);
+  }
+  body.tod-night {
+    --tod-grad: linear-gradient(160deg, #6e3a5c 0%, #48243e 45%, #1e0f1a 100%);
+    --tod-far: #6e3a5c; --tod-glow: rgba(110, 58, 92, 0.28);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { color: var(--fg); }
+  ::selection { background: var(--accent); color: #0a0a0a; }
+
+  header {
+    display: flex; align-items: center;
+    padding: 20px 32px;
+    border-bottom: 1px solid var(--hairline);
+    font-size: 13px; font-weight: 500;
+  }
+
+  footer {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 20px 32px;
+    border-top: 1px solid var(--hairline);
+    font-size: 12px; color: var(--muted);
+  }
+  footer nav { display: flex; gap: 18px; }
+  footer a { color: inherit; text-decoration: underline; }
+  footer a:hover { color: var(--fg); }
+
+  main {
+    flex: 1;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 44px;
+    padding: 60px 48px 130px;
+    text-align: center;
+  }
+
+  h1 {
+    font-size: 40px; font-weight: 600; letter-spacing: -0.01em;
+    text-align: center; text-wrap: balance;
+  }
+  h1 .cursor { color: var(--accent); }
+
+  .below { display: flex; flex-direction: column; align-items: center; gap: 14px; margin-top: -20px; }
+  .sub { font-size: 19px; color: var(--fg); }
+  .cta {
+    display: inline-block; text-align: center;
+    background: linear-gradient(180deg, #e5d6bb, #c5a56d);
+    color: #141412;
+    border: none; border-radius: 999px;
+    padding: 15px 42px;
+    font: inherit; font-size: 15px; font-weight: 600;
+    cursor: pointer;
+  }
+  .cta:hover { filter: brightness(1.06); color: #141412; }
+  .fine { font-size: 12px; color: var(--muted); }
+  .fine a { color: inherit; text-decoration: underline; }
+  .fine a:hover { color: var(--fg); }
+  .mission { font-size: 12px; color: var(--fg); }
+
+  /* ---- the orb ---- */
+  .orb {
+    position: relative;
+    width: 150px; height: 150px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+  }
+  .orb-body {
+    position: absolute; inset: 0;
+    overflow: hidden; border-radius: inherit;
+    background: var(--tod-grad);
+    box-shadow: 0 0 60px var(--tod-glow),
+      inset -12px -12px 28px rgba(0, 0, 0, 0.18),
+      inset 11px 11px 24px rgba(255, 255, 255, 0.30);
+    transition: background 2s linear, box-shadow 2s linear;
+  }
+  .swirl { position: absolute; inset: -30%; }
+  .swirl .blob { position: absolute; }
+  .swirl.sa .blob {
+    width: 75%; height: 75%; top: 0; left: 8%;
+    background: radial-gradient(circle, var(--tod-light) 0%, color-mix(in srgb, var(--tod-light) 40%, transparent) 40%, transparent 70%);
+    filter: blur(12px);
+  }
+  .swirl.sb .blob {
+    width: 80%; height: 80%; bottom: 0; right: 5%;
+    background: radial-gradient(circle, var(--tod-far) 0%, color-mix(in srgb, var(--tod-far) 10%, transparent) 45%, transparent 72%);
+    filter: blur(13px); mix-blend-mode: screen;
+  }
+  .orb-hl {
+    position: absolute; inset: 0;
+    background: radial-gradient(circle at 32% 26%, rgba(255, 255, 255, 0.5) 0%, rgba(255, 255, 255, 0.12) 30%, transparent 55%);
+  }
+  .blush { position: absolute; top: 58%; width: 24px; height: 12px; border-radius: 50%; background: rgba(197, 165, 109, 0.55); filter: blur(4px); }
+  .blush.l { left: 12%; }
+  .blush.r { right: 12%; }
+
+  /* One continuous pair of eyes that morphs between states, instead of
+     separate sleeping/waking faces crossfading over each other. The eye
+     wrapper carries the shape morph (a squashed lens for sleep stretching
+     open into a tilted ellipse), timed to the same windows as the gradient
+     dissolves; the iris carries the color, drifting to the pale night tone
+     while the eyes narrow shut. 0% matches 100% so the loop never jumps. */
+  .eyes { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 12px; }
+  /* Closed eyes exactly as the widget draws them (widget/ui/palette.css):
+     an arc made from a complete ellipse ring with a uniform border, clipped
+     to its top half by the eye box — never border-top, whose corner taper
+     draws horns past each eye. Widget's 13x4 eye with an 8px ring and 2.5px
+     stroke, scaled x3.57 to this orb. Stroke stays well under half the ring
+     height or the crescent closes into a lump. */
+  .eye {
+    position: relative;
+    width: 46px; height: 14px;
+    overflow: hidden;
+  }
+  .eye::before {
+    content: '';
+    position: absolute; left: 0; right: 0; top: 0;
+    height: 28px;
+    border: 9px solid rgba(20, 20, 18, 0.9);
+    border-radius: 50%;
+  }
+
+  /* The orb is permanently asleep (owner): closed eyes, soft breathing,
+     drifting z's — but it wears the time of day, like the widget. The z's
+     run even under Reduce Motion: the widget's palette.css learned the hard
+     way that gating a state's identity behind that setting deletes the
+     feature for the one machine that matters. */
+  .zz-layer { position: absolute; inset: 0; }
+  /* Trina, vendored (owner confirmed the licence, 2026-08-21): subset to
+     the one glyph the page uses — lowercase z, which in Trina IS the
+     display capital — and served from this origin, so every visitor gets
+     the real face. The mono stack stays as the fallback while the 576-byte
+     woff2 loads. Regular weight on purpose — Trina ships one, and a
+     synthesised bold goes muddy. The text-shadow ring keeps the glyph
+     legible over whatever the time-of-day gradient is doing behind it. */
+  @font-face {
+    font-family: 'Trina';
+    src: url('/fonts/trina-z.woff2') format('woff2');
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+  }
+  .zz {
+    position: absolute; opacity: 0;
+    font-family: 'Trina', 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+    font-weight: 400;
+    text-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.95),
+      0 0 3px rgba(0, 0, 0, 0.9),
+      0 0 10px rgba(0, 0, 0, 0.55);
+  }
+  .zz.z1 { top: -14px; right: 16px; font-size: 21px; color: #e5d6bb; animation: zz-float 2.6s ease-out infinite; }
+  .zz.z2 { top: -2px; right: 4px; font-size: 16px; color: #c5a56d; animation: zz-float 2.6s ease-out infinite 1.3s; }
+  @keyframes zz-float { 0% { opacity: 0; transform: translate(0, 4px) scale(0.7); } 30% { opacity: 1; } 100% { opacity: 0; transform: translate(8px, -14px) scale(1.1); } }
+  /* These keyframes sit outside the motion gate because the jackpot below
+     borrows them at full tilt regardless of the setting; their idle USE
+     stays gated. */
+  @keyframes orb-spin { to { transform: rotate(360deg); } }
+  @keyframes orb-spin-rev { to { transform: rotate(-360deg); } }
+  @keyframes orb-drift { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.45); } }
+  @media (prefers-reduced-motion: no-preference) {
+    @keyframes orb-breathe {
+      0%, 100% { transform: scale(1) translateY(0) rotate(0deg); }
+      33% { transform: scale(1.04) translateY(-3px) rotate(1.5deg); }
+      66% { transform: scale(0.985) translateY(2px) rotate(-1.5deg); }
+    }
+    @keyframes eye-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2.5px); } }
+    .orb { animation: orb-breathe 7s ease-in-out infinite; }
+    .eyes { animation: eye-bob 3.5s ease-in-out infinite; }
+    .swirl.sa { animation: orb-spin 4.5s linear infinite; }
+    .swirl.sb { animation: orb-spin-rev 3.5s linear infinite; }
+    .swirl.sa .blob { animation: orb-drift 2.25s ease-in-out infinite; }
+    .swirl.sb .blob { animation: orb-drift 1.75s ease-in-out infinite 0.6s; }
+  }
+
+  /* ---- mobile (design screen 11) ---- */
+  @media (max-width: 640px) {
+    header { justify-content: center; padding: 18px 20px; font-size: 12px; }
+    main { gap: 32px; padding: 48px 24px 72px; }
+    .orb { width: 116px; height: 116px; }
+    .blush { width: 19px; height: 10px; }
+    .eyes { gap: 9px; }
+    .eye { width: 36px; height: 11px; }
+    .eye::before { height: 22px; border-width: 7px; }
+    h1 { font-size: 26px; padding: 0 8px; }
+    .below { margin-top: -14px; align-self: stretch; }
+    .sub { font-size: 14px; text-wrap: balance; }
+    .cta { align-self: stretch; margin: 0 12px; padding: 15px 0; }
+    .mission { text-align: center; text-wrap: balance; }
+  }
+
+  /* ---------------- jackpot ----------------
+     Ported from the widget (widget/ui/palette.css §jackpot, widget.js): spam
+     the orb and it pays out. Kept LAST so it wins every state block on source
+     order, same as the widget. Reduce Motion does NOT suppress it, same
+     reasoning as the widget: six deliberate taps and the reward for them —
+     it cannot start on its own and it stops on its own. Widget geometry
+     scaled x3.57 to this orb. */
+  .orb { cursor: pointer; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+  @keyframes jack-spaz {
+    0%   { transform: translate(0, 0) rotate(0deg) scale(1, 1); }
+    9%   { transform: translate(-10px, 7px) rotate(-13deg) scale(1.20, 0.84); }
+    20%  { transform: translate(10px, -10px) rotate(12deg) scale(0.84, 1.22); }
+    31%  { transform: translate(-7px, -10px) rotate(-16deg) scale(1.24, 0.82); }
+    43%  { transform: translate(14px, 7px) rotate(9deg) scale(0.88, 1.18); }
+    55%  { transform: translate(-14px, 4px) rotate(-11deg) scale(1.18, 0.86); }
+    67%  { transform: translate(7px, -7px) rotate(15deg) scale(0.86, 1.20); }
+    80%  { transform: translate(-4px, 10px) rotate(-8deg) scale(1.14, 0.90); }
+    91%  { transform: translate(10px, -4px) rotate(6deg) scale(0.92, 1.12); }
+    100% { transform: translate(0, 0) rotate(0deg) scale(1, 1); }
+  }
+  /* Opacity strobe on the body, not a filter and not a background swap —
+     both re-rasterize the gradient every frame and this runs at 7Hz. */
+  @keyframes jack-strobe { 0%, 100% { opacity: 1; } 50% { opacity: 0.42; } }
+  /* Reels: the eye spins and squashes flat twice a turn — a fruit-machine
+     drum seen edge-on. */
+  @keyframes jack-reel {
+    0%   { transform: rotate(0deg) scaleY(1); }
+    25%  { transform: rotate(90deg) scaleY(0.2); }
+    50%  { transform: rotate(180deg) scaleY(1); }
+    75%  { transform: rotate(270deg) scaleY(0.2); }
+    100% { transform: rotate(360deg) scaleY(1); }
+  }
+  /* The z's get a second job: coins off the top of the machine. */
+  @keyframes jack-spark {
+    0%   { opacity: 0; transform: translate(0, 0) scale(0.4) rotate(0deg); }
+    15%  { opacity: 1; }
+    100% { opacity: 0; transform: translate(var(--jx), var(--jy)) scale(1.5) rotate(var(--jr)); }
+  }
+  .orb.jackpot { animation: jack-spaz 0.42s linear infinite; }
+  .orb.jackpot .orb-body { animation: jack-strobe 0.14s steps(2, end) infinite; }
+  /* Innards at full tilt — the same animations idle tunes, wound to a blur.
+     Full shorthands, not durations, so the payout runs under Reduce Motion
+     where the idle spin never started. */
+  .orb.jackpot .swirl.sa { animation: orb-spin 0.42s linear infinite; }
+  .orb.jackpot .swirl.sb { animation: orb-spin-rev 0.3s linear infinite; }
+  .orb.jackpot .swirl.sa .blob { animation: orb-drift 0.26s ease-in-out infinite; }
+  .orb.jackpot .swirl.sb .blob { animation: orb-drift 0.2s ease-in-out infinite 0.05s; }
+  .orb.jackpot .eyes { gap: 21px; animation: none; }
+  .orb.jackpot .eye {
+    width: 39px; height: 46px;
+    overflow: visible;
+    background: radial-gradient(ellipse at 50% 45%, #1a1917 0%, #141412 78%, #141412 100%);
+    border-radius: 50%;
+    animation: jack-reel 0.3s linear infinite;
+  }
+  /* The shut-eye ring is a pseudo-element, so opening the eyes takes it away. */
+  .orb.jackpot .eye::before { display: none; }
+  /* Counter-spun so the reels never line up into a readable face. */
+  .orb.jackpot .eye:last-child { animation-direction: reverse; animation-duration: 0.26s; }
+  .orb.jackpot .zz { --jx: 54px; --jy: -57px; --jr: 220deg; animation: jack-spark 0.5s ease-out infinite; }
+  .orb.jackpot .zz.z2 { --jx: -46px; --jy: -43px; --jr: -260deg; animation-duration: 0.62s; animation-delay: 0.12s; }
+  /* The badge: a hazelnut disc that counts the taps during a payout — which
+     is exactly what the number on a machine is doing. Widget's 14px disc at
+     landing scale. */
+  .orb-badge {
+    position: absolute; top: -11px; right: -7px;
+    width: 50px; height: 50px; border-radius: 50%;
+    background: linear-gradient(180deg, #e5d6bb, #c5a56d);
+    color: #141412; font-size: 28px; font-weight: 700; line-height: 1;
+    display: none; align-items: center; justify-content: center;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+  }
+  @keyframes jack-badge {
+    from { transform: scale(1) rotate(-9deg); }
+    to   { transform: scale(1.5) rotate(9deg); }
+  }
+  .orb.jackpot .orb-badge { display: flex; animation: jack-badge 0.15s ease-in-out infinite alternate; }
+</style>
+</head>
+<body>
+
+<header>Intaglio Labs, Inc.</header>
+
+<main>
+  <div class="orb" aria-hidden="true">
+    <div class="orb-body">
+      <div class="swirl sa"><div class="blob"></div></div>
+      <div class="swirl sb"><div class="blob"></div></div>
+      <div class="orb-hl"></div>
+      <div class="blush l"></div><div class="blush r"></div>
+    </div>
+    <div class="eyes">
+      <div class="eye"></div>
+      <div class="eye"></div>
+    </div>
+    <div class="zz-layer"><span class="zz z1">z</span><span class="zz z2">z</span></div>
+    <div class="orb-badge">1</div>
+  </div>
+
+  <h1>private &amp; personalized AI<span class="cursor">_</span></h1>
+
+  <div class="below">
+    <div class="sub">storage &amp; compute done locally so you, own you</div>
+    <a class="cta" href="https://github.com/intaglio-labs/privateAndPersonalizedOS/releases/latest/download/IntaglioLabs.dmg">download for mac</a>
+    <div class="fine">backed by <a href="https://www.character.vc/" target="_blank" rel="noopener">character vc</a></div>
+    <div class="fine">built by <a href="https://www.linkedin.com/in/austinyoshino" target="_blank" rel="noopener">austin</a> &amp; <a href="https://www.linkedin.com/in/rishabnayak" target="_blank" rel="noopener">rishab</a></div>
+    <div class="mission">mission: bring frontier ai home to our family :)</div>
+  </div>
+</main>
+
+<footer>
+  <span>&copy; 2026 Intaglio Labs, Inc.</span>
+  <nav>
+    <a href="/terms" target="_blank" rel="noopener">terms</a>
+    <a href="/privacy" target="_blank" rel="noopener">privacy</a>
+    <a href="/notices" target="_blank" rel="noopener">notices</a>
+  </nav>
+</footer>
+
+<script>
+  // Time-of-day bands verbatim from the widget (widget/ui/bridge.js):
+  // night is the fallback because it wraps midnight.
+  (function () {
+    var bands = ['tod-early', 'tod-late', 'tod-power', 'tod-happy', 'tod-night'];
+    function band(h) {
+      if (h >= 5 && h < 9) return 'tod-early';
+      if (h >= 9 && h < 12) return 'tod-late';
+      if (h >= 12 && h < 17) return 'tod-power';
+      if (h >= 17 && h < 21) return 'tod-happy';
+      return 'tod-night';
+    }
+    function apply() {
+      var b = band(new Date().getHours());
+      bands.forEach(function (c) { document.body.classList.toggle(c, c === b); });
+    }
+    apply();
+    setInterval(apply, 60000);
+  })();
+
+  // Jackpot: counting, badge and sound verbatim from the widget
+  // (widget/ui/widget.js + bridge.js) — taps closer than SPAM_GAP belong to
+  // one burst, SPAM_TRIP of them trips the payout, continued hammering holds
+  // it open up to PAYOUT_CAP so a finger left on the button never keeps it
+  // running forever. The synth is the widget's hzVoice: one oscillator per
+  // note through a lowpass, exponential attack and release.
+  (function () {
+    var audioCtx = null;
+    function hzAudio() {
+      try {
+        if (!audioCtx) {
+          var Ctx = window.AudioContext || window.webkitAudioContext;
+          if (!Ctx) return null;
+          audioCtx = new Ctx();
+        }
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        return audioCtx;
+      } catch (e) { return null; }
+    }
+    function hzVoice(ctx, o) {
+      var t0 = ctx.currentTime + (o.delay || 0);
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      var tone = ctx.createBiquadFilter();
+      tone.type = 'lowpass';
+      tone.frequency.value = 2600;
+      osc.type = o.type;
+      osc.frequency.setValueAtTime(o.from, t0);
+      if (o.to !== o.from) osc.frequency.exponentialRampToValueAtTime(o.to, t0 + o.dur);
+      gain.gain.setValueAtTime(0.0001, t0);
+      gain.gain.exponentialRampToValueAtTime(o.peak, t0 + (o.attack || 0.008));
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + o.dur);
+      osc.connect(gain); gain.connect(tone); tone.connect(ctx.destination);
+      osc.start(t0);
+      osc.stop(t0 + o.dur + 0.05);
+    }
+    var sfx = {
+      // A soft downward blip — something giving under a thumb.
+      squish: function () {
+        var ctx = hzAudio(); if (!ctx) return;
+        hzVoice(ctx, { type: 'sine', from: 380, to: 210, dur: 0.09, peak: 0.15, attack: 0.005 });
+      },
+      // Winding up: one blip per tap, climbing a semitone at a time — the
+      // ratchet on a fruit machine as the handle comes back.
+      ratchet: function (step) {
+        var ctx = hzAudio(); if (!ctx) return;
+        var f = 330 * Math.pow(2, Math.min(step, 12) / 12);
+        hzVoice(ctx, { type: 'square', from: f, to: f, dur: 0.05, peak: 0.07, attack: 0.003 });
+      },
+      // The payout: a pentatonic run up two octaves — no semitones, so
+      // however fast it spills it cannot sound wrong — over low coin thuds
+      // on an irregular scatter (evenly spaced would be a drum roll).
+      jackpot: function () {
+        var ctx = hzAudio(); if (!ctx) return;
+        var run = [523.25, 587.33, 659.25, 783.99, 880, 1046.5, 1174.66, 1318.51, 1567.98, 1760];
+        run.forEach(function (f, i) {
+          hzVoice(ctx, { type: 'triangle', from: f, to: f, dur: 0.16, peak: 0.10, attack: 0.004, delay: i * 0.055 });
+          if (i % 2 === 0) {
+            hzVoice(ctx, { type: 'sine', from: f * 2, to: f * 2, dur: 0.22, peak: 0.045, attack: 0.006, delay: i * 0.055 });
+          }
+        });
+        [0.02, 0.11, 0.17, 0.29, 0.34, 0.48, 0.55, 0.71].forEach(function (t, i) {
+          hzVoice(ctx, { type: 'triangle', from: 150 + (i % 3) * 18, to: 88, dur: 0.12, peak: 0.09, attack: 0.003, delay: t });
+        });
+      },
+    };
+
+    var SPAM_GAP = 340, SPAM_TRIP = 6, BURST_END = 700, PAYOUT_MS = 2000, PAYOUT_CAP = 8000;
+    var orb = document.querySelector('.orb');
+    var badge = orb.querySelector('.orb-badge');
+    var lastTap = 0, burst = 0, jackpotOn = false, jackpotStarted = 0, jackpotTimer = null, burstTimer = null;
+    function endJackpot() {
+      jackpotOn = false;
+      jackpotTimer = null;
+      orb.classList.remove('jackpot');
+      badge.textContent = '1';
+    }
+    function bumpJackpot(count) {
+      badge.textContent = String(Math.min(count, 99));
+      if (!jackpotOn) {
+        jackpotOn = true;
+        jackpotStarted = Date.now();
+        orb.classList.add('jackpot');
+        sfx.jackpot();
+      } else if ((count - SPAM_TRIP) % 10 === 0) {
+        sfx.jackpot(); // still going: pay out again rather than run on in silence
+      }
+      clearTimeout(jackpotTimer);
+      var left = Math.max(0, PAYOUT_CAP - (Date.now() - jackpotStarted));
+      jackpotTimer = setTimeout(endJackpot, Math.min(PAYOUT_MS, left));
+    }
+    orb.addEventListener('click', function () {
+      var now = Date.now();
+      burst = (now - lastTap < SPAM_GAP) ? burst + 1 : 1;
+      lastTap = now;
+      clearTimeout(burstTimer);
+      burstTimer = setTimeout(function () { burst = 0; }, BURST_END);
+      if (burst === 1) { sfx.squish(); return; } // an ordinary tap on a sleeping orb
+      sfx.ratchet(burst - 2);
+      if (burst >= SPAM_TRIP) bumpJackpot(burst);
+    });
+  })();
+</script>
+
+</body>
+</html>

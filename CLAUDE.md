@@ -33,7 +33,16 @@ Do not re-add these; their absence is a decision, not an oversight.
   it, the comment is stale — fix the comment.
 - **Any lane that sends messages or data between two machines** — no tunnel, no
   courier, no outbound iMessage. The app does not text its user.
-- **The website and deploy config.** They live in a separate private repo.
+- ~~**The website and deploy config.**~~ Both moved HERE on 2026-08-24 and
+  the exclusion is withdrawn. The marketing site is `site/` — four
+  hand-written pages, one vendored font subset, no build step — and the hosts
+  it reaches are declared in `ops/EGRESS.json` under kind `website`, scanned
+  like any other root. Its deploy config is `firebase.json` and `.firebaserc`
+  at the repo root, it deploys to Firebase Hosting on push to `main` via
+  `.github/workflows/site.yml`, and the runbook is `site/DEPLOY.md`. What is
+  still NOT here: the credentials to deploy with — they live in the
+  `FIREBASE_SERVICE_ACCOUNT` repository secret, never in the tree — and the
+  domain's owning account.
 - **Experiment code, results, and planning docs.**
 
 ## Rules that bind everything

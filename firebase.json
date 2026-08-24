@@ -1,0 +1,16 @@
+{
+  "hosting": [
+    {
+      "site": "hazlie-prod",
+      "public": "site",
+      "ignore": [
+        "firebase.json",
+        "**/.*",
+        "**/node_modules/**",
+        "**/DEPLOY.md"
+      ],
+      "cleanUrls": true,
+      "trailingSlash": false
+    }
+  ]
+}

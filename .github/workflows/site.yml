@@ -1,0 +1,125 @@
+# Push to deploy: main -> Firebase Hosting (the project's default site).
+#
+# The site is four hand-written HTML pages and a vendored font. There is no build
+# step and this workflow deliberately does not invent one — it deploys `site/` as
+# it stands in the repository, so what is reviewed in a diff is exactly what is
+# served.
+#
+# WHAT THIS REPLACES: a `firebase deploy` run by hand from somebody's laptop. The
+# hosting is unchanged; the remembering is what is being removed.
+#
+# firebase-tools is invoked directly rather than through a marketplace action.
+# One fewer third party in the path that holds the deploy credential, and the
+# command in the log is the same one a person would type.
+name: site
+
+on:
+  push:
+    branches: [main]
+    # Only when something that is actually served changes. The app and the
+    # backend share this repository and change constantly; redeploying identical
+    # HTML on each of those commits makes the deployment history unreadable.
+    paths:
+      - 'site/**'
+      - 'firebase.json'
+      - '.firebaserc'
+      - '.github/workflows/site.yml'
+  # So a deploy can be re-run without an empty commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never let two deploys race: a half-finished hosting release is worse than a
+# slightly delayed one, so let the running deploy land before starting the next.
+concurrency:
+  group: firebase-hosting
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Nothing here pushes, and the default leaves the job's token sitting in
+          # .git/config for every later step to read.
+          persist-credentials: false
+
+      # THE CHECKS RUN BEFORE THE DEPLOY, not after, so a broken page is never
+      # published and then noticed.
+      #
+      # Internal links resolve against `site/` the way Hosting serves them:
+      # `cleanUrls` is on, so `/privacy` is `site/privacy/index.html`.
+      - name: check internal links
+        run: |
+          python3 - <<'EOF'
+          import pathlib, re, sys
+          site = pathlib.Path('site')
+          bad = []
+          for f in site.rglob('*.html'):
+              for ref in (re.findall(r'(?:href|src)="([^"]+)"', f.read_text())
+                          + re.findall(r"url\('([^']+)'\)", f.read_text())):
+                  if ref.startswith(('http://', 'https://', 'mailto:', 'data:', '#')):
+                      continue
+                  clean = ref.split('#')[0].split('?')[0]
+                  if not clean:
+                      continue
+                  # cleanUrls: an extensionless path is that directory's index.
+                  base = site if clean.startswith('/') else f.parent
+                  target = (base / clean.lstrip('/')).resolve()
+                  if target.is_dir():
+                      target = target / 'index.html'
+                  elif not target.suffix:
+                      target = target.with_name(target.name) / 'index.html'
+                  if not target.exists():
+                      bad.append(f'{f}: "{ref}" resolves to nothing')
+          for b in bad:
+              print('BROKEN:', b)
+          sys.exit(1 if bad else 0)
+          EOF
+
+      # The download is an external permalink to the newest release. If it stops
+      # resolving, every visitor's download is broken and nothing on the page
+      # would show it.
+      - name: check the download link resolves
+        run: |
+          url=$(grep -ohE 'https://github.com/[^"]*/releases/latest/download/[^"]*' site/index.html | head -1)
+          echo "download link: $url"
+          code=$(curl -sIL -o /dev/null -w '%{http_code}' "$url")
+          echo "status: $code"
+          [ "$code" = "200" ] || { echo "the download link does not resolve"; exit 1; }
+
+      # The credential never lands in the repository and never reaches a log:
+      # written to a file the runner discards, passed by path, and the deploy
+      # itself prints only what it changed.
+      - name: deploy
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then
+            echo "FIREBASE_SERVICE_ACCOUNT is not set — see site/DEPLOY.md for how to create it."
+            exit 1
+          fi
+          # INSTALL FIRST, THEN WRITE THE KEY. `npm install` runs install scripts
+          # from a dependency tree of its own; with the key already on disk, any
+          # one of them could read it. The window is not zero either way — the
+          # deploy tool is handed the credential by design — but it does not need
+          # to be open during the install as well.
+          #
+          # Pinned: an unpinned deploy tool is an unreviewed change to the thing
+          # that publishes the site. The pin covers the top level only; npm
+          # re-resolves the tree beneath it.
+          npm install --no-fund --no-audit --global firebase-tools@15.11.0
+
+          # And removed on the way out, whatever happened. The runner is
+          # ephemeral, but a key left readable for the rest of the job is a key
+          # every later step can read, and steps get added.
+          trap 'rm -f "$RUNNER_TEMP/sa.json"' EXIT
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
+          chmod 600 "$RUNNER_TEMP/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+
+          firebase deploy --only hosting --non-interactive \
+            --project hazlie-prod \
+            --message "${GITHUB_SHA::7} ${GITHUB_EVENT_NAME}"
