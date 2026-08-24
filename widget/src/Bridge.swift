@@ -790,7 +790,18 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
          let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
          url.scheme == "http",
          url.host == "localhost" || url.host == "127.0.0.1" {
-        NSWorkspace.shared.open(url)
+        // An OPTIONAL sub-page, from a fixed list. The review queue lives at
+        // <link>/memory and there was no way to reach it — the root page does not
+        // link to it either — so 119 claims sat in a queue nobody knew about.
+        // An allowlist rather than a free path: this URL carries a live bearer
+        // token in it, and appending page-supplied text to a credential-bearing
+        // URL is how a token ends up somewhere it was never meant to go.
+        let page = payload["page"] as? String ?? ""
+        let allowed: Set<String> = ["memory"]
+        let target = allowed.contains(page)
+          ? url.appendingPathComponent(page)
+          : url
+        NSWorkspace.shared.open(target)
         reply(webView, id, ["state": "ok"])
       } else {
         reply(webView, id, ["state": "error", "error": "no connect link yet"])

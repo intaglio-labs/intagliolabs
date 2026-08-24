@@ -1977,6 +1977,25 @@ const PRIVATE_RESPONSE_HEADERS = Object.freeze({
 function memoryProgress(db) {
   try {
     const claims = Number(db.prepare('SELECT count(*) AS n FROM claim').get()?.n ?? 0);
+    // CLAIMS ARE NOT ANSWERS UNTIL SOMEBODY SAYS SO.
+    //
+    // v_claim_accepted requires a claim_decision of 'accept', and retrieve.mjs
+    // reads that view and nothing else — so a distilled claim nobody has reviewed
+    // is invisible to every question. That is deliberate (a model's assertion is
+    // not ground truth) but it was also silent: 119 claims, 0 decisions, and an
+    // owner told "nothing in what i've got covers that" by a system holding 119
+    // things it had written down and never asked about.
+    const review = Number(
+      db
+        .prepare(
+          'SELECT count(*) AS n FROM claim c WHERE NOT EXISTS (' +
+            'SELECT 1 FROM claim_decision d WHERE d.claim_id = c.id)'
+        )
+        .get()?.n ?? 0
+    );
+    const accepted = Number(
+      db.prepare('SELECT count(*) AS n FROM v_claim_accepted').get()?.n ?? 0
+    );
     const runs = db
       .prepare(
         "SELECT count(*) AS n, " +
@@ -1997,13 +2016,21 @@ function memoryProgress(db) {
     const done = Number(runs?.done ?? 0);
     return {
       claims,
+      accepted,
+      review,
       runs: Number(runs?.n ?? 0),
       done,
       pending,
       total: done + pending,
       running: running > 0,
       // The one field the UI branches on, so the wording lives in one place.
-      state: pending > 0 ? 'reading' : done > 0 ? 'ready' : 'idle',
+      //
+      // 'review' outranks 'reading' because it is the ACTIONABLE state: reading
+      // proceeds on its own and needs nobody, while a review queue is the thing
+      // standing between the owner and an answer. Reading progress is still in
+      // the payload for the UI to say as well.
+      state:
+        review > 0 ? 'review' : pending > 0 ? 'reading' : done > 0 ? 'ready' : 'idle',
     };
   } catch {
     // Never let a progress read break /stats — this endpoint is also the health

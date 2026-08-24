@@ -117,7 +117,14 @@ test('stats requires authentication and reports the row count', async () => {
     // way to tell busy from broken. An empty store is 'idle': nothing read and
     // nothing waiting, so there is no progress to claim.
     memory: {
-      claims: 0, runs: 0, done: 0, pending: 0, total: 0, running: false, state: 'idle',
+      claims: 0,
+      // Distilled is not accepted. v_claim_accepted needs a claim_decision, and
+      // retrieve.mjs reads that view and nothing else — so `review` is the count
+      // standing between a claim and an answer, and it is reported separately
+      // from `claims` because they were silently the same number for 119 claims.
+      accepted: 0,
+      review: 0,
+      runs: 0, done: 0, pending: 0, total: 0, running: false, state: 'idle',
     },
   });
 });
@@ -155,6 +162,7 @@ test('stats reports work still to do as "reading", not as an empty memory', asyn
     assert.equal(body.memory.pending, 1, 'a row nobody has read yet is pending');
     assert.equal(body.memory.total, 1);
     assert.equal(body.memory.state, 'reading', 'pending work is "reading", never "idle"');
+    assert.equal(body.memory.review, 0, 'nothing distilled yet, so nothing to review');
   } finally {
     await srv.close();
   }

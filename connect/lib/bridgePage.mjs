@@ -141,7 +141,7 @@ export function renderBridgePage(
   const body = status.connected
     ? `<div class="connected">✓ ${escapeHtml(platform.label)} is linked${
         status.name ? ` as <b>${escapeHtml(status.name)}</b>` : ''
-      }.<br>your DMs are syncing into Hazlie.</div>
+      }.<br>your DMs are syncing in.</div>
        <a class="cta secondary" href="${escapeHtml(base)}">← back to connect</a>`
     : `<p class="sub">this happens entirely on your Mac — your cookies go to the local bridge and nowhere else.</p>
        ${renderLog(transcript)}
@@ -172,12 +172,12 @@ export function renderBridgePage(
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Connect ${escapeHtml(platform.label)} · Hazlie</title>
+<title>Connect ${escapeHtml(platform.label)} · intaglio labs</title>
 <meta name="robots" content="noindex">
 <meta name="theme-color" content="${C.bg}">
 <style>${STYLE}</style></head>
 <body><div class="wrap"><div class="glow"></div><div class="inner">
-  <a class="brand" href="${escapeHtml(base)}">HAZLIE / CONNECT</a>
+  <a class="brand" href="${escapeHtml(base)}">INTAGLIO LABS / CONNECT</a>
   ${bannerHtml}
   <h1>Connect ${escapeHtml(platform.label)}</h1>
   ${body}

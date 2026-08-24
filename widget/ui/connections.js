@@ -951,9 +951,37 @@ const memLabel = document.getElementById('memLabel');
 const memCount = document.getElementById('memCount');
 const memBar = document.getElementById('memBar');
 const memNote = document.getElementById('memNote');
+const memAct = document.getElementById('memAct');
+// The review queue is a page on the connect server, at <link>/memory. Native holds
+// the tokened URL and appends only names it recognises.
+if (memAct) {
+  memAct.addEventListener('click', () => {
+    hzPost('openConnectLink', { page: 'memory' }).catch(() => {});
+  });
+}
 
 function paintMemory(m) {
   if (!m || !mem) { if (mem) mem.hidden = true; return; }
+  // WAITING ON YOU outranks waiting on the machine.
+  //
+  // A distilled claim is invisible to every question until it has been accepted —
+  // retrieve.mjs reads v_claim_accepted and nothing else. That is on purpose (a
+  // model's assertion is not ground truth) but it was silent: claims piled up in
+  // a queue with no route to it from anywhere in the app, and the answer to every
+  // question stayed "nothing in what i've got covers that".
+  if (m.state === 'review') {
+    mem.hidden = false;
+    mem.classList.remove('busy');
+    memLabel.textContent = 'waiting on you';
+    memCount.textContent = `${m.review.toLocaleString()}`;
+    memBar.style.width = m.total > 0 ? `${Math.round((m.done / m.total) * 100)}%` : '100%';
+    memNote.textContent = m.pending > 0
+      ? `${m.review.toLocaleString()} things to confirm before i can use them — still reading the rest`
+      : `${m.review.toLocaleString()} things to confirm before i can use them`;
+    memAct.hidden = false;
+    return;
+  }
+  memAct.hidden = true;
   if (m.state === 'reading') {
     const pct = m.total > 0 ? Math.round((m.done / m.total) * 100) : 0;
     mem.hidden = false;

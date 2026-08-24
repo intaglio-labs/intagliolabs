@@ -281,7 +281,7 @@ export function renderMemoryPage(
 ) {
   const base = token === null ? '' : `/c/${token}`;
   const body = error
-    ? `<p class="empty">Hazlie could not reach its own store: ${escapeHtml(error)}</p>`
+    ? `<p class="empty">intaglio labs could not reach its own store: ${escapeHtml(error)}</p>`
     : claims.length === 0
       ? `<p class="empty">Nothing to review.<br>An empty queue is the normal state — most messages say nothing durable, and the distiller is meant to return nothing for them.</p>`
       : `<ul id="q">${claims.map((c, i) => claimItem(c, base, i)).join('')}</ul>`;
@@ -289,14 +289,14 @@ export function renderMemoryPage(
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Memory · Hazlie</title>
+<title>Memory · intaglio labs</title>
 <meta name="robots" content="noindex">
 <meta name="theme-color" content="${C.bg}">
 <style>${STYLE}</style></head>
 <body><div class="wrap">
-  <p class="brand">HAZLIE / MEMORY</p>
+  <p class="brand">INTAGLIO LABS / MEMORY</p>
   ${banner ? `<div class="banner">${escapeHtml(banner)}</div>` : ''}
-  <h1>What Hazlie thinks it learned</h1>
+  <h1>What i think i learned</h1>
   <p class="sub">Nothing here is in use yet. A claim does nothing until you accept it.</p>
   <p class="counts" id="counts"
      data-waiting="${escapeHtml(String(counts.proposed ?? 0))}"

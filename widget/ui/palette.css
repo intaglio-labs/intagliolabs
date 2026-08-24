@@ -2568,3 +2568,8 @@ body.connections .tile-tip.on { opacity: 1; }
 }
 ::-webkit-scrollbar-thumb:hover { background-color: rgba(234, 234, 234, 0.26); background-clip: padding-box; }
 ::-webkit-scrollbar-corner { background: transparent; }
+
+/* The review button, in the memory row. Full-width and quiet: it is the one
+   actionable thing in the settings column, but it is a chore rather than an
+   invitation, so it should read as available rather than eager. */
+.mem-act { align-self: flex-start; margin-top: 2px; }

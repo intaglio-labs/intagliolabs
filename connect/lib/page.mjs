@@ -227,12 +227,12 @@ export function renderConnectPage(items, { banner = null, token = null } = {}) {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Connect · Hazlie</title>
+<title>Connect · intaglio labs</title>
 <meta name="robots" content="noindex">
 <meta name="theme-color" content="${C.bg}">
 <style>${STYLE}</style></head>
 <body><div class="wrap"><div class="glow"></div><div class="inner">
-  <p class="brand">HAZLIE / CONNECT</p>
+  <p class="brand">INTAGLIO LABS / CONNECT</p>
   ${banner ? `<div class="banner">${escapeHtml(banner)}</div>` : ''}
   <div class="head">
     <h1>Connect your accounts</h1>
@@ -244,6 +244,11 @@ export function renderConnectPage(items, { banner = null, token = null } = {}) {
       ? '&rsaquo; all set — progress lands back in your texts'
       : `&rsaquo; ${remaining} left · progress lands back in your texts`
   }</p>
+      <!-- The review queue. It has always been served at /c/&lt;token&gt;/memory and
+           nothing has ever linked to it, so distilled claims piled up in a page
+           nobody could find — and every question kept answering "nothing in what
+           i've got covers that " while they sat there. -->
+      ${token === null ? '' : `<p class="foot"><a href="${escapeHtml(formBase)}/memory">&rsaquo; review what i have learned</a></p>`}
 </div></div></body></html>`;
 }
 
@@ -361,12 +366,12 @@ export function renderHelpPage(id, { token = null } = {}) {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>${escapeHtml(topic.title)} · Hazlie</title>
+<title>${escapeHtml(topic.title)} · intaglio labs</title>
 <meta name="robots" content="noindex">
 <meta name="theme-color" content="${C.bg}">
 <style>${STYLE}</style></head>
 <body><div class="wrap"><div class="glow"></div><div class="inner">
-  <p class="brand">HAZLIE / CONNECT</p>
+  <p class="brand">INTAGLIO LABS / CONNECT</p>
   <div class="head">
     <h1>${escapeHtml(topic.title)}</h1>
   </div>
