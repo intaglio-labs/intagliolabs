@@ -17,7 +17,83 @@ set -eu
 cd "$(dirname "$0")"
 
 NOTARIZE=1
-[ "${1:-}" = "--no-notarize" ] && NOTARIZE=0
+ALLOW_DIRTY=0
+for arg in "$@"; do
+  case "$arg" in
+    --no-notarize) NOTARIZE=0 ;;
+    --allow-dirty) ALLOW_DIRTY=1 ;;
+    *) echo "unknown flag: $arg (--no-notarize, --allow-dirty)" >&2; exit 1 ;;
+  esac
+done
+
+# --- provenance guard ---------------------------------------------------------
+#
+# WHAT THIS EXISTS TO PREVENT. Everything past this point signs with Developer
+# ID, notarizes, staples, and writes a DMG that Gatekeeper clears silently on
+# any Mac in the world. And it builds from the WORKING TREE -- whatever files
+# happen to be on disk the moment it runs. Put those two facts together and a
+# release is one mistyped command away from being somebody's half-finished
+# branch, delivered to every downloader with Apple's blessing on it.
+#
+# This is not hypothetical. The tree this ships from is a SHARED checkout that
+# other people and other sessions work in: on 2026-08-24 it changed branch three
+# times in one day, and sat with uncommitted edits in widget/ui/ for much of it.
+# Nothing in this script had ever looked at any of that.
+#
+# The rule: a release comes from a commit that is on main, clean, and already
+# pushed. "Pushed" is not bureaucracy -- it is the line between shipping code
+# somebody can read and shipping code that exists only on this Mac. If the DMG
+# turns out to be broken, the first question is always "what is in it", and an
+# unpushed commit cannot answer.
+#
+# --allow-dirty does NOT bypass the guard. It changes the OUTPUT: the DMG is
+# renamed so it can never be handed out as a release by accident. That is the
+# only escape hatch, and it is deliberately one that leaves a mark.
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  echo "ERROR: not a git checkout, so this build cannot be traced to a commit." >&2
+  echo "       Release from a clone. (A tarball build is fine for yourself --" >&2
+  echo "       use widget/build.sh, which does not sign or notarize.)" >&2
+  exit 1
+fi
+
+COMMIT="$(git rev-parse --short HEAD)"
+BRANCH="$(git symbolic-ref --quiet --short HEAD || echo '(detached)')"
+DIRT="$(git status --porcelain)"
+RELEASABLE=1
+WHY=""
+
+[ -n "$DIRT" ] && { RELEASABLE=0; WHY="$WHY
+  - the working tree has uncommitted changes:
+$(printf '%s\n' "$DIRT" | sed 's/^/      /' | head -10)"; }
+
+[ "$BRANCH" = main ] || { RELEASABLE=0; WHY="$WHY
+  - HEAD is on '$BRANCH', not main"; }
+
+# Compared against the LOCAL origin/main ref, and deliberately not preceded by a
+# fetch: a build script that reaches the network to decide what it is allowed to
+# ship can be answered differently on two runs a minute apart. Staleness is
+# named in the failure text instead, so the person reading it knows to fetch.
+if git rev-parse --verify --quiet origin/main >/dev/null; then
+  [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || {
+    RELEASABLE=0; WHY="$WHY
+  - HEAD is not origin/main, so this code is not pushed anywhere
+    (run 'git fetch' first if origin/main looks stale)"; }
+else
+  RELEASABLE=0; WHY="$WHY
+  - there is no origin/main to compare against"
+fi
+
+if [ "$RELEASABLE" = 0 ] && [ "$ALLOW_DIRTY" = 0 ]; then
+  echo "ERROR: refusing to build a release from this tree.$WHY" >&2
+  echo "" >&2
+  echo "  A release is signed, notarized and stapled -- once it is on your" >&2
+  echo "  download page it is indistinguishable from a real one, and users get" >&2
+  echo "  it silently. Commit, push to main, and re-run." >&2
+  echo "" >&2
+  echo "  For a test build, re-run with --allow-dirty; the DMG is then named" >&2
+  echo "  so it cannot be mistaken for a release." >&2
+  exit 1
+fi
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist)"
 
@@ -34,8 +110,12 @@ if [ -z "$IDENTITY" ]; then
 fi
 
 # build.sh does the compile, bundle and (re)sign; hand it the identity so
-# its own scan cannot pick Apple Development first.
-HAZLIE_SIGN_IDENTITY="$IDENTITY" ./build.sh
+# its own scan cannot pick Apple Development first, and the provenance the
+# guard above established so the stamp inside the bundle agrees with it.
+HAZLIE_SIGN_IDENTITY="$IDENTITY" \
+  HZ_SOURCE_COMMIT="$COMMIT" \
+  HZ_SOURCE_CLEAN="$([ -z "$DIRT" ] && echo 1 || echo 0)" \
+  ./build.sh
 
 APP="build/Intaglio Labs.app"
 DIST=build/dist
@@ -70,7 +150,17 @@ if [ ! -f icon/dmg-bg.png ]; then
 fi
 cp icon/dmg-bg.png "$STAGE/.background/bg.png"
 ln -s /Applications "$STAGE/Applications"
-DMG="$DIST/IntaglioLabs-$VERSION.dmg"
+# A build the guard would have refused carries that fact in its FILENAME. The
+# version string alone is hand-maintained in Info.plist and identical across
+# every build of a given version, so it cannot distinguish a release from a
+# scratch build sitting in the same folder a week later -- and the one that gets
+# uploaded is whichever one the tab-completion found.
+if [ "$RELEASABLE" = 1 ]; then
+  DMG="$DIST/IntaglioLabs-$VERSION.dmg"
+else
+  DMG="$DIST/IntaglioLabs-$VERSION-NOT-A-RELEASE-$COMMIT$([ -n "$DIRT" ] && echo '-dirty').dmg"
+  echo "NOTE: --allow-dirty -- writing $(basename "$DMG")" >&2
+fi
 RW="$DIST/rw.dmg"
 rm -f "$RW" "$DMG"
 hdiutil create -volname "Intaglio Labs" -srcfolder "$STAGE" -ov -format UDRW "$RW" >/dev/null

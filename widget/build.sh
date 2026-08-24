@@ -27,6 +27,27 @@ APP="build/Intaglio Labs.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/ui"
 cp Info.plist "$APP/Contents/Info.plist"
+
+# PROVENANCE: which source this bundle was built from, stamped into the COPY in
+# build/ and never into the tracked Info.plist -- stamping the source file would
+# dirty the tree on every build, and a dirty tree is exactly what release.sh
+# refuses to ship. Done here, before the signature at the foot of this script,
+# so the stamp is covered by it: a later edit would invalidate the signature
+# rather than quietly rewrite the answer.
+#
+# Why an app needs this at all: build.sh compiles whatever is on disk right now.
+# Without a stamp, a DMG in a downloads folder is unattributable -- there is no
+# way, ever, to find out which commit a user is running, which turns every bug
+# report from that build into a guess. release.sh sets these; a direct build.sh
+# run derives them itself so a hand-built app is traceable too.
+HZ_COMMIT="${HZ_SOURCE_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
+if [ -z "${HZ_SOURCE_CLEAN:-}" ]; then
+  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then HZ_SOURCE_CLEAN=0; else HZ_SOURCE_CLEAN=1; fi
+fi
+/usr/libexec/PlistBuddy -c "Add :HZSourceCommit string $HZ_COMMIT" \
+  "$APP/Contents/Info.plist" >/dev/null
+/usr/libexec/PlistBuddy -c "Add :HZSourceClean bool $([ "$HZ_SOURCE_CLEAN" = 1 ] && echo YES || echo NO)" \
+  "$APP/Contents/Info.plist" >/dev/null
 cp build/Hazlie "$APP/Contents/MacOS/Hazlie"
 # The icon is a committed artifact (icon/Hazlie.icns); regenerate with
 # icon/make-icon.swift + iconutil when the face changes.
