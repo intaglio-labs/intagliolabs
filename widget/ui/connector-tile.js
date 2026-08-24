@@ -100,6 +100,7 @@ const HZ_FDA_HINT = {
   text: 'Switch on intaglio labs under System Settings → Privacy & Security → Full Disk Access.',
   url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles',
   link: 'Open System Settings',
+  local: true, // one per Mac; see connections.js
 };
 // WRITTEN FOR SOMEBODY WHO INSTALLED AN APP. These used to name repo scripts
 // (ops/gcal-auth.mjs) and secret file paths (~/.hazlie/secrets/*.txt) — neither
@@ -111,7 +112,11 @@ const HZ_FDA_HINT = {
 // copies were corrected together; if you change one, change the other, or move
 // it to a shared module.
 const HZ_HINTS = {
-  imessage: HZ_FDA_HINT, photos: HZ_FDA_HINT, notes: HZ_FDA_HINT, contacts: HZ_FDA_HINT,
+  imessage: HZ_FDA_HINT, photos: HZ_FDA_HINT, notes: HZ_FDA_HINT,
+  // Contacts left the disk grant on 2026-08-24: it reads through the Contacts
+  // framework now, on its own switch, so sending someone to Full Disk Access
+  // for it points at the wrong pane entirely.
+  contacts: { text: 'Allow Contacts for intaglio labs when it asks, or in System Settings → Privacy & Security → Contacts.' },
   files: { text: 'Sign in to iCloud Drive, Box, or Dropbox on this Mac — any one of them counts.' },
   calendar: { text: 'Connect your Google account on the connect page and approve read-only calendar access.' },
   mail: { text: 'Create a 16-letter Google app password, then paste it on the connect page.',

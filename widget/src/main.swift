@@ -314,6 +314,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     let p = PopupPanel(
       contentRect: NSRect(origin: .zero, size: size),
       styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    // Every panel reports its own disappearance, so the dream band's "is
+    // something covering me" answer is maintained in one place rather than at
+    // each of the several exits a popup has. Callers that need their own
+    // willOrderOut chain onto this rather than replacing it -- see openOnboarding.
+    p.willOrderOut = { [weak self] in
+      // After this returns the panel is still visible, so the recount has to
+      // happen once AppKit has actually taken it down.
+      DispatchQueue.main.async { self?.notifyPanelState() }
+    }
     p.isOpaque = false
     p.backgroundColor = .clear
     p.hasShadow = true
@@ -446,6 +455,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
 
   private func present(_ panel: PopupPanel) {
     watchForOutsideClicks()
+    defer { notifyPanelState() } // something now covers the dream band
     for other in edgePanels where other !== panel {
       if other?.isVisible == true { other?.orderOut(nil) }
     }
@@ -513,7 +523,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       p.level = .floating
       // Whatever route the flow leaves by, the widget goes back under the
       // windows — see PopupPanel.willOrderOut.
+      let reportPanels = p.willOrderOut // set in makePanel; chained, not replaced
       p.willOrderOut = { [weak self] in
+        reportPanels?()
         self?.spotlightWidget(false)
         // ...and the widget comes back however the flow ended — finished,
         // escaped from scene 1, or the panel closed by any native path. At
@@ -1021,6 +1033,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // The two callers that legitimately want the WHOLE window -- "does it fit on
   // this screen" and the onboarding card's clearance line -- say so by reading
   // widgetWindow.frame directly, and are commented where they do.
+  // TELL THE WIDGET PAGE WHETHER ANYTHING IS COVERING ITS DREAM BAND.
+  //
+  // The band above the bar is empty almost always, which is why popups are
+  // placed against the visible widget and not the window (see
+  // visibleWidgetFrame). "Almost" is the catch: tapping the orb raises a 76pt
+  // dream bubble INTO that band for 2.4s, and a popup sitting 12pt above the bar
+  // covers nearly all of it. The bubble would play, unseen, behind the panel.
+  //
+  // Rather than move an open panel 76pt up and back inside 2.4 seconds -- which
+  // reads worse than the thing it fixes -- the page simply does not raise the
+  // bubble while a panel is open. The orb still answers the finger: the wake
+  // animation and its tone run either way, which is the part that matters.
+  //
+  // WHEN VOICE ACTUALLY SHIPS this has to change. The bubble stops being a
+  // "coming soon" placeholder and starts carrying the answer, and an answer that
+  // is silently withheld because a panel is open is a bug rather than a tidy-up.
+  // At that point the popup has to yield the band instead.
+  private func notifyPanelState() {
+    let covered = edgePanels.contains { $0?.isVisible == true }
+    eval(widgetWeb, "window.__hzPanels && window.__hzPanels(\(covered))")
+  }
+
   private var visibleWidgetFrame: NSRect {
     var f = widgetWindow.frame
     let slot = Self.cloudSlot * CGFloat(Bridge.scale)
