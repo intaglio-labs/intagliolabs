@@ -183,7 +183,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     startBlink()
     // State the trust fact plainly.
     let sub = makeLabel(
-      "your password stays on this machine",
+      "your credentials stay local",
       font: mono, color: muted, y: 8
     )
     view.addSubview(title)

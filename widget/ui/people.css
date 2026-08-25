@@ -52,7 +52,13 @@ body.people .win {
 
 .p-title {
   margin: 0;
-  font-size: 19px;
+  /* Tied to the ring so a squeeze cannot land tiles on the title. The wide
+     line is "unify your": 10 mono chars at ~0.6em advance is 6 font-sizes of
+     width, so half of it fits inside the ring's clear zone (r minus the 27px
+     half-tile, minus a 4px breath) when font-size <= (r - 31) / 3. At the
+     design radii this solves to ~19px — the size this always was — and it
+     only bites when --ring-cap has shrunk the ring below design. */
+  font-size: clamp(11px, calc((var(--ring-r, 89px) - 31px) / 3), 19px);
   line-height: 1.2;
   font-weight: 600;
   letter-spacing: -0.01em;

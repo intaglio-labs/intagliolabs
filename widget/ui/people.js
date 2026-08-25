@@ -142,7 +142,7 @@ function openSearchDetails() {
   tip.appendChild(ul);
   const stay = document.createElement('span');
   stay.className = 'stay';
-  stay.textContent = 'everything stored locally — no cloud model ever sees it';
+  stay.textContent = 'data stored locally';
   tip.appendChild(stay);
   phint.appendChild(tip);
   addHintClose();

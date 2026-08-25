@@ -1550,17 +1550,11 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
   display: block; color: var(--status-bad); font-weight: 600;
   margin-bottom: 2px;
 }
-/* The one failure with somewhere to send them gets a button. Sized off
-   .setting-action so the two read as the same control. */
-.hint.hold .broken-fix {
-  display: block; margin-top: 7px;
-  padding: 4px 10px;
-  border: 1px solid var(--status-bad); border-radius: 999px;
-  background: transparent; color: var(--status-bad);
-  font: inherit; font-size: 10px; letter-spacing: 0.04em;
-  cursor: pointer;
-}
-.hint.hold .broken-fix:hover { background: rgba(255, 83, 71, 0.14); }
+/* ~~The one failure with somewhere to send them got a red-outlined
+   .broken-fix button.~~ Gone with its only caller (owner, 2026-08-25): the
+   Full Disk Access panel now renders in plain text with the shared .hold-ok
+   button — needing a grant is setup, not failure — so nothing red survives
+   on that panel and this rule had nothing left to style. */
 /* The bridge login's pieces inside a hold strip: the bot conversation and
    the paste box. The transcript is capped and scrolls — a login exchange is
    a few lines, an old one can be long, and the popup must not grow to fit

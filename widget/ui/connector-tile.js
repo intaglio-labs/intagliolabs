@@ -134,7 +134,7 @@ const HZ_HINTS = {
 const HZ_HINT_FOR = (id) => (id.startsWith('mail:') ? HZ_HINTS.mail : HZ_HINTS[id]);
 // HZ_WHY — the one-line what-this-reads subheader — was yeeted with its twin
 // in connections.js (owner, 2026-08-25); the note there carries the reasoning.
-const HZ_STAY = "no cloud model ever sees it";
+const HZ_STAY = "data stored locally";
 const HZ_NOTICES = {
   down: 'connect service unreachable — status unknown',
   auth: 'token mismatch — status unknown',
@@ -159,9 +159,8 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
     head.textContent = src.label;
     tip.appendChild(head);
     if (src.disabled && src.action === 'enable') {
-      const setup = document.createElement('span');
-      setup.className = 'setup';
-      setup.textContent = 'Intaglio Labs has not connected this source yet.';
+      // No sentence above the button (owner, 2026-08-25): "has not connected
+      // this source yet" restated what the button already says.
       const enable = document.createElement('button');
       enable.className = 'hold-ok';
       enable.textContent = `connect ${src.label}`;
@@ -173,7 +172,7 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
           .then(refresh)
           .catch(() => { enable.disabled = false; enable.textContent = `connect ${src.label}`; });
       });
-      tip.append(setup, enable);
+      tip.appendChild(enable);
     } else if (hint) {
       tip.append(hint.text + ' ');
       if (hint.url) {
@@ -252,47 +251,49 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
         }
         tip.appendChild(log);
       }
-      const adv = document.createElement('details');
-      // Not "advanced" when it is the only way in — open it and say so.
-      if (manual) adv.open = true;
-      const sum = document.createElement('summary');
-      sum.className = 'why';
-      sum.textContent = manual
-        ? `link ${src.label} step by step`
-        : 'having trouble? paste cookies manually';
-      sum.addEventListener('click', (e) => e.stopPropagation());
-      adv.appendChild(sum);
-      const begin = document.createElement('button');
-      begin.className = 'hold-ok';
-      begin.textContent = 'begin manual login';
-      begin.addEventListener('click', (e) => {
-        e.stopPropagation();
-        begin.disabled = true; begin.textContent = 'starting…';
-        hzPost('bridgeBegin', { p: HZ_KIND(src.id) })
-          .then(renderBridge)
-          .catch(() => { begin.disabled = false; begin.textContent = 'begin manual login'; });
-      });
-      const paste = document.createElement('textarea');
-      paste.className = 'bpaste';
-      paste.placeholder = manual
-        ? 'paste what the bot asks for'
-        : 'paste cookies (JSON or Copy-as-cURL)';
-      paste.setAttribute('spellcheck', 'false');
-      const send = document.createElement('button');
-      send.className = 'hold-ok';
-      send.textContent = 'send';
-      send.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const val = paste.value.trim();
-        if (!val) return;
-        paste.value = '';
-        send.disabled = true; send.textContent = 'sending…';
-        hzPost('bridgeCookies', { p: HZ_KIND(src.id), cookies: val })
-          .then(renderBridge)
-          .catch(() => { send.disabled = false; send.textContent = 'send'; });
-      });
-      adv.append(begin, paste, send);
-      tip.appendChild(adv);
+      // Token (discord/slack) and phone (telegram) connectors keep the guided
+      // conversation — it is their only way in. The cookie-paste fallback the
+      // other platforms carried here ("having trouble? paste cookies
+      // manually") was yeeted (owner, 2026-08-25), same call as in
+      // connections.js: the webview login is the flow, not one of two.
+      if (manual) {
+        const adv = document.createElement('details');
+        adv.open = true; // not "advanced" when it is the only way in
+        const sum = document.createElement('summary');
+        sum.className = 'why';
+        sum.textContent = `link ${src.label} step by step`;
+        sum.addEventListener('click', (e) => e.stopPropagation());
+        adv.appendChild(sum);
+        const begin = document.createElement('button');
+        begin.className = 'hold-ok';
+        begin.textContent = 'begin manual login';
+        begin.addEventListener('click', (e) => {
+          e.stopPropagation();
+          begin.disabled = true; begin.textContent = 'starting…';
+          hzPost('bridgeBegin', { p: HZ_KIND(src.id) })
+            .then(renderBridge)
+            .catch(() => { begin.disabled = false; begin.textContent = 'begin manual login'; });
+        });
+        const paste = document.createElement('textarea');
+        paste.className = 'bpaste';
+        paste.placeholder = 'paste what the bot asks for';
+        paste.setAttribute('spellcheck', 'false');
+        const send = document.createElement('button');
+        send.className = 'hold-ok';
+        send.textContent = 'send';
+        send.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const val = paste.value.trim();
+          if (!val) return;
+          paste.value = '';
+          send.disabled = true; send.textContent = 'sending…';
+          hzPost('bridgeCookies', { p: HZ_KIND(src.id), cookies: val })
+            .then(renderBridge)
+            .catch(() => { send.disabled = false; send.textContent = 'send'; });
+        });
+        adv.append(begin, paste, send);
+        tip.appendChild(adv);
+      }
     }
     const stay = document.createElement('span');
     stay.className = 'stay';

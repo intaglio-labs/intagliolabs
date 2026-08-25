@@ -447,7 +447,7 @@ const BRIDGE_HELP = {
 // mac" was false there (the ops/EGRESS.json ledger enumerates the real
 // paths). What IS true everywhere: hazlie reasons over it locally and no
 // cloud model sees it.
-const STAY = "no cloud model ever sees it";
+const STAY = "data stored locally";
 
 const kindOf = (id) => (id.startsWith('mail:') ? 'mail' : id);
 
@@ -599,9 +599,8 @@ function card(src, keep) {
     // the only thing on this panel the owner has to act on, and burying it
     // under an explanation of what Granola is would be the wrong order.
     if (src.disabled && src.action === 'enable') {
-      const setup = document.createElement('span');
-      setup.className = 'setup';
-      setup.textContent = 'Intaglio Labs has not connected this source yet.';
+      // No sentence above the button (owner, 2026-08-25): "has not connected
+      // this source yet" restated what the button already says.
       const enable = document.createElement('button');
       enable.className = 'hold-ok';
       enable.textContent = `connect ${src.label}`;
@@ -613,19 +612,19 @@ function card(src, keep) {
           .then(refresh)
           .catch(() => { enable.disabled = false; enable.textContent = `connect ${src.label}`; });
       });
-      tip.append(setup, enable);
+      tip.appendChild(enable);
     } else if (src.broken && src.fix) {
-      const bad = document.createElement('span');
-      bad.className = 'broken';
-      const what = document.createElement('b');
-      what.textContent = src.detail || 'not working';
-      bad.append(what, document.createTextNode(' ' + src.fix));
-
-      // Full Disk Access is the one failure with a place to send them, so it
-      // gets a button rather than a paragraph to follow by hand.
+      // Full Disk Access is not a failure, it is the setup step every local
+      // store starts at — so it lost its red block (owner, 2026-08-25): the
+      // alarm heading, the tinted panel, the red-outlined button, all of it.
+      // Now it reads like every other not-yet-connected source: the steps in
+      // plain text, then the same button style the rest of the panel uses.
       if (src.action === 'fda') {
+        const steps = document.createElement('span');
+        steps.className = 'setup';
+        steps.textContent = src.fix;
         const open = document.createElement('button');
-        open.className = 'broken-fix';
+        open.className = 'hold-ok';
         open.textContent = 'Open Full Disk Access';
         open.addEventListener('click', (e) => {
           e.preventDefault();
@@ -638,9 +637,17 @@ function card(src, keep) {
             url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles',
           }).catch(() => {});
         });
-        bad.appendChild(open);
+        tip.append(steps, open);
+      } else {
+        // Everything else that is broken stays loud: red is for a thing that
+        // worked and stopped, and those still exist.
+        const bad = document.createElement('span');
+        bad.className = 'broken';
+        const what = document.createElement('b');
+        what.textContent = src.detail || 'not working';
+        bad.append(what, document.createTextNode(' ' + src.fix));
+        tip.appendChild(bad);
       }
-      tip.appendChild(bad);
     } else if (src.connected) {
       // CONNECTED: one line naming what's connected, and a + to add another
       // account (owner). Mail carries the address in its id; the local stores
@@ -828,42 +835,11 @@ function card(src, keep) {
         tip.appendChild(note);
       }
       appendTranscript();
-      // Advanced fallback, tucked away: paste cookies by hand (the old flow).
-      const adv = document.createElement('details');
-      const sum = document.createElement('summary');
-      sum.className = 'why';
-      sum.textContent = 'having trouble? paste cookies manually';
-      sum.addEventListener('click', (e) => e.stopPropagation());
-      adv.appendChild(sum);
-      const begin = document.createElement('button');
-      begin.className = 'hold-ok';
-      begin.textContent = 'begin manual login';
-      begin.addEventListener('click', (e) => {
-        e.stopPropagation();
-        begin.disabled = true; begin.textContent = 'starting…';
-        hzPost('bridgeBegin', { p: kindOf(src.id) })
-          .then(renderBridge)
-          .catch(() => { begin.disabled = false; begin.textContent = 'begin manual login'; });
-      });
-      const paste = document.createElement('textarea');
-      paste.className = 'bpaste';
-      paste.placeholder = 'paste cookies (JSON or Copy-as-cURL)';
-      paste.setAttribute('spellcheck', 'false');
-      const send = document.createElement('button');
-      send.className = 'hold-ok';
-      send.textContent = 'send';
-      send.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const val = paste.value.trim();
-        if (!val) return;
-        paste.value = '';
-        send.disabled = true; send.textContent = 'sending…';
-        hzPost('bridgeCookies', { p: kindOf(src.id), cookies: val })
-          .then(renderBridge)
-          .catch(() => { send.disabled = false; send.textContent = 'send'; });
-      });
-      adv.append(begin, paste, send);
-      tip.appendChild(adv);
+      // The manual cookie-paste fallback ("having trouble? paste cookies
+      // manually") was yeeted (owner, 2026-08-25): the webview login is the
+      // flow, and a devtools-grade escape hatch under every login button made
+      // the panel read as if the button were expected to fail. bridgeCookies
+      // stays in the bridge for the token/phone conversation below.
     } else {
       // TOKEN (discord/slack) and PHONE (telegram): a guided conversation with
       // the bridge bot, because these do not authenticate by cookie harvest.
