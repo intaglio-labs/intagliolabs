@@ -174,8 +174,12 @@ test('buildYear: one year of people by year engagement, with year topics', () =>
   insertRows(ctx, [
     // March: Sam quiet, Ana loud. July: only Sam.
     { ...msg(mar, 'gym then a workout before the marathon'), entity_id: 'm1' },
+    // FIVE SEPARATE DAYS, not five messages in one afternoon. A taxonomy chip
+    // counts conversations, so a single burst is a single hit and would not
+    // clear minTaxonomy -- which is the rule working, not a bug to fixture
+    // around. Spreading them is what "Ana talks about fundraising" means.
     ...Array.from({ length: 5 }, (_, i) => ({
-      ts: mar + i * 3600_000, source: 'imessage', entity_id: `m2:${i}`,
+      ts: mar + i * 86_400_000, source: 'imessage', entity_id: `m2:${i}`,
       text: 'the seed round term sheet from the investors', meta: { chat_handle: '+18085550200', is_from_me: false },
     })),
     { ...msg(jul, 'surf at sunrise?'), entity_id: 'm3' },

@@ -23,6 +23,8 @@
 // about THAT year, so a friendship that moved from "classes" to "startups"
 // reads as the story it is.
 
+import { approximateConversationKey } from '../memory/episodes.mjs';
+
 // Curated topic signals. Word-boundary, case-insensitive, one hit counted per
 // ROW containing the signal (a message that says "coffee" five times is one
 // coffee conversation, not five).
@@ -279,12 +281,14 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
     // in few conversations while fundraising was spread across many. Spread is
     // what a topic chip is trying to say.
     //
-    // A row with no episode -- mail and linkedin have no thread to cut, and the
-    // index may not have reached a new row yet -- keys on itself, so it counts
-    // once as itself instead of merging with unrelated rows under a null key.
+    // A row with no episode keys on an APPROXIMATION of its conversation, not on
+    // itself. 19% of the episodic corpus has no episode -- makeEpisode drops any
+    // run the owner never spoke in, and mail has no thread at all -- and keying
+    // those on the row turned each one back into its own conversation, quietly
+    // restoring the message-counting this whole block exists to replace.
     const convo =
       row.episode_id === null || row.episode_id === undefined
-        ? `row:${row.ts}`
+        ? approximateConversationKey(row, meta, Number(row.ts))
         : `ep:${row.episode_id}`;
     for (const name of topicNames) {
       if (!TOPIC_SIGNALS[name].test(row.text)) continue;
