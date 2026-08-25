@@ -65,6 +65,42 @@ enum Provision {
   // Call once at launch. Runs off the main thread — copying node and booting
   // launchd agents should not block the UI coming up.
 
+  /// Ensure the connector daemon has its minimum config before anything tries
+  /// to start it. A downloaded app used to create this file only if onboarding
+  /// reached one particular button, so skipping/resuming that scene left every
+  /// connector permanently parked after an otherwise successful provision.
+  ///
+  /// A newly-created connector identity also starts WhatsApp OFF. WhatsApp's
+  /// Desktop database belongs to WhatsApp, not to Intaglio Labs, and survives a
+  /// Hazlie wipe. Treating its mere presence as prior consent made a truly fresh
+  /// install paint WhatsApp green before the owner had selected it. The marker
+  /// is removed only by the explicit Connect button in the connections UI.
+  @discardableResult
+  static func ensureConnectorDefaults() -> Bool {
+    let dir = hazlie.appendingPathComponent("connectors")
+    let config = dir.appendingPathComponent("config.json")
+    if fm.fileExists(atPath: config.path) { return true }
+    do {
+      try mkdir(hazlie, 0o700)
+      try mkdir(dir, 0o700)
+      let whatsapp = dir.appendingPathComponent("whatsapp.disabled")
+      if !fm.fileExists(atPath: whatsapp.path) {
+        try Data().write(to: whatsapp, options: .atomic)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: whatsapp.path)
+      }
+
+      // Config is the completion marker and is deliberately written last. If
+      // anything above fails, the next launch retries instead of seeing a config
+      // and skipping the consent marker that should accompany its creation.
+      try "{}\n".write(to: config, atomically: true, encoding: .utf8)
+      try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: config.path)
+      return true
+    } catch {
+      NSLog("Intaglio Labs: connector defaults failed: \(error)")
+      return false
+    }
+  }
+
   static func ensureBackend() {
     DispatchQueue.global(qos: .utility).async {
       let connectPlist = launchAgents.appendingPathComponent("io.intaglio.connect.plist")

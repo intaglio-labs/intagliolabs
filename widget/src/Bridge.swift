@@ -74,7 +74,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
-                    "status", "setMotion", "setScale", "setSounds", "openOnboarding",
+                    "status", "setConnectorEnabled", "setMotion", "setScale", "setSounds", "openOnboarding",
                     "markHandheld",
                     // Same setup controls, reachable from the gear after the
                     // flow — a skipped step must stay reachable.
@@ -96,7 +96,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // map from the wrong file cost one broken popup in review.
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
-               "openExternal"],
+               "openExternal", "setConnectorEnabled"],
     "people-months": ["close", "peopleYear", "peopleFind", "peopleSummary", "openPeople"],
     "ear": ["orbState", "voiceError", "voiceTranscript"],
   ]
@@ -572,6 +572,32 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": "ok"])
     case "status":
       fetchStatus { [weak self] data in self?.reply(webView, id, data) }
+    case "setConnectorEnabled":
+      // Passive local stores require explicit product-level consent even when
+      // another app's database already exists. Keep the filename allow-listed:
+      // this message crosses from JS to a filesystem mutation.
+      let connector = payload["connector"] as? String ?? ""
+      guard connector == "whatsapp" else {
+        reply(webView, id, ["state": "error", "error": "unknown connector"])
+        return
+      }
+      let marker = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".hazlie/connectors/\(connector).disabled")
+      do {
+        if payload["enabled"] as? Bool == true {
+          if FileManager.default.fileExists(atPath: marker.path) {
+            try FileManager.default.removeItem(at: marker)
+          }
+        } else {
+          try Data().write(to: marker, options: .atomic)
+          try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: marker.path)
+        }
+        Connectors.shared.start()
+        reply(webView, id, ["state": "ok"])
+      } catch {
+        reply(webView, id, ["state": "error", "error": "could not update connector"])
+      }
     case "bridgeStatus":
       let p = String((payload["p"] as? String ?? "").prefix(24))
       bridgeCall("GET", "api/bridge", query: ["p": p]) { [weak self] d in
@@ -597,7 +623,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // endpoint. The webview and its cookies never touch this bridge's own
       // views; only the harvested set is POSTed to the loopback server.
       let p = String((payload["p"] as? String ?? "").prefix(24))
-      bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { [weak self] begin in
+      // Fetch policy without beginning the Matrix-bot conversation. Beginning
+      // used to happen first, which meant a fresh install with no bridge state
+      // failed before the real Facebook/Instagram/X login window could even
+      // appear. The login window needs only the static, server-authored policy;
+      // start the bot immediately after cookies are available.
+      bridgeCall("GET", "api/bridge", query: ["p": p]) { [weak self] begin in
         guard let self else { return }
         guard begin["state"] as? String == "ok",
               let loginUrl = begin["loginUrl"] as? String,
@@ -628,10 +659,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
               self.reply(webView, id, ["state": "cancelled"])
               return
             }
-            self.bridgeCall(
-              "POST", "api/bridge/cookies", json: ["p": p, "cookies": cookiesJSON], timeout: 15
-            ) { done in
-              self.reply(webView, id, done)
+            self.bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { started in
+              guard started["state"] as? String == "ok" else {
+                self.reply(webView, id, started)
+                return
+              }
+              self.bridgeCall(
+                "POST", "api/bridge/cookies", json: ["p": p, "cookies": cookiesJSON], timeout: 15
+              ) { done in
+                self.reply(webView, id, done)
+              }
             }
           }
         }
@@ -769,7 +806,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // the local Apple stores turn on together the moment Full Disk Access
       // lands. The config is what makes the daemon boot AT ALL -- without it
       // the agent parks at exit 1 -- so writing it is the whole action.
-      let ok = writeConnectorsConfigIfMissing()
+      let ok = Provision.ensureConnectorDefaults()
       // Started as a CHILD of this app, not bootstrapped into launchd, so the
       // reader inherits this app's permissions instead of needing its own.
       Provision.retireConnectorsAgent()
@@ -1063,35 +1100,6 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
       DispatchQueue.main.async { done(n, memory) }
     }.resume()
-  }
-
-  /// The connectors daemon refuses to start without ~/.hazlie/connectors/config.json
-  /// and says so; on a fresh install nothing writes it, so the agent parks at
-  /// exit 1 forever and no data ever arrives. This writes the minimum valid one.
-  ///
-  /// Deliberately almost empty. There is no "enabled sources" list to fill in --
-  /// every install runs every connector it has credentials for, and each source's
-  /// needs() decides whether it can run this pass. So the file's job here is to
-  /// exist and to parse; every key in it is an override nobody has asked for yet.
-  ///
-  /// Held to the same file standard as a secret (0600 inside the 0700 tree),
-  /// because daemon.mjs checks: it is the file whose silent replacement would
-  /// redirect what gets polled.
-  @discardableResult
-  private func writeConnectorsConfigIfMissing() -> Bool {
-    let fm = FileManager.default
-    let dir = fm.homeDirectoryForCurrentUser.appendingPathComponent(".hazlie/connectors")
-    let file = dir.appendingPathComponent("config.json")
-    if fm.fileExists(atPath: file.path) { return true }
-    do {
-      try fm.createDirectory(at: dir, withIntermediateDirectories: true,
-                             attributes: [.posixPermissions: 0o700])
-      try "{}\n".write(to: file, atomically: true, encoding: .utf8)
-      try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-      return true
-    } catch {
-      return false
-    }
   }
 
   // Messages that arrived before chat.js finished loading queue one by one

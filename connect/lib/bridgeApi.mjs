@@ -12,7 +12,7 @@
 //   POST /api/bridge/cookies {p, cookies}  → send the pasted cookies/cURL
 
 import { homedir } from 'node:os';
-import { PLATFORMS, bridgeStatus, loadPanel, beginLogin, relay, loginUrlFrom } from './bridge.mjs';
+import { PLATFORMS, bridgeStatus, beginLogin, relay, loginUrlFrom } from './bridge.mjs';
 import { maskOwn } from './bridgePage.mjs';
 import { bearerAuthorized } from './statusApi.mjs';
 
@@ -76,8 +76,12 @@ export async function bridgeApiResponse({
     if (method === 'GET' && subpath === '') {
       const st = bridgeStatus(platformId, { home });
       if (st.connected) return wrap([]);
-      const { transcript } = await loadPanel(platformId, { home });
-      return wrap(transcript);
+      // Policy/status is useful before the Matrix stack exists: it is enough
+      // for the native app to open the platform's real, fenced login window.
+      // Requiring loadPanel() here made a fresh install fail on missing Matrix
+      // credentials before Facebook/Instagram/X could even be shown. Bot
+      // transcript work remains in begin/cookies, where the bridge is needed.
+      return wrap([]);
     }
     if (method === 'POST' && subpath === 'begin') {
       const { transcript } = await beginLogin(platformId, { home });

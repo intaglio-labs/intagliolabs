@@ -20,6 +20,11 @@ const closeHint = () => {
 new MutationObserver(() => {
   const open = [...hintHost.children].some((el) => !el.classList.contains('hint-x'));
   document.body.classList.toggle('hint-open', open);
+  // Structural :not(:empty) animation restarted on every replaceChildren(),
+  // so switching connector details looked like the whole UI reloaded. Keep a
+  // stable state class instead: it animates only closed -> open, not content ->
+  // different content while the side panel remains open.
+  hintHost.classList.toggle('open', open);
   if (open) {
     const main = document.querySelector('.conn-main');
     if (main) hintHost.style.height = `${Math.round(main.getBoundingClientRect().height)}px`;
@@ -632,7 +637,23 @@ function card(src, keep) {
     // A broken source states the problem BEFORE the WHY and the how-to. It is
     // the only thing on this panel the owner has to act on, and burying it
     // under an explanation of what Granola is would be the wrong order.
-    if (src.broken && src.fix) {
+    if (src.disabled && src.action === 'enable') {
+      const setup = document.createElement('span');
+      setup.className = 'setup';
+      setup.textContent = 'Intaglio Labs has not connected this source yet.';
+      const enable = document.createElement('button');
+      enable.className = 'hold-ok';
+      enable.textContent = `connect ${src.label}`;
+      enable.addEventListener('click', (e) => {
+        e.stopPropagation();
+        enable.disabled = true;
+        enable.textContent = 'connecting…';
+        hzPost('setConnectorEnabled', { connector: src.id, enabled: true })
+          .then(refresh)
+          .catch(() => { enable.disabled = false; enable.textContent = `connect ${src.label}`; });
+      });
+      tip.append(setup, enable);
+    } else if (src.broken && src.fix) {
       const bad = document.createElement('span');
       bad.className = 'broken';
       const what = document.createElement('b');

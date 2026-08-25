@@ -29,9 +29,10 @@ function withDisabled(row, home) {
     ...row,
     connected: false,
     broken: false, // off on purpose is not a fault; it must never paint red
-    detail: 'turned off',
-    action: null,
-    fix: `re-enable with: rm ~/.hazlie/connectors/${row.id}.disabled`,
+    disabled: true,
+    detail: 'not connected yet',
+    action: 'enable',
+    fix: null,
     caveat: null,
   };
 }

@@ -181,7 +181,23 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
     why.className = 'why';
     why.textContent = HZ_WHY[HZ_KIND(src.id)] || HZ_WHY_FALLBACK;
     tip.appendChild(why);
-    if (hint) {
+    if (src.disabled && src.action === 'enable') {
+      const setup = document.createElement('span');
+      setup.className = 'setup';
+      setup.textContent = 'Intaglio Labs has not connected this source yet.';
+      const enable = document.createElement('button');
+      enable.className = 'hold-ok';
+      enable.textContent = `connect ${src.label}`;
+      enable.addEventListener('click', (e) => {
+        e.stopPropagation();
+        enable.disabled = true;
+        enable.textContent = 'connecting…';
+        hzPost('setConnectorEnabled', { connector: src.id, enabled: true })
+          .then(refresh)
+          .catch(() => { enable.disabled = false; enable.textContent = `connect ${src.label}`; });
+      });
+      tip.append(setup, enable);
+    } else if (hint) {
       tip.append(hint.text + ' ');
       if (hint.url) {
         const a = document.createElement('a');

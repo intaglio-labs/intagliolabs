@@ -1377,7 +1377,7 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
   55%  { opacity: 1; }
   100% { transform: perspective(900px) rotateY(0deg); opacity: 1; }
 }
-.hint-host:not(:empty) {
+.hint-host.open {
   animation: hint-book-open 0.34s cubic-bezier(0.22, 0.72, 0.24, 1) both;
 }
 .hint-host:empty { display: none; }

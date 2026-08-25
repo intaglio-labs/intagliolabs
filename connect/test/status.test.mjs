@@ -90,3 +90,22 @@ test('notion reports on the token file, which must be owner-only', (t) => {
   chmodSync(token, 0o600);
   assert.equal(readStatus({ home: dir }).find((r) => r.id === 'notion').connected, true);
 });
+
+test('WhatsApp stays explicitly disconnected until Intaglio Labs enables it', (t) => {
+  const dir = home(t, {});
+  const store = join(dir, 'Library', 'Group Containers',
+    'group.net.whatsapp.WhatsApp.shared', 'ChatStorage.sqlite');
+  mkdirSync(join(store, '..'), { recursive: true });
+  writeFileSync(store, 'WhatsApp owns this file');
+
+  const marker = join(dir, '.hazlie', 'connectors', 'whatsapp.disabled');
+  writeFileSync(marker, '', { mode: 0o600 });
+  const disabled = readStatus({ home: dir }).find((r) => r.id === 'whatsapp');
+  assert.equal(disabled.connected, false);
+  assert.equal(disabled.disabled, true);
+  assert.equal(disabled.action, 'enable');
+
+  rmSync(marker);
+  const enabled = readStatus({ home: dir }).find((r) => r.id === 'whatsapp');
+  assert.equal(enabled.connected, true, 'the existing WhatsApp store is used only after consent');
+});

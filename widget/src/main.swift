@@ -86,6 +86,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // owner's repo-based setup, or a prior run) this only regenerates a
     // missing secret file, and it runs off the main thread so it never
     // delays the UI.
+    // Synchronous and tiny: the connector child is started later in this same
+    // launch, so its config must exist before that race begins. The expensive
+    // backend copy remains asynchronous inside ensureBackend().
+    Provision.ensureConnectorDefaults()
     Provision.ensureBackend()
 
     // The second half of the self-move (Bridge "moveToApplications"): the
