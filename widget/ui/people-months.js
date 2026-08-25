@@ -7,7 +7,6 @@
 (function () {
   const listEl = document.getElementById('list');
   const searchEl = document.getElementById('search');
-  const footEl = document.getElementById('foot');
   const closeEl = document.getElementById('close');
   const tabsEl = document.getElementById('tabs');
   const syncEl = document.getElementById('sync');
@@ -33,7 +32,7 @@
     return `${MONTH_NAMES[Number(ym.slice(5)) - 1]} ${ym.slice(0, 4)}`;
   }
 
-  function rowHtml(p, maxEng) {
+  function rowHtml(p) {
     const chips = (p.topics || [])
       .map((t) => `<span class="pl-chip pl-topic">${esc(t.label)}</span>`)
       .join('');
@@ -41,7 +40,6 @@
     sub.push(`${p.messages} msg${p.messages === 1 ? '' : 's'}`);
     if (p.met) sub.push(`met ${p.met}×`);
     if (p.company) sub.push(esc(p.company));
-    const w = Math.max(2, Math.round((p.engagement / (maxEng || 1)) * 100));
     return (
       `<div class="pl-row">` +
         `<div class="pl-main">` +
@@ -49,17 +47,10 @@
             `<span class="pl-name">${esc(p.name)}</span>` +
             `<span class="pl-src">${chips}</span>` +
           `</div>` +
-          `<div class="pl-bar"><span class="pl-bar-fill" data-w="${w}"></span></div>` +
           `<div class="pl-sub">${sub.join(' · ')}</div>` +
         `</div>` +
       `</div>`
     );
-  }
-
-  function paintBars(root) {
-    for (const bar of root.querySelectorAll('.pl-bar-fill[data-w]')) {
-      bar.style.width = bar.getAttribute('data-w') + '%';
-    }
   }
 
   // Within-month orderings for the sort control. Engagement is the default
@@ -116,19 +107,16 @@
       const rows = m.people.filter((p) => passesFilters(p, term));
       rows.sort(SORTS[sortEl.value] || SORTS.engagement);
       if (rows.length === 0) continue;
-      const maxEng = Math.max(...rows.map((p) => p.engagement));
       const count = filtering ? rows.length : m.total;
       html.push(`<div class="pl-year">${monthLabel(m.ym)} <span class="pl-year-n">· ${count} people</span></div>`);
-      for (const p of rows) html.push(rowHtml(p, maxEng));
+      for (const p of rows) html.push(rowHtml(p));
       if (!filtering && m.total > m.people.length) {
         html.push(`<div class="pl-more">+ ${m.total - m.people.length} more in ${monthLabel(m.ym)}</div>`);
       }
       shown += rows.length;
     }
     listEl.innerHTML = html.join('') || `<div class="pl-empty">no activity in ${year}</div>`;
-    paintBars(listEl);
     searchEl.placeholder = `search ${year} (${shown} shown)…`;
-    footEl.textContent = 'by month — most engaged first · chips are that month’s topics';
     renderTabs();
   }
 
@@ -157,7 +145,6 @@
     const my = ++reqId;
     searchEl.placeholder = `loading ${year}…`;
     listEl.innerHTML = `<div class="pm-loading">loading ${year}…</div>`;
-    footEl.textContent = '';
     const res = await hzPost('peopleMonths', { year });
     if (my !== reqId) return; // superseded by a newer tab click
     if (!res || !Array.isArray(res.months)) throw new Error('bad months payload');

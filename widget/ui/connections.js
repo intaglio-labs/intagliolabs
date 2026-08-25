@@ -261,20 +261,12 @@ async function renderSettings() {
     on: !p || p.sounds !== false,
     message: 'setSounds',
   }));
-  // Size. Everything scales together — the widget, both popups and the type
-  // inside them — because native drives it with pageZoom rather than by
-  // restyling anything (main.swift scaleChanged).
-  if (p && typeof p.scale === 'number') {
-    rows.push(rangeRow({
-      name: 'size',
-      note: 'the widget and its popups',
-      value: p.scale,
-      min: typeof p.scaleMin === 'number' ? p.scaleMin : 0.7,
-      max: typeof p.scaleMax === 'number' ? p.scaleMax : 1.6,
-      step: 0.05,
-      message: 'setScale',
-      format: (v) => `${Math.round(v * 100)}%`,
-    }));
+  // The size slider was yeeted (owner, 2026-08-24): everything runs at 100%.
+  // Native's setScale plumbing survives untouched, so a stored non-1 scale
+  // from the slider era is snapped back to 1 here — without the control, a
+  // leftover 130% would be permanent.
+  if (p && typeof p.scale === 'number' && Math.abs(p.scale - 1) > 0.001) {
+    hzPost('setScale', { scale: 1 }).catch(() => {});
   }
   rows.push(actionRow({
     name: 'onboarding',

@@ -193,19 +193,6 @@ body.plist .pl-year {
   background: rgba(16, 16, 15, 0.96);
 }
 body.plist .pl-year-n { color: var(--muted); letter-spacing: normal; }
-body.plist .pl-bar {
-  height: 3px;
-  margin-top: 4px;
-  border-radius: 999px;
-  background: rgba(234, 234, 234, 0.08);
-  overflow: hidden;
-}
-body.plist .pl-bar-fill {
-  display: block;
-  height: 100%;
-  border-radius: 999px;
-  background: rgba(197, 165, 109, 0.65);
-}
 /* Topic chips: what you talked about that year. A quieter tint than the
    hazelnut source chips so the name line reads name -> topics at a glance. */
 body.plist .pl-chip.pl-topic {

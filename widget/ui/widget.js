@@ -395,11 +395,14 @@ function reportBounds() {
   for (const el of boundsWatched) {
     if (!el) continue;
     if (el === winput && !barOpen) continue; // collapsed input is invisible glass
-    const cs = getComputedStyle(el);
-    if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) < 0.05) continue;
     const r = el.getBoundingClientRect();
     if (r.width > 0) left = Math.min(left, r.left);
   }
+  // No visibility/opacity filtering, deliberately: the bubble FADES but never
+  // stops occupying its spot, and skipping it while dim is exactly how the
+  // panel ended up on top of it. Reserving the full layout footprint means
+  // the panel never overlaps anything and never has to slide when a faded
+  // element comes back.
   if (!Number.isFinite(left)) return;
   hzPost('widgetBounds', { left: Math.max(0, left) }).catch(() => {});
 }
