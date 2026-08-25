@@ -173,6 +173,46 @@ export function attendeeIdentities(occurrences) {
   }));
 }
 
+// THE SAME HARVEST, FROM ROWS INSTEAD OF OCCURRENCES.
+//
+// attendeeIdentities above reads EventKit occurrences, and EventKit is one of
+// three backends. Google and the local sqlite path never entered it, so those
+// installations kept rendering historical counterparties as raw addresses even
+// though their event rows carry the same attendee names.
+//
+// Rows ARE the shared surface: every backend normalises into `meta.attendees`
+// and `meta.organizer` with the same {email, name} shape before ingest, whether
+// it came from buildRows or gcalRows.eventsToRows. So this adapts a row back
+// into the shape attendeeIdentities already understands rather than growing a
+// second definition of what an attendee is.
+//
+// EventKit keeps its separate WIDE read on top of this: rows are a narrow
+// window by design (a week back, a month ahead) and its extra pass reaches six
+// years. The other two get the narrow window, which is what they had access to
+// anyway and is strictly more than the nothing they were harvesting before.
+export function identitiesFromRows(rows) {
+  return attendeeIdentities(
+    (Array.isArray(rows) ? rows : []).map((row) => ({
+      attendees: row?.meta?.attendees,
+      organizer: row?.meta?.organizer,
+    }))
+  );
+}
+
+// Writing them down, wherever they came from. Count only in the log: an address
+// in a log is an address in a log.
+export function rememberIdentities(ctx, identities, backend) {
+  if (!Array.isArray(identities) || identities.length === 0) return 0;
+  if (typeof ctx?.state?.upsertContacts !== 'function') return 0;
+  ctx.state.upsertContacts(identities);
+  ctx.log?.info?.('calendar_identities', {
+    connector: 'calendar',
+    backend,
+    people: identities.length,
+  });
+  return identities.length;
+}
+
 // How far back to look for NAMES, as distinct from rows. Wide and cheap: this
 // read ingests nothing, and a person met in 2019 is still worth being able to
 // name in 2026.
@@ -439,15 +479,7 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
       // A failed wide read is not a failed run: fall back to the rows this
       // pass already has, which is what the narrow window would have given.
     }
-    const identities = attendeeIdentities(identityOccurrences);
-    if (identities.length > 0 && typeof ctx.state?.upsertContacts === 'function') {
-      ctx.state.upsertContacts(identities);
-      // Count only. An address in a log is an address in a log.
-      ctx.log.info('calendar_identities', {
-        connector: 'calendar',
-        people: identities.length,
-      });
-    }
+    rememberIdentities(ctx, attendeeIdentities(identityOccurrences), 'eventkit');
 
     const { rows, skipped } = buildRows(occurrences, window);
     if (skipped > 0) {
@@ -586,6 +618,9 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
       ctx.log.warn('calendar_rows_skipped', { connector: 'calendar', count: skipped });
     }
 
+    // Names, from the rows this pass already built (identitiesFromRows explains
+    // why rows and not occurrences).
+    rememberIdentities(ctx, identitiesFromRows(deduped), 'google');
     const totals = await ctx.ingest(deduped);
 
     const observed = new Set(deduped.map((row) => row.entity_id));
@@ -714,6 +749,7 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
         ctx.log.warn('calendar_rows_skipped', { connector: 'calendar', count: skipped });
       }
 
+      rememberIdentities(ctx, identitiesFromRows(rows), 'local');
       const totals = await ctx.ingest(rows);
 
       // Reconciliation — reached ONLY when the snapshot, the scan, and every
