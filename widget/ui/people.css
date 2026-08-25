@@ -19,6 +19,14 @@ body.people {
 }
 
 body.people .win {
+  /* THE MEASUREMENT THE FITTER DEPENDS ON. The shared shell (palette.css
+     .win) is height: 100% — right for the fixed-size popups, fatal here:
+     fitPeople measures this box to decide the window's height, and a box
+     that is always exactly the window's height can only ever report the
+     window back at itself. The popup sat at whatever size it started with,
+     the ring ran off the bottom, and the fitter looked installed while
+     measuring nothing. Auto is what makes the measurement mean the content. */
+  height: auto;
   position: relative;
   /* A row, like settings: the hint strip is a SIDE panel on the left, the main
      column on the right. The popup is pinned to the widget's right edge by
@@ -141,7 +149,15 @@ body.people .p-select:focus { outline: none; border-color: rgba(197, 165, 109, 0
    overlap around the circle — see the chord-length math where .row's
    transform is defined below before moving either number. */
 body.people .p-ring {
-  --ring-r: clamp(64px, calc(36px + var(--n, 8) * 4.4px), 104px);
+  /* --ring-cap is the second constraint, set by people.js from the height the
+     window was ACTUALLY granted: native clamps every popup to the room above
+     the widget (main.swift popupCeiling()), and a ring sized only by count
+     answered that clamp by scrolling — the bottom arc of tiles and the search
+     controls just looked amputated, with an overlay scrollbar nobody can see.
+     Absent (10000px), it constrains nothing; the count term stays the design
+     size. The clamp's 64px floor still wins below it: past that point the
+     tiles would overlap, so a genuinely tiny window scrolls instead. */
+  --ring-r: clamp(64px, min(calc(36px + var(--n, 8) * 4.4px), var(--ring-cap, 10000px)), 104px);
   position: relative;
   width: calc(var(--ring-r) * 2 + 44px);
   height: calc(var(--ring-r) * 2 + 44px);

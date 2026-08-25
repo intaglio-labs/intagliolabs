@@ -127,14 +127,21 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   static let orbFaces: Set<String> = ["idle", "notify", "listening", "talking"]
 
   // The per-app Reduce Motion override. macOS Reduce Motion is a SYSTEM
-  // accessibility setting and the widget honours it by default; this is the
-  // ordinary per-app opt-back-in for someone who wants the animation anyway.
-  // Both prefs live in native storage because the webviews are configured
+  // accessibility setting; this is the ordinary per-app answer to it. Both
+  // prefs live in native storage because the webviews are configured
   // .nonPersistent() (Windows.swift), so nothing a page stores survives a
-  // relaunch. Default false: a fresh install always respects the setting.
+  // relaunch. ~~Default false: a fresh install always respects the setting.~~
+  // Flipped to default TRUE (owner, 2026-08-25): the widget's animation is the
+  // product, not a flourish, and a fresh install was arriving frozen on any
+  // Mac with Reduce Motion on — which reads as broken, not as respectful. The
+  // switch in Settings still appears whenever the system setting is on, so
+  // turning the animation off remains one visible toggle away; only the
+  // starting position changed. Distinguish "never set" from "set to false" via
+  // object(forKey:), because bool(forKey:) collapses both to false — which is
+  // exactly the old default this is undoing.
   static let motionDefaultsKey = "HazlieMotionAnyway"
   static var motionAnyway: Bool {
-    get { UserDefaults.standard.bool(forKey: motionDefaultsKey) }
+    get { UserDefaults.standard.object(forKey: motionDefaultsKey) as? Bool ?? true }
     set { UserDefaults.standard.set(newValue, forKey: motionDefaultsKey) }
   }
 

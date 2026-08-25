@@ -396,33 +396,12 @@ function hintFor(id) {
   return id.startsWith('mail:') ? HINTS.mail : HINTS[id];
 }
 
-// Why each connector is worth connecting — one or two sentences, shown the
-// FIRST time its tile is pressed, with the privacy line under it. Keyed by
-// kind (both mail accounts are one "mail"); the fallback keeps an unknown
-// future source from arriving with no story at all.
-// One sentence, factual: WHAT DATA this source gives access to. Not a pitch —
-// the owner wants the subheader to say plainly what is read.
-const WHY = {
-  imessage: "your text messages and who they're with.",
-  photos: "photo dates, places, and the people your library has tagged.",
-  notes: "the notes you've written.",
-  files: "pdfs, docs, and downloads on this Mac.",
-  calendar: "your events — titles, times, and who's invited.",
-  mail: "your email — senders, subjects, and message text.",
-  granola: "your meeting notes and transcripts.",
-  oura: "your sleep, readiness, and activity data.",
-  notion: "the pages you share with the integration.",
-  linkedin: "your connections and their details, from your export.",
-  whatsapp: "your WhatsApp chats and who they're with.",
-  messenger: "your Messenger DMs.",
-  instagram: "your Instagram DMs.",
-  twitter: "your X DMs.",
-  telegram: "your Telegram chats and channels.",
-  discord: "your Discord DMs and servers.",
-  slack: "your Slack messages and channels.",
-  contacts: "names, phone numbers, and email addresses.",
-};
-const WHY_FALLBACK = "the data from this source, read on your Mac.";
+// The WHY table — one sentence per connector on what data it reads, shown as a
+// subheader under the panel title — was yeeted for every connector (owner,
+// 2026-08-25). The hint's how-to and the caveat lines already say what is read
+// where it matters, and the subheader had become a second copy that each panel
+// paid a line of height for. The privacy line (STAY, below) survives — it is a
+// promise, not a description, and nothing else on the panel makes it.
 
 // Connectors finished on the loopback connect page (paste an app password or
 // token there). They get an "open the connect page" door in their hint.
@@ -616,12 +595,6 @@ function card(src, keep) {
     const head = document.createElement('b');
     head.textContent = src.label;
     tip.appendChild(head);
-    {
-      const why = document.createElement('span');
-      why.className = 'why';
-      why.textContent = WHY[kindOf(src.id)] || WHY_FALLBACK;
-      tip.appendChild(why);
-    }
     // A broken source states the problem BEFORE the WHY and the how-to. It is
     // the only thing on this panel the owner has to act on, and burying it
     // under an explanation of what Granola is would be the wrong order.
@@ -760,10 +733,6 @@ function card(src, keep) {
     const head = document.createElement('b');
     head.textContent = src.label;
     tip.appendChild(head);
-    const why = document.createElement('span');
-    why.className = 'why';
-    why.textContent = WHY[kindOf(src.id)] || WHY_FALLBACK;
-    tip.appendChild(why);
 
     // Any bot chatter shows so the owner sees what the bridge said/asked.
     const appendTranscript = () => {

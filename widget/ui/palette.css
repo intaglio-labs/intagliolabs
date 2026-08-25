@@ -1520,9 +1520,10 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
 /* The connectors intro (its banner and promo pulse) was yeeted 2026-08-22 —
    see connections.js; the hint hand-holds below are the only guidance now. */
 /* The hand-hold: a connector's first press opens the tall version of its
-   hint — why it is worth connecting, the privacy line, then the how. */
+   hint — the privacy line, then the how. The `.why` subheader (what data the
+   source reads) was yeeted with its tables (owner, 2026-08-25); its rule left
+   with it. */
 .hint.hold { padding: 10px 12px; }
-.hint.hold .why { display: block; color: var(--fg); margin-bottom: 6px; }
 /* The connected-account line: who's linked, in cream, above the + add button. */
 .hint.hold .acct { display: block; color: var(--fg); font-size: 11px; margin: 2px 0 4px; }
 .hint.hold .add-acct { font-size: 11px; }

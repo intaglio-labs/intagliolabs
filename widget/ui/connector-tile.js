@@ -132,27 +132,8 @@ const HZ_HINTS = {
             url: 'https://www.notion.so/my-integrations', link: 'notion.so/my-integrations' },
 };
 const HZ_HINT_FOR = (id) => (id.startsWith('mail:') ? HZ_HINTS.mail : HZ_HINTS[id]);
-const HZ_WHY = {
-  imessage: "your text messages and who they're with.",
-  photos: "photo dates, places, and the people your library has tagged.",
-  notes: "the notes you've written.",
-  files: "pdfs, docs, and downloads on this Mac.",
-  calendar: "your events — titles, times, and who's invited.",
-  mail: "your email — senders, subjects, and message text.",
-  granola: "your meeting notes and transcripts.",
-  oura: "your sleep, readiness, and activity data.",
-  notion: "the pages you share with the integration.",
-  linkedin: "your connections and their details, from your export.",
-  whatsapp: "your WhatsApp chats and who they're with.",
-  messenger: "your Messenger DMs.",
-  instagram: "your Instagram DMs.",
-  twitter: "your X DMs.",
-  telegram: "your Telegram chats and channels.",
-  discord: "your Discord DMs and servers.",
-  slack: "your Slack messages and channels.",
-  contacts: "names, phone numbers, and email addresses.",
-};
-const HZ_WHY_FALLBACK = "the data from this source, read on your Mac.";
+// HZ_WHY — the one-line what-this-reads subheader — was yeeted with its twin
+// in connections.js (owner, 2026-08-25); the note there carries the reasoning.
 const HZ_STAY = "no cloud model ever sees it";
 const HZ_NOTICES = {
   down: 'connect service unreachable — status unknown',
@@ -177,10 +158,6 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
     const head = document.createElement('b');
     head.textContent = src.label;
     tip.appendChild(head);
-    const why = document.createElement('span');
-    why.className = 'why';
-    why.textContent = HZ_WHY[HZ_KIND(src.id)] || HZ_WHY_FALLBACK;
-    tip.appendChild(why);
     if (src.disabled && src.action === 'enable') {
       const setup = document.createElement('span');
       setup.className = 'setup';
@@ -222,10 +199,6 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
     const head = document.createElement('b');
     head.textContent = src.label;
     tip.appendChild(head);
-    const why = document.createElement('span');
-    why.className = 'why';
-    why.textContent = HZ_WHY[HZ_KIND(src.id)] || HZ_WHY_FALLBACK;
-    tip.appendChild(why);
 
     // WHETHER THERE IS AN EMBEDDED LOGIN AT ALL IS THE SERVER'S CALL.
     //

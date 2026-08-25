@@ -355,9 +355,42 @@ function fitPeople() {
   // shrinks back when a side panel closes.
   requestAnimationFrame(() => {
     const win = document.querySelector('.win');
-    if (win) hzPost('fitContent', { height: Math.ceil(win.getBoundingClientRect().height) + 4 }).catch(() => {});
+    if (!win) return;
+    // Measure what the content WANTS, not what the last squeeze left it: with
+    // the cap still applied, the measurement would ratify the shrunken ring
+    // and the window could never grow back when the widget is moved and the
+    // ceiling rises. Cleared and re-applied inside one rAF, so no intermediate
+    // layout is ever painted.
+    const pring = document.getElementById('pring');
+    if (pring) pring.style.removeProperty('--ring-cap');
+    hzPost('fitContent', { height: Math.ceil(win.getBoundingClientRect().height) + 4 }).catch(() => {});
+    capRing();
   });
 }
+
+// The other half of the bargain fitContent strikes: the page asks for the
+// height its content wants, and native answers with the room it actually has
+// (popupCeiling clamps every popup to the space above the widget). When the
+// answer is short, shrink the RING to fit it rather than scrolling — a ring
+// with its bottom arc cut off reads as broken, and the overlay scrollbar that
+// would say otherwise is invisible until touched. Solving the box arithmetic
+// backwards (box = 2r + 44, so r = room/2 − 22) makes the shrunken ring land
+// exactly inside the granted height in one step, no creep and no oscillation:
+// re-running with an unchanged grant computes the same cap. CSS floors the
+// result at 64px — below that the tiles would overlap, so scrolling returns
+// as the honest last resort.
+function capRing() {
+  const pring = document.getElementById('pring');
+  const win = document.querySelector('.win');
+  if (!pring || !win) return;
+  const ringH = pring.getBoundingClientRect().height;
+  if (ringH < 1) return; // review mode: no ring on screen, nothing to size
+  const chrome = win.getBoundingClientRect().height - ringH;
+  pring.style.setProperty('--ring-cap', `${Math.floor((window.innerHeight - chrome) / 2) - 22}px`);
+}
+// Native's resize lands after the fitContent round trip, as a window resize
+// here — that is the moment the granted height is knowable.
+window.addEventListener('resize', capRing);
 
 reload();
 // No hzAutoFit here — see fitPeople's header for why the two cannot both run.
