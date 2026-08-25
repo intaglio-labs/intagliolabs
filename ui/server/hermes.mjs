@@ -58,6 +58,7 @@ import { buildMap } from './people/map.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
+import { validToFor } from './memory/validity.mjs';
 import {
   ABSTAIN,
   buildAnswerPrompt,
@@ -318,6 +319,74 @@ END;
    the claims derived from them move in one SQLite transaction; separate
    tables so model output can never be mistaken for connector truth. */
 
+/* --- EPISODES: what happened together -----------------------------------------
+
+   A DERIVED index over context, decided by ARITHMETIC over (thread, ts). No
+   model picks a boundary, for the same reason no model picks a query: a
+   boundary is a decision about what evidence exists, and those flow one way.
+
+   REBUILDABLE IN FULL. Drop both tables, re-run scripts/build-episodes.mjs, and
+   the state is identical. Nothing here is evidence -- the evidence is still the
+   context row, claim_source still points at a row, and no claim ever points at
+   an episode.
+
+   WHY IT EXISTS. The distiller sent one row per call: a static 10.6 KB
+   instruction sheet with a 39-character message stapled to it, 99.4% of every
+   call spent re-reading the rules. Worse than the waste, the message arrived
+   ALONE -- "ok" with no question above it, which is how a friend asking about
+   Chick-fil-A once became "the owner plans to order Chick-fil-A". Measured on
+   the live store: adjacent messages in a thread sit 0.6 min apart at the median
+   and 336 min apart at p90, so a 60-minute gap cuts conversations where they
+   actually end, and 3,485 owner rows collapse into 756 episodes. */
+CREATE TABLE IF NOT EXISTS episode(
+  id               INTEGER PRIMARY KEY,
+  source           TEXT NOT NULL,
+  /* chat_guid, or 'solo:<context_id>' for an owner row with no chat, or
+     'note:<entity_id>'. NOT unique: one thread has many episodes over time. */
+  thread_key       TEXT NOT NULL,
+  started_at       INTEGER NOT NULL,
+  ended_at         INTEGER NOT NULL,
+  row_count        INTEGER NOT NULL,
+  owner_row_count  INTEGER NOT NULL,
+  /* The canonical person this episode is WITH, when there is exactly one and
+     it resolves. NULL for a group thread or an unrecognised handle. Written by
+     code from the contacts spine -- never by a model. */
+  counterparty_key TEXT,
+  /* The rule that made this episode, recorded so a threshold change is visible
+     rather than silent. The CHECK is the point: elsewhere "no model picks a
+     boundary" is prose, and prose is what a later session routes around. */
+  built_by         TEXT NOT NULL CHECK (built_by IN ('gap-rule')),
+  gap_ms           INTEGER NOT NULL,
+  /* sha256 over the members' content_hashes in line order: the distiller's
+     cache key and the "has this episode changed" test. */
+  member_hash      TEXT NOT NULL,
+  /* ended_at + gap_ms. An episode may only be distilled once settled_at <= now.
+     Before that a new message can still join it, changing member_hash -- and
+     claim is append-only, so a live thread would otherwise re-distil into a
+     growing pile of near-duplicates. */
+  settled_at       INTEGER NOT NULL,
+  built_at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS episode_thread ON episode(source, thread_key, started_at);
+CREATE INDEX IF NOT EXISTS episode_span   ON episode(source, ended_at, started_at);
+CREATE INDEX IF NOT EXISTS episode_person ON episode(counterparty_key, started_at)
+  WHERE counterparty_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS episode_member(
+  episode_id INTEGER NOT NULL REFERENCES episode(id) ON DELETE CASCADE,
+  context_id INTEGER NOT NULL REFERENCES context(id) ON DELETE CASCADE,
+  /* The number the model sees and the number it must cite back. Assigned by the
+     builder in (ts, id) order, stable within an episode. */
+  line_no    INTEGER NOT NULL,
+  /* 1 = the owner wrote it and it MAY be quoted. 0 = context only: it may
+     inform how the model reads, it may never become a receipt. This column is
+     the security boundary that replaces "one row per call". */
+  quotable   INTEGER NOT NULL CHECK (quotable IN (0,1)),
+  PRIMARY KEY (episode_id, line_no)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS episode_member_ctx
+  ON episode_member(context_id, episode_id);
+
 CREATE TABLE IF NOT EXISTS distill_run(
   id                 INTEGER PRIMARY KEY,
   model              TEXT NOT NULL,
@@ -330,6 +399,11 @@ CREATE TABLE IF NOT EXISTS distill_run(
      stamps every row it delivers with one value -- so a run has to record which
      ROW it stopped on, not just which instant. See memory/select.mjs. */
   through_id         INTEGER,
+  /* Which EPISODE this run distilled, by content. The hash rather than the
+     episode id, because the episode index is rebuilt and replaced -- ids move,
+     content does not, so this is what makes "already distilled" survive a
+     rebuild. NULL for a row-mode run. */
+  episode_hash       TEXT,
   rows_in            INTEGER NOT NULL DEFAULT 0,
   claims_out         INTEGER NOT NULL DEFAULT 0,
   status             TEXT NOT NULL CHECK (status IN ('running','complete','failed')),
@@ -349,6 +423,13 @@ CREATE TABLE IF NOT EXISTS claim(
                 ('fact','preference','constraint','plan','commitment')),
   text        TEXT NOT NULL,
   observed_at INTEGER,
+  /* WHEN THE CLAIM IS ABOUT, as distinct from when it was said. observed_at is
+     the row's timestamp; valid_to is the end of the day a plan or commitment
+     names, lifted from its text by a regex in memory/validity.mjs and NULL for
+     everything else. Advisory: an expired claim is never deleted, rejected or
+     hidden -- it sorts below live ones. Only the owner retires a claim, through
+     claim_decision. */
+  valid_to    INTEGER,
   p_claim     REAL,
   created_at  INTEGER NOT NULL
 );
@@ -559,6 +640,13 @@ WHERE r.scope = 'day'
 //      verb forms. It is a partial win only -- see the note in SCHEMA.
 //   5  the entity uniqueness key becomes (source, entity_id) -- ids are only
 //      unique within a source; the incident is recorded on the v5 branch.
+//   9  claim.valid_to: a plan or commitment can finally say which day it was
+//      about. 95 of 156 claims on the live store were intentions and 92 of
+//      those were over 30 days old, ageing exactly like a standing fact.
+//   8  episode + episode_member, and distill_run.episode_context recording
+//      which arm produced a run. The episode is a derived grouping of context
+//      rows; the arm column is what makes turning received-message context on
+//      revertible by one index scan instead of an argument.
 //   7  distill_run.through_id: the distiller's cursor becomes (store_changed_at,
 //      id). It was store_changed_at alone, described as strictly monotonic and
 //      measurably not -- 18,775 rows over 149 distinct values -- so a capped
@@ -567,7 +655,7 @@ WHERE r.scope = 'day'
 //   6  context_source_ts(source, ts, entity_id): per-source time-range reads
 //      (reconciliation slices, retain sweeps, the episodic shelf, the digest
 //      aggregate, the watchdog's max(ts)) all scanned without it.
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 9;
 
 // The PRAGMAs that decide whether "deleted" means deleted, and whether the
 // memory tables' declared references mean anything. Applied to every
@@ -745,6 +833,36 @@ function migrate(db) {
     );
     if (!cols.has('through_id')) db.exec('ALTER TABLE distill_run ADD COLUMN through_id INTEGER');
     version = 7;
+  }
+  if (version < 8) {
+    // episode/episode_member are created by SCHEMA above with IF NOT EXISTS.
+    // Only the distill_run column needs an ALTER, and only because a column
+    // cannot be added twice.
+    const cols = new Set(
+      db.prepare("SELECT name FROM pragma_table_info('distill_run')").all().map((c) => c.name)
+    );
+    if (!cols.has('episode_hash')) db.exec('ALTER TABLE distill_run ADD COLUMN episode_hash TEXT');
+    db.exec('CREATE INDEX IF NOT EXISTS distill_run_episode ON distill_run(episode_hash)');
+    if (!cols.has('episode_context')) {
+      db.exec(
+        "ALTER TABLE distill_run ADD COLUMN episode_context TEXT " +
+          "CHECK (episode_context IN ('off','on'))"
+      );
+    }
+    db.exec('CREATE INDEX IF NOT EXISTS distill_run_arm ON distill_run(episode_context, id)');
+    version = 8;
+  }
+  if (version < 9) {
+    const cols = new Set(
+      db.prepare("SELECT name FROM pragma_table_info('claim')").all().map((c) => c.name)
+    );
+    if (!cols.has('valid_to')) db.exec('ALTER TABLE claim ADD COLUMN valid_to INTEGER');
+    // Partial: only the rows that can expire carry a value, and those are the
+    // only rows any query on it wants.
+    db.exec(
+      'CREATE INDEX IF NOT EXISTS claim_valid_to ON claim(valid_to) WHERE valid_to IS NOT NULL'
+    );
+    version = 9;
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
@@ -1256,6 +1374,13 @@ const APPLY_RUN_FIELDS = Object.freeze([
   'through_changed_at',
   'rows_in',
   'started_at',
+  'through_id',
+  // Episode mode. episode_hash says WHICH episode by content (ids move when the
+  // index is rebuilt, content does not); episode_context records which arm
+  // produced the run, which is what makes turning received context on
+  // revertible by one index scan rather than by argument.
+  'episode_hash',
+  'episode_context',
 ]);
 // Note what is NOT here: `subject` and `observed_at`. The model emits kind,
 // text and quote; subject is closed to 'owner' by the schema, and observed_at
@@ -1270,7 +1395,10 @@ const DECISION_ACTIONS = Object.freeze(['accept', 'reject', 'retract']);
 // The review page is the v1 product surface and it has to show the receipt, so
 // this cap is about one sitting's reading, not about safety.
 const PENDING_CAP = 200;
-const APPLY_SOURCE_FIELDS = Object.freeze(['context_id', 'quote', 'content_hash']);
+// Row mode names the row; EPISODE mode names the LINE and hermes resolves the
+// row itself. Both are listed so the closed-field check accepts either shape,
+// and the staging code below refuses the combination -- see the note there.
+const APPLY_SOURCE_FIELDS = Object.freeze(['context_id', 'line', 'quote', 'content_hash']);
 const CLAIM_KINDS = Object.freeze(['fact', 'preference', 'constraint', 'plan', 'commitment']);
 const APPLY_CLAIM_CAP = 500;
 
@@ -1478,15 +1606,44 @@ export function applyMemoryBatch(db, body) {
   if (run.params === undefined || run.params === null || typeof run.params !== 'object') {
     throw badRequest('"run.params" must be an object');
   }
-  for (const key of ['from_changed_at', 'through_changed_at', 'rows_in', 'started_at']) {
+  if (run.episode_hash !== undefined && run.episode_hash !== null) {
+    if (typeof run.episode_hash !== 'string' || !/^[0-9a-f]{64}$/u.test(run.episode_hash)) {
+      throw badRequest('"run.episode_hash" must be a sha256 hex digest');
+    }
+    // The episode has to exist, or `line` resolves against nothing and every
+    // claim in the batch would be refused one by one with a confusing message.
+    const known = db
+      .prepare('SELECT 1 AS ok FROM episode WHERE member_hash = ? LIMIT 1')
+      .get(run.episode_hash);
+    if (known === undefined) throw badRequest('"run.episode_hash" names no known episode');
+  }
+  if (run.episode_context !== undefined && run.episode_context !== null) {
+    if (run.episode_context !== 'off' && run.episode_context !== 'on') {
+      throw badRequest('"run.episode_context" must be "off" or "on"');
+    }
+  }
+  for (const key of ['from_changed_at', 'through_changed_at', 'rows_in', 'started_at', 'through_id']) {
     const v = run[key];
     if (v !== undefined && v !== null && !Number.isFinite(v)) {
       throw badRequest(`"run.${key}" must be a number`);
     }
   }
   const claims = body.claims;
-  if (!Array.isArray(claims) || claims.length < 1 || claims.length > APPLY_CLAIM_CAP) {
-    throw badRequest(`"claims" must be an array of 1 to ${APPLY_CLAIM_CAP} objects`);
+  // AN EPISODE THAT YIELDED NOTHING IS A RESULT, and it has to be recordable.
+  //
+  // Row mode still requires at least one claim: a row is picked by a cursor
+  // that moves regardless, so an empty batch there is a caller mistake. An
+  // EPISODE is picked by "no complete run names this member_hash", so an
+  // episode the model read and found nothing in must still record a run --
+  // otherwise it is re-read on every pass, forever, and the pass never drains.
+  // Most conversations contain no durable claim, so this is the common case,
+  // not the edge one.
+  const episodeRun = run?.episode_hash !== undefined && run?.episode_hash !== null;
+  const floor = episodeRun ? 0 : 1;
+  if (!Array.isArray(claims) || claims.length < floor || claims.length > APPLY_CLAIM_CAP) {
+    throw badRequest(
+      `"claims" must be an array of ${floor} to ${APPLY_CLAIM_CAP} objects`
+    );
   }
 
   // Shape validation first, in full, before the transaction opens. A 400 must
@@ -1523,6 +1680,44 @@ export function applyMemoryBatch(db, body) {
         throw at(`source: unknown field ${JSON.stringify(key)}`);
       }
     }
+    // WHICH ROW A CLAIM RESTS ON IS THE SERVER'S DECISION IN EPISODE MODE.
+    //
+    // The distiller returns the LINE it quoted, not a row id, and hermes maps
+    // that line to a context_id through episode_member. The mapping is the
+    // whole security boundary: an episode deliberately shows the model text the
+    // owner did not write, and `quotable` is what separates "may inform" from
+    // "may be cited". If a caller could supply the row id directly it could
+    // pair a received row's id with an owner row's quote -- the quote check
+    // would pass, because the quote really is a span of the row it names, and
+    // the claim would carry a receipt pointing at somebody else's words.
+    //
+    // So the two shapes are exclusive, and supplying both is refused rather
+    // than resolved in some precedence order that a later reader has to know.
+    const episodeMode = run.episode_hash !== undefined && run.episode_hash !== null;
+    if (episodeMode) {
+      if (src.context_id !== undefined) {
+        throw at('source.context_id is not accepted in episode mode; send source.line');
+      }
+      if (!Number.isInteger(src.line) || src.line < 1) {
+        throw at('"source.line" must be a positive integer');
+      }
+      const member = db
+        .prepare(
+          'SELECT m.context_id, m.quotable FROM episode_member m ' +
+            'JOIN episode e ON e.id = m.episode_id ' +
+            'WHERE e.member_hash = ? AND m.line_no = ?'
+        )
+        .get(run.episode_hash, src.line);
+      if (member === undefined) throw at(`source.line ${src.line} is not in this episode`);
+      if (member.quotable !== 1) {
+        // The distiller checks this too. It is checked again here because the
+        // distiller is a client, and a client is not a boundary.
+        throw at(`source.line ${src.line} is not a line the owner wrote`);
+      }
+      src.context_id = Number(member.context_id);
+    } else if (src.line !== undefined) {
+      throw at('source.line is only accepted for an episode run');
+    }
     if (!Number.isInteger(src.context_id)) throw at('"source.context_id" must be an integer');
     if (typeof src.quote !== 'string' || src.quote.length === 0) {
       throw at('"source.quote" must be a non-empty string');
@@ -1543,12 +1738,13 @@ export function applyMemoryBatch(db, body) {
   );
   const insRun = db.prepare(
     'INSERT INTO distill_run(model, prompt_path, prompt_sha, params, from_changed_at, ' +
-      'through_changed_at, through_id, rows_in, claims_out, status, started_at, ended_at) ' +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?, ?)"
+      'through_changed_at, through_id, episode_hash, episode_context, rows_in, claims_out, ' +
+      'status, started_at, ended_at) ' +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?, ?)"
   );
   const insClaim = db.prepare(
-    'INSERT INTO claim(run_id, subject, kind, text, observed_at, p_claim, created_at) ' +
-      "VALUES (?, 'owner', ?, ?, ?, ?, ?)"
+    'INSERT INTO claim(run_id, subject, kind, text, observed_at, valid_to, p_claim, created_at) ' +
+      "VALUES (?, 'owner', ?, ?, ?, ?, ?, ?)"
   );
   const insSource = db.prepare(
     'INSERT INTO claim_source(claim_id, context_id, source, entity_id, content_hash, quote) ' +
@@ -1572,6 +1768,8 @@ export function applyMemoryBatch(db, body) {
         // predates schema v7; the reader treats null as 0 and re-offers the
         // group rather than stepping over it.
         run.through_id ?? null,
+        run.episode_hash ?? null,
+        run.episode_context ?? null,
         Math.trunc(run.rows_in ?? 0),
         0,
         Math.trunc(run.started_at ?? now),
@@ -1605,6 +1803,11 @@ export function applyMemoryBatch(db, body) {
           // than becoming "now" -- an unknown observation time is a fact
           // about the corpus, and inventing one makes it unfalsifiable.
           row.ts ?? null,
+          // The day the claim is ABOUT, computed here for the same reason
+          // observed_at is: it is a fact about the calendar, and a model-supplied
+          // expiry would let a claim decide its own standing. NULL for anything
+          // that is not a dated intention -- see memory/validity.mjs.
+          validToFor(claim, { observedAt: row.ts ?? null }),
           claim.p_claim ?? null,
           now
         ).lastInsertRowid
