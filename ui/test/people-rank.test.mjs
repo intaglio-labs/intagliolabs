@@ -11,6 +11,7 @@ import {
   scoreForNeed,
   rankForNeed,
   evidenceLine,
+  isNonPerson,
   MENTOR_NEED,
 } from '../server/people/rank.mjs';
 
@@ -157,4 +158,17 @@ test('a domain-only investor (no title) is a candidate and names its domain', ()
   const { score, reasons } = scoreForNeed(vc, INVESTOR_NEED);
   assert.ok(score > 0, 'a VC who emailed you is a candidate even with no fundraising-keyword hits');
   assert.ok(reasons.some((r) => /newstack\.vc/u.test(r)), 'the domain is named as the evidence');
+});
+
+// Apple Messages for Business: "urn:biz:<uuid>" is Apple's own statement that
+// the sender is a company. Seven of these sat in the owner's people list
+// (2026-08-25), one wearing order-confirmation chips.
+test('a Messages-for-Business urn is a non-person, by identifier or by name', () => {
+  assert.equal(isNonPerson({
+    name: 'urn:biz:b15ed000-0000-0000-0000-000000000000',
+    identifiers: ['urn:biz:b15ed000-0000-0000-0000-000000000000'],
+  }), true);
+  // The urn only ever appears at the START of a handle; a person who merely
+  // mentioned the string in some identifier-shaped way stays a person.
+  assert.equal(isNonPerson({ name: 'Pat Kim', identifiers: ['+18085550100'] }), false);
 });

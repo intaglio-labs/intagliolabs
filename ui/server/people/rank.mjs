@@ -249,10 +249,18 @@ const NEWSLETTER_PLATFORM = /@(substack\.com|beehiiv\.com|mailchimp|mailchimpapp
 // identifiers. Exported so the constellation (people/map.mjs) drops the same
 // newsletters and no-reply handles the ranker does, from one definition rather
 // than a second copy that drifts.
+// Apple Messages for Business. A sender whose iMessage handle is
+// "urn:biz:<uuid>" is a company texting through Apple's business channel —
+// the URN is APPLE'S OWN declaration that this is not a person, so no
+// name-shape heuristic is involved. Seven of these sat in the owner's list as
+// people (2026-08-25), one wearing order-confirmation topic chips.
+const BUSINESS_URN = /^urn:biz:/iu;
+
 export function isNonPerson(p) {
-  if (NON_PERSON.test(p.name)) return true;
+  if (NON_PERSON.test(p.name) || BUSINESS_URN.test(p.name)) return true;
   return (p.identifiers ?? []).some(
-    (id) => AUTOMATED_DOMAIN.test(id) || NEWSLETTER_PLATFORM.test(id) || ROLE_LOCALPART.test(id)
+    (id) => AUTOMATED_DOMAIN.test(id) || NEWSLETTER_PLATFORM.test(id)
+      || ROLE_LOCALPART.test(id) || BUSINESS_URN.test(id)
   );
 }
 
