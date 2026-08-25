@@ -172,3 +172,25 @@ test('a Messages-for-Business urn is a non-person, by identifier or by name', ()
   // mentioned the string in some identifier-shaped way stays a person.
   assert.equal(isNonPerson({ name: 'Pat Kim', identifiers: ['+18085550100'] }), false);
 });
+
+// ---- an SMS short code is not a person ----
+//
+// Every other non-person rule here is an email shape, and on a corpus that is
+// 85% iMessage they matched nothing: 152 short codes sat in the graph as people,
+// 12% of it, and their notification text became somebody's topic chips.
+test('a short numeric sender is not a person, an actual phone number is', () => {
+  const shortCode = (id) => person({ name: id, identifiers: [id] });
+  for (const id of ['550190', '55021', '55074', '4321', '729']) {
+    assert.ok(isNonPerson(shortCode(id)), `${id} is a short code`);
+  }
+  // The boundary that matters: seven digits and up can be a real local number,
+  // and anything with a country code or a letter is left alone entirely.
+  for (const id of ['+13135550002', '3135550002', '5550002', '12345678', 'sam@work.com', '99887766@lid']) {
+    assert.equal(isNonPerson(shortCode(id)), false, `${id} must survive`);
+  }
+});
+
+test('a short code is not rescued by looking chatty', () => {
+  const p = person({ name: '550190', identifiers: ['550190'], messages: 4000, reciprocity: 1 });
+  assert.ok(isNonPerson(p), 'volume is not personhood — a retailer texts a lot');
+});

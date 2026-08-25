@@ -21,7 +21,7 @@ test('clusterOf groups by LinkedIn company, then work domain, else personal', ()
 
 function seed() {
   const ctx = new DatabaseSync(':memory:');
-  ctx.exec('CREATE TABLE context (ts INTEGER, source TEXT, entity_id TEXT, text TEXT, meta TEXT)');
+  ctx.exec('CREATE TABLE context (ts INTEGER, source TEXT, speaker TEXT, entity_id TEXT, text TEXT, meta TEXT)');
   const rows = [
     // Two colleagues at acme.com -> one named cluster; recent AND two-way (the
     // owner both received from and replied to them), so they clear the
@@ -34,7 +34,7 @@ function seed() {
     // on its own), gone dormant (>1y since inbound).
     [NOW - 800 * DAY, 'imessage', 'i:1', null, JSON.stringify({ chat_handle: 'old@gmail.com', is_from_me: false })],
   ];
-  for (const r of rows) ctx.prepare('INSERT INTO context VALUES (?,?,?,?,?)').run(...r);
+  for (const r of rows) ctx.prepare('INSERT INTO context (ts, source, entity_id, text, meta) VALUES (?,?,?,?,?)').run(...r);
   return ctx;
 }
 
@@ -60,9 +60,9 @@ test('buildMap returns clusters, normalized strength, and warmth by recency', ()
 
 test('a one-way inbound mail contact (newsletter-shaped) is not a star', () => {
   const ctx = new DatabaseSync(':memory:');
-  ctx.exec('CREATE TABLE context (ts INTEGER, source TEXT, entity_id TEXT, text TEXT, meta TEXT)');
+  ctx.exec('CREATE TABLE context (ts INTEGER, source TEXT, speaker TEXT, entity_id TEXT, text TEXT, meta TEXT)');
   // Inbound only, never replied, never met, mail-only -> no relationship.
-  ctx.prepare('INSERT INTO context VALUES (?,?,?,?,?)').run(
+  ctx.prepare('INSERT INTO context (ts, source, entity_id, text, meta) VALUES (?,?,?,?,?)').run(
     NOW - 5 * DAY, 'mail', 'n:1', null, JSON.stringify({ from: ['digest@somelist.com'], to: ['me@x.com'] }));
   const map = buildMap(ctx, null, { now: NOW, owner });
   assert.equal(map.counts.people, 0);
@@ -70,9 +70,9 @@ test('a one-way inbound mail contact (newsletter-shaped) is not a star', () => {
 
 test('a WhatsApp @lid identifier is a personal contact, not a "Lid" company', () => {
   const ctx = new DatabaseSync(':memory:');
-  ctx.exec('CREATE TABLE context (ts INTEGER, source TEXT, entity_id TEXT, text TEXT, meta TEXT)');
+  ctx.exec('CREATE TABLE context (ts INTEGER, source TEXT, speaker TEXT, entity_id TEXT, text TEXT, meta TEXT)');
   // A real WhatsApp person whose phone is hidden behind a LID. Two-way.
-  ctx.prepare('INSERT INTO context VALUES (?,?,?,?,?)').run(
+  ctx.prepare('INSERT INTO context (ts, source, entity_id, text, meta) VALUES (?,?,?,?,?)').run(
     NOW - 2 * DAY, 'whatsapp', 'w:1', null, JSON.stringify({ chat_handle: '12345@lid', is_from_me: false }));
   const map = buildMap(ctx, null, { now: NOW, owner });
   assert.equal(map.counts.people, 1);

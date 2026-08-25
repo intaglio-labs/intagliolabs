@@ -55,41 +55,6 @@ body.plist .close {
 }
 body.plist .close:hover { filter: brightness(1.15); }
 
-/* Filter/sort controls — all four on ONE row, equal width, shrinking to fit. */
-.pl-controls {
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 8px;
-  padding: 0 14px 10px;
-  flex: 0 0 auto;
-}
-body.plist .pl-ctl {
-  flex: 1 1 0;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  font-size: 9px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-body.plist .pl-ctl select {
-  width: 100%;
-  min-width: 0;
-  font-family: inherit;
-  font-size: 12px;
-  text-transform: none;
-  letter-spacing: 0;
-  color: var(--fg);
-  background: rgba(10, 10, 10, 0.5);
-  border: 1px solid rgba(234, 234, 234, 0.14);
-  border-radius: 8px;
-  padding: 6px 8px;
-  cursor: pointer;
-}
-body.plist .pl-ctl select:focus { outline: none; border-color: rgba(197, 165, 109, 0.5); }
-
 /* The scrolling list. */
 .pl-list {
   flex: 1 1 auto;
@@ -107,11 +72,6 @@ body.plist .pl-row {
 }
 body.plist .pl-row:hover { background: rgba(234, 234, 234, 0.05); }
 body.plist .pl-row.open { background: rgba(234, 234, 234, 0.06); }
-/* .pl-dot (the warmth dot) lived here until 2026-08-25. It was the sky list's,
-   its only colour came from a style attribute this page's CSP threw away, and
-   the timeline that replaced that list says the same thing in text — a message
-   count and source glyphs on .pl-nameline. Nothing has rendered the element
-   since 2026-08-24; the rule was styling markup that no longer exists. */
 body.plist .pl-main { min-width: 0; flex: 1 1 auto; }
 /* Name and source chips share one line: name on the left (ellipsizes if long),
    chips flowing to its right. */
@@ -129,11 +89,6 @@ body.plist .pl-name {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-body.plist .pl-sub {
-  font-size: 11px;
-  color: var(--muted);
-  margin-top: 1px;
 }
 /* Source connections a person appears in, as small chips, beside the name. */
 body.plist .pl-src {
@@ -159,41 +114,12 @@ body.plist .pl-detail {
 }
 body.plist .pl-d { font-size: 11.5px; color: var(--secondary); word-break: break-all; }
 body.plist .pl-d.pl-dim { color: var(--muted); }
-
-.pl-foot {
-  flex: 0 0 auto;
-  text-align: center;
-  padding: 8px 0 10px;
-  font-size: 10px;
-  color: var(--muted);
-}
 body.plist .pl-empty {
   text-align: center;
   padding: 40px 0;
   font-size: 12px;
   color: var(--muted);
 }
-
-/* ---- the "by year" grouping (sort: by year) ----
-   Year sections newest first; within a year, rows sort by that YEAR's
-   engagement and carry that year's topic chips. The bar is scaled to the
-   year's own max so 2016 is legible next to 2021. Bar widths are painted
-   through the CSSOM rather than a style attribute, because this page's CSP
-   blocks style attributes (see widget/test/csp-inline-style.test.mjs).
-   (Said "people-sky.js paintBars/paintDots" until 2026-08-25. That file was
-   yeeted 2026-08-24 with the sky list, and the dots went with it — the
-   painting that survives is the bars', done from people-months.js.) */
-body.plist .pl-year {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  padding: 8px 10px 4px;
-  font-size: 12px;
-  letter-spacing: 0.08em;
-  color: var(--hazelnut-light);
-  background: rgba(16, 16, 15, 0.96);
-}
-body.plist .pl-year-n { color: var(--muted); letter-spacing: normal; }
 /* Topic chips: what you talked about that year. A quieter tint than the
    hazelnut source chips so the name line reads name -> topics at a glance. */
 body.plist .pl-chip.pl-topic {

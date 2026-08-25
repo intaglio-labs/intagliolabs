@@ -16,7 +16,8 @@
 // everyone, for a feature that no longer exists. Deleted rather than
 // repointed: no current page paints a dot, so any file it was aimed at would
 // have passed by accident and pinned nothing. The class check below is the
-// part that was always the point, and it still scans every page.
+// part that was always the point, and it still scans every page. Its .pl-dot
+// rule and six other orphaned selectors went from people-sky.css with it.
 //
 // The failure is invisible by construction. CSP writes one line to a console,
 // inside a native app, with no devtools — so nothing surfaces, nothing throws,

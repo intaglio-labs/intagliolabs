@@ -97,13 +97,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                "openExternal"],
-    // monthsView: where the popup was left (year / list-or-globe / topic),
-    // so a restart resumes on it rather than snapping back to this year.
-    // peopleMap: the ALL-YEARS source behind the constellation — every person,
-    // uncapped, with their per-year topics. monthsView: where the popup was
-    // left, so a restart resumes on it.
-    "people-months": ["close", "peopleYear", "peopleSummary", "openPeople",
-                      "monthsView", "peopleMap"],
+    // peopleFind: search across every year, server-ranked. peopleMap: the
+    // ALL-YEARS source behind the constellation — every person, uncapped, with
+    // their per-year topics. monthsView: where the popup was left, so a restart
+    // resumes on it rather than snapping back to this year.
+    "people-months": ["close", "peopleYear", "peopleFind", "peopleSummary",
+                      "openPeople", "monthsView", "peopleMap"],
     "ear": ["orbState", "voiceError", "voiceTranscript"],
   ]
 
@@ -951,6 +950,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       peopleCall("GET", yPath, json: nil) { [weak self] data in
         self?.reply(webView, id, data)
       }
+    case "peopleFind":
+      // Search across every year, ranked by hermes. The page used to filter the
+      // open year's already-loaded list, which could not reach a person in
+      // another year or past the 250 that list holds.
+      let fq = String(String(payload["q"] as? String ?? "").prefix(100))
+      let esc = fq.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+      peopleCall("GET", "people/find?q=\(esc)", json: nil) { [weak self] data in
+        self?.reply(webView, id, data)
+      }
+
     case "peopleMap":
       // Every person across every year, with per-year topics and NO row cap —
       // which is why the constellation reads from here rather than summing the

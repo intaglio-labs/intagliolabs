@@ -368,7 +368,44 @@ for svc in com.hazlie.hermes com.hazlie.connect com.hazlie.llama-server; do
   fi
 done
 
-if [ "${1:-}" = "--run" ]; then
+# RESTART THE APP TOO, for exactly the same reason as the agents above.
+#
+# The comment above is careful about three background services and then left the
+# app itself behind a flag, which is the half of the install that is actually on
+# screen. A running Hazlie holds the bundle it launched with -- its webviews keep
+# serving the HTML and JS from that copy -- so overwriting /Applications changes
+# nothing it displays. On 2026-08-25 that meant an hour of testing a panel whose
+# JS was 73 minutes old, and the symptom was the worst kind: the feature looked
+# broken rather than stale, because the OLD code was doing exactly what the old
+# code did.
+#
+# Only if it was ALREADY running. Launching an app the owner had closed is a
+# surprise an install has no business springing; --run stays the way to say
+# "start it regardless".
+if pgrep -x Hazlie >/dev/null 2>&1; then
   pkill -x Hazlie 2>/dev/null || true
+  # Wait for it to actually go. `open` on a still-dying instance reactivates the
+  # corpse instead of launching the new bundle, which would reproduce the very
+  # bug this block exists to fix.
+  for _ in $(seq 1 50); do
+    pgrep -x Hazlie >/dev/null 2>&1 || break
+    sleep 0.1
+  done
+  if pgrep -x Hazlie >/dev/null 2>&1; then
+    echo "WARNING: Hazlie would not quit; it is still showing the old bundle" >&2
+  else
+    # REAP THE CONNECTOR DAEMON, which is the app's CHILD and not a launchd
+    # agent, so killing the app orphans it (reparented to launchd) rather than
+    # stopping it. The new app then spawns a second one, and two daemons ingest
+    # into the same state.db at once -- observed on 2026-08-25, where the visible
+    # symptom was a plain "database is locked" from an unrelated query.
+    #
+    # Safe only in this window: the app is confirmed dead, so any daemon still
+    # alive is by definition an orphan, and the replacement has not started yet.
+    pkill -f 'connectors/daemon\.mjs' 2>/dev/null \
+      && echo "reaped: orphaned connector daemon" || true
+    open "$DEST" && echo "restarted: Intaglio Labs.app"
+  fi
+elif [ "${1:-}" = "--run" ]; then
   open "$DEST"
 fi

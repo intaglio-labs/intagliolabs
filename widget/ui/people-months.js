@@ -1,9 +1,11 @@
 // The timeline popup: ONE YEAR of your people, sorted by that year's
 // engagement, with the year's topic chips — month grouping was yeeted
 // (owner, 2026-08-25). Browser-style year tabs page between years; one fetch
-// per year (cached, dropped on every panel re-open via __hzRefresh); search
-// and search narrows client-side (the filter row was yeeted — owner,
-// 2026-08-25). Expanding a row shows one
+// per year (cached, dropped on every panel re-open via __hzRefresh). Search
+// is SERVER-SIDE and crosses every year (the filter row was yeeted — owner,
+// 2026-08-25): filtering the open year's loaded list could not reach a person
+// in another year, nor one past the 250 that list holds, which is most of them
+// once history lands. Expanding a row shows one
 // thing: a model-written summary fetched on demand — labeled as the
 // model's, because unlike the chips it is not counted, it is written. The
 // taxonomy and specifics lines were yeeted in turn (owner, 2026-08-25); the
@@ -55,6 +57,12 @@
   let years = []; // every year with activity, from the server
   let expanded = null; // '<personKey>|<year>' of the row showing its detail
   const cache = new Map(); // year -> payload
+  // Search state. `findRows` is null when not searching, so an empty ARRAY can
+  // honestly mean "nobody matches" rather than "no search has run".
+  let findTerm = '';
+  let findRows = null;
+  let findState = 'idle'; // 'pending' | 'done' | 'degraded'
+  let findCapped = false; // the corpus scan hit its row ceiling; counts are a floor
   const summaries = new Map(); // '<personKey>|<year>' -> {state, text?, reason?}
 
   function esc(s) {
@@ -96,15 +104,46 @@
     return `<div class="pl-detail">${bits.join('')}</div>`;
   }
 
-  function rowHtml(p) {
+  // `y` is the row's own year, which in search results is NOT the open tab --
+  // a person found in 2021 must carry 2021, or their summary and their message
+  // count would be fetched for a year they were never in.
+  // WHY THIS PERSON IS IN A SEARCH RESULT. A row that matched on what you talked
+  // about is otherwise indistinguishable from a row that matched on their name,
+  // and the corpus tier can surface somebody whose name looks nothing like the
+  // query -- without this the list reads as broken.
+  function whyHtml(p) {
+    if (!findTerm) return '';
+    if (p.matchField === 'content' && p.evidence) {
+      const { messages: m, conversations: c } = p.evidence;
+      return `<span class="pm-why">${m} msg${m === 1 ? '' : 's'} · ${c} conversation${c === 1 ? '' : 's'}</span>`;
+    }
+    const label = { identifier: 'matched their handle', topic: 'a topic of theirs',
+                    fuzzy: 'close to their name' }[p.matchField];
+    return label ? `<span class="pm-why">${label}</span>` : '';
+  }
+
+  // The line that put this person in the list. Bounded and prepared by the
+  // server (people/content.mjs); escaped here like everything else, because it
+  // is somebody's own words and must never be able to act as markup.
+  function excerptHtml(p) {
+    const e = findTerm && p.matchField === 'content' ? p.evidence?.excerpt : null;
+    if (!e || !e.text) return '';
+    return (
+      `<div class="pm-quote">` +
+        `<span class="pm-quote-who">${e.fromMe ? 'you' : 'them'}</span>` +
+        `<span class="pm-quote-text">${esc(e.text)}</span>` +
+      `</div>`
+    );
+  }
+
+  function rowHtml(p, y) {
     // Five chips is the row's budget. The all-years union can carry more than
     // that, so the slice lives here rather than in the data — clustering needs
     // every topic a person belongs to, the row only needs the loudest five.
     const chips = (p.topics || []).slice(0, 5)
       .map((t) => `<span class="pl-chip pl-topic">${esc(t.label)}</span>`)
       .join('');
-    const rowYear = scope === 'all' ? (p.latestYear || year) : year;
-    const rowKey = `${p.key}|${rowYear}`;
+    const rowKey = `${p.key}|${y}`;
     const open = expanded === rowKey;
     const srcIcons = (p.channels || [])
       .map((c) => `<span class="pm-src-ic" data-tip="${esc(CHAN_LABEL[c] || c)}">${hzGlyph(c)}</span>`)
@@ -115,20 +154,23 @@
           `<div class="pl-nameline">` +
             `<span class="pl-name">${esc(p.name)}</span>` +
             `<span class="pm-msgs">${p.messages} msg${p.messages === 1 ? '' : 's'}</span>` +
+            (y === year ? '' : `<span class="pm-yr-badge">${y}</span>`) +
+            whyHtml(p) +
             srcIcons +
           `</div>` +
+          excerptHtml(p) +
           (chips ? `<div class="pl-src pm-chip-row">${chips}</div>` : '') +
-          (open ? detailHtml(p, rowYear) : '') +
+          (open ? detailHtml(p, y) : '') +
         `</div>` +
       `</div>`
     );
   }
 
-  // Search narrows both views; a topic narrows only the list, because a
-  // constellation of one topic is a circle. Order is the server's: most
-  // engaged first.
+  // A topic narrows the list only — a constellation of one topic is a circle.
+  // NAME MATCHING IS NOT HERE ANY MORE: search is server-side and crosses every
+  // year, so filtering the loaded rows would quietly re-impose the limit that
+  // change removed. Order is the server's: most engaged first.
   function visible(data) {
-    const term = searchEl.value.trim().toLowerCase();
     let rows = data.people;
     // The topic applies to the LIST ONLY. Filtering the sky by one topic
     // leaves a constellation with a single circle in it — and when a restored
@@ -138,7 +180,6 @@
     if (topic && view === 'list') {
       rows = rows.filter((p) => (p.topics || []).some((t) => t && t.label === topic));
     }
-    if (term) rows = rows.filter((p) => (p.name || '').toLowerCase().includes(term));
     return rows;
   }
 
@@ -213,7 +254,7 @@
     // Also stand down inside a topic and in all-years: the cards are claims
     // about ONE year — that is what the server computed them over — and
     // sitting them above an all-years or topic list misattributes them.
-    const show = hs.length > 0 && !searchEl.value.trim() && view === 'list'
+    const show = hs.length > 0 && !findTerm && view === 'list'
       && !topic && scope === 'year';
     cardsEl.hidden = !show;
     cardsEl.innerHTML = show ? hs.map(cardHtml).join('') : '';
@@ -224,12 +265,15 @@
     const empty = topic
       ? `no one in ${esc(topic)} in ${where}`
       : `no one matches in ${where}`;
-    listEl.innerHTML = rows.map(rowHtml).join('') || `<div class="pl-empty">${empty}</div>`;
+    // The row's own year: in all-years each person carries the last year they
+    // were active, so their summary is fetched for a year they appear in.
+    listEl.innerHTML = rows.map((pp) => rowHtml(pp, scope === 'all' ? (pp.latestYear || year) : year)).join('')
+      || `<div class="pl-empty">${empty}</div>`;
     // The overflow line counts one year's rows, so it has no meaning under a
     // topic-filtered list, a search, or the uncapped all-years set.
-    if (scope === 'year' && !searchEl.value.trim() && !topic && data.total > data.people.length) {
+    if (scope === 'year' && !findTerm && !topic && data.total > data.people.length) {
       listEl.insertAdjacentHTML('beforeend',
-        `<div class="pl-more">+ ${data.total - data.people.length} more in ${year} — search or filter to narrow</div>`);
+        `<div class="pl-more">+ ${data.total - data.people.length} more in ${year} — search reaches all of them</div>`);
     }
   }
 
@@ -256,6 +300,18 @@
   }
 
   function render() {
+    // A SEARCH TAKES OVER, whatever was up. It is server-side and spans every
+    // year, so it belongs to neither the open tab nor the constellation — and
+    // a sky filtered to one query would be a single circle.
+    if (findTerm) {
+      listEl.hidden = false;
+      skyEl.hidden = true;
+      cardsEl.hidden = true;
+      filterEl.hidden = true;
+      renderFind();
+      saveView();
+      return;
+    }
     if (scope === 'all') {
       if (!mapData) {
         renderTabs();
@@ -281,9 +337,10 @@
     renderFilter(rows.length);
     if (view === 'sky') renderSky(data, rows);
     else renderList(data, rows);
-    searchEl.placeholder = scope === 'all'
-      ? `search every year (${rows.length} shown)…`
-      : `search ${year} (${rows.length} shown)…`;
+    // One placeholder, because search now means the same thing everywhere:
+    // every person, every year, ranked by the server. Naming the open year
+    // here would say the box only reaches it.
+    searchEl.placeholder = 'search everyone, every year…';
     renderTabs();
     saveView();
   }
@@ -297,6 +354,67 @@
     '<circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path>' +
     '<path d="M12 3a14 14 0 0 0 0 18a14 14 0 0 0 0-18"></path></svg>';
 
+  // Search results: ranked by the server across every year, each row carrying
+  // the year it was found in.
+  function renderFind() {
+    if (findRows === null) {
+      listEl.innerHTML = `<div class="pm-loading">searching…</div>`;
+      renderTabs();
+      return;
+    }
+    const head = findState === 'degraded'
+      ? `<div class="pl-more">couldn’t reach search — showing matches from the years already loaded</div>`
+      : '';
+    listEl.innerHTML = head + (findRows.map((p) => rowHtml(p, p.year)).join('')
+      || `<div class="pl-empty">no one matches “${esc(findTerm)}”</div>`);
+    searchEl.placeholder = 'search everyone, every year…';
+    renderTabs();
+  }
+
+  // Ask the server. reqId guards the race the same way the year loader does:
+  // typing fast means several in flight, and only the newest may paint.
+  let findId = 0;
+  function runFind(term) {
+    const my = ++findId;
+    findRows = null;
+    findState = 'pending';
+    render();
+    hzPost('peopleFind', { q: term })
+      .then((res) => {
+        if (my !== findId) return; // superseded by a later keystroke
+        if (!res || !Array.isArray(res.people)) throw new Error('bad find payload');
+        findRows = res.people;
+        findState = 'done';
+        findCapped = res.capped === true;
+        if (Array.isArray(res.years) && res.years.length) years = res.years;
+        render();
+      })
+      .catch(() => {
+        if (my !== findId) return;
+        // DEGRADE HONESTLY. Falling back to the cached years silently would
+        // report "no one matches" for people the server would have found, so
+        // renderFind says which answer this is.
+        const q = term.toLowerCase();
+        const seen = new Set();
+        const rows = [];
+        for (const [y, data] of cache) {
+          for (const p of data.people || []) {
+            if (seen.has(p.key)) continue;
+            if (!(p.name || '').toLowerCase().includes(q)) continue;
+            seen.add(p.key);
+            rows.push({ ...p, year: y });
+          }
+        }
+        findRows = rows;
+        findState = 'degraded';
+        findCapped = false;
+        render();
+      });
+  }
+
+  // Browser-style year tabs: oldest left, newest right, the open one active,
+  // and the globe last — all-years rather than a year, but on the same strip
+  // because it is the same surface.
   function renderTabs() {
     const ys = years.length ? years : [year];
     tabsEl.replaceChildren();
@@ -728,6 +846,13 @@
     summaries.clear();
     mapData = null;
     prefetching = false;
+    // A re-open drops the search as well as the cache: a stale query over
+    // refetched years would be answering a question nobody is asking now.
+    findId++;
+    findTerm = '';
+    findRows = null;
+    findState = 'idle';
+    searchEl.value = '';
     // Re-open where the panel was left: in all-years the year fetch is not
     // what is on screen, and loading it would flip the view back to a year.
     if (scope === 'all') render();
@@ -764,11 +889,12 @@
     const rk = row.getAttribute('data-rk');
     expanded = expanded === rk ? null : rk;
     if (expanded !== null) {
-      // The year comes off the ROW, not from the global: in all-years mode
-      // each row summarises its own last active year, and reading the global
-      // here would ask the server about a year that person may not appear in.
       const cut = rk.lastIndexOf('|');
-      requestSummary(rk.slice(0, cut), Number(rk.slice(cut + 1)));
+      const key = rk.slice(0, cut);
+      // The row's own year -- a 2021 result summarised against the open tab
+      // would be a summary of a year that person may not appear in at all.
+      const rowYear = Number(rk.slice(cut + 1)) || year;
+      requestSummary(key, rowYear);
     }
     render();
   });
@@ -780,7 +906,21 @@
   });
   syncEl.addEventListener('click', () => { hzPost('openPeople').catch(() => {}); });
   let t = null;
-  searchEl.addEventListener('input', () => { clearTimeout(t); t = setTimeout(render, 90); });
+  searchEl.addEventListener('input', () => {
+    clearTimeout(t);
+    const term = searchEl.value.trim();
+    if (term === findTerm) return;
+    findTerm = term;
+    if (!term) {
+      findId++; // any in-flight search must not paint over the year list
+      findRows = null;
+      findState = 'idle';
+      render();
+      return;
+    }
+    // Longer than the old 90ms because each keystroke is now a round trip.
+    t = setTimeout(() => runFind(term), 160);
+  });
   if (closeEl) closeEl.addEventListener('click', () => { hzSfx.close(); hzPost('close').catch(() => {}); });
 
   // Resume where the popup was left, then fetch. The restore has to land

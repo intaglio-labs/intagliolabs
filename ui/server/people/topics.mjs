@@ -23,6 +23,8 @@
 // about THAT year, so a friendship that moved from "classes" to "startups"
 // reads as the story it is.
 
+import { approximateConversationKey } from '../memory/episodes.mjs';
+
 // Curated topic signals. Word-boundary, case-insensitive, one hit counted per
 // ROW containing the signal (a message that says "coffee" five times is one
 // coffee conversation, not five).
@@ -97,42 +99,63 @@ const STOPWORDS = new Set(
     // Laughter runs in every alphabet the corpus texts in — 'kkk' is how half
     // the world laughs and reads appallingly as a chip.
     'kkk kkkk kkkkk jaja jajaja jajaj wkwk wkwkwk jeje interesting ' +
-    // THE TRANSACTIONAL REGISTER (owner, 2026-08-25). The list above is built
-    // out of how people TALK, and it worked — what it never covered is how
-    // machines write. Order confirmations, shipping notices and account mail
-    // are formal English, so none of their vocabulary was being stopped, and
-    // it chipped as though it were a topic: "order number", "future
-    // reference", "received either", "mind providing", "profile accept",
-    // "email address" all appeared on real rows.
-    //
-    // Why a stoplist and not a rarity threshold: these phrases are not common
-    // ENOUGH to be caught by document frequency. Only a slice of any corpus is
-    // automated mail, so "order number" sits well under any ratio loose enough
-    // to keep real terms like a place name or a nickname. The register is the
-    // signal, not the frequency.
-    //
-    // Applied at TOKENIZATION, so a stopped word cannot form half of a pair
-    // either — killing the word kills "order number" without needing the pair
-    // spelled out. Deliberately excludes anything the taxonomy already owns
-    // (money, housing, hiring): those chips come from TOPIC_SIGNALS, not from
-    // here, and are unaffected.
-    'order orders invoice invoices receipt receipts shipping shipment shipments tracking delivery delivered ' +
-    'refund refunds unsubscribe subscription subscribe account accounts password passwords verify verification ' +
-    'verified confirm confirmation confirmed reference references address addresses number numbers code codes ' +
-    'terms policy privacy conditions click clicking link links browser email emails reply replies ' +
-    'notification notifications alert alerts update updates updated request requests requested response ' +
-    'responses received receive receiving provide provided providing accept accepted accepting original ' +
-    'future either neither contact support customer customers kindly regards sincerely dear attached ' +
-    'attachment information details detail available required require requires ensure notice purchase ' +
-    'purchased payment payments billing billed charged transaction transactions balance statement login ' +
-    'signin signup register registration profile profiles settings preferences mailing newsletter promotional ' +
-    'offer offers discount coupon expires expired valid recipient sender inbox archive receipt'
+    // VOCABULARY ABOUT THE MEDIUM, not about the subject. A chip that says
+    // "message" or "link" describes the fact that you were texting, which is
+    // already the only reason the row exists. Filler in the same pass.
+    'message messages msg msgs link links reply replied forward forwarded chat chats texts ' +
+    'tho through again per stay ready'
   ).split(/\s+/u)
 );
 
+// A MESSAGE FROM A ROBOT IS NOBODY'S TOPIC.
+//
+// Measured on the live corpus before this existed, four of the fifteen most
+// repeated non-taxonomy chips were unsubscribe boilerplate -- "reply stop" on
+// 22 person-years, then "msg data", "reply help", "txt stop", "terms apply".
+// They are distinctive by every measure the ranker has (rare across the corpus,
+// repeated within a thread) and they describe no relationship at all.
+//
+// This drops the ROW rather than blacklisting the words, and the distinction is
+// the whole design. "order", "ride", "share" and "join" were all chipping off
+// this same boilerplate; stoplisting them would also have silenced the friend
+// who ordered dinner or shared a ride. Dropping the row silences the robot and
+// leaves every one of those words available to a person who actually said it.
+//
+// Deliberately narrow: each pattern is compliance language that a person does
+// not write to another person. `isNonPerson` already drops automated SENDERS
+// from the graph; this catches the automated MESSAGE reaching a person who
+// stays -- a real business the owner talks to, or a forwarded notification.
+const AUTOMATED_ROW = [
+  /\b(reply|txt|text)\s+(stop|help)\b/iu,
+  /\bstop\s*(=|to)\s*(end|quit|cancel|unsubscribe|opt)/iu,
+  /\b(msg|message|text)\s*(&|and)?\s*data rates?\b/iu,
+  /\bstd (msg|message|text) rates?\b/iu,
+  /\bterms\s+(and conditions\s+)?apply\b/iu,
+  /\bunsubscribe\b/iu,
+  /\bopt[-\s]?out\b/iu,
+  /\b(do not|don'?t) reply\b/iu,
+  /\bno[-\s]?reply@/iu,
+  /\b(verification|security|confirmation|access) code\b/iu,
+  /\bone[-\s]?time (code|passcode|password|pin)\b/iu,
+  // A ONE-TIME CODE, by the thing that actually distinguishes one: a code word
+  // sitting next to a run of digits. Matching "your ... code" on its own would
+  // swallow "your code review is done"; requiring the digits means a real
+  // conversation about code is only ever caught if somebody also said a number
+  // in the same breath, which is a door code and no more a topic than the rest.
+  /\b(code|otp|passcode|pin)\b[^\n]{0,24}\b\d{4,8}\b/iu,
+  /\b\d{4,8}\b[^\n]{0,24}\b(code|otp|passcode|pin)\b/iu,
+  /\bhelp for help\b/iu,
+];
+
+export function isAutomatedRow(text) {
+  const t = String(text ?? '');
+  if (t.length === 0) return false;
+  return AUTOMATED_ROW.some((re) => re.test(t));
+}
+
 // One person-year of tallies.
 function emptyDoc() {
-  return { taxonomy: {}, terms: new Map(), pairs: new Map() };
+  return { taxonomy: {}, terms: new Map(), pairs: new Map(), countedIn: new Set() };
 }
 
 // Strip the shapes that must never become a chip before tokenizing: URLs and
@@ -195,10 +218,28 @@ function rowPersonId(row, meta) {
 // grain: 'year' ('key|2021', the year view) or 'month' ('key|2021-03', for a
 // months-of-one-year view where a year would blur the story).
 export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucketBy = 'year' } = {}) {
+  // Cheap and honest: ask the schema rather than catching a query failure,
+  // which would also swallow a real error in the join.
+  const hasEpisodes =
+    contextDb
+      .prepare("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name='episode_member'")
+      .get().n === 1;
   const rows = contextDb
     .prepare(
-      "SELECT source, ts, text, meta FROM context " +
-        "WHERE source IN ('imessage','whatsapp','mail','linkedin') AND text IS NOT NULL"
+      hasEpisodes
+        ? // The episode id rides along so a topic is counted once per
+          // CONVERSATION. LEFT JOIN, because mail and linkedin have no thread to
+          // cut and a row the index has not reached yet must still be counted.
+          'SELECT c.source, c.ts, c.text, c.meta, m.episode_id ' +
+            'FROM context c LEFT JOIN episode_member m ON m.context_id = c.id ' +
+            "WHERE c.source IN ('imessage','whatsapp','mail','linkedin') AND c.text IS NOT NULL"
+        : // NO INDEX, NO DEPENDENCY. The episode table is derived and rebuilt on
+          // a timer, so it can legitimately be absent -- a fresh install before
+          // the first build, or any caller holding a plain context database.
+          // Chips are worth having either way, so this falls back to counting
+          // per message: the old weighting, which is worse but not wrong.
+          "SELECT source, ts, text, meta, NULL AS episode_id FROM context " +
+            "WHERE source IN ('imessage','whatsapp','mail','linkedin') AND text IS NOT NULL"
     )
     .all();
   const docs = new Map();
@@ -210,6 +251,9 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
     } catch {
       meta = {};
     }
+    // Compliance boilerplate is not a conversation. Dropped before the person
+    // is even resolved, so it costs nothing on the rows it does not match.
+    if (isAutomatedRow(row.text)) continue;
     const id = rowPersonId(row, meta);
     if (id === null) continue;
     const key = idToKey.get(id);
@@ -227,8 +271,31 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
       doc = emptyDoc();
       docs.set(docKey, doc);
     }
+    // ONE HIT PER CONVERSATION, not per message.
+    //
+    // Counting messages let a single thread decide the chips: the largest
+    // episode on this corpus is 243 messages, so an hour spent on one subject
+    // counted 243 times against a whole year of everything else. Measured
+    // across the corpus the two weightings rank differently -- "hiring" leaves
+    // the top eight and "fundraising" enters, because hiring was concentrated
+    // in few conversations while fundraising was spread across many. Spread is
+    // what a topic chip is trying to say.
+    //
+    // A row with no episode keys on an APPROXIMATION of its conversation, not on
+    // itself. 19% of the episodic corpus has no episode -- makeEpisode drops any
+    // run the owner never spoke in, and mail has no thread at all -- and keying
+    // those on the row turned each one back into its own conversation, quietly
+    // restoring the message-counting this whole block exists to replace.
+    const convo =
+      row.episode_id === null || row.episode_id === undefined
+        ? approximateConversationKey(row, meta, Number(row.ts))
+        : `ep:${row.episode_id}`;
     for (const name of topicNames) {
-      if (TOPIC_SIGNALS[name].test(row.text)) doc.taxonomy[name] = (doc.taxonomy[name] ?? 0) + 1;
+      if (!TOPIC_SIGNALS[name].test(row.text)) continue;
+      const seen = `${convo}|${name}`;
+      if (doc.countedIn.has(seen)) continue;
+      doc.countedIn.add(seen);
+      doc.taxonomy[name] = (doc.taxonomy[name] ?? 0) + 1;
     }
     for (const clause of clauseTokens(row.text)) {
       for (let i = 0; i < clause.length; i++) {
@@ -269,6 +336,26 @@ export function nameTokenSet(names) {
 const PAIR_STOP = new Set([
   'fair enough', 'makes sense', 'take care', 'thank you', 'thanks man',
   'sounds like', 'kind regards', 'talk soon', 'miss you', 'appreciate it',
+  // FORMAL-MAIL BOILERPLATE, as PHRASES rather than words (owner, 2026-08-25).
+  // These chipped on real rows: "order number", "future reference", "received
+  // either", "mind providing", "profile accept", "email address".
+  //
+  // isAutomatedRow above is the primary defence and catches the bulk of it, but
+  // it is aimed at SMS compliance text and one-time codes — an order
+  // confirmation or a LinkedIn notification is ordinary formal English and
+  // passes it. A first attempt stopped the transactional VOCABULARY instead
+  // (order, address, invoice, reference…) and was wrong for exactly the reason
+  // isAutomatedRow's own comment gives: it would have silenced the friend who
+  // ordered dinner. The phrase is the boilerplate; the words are not.
+  //
+  // Precision over recall on purpose. This cannot catch a phrase nobody has
+  // seen yet, and that is the correct trade against deleting real vocabulary
+  // from every conversation in the corpus.
+  'order number', 'future reference', 'email address', 'mailing address',
+  'contact information', 'customer service', 'privacy policy', 'terms conditions',
+  'confirmation number', 'tracking number', 'reference number', 'account number',
+  'received either', 'mind providing', 'profile accept', 'view profile',
+  'click here', 'please note', 'best regards', 'original trade',
 ]);
 
 // The candidate list under both chip backfill and the specifics line.

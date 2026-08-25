@@ -67,3 +67,19 @@ test('the count reaches run_log through recordRun', (t) => {
   assert.equal(row.connector, 'files');
   assert.equal(row.ingested, 2000);
 });
+
+// THE FIELD THAT DOES NOT EXIST, pinned.
+//
+// The history loop in daemon.mjs read `back.inserted` off a runCounts() result.
+// runCounts NORMALISES {inserted|ingested} into `ingested` and never emits
+// `inserted`, so that read was undefined on every pass: `gained` accumulated
+// NaN (logged as null, which is how it survived) and the all-zero early exit
+// could not fire through its first condition. Nothing failed loudly, which is
+// exactly why this assertion is worth having.
+test('a normalised result has no `inserted` field to read back', () => {
+  const out = runCounts({ inserted: 5, updated: 1, unchanged: 2 });
+  assert.equal(out.inserted, undefined, 'reading this back is always a bug');
+  assert.deepEqual(Object.keys(out).sort(), ['deleted', 'ingested', 'unchanged', 'updated']);
+  // The shape the daemon's arithmetic and its early exit actually depend on.
+  assert.equal(Number.isFinite(out.ingested + out.updated), true);
+});
