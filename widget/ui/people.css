@@ -237,6 +237,16 @@ body.people .people-review {
   min-width: 0;
   flex: 1 1 auto;
 }
+/* THE GHOST COLUMN. people.js swaps the setup column and review mode by
+   toggling the `hidden` attribute — but `hidden` is only a UA-stylesheet
+   `display: none`, and the authored `display: flex` on both columns above
+   outranks it. The "hidden" review pane stayed a living flex: 1 sibling,
+   invisible and empty, quietly taking its share of the row — which is why the
+   ring, the controls and the specs link all sat left of the popup's center.
+   In review mode the same bug ran the other way: the setup column kept
+   rendering underneath. `hidden` must always win over our own display. */
+body.people .people-main[hidden],
+body.people .people-review[hidden] { display: none; }
 body.people .rv-head {
   display: flex;
   align-items: baseline;
