@@ -156,24 +156,50 @@ export function selectionSql(excludedGuidCount = 0) {
     }
     return `(source = '${source}' AND ${predicate})`;
   }).join(' OR ');
+  // KEYSET PAGINATION over (store_changed_at, id), which is the pair this
+  // already sorts by. It used to be `store_changed_at > ?` alone, on the stated
+  // grounds that hermes assigns store_changed_at "strictly monotonically". IT
+  // DOES NOT, and the live store is not close: 18,775 rows across 149 distinct
+  // values, because a connector pass stamps every row it delivers with one
+  // timestamp. Ties of ~100-200 rows are ordinary.
+  //
+  // What that cost: a capped pass took `limit` rows out of a tie group, the
+  // caller advanced the cursor to that group's shared value, and the next pass
+  // asked for a value strictly greater -- stepping over every remaining row in
+  // the group, permanently. Measured on the live store before this fix: 37 runs
+  // sent 1,480 rows while the watermark walked over 2,890 eligible ones. 1,410
+  // rows, 49% of the corpus it had covered, were never read and never would be.
+  //
+  // The pair is unique (id is the primary key), so `>` on it is exact: no rows
+  // skipped, none repeated, and no rewind-and-refetch dance like the one
+  // connectors/sources/whatsapp.mjs needs for a cursor it does not control.
+  // There the tie is in Apple's own column; here the sort key includes our own
+  // primary key, so the ordering is total and the cursor can be exact.
   return (
     'SELECT id, ts, source, speaker, text, meta, entity_id, content_hash, store_changed_at ' +
     'FROM context ' +
-    `WHERE store_changed_at > ? AND ts >= ? AND (${branches}) ` +
+    'WHERE (store_changed_at > ? OR (store_changed_at = ? AND id > ?)) ' +
+    `AND ts >= ? AND (${branches}) ` +
     'ORDER BY store_changed_at, id LIMIT ?'
   );
 }
 
 // Rows the distiller may read, oldest cursor position first.
 //
-// `sinceChangedAt` is the cursor, and it is compared with `>` against
-// store_changed_at, which hermes assigns strictly monotonically. That pairing
-// is what makes a re-run idempotent and what stops an in-place edit from
-// sorting below a cursor that already passed it.
+// THE CURSOR IS A PAIR: (sinceChangedAt, sinceId). store_changed_at alone is not
+// unique -- see selectionSql -- so a cursor made of it alone either skips the
+// rest of a tie group or re-reads it forever. The id breaks every tie exactly.
+//
+// sinceId defaults to 0, which is below every rowid, so a caller that knows only
+// a timestamp gets the WHOLE group at that timestamp re-offered rather than
+// silently dropped. That is the safe direction: re-reading a row costs a cache
+// hit (cache.mjs keys on prompt+model+content), and re-proposing a claim the
+// owner already decided is handled downstream.
 export function selectRows(
   db,
   {
     sinceChangedAt = 0,
+    sinceId = 0,
     fromDays = DEFAULT_FROM_DAYS,
     limit = DEFAULT_ROW_CAP,
     now = Date.now(),
@@ -185,6 +211,9 @@ export function selectRows(
   if (!Number.isFinite(sinceChangedAt) || sinceChangedAt < 0) {
     throw new Error('sinceChangedAt must be a non-negative number');
   }
+  if (!Number.isInteger(sinceId) || sinceId < 0) {
+    throw new Error('sinceId must be a non-negative integer');
+  }
   if (!Number.isFinite(fromDays) || fromDays <= 0) throw new Error('fromDays must be positive');
   if (!Number.isInteger(limit) || limit < 1) throw new Error('limit must be a positive integer');
   const guids = excludeChatGuids ?? pinnedThreadGuids();
@@ -193,7 +222,7 @@ export function selectRows(
   }
   const rows = db
     .prepare(selectionSql(guids.length))
-    .all(sinceChangedAt, now - fromDays * DAY_MS, ...guids, limit);
+    .all(sinceChangedAt, sinceChangedAt, sinceId, now - fromDays * DAY_MS, ...guids, limit);
   // Belt and braces. If this ever fires, the SQL and the allowlist have
   // diverged, and the right outcome is a dead run rather than a quiet one.
   for (const row of rows) {

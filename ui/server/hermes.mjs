@@ -326,6 +326,10 @@ CREATE TABLE IF NOT EXISTS distill_run(
   params             TEXT NOT NULL,   /* canonical JSON */
   from_changed_at    INTEGER,
   through_changed_at INTEGER,
+  /* The cursor is a PAIR. store_changed_at is not unique -- a connector pass
+     stamps every row it delivers with one value -- so a run has to record which
+     ROW it stopped on, not just which instant. See memory/select.mjs. */
+  through_id         INTEGER,
   rows_in            INTEGER NOT NULL DEFAULT 0,
   claims_out         INTEGER NOT NULL DEFAULT 0,
   status             TEXT NOT NULL CHECK (status IN ('running','complete','failed')),
@@ -555,10 +559,15 @@ WHERE r.scope = 'day'
 //      verb forms. It is a partial win only -- see the note in SCHEMA.
 //   5  the entity uniqueness key becomes (source, entity_id) -- ids are only
 //      unique within a source; the incident is recorded on the v5 branch.
+//   7  distill_run.through_id: the distiller's cursor becomes (store_changed_at,
+//      id). It was store_changed_at alone, described as strictly monotonic and
+//      measurably not -- 18,775 rows over 149 distinct values -- so a capped
+//      pass advanced past the rest of its tie group and 1,410 eligible rows,
+//      49% of what the watermark had covered, were never read.
 //   6  context_source_ts(source, ts, entity_id): per-source time-range reads
 //      (reconciliation slices, retain sweeps, the episodic shelf, the digest
 //      aggregate, the watchdog's max(ts)) all scanned without it.
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 // The PRAGMAs that decide whether "deleted" means deleted, and whether the
 // memory tables' declared references mean anything. Applied to every
@@ -724,6 +733,18 @@ function migrate(db) {
     // open of exactly the databases these migrations exist to upgrade.
     db.exec('CREATE INDEX IF NOT EXISTS context_source_ts ON context(source, ts, entity_id)');
     version = 6;
+  }
+  if (version < 7) {
+    // The distiller's cursor gains its tie-breaker. Existing rows keep
+    // through_id NULL, and distill-once reads NULL as 0 -- so the first pass
+    // after this upgrade re-offers the whole tie group the old cursor stopped
+    // inside, which is exactly the group it used to skip. Rows already
+    // distilled come back as cache hits rather than model calls.
+    const cols = new Set(
+      db.prepare("SELECT name FROM pragma_table_info('distill_run')").all().map((c) => c.name)
+    );
+    if (!cols.has('through_id')) db.exec('ALTER TABLE distill_run ADD COLUMN through_id INTEGER');
+    version = 7;
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
@@ -1522,8 +1543,8 @@ export function applyMemoryBatch(db, body) {
   );
   const insRun = db.prepare(
     'INSERT INTO distill_run(model, prompt_path, prompt_sha, params, from_changed_at, ' +
-      'through_changed_at, rows_in, claims_out, status, started_at, ended_at) ' +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?, ?)"
+      'through_changed_at, through_id, rows_in, claims_out, status, started_at, ended_at) ' +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?, ?)"
   );
   const insClaim = db.prepare(
     'INSERT INTO claim(run_id, subject, kind, text, observed_at, p_claim, created_at) ' +
@@ -1547,6 +1568,10 @@ export function applyMemoryBatch(db, body) {
         JSON.stringify(run.params),
         run.from_changed_at ?? null,
         run.through_changed_at ?? null,
+        // The tie-breaker half of the cursor. Null only from a caller that
+        // predates schema v7; the reader treats null as 0 and re-offers the
+        // group rather than stepping over it.
+        run.through_id ?? null,
         Math.trunc(run.rows_in ?? 0),
         0,
         Math.trunc(run.started_at ?? now),

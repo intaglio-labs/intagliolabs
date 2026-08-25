@@ -206,9 +206,23 @@ test('the window and the cursor both bound the run', () => {
 
   // Resuming past the cursor yields nothing: the whole point of a run being
   // re-runnable without re-proposing everything it already proposed.
+  //
+  // The cursor is the PAIR (store_changed_at, id). Both rows above arrive in one
+  // insertRows call and therefore share a store_changed_at, so the timestamp
+  // alone does not identify a position within them -- passing it without the id
+  // correctly re-offers the whole group. That is the fix, not a regression: see
+  // select-tie.test.mjs.
   const all = selectRows(d, { now: NOW, fromDays: 90 });
-  const last = Number(all[all.length - 1].store_changed_at);
-  assert.equal(selectRows(d, { now: NOW, fromDays: 90, sinceChangedAt: last }).length, 0);
+  const last = all[all.length - 1];
+  assert.equal(
+    selectRows(d, {
+      now: NOW,
+      fromDays: 90,
+      sinceChangedAt: Number(last.store_changed_at),
+      sinceId: Number(last.id),
+    }).length,
+    0
+  );
   d.close();
 });
 
@@ -218,14 +232,17 @@ test('an edited row comes back for redistillation, in cursor order', () => {
     { ts: NOW, source: 'imessage', entity_id: 'imessage:a', text: 'first', meta: { is_from_me: true } },
     { ts: NOW, source: 'imessage', entity_id: 'imessage:b', text: 'second', meta: { is_from_me: true } },
   ]);
-  const cursor = Number(selectRows(d, { now: NOW }).pop().store_changed_at);
-  assert.equal(selectRows(d, { now: NOW, sinceChangedAt: cursor }).length, 0);
+  // The pair, not the timestamp alone -- rows inserted together share a stamp.
+  const tail = selectRows(d, { now: NOW }).pop();
+  const cursor = Number(tail.store_changed_at);
+  const cursorId = Number(tail.id);
+  assert.equal(selectRows(d, { now: NOW, sinceChangedAt: cursor, sinceId: cursorId }).length, 0);
 
   // The FIRST row is edited -- the lower id, the one a millisecond tie would
   // have stranded below the cursor.
   add(d, [{ ts: NOW, source: 'imessage', entity_id: 'imessage:a', text: 'first, edited', meta: { is_from_me: true } }]);
   assert.deepEqual(
-    selectRows(d, { now: NOW, sinceChangedAt: cursor }).map((r) => r.entity_id),
+    selectRows(d, { now: NOW, sinceChangedAt: cursor, sinceId: cursorId }).map((r) => r.entity_id),
     ['imessage:a']
   );
   d.close();
@@ -238,7 +255,9 @@ test('the query is built from the allowlist alone', () => {
     assert.ok(!sql.includes(`'${source}'`), `${source} must not appear in the selection SQL`);
   }
   // Values are bound, never interpolated.
-  assert.equal((sql.match(/\?/gu) ?? []).length, 3);
+  // 5 now, not 3: the cursor became a pair, so the WHERE binds
+  // (store_changed_at, store_changed_at, id) ahead of ts and LIMIT.
+  assert.equal((sql.match(/\?/gu) ?? []).length, 5);
 });
 
 test('bad bounds are refused rather than silently widened', () => {
