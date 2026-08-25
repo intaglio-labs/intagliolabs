@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import { openDb, insertRows } from '../server/hermes.mjs';
-import { summarizeYear, sampleRows, MIN_ROWS } from '../server/people/summary.mjs';
+import { summarizeYear, sampleRows, MIN_ROWS, openSummariesDb } from '../server/people/summary.mjs';
 
 const NOW = new Date(2027, 0, 1).getTime();
 
@@ -37,6 +37,7 @@ test('thin input never reaches the model — the guard answers instead', async (
     owner: { addresses: new Set(), names: [] },
     llama: LLAMA,
     fetchFn: async () => { called += 1; throw new Error('must not be called'); },
+    summariesDb: openSummariesDb(':memory:'),
   });
   assert.equal(called, 0, 'no model call on thin input');
   assert.equal(out.text, null);
@@ -59,6 +60,9 @@ test('a real sample produces a summary, and the request stays on the given base'
       url = u; body = JSON.parse(opts.body);
       return { ok: true, json: async () => ({ choices: [{ message: { content: 'You two mostly planned a surf trip.' } }] }) };
     },
+    // ALWAYS injected: without it this test once wrote its fixture into the
+    // owner's real summaries.db and then failed against its own stale row.
+    summariesDb: openSummariesDb(':memory:'),
   });
   assert.equal(url, 'http://127.0.0.1:51780/v1/chat/completions');
   assert.equal(out.text, 'You two mostly planned a surf trip.');
@@ -81,7 +85,7 @@ test('a persisted summary is reused, and regenerates only after real drift', asy
   insertRows(ctx, Array.from({ length: 30 }, (_, i) =>
     msgRow(y0 + i * 86_400_000, `long enough message number ${i} about the surf trip planning`, i % 2 === 0)));
   const spine = spineDb([[HANDLE, 'Sam Lee']]);
-  const { openSummariesDb, summaryStillValid } = await import('../server/people/summary.mjs');
+  const { summaryStillValid } = await import('../server/people/summary.mjs');
   const sdb = openSummariesDb(':memory:');
   let calls = 0;
   const fetchFn = async () => {

@@ -20,9 +20,7 @@
   const filtEl = document.getElementById('filt');
   const filtersEl = document.getElementById('filters');
   const sortEl = document.getElementById('sort');
-  const companyEl = document.getElementById('fcompany');
   const channelEl = document.getElementById('fchannel');
-  const statusEl = document.getElementById('fstatus');
   const resetEl = document.getElementById('freset');
   if (!listEl) return;
 
@@ -98,47 +96,20 @@
   const SORTS = {
     engagement: (a, b) => b.engagement - a.engagement,
     messages: (a, b) => (b.messages || 0) - (a.messages || 0),
-    met: (a, b) => (b.met || 0) - (a.met || 0) || b.engagement - a.engagement,
     name: (a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()),
   };
 
   function passesFilters(p, term) {
     if (term && !(p.name || '').toLowerCase().includes(term)) return false;
-    if (companyEl.value && p.cluster !== companyEl.value) return false;
     if (channelEl.value && !(p.channels || []).includes(channelEl.value)) return false;
-    if (statusEl.value === 'active' && !(p.recencyDays != null && p.recencyDays < 90)) return false;
-    if (statusEl.value === 'dormant' && !(p.recencyDays != null && p.recencyDays >= 365)) return false;
     return true;
-  }
-
-  // Company dropdown options from every cached year, so switching tabs keeps
-  // the selection meaningful. Rebuilt after each load; selection preserved.
-  function fillCompanies() {
-    const sizes = new Map();
-    const labels = new Map();
-    for (const data of cache.values()) {
-      for (const p of data.people) {
-        if (!p.cluster || p.cluster === 'personal') continue;
-        sizes.set(p.cluster, (sizes.get(p.cluster) || 0) + 1);
-        if (!labels.has(p.cluster)) labels.set(p.cluster, p.clusterLabel || p.cluster);
-      }
-    }
-    const keep = companyEl.value;
-    const opts = ['<option value="">all</option>'];
-    for (const [key] of [...sizes.entries()].sort((a, b) => b[1] - a[1])) {
-      opts.push(`<option value="${esc(key)}">${esc(labels.get(key))}</option>`);
-    }
-    opts.push('<option value="personal">personal</option>');
-    companyEl.innerHTML = opts.join('');
-    companyEl.value = keep;
-    if (companyEl.value !== keep) companyEl.value = '';
   }
 
   function render() {
     const data = cache.get(year);
     if (!data) return;
     const term = searchEl.value.trim().toLowerCase();
-    const filtering = Boolean(term || companyEl.value || channelEl.value || statusEl.value);
+    const filtering = Boolean(term || channelEl.value);
     const rows = data.people.filter((p) => passesFilters(p, term));
     rows.sort(SORTS[sortEl.value] || SORTS.engagement);
     listEl.innerHTML = rows.map(rowHtml).join('') || `<div class="pl-empty">no one matches in ${year}</div>`;
@@ -177,7 +148,6 @@
     if (!res || !Array.isArray(res.people)) throw new Error('bad year payload');
     cache.set(year, res);
     if (Array.isArray(res.years) && res.years.length) years = res.years;
-    fillCompanies();
     render();
     prefetchRest();
   }
@@ -240,12 +210,10 @@
     filtersEl.hidden = !filtersEl.hidden;
     filtEl.classList.toggle('on', !filtersEl.hidden);
   });
-  for (const el of [sortEl, companyEl, channelEl, statusEl]) el.addEventListener('change', render);
+  for (const el of [sortEl, channelEl]) el.addEventListener('change', render);
   resetEl.addEventListener('click', () => {
     sortEl.value = 'engagement';
-    companyEl.value = '';
     channelEl.value = '';
-    statusEl.value = '';
     render();
   });
   let t = null;

@@ -22,7 +22,6 @@ protocol BridgeDelegate: AnyObject {
   func openConnections()
   func openPeople()
   func openMonths()
-  func openMemory() -> Bool
   func openConnectRoot() -> Bool
   func closeWindow(of webView: WKWebView)
   func dragWindow(of webView: WKWebView)
@@ -74,7 +73,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                "openMonths", "voiceArm", "widgetBounds"],
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
-                    "close", "connectorsIntroSeen", "openMemory", "openConnectLink", "openExternal",
+                    "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
                     "status", "setMotion", "setScale", "setSounds", "openOnboarding",
                     "markHandheld",
                     // Same setup controls, reachable from the gear after the
@@ -867,26 +866,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "openConnectLink":
       // The cloud-connector setup door: the connect page's ROOT, in the
       // browser — a full setup flow (tokens, app passwords) that wants a real
-      // browser. The memory review SUB-page no longer routes through here; it
-      // has its own side panel (openMemory below).
+      // browser.
       if delegate?.openConnectRoot() == true {
         reply(webView, id, ["state": "ok"])
       } else {
         reply(webView, id, ["state": "error", "error": "no connect link yet"])
       }
-    case "openMemory":
-      // The memory review queue, opened as a side PANEL beside the widget
-      // (owner, 2026-08-25) — not in the browser. Native owns the tokened
-      // URL; the delegate reads and validates it per open. false = no valid
-      // link yet, and the page's button says so instead of doing nothing.
-      if delegate?.openMemory() == true {
-        reply(webView, id, ["state": "ok"])
-      } else {
-        reply(webView, id, ["state": "error", "error": "no connect link yet"])
-      }
-    // People identity-review (users-b8's Stage 3). Thin hermes passthroughs —
-    // same bearer + identity gate as ask(); the body shape belongs to the
-    // people server, so we reply whatever it returns verbatim.
     case "initSearch":
       let days = (payload["days"] as? Int) ?? Int(payload["days"] as? Double ?? 365)
       peopleCall("POST", "people/init", json: ["days": days]) { [weak self] data in

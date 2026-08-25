@@ -166,32 +166,6 @@ func makeEarWebView(bridge: Bridge) -> WKWebView {
   return web
 }
 
-// The ONE remote-ish webview the widget shows: the connect server's review
-// queue on loopback. Deliberately BRIDGE-LESS — content served by a server,
-// however local, gets no native message handlers. Navigation is pinned to
-// loopback http by LoopbackOnlyNavigation: an external href on the page, or
-// a redirect, is cancelled rather than followed, which keeps the
-// no-external-navigation posture every other webview has.
-final class LoopbackOnlyNavigation: NSObject, WKNavigationDelegate {
-  func webView(
-    _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-    decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
-  ) {
-    let url = navigationAction.request.url
-    let ok = url?.scheme == "http" && (url?.host == "localhost" || url?.host == "127.0.0.1")
-    decisionHandler(ok ? .allow : .cancel)
-  }
-}
-
-func makeLoopbackWebView(delegate: LoopbackOnlyNavigation) -> WKWebView {
-  let config = WKWebViewConfiguration()
-  config.websiteDataStore = .nonPersistent()
-  let web = ClickThroughWebView(frame: .zero, configuration: config)
-  web.navigationDelegate = delegate
-  web.setValue(false, forKey: "drawsBackground")
-  return web
-}
-
 func makeWebView(bridge: Bridge, page: String) -> WKWebView {
   let config = WKWebViewConfiguration()
   config.websiteDataStore = .nonPersistent()

@@ -199,21 +199,15 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
     years: [...yearsSet].sort((a, b) => a - b),
     total: entries.length,
     people: entries.slice(0, cap).map((e) => {
-      const c = clusterOf(e.p);
-      const sinceSeen = Number.isFinite(e.p.lastSeen)
-        ? Math.max(0, Math.floor((now - e.p.lastSeen) / DAY))
-        : null;
       const doc = topics.docs.get(`${e.p.key}|${year}`);
+      // The row carries only what the page still shows: the company, status
+      // and in-person filters were yeeted (owner, 2026-08-25) and their
+      // fields left with them.
       return {
         key: e.p.key,
         name: e.p.name,
-        company: e.p.linkedin?.company ?? null,
-        cluster: c.key,
-        clusterLabel: c.label,
         channels: e.p.channels ?? [],
-        recencyDays: e.p.dormancyDays != null ? e.p.dormancyDays : sinceSeen,
         messages: e.messages,
-        met: e.met,
         engagement: e.engagement,
         // Five chips, not three (owner, 2026-08-25) — and no separate
         // taxonomy or specifics fields: the chips ARE the topic surface, and
