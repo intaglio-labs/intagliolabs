@@ -303,3 +303,26 @@ test('a claim that names somebody instead of the owner is dropped', () => {
   const owned = validateRowClaims(ROW, [claim()]);
   assert.equal(owned.kept.length, 1, 'the same claim, correctly subjected, survives');
 });
+
+test('a name sourced from the author label, not the row text, drops the claim', () => {
+  const row = { id: 7, content_hash: 'h', speaker: 'Casey Lang', text: "he's building the app with me" };
+  const leak = {
+    kind: 'fact',
+    text: 'The owner is building the app with Casey.',
+    quote: "he's building the app with me",
+    p: 0.8,
+  };
+  const clean = {
+    kind: 'fact',
+    text: 'The owner is building an app with someone.',
+    quote: "he's building the app with me",
+    p: 0.8,
+  };
+  const out = validateRowClaims(row, [leak, clean]);
+  assert.equal(out.kept.length, 1);
+  assert.match(out.dropped[0].reason, /author label/u);
+  // The same name IN the row text is legitimate — only label-sourced names drop.
+  const named = { ...row, text: "casey and i are building the app together" };
+  const ok = validateRowClaims(named, [{ ...leak, quote: 'casey and i are building the app' }]);
+  assert.equal(ok.kept.length, 1);
+});
