@@ -54,9 +54,13 @@ import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch } from './people/search.mjs';
 import { loadOwner } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
-import { buildMap, buildYear } from './people/map.mjs';
+import { buildMap, buildYear, buildSearchYears } from './people/map.mjs';
 import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
+import { rankAcrossYears } from './people/find.mjs';
+import { contentMatches } from './people/content.mjs';
+import { rebuildEpisodes } from './memory/episodeStore.mjs';
+import { loadSpine } from './people/graph.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
 import { validToFor } from './memory/validity.mjs';
@@ -1364,6 +1368,7 @@ const RETAIN_FIELDS = Object.freeze(['source', 'keep_days']);
 const PURGE_FIELDS = Object.freeze(['source']);
 const DELETE_ENTITIES_FIELDS = Object.freeze(['source', 'entity_ids']);
 const MAINTAIN_FIELDS = Object.freeze([]);
+const EPISODE_REBUILD_FIELDS = Object.freeze([]);
 const ENTITIES_PARAMS = Object.freeze(['source', 'from_ts', 'to_ts']);
 const APPLY_FIELDS = Object.freeze(['run', 'claims']);
 const APPLY_RUN_FIELDS = Object.freeze([
@@ -2108,6 +2113,39 @@ async function handleAdmin(db, req, res, cors, url, channel) {
       return;
     }
 
+    // REBUILDING THE EPISODE INDEX, on the database's only writer.
+    //
+    // This used to be `node ui/scripts/build-episodes.mjs` spawned by the widget
+    // every distiller cycle, which was wrong twice over. It opened context.db
+    // read-write from a SECOND process while hermes was serving and ingesting
+    // against it — and the corpus runs journal_mode=DELETE, where a writer takes
+    // a lock that excludes every reader for the length of the rebuild — so it
+    // broke the sole-writer rule that connectors/AGENTS.md and ui/AGENTS.md both
+    // state, and could stall hermes for the full 5s busy_timeout. The widget also
+    // waited on it synchronously on the main run loop, so the UI froze for the
+    // duration: ~110ms when that comment was written at 12,782 rows, 1,414ms at
+    // 113,371, and growing with every history slice.
+    //
+    // Here it is just a function call on the handle that already owns the write
+    // lock, so there is no contention to lose to and nothing to wait on.
+    // ui/scripts/build-episodes.mjs stays as a CLI for a stopped hermes; it is
+    // simply off the running app's path.
+    if (url.pathname === '/admin/episodes/rebuild') {
+      const body = await readJson(req);
+      assertClosedFields(body, EPISODE_REBUILD_FIELDS);
+      const out = withPeopleDbs(db, (state) => rebuildEpisodes(db, { spine: state ? loadSpine(state) : null }));
+      // COUNTS ONLY: thread_key holds a chat guid, a chat guid holds a handle,
+      // and counterparty_key holds a person's name. None of them may be logged
+      // or returned.
+      send(res, 200, {
+        episodes: out.episodes,
+        settled: out.settled,
+        rows: out.rows,
+        withCounterparty: out.withCounterparty,
+      }, cors);
+      return;
+    }
+
     if (url.pathname === '/admin/maintain') {
       const body = await readJson(req);
       assertClosedFields(body, MAINTAIN_FIELDS);
@@ -2786,7 +2824,7 @@ function handle(db, req, res, cors, url, policy) {
   // map and WRITE the owner's merge decisions, neither of which is a browser
   // capability. The Origin channel is authenticated but not entitled here, so
   // 403 (not 401), matching handleAdmin's reasoning.
-  if (url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary') {
+  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary') {
     if (channel !== 'bearer') {
       send(res, 403, { error: 'people routes are bearer-only: call with the token from ~/.hazlie/secrets/hermes-token.txt and no Origin header.' }, cors);
       return;
@@ -2858,6 +2896,35 @@ async function handlePeople(db, req, res, cors, url, policy) {
 
   // The timeline view: one year of people by that year's engagement, with
   // the year's topics. Same auth posture as map.
+  // FINDING A PERSON, across every year rather than whichever tab is open.
+  //
+  // The timeline filtered client-side over the 250 people already loaded for one
+  // year, so anybody outside that page or that year was unreachable -- which is
+  // most people once history lands. Ranking lives in people/find.mjs and is
+  // arithmetic: no model is in this path, because a search that invents a person
+  // is worse than one that finds nobody.
+  if (req.method === 'GET' && url.pathname === '/people/find') {
+    const q = url.searchParams.get('q') ?? '';
+    if (typeof q !== 'string' || q.length > 100) {
+      throw badRequest('"q" must be a string of at most 100 characters');
+    }
+    const out = withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      const { byYear, years, idToKey } = buildSearchYears(db, state, { owner, aliases });
+      // The corpus half: who actually talked about this, counted per person-year
+      // (people/content.mjs). Counts only — no message text crosses this line.
+      const { stats, capped } = contentMatches(db, idToKey, q);
+      const people = rankAcrossYears(byYear, q, { limit: 60, content: stats }).map(
+        // The handles matched the query; they are not part of the answer, and
+        // the page has no use for them.
+        ({ identifiers, engagement, ...row }) => row
+      );
+      return { query: q, years, people, capped };
+    });
+    send(res, 200, out, cors);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/people/year') {
     const raw = url.searchParams.get('year');
     const thisYear = new Date().getFullYear();

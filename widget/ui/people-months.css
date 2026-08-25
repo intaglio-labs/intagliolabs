@@ -117,3 +117,70 @@ body.plist .pm-src-ic:hover::after { opacity: 1; }
 body.plist .pm-sum { color: var(--secondary); }
 body.plist .pm-sum .pm-sum-tag { color: var(--muted); font-size: 10px; }
 body.plist .pm-sum-wait { animation: pm-pulse 1.2s ease-in-out infinite; }
+
+/* The year a SEARCH result was found in. Only drawn when it differs from the
+   open tab, because a cross-year hit without its year is a message count from
+   a year you are not looking at. Reads as a tab, not as another chip: the
+   chips below the name are topics, and confusing the two would be worse than
+   having no badge. */
+body.plist .pm-yr-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.03em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--hazelnut-light);
+  background: color-mix(in srgb, var(--hazelnut-light) 14%, transparent);
+  white-space: nowrap;
+}
+
+/* WHY a search result is in the list — "12 msgs · 4 conversations" for a person
+   who matched on what you talked about, or a short phrase for a handle or topic
+   match. Quiet: it explains the row, it is not the row. Only ever drawn while
+   searching. */
+body.plist .pm-why {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+/* THE LINE THAT PUT THIS PERSON IN THE LIST — one bounded excerpt of the
+   message that matched, shown only for a content match while searching. Set in
+   italic against a quiet rule so it reads as somebody's words rather than as
+   another chip; the chips below it are counted, this is quoted, and the two
+   must not look alike. */
+body.plist .pm-quote {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 4px;
+  padding-left: 7px;
+  border-left: 2px solid rgba(197, 165, 109, 0.35);
+  min-width: 0;
+}
+body.plist .pm-quote-who {
+  flex: 0 0 auto;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  opacity: 0.75;
+}
+body.plist .pm-quote-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  font-style: italic;
+  line-height: 1.35;
+  color: var(--fg);
+  opacity: 0.9;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}

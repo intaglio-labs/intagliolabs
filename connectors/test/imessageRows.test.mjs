@@ -8,7 +8,7 @@ import {
   messageToRow,
   messagesToRows,
 } from '../lib/imessageRows.mjs';
-import { scanFloor } from '../sources/imessage.mjs';
+import { scanFloor, historyCeiling } from '../sources/imessage.mjs';
 
 // Build a minimal typedstream blob of the shape Messages writes.
 function blob(text, { attachment = false } = {}) {
@@ -186,4 +186,58 @@ test('a corrupt cursor falls back to the window instead of resuming from garbage
       'no-cursor'
     );
   }
+});
+
+// ── walking history backwards ────────────────────────────────────────────────
+//
+// The forward cursor only ever moves toward now, so nothing in the daemon could
+// reach a message older than the day it first ran. Measured on a real machine:
+// chat.db held 479,967 messages across 2017-2026 and 9,603 were ingested, all
+// of them 2026. The years were not thin; they were never fetched.
+
+const NOW = Date.UTC(2026, 7, 25);
+const APPLE_EPOCH_MS = 978307200000;
+const nanosFor = (ms) => BigInt(Math.round((ms - APPLE_EPOCH_MS) * 1e6));
+
+test('the first history pass starts where the forward scan started', () => {
+  // Nothing below that point was ever reachable, so that is where the walk down
+  // begins.
+  const c = historyCeiling({ storedCursor: null, nowMs: NOW, backfillDays: 90 });
+  assert.equal(c.reason, 'history-start');
+  assert.equal(c.appleNanos, nanosFor(NOW - 90 * 86_400_000));
+});
+
+test('later passes resume from the history cursor, not the forward one', () => {
+  const stored = String(nanosFor(Date.UTC(2021, 0, 1)));
+  const c = historyCeiling({ storedCursor: stored, nowMs: NOW, backfillDays: 90 });
+  assert.equal(c.reason, 'history-cursor');
+  assert.equal(c.appleNanos, BigInt(stored));
+});
+
+test('a junk cursor falls back to the start rather than reading nothing', () => {
+  for (const bad of ['', 'abc', '12.5', null, undefined]) {
+    assert.equal(
+      historyCeiling({ storedCursor: bad, nowMs: NOW, backfillDays: 90 }).reason,
+      'history-start'
+    );
+  }
+});
+
+// The two cursors answer different questions and must not share a value: a
+// forward pass that moved the history cursor would strand everything between
+// them, permanently and with nothing to notice it by.
+test('the history ceiling is independent of the forward floor', () => {
+  const forward = scanFloor({
+    storedCursor: String(nanosFor(NOW)),
+    backfill: false,
+    nowMs: NOW,
+    backfillDays: 90,
+  });
+  const history = historyCeiling({
+    storedCursor: String(nanosFor(Date.UTC(2021, 0, 1))),
+    nowMs: NOW,
+    backfillDays: 90,
+  });
+  assert.notEqual(forward.appleNanos, history.appleNanos);
+  assert.ok(history.appleNanos < forward.appleNanos, 'history reads below the live cursor');
 });

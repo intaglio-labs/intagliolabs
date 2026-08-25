@@ -18,7 +18,7 @@ import { start } from '../../ui/server/hermes.mjs';
 import { adminDeleteEntities, adminEntities, ingest } from '../lib/ingestClient.mjs';
 import { APPLE_EPOCH_MS } from '../lib/appleTime.mjs';
 import { createLogger } from '../lib/log.mjs';
-import calendarSource, { createCalendarSource, scanWindow } from '../sources/calendar.mjs';
+import calendarSource, { createCalendarSource, scanWindow, identitiesFromRows, rememberIdentities } from '../sources/calendar.mjs';
 
 const TEST_LLAMA_KEY = 'a'.repeat(64);
 const TEST_BEARER_TOKEN = 'c'.repeat(64);
@@ -453,4 +453,55 @@ test('a failed google calendar logs status only — never the id-bearing error m
   const everything = JSON.stringify(logged);
   assert.ok(!everything.includes('person@gmail.com'), 'no calendar id in any log line');
   assert.ok(!everything.includes('notFound'), 'no response-body echo in any log line');
+});
+
+// ---- names, from EVERY backend ----
+//
+// attendeeIdentities reads EventKit occurrences, and EventKit is one backend of
+// three. Google and the local sqlite path never reached it, so those installs
+// kept rendering historical counterparties as raw addresses even though their
+// rows carry the same names. Rows are the shared surface: harvesting from them
+// is what makes the feature backend-independent.
+test('identities come out of rows, whichever backend built them', () => {
+  // The shape gcalRows.eventsToRows emits, which is also what buildRows emits.
+  const rows = [
+    { source: 'calendar', meta: { attendees: [{ email: 'Dana@Corp.com', name: 'Dana Ruiz' }] } },
+    { source: 'calendar', meta: { organizer: { email: 'chair@corp.com', name: 'Chair Person' } } },
+  ];
+  const ids = identitiesFromRows(rows);
+  const byId = Object.fromEntries(ids.map((i) => [i.identifier, i.displayName]));
+  assert.equal(byId['dana@corp.com'], 'Dana Ruiz', 'attendees, lowercased');
+  assert.equal(byId['chair@corp.com'], 'Chair Person', 'and the organizer');
+  assert.ok(ids.every((i) => i.kind === 'email' && i.source === 'calendar'));
+});
+
+test('an address with no name is not an identity', () => {
+  assert.deepEqual(identitiesFromRows([{ meta: { attendees: [{ email: 'a@b.com' }] } }]), []);
+});
+
+test('rows without attendees, and junk, do not throw', () => {
+  assert.deepEqual(identitiesFromRows([]), []);
+  assert.deepEqual(identitiesFromRows(null), []);
+  assert.deepEqual(identitiesFromRows([null, {}, { meta: null }]), []);
+});
+
+test('remembering writes through state and logs a COUNT, never an address', () => {
+  const wrote = [];
+  const logged = [];
+  const ctx = {
+    state: { upsertContacts: (ids) => wrote.push(...ids) },
+    log: { info: (event, fields) => logged.push({ event, fields }) },
+  };
+  const n = rememberIdentities(ctx, identitiesFromRows(
+    [{ meta: { attendees: [{ email: 'dana@corp.com', name: 'Dana Ruiz' }] } }]
+  ), 'google');
+  assert.equal(n, 1);
+  assert.equal(wrote.length, 1);
+  assert.equal(logged[0].fields.backend, 'google', 'which backend found them');
+  assert.equal(logged[0].fields.people, 1);
+  assert.ok(!JSON.stringify(logged).includes('dana@corp.com'), 'an address in a log is an address in a log');
+});
+
+test('a state with no upsertContacts is not an error', () => {
+  assert.equal(rememberIdentities({ log: { info() {} } }, [{ identifier: 'x' }], 'local'), 0);
 });
