@@ -56,7 +56,7 @@ equivalent, non-interactively:
     gcloud iam service-accounts keys create "$KEY" \
         --iam-account gh-deploy-site@hazlie-prod.iam.gserviceaccount.com
     gh secret set FIREBASE_SERVICE_ACCOUNT \
-        --repo intaglio-labs/privateAndPersonalizedOS < "$KEY"
+        --repo intaglio-labs/intagliolabs < "$KEY"
     rm -f "$KEY"
 
 **Delete the key file, and check `keys list` afterwards.** Removing the local copy
@@ -80,7 +80,7 @@ Two checks run before the deploy, and either one fails the run:
 
 One link, to one place:
 
-    https://github.com/intaglio-labs/privateAndPersonalizedOS/releases/latest/download/IntaglioLabs.dmg
+    https://github.com/intaglio-labs/intagliolabs/releases/latest/download/IntaglioLabs.dmg
 
 GitHub resolves `latest` at request time, so publishing a release is publishing
 the download. The site does not change between versions and there is nothing to
