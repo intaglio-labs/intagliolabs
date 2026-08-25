@@ -185,3 +185,18 @@ test('an empty phrase falls back to scanning the prose', () => {
   const claim = { kind: 'plan', text: 'The owner flies on 2026-04-02.', when_phrase: '' };
   assert.equal(validToFor(claim, { observedAt: WED }), day(2026, 4, 2));
 });
+
+// Same input, one rule. "the 14th" written on the 14th used to resolve to that
+// same night while "saturday" written on a Saturday went a week out, because
+// the ordinal compared end-of-day against the send TIME and a day's end is
+// always after a message sent during it.
+test('an ordinal on its own day advances, exactly as a weekday does', () => {
+  const on14 = Date.UTC(2026, 2, 14, 10, 0, 0); // 2026-03-14, a Saturday
+  assert.equal(resolvePhrase('the 14th', on14), day(2026, 4, 14), 'next month, not tonight');
+  assert.equal(resolvePhrase('saturday', on14), day(2026, 3, 21), 'and the weekday still agrees');
+});
+
+test('an ordinal still ahead this month stays in it', () => {
+  const on10 = Date.UTC(2026, 2, 10, 10, 0, 0);
+  assert.equal(resolvePhrase('the 14th', on10), day(2026, 3, 14));
+});

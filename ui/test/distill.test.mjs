@@ -126,6 +126,11 @@ test('a surviving claim carries the receipt and nothing the model invented', () 
     {
       kind: 'fact',
       text: 'The owner is allergic to penicillin.',
+      // Empty because this fixture's claim carries no when_phrase, and an
+      // absent one is empty rather than invented. A phrase that IS supplied is
+      // checked against the row's text first -- see verifiedPhrase -- so this
+      // field can only ever hold words the row already contained.
+      when_phrase: '',
       p_claim: null,
       source: { context_id: 42, quote: "i'm allergic to penicillin", content_hash: 'h'.repeat(64) },
     },
@@ -187,7 +192,17 @@ test('injection text in an owner-sent row cannot become control flow', () => {
   assert.equal(kept[0].text, 'The owner received a scam message.');
   for (const k of kept) {
     assert.ok(row.text.includes(k.source.quote), 'every kept quote is a real span');
-    assert.deepEqual(Object.keys(k).sort(), ['kind', 'p_claim', 'source', 'text']);
+    // when_phrase joined this set on 2026-08-25, and a widening here is
+      // supposed to be deliberate -- that is what the pin is for. It carries
+      // the message's own words for WHEN, verified as a span of this row by
+      // verifiedPhrase, and an unverifiable one is emptied rather than kept.
+      // It is not a channel for anything: it is at most 40 characters that
+      // already appear in the row, and validity.mjs turns it into a timestamp
+      // or into nothing.
+      assert.deepEqual(
+        Object.keys(k).sort(),
+        ['kind', 'p_claim', 'source', 'text', 'when_phrase']
+      );
   }
 });
 
@@ -229,16 +244,24 @@ test('a blank or non-string speaker adds no prefix and no stray colon', () => {
   }
 });
 
-test('the schema lets the model emit nothing but kind, text, quote and p', () => {
+test('the schema lets the model emit nothing but kind, text, quote, when_phrase and p', () => {
   const item = CLAIM_SCHEMA.schema.properties.claims.items;
-  assert.deepEqual(Object.keys(item.properties).sort(), ['kind', 'p', 'quote', 'text']);
+  assert.deepEqual(
+    Object.keys(item.properties).sort(),
+    ['kind', 'p', 'quote', 'text', 'when_phrase']
+  );
   assert.equal(item.additionalProperties, false);
   assert.equal(CLAIM_SCHEMA.schema.properties.claims.maxItems, MAX_CLAIMS_PER_ROW);
 
   // p is REQUIRED, not optional. An optional confidence is one the model omits
   // on exactly the rows where it is least sure -- which is where the number is
   // worth the most.
-  assert.deepEqual([...item.required].sort(), ['kind', 'p', 'quote', 'text']);
+  //
+  // when_phrase is required for the same reason and a stronger one: the model
+  // obeyed this grammar on 1,030 of 1,030 calls and the equivalent instruction
+  // in prose on 1 of 38. Optional here would mean absent in practice.
+  assert.deepEqual([...item.required].sort(), ['kind', 'p', 'quote', 'text', 'when_phrase']);
+  assert.deepEqual(item.properties.when_phrase, { type: 'string', maxLength: 40 });
   assert.deepEqual(item.properties.p, { type: 'number', minimum: 0, maximum: 1 });
 });
 

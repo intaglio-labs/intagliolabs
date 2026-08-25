@@ -137,8 +137,17 @@ export function resolvePhrase(phrase, observedAt) {
   if (dom) {
     const day = Number(dom[1]);
     if (day >= 1 && day <= 31) {
+      // STRICTLY LATER THAN THE MESSAGE'S DAY, not merely later than its
+      // timestamp. Comparing end-of-day against the send time made "the 14th"
+      // written ON the 14th resolve to that same night, because the day's end
+      // is always after a message sent during it -- while "saturday" written on
+      // a Saturday correctly went a week out. Same input, two answers. A plan
+      // is written before the thing it plans, so the ordinal follows the
+      // weekday: this month only if the day has not arrived yet.
+      const sameDay =
+        said.getUTCDate() === day;
       const thisMonth = endOfDayUtc(said.getUTCFullYear(), said.getUTCMonth() + 1, day);
-      if (thisMonth !== null && thisMonth >= ts) return thisMonth;
+      if (!sameDay && thisMonth !== null && thisMonth >= ts) return thisMonth;
       const y = said.getUTCMonth() === 11 ? said.getUTCFullYear() + 1 : said.getUTCFullYear();
       const m = ((said.getUTCMonth() + 1) % 12) + 1;
       return endOfDayUtc(y, m, day);
