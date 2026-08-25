@@ -38,6 +38,16 @@ body.plist .pm-tab.active {
   background: rgba(234, 234, 234, 0.07);
   color: var(--hazelnut-light);
 }
+/* The year the constellation is drawing, while the globe holds `active`. NOT
+   lifted — it is not the tab the surface below belongs to — but coloured and
+   underlined, because the sky is otherwise silent about which year it is and a
+   fully unmarked strip made clicking a bubble look like a jump to some other
+   year. */
+body.plist .pm-tab.current {
+  color: var(--hazelnut-light);
+  border-color: rgba(197, 165, 109, 0.22);
+  box-shadow: inset 0 -2px 0 rgba(197, 165, 109, 0.45);
+}
 
 /* The instant answer to a tab click while the server rebuilds the year. */
 body.plist .pm-loading {

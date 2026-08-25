@@ -250,7 +250,17 @@
     tabsEl.replaceChildren();
     for (const y of ys) {
       const b = document.createElement('button');
-      b.className = 'pm-tab' + (y === year && view === 'list' ? ' active' : '');
+      // TWO states, and the second one exists because leaving it out was a bug.
+      // `active` is the lifted tab the list belongs to. `current` is the year
+      // still being looked at while the globe is up — without it the whole
+      // strip went unmarked in the sky view, the constellation said nothing
+      // about which year it was drawing, and clicking a bubble looked like it
+      // had jumped you to some other year rather than revealing the one you
+      // were already on.
+      const isYear = y === year;
+      b.className = 'pm-tab'
+        + (isYear && view === 'list' ? ' active' : '')
+        + (isYear && view === 'sky' ? ' current' : '');
       b.dataset.y = String(y);
       b.textContent = String(y);
       tabsEl.appendChild(b);
@@ -495,26 +505,25 @@
     // BOTH caps, said out loud. The server caps the year's rows, and the ring
     // holds four bubbles — either one silently makes this picture look like the
     // whole year when it is a top slice of it.
-    const bits = [];
+    const caps = [];
     if (data.total > data.people.length) {
-      bits.push(`the top ${data.people.length} of ${data.total} people`);
+      caps.push(`the top ${data.people.length} of ${data.total} people`);
     }
     if (all.length > clusters.length) {
-      bits.push(`${clusters.length} of ${all.length} topics`);
+      caps.push(`${clusters.length} of ${all.length} topics`);
     }
-    // The year belongs with the counts, and the skew clause after them — put
-    // in `bits` it landed as "...topics inferred (older local server) in 2026".
-    const parts = [];
-    if (bits.length) parts.push(`showing ${bits.join(' · ')} in ${year}`);
+    // The YEAR LEADS, and is printed even when there is nothing to caveat —
+    // this was only shown alongside a cap, so a year with nothing to disclose
+    // drew a constellation that never said which year it was.
+    let text = `${year} by topic`;
+    if (caps.length) text += ` — showing ${caps.join(' · ')}`;
     // Say when the grouping is the approximation rather than the server's own
     // labelling, so a slightly-off bubble is explainable instead of puzzling.
-    if (!marked) parts.push('topics inferred (this local server predates the topic labels)');
-    if (parts.length) {
-      const note = document.createElement('div');
-      note.className = 'pm-sky-note';
-      note.textContent = parts.join(' — ');
-      skyEl.appendChild(note);
-    }
+    if (!marked) text += ' — topics inferred (this local server predates the topic labels)';
+    const note = document.createElement('div');
+    note.className = 'pm-sky-note';
+    note.textContent = text;
+    skyEl.appendChild(note);
   }
 
   // An uncached year is a server rebuild on first touch, so the click must
