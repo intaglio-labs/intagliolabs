@@ -97,7 +97,10 @@ function hzConnectorTile(src, { onOpen } = {}) {
 const HZ_KIND = (id) => (id.startsWith('mail:') ? 'mail' : id);
 
 const HZ_FDA_HINT = {
-  text: 'Switch on intaglio labs under System Settings → Privacy & Security → Full Disk Access.',
+  // ~~text: the sentence walking through the grant.~~ Yeeted (owner,
+  // 2026-08-25), same call as the broken-branch steps: the link IS the
+  // walkthrough — it opens the exact pane with the right row to switch on.
+  text: '',
   url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles',
   link: 'Open System Settings',
   local: true, // one per Mac; see connections.js

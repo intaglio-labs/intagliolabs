@@ -155,7 +155,7 @@
       .map((c) => `<span class="pm-src-ic" data-tip="${esc(CHAN_LABEL[c] || c)}">${hzGlyph(c)}</span>`)
       .join('');
     return (
-      `<div class="pl-row${open ? ' open' : ''}" data-rk="${esc(rowKey)}">` +
+      `<div class="pl-row${open ? ' open' : ''}" role="button" data-rk="${esc(rowKey)}">` +
         `<div class="pl-main">` +
           `<div class="pl-nameline">` +
             `<span class="pl-name">${esc(p.name)}</span>` +

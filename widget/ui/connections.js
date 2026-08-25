@@ -186,10 +186,10 @@ function modelRow() {
   head.className = 'setting-head';
   const name = document.createElement('span');
   name.className = 'setting-name';
-  name.textContent = 'model';
-  const value = document.createElement('span');
-  value.className = 'setting-value';
-  head.append(name, value);
+  name.textContent = 'local model size';
+  // The corner GB readout was yeeted (owner, 2026-08-25): the highlighted
+  // tier button says the same thing one line lower.
+  head.append(name);
   const choices = document.createElement('div');
   choices.className = 'model-pick';
   const status = document.createElement('span');
@@ -213,7 +213,6 @@ function modelRow() {
   function paint() {
     if (!state) return;
     const active = state.model || '';
-    value.textContent = active ? (active === '8b' ? '5.0 GB' : '2.5 GB') : 'not installed';
     choices.replaceChildren();
     for (const tier of state.tiers || []) {
       const b = document.createElement('button');
@@ -359,7 +358,10 @@ hzPost('prefs')
 // One sentence per source on how to connect it. Links open in the default
 // browser via the native bridge — the webview itself can navigate nowhere.
 const FDA_HINT = {
-  text: 'Switch on intaglio labs under System Settings → Privacy & Security → Full Disk Access.',
+  // ~~text: the sentence walking through the grant.~~ Yeeted (owner,
+  // 2026-08-25), same call as the broken-branch steps: the link IS the
+  // walkthrough — it opens the exact pane with the right row to switch on.
+  text: '',
   url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles',
   link: 'Open System Settings',
   // One per Mac: there is no second Messages, Notes or photo library to add.
@@ -620,9 +622,11 @@ function card(src, keep) {
       // Now it reads like every other not-yet-connected source: the steps in
       // plain text, then the same button style the rest of the panel uses.
       if (src.action === 'fda') {
-        const steps = document.createElement('span');
-        steps.className = 'setup';
-        steps.textContent = src.fix;
+        // ~~The written steps (src.fix) rendered above the button.~~ Yeeted
+        // (owner, 2026-08-25): the button IS the walkthrough — it lands on the
+        // exact Settings pane — and a paragraph of directions above it made
+        // the panel read like homework. The server still sends the text; the
+        // connect page still uses it.
         const open = document.createElement('button');
         open.className = 'hold-ok';
         open.textContent = 'Open Full Disk Access';
@@ -637,7 +641,7 @@ function card(src, keep) {
             url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles',
           }).catch(() => {});
         });
-        tip.append(steps, open);
+        tip.appendChild(open);
       } else {
         // Everything else that is broken stays loud: red is for a thing that
         // worked and stopped, and those still exist.

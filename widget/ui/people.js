@@ -7,6 +7,9 @@
 'use strict';
 
 document.getElementById('close').addEventListener('click', () => {
+  // The close tone, same as every other popup — this id is excluded from the
+  // global squish (bridge.js HZ_OWN_TONE) precisely so it can play this.
+  hzSfx.close();
   hzPost('close').catch(() => {});
 });
 

@@ -339,9 +339,13 @@ const hzSfx = {
 // Every button on every page squishes, from one listener rather than a call
 // at each site — except the few that have a tone of their own, which would
 // otherwise play both and muddy into one longer noise.
+// Links and <summary> toggles too (owner, 2026-08-25): the pages use <a> for
+// press-shaped things — "read specs", the hint how-to links — and a details
+// summary is a button in every way but the tag, so the silent ones read as
+// broken next to the tiles that click.
 const HZ_OWN_TONE = new Set(['orb', 'fold', 'close', 'demoSend']);
 document.addEventListener('pointerdown', (e) => {
-  const hit = e.target.closest('button, [role="button"]');
+  const hit = e.target.closest('button, [role="button"], a, summary');
   if (!hit || HZ_OWN_TONE.has(hit.id)) return;
   hzSfx.squish();
 }, true);
