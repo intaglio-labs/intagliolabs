@@ -31,20 +31,41 @@ function parseMeta(meta) {
   }
 }
 
-// A thread is a chat where the store knows one, and otherwise the row itself.
+// EACH SOURCE NAMES ITS THREAD DIFFERENTLY, and reading only one of those names
+// silently turns a whole source into singletons.
 //
-// A row with no chat_guid becomes its own episode rather than being dropped or
-// piled in with unrelated singletons: 186 owner-sent rows on the live store
-// carry no chat, and lumping them together by absence would invent a
-// conversation that never happened.
+// iMessage carries `chat_guid`; WhatsApp carries `chat_handle`
+// (connectors/lib/whatsappRows.mjs writes it from the chat JID). This read
+// chat_guid alone at first, and the result was measurable and quiet: 0 of 3,190
+// WhatsApp rows carry chat_guid, so every one fell through to `solo:` -- 57
+// single-message episodes, one per owner-sent row, with every received message
+// discarded as an unquotable singleton. Episodes were doing nothing at all for
+// that source while reporting a perfectly healthy 57.
+//
+// Listed per source rather than by trying every key, so a new connector that
+// invents a third name shows up as singletons in the test that pins this rather
+// than being half-handled by a fallback nobody chose.
+const THREAD_FIELD = Object.freeze({
+  imessage: 'chat_guid',
+  whatsapp: 'chat_handle',
+});
+
+// A row with no thread of its own becomes its own episode rather than being
+// dropped or piled in with unrelated singletons: 186 owner-sent iMessage rows
+// on the live store carry no chat, and lumping them together by absence would
+// invent a conversation that never happened.
 export function threadKeyFor(row) {
   if (!row || typeof row !== 'object') return null;
   if (row.source === 'notes') {
     return row.entity_id ? `note:${row.entity_id}` : `solo:${row.id}`;
   }
+  const field = THREAD_FIELD[row.source];
+  if (!field) return `solo:${row.id}`;
   const meta = parseMeta(row.meta);
-  const guid = typeof meta?.chat_guid === 'string' ? meta.chat_guid.trim() : '';
-  return guid ? `chat:${guid}` : `solo:${row.id}`;
+  const key = typeof meta?.[field] === 'string' ? meta[field].trim() : '';
+  // Namespaced by source: two connectors could mint the same opaque string and
+  // a shared prefix would merge two unrelated conversations into one episode.
+  return key ? `chat:${row.source}:${key}` : `solo:${row.id}`;
 }
 
 // The owner wrote it, so it may be quoted. Everything else is context.

@@ -140,3 +140,49 @@ test('every episode records the rule that made it', () => {
   assert.equal(ep.built_by, 'gap-rule');
   assert.equal(ep.gap_ms, DEFAULT_GAP_MS);
 });
+
+// EACH SOURCE NAMES ITS THREAD DIFFERENTLY. Reading only iMessage's name turned
+// all 3,190 live WhatsApp rows into singletons -- 57 one-message episodes, one
+// per owner-sent row, every received message discarded as unquotable. Episodes
+// did nothing at all for that source while reporting a healthy 57.
+test('whatsapp threads group by chat_handle, not chat_guid', () => {
+  const wa = (id, minutes, me) => ({
+    id,
+    ts: T0 + minutes * MIN,
+    source: 'whatsapp',
+    speaker: me ? 'Owner' : 'Sam',
+    text: `line ${id}`,
+    meta: JSON.stringify({ is_from_me: me ? 1 : 0, chat_handle: '15550100' }),
+    content_hash: `w${id}`,
+  });
+  const [ep] = buildEpisodes([wa(1, 0, false), wa(2, 1, true)], { now: T0 + 1000 * MIN });
+  assert.ok(ep, 'the owner spoke, so there is an episode');
+  assert.equal(ep.row_count, 2, 'both messages are in it, not one each');
+  assert.ok(ep.thread_key.startsWith('chat:whatsapp:'), ep.thread_key);
+});
+
+test('two sources cannot collide on the same opaque thread id', () => {
+  const row = (id, source, field) => ({
+    id,
+    ts: T0,
+    source,
+    text: 'x',
+    meta: JSON.stringify({ is_from_me: 1, [field]: 'SAME' }),
+    content_hash: `h${id}`,
+  });
+  const a = threadKeyFor(row(1, 'imessage', 'chat_guid'));
+  const b = threadKeyFor(row(2, 'whatsapp', 'chat_handle'));
+  assert.notEqual(a, b, 'the same string from two connectors is two threads');
+});
+
+test('a source with no known thread field degrades to singletons, visibly', () => {
+  const odd = {
+    id: 1,
+    ts: T0,
+    source: 'granola',
+    text: 'x',
+    meta: JSON.stringify({ is_from_me: 1, room_id: 'R1' }),
+    content_hash: 'g1',
+  };
+  assert.ok(threadKeyFor(odd).startsWith('solo:'), 'not half-handled by a guess');
+});

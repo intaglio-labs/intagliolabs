@@ -122,18 +122,35 @@ let db;
 try {
   db = new DatabaseSync(dbPath, { readOnly: true });
 
-  // Settled episodes this prompt+model+arm has not already produced a run for.
-  // Keyed on member_hash, not id: the episode index is rebuilt and replaced, so
-  // ids move and content does not.
+  // The model has to be known BEFORE the pending query, because it is part of
+  // what "already done" means.
+  const model = dryRun ? '(dry-run)' : await resolveModel();
+
+  // Settled episodes THIS prompt, model and arm has not already produced a run
+  // for. All four parts matter and the first version had only two:
+  //
+  //   member_hash  -- not the episode id, because the index is rebuilt and
+  //                   replaced, so ids move and content does not;
+  //   episode_context -- or running with --context after an --off pass selects
+  //                   NOTHING, and the comparison this flag exists for cannot be
+  //                   run on any episode already processed. That is the whole
+  //                   experiment, silently doing nothing;
+  //   prompt_sha, model -- the comment claimed prompt/model specificity and the
+  //                   query did not implement it, so a prompt edit or a swapped
+  //                   model would have looked like "nothing new".
   const pending = db
     .prepare(
       'SELECT e.* FROM episode e ' +
         'WHERE e.settled_at <= ? ' +
         '  AND NOT EXISTS (SELECT 1 FROM distill_run r ' +
-        "       WHERE r.episode_hash = e.member_hash AND r.status = 'complete') " +
+        '       WHERE r.episode_hash = e.member_hash ' +
+        "         AND r.status = 'complete' " +
+        '         AND r.episode_context IS ? ' +
+        '         AND r.prompt_sha = ? ' +
+        '         AND r.model = ?) ' +
         'ORDER BY e.started_at LIMIT ?'
     )
-    .all(Date.now(), limit);
+    .all(Date.now(), withContext ? 'on' : 'off', sha, model, limit);
 
   if (dryRun) {
     process.stdout.write(
@@ -157,7 +174,6 @@ try {
     process.exit(0);
   }
 
-  const model = await resolveModel();
   const stats = {
     episodes_in: pending.length,
     from_cache: 0,

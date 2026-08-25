@@ -94,6 +94,53 @@ export function storeCandidatePaths(home = homedir()) {
   ];
 }
 
+// WHO WAS THERE, normalised.
+//
+// Attendee emails are the one join key that reaches across platforms: they
+// match the contacts spine's `email` identifiers, which is how a calendar
+// event and a message thread resolve to the same person. Measured before
+// this was written: 1,417 of 1,905 events on this machine carry attendees,
+// 10,362 records in all, and 1,348 events have at least one email. The stored
+// rows carried none of it.
+//
+// The OWNER is dropped from the list (isMe) -- "who else was there" is the
+// question, and the owner is in every one of their own events. The count of
+// dropped-because-me is not kept: an event with only the owner is simply an
+// event with no other attendees.
+//
+// Emails are lowercased to match normalizeEmail in contacts.mjs, or the join
+// this exists for silently misses on case alone.
+export function attendeesOf(occ) {
+  const raw = Array.isArray(occ?.attendees) ? occ.attendees : [];
+  const out = [];
+  for (const a of raw) {
+    if (a?.isMe === true) continue;
+    const name = typeof a?.name === 'string' && a.name.trim() ? a.name.trim() : null;
+    const email =
+      typeof a?.email === 'string' && a.email.includes('@') ? a.email.trim().toLowerCase() : null;
+    if (!name && !email) continue;
+    const person = {};
+    if (name) person.name = name;
+    if (email) person.email = email;
+    if (typeof a?.status === 'string') person.status = a.status;
+    out.push(person);
+  }
+  // PRE-SORTED, and connectors/AGENTS.md names this exact field as the reason
+  // the rule exists: hermes canonicalizes object KEY order for the content
+  // hash but keeps ARRAY order, because it cannot know which arrays are sets.
+  // EventKit does not promise a stable participant order, so an unsorted list
+  // reads as an edit on every delivery -- the row's hash changes, hermes
+  // treats an unchanged meeting as modified, and invalidateClaimsForChangedRow
+  // retires claims that nothing about the meeting actually contradicted.
+  //
+  // Email first because it is the identity; name only breaks ties for the
+  // participants who have no address.
+  out.sort((a, b) =>
+    (a.email ?? '').localeCompare(b.email ?? '') || (a.name ?? '').localeCompare(b.name ?? '')
+  );
+  return out;
+}
+
 export function scanWindow(nowMs, backfill = false) {
   const { backMs, aheadMs } = backfill ? BACKFILL_WINDOW : STEADY_WINDOW;
   return { fromTs: nowMs - backMs, toTs: nowMs + aheadMs };
@@ -227,40 +274,6 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
       epochMsToAppleSeconds(fromTs - WINDOW_SLACK_MS),
       epochMsToAppleSeconds(toTs + WINDOW_SLACK_MS)
     );
-  }
-
-  // WHO WAS THERE, normalised.
-  //
-  // Attendee emails are the one join key that reaches across platforms: they
-  // match the contacts spine's `email` identifiers, which is how a calendar
-  // event and a message thread resolve to the same person. Measured before
-  // this was written: 1,417 of 1,905 events on this machine carry attendees,
-  // 10,362 records in all, and 1,348 events have at least one email. The stored
-  // rows carried none of it.
-  //
-  // The OWNER is dropped from the list (isMe) -- "who else was there" is the
-  // question, and the owner is in every one of their own events. The count of
-  // dropped-because-me is not kept: an event with only the owner is simply an
-  // event with no other attendees.
-  //
-  // Emails are lowercased to match normalizeEmail in contacts.mjs, or the join
-  // this exists for silently misses on case alone.
-  function attendeesOf(occ) {
-    const raw = Array.isArray(occ?.attendees) ? occ.attendees : [];
-    const out = [];
-    for (const a of raw) {
-      if (a?.isMe === true) continue;
-      const name = typeof a?.name === 'string' && a.name.trim() ? a.name.trim() : null;
-      const email =
-        typeof a?.email === 'string' && a.email.includes('@') ? a.email.trim().toLowerCase() : null;
-      if (!name && !email) continue;
-      const person = {};
-      if (name) person.name = name;
-      if (email) person.email = email;
-      if (typeof a?.status === 'string') person.status = a.status;
-      out.push(person);
-    }
-    return out;
   }
 
   function buildRows(raw, { fromTs, toTs }) {
