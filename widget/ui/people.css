@@ -31,7 +31,7 @@ body.people .win {
   background: rgba(20, 20, 18, 0.72);
   border: 1px solid rgba(234, 234, 234, 0.10);
   box-shadow: inset 0 1px 0 rgba(234, 234, 234, 0.08);
-  padding: 14px 20px 12px;
+  padding: 12px 14px;
 }
 
 .people-main {

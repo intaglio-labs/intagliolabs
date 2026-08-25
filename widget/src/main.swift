@@ -44,13 +44,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // its real content height (hzAutoFit on .conn-main), so the card fits snugly
   // instead of standing 500px tall with the shelf pinned to the bottom.
   private static let connectionsBase = NSSize(width: 312, height: 150)
-  // Wider and taller than the other popups because this one is not a list: the
-  // connector ring needs its diameter in BOTH axes at once, and the title sits
-  // inside it. At 312x300 the ring filled the card and pushed "read specs" off
-  // the bottom edge — the height is a floor, but a floor the content cleared
-  // by so much that fitContent's answer was landing past the screen room above
-  // the widget (popupCeiling) and being clamped away.
-  private static let peopleBase = NSSize(width: 360, height: 430)
+  // Wider than the other popups because this one is not a list: the connector
+  // ring needs its diameter in BOTH axes at once, and the title sits inside it.
+  //
+  // The height is a FLOOR, deliberately below what the page actually needs —
+  // people.js measures the card and reports it (fitPeople), and `want` below
+  // takes max(base, reported). Raising this to "make it fit" was the wrong
+  // lever and cost a band of dead card under "read specs": the content was
+  // never the thing that failed to fit, a second fitter was overwriting the
+  // measurement. See fitPeople's header in widget/ui/people.js.
+  private static let peopleBase = NSSize(width: 360, height: 240)
   private static let skyBase = NSSize(width: 520, height: 620)
 
   private let bridge = Bridge()

@@ -334,8 +334,21 @@ document.getElementById('pinit').addEventListener('click', () => {
 });
 
 // Push the exact card height to native, so a bottom row like "read specs" can
-// never sit below the panel's bottom edge. Belt-and-suspenders alongside
-// hzAutoFit's observer.
+// never sit below the panel's bottom edge.
+//
+// THIS IS THE ONLY FITTER ON THIS PAGE, and the page must not also run
+// hzAutoFit. That one reports `window.innerHeight + (scrollHeight -
+// clientHeight)` — the height the window ALREADY has, plus whatever overflows
+// it. Two consequences, both of which this page hit:
+//   - it can only ever grow the window, never shrink it back;
+//   - under `overflow: hidden` there is no measurable overflow, so it reports
+//     the current height forever and the window never grows either.
+// Running both meant hzAutoFit's "keep it exactly as it is" answer landed
+// after this one's correct measurement and pinned the panel to whatever the
+// native base size happened to be — content cut off when the base was small,
+// and a band of empty card below "read specs" when the base was raised to
+// compensate. Measuring the card itself grows AND shrinks, which is the whole
+// job.
 function fitPeople() {
   // Measure AFTER layout settles (rAF), by the rendered rect, so the popup
   // sizes exactly to the card — no dead space below "read specs", and it
@@ -347,7 +360,10 @@ function fitPeople() {
 }
 
 reload();
-if (window.hzAutoFit) hzAutoFit(document.body);
+// No hzAutoFit here — see fitPeople's header for why the two cannot both run.
 requestAnimationFrame(fitPeople);
+// rAF does not fire in a window that is ordered out, and this page loads while
+// hidden; the timer is what makes the first measurement happen at all. (This
+// backstop is the one genuinely useful thing hzAutoFit was providing.)
 setTimeout(fitPeople, 250);
 window.addEventListener('focus', () => { reload(); fitPeople(); });
