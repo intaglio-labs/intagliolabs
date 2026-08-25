@@ -381,9 +381,14 @@ winput.addEventListener('blur', syncBar);
 // Re-measured whenever the bar opens/closes or the window resizes, debounced
 // past the CSS transitions so the number describes the settled layout.
 function reportBounds() {
+  // MEASURE THE BUTTONS, NEVER THEIR ROW. .gear-row (and .wbar when closed)
+  // are transparent flex containers that span the whole window, so their
+  // rect.left is ~0 and one of them in this list silently zeroed the whole
+  // correction — the first live run shipped exactly that bug and the panels
+  // kept hugging the invisible window edge.
   const els = barOpen
-    ? [document.querySelector('.wbar'), document.querySelector('.gear-row')]
-    : [chatBtn, orbBtn, document.querySelector('.gear-row')];
+    ? [winput, chatBtn, orbBtn, ...document.querySelectorAll('.gear-row .gear')]
+    : [chatBtn, orbBtn, ...document.querySelectorAll('.gear-row .gear')];
   let left = Infinity;
   for (const el of els) {
     if (!el) continue;
