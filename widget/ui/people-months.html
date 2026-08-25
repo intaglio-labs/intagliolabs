@@ -26,41 +26,9 @@
         <polyline points="34 38 34 31 27 31"/>
       </svg>
     </button>
-    <!-- Filters: toggles the sort/company/channel/status row below. -->
-    <button class="pm-icon" id="filt" title="Filters">
-      <svg viewBox="0 0 44 44" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M7 12h30"/>
-        <path d="M13 22h18"/>
-        <path d="M19 32h6"/>
-      </svg>
-    </button>
     <input class="pl-search" id="search" type="text" placeholder="loading your year…"
            autocomplete="off" autocorrect="off" spellcheck="false">
     <button class="close" id="close" title="Close">×</button>
-  </div>
-  <!-- The sky's filter set, hidden until the funnel above opens it. Sort is
-       WITHIN each month; the other three narrow who appears at all. -->
-  <div class="pl-controls pm-filters" id="filters" hidden>
-    <label class="pl-ctl">
-      <span>sort</span>
-      <select id="sort">
-        <option value="engagement">most engaged</option>
-        <option value="messages">most messages</option>
-        <option value="name">name A–Z</option>
-      </select>
-    </label>
-    <label class="pl-ctl">
-      <span>channel</span>
-      <select id="fchannel">
-        <option value="">all</option>
-        <option value="imessage">iMessage</option>
-        <option value="whatsapp">WhatsApp</option>
-        <option value="mail">mail</option>
-        <option value="calendar">calendar</option>
-        <option value="linkedin">LinkedIn</option>
-      </select>
-    </label>
-    <button class="pm-reset" id="freset" title="Reset filters">reset</button>
   </div>
   <!-- Year tabs, browser-style: every year with activity, oldest to newest,
        the open year lifted and connected to the list below. -->

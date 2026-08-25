@@ -2,7 +2,8 @@
 // engagement, with the year's topic chips — month grouping was yeeted
 // (owner, 2026-08-25). Browser-style year tabs page between years; one fetch
 // per year (cached, dropped on every panel re-open via __hzRefresh); search
-// and the funnel filters narrow client-side. Expanding a row shows one
+// and search narrows client-side (the filter row was yeeted — owner,
+// 2026-08-25). Expanding a row shows one
 // thing: a model-written summary fetched on demand — labeled as the
 // model's, because unlike the chips it is not counted, it is written. The
 // taxonomy and specifics lines were yeeted in turn (owner, 2026-08-25); the
@@ -17,11 +18,6 @@
   const closeEl = document.getElementById('close');
   const tabsEl = document.getElementById('tabs');
   const syncEl = document.getElementById('sync');
-  const filtEl = document.getElementById('filt');
-  const filtersEl = document.getElementById('filters');
-  const sortEl = document.getElementById('sort');
-  const channelEl = document.getElementById('fchannel');
-  const resetEl = document.getElementById('freset');
   if (!listEl) return;
 
   // Hover hint per connector — shown by our own CSS tooltip (data-tip),
@@ -93,29 +89,19 @@
     );
   }
 
-  const SORTS = {
-    engagement: (a, b) => b.engagement - a.engagement,
-    messages: (a, b) => (b.messages || 0) - (a.messages || 0),
-    name: (a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()),
-  };
-
-  function passesFilters(p, term) {
-    if (term && !(p.name || '').toLowerCase().includes(term)) return false;
-    if (channelEl.value && !(p.channels || []).includes(channelEl.value)) return false;
-    return true;
-  }
-
   function render() {
     const data = cache.get(year);
     if (!data) return;
+    // Search is the one narrowing control left; the filter row was yeeted
+    // (owner, 2026-08-25). Order is the server's: most engaged first.
     const term = searchEl.value.trim().toLowerCase();
-    const filtering = Boolean(term || channelEl.value);
-    const rows = data.people.filter((p) => passesFilters(p, term));
-    rows.sort(SORTS[sortEl.value] || SORTS.engagement);
+    const rows = term
+      ? data.people.filter((p) => (p.name || '').toLowerCase().includes(term))
+      : data.people;
     listEl.innerHTML = rows.map(rowHtml).join('') || `<div class="pl-empty">no one matches in ${year}</div>`;
     const shown = rows.length;
     searchEl.placeholder = `search ${year} (${shown} shown)…`;
-    if (!filtering && data.total > data.people.length) {
+    if (!term && data.total > data.people.length) {
       listEl.insertAdjacentHTML('beforeend',
         `<div class="pl-more">+ ${data.total - data.people.length} more in ${year} — search or filter to narrow</div>`);
     }
@@ -206,16 +192,6 @@
     render();
   });
   syncEl.addEventListener('click', () => { hzPost('openPeople').catch(() => {}); });
-  filtEl.addEventListener('click', () => {
-    filtersEl.hidden = !filtersEl.hidden;
-    filtEl.classList.toggle('on', !filtersEl.hidden);
-  });
-  for (const el of [sortEl, channelEl]) el.addEventListener('change', render);
-  resetEl.addEventListener('click', () => {
-    sortEl.value = 'engagement';
-    channelEl.value = '';
-    render();
-  });
   let t = null;
   searchEl.addEventListener('input', () => { clearTimeout(t); t = setTimeout(render, 90); });
   if (closeEl) closeEl.addEventListener('click', () => { hzSfx.close(); hzPost('close').catch(() => {}); });
