@@ -22,6 +22,7 @@
   const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   let year = new Date().getFullYear();
   let years = []; // every year with activity, from the server
+  let expanded = null; // '<personKey>|<ym>' of the row showing its detail
   const cache = new Map(); // year -> payload
 
   function esc(s) {
@@ -32,7 +33,22 @@
     return `${MONTH_NAMES[Number(ym.slice(5)) - 1]} ${ym.slice(0, 4)}`;
   }
 
-  function rowHtml(p) {
+  // A row expands on click into what you two ACTUALLY talked about that
+  // month: the taxonomy categories with their counts, and the SPECIFICS —
+  // the distinctive words themselves (a place, a project, a nickname).
+  function detailHtml(p) {
+    const bits = [];
+    if (p.taxonomy && p.taxonomy.length) {
+      bits.push(`<div class="pl-d">topics: ${p.taxonomy.map((t) => `${esc(t.label)} (${t.n})`).join(' · ')}</div>`);
+    }
+    if (p.specifics && p.specifics.length) {
+      bits.push(`<div class="pl-d">specifics: ${p.specifics.map((t) => `${esc(t.label)} (${t.n})`).join(' · ')}</div>`);
+    }
+    if (!bits.length) bits.push('<div class="pl-d pl-dim">not enough said this month to name topics</div>');
+    return `<div class="pl-detail">${bits.join('')}</div>`;
+  }
+
+  function rowHtml(p, ym) {
     const chips = (p.topics || [])
       .map((t) => `<span class="pl-chip pl-topic">${esc(t.label)}</span>`)
       .join('');
@@ -40,14 +56,17 @@
     sub.push(`${p.messages} msg${p.messages === 1 ? '' : 's'}`);
     if (p.met) sub.push(`met ${p.met}×`);
     if (p.company) sub.push(esc(p.company));
+    const rowKey = `${p.key}|${ym}`;
+    const open = expanded === rowKey;
     return (
-      `<div class="pl-row">` +
+      `<div class="pl-row${open ? ' open' : ''}" data-rk="${esc(rowKey)}">` +
         `<div class="pl-main">` +
           `<div class="pl-nameline">` +
             `<span class="pl-name">${esc(p.name)}</span>` +
             `<span class="pl-src">${chips}</span>` +
           `</div>` +
           `<div class="pl-sub">${sub.join(' · ')}</div>` +
+          (open ? detailHtml(p) : '') +
         `</div>` +
       `</div>`
     );
@@ -109,7 +128,7 @@
       if (rows.length === 0) continue;
       const count = filtering ? rows.length : m.total;
       html.push(`<div class="pl-year">${monthLabel(m.ym)} <span class="pl-year-n">· ${count} people</span></div>`);
-      for (const p of rows) html.push(rowHtml(p));
+      for (const p of rows) html.push(rowHtml(p, m.ym));
       if (!filtering && m.total > m.people.length) {
         html.push(`<div class="pl-more">+ ${m.total - m.people.length} more in ${monthLabel(m.ym)}</div>`);
       }
@@ -179,6 +198,13 @@
     const b = e.target.closest('.pm-tab');
     if (!b || !b.dataset.y) return;
     loadOrFail(Number(b.dataset.y));
+  });
+  listEl.addEventListener('click', (e) => {
+    const row = e.target.closest('.pl-row');
+    if (!row) return;
+    const rk = row.getAttribute('data-rk');
+    expanded = expanded === rk ? null : rk;
+    render();
   });
   syncEl.addEventListener('click', () => { hzPost('openPeople').catch(() => {}); });
   filtEl.addEventListener('click', () => {

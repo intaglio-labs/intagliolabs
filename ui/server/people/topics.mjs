@@ -236,3 +236,20 @@ export function topTopics(doc, docFreq, totalDocs, { limit = 3, minTaxonomy = 2,
   }
   return out;
 }
+
+// The SPECIFICS: distinctive terms alone, idf-ranked, no taxonomy labels and
+// no dedupe against them — this is "the actual words we used" (tahoe, figma,
+// a nickname), for the expanded row where the generic category chips are not
+// specific enough. Same floors as topTopics so a one-off word still cannot
+// appear. Returns [{ label, n }].
+export function topTerms(doc, docFreq, totalDocs, { limit = 8, minCount = 3 } = {}) {
+  if (!doc || totalDocs === 0) return [];
+  const scored = [];
+  for (const [t, n] of doc.terms) {
+    if (n < minCount) continue;
+    const df = docFreq.get(t) ?? 1;
+    scored.push({ label: t, n, score: n * Math.log((totalDocs + 1) / df) });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map(({ label, n }) => ({ label, n }));
+}

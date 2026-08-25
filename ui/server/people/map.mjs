@@ -11,7 +11,7 @@
 
 import { buildGraph } from './graph.mjs';
 import { depthScore, isNonPerson } from './rank.mjs';
-import { topicTallies, topTopics, nameTokenSet } from './topics.mjs';
+import { topicTallies, topTopics, topTerms, nameTokenSet } from './topics.mjs';
 
 const DAY = 86_400_000;
 
@@ -216,6 +216,14 @@ export function buildMonths(contextDb, stateDb, { year, now = Date.now(), owner,
             met: e.met,
             engagement: e.engagement,
             topics: topTopics(topics.docs.get(`${e.p.key}|${ym}`), topics.docFreq, topics.totalDocs),
+            // The expanded row's detail: taxonomy with counts, and the
+            // SPECIFICS — their actual distinctive words for that month.
+            taxonomy: Object.entries(topics.docs.get(`${e.p.key}|${ym}`)?.taxonomy ?? {})
+              .filter(([, n]) => n >= 2)
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, 3)
+              .map(([label, n]) => ({ label, n })),
+            specifics: topTerms(topics.docs.get(`${e.p.key}|${ym}`), topics.docFreq, topics.totalDocs),
           };
         }),
       };

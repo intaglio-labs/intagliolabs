@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import { openDb, insertRows } from '../server/hermes.mjs';
-import { topicTallies, topTopics, nameTokenSet, TOPIC_SIGNALS } from '../server/people/topics.mjs';
+import { topicTallies, topTopics, topTerms, nameTokenSet, TOPIC_SIGNALS } from '../server/people/topics.mjs';
 import { yearRows, buildMap, buildMonths } from '../server/people/map.mjs';
 
 const NOW = new Date(2027, 0, 1).getTime();
@@ -189,4 +189,15 @@ test('buildMonths: one year, months newest-first, sorted by that month engagemen
   assert.deepEqual(out.months[1].people.map((p) => p.name), ['Ana Chen', 'Sam Lee'], 'month engagement order');
   assert.equal(out.months[1].people[0].topics[0].label, 'fundraising', 'taxonomy chip leads');
   assert.equal(out.months[1].people[0].engagement, 5);
+});
+
+test('topTerms returns the specifics alone — no taxonomy labels, floors intact', () => {
+  const doc = {
+    taxonomy: { fundraising: 9 },
+    terms: new Map([['tahoe', 4], ['figma', 3], ['once', 1]]),
+  };
+  const out = topTerms(doc, new Map([['tahoe', 1], ['figma', 2], ['once', 1]]), 4);
+  assert.deepEqual(out.map((t) => t.label), ['tahoe', 'figma'], 'idf order, one-offs floored');
+  assert.equal(out.some((t) => t.label === 'fundraising'), false);
+  assert.deepEqual(topTerms(undefined, new Map(), 0), []);
 });
