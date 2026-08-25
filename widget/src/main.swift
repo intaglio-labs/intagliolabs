@@ -813,6 +813,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // this panel does not live there.
       monthsPanel = makePanel(page: "people-months", size: Self.fit(Self.scaled(Self.monthsBase, Bridge.scale), on: widgetWindow))
       monthsPanel!.hasShadow = false
+    } else {
+      // The panel survives hidden with its page state intact, so a re-open
+      // must tell the page to drop its cache and refetch — otherwise the
+      // first open's data is the data forever.
+      let web = monthsPanel!.contentView as? WKWebView ?? monthsPanel!.contentView?.subviews.first as? WKWebView
+      web?.evaluateJavaScript("window.__hzRefresh && window.__hzRefresh()", completionHandler: nil)
     }
     present(monthsPanel!)
   }

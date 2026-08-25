@@ -202,6 +202,16 @@
     }
   }
 
+  // Native calls this on every panel re-open: the webview SURVIVES hidden
+  // (panels keep state), so without it the year cache from the first open
+  // was the data forever — the server could move on and this page never
+  // asked again. Refetch is cheap (the server memoizes the heavy scan).
+  window.__hzRefresh = () => {
+    cache.clear();
+    prefetching = false;
+    loadOrFail(year);
+  };
+
   tabsEl.addEventListener('click', (e) => {
     const b = e.target.closest('.pm-tab');
     if (!b || !b.dataset.y) return;
