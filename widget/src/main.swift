@@ -99,6 +99,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     w.isFloatingPanel = false
     w.hidesOnDeactivate = false
+    // INERT FOR THIS WINDOW, and kept only because it is correct in principle.
+    //
+    // This was added believing it fixed the two-click switch. It does not, and
+    // saying so here is cheaper than someone measuring it again: the flag only
+    // withholds key when the CLICKED VIEW reports it does not need key, and
+    // WKWebView.needsPanelToBecomeKey is true (measured). Every click into the
+    // page therefore takes key regardless of this line. What actually delivers
+    // that click is ClickThroughWebView -- see Windows.swift.
+    //
+    // Left in because it costs nothing and is the right answer for any non-web
+    // view this window ever hosts.
+    w.becomesKeyOnlyIfNeeded = true
     w.isOpaque = false
     w.backgroundColor = .clear
     // Elements float on the wallpaper; a window shadow would draw one blob
@@ -136,12 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       //
       // Reachable means: enough of it overlaps a screen to grab. Anything less
       // goes back to the corner it started in.
-      let f = w.frame
-      let onSomeScreen = NSScreen.screens.contains { screen in
-        let hit = screen.visibleFrame.intersection(f)
-        return hit.width >= 80 && hit.height >= 40
-      }
-      if !onSomeScreen { placeBottomRight() }
+      if !Self.isUsablyOnScreen(w.frame) { placeBottomRight() }
     } else {
       placeBottomRight()
     }
@@ -227,6 +234,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       DispatchQueue.main.async { FullDiskWatch.begin() }
     }
 
+    // THE DISPLAY CHANGING IS AN EVENT, and until now nothing treated it as one.
+    //
+    // The widget's frame is absolute global coordinates. Unplug a monitor, change
+    // the arrangement, or switch resolution, and those coordinates keep pointing
+    // at wherever they pointed before -- which may be off every screen, or simply
+    // nowhere near the corner the widget is supposed to live in. The rescue that
+    // handles this existed but ran ONLY at launch, so it fixed the case of
+    // "started up on a different display" and never the far more common case of
+    // "the display changed while I was using it".
+    //
+    // Coalesced onto the next main-loop pass: macOS emits this several times
+    // during one arrangement change, and re-placing a window per notification is
+    // visible as a stutter.
+    NotificationCenter.default.addObserver(
+      forName: NSApplication.didChangeScreenParametersNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      guard let self else { return }
+      self.screenChangeWork?.cancel()
+      let work = DispatchWorkItem { [weak self] in self?.rehomeWidget() }
+      self.screenChangeWork = work
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
     // First launch shows the welcome flow. Only completing it sets the flag,
     // so a dismissed flow comes back — and the settings button reopens it on
     // demand regardless.
@@ -294,6 +326,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     let p = PopupPanel(
       contentRect: NSRect(origin: .zero, size: size),
       styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    // Every panel reports its own disappearance, so the dream band's "is
+    // something covering me" answer is maintained in one place rather than at
+    // each of the several exits a popup has. Callers that need their own
+    // willOrderOut chain onto this rather than replacing it -- see openOnboarding.
+    p.willOrderOut = { [weak self] in
+      // After this returns the panel is still visible, so the recount has to
+      // happen once AppKit has actually taken it down.
+      DispatchQueue.main.async { self?.notifyPanelState() }
+    }
     p.isOpaque = false
     p.backgroundColor = .clear
     p.hasShadow = true
@@ -327,7 +368,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // walks its right edge away from the widget's, which is the edge both of
   // them are pinned to.
   private func placedFrame(_ size: NSSize) -> NSRect {
-    let wf = widgetWindow.frame
+    // The VISIBLE widget, not the window: popupGap is meant to be the gap the
+    // owner sees, and measuring from the window's top added the empty cloud band
+    // to it.
+    let wf = visibleWidgetFrame
     let screen = widgetWindow.screen ?? NSScreen.main
     var origin = NSPoint(x: wf.maxX - size.width, y: wf.maxY + Self.popupGap)
     if let v = screen?.visibleFrame {
@@ -423,6 +467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
 
   private func present(_ panel: PopupPanel) {
     watchForOutsideClicks()
+    defer { notifyPanelState() } // something now covers the dream band
     for other in edgePanels where other !== panel {
       if other?.isVisible == true { other?.orderOut(nil) }
     }
@@ -438,11 +483,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // panel was not enough on its own — something still had to stop TAKING key
     // from it.
     //
-    // becomesKeyOnlyIfNeeded (set at construction) is the AppKit answer: the
-    // panel takes key only when a control that needs typing is clicked. Every
-    // one of these surfaces is buttons except people-sky's search field, and
-    // that field still focuses on click because AppKit asks the view whether it
-    // needs key rather than guessing.
+    // orderFront still matters: it stops the popup TAKING key on open, so the
+    // widget keeps it and a popup that was opened but not yet touched does not
+    // steal typing.
+    //
+    // The becomesKeyOnlyIfNeeded set in makePanel was credited here with the
+    // rest of it, and that part was wrong. The flag defers to the clicked view's
+    // needsPanelToBecomeKey, and a webview always answers true, so every click
+    // into a popup takes key anyway. Which also means the first click into any
+    // popup is a first-mouse click on every open -- delivered now only because
+    // the page webviews accept it (ClickThroughWebView, Windows.swift).
     panel.orderFront(nil)
   }
 
@@ -490,7 +540,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       p.level = .floating
       // Whatever route the flow leaves by, the widget goes back under the
       // windows — see PopupPanel.willOrderOut.
+      let reportPanels = p.willOrderOut // set in makePanel; chained, not replaced
       p.willOrderOut = { [weak self] in
+        reportPanels?()
         self?.spotlightWidget(false)
         // ...and the widget comes back however the flow ended — finished,
         // escaped from scene 1, or the panel closed by any native path. At
@@ -755,13 +807,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // does not know by how much; a fraction of innerWidth survives that.
   func widgetSpot() -> [String: Double] {
     guard let panel = onboardingPanel else { return [:] }
-    var w = widgetWindow.frame
-    // The dream cloud's reserved band is empty almost all of the time, and a
-    // spotlight that includes it rings a rectangle whose top half is nothing.
-    // The onboarding scene is pointing at the BAR, so the highlight stops
-    // where the bar starts. Scaled, because the window is.
-    let slot = Self.cloudSlot * CGFloat(Bridge.scale)
-    if w.height > slot { w.size.height -= slot }
+    // The ring points at the BAR: the reserved band is empty almost all of the
+    // time, and ringing it would circle a rectangle whose top half is nothing.
+    // That is exactly visibleWidgetFrame, which now owns the arithmetic this
+    // used to do inline -- and owns it for every other caller too.
+    let w = visibleWidgetFrame
     let p = panel.frame
     guard p.width > 0, p.height > 0 else { return [:] }
     return [
@@ -810,6 +860,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // it. This makes the "where it lives" scene point at a whole widget on
       // any screen size.
       if let v = (widgetWindow.screen ?? NSScreen.main)?.visibleFrame {
+        // The WHOLE window on purpose: this asks whether the thing fits on the
+        // screen, and the empty band is part of what has to fit.
         var f = widgetWindow.frame
         if !v.contains(f) {
           f.origin.x = v.maxX - f.width - Self.edgeInset
@@ -967,7 +1019,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     guard let v = (widgetWindow.screen ?? NSScreen.main)?.visibleFrame else {
       return .greatestFiniteMagnitude
     }
-    let room = v.maxY - Self.screenMargin - (widgetWindow.frame.maxY + Self.popupGap)
+    // Visible frame again, for the same reason: measured from the window's top
+    // this understated the available height by the whole cloud band, and popups
+    // were capped shorter than the screen actually allowed.
+    let room = v.maxY - Self.screenMargin - (visibleWidgetFrame.maxY + Self.popupGap)
     // If the widget has been dragged high enough that there is no usable room
     // above it, overlap is unavoidable and a popup squeezed to 200pt would be
     // useless anyway. Fall back to the screen and let `place` sort it out.
@@ -978,6 +1033,111 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // The widget's frame at a given scale: right edge against the screen's right
   // edge, bottom edge wherever it already was, clamped so a tall widget near
   // the bottom cannot end up under the Dock.
+  // THE WIDGET YOU CAN SEE, which is not the window it lives in.
+  //
+  // The window reserves `cloudSlot` of empty room above the bar for the orb's
+  // dream cloud. That band is transparent and, most of the time, empty -- but it
+  // is still part of the window, so `widgetWindow.frame.maxY` is up to 76pt
+  // above anything the owner can actually see.
+  //
+  // Every position derived from the widget wants THIS rectangle, and until this
+  // existed each call site was on its own: one subtracted the slot, the rest did
+  // not, and the ones that did not produced an 88pt gap where 12 was intended, a
+  // popup capped 76pt short of the room it had, and an onboarding button placed
+  // inside a transparent window that swallowed its clicks. Those were one bug
+  // wearing three faces, which is what an invariant nobody owns looks like.
+  //
+  // The two callers that legitimately want the WHOLE window -- "does it fit on
+  // this screen" and the onboarding card's clearance line -- say so by reading
+  // widgetWindow.frame directly, and are commented where they do.
+  // TELL THE WIDGET PAGE WHETHER ANYTHING IS COVERING ITS DREAM BAND.
+  //
+  // The band above the bar is empty almost always, which is why popups are
+  // placed against the visible widget and not the window (see
+  // visibleWidgetFrame). "Almost" is the catch: tapping the orb raises a 76pt
+  // dream bubble INTO that band for 2.4s, and a popup sitting 12pt above the bar
+  // covers nearly all of it. The bubble would play, unseen, behind the panel.
+  //
+  // Rather than move an open panel 76pt up and back inside 2.4 seconds -- which
+  // reads worse than the thing it fixes -- the page simply does not raise the
+  // bubble while a panel is open. The orb still answers the finger: the wake
+  // animation and its tone run either way, which is the part that matters.
+  //
+  // WHEN VOICE ACTUALLY SHIPS this has to change. The bubble stops being a
+  // "coming soon" placeholder and starts carrying the answer, and an answer that
+  // is silently withheld because a panel is open is a bug rather than a tidy-up.
+  // At that point the popup has to yield the band instead.
+  private func notifyPanelState() {
+    let covered = edgePanels.contains { $0?.isVisible == true }
+    eval(widgetWeb, "window.__hzPanels && window.__hzPanels(\(covered))")
+  }
+
+  private var visibleWidgetFrame: NSRect {
+    var f = widgetWindow.frame
+    let slot = Self.cloudSlot * CGFloat(Bridge.scale)
+    if f.height > slot { f.size.height -= slot } // AppKit's origin is bottom-left: this lowers maxY
+    return f
+  }
+
+  // Enough of the widget to be seen and grabbed. This used to be 80x40, which a
+  // widget hanging 90% off the side of a screen satisfies -- so the rescue below
+  // looked at something nobody could use and decided it was fine. The bar is now
+  // most of the widget, because "reachable" was never the interesting question:
+  // "is this where someone would expect to find it" is.
+  /// Coalesces a burst of screen-parameter notifications into one re-place.
+  private var screenChangeWork: DispatchWorkItem?
+
+  /// Put the widget back where it belongs after the screens changed.
+  ///
+  /// Two different situations, and they want different answers. A widget that is
+  /// still usably on a screen has only drifted relative to the corner, so it is
+  /// re-anchored against the screen it is on and keeps the height the owner
+  /// chose. A widget that is no longer usably anywhere has effectively been lost,
+  /// and goes home to the bottom-right of the main screen rather than being
+  /// nudged toward a position nobody can reach.
+  private func rehomeWidget() {
+    let old = widgetWindow.frame
+    let target: NSRect
+    if Self.isUsablyOnScreen(old), let v = (widgetWindow.screen ?? NSScreen.main)?.visibleFrame {
+      target = Self.reanchored(old, from: widgetWindow.screen?.visibleFrame ?? v, to: v)
+    } else if let v = NSScreen.main?.visibleFrame {
+      var f = old
+      f.origin = NSPoint(x: v.maxX - f.width - Self.edgeInset, y: v.minY + 24)
+      target = f
+    } else {
+      return
+    }
+    guard target != old else { return }
+    widgetWindow.setFrame(target, display: true)
+    // The popups are placed against the widget, so anything open has to follow it
+    // rather than stay pinned to where the widget used to be. edgePanels is
+    // exactly that set; the onboarding panel is deliberately absent, being a
+    // full-screen scrim sized to the screen rather than placed against the
+    // widget -- running it through placedFrame would shrink it to a popup.
+    for panel in edgePanels {
+      guard let panel, panel.isVisible else { continue }
+      panel.setFrame(placedFrame(panel.frame.size), display: true)
+    }
+    // The scrim is sized to the SCREEN, so it needs the opposite treatment: not
+    // re-placed against the widget, but re-stretched. A screen change mid-flow
+    // otherwise leaves a dim covering part of the display and bare desktop beside
+    // it, with the flow's own layout measured against the old rectangle.
+    if let panel = onboardingPanel, panel.isVisible,
+       let frame = (widgetWindow.screen ?? NSScreen.main)?.frame {
+      panel.setFrame(frame, display: true)
+      // The last scene positions its ring and card from measurements of this
+      // window, so it has to take them again against the new one.
+      eval(panel.contentView as? WKWebView, "window.__hzRehome && window.__hzRehome()")
+    }
+  }
+
+  private static func isUsablyOnScreen(_ f: NSRect) -> Bool {
+    NSScreen.screens.contains { screen in
+      let hit = screen.visibleFrame.intersection(f)
+      return hit.width >= f.width * 0.75 && hit.height >= f.height * 0.75
+    }
+  }
+
   private static func pinnedFrame(_ window: NSWindow, _ scale: Double) -> NSRect {
     let size = fit(scaled(widgetBase, scale), on: window)
     var frame = NSRect(origin: window.frame.origin, size: size)
@@ -985,6 +1145,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     frame.origin.x = v.maxX - size.width - edgeInset
     frame.origin.y = max(v.minY + 24, min(frame.origin.y, v.maxY - size.height))
     return frame
+  }
+
+  // Re-place the widget for a screen that is not the one it was placed on.
+  //
+  // x is pinned to the right edge as always. y is the part with a choice in it,
+  // and the rule is: KEEP THE DISTANCE FROM WHICHEVER EDGE IT SAT CLOSER TO.
+  //
+  // The alternative -- keeping y as a fraction of screen height -- sounds more
+  // faithful and behaves worse. The widget's home is the bottom corner, the Dock
+  // is down there with it, and a proportional y drifts it off that line as soon
+  // as the aspect ratio changes: a widget resting just above the Dock on a 16:10
+  // display lands somewhere in open space on a 4:3 one. Anchoring to the nearer
+  // edge keeps the common case (near the bottom) exactly where it belongs, and
+  // still honours a deliberate drag upward by keeping it near the top.
+  private static func reanchored(_ frame: NSRect, from old: NSRect, to v: NSRect) -> NSRect {
+    var f = frame
+    f.origin.x = v.maxX - f.width - edgeInset
+    let fromBottom = frame.minY - old.minY
+    let fromTop = old.maxY - frame.maxY
+    f.origin.y = fromBottom <= fromTop ? v.minY + fromBottom : v.maxY - f.height - fromTop
+    // Whatever the anchor said, it has to land on the screen it was given.
+    f.origin.y = max(v.minY + 24, min(f.origin.y, v.maxY - f.height))
+    return f
   }
 
   // Resize everything to match the slider. Two halves, and both are needed:

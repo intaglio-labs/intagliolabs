@@ -101,9 +101,38 @@ export function cacheKey({ promptSha: sha, model, contentHash }) {
 // a label, not message content: the prompt says so, and validateRowClaims
 // still checks quotes against the BARE text, so a quote that swallows the
 // prefix is dropped rather than stored.
+// THE DATE, and why it is here rather than in the system prompt.
+//
+// The model was given the message and nothing else, so it could not resolve the
+// time IN the message. Measured on the live store: 21% of plan claims (20 of 94)
+// carried "tomorrow", "next Tuesday", "the 2nd" -- text that means nothing
+// without knowing when it was written, stored as though it meant something. The
+// row's own timestamp was sitting one field away the whole time; observed_at is
+// assigned from it by code immediately afterwards.
+//
+// In the USER message, not the system prompt, for two reasons. The system prompt
+// is hashed into the cache key (cacheKey/promptSha), so a per-row value there
+// would make every row its own prompt and the cache useless. And the row's ts is
+// already inside content_hash (canonicalHash covers it), so the existing key
+// stays exactly as sound as it was.
+//
+// ISO date only, never a time: a claim wants the day, and a wall-clock time
+// invites the model to quote it. On its own line ABOVE the message so it cannot
+// be mistaken for part of the text -- the same reasoning as the author prefix,
+// and validateRowClaims still checks quotes against the bare text, so a quote
+// that swallows this line is dropped rather than stored.
+export function rowDateLine(row) {
+  const ts = Number(row?.ts);
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? null : `[written ${d.toISOString().slice(0, 10)}]`;
+}
+
 export function rowContent(row) {
   const speaker = typeof row.speaker === 'string' && row.speaker.trim() ? row.speaker.trim() : null;
-  return speaker ? `${speaker}: ${row.text}` : row.text;
+  const body = speaker ? `${speaker}: ${row.text}` : row.text;
+  const dated = rowDateLine(row);
+  return dated ? `${dated}\n${body}` : body;
 }
 
 export function buildRequest({ system, row, model }) {

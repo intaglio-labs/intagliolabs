@@ -12,7 +12,12 @@ which:
   into new numbers.**
 - `(calendar, …)`, `(health, …)`, `(notes, …)` and so on — raw entries from
   the owner's own calendar, health log, notes, sent messages and meeting
-  notes, newest first, each with its date.
+  notes, **each with its date**.
+
+  They are ordered by how well they match the question, then by nearness to
+  now — NOT newest first. (This said "newest first" until 2026-08-24 and never
+  was: the shelf sorts by term match, then by distance from today. Read the date
+  on each line rather than its position; position carries no time information.)
 
 ## What the labels mean, in the owner's terms
 

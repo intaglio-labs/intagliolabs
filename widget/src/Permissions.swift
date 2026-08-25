@@ -15,7 +15,6 @@ import Foundation
 import AppKit
 import Contacts
 import EventKit
-import Photos
 
 enum Permissions {
   enum Status: String { case granted, denied, undetermined }
@@ -53,13 +52,28 @@ enum Permissions {
     }
   }
 
+  // PHOTOS IS NOT ITS OWN ASK ANY MORE, and this is why.
+  //
+  // This used to call PHPhotoLibrary.requestAuthorization and show a row for it.
+  // Nothing consumed the result. The photos CONNECTOR does not use PhotoKit at
+  // all -- it reads Photos.sqlite, because PhotoKit has no people API (no
+  // PHPerson, no PHFace, and no title or description on PHAsset; checked against
+  // the SDK headers). Faces joined to person names are most of why photos are
+  // worth reading here, so that connector cannot move the way calendar and
+  // contacts did.
+  //
+  // Which left the app asking for a photo-library grant it never used, while the
+  // data actually arrived through Full Disk Access -- one more permission on the
+  // screen, buying nothing, for a feature already paid for elsewhere. MEASURED
+  // rather than assumed: with the Photos grant reset and FDA still in place, the
+  // connector opened and queried the library normally, where a denied read fails
+  // the source loudly instead. So the ask is gone and photos rides in on the
+  // grant that was always doing the work.
+  //
+  // If PhotoKit ever grows a people API this comes back, and photos leaves the
+  // disk grant at the same time -- see photos.mjs.
   static func photos() -> Status {
-    let st = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-    switch st {
-    case .notDetermined: return .undetermined
-    case .denied, .restricted: return .denied
-    default: return .granted
-    }
+    fullDisk()
   }
 
   /// Bring this app forward before asking.
@@ -133,10 +147,9 @@ enum Permissions {
         }
       }
     case "photos":
-      guard photos() == .undetermined else { finish(photos()); return }
-      PHPhotoLibrary.requestAuthorization(for: .readWrite) { st in
-        finish(st == .authorized || st == .limited ? .granted : .denied)
-      }
+      // No prompt of its own any more: photos comes in with Full Disk Access,
+      // which has no request API and is opened as a settings pane instead.
+      finish(photos())
     default:
       finish(.denied)
     }
@@ -219,7 +232,6 @@ enum Permissions {
     let payload: [String: Any] = [
       "contacts_raw": CNContactStore.authorizationStatus(for: .contacts).rawValue,
       "calendar_raw": EKEventStore.authorizationStatus(for: .event).rawValue,
-      "photos_raw": PHPhotoLibrary.authorizationStatus(for: .readWrite).rawValue,
       "mapped": all,
       "bundle": Bundle.main.bundleIdentifier ?? "?",
       "path": Bundle.main.bundleURL.path,

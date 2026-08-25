@@ -51,6 +51,22 @@ splitting one thing into pieces or reaching.
   this task wrong, because these messages are everywhere and they are phrased
   exactly like commitments.
 
+## The date line
+
+The row arrives with `[written YYYY-MM-DD]` on its own line above the message.
+That is the day the message was SENT, attached by the system. It is not part of
+the message and must **never appear in a quote**.
+
+Use it to resolve time. "tomorrow" in a message written 2026-03-04 is 2026-03-05,
+and the claim should say so: write **"The owner flies to Denver on 2026-03-05"**,
+not "The owner flies to Denver tomorrow". A claim is read back months later, when
+"tomorrow" has no meaning and "next Tuesday" has the wrong one.
+
+Where the message names a day without a year ("the 14th", "Tuesday"), resolve it
+to the nearest such day AFTER the written date, and write the full date. If the
+message is genuinely ambiguous about which one it means, that is a reason to
+lower `p`, not a reason to guess silently.
+
 ## The author prefix
 
 The row may arrive as `Name: text` — the name before the first colon is the

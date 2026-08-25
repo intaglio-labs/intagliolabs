@@ -18,7 +18,7 @@ const FAILURES = {
   notready: "memory isn't ready yet — give it a moment and try again",
   auth: 'intaglio labs could not unlock its own memory. Quitting and reopening usually fixes it.',
   identity: 'something else is using the port this app needs',
-  down: "memory isn't running — quit and reopen to restart it",
+  down: "memory isn't running — it should come back on its own in a moment",
   error: 'something went wrong on this app’s side',
 };
 

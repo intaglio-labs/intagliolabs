@@ -165,16 +165,29 @@ try {
   // not yet reviewed is a duplicate in the review queue, not corruption. That
   // is the cheap failure, and it is the one chosen here deliberately.
   const cursorRow = db
-    .prepare("SELECT MAX(through_changed_at) AS c FROM distill_run WHERE status = 'complete'")
+    // The LAST complete run, not MAX(through_changed_at): the cursor is now the
+    // pair (store_changed_at, id), and the id that belongs with the newest
+    // timestamp is only knowable from the same row. MAX() over one column would
+    // pair a timestamp with some other run's id.
+    .prepare(
+      "SELECT through_changed_at AS c, through_id AS i FROM distill_run " +
+        "WHERE status = 'complete' ORDER BY through_changed_at DESC, id DESC LIMIT 1"
+    )
     .get();
   const sinceChangedAt = Number(cursorRow?.c ?? 0);
+  // NULL on any run recorded before schema v7. Reading it as 0 re-offers the
+  // whole tie group that run stopped inside -- the rows the old cursor skipped.
+  const sinceId = Number(cursorRow?.i ?? 0);
 
-  const rows = selectRows(db, { sinceChangedAt, fromDays, limit: rowCap });
+  const rows = selectRows(db, { sinceChangedAt, sinceId, fromDays, limit: rowCap });
   const perSource = {};
   for (const row of rows) perSource[row.source] = (perSource[row.source] ?? 0) + 1;
-  const throughChangedAt = rows.length
-    ? Number(rows[rows.length - 1].store_changed_at)
-    : sinceChangedAt;
+  // Both halves come from the SAME row -- the last one this pass actually read.
+  // Recording a timestamp without its id is what let the next pass step over the
+  // rest of that row's tie group.
+  const last = rows.length ? rows[rows.length - 1] : null;
+  const throughChangedAt = last ? Number(last.store_changed_at) : sinceChangedAt;
+  const throughId = last ? Number(last.id) : sinceId;
 
   if (dryRun) {
     process.stdout.write(
@@ -265,6 +278,7 @@ try {
         params: { temperature: 0, max_tokens: 512, constrained: true },
         from_changed_at: sinceChangedAt,
         through_changed_at: throughChangedAt,
+        through_id: throughId,
         rows_in: rows.length,
       },
       claims: proposals,

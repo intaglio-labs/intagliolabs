@@ -128,7 +128,16 @@ you can carry on while it downloads.</p>
        in context, naming this app. Messages and Notes have none — they are
        SQLite stores under ~/Library, so they need Full Disk Access, and no API
        asks for it. That split is macOS', not ours, so the screen shows it
-       honestly rather than flattening everything into one scary permission. -->
+       honestly rather than flattening everything into one scary permission.
+
+       Photos sits with Messages and Notes rather than with Contacts and
+       Calendar, and it used to have a row of its own asking for the photo
+       library. That row is gone: PhotoKit has no people API — no PHPerson, no
+       PHFace — so who was in a photo can only be read from the store, which is
+       the disk grant. The separate switch was buying nothing the app used, and
+       asking for a permission twice over is worse than asking once honestly.
+       Contacts and Calendar were in the same position and got out of it by
+       moving to real APIs; photos cannot follow until Apple ships one. -->
   <div class="ob-screen ob-setup" id="screenData" hidden>
     <button class="ob-back" id="dataBack" hidden>← the download</button>
     <p class="ob-tagline">what should i know about?</p>
@@ -144,13 +153,9 @@ none of it leaves this Mac.</p>
         <div class="ob-perm-t"><b>Calendar</b><span>so i can answer about where your time goes</span></div>
         <button class="ob-cta ob-cta-sm">allow</button>
       </div>
-      <div class="ob-perm" data-which="photos">
-        <div class="ob-perm-t"><b>Photos</b><span>so i can remember where you were, and who with</span></div>
-        <button class="ob-cta ob-cta-sm">allow</button>
-      </div>
       <div class="ob-perm ob-perm-fda" data-which="fda">
-        <div class="ob-perm-t"><b>Messages &amp; Notes</b>
-          <span>these two have no switch of their own — macOS only offers Full Disk Access for them</span></div>
+        <div class="ob-perm-t"><b>Messages, Notes &amp; Photos</b>
+          <span>these have no switch of their own — macOS only offers Full Disk Access for them</span></div>
         <button class="ob-cta ob-cta-sm" id="fdaOpen">open settings</button>
       </div>
     </div>

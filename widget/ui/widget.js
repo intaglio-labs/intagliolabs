@@ -71,7 +71,18 @@ const TEASE_MS = 2400;
 const dreamEl = document.getElementById('wdream');
 const dreamText = document.getElementById('wdreamtext');
 let teaseTimer = null;
+// Set by native whenever a popup opens or closes. The popups sit directly above
+// the bar and grow upward, so ANY open one covers the band this bubble needs --
+// see notifyPanelState in main.swift for why the bubble yields rather than the
+// panel moving.
+let panelCovering = false;
+window.__hzPanels = (on) => { panelCovering = on === true; if (panelCovering) hideTease(); };
+
 function showTease() {
+  // Nothing to see: the bubble would render behind an open panel and time out
+  // unread. The orb still wakes and still sounds -- the caller does both before
+  // this -- so the tap is answered, just not with a line nobody can read.
+  if (panelCovering) return;
   dreamText.textContent = TEASE_TEXT;
   dreamEl.classList.add('on');
   clearTimeout(teaseTimer);

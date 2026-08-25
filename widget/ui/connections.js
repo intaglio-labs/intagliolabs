@@ -310,6 +310,10 @@ const FDA_HINT = {
   text: 'Switch on intaglio labs under System Settings → Privacy & Security → Full Disk Access.',
   url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles',
   link: 'Open System Settings',
+  // One per Mac: there is no second Messages, Notes or photo library to add.
+  // The `url` above is a Settings pane, not a sign-up page, so without this the
+  // "+ add account" below offers to add an account by opening Full Disk Access.
+  local: true,
 };
 // WRITTEN FOR SOMEBODY WHO INSTALLED AN APP. These used to name repo scripts
 // (ops/gcal-auth.mjs) and secret file paths (~/.hazlie/secrets/*.txt) — neither
@@ -610,7 +614,12 @@ function card(src, keep) {
         ? `connected · ${src.id.slice(5)}`
         : 'connected';
       tip.appendChild(acct);
-      if (hint && hint.url && src.action !== 'fda') {
+      // `hint.local` is the test, NOT src.action. action is only 'fda' while the
+      // source is BROKEN, so a Messages store that was working showed "+ add
+      // account" -- on a one-per-Mac store, wired to open the Full Disk Access
+      // pane. The condition the comment above always described is a property of
+      // the source, not of its current error state.
+      if (hint && hint.url && !hint.local) {
         const add = document.createElement('button');
         add.className = 'hold-ok add-acct';
         add.textContent = '+ add account';
