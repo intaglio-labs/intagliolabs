@@ -6,9 +6,10 @@
 // the sample includes RECEIVED message text. That is the same envelope the
 // episode distiller already ships to the same loopback model (two-sided,
 // speaker-labeled lines), and it goes nowhere else — loopback llama only,
-// redirect: 'error', nothing cached to disk. The output is model prose and
-// is LABELED as such in the UI; it is never stored as a claim, never fed to
-// retrieval, and expires with the corpus stamp. In-message instructions are
+// redirect: 'error'. The output is model prose and is LABELED as such in
+// the UI; it is never stored as a claim and never fed to retrieval. It IS
+// persisted (summaries.db below, 0600, derived and rebuildable) so the same
+// year is not re-summarized on every open. In-message instructions are
 // named as data in the prompt, and the worst case of a poisoned sample is a
 // wrong sentence the owner reads next to counted evidence that contradicts
 // it.
@@ -19,6 +20,10 @@
 // with thin input is worse than no summary, so under MIN_ROWS substantive
 // messages this module refuses to call the model at all and says why.
 
+import { existsSync, mkdirSync, chmodSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { yearCore } from './map.mjs';
 
 // Substantive = long enough to carry a subject. Reactions, "ok", and stray
@@ -79,16 +84,42 @@ function systemPrompt(year) {
   );
 }
 
-// Generated summaries, per db handle, keyed person|year|corpus-stamp — the
-// same invalidation the year view's core uses, so a summary can never
-// outlive the corpus it described. In-process only: a restart regenerates in
-// seconds, and model prose written to disk would be a new stored artifact
-// this system has not decided to have.
-const memo = new WeakMap();
+// Generated summaries PERSIST, in a derived store beside the resolutions db.
+// The first cut cached in-process against the whole-corpus stamp, and that
+// was a cache in name only: hermes restarts wiped it, and the stamp moved
+// every time ANY connector ingested ANYTHING (~every 15 minutes), so the
+// owner watched the same person re-summarize on every open. The right
+// invalidation is the PERSON-YEAR: a summary stays valid until that person's
+// own substantive-row count for that year has moved meaningfully. A past
+// year's count never moves (backfills aside), so its summary is generated
+// once, ever. Unlike resolutions.db this store is derived and rebuildable —
+// losing it costs regeneration, not truth.
+const REGEN_ABS = 20; // messages of drift before a regeneration...
+const REGEN_FRAC = 0.2; // ...or a fifth of the sample's basis, whichever is larger
 
-function corpusStamp(db) {
-  const c = db.prepare('SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM context').get();
-  return `${c.n}|${c.m}`;
+export function summaryStillValid(rowsSeen, rowsNow) {
+  return Math.abs(rowsNow - rowsSeen) <= Math.max(REGEN_ABS, Math.floor(rowsSeen * REGEN_FRAC));
+}
+
+export function summariesDbPath(home = homedir()) {
+  return join(home, '.hazlie', 'people', 'summaries.db');
+}
+
+export function openSummariesDb(path = summariesDbPath()) {
+  if (path !== ':memory:') {
+    const dir = dirname(path);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try { chmodSync(dir, 0o700); } catch {}
+  }
+  const db = new DatabaseSync(path);
+  if (path !== ':memory:') { try { chmodSync(path, 0o600); } catch {} }
+  db.exec(
+    'CREATE TABLE IF NOT EXISTS summaries (' +
+      'person_key TEXT NOT NULL, year INTEGER NOT NULL, text TEXT NOT NULL, ' +
+      'rows_seen INTEGER NOT NULL, generated_ms INTEGER NOT NULL, ' +
+      'PRIMARY KEY (person_key, year))'
+  );
+  return db;
 }
 
 // The one call the route uses. Returns { text, sampled, of } on success, or
@@ -97,17 +128,8 @@ function corpusStamp(db) {
 export async function summarizeYear(
   contextDb,
   stateDb,
-  { personKey, year, now = Date.now(), owner, aliases = null, llama, fetchFn = fetch } = {}
+  { personKey, year, now = Date.now(), owner, aliases = null, llama, fetchFn = fetch, summariesDb = null } = {}
 ) {
-  let cache = memo.get(contextDb);
-  if (!cache) {
-    cache = new Map();
-    memo.set(contextDb, cache);
-  }
-  const key = `${personKey}|${year}|${corpusStamp(contextDb)}`;
-  const hit = cache.get(key);
-  if (hit !== undefined) return hit;
-
   const { graph } = yearCore(contextDb, stateDb, { now, owner, aliases });
   const person = graph.find((p) => p.key === personKey);
   if (!person) return { text: null, reason: 'unknown person' };
@@ -115,10 +137,19 @@ export async function summarizeYear(
 
   const rows = gatherRows(contextDb, idToKey, personKey, year);
   if (rows.length < MIN_ROWS) {
-    const out = { text: null, reason: `only ${rows.length} substantive messages in ${year}` };
-    cache.set(key, out);
-    return out;
+    return { text: null, reason: `only ${rows.length} substantive messages in ${year}` };
   }
+
+  // The persisted answer, unless this person's year has drifted past it. An
+  // injected handle is the caller's to close; a default one is ours.
+  const sdb = summariesDb ?? openSummariesDb();
+  try {
+    const hit = sdb
+      .prepare('SELECT text, rows_seen, generated_ms FROM summaries WHERE person_key = ? AND year = ?')
+      .get(personKey, year);
+    if (hit && summaryStillValid(hit.rows_seen, rows.length)) {
+      return { text: hit.text, sampled: null, of: rows.length, cached: true };
+    }
 
   const sample = sampleRows(rows);
   const label = (person.name.split(/\s+/u)[0] || 'them').slice(0, 24);
@@ -150,9 +181,18 @@ export async function summarizeYear(
   }
   const body = await res.json().catch(() => null);
   const text = body?.choices?.[0]?.message?.content?.trim() || null;
-  const out = text
-    ? { text, sampled: sample.length, of: rows.length }
-    : { text: null, reason: 'empty model output' };
-  if (text !== null) cache.set(key, out);
-  return out;
+  if (text === null) return { text: null, reason: 'empty model output' };
+    sdb
+      .prepare(
+        'INSERT INTO summaries (person_key, year, text, rows_seen, generated_ms) VALUES (?,?,?,?,?) ' +
+          'ON CONFLICT (person_key, year) DO UPDATE SET text = excluded.text, ' +
+          'rows_seen = excluded.rows_seen, generated_ms = excluded.generated_ms'
+      )
+      .run(personKey, year, text, rows.length, now);
+    return { text, sampled: sample.length, of: rows.length };
+  } finally {
+    if (summariesDb === null) {
+      try { sdb.close(); } catch {}
+    }
+  }
 }

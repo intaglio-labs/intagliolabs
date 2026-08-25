@@ -74,3 +74,33 @@ test('sampleRows spreads evenly and caps', () => {
   assert.equal(s[0].i, 0);
   assert.ok(s[119].i > 500, 'reaches the tail of the year');
 });
+
+test('a persisted summary is reused, and regenerates only after real drift', async () => {
+  const ctx = openDb(':memory:');
+  const y0 = new Date(2026, 1, 1).getTime();
+  insertRows(ctx, Array.from({ length: 30 }, (_, i) =>
+    msgRow(y0 + i * 86_400_000, `long enough message number ${i} about the surf trip planning`, i % 2 === 0)));
+  const spine = spineDb([[HANDLE, 'Sam Lee']]);
+  const { openSummariesDb, summaryStillValid } = await import('../server/people/summary.mjs');
+  const sdb = openSummariesDb(':memory:');
+  let calls = 0;
+  const fetchFn = async () => {
+    calls += 1;
+    return { ok: true, json: async () => ({ choices: [{ message: { content: `summary v${calls}` } }] }) };
+  };
+  const opts = { personKey: 'name:sam lee', year: 2026, now: NOW, owner: { addresses: new Set(), names: [] }, llama: LLAMA, fetchFn, summariesDb: sdb };
+  const first = await summarizeYear(ctx, spine, opts);
+  assert.equal(first.text, 'summary v1');
+  const second = await summarizeYear(ctx, spine, opts);
+  assert.equal(calls, 1, 'no second model call');
+  assert.equal(second.text, 'summary v1');
+  assert.equal(second.cached, true);
+  // Small drift stays cached; large drift regenerates.
+  assert.ok(summaryStillValid(30, 40));
+  insertRows(ctx, Array.from({ length: 25 }, (_, i) =>
+    msgRow(y0 + (40 + i) * 3600_000, `a brand new long enough message ${i} about something else entirely`)));
+  const third = await summarizeYear(ctx, spine, opts);
+  assert.equal(calls, 2, 'drift past the threshold regenerates');
+  assert.equal(third.text, 'summary v2');
+  sdb.close();
+});
