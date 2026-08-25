@@ -584,11 +584,16 @@ const makeCtx = ({ history = false } = {}) => ({
           while (now() < deadline) {
             const back = runCounts((await source.run(makeCtx({ history: true }))) ?? {});
             slices += 1;
-            gained += back.inserted + back.updated;
+            // `ingested`, not `inserted`: runCounts NORMALISES a source's
+            // {inserted|ingested} into one name, and reading the pre-normalised
+            // one back made this undefined. `gained` was NaN on every pass --
+            // logged as null, which is how it went unnoticed -- and the all-zero
+            // guard below could never fire through its first condition.
+            gained += back.ingested + back.updated;
             // Nothing read means the walk reached the beginning of the store.
             // The source records that itself; stop asking.
             if (state.getCursor(`${source.name}:history-done`)) break;
-            if (back.inserted === 0 && back.updated === 0 && back.unchanged === 0) break;
+            if (back.ingested === 0 && back.updated === 0 && back.unchanged === 0) break;
           }
           if (slices > 0) {
             log.info('history_pass', { connector: source.name, slices, gained });
