@@ -73,7 +73,18 @@ final class Distiller {
   private func runOnce() {
     guard !isRunning, !stopping else { schedule(after: busyInterval); return }
     let node = home.appendingPathComponent(".hazlie/bin/node")
-    let script = backend.appendingPathComponent("ui/scripts/distill-once.mjs")
+    // TWO STEPS, IN ORDER. The episode index is derived from context, so it has
+    // to be rebuilt before anything reads it -- otherwise a conversation that
+    // arrived since the last pass is invisible to the distiller, and one that
+    // grew is distilled at a stale shape.
+    //
+    // Episodes rather than rows, because the row was the wrong unit and this is
+    // where that decision takes effect. A row reached the model alone -- "ok"
+    // with no question above it -- and 99.4% of every call was the instruction
+    // sheet. Measured on this corpus: 3,759 owner rows collapse into 1,030
+    // conversations, so the same evidence costs a third of the calls and each
+    // one carries the exchange it came from.
+    let script = backend.appendingPathComponent("ui/scripts/distill-episodes.mjs")
     let db = home.appendingPathComponent(".hazlie/context/context.db")
     guard fm.fileExists(atPath: node.path), fm.fileExists(atPath: script.path),
           fm.fileExists(atPath: db.path) else {
@@ -81,13 +92,78 @@ final class Distiller {
       return
     }
 
+    // ASK HERMES TO REBUILD THE INDEX; do not rebuild it here.
+    //
+    // This used to spawn `node ui/scripts/build-episodes.mjs` and
+    // waitUntilExit() right on this line, which was wrong twice. It opened
+    // context.db read-write from a SECOND process while hermes was serving and
+    // ingesting against it, breaking the sole-writer rule that
+    // connectors/AGENTS.md and ui/AGENTS.md both state -- and the corpus runs
+    // journal_mode=DELETE, where a writer's lock excludes every reader for the
+    // whole rebuild, so the two could stall each other for the full 5s
+    // busy_timeout. And runOnce() is a main-run-loop timer callback, so waiting
+    // on it froze the UI for the duration: the comment here used to say 110ms at
+    // 12,782 rows; it measured 1,414ms at 113,371, and it grows with every
+    // history slice that lands.
+    //
+    // Now it is one POST to the writer that already holds the lock, and the
+    // distiller starts in the completion handler instead of after a blocked
+    // main thread. A failure is still not fatal -- the distiller reads the
+    // previous index, stale rather than wrong, and the next pass rebuilds it --
+    // so this proceeds either way.
+    rebuildIndex { [weak self] in
+      guard let self, !self.stopping else { return }
+      self.startDistiller(node: node, script: script)
+    }
+  }
+
+  /// POST /admin/episodes/rebuild, then call `done` on the main queue whatever
+  /// happened. Never throws the pass away: a rebuild that did not run leaves the
+  /// previous index in place, which is stale rather than wrong.
+  private func rebuildIndex(done: @escaping () -> Void) {
+    let finish = { DispatchQueue.main.async(execute: done) }
+    guard let tok = hermesToken(),
+          let url = URL(string: "http://127.0.0.1:51789/admin/episodes/rebuild") else {
+      finish()
+      return
+    }
+    var req = URLRequest(url: url)
+    req.httpMethod = "POST"
+    req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization")
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.httpBody = Data("{}".utf8)
+    // Generous: a full rebuild is seconds on a large corpus and this is a
+    // background pass with nothing waiting on it.
+    req.timeoutInterval = 120
+    URLSession.shared.dataTask(with: req) { _, response, error in
+      if let error {
+        NSLog("Intaglio Labs: episode index rebuild failed: \(error.localizedDescription)")
+      } else if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+        NSLog("Intaglio Labs: episode index rebuild refused (status \(http.statusCode))")
+      }
+      finish()
+    }.resume()
+  }
+
+  /// The hermes bearer, read the same way Bridge reads it. Sixty-four hex
+  /// characters or nothing -- a malformed token is treated as no token, so a
+  /// half-written secrets file cannot become an Authorization header.
+  private func hermesToken() -> String? {
+    let url = home.appendingPathComponent(".hazlie/secrets/hermes-token.txt")
+    guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+    let tok = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    let hex = Set("0123456789abcdef")
+    guard tok.count == 64, tok.allSatisfy({ hex.contains($0) }) else { return nil }
+    return tok
+  }
+
+  private func startDistiller(node: URL, script: URL) {
     let p = Process()
     p.executableURL = node
     // --backfill with a wide window and a row cap: the window says "all of
     // history is in scope", the cap says "not all of it at once", and the
     // watermark makes the next pass continue instead of repeat.
-    p.arguments = [script.path, "--backfill", "--from-days", "3650",
-                   "--limit", String(batch)]
+    p.arguments = [script.path, "--limit", String(batch)]
     // The script resolves prompts/ relative to the backend root, so it has to run
     // from ui/ exactly as its own usage block says.
     p.currentDirectoryURL = backend.appendingPathComponent("ui")
@@ -112,14 +188,14 @@ final class Distiller {
       // Anything else means there is more to do, so come back promptly.
       var rowsIn = -1
       if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-         let n = json["rows_in"] as? Int {
+         let n = json["episodes_in"] as? Int {
         rowsIn = n
       }
       let drained = (rowsIn == 0)
       if proc.terminationStatus != 0 {
         NSLog("Intaglio Labs: distill pass failed (status \(proc.terminationStatus))")
       } else if rowsIn > 0 {
-        NSLog("Intaglio Labs: distilled \(rowsIn) rows")
+        NSLog("Intaglio Labs: distilled \(rowsIn) conversations")
       }
       DispatchQueue.main.async {
         self.schedule(after: drained ? self.idleInterval : self.busyInterval)

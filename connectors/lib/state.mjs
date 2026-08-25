@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS contact_ids(
   identifier   TEXT PRIMARY KEY,  /* E.164 phone or lowercased email */
   display_name TEXT NOT NULL,
   kind         TEXT NOT NULL,     /* 'phone' | 'email' */
+  /* WHERE THE NAME CAME FROM, because more than one place knows names and they
+     do not rank equally. 'contacts' is the address book -- a name the owner
+     chose. 'calendar' is an event attendee: a real name, but one an invite
+     supplied. Contacts wins on conflict; see upsertContacts. */
+  source       TEXT NOT NULL DEFAULT 'contacts',
   updated_ts   INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS imessage_undecoded(
@@ -78,6 +83,9 @@ function hardenConnection(db) {
 }
 
 const CONTACT_KINDS = Object.freeze(['phone', 'email']);
+// Named rather than open, so a third source has to decide where it ranks
+// instead of silently outranking the address book by running last.
+const CONTACT_SOURCES = Object.freeze(['contacts', 'calendar']);
 
 export function openStateDb(path = defaultStateDbPath()) {
   // umask is process-global but everything here is synchronous; restore in
@@ -106,6 +114,17 @@ export function openStateDb(path = defaultStateDbPath()) {
     chmodSync(path, 0o600);
     hardenConnection(db);
     db.exec(SCHEMA);
+    // contact_ids.source, for a state.db created before names had a ranking.
+    // CREATE TABLE IF NOT EXISTS cannot add a column, so an existing install
+    // would keep the old three-column table and every insert naming a source
+    // would fail. Everything already there came from the address book, which is
+    // exactly what the default says.
+    const contactCols = new Set(
+      db.prepare("SELECT name FROM pragma_table_info('contact_ids')").all().map((c) => c.name)
+    );
+    if (!contactCols.has('source')) {
+      db.exec("ALTER TABLE contact_ids ADD COLUMN source TEXT NOT NULL DEFAULT 'contacts'");
+    }
     chmodSync(path, 0o600);
   } catch (error) {
     try {
@@ -126,10 +145,22 @@ export function openStateDb(path = defaultStateDbPath()) {
     'INSERT INTO run_log(connector, started_ts, finished_ts, ok, ingested, updated, unchanged, deleted, error) ' +
       'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
   );
+  // PRECEDENCE IN THE SQL, not in the caller.
+  //
+  // Two sources now write names and they do not rank equally: the address book
+  // is a name the owner chose, an invite attendee is a name somebody else
+  // typed. Without the guard the last connector to run would win, so whether
+  // a person had their real name depended on connector order -- which is not a
+  // thing anyone should have to know.
+  //
+  // A 'contacts' write always lands. A 'calendar' write lands only where no
+  // contacts row already holds that identifier.
   const upsertContactStmt = db.prepare(
-    'INSERT INTO contact_ids(identifier, display_name, kind, updated_ts) VALUES (?, ?, ?, ?) ' +
+    'INSERT INTO contact_ids(identifier, display_name, kind, source, updated_ts) ' +
+      'VALUES (?, ?, ?, ?, ?) ' +
       'ON CONFLICT(identifier) DO UPDATE SET display_name = excluded.display_name, ' +
-      'kind = excluded.kind, updated_ts = excluded.updated_ts'
+      'kind = excluded.kind, source = excluded.source, updated_ts = excluded.updated_ts ' +
+      "WHERE excluded.source = 'contacts' OR contact_ids.source != 'contacts'"
   );
   const resolveStmt = db.prepare(
     'SELECT display_name, kind FROM contact_ids WHERE identifier = ?'
@@ -217,10 +248,14 @@ export function openStateDb(path = defaultStateDbPath()) {
         if (!CONTACT_KINDS.includes(c.kind)) {
           throw new Error(`contacts[${i}]: "kind" must be one of ${CONTACT_KINDS.join(', ')}`);
         }
+        if (c.source !== undefined && !CONTACT_SOURCES.includes(c.source)) {
+          throw new Error(`contacts[${i}]: "source" must be one of ${CONTACT_SOURCES.join(', ')}`);
+        }
       }
       db.exec('BEGIN');
       try {
-        for (const c of list) upsertContactStmt.run(c.identifier, c.displayName, c.kind, now);
+        for (const c of list)
+          upsertContactStmt.run(c.identifier, c.displayName, c.kind, c.source ?? 'contacts', now);
         db.exec('COMMIT');
       } catch (e) {
         db.exec('ROLLBACK');

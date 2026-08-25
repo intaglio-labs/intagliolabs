@@ -102,3 +102,50 @@ test('a participant with neither name nor address contributes nothing', () => {
   assert.deepEqual(attendeesOf({}), []);
   assert.deepEqual(attendeesOf(null), []);
 });
+
+// ── attendees as identities ──────────────────────────────────────────────────
+//
+// 706 distinct attendee emails on this machine, all 706 carrying a name, and
+// only 19 of them in the address book. Without this the timeline renders them
+// as raw email addresses.
+import { attendeeIdentities } from '../sources/calendar.mjs';
+
+const ev = (attendees, organizer) => ({ attendees, organizer });
+
+test('an attendee with a name and an address becomes an identity', () => {
+  const out = attendeeIdentities([
+    ev([{ name: 'Al Baker', email: 'AL@example.com', isMe: false }]),
+  ]);
+  assert.deepEqual(out, [
+    { identifier: 'al@example.com', displayName: 'Al Baker', kind: 'email', source: 'calendar' },
+  ]);
+});
+
+test('they are written at calendar rank, never as address-book truth', () => {
+  const [one] = attendeeIdentities([ev([{ name: 'Al', email: 'al@example.com', isMe: false }])]);
+  assert.equal(one.source, 'calendar', 'a name an invite supplied is not a name the owner chose');
+});
+
+test('the organizer counts too', () => {
+  const out = attendeeIdentities([ev([], { name: 'Bea', email: 'bea@example.com', isMe: false })]);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].displayName, 'Bea');
+});
+
+test('the owner is never an identity in their own calendar', () => {
+  assert.deepEqual(attendeeIdentities([ev([{ name: 'Me', email: 'me@example.com', isMe: true }])]), []);
+});
+
+test('an attendee with no address contributes nothing to the spine', () => {
+  // A name alone cannot key anything — the spine is identifier-first.
+  assert.deepEqual(attendeeIdentities([ev([{ name: 'Nameless Phone', isMe: false }])]), []);
+});
+
+test('one person across many events yields one identity, stably named', () => {
+  const out = attendeeIdentities([
+    ev([{ name: 'Al Baker', email: 'al@example.com', isMe: false }]),
+    ev([{ name: 'Al B.', email: 'al@example.com', isMe: false }]),
+  ]);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].displayName, 'Al Baker', 'first seen wins, so the label does not flicker');
+});

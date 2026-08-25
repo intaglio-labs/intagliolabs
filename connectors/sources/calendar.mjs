@@ -141,6 +141,87 @@ export function attendeesOf(occ) {
   return out;
 }
 
+// EVERY ATTENDEE IS ALSO AN IDENTITY, and the calendar is the only place many
+// of them are named.
+//
+// Measured on this machine: 1,417 of 1,905 events carry attendees, giving 706
+// distinct emails and ALL 706 carry a name -- while only 19 of those emails are
+// in the address book. They are work contacts nobody ever saved. Without this
+// the timeline shows them as raw email addresses, which is what
+// "ay@austinyoshino.com" was.
+//
+// Written at source 'calendar', which ranks BELOW 'contacts': a name the owner
+// chose always beats a name an invite supplied, whichever connector ran last.
+export function attendeeIdentities(occurrences) {
+  const byEmail = new Map();
+  for (const occ of Array.isArray(occurrences) ? occurrences : []) {
+    const people = attendeesOf(occ);
+    const organizer = attendeesOf({ attendees: occ?.organizer ? [occ.organizer] : [] });
+    for (const p of [...people, ...organizer]) {
+      if (!p.email || !p.name) continue;
+      // First name wins, and events are walked oldest-first, so a person who
+      // later changed how their name renders keeps one stable label rather than
+      // flickering between them.
+      if (!byEmail.has(p.email)) byEmail.set(p.email, p.name);
+    }
+  }
+  return [...byEmail].map(([identifier, displayName]) => ({
+    identifier,
+    displayName,
+    kind: 'email',
+    source: 'calendar',
+  }));
+}
+
+// THE SAME HARVEST, FROM ROWS INSTEAD OF OCCURRENCES.
+//
+// attendeeIdentities above reads EventKit occurrences, and EventKit is one of
+// three backends. Google and the local sqlite path never entered it, so those
+// installations kept rendering historical counterparties as raw addresses even
+// though their event rows carry the same attendee names.
+//
+// Rows ARE the shared surface: every backend normalises into `meta.attendees`
+// and `meta.organizer` with the same {email, name} shape before ingest, whether
+// it came from buildRows or gcalRows.eventsToRows. So this adapts a row back
+// into the shape attendeeIdentities already understands rather than growing a
+// second definition of what an attendee is.
+//
+// EventKit keeps its separate WIDE read on top of this: rows are a narrow
+// window by design (a week back, a month ahead) and its extra pass reaches six
+// years. The other two get the narrow window, which is what they had access to
+// anyway and is strictly more than the nothing they were harvesting before.
+export function identitiesFromRows(rows) {
+  return attendeeIdentities(
+    (Array.isArray(rows) ? rows : []).map((row) => ({
+      attendees: row?.meta?.attendees,
+      organizer: row?.meta?.organizer,
+    }))
+  );
+}
+
+// Writing them down, wherever they came from. Count only in the log: an address
+// in a log is an address in a log.
+export function rememberIdentities(ctx, identities, backend) {
+  if (!Array.isArray(identities) || identities.length === 0) return 0;
+  if (typeof ctx?.state?.upsertContacts !== 'function') return 0;
+  ctx.state.upsertContacts(identities);
+  ctx.log?.info?.('calendar_identities', {
+    connector: 'calendar',
+    backend,
+    people: identities.length,
+  });
+  return identities.length;
+}
+
+// How far back to look for NAMES, as distinct from rows. Wide and cheap: this
+// read ingests nothing, and a person met in 2019 is still worth being able to
+// name in 2026.
+const IDENTITY_BACK_MS = 6 * 365 * DAY_MS;
+const IDENTITY_AHEAD_MS = 365 * DAY_MS;
+export function identityWindow(nowMs) {
+  return { fromTs: nowMs - IDENTITY_BACK_MS, toTs: nowMs + IDENTITY_AHEAD_MS };
+}
+
 export function scanWindow(nowMs, backfill = false) {
   const { backMs, aheadMs } = backfill ? BACKFILL_WINDOW : STEADY_WINDOW;
   return { fromTs: nowMs - backMs, toTs: nowMs + aheadMs };
@@ -378,6 +459,28 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
   // so there is no dependence on a lazily-populated occurrence cache.
   async function runEventKitBackend(ctx, window) {
     const occurrences = await readEvents(window);
+
+    // THE IDENTITY WINDOW IS NOT THE ROW WINDOW.
+    //
+    // Rows are deliberately narrow -- a week back, a month ahead -- because the
+    // calendar surface is about what is coming up. Names are not: a colleague
+    // from two years ago is exactly who the timeline needs to label, and their
+    // name costs nothing to keep. Harvesting only the row window gave 85 of the
+    // 706 people this calendar knows.
+    //
+    // A separate wide read, ingesting nothing. EventKit answers it in about a
+    // second for a decade, and the result is names and addresses only -- no
+    // rows, no text, nothing that reaches a model.
+    const idWindow = identityWindow(ctx.now());
+    let identityOccurrences = occurrences;
+    try {
+      identityOccurrences = await readEvents(idWindow);
+    } catch {
+      // A failed wide read is not a failed run: fall back to the rows this
+      // pass already has, which is what the narrow window would have given.
+    }
+    rememberIdentities(ctx, attendeeIdentities(identityOccurrences), 'eventkit');
+
     const { rows, skipped } = buildRows(occurrences, window);
     if (skipped > 0) {
       ctx.log.warn('calendar_rows_skipped', { connector: 'calendar', count: skipped });
@@ -515,6 +618,9 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
       ctx.log.warn('calendar_rows_skipped', { connector: 'calendar', count: skipped });
     }
 
+    // Names, from the rows this pass already built (identitiesFromRows explains
+    // why rows and not occurrences).
+    rememberIdentities(ctx, identitiesFromRows(deduped), 'google');
     const totals = await ctx.ingest(deduped);
 
     const observed = new Set(deduped.map((row) => row.entity_id));
@@ -643,6 +749,7 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
         ctx.log.warn('calendar_rows_skipped', { connector: 'calendar', count: skipped });
       }
 
+      rememberIdentities(ctx, identitiesFromRows(rows), 'local');
       const totals = await ctx.ingest(rows);
 
       // Reconciliation — reached ONLY when the snapshot, the scan, and every

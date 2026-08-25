@@ -17,14 +17,14 @@ const owner = { addresses: new Set(['me@x.com']), names: ['Me'] };
 // case the review queue exists for.
 function seed() {
   const ctx = new DatabaseSync(':memory:');
-  ctx.exec('CREATE TABLE context (ts INTEGER, source TEXT, entity_id TEXT, text TEXT, meta TEXT)');
+  ctx.exec('CREATE TABLE context (ts INTEGER, source TEXT, speaker TEXT, entity_id TEXT, text TEXT, meta TEXT)');
   const rows = [
     [NOW - 2 * DAY, 'imessage', 'i:1', null, JSON.stringify({ chat_handle: '+15551111', is_from_me: false })],
     [NOW - 3 * DAY, 'calendar', 'c:1', null, JSON.stringify({ attendees: [{ email: '+15551111', name: 'Mike Chen' }] })],
     [NOW - 400 * DAY, 'mail', 'm:1', null, JSON.stringify({ from: ['michael.chen@acme.co'], to: ['me@x.com'] })],
     [NOW - 401 * DAY, 'calendar', 'c:2', null, JSON.stringify({ attendees: [{ email: 'michael.chen@acme.co', name: 'Michael Chen' }] })],
   ];
-  for (const r of rows) ctx.prepare('INSERT INTO context VALUES (?,?,?,?,?)').run(...r);
+  for (const r of rows) ctx.prepare('INSERT INTO context (ts, source, entity_id, text, meta) VALUES (?,?,?,?,?)').run(...r);
   const res = openResolutionsDb(':memory:');
   return { ctx, res };
 }

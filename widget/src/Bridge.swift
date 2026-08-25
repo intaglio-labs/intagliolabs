@@ -97,7 +97,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                "openExternal"],
-    "people-months": ["close", "peopleYear", "peopleSummary", "openPeople"],
+    "people-months": ["close", "peopleYear", "peopleFind", "peopleSummary", "openPeople"],
     "ear": ["orbState", "voiceError", "voiceTranscript"],
   ]
 
@@ -922,6 +922,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       let year = (payload["year"] as? Int) ?? Int(payload["year"] as? Double ?? 0)
       let yPath = year > 0 ? "people/year?year=\(year)" : "people/year"
       peopleCall("GET", yPath, json: nil) { [weak self] data in
+        self?.reply(webView, id, data)
+      }
+    case "peopleFind":
+      // Search across every year, ranked by hermes. The page used to filter the
+      // open year's already-loaded list, which could not reach a person in
+      // another year or past the 250 that list holds.
+      let fq = String(String(payload["q"] as? String ?? "").prefix(100))
+      let esc = fq.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+      peopleCall("GET", "people/find?q=\(esc)", json: nil) { [weak self] data in
         self?.reply(webView, id, data)
       }
     case "peopleSummary":

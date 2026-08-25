@@ -34,6 +34,35 @@ function normName(s) {
 }
 
 // identifier (phone/email) -> canonical display name, from the spine.
+// Is this string a NAME, or an identifier wearing one? `speaker` falls back to
+// the handle when the store knows no name, so a WhatsApp LID
+// ("11107305521405@lid") and a bare phone number both arrive looking like
+// labels. Neither is one.
+// What to show when nobody, anywhere, knows this person's name.
+//
+// A raw WhatsApp LID is seventeen digits and an @lid suffix. It is not a
+// name, it is not recognisable, and it is not even a number the owner could
+// look up -- WhatsApp mints it precisely so it cannot be traced back to one.
+// Rendering it verbatim asks somebody to recognise an opaque token.
+//
+// A phone number is different: it is unrecognisable too, but it is REAL, and
+// an owner can often place it. So numbers stay, formatted; only the LID gets
+// replaced by an honest description of what it is.
+export function readableId(identifier) {
+  if (typeof identifier !== 'string' || identifier.length === 0) return null;
+  if (identifier.endsWith('@lid')) return 'WhatsApp contact';
+  return identifier;
+}
+
+export function namelike(value) {
+  if (typeof value !== 'string') return false;
+  const v = value.trim();
+  if (v.length === 0 || v.length > 80) return false;
+  if (v.includes('@')) return false; // an address or a LID, never a name
+  if (/^\+?[0-9()\s.-]+$/u.test(v)) return false; // a phone number
+  return /\p{L}/u.test(v); // has an actual letter in it
+}
+
 export function loadSpine(stateDb) {
   const map = new Map();
   const nameToIds = new Map();
@@ -63,14 +92,40 @@ function personSignalsForRow(row, meta, owner) {
       // only ever talked to in a group thread is now visible. The owner's own
       // group messages have no single counterparty and are still skipped; a
       // one-to-one message is credited to the chat handle as before.
+      // THE SPEAKER IS A NAME WHEN WHATSAPP KNOWS ONE, and for most of these
+      // people it is the only name there is. A group sender arrives as a privacy
+      // LID -- an opaque id WhatsApp uses instead of a phone number -- which the
+      // spine can never resolve, so the timeline rendered seventeen digits. The
+      // connector already joins ZWAGROUPMEMBER for a contact name and puts it in
+      // `speaker`; this is where it was being thrown away.
+      //
+      // Guarded, because `speaker` falls back to the handle itself when the
+      // store knows no name: a LID or a bare number is an identifier, and
+      // passing one through here would make it somebody's display name, which
+      // is the bug this whole pass exists to fix.
+      const speakerName = namelike(row.speaker) ? row.speaker : undefined;
       if (meta.is_group) {
         if (fromMe) return [];
         const sender = meta.sender_handle ?? meta.handle ?? null;
-        return sender ? [{ id: sender, channel: row.source, ts, fromMe: false }] : [];
+        return sender
+          ? [{ id: sender, channel: row.source, ts, fromMe: false, name: speakerName }]
+          : [];
       }
       const id = meta.chat_handle ?? meta.handle ?? null;
       if (!id) return [];
-      return [{ id, channel: row.source, ts, fromMe }];
+      // ONE-TO-ONE, where the id is the chat rather than the sender -- so the
+      // speaker of an OUTBOUND row is the owner, and passing it here would file
+      // the owner's own name under the person they were writing to. Measured on
+      // the live corpus: every outbound one-to-one WhatsApp row carries a
+      // namelike speaker, and all of them are the same one name.
+      //
+      // The name for a one-to-one chat is the CHAT's name, which WhatsApp sets
+      // from the contact -- 41 of 61 chats have one, and 20 of those have no
+      // other name anywhere. A group's chat_name is the room, so this is only
+      // reachable below the is_group branch above.
+      const oneToOneName = (!fromMe && speakerName)
+        || (namelike(meta.chat_name) ? meta.chat_name : undefined);
+      return [{ id, channel: row.source, ts, fromMe, name: oneToOneName || undefined }];
     }
     case 'mail': {
       // EVERY non-owner address on the email is counted, not just the first
@@ -99,9 +154,21 @@ function personSignalsForRow(row, meta, owner) {
     }
     case 'calendar': {
       const out = [];
-      for (const a of meta.attendees ?? []) {
-        if (a?.email) out.push({ id: a.email.toLowerCase(), channel: 'calendar', ts, fromMe: false, name: a.name });
-      }
+      const seen = new Set();
+      const add = (email, name) => {
+        const id = String(email ?? '').toLowerCase();
+        if (!id || seen.has(id)) return;
+        seen.add(id);
+        out.push({ id, channel: 'calendar', ts, fromMe: false, name: namelike(name) ? name : undefined });
+      };
+      for (const a of meta.attendees ?? []) add(a?.email, a?.name);
+      // THE ORGANIZER IS A PERSON TOO, and EventKit does not always repeat them
+      // in the attendee list -- two of them are in no attendee list at all on
+      // the live corpus, which meant the person who called the meeting was the
+      // one person it did not record. Deduped against the attendees, because
+      // usually they ARE in both.
+      const org = meta.organizer;
+      add(typeof org === 'string' ? org : org?.email, typeof org === 'string' ? undefined : org?.name);
       return out;
     }
     case 'linkedin': {
@@ -260,7 +327,11 @@ export function buildGraph(
 
   const rows = contextDb
     .prepare(
-      "SELECT ts, source, entity_id, meta FROM context " +
+      // `speaker` is in this list because it was missing from it, and its
+      // absence made the name-recovery below dead code: signalsFor read
+      // row.speaker, row.speaker was always undefined, and every WhatsApp
+      // name it was written to rescue was discarded silently.
+      "SELECT ts, source, speaker, entity_id, meta FROM context " +
         "WHERE source IN ('imessage','whatsapp','mail','calendar','linkedin')" +
         (sinceTs != null ? " AND ts >= ?" : "")
     )
@@ -353,8 +424,27 @@ export function buildGraph(
   return [...people.values()]
     .map((p) => {
       const messages = p.sent + p.received;
+      // THE SPINE FIRST, because it is the only source that knows a name for
+      // somebody who has never been named IN the data.
+      //
+      // p.names holds names carried by the events themselves -- a calendar
+      // attendee, a LinkedIn profile. A message carries a HANDLE and never a
+      // name, so for anyone known only through the address book that set is
+      // empty and this fell through to the raw identifier. That is why the
+      // timeline showed "ay@austinyoshino.com" for a person whose own key was
+      // already `name:austin yoshino`: the key had resolved him through the
+      // spine, and the label never asked.
+      //
+      // nameToIds keeps the ORIGINAL casing against the normalised key, so this
+      // renders "Austin Yoshino" rather than the flattened form the key carries.
+      const fromSpine = p.key.startsWith('name:')
+        ? spine.nameToIds.get(p.key.slice('name:'.length))?.name
+        : null;
       const display =
-        [...p.names].sort((a, b) => b.length - a.length)[0] ?? [...p.identifiers][0] ?? p.key;
+        fromSpine ??
+        [...p.names].sort((a, b) => b.length - a.length)[0] ??
+        readableId([...p.identifiers][0]) ??
+        p.key;
       return {
         // The canonical resolution key. Stable across rebuilds (derived from the
         // data, not the run), so the review queue's decisions key on it.

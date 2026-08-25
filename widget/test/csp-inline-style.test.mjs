@@ -84,17 +84,7 @@ test('no page generates a style attribute its CSP would block', () => {
   );
 });
 
-test('the warmth dot gets its colour from somewhere', () => {
-  // The specific regression, pinned. The dot has no background in CSS, so if
-  // the script stops assigning one the feature is gone again — and the only
-  // symptom is a colourless dot.
-  const css = readFileSync(join(UI, 'people-sky.css'), 'utf8');
-  const js = readFileSync(join(UI, 'people-sky.js'), 'utf8');
-  const cssPaintsIt = /\.pl-dot\b[^}]*background/u.test(css);
-  const jsPaintsIt = /\.style\.background\s*=/u.test(js);
-  assert.ok(
-    cssPaintsIt || jsPaintsIt,
-    'nothing gives .pl-dot a background — neither people-sky.css nor a CSSOM ' +
-      'assignment in people-sky.js. Every warmth dot will render transparent.'
-  );
-});
+// The warmth-dot regression test lived here. The dot itself went with the sky
+// view (#8), which deleted people-sky.js -- the file this test read -- so it has
+// been failing on ENOENT ever since rather than guarding anything. Its .pl-dot
+// rule and six other orphaned selectors are gone from people-sky.css with it.
