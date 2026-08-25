@@ -47,11 +47,130 @@ export function endOfDayUtc(y, m, d) {
   return ms;
 }
 
+// RESOLVING A TIME PHRASE, which is the half the model must not do.
+//
+// MEASURED, and it is the whole reason this function exists. Told to resolve
+// relative time into a real date, and shown [written YYYY-MM-DD] to do it with,
+// the local 8B complied ONCE IN 38 across a full corpus pass. Given a
+// pattern-constrained date field it emitted a well-formed date every time and
+// still wrote the day the message was SENT rather than the day "tomorrow" means.
+// The format was never the problem; the arithmetic was.
+//
+// Asked instead to COPY the words the message uses for when -- "tomorrow",
+// "tuesday", "the 14th" -- it was right 6 times out of 6 including the empty
+// case, because copying an exact span is the thing this pipeline already relies
+// on it for everywhere else (see the quote check).
+//
+// So the split is the same one the rest of this system makes: the model reads,
+// code decides. Dates are arithmetic and arithmetic belongs here.
+//
+// Everything below resolves FORWARD from when the message was written, because
+// a plan is written before the thing it plans. Anything unrecognised returns
+// null, which means "no expiry" -- the safe direction.
+
+const DAY_MS = 86_400_000;
+
+const nextWeekday = (said, want) => {
+  let ahead = (want - said.getUTCDay() + 7) % 7;
+  if (ahead === 0) ahead = 7; // a plan for "friday" said on a friday means the next one
+  return new Date(said.getTime() + ahead * DAY_MS);
+};
+
+const asEndOfDay = (d) => endOfDayUtc(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+
+export function resolvePhrase(phrase, observedAt) {
+  if (typeof phrase !== 'string') return null;
+  const p = phrase.toLowerCase().trim();
+  if (p.length === 0) return null;
+  // null and undefined are rejected BEFORE the Number(), because Number(null)
+  // is 0 and 0 is finite: an unanchored phrase would otherwise resolve against
+  // 1970 and every such claim would read as PASSED the moment it was written.
+  if (observedAt === null || observedAt === undefined) return null;
+  const ts = Number(observedAt);
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+  const said = new Date(ts);
+  if (Number.isNaN(said.getTime())) return null;
+
+  // An explicit date inside the phrase wins over any relative reading.
+  const iso = p.match(ISO);
+  if (iso) return endOfDayUtc(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+
+  const md = p.match(MONTH_DAY);
+  if (md) {
+    const month = MONTHS.split(' ').indexOf(md[1]) + 1;
+    const year = md[3]
+      ? Number(md[3])
+      : month < said.getUTCMonth() + 1
+        ? said.getUTCFullYear() + 1
+        : said.getUTCFullYear();
+    return endOfDayUtc(year, month, Number(md[2]));
+  }
+
+  // Same day. "tonight" is still today: the plan is over when the day is.
+  if (/\b(today|tonight|this (morning|afternoon|evening)|later today)\b/u.test(p)) {
+    return asEndOfDay(said);
+  }
+  if (/\bday after tomorrow\b/u.test(p)) return asEndOfDay(new Date(ts + 2 * DAY_MS));
+  if (/\b(tomorrow|tmr|tmrw|tomo)\b/u.test(p)) return asEndOfDay(new Date(ts + DAY_MS));
+
+  // A named day, with or without "next" -- both mean the next one to arrive.
+  const wd = p.match(WEEKDAY);
+  if (wd) return asEndOfDay(nextWeekday(said, DAYS.indexOf(wd[1])));
+
+  // The weekend: the Saturday that starts it.
+  if (/\b(this |next |the )?weekend\b/u.test(p)) return asEndOfDay(nextWeekday(said, 6));
+
+  // Vague spans resolve to the END of the span, which is the honest reading of
+  // "sometime next week" -- it is over when the week is, not on any one day.
+  if (/\bnext week\b/u.test(p)) {
+    const start = nextWeekday(said, 1); // the coming Monday
+    return asEndOfDay(new Date(start.getTime() + 6 * DAY_MS));
+  }
+  if (/\bnext month\b/u.test(p)) {
+    const y = said.getUTCMonth() === 11 ? said.getUTCFullYear() + 1 : said.getUTCFullYear();
+    const m = ((said.getUTCMonth() + 1) % 12) + 1;
+    return endOfDayUtc(y, m, new Date(Date.UTC(y, m, 0)).getUTCDate()); // last day of it
+  }
+
+  // "the 14th" -- a day of the month with no month named. The next one to come.
+  const dom = p.match(/\b(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)\b/u);
+  if (dom) {
+    const day = Number(dom[1]);
+    if (day >= 1 && day <= 31) {
+      // STRICTLY LATER THAN THE MESSAGE'S DAY, not merely later than its
+      // timestamp. Comparing end-of-day against the send time made "the 14th"
+      // written ON the 14th resolve to that same night, because the day's end
+      // is always after a message sent during it -- while "saturday" written on
+      // a Saturday correctly went a week out. Same input, two answers. A plan
+      // is written before the thing it plans, so the ordinal follows the
+      // weekday: this month only if the day has not arrived yet.
+      const sameDay =
+        said.getUTCDate() === day;
+      const thisMonth = endOfDayUtc(said.getUTCFullYear(), said.getUTCMonth() + 1, day);
+      if (!sameDay && thisMonth !== null && thisMonth >= ts) return thisMonth;
+      const y = said.getUTCMonth() === 11 ? said.getUTCFullYear() + 1 : said.getUTCFullYear();
+      const m = ((said.getUTCMonth() + 1) % 12) + 1;
+      return endOfDayUtc(y, m, day);
+    }
+  }
+  return null;
+}
+
 // The date a claim is about, or null. End of that day: a plan for the 14th is
 // live all through the 14th.
 export function validToFor(claim, { observedAt = null } = {}) {
   if (!claim || typeof claim !== 'object') return null;
   if (!EXPIRING_KINDS.includes(claim.kind)) return null;
+
+  // THE STRUCTURED PHRASE FIRST. `when_phrase` is the words the message itself
+  // used, copied by the model rather than interpreted, and it is far more
+  // reliable than scanning the claim's rewritten prose -- the model paraphrases
+  // freely in `text` and copies exactly in a field the grammar requires.
+  const fromPhrase = resolvePhrase(claim.when_phrase, observedAt);
+  if (fromPhrase !== null) return fromPhrase;
+
+  // Falling back to the prose, for claims written before the field existed and
+  // for any the model left empty.
   const text = typeof claim.text === 'string' ? claim.text : '';
 
   const iso = text.match(ISO);

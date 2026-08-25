@@ -144,3 +144,44 @@ test('a flood is refused wholesale rather than trimmed', () => {
   assert.equal(flooded, true);
   assert.deepEqual(kept, []);
 });
+
+// ── when_phrase has to be the message's own words ────────────────────────────
+//
+// validToFor TRUSTS the phrase over the claim prose, so an invented phrase
+// outranks the honest fallback: a fabricated expiry gets stored and the claim
+// sorts itself away as PASSED. A hallucinated date is worse than no date,
+// because no date is visibly no date.
+import { verifiedPhrase } from '../server/memory/distill.mjs';
+
+test('a phrase the message never contained is discarded', () => {
+  assert.equal(verifiedPhrase('tomorrow', 'im going to denver'), '', 'invented');
+  assert.equal(verifiedPhrase('tomorrow', 'flying out tomorrow'), 'tomorrow', 'really there');
+});
+
+test('case is forgiven, because the model lowercases what it copies', () => {
+  assert.equal(verifiedPhrase('tuesday', 'see you Tuesday'), 'tuesday');
+});
+
+test('an empty phrase is simply empty, not a failure', () => {
+  assert.equal(verifiedPhrase('', 'anything'), '');
+  assert.equal(verifiedPhrase(null, 'anything'), '');
+});
+
+test('the episode validator checks the phrase against the CITED line only', () => {
+  const lines = [
+    line(1, 0, 'can you do it tomorrow?'),
+    line(2, 1, 'yes ill do it'),
+  ];
+  const { kept } = validateEpisodeClaims(lines, [
+    {
+      kind: 'plan',
+      text: 'The owner will do it.',
+      line: 2,
+      quote: 'ill do it',
+      when_phrase: 'tomorrow', // said by the OTHER person, on line 1
+      p: 0.9,
+    },
+  ]);
+  assert.equal(kept.length, 1, 'the claim itself stands');
+  assert.equal(kept[0].when_phrase, '', 'but somebody else timing is not the owner timing');
+});
