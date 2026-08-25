@@ -11,7 +11,7 @@
 
 import { buildGraph } from './graph.mjs';
 import { depthScore, isNonPerson } from './rank.mjs';
-import { topicTallies, topTopics, topTerms, nameTokenSet } from './topics.mjs';
+import { topicTallies, topTopics, nameTokenSet } from './topics.mjs';
 
 const DAY = 86_400_000;
 
@@ -216,9 +216,9 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
         met: e.met,
         engagement: e.engagement,
         // Five chips, not three (owner, 2026-08-25) — and no separate
-        // taxonomy field: the chips ARE the topics line now.
+        // taxonomy or specifics fields: the chips ARE the topic surface, and
+        // the expanded row's only extra is the model-written summary.
         topics: topTopics(doc, topics.docFreq, topics.totalDocs, { limit: 5 }),
-        specifics: topTerms(doc, topics.docFreq, topics.totalDocs),
       };
     }),
   };
