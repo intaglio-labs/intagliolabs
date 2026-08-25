@@ -995,11 +995,20 @@ const memCount = document.getElementById('memCount');
 const memBar = document.getElementById('memBar');
 const memNote = document.getElementById('memNote');
 const memAct = document.getElementById('memAct');
-// The review queue is a page on the connect server, at <link>/memory. Native holds
-// the tokened URL and appends only names it recognises.
+// The review queue is the connect server's <link>/memory page, shown as a
+// side PANEL beside the widget (native openMemory) — not a browser tab.
 if (memAct) {
   memAct.addEventListener('click', () => {
-    hzPost('openConnectLink', { page: 'memory' }).catch(() => {});
+    // A failed open must SAY so on the button — the silent .catch here is
+    // how "pressing review doesn't do anything" shipped undiagnosable.
+    hzPost('openMemory')
+      .then((r) => {
+        if (!r || r.state !== 'ok') throw new Error((r && r.error) || 'open failed');
+      })
+      .catch(() => {
+        memAct.textContent = 'couldn’t open — try again';
+        setTimeout(() => { memAct.textContent = 'review them'; }, 2000);
+      });
   });
 }
 

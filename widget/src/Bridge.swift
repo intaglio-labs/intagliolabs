@@ -22,6 +22,8 @@ protocol BridgeDelegate: AnyObject {
   func openConnections()
   func openPeople()
   func openMonths()
+  func openMemory() -> Bool
+  func openConnectRoot() -> Bool
   func closeWindow(of webView: WKWebView)
   func dragWindow(of webView: WKWebView)
   func motionAnywayChanged(_ on: Bool)
@@ -72,7 +74,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                "openMonths", "voiceArm", "widgetBounds"],
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
-                    "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
+                    "close", "connectorsIntroSeen", "openMemory", "openConnectLink", "openExternal",
                     "status", "setMotion", "setScale", "setSounds", "openOnboarding",
                     "markHandheld",
                     // Same setup controls, reachable from the gear after the
@@ -863,28 +865,21 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         reply(webView, id, ["state": "error", "error": "url not in allowlist"])
       }
     case "openConnectLink":
-      // The tokened connect-page URL is dynamic (the token rotates), so it
-      // cannot be in the static allowlist. The connect server writes it to
-      // ~/.hazlie/connect-link.txt (0600); read it and open it, but ONLY if it
-      // is the loopback URL it is supposed to be — never an arbitrary address.
-      let linkFile = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".hazlie/connect-link.txt")
-      if let raw = try? String(contentsOf: linkFile, encoding: .utf8),
-         let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
-         url.scheme == "http",
-         url.host == "localhost" || url.host == "127.0.0.1" {
-        // An OPTIONAL sub-page, from a fixed list. The review queue lives at
-        // <link>/memory and there was no way to reach it — the root page does not
-        // link to it either — so 119 claims sat in a queue nobody knew about.
-        // An allowlist rather than a free path: this URL carries a live bearer
-        // token in it, and appending page-supplied text to a credential-bearing
-        // URL is how a token ends up somewhere it was never meant to go.
-        let page = payload["page"] as? String ?? ""
-        let allowed: Set<String> = ["memory"]
-        let target = allowed.contains(page)
-          ? url.appendingPathComponent(page)
-          : url
-        NSWorkspace.shared.open(target)
+      // The cloud-connector setup door: the connect page's ROOT, in the
+      // browser — a full setup flow (tokens, app passwords) that wants a real
+      // browser. The memory review SUB-page no longer routes through here; it
+      // has its own side panel (openMemory below).
+      if delegate?.openConnectRoot() == true {
+        reply(webView, id, ["state": "ok"])
+      } else {
+        reply(webView, id, ["state": "error", "error": "no connect link yet"])
+      }
+    case "openMemory":
+      // The memory review queue, opened as a side PANEL beside the widget
+      // (owner, 2026-08-25) — not in the browser. Native owns the tokened
+      // URL; the delegate reads and validates it per open. false = no valid
+      // link yet, and the page's button says so instead of doing nothing.
+      if delegate?.openMemory() == true {
         reply(webView, id, ["state": "ok"])
       } else {
         reply(webView, id, ["state": "error", "error": "no connect link yet"])

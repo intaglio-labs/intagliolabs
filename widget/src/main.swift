@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // fit()/sidePlacedFrame clamp it to the screen — so this reads "as tall as
   // the screen allows", not 2000pt.
   private static let monthsBase = NSSize(width: 520, height: 2000)
+  private static let memoryBase = NSSize(width: 480, height: 2000)
 
   private let bridge = Bridge()
   private var widgetWindow: WidgetWindow!
@@ -58,6 +59,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   private var connectionsPanel: PopupPanel?
   private var peoplePanel: PopupPanel?
   private var monthsPanel: PopupPanel?
+  private var memoryPanel: PopupPanel?
+  private var memoryWeb: WKWebView?
+  private let loopbackNav = LoopbackOnlyNavigation()
   private var onboardingPanel: PopupPanel?
   private var earWeb: WKWebView?
   // Messages submitted (typed or spoken) before the chat page is alive, in
@@ -323,9 +327,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
 
   // MARK: popups
 
-  private func makePanel(page: String, size rawSize: NSSize, glass: Bool = false) -> PopupPanel {
+  private func makePanel(page: String, size rawSize: NSSize, glass: Bool = false, web preMade: WKWebView? = nil) -> PopupPanel {
     let size = Self.fit(rawSize, on: widgetWindow)
-    let web = makeWebView(bridge: bridge, page: page)
+    let web = preMade ?? makeWebView(bridge: bridge, page: page)
     let p = PopupPanel(
       contentRect: NSRect(origin: .zero, size: size),
       styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -439,7 +443,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // it. Membership decides placement AND exempts them from popupCeiling —
   // that ceiling measures room above the widget, where these do not live.
   private func isSidePlaced(_ panel: PopupPanel) -> Bool {
-    panel === monthsPanel || panel === connectionsPanel
+    panel === monthsPanel || panel === connectionsPanel || panel === memoryPanel
   }
 
   private func chosenFrame(_ panel: PopupPanel, _ size: NSSize) -> NSRect {
@@ -463,7 +467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // Every popup this app opens along the widget's edge. Onboarding is not in
   // the list: it is a full-screen scrim that deliberately covers everything,
   // and it closes the others itself when it opens.
-  private var edgePanels: [PopupPanel?] { [chatPanel, connectionsPanel, peoplePanel, monthsPanel] }
+  private var edgePanels: [PopupPanel?] { [chatPanel, connectionsPanel, peoplePanel, monthsPanel, memoryPanel] }
 
   // ONE AT A TIME. Opening any popup closes the others first.
   //
@@ -811,6 +815,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       monthsPanel!.hasShadow = false
     }
     present(monthsPanel!)
+  }
+
+  // The tokened connect-page URL, read fresh (it rotates) and validated the
+  // same way the old browser path did: loopback http only, never an
+  // arbitrary address.
+  private func connectLink() -> URL? {
+    let f = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".hazlie/connect-link.txt")
+    guard let raw = try? String(contentsOf: f, encoding: .utf8),
+          let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+          url.scheme == "http",
+          url.host == "localhost" || url.host == "127.0.0.1" else { return nil }
+    return url
+  }
+
+  // The cloud-connector setup door: the connect page's root, in the browser.
+  func openConnectRoot() -> Bool {
+    guard let link = connectLink() else { return false }
+    NSWorkspace.shared.open(link)
+    return true
+  }
+
+  // The memory review queue as a side panel, like the timeline — reviewing
+  // claims happens beside the widget, not in a browser tab. The page still
+  // comes from the connect server (it owns the queue); only the window
+  // changed. Bridge-less webview (Windows.swift): served content gets no
+  // native handlers, and its navigation is pinned to loopback. The URL is
+  // re-read on every open so a rotated token never strands the panel.
+  func openMemory() -> Bool {
+    if let p = memoryPanel, p.isVisible {
+      p.orderOut(nil)
+      return true
+    }
+    guard let link = connectLink() else { return false }
+    let target = link.appendingPathComponent("memory")
+    if memoryPanel == nil {
+      let web = makeLoopbackWebView(delegate: loopbackNav)
+      memoryWeb = web
+      memoryPanel = makePanel(page: "memory-review", size: Self.fit(Self.scaled(Self.memoryBase, Bridge.scale), on: widgetWindow), web: web)
+      memoryPanel!.hasShadow = false
+    }
+    memoryWeb?.load(URLRequest(url: target))
+    present(memoryPanel!)
+    return true
   }
 
   // What each popup's page last said it needs, in CSS px — unscaled, because
