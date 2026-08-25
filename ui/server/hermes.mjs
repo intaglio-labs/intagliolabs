@@ -59,6 +59,8 @@ import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
 import { contentMatches } from './people/content.mjs';
+import { rebuildEpisodes } from './memory/episodeStore.mjs';
+import { loadSpine } from './people/graph.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
 import { validToFor } from './memory/validity.mjs';
@@ -1366,6 +1368,7 @@ const RETAIN_FIELDS = Object.freeze(['source', 'keep_days']);
 const PURGE_FIELDS = Object.freeze(['source']);
 const DELETE_ENTITIES_FIELDS = Object.freeze(['source', 'entity_ids']);
 const MAINTAIN_FIELDS = Object.freeze([]);
+const EPISODE_REBUILD_FIELDS = Object.freeze([]);
 const ENTITIES_PARAMS = Object.freeze(['source', 'from_ts', 'to_ts']);
 const APPLY_FIELDS = Object.freeze(['run', 'claims']);
 const APPLY_RUN_FIELDS = Object.freeze([
@@ -2107,6 +2110,39 @@ async function handleAdmin(db, req, res, cors, url, channel) {
     if (url.pathname === '/admin/memory/apply') {
       const body = await readJson(req);
       send(res, 200, applyMemoryBatch(db, body), cors);
+      return;
+    }
+
+    // REBUILDING THE EPISODE INDEX, on the database's only writer.
+    //
+    // This used to be `node ui/scripts/build-episodes.mjs` spawned by the widget
+    // every distiller cycle, which was wrong twice over. It opened context.db
+    // read-write from a SECOND process while hermes was serving and ingesting
+    // against it — and the corpus runs journal_mode=DELETE, where a writer takes
+    // a lock that excludes every reader for the length of the rebuild — so it
+    // broke the sole-writer rule that connectors/AGENTS.md and ui/AGENTS.md both
+    // state, and could stall hermes for the full 5s busy_timeout. The widget also
+    // waited on it synchronously on the main run loop, so the UI froze for the
+    // duration: ~110ms when that comment was written at 12,782 rows, 1,414ms at
+    // 113,371, and growing with every history slice.
+    //
+    // Here it is just a function call on the handle that already owns the write
+    // lock, so there is no contention to lose to and nothing to wait on.
+    // ui/scripts/build-episodes.mjs stays as a CLI for a stopped hermes; it is
+    // simply off the running app's path.
+    if (url.pathname === '/admin/episodes/rebuild') {
+      const body = await readJson(req);
+      assertClosedFields(body, EPISODE_REBUILD_FIELDS);
+      const out = withPeopleDbs(db, (state) => rebuildEpisodes(db, { spine: state ? loadSpine(state) : null }));
+      // COUNTS ONLY: thread_key holds a chat guid, a chat guid holds a handle,
+      // and counterparty_key holds a person's name. None of them may be logged
+      // or returned.
+      send(res, 200, {
+        episodes: out.episodes,
+        settled: out.settled,
+        rows: out.rows,
+        withCounterparty: out.withCounterparty,
+      }, cors);
       return;
     }
 
