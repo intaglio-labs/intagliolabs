@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { scoreMatch, rankPeople, rankAcrossYears, MATCH } from '../server/people/find.mjs';
+import { scoreMatch, rankPeople, rankAcrossYears, editDistance, MATCH } from '../server/people/find.mjs';
 
 const person = (key, name, over = {}) => ({
   key,
@@ -117,4 +117,99 @@ test('a person found only in an old year is still found', () => {
 test('the result set is bounded', () => {
   const many = Array.from({ length: 300 }, (_, i) => person(`k${i}`, `Rowan ${i}`));
   assert.equal(rankPeople(many, 'rowan', { limit: 25 }).length, 25);
+});
+
+// ---- a name you nearly typed ----
+test('edit distance counts a transposition once, and gives up early', () => {
+  assert.equal(editDistance('kitten', 'sitting', 3), 3);
+  // The commonest typo of all. Plain Levenshtein calls this 2 and puts it
+  // outside a one-edit budget, which is why this is the Damerau variant.
+  assert.equal(editDistance('rowna', 'rowan', 1), 1);
+  assert.equal(editDistance('abc', 'abc', 1), 0);
+  assert.ok(editDistance('abc', 'xyzzy', 1) > 1, 'gives up rather than computing a big answer');
+});
+
+test('a typo still finds the person', () => {
+  const p = person('name:rowan vance', 'Rowan Vance');
+  assert.equal(scoreMatch(p, 'rowna').field, 'fuzzy', 'transposed');
+  assert.equal(scoreMatch(p, 'rowen').field, 'fuzzy', 'misspelled');
+  assert.equal(scoreMatch(p, 'vanse').field, 'fuzzy', 'the surname too');
+});
+
+// Fuzzy is the tier most able to turn a search into a shrug, so the limits are
+// pinned as hard as the behaviour.
+test('fuzzy never fires on a query too short to mean anything', () => {
+  const rob = person('name:rob nash', 'Rob Nash');
+  assert.equal(scoreMatch(rob, 'ron'), null, 'three letters, one edit — that is not a search');
+  assert.equal(scoreMatch(rob, 'rod'), null);
+});
+
+test('an exact reading of the name always beats a fuzzy one', () => {
+  const exact = person('name:vance hill', 'Vance Hill');
+  const typo = person('name:vanse holt', 'Vanse Holt', { messages: 99999 });
+  const ranked = rankPeople([typo, exact], 'vance');
+  assert.equal(ranked[0].name, 'Vance Hill', 'volume cannot lift a typo over a real match');
+});
+
+// ---- who you actually talked to about it ----
+const stat = (messages, conversations) => new Map([['name:rowan vance|2025', { messages, conversations }]]);
+
+test('a person is found by what you talked about, not just their name', () => {
+  const p = person('name:rowan vance', 'Rowan Vance');
+  assert.equal(scoreMatch(p, 'pickleball', { messages: 12, conversations: 4 }).field, 'content');
+  assert.equal(scoreMatch(p, 'pickleball', { messages: 0, conversations: 0 }), null, 'no evidence is not a match');
+  assert.equal(scoreMatch(p, 'pickleball', null), null);
+});
+
+// The exact thing find.mjs's header warned about when it argued against bm25.
+test('typing a name is never outranked by someone who merely said that word', () => {
+  const named = person('name:rowan vance', 'Rowan Vance', { messages: 5 });
+  const talker = person('name:someone else', 'Someone Else', { messages: 90000 });
+  const content = new Map([['name:someone else|2025', { messages: 400, conversations: 90 }]]);
+  const ranked = rankPeople([talker, named], 'rowan', { content, year: 2025 });
+  assert.equal(ranked[0].name, 'Rowan Vance');
+});
+
+test('content is ranked by conversations, not by message count', () => {
+  const a = person('name:a burst', 'A Burst');
+  const b = person('name:b spread', 'B Spread');
+  const content = new Map([
+    ['name:a burst|2025', { messages: 60, conversations: 1 }],  // one long thread
+    ['name:b spread|2025', { messages: 12, conversations: 6 }], // a running subject
+  ]);
+  const ranked = rankPeople([a, b], 'pickleball', { content, year: 2025 });
+  assert.equal(ranked[0].name, 'B Spread', 'six conversations beat one long thread');
+});
+
+test('messages break a tie inside an equal number of conversations', () => {
+  const a = person('name:a one', 'A One');
+  const b = person('name:b three', 'B Three');
+  const content = new Map([
+    ['name:a one|2025', { messages: 1, conversations: 1 }],
+    ['name:b three|2025', { messages: 9, conversations: 1 }],
+  ]);
+  const ranked = rankPeople([a, b], 'tahoe', { content, year: 2025 });
+  assert.equal(ranked[0].name, 'B Three', 'alphabetical order is not a ranking');
+});
+
+test('a subject lands on the year it was discussed, not the busiest year', () => {
+  const byYear = {
+    2021: [person('name:rowan vance', 'Rowan Vance', { messages: 8000 })], // the loud year
+    2025: [person('name:rowan vance', 'Rowan Vance', { messages: 30 })],
+  };
+  const content = new Map([['name:rowan vance|2025', { messages: 14, conversations: 5 }]]);
+  const out = rankAcrossYears(byYear, 'pickleball', { content });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].year, 2025, 'the year the subject actually happened');
+  assert.deepEqual(out[0].evidence, { messages: 14, conversations: 5 });
+});
+
+test('a row carries the evidence for what it claims', () => {
+  const p = person('name:rowan vance', 'Rowan Vance');
+  const [hit] = rankPeople([p], 'pickleball', { content: stat(12, 4), year: 2025 });
+  assert.equal(hit.matchField, 'content');
+  assert.deepEqual(hit.evidence, { messages: 12, conversations: 4 });
+  // A name match has nothing to count, and must not invent something to show.
+  const [byName] = rankPeople([p], 'rowan', { content: stat(12, 4), year: 2025 });
+  assert.equal(byName.matchField, 'name');
 });

@@ -58,6 +58,7 @@ import { buildMap, buildYear, buildSearchYears } from './people/map.mjs';
 import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
+import { contentMatches } from './people/content.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
 import { validToFor } from './memory/validity.mjs';
@@ -2873,13 +2874,16 @@ async function handlePeople(db, req, res, cors, url, policy) {
     }
     const out = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
-      const { byYear, years } = buildSearchYears(db, state, { owner, aliases });
-      const people = rankAcrossYears(byYear, q, { limit: 60 }).map(
+      const { byYear, years, idToKey } = buildSearchYears(db, state, { owner, aliases });
+      // The corpus half: who actually talked about this, counted per person-year
+      // (people/content.mjs). Counts only — no message text crosses this line.
+      const { stats, capped } = contentMatches(db, idToKey, q);
+      const people = rankAcrossYears(byYear, q, { limit: 60, content: stats }).map(
         // The handles matched the query; they are not part of the answer, and
         // the page has no use for them.
         ({ identifiers, engagement, ...row }) => row
       );
-      return { query: q, years, people };
+      return { query: q, years, people, capped };
     });
     send(res, 200, out, cors);
     return;

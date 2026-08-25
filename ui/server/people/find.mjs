@@ -39,13 +39,66 @@ export const MATCH = Object.freeze({
   namePrefix: 80,
   nameWord: 60,
   nameAnywhere: 40,
+  // A NAME YOU NEARLY TYPED. Below every exact reading of the name and above
+  // the handle, because "austn" is still someone reaching for a name.
+  nameFuzzy: 35,
   identifier: 30,
+  // WHO YOU ACTUALLY TALKED TO ABOUT THIS. Below every name tier on purpose:
+  // typing a name must never be outranked by somebody who merely said that word.
+  // Above `topic` because a chip is a summary of this same evidence, and the
+  // evidence is the better answer when both exist.
+  content: 20,
   topic: 15,
 });
 
+// Edit distance, capped, counting a TRANSPOSITION as one edit rather than two.
+//
+// That last part is the whole reason this is not plain Levenshtein: swapped
+// adjacent letters are the most common typing mistake there is, and "rowna" for
+// "rowan" scores 2 under Levenshtein (a delete plus an insert) which puts the
+// commonest typo outside a one-edit budget. This is the optimal-string-alignment
+// Damerau variant, which is enough for a name box.
+//
+// Capped so it stops as soon as no cell in a row can still come in under the
+// budget. Bounding it is what keeps fuzzy matching from being a second, sloppier
+// substring search, and what keeps it cheap enough to run per candidate.
+export function editDistance(a, b, max) {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let twoBack = null;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i += 1) {
+    const cur = [i];
+    let best = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let v = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+      if (twoBack !== null && i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        v = Math.min(v, twoBack[j - 2] + 1); // the two letters are simply swapped
+      }
+      cur[j] = v;
+      if (v < best) best = v;
+    }
+    if (best > max) return max + 1; // no cell in this row can still win
+    twoBack = prev;
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+// How wrong a query may be and still count as the name.
+//
+// Nothing under four characters is allowed to be fuzzy: at three characters a
+// single edit reaches most short names, and "row" matching "rob", "ron" and
+// "rod" is not a search, it is a shrug. One edit up to six characters, two
+// beyond -- long names are where real typos accumulate.
+function fuzzyBudget(q) {
+  if (q.length < 4) return 0;
+  return q.length <= 6 ? 1 : 2;
+}
+
 // Where in a person a query hit, and how well. Returns null for no match at all
 // so the caller can drop them without a score of zero pretending to be a result.
-export function scoreMatch(person, query) {
+export function scoreMatch(person, query, content = null) {
   const q = norm(query);
   if (q.length === 0) return null;
   const name = norm(person?.name);
@@ -71,6 +124,26 @@ export function scoreMatch(person, query) {
     field = 'name';
   }
 
+  // A NAME WITH A TYPO IN IT. Only consulted when no exact reading of the name
+  // matched, and only word by word: measuring the whole display name against the
+  // query would let "sam" fail on "Sam Lee" for being nine characters shorter.
+  if (best === 0) {
+    const budget = fuzzyBudget(q);
+    if (budget > 0) {
+      for (const word of name.split(/\s+/u)) {
+        if (word.length < 3) continue;
+        // Compare against the same length the query is, so a long surname is
+        // not penalised for the letters the query never reached.
+        const head = word.slice(0, Math.max(q.length, 3));
+        if (editDistance(q, head, budget) <= budget) {
+          best = MATCH.nameFuzzy;
+          field = 'fuzzy';
+          break;
+        }
+      }
+    }
+  }
+
   // The handle is often the only thing the owner remembers: a number they know
   // by sight, or the address a colleague mails from.
   if (best < MATCH.identifier) {
@@ -81,6 +154,13 @@ export function scoreMatch(person, query) {
         break;
       }
     }
+  }
+
+  // WHAT YOU ACTUALLY TALKED ABOUT, supplied by the caller from the corpus
+  // (people/content.mjs). Counts, never text.
+  if (best < MATCH.content && content && content.messages > 0) {
+    best = MATCH.content;
+    field = 'content';
   }
 
   // Topics last, and deliberately weak. "fundraising" should surface the people
@@ -106,16 +186,38 @@ export function scoreMatch(person, query) {
 // difference between finding a friend and finding somebody who texted once in
 // 2019. It can never promote a weaker match above a stronger one -- the bonus
 // is bounded below the gap between adjacent MATCH tiers.
-export function rankPeople(people, query, { limit = 50 } = {}) {
+export function rankPeople(people, query, { limit = 50, content = null, year = null } = {}) {
   const out = [];
   for (const p of Array.isArray(people) ? people : []) {
-    const hit = scoreMatch(p, query);
+    const stat = content && year !== null ? content.get(`${p?.key}|${year}`) ?? null : null;
+    const hit = scoreMatch(p, query, stat);
     if (hit === null) continue;
     const messages = Number(p?.messages) || 0;
     // log10 so a 10,000-message friendship outranks a 100-message one without
     // a 10,000-message stranger outranking a name that actually matched.
     const weight = Math.min(10, Math.log10(messages + 1) * 2.5);
-    out.push({ ...p, matchField: hit.field, score: hit.score + weight });
+    // A CONTENT MATCH IS RANKED BY CONVERSATIONS, not by messages and not by a
+    // relevance score. One thread where the word appears forty times is one
+    // conversation; four separate threads are four, and four is the one that
+    // means you and this person have a subject. Same reasoning topics.mjs
+    // settled for chips, where message-counting let a single 243-message thread
+    // outweigh a whole year.
+    // Conversations carry the weight; messages break ties inside an equal number
+    // of them, so three mentions in one thread still beat one. The message term
+    // is bounded well under a single conversation's worth so it can never
+    // reorder the primary signal.
+    const spread = stat
+      ? Math.min(9, Math.log10(stat.conversations + 1) * 6) +
+        Math.min(0.9, Math.log10(stat.messages + 1) * 0.4)
+      : 0;
+    out.push({
+      ...p,
+      matchField: hit.field,
+      // Why this person is in the list, for the row to say out loud. Counts
+      // only -- no text ever comes out of the content tier.
+      evidence: stat ? { messages: stat.messages, conversations: stat.conversations } : null,
+      score: hit.score + (hit.field === 'content' ? spread : weight),
+    });
   }
   out.sort((a, b) => b.score - a.score || String(a.name).localeCompare(String(b.name)));
   return out.slice(0, limit);
@@ -125,15 +227,17 @@ export function rankPeople(people, query, { limit = 50 } = {}) {
 // happens to be open.
 //
 // A person is returned ONCE, at their best year -- the year they matched
-// strongest, which for a name match is the year you talked most. Returning them
-// once per year would fill the list with the same face.
-export function rankAcrossYears(byYear, query, { limit = 50 } = {}) {
+// strongest. For a name that is the year you talked most; for a subject it is
+// the year you actually discussed it, which is the more useful answer and falls
+// out of the same comparison because the content score is per-year.
+export function rankAcrossYears(byYear, query, { limit = 50, content = null } = {}) {
   const best = new Map();
   for (const [year, people] of Object.entries(byYear ?? {})) {
-    for (const hit of rankPeople(people, query, { limit: Infinity })) {
+    const y = Number(year);
+    for (const hit of rankPeople(people, query, { limit: Infinity, content, year: y })) {
       const prior = best.get(hit.key);
       if (prior === undefined || hit.score > prior.score) {
-        best.set(hit.key, { ...hit, year: Number(year) });
+        best.set(hit.key, { ...hit, year: y });
       }
     }
   }

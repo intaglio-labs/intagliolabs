@@ -168,7 +168,11 @@ export function yearCore(contextDb, stateDb, { now, owner, aliases }) {
   const nameTokens = nameTokenSet([...graph.map((p) => p.name), ...(owner?.names ?? [])]);
   const topics = topicTallies(contextDb, idToKey, { nameTokens, bucketBy: 'year' });
 
-  const core = { graph, topics };
+  // idToKey rides along because people/content.mjs needs exactly this
+  // resolution to credit a corpus hit to the same person their message count
+  // already belongs to -- recomputing it there would be a second copy free to
+  // drift from this one.
+  const core = { graph, topics, idToKey };
   yearMemo.set(contextDb, { stamp, core });
   return core;
 }
@@ -238,7 +242,7 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
   const hit = searchMemo.get(contextDb);
   if (hit && hit.stamp === stamp) return hit.value;
 
-  const { graph, topics } = yearCore(contextDb, stateDb, { now, owner, aliases });
+  const { graph, topics, idToKey } = yearCore(contextDb, stateDb, { now, owner, aliases });
   const byYear = new Map();
   for (const p of graph) {
     const per = new Map(); // year -> tallies, from the person's own timeline
@@ -270,6 +274,7 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
   const value = {
     byYear: Object.fromEntries(byYear),
     years: [...byYear.keys()].sort((a, b) => a - b),
+    idToKey,
   };
   searchMemo.set(contextDb, { stamp, value });
   return value;

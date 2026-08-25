@@ -36,6 +36,7 @@
   let findTerm = '';
   let findRows = null;
   let findState = 'idle'; // 'pending' | 'done' | 'degraded'
+  let findCapped = false; // the corpus scan hit its row ceiling; counts are a floor
   const summaries = new Map(); // '<personKey>|<year>' -> {state, text?, reason?}
 
   function esc(s) {
@@ -75,6 +76,21 @@
   // `y` is the row's own year, which in search results is NOT the open tab --
   // a person found in 2021 must carry 2021, or their summary and their message
   // count would be fetched for a year they were never in.
+  // WHY THIS PERSON IS IN A SEARCH RESULT. A row that matched on what you talked
+  // about is otherwise indistinguishable from a row that matched on their name,
+  // and the corpus tier can surface somebody whose name looks nothing like the
+  // query -- without this the list reads as broken.
+  function whyHtml(p) {
+    if (!findTerm) return '';
+    if (p.matchField === 'content' && p.evidence) {
+      const { messages: m, conversations: c } = p.evidence;
+      return `<span class="pm-why">${m} msg${m === 1 ? '' : 's'} · ${c} conversation${c === 1 ? '' : 's'}</span>`;
+    }
+    const label = { identifier: 'matched their handle', topic: 'a topic of theirs',
+                    fuzzy: 'close to their name' }[p.matchField];
+    return label ? `<span class="pm-why">${label}</span>` : '';
+  }
+
   function rowHtml(p, y) {
     const chips = (p.topics || [])
       .map((t) => `<span class="pl-chip pl-topic">${esc(t.label)}</span>`)
@@ -91,6 +107,7 @@
             `<span class="pl-name">${esc(p.name)}</span>` +
             `<span class="pm-msgs">${p.messages} msg${p.messages === 1 ? '' : 's'}</span>` +
             (y === year ? '' : `<span class="pm-yr-badge">${y}</span>`) +
+            whyHtml(p) +
             srcIcons +
           `</div>` +
           (chips ? `<div class="pl-src pm-chip-row">${chips}</div>` : '') +
@@ -146,6 +163,7 @@
         if (!res || !Array.isArray(res.people)) throw new Error('bad find payload');
         findRows = res.people;
         findState = 'done';
+        findCapped = res.capped === true;
         if (Array.isArray(res.years) && res.years.length) years = res.years;
         render();
       })
@@ -167,6 +185,7 @@
         }
         findRows = rows;
         findState = 'degraded';
+        findCapped = false;
         render();
       });
   }

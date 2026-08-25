@@ -134,3 +134,16 @@ body.plist .pm-yr-badge {
   background: color-mix(in srgb, var(--hazelnut-light) 14%, transparent);
   white-space: nowrap;
 }
+
+/* WHY a search result is in the list — "12 msgs · 4 conversations" for a person
+   who matched on what you talked about, or a short phrase for a handle or topic
+   match. Quiet: it explains the row, it is not the row. Only ever drawn while
+   searching. */
+body.plist .pm-why {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+  white-space: nowrap;
+}
