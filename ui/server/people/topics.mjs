@@ -291,9 +291,16 @@ export function topTopics(doc, docFreq, totalDocs, { limit = 3, minTaxonomy = 2,
   const tax = Object.entries(doc.taxonomy)
     .filter(([, n]) => n >= minTaxonomy)
     .sort((a, b) => b[1] - a[1]);
+  // `tax` marks the chip as coming from the FIXED vocabulary above rather than
+  // from this pair's distinctive words. Both render identically as chips, but
+  // only the fixed set is comparable ACROSS people — "food & drinks" means the
+  // same thing on every row, "tokyo station" means it on exactly one. The
+  // constellation groups by topic, so it needs that distinction; without the
+  // flag the page would have to keep its own copy of the vocabulary and the
+  // two would drift.
   for (const [label, n] of tax) {
     if (out.length >= limit) break;
-    out.push({ label, n });
+    out.push({ label, n, tax: true });
     taken.add(label);
   }
   if (out.length < limit) {
@@ -302,7 +309,8 @@ export function topTopics(doc, docFreq, totalDocs, { limit = 3, minTaxonomy = 2,
     // the shown topics' own signals match. Learned from the first live run.
     const shownSignals = [...taken].map((label) => TOPIC_SIGNALS[label]).filter(Boolean);
     const skip = (label) => taken.has(label) || shownSignals.some((re) => re.test(label));
-    out.push(...pickTerms(doc, docFreq, totalDocs, { limit: limit - out.length, minCount, skip }));
+    out.push(...pickTerms(doc, docFreq, totalDocs, { limit: limit - out.length, minCount, skip })
+      .map((t) => ({ ...t, tax: false })));
   }
   return out;
 }

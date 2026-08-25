@@ -92,7 +92,9 @@ body.plist .pm-chip-row { margin-top: 4px; }
    unreliable in a borderless non-activating panel. Below the icon, so the
    list's own top edge cannot clip it. */
 body.plist .pm-src-ic { position: relative; }
-body.plist .pm-src-ic::after {
+body.plist .pm-src-ic::after,
+body.plist .pm-face[data-tip]::after,
+body.plist .pm-tab-globe[data-tip]::after {
   content: attr(data-tip);
   position: absolute;
   left: 50%; top: calc(100% + 5px);
@@ -109,7 +111,159 @@ body.plist .pm-src-ic::after {
   transition: opacity 0.12s;
   z-index: 5;
 }
-body.plist .pm-src-ic:hover::after { opacity: 1; }
+body.plist .pm-src-ic:hover::after,
+body.plist .pm-face[data-tip]:hover::after,
+body.plist .pm-tab-globe[data-tip]:hover::after { opacity: 1; }
+/* Initials alone are a riddle — the tooltip is what makes a disc a person.
+   Both of these need the positioning context the shared rule assumes. */
+body.plist .pm-tab-globe { position: relative; }
+
+/* The globe tab: an icon where the others are a year, so it reads as a
+   different KIND of thing on the same strip. */
+body.plist .pm-tab-globe {
+  display: flex;
+  align-items: center;
+  padding: 5px 10px 6px;
+}
+body.plist .pm-tab-globe svg { display: block; width: 14px; height: 14px; }
+/* The sky has no flow to put a loading line in, so centre it like the empty
+   state rather than let it stick to the top-left corner. */
+body.plist .pm-sky .pm-loading {
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 0;
+}
+
+/* ---- the constellation (the globe tab, 2026-08-25) ----
+   The same year's people, grouped by TOPIC instead of listed by engagement:
+   one dashed bubble per topic, the people in it as initial discs, sized by
+   that year's engagement. The list answers "who"; this answers "about what".
+
+   EVERY POSITION AND SIZE HERE IS SET FROM JAVASCRIPT through element.style,
+   never a style attribute — this page ships style-src 'self' with no
+   'unsafe-inline', so a generated style="" is parsed, dropped, and silently
+   does nothing. widget/test/csp-inline-style.test.mjs is the tripwire. What
+   lives in this file is only what is the SAME for every star. */
+body.plist .pm-sky {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 380px;
+  overflow: hidden;
+}
+/* The three dashed orbits. Decoration, not data: they do not encode distance
+   or count, they give the field a centre to be arranged around. */
+body.plist .pm-orbit {
+  position: absolute;
+  left: 50%; top: 51%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 1px dashed rgba(197, 165, 109, 0.22);
+  pointer-events: none;
+}
+/* Background specks. Deterministic per year (seeded PRNG in the page), so a
+   re-render or a search keystroke does not reshuffle the sky under the eye. */
+body.plist .pm-speck {
+  position: absolute;
+  border-radius: 50%;
+  background: var(--hazelnut-light);
+  pointer-events: none;
+}
+/* The owner, at the centre — the one thing every topic is a relationship to.
+   Same blob and breathing as the widget's own orb so it reads as the same
+   creature, with the brand gradient running cream -> hazelnut -> green. */
+body.plist .pm-core {
+  position: absolute;
+  left: 50%; top: 51%;
+  transform: translate(-50%, -50%);
+  width: 54px; height: 54px;
+  border-radius: 49% 51% 52% 48% / 51% 49% 51% 49%;
+  background: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 45%, #33ff66 100%);
+  box-shadow: 0 0 34px rgba(51, 255, 102, 0.25),
+              inset -4px -4px 10px rgba(0, 0, 0, 0.18),
+              inset 4px 4px 9px rgba(255, 255, 255, 0.30);
+  animation: orb-breathe 7s ease-in-out infinite;
+  pointer-events: none;
+}
+/* One topic. Width/height/left/top come from the page. */
+body.plist .pm-cluster {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 1.5px dashed rgba(197, 165, 109, 0.28);
+  background: radial-gradient(circle at 50% 40%, rgba(197, 165, 109, 0.07) 0%, transparent 70%);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 7px;
+}
+/* 78%, not 84%: the discs wrap to a second row, and a circle is narrower there
+   than across its middle. At 84% the trailing "+N" chip sat on the dashed
+   border and looked like it had fallen out of the bubble. */
+body.plist .pm-faces {
+  display: flex; flex-wrap: wrap;
+  align-items: center; justify-content: center;
+  gap: 4px;
+  max-width: 78%;
+}
+/* A person: their initials on a hazelnut disc, lit from the upper left so a
+   crowd of them reads as beads rather than flat dots. Diameter is set from
+   the page — it carries that year's engagement. */
+body.plist .pm-face {
+  position: relative;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 60%, #a8854c 100%);
+  box-shadow: inset -2px -2px 5px rgba(0, 0, 0, 0.18),
+              inset 2px 2px 4px rgba(255, 255, 255, 0.35);
+  color: #141412;
+  font-weight: 600;
+  cursor: default;
+}
+/* The people this bubble could not fit. Hollow on purpose: it is a count, not
+   a person, and must never be mistaken for one. */
+body.plist .pm-face-more {
+  background: none;
+  box-shadow: none;
+  border: 1px dashed rgba(234, 234, 234, 0.25);
+  color: var(--muted);
+}
+body.plist .pm-cluster-label {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  text-align: center;
+  white-space: nowrap;
+}
+/* The biggest topic of the year gets the hazelnut, so the eye has somewhere
+   to land first. */
+body.plist .pm-cluster.lead .pm-cluster-label { color: var(--hazelnut-light); }
+body.plist .pm-cluster.lead { border-color: rgba(197, 165, 109, 0.45); }
+/* Said plainly rather than drawn: a constellation of nothing is just an empty
+   box, and the reason it is empty is the useful part. */
+body.plist .pm-sky-empty {
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 80%;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+/* The count caveat, when the year is bigger than the server's row cap: the
+   bubbles describe the people that were loaded, not everyone. */
+body.plist .pm-sky-note {
+  position: absolute;
+  left: 0; right: 0; bottom: 6px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 10px;
+  opacity: 0.75;
+}
+@media (prefers-reduced-motion: reduce) {
+  body.plist .pm-core { animation: none; }
+}
 
 /* The model-written year summary in the expanded row — visually set apart
    from the counted lines below it, and labeled, because unlike them it is
