@@ -1265,9 +1265,18 @@ body.connections .win {
   box-shadow: inset 0 1px 0 rgba(234, 234, 234, 0.08);
   /* A row, not a column: the hint strip is a SIDE section on the left and
      the shelf keeps the right, pinned to the widget by native placement.
-     flex-end on both axes hugs everything to the bottom-right corner —
-     content-shaped windows grow up and left, never push down. */
-  flex-direction: row; align-items: flex-end; justify-content: flex-end;
+     align-items: flex-end hugs the bottom — content-shaped windows grow up,
+     never push down. ~~justify-content: flex-end hugged the right too~~ —
+     replaced by the auto left margin on .hint-host (owner, 2026-08-25), the
+     same trade this file already makes for the vertical axis below: with
+     flex-end, any moment the row is wider than the window (a hint opening
+     before the extraWidth resize lands, a scale snap mid-flight) shoves the
+     overflow past the START edge, where it is clipped and unreachable — the
+     settings column lost its first characters off the window's left edge. An
+     auto margin hugs right identically when content fits and resolves to
+     zero under overflow, so the excess falls off the RIGHT, where the very
+     next resize brings it back. */
+  flex-direction: row; align-items: flex-end;
   gap: 12px;
 }
 /* The column the window used to be: everything except the hint strip.
@@ -1357,7 +1366,13 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
    set by connections.js to match .conn-main exactly, so with both columns
    bottom-anchored the panel's TOP lines up with the CONNECTIONS eyebrow. */
 .hint-host {
-  flex: 0 0 236px; max-height: 100%; overflow-y: auto;
+  /* Shrinkable (0 1, not 0 0): a rigid 236px in a window that has not
+     widened yet is exactly the overflow the .win comment above describes.
+     Squeezing the strip for a beat, until native's extraWidth resize lands,
+     beats clipping the settings column. The auto margin is the right-hug —
+     see the .win comment. */
+  flex: 0 1 236px; min-width: 0; margin-left: auto;
+  max-height: 100%; overflow-y: auto;
   position: relative;
   display: flex; flex-direction: column; align-items: stretch;
   /* Bottom-aligned so the pop-up sits in-line to the LEFT of the connectors
