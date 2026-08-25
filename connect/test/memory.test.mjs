@@ -12,7 +12,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { renderMemoryPage } from '../lib/memoryPage.mjs';
+import { renderMemoryPage, substituteOwner } from '../lib/memoryPage.mjs';
 import { readToken, hermesBase } from '../lib/memory.mjs';
 
 const CLAIM = Object.freeze({
@@ -31,7 +31,7 @@ const CLAIM = Object.freeze({
 });
 
 const page = (over = {}, opts = {}) =>
-  renderMemoryPage({ claims: [CLAIM], more: false, counts: { proposed: 1 }, ...over }, { token: 'tok', ...opts });
+  renderMemoryPage({ claims: [CLAIM], more: false, counts: { proposed: 1 }, ...over }, { token: 'tok', ownerName: null, ...opts });
 
 test('the claim is shown with its exact quote and its provenance', () => {
   const html = page();
@@ -214,4 +214,23 @@ test('the script renders server error text as a text node, never as markup', () 
   const html = page({}, { nonce: 'N' });
   const script = html.slice(html.indexOf('<script'), html.indexOf('</script>'));
   assert.ok(!script.includes('innerHTML +='), 'the error path must not append via innerHTML');
+});
+
+test('the page renders claims with the owner named, substituted in code', () => {
+  assert.equal(
+    substituteOwner('The owner is allergic to penicillin.', 'Riley'),
+    'Riley is allergic to penicillin.'
+  );
+  assert.equal(
+    substituteOwner("the owner's brother lives nearby.", 'Riley'),
+    "Riley's brother lives nearby."
+  );
+  // No configured name: claims render exactly as stored.
+  assert.equal(substituteOwner('The owner cannot drive.', null), 'The owner cannot drive.');
+});
+
+test('a configured name substitutes end-to-end in the rendered page', () => {
+  const html = page({}, { ownerName: 'Riley' });
+  assert.ok(html.includes('Riley would rather do mornings than evenings.'));
+  assert.ok(!html.includes('The owner would rather'));
 });

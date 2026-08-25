@@ -21,6 +21,7 @@ import { buildGraph, CONTENT_SIGNALS } from './graph.mjs';
 import { rankForNeed, MENTOR_NEED, INVESTOR_NEED, evidenceLine } from './rank.mjs';
 import { groupByFirm, warmthLabel } from './firms.mjs';
 import { warmIntro } from './intros.mjs';
+import { eraLine } from './profile.mjs';
 
 // "how do i reach X", "warm intro to X", "who can introduce me to X" -> the
 // target string X, or null. Separate from the who-fits-a-need searches: this
@@ -36,6 +37,40 @@ export function detectIntro(question) {
   );
   const target = m?.[1]?.trim();
   return target && target.length >= 2 ? target : null;
+}
+
+// "from 2020 to 2022", "between 2020 and 2022", "2020-2022", "in 2021",
+// "since 2019", "3 years ago" -> a month window { fromYm, toYm }, or null.
+// Parsed ONLY after a person-search intent already fired (answerPersonSearch
+// below), so a bare year in an unrelated question can never hijack anything.
+// Years are clamped to a sane band rather than trusted -- "in 1875" is a typo
+// or a street address, not an era of the owner's life.
+export function detectEraWindow(question, { now = Date.now() } = {}) {
+  const q = String(question ?? '').toLowerCase();
+  const d = new Date(now);
+  const thisYear = d.getFullYear();
+  const nowYm = `${thisYear}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  const yr = (y) => Math.min(Math.max(Number(y), 1990), thisYear + 1);
+  let m = q.match(/\b(?:from|between)?\s*((?:19|20)\d{2})\s*(?:-|\u2013|\u2014|to|and|until|through)\s*((?:19|20)\d{2})\b/u);
+  if (m) {
+    const a = yr(m[1]);
+    const b = yr(m[2]);
+    const [lo, hi] = a <= b ? [a, b] : [b, a];
+    return { fromYm: `${lo}-01`, toYm: `${hi}-12` };
+  }
+  m = q.match(/\bsince\s+((?:19|20)\d{2})\b/u);
+  if (m) return { fromYm: `${yr(m[1])}-01`, toYm: nowYm };
+  m = q.match(/\b(?:in|from|back in|during|around)\s+((?:19|20)\d{2})\b/u);
+  if (m) {
+    const y = yr(m[1]);
+    return { fromYm: `${y}-01`, toYm: `${y}-12` };
+  }
+  m = q.match(/\b(\d{1,2})\s*years?\s+(?:ago|back)\b/u);
+  if (m) {
+    const y = thisYear - Number(m[1]);
+    return { fromYm: `${y}-01`, toYm: `${y}-12` };
+  }
+  return null;
 }
 
 // A generic "reconnect with real people" need: depth-ranked, reachable, in a
@@ -69,12 +104,20 @@ export function detectPersonSearch(question) {
 
 // Format one candidate as a chat line: name, the one-line evidence, and a
 // compact reason tag. Deterministic, grounded, no model.
-function formatCandidate(p, i) {
+//
+// The WHEN clause is the memory jog (profile.mjs eraLine): "peak 2018–2019
+// (340 messages) — went quiet Mar 2020 — they wrote last, unanswered". For a
+// years-old contact, "last heard ~4.2y ago" alone jogs nothing — the peak era
+// is the memory. The bare dormancy clause survives only as the fallback for a
+// person with no message timeline (calendar-only tie).
+function formatCandidate(p, i, now) {
   const title = p.linkedin?.position
     ? ` — ${p.linkedin.position}${p.linkedin.company ? ' @ ' + p.linkedin.company : ''}`
     : '';
-  const when =
-    p.dormancyDays === null
+  const era = eraLine(p, { now });
+  const when = era
+    ? ` — ${era}`
+    : p.dormancyDays === null
       ? ''
       : p.dormancyDays > 365
         ? `, last heard ~${(p.dormancyDays / 365).toFixed(1)}y ago`
@@ -82,6 +125,13 @@ function formatCandidate(p, i) {
   const topic =
     p.content?.investor > 0 ? `, ${p.content.investor} threads on raising` : '';
   return `${i + 1}. ${p.name}${title}${when}${topic}`;
+}
+
+// '2020-01'..'2022-12' -> "2020–2022"; a single year stays "2021".
+function eraSpanNote(era) {
+  const fy = era.fromYm.slice(0, 4);
+  const ty = era.toYm.slice(0, 4);
+  return fy === ty ? fy : `${fy}–${ty}`;
 }
 
 // The one call the ask route uses. Returns { text, sources, count } or null
@@ -120,15 +170,26 @@ export function answerPersonSearch(
   const intent = detectPersonSearch(question);
   if (intent === null) return null;
 
+  // An explicit era ("investors from 2020 to 2022", "mentors back in 2019")
+  // narrows any need to the people active in that window — and REPLACES the
+  // need's recency shaping (dormancy band), because "who, from back then" and
+  // "who, recently quiet" are different questions and the owner just asked
+  // the first one.
+  const era = detectEraWindow(question, { now });
+  const need = era
+    ? { ...intent.need, activeWindow: [era.fromYm, era.toYm], dormancyBandDays: null }
+    : intent.need;
+  const eraNote = era ? ` (${eraSpanNote(era)})` : '';
+
   const graph = buildGraph(contextDb, stateDb, {
     now,
     owner,
-    contentSignals: intent.need.contentSignal ? CONTENT_SIGNALS : null,
+    contentSignals: need.contentSignal ? CONTENT_SIGNALS : null,
   });
-  const ranked = rankForNeed(graph, intent.need, { limit });
+  const ranked = rankForNeed(graph, need, { limit });
 
   if (ranked.length === 0) {
-    return { text: `nothing in your connections fits "${intent.need.label}" yet.`, sources: [], count: 0 };
+    return { text: `nothing in your connections fits "${need.label}${eraNote}" yet.`, sources: [], count: 0 };
   }
 
   const sources = [...new Set(ranked.flatMap((p) => p.channels))].sort();
@@ -138,7 +199,7 @@ export function answerPersonSearch(
   // needs stay a flat person list.
   if (intent.kind === 'investor') {
     const firms = groupByFirm(ranked);
-    const header = `investors you've talked to — ${firms.length} firms, ${ranked.length} people, warmest first:`;
+    const header = `investors you've talked to${eraNote} — ${firms.length} firms, ${ranked.length} people, warmest first:`;
     const lines = firms.map((f, i) => {
       const warm = warmthLabel(f.warmth);
       const names = f.contacts.map((c) => c.name.includes('@') ? c.name.split('@')[0] : c.name).slice(0, 5).join(', ');
@@ -160,12 +221,17 @@ export function answerPersonSearch(
     };
   }
 
-  const header = `${intent.need.label}, from your ${graph.length} connections:`;
-  const lines = ranked.map(formatCandidate);
+  const header = `${need.label}${eraNote}, from your ${graph.length} connections:`;
+  const lines = ranked.map((p, i) => formatCandidate(p, i, now));
   return {
     text: `${header}\n${lines.join('\n')}`,
     sources,
     count: ranked.length,
-    evidence: ranked.map((p) => ({ name: p.name, line: evidenceLine(p), reasons: p.reasons })),
+    evidence: ranked.map((p) => ({
+      name: p.name,
+      line: evidenceLine(p),
+      reasons: p.reasons,
+      era: eraLine(p, { now }),
+    })),
   };
 }

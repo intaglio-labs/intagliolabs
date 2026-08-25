@@ -67,6 +67,11 @@ orbEl.addEventListener('animationend', (e) => {
 // reserves it above the bar.
 const VOICE_TEASE = true;
 const TEASE_TEXT = 'voice things coming soon';
+// Chat wears the same sign for now (owner, 2026-08-25): the pill no longer
+// expands, and pressing it answers with a line instead of an input. Flip
+// this off to give the bar back.
+const CHAT_TEASE = true;
+const CHAT_TEASE_TEXT = 'chat coming soon';
 const TEASE_MS = 2400;
 const dreamEl = document.getElementById('wdream');
 const dreamText = document.getElementById('wdreamtext');
@@ -78,12 +83,12 @@ let teaseTimer = null;
 let panelCovering = false;
 window.__hzPanels = (on) => { panelCovering = on === true; if (panelCovering) hideTease(); };
 
-function showTease() {
+function showTease(text = TEASE_TEXT) {
   // Nothing to see: the bubble would render behind an open panel and time out
   // unread. The orb still wakes and still sounds -- the caller does both before
   // this -- so the tap is answered, just not with a line nobody can read.
   if (panelCovering) return;
-  dreamText.textContent = TEASE_TEXT;
+  dreamText.textContent = text;
   dreamEl.classList.add('on');
   clearTimeout(teaseTimer);
   // Re-tapping restarts the dwell rather than stacking timers, so a second
@@ -356,6 +361,7 @@ function syncBar() {
   winput.placeholder = open ? 'Message…' : '';
   winput.classList.toggle('open', open);
   syncChatGlyph();
+  reportBoundsSoon();
 }
 // The glyph's third face. Gated on there being something to SEND rather than
 // on the bar being open, so a collapsed pill holding a draft still offers the
@@ -367,12 +373,67 @@ function syncChatGlyph() {
   chatBtn.classList.toggle('ready', ready);
   chatBtn.title = ready ? 'Send' : (barOpen ? 'Collapse' : 'Chat');
 }
-winput.addEventListener('focus', () => { barMinimized = false; hideTease(); syncBar(); });
+winput.addEventListener('focus', () => {
+  if (CHAT_TEASE) {
+    // The collapsed sliver can still catch a click; it answers with the sign
+    // too, and never opens.
+    winput.blur();
+    showTease(CHAT_TEASE_TEXT);
+    return;
+  }
+  barMinimized = false; hideTease(); syncBar();
+});
 // NOT on focus: the native openChat makes the chat panel key, which yanks
 // focus off this input mid-click and the bar snaps shut before a keystroke
 // lands. Until the bridge can order the chat front without focusing it,
 // the chat appears on send instead.
 winput.addEventListener('blur', syncBar);
+
+// Where the VISIBLE widget starts inside this mostly-transparent window, in
+// CSS px — native anchors the side panels (timeline, settings) against this
+// edge instead of the window's, which can be ~160px of empty glass away.
+// Re-measured whenever the bar opens/closes or the window resizes, debounced
+// past the CSS transitions so the number describes the settled layout.
+// The cluster is a MOVING target — the chat bubble fades in and out, the bar
+// expands, states restyle things — so this is observation, not a snapshot:
+// every element is watched (ResizeObserver + transition ends + window
+// resize), each change re-reports, and native re-places any open side panel
+// on each report. A one-shot measurement at load is how the panel ended up
+// overlapping a bubble that appeared after it was placed.
+const boundsWatched = [winput, chatBtn, orbBtn, ...document.querySelectorAll('.gear-row .gear')];
+function reportBounds() {
+  // MEASURE THE BUTTONS, NEVER THEIR ROW. .gear-row and .wbar are transparent
+  // flex containers spanning the whole window, so their rect.left is ~0 and
+  // one of them in the list silently zeroes the whole correction.
+  let left = Infinity;
+  for (const el of boundsWatched) {
+    if (!el) continue;
+    if (el === winput && !barOpen) continue; // collapsed input is invisible glass
+    const r = el.getBoundingClientRect();
+    if (r.width > 0) left = Math.min(left, r.left);
+  }
+  // No visibility/opacity filtering, deliberately: the bubble FADES but never
+  // stops occupying its spot, and skipping it while dim is exactly how the
+  // panel ended up on top of it. Reserving the full layout footprint means
+  // the panel never overlaps anything and never has to slide when a faded
+  // element comes back.
+  if (!Number.isFinite(left)) return;
+  hzPost('widgetBounds', { left: Math.max(0, left) }).catch(() => {});
+}
+let boundsTimer = null;
+function reportBoundsSoon() {
+  clearTimeout(boundsTimer);
+  boundsTimer = setTimeout(reportBounds, 260);
+}
+window.addEventListener('resize', reportBoundsSoon);
+if (window.ResizeObserver) {
+  const ro = new ResizeObserver(reportBoundsSoon);
+  for (const el of boundsWatched) if (el) ro.observe(el);
+}
+// Position changes without a resize (a fade completing, a shift) end in a
+// transition somewhere in the cluster; capture-phase so none are missed.
+document.body.addEventListener('transitionend', reportBoundsSoon, true);
+reportBoundsSoon();
 // Every keystroke, not just Enter: the glyph has to flip to the arrow on the
 // first character and back on the last backspace. `input` rather than
 // `keydown` so a paste and a native delete count too.
@@ -388,6 +449,12 @@ winput.addEventListener('input', () => { hideTease(); syncChatGlyph(); });
 // of the two paths wins the race, and it feels quicker besides.
 chatBtn.addEventListener('pointerdown', (e) => {
   e.preventDefault(); // or the button takes focus off the input on the way down
+  if (CHAT_TEASE) {
+    // Chat is signed off for now: the press is answered with the same dream
+    // cloud the orb uses, and the bar stays shut.
+    showTease(CHAT_TEASE_TEXT);
+    return;
+  }
   hideTease();        // reaching for the bar means the line has been read
   if (winput.value.trim()) {
     // Focus stays in the pill, so the next message can be typed straight away.
@@ -416,12 +483,8 @@ gearBtn.addEventListener('click', () => {
   hzPost('openConnections');
 });
 
-// People: opens the who's-who / person-index feature in its own popup.
-document.getElementById('people').addEventListener('click', () => {
-  hzPost('openPeople');
-});
-document.getElementById('globe').addEventListener('click', () => {
-  hzPost('openSky');
+document.getElementById('months').addEventListener('click', () => {
+  hzPost('openMonths');
 });
 
 // The handoff out of onboarding: the flow ends pointing at the widget, and

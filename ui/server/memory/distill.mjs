@@ -262,6 +262,29 @@ export function validateRowClaims(row, claims) {
       dropped.push({ reason: 'claim text does not name the owner as its subject' });
       continue;
     }
+    // THE AUTHOR LABEL MUST NOT BECOME A PERSON IN THE CLAIM. The speaker
+    // prefix hands the model a real name as a byline; on a live run the model
+    // resolved a bare "He" in the message to that name — inventing a second
+    // person out of the label ("the owner is working on the company with
+    // <the owner's own name>"). A name that appears in the claim but nowhere
+    // in the row's own text has exactly one possible source, the label, so
+    // the claim is dropped. Same enforcement philosophy as the subject check
+    // above: the prompt already forbids this; a rule that lives only in a
+    // prompt is a request.
+    if (typeof row.speaker === 'string' && row.speaker.trim()) {
+      const leaked = row.speaker
+        .trim()
+        .split(/\s+/u)
+        .filter((t) => t.length >= 3)
+        .find((t) => {
+          const re = new RegExp(`\\b${t.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}\\b`, 'iu');
+          return re.test(claim.text) && !re.test(row.text);
+        });
+      if (leaked !== undefined) {
+        dropped.push({ reason: 'claim names the author label; the row text does not' });
+        continue;
+      }
+    }
     const key = `${claim.kind} ${claim.text.trim()}`;
     if (seen.has(key)) {
       dropped.push({ reason: 'duplicate of another claim from the same row' });

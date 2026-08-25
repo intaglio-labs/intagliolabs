@@ -327,20 +327,12 @@ async function renderSettings() {
     on: !p || p.sounds !== false,
     message: 'setSounds',
   }));
-  // Size. Everything scales together — the widget, both popups and the type
-  // inside them — because native drives it with pageZoom rather than by
-  // restyling anything (main.swift scaleChanged).
-  if (p && typeof p.scale === 'number') {
-    rows.push(rangeRow({
-      name: 'size',
-      note: 'the widget and its popups',
-      value: p.scale,
-      min: typeof p.scaleMin === 'number' ? p.scaleMin : 0.7,
-      max: typeof p.scaleMax === 'number' ? p.scaleMax : 1.6,
-      step: 0.05,
-      message: 'setScale',
-      format: (v) => `${Math.round(v * 100)}%`,
-    }));
+  // The size slider was yeeted (owner, 2026-08-24): everything runs at 100%.
+  // Native's setScale plumbing survives untouched, so a stored non-1 scale
+  // from the slider era is snapped back to 1 here — without the control, a
+  // leftover 130% would be permanent.
+  if (p && typeof p.scale === 'number' && Math.abs(p.scale - 1) > 0.001) {
+    hzPost('setScale', { scale: 1 }).catch(() => {});
   }
   rows.push(modelRow());
   rows.push(actionRow({
@@ -1055,91 +1047,11 @@ async function refresh() {
     notice.hidden = false;
   }
 }
-// MEMORY PROGRESS — the difference between "found" and "understood".
-//
-// Sources land in `context` in seconds. Answers come from CLAIMS, which a local
-// model distils out of those rows one pass at a time, and until this shipped
-// nothing ran that step at all: a full database, zero claims, and every question
-// abstaining. Even now that it runs, it is slow enough that silence reads as
-// broken. So the numbers are on screen, and they are the real ones — `pending`
-// is the selector re-run at the live watermark, not an estimate.
-const mem = document.getElementById('mem');
-const memDot = document.getElementById('memDot');
-const memLabel = document.getElementById('memLabel');
-const memCount = document.getElementById('memCount');
-const memBar = document.getElementById('memBar');
-const memNote = document.getElementById('memNote');
-const memAct = document.getElementById('memAct');
-// The review queue is a page on the connect server, at <link>/memory. Native holds
-// the tokened URL and appends only names it recognises.
-if (memAct) {
-  memAct.addEventListener('click', () => {
-    hzPost('openConnectLink', { page: 'memory' }).catch(() => {});
-  });
-}
-
-function paintMemory(m) {
-  if (!m || !mem) { if (mem) mem.hidden = true; return; }
-  // WAITING ON YOU outranks waiting on the machine.
-  //
-  // A distilled claim is invisible to every question until it has been accepted —
-  // retrieve.mjs reads v_claim_accepted and nothing else. That is on purpose (a
-  // model's assertion is not ground truth) but it was silent: claims piled up in
-  // a queue with no route to it from anywhere in the app, and the answer to every
-  // question stayed "nothing in what i've got covers that".
-  if (m.state === 'review') {
-    mem.hidden = false;
-    mem.classList.remove('busy');
-    memLabel.textContent = 'waiting on you';
-    memCount.textContent = `${m.review.toLocaleString()}`;
-    memBar.style.width = m.total > 0 ? `${Math.round((m.done / m.total) * 100)}%` : '100%';
-    memNote.textContent = m.pending > 0
-      ? `${m.review.toLocaleString()} things to confirm before i can use them — still reading the rest`
-      : `${m.review.toLocaleString()} things to confirm before i can use them`;
-    memAct.hidden = false;
-    return;
-  }
-  memAct.hidden = true;
-  if (m.state === 'reading') {
-    const pct = m.total > 0 ? Math.round((m.done / m.total) * 100) : 0;
-    mem.hidden = false;
-    mem.classList.add('busy');
-    memLabel.textContent = 'reading';
-    memCount.textContent = `${m.done.toLocaleString()} of ${m.total.toLocaleString()}`;
-    memBar.style.width = `${Math.max(pct, 2)}%`;
-    // Says what it BUYS, so waiting has a point rather than being a bar.
-    memNote.textContent = m.claims > 0
-      ? `${m.claims.toLocaleString()} things learned so far — i can already answer about those`
-      : 'i can answer about anything i have read once this gets going';
-    return;
-  }
-  if (m.state === 'ready') {
-    mem.hidden = false;
-    mem.classList.remove('busy');
-    memLabel.textContent = 'memory';
-    memCount.textContent = '';
-    memBar.style.width = '100%';
-    memNote.textContent = `up to date — ${m.claims.toLocaleString()} things learned`;
-    return;
-  }
-  // Nothing read and nothing pending: there is no progress to report, and a bar
-  // at zero would imply work is happening when none is.
-  mem.hidden = true;
-}
-
-async function refreshMemory() {
-  const st = await hzPost('setupState').catch(() => null);
-  paintMemory(st && st.memory);
-}
-refreshMemory();
-// Slow poll: this moves on the order of a batch, not a frame.
-setInterval(refreshMemory, 5000);
 
 refresh();
 // The panel is hidden and re-shown, not reloaded — without this, a reopened
 // popup would show the status from its first open forever.
 window.addEventListener('focus', refresh);
-window.addEventListener('focus', refreshMemory);
 
 // The close must SURVIVE the chrome around it: the sound is best-effort (a
 // Web Audio throw must never eat the close). The dead-clicks bug itself was
