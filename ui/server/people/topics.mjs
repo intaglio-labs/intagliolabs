@@ -234,37 +234,41 @@ export function nameTokenSet(names) {
   return out;
 }
 
-// The candidate list under both chip backfill and the specifics line:
-// WORD PAIRS and single words together, idf-scored, sorted best first.
-// Selection applies SUBSUMPTION — once a pair is picked, its component
-// words are covered and skipped ("memory architecture" absorbs "memory" and
-// "architecture"), which is what turns a word cloud into a topic list.
+// Two-word phrases that are conversation, not conversation TOPICS — each is
+// a fixed expression whose words are individually too ordinary to stoplist.
+const PAIR_STOP = new Set([
+  'fair enough', 'makes sense', 'take care', 'thank you', 'thanks man',
+  'sounds like', 'kind regards', 'talk soon', 'miss you', 'appreciate it',
+]);
+
+// The candidate list under both chip backfill and the specifics line.
+// PAIRS FIRST, then single words for whatever slots remain — not one merged
+// score. Measured on the live corpus: a month rich in real phrases ("wake
+// word", "desk companion") still rendered as word salad, because the phrase
+// appears 3× while its component words appear 20× each and count×idf let
+// the words win every slot. A pair is always the more specific claim, and
+// specificity is this list's whole point, so specificity is structural, not
+// a score nudge. Subsumption still applies — a picked pair covers its
+// component words, and a later word-order variant of the same pair is
+// covered by the same rule.
 // `skip` lets the caller drop candidates a shown taxonomy chip already says.
 function pickTerms(doc, docFreq, totalDocs, { limit, minCount, skip = null } = {}) {
   if (!doc || totalDocs <= 0 || limit <= 0) return [];
-  const scored = [];
+  const idf = (label) => Math.log((totalDocs + 1) / (docFreq.get(label) ?? 1));
   // Pairs get a floor one below the singles': an exact two-word phrase is a
-  // far rarer event than a word, so repeating it even twice is signal, and
-  // holding pairs to the singles' floor left phrase-rich months showing only
-  // word salad (measured on the first live run).
+  // far rarer event than a word, so repeating it even twice is signal.
   const pairFloor = Math.max(2, minCount - 1);
-  for (const [label, n] of doc.pairs ?? new Map()) {
-    if (n < pairFloor) continue;
-    const df = docFreq.get(label) ?? 1;
-    // The 1.25 nudges a pair past the singles it is built from when their
-    // scores are close: at equal counts the pair is always the more
-    // specific claim, and specificity is the point of this list.
-    scored.push({ label, n, score: 1.25 * n * Math.log((totalDocs + 1) / df) });
-  }
-  for (const [label, n] of doc.terms ?? new Map()) {
-    if (n < minCount) continue;
-    const df = docFreq.get(label) ?? 1;
-    scored.push({ label, n, score: n * Math.log((totalDocs + 1) / df) });
-  }
-  scored.sort((a, b) => b.score - a.score);
+  const pairs = [...(doc.pairs ?? new Map())]
+    .filter(([label, n]) => n >= pairFloor && !PAIR_STOP.has(label))
+    .map(([label, n]) => ({ label, n, score: n * idf(label) }))
+    .sort((a, b) => b.score - a.score);
+  const singles = [...(doc.terms ?? new Map())]
+    .filter(([, n]) => n >= minCount)
+    .map(([label, n]) => ({ label, n, score: n * idf(label) }))
+    .sort((a, b) => b.score - a.score);
   const out = [];
   const covered = new Set();
-  for (const c of scored) {
+  for (const c of [...pairs, ...singles]) {
     if (out.length >= limit) break;
     if (skip !== null && skip(c.label)) continue;
     const words = c.label.split(' ');
