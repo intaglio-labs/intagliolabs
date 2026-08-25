@@ -1351,6 +1351,13 @@ const APPLY_RUN_FIELDS = Object.freeze([
   'through_changed_at',
   'rows_in',
   'started_at',
+  'through_id',
+  // Episode mode. episode_hash says WHICH episode by content (ids move when the
+  // index is rebuilt, content does not); episode_context records which arm
+  // produced the run, which is what makes turning received context on
+  // revertible by one index scan rather than by argument.
+  'episode_hash',
+  'episode_context',
 ]);
 // Note what is NOT here: `subject` and `observed_at`. The model emits kind,
 // text and quote; subject is closed to 'owner' by the schema, and observed_at
@@ -1365,7 +1372,10 @@ const DECISION_ACTIONS = Object.freeze(['accept', 'reject', 'retract']);
 // The review page is the v1 product surface and it has to show the receipt, so
 // this cap is about one sitting's reading, not about safety.
 const PENDING_CAP = 200;
-const APPLY_SOURCE_FIELDS = Object.freeze(['context_id', 'quote', 'content_hash']);
+// Row mode names the row; EPISODE mode names the LINE and hermes resolves the
+// row itself. Both are listed so the closed-field check accepts either shape,
+// and the staging code below refuses the combination -- see the note there.
+const APPLY_SOURCE_FIELDS = Object.freeze(['context_id', 'line', 'quote', 'content_hash']);
 const CLAIM_KINDS = Object.freeze(['fact', 'preference', 'constraint', 'plan', 'commitment']);
 const APPLY_CLAIM_CAP = 500;
 
@@ -1573,7 +1583,23 @@ export function applyMemoryBatch(db, body) {
   if (run.params === undefined || run.params === null || typeof run.params !== 'object') {
     throw badRequest('"run.params" must be an object');
   }
-  for (const key of ['from_changed_at', 'through_changed_at', 'rows_in', 'started_at']) {
+  if (run.episode_hash !== undefined && run.episode_hash !== null) {
+    if (typeof run.episode_hash !== 'string' || !/^[0-9a-f]{64}$/u.test(run.episode_hash)) {
+      throw badRequest('"run.episode_hash" must be a sha256 hex digest');
+    }
+    // The episode has to exist, or `line` resolves against nothing and every
+    // claim in the batch would be refused one by one with a confusing message.
+    const known = db
+      .prepare('SELECT 1 AS ok FROM episode WHERE member_hash = ? LIMIT 1')
+      .get(run.episode_hash);
+    if (known === undefined) throw badRequest('"run.episode_hash" names no known episode');
+  }
+  if (run.episode_context !== undefined && run.episode_context !== null) {
+    if (run.episode_context !== 'off' && run.episode_context !== 'on') {
+      throw badRequest('"run.episode_context" must be "off" or "on"');
+    }
+  }
+  for (const key of ['from_changed_at', 'through_changed_at', 'rows_in', 'started_at', 'through_id']) {
     const v = run[key];
     if (v !== undefined && v !== null && !Number.isFinite(v)) {
       throw badRequest(`"run.${key}" must be a number`);
@@ -1618,6 +1644,44 @@ export function applyMemoryBatch(db, body) {
         throw at(`source: unknown field ${JSON.stringify(key)}`);
       }
     }
+    // WHICH ROW A CLAIM RESTS ON IS THE SERVER'S DECISION IN EPISODE MODE.
+    //
+    // The distiller returns the LINE it quoted, not a row id, and hermes maps
+    // that line to a context_id through episode_member. The mapping is the
+    // whole security boundary: an episode deliberately shows the model text the
+    // owner did not write, and `quotable` is what separates "may inform" from
+    // "may be cited". If a caller could supply the row id directly it could
+    // pair a received row's id with an owner row's quote -- the quote check
+    // would pass, because the quote really is a span of the row it names, and
+    // the claim would carry a receipt pointing at somebody else's words.
+    //
+    // So the two shapes are exclusive, and supplying both is refused rather
+    // than resolved in some precedence order that a later reader has to know.
+    const episodeMode = run.episode_hash !== undefined && run.episode_hash !== null;
+    if (episodeMode) {
+      if (src.context_id !== undefined) {
+        throw at('source.context_id is not accepted in episode mode; send source.line');
+      }
+      if (!Number.isInteger(src.line) || src.line < 1) {
+        throw at('"source.line" must be a positive integer');
+      }
+      const member = db
+        .prepare(
+          'SELECT m.context_id, m.quotable FROM episode_member m ' +
+            'JOIN episode e ON e.id = m.episode_id ' +
+            'WHERE e.member_hash = ? AND m.line_no = ?'
+        )
+        .get(run.episode_hash, src.line);
+      if (member === undefined) throw at(`source.line ${src.line} is not in this episode`);
+      if (member.quotable !== 1) {
+        // The distiller checks this too. It is checked again here because the
+        // distiller is a client, and a client is not a boundary.
+        throw at(`source.line ${src.line} is not a line the owner wrote`);
+      }
+      src.context_id = Number(member.context_id);
+    } else if (src.line !== undefined) {
+      throw at('source.line is only accepted for an episode run');
+    }
     if (!Number.isInteger(src.context_id)) throw at('"source.context_id" must be an integer');
     if (typeof src.quote !== 'string' || src.quote.length === 0) {
       throw at('"source.quote" must be a non-empty string');
@@ -1638,8 +1702,9 @@ export function applyMemoryBatch(db, body) {
   );
   const insRun = db.prepare(
     'INSERT INTO distill_run(model, prompt_path, prompt_sha, params, from_changed_at, ' +
-      'through_changed_at, through_id, rows_in, claims_out, status, started_at, ended_at) ' +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?, ?)"
+      'through_changed_at, through_id, episode_hash, episode_context, rows_in, claims_out, ' +
+      'status, started_at, ended_at) ' +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?, ?)"
   );
   const insClaim = db.prepare(
     'INSERT INTO claim(run_id, subject, kind, text, observed_at, p_claim, created_at) ' +
@@ -1667,6 +1732,8 @@ export function applyMemoryBatch(db, body) {
         // predates schema v7; the reader treats null as 0 and re-offers the
         // group rather than stepping over it.
         run.through_id ?? null,
+        run.episode_hash ?? null,
+        run.episode_context ?? null,
         Math.trunc(run.rows_in ?? 0),
         0,
         Math.trunc(run.started_at ?? now),
