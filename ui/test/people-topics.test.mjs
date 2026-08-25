@@ -201,3 +201,35 @@ test('topTerms returns the specifics alone — no taxonomy labels, floors intact
   assert.equal(out.some((t) => t.label === 'fundraising'), false);
   assert.deepEqual(topTerms(undefined, new Map(), 0), []);
 });
+
+test('word pairs form within a clause, subsume their words, and stop at punctuation', () => {
+  const ctx = openDb(':memory:');
+  const y = new Date(2026, 3, 1).getTime();
+  insertRows(ctx, [
+    // "memory architecture" adjacent 3× -> a pair that absorbs both words.
+    // The comma between "round" and "term" must NOT mint "round term".
+    { ...msg(y, 'the memory architecture needs work'), entity_id: 'p1' },
+    { ...msg(y + DAY, 'memory architecture again today'), entity_id: 'p2' },
+    { ...msg(y + 2 * DAY, 'still on memory architecture, round term nonsense elsewhere'), entity_id: 'p3' },
+  ]);
+  const { docs, docFreq, totalDocs } = topicTallies(ctx, new Map([[HANDLE, 'k']]), { bucketBy: 'month' });
+  const doc = docs.get('k|2026-04');
+  assert.equal(doc.pairs.get('memory architecture'), 3);
+  assert.equal(doc.pairs.get('architecture round'), undefined, 'comma breaks adjacency');
+  const top = topTerms(doc, docFreq, totalDocs, { limit: 4 });
+  assert.equal(top[0].label, 'memory architecture');
+  const labels = top.map((t) => t.label);
+  assert.ok(!labels.includes('memory') && !labels.includes('architecture'), 'pair subsumes its words');
+});
+
+test('a stopword between two words breaks the pair', () => {
+  const ctx = openDb(':memory:');
+  const y = new Date(2026, 4, 1).getTime();
+  insertRows(ctx, [
+    { ...msg(y, 'working on the app together'), entity_id: 'q1' },
+    { ...msg(y + DAY, 'working on the app more'), entity_id: 'q2' },
+    { ...msg(y + 2 * DAY, 'working on the app still'), entity_id: 'q3' },
+  ]);
+  const { docs } = topicTallies(ctx, new Map([[HANDLE, 'k']]), { bucketBy: 'month' });
+  assert.equal(docs.get('k|2026-05').pairs.get('working app'), undefined);
+});

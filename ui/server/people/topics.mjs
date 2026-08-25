@@ -102,7 +102,7 @@ const STOPWORDS = new Set(
 
 // One person-year of tallies.
 function emptyDoc() {
-  return { taxonomy: {}, terms: new Map() };
+  return { taxonomy: {}, terms: new Map(), pairs: new Map() };
 }
 
 // Strip the shapes that must never become a chip before tokenizing: URLs and
@@ -119,6 +119,25 @@ function tokenize(text) {
     .replace(/[’'`]/gu, '')
     .split(/[^\p{L}]+/u)
     .filter((t) => t.length >= 3 && t.length <= 24 && !STOPWORDS.has(t));
+}
+
+// The same tokens, but clause by clause and with stopwords kept as gaps —
+// the raw material for WORD PAIRS. A pair is two meaningful words that were
+// literally adjacent in the same clause: splitting on punctuation first
+// stops "seed round, term sheet" minting a phantom "round term", and a
+// stopword between two words breaks the pair ("working on the app" is not
+// "working app").
+function clauseTokens(text) {
+  return stripNonProse(text)
+    .toLowerCase()
+    .replace(/[’'`]/gu, '')
+    .split(/[.!?,;:()\n\r]+/u)
+    .map((clause) =>
+      clause
+        .split(/[^\p{L}]+/u)
+        .filter((t) => t.length > 0)
+        .map((t) => (t.length >= 3 && t.length <= 24 && !STOPWORDS.has(t) ? t : null))
+    );
 }
 
 // The counterparty of one prose row -- the SAME derivation as graph.mjs's
@@ -181,15 +200,27 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
     for (const name of topicNames) {
       if (TOPIC_SIGNALS[name].test(row.text)) doc.taxonomy[name] = (doc.taxonomy[name] ?? 0) + 1;
     }
-    for (const t of tokenize(row.text)) {
-      if (nameTokens.has(t)) continue;
-      doc.terms.set(t, (doc.terms.get(t) ?? 0) + 1);
+    for (const clause of clauseTokens(row.text)) {
+      for (let i = 0; i < clause.length; i++) {
+        const t = clause[i];
+        if (t === null || nameTokens.has(t)) continue;
+        doc.terms.set(t, (doc.terms.get(t) ?? 0) + 1);
+        // The pair: this word and the next, only when the next is also a
+        // meaningful word (a stopword or name in between breaks adjacency).
+        const u = clause[i + 1];
+        if (u !== null && u !== undefined && !nameTokens.has(u)) {
+          const pair = `${t} ${u}`;
+          doc.pairs.set(pair, (doc.pairs.get(pair) ?? 0) + 1);
+        }
+      }
     }
   }
-  // Document frequency over person-years, for the idf weight.
+  // Document frequency over person-buckets — singles and pairs share one map
+  // (the space in a pair key keeps the namespaces apart).
   const docFreq = new Map();
   for (const doc of docs.values()) {
     for (const t of doc.terms.keys()) docFreq.set(t, (docFreq.get(t) ?? 0) + 1);
+    for (const pr of doc.pairs.keys()) docFreq.set(pr, (docFreq.get(pr) ?? 0) + 1);
   }
   return { docs, docFreq, totalDocs: docs.size };
 }
@@ -203,10 +234,52 @@ export function nameTokenSet(names) {
   return out;
 }
 
-// Top topics for one person-year: taxonomy hits first (count >= minTaxonomy
-// rows, ordered by count), backfilled to `limit` with distinctive terms
-// (count * idf, floored at minCount occurrences so a one-off word cannot
-// become a chip). Returns [{ label, n }].
+// The candidate list under both chip backfill and the specifics line:
+// WORD PAIRS and single words together, idf-scored, sorted best first.
+// Selection applies SUBSUMPTION — once a pair is picked, its component
+// words are covered and skipped ("memory architecture" absorbs "memory" and
+// "architecture"), which is what turns a word cloud into a topic list.
+// `skip` lets the caller drop candidates a shown taxonomy chip already says.
+function pickTerms(doc, docFreq, totalDocs, { limit, minCount, skip = null } = {}) {
+  if (!doc || totalDocs <= 0 || limit <= 0) return [];
+  const scored = [];
+  // Pairs get a floor one below the singles': an exact two-word phrase is a
+  // far rarer event than a word, so repeating it even twice is signal, and
+  // holding pairs to the singles' floor left phrase-rich months showing only
+  // word salad (measured on the first live run).
+  const pairFloor = Math.max(2, minCount - 1);
+  for (const [label, n] of doc.pairs ?? new Map()) {
+    if (n < pairFloor) continue;
+    const df = docFreq.get(label) ?? 1;
+    // The 1.25 nudges a pair past the singles it is built from when their
+    // scores are close: at equal counts the pair is always the more
+    // specific claim, and specificity is the point of this list.
+    scored.push({ label, n, score: 1.25 * n * Math.log((totalDocs + 1) / df) });
+  }
+  for (const [label, n] of doc.terms ?? new Map()) {
+    if (n < minCount) continue;
+    const df = docFreq.get(label) ?? 1;
+    scored.push({ label, n, score: n * Math.log((totalDocs + 1) / df) });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  const out = [];
+  const covered = new Set();
+  for (const c of scored) {
+    if (out.length >= limit) break;
+    if (skip !== null && skip(c.label)) continue;
+    const words = c.label.split(' ');
+    if (words.some((w) => covered.has(w)) || covered.has(c.label)) continue;
+    out.push({ label: c.label, n: c.n });
+    for (const w of words) covered.add(w);
+    covered.add(c.label);
+  }
+  return out;
+}
+
+// Top topics for one person-bucket: taxonomy hits first (count >= minTaxonomy
+// rows, ordered by count), backfilled to `limit` with distinctive terms —
+// pairs and words via pickTerms, floored at minCount occurrences so a
+// one-off cannot become a chip. Returns [{ label, n }].
 export function topTopics(doc, docFreq, totalDocs, { limit = 3, minTaxonomy = 2, minCount = 3 } = {}) {
   if (!doc) return [];
   const out = [];
@@ -219,23 +292,13 @@ export function topTopics(doc, docFreq, totalDocs, { limit = 3, minTaxonomy = 2,
     out.push({ label, n });
     taken.add(label);
   }
-  if (out.length < limit && totalDocs > 0) {
+  if (out.length < limit) {
     // A term already covered by a SHOWN taxonomy chip wastes the slot
-    // ("fundraising · investors" says fundraising twice) — skip any token the
-    // shown topics' own signals match. Learned from the first live run.
+    // ("fundraising · investors" says fundraising twice) — skip any candidate
+    // the shown topics' own signals match. Learned from the first live run.
     const shownSignals = [...taken].map((label) => TOPIC_SIGNALS[label]).filter(Boolean);
-    const scored = [];
-    for (const [t, n] of doc.terms) {
-      if (n < minCount || taken.has(t)) continue;
-      if (shownSignals.some((re) => re.test(t))) continue;
-      const df = docFreq.get(t) ?? 1;
-      scored.push({ label: t, n, score: n * Math.log((totalDocs + 1) / df) });
-    }
-    scored.sort((a, b) => b.score - a.score);
-    for (const s of scored) {
-      if (out.length >= limit) break;
-      out.push({ label: s.label, n: s.n });
-    }
+    const skip = (label) => taken.has(label) || shownSignals.some((re) => re.test(label));
+    out.push(...pickTerms(doc, docFreq, totalDocs, { limit: limit - out.length, minCount, skip }));
   }
   return out;
 }
@@ -246,13 +309,5 @@ export function topTopics(doc, docFreq, totalDocs, { limit = 3, minTaxonomy = 2,
 // specific enough. Same floors as topTopics so a one-off word still cannot
 // appear. Returns [{ label, n }].
 export function topTerms(doc, docFreq, totalDocs, { limit = 8, minCount = 3 } = {}) {
-  if (!doc || totalDocs === 0) return [];
-  const scored = [];
-  for (const [t, n] of doc.terms) {
-    if (n < minCount) continue;
-    const df = docFreq.get(t) ?? 1;
-    scored.push({ label: t, n, score: n * Math.log((totalDocs + 1) / df) });
-  }
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, limit).map(({ label, n }) => ({ label, n }));
+  return pickTerms(doc, docFreq, totalDocs, { limit, minCount });
 }
