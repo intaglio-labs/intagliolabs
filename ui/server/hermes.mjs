@@ -58,6 +58,7 @@ import { buildMap } from './people/map.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
+import { validToFor } from './memory/validity.mjs';
 import {
   ABSTAIN,
   buildAnswerPrompt,
@@ -422,6 +423,13 @@ CREATE TABLE IF NOT EXISTS claim(
                 ('fact','preference','constraint','plan','commitment')),
   text        TEXT NOT NULL,
   observed_at INTEGER,
+  /* WHEN THE CLAIM IS ABOUT, as distinct from when it was said. observed_at is
+     the row's timestamp; valid_to is the end of the day a plan or commitment
+     names, lifted from its text by a regex in memory/validity.mjs and NULL for
+     everything else. Advisory: an expired claim is never deleted, rejected or
+     hidden -- it sorts below live ones. Only the owner retires a claim, through
+     claim_decision. */
+  valid_to    INTEGER,
   p_claim     REAL,
   created_at  INTEGER NOT NULL
 );
@@ -632,6 +640,9 @@ WHERE r.scope = 'day'
 //      verb forms. It is a partial win only -- see the note in SCHEMA.
 //   5  the entity uniqueness key becomes (source, entity_id) -- ids are only
 //      unique within a source; the incident is recorded on the v5 branch.
+//   9  claim.valid_to: a plan or commitment can finally say which day it was
+//      about. 95 of 156 claims on the live store were intentions and 92 of
+//      those were over 30 days old, ageing exactly like a standing fact.
 //   8  episode + episode_member, and distill_run.episode_context recording
 //      which arm produced a run. The episode is a derived grouping of context
 //      rows; the arm column is what makes turning received-message context on
@@ -644,7 +655,7 @@ WHERE r.scope = 'day'
 //   6  context_source_ts(source, ts, entity_id): per-source time-range reads
 //      (reconciliation slices, retain sweeps, the episodic shelf, the digest
 //      aggregate, the watchdog's max(ts)) all scanned without it.
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 // The PRAGMAs that decide whether "deleted" means deleted, and whether the
 // memory tables' declared references mean anything. Applied to every
@@ -840,6 +851,18 @@ function migrate(db) {
     }
     db.exec('CREATE INDEX IF NOT EXISTS distill_run_arm ON distill_run(episode_context, id)');
     version = 8;
+  }
+  if (version < 9) {
+    const cols = new Set(
+      db.prepare("SELECT name FROM pragma_table_info('claim')").all().map((c) => c.name)
+    );
+    if (!cols.has('valid_to')) db.exec('ALTER TABLE claim ADD COLUMN valid_to INTEGER');
+    // Partial: only the rows that can expire carry a value, and those are the
+    // only rows any query on it wants.
+    db.exec(
+      'CREATE INDEX IF NOT EXISTS claim_valid_to ON claim(valid_to) WHERE valid_to IS NOT NULL'
+    );
+    version = 9;
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
@@ -1707,8 +1730,8 @@ export function applyMemoryBatch(db, body) {
       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?, ?)"
   );
   const insClaim = db.prepare(
-    'INSERT INTO claim(run_id, subject, kind, text, observed_at, p_claim, created_at) ' +
-      "VALUES (?, 'owner', ?, ?, ?, ?, ?)"
+    'INSERT INTO claim(run_id, subject, kind, text, observed_at, valid_to, p_claim, created_at) ' +
+      "VALUES (?, 'owner', ?, ?, ?, ?, ?, ?)"
   );
   const insSource = db.prepare(
     'INSERT INTO claim_source(claim_id, context_id, source, entity_id, content_hash, quote) ' +
@@ -1767,6 +1790,11 @@ export function applyMemoryBatch(db, body) {
           // than becoming "now" -- an unknown observation time is a fact
           // about the corpus, and inventing one makes it unfalsifiable.
           row.ts ?? null,
+          // The day the claim is ABOUT, computed here for the same reason
+          // observed_at is: it is a fact about the calendar, and a model-supplied
+          // expiry would let a claim decide its own standing. NULL for anything
+          // that is not a dated intention -- see memory/validity.mjs.
+          validToFor(claim, { observedAt: row.ts ?? null }),
           claim.p_claim ?? null,
           now
         ).lastInsertRowid

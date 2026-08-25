@@ -38,7 +38,7 @@ export const MAX_RECALL_LIMIT = 25;
 // able to silently widen what reaches Messages — which is exactly how a quote
 // would arrive here one day without anybody deciding it should.
 const FIELDS =
-  'c.id, c.kind, c.text, c.observed_at, c.created_at, s.source, x.ts AS source_ts';
+  'c.id, c.kind, c.text, c.observed_at, c.created_at, c.valid_to, s.source, x.ts AS source_ts';
 
 function recentRows(db, limit) {
   return db
@@ -86,7 +86,7 @@ export function recallClaims(db, { match = null, limit = DEFAULT_RECALL_LIMIT, n
             //
             // The header of this file says to replace this on evidence rather
             // than because ranking is fun to write. This is that evidence.
-            `SELECT id, kind, text, observed_at, created_at, source, source_ts FROM (` +
+            `SELECT id, kind, text, observed_at, created_at, valid_to, source, source_ts FROM (` +
               `SELECT ${FIELDS}, bm25(claim_fts) AS rank FROM claim_fts f ` +
               'JOIN v_claim_accepted c ON c.id = f.rowid ' +
               'JOIN claim_source s ON s.claim_id = c.id ' +
@@ -147,7 +147,19 @@ export function recallClaims(db, { match = null, limit = DEFAULT_RECALL_LIMIT, n
     observed_at: r.observed_at === null ? null : Number(r.observed_at),
     source: r.source,
     stale: Number(r.observed_at ?? r.created_at) < horizon,
+    // WHICH DAY IT WAS ABOUT, where the claim named one. Distinct from `stale`:
+    // stale means "said a long time ago", passed means "the day it was about has
+    // been and gone". A plan for last Tuesday is not old, it is over, and a
+    // standing preference stated in 2024 is old but perfectly true.
+    valid_to: r.valid_to === null || r.valid_to === undefined ? null : Number(r.valid_to),
+    passed: r.valid_to !== null && r.valid_to !== undefined && Number(r.valid_to) < now,
   }));
+
+  // Live claims first. NOT a filter: a passed plan is often exactly what a
+  // question is about ("did I ever go to Denver?"), and the owner is the only
+  // one who retires a claim. This only decides what the model reads FIRST when
+  // the shelf is capped at 12.
+  claims.sort((a, b) => Number(a.passed) - Number(b.passed));
 
   return { claims, abstain: claims.length === 0, matched };
 }
@@ -168,7 +180,10 @@ function localDay(ms) {
 export function groundingLines(claims) {
   return claims.map((c, i) => {
     const when = c.observed_at === null ? 'undated' : localDay(c.observed_at);
-    return `[${i + 1}] (${c.kind}, ${c.source}, ${when}${c.stale ? ', OLD' : ''}) ${c.text}`;
+    // PASSED is said out loud rather than left for the model to work out from
+    // the date, because it cannot: nothing in the envelope says what today is.
+    const flags = `${c.stale ? ', OLD' : ''}${c.passed ? ', PASSED' : ''}`;
+    return `[${i + 1}] (${c.kind}, ${c.source}, ${when}${flags}) ${c.text}`;
   });
 }
 

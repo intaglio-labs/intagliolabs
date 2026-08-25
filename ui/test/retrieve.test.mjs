@@ -135,13 +135,20 @@ test('recall never returns a quote, whatever is asked for', () => {
   for (const opts of [{ now: NOW }, { now: NOW, match: ftsQuery('vegetarian') }]) {
     const { claims } = recallClaims(db, opts);
     assert.equal(claims.length, 1);
+    // Widened deliberately on 2026-08-24, which is what this pin is for.
+    // valid_to is the end of the day a plan named and `passed` is whether that
+    // day has gone -- both computed from the claim's own text and its row's
+    // timestamp. Neither is a quote and neither is row content, which is the
+    // property the rest of this test checks directly.
     assert.deepEqual(Object.keys(claims[0]).sort(), [
       'id',
       'kind',
       'observed_at',
+      'passed',
       'source',
       'stale',
       'text',
+      'valid_to',
     ]);
     assert.ok(!('quote' in claims[0]));
     assert.ok(!JSON.stringify(claims[0]).includes('i went vegetarian'));

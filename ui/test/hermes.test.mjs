@@ -286,7 +286,7 @@ test('storage is hardened so deleted text does not survive in the free list', ()
       String(db.prepare('PRAGMA journal_mode').get().journal_mode).toLowerCase(),
       'delete'
     );
-    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 8);
+    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 9);
   } finally {
     db.close();
     rmSync(sandbox, { recursive: true, force: true });
@@ -300,7 +300,7 @@ test('in-memory databases are hardened too, minus what SQLite will not allow', (
   const db = openDb(':memory:');
   try {
     assert.equal(Number(db.prepare('PRAGMA secure_delete').get().secure_delete), 1);
-    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 8);
+    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 9);
   } finally {
     db.close();
   }
@@ -948,7 +948,7 @@ CREATE TRIGGER IF NOT EXISTS context_au AFTER UPDATE ON context BEGIN
 END;
 `;
 
-test('a v1 database migrates in place to v8 with its rows preserved', () => {
+test('a v1 database migrates in place to v9 with its rows preserved', () => {
   const sandbox = mkdtempSync(join(tmpdir(), 'hermes-migrate-test-'));
   const dbPath = join(sandbox, 'context.db');
   try {
@@ -962,7 +962,7 @@ test('a v1 database migrates in place to v8 with its rows preserved', () => {
 
     const db = openDb(dbPath);
     try {
-      assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 8);
+      assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 9);
       const columns = db
         .prepare("SELECT name FROM pragma_table_info('context')")
         .all()
