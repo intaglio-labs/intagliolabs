@@ -605,14 +605,14 @@ function card(src, keep) {
       // this source yet" restated what the button already says.
       const enable = document.createElement('button');
       enable.className = 'hold-ok';
-      enable.textContent = `connect ${src.label}`;
+      enable.textContent = 'connect';
       enable.addEventListener('click', (e) => {
         e.stopPropagation();
         enable.disabled = true;
         enable.textContent = 'connecting…';
         hzPost('setConnectorEnabled', { connector: src.id, enabled: true })
           .then(refresh)
-          .catch(() => { enable.disabled = false; enable.textContent = `connect ${src.label}`; });
+          .catch(() => { enable.disabled = false; enable.textContent = 'connect'; });
       });
       tip.appendChild(enable);
     } else if (src.broken && src.fix) {
@@ -823,13 +823,13 @@ function card(src, keep) {
       // devtools, no paste. See ops/WIDGET-WEBVIEW-LOGIN-SPEC.md.
       const login = document.createElement('button');
       login.className = 'hold-ok';
-      login.textContent = `log in to ${src.label}`;
+      login.textContent = 'log in';
       login.addEventListener('click', (e) => {
         e.stopPropagation();
         login.disabled = true; login.textContent = 'opening login…';
         hzPost('bridgeWebLogin', { p: kindOf(src.id) })
           .then(renderBridge)
-          .catch(() => { login.disabled = false; login.textContent = `log in to ${src.label}`; });
+          .catch(() => { login.disabled = false; login.textContent = 'log in'; });
       });
       tip.appendChild(login);
       if (data && data.state === 'cancelled') {
@@ -868,7 +868,7 @@ function card(src, keep) {
       }
       const started = data && data.transcript && data.transcript.length;
       if (!started) {
-        beginButton(`begin ${src.label} login`);
+        beginButton('begin login');
       } else {
         appendTranscript();
         // The bot is waiting for the next thing. Token pastes want room;

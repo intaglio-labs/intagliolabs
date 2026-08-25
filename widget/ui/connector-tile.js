@@ -166,14 +166,14 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
       // this source yet" restated what the button already says.
       const enable = document.createElement('button');
       enable.className = 'hold-ok';
-      enable.textContent = `connect ${src.label}`;
+      enable.textContent = 'connect';
       enable.addEventListener('click', (e) => {
         e.stopPropagation();
         enable.disabled = true;
         enable.textContent = 'connecting…';
         hzPost('setConnectorEnabled', { connector: src.id, enabled: true })
           .then(refresh)
-          .catch(() => { enable.disabled = false; enable.textContent = `connect ${src.label}`; });
+          .catch(() => { enable.disabled = false; enable.textContent = 'connect'; });
       });
       tip.appendChild(enable);
     } else if (hint) {
@@ -226,13 +226,13 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
       } else {
       const login = document.createElement('button');
       login.className = 'hold-ok';
-      login.textContent = `log in to ${src.label}`;
+      login.textContent = 'log in';
       login.addEventListener('click', (e) => {
         e.stopPropagation();
         login.disabled = true; login.textContent = 'opening login…';
         hzPost('bridgeWebLogin', { p: HZ_KIND(src.id) })
           .then(renderBridge)
-          .catch(() => { login.disabled = false; login.textContent = `log in to ${src.label}`; });
+          .catch(() => { login.disabled = false; login.textContent = 'log in'; });
       });
       tip.appendChild(login);
       }
