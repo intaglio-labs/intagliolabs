@@ -113,7 +113,19 @@ function personSignalsForRow(row, meta, owner) {
       }
       const id = meta.chat_handle ?? meta.handle ?? null;
       if (!id) return [];
-      return [{ id, channel: row.source, ts, fromMe, name: speakerName }];
+      // ONE-TO-ONE, where the id is the chat rather than the sender -- so the
+      // speaker of an OUTBOUND row is the owner, and passing it here would file
+      // the owner's own name under the person they were writing to. Measured on
+      // the live corpus: every outbound one-to-one WhatsApp row carries a
+      // namelike speaker, and all of them are the same one name.
+      //
+      // The name for a one-to-one chat is the CHAT's name, which WhatsApp sets
+      // from the contact -- 41 of 61 chats have one, and 20 of those have no
+      // other name anywhere. A group's chat_name is the room, so this is only
+      // reachable below the is_group branch above.
+      const oneToOneName = (!fromMe && speakerName)
+        || (namelike(meta.chat_name) ? meta.chat_name : undefined);
+      return [{ id, channel: row.source, ts, fromMe, name: oneToOneName || undefined }];
     }
     case 'mail': {
       // EVERY non-owner address on the email is counted, not just the first
@@ -142,9 +154,21 @@ function personSignalsForRow(row, meta, owner) {
     }
     case 'calendar': {
       const out = [];
-      for (const a of meta.attendees ?? []) {
-        if (a?.email) out.push({ id: a.email.toLowerCase(), channel: 'calendar', ts, fromMe: false, name: a.name });
-      }
+      const seen = new Set();
+      const add = (email, name) => {
+        const id = String(email ?? '').toLowerCase();
+        if (!id || seen.has(id)) return;
+        seen.add(id);
+        out.push({ id, channel: 'calendar', ts, fromMe: false, name: namelike(name) ? name : undefined });
+      };
+      for (const a of meta.attendees ?? []) add(a?.email, a?.name);
+      // THE ORGANIZER IS A PERSON TOO, and EventKit does not always repeat them
+      // in the attendee list -- two of them are in no attendee list at all on
+      // the live corpus, which meant the person who called the meeting was the
+      // one person it did not record. Deduped against the attendees, because
+      // usually they ARE in both.
+      const org = meta.organizer;
+      add(typeof org === 'string' ? org : org?.email, typeof org === 'string' ? undefined : org?.name);
       return out;
     }
     case 'linkedin': {
@@ -303,7 +327,11 @@ export function buildGraph(
 
   const rows = contextDb
     .prepare(
-      "SELECT ts, source, entity_id, meta FROM context " +
+      // `speaker` is in this list because it was missing from it, and its
+      // absence made the name-recovery below dead code: signalsFor read
+      // row.speaker, row.speaker was always undefined, and every WhatsApp
+      // name it was written to rescue was discarded silently.
+      "SELECT ts, source, speaker, entity_id, meta FROM context " +
         "WHERE source IN ('imessage','whatsapp','mail','calendar','linkedin')" +
         (sinceTs != null ? " AND ts >= ?" : "")
     )

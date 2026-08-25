@@ -177,3 +177,77 @@ test('a phone number survives, because it is something a person can place', () =
   assert.equal(readableId('ay@austinyoshino.com'), 'ay@austinyoshino.com');
   assert.equal(readableId(''), null);
 });
+
+// WHERE THE NAME COMES FROM WHEN THE SPINE HAS NOTHING.
+//
+// These four exist because the code they cover was dead and nothing noticed:
+// buildGraph selected `ts, source, entity_id, meta`, so `row.speaker` was
+// always undefined and every name it was written to rescue was dropped. The
+// fixtures could not have caught it either -- they created a `context` table
+// with no speaker column at all.
+test('a group sender is named by the speaker, not by their LID', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - DAY, source: 'whatsapp', entity_id: 'w:g1', text: 'hey all',
+      speaker: 'Priya Raman',
+      meta: { chat_handle: 'group@g.us', sender_handle: '99887766@lid', is_group: true, is_from_me: false } },
+    { ts: NOW - 2 * DAY, source: 'whatsapp', entity_id: 'w:g2', text: 'again',
+      speaker: 'Priya Raman',
+      meta: { chat_handle: 'group@g.us', sender_handle: '99887766@lid', is_group: true, is_from_me: false } },
+  ]);
+  const p = buildGraph(ctx, spineDb([]), { now: NOW }).find((x) => x.identifiers.includes('99887766@lid'));
+  assert.ok(p, 'the group sender is a person');
+  assert.equal(p.name, 'Priya Raman', 'the LID is an identifier, never a display name');
+});
+
+test('a one-to-one chat takes its name from the chat, which is the counterparty', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - DAY, source: 'whatsapp', entity_id: 'w:1', text: 'hi',
+      meta: { chat_handle: '+19995550000', chat_name: 'Dana Okafor', is_group: false, is_from_me: false } },
+  ]);
+  const p = buildGraph(ctx, spineDb([]), { now: NOW }).find((x) => x.identifiers.includes('+19995550000'));
+  assert.equal(p.name, 'Dana Okafor');
+});
+
+// The one that makes the fix safe rather than just effective: in a one-to-one
+// chat the id is the CHAT, so the speaker of an outbound row is the owner.
+test('an outbound one-to-one message never names the counterparty after the owner', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - DAY, source: 'whatsapp', entity_id: 'w:1', text: 'sent this',
+      speaker: 'The Owner',
+      meta: { chat_handle: '+19995550001', is_group: false, is_from_me: true } },
+    { ts: NOW - 2 * DAY, source: 'whatsapp', entity_id: 'w:2', text: 'their reply',
+      meta: { chat_handle: '+19995550001', is_group: false, is_from_me: false } },
+  ]);
+  const p = buildGraph(ctx, spineDb([]), { now: NOW }).find((x) => x.identifiers.includes('+19995550001'));
+  assert.ok(p);
+  assert.notEqual(p.name, 'The Owner', 'the owner is not their own counterparty');
+});
+
+test('the spine still outranks a chat name', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - DAY, source: 'whatsapp', entity_id: 'w:1', text: 'hi',
+      meta: { chat_handle: '+19995550002', chat_name: 'Mum', is_group: false, is_from_me: false } },
+  ]);
+  const p = buildGraph(ctx, spineDb([['+19995550002', 'Adaeze Okafor', 'phone']]), { now: NOW })
+    .find((x) => x.identifiers.includes('+19995550002'));
+  assert.equal(p.name, 'Adaeze Okafor', 'Contacts is the better authority than a chat label');
+});
+
+// The organizer of a meeting is a person you met, and EventKit does not always
+// repeat them in the attendee list.
+test('a calendar organizer absent from the attendee list is still a person', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - DAY, source: 'calendar', entity_id: 'c:1', text: 'Design review',
+      meta: { attendees: [{ email: 'guest@corp.com', name: 'Guest One' }],
+              organizer: { email: 'chair@corp.com', name: 'Chair Person' } } },
+  ]);
+  const graph = buildGraph(ctx, spineDb([]), { now: NOW });
+  const chair = graph.find((x) => x.identifiers.includes('chair@corp.com'));
+  assert.ok(chair, 'the person who called the meeting is in the graph');
+  assert.equal(chair.name, 'Chair Person');
+});
