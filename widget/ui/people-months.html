@@ -33,7 +33,22 @@
   <!-- Year tabs, browser-style: every year with activity, oldest to newest,
        the open year lifted and connected to the list below. -->
   <div class="pm-tabs" id="tabs"></div>
+  <!-- The year's highlight cards, from the server's own arithmetic over the
+       month timeline (ui/server/people/highlights.mjs). A card only exists
+       when its sentence is true, so this row is often shorter than five and
+       is empty on a thin year. Outside .pl-list so it stays put while the
+       list scrolls under it. -->
+  <div class="pm-cards" id="cards" hidden></div>
+  <!-- Which topic the list is standing inside, after a bubble was clicked, and
+       the way back out. Hidden when the list is the whole year. -->
+  <div class="pm-filter" id="filter" hidden></div>
   <div class="pl-list" id="list"></div>
+  <!-- The constellation: the same year seen by topic instead of by person.
+       A sibling of the list rather than a second window — the year tabs above
+       belong to both, and the globe is just the last tab. Hidden until it is
+       the chosen view; people-months.js fills it from the year already in
+       hand, so opening it costs no fetch. -->
+  <div class="pm-sky" id="sky" hidden></div>
   </div>
   <script src="bridge.js"></script>
   <script src="people-months.js"></script>
