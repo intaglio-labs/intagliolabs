@@ -54,7 +54,7 @@ import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch } from './people/search.mjs';
 import { loadOwner } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
-import { buildMap } from './people/map.mjs';
+import { buildMap, buildMonths } from './people/map.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
@@ -2578,7 +2578,7 @@ function handle(db, req, res, cors, url, policy) {
   // map and WRITE the owner's merge decisions, neither of which is a browser
   // capability. The Origin channel is authenticated but not entitled here, so
   // 403 (not 401), matching handleAdmin's reasoning.
-  if (url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map') {
+  if (url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/months') {
     if (channel !== 'bearer') {
       send(res, 403, { error: 'people routes are bearer-only: call with the token from ~/.hazlie/secrets/hermes-token.txt and no Origin header.' }, cors);
       return;
@@ -2642,6 +2642,23 @@ async function handlePeople(db, req, res, cors, url) {
     const out = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
       return buildMap(db, state, { owner, sinceTs, aliases });
+    });
+    send(res, 200, out, cors);
+    return;
+  }
+
+  // The timeline view: one year's months, each month's people by that
+  // month's engagement with that month's topics. Same auth posture as map.
+  if (req.method === 'GET' && url.pathname === '/people/months') {
+    const raw = url.searchParams.get('year');
+    const thisYear = new Date().getFullYear();
+    const year = raw === null || raw === '' ? thisYear : Number(raw);
+    if (!Number.isInteger(year) || year < 1990 || year > thisYear + 1) {
+      throw badRequest(`"year" must be an integer 1990..${thisYear + 1}`);
+    }
+    const out = withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      return buildMonths(db, state, { year, owner, aliases });
     });
     send(res, 200, out, cors);
     return;
