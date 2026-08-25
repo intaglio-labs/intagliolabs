@@ -318,6 +318,74 @@ END;
    the claims derived from them move in one SQLite transaction; separate
    tables so model output can never be mistaken for connector truth. */
 
+/* --- EPISODES: what happened together -----------------------------------------
+
+   A DERIVED index over context, decided by ARITHMETIC over (thread, ts). No
+   model picks a boundary, for the same reason no model picks a query: a
+   boundary is a decision about what evidence exists, and those flow one way.
+
+   REBUILDABLE IN FULL. Drop both tables, re-run scripts/build-episodes.mjs, and
+   the state is identical. Nothing here is evidence -- the evidence is still the
+   context row, claim_source still points at a row, and no claim ever points at
+   an episode.
+
+   WHY IT EXISTS. The distiller sent one row per call: a static 10.6 KB
+   instruction sheet with a 39-character message stapled to it, 99.4% of every
+   call spent re-reading the rules. Worse than the waste, the message arrived
+   ALONE -- "ok" with no question above it, which is how a friend asking about
+   Chick-fil-A once became "the owner plans to order Chick-fil-A". Measured on
+   the live store: adjacent messages in a thread sit 0.6 min apart at the median
+   and 336 min apart at p90, so a 60-minute gap cuts conversations where they
+   actually end, and 3,485 owner rows collapse into 756 episodes. */
+CREATE TABLE IF NOT EXISTS episode(
+  id               INTEGER PRIMARY KEY,
+  source           TEXT NOT NULL,
+  /* chat_guid, or 'solo:<context_id>' for an owner row with no chat, or
+     'note:<entity_id>'. NOT unique: one thread has many episodes over time. */
+  thread_key       TEXT NOT NULL,
+  started_at       INTEGER NOT NULL,
+  ended_at         INTEGER NOT NULL,
+  row_count        INTEGER NOT NULL,
+  owner_row_count  INTEGER NOT NULL,
+  /* The canonical person this episode is WITH, when there is exactly one and
+     it resolves. NULL for a group thread or an unrecognised handle. Written by
+     code from the contacts spine -- never by a model. */
+  counterparty_key TEXT,
+  /* The rule that made this episode, recorded so a threshold change is visible
+     rather than silent. The CHECK is the point: elsewhere "no model picks a
+     boundary" is prose, and prose is what a later session routes around. */
+  built_by         TEXT NOT NULL CHECK (built_by IN ('gap-rule')),
+  gap_ms           INTEGER NOT NULL,
+  /* sha256 over the members' content_hashes in line order: the distiller's
+     cache key and the "has this episode changed" test. */
+  member_hash      TEXT NOT NULL,
+  /* ended_at + gap_ms. An episode may only be distilled once settled_at <= now.
+     Before that a new message can still join it, changing member_hash -- and
+     claim is append-only, so a live thread would otherwise re-distil into a
+     growing pile of near-duplicates. */
+  settled_at       INTEGER NOT NULL,
+  built_at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS episode_thread ON episode(source, thread_key, started_at);
+CREATE INDEX IF NOT EXISTS episode_span   ON episode(source, ended_at, started_at);
+CREATE INDEX IF NOT EXISTS episode_person ON episode(counterparty_key, started_at)
+  WHERE counterparty_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS episode_member(
+  episode_id INTEGER NOT NULL REFERENCES episode(id) ON DELETE CASCADE,
+  context_id INTEGER NOT NULL REFERENCES context(id) ON DELETE CASCADE,
+  /* The number the model sees and the number it must cite back. Assigned by the
+     builder in (ts, id) order, stable within an episode. */
+  line_no    INTEGER NOT NULL,
+  /* 1 = the owner wrote it and it MAY be quoted. 0 = context only: it may
+     inform how the model reads, it may never become a receipt. This column is
+     the security boundary that replaces "one row per call". */
+  quotable   INTEGER NOT NULL CHECK (quotable IN (0,1)),
+  PRIMARY KEY (episode_id, line_no)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS episode_member_ctx
+  ON episode_member(context_id, episode_id);
+
 CREATE TABLE IF NOT EXISTS distill_run(
   id                 INTEGER PRIMARY KEY,
   model              TEXT NOT NULL,
@@ -330,6 +398,11 @@ CREATE TABLE IF NOT EXISTS distill_run(
      stamps every row it delivers with one value -- so a run has to record which
      ROW it stopped on, not just which instant. See memory/select.mjs. */
   through_id         INTEGER,
+  /* Which EPISODE this run distilled, by content. The hash rather than the
+     episode id, because the episode index is rebuilt and replaced -- ids move,
+     content does not, so this is what makes "already distilled" survive a
+     rebuild. NULL for a row-mode run. */
+  episode_hash       TEXT,
   rows_in            INTEGER NOT NULL DEFAULT 0,
   claims_out         INTEGER NOT NULL DEFAULT 0,
   status             TEXT NOT NULL CHECK (status IN ('running','complete','failed')),
@@ -559,6 +632,10 @@ WHERE r.scope = 'day'
 //      verb forms. It is a partial win only -- see the note in SCHEMA.
 //   5  the entity uniqueness key becomes (source, entity_id) -- ids are only
 //      unique within a source; the incident is recorded on the v5 branch.
+//   8  episode + episode_member, and distill_run.episode_context recording
+//      which arm produced a run. The episode is a derived grouping of context
+//      rows; the arm column is what makes turning received-message context on
+//      revertible by one index scan instead of an argument.
 //   7  distill_run.through_id: the distiller's cursor becomes (store_changed_at,
 //      id). It was store_changed_at alone, described as strictly monotonic and
 //      measurably not -- 18,775 rows over 149 distinct values -- so a capped
@@ -567,7 +644,7 @@ WHERE r.scope = 'day'
 //   6  context_source_ts(source, ts, entity_id): per-source time-range reads
 //      (reconciliation slices, retain sweeps, the episodic shelf, the digest
 //      aggregate, the watchdog's max(ts)) all scanned without it.
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 // The PRAGMAs that decide whether "deleted" means deleted, and whether the
 // memory tables' declared references mean anything. Applied to every
@@ -745,6 +822,24 @@ function migrate(db) {
     );
     if (!cols.has('through_id')) db.exec('ALTER TABLE distill_run ADD COLUMN through_id INTEGER');
     version = 7;
+  }
+  if (version < 8) {
+    // episode/episode_member are created by SCHEMA above with IF NOT EXISTS.
+    // Only the distill_run column needs an ALTER, and only because a column
+    // cannot be added twice.
+    const cols = new Set(
+      db.prepare("SELECT name FROM pragma_table_info('distill_run')").all().map((c) => c.name)
+    );
+    if (!cols.has('episode_hash')) db.exec('ALTER TABLE distill_run ADD COLUMN episode_hash TEXT');
+    db.exec('CREATE INDEX IF NOT EXISTS distill_run_episode ON distill_run(episode_hash)');
+    if (!cols.has('episode_context')) {
+      db.exec(
+        "ALTER TABLE distill_run ADD COLUMN episode_context TEXT " +
+          "CHECK (episode_context IN ('off','on'))"
+      );
+    }
+    db.exec('CREATE INDEX IF NOT EXISTS distill_run_arm ON distill_run(episode_context, id)');
+    version = 8;
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
