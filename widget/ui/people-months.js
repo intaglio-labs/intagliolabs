@@ -36,6 +36,12 @@
   // year: the year tabs stay live in both, so the globe is the last tab rather
   // than a second window.
   let view = 'list';
+  // 'year' = one year, from /people/year. 'all' = every year at once, from
+  // /people/map. The constellation is ALWAYS 'all' (owner, 2026-08-25): a
+  // person's topics are a thing about the relationship, not about a calendar
+  // year, and slicing them by year made the same friend appear and vanish
+  // between tabs.
+  let scope = 'year';
   // The topic a bubble was clicked into, or null. Only the list honours it —
   // filtering the constellation to one topic would just draw that one circle.
   let topic = null;
@@ -70,14 +76,19 @@
       .finally(render);
   }
 
-  function detailHtml(p) {
+  function detailHtml(p, y) {
     const bits = [];
-    const sk = `${p.key}|${year}`;
+    const sk = `${p.key}|${y}`;
     const sum = summaries.get(sk);
+    // The summary is always ABOUT ONE YEAR — that is what /people/summary
+    // takes. Outside a year tab it covers the last year this person was
+    // active, and says so, because an unlabelled paragraph under an all-years
+    // row would read as a summary of the whole relationship.
+    const tag = scope === 'all' ? `· ${y}, written by the local model` : '· written by the local model';
     if (sum && sum.state === 'pending') {
-      bits.push('<div class="pl-d pm-sum pm-sum-wait">summarizing this year…</div>');
+      bits.push(`<div class="pl-d pm-sum pm-sum-wait">summarizing ${y}…</div>`);
     } else if (sum && sum.state === 'done') {
-      bits.push(`<div class="pl-d pm-sum">${esc(sum.text)} <span class="pm-sum-tag">· written by the local model</span></div>`);
+      bits.push(`<div class="pl-d pm-sum">${esc(sum.text)} <span class="pm-sum-tag">${tag}</span></div>`);
     } else if (sum && sum.state === 'none') {
       bits.push(`<div class="pl-d pl-dim">no summary — ${esc(sum.reason)}</div>`);
     }
@@ -86,10 +97,14 @@
   }
 
   function rowHtml(p) {
-    const chips = (p.topics || [])
+    // Five chips is the row's budget. The all-years union can carry more than
+    // that, so the slice lives here rather than in the data — clustering needs
+    // every topic a person belongs to, the row only needs the loudest five.
+    const chips = (p.topics || []).slice(0, 5)
       .map((t) => `<span class="pl-chip pl-topic">${esc(t.label)}</span>`)
       .join('');
-    const rowKey = `${p.key}|${year}`;
+    const rowYear = scope === 'all' ? (p.latestYear || year) : year;
+    const rowKey = `${p.key}|${rowYear}`;
     const open = expanded === rowKey;
     const srcIcons = (p.channels || [])
       .map((c) => `<span class="pm-src-ic" data-tip="${esc(CHAN_LABEL[c] || c)}">${hzGlyph(c)}</span>`)
@@ -103,7 +118,7 @@
             srcIcons +
           `</div>` +
           (chips ? `<div class="pl-src pm-chip-row">${chips}</div>` : '') +
-          (open ? detailHtml(p) : '') +
+          (open ? detailHtml(p, rowYear) : '') +
         `</div>` +
       `</div>`
     );
@@ -144,7 +159,10 @@
     x.className = 'pm-filter-x';
     x.textContent = '×';
     chip.append(label, x);
-    chip.addEventListener('click', () => { topic = null; render(); });
+    // Back to the constellation, not to a bare list: without the topic this
+    // list is every person in every year, which is thousands of rows nobody
+    // asked for. You came from the sky; the way out is back to it.
+    chip.addEventListener('click', () => { topic = null; view = 'sky'; render(); });
     filterEl.replaceChildren(chip);
   }
 
@@ -192,22 +210,24 @@
   // row, which is the honest result rather than an empty frame.
   function renderCards(data) {
     const hs = Array.isArray(data.highlights) ? data.highlights : [];
-    // Also stand down inside a topic: "person of the year" is a claim about the
-    // whole year, and sitting it above a list of six travel contacts reads as a
-    // claim about travel.
-    const show = hs.length > 0 && !searchEl.value.trim() && view === 'list' && !topic;
+    // Also stand down inside a topic and in all-years: the cards are claims
+    // about ONE year — that is what the server computed them over — and
+    // sitting them above an all-years or topic list misattributes them.
+    const show = hs.length > 0 && !searchEl.value.trim() && view === 'list'
+      && !topic && scope === 'year';
     cardsEl.hidden = !show;
     cardsEl.innerHTML = show ? hs.map(cardHtml).join('') : '';
   }
 
   function renderList(data, rows) {
+    const where = scope === 'all' ? 'any year' : String(year);
     const empty = topic
-      ? `no one in ${esc(topic)} in ${year}`
-      : `no one matches in ${year}`;
+      ? `no one in ${esc(topic)} in ${where}`
+      : `no one matches in ${where}`;
     listEl.innerHTML = rows.map(rowHtml).join('') || `<div class="pl-empty">${empty}</div>`;
-    // The overflow line counts the whole year, so it would be a non-sequitur
-    // under a topic-filtered or searched list.
-    if (!searchEl.value.trim() && !topic && data.total > data.people.length) {
+    // The overflow line counts one year's rows, so it has no meaning under a
+    // topic-filtered list, a search, or the uncapped all-years set.
+    if (scope === 'year' && !searchEl.value.trim() && !topic && data.total > data.people.length) {
       listEl.insertAdjacentHTML('beforeend',
         `<div class="pl-more">+ ${data.total - data.people.length} more in ${year} — search or filter to narrow</div>`);
     }
@@ -225,24 +245,45 @@
   }
 
   // Opening a bubble IS opening its list — the sky answers "about what", and
-  // the obvious next question is "who". Clearing the topic leaves you in the
-  // list rather than bouncing back to the globe: by then you came for a person.
+  // the obvious next question is "who". Stays in scope 'all', so the list is
+  // everyone who has ever talked to you about it and the count matches the
+  // number printed on the bubble.
   function openTopic(label) {
     topic = label;
     view = 'list';
+    scope = 'all';
     render();
   }
 
   function render() {
+    if (scope === 'all') {
+      if (!mapData) {
+        renderTabs();
+        cardsEl.hidden = true;
+        filterEl.hidden = true;
+        surface().innerHTML = '<div class="pm-loading">reading every year…</div>';
+        ensureMap().then(render).catch(() => {
+          surface().innerHTML = '<div class="pl-empty">couldn’t read your years</div>';
+        });
+        return;
+      }
+      return paint(mapData);
+    }
     const data = cache.get(year);
     if (!data) return;
+    paint(data);
+  }
+
+  function paint(data) {
     const rows = visible(data);
     surface();
     renderCards(data);
     renderFilter(rows.length);
     if (view === 'sky') renderSky(data, rows);
     else renderList(data, rows);
-    searchEl.placeholder = `search ${year} (${rows.length} shown)…`;
+    searchEl.placeholder = scope === 'all'
+      ? `search every year (${rows.length} shown)…`
+      : `search ${year} (${rows.length} shown)…`;
     renderTabs();
     saveView();
   }
@@ -261,25 +302,24 @@
     tabsEl.replaceChildren();
     for (const y of ys) {
       const b = document.createElement('button');
-      // TWO states, and the second one exists because leaving it out was a bug.
-      // `active` is the lifted tab the list belongs to. `current` is the year
-      // still being looked at while the globe is up — without it the whole
-      // strip went unmarked in the sky view, the constellation said nothing
-      // about which year it was drawing, and clicking a bubble looked like it
-      // had jumped you to some other year rather than revealing the one you
-      // were already on.
-      const isYear = y === year;
-      b.className = 'pm-tab'
-        + (isYear && view === 'list' ? ' active' : '')
-        + (isYear && view === 'sky' ? ' current' : '');
+      // Lit only when a YEAR is what is on screen. The globe and everything
+      // reached from it are all-years, so no single year is the answer there —
+      // an earlier cut marked one anyway and it read as though clicking a
+      // bubble had moved you to that year.
+      b.className = 'pm-tab' + (y === year && scope === 'year' ? ' active' : '');
       b.dataset.y = String(y);
       b.textContent = String(y);
       tabsEl.appendChild(b);
     }
     const g = document.createElement('button');
-    g.className = 'pm-tab pm-tab-globe' + (view === 'sky' ? ' active' : '');
+    // Stays lit for the topic LIST as well as the constellation: both are
+    // all-years and both were reached through here, so this is where you are.
+    // No data-tip — its hover bubble is laid out 25px below the strip, which
+    // (with overflow-y promoted to auto by the horizontal scroll) made the
+    // whole tab row vertically scrollable.
+    g.className = 'pm-tab pm-tab-globe' + (scope === 'all' ? ' active' : '');
     g.dataset.view = 'sky';
-    g.setAttribute('data-tip', `${year} by topic`);
+    g.setAttribute('aria-label', 'every year by topic');
     g.innerHTML = GLOBE_SVG;
     tabsEl.appendChild(g);
     const active = tabsEl.querySelector('.pm-tab.active');
@@ -516,25 +556,67 @@
     // BOTH caps, said out loud. The server caps the year's rows, and the ring
     // holds four bubbles — either one silently makes this picture look like the
     // whole year when it is a top slice of it.
-    const caps = [];
-    if (data.total > data.people.length) {
-      caps.push(`the top ${data.people.length} of ${data.total} people`);
+    // NO FOOTNOTE (owner, 2026-08-25). It carried two disclosures and both had
+    // stopped being true of this surface: the row cap belonged to /people/year
+    // and the constellation no longer reads from there, and the year belonged
+    // to a per-year sky that no longer exists. What remains is the topic cap,
+    // and the bubbles that fit are the largest ones — see fitLayout.
+  }
+
+  // ---- every year at once ----
+  // /people/map is the whole graph: every person, UNCAPPED, each carrying
+  // their per-year topic chips. The constellation reads from here rather than
+  // summing the year payloads, and the reason is arithmetic — /people/year
+  // caps at 250 rows, so a sum of capped pages would print topic counts that
+  // are quietly short while looking exact.
+  //
+  // Adapted into the row shape the year payload already uses, so one renderer
+  // serves both surfaces.
+  let mapData = null;
+  let mapPending = null;
+
+  function adaptMap(payload) {
+    const people = [];
+    for (const p of payload.people || []) {
+      const byLabel = new Map();
+      let latestYear = null;
+      for (const y of p.years || []) {
+        if (latestYear === null || y.year > latestYear) latestYear = y.year;
+        for (const t of y.topics || []) {
+          if (!t || !t.label) continue;
+          const cur = byLabel.get(t.label);
+          if (cur) cur.n += t.n || 0;
+          else byLabel.set(t.label, { label: t.label, n: t.n || 0, tax: t.tax });
+        }
+      }
+      const messages = p.messages || 0;
+      if (messages <= 0) continue;
+      people.push({
+        key: p.key,
+        name: p.name,
+        channels: p.channels || [],
+        messages,
+        engagement: messages,
+        // The FULL union, not a top-five slice: the chips show five, but the
+        // clustering needs every topic a person belongs to or bubbles would
+        // lose members for no reason a reader could see.
+        topics: [...byLabel.values()].sort((a, b) => b.n - a.n),
+        // Which year to summarise when a row is opened outside a year tab.
+        latestYear,
+      });
     }
-    if (all.length > clusters.length) {
-      caps.push(`${clusters.length} of ${all.length} topics`);
+    people.sort((a, b) => b.engagement - a.engagement);
+    return { people, total: people.length, allYears: true };
+  }
+
+  function ensureMap() {
+    if (mapData) return Promise.resolve(mapData);
+    if (!mapPending) {
+      mapPending = hzPost('peopleMap')
+        .then((r) => { mapData = adaptMap(r || {}); return mapData; })
+        .finally(() => { mapPending = null; });
     }
-    // The YEAR LEADS, and is printed even when there is nothing to caveat —
-    // this was only shown alongside a cap, so a year with nothing to disclose
-    // drew a constellation that never said which year it was.
-    let text = `${year} by topic`;
-    if (caps.length) text += ` — showing ${caps.join(' · ')}`;
-    // Say when the grouping is the approximation rather than the server's own
-    // labelling, so a slightly-off bubble is explainable instead of puzzling.
-    if (!marked) text += ' — topics inferred (this local server predates the topic labels)';
-    const note = document.createElement('div');
-    note.className = 'pm-sky-note';
-    note.textContent = text;
-    skyEl.appendChild(note);
+    return mapPending;
   }
 
   // ---- remembering where you were ----
@@ -551,7 +633,7 @@
     // Debounced: render() runs on every keystroke of a search, and each save is
     // a UserDefaults write.
     saveTimer = setTimeout(() => {
-      hzPost('monthsView', { state: `${year}|${view}|${topic || ''}` }).catch(() => {});
+      hzPost('monthsView', { state: `${year}|${view}|${topic || ''}|${scope}` }).catch(() => {});
     }, 250);
   }
 
@@ -567,12 +649,16 @@
       return null; // no memory is not an error; start on this year
     }
     if (!saved) return null;
-    const [y, v, t] = saved.split('|');
+    const [y, v, t, s] = saved.split('|');
     const n = Number(y);
     // Trust nothing that came back: the value outlives the code that wrote it,
     // and a year the corpus no longer has would strand the page on an empty
-    // tab it cannot explain.
+    // tab it cannot explain. A three-field value predates the scope field and
+    // reads as scope 'year', which is what it meant.
     if (v === 'sky' || v === 'list') view = v;
+    scope = s === 'all' ? 'all' : 'year';
+    // The constellation IS all-years, so these two cannot disagree.
+    if (view === 'sky') scope = 'all';
     // A topic belongs to the list. Never restore one alongside the globe —
     // saveView cannot produce that pair, but a hand-edited or older value can,
     // and it is one line to refuse rather than reason about downstream.
@@ -640,8 +726,12 @@
   window.__hzRefresh = () => {
     cache.clear();
     summaries.clear();
+    mapData = null;
     prefetching = false;
-    loadOrFail(year);
+    // Re-open where the panel was left: in all-years the year fetch is not
+    // what is on screen, and loading it would flip the view back to a year.
+    if (scope === 'all') render();
+    else loadOrFail(year);
   };
 
   tabsEl.addEventListener('click', (e) => {
@@ -649,17 +739,21 @@
     if (!b) return;
     if (b.dataset.view === 'sky') {
       view = 'sky';
-      // The globe is the whole year's topics; arriving with one still selected
-      // would show a field where every bubble but the chosen one was missing.
+      scope = 'all';
+      // Arriving with a topic still selected would show a field where every
+      // bubble but the chosen one was missing.
       topic = null;
       render();
       return;
     }
     if (!b.dataset.y) return;
-    // A year tab is also the way BACK from the globe, so it has to switch the
-    // view even when the year itself has not changed — otherwise clicking the
-    // already-open year while the constellation is up does nothing at all.
+    // A year tab is also the way BACK from the globe, so it has to switch both
+    // the view and the scope even when the year itself has not changed —
+    // otherwise clicking the already-open year from the constellation does
+    // nothing at all.
     view = 'list';
+    scope = 'year';
+    topic = null;
     const y = Number(b.dataset.y);
     if (y === year && cache.has(y)) { render(); return; }
     loadOrFail(y);
@@ -670,8 +764,11 @@
     const rk = row.getAttribute('data-rk');
     expanded = expanded === rk ? null : rk;
     if (expanded !== null) {
-      const key = rk.slice(0, rk.lastIndexOf('|'));
-      requestSummary(key, year);
+      // The year comes off the ROW, not from the global: in all-years mode
+      // each row summarises its own last active year, and reading the global
+      // here would ask the server about a year that person may not appear in.
+      const cut = rk.lastIndexOf('|');
+      requestSummary(rk.slice(0, cut), Number(rk.slice(cut + 1)));
     }
     render();
   });
@@ -692,5 +789,9 @@
   restoreView()
     .then((y) => { if (y !== null) year = y; })
     .catch(() => {})
-    .finally(() => loadOrFail(year));
+    .finally(() => {
+      // All-years does not want the year fetch painted over it.
+      if (scope === 'all') render();
+      else loadOrFail(year);
+    });
 })();

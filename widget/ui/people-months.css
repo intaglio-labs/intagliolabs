@@ -13,6 +13,12 @@ body.plist .pm-tabs {
   padding: 8px 14px 0;
   border-bottom: 1px solid rgba(234, 234, 234, 0.12);
   overflow-x: auto;
+  /* overflow-y MUST be explicit — same trap palette.css documents on
+     .conn-main, from the other side: overflow-x: auto alone promotes the
+     unset overflow-y from visible to auto, and anything laid out past the
+     strip's box (the globe tab's hover tooltip was, 25px of it) makes the
+     row vertically scrollable. The strip scrolls SIDEWAYS only. */
+  overflow-y: hidden;
   scrollbar-width: none;
   flex: 0 0 auto;
 }
@@ -32,22 +38,21 @@ body.plist .pm-tab {
 }
 body.plist .pm-tab:hover { color: var(--fg); filter: brightness(1.15); }
 body.plist .pm-tab.active {
-  margin-bottom: -1px;
+  /* The "punches through the strip line" overlap is now a BOX-SHADOW: a 1px
+     drop of the panel's background painted over the border segment directly
+     beneath the tab. It was margin-bottom: -1px, then translateY(1px), and
+     both left the strip 1px scrollable — a negative margin adds a real pixel
+     of layout height, and a transformed box extends the scrollable overflow
+     area too (measured, both). Shadows never enter overflow. */
+  box-shadow: 0 1px 0 rgba(16, 16, 15, 0.92);
   border-color: rgba(197, 165, 109, 0.35);
-  border-bottom: 1px solid rgba(16, 16, 15, 0.92);
   background: rgba(234, 234, 234, 0.07);
   color: var(--hazelnut-light);
 }
-/* The year the constellation is drawing, while the globe holds `active`. NOT
-   lifted — it is not the tab the surface below belongs to — but coloured and
-   underlined, because the sky is otherwise silent about which year it is and a
-   fully unmarked strip made clicking a bubble look like a jump to some other
-   year. */
-body.plist .pm-tab.current {
-  color: var(--hazelnut-light);
-  border-color: rgba(197, 165, 109, 0.22);
-  box-shadow: inset 0 -2px 0 rgba(197, 165, 109, 0.45);
-}
+/* (.pm-tab.current was here 2026-08-25, same day: it marked the year the
+   constellation was drawing while the globe held `active`. The sky went
+   all-years hours later, no single year is the answer there any more, and the
+   globe tab itself carries `active` for the whole all-years surface.) */
 
 /* The instant answer to a tab click while the server rebuilds the year. */
 body.plist .pm-loading {
@@ -103,8 +108,7 @@ body.plist .pm-chip-row { margin-top: 4px; }
    list's own top edge cannot clip it. */
 body.plist .pm-src-ic { position: relative; }
 body.plist .pm-src-ic::after,
-body.plist .pm-face[data-tip]::after,
-body.plist .pm-tab-globe[data-tip]::after {
+body.plist .pm-face[data-tip]::after {
   content: attr(data-tip);
   position: absolute;
   left: 50%; top: calc(100% + 5px);
@@ -122,11 +126,12 @@ body.plist .pm-tab-globe[data-tip]::after {
   z-index: 5;
 }
 body.plist .pm-src-ic:hover::after,
-body.plist .pm-face[data-tip]:hover::after,
-body.plist .pm-tab-globe[data-tip]:hover::after { opacity: 1; }
-/* Initials alone are a riddle — the tooltip is what makes a disc a person.
-   Both of these need the positioning context the shared rule assumes. */
-body.plist .pm-tab-globe { position: relative; }
+body.plist .pm-face[data-tip]:hover::after { opacity: 1; }
+/* (The globe tab had this tooltip too, until 2026-08-25 the same day: its
+   bubble laid out 25px past the strip's box, and with overflow-y promoted to
+   auto by overflow-x: auto that made the whole tab row vertically scrollable.
+   The faces keep theirs — the sky stage is tall enough to absorb it, and
+   initials without a name are a riddle.) */
 
 /* The globe tab: an icon where the others are a year, so it reads as a
    different KIND of thing on the same strip. */

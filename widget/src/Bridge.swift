@@ -99,7 +99,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                "openExternal"],
     // monthsView: where the popup was left (year / list-or-globe / topic),
     // so a restart resumes on it rather than snapping back to this year.
-    "people-months": ["close", "peopleYear", "peopleSummary", "openPeople", "monthsView"],
+    // peopleMap: the ALL-YEARS source behind the constellation — every person,
+    // uncapped, with their per-year topics. monthsView: where the popup was
+    // left, so a restart resumes on it.
+    "people-months": ["close", "peopleYear", "peopleSummary", "openPeople",
+                      "monthsView", "peopleMap"],
     "ear": ["orbState", "voiceError", "voiceTranscript"],
   ]
 
@@ -947,6 +951,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       peopleCall("GET", yPath, json: nil) { [weak self] data in
         self?.reply(webView, id, data)
       }
+    case "peopleMap":
+      // Every person across every year, with per-year topics and NO row cap —
+      // which is why the constellation reads from here rather than summing the
+      // year payloads: those are capped per year, and a sum of capped pages
+      // would print topic counts that are quietly short.
+      peopleCall("GET", "people/map", json: nil) { [weak self] data in
+        self?.reply(webView, id, data)
+      }
+
     case "monthsView":
       // Both directions on one verb: a payload with "state" saves, a bare call
       // reads. Bounded for the same reason onboardingStep is — this is a
