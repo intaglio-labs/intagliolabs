@@ -314,11 +314,15 @@ if [ -n "$IDENTITY" ]; then
   if [ -f "$BE/helpers/apple-data" ]; then
     codesign --force --options runtime -s "$IDENTITY" "$BE/helpers/apple-data"
   fi
+  # Signing nested Mach-O can restore this Finder attribute on the bundle.
+  # Remove it immediately before the app-level signature.
+  xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
   codesign --force --options runtime \
     --entitlements "$ENTS" \
     -s "$IDENTITY" "$APP"
   echo "signed with $IDENTITY (hardened runtime, $ENTS)"
 else
+  xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
   codesign --force -s - "$APP"
   echo "WARNING: no code-signing identity found; signed ad-hoc." >&2
   echo "         macOS will re-ask for microphone access on every arm." >&2
