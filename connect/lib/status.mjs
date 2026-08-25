@@ -25,6 +25,21 @@ const disabledMarker = (home, id) =>
 
 function withDisabled(row, home) {
   if (!disabledMarker(home, row.id)) return row;
+  // WhatsApp is the one passive store a fresh app deliberately gates in the
+  // product UI. Preserve the existing CLI-only semantics for every other
+  // source: their markers may have been created by run.mjs --disable, and the
+  // native enable action is intentionally not authorized to mutate them.
+  if (row.id !== 'whatsapp') {
+    return {
+      ...row,
+      connected: false,
+      broken: false,
+      detail: 'turned off',
+      action: null,
+      fix: `re-enable with: rm ~/.hazlie/connectors/${row.id}.disabled`,
+      caveat: null,
+    };
+  }
   return {
     ...row,
     connected: false,
