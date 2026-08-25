@@ -186,3 +186,25 @@ test('the arm is recorded on the run, which is what makes it revertible', () => 
   assert.equal(n, 1);
   db.close();
 });
+
+// Most conversations hold no durable claim. An episode the model read and found
+// nothing in must still record a run, or "not yet distilled" is true forever and
+// the pass never drains.
+test('an episode run with no claims is recorded, so it is not re-read forever', () => {
+  const { db, ep } = seed();
+  const out = applyMemoryBatch(db, { run: run(ep.member_hash), claims: [] });
+  assert.equal(out.applied, 0);
+  const r = db.prepare('SELECT episode_hash, status FROM distill_run').get();
+  assert.equal(r.episode_hash, ep.member_hash);
+  assert.equal(r.status, 'complete');
+  db.close();
+});
+
+// Row mode is unchanged: there the cursor moves regardless, so an empty batch
+// is a caller mistake rather than a result.
+test('a row-mode run still requires at least one claim', () => {
+  const { db } = seed();
+  const rowRun = { ...run(undefined), episode_hash: undefined, episode_context: undefined };
+  assert.throws(() => applyMemoryBatch(db, { run: rowRun, claims: [] }), /array of 1 to/);
+  db.close();
+});

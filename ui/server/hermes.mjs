@@ -1629,8 +1629,21 @@ export function applyMemoryBatch(db, body) {
     }
   }
   const claims = body.claims;
-  if (!Array.isArray(claims) || claims.length < 1 || claims.length > APPLY_CLAIM_CAP) {
-    throw badRequest(`"claims" must be an array of 1 to ${APPLY_CLAIM_CAP} objects`);
+  // AN EPISODE THAT YIELDED NOTHING IS A RESULT, and it has to be recordable.
+  //
+  // Row mode still requires at least one claim: a row is picked by a cursor
+  // that moves regardless, so an empty batch there is a caller mistake. An
+  // EPISODE is picked by "no complete run names this member_hash", so an
+  // episode the model read and found nothing in must still record a run --
+  // otherwise it is re-read on every pass, forever, and the pass never drains.
+  // Most conversations contain no durable claim, so this is the common case,
+  // not the edge one.
+  const episodeRun = run?.episode_hash !== undefined && run?.episode_hash !== null;
+  const floor = episodeRun ? 0 : 1;
+  if (!Array.isArray(claims) || claims.length < floor || claims.length > APPLY_CLAIM_CAP) {
+    throw badRequest(
+      `"claims" must be an array of ${floor} to ${APPLY_CLAIM_CAP} objects`
+    );
   }
 
   // Shape validation first, in full, before the transaction opens. A 400 must
