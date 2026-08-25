@@ -93,7 +93,10 @@ const STOPWORDS = new Set(
     'omw otw ttyl hbu wbu wyd wya smh wtf lmfao hahah hahahah heheh yup yupp nah nahh mhm damn dang god omg ' +
     'shit fuck fucking fucked ass hell bitch crazy insane wild funny weird cute dope fire lit bet facts true ' +
     'real deal huh cry crying dying dead bummer oof yikes sheesh ' +
-    'looking making getting taking coming trying saying telling asking thinking feeling talking texting waiting'
+    'looking making getting taking coming trying saying telling asking thinking feeling talking texting waiting ' +
+    // Laughter runs in every alphabet the corpus texts in — 'kkk' is how half
+    // the world laughs and reads appallingly as a chip.
+    'kkk kkkk kkkkk jaja jajaja jajaj wkwk wkwkwk jeje interesting'
   ).split(/\s+/u)
 );
 
