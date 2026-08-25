@@ -333,6 +333,32 @@ LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServic
 "$LSREG" -f "$DEST" 2>/dev/null || true
 "$LSREG" -u "$PWD/build/Intaglio Labs.app" 2>/dev/null || true
 
+# RESTART THE BACKGROUND SERVICES, or the install is only half done.
+#
+# hermes, connect and llama-server are launchd agents with KeepAlive=true and
+# ProgramArguments pointing INTO this bundle. They are not children of the app,
+# so quitting the app does not stop them and `pkill` does not either -- launchd
+# restarts within ThrottleInterval, reading whatever is on disk at that instant.
+#
+# That lost two deploys on 2026-08-24. The sequence is silent and looks fine:
+# kill the app, start a build, launchd relaunches hermes from the OLD bundle
+# mid-build, the build then overwrites the files under the running process, and
+# the app comes up talking to a server running last build's code. The symptom
+# was a schema migration that simply never ran, and the only way to notice was
+# to check PRAGMA user_version by hand.
+#
+# kickstart -k kills and restarts in one step, AFTER the copy, so the process
+# that comes back is guaranteed to be reading the bundle just installed.
+# Failures are tolerated: a machine that has never provisioned the agents has
+# nothing to restart, which is a normal state and not a build error.
+for svc in com.hazlie.hermes com.hazlie.connect com.hazlie.llama-server; do
+  if launchctl print "gui/$(id -u)/$svc" >/dev/null 2>&1; then
+    launchctl kickstart -k "gui/$(id -u)/$svc" >/dev/null 2>&1 \
+      && echo "restarted: $svc" \
+      || echo "WARNING: $svc did not restart; it may still be running old code" >&2
+  fi
+done
+
 if [ "${1:-}" = "--run" ]; then
   pkill -x Hazlie 2>/dev/null || true
   open "$DEST"
