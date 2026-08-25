@@ -54,7 +54,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // never the thing that failed to fit, a second fitter was overwriting the
   // measurement. See fitPeople's header in widget/ui/people.js.
   private static let peopleBase = NSSize(width: 360, height: 240)
-  private static let skyBase = NSSize(width: 520, height: 620)
+  // Height is deliberately absurd: the timeline is a tall side panel, and
+  // fit()/sidePlacedFrame clamp it to the screen — so this reads "as tall as
+  // the screen allows", not 2000pt.
+  private static let monthsBase = NSSize(width: 520, height: 2000)
 
   private let bridge = Bridge()
   private var widgetWindow: WidgetWindow!
@@ -63,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   private var chatWeb: WKWebView?
   private var connectionsPanel: PopupPanel?
   private var peoplePanel: PopupPanel?
-  private var skyPanel: PopupPanel?
+  private var monthsPanel: PopupPanel?
   private var onboardingPanel: PopupPanel?
   private var earWeb: WKWebView?
   // Messages submitted (typed or spoken) before the chat page is alive, in
@@ -329,9 +332,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
 
   // MARK: popups
 
-  private func makePanel(page: String, size rawSize: NSSize, glass: Bool = false) -> PopupPanel {
+  private func makePanel(page: String, size rawSize: NSSize, glass: Bool = false, web preMade: WKWebView? = nil) -> PopupPanel {
     let size = Self.fit(rawSize, on: widgetWindow)
-    let web = makeWebView(bridge: bridge, page: page)
+    let web = preMade ?? makeWebView(bridge: bridge, page: page)
     let p = PopupPanel(
       contentRect: NSRect(origin: .zero, size: size),
       styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -398,19 +401,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // produces them the intermediate state is on screen long enough to see: the
   // popup grew downward over the widget and then jumped back up.
   private func resize(_ panel: PopupPanel, to size: NSSize) {
-    let frame = placedFrame(size)
+    let frame = chosenFrame(panel, size)
     guard frame != panel.frame else { return }
     panel.setFrame(frame, display: false)
   }
 
+  // The timeline sits BESIDE the widget, not above it: it is a tall reading
+  // surface, and the column of screen next to the widget is the only place a
+  // near-full-height panel can live without covering the widget it belongs
+  // to. Prefers the widget's left, falls back to the right when the widget
+  // hugs the left edge, clamps to the screen either way, and fills the
+  // screen's height top to bottom.
+  // Flush, not gapped: the timeline should read as attached to the widget
+  // (owner: "right next to each other"), so it uses a 2pt seam instead of the
+  // 12pt popupGap the stacked popups use.
+  private static let sideSeam: CGFloat = 2
+
+  private func sidePlacedFrame(_ size: NSSize) -> NSRect {
+    let wf = visibleWidgetFrame
+    guard let v = (widgetWindow.screen ?? NSScreen.main)?.visibleFrame else {
+      return NSRect(origin: NSPoint(x: wf.minX - size.width - Self.sideSeam, y: wf.minY), size: size)
+    }
+    var s = size
+    s.height = min(s.height, v.height - Self.screenMargin * 2)
+    s.width = min(s.width, v.width - Self.screenMargin * 2)
+    // The widget window is wider than the widget: the orb cluster is
+    // right-aligned inside a mostly-transparent window, so the window's minX
+    // can be ~160pt of empty glass left of anything visible. The page reports
+    // where the visible content starts (Bridge.widgetVisibleLeftCSS, CSS px,
+    // scaled to points here); fall back to the window edge until it has.
+    let visibleMinX = wf.minX + CGFloat((Bridge.widgetVisibleLeftCSS ?? 0) * Bridge.scale)
+    var x = visibleMinX - Self.sideSeam - s.width
+    if x < v.minX + 12 {
+      x = wf.maxX + Self.sideSeam
+      if x + s.width > v.maxX - 12 { x = v.maxX - s.width - 12 }
+    }
+    // Top-aligned to the widget so a short panel (settings) hangs beside it;
+    // a full-height panel (the timeline) clamps to the screen and fills it —
+    // the same expression serves both.
+    var y = min(wf.maxY, v.maxY - Self.screenMargin) - s.height
+    y = max(v.minY + Self.screenMargin, y)
+    return NSRect(origin: NSPoint(x: x, y: y), size: s)
+  }
+
+  // The side-placed set: panels that sit BESIDE the widget rather than above
+  // it. Membership decides placement AND exempts them from popupCeiling —
+  // that ceiling measures room above the widget, where these do not live.
+  private func isSidePlaced(_ panel: PopupPanel) -> Bool {
+    panel === monthsPanel || panel === connectionsPanel
+  }
+
+  private func chosenFrame(_ panel: PopupPanel, _ size: NSSize) -> NSRect {
+    isSidePlaced(panel) ? sidePlacedFrame(size) : placedFrame(size)
+  }
+
+  // The widget page re-measured its visible cluster (bar opened or closed,
+  // scale changed): any open side panel is anchored to that edge and must
+  // follow it.
+  func widgetBoundsChanged() {
+    for panel in edgePanels {
+      guard let panel, panel.isVisible, isSidePlaced(panel) else { continue }
+      place(panel)
+    }
+  }
+
   private func place(_ panel: PopupPanel) {
-    panel.setFrame(placedFrame(panel.frame.size), display: false)
+    panel.setFrame(chosenFrame(panel, panel.frame.size), display: false)
   }
 
   // Every popup this app opens along the widget's edge. Onboarding is not in
   // the list: it is a full-screen scrim that deliberately covers everything,
   // and it closes the others itself when it opens.
-  private var edgePanels: [PopupPanel?] { [chatPanel, connectionsPanel, peoplePanel, skyPanel] }
+  private var edgePanels: [PopupPanel?] { [chatPanel, connectionsPanel, peoplePanel, monthsPanel] }
 
   // ONE AT A TIME. Opening any popup closes the others first.
   //
@@ -743,19 +805,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     present(peoplePanel!)
   }
 
-  // The constellation is its own popup (owner: a standalone star-field, not a
-  // column inside People). Toggles like the others; the page's own close
-  // routes here via closeWindow. Bigger base because it is a star-field.
-  func openSky() {
-    if let p = skyPanel, p.isVisible {
+  // The timeline popup: the people list dressed by month, one year at a
+  // time. (It absorbed the constellation/sky list, retired 2026-08-24 —
+  // people-sky.css survives as this popup's base stylesheet.)
+  func openMonths() {
+    if let p = monthsPanel, p.isVisible {
       p.orderOut(nil)
       return
     }
-    if skyPanel == nil {
-      skyPanel = makePanel(page: "people-sky", size: capped(Self.scaled(Self.skyBase, Bridge.scale)))
-      skyPanel!.hasShadow = false
+    if monthsPanel == nil {
+      // fit(), not capped(): the ceiling measures room ABOVE the widget, and
+      // this panel does not live there.
+      monthsPanel = makePanel(page: "people-months", size: Self.fit(Self.scaled(Self.monthsBase, Bridge.scale), on: widgetWindow))
+      monthsPanel!.hasShadow = false
+    } else {
+      // The panel survives hidden with its page state intact, so a re-open
+      // must tell the page to drop its cache and refetch — otherwise the
+      // first open's data is the data forever.
+      let web = monthsPanel!.contentView as? WKWebView ?? monthsPanel!.contentView?.subviews.first as? WKWebView
+      web?.evaluateJavaScript("window.__hzRefresh && window.__hzRefresh()", completionHandler: nil)
     }
-    present(skyPanel!)
+    present(monthsPanel!)
+  }
+
+  // The tokened connect-page URL, read fresh (it rotates) and validated the
+  // same way the old browser path did: loopback http only, never an
+  // arbitrary address.
+  private func connectLink() -> URL? {
+    let f = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".hazlie/connect-link.txt")
+    guard let raw = try? String(contentsOf: f, encoding: .utf8),
+          let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+          url.scheme == "http",
+          url.host == "localhost" || url.host == "127.0.0.1" else { return nil }
+    return url
+  }
+
+  // The cloud-connector setup door: the connect page's root, in the browser.
+  func openConnectRoot() -> Bool {
+    guard let link = connectLink() else { return false }
+    NSWorkspace.shared.open(link)
+    return true
   }
 
   // What each popup's page last said it needs, in CSS px — unscaled, because
@@ -780,7 +870,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // change again, and acting on it is what turned one drag into a stream of
     // window resizes.
     if scaleDragging {
-      for (panel, _) in [(connectionsPanel, 0), (chatPanel, 0), (peoplePanel, 0), (skyPanel, 0)] {
+      for (panel, _) in [(connectionsPanel, 0), (chatPanel, 0), (peoplePanel, 0), (monthsPanel, 0)] {
         guard let p = panel, p.contentView === webView
           || p.contentView?.subviews.first === webView else { continue }
         if contentHeight > 0 { contentHeights[p] = CGFloat(contentHeight) }
@@ -791,7 +881,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     }
     let panels: [(PopupPanel?, NSSize)] = [
       (connectionsPanel, Self.connectionsBase), (chatPanel, Self.chatBase),
-      (peoplePanel, Self.peopleBase), (skyPanel, Self.skyBase),
+      (peoplePanel, Self.peopleBase), (monthsPanel, Self.monthsBase),
     ]
     for (panel, base) in panels {
       guard let p = panel, p.contentView === webView
@@ -801,7 +891,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       let want = NSSize(
         width: base.width + (extraWidths[p] ?? 0),
         height: max(base.height, contentHeights[p] ?? 0))
-      let size = capped(Self.fit(Self.scaled(want, Bridge.scale), on: p))
+      let fitted = Self.fit(Self.scaled(want, Bridge.scale), on: p)
+      let size = isSidePlaced(p) ? fitted : capped(fitted)
       guard abs(size.height - p.frame.height) > 1
         || abs(size.width - p.frame.width) > 1 else { return } // no thrash
       resize(p, to: size)
@@ -1146,7 +1237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // widget -- running it through placedFrame would shrink it to a popup.
     for panel in edgePanels {
       guard let panel, panel.isVisible else { continue }
-      panel.setFrame(placedFrame(panel.frame.size), display: true)
+      panel.setFrame(chosenFrame(panel, panel.frame.size), display: true)
     }
     // The scrim is sized to the SCREEN, so it needs the opposite treatment: not
     // re-placed against the widget, but re-stretched. A screen change mid-flow
@@ -1254,7 +1345,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // The page may have told us it needs more height than the base; keep
       // that, scaled, rather than snapping back to the guess.
       let want = NSSize(width: base.width, height: max(base.height, contentHeights[p] ?? 0))
-      resize(p, to: capped(Self.fit(Self.scaled(want, scale), on: p)))
+      let sized = Self.fit(Self.scaled(want, scale), on: p)
+      resize(p, to: isSidePlaced(p) ? sized : capped(sized))
       (p.contentView as? WKWebView ?? p.contentView?.subviews.first as? WKWebView)?.pageZoom = scale
     }
     // Onboarding is full-screen by definition, so its FRAME must not scale —

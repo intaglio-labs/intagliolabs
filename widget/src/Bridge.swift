@@ -21,7 +21,8 @@ protocol BridgeDelegate: AnyObject {
   func speakAnswer(_ text: String)
   func openConnections()
   func openPeople()
-  func openSky()
+  func openMonths()
+  func openConnectRoot() -> Bool
   func closeWindow(of webView: WKWebView)
   func dragWindow(of webView: WKWebView)
   func motionAnywayChanged(_ on: Bool)
@@ -29,6 +30,7 @@ protocol BridgeDelegate: AnyObject {
   func scaleChanged(_ scale: Double, committed: Bool, from webView: WKWebView?)
   func fitPopup(_ webView: WKWebView, contentHeight: Double, extraWidth: Double)
   func widgetSpot() -> [String: Double]
+  func widgetBoundsChanged()
   func spotlightWidget(_ on: Bool)
   func openOnboarding()
   func setupProgress(_ payload: [String: Any])
@@ -67,8 +69,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "prefs", "fitContent",
   ]
   static let pageCapabilities: [String: Set<String>] = [
-    "widget": ["drag", "openChat", "openChatWith", "openConnections", "openPeople",
-               "openSky", "voiceArm"],
+    "widget": ["drag", "openChat", "openChatWith", "openConnections",
+               "openMonths", "voiceArm", "widgetBounds"],
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
@@ -95,7 +97,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                "openExternal"],
-    "people-sky": ["close", "peopleMap"],
+    "people-months": ["close", "peopleYear", "peopleSummary", "openPeople"],
     "ear": ["orbState", "voiceError", "voiceTranscript"],
   ]
 
@@ -186,6 +188,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // inherit, so this defaults ON — and an absent key has to be checked for
   // explicitly, because UserDefaults reads a missing Bool as false and would
   // otherwise ship every fresh install silent.
+  // See case "widgetBounds": CSS-px offset of the visible widget's left edge
+  // within its window. nil until the page first reports.
+  static var widgetVisibleLeftCSS: Double? = nil
+
   static let soundsDefaultsKey = "HazlieSounds"
   static var soundsOn: Bool {
     get {
@@ -413,8 +419,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "openConnections":
       delegate?.openConnections()
       reply(webView, id, ["state": "ok"])
-    case "openSky":
-      delegate?.openSky()
+    case "openMonths":
+      delegate?.openMonths()
       reply(webView, id, ["state": "ok"])
     case "openPeople":
       delegate?.openPeople()
@@ -551,6 +557,18 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": "ok"])
     case "drag":
       delegate?.dragWindow(of: webView)
+      reply(webView, id, ["state": "ok"])
+    case "widgetBounds":
+      // Where the VISIBLE widget starts inside its mostly-transparent window,
+      // in CSS px from the window's left edge. The widget window is 312pt wide
+      // but the orb cluster is right-aligned inside it, so a panel placed
+      // against the WINDOW edge floats ~160pt away from anything visible —
+      // the side panels place against this instead.
+      if let left = payload["left"] as? Double, left.isFinite, left >= 0,
+         abs((Bridge.widgetVisibleLeftCSS ?? -1000) - left) > 0.5 {
+        Bridge.widgetVisibleLeftCSS = left
+        delegate?.widgetBoundsChanged()
+      }
       reply(webView, id, ["state": "ok"])
     case "status":
       fetchStatus { [weak self] data in self?.reply(webView, id, data) }
@@ -872,35 +890,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         reply(webView, id, ["state": "error", "error": "url not in allowlist"])
       }
     case "openConnectLink":
-      // The tokened connect-page URL is dynamic (the token rotates), so it
-      // cannot be in the static allowlist. The connect server writes it to
-      // ~/.hazlie/connect-link.txt (0600); read it and open it, but ONLY if it
-      // is the loopback URL it is supposed to be — never an arbitrary address.
-      let linkFile = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".hazlie/connect-link.txt")
-      if let raw = try? String(contentsOf: linkFile, encoding: .utf8),
-         let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
-         url.scheme == "http",
-         url.host == "localhost" || url.host == "127.0.0.1" {
-        // An OPTIONAL sub-page, from a fixed list. The review queue lives at
-        // <link>/memory and there was no way to reach it — the root page does not
-        // link to it either — so 119 claims sat in a queue nobody knew about.
-        // An allowlist rather than a free path: this URL carries a live bearer
-        // token in it, and appending page-supplied text to a credential-bearing
-        // URL is how a token ends up somewhere it was never meant to go.
-        let page = payload["page"] as? String ?? ""
-        let allowed: Set<String> = ["memory"]
-        let target = allowed.contains(page)
-          ? url.appendingPathComponent(page)
-          : url
-        NSWorkspace.shared.open(target)
+      // The cloud-connector setup door: the connect page's ROOT, in the
+      // browser — a full setup flow (tokens, app passwords) that wants a real
+      // browser.
+      if delegate?.openConnectRoot() == true {
         reply(webView, id, ["state": "ok"])
       } else {
         reply(webView, id, ["state": "error", "error": "no connect link yet"])
       }
-    // People identity-review (users-b8's Stage 3). Thin hermes passthroughs —
-    // same bearer + identity gate as ask(); the body shape belongs to the
-    // people server, so we reply whatever it returns verbatim.
     case "initSearch":
       let days = (payload["days"] as? Int) ?? Int(payload["days"] as? Double ?? 365)
       peopleCall("POST", "people/init", json: ["days": days]) { [weak self] data in
@@ -919,12 +916,20 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       peopleCall("POST", "people/decide", json: ["a": a, "b": b, "verdict": verdict]) { [weak self] data in
         self?.reply(webView, id, data)
       }
-    case "peopleMap":
-      // Phase 2 constellation view. days 0/absent = all time. Bigger body
-      // (~1MB) than the others; the passthrough's JSON path handles it.
-      let days = (payload["days"] as? Int) ?? Int(payload["days"] as? Double ?? 0)
-      let path = days > 0 ? "people/map?days=\(days)" : "people/map"
-      peopleCall("GET", path, json: nil) { [weak self] data in
+    case "peopleYear":
+      // The timeline view: one year of people with the year's topics. Absent
+      // year = server default (the current year).
+      let year = (payload["year"] as? Int) ?? Int(payload["year"] as? Double ?? 0)
+      let yPath = year > 0 ? "people/year?year=\(year)" : "people/year"
+      peopleCall("GET", yPath, json: nil) { [weak self] data in
+        self?.reply(webView, id, data)
+      }
+    case "peopleSummary":
+      // Model-written year summary for one person; generated on demand,
+      // served by hermes from the LOCAL model only.
+      let sKey = String(payload["key"] as? String ?? "")
+      let sYear = (payload["year"] as? Int) ?? Int(payload["year"] as? Double ?? 0)
+      peopleCall("POST", "people/summary", json: ["key": sKey, "year": sYear]) { [weak self] data in
         self?.reply(webView, id, data)
       }
     default:

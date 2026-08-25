@@ -289,6 +289,8 @@ export function buildGraph(
           metInPerson: 0,
           linkedin: null,
           content: {},
+          timeline: new Map(),
+          lastFromOwner: null,
         });
       }
       const p = people.get(key);
@@ -311,10 +313,33 @@ export function buildGraph(
         if (isMessage && !sig.fromMe && sig.ts <= now && (p.lastFromThem === null || sig.ts > p.lastFromThem)) {
           p.lastFromThem = sig.ts;
         }
+        // The owner's side of the same clock, for open-loop detection ("they
+        // wrote last and I never answered"). Message channels only, like
+        // lastFromThem -- a calendar invite neither opens nor closes a loop.
+        if (isMessage && sig.fromMe && sig.ts <= now && (p.lastFromOwner === null || sig.ts > p.lastFromOwner)) {
+          p.lastFromOwner = sig.ts;
+        }
       }
       if (sig.channel === 'calendar') p.metInPerson += 1;
       else if (sig.fromMe) p.sent += 1;
       else p.received += 1;
+      // The activity TIMELINE: the same counts, bucketed by calendar month, so
+      // downstream code (people/profile.mjs) can see WHEN a relationship lived
+      // -- peak era, cadence, "active in 2020-2022" -- not just its lifetime
+      // totals. Only signals that have already happened tick a bucket, the
+      // same rule as the dormancy clock: a future meeting is not history yet.
+      if (Number.isFinite(sig.ts) && sig.ts <= now) {
+        const d = new Date(sig.ts);
+        const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        let bucket = p.timeline.get(ym);
+        if (bucket === undefined) {
+          bucket = { sent: 0, received: 0, met: 0 };
+          p.timeline.set(ym, bucket);
+        }
+        if (sig.channel === 'calendar') bucket.met += 1;
+        else if (sig.fromMe) bucket.sent += 1;
+        else bucket.received += 1;
+      }
       if (sig.linkedin) p.linkedin = sig.linkedin;
     }
   }
@@ -357,6 +382,15 @@ export function buildGraph(
         // 0, not negative nonsense, for a person whose only signals are still
         // in the future (lastSeen null).
         relationshipDays: p.lastSeen === null ? 0 : Math.floor((p.lastSeen - p.firstSeen) / DAY),
+        // The raw clocks behind dormancy, exposed for open-loop detection
+        // (profile.mjs): who spoke last, on a message channel, and when.
+        lastFromThem: p.lastFromThem,
+        lastFromOwner: p.lastFromOwner,
+        // Month-bucketed activity, oldest first: [{ ym: 'YYYY-MM', sent,
+        // received, met }]. The extraction layer's raw material.
+        timeline: [...p.timeline.entries()]
+          .sort(([a], [b]) => (a < b ? -1 : 1))
+          .map(([ym, b]) => ({ ym, ...b })),
         linkedin: p.linkedin,
         content: p.content,
       };

@@ -11,8 +11,35 @@
 
 import { buildGraph } from './graph.mjs';
 import { depthScore, isNonPerson } from './rank.mjs';
+import { topicTallies, topTopics, nameTokenSet } from './topics.mjs';
 
 const DAY = 86_400_000;
+
+// The year view's engagement formula, declared once so tuning is a visible
+// diff: a meeting is worth more than a message, and three felt right against
+// the seed ("met monthly" should outrank "texted weekly, never met").
+const MEETING_WEIGHT = 3;
+
+// Collapse a person's month-bucketed timeline (graph.mjs) into year rows:
+// [{ year, engagement, messages, met }], oldest first. The year view's raw
+// material; topics are attached by buildMap, which owns the corpus scan.
+export function yearRows(timeline) {
+  const byYear = new Map();
+  for (const b of timeline ?? []) {
+    const year = Number(b.ym.slice(0, 4));
+    let row = byYear.get(year);
+    if (row === undefined) {
+      row = { year, messages: 0, met: 0 };
+      byYear.set(year, row);
+    }
+    row.messages += (b.sent ?? 0) + (b.received ?? 0);
+    row.met += b.met ?? 0;
+  }
+  return [...byYear.values()]
+    .map((r) => ({ ...r, engagement: r.messages + MEETING_WEIGHT * r.met }))
+    .filter((r) => r.engagement > 0)
+    .sort((a, b) => a.year - b.year);
+}
 
 // LinkedIn "company" values that name no real company — placeholders everyone
 // between jobs uses. As a cluster label they'd fuse hundreds of unrelated
@@ -106,11 +133,104 @@ function hasRelationship(p) {
   return (p.reciprocity ?? 0) > 0;
 }
 
+// The TIMELINE view's payload: one YEAR of people, sorted by that year's
+// engagement, each carrying the year's topics, taxonomy counts and
+// specifics (people/topics.mjs, bucketBy year). Month grouping was yeeted
+// (owner, 2026-08-25) — a year at a glance beat twelve section headers.
+// Same person filter as the map (isNonPerson + hasRelationship), same alias
+// folding. `years` lists every year the graph has activity in, so the
+// client can page without guessing.
+// The expensive core under the year view — the graph and the year-bucketed
+// topic tallies — is IDENTICAL for every year (both scan the whole corpus),
+// so it is memoized per database handle and reused until the corpus changes.
+// Clicking through year tabs costs one rebuild, not ten.
+//
+// Keyed by the handle (WeakMap) so two different databases can never serve
+// each other's people — a stamp alone would collide across handles with equal
+// row counts (every test's fresh :memory: db, for one). The stamp (row count +
+// max rowid + alias count) invalidates on ingest, deletion, and owner merge
+// decisions. `now` is deliberately NOT in the stamp: it only gates
+// future-dated rows out of the timeline, and a cache a few minutes stale on
+// that axis changes nothing a month view can show.
+const yearMemo = new WeakMap();
+
+// Exported for people/summary.mjs, which needs the same graph and pays the
+// same memo.
+export function yearCore(contextDb, stateDb, { now, owner, aliases }) {
+  const c = contextDb.prepare('SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM context').get();
+  const stamp = `${c.n}|${c.m}|${aliases ? aliases.size : 0}`;
+  const hit = yearMemo.get(contextDb);
+  if (hit && hit.stamp === stamp) return hit.core;
+
+  const graph = buildGraph(contextDb, stateDb, { now, owner, aliases })
+    .filter((p) => !isNonPerson(p) && hasRelationship(p));
+  const idToKey = new Map(graph.flatMap((p) => (p.identifiers ?? []).map((id) => [id, p.key])));
+  const nameTokens = nameTokenSet([...graph.map((p) => p.name), ...(owner?.names ?? [])]);
+  const topics = topicTallies(contextDb, idToKey, { nameTokens, bucketBy: 'year' });
+
+  const core = { graph, topics };
+  yearMemo.set(contextDb, { stamp, core });
+  return core;
+}
+
+export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, aliases = null, cap = 250 } = {}) {
+  const { graph, topics } = yearCore(contextDb, stateDb, { now, owner, aliases });
+
+  const yearsSet = new Set();
+  const entries = [];
+  const prefix = `${year}-`;
+  for (const p of graph) {
+    let messages = 0;
+    let met = 0;
+    for (const b of p.timeline ?? []) {
+      yearsSet.add(Number(b.ym.slice(0, 4)));
+      if (!b.ym.startsWith(prefix)) continue;
+      messages += (b.sent ?? 0) + (b.received ?? 0);
+      met += b.met ?? 0;
+    }
+    const engagement = messages + MEETING_WEIGHT * met;
+    if (engagement === 0) continue;
+    entries.push({ p, messages, met, engagement });
+  }
+  entries.sort((a, b) => b.engagement - a.engagement);
+
+  return {
+    year,
+    years: [...yearsSet].sort((a, b) => a - b),
+    total: entries.length,
+    people: entries.slice(0, cap).map((e) => {
+      const doc = topics.docs.get(`${e.p.key}|${year}`);
+      // The row carries only what the page still shows: the company, status
+      // and in-person filters were yeeted (owner, 2026-08-25) and their
+      // fields left with them.
+      return {
+        key: e.p.key,
+        name: e.p.name,
+        channels: e.p.channels ?? [],
+        messages: e.messages,
+        engagement: e.engagement,
+        // Five chips, not three (owner, 2026-08-25) — and no separate
+        // taxonomy or specifics fields: the chips ARE the topic surface, and
+        // the expanded row's only extra is the model-written summary.
+        topics: topTopics(doc, topics.docFreq, topics.totalDocs, { limit: 5 }),
+      };
+    }),
+  };
+}
+
 export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs = null, aliases = null } = {}) {
   // Drop automated senders/role addresses (shared filter), then keep only the
   // people the owner actually has a relationship with — see hasRelationship.
   const graph = buildGraph(contextDb, stateDb, { now, owner, sinceTs, aliases })
     .filter((p) => !isNonPerson(p) && hasRelationship(p));
+
+  // Per-year topic chips (people/topics.mjs): one corpus scan, keyed by the
+  // SAME resolution the graph just produced (identifier -> person key), so a
+  // merged person tallies as one. Name tokens — everyone's, plus the
+  // owner's — are excluded up front: a person's own name is never their topic.
+  const idToKey = new Map(graph.flatMap((p) => (p.identifiers ?? []).map((id) => [id, p.key])));
+  const nameTokens = nameTokenSet([...graph.map((p) => p.name), ...(owner?.names ?? [])]);
+  const topics = topicTallies(contextDb, idToKey, { nameTokens });
 
   // Strength is depth (volume + reciprocity + reach), normalized to 0..1 across
   // the whole map so the client sizes stars on a stable scale.
@@ -156,6 +276,12 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
       dormancyDays: p.dormancyDays ?? null,
       company: p.linkedin?.company ?? null,
       title: p.linkedin?.position ?? null,
+      // The year view: engagement per year plus that YEAR's top-3 topics —
+      // "what we talked about in 2021", not a lifetime blur.
+      years: yearRows(p.timeline).map((r) => ({
+        ...r,
+        topics: topTopics(topics.docs.get(`${p.key}|${r.year}`), topics.docFreq, topics.totalDocs),
+      })),
       // A few identifiers for the card; the full set is not needed to render.
       identifiers: (p.identifiers ?? []).slice(0, 4),
     };

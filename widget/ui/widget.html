@@ -99,27 +99,14 @@
     </div>
     <!-- Second row: the people button and the settings gear, right-aligned. -->
     <div class="gear-row">
-      <!-- People: the door into the who's-who / person-index feature. Reuses
-           the gear's pill styling so the two read as a pair; the glyph is two
-           figures. -->
-      <button class="gear" id="people" title="People">
-        <!-- Person x globe, from the Terminal Palette design: a person set in a
-             location pin — your people, out in the world. currentColor tint. -->
+      <!-- Timeline: your people, one year at a time. Person-in-a-pin glyph
+           (the Terminal Palette person x globe mark, back from the retired
+           People button — owner, 2026-08-25); opens monthsPanel. -->
+      <button class="gear" id="months" title="Timeline">
         <svg viewBox="0 0 44 44" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M22 38c8-8.5 12-14.6 12-20a12 12 0 1 0-24 0c0 5.4 4 11.5 12 20z"/>
           <circle cx="22" cy="15" r="3.8" fill="currentColor" stroke="none"/>
           <path d="M15.5 25c1.2-3.5 3.6-5.2 6.5-5.2s5.3 1.7 6.5 5.2" fill="currentColor" stroke="none"/>
-        </svg>
-      </button>
-      <!-- Constellation: the people-map as a star-field. Same pill as the
-           others; a globe glyph — your network, mapped. Opens skyPanel. -->
-      <button class="gear" id="globe" title="Constellation">
-        <svg viewBox="0 0 44 44" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="22" cy="22" r="15"/>
-          <ellipse cx="22" cy="22" rx="6" ry="15"/>
-          <line x1="7" y1="22" x2="37" y2="22"/>
-          <line x1="9.5" y1="15" x2="34.5" y2="15"/>
-          <line x1="9.5" y1="29" x2="34.5" y2="29"/>
         </svg>
       </button>
       <button class="gear" id="gear" title="Settings">

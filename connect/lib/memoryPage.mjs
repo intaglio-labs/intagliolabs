@@ -18,7 +18,34 @@
 // this file borrows both from page.mjs rather than restating them.
 
 import { groupClaims } from '../../ui/server/memory/group.mjs';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { escapeHtml } from './page.mjs';
+
+// Claims are STORED saying "the owner" — that is deliberate and hard-won: the
+// distiller prompt forbids names because a placeholder name in its examples
+// once became 75 of 119 claims' subject. But the page is read by the owner,
+// about themselves, and "The owner is allergic to penicillin" reads like a
+// file about a stranger. So the substitution happens HERE, in code, at render
+// time, from the config the system already trusts for identity
+// (connectors/config.json selfName) — the model is never asked to write a
+// name, so the copied-name failure cannot recur.
+export function substituteOwner(text, name) {
+  if (typeof name !== 'string' || name.trim() === '') return text;
+  return String(text).replace(/\bthe owner\b/giu, name.trim());
+}
+
+function ownerName() {
+  try {
+    const raw = JSON.parse(
+      readFileSync(join(homedir(), '.hazlie', 'connectors', 'config.json'), 'utf8')
+    );
+    return typeof raw?.selfName === 'string' && raw.selfName.trim() ? raw.selfName.trim() : null;
+  } catch {
+    return null; // no config yet: claims render as stored
+  }
+}
 
 const C = {
   bg: '#141412',
@@ -33,14 +60,27 @@ const C = {
 const STYLE = `
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
+  /* The page renders inside the widget's side panel, whose window is
+     transparent — so the BODY stays transparent and .wrap is the rounded
+     card, the same dressing as the people popups (people-sky.css
+     .plist-win): near-black glass, hairline border, 16px corners. In a
+     plain browser tab the card still reads; only the page behind it is the
+     browser's own. */
   body {
     margin: 0; min-height: 100vh;
-    background: ${C.bg}; color: ${C.fg};
+    background: transparent; color: ${C.fg};
     font-family: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
-    display: flex; justify-content: center; padding: 56px 20px;
+    display: flex; justify-content: center; padding: 0;
   }
   ::selection { background: ${C.hazelnut}; color: ${C.bg}; }
-  .wrap { width: 100%; max-width: 640px; }
+  .wrap {
+    width: 100%; max-width: 640px;
+    height: 100vh; overflow-y: auto;
+    background: rgba(16, 16, 15, 0.92);
+    border: 1px solid rgba(234, 234, 234, 0.10);
+    border-radius: 16px;
+    padding: 26px 24px;
+  }
   .brand { font-size: 11px; color: ${C.muted}; letter-spacing: 0.08em; margin: 0 0 18px; }
   h1 { font-size: 20px; font-weight: 500; margin: 0 0 6px; letter-spacing: -0.01em; }
   .sub { margin: 0 0 4px; font-size: 13px; color: ${C.secondary}; line-height: 1.7; }
@@ -49,6 +89,7 @@ const STYLE = `
   .banner {
     border: 1px solid ${C.hazelnut}; color: ${C.hazelnutLight};
     padding: 10px 12px; font-size: 12px; margin: 0 0 20px;
+    border-radius: 10px;
   }
   ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 26px; }
   li { border-top: 1px solid ${C.hairline}; padding-top: 18px; }
@@ -70,7 +111,7 @@ const STYLE = `
   form { margin: 0; }
   button {
     font: inherit; font-size: 12px; cursor: pointer;
-    padding: 7px 16px; border-radius: 2px;
+    padding: 7px 16px; border-radius: 9px;
     background: transparent; color: ${C.hazelnut};
     border: 1px solid ${C.hazelnut};
   }
@@ -121,13 +162,14 @@ function claimItem(claim, base, index) {
     ? claim.group_ids
     : [claim.id];
   const extra = ids.length - 1;
+  const shownText = substituteOwner(claim.text, claimItem.ownerName);
   return `<li data-id="${escapeHtml(String(claim.id))}" data-ids="${escapeHtml(ids.join(','))}" data-i="${index}">
     <p class="kind">${escapeHtml(claim.kind)}${
       extra > 0
         ? ` &middot; said ${escapeHtml(String(ids.length))} times`
         : ''
     }</p>
-    <p class="claim">${escapeHtml(claim.text)}</p>
+    <p class="claim">${escapeHtml(shownText)}</p>
     <blockquote class="quote">${escapeHtml(claim.quote)}</blockquote>
     <p class="prov">from ${escapeHtml(SOURCE_LABEL[claim.source] ?? claim.source)} on ${escapeHtml(
       stamp(claim.source_ts ?? claim.observed_at)
@@ -300,9 +342,14 @@ function keyboardScript(base) {
 
 export function renderMemoryPage(
   { claims = [], more = false, counts = {} } = {},
-  { token = null, banner = null, error = null, nonce = null } = {}
+  // `ownerName` undefined means "read the config" — tests pass an explicit
+  // value (or null) so a machine's real config never leaks into a fixture.
+  { token = null, banner = null, error = null, nonce = null, ownerName: nameOverride = undefined } = {}
 ) {
   const base = token === null ? '' : `/c/${token}`;
+  // Resolved once per render and hung on the function rather than threaded
+  // through every call: claimItem is a private detail of this module.
+  claimItem.ownerName = nameOverride === undefined ? ownerName() : nameOverride;
   const body = error
     ? `<p class="empty">intaglio labs could not reach its own store: ${escapeHtml(error)}</p>`
     : claims.length === 0

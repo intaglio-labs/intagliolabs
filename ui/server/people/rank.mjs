@@ -17,6 +17,8 @@
 // Seniority is read off the LinkedIn title, because that is the one place the
 // corpus states "operates ahead of me" explicitly. Word-boundary matches, most
 // senior first — a Founder outranks a Lead.
+import { activityInWindow } from './profile.mjs';
+
 const SENIORITY_TIERS = [
   { re: /\b(founder|co-?founder|ceo|cto|coo|chief|president|managing partner|general partner|partner|principal|investor|venture)\b/iu, points: 5 },
   { re: /\b(vp|vice president|head of|director|gm|general manager)\b/iu, points: 3 },
@@ -157,6 +159,18 @@ export function scoreForNeed(p, need = MENTOR_NEED) {
   const depth = depthScore(p);
   if (depth < (need.minDepth ?? 0)) return { score: 0, reasons: ['relationship too thin'] };
 
+  // An explicit era filter (`activeWindow: ['2020-01', '2022-12']` -- see
+  // search.mjs detectEraWindow): the owner named a WHEN, and a person with no
+  // contact inside those months is a wrong answer however strong otherwise.
+  // A hard gate, not a weight, for that reason.
+  let windowActivity = null;
+  if (need.activeWindow) {
+    windowActivity = activityInWindow(p.timeline ?? [], need.activeWindow[0], need.activeWindow[1]);
+    if (windowActivity.messages + windowActivity.met === 0) {
+      return { score: 0, reasons: ['no contact inside the asked window'] };
+    }
+  }
+
   // Identity: a need may supply its own identity function (the investor need
   // uses one that rewards VC/angel/firm and IGNORES founder); otherwise the
   // general seniority tiers apply. The score line uses whichever ran.
@@ -197,6 +211,12 @@ export function scoreForNeed(p, need = MENTOR_NEED) {
   if (p.channelCount >= 2) reasons.push(`${p.channelCount} channels`);
   if (need.contentSignal && (p.content?.[need.contentSignal] ?? 0) > 0) {
     reasons.push(`${p.content[need.contentSignal]} threads mention ${need.contentSignal} topic`);
+  }
+  if (windowActivity !== null) {
+    reasons.push(
+      `in window: ${windowActivity.messages} messages` +
+        (windowActivity.met > 0 ? `, met ${windowActivity.met}×` : '')
+    );
   }
 
   return { score: Math.round(score * 100) / 100, reasons };
