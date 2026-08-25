@@ -380,18 +380,23 @@ winput.addEventListener('blur', syncBar);
 // edge instead of the window's, which can be ~160px of empty glass away.
 // Re-measured whenever the bar opens/closes or the window resizes, debounced
 // past the CSS transitions so the number describes the settled layout.
+// The cluster is a MOVING target — the chat bubble fades in and out, the bar
+// expands, states restyle things — so this is observation, not a snapshot:
+// every element is watched (ResizeObserver + transition ends + window
+// resize), each change re-reports, and native re-places any open side panel
+// on each report. A one-shot measurement at load is how the panel ended up
+// overlapping a bubble that appeared after it was placed.
+const boundsWatched = [winput, chatBtn, orbBtn, ...document.querySelectorAll('.gear-row .gear')];
 function reportBounds() {
-  // MEASURE THE BUTTONS, NEVER THEIR ROW. .gear-row (and .wbar when closed)
-  // are transparent flex containers that span the whole window, so their
-  // rect.left is ~0 and one of them in this list silently zeroed the whole
-  // correction — the first live run shipped exactly that bug and the panels
-  // kept hugging the invisible window edge.
-  const els = barOpen
-    ? [winput, chatBtn, orbBtn, ...document.querySelectorAll('.gear-row .gear')]
-    : [chatBtn, orbBtn, ...document.querySelectorAll('.gear-row .gear')];
+  // MEASURE THE BUTTONS, NEVER THEIR ROW. .gear-row and .wbar are transparent
+  // flex containers spanning the whole window, so their rect.left is ~0 and
+  // one of them in the list silently zeroes the whole correction.
   let left = Infinity;
-  for (const el of els) {
+  for (const el of boundsWatched) {
     if (!el) continue;
+    if (el === winput && !barOpen) continue; // collapsed input is invisible glass
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) < 0.05) continue;
     const r = el.getBoundingClientRect();
     if (r.width > 0) left = Math.min(left, r.left);
   }
@@ -404,6 +409,13 @@ function reportBoundsSoon() {
   boundsTimer = setTimeout(reportBounds, 260);
 }
 window.addEventListener('resize', reportBoundsSoon);
+if (window.ResizeObserver) {
+  const ro = new ResizeObserver(reportBoundsSoon);
+  for (const el of boundsWatched) if (el) ro.observe(el);
+}
+// Position changes without a resize (a fade completing, a shift) end in a
+// transition somewhere in the cluster; capture-phase so none are missed.
+document.body.addEventListener('transitionend', reportBoundsSoon, true);
 reportBoundsSoon();
 // Every keystroke, not just Enter: the glyph has to flip to the arrow on the
 // first character and back on the last backspace. `input` rather than

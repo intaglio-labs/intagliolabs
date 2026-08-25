@@ -537,7 +537,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // but the orb cluster is right-aligned inside it, so a panel placed
       // against the WINDOW edge floats ~160pt away from anything visible —
       // the side panels place against this instead.
-      if let left = payload["left"] as? Double, left.isFinite, left >= 0 {
+      if let left = payload["left"] as? Double, left.isFinite, left >= 0,
+         abs((Bridge.widgetVisibleLeftCSS ?? -1000) - left) > 0.5 {
         Bridge.widgetVisibleLeftCSS = left
         delegate?.widgetBoundsChanged()
       }
