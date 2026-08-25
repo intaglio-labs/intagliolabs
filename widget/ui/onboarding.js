@@ -324,7 +324,7 @@ function finish({ then } = {}) {
 // Escape leaves but does NOT mark it done — dismissing is not finishing, and a
 // flow you backed out of should still be there next time.
 document.addEventListener('keydown', (e) => {
-  if ((e.key === 'Enter' || e.key === 'Return') && currentScreen === '2' && demoArmed) {
+  if ((e.key === 'Enter' || e.key === 'Return') && String(currentScreen) === '2' && demoArmed) {
     e.preventDefault();
     demoSendNow();
     return;
