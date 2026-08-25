@@ -229,6 +229,40 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
     );
   }
 
+  // WHO WAS THERE, normalised.
+  //
+  // Attendee emails are the one join key that reaches across platforms: they
+  // match the contacts spine's `email` identifiers, which is how a calendar
+  // event and a message thread resolve to the same person. Measured before
+  // this was written: 1,417 of 1,905 events on this machine carry attendees,
+  // 10,362 records in all, and 1,348 events have at least one email. The stored
+  // rows carried none of it.
+  //
+  // The OWNER is dropped from the list (isMe) -- "who else was there" is the
+  // question, and the owner is in every one of their own events. The count of
+  // dropped-because-me is not kept: an event with only the owner is simply an
+  // event with no other attendees.
+  //
+  // Emails are lowercased to match normalizeEmail in contacts.mjs, or the join
+  // this exists for silently misses on case alone.
+  function attendeesOf(occ) {
+    const raw = Array.isArray(occ?.attendees) ? occ.attendees : [];
+    const out = [];
+    for (const a of raw) {
+      if (a?.isMe === true) continue;
+      const name = typeof a?.name === 'string' && a.name.trim() ? a.name.trim() : null;
+      const email =
+        typeof a?.email === 'string' && a.email.includes('@') ? a.email.trim().toLowerCase() : null;
+      if (!name && !email) continue;
+      const person = {};
+      if (name) person.name = name;
+      if (email) person.email = email;
+      if (typeof a?.status === 'string') person.status = a.status;
+      out.push(person);
+    }
+    return out;
+  }
+
   function buildRows(raw, { fromTs, toTs }) {
     const byId = new Map();
     let skipped = 0;
@@ -284,11 +318,30 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
         all_day: allDay,
       };
       if (typeof occ.rrule === 'string' && occ.rrule.length > 0) meta.rrule = occ.rrule;
+      const people = attendeesOf(occ);
+      if (people.length > 0) meta.attendees = people;
+      const organizer = attendeesOf({ attendees: occ.organizer ? [occ.organizer] : [] })[0];
+      if (organizer) meta.organizer = organizer;
       byId.set(entityId, {
         ts: startMs,
         source: 'calendar',
         entity_id: entityId,
-        text: `"${summary}" ${humanSpan({ allDay, startMs, endMs })} (${calendarTitle})`,
+        // Names ride in the TEXT as well as the meta, because the text is what
+        // FTS5 indexes and the episodic shelf renders -- "who was at the
+        // Tuesday review" is unanswerable if the people are only in JSON.
+        // Bounded at four names so a 200-person invite does not become the row:
+        // the meta keeps all of them for the join, the text carries enough to
+        // recognise. Emails stay OUT of the text -- they are a join key, not
+        // something to read back, and an address in an FTS index is an address
+        // in every snippet that matches.
+        text:
+          `"${summary}" ${humanSpan({ allDay, startMs, endMs })} (${calendarTitle})` +
+          (people.length > 0
+            ? ` with ${people
+                .slice(0, 4)
+                .map((x) => x.name ?? '(unnamed)')
+                .join(', ')}${people.length > 4 ? ` and ${people.length - 4} more` : ''}`
+            : ''),
         meta,
       });
     }
