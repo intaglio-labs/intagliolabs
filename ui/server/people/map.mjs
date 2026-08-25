@@ -215,12 +215,9 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
         messages: e.messages,
         met: e.met,
         engagement: e.engagement,
-        topics: topTopics(doc, topics.docFreq, topics.totalDocs),
-        taxonomy: Object.entries(doc?.taxonomy ?? {})
-          .filter(([, n]) => n >= 2)
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 3)
-          .map(([label, n]) => ({ label, n })),
+        // Five chips, not three (owner, 2026-08-25) — and no separate
+        // taxonomy field: the chips ARE the topics line now.
+        topics: topTopics(doc, topics.docFreq, topics.totalDocs, { limit: 5 }),
         specifics: topTerms(doc, topics.docFreq, topics.totalDocs),
       };
     }),

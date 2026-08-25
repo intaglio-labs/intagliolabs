@@ -189,7 +189,8 @@ test('buildYear: one year of people by year engagement, with year topics', () =>
   const ana = out.people.find((p) => p.name === 'Ana Chen');
   assert.equal(ana.topics[0].label, 'fundraising', 'taxonomy chip leads');
   assert.equal(ana.engagement, 5);
-  assert.ok(Array.isArray(ana.specifics) && Array.isArray(ana.taxonomy));
+  assert.ok(Array.isArray(ana.specifics));
+  assert.equal(ana.taxonomy, undefined, 'chips are the topics line; no separate field');
 });
 
 test('topTerms returns the specifics alone — no taxonomy labels, floors intact', () => {

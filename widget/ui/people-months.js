@@ -2,10 +2,11 @@
 // engagement, with the year's topic chips — month grouping was yeeted
 // (owner, 2026-08-25). Browser-style year tabs page between years; one fetch
 // per year (cached, dropped on every panel re-open via __hzRefresh); search
-// and the funnel filters narrow client-side. Expanding a row shows the
-// year's taxonomy counts, the specifics (word pairs first), and a
+// and the funnel filters narrow client-side. Expanding a row shows a
 // model-written summary fetched on demand — labeled as the model's, because
-// unlike every other line here it is not counted, it is written.
+// unlike every other line here it is not counted, it is written — and the
+// specifics (word pairs first). The taxonomy line was yeeted: the row's own
+// chips are the topics line, five of them.
 // (The file keeps its historical name; renaming the page id would ripple
 // through the bridge allowlist and panel factory for no behavioral gain.)
 'use strict';
@@ -65,9 +66,6 @@
       bits.push(`<div class="pl-d pm-sum">${esc(sum.text)} <span class="pm-sum-tag">· written by the local model</span></div>`);
     } else if (sum && sum.state === 'none') {
       bits.push(`<div class="pl-d pl-dim">no summary — ${esc(sum.reason)}</div>`);
-    }
-    if (p.taxonomy && p.taxonomy.length) {
-      bits.push(`<div class="pl-d">topics: ${p.taxonomy.map((t) => `${esc(t.label)} (${t.n})`).join(' · ')}</div>`);
     }
     if (p.specifics && p.specifics.length) {
       bits.push(`<div class="pl-d">specifics: ${p.specifics.map((t) => `${esc(t.label)} (${t.n})`).join(' · ')}</div>`);
