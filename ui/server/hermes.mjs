@@ -54,9 +54,10 @@ import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch } from './people/search.mjs';
 import { loadOwner } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
-import { buildMap, buildYear } from './people/map.mjs';
+import { buildMap, buildYear, buildSearchYears } from './people/map.mjs';
 import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
+import { rankAcrossYears } from './people/find.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
 import { validToFor } from './memory/validity.mjs';
@@ -2786,7 +2787,7 @@ function handle(db, req, res, cors, url, policy) {
   // map and WRITE the owner's merge decisions, neither of which is a browser
   // capability. The Origin channel is authenticated but not entitled here, so
   // 403 (not 401), matching handleAdmin's reasoning.
-  if (url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary') {
+  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary') {
     if (channel !== 'bearer') {
       send(res, 403, { error: 'people routes are bearer-only: call with the token from ~/.hazlie/secrets/hermes-token.txt and no Origin header.' }, cors);
       return;
@@ -2858,6 +2859,32 @@ async function handlePeople(db, req, res, cors, url, policy) {
 
   // The timeline view: one year of people by that year's engagement, with
   // the year's topics. Same auth posture as map.
+  // FINDING A PERSON, across every year rather than whichever tab is open.
+  //
+  // The timeline filtered client-side over the 250 people already loaded for one
+  // year, so anybody outside that page or that year was unreachable -- which is
+  // most people once history lands. Ranking lives in people/find.mjs and is
+  // arithmetic: no model is in this path, because a search that invents a person
+  // is worse than one that finds nobody.
+  if (req.method === 'GET' && url.pathname === '/people/find') {
+    const q = url.searchParams.get('q') ?? '';
+    if (typeof q !== 'string' || q.length > 100) {
+      throw badRequest('"q" must be a string of at most 100 characters');
+    }
+    const out = withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      const { byYear, years } = buildSearchYears(db, state, { owner, aliases });
+      const people = rankAcrossYears(byYear, q, { limit: 60 }).map(
+        // The handles matched the query; they are not part of the answer, and
+        // the page has no use for them.
+        ({ identifiers, engagement, ...row }) => row
+      );
+      return { query: q, years, people };
+    });
+    send(res, 200, out, cors);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/people/year') {
     const raw = url.searchParams.get('year');
     const thisYear = new Date().getFullYear();

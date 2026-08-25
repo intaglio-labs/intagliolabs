@@ -218,6 +218,63 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
   };
 }
 
+// EVERY year's people, uncapped and carrying identifiers -- the corpus a SEARCH
+// box ranks over.
+//
+// buildYear is not that corpus, and the two ways it differs are exactly the two
+// things search exists to fix. It slices to a 250-person cap, so the person you
+// cannot find on the page is the person it would also hide from the search; and
+// its rows carry no identifiers, so "the number I know them by" -- often the
+// only thing the owner remembers -- could never match. Widening buildYear
+// instead would push both onto the page payload, which needs neither.
+//
+// Memoized on the same corpus stamp as yearCore, because this is called on a
+// keystroke and the answer only changes when the corpus does.
+const searchMemo = new WeakMap();
+
+export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, aliases = null } = {}) {
+  const c = contextDb.prepare('SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM context').get();
+  const stamp = `${c.n}|${c.m}|${aliases ? aliases.size : 0}`;
+  const hit = searchMemo.get(contextDb);
+  if (hit && hit.stamp === stamp) return hit.value;
+
+  const { graph, topics } = yearCore(contextDb, stateDb, { now, owner, aliases });
+  const byYear = new Map();
+  for (const p of graph) {
+    const per = new Map(); // year -> tallies, from the person's own timeline
+    for (const b of p.timeline ?? []) {
+      const y = Number(String(b.ym).slice(0, 4));
+      if (!Number.isInteger(y)) continue;
+      const cur = per.get(y) ?? { messages: 0, met: 0 };
+      cur.messages += (b.sent ?? 0) + (b.received ?? 0);
+      cur.met += b.met ?? 0;
+      per.set(y, cur);
+    }
+    for (const [y, v] of per) {
+      const engagement = v.messages + MEETING_WEIGHT * v.met;
+      if (engagement === 0) continue; // a year they do not appear in
+      if (!byYear.has(y)) byYear.set(y, []);
+      byYear.get(y).push({
+        key: p.key,
+        name: p.name,
+        channels: p.channels ?? [],
+        identifiers: p.identifiers ?? [],
+        messages: v.messages,
+        engagement,
+        // Each person-year doc is touched once across the whole loop, so this
+        // is one pass over the docs rather than one per year.
+        topics: topTopics(topics.docs.get(`${p.key}|${y}`), topics.docFreq, topics.totalDocs, { limit: 5 }),
+      });
+    }
+  }
+  const value = {
+    byYear: Object.fromEntries(byYear),
+    years: [...byYear.keys()].sort((a, b) => a - b),
+  };
+  searchMemo.set(contextDb, { stamp, value });
+  return value;
+}
+
 export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs = null, aliases = null } = {}) {
   // Drop automated senders/role addresses (shared filter), then keep only the
   // people the owner actually has a relationship with — see hasRelationship.

@@ -1,9 +1,11 @@
 // The timeline popup: ONE YEAR of your people, sorted by that year's
 // engagement, with the year's topic chips — month grouping was yeeted
 // (owner, 2026-08-25). Browser-style year tabs page between years; one fetch
-// per year (cached, dropped on every panel re-open via __hzRefresh); search
-// and search narrows client-side (the filter row was yeeted — owner,
-// 2026-08-25). Expanding a row shows one
+// per year (cached, dropped on every panel re-open via __hzRefresh). Search
+// is SERVER-SIDE and crosses every year (the filter row was yeeted — owner,
+// 2026-08-25): filtering the open year's loaded list could not reach a person
+// in another year, nor one past the 250 that list holds, which is most of them
+// once history lands. Expanding a row shows one
 // thing: a model-written summary fetched on demand — labeled as the
 // model's, because unlike the chips it is not counted, it is written. The
 // taxonomy and specifics lines were yeeted in turn (owner, 2026-08-25); the
@@ -29,6 +31,11 @@
   let years = []; // every year with activity, from the server
   let expanded = null; // '<personKey>|<year>' of the row showing its detail
   const cache = new Map(); // year -> payload
+  // Search state. `findRows` is null when not searching, so an empty ARRAY can
+  // honestly mean "nobody matches" rather than "no search has run".
+  let findTerm = '';
+  let findRows = null;
+  let findState = 'idle'; // 'pending' | 'done' | 'degraded'
   const summaries = new Map(); // '<personKey>|<year>' -> {state, text?, reason?}
 
   function esc(s) {
@@ -50,9 +57,9 @@
       .finally(render);
   }
 
-  function detailHtml(p) {
+  function detailHtml(p, y) {
     const bits = [];
-    const sk = `${p.key}|${year}`;
+    const sk = `${p.key}|${y}`;
     const sum = summaries.get(sk);
     if (sum && sum.state === 'pending') {
       bits.push('<div class="pl-d pm-sum pm-sum-wait">summarizing this year…</div>');
@@ -65,11 +72,14 @@
     return `<div class="pl-detail">${bits.join('')}</div>`;
   }
 
-  function rowHtml(p) {
+  // `y` is the row's own year, which in search results is NOT the open tab --
+  // a person found in 2021 must carry 2021, or their summary and their message
+  // count would be fetched for a year they were never in.
+  function rowHtml(p, y) {
     const chips = (p.topics || [])
       .map((t) => `<span class="pl-chip pl-topic">${esc(t.label)}</span>`)
       .join('');
-    const rowKey = `${p.key}|${year}`;
+    const rowKey = `${p.key}|${y}`;
     const open = expanded === rowKey;
     const srcIcons = (p.channels || [])
       .map((c) => `<span class="pm-src-ic" data-tip="${esc(CHAN_LABEL[c] || c)}">${hzGlyph(c)}</span>`)
@@ -80,32 +90,85 @@
           `<div class="pl-nameline">` +
             `<span class="pl-name">${esc(p.name)}</span>` +
             `<span class="pm-msgs">${p.messages} msg${p.messages === 1 ? '' : 's'}</span>` +
+            (y === year ? '' : `<span class="pm-yr-badge">${y}</span>`) +
             srcIcons +
           `</div>` +
           (chips ? `<div class="pl-src pm-chip-row">${chips}</div>` : '') +
-          (open ? detailHtml(p) : '') +
+          (open ? detailHtml(p, y) : '') +
         `</div>` +
       `</div>`
     );
   }
 
   function render() {
+    if (findTerm) return renderFind();
     const data = cache.get(year);
     if (!data) return;
-    // Search is the one narrowing control left; the filter row was yeeted
-    // (owner, 2026-08-25). Order is the server's: most engaged first.
-    const term = searchEl.value.trim().toLowerCase();
-    const rows = term
-      ? data.people.filter((p) => (p.name || '').toLowerCase().includes(term))
-      : data.people;
-    listEl.innerHTML = rows.map(rowHtml).join('') || `<div class="pl-empty">no one matches in ${year}</div>`;
-    const shown = rows.length;
-    searchEl.placeholder = `search ${year} (${shown} shown)…`;
-    if (!term && data.total > data.people.length) {
+    // Order is the server's: most engaged first.
+    listEl.innerHTML = data.people.map((p) => rowHtml(p, year)).join('')
+      || `<div class="pl-empty">no one in ${year}</div>`;
+    searchEl.placeholder = `search everyone, every year…`;
+    if (data.total > data.people.length) {
       listEl.insertAdjacentHTML('beforeend',
-        `<div class="pl-more">+ ${data.total - data.people.length} more in ${year} — search or filter to narrow</div>`);
+        `<div class="pl-more">+ ${data.total - data.people.length} more in ${year} — search reaches all of them</div>`);
     }
     renderTabs();
+  }
+
+  // Search results: ranked by the server across every year, each row carrying
+  // the year it was found in.
+  function renderFind() {
+    if (findRows === null) {
+      listEl.innerHTML = `<div class="pm-loading">searching…</div>`;
+      renderTabs();
+      return;
+    }
+    const head = findState === 'degraded'
+      ? `<div class="pl-more">couldn’t reach search — showing matches from the years already loaded</div>`
+      : '';
+    listEl.innerHTML = head + (findRows.map((p) => rowHtml(p, p.year)).join('')
+      || `<div class="pl-empty">no one matches “${esc(findTerm)}”</div>`);
+    searchEl.placeholder = 'search everyone, every year…';
+    renderTabs();
+  }
+
+  // Ask the server. reqId guards the race the same way the year loader does:
+  // typing fast means several in flight, and only the newest may paint.
+  let findId = 0;
+  function runFind(term) {
+    const my = ++findId;
+    findRows = null;
+    findState = 'pending';
+    render();
+    hzPost('peopleFind', { q: term })
+      .then((res) => {
+        if (my !== findId) return; // superseded by a later keystroke
+        if (!res || !Array.isArray(res.people)) throw new Error('bad find payload');
+        findRows = res.people;
+        findState = 'done';
+        if (Array.isArray(res.years) && res.years.length) years = res.years;
+        render();
+      })
+      .catch(() => {
+        if (my !== findId) return;
+        // DEGRADE HONESTLY. Falling back to the cached years silently would
+        // report "no one matches" for people the server would have found, so
+        // renderFind says which answer this is.
+        const q = term.toLowerCase();
+        const seen = new Set();
+        const rows = [];
+        for (const [y, data] of cache) {
+          for (const p of data.people || []) {
+            if (seen.has(p.key)) continue;
+            if (!(p.name || '').toLowerCase().includes(q)) continue;
+            seen.add(p.key);
+            rows.push({ ...p, year: y });
+          }
+        }
+        findRows = rows;
+        findState = 'degraded';
+        render();
+      });
   }
 
   // Browser-style year tabs: oldest left, newest right, the open one active.
@@ -172,6 +235,11 @@
     cache.clear();
     summaries.clear();
     prefetching = false;
+    findId++;
+    findTerm = '';
+    findRows = null;
+    findState = 'idle';
+    searchEl.value = '';
     loadOrFail(year);
   };
 
@@ -186,14 +254,32 @@
     const rk = row.getAttribute('data-rk');
     expanded = expanded === rk ? null : rk;
     if (expanded !== null) {
-      const key = rk.slice(0, rk.lastIndexOf('|'));
-      requestSummary(key, year);
+      const cut = rk.lastIndexOf('|');
+      const key = rk.slice(0, cut);
+      // The row's own year -- a 2021 result summarised against the open tab
+      // would be a summary of a year that person may not appear in at all.
+      const rowYear = Number(rk.slice(cut + 1)) || year;
+      requestSummary(key, rowYear);
     }
     render();
   });
   syncEl.addEventListener('click', () => { hzPost('openPeople').catch(() => {}); });
   let t = null;
-  searchEl.addEventListener('input', () => { clearTimeout(t); t = setTimeout(render, 90); });
+  searchEl.addEventListener('input', () => {
+    clearTimeout(t);
+    const term = searchEl.value.trim();
+    if (term === findTerm) return;
+    findTerm = term;
+    if (!term) {
+      findId++; // any in-flight search must not paint over the year list
+      findRows = null;
+      findState = 'idle';
+      render();
+      return;
+    }
+    // Longer than the old 90ms because each keystroke is now a round trip.
+    t = setTimeout(() => runFind(term), 160);
+  });
   if (closeEl) closeEl.addEventListener('click', () => { hzSfx.close(); hzPost('close').catch(() => {}); });
 
   loadOrFail(year);

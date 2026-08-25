@@ -117,3 +117,20 @@ body.plist .pm-src-ic:hover::after { opacity: 1; }
 body.plist .pm-sum { color: var(--secondary); }
 body.plist .pm-sum .pm-sum-tag { color: var(--muted); font-size: 10px; }
 body.plist .pm-sum-wait { animation: pm-pulse 1.2s ease-in-out infinite; }
+
+/* The year a SEARCH result was found in. Only drawn when it differs from the
+   open tab, because a cross-year hit without its year is a message count from
+   a year you are not looking at. Reads as a tab, not as another chip: the
+   chips below the name are topics, and confusing the two would be worse than
+   having no badge. */
+body.plist .pm-yr-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.03em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--hazelnut-light);
+  background: color-mix(in srgb, var(--hazelnut-light) 14%, transparent);
+  white-space: nowrap;
+}
