@@ -67,6 +67,11 @@ orbEl.addEventListener('animationend', (e) => {
 // reserves it above the bar.
 const VOICE_TEASE = true;
 const TEASE_TEXT = 'voice things coming soon';
+// Chat wears the same sign for now (owner, 2026-08-25): the pill no longer
+// expands, and pressing it answers with a line instead of an input. Flip
+// this off to give the bar back.
+const CHAT_TEASE = true;
+const CHAT_TEASE_TEXT = 'chat coming soon';
 const TEASE_MS = 2400;
 const dreamEl = document.getElementById('wdream');
 const dreamText = document.getElementById('wdreamtext');
@@ -78,12 +83,12 @@ let teaseTimer = null;
 let panelCovering = false;
 window.__hzPanels = (on) => { panelCovering = on === true; if (panelCovering) hideTease(); };
 
-function showTease() {
+function showTease(text = TEASE_TEXT) {
   // Nothing to see: the bubble would render behind an open panel and time out
   // unread. The orb still wakes and still sounds -- the caller does both before
   // this -- so the tap is answered, just not with a line nobody can read.
   if (panelCovering) return;
-  dreamText.textContent = TEASE_TEXT;
+  dreamText.textContent = text;
   dreamEl.classList.add('on');
   clearTimeout(teaseTimer);
   // Re-tapping restarts the dwell rather than stacking timers, so a second
@@ -368,7 +373,16 @@ function syncChatGlyph() {
   chatBtn.classList.toggle('ready', ready);
   chatBtn.title = ready ? 'Send' : (barOpen ? 'Collapse' : 'Chat');
 }
-winput.addEventListener('focus', () => { barMinimized = false; hideTease(); syncBar(); });
+winput.addEventListener('focus', () => {
+  if (CHAT_TEASE) {
+    // The collapsed sliver can still catch a click; it answers with the sign
+    // too, and never opens.
+    winput.blur();
+    showTease(CHAT_TEASE_TEXT);
+    return;
+  }
+  barMinimized = false; hideTease(); syncBar();
+});
 // NOT on focus: the native openChat makes the chat panel key, which yanks
 // focus off this input mid-click and the bar snaps shut before a keystroke
 // lands. Until the bridge can order the chat front without focusing it,
@@ -435,6 +449,12 @@ winput.addEventListener('input', () => { hideTease(); syncChatGlyph(); });
 // of the two paths wins the race, and it feels quicker besides.
 chatBtn.addEventListener('pointerdown', (e) => {
   e.preventDefault(); // or the button takes focus off the input on the way down
+  if (CHAT_TEASE) {
+    // Chat is signed off for now: the press is answered with the same dream
+    // cloud the orb uses, and the bar stays shut.
+    showTease(CHAT_TEASE_TEXT);
+    return;
+  }
   hideTease();        // reaching for the bar means the line has been read
   if (winput.value.trim()) {
     // Focus stays in the pill, so the next message can be typed straight away.
