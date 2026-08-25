@@ -96,7 +96,37 @@ const STOPWORDS = new Set(
     'looking making getting taking coming trying saying telling asking thinking feeling talking texting waiting ' +
     // Laughter runs in every alphabet the corpus texts in — 'kkk' is how half
     // the world laughs and reads appallingly as a chip.
-    'kkk kkkk kkkkk jaja jajaja jajaj wkwk wkwkwk jeje interesting'
+    'kkk kkkk kkkkk jaja jajaja jajaj wkwk wkwkwk jeje interesting ' +
+    // THE TRANSACTIONAL REGISTER (owner, 2026-08-25). The list above is built
+    // out of how people TALK, and it worked — what it never covered is how
+    // machines write. Order confirmations, shipping notices and account mail
+    // are formal English, so none of their vocabulary was being stopped, and
+    // it chipped as though it were a topic: "order number", "future
+    // reference", "received either", "mind providing", "profile accept",
+    // "email address" all appeared on real rows.
+    //
+    // Why a stoplist and not a rarity threshold: these phrases are not common
+    // ENOUGH to be caught by document frequency. Only a slice of any corpus is
+    // automated mail, so "order number" sits well under any ratio loose enough
+    // to keep real terms like a place name or a nickname. The register is the
+    // signal, not the frequency.
+    //
+    // Applied at TOKENIZATION, so a stopped word cannot form half of a pair
+    // either — killing the word kills "order number" without needing the pair
+    // spelled out. Deliberately excludes anything the taxonomy already owns
+    // (money, housing, hiring): those chips come from TOPIC_SIGNALS, not from
+    // here, and are unaffected.
+    'order orders invoice invoices receipt receipts shipping shipment shipments tracking delivery delivered ' +
+    'refund refunds unsubscribe subscription subscribe account accounts password passwords verify verification ' +
+    'verified confirm confirmation confirmed reference references address addresses number numbers code codes ' +
+    'terms policy privacy conditions click clicking link links browser email emails reply replies ' +
+    'notification notifications alert alerts update updates updated request requests requested response ' +
+    'responses received receive receiving provide provided providing accept accepted accepting original ' +
+    'future either neither contact support customer customers kindly regards sincerely dear attached ' +
+    'attachment information details detail available required require requires ensure notice purchase ' +
+    'purchased payment payments billing billed charged transaction transactions balance statement login ' +
+    'signin signup register registration profile profiles settings preferences mailing newsletter promotional ' +
+    'offer offers discount coupon expires expired valid recipient sender inbox archive receipt'
   ).split(/\s+/u)
 );
 

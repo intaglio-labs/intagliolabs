@@ -115,7 +115,14 @@
   function visible(data) {
     const term = searchEl.value.trim().toLowerCase();
     let rows = data.people;
-    if (topic) rows = rows.filter((p) => (p.topics || []).some((t) => t && t.label === topic));
+    // The topic applies to the LIST ONLY. Filtering the sky by one topic
+    // leaves a constellation with a single circle in it — and when a restored
+    // state paired 'sky' with a topic, it left NO circles and the page claimed
+    // the year had nothing to group. Enforced here rather than trusted to
+    // every caller clearing it at the right moment.
+    if (topic && view === 'list') {
+      rows = rows.filter((p) => (p.topics || []).some((t) => t && t.label === topic));
+    }
     if (term) rows = rows.filter((p) => (p.name || '').toLowerCase().includes(term));
     return rows;
   }
@@ -123,8 +130,11 @@
   // The chip that says which topic the list is standing in, and the way out of
   // it. Without it a filtered list is indistinguishable from a short year.
   function renderFilter(count) {
-    filterEl.hidden = !topic;
-    if (!topic) { filterEl.replaceChildren(); return; }
+    // Same rule as visible(): a topic is a thing the list is standing in, so
+    // the chip has no business hanging over the constellation.
+    const show = topic && view === 'list';
+    filterEl.hidden = !show;
+    if (!show) { filterEl.replaceChildren(); return; }
     const chip = document.createElement('button');
     chip.className = 'pm-filter-chip';
     chip.type = 'button';
@@ -234,6 +244,7 @@
     else renderList(data, rows);
     searchEl.placeholder = `search ${year} (${rows.length} shown)…`;
     renderTabs();
+    saveView();
   }
 
   // Browser-style year tabs: oldest left, newest right, the open one active,
@@ -526,6 +537,49 @@
     skyEl.appendChild(note);
   }
 
+  // ---- remembering where you were ----
+  // Closing the popup already returns you here, because the panel survives
+  // hidden with its page state intact. A RESTART does not: the page is built
+  // again and `year` goes back to today's, which is why quitting and reopening
+  // landed on this year with nothing selected.
+  //
+  // One compact string rather than a JSON blob: native stores it opaquely and
+  // bounds its length, and three fields do not need a schema on the far side.
+  let saveTimer = null;
+  function saveView() {
+    clearTimeout(saveTimer);
+    // Debounced: render() runs on every keystroke of a search, and each save is
+    // a UserDefaults write.
+    saveTimer = setTimeout(() => {
+      hzPost('monthsView', { state: `${year}|${view}|${topic || ''}` }).catch(() => {});
+    }, 250);
+  }
+
+  // Returns the remembered year, or null. view/topic are applied as a side
+  // effect because they need no validation against the server's answer — a
+  // stale topic simply filters to nothing and the chip offers the way out.
+  async function restoreView() {
+    let saved = null;
+    try {
+      const r = await hzPost('monthsView', {});
+      saved = r && typeof r.state === 'string' ? r.state : null;
+    } catch {
+      return null; // no memory is not an error; start on this year
+    }
+    if (!saved) return null;
+    const [y, v, t] = saved.split('|');
+    const n = Number(y);
+    // Trust nothing that came back: the value outlives the code that wrote it,
+    // and a year the corpus no longer has would strand the page on an empty
+    // tab it cannot explain.
+    if (v === 'sky' || v === 'list') view = v;
+    // A topic belongs to the list. Never restore one alongside the globe —
+    // saveView cannot produce that pair, but a hand-edited or older value can,
+    // and it is one line to refuse rather than reason about downstream.
+    topic = view === 'list' && t ? t : null;
+    return Number.isInteger(n) && n >= 1990 && n <= new Date().getFullYear() + 1 ? n : null;
+  }
+
   // An uncached year is a server rebuild on first touch, so the click must
   // answer INSTANTLY with a loading state. reqId guards the race: only the
   // newest click's response may paint.
@@ -632,5 +686,11 @@
   searchEl.addEventListener('input', () => { clearTimeout(t); t = setTimeout(render, 90); });
   if (closeEl) closeEl.addEventListener('click', () => { hzSfx.close(); hzPost('close').catch(() => {}); });
 
-  loadOrFail(year);
+  // Resume where the popup was left, then fetch. The restore has to land
+  // BEFORE the first load or the page would fetch this year, paint it, and
+  // then visibly jump to the remembered one.
+  restoreView()
+    .then((y) => { if (y !== null) year = y; })
+    .catch(() => {})
+    .finally(() => loadOrFail(year));
 })();
