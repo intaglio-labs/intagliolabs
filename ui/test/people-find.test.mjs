@@ -201,14 +201,14 @@ test('a subject lands on the year it was discussed, not the busiest year', () =>
   const out = rankAcrossYears(byYear, 'pickleball', { content });
   assert.equal(out.length, 1);
   assert.equal(out[0].year, 2025, 'the year the subject actually happened');
-  assert.deepEqual(out[0].evidence, { messages: 14, conversations: 5 });
+  assert.deepEqual(out[0].evidence, { messages: 14, conversations: 5, excerpt: null });
 });
 
 test('a row carries the evidence for what it claims', () => {
   const p = person('name:rowan vance', 'Rowan Vance');
   const [hit] = rankPeople([p], 'pickleball', { content: stat(12, 4), year: 2025 });
   assert.equal(hit.matchField, 'content');
-  assert.deepEqual(hit.evidence, { messages: 12, conversations: 4 });
+  assert.deepEqual(hit.evidence, { messages: 12, conversations: 4, excerpt: null });
   // A name match has nothing to count, and must not invent something to show.
   const [byName] = rankPeople([p], 'rowan', { content: stat(12, 4), year: 2025 });
   assert.equal(byName.matchField, 'name');

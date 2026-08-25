@@ -1,12 +1,12 @@
 // Tests for the corpus half of person search (people/content.mjs). Every
-// fixture invented; the repo is public. The assertions pin counts and the two
-// things that must never happen: text coming out, and an FTS operator in the
-// query being treated as syntax.
+// fixture invented; the repo is public. The assertions pin the counts, the
+// bounds on the one excerpt a result may carry, and that an FTS operator in the
+// query is treated as data rather than syntax.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { openDb, insertRows } from '../server/hermes.mjs';
-import { contentMatches, ftsQuery, rowPersonId } from '../server/people/content.mjs';
+import { contentMatches, ftsQuery, rowPersonId, trimExcerpt } from '../server/people/content.mjs';
 
 const NOW = new Date(2025, 5, 1).getTime();
 const DAY = 86_400_000;
@@ -75,12 +75,64 @@ test('a person outside the graph is not invented from a corpus hit', () => {
   assert.equal(contentMatches(ctx, idToKey, 'pickleball').stats.size, 0);
 });
 
-test('nothing but numbers comes out', () => {
+// ---- the excerpt, and the bounds that make it safe to have ----
+//
+// The "counts only" rule was widened deliberately (owner, 2026-08-25) so a
+// search result can show the line that put somebody in the list. These pin what
+// the widening did NOT include.
+test('one excerpt per person, from a row that matched, and never a transcript', () => {
   const ctx = openDb(':memory:');
-  insertRows(ctx, [msg(NOW, 'pickleball at the secret address on maple street')]);
+  insertRows(ctx, [
+    msg(NOW, 'pickleball on saturday'),
+    msg(NOW + 1000, 'pickleball again on sunday'),
+    msg(NOW + 2000, 'unrelated chatter that matched nothing'),
+  ]);
   const stat = contentMatches(ctx, idToKey, 'pickleball').stats.get(`${KEY}|2025`);
-  assert.deepEqual(Object.keys(stat).sort(), ['conversations', 'messages']);
-  assert.ok(!JSON.stringify(stat).includes('maple'), 'no text, ever');
+  assert.equal(stat.messages, 2, 'the non-matching row is not evidence');
+  assert.equal(typeof stat.excerpt.text, 'string');
+  assert.ok(stat.excerpt.text.includes('sunday'), 'the most recent match wins');
+  assert.ok(!stat.excerpt.text.includes('unrelated'), 'only rows that matched');
+  assert.deepEqual(Object.keys(stat.excerpt).sort(), ['fromMe', 'text', 'ts']);
+});
+
+test('an excerpt is capped however long the message is', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [msg(NOW, `pickleball ${'verylongword '.repeat(80)}`)]);
+  const stat = contentMatches(ctx, idToKey, 'pickleball').stats.get(`${KEY}|2025`);
+  assert.ok(stat.excerpt.text.length <= 140, `capped, got ${stat.excerpt.text.length}`);
+});
+
+test('an excerpt is one line — a message cannot bring its own layout', () => {
+  assert.equal(trimExcerpt('hello\n\n   there\tfriend'), 'hello there friend');
+});
+
+test('a link is not a sentence', () => {
+  // The first live run gave somebody an excerpt that was a bare event URL.
+  assert.equal(trimExcerpt('https://example.com/e/a-very-long-event-slug'), null);
+  assert.equal(trimExcerpt('come to (link) https://example.com/x on saturday'),
+    'come to (link) (link) on saturday');
+  assert.equal(trimExcerpt('  '), null);
+  assert.equal(trimExcerpt(null), null);
+});
+
+test('an address is contact details, not the sentence', () => {
+  assert.equal(trimExcerpt('mail rowan@example.com about saturday'), 'mail about saturday');
+});
+
+test('a person whose newest match is a bare link still gets a real line', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    msg(NOW, 'pickleball at the park on saturday'),
+    msg(NOW + 1000, 'https://example.com/pickleball-signup-page'),
+  ]);
+  const stat = contentMatches(ctx, idToKey, 'pickleball').stats.get(`${KEY}|2025`);
+  assert.ok(stat.excerpt.text.includes('park'), 'skipped past the link to the sentence');
+});
+
+test('who said it is recorded, because it changes what the line means', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [msg(NOW, 'pickleball on saturday', { is_from_me: true })]);
+  assert.equal(contentMatches(ctx, idToKey, 'pickleball').stats.get(`${KEY}|2025`).excerpt.fromMe, true);
 });
 
 test('a corpus with no FTS index degrades to contributing nothing', () => {

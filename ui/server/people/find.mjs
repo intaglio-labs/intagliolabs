@@ -213,9 +213,12 @@ export function rankPeople(people, query, { limit = 50, content = null, year = n
     out.push({
       ...p,
       matchField: hit.field,
-      // Why this person is in the list, for the row to say out loud. Counts
-      // only -- no text ever comes out of the content tier.
-      evidence: stat ? { messages: stat.messages, conversations: stat.conversations } : null,
+      // Why this person is in the list, for the row to say out loud: the two
+      // counts, and one bounded excerpt of the message that matched (see
+      // people/content.mjs for what that excerpt is and is not allowed to be).
+      evidence: stat
+        ? { messages: stat.messages, conversations: stat.conversations, excerpt: stat.excerpt ?? null }
+        : null,
       score: hit.score + (hit.field === 'content' ? spread : weight),
     });
   }

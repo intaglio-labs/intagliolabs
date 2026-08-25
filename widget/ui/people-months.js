@@ -91,6 +91,20 @@
     return label ? `<span class="pm-why">${label}</span>` : '';
   }
 
+  // The line that put this person in the list. Bounded and prepared by the
+  // server (people/content.mjs); escaped here like everything else, because it
+  // is somebody's own words and must never be able to act as markup.
+  function excerptHtml(p) {
+    const e = findTerm && p.matchField === 'content' ? p.evidence?.excerpt : null;
+    if (!e || !e.text) return '';
+    return (
+      `<div class="pm-quote">` +
+        `<span class="pm-quote-who">${e.fromMe ? 'you' : 'them'}</span>` +
+        `<span class="pm-quote-text">${esc(e.text)}</span>` +
+      `</div>`
+    );
+  }
+
   function rowHtml(p, y) {
     const chips = (p.topics || [])
       .map((t) => `<span class="pl-chip pl-topic">${esc(t.label)}</span>`)
@@ -110,6 +124,7 @@
             whyHtml(p) +
             srcIcons +
           `</div>` +
+          excerptHtml(p) +
           (chips ? `<div class="pl-src pm-chip-row">${chips}</div>` : '') +
           (open ? detailHtml(p, y) : '') +
         `</div>` +

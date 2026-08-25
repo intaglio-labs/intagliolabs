@@ -147,3 +147,40 @@ body.plist .pm-why {
   opacity: 0.85;
   white-space: nowrap;
 }
+
+/* THE LINE THAT PUT THIS PERSON IN THE LIST — one bounded excerpt of the
+   message that matched, shown only for a content match while searching. Set in
+   italic against a quiet rule so it reads as somebody's words rather than as
+   another chip; the chips below it are counted, this is quoted, and the two
+   must not look alike. */
+body.plist .pm-quote {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 4px;
+  padding-left: 7px;
+  border-left: 2px solid rgba(197, 165, 109, 0.35);
+  min-width: 0;
+}
+body.plist .pm-quote-who {
+  flex: 0 0 auto;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  opacity: 0.75;
+}
+body.plist .pm-quote-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  font-style: italic;
+  line-height: 1.35;
+  color: var(--fg);
+  opacity: 0.9;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}

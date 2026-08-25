@@ -18,8 +18,60 @@ import { approximateConversationKey } from '../memory/episodes.mjs';
 // topics.mjs already settled for chips, where a 243-message thread counted 243
 // times drowned out a whole year of everything else. Spread is the signal.
 //
-// COUNTS ONLY. This returns how many messages and how many conversations, per
-// person, per year. It never returns text, and no row or snippet leaves here.
+// COUNTS, PLUS ONE LINE. This returns how many messages and how many
+// conversations per person per year, and an excerpt of the single most recent
+// message that matched.
+//
+// The excerpt is a WIDENING, made deliberately (owner, 2026-08-25) of the
+// "labels and counts only" rule topics.mjs still keeps for chips. The reason to
+// widen here and not there: a chip is a summary that stands on its own, while a
+// search result naming somebody you would never have guessed is unreadable
+// without the line that put them in the list. The reason it is safe to widen
+// here is that it is bounded in every direction that matters, and those bounds
+// are the contract:
+//
+//   * ONE excerpt per person per year, never a transcript;
+//   * only from a row that MATCHED the query, never surrounding conversation;
+//   * capped in tokens by FTS and again in characters here;
+//   * whitespace collapsed, so a message cannot smuggle layout;
+//   * it goes to the owner's own screen and nowhere else. It is never logged --
+//     the log rule did not widen -- and it never reaches a model.
+//
+// Excerpts still do not belong in chips, in logs, or in anything committed.
+
+// How much of a matching message may be shown. Tokens bound it inside FTS;
+// characters bound it again here, because a token can be arbitrarily long and
+// the first cap alone is not a promise about length.
+const SNIPPET_TOKENS = 12;
+const SNIPPET_CHARS = 140;
+
+// One line of prose, and only one line.
+//
+// Newlines and runs of whitespace collapse to single spaces: a message is
+// free-form text and without this it could carry its own layout into a row that
+// is supposed to be one line.
+//
+// A URL is replaced by "(link)" rather than shown. An excerpt that is a bare
+// link tells the reader nothing -- the first live run had a person's whole
+// excerpt be a forty-character event URL -- and a link is not what anyone means
+// by "what did we say about this". Email addresses come out entirely: they are
+// somebody's contact details, never the sentence.
+//
+// Returning null for a line with nothing left to read is what makes the caller
+// keep looking, so a person whose most recent match was a bare link still gets
+// the most recent one that was actually a sentence.
+export function trimExcerpt(raw) {
+  const prose = String(raw ?? '')
+    .replace(/https?:\/\/\S+|\bwww\.\S+/giu, '(link)')
+    .replace(/\S+@\S+\.\S+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  // Two real words, or there is no sentence here to show.
+  const words = prose.replace(/\(link\)/gu, ' ').match(/[\p{L}\p{N}]{2,}/gu) ?? [];
+  if (words.length < 2) return null;
+  if (prose.length <= SNIPPET_CHARS) return prose;
+  return `${prose.slice(0, SNIPPET_CHARS - 1).trimEnd()}…`;
+}
 
 // Turn what somebody typed into an FTS5 query, safely.
 //
@@ -75,11 +127,15 @@ export function contentMatches(db, idToKey, query, { maxRows = 6000 } = {}) {
   try {
     rows = db
       .prepare(
-        'SELECT c.id, c.ts, c.source, c.meta, m.episode_id ' +
-          'FROM context_fts f ' +
-          'JOIN context c ON c.id = f.rowid ' +
+        // No alias on context_fts: snippet() resolves the table by name and
+        // fails on an alias. SNIPPET_TOKENS bounds it inside FTS, before any
+        // text is materialised.
+        'SELECT c.id, c.ts, c.source, c.meta, m.episode_id, ' +
+          `snippet(context_fts, 0, '', '', '…', ${SNIPPET_TOKENS}) AS snip ` +
+          'FROM context_fts ' +
+          'JOIN context c ON c.id = context_fts.rowid ' +
           'LEFT JOIN episode_member m ON m.context_id = c.id ' +
-          "WHERE f.context_fts MATCH ? AND c.source IN ('imessage','whatsapp','mail') " +
+          "WHERE context_fts MATCH ? AND c.source IN ('imessage','whatsapp','mail') " +
           'ORDER BY c.ts DESC LIMIT ?'
       )
       .all(match, maxRows);
@@ -106,8 +162,18 @@ export function contentMatches(db, idToKey, query, { maxRows = 6000 } = {}) {
     if (!Number.isFinite(ts) || ts <= 0) continue;
     const bucket = `${key}|${new Date(ts).getFullYear()}`;
 
-    const stat = out.get(bucket) ?? { messages: 0, conversations: 0 };
+    const stat = out.get(bucket) ?? { messages: 0, conversations: 0, excerpt: null };
     stat.messages += 1;
+    // The FIRST row to reach a bucket wins the excerpt, and the query is
+    // ordered newest-first, so it is the most recent thing said on the subject
+    // -- which is what somebody searching for it is usually chasing. One per
+    // bucket, so no amount of matching rows turns this into a transcript.
+    if (stat.excerpt === null) {
+      const text = trimExcerpt(row.snip);
+      if (text) {
+        stat.excerpt = { text, ts, fromMe: meta.is_from_me === true || meta.is_from_me === 1 };
+      }
+    }
     out.set(bucket, stat);
     // A row the episode index has not reached yet still needs a conversation.
     let set = convos.get(bucket);
