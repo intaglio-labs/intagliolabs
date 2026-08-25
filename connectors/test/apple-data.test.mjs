@@ -57,3 +57,48 @@ test('a missing helper is reported, not thrown', () => {
   assert.equal(helperAvailable('/nope/not/here/apple-data'), false);
   assert.ok(new AppleDataError('x', { denied: true }).denied);
 });
+
+// ── attendee ordering ────────────────────────────────────────────────────────
+//
+// connectors/AGENTS.md names attendees as its own example of the rule: hermes
+// canonicalizes object KEY order for the content hash but keeps ARRAY order,
+// because it cannot know which arrays are sets. EventKit promises no stable
+// participant order, so an unsorted list reads as an EDIT on every delivery --
+// the row's hash changes, hermes treats an unchanged meeting as modified, and
+// invalidateClaimsForChangedRow retires claims nothing contradicted.
+import { attendeesOf } from '../sources/calendar.mjs';
+
+const bea = { name: 'Bea', email: 'BEA@Example.com', isMe: false };
+const al = { name: 'Al', email: 'al@example.com', isMe: false };
+
+test('the same people in a different order normalise identically', () => {
+  assert.deepEqual(attendeesOf({ attendees: [bea, al] }), attendeesOf({ attendees: [al, bea] }));
+});
+
+test('they sort by email, which is the identity', () => {
+  const out = attendeesOf({ attendees: [bea, al] });
+  assert.deepEqual(out.map((p) => p.email), ['al@example.com', 'bea@example.com']);
+});
+
+test('emails are lowercased, or the join to contacts misses on case alone', () => {
+  const [, b] = attendeesOf({ attendees: [al, bea] });
+  assert.equal(b.email, 'bea@example.com');
+});
+
+test('name breaks the tie for participants with no address', () => {
+  const out = attendeesOf({
+    attendees: [{ name: 'Zoe', isMe: false }, { name: 'Ada', isMe: false }],
+  });
+  assert.deepEqual(out.map((p) => p.name), ['Ada', 'Zoe']);
+});
+
+test('the owner is dropped: "who else was there" is the question', () => {
+  const out = attendeesOf({ attendees: [al, { name: 'Me', email: 'me@example.com', isMe: true }] });
+  assert.deepEqual(out.map((p) => p.email), ['al@example.com']);
+});
+
+test('a participant with neither name nor address contributes nothing', () => {
+  assert.deepEqual(attendeesOf({ attendees: [{ isMe: false }] }), []);
+  assert.deepEqual(attendeesOf({}), []);
+  assert.deepEqual(attendeesOf(null), []);
+});
