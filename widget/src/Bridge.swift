@@ -140,6 +140,20 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     set { UserDefaults.standard.set(newValue, forKey: onboardedDefaultsKey) }
   }
 
+  // A completed old flow must not suppress a materially redesigned welcome.
+  // Keep its revision separately from the Boolean so future flow changes can
+  // deliberately welcome existing installs once, without resetting any other
+  // app preferences or personal data.
+  static let onboardingRevisionDefaultsKey = "HazlieOnboardingRevision"
+  static let currentOnboardingRevision = 2
+  static var needsOnboarding: Bool {
+    !onboarded || UserDefaults.standard.integer(forKey: onboardingRevisionDefaultsKey) < currentOnboardingRevision
+  }
+  static func completeOnboarding() {
+    onboarded = true
+    UserDefaults.standard.set(currentOnboardingRevision, forKey: onboardingRevisionDefaultsKey)
+  }
+
   // WHICH SCENE THE FLOW WAS ON, so a restart resumes rather than rewinds.
   //
   // Granting Full Disk Access to a running app makes macOS offer "Quit &
@@ -442,7 +456,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "onboardingDone":
       // Only the flow finishing sets this. Dismissing with Escape closes the
       // window without sending it, so a flow backed out of returns next time.
-      Bridge.onboarded = true
+      Bridge.completeOnboarding()
       // Nothing left to resume; a replay from settings starts at the welcome.
       Bridge.onboardingStep = nil
       // ...and the handoff arms: the gear will nudge until settings opens.
@@ -467,7 +481,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         "state": "ok",
         "motion": Bridge.motionAnyway,
         "sounds": Bridge.soundsOn,
-        "onboarded": Bridge.onboarded,
+        "onboarded": !Bridge.needsOnboarding,
         "scale": Bridge.scale,
         "scaleMin": Bridge.scaleRange.lowerBound,
         "scaleMax": Bridge.scaleRange.upperBound,

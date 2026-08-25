@@ -195,6 +195,72 @@ function actionRow({ name, note, action, message }) {
   return el;
 }
 
+// The answer model is a Settings choice, not an onboarding gate. Fresh installs
+// default to the roughly 5 GB tier; this row keeps the smaller option available
+// for a Mac that needs less memory.
+function modelRow() {
+  const el = document.createElement('div');
+  el.className = 'setting setting-col model-setting';
+  const head = document.createElement('div');
+  head.className = 'setting-head';
+  const name = document.createElement('span');
+  name.className = 'setting-name';
+  name.textContent = 'model';
+  const value = document.createElement('span');
+  value.className = 'setting-value';
+  head.append(name, value);
+  const note = document.createElement('span');
+  note.className = 'setting-note';
+  note.textContent = 'the local model that answers your questions';
+  const choices = document.createElement('div');
+  choices.className = 'model-pick';
+  const status = document.createElement('span');
+  status.className = 'setting-note model-status';
+  const bar = document.createElement('span');
+  bar.className = 'model-progress';
+  el.append(head, note, choices, bar, status);
+
+  let state = null;
+  const gb = (bytes) => `${(bytes / 1e9).toFixed(1)} GB`;
+  function paint() {
+    if (!state) return;
+    const active = state.model || '';
+    value.textContent = active ? (active === '8b' ? '5.0 GB' : '2.5 GB') : 'not installed';
+    choices.replaceChildren();
+    for (const tier of state.tiers || []) {
+      const b = document.createElement('button');
+      b.className = 'model-pick-button' + (tier.id === active ? ' on' : '');
+      b.textContent = `${tier.label} · ${gb(tier.bytes)}`;
+      b.title = tier.detail;
+      b.addEventListener('click', () => {
+        status.textContent = tier.id === active ? 'already selected' : 'starting download…';
+        bar.style.width = tier.id === active ? '100%' : '0%';
+        hzPost('modelDownload', { tier: tier.id }).catch(() => {
+          status.textContent = 'could not start the download';
+        });
+      });
+      choices.appendChild(b);
+    }
+  }
+  window.__hzSetup = (d) => {
+    if (!d || typeof d !== 'object') return;
+    if (d.phase === 'downloading' && d.total > 0) {
+      bar.style.width = `${Math.min(100, (d.got / d.total) * 100)}%`;
+      status.textContent = `${gb(d.got)} of ${gb(d.total)}`;
+    } else if (d.phase === 'installing') {
+      bar.style.width = '100%';
+      status.textContent = 'starting the local engine…';
+    } else if (d.phase === 'ready') {
+      status.textContent = 'ready';
+      hzPost('setupState').then((next) => { state = next; paint(); }).catch(() => {});
+    } else if (d.phase === 'failed') {
+      status.textContent = d.error || 'download failed';
+    }
+  };
+  hzPost('setupState').then((next) => { state = next; paint(); }).catch(() => {});
+  return el;
+}
+
 // Fit the popup to its content EXACTLY. hzAutoFit only ever grows (its measure
 // is innerHeight + overflow, and overflow is 0 once the window is big enough),
 // so a tall window stayed stuck above short content — the dead space up top the
@@ -276,6 +342,7 @@ async function renderSettings() {
       format: (v) => `${Math.round(v * 100)}%`,
     }));
   }
+  rows.push(modelRow());
   rows.push(actionRow({
     name: 'onboarding',
     note: 'replay the welcome flow',

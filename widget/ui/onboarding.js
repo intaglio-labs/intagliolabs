@@ -1,19 +1,10 @@
 'use strict';
-// The welcome flow, three scenes that run into each other: screen 1 (§07)
-// introduces, screen 2 (§08) is a chat demo with one press in it, screen 3
-// (§09, "your turn") is the answer coming back. The only thing the viewer has
-// to do is send the message on screen 2; everything else advances itself.
-
-// 'model' and 'data' sit between the demo and the home reveal: the flow now
-// ends with a machine that can actually do something, rather than with a tour.
-// Keyed by name rather than by number because they are steps, not a countdown,
-// and either can be skipped without renumbering the rest.
+// The welcome flow: welcome, message demo, connections, model, then the live
+// widget spotlight. The setup steps are named because they are real work, not
+// a numbered tour, and either can be skipped without renumbering the rest.
 const screens = {
-  0: document.getElementById('screen0'),
   1: document.getElementById('screen'),
   2: document.getElementById('screen2'),
-  model: document.getElementById('screenModel'),
-  data: document.getElementById('screenData'),
   3: document.getElementById('screen3'),
 };
 // Both orbs read the same time-of-day band as the widget (bridge.js).
@@ -32,8 +23,6 @@ function showScreen(n) {
   }
   screens[n]?.classList.add('entering');
   if (String(n) === '2') runDemo();
-  if (String(n) === 'model') { clearDemo(); loadSetup(); }
-  if (String(n) === 'data') { refreshBack(); startPermPolling(); } else { stopPermPolling(); }
   if (String(n) === '3') { clearDemo(); runHome(); }
   // The scrim gets out of the way of the real widget only on the last scene.
   document.body.classList.toggle('spotlight', String(n) === '3');
@@ -44,10 +33,10 @@ function showScreen(n) {
   hzPost('onboardingStep', { step: String(n) }).catch(() => {});
 }
 
-// Called by native INSTEAD of __hzOnboardingReset when the app is launching back
-// into a flow it was already in, rather than replaying one from settings.
+// Called by native when the app is launching back into a flow it was already in,
+// rather than replaying one from settings.
 window.__hzOnboardingResume = (step) => {
-  if (!step || !(step in screens)) { showScreen(needsMove ? 0 : 1); return; }
+  if (!step || !(step in screens)) { showScreen(1); return; }
   clearDemo();
   demoArmed = false;
   showScreen(step);
@@ -57,53 +46,12 @@ window.__hzOnboardingResume = (step) => {
 // the flow would otherwise resume on whatever screen it was abandoned on.
 // Native calls this on every open; on the very first one the page has not
 // loaded yet, which is why the caller guards on the function existing.
-// The move: one press, and the rest is native — copy, relaunch, quit. The
-// button narrates while the process dies under it. If native reports there
-// was nothing to move (dev override, or a race), fall through to welcome.
-const moveGo = document.getElementById('moveGo');
-moveGo.addEventListener('click', () => {
-  moveGo.disabled = true;
-  moveGo.textContent = 'moving…';
-  hzPost('moveToApplications')
-    .then((d) => {
-      if (!d || d.moved !== true) showScreen(1);
-      // moved === true: this process is about to terminate; nothing to do.
-    })
-    .catch(() => {
-      moveGo.disabled = false;
-      moveGo.textContent = 'move to Applications';
-    });
-});
-document.getElementById('moveSkip').addEventListener('click', () => showScreen(1));
-
-// Whether the app needs moving to /Applications — screen 0's condition.
-// False until prefs says otherwise, so an old native (or no bridge at all)
-// never nags about a move it cannot perform.
-let needsMove = false;
-function refreshNeedsMove() {
-  return hzPost('prefs')
-    .then((p) => { needsMove = !!p && p.inApplications === false; })
-    .catch(() => {});
-}
-refreshNeedsMove().then(() => { if (needsMove) showScreen(0); });
-
 window.__hzOnboardingReset = () => {
   clearDemo();
   demoArmed = false;
-  // The move button may have been left mid-gesture — a failed attempt says
-  // "moving…", a skip leaves nothing — and a first run has never touched it.
-  moveGo.disabled = false;
-  moveGo.textContent = 'move to Applications';
-  // also clears body.spotlight, so a reopened flow starts dim
-  showScreen(needsMove ? 0 : 1);
-  // Replay is a fresh-install rehearsal, and the one fact that can change
-  // between rehearsals is where the app is (the move itself changes it).
-  // Open on the cached answer, correct it when the fresh one lands — but
-  // only while still on an opening screen; never yank a flow mid-scene.
-  refreshNeedsMove().then(() => {
-    if (needsMove && !screens[1].hidden) showScreen(0);
-    if (!needsMove && !screens[0].hidden) showScreen(1);
-  });
+  // Replays always start at the welcome; the app location is handled by the
+  // normal DMG/Finder install flow, not as a product onboarding step.
+  showScreen(1);
 };
 
 
@@ -281,19 +229,14 @@ function demoSendNow() {
         pipe.classList.add('suck');
       });
   });
-  // The pipe used to land on the home reveal. Setup goes in between, so the
-  // flow ends with a machine that can do something rather than a tour of one
-  // that cannot.
-  // The flight lands the orb in the corner, and the widget surfaces there a
-  // beat later — so this has to be the LAST thing before the reveal. It used to
-  // fire with two setup steps still to come, which told the owner "i live down
-  // here now" and then asked them for two more things.
+  // The demo hands directly into connections. Model choice follows that, and
+  // only then does the real widget surface in the bottom-right spotlight.
   at(1960, () => showScreen(3));
 }
 demoSend.addEventListener('click', demoSendNow);
 
 
-// ---------------- screen 3: where it lives ----------------
+// ---------------- final scene: where it lives ----------------
 // The flow has been talking to an orb in the middle of the screen; the app it
 // is introducing is a strip in the corner that sits UNDER every window. That
 // gap is the last thing onboarding owes anyone, and a drawing of a widget
@@ -321,15 +264,10 @@ function placeHome(spot) {
   // straight down the copy into the thing being pointed at. Clamped off the
   // top so it cannot slide under the menu bar on a short display.
   homeCard.style.right = `${Math.max(24, w - (left + width))}px`;
-  // Cleared against the WINDOW's top (clearY), not the ring's. The widget
-  // reserves an empty band above its bar, the ring deliberately excludes it,
-  // and for this scene the widget window sits above this page -- so a card
-  // placed against the ring lands inside that invisible band and the button
-  // stops receiving clicks. See widgetSpot() in main.swift. Falls back to the
-  // ring's top for a bridge that predates clearY, which is the old behaviour
-  // rather than a broken one.
-  const clearTop = typeof s.clearY === 'number' ? s.clearY * h : top;
-  homeCard.style.bottom = `${Math.max(24, h - clearTop + 26)}px`;
+  // Leave a deliberate 8px of air above the ring. It keeps the button from
+  // reading as part of the outline while still making the handoff feel tight.
+  // The ring extends 10px above the measured widget rectangle.
+  homeCard.style.bottom = `${Math.max(24, h - top + 18)}px`;
 }
 
 function runHome() {
@@ -354,16 +292,17 @@ window.__hzRehome = () => {
 document.getElementById('homeDone').addEventListener('click', () => finish());
 
 // ---------------- flow ----------------
-// Welcome -> SETUP -> demo -> flight -> home.
-//
-// Setup used to sit between the demo and the reveal, which put two more asks
-// after the orb had already flown to the corner saying "i live down here now".
-// Moving it earlier fixes that and buys something: a multi-gigabyte download
-// starts here and runs underneath the demo, so by the time the demo is over it
-// has usually landed.
+// Welcome -> demo -> home spotlight. Connections and model choice live in Settings.
 document.getElementById('cta').addEventListener('click', () => {
   hzSfx.wake();
-  showScreen('model');
+  // Fresh installs use the roughly 5 GB model without interrupting the welcome
+  // flow. An existing choice is respected; changing it lives in Settings.
+  hzPost('setupState').then((st) => {
+    if (st && !st.model && !st.downloading) {
+      hzPost('modelDownload', { tier: '8b' }).catch(() => {});
+    }
+  }).catch(() => {});
+  showScreen(2);
 });
 
 function finish({ then } = {}) {
@@ -385,6 +324,11 @@ function finish({ then } = {}) {
 // Escape leaves but does NOT mark it done — dismissing is not finishing, and a
 // flow you backed out of should still be there next time.
 document.addEventListener('keydown', (e) => {
+  if ((e.key === 'Enter' || e.key === 'Return') && currentScreen === '2' && demoArmed) {
+    e.preventDefault();
+    demoSendNow();
+    return;
+  }
   if (e.key === 'Escape') {
     clearDemo();
     hzSfx.close();
@@ -395,12 +339,15 @@ document.addEventListener('keydown', (e) => {
 
 hzApplyPrefs();
 
-// ---------------- setup: the model, then one real data source ----------------
+// The old setup implementation remains isolated below for resume compatibility
+// with an already-loaded page, but its screens are no longer part of the DOM or
+// reachable from onboarding. Settings owns both connections and model choice.
+if (document.getElementById('screenModel')) {
+// ---------------- setup: one real data source, then the model ---------------
 //
-// These two run after the demo and before the home reveal. The order is
-// deliberate: the model is the slow one, so it starts downloading while the
-// owner reads the next screen, and by the time they finish granting Full Disk
-// Access it has usually landed.
+// Connections come before model choice so the onboarding reads like the
+// product's natural first question: what should I know about? Then it asks how
+// it should think, and finally reveals the widget.
 //
 // Both are genuinely skippable. Everything except answering questions works
 // with no model, and the app is honest-but-empty with no sources — a setup step
@@ -483,7 +430,7 @@ function startModel(tier) {
   // Already the installed one: nothing to fetch, and pretending to download
   // 5 GB that are already here would be a lie with a progress bar on it.
   if (setupState && setupState.model === tier) {
-    showScreen('data');
+    showScreen(3);
     return;
   }
   selectedTier = tier;
@@ -504,7 +451,7 @@ function startModel(tier) {
     // Gated on the SCREEN, not on whether a model exists. It used to check
     // !modelDone, which loadSetup() sets true for an already-installed model —
     // so on any Mac that already had one the screen never advanced at all.
-    if (currentScreen === 'model') showScreen('data');
+    if (currentScreen === 'model') showScreen(3);
   }, 5000);
 }
 let autoAdvance = null;
@@ -528,7 +475,6 @@ window.__hzSetup = (d) => {
   if (d.phase === 'ready') {
     modelDone = true;
     downloading = false;
-    refreshBack();
     modelBar.style.width = '100%';
     modelLabel.textContent = 'ready';
     const cancel = document.getElementById('modelCancel');
@@ -536,12 +482,11 @@ window.__hzSetup = (d) => {
     // May well arrive after the flow has moved on — that is expected, and the
     // notification is what actually delivers the news. Only advance if the
     // owner is still sitting on this screen watching it.
-    setTimeout(() => { if (currentScreen === 'model') showScreen('data'); }, 1200);
+    setTimeout(() => { if (currentScreen === 'model') showScreen(3); }, 1200);
     return;
   }
   if (d.phase === 'failed') {
     downloading = false;
-    refreshBack();
     showModelPhase('choose');
     if (d.error !== 'cancelled') {
       modelErr.hidden = false;
@@ -560,7 +505,7 @@ document.getElementById('modelCancel').addEventListener('click', () => {
   // that clears the screen before the work has actually stopped is the lie this
   // whole change is about.
 });
-document.getElementById('modelSkip').addEventListener('click', () => showScreen('data'));
+document.getElementById('modelSkip').addEventListener('click', () => showScreen(3));
 
 // ---- the data screen -------------------------------------------------------
 //
@@ -642,14 +587,6 @@ permsEl.addEventListener('click', async (e) => {
 
 let lastPerms = null;
 
-// Back to the download — only offered while there IS one, because a back
-// button to a finished screen is a dead end wearing an arrow.
-const dataBack = document.getElementById('dataBack');
-dataBack.addEventListener('click', () => showScreen('model'));
-function refreshBack() {
-  dataBack.hidden = !(downloading && !modelDone);
-}
-
 // LIVE PERMISSION POLLING, which is what makes this feel like it is watching.
 //
 // Full Disk Access has no query API and no callback, so the only way to know is
@@ -728,13 +665,13 @@ document.getElementById('dataCheck').addEventListener('click', async () => {
     dataStatus.textContent = mem && mem.pending > 0
       ? `found ${rows.toLocaleString()} things — now reading them`
       : `found ${rows.toLocaleString()} things so far`;
-    setTimeout(() => { if (currentScreen === 'data') showScreen(2); }, 1400);
+    setTimeout(() => { if (currentScreen === 'data') showScreen('model'); }, 1400);
   } else {
     dataStatus.textContent = "nothing yet — that's fine, i'll keep looking as you go.";
-    setTimeout(() => { if (currentScreen === 'data') showScreen(2); }, 2600);
+    setTimeout(() => { if (currentScreen === 'data') showScreen('model'); }, 2600);
   }
 });
-document.getElementById('dataSkip').addEventListener('click', () => showScreen(2));
+document.getElementById('dataSkip').addEventListener('click', () => showScreen('model'));
 
 // Loaded once, when the flow reaches the setup screens.
 async function loadSetup() {
@@ -757,4 +694,5 @@ async function loadSetup() {
   selectedTier = setupState.model || null;
   renderChoices();
   showModelPhase('choose');
+}
 }

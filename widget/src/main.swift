@@ -262,7 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // First launch shows the welcome flow. Only completing it sets the flag,
     // so a dismissed flow comes back — and the settings button reopens it on
     // demand regardless.
-    if !Bridge.onboarded {
+    if Bridge.needsOnboarding {
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
         self?.openOnboarding(resume: true)
       }
@@ -849,6 +849,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // happens to be topmost under the onboarding panel at that point, which is
   // the widget only if no other window is in the way.
   private var widgetLevelBeforeSpotlight: NSWindow.Level?
+  private var widgetFrameBeforeSpotlight: NSRect?
   func spotlightWidget(_ on: Bool) {
     if on {
       // BE VISIBLE FIRST. A frame restored from a different-sized display — a
@@ -869,7 +870,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
           widgetWindow.setFrame(f, display: true)
         }
       }
-      if widgetLevelBeforeSpotlight == nil { widgetLevelBeforeSpotlight = widgetWindow.level }
+      if widgetLevelBeforeSpotlight == nil {
+        widgetLevelBeforeSpotlight = widgetWindow.level
+        // The cloud slot only gives the idle dream bubble room to rise. It is
+        // empty in this scene but still catches clicks from the onboarding
+        // page below, so remove it for the spotlight's duration.
+        let visibleFrame = visibleWidgetFrame
+        widgetFrameBeforeSpotlight = widgetWindow.frame
+        widgetWindow.setFrame(visibleFrame, display: true)
+        // The native trim above removes the cloud slot. Tell the page to
+        // remove its matching invisible spacer too, or it will keep laying
+        // the bar out 76pt too low and clip half of the real widget.
+        eval(widgetWeb, "document.body.classList.add('spotlight-widget')")
+      }
       // One above onboarding's .floating, so it clears the scrim and nothing
       // else does.
       widgetWindow.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
@@ -877,6 +890,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     } else if let previous = widgetLevelBeforeSpotlight {
       widgetWindow.level = previous
       widgetLevelBeforeSpotlight = nil
+      if let frame = widgetFrameBeforeSpotlight {
+        widgetWindow.setFrame(frame, display: true)
+      }
+      widgetFrameBeforeSpotlight = nil
+      eval(widgetWeb, "document.body.classList.remove('spotlight-widget')")
     }
   }
 
@@ -1074,6 +1092,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
 
   private var visibleWidgetFrame: NSRect {
     var f = widgetWindow.frame
+    // The final onboarding scene trims the window to this visible frame. Do
+    // not subtract the cloud slot a second time while that trim is active.
+    if widgetFrameBeforeSpotlight != nil { return f }
     let slot = Self.cloudSlot * CGFloat(Bridge.scale)
     if f.height > slot { f.size.height -= slot } // AppKit's origin is bottom-left: this lowers maxY
     return f

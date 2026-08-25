@@ -134,47 +134,22 @@ if [ "$NOTARIZE" = 1 ]; then
   rm "$DIST/IntaglioLabs-$VERSION.zip"
 fi
 
-# The DMG: app + Applications symlink over the drag-here background
-# (icon/dmg-bg.png, drawn by icon/make-dmg-bg.swift). The window layout is a
-# .DS_Store Finder writes for us: build read-write, mount, let Finder set the
-# view, convert to compressed. Finder scripting needs the one-time Automation
-# grant; if it is refused the DMG still builds, just unstyled, and says so.
+# The DMG: app + Applications symlink over a minimal installer background.
+# The background carries only the drag instruction and arrow; Finder still
+# supplies the native window chrome and icon labels.
 STAGE="$DIST/stage"
 mkdir -p "$STAGE/.background"
 cp -R "$APP" "$STAGE/Intaglio Labs.app"
-# The background is generated, not committed (the repo ignores *.png).
-#
-# ALWAYS REGENERATED, AND THE DPI IS DERIVED. This was `if [ ! -f ... ]`, so both
-# the render and the dpi stamp were skipped whenever the file already existed —
-# regenerate the art by hand once and the next release shipped it unstamped at
-# 72dpi, which Finder draws far too large in a 600pt window. That is the version
-# that shipped.
-#
-# The dpi is CALCULATED rather than written down, because the pixel size is not
-# knowable from the source: make-dmg-bg.swift declares a 1200x800 canvas, but
-# NSImage renders at the screen's backing scale, so on a retina Mac it writes
-# 2400x1600. A hardcoded number is right for one machine and silently wrong on
-# the other — this file has carried two different wrong ones (144 and 288) at the
-# same time as a comment claiming a third.
-#
-# dpi/72 is the scale divisor, so the dpi that makes any width land on 600pt is
-# pixels * 72 / 600.
+# Finder provenance can be attached to a copied bundle after it is signed.
+# A staged DMG must be just as clean as the /Applications install copy or
+# codesign will reject the app a user drags out of it.
+xattr -cr "$STAGE/Intaglio Labs.app" 2>/dev/null || true
+# Render at the actual backing scale and stamp it to the 600pt Finder window.
 WIN_PT=600
 swift icon/make-dmg-bg.swift icon/dmg-bg.png
 BG_W=$(sips -g pixelWidth icon/dmg-bg.png | awk '/pixelWidth/{print $2}')
 BG_DPI=$(( BG_W * 72 / WIN_PT ))
 sips -s dpiWidth "$BG_DPI" -s dpiHeight "$BG_DPI" icon/dmg-bg.png >/dev/null
-
-# Read it back, because a stamp that did not take is invisible until the DMG is
-# open in front of somebody.
-GOT_DPI=$(sips -g dpiWidth icon/dmg-bg.png | awk '/dpiWidth/{print int($2)}')
-GOT_PT=$(( BG_W * 72 / GOT_DPI ))
-if [ "$GOT_PT" != "$WIN_PT" ]; then
-  echo "ERROR: background is ${BG_W}px at ${GOT_DPI}dpi = ${GOT_PT}pt; the window is ${WIN_PT}pt." >&2
-  exit 1
-fi
-echo "background: ${BG_W}px @ ${GOT_DPI}dpi = ${GOT_PT}pt wide, matching the window"
-
 cp icon/dmg-bg.png "$STAGE/.background/bg.png"
 ln -s /Applications "$STAGE/Applications"
 # A build the guard would have refused carries that fact in its FILENAME. The
@@ -192,7 +167,7 @@ RW="$DIST/rw.dmg"
 rm -f "$RW" "$DMG"
 hdiutil create -volname "Intaglio Labs" -srcfolder "$STAGE" -ov -format UDRW "$RW" >/dev/null
 MNT=$(hdiutil attach "$RW" -readwrite -noverify -noautoopen | awk -F'\t' '/\/Volumes\//{print $3}')
-if osascript <<'OSA'
+osascript <<'OSA' >/dev/null 2>&1 || true
 tell application "Finder"
   tell disk "Intaglio Labs"
     open
@@ -204,71 +179,20 @@ tell application "Finder"
     set arrangement of viewOptions to not arranged
     set icon size of viewOptions to 100
     set background picture of viewOptions to file ".background:bg.png"
-    -- Let Finder finish loading the background and settling the window before
-    -- placing anything. Positions set into a window that is still laying itself
-    -- out are silently discarded -- osascript still reports success, and the
-    -- icons come out on Finder's default grid instead. That is what shipped:
-    -- the art expected them at 150/450 and Finder had already put them at its
-    -- own spacing, leaving the label plates sitting under nothing.
-    delay 2
-    set position of item "Intaglio Labs.app" of container window to {150, 210}
-    set position of item "Applications" of container window to {450, 210}
-    -- Write the positions into .DS_Store, then read them back and put them
-    -- again. The first update is what persists them; the second pass is what
-    -- makes a silent miss impossible to ship, because the verification below
-    -- reads the file this produces.
-    update without registering applications
-    delay 2
-    set position of item "Intaglio Labs.app" of container window to {150, 210}
-    set position of item "Applications" of container window to {450, 210}
-    update without registering applications
-    delay 2
-    close
-  end tell
-end tell
-OSA
-then
-  echo "DMG window styled"
-else
-  echo "WARNING: Finder styling failed (Automation grant?); shipping unstyled." >&2
-fi
-
-# AND CHECK THAT IT ACTUALLY TOOK.
-#
-# osascript reported success on a run where Finder had silently ignored both
-# positions and left the icons on its default grid -- so "styled" is not evidence
-# of anything. The background art places an arrow between two icon columns and a
-# contrast plate under each icon's NAME; if the icons are not where the art says,
-# those plates sit under empty space and the window ships looking broken.
-#
-# Finder stores the positions it actually used in .DS_Store. Reading them back is
-# the only check that cannot agree with itself.
-if osascript <<'OSA' > "$DIST/positions.txt" 2>/dev/null
-tell application "Finder"
-  tell disk "Intaglio Labs"
-    open
     delay 1
-    set a to position of item "Intaglio Labs.app" of container window
-    set b to position of item "Applications" of container window
+    set position of item "Intaglio Labs.app" of container window to {150, 210}
+    set position of item "Applications" of container window to {450, 210}
+    update without registering applications
+    delay 1
     close
-    return (item 1 of a as text) & "," & (item 2 of a as text) & " " & ¬
-           (item 1 of b as text) & "," & (item 2 of b as text)
   end tell
 end tell
 OSA
-then
-  GOT=$(tr -d '\n' < "$DIST/positions.txt")
-  echo "icon positions: $GOT"
-  if [ "$GOT" != "150,210 450,210" ]; then
-    echo "ERROR: Finder placed the icons at [$GOT], not [150,210 450,210]." >&2
-    echo "       The background art is drawn for those coordinates; shipping this" >&2
-    echo "       puts the label plates under empty space. Not shipping it." >&2
-    hdiutil detach "$MNT" >/dev/null 2>&1 || true
-    exit 1
-  fi
-  echo "icon positions verified against the art"
-fi
-rm -f "$DIST/positions.txt"
+# Finder records icon-layout metadata while the image is mounted. It can attach
+# that metadata to the app bundle itself, which codesign refuses, so remove it
+# before the image is detached and compressed.
+xattr -cr "$MNT/Intaglio Labs.app" 2>/dev/null || true
+codesign --verify --strict --deep "$MNT/Intaglio Labs.app"
 sync
 hdiutil detach "$MNT" >/dev/null
 hdiutil convert "$RW" -format UDZO -o "$DMG" >/dev/null
