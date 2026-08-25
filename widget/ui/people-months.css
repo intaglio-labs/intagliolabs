@@ -135,6 +135,83 @@ body.plist .pm-sky .pm-loading {
   padding: 0;
 }
 
+/* ---- the year's highlight cards (2026-08-25) ----
+   One card per claim the year actually earns. The server decides which exist
+   (people/highlights.mjs); this file only knows how to draw one. They sit
+   between the tabs and the list, scrolling sideways rather than wrapping,
+   because a year that earns five should not push the list off the panel. */
+body.plist .pm-cards {
+  display: flex;
+  gap: 8px;
+  padding: 12px 14px 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex: 0 0 auto;
+}
+body.plist .pm-cards::-webkit-scrollbar { display: none; }
+body.plist .pm-card {
+  flex: 0 0 auto;
+  width: 168px;
+  box-sizing: border-box;
+  padding: 12px;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  background: rgba(234, 234, 234, 0.04);
+  border: 1px solid rgba(234, 234, 234, 0.10);
+}
+/* Person of the year is always first and always the loudest — it is the only
+   card that is a plain maximum, so it is the one that is nearly always there
+   and the one the eye should find first. */
+body.plist .pm-card.lead {
+  background: linear-gradient(160deg, rgba(242, 232, 212, 0.14) 0%,
+              rgba(197, 165, 109, 0.10) 55%, rgba(51, 255, 102, 0.08) 100%);
+  border-color: rgba(197, 165, 109, 0.30);
+}
+body.plist .pm-card-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 9px;
+  letter-spacing: 0.13em;
+  color: var(--muted);
+  white-space: nowrap;
+  text-transform: uppercase;
+}
+body.plist .pm-card-eyebrow svg { flex: 0 0 auto; width: 13px; height: 13px; display: block; }
+body.plist .pm-card-who { display: flex; align-items: center; gap: 7px; min-width: 0; }
+body.plist .pm-card-face {
+  flex: 0 0 auto;
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 60%, #a8854c 100%);
+  box-shadow: inset -2px -2px 5px rgba(0, 0, 0, 0.18),
+              inset 2px 2px 4px rgba(255, 255, 255, 0.35);
+  color: #141412;
+  font-size: 9px;
+  font-weight: 600;
+}
+body.plist .pm-card.lead .pm-card-face {
+  box-shadow: inset -2px -2px 5px rgba(0, 0, 0, 0.18),
+              inset 2px 2px 4px rgba(255, 255, 255, 0.35),
+              0 0 14px rgba(51, 255, 102, 0.35);
+}
+body.plist .pm-card-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+body.plist .pm-card-line {
+  font-size: 10.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 /* ---- the constellation (the globe tab, 2026-08-25) ----
    The same year's people, grouped by TOPIC instead of listed by engagement:
    one dashed bubble per topic, the people in it as initial discs, sized by

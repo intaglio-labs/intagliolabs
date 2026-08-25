@@ -28,6 +28,7 @@
   const tabsEl = document.getElementById('tabs');
   const syncEl = document.getElementById('sync');
   const skyEl = document.getElementById('sky');
+  const cardsEl = document.getElementById('cards');
   if (!listEl) return;
 
   // 'list' = the year by person, 'sky' = the same year by topic. A VIEW, not a
@@ -114,6 +115,55 @@
       : data.people;
   }
 
+  // One glyph per card kind. Keyed by the server's `kind`, with a fallback, so
+  // a server that grows a sixth card renders as a nameless-but-present card
+  // rather than throwing.
+  const CARD_ICON = {
+    'person-of-the-year':
+      '<path d="M8 4h8v5a4 4 0 0 1-8 0V4Z"></path><path d="M8 5H5v2a3 3 0 0 0 3 3"></path>' +
+      '<path d="M16 5h3v2a3 3 0 0 1-3 3"></path><path d="M12 13v4"></path><path d="M9 20h6"></path>',
+    'back-from-your-past':
+      '<circle cx="12" cy="12" r="8"></circle><path d="M12 7v5l3 2"></path>',
+    'rising-star':
+      '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z"></path>',
+    drifting:
+      '<path d="M4 8h10"></path><path d="M4 13h7"></path><path d="M4 18h4"></path>' +
+      '<path d="M17 13v6"></path><path d="M14.5 16.5 17 19l2.5-2.5"></path>',
+    streak:
+      '<path d="M12 3s5 4.2 5 9a5 5 0 0 1-10 0c0-4.8 5-9 5-9Z"></path>' +
+      '<path d="M12 20a2.6 2.6 0 0 1-2.6-2.6c0-1.6 2.6-3.9 2.6-3.9s2.6 2.3 2.6 3.9A2.6 2.6 0 0 1 12 20Z"></path>',
+  };
+  const FALLBACK_ICON = '<circle cx="12" cy="12" r="7"></circle>';
+
+  function cardHtml(h, i) {
+    const icon = CARD_ICON[h.kind] || FALLBACK_ICON;
+    return (
+      `<div class="pm-card${i === 0 ? ' lead' : ''}">` +
+        '<div class="pm-card-eyebrow">' +
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+          `stroke-linecap="round" stroke-linejoin="round">${icon}</svg>` +
+          `<span>${esc(h.label)}</span>` +
+        '</div>' +
+        '<div class="pm-card-who">' +
+          `<span class="pm-card-face">${esc(initials(h.name))}</span>` +
+          `<span class="pm-card-name">${esc(h.name)}</span>` +
+        '</div>' +
+        `<div class="pm-card-line">${esc(h.line)}</div>` +
+      '</div>'
+    );
+  }
+
+  // Cards describe the YEAR, not the filtered set, so they step aside while a
+  // search is running — a card about someone the search excluded reads as a
+  // bug. An older backend sends no highlights at all; then there is simply no
+  // row, which is the honest result rather than an empty frame.
+  function renderCards(data) {
+    const hs = Array.isArray(data.highlights) ? data.highlights : [];
+    const show = hs.length > 0 && !searchEl.value.trim() && view === 'list';
+    cardsEl.hidden = !show;
+    cardsEl.innerHTML = show ? hs.map(cardHtml).join('') : '';
+  }
+
   function renderList(data, rows) {
     listEl.innerHTML = rows.map(rowHtml).join('') || `<div class="pl-empty">no one matches in ${year}</div>`;
     if (!searchEl.value.trim() && data.total > data.people.length) {
@@ -138,6 +188,7 @@
     if (!data) return;
     const rows = visible(data);
     surface();
+    renderCards(data);
     if (view === 'sky') renderSky(data, rows);
     else renderList(data, rows);
     searchEl.placeholder = `search ${year} (${rows.length} shown)…`;
@@ -213,16 +264,30 @@
     };
   }
 
-  // Group by topic. ONLY `tax` chips — the fixed vocabulary from the server's
-  // TOPIC_SIGNALS. The other chips are terms distinctive to one pair
-  // ("tokyo station"), which by construction cannot be shared, so clustering
-  // on them would produce a bubble of one wearing a stranger's word.
+  // Does this payload carry the server's taxonomy mark at all? The app bundle
+  // and the backend the launchd agents run are updated by DIFFERENT routes —
+  // widget/build.sh installs the bundle, ops/promote.sh installs the backend —
+  // so a newer page talking to an older server is a normal state here, not a
+  // broken one. Detected rather than assumed, because the first cut assumed it
+  // and rendered an empty sky that read as "you have no topics" when it meant
+  // "this server never told me which ones were comparable".
+  function topicsAreMarked(people) {
+    return people.some((p) => (p.topics || []).some((t) => t && typeof t.tax === 'boolean'));
+  }
+
+  // Group by topic. Prefer the server's `tax` mark: the other chips are terms
+  // distinctive to a single pair ("tokyo station"), which by construction
+  // cannot be shared, so clustering on them yields a bubble of one wearing a
+  // stranger's word. Without the mark, fall back to "a label at least
+  // MIN_CLUSTER people share" — the same line drawn approximately, since a
+  // term distinctive to one pair cannot clear that bar either.
   // A person joins every topic they carry: people are not one thing.
-  function clustersFrom(people) {
+  function clustersFrom(people, marked) {
     const by = new Map();
     for (const p of people) {
       for (const t of p.topics || []) {
-        if (!t || !t.tax) continue;
+        if (!t || !t.label) continue;
+        if (marked && !t.tax) continue;
         let c = by.get(t.label);
         if (!c) by.set(t.label, (c = { label: t.label, members: [] }));
         c.members.push(p);
@@ -300,7 +365,8 @@
 
   function renderSky(data, people) {
     skyEl.replaceChildren();
-    const all = clustersFrom(people);
+    const marked = topicsAreMarked(people);
+    const all = clustersFrom(people, marked);
     const clusters = all.slice(0, MAX_CLUSTERS);
     if (!clusters.length) {
       const m = document.createElement('div');
@@ -353,10 +419,17 @@
     if (all.length > clusters.length) {
       bits.push(`${clusters.length} of ${all.length} topics`);
     }
-    if (bits.length) {
+    // The year belongs with the counts, and the skew clause after them — put
+    // in `bits` it landed as "...topics inferred (older local server) in 2026".
+    const parts = [];
+    if (bits.length) parts.push(`showing ${bits.join(' · ')} in ${year}`);
+    // Say when the grouping is the approximation rather than the server's own
+    // labelling, so a slightly-off bubble is explainable instead of puzzling.
+    if (!marked) parts.push('topics inferred (this local server predates the topic labels)');
+    if (parts.length) {
       const note = document.createElement('div');
       note.className = 'pm-sky-note';
-      note.textContent = `showing ${bits.join(' · ')} in ${year}`;
+      note.textContent = parts.join(' — ');
       skyEl.appendChild(note);
     }
   }
@@ -374,6 +447,10 @@
     // Into whichever surface is actually up. Writing it unconditionally to the
     // list meant a tab click from the constellation looked like nothing had
     // happened — the old year's bubbles just sat there until the fetch landed.
+    // The cards belong to the year being replaced, so they go with it rather
+    // than sitting over a loading list making last year's claims.
+    cardsEl.hidden = true;
+    cardsEl.innerHTML = '';
     surface().innerHTML = `<div class="pm-loading">loading ${year}…</div>`;
     const res = await hzPost('peopleYear', { year });
     if (my !== reqId) return; // superseded by a newer tab click
