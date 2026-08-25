@@ -51,6 +51,22 @@ mkdir -p "$BIN_DIR" "$LIB_DIR" "$HAZLIE/cache" "$HAZLIE/connectors" "$SECRET_DIR
 chmod 700 "$HAZLIE" "$BIN_DIR" "$LIB_DIR" "$HAZLIE/cache" "$HAZLIE/connectors" "$SECRET_DIR" "$LOG_DIR"
 echo "    0700 asserted on ~/.hazlie and children"
 
+# Every connector's loadConfig() (connectors/daemon.mjs) refuses to run at all
+# without this file, and every top-level key in it is optional — so a bare "{}"
+# is a fully valid config. Without this step a fresh install could complete
+# every other part of setup and still have zero working connectors, with each
+# one failing identically ("connectors config file is missing") for a reason
+# none of them state (ops/CONNECTORS.md, "Configuration (config.json)").
+CONFIG_FILE="$HAZLIE/connectors/config.json"
+if [[ -f "$CONFIG_FILE" ]]; then
+  chmod 600 "$CONFIG_FILE"
+  echo "    config.json present (mode 0600 reasserted)"
+else
+  printf '{}\n' > "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE"
+  echo "    config.json created (empty; see ops/CONNECTORS.md, \"Configuration (config.json)\" to customize)"
+fi
+
 # ── (b) stable node binary ────────────────────────────────────────────────────
 # TCC grants Full Disk Access to one exact file. /opt/homebrew/bin/node is a
 # symlink into a Cellar directory that brew upgrade deletes, so the grant must

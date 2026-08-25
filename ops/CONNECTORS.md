@@ -53,6 +53,36 @@ there is nothing inbound to check.
 > each claiming to supersede the other is exactly the failure that produced
 > them.
 
+## Configuration (config.json)
+
+`~/.hazlie/connectors/config.json` (0600, in the 0700 `~/.hazlie/connectors`
+directory) is required — `loadConfig()` (`connectors/daemon.mjs`) refuses to
+run any connector without it, `run.mjs` included. `ops/setup-connectors.sh`
+creates it as `{}` if missing; every top-level key below is optional, so `{}`
+is a fully valid config and every connector runs with its defaults.
+
+| Key | Shape | Notes |
+|---|---|---|
+| `selfName` | string | Non-empty if present. |
+| `ownerEmails` | — | The owner's own addresses beyond `mail.accounts`, read by the people graph, not the connectors themselves. |
+| `hermesUrl` | string | HTTP loopback origin, e.g. `"http://127.0.0.1:51789"` — for a machine where 51789 is taken. Env (`HAZLIE_HERMES_URL`) wins under launchd; this is what a hand-run `node run.mjs <source>` reads instead. |
+| `intervals` | `{ <source>: seconds }` | 60–86400; per-source poll interval override. |
+| `mail` | `{ host, port, user, folders, backfillDays, maxBodyBytes, accounts: [...] }` | `accounts[]` takes the same keys (minus `accounts`) for more than one mailbox. The Gmail app password itself is a secret (`gmail-app-password.txt`), not part of this file. |
+| `imessage` | `{ backfillDays }` | |
+| `calendar` | `{ backend: "local" \| "google" }` | Never both — see `sources/calendar.mjs` `run()`. |
+| `granola` | `{ includeTranscripts }` | |
+| `oura` | `{ backfillDays }` | |
+| `photos` | `{ backfillDays }` | |
+| `notion` | `{}` | No keys yet — reads only its secret file. |
+| `files` | `{ roots, materializeDataless }` | `materializeDataless: true` opts into opening online-only cloud files; see "files — the dataless rule" below for the cost. |
+| `linkedin` | `{}` | No keys yet — an unknown key here is a caller bug, not a no-op. |
+| `retention` | `{ <source>: days, maintainHour: "HH:MM" }` | 24-hour clock. |
+| `role` | — | Accepted, ignored (dead since the two-machine split was removed). |
+
+Every level is closed: an unrecognized key throws rather than being silently
+ignored, so a typo (`interval` for `intervals`) fails loudly at startup
+instead of quietly running with defaults.
+
 ## Source registry
 
 One namespace per source; the full `entity_id` grammar and upsert semantics

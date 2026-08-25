@@ -47,7 +47,11 @@ HOST_MEMORY_BYTES="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
 MODEL_TIER_REQUEST="${HAZLIE_MODEL_TIER:-auto}"
 case "$MODEL_TIER_REQUEST" in
   auto)
-    MODEL_TIER="8B hybrid-thinking (default)"
+    if (( HOST_MEMORY_BYTES > 0 && HOST_MEMORY_BYTES <= 12884901888 )); then
+      MODEL_TIER="4B 2507 instruct (default for host RAM)"
+    else
+      MODEL_TIER="8B hybrid-thinking (default)"
+    fi
     ;;
   4b) MODEL_TIER="4B 2507 instruct (explicit override)" ;;
   8b) MODEL_TIER="8B hybrid-thinking (explicit override)" ;;

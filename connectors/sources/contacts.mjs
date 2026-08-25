@@ -125,6 +125,10 @@ export function entriesFromContacts(contacts) {
   return entries;
 }
 
+function statusError(status, message) {
+  return Object.assign(new Error(message), { status });
+}
+
 export function createContactsSource({ home } = {}) {
   return {
     name: 'contacts',
@@ -199,6 +203,7 @@ export function createContactsSource({ home } = {}) {
 
       const byIdentifier = new Map();
       let storesRead = 0;
+      const attempts = [];
       const cacheDir = join(ctx.cacheDir, 'contacts');
       for (const src of stores) {
         let snapshotPath = null;
@@ -212,6 +217,7 @@ export function createContactsSource({ home } = {}) {
           // and are fresher than the legacy top-level store.
           for (const e of entries) byIdentifier.set(`${e.kind}:${e.identifier}`, e);
         } catch (error) {
+          attempts.push(`${src} (${error?.message ?? error})`);
           ctx.log.info('contacts_store_skipped', { connector: 'contacts', code: error?.code ?? '' });
         } finally {
           try {
@@ -219,6 +225,22 @@ export function createContactsSource({ home } = {}) {
           } catch {}
           if (snapshotPath) rmSync(snapshotPath, { force: true });
         }
+      }
+
+      // Every candidate passed the stat filter above (it exists) but not one
+      // could actually be opened. Unlike a single bad store among several —
+      // a genuine schema surprise, degraded per readStore()'s contract — this
+      // is the FDA signature: every store denied is calendar.mjs's identical
+      // all-candidates-failed case, and must fail loudly the same way rather
+      // than read as a quiet "0 contacts".
+      if (stores.length > 0 && storesRead === 0) {
+        throw statusError(
+          403,
+          `contacts store is not readable at any candidate path: ${attempts.join('; ')}. ` +
+            'If the store exists, this is Full Disk Access attribution: the read only works when ' +
+            'launchd spawns the granted binary ~/.hazlie/bin/node directly — see the FDA runbook ' +
+            'in ops/CONNECTORS.md.'
+        );
       }
 
       const entries = [...byIdentifier.values()];
