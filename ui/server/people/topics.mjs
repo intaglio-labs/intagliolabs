@@ -102,7 +102,7 @@ const STOPWORDS = new Set(
 
 // One person-year of tallies.
 function emptyDoc() {
-  return { taxonomy: {}, terms: new Map(), pairs: new Map() };
+  return { taxonomy: {}, terms: new Map(), pairs: new Map(), countedIn: new Set() };
 }
 
 // Strip the shapes that must never become a chip before tokenizing: URLs and
@@ -165,10 +165,28 @@ function rowPersonId(row, meta) {
 // grain: 'year' ('key|2021', the year view) or 'month' ('key|2021-03', for a
 // months-of-one-year view where a year would blur the story).
 export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucketBy = 'year' } = {}) {
+  // Cheap and honest: ask the schema rather than catching a query failure,
+  // which would also swallow a real error in the join.
+  const hasEpisodes =
+    contextDb
+      .prepare("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name='episode_member'")
+      .get().n === 1;
   const rows = contextDb
     .prepare(
-      "SELECT source, ts, text, meta FROM context " +
-        "WHERE source IN ('imessage','whatsapp','mail','linkedin') AND text IS NOT NULL"
+      hasEpisodes
+        ? // The episode id rides along so a topic is counted once per
+          // CONVERSATION. LEFT JOIN, because mail and linkedin have no thread to
+          // cut and a row the index has not reached yet must still be counted.
+          'SELECT c.source, c.ts, c.text, c.meta, m.episode_id ' +
+            'FROM context c LEFT JOIN episode_member m ON m.context_id = c.id ' +
+            "WHERE c.source IN ('imessage','whatsapp','mail','linkedin') AND c.text IS NOT NULL"
+        : // NO INDEX, NO DEPENDENCY. The episode table is derived and rebuilt on
+          // a timer, so it can legitimately be absent -- a fresh install before
+          // the first build, or any caller holding a plain context database.
+          // Chips are worth having either way, so this falls back to counting
+          // per message: the old weighting, which is worse but not wrong.
+          "SELECT source, ts, text, meta, NULL AS episode_id FROM context " +
+            "WHERE source IN ('imessage','whatsapp','mail','linkedin') AND text IS NOT NULL"
     )
     .all();
   const docs = new Map();
@@ -197,8 +215,29 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
       doc = emptyDoc();
       docs.set(docKey, doc);
     }
+    // ONE HIT PER CONVERSATION, not per message.
+    //
+    // Counting messages let a single thread decide the chips: the largest
+    // episode on this corpus is 243 messages, so an hour spent on one subject
+    // counted 243 times against a whole year of everything else. Measured
+    // across the corpus the two weightings rank differently -- "hiring" leaves
+    // the top eight and "fundraising" enters, because hiring was concentrated
+    // in few conversations while fundraising was spread across many. Spread is
+    // what a topic chip is trying to say.
+    //
+    // A row with no episode -- mail and linkedin have no thread to cut, and the
+    // index may not have reached a new row yet -- keys on itself, so it counts
+    // once as itself instead of merging with unrelated rows under a null key.
+    const convo =
+      row.episode_id === null || row.episode_id === undefined
+        ? `row:${row.ts}`
+        : `ep:${row.episode_id}`;
     for (const name of topicNames) {
-      if (TOPIC_SIGNALS[name].test(row.text)) doc.taxonomy[name] = (doc.taxonomy[name] ?? 0) + 1;
+      if (!TOPIC_SIGNALS[name].test(row.text)) continue;
+      const seen = `${convo}|${name}`;
+      if (doc.countedIn.has(seen)) continue;
+      doc.countedIn.add(seen);
+      doc.taxonomy[name] = (doc.taxonomy[name] ?? 0) + 1;
     }
     for (const clause of clauseTokens(row.text)) {
       for (let i = 0; i < clause.length; i++) {

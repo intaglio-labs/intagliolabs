@@ -73,12 +73,41 @@ final class Distiller {
   private func runOnce() {
     guard !isRunning, !stopping else { schedule(after: busyInterval); return }
     let node = home.appendingPathComponent(".hazlie/bin/node")
-    let script = backend.appendingPathComponent("ui/scripts/distill-once.mjs")
+    // TWO STEPS, IN ORDER. The episode index is derived from context, so it has
+    // to be rebuilt before anything reads it -- otherwise a conversation that
+    // arrived since the last pass is invisible to the distiller, and one that
+    // grew is distilled at a stale shape.
+    //
+    // Episodes rather than rows, because the row was the wrong unit and this is
+    // where that decision takes effect. A row reached the model alone -- "ok"
+    // with no question above it -- and 99.4% of every call was the instruction
+    // sheet. Measured on this corpus: 3,759 owner rows collapse into 1,030
+    // conversations, so the same evidence costs a third of the calls and each
+    // one carries the exchange it came from.
+    let builder = backend.appendingPathComponent("ui/scripts/build-episodes.mjs")
+    let script = backend.appendingPathComponent("ui/scripts/distill-episodes.mjs")
     let db = home.appendingPathComponent(".hazlie/context/context.db")
     guard fm.fileExists(atPath: node.path), fm.fileExists(atPath: script.path),
-          fm.fileExists(atPath: db.path) else {
+          fm.fileExists(atPath: builder.path), fm.fileExists(atPath: db.path) else {
       schedule(after: idleInterval)
       return
+    }
+
+    // The index first, synchronously and cheaply -- 12,782 rows rebuild in about
+    // 110ms, so this is not worth a callback chain. A failure here is not fatal:
+    // the distiller simply reads the previous index, which is stale rather than
+    // wrong, and the next pass rebuilds it.
+    let build = Process()
+    build.executableURL = node
+    build.arguments = [builder.path]
+    build.currentDirectoryURL = backend.appendingPathComponent("ui")
+    build.standardOutput = FileHandle.nullDevice
+    build.standardError = FileHandle.nullDevice
+    do {
+      try build.run()
+      build.waitUntilExit()
+    } catch {
+      NSLog("Intaglio Labs: episode index rebuild failed: \(error.localizedDescription)")
     }
 
     let p = Process()
@@ -86,8 +115,7 @@ final class Distiller {
     // --backfill with a wide window and a row cap: the window says "all of
     // history is in scope", the cap says "not all of it at once", and the
     // watermark makes the next pass continue instead of repeat.
-    p.arguments = [script.path, "--backfill", "--from-days", "3650",
-                   "--limit", String(batch)]
+    p.arguments = [script.path, "--limit", String(batch)]
     // The script resolves prompts/ relative to the backend root, so it has to run
     // from ui/ exactly as its own usage block says.
     p.currentDirectoryURL = backend.appendingPathComponent("ui")
@@ -112,14 +140,14 @@ final class Distiller {
       // Anything else means there is more to do, so come back promptly.
       var rowsIn = -1
       if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-         let n = json["rows_in"] as? Int {
+         let n = json["episodes_in"] as? Int {
         rowsIn = n
       }
       let drained = (rowsIn == 0)
       if proc.terminationStatus != 0 {
         NSLog("Intaglio Labs: distill pass failed (status \(proc.terminationStatus))")
       } else if rowsIn > 0 {
-        NSLog("Intaglio Labs: distilled \(rowsIn) rows")
+        NSLog("Intaglio Labs: distilled \(rowsIn) conversations")
       }
       DispatchQueue.main.async {
         self.schedule(after: drained ? self.idleInterval : self.busyInterval)
