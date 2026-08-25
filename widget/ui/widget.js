@@ -356,6 +356,7 @@ function syncBar() {
   winput.placeholder = open ? 'Message…' : '';
   winput.classList.toggle('open', open);
   syncChatGlyph();
+  reportBoundsSoon();
 }
 // The glyph's third face. Gated on there being something to SEND rather than
 // on the bar being open, so a collapsed pill holding a draft still offers the
@@ -373,6 +374,32 @@ winput.addEventListener('focus', () => { barMinimized = false; hideTease(); sync
 // lands. Until the bridge can order the chat front without focusing it,
 // the chat appears on send instead.
 winput.addEventListener('blur', syncBar);
+
+// Where the VISIBLE widget starts inside this mostly-transparent window, in
+// CSS px — native anchors the side panels (timeline, settings) against this
+// edge instead of the window's, which can be ~160px of empty glass away.
+// Re-measured whenever the bar opens/closes or the window resizes, debounced
+// past the CSS transitions so the number describes the settled layout.
+function reportBounds() {
+  const els = barOpen
+    ? [document.querySelector('.wbar'), document.querySelector('.gear-row')]
+    : [chatBtn, orbBtn, document.querySelector('.gear-row')];
+  let left = Infinity;
+  for (const el of els) {
+    if (!el) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width > 0) left = Math.min(left, r.left);
+  }
+  if (!Number.isFinite(left)) return;
+  hzPost('widgetBounds', { left: Math.max(0, left) }).catch(() => {});
+}
+let boundsTimer = null;
+function reportBoundsSoon() {
+  clearTimeout(boundsTimer);
+  boundsTimer = setTimeout(reportBounds, 260);
+}
+window.addEventListener('resize', reportBoundsSoon);
+reportBoundsSoon();
 // Every keystroke, not just Enter: the glyph has to flip to the arrow on the
 // first character and back on the last backspace. `input` rather than
 // `keydown` so a paste and a native delete count too.
@@ -416,12 +443,8 @@ gearBtn.addEventListener('click', () => {
   hzPost('openConnections');
 });
 
-// People: opens the who's-who / person-index feature in its own popup.
-document.getElementById('people').addEventListener('click', () => {
-  hzPost('openPeople');
-});
-document.getElementById('globe').addEventListener('click', () => {
-  hzPost('openSky');
+document.getElementById('months').addEventListener('click', () => {
+  hzPost('openMonths');
 });
 
 // The handoff out of onboarding: the flow ends pointing at the widget, and

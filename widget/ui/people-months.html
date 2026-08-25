@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'">
+<link rel="stylesheet" href="palette.css">
+<link rel="stylesheet" href="people-sky.css">
+<link rel="stylesheet" href="people-months.css">
+</head>
+<body class="plist">
+  <!-- The TIMELINE: one year of your people, month by month — each month
+       sorted by that month's engagement, each row carrying that MONTH's top-3
+       topic chips. Data from GET /people/months via the peopleMonths handler;
+       logic in people-months.js. Reuses the people-sky list styling (same
+       body.plist scope) so the two popups read as siblings. -->
+  <div class="plist-win">
+  <div class="pl-top">
+    <!-- Sync: the door into the unify-your-circles popup (people.html) — the
+         People HUD button moved here, next to the surface its merges feed. -->
+    <button class="pm-icon" id="sync" title="Unify your circles">
+      <svg viewBox="0 0 44 44" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M34 14a14 14 0 0 0-24-2"/>
+        <polyline points="10 6 10 13 17 13"/>
+        <path d="M10 30a14 14 0 0 0 24 2"/>
+        <polyline points="34 38 34 31 27 31"/>
+      </svg>
+    </button>
+    <!-- Filters: toggles the sort/company/channel/status row below. -->
+    <button class="pm-icon" id="filt" title="Filters">
+      <svg viewBox="0 0 44 44" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M7 12h30"/>
+        <path d="M13 22h18"/>
+        <path d="M19 32h6"/>
+      </svg>
+    </button>
+    <input class="pl-search" id="search" type="text" placeholder="loading your year…"
+           autocomplete="off" autocorrect="off" spellcheck="false">
+    <button class="close" id="close" title="Close">×</button>
+  </div>
+  <!-- The sky's filter set, hidden until the funnel above opens it. Sort is
+       WITHIN each month; the other three narrow who appears at all. -->
+  <div class="pl-controls pm-filters" id="filters" hidden>
+    <label class="pl-ctl">
+      <span>sort</span>
+      <select id="sort">
+        <option value="engagement">most engaged</option>
+        <option value="messages">most messages</option>
+        <option value="met">most in person</option>
+        <option value="name">name A–Z</option>
+      </select>
+    </label>
+    <label class="pl-ctl">
+      <span>company</span>
+      <select id="fcompany"><option value="">all</option></select>
+    </label>
+    <label class="pl-ctl">
+      <span>channel</span>
+      <select id="fchannel">
+        <option value="">all</option>
+        <option value="imessage">iMessage</option>
+        <option value="whatsapp">WhatsApp</option>
+        <option value="mail">mail</option>
+        <option value="calendar">calendar</option>
+        <option value="linkedin">LinkedIn</option>
+      </select>
+    </label>
+    <label class="pl-ctl">
+      <span>status</span>
+      <select id="fstatus">
+        <option value="">all</option>
+        <option value="active">active</option>
+        <option value="dormant">dormant</option>
+      </select>
+    </label>
+    <button class="pm-reset" id="freset" title="Reset filters">reset</button>
+  </div>
+  <!-- Year tabs, browser-style: every year with activity, oldest to newest,
+       the open year lifted and connected to the list below. -->
+  <div class="pm-tabs" id="tabs"></div>
+  <div class="pl-list" id="list"></div>
+  <div class="pl-foot" id="foot"></div>
+  </div>
+  <script src="bridge.js"></script>
+  <script src="people-months.js"></script>
+</body>
+</html>
