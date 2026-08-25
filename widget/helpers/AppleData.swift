@@ -68,6 +68,42 @@ private func emit(_ value: Any) -> Never {
 // afterwards anyway.
 private let chunk: TimeInterval = 365 * 24 * 60 * 60
 
+
+// WHO WAS THERE. An EKParticipant carries a display name and a mailto: URL, and
+// the email in that URL is the single best cross-platform join key this corpus
+// has: it matches the contacts spine's `email` identifiers directly, which is
+// how a calendar event and an iMessage thread become the same person.
+//
+// Measured on this machine before it was written: 1,905 events in a year hold
+// 10,362 attendee records, and 1,348 of those events have at least one attendee
+// with an email. The stored corpus carried NONE of it -- the row meta had five
+// keys and not one of them was a person.
+//
+// isCurrentUser is kept rather than filtered here: the Node side decides whether
+// "me" belongs in a row, and a helper that silently drops the owner would make
+// "who else was at this" impossible to distinguish from "nobody was".
+private func participant(_ p: EKParticipant?) -> [String: Any]? {
+  guard let p else { return nil }
+  var out: [String: Any] = ["isMe": p.isCurrentUser]
+  if let n = p.name, !n.isEmpty { out["name"] = n }
+  // mailto:someone@example.com -> someone@example.com. Anything else (a phone
+  // participant, an opaque directory URL) contributes no email and is kept for
+  // its name alone.
+  if p.url.scheme?.lowercased() == "mailto" {
+    let raw = p.url.absoluteString
+    let addr = String(raw.dropFirst("mailto:".count))
+    if !addr.isEmpty { out["email"] = addr }
+  }
+  switch p.participantStatus {
+  case .accepted: out["status"] = "accepted"
+  case .declined: out["status"] = "declined"
+  case .tentative: out["status"] = "tentative"
+  case .pending: out["status"] = "pending"
+  default: break
+  }
+  return out
+}
+
 private func dumpEvents(fromSeconds: Double, toSeconds: Double) -> Never {
   let store = EKEventStore()
   let sem = DispatchSemaphore(value: 0)
@@ -122,11 +158,15 @@ private func dumpEvents(fromSeconds: Double, toSeconds: Double) -> Never {
       // structured EKRecurrenceRule objects rather than the RFC 5545 string the
       // sqlite column holds. Re-serialising one would mean inventing a string
       // that no store ever contained, so this omits the field instead.
+      let people = (event.attendees ?? []).compactMap(participant)
+      if !people.isEmpty { row["attendees"] = people }
+      if let org = participant(event.organizer) { row["organizer"] = org }
       out.append(row)
     }
     start = stop
   }
-  FileHandle.standardError.write(Data("apple-data: events=\(out.count)\n".utf8))
+  let withPeople = out.filter { ($0["attendees"] as? [[String: Any]])?.isEmpty == false }.count
+  FileHandle.standardError.write(Data("apple-data: events=\(out.count) withAttendees=\(withPeople)\n".utf8))
   emit(out)
 }
 
