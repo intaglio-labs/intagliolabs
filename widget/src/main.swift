@@ -99,19 +99,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     w.isFloatingPanel = false
     w.hidesOnDeactivate = false
-    // THE OTHER HALF OF THE TWO-CLICK FIX, and it was only ever applied to the
-    // popups. present() stopped them TAKING key from the widget (orderFront
-    // rather than makeKeyAndOrderFront, plus this same flag in makePanel), which
-    // fixed going widget -> popup. Coming BACK still cost a click: type in a
-    // popup's field, or open one that legitimately takes key, and the widget is
-    // no longer key -- so the next click on it was spent making it key again
-    // instead of pressing what it hit.
+    // INERT FOR THIS WINDOW, and kept only because it is correct in principle.
     //
-    // Same answer, same reasoning as the popups: take key only when a control
-    // that actually needs typing is clicked. The widget's message bar keeps
-    // working, because AppKit asks the view whether it needs key rather than
-    // guessing -- exactly as people-sky's search field does inside a panel that
-    // has carried this flag all along.
+    // This was added believing it fixed the two-click switch. It does not, and
+    // saying so here is cheaper than someone measuring it again: the flag only
+    // withholds key when the CLICKED VIEW reports it does not need key, and
+    // WKWebView.needsPanelToBecomeKey is true (measured). Every click into the
+    // page therefore takes key regardless of this line. What actually delivers
+    // that click is ClickThroughWebView -- see Windows.swift.
+    //
+    // Left in because it costs nothing and is the right answer for any non-web
+    // view this window ever hosts.
     w.becomesKeyOnlyIfNeeded = true
     w.isOpaque = false
     w.backgroundColor = .clear
@@ -485,11 +483,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // panel was not enough on its own — something still had to stop TAKING key
     // from it.
     //
-    // becomesKeyOnlyIfNeeded (set at construction) is the AppKit answer: the
-    // panel takes key only when a control that needs typing is clicked. Every
-    // one of these surfaces is buttons except people-sky's search field, and
-    // that field still focuses on click because AppKit asks the view whether it
-    // needs key rather than guessing.
+    // orderFront still matters: it stops the popup TAKING key on open, so the
+    // widget keeps it and a popup that was opened but not yet touched does not
+    // steal typing.
+    //
+    // The becomesKeyOnlyIfNeeded set in makePanel was credited here with the
+    // rest of it, and that part was wrong. The flag defers to the clicked view's
+    // needsPanelToBecomeKey, and a webview always answers true, so every click
+    // into a popup takes key anyway. Which also means the first click into any
+    // popup is a first-mouse click on every open -- delivered now only because
+    // the page webviews accept it (ClickThroughWebView, Windows.swift).
     panel.orderFront(nil)
   }
 

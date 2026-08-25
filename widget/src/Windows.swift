@@ -28,21 +28,59 @@ final class WidgetWindow: NSPanel {
   override var canBecomeMain: Bool { false }
 }
 
-// NOT HERE: a WKWebView subclass returning true from acceptsFirstMouse.
+// THE CLICK THAT LANDS THE FIRST TIME.
 //
-// It was added to fix the collapse arrow needing two taps when the widget was
-// not already key — AppKit swallows the click that activates an inactive
-// window — and it was backed out the same session because clicks across the
-// popups stopped landing at all. Whether it was the cause was never proven;
-// what is certain is that it changed mouse routing app-wide to fix an
-// occasional second tap, which is a bad trade however it turns out. The page
-// side of that bug (widget.js: the arrow collapsing on pointerdown so it
-// cannot be hidden out from under the release) is real and stayed.
+// This is the subclass the note here used to forbid. It is back because the two
+// beliefs that kept it out have now been MEASURED with compiled probes rather
+// than reasoned about, and both were wrong. The old note is rewritten instead of
+// argued with, but the history it recorded is kept below, because it is the
+// reason to be careful here.
 //
-// If the two-tap ever needs fixing again, the move is making WidgetWindow a
-// .nonactivatingPanel like the popups already are — clicks reach a
-// nonactivating panel without an activation step to swallow them — not
-// overriding hit-testing on a webview.
+// WHAT WAS MEASURED (2026-08-24):
+//   • WKWebView.needsPanelToBecomeKey == true. That makes
+//     NSPanel.becomesKeyOnlyIfNeeded INERT for every window in this app -- the
+//     flag only withholds key when the clicked view says it does not need it,
+//     and a webview always says it does. So the recommendation this note used to
+//     make (make WidgetWindow a nonactivating panel) was tried, then extended
+//     with that flag, and neither could ever have worked. The nonactivating
+//     style mask removes the app-ACTIVATION step; the window-KEY step is a
+//     separate one, and it is the one eating the click.
+//   • WKWebView.acceptsFirstMouse == false, so the key-acquiring click is
+//     discarded rather than delivered. This override is the only lever on that.
+//   • The override is ADDITIVE, not substitutive: the window still takes key,
+//     the click is ALSO delivered. On a window that is already key AppKit never
+//     calls acceptsFirstMouse at all, so this cannot change any click except the
+//     first one into a non-key window.
+//   • It does not break dragging. It is a PRECONDITION for first-click dragging;
+//     without it a press on a non-key panel produces no mouseDown at all.
+//
+// WHAT HAPPENED LAST TIME, and why that is not a reason to stay out. The version
+// backed out on 2026-08-21 was the same two lines, applied at the same single
+// place -- this factory -- and the revert said "clicks across the popups stopped
+// landing at all", while conceding in its own words that "whether it was the
+// cause is not proven". A day later a different commit found that every
+// pressable carried an `:active` transform of scale(1.10, 0.91), and that a
+// transform moves the HIT BOX with the pixels, so an edge press slipped off the
+// element before release and neither click nor pointerup fired. Those rules were
+// byte-identical before, during and after the acceptsFirstMouse window, they
+// affected exactly the popup controls, and they were not fixed until 2026-08-22.
+// That is a documented, sufficient explanation for the symptom this override was
+// blamed for, and it is fixed.
+//
+// So: same override, same site, applied knowingly rather than hopefully. If
+// clicks across the popups ever stop landing again, this is still the first
+// thing to suspect -- but suspect it with a bisect, not with a memory.
+//
+// ONE REAL BEHAVIOUR CHANGE, and it is intended: a control now ACTS on the click
+// that focuses its window instead of only focusing it. Click the size slider in
+// a popup that is not key and the slider moves, where before the press was
+// swallowed. That is what every already-key window in macOS does, and it is what
+// "my clicks should land" asks for.
+final class ClickThroughWebView: WKWebView {
+  // No super call, deliberately: NSView's implementation returns false, and
+  // WKWebView does not override it. There is nothing to defer to.
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
 
 final class PopupPanel: NSPanel {
   override var canBecomeKey: Bool { true }
@@ -144,7 +182,7 @@ func makeWebView(bridge: Bridge, page: String) -> WKWebView {
   // Siri" ever reappears over the message bar, THIS is the trade to revisit:
   // raising the floor to macOS 15 would drop 13 and 14.
 
-  let web = WKWebView(frame: .zero, configuration: config)
+  let web = ClickThroughWebView(frame: .zero, configuration: config)
   web.navigationDelegate = bridge
   // KVC is the sanctioned spelling for a transparent WKWebView on macOS.
   web.setValue(false, forKey: "drawsBackground")
