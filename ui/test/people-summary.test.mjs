@@ -1,0 +1,76 @@
+// Tests for the year summary (people/summary.mjs): the guard that refuses to
+// call the model on thin input (measured: an empty sample produced confident
+// fiction), the even sampling, and the request shape — with a fake fetch, so
+// no test ever needs a model.
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+
+import { openDb, insertRows } from '../server/hermes.mjs';
+import { summarizeYear, sampleRows, MIN_ROWS } from '../server/people/summary.mjs';
+
+const NOW = new Date(2027, 0, 1).getTime();
+
+function spineDb(pairs) {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE contact_ids (identifier TEXT PRIMARY KEY, display_name TEXT, kind TEXT, updated_ts INTEGER)');
+  const ins = db.prepare('INSERT INTO contact_ids VALUES (?,?,?,?)');
+  for (const [id, name] of pairs) ins.run(id, name, 'phone', NOW);
+  return db;
+}
+
+const HANDLE = '+18085550100';
+const LLAMA = { baseUrl: 'http://127.0.0.1:51780', apiKey: () => 'k' };
+
+function msgRow(ts, text, fromMe = false) {
+  return { ts, source: 'imessage', entity_id: `s:${ts}:${text.length}`, text, meta: { chat_handle: HANDLE, is_from_me: fromMe } };
+}
+
+test('thin input never reaches the model — the guard answers instead', async () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [msgRow(new Date(2026, 3, 1).getTime(), 'a single long-enough message about surfing')]);
+  const spine = spineDb([[HANDLE, 'Sam Lee']]);
+  let called = 0;
+  const out = await summarizeYear(ctx, spine, {
+    personKey: 'name:sam lee', year: 2026, now: NOW,
+    owner: { addresses: new Set(), names: [] },
+    llama: LLAMA,
+    fetchFn: async () => { called += 1; throw new Error('must not be called'); },
+  });
+  assert.equal(called, 0, 'no model call on thin input');
+  assert.equal(out.text, null);
+  assert.match(out.reason, /substantive messages/u);
+});
+
+test('a real sample produces a summary, and the request stays on the given base', async () => {
+  const ctx = openDb(':memory:');
+  const y0 = new Date(2026, 1, 1).getTime();
+  insertRows(ctx, Array.from({ length: 30 }, (_, i) =>
+    msgRow(y0 + i * 86_400_000, `long enough message number ${i} about the surf trip planning`, i % 2 === 0)));
+  const spine = spineDb([[HANDLE, 'Sam Lee']]);
+  let url = null;
+  let body = null;
+  const out = await summarizeYear(ctx, spine, {
+    personKey: 'name:sam lee', year: 2026, now: NOW,
+    owner: { addresses: new Set(), names: [] },
+    llama: LLAMA,
+    fetchFn: async (u, opts) => {
+      url = u; body = JSON.parse(opts.body);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'You two mostly planned a surf trip.' } }] }) };
+    },
+  });
+  assert.equal(url, 'http://127.0.0.1:51780/v1/chat/completions');
+  assert.equal(out.text, 'You two mostly planned a surf trip.');
+  assert.ok(out.sampled >= MIN_ROWS && out.of === 30);
+  assert.match(body.messages[1].content, /you: /u, 'owner side labeled');
+  assert.match(body.messages[1].content, /Sam: /u, 'their side labeled by first name');
+});
+
+test('sampleRows spreads evenly and caps', () => {
+  const rows = Array.from({ length: 600 }, (_, i) => ({ i }));
+  const s = sampleRows(rows, 120);
+  assert.equal(s.length, 120);
+  assert.equal(s[0].i, 0);
+  assert.ok(s[119].i > 500, 'reaches the tail of the year');
+});

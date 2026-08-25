@@ -133,12 +133,14 @@ function hasRelationship(p) {
   return (p.reciprocity ?? 0) > 0;
 }
 
-// The TIMELINE view's payload: one year, its months newest-first, each month's
-// people sorted by that MONTH's engagement and carrying that month's top-3
-// topics (people/topics.mjs, bucketBy month). Same person filter as the map
-// (isNonPerson + hasRelationship), same alias folding. `years` lists every
-// year the graph has activity in, so the client can page without guessing.
-// The expensive core under buildMonths — the graph and the month-bucketed
+// The TIMELINE view's payload: one YEAR of people, sorted by that year's
+// engagement, each carrying the year's topics, taxonomy counts and
+// specifics (people/topics.mjs, bucketBy year). Month grouping was yeeted
+// (owner, 2026-08-25) — a year at a glance beat twelve section headers.
+// Same person filter as the map (isNonPerson + hasRelationship), same alias
+// folding. `years` lists every year the graph has activity in, so the
+// client can page without guessing.
+// The expensive core under the year view — the graph and the year-bucketed
 // topic tallies — is IDENTICAL for every year (both scan the whole corpus),
 // so it is memoized per database handle and reused until the corpus changes.
 // Clicking through year tabs costs one rebuild, not ten.
@@ -150,86 +152,79 @@ function hasRelationship(p) {
 // decisions. `now` is deliberately NOT in the stamp: it only gates
 // future-dated rows out of the timeline, and a cache a few minutes stale on
 // that axis changes nothing a month view can show.
-const monthsMemo = new WeakMap();
+const yearMemo = new WeakMap();
 
-function monthsCore(contextDb, stateDb, { now, owner, aliases }) {
+// Exported for people/summary.mjs, which needs the same graph and pays the
+// same memo.
+export function yearCore(contextDb, stateDb, { now, owner, aliases }) {
   const c = contextDb.prepare('SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM context').get();
   const stamp = `${c.n}|${c.m}|${aliases ? aliases.size : 0}`;
-  const hit = monthsMemo.get(contextDb);
+  const hit = yearMemo.get(contextDb);
   if (hit && hit.stamp === stamp) return hit.core;
 
   const graph = buildGraph(contextDb, stateDb, { now, owner, aliases })
     .filter((p) => !isNonPerson(p) && hasRelationship(p));
   const idToKey = new Map(graph.flatMap((p) => (p.identifiers ?? []).map((id) => [id, p.key])));
   const nameTokens = nameTokenSet([...graph.map((p) => p.name), ...(owner?.names ?? [])]);
-  const topics = topicTallies(contextDb, idToKey, { nameTokens, bucketBy: 'month' });
+  const topics = topicTallies(contextDb, idToKey, { nameTokens, bucketBy: 'year' });
 
   const core = { graph, topics };
-  monthsMemo.set(contextDb, { stamp, core });
+  yearMemo.set(contextDb, { stamp, core });
   return core;
 }
 
-export function buildMonths(contextDb, stateDb, { year, now = Date.now(), owner, aliases = null, perMonthCap = 40 } = {}) {
-  const { graph, topics } = monthsCore(contextDb, stateDb, { now, owner, aliases });
+export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, aliases = null, cap = 250 } = {}) {
+  const { graph, topics } = yearCore(contextDb, stateDb, { now, owner, aliases });
 
   const yearsSet = new Set();
-  const byMonth = new Map(); // ym -> [{p, messages, met, engagement}]
+  const entries = [];
   const prefix = `${year}-`;
   for (const p of graph) {
+    let messages = 0;
+    let met = 0;
     for (const b of p.timeline ?? []) {
       yearsSet.add(Number(b.ym.slice(0, 4)));
       if (!b.ym.startsWith(prefix)) continue;
-      const messages = (b.sent ?? 0) + (b.received ?? 0);
-      const engagement = messages + MEETING_WEIGHT * (b.met ?? 0);
-      if (engagement === 0) continue;
-      if (!byMonth.has(b.ym)) byMonth.set(b.ym, []);
-      byMonth.get(b.ym).push({ p, messages, met: b.met ?? 0, engagement });
+      messages += (b.sent ?? 0) + (b.received ?? 0);
+      met += b.met ?? 0;
     }
+    const engagement = messages + MEETING_WEIGHT * met;
+    if (engagement === 0) continue;
+    entries.push({ p, messages, met, engagement });
   }
+  entries.sort((a, b) => b.engagement - a.engagement);
 
-  const months = [...byMonth.keys()]
-    .sort()
-    .reverse() // newest month first, like the year view
-    .map((ym) => {
-      const entries = byMonth.get(ym).sort((a, b) => b.engagement - a.engagement);
+  return {
+    year,
+    years: [...yearsSet].sort((a, b) => a - b),
+    total: entries.length,
+    people: entries.slice(0, cap).map((e) => {
+      const c = clusterOf(e.p);
+      const sinceSeen = Number.isFinite(e.p.lastSeen)
+        ? Math.max(0, Math.floor((now - e.p.lastSeen) / DAY))
+        : null;
+      const doc = topics.docs.get(`${e.p.key}|${year}`);
       return {
-        ym,
-        total: entries.length,
-        // Chips only for the rows actually shown — the tail would be payload
-        // for nothing.
-        people: entries.slice(0, perMonthCap).map((e) => {
-          // The same filter facts the sky list carries, so the timeline's
-          // filter row (company / channel / status) works off one vocabulary.
-          const c = clusterOf(e.p);
-          const sinceSeen = Number.isFinite(e.p.lastSeen)
-            ? Math.max(0, Math.floor((now - e.p.lastSeen) / DAY))
-            : null;
-          return {
-            key: e.p.key,
-            name: e.p.name,
-            company: e.p.linkedin?.company ?? null,
-            cluster: c.key,
-            clusterLabel: c.label,
-            channels: e.p.channels ?? [],
-            recencyDays: e.p.dormancyDays != null ? e.p.dormancyDays : sinceSeen,
-            messages: e.messages,
-            met: e.met,
-            engagement: e.engagement,
-            topics: topTopics(topics.docs.get(`${e.p.key}|${ym}`), topics.docFreq, topics.totalDocs),
-            // The expanded row's detail: taxonomy with counts, and the
-            // SPECIFICS — their actual distinctive words for that month.
-            taxonomy: Object.entries(topics.docs.get(`${e.p.key}|${ym}`)?.taxonomy ?? {})
-              .filter(([, n]) => n >= 2)
-              .sort((a, b) => b[1] - a[1])
-              .slice(0, 3)
-              .map(([label, n]) => ({ label, n })),
-            specifics: topTerms(topics.docs.get(`${e.p.key}|${ym}`), topics.docFreq, topics.totalDocs),
-          };
-        }),
+        key: e.p.key,
+        name: e.p.name,
+        company: e.p.linkedin?.company ?? null,
+        cluster: c.key,
+        clusterLabel: c.label,
+        channels: e.p.channels ?? [],
+        recencyDays: e.p.dormancyDays != null ? e.p.dormancyDays : sinceSeen,
+        messages: e.messages,
+        met: e.met,
+        engagement: e.engagement,
+        topics: topTopics(doc, topics.docFreq, topics.totalDocs),
+        taxonomy: Object.entries(doc?.taxonomy ?? {})
+          .filter(([, n]) => n >= 2)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 3)
+          .map(([label, n]) => ({ label, n })),
+        specifics: topTerms(doc, topics.docFreq, topics.totalDocs),
       };
-    });
-
-  return { year, years: [...yearsSet].sort((a, b) => a - b), months };
+    }),
+  };
 }
 
 export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs = null, aliases = null } = {}) {

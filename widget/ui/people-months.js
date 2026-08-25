@@ -1,7 +1,13 @@
-// The timeline popup: one year, month sections newest-first, rows by that
-// month's engagement with that month's topic chips. One fetch per year
-// (cached); search filters by name client-side. Same CSP discipline as
-// people-sky.js: bar widths and nothing else go through the CSSOM.
+// The timeline popup: ONE YEAR of your people, sorted by that year's
+// engagement, with the year's topic chips — month grouping was yeeted
+// (owner, 2026-08-25). Browser-style year tabs page between years; one fetch
+// per year (cached, dropped on every panel re-open via __hzRefresh); search
+// and the funnel filters narrow client-side. Expanding a row shows the
+// year's taxonomy counts, the specifics (word pairs first), and a
+// model-written summary fetched on demand — labeled as the model's, because
+// unlike every other line here it is not counted, it is written.
+// (The file keeps its historical name; renaming the page id would ripple
+// through the bridge allowlist and panel factory for no behavioral gain.)
 'use strict';
 
 (function () {
@@ -19,52 +25,66 @@
   const resetEl = document.getElementById('freset');
   if (!listEl) return;
 
-  const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  // Hover hint per connector — the icon says which source knows this person.
+  // Hover hint per connector — shown by our own CSS tooltip (data-tip),
+  // because native title tooltips are unreliable in a borderless
+  // non-activating panel.
   const CHAN_LABEL = { imessage: 'iMessage', whatsapp: 'WhatsApp', mail: 'mail', calendar: 'calendar', linkedin: 'LinkedIn' };
+
   let year = new Date().getFullYear();
   let years = []; // every year with activity, from the server
-  let expanded = null; // '<personKey>|<ym>' of the row showing its detail
+  let expanded = null; // '<personKey>|<year>' of the row showing its detail
   const cache = new Map(); // year -> payload
+  const summaries = new Map(); // '<personKey>|<year>' -> {state, text?, reason?}
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   }
 
-  function monthLabel(ym) {
-    return `${MONTH_NAMES[Number(ym.slice(5)) - 1]} ${ym.slice(0, 4)}`;
+  // ---- the model-written summary, fetched on demand per expanded row ----
+  function requestSummary(key, y) {
+    const sk = `${key}|${y}`;
+    if (summaries.has(sk)) return;
+    summaries.set(sk, { state: 'pending' });
+    hzPost('peopleSummary', { key, year: y })
+      .then((r) => {
+        summaries.set(sk, r && r.text
+          ? { state: 'done', text: r.text }
+          : { state: 'none', reason: (r && r.reason) || 'unavailable' });
+      })
+      .catch(() => summaries.set(sk, { state: 'none', reason: 'unavailable' }))
+      .finally(render);
   }
 
-  // A row expands on click into what you two ACTUALLY talked about that
-  // month: the taxonomy categories with their counts, and the SPECIFICS —
-  // the distinctive words themselves (a place, a project, a nickname).
   function detailHtml(p) {
     const bits = [];
+    const sk = `${p.key}|${year}`;
+    const sum = summaries.get(sk);
+    if (sum && sum.state === 'pending') {
+      bits.push('<div class="pl-d pm-sum pm-sum-wait">summarizing this year…</div>');
+    } else if (sum && sum.state === 'done') {
+      bits.push(`<div class="pl-d pm-sum">${esc(sum.text)} <span class="pm-sum-tag">· written by the local model</span></div>`);
+    } else if (sum && sum.state === 'none') {
+      bits.push(`<div class="pl-d pl-dim">no summary — ${esc(sum.reason)}</div>`);
+    }
     if (p.taxonomy && p.taxonomy.length) {
       bits.push(`<div class="pl-d">topics: ${p.taxonomy.map((t) => `${esc(t.label)} (${t.n})`).join(' · ')}</div>`);
     }
     if (p.specifics && p.specifics.length) {
       bits.push(`<div class="pl-d">specifics: ${p.specifics.map((t) => `${esc(t.label)} (${t.n})`).join(' · ')}</div>`);
     }
-    if (!bits.length) bits.push('<div class="pl-d pl-dim">not enough said this month to name topics</div>');
+    if (!bits.length) bits.push('<div class="pl-d pl-dim">not enough said this year to name topics</div>');
     return `<div class="pl-detail">${bits.join('')}</div>`;
   }
 
-  function rowHtml(p, ym) {
+  function rowHtml(p) {
     const chips = (p.topics || [])
       .map((t) => `<span class="pl-chip pl-topic">${esc(t.label)}</span>`)
       .join('');
-    const rowKey = `${p.key}|${ym}`;
+    const rowKey = `${p.key}|${year}`;
     const open = expanded === rowKey;
-    // Which connectors know this person, as the same glyphs the connector
-    // tiles use (bridge.js hzGlyph), directly after the name. title= is the
-    // hover hint; the glyph itself stays wordless.
     const srcIcons = (p.channels || [])
-      .map((c) => `<span class="pm-src-ic" title="${esc(CHAN_LABEL[c] || c)}">${hzGlyph(c)}</span>`)
+      .map((c) => `<span class="pm-src-ic" data-tip="${esc(CHAN_LABEL[c] || c)}">${hzGlyph(c)}</span>`)
       .join('');
-    // Line 1: name, message count, connector glyphs. Line 2: the topic
-    // chips. Met-count and company left the row (owner, 2026-08-25) — the
-    // expanded detail is where secondary facts live now.
     return (
       `<div class="pl-row${open ? ' open' : ''}" data-rk="${esc(rowKey)}">` +
         `<div class="pl-main">` +
@@ -80,8 +100,6 @@
     );
   }
 
-  // Within-month orderings for the sort control. Engagement is the default
-  // and the server's own order; the rest re-sort client-side.
   const SORTS = {
     engagement: (a, b) => b.engagement - a.engagement,
     messages: (a, b) => (b.messages || 0) - (a.messages || 0),
@@ -104,12 +122,10 @@
     const sizes = new Map();
     const labels = new Map();
     for (const data of cache.values()) {
-      for (const m of data.months) {
-        for (const p of m.people) {
-          if (!p.cluster || p.cluster === 'personal') continue;
-          sizes.set(p.cluster, (sizes.get(p.cluster) || 0) + 1);
-          if (!labels.has(p.cluster)) labels.set(p.cluster, p.clusterLabel || p.cluster);
-        }
+      for (const p of data.people) {
+        if (!p.cluster || p.cluster === 'personal') continue;
+        sizes.set(p.cluster, (sizes.get(p.cluster) || 0) + 1);
+        if (!labels.has(p.cluster)) labels.set(p.cluster, p.clusterLabel || p.cluster);
       }
     }
     const keep = companyEl.value;
@@ -128,28 +144,19 @@
     if (!data) return;
     const term = searchEl.value.trim().toLowerCase();
     const filtering = Boolean(term || companyEl.value || channelEl.value || statusEl.value);
-    const html = [];
-    let shown = 0;
-    for (const m of data.months) {
-      const rows = m.people.filter((p) => passesFilters(p, term));
-      rows.sort(SORTS[sortEl.value] || SORTS.engagement);
-      if (rows.length === 0) continue;
-      const count = filtering ? rows.length : m.total;
-      html.push(`<div class="pl-year">${monthLabel(m.ym)} <span class="pl-year-n">· ${count} people</span></div>`);
-      for (const p of rows) html.push(rowHtml(p, m.ym));
-      if (!filtering && m.total > m.people.length) {
-        html.push(`<div class="pl-more">+ ${m.total - m.people.length} more in ${monthLabel(m.ym)}</div>`);
-      }
-      shown += rows.length;
-    }
-    listEl.innerHTML = html.join('') || `<div class="pl-empty">no activity in ${year}</div>`;
+    const rows = data.people.filter((p) => passesFilters(p, term));
+    rows.sort(SORTS[sortEl.value] || SORTS.engagement);
+    listEl.innerHTML = rows.map(rowHtml).join('') || `<div class="pl-empty">no one matches in ${year}</div>`;
+    const shown = rows.length;
     searchEl.placeholder = `search ${year} (${shown} shown)…`;
+    if (!filtering && data.total > data.people.length) {
+      listEl.insertAdjacentHTML('beforeend',
+        `<div class="pl-more">+ ${data.total - data.people.length} more in ${year} — search or filter to narrow</div>`);
+    }
     renderTabs();
   }
 
   // Browser-style year tabs: oldest left, newest right, the open one active.
-  // Until the first payload names the years, the strip shows just the year
-  // being loaded.
   function renderTabs() {
     const ys = years.length ? years : [year];
     tabsEl.innerHTML = ys
@@ -159,11 +166,9 @@
     if (active) active.scrollIntoView({ inline: 'nearest', block: 'nearest' });
   }
 
-  // An uncached year is a full server rebuild (~seconds), so the click must
-  // answer INSTANTLY with a loading state — a tab that highlights while the
-  // old year's list sits there reads as broken. reqId guards the race: only
-  // the newest click's response may paint (clicking 2019 then 2024 must never
-  // end on 2019's data because 2019's fetch finished last).
+  // An uncached year is a server rebuild on first touch, so the click must
+  // answer INSTANTLY with a loading state. reqId guards the race: only the
+  // newest click's response may paint.
   let reqId = 0;
   async function load(y) {
     year = y;
@@ -172,9 +177,9 @@
     const my = ++reqId;
     searchEl.placeholder = `loading ${year}…`;
     listEl.innerHTML = `<div class="pm-loading">loading ${year}…</div>`;
-    const res = await hzPost('peopleMonths', { year });
+    const res = await hzPost('peopleYear', { year });
     if (my !== reqId) return; // superseded by a newer tab click
-    if (!res || !Array.isArray(res.months)) throw new Error('bad months payload');
+    if (!res || !Array.isArray(res.people)) throw new Error('bad year payload');
     cache.set(year, res);
     if (Array.isArray(res.years) && res.years.length) years = res.years;
     fillCompanies();
@@ -182,9 +187,9 @@
     prefetchRest();
   }
 
-  // Warm the remaining years in the background, newest first, one at a time —
-  // the server memoizes the heavy scan after the first build, so each of
-  // these is cheap, and every later tab click lands on the client cache.
+  // Warm the remaining years in the background, newest first — the server
+  // memoizes the heavy scan, so each is cheap and later clicks land on the
+  // client cache.
   let prefetching = false;
   async function prefetchRest() {
     if (prefetching) return;
@@ -192,8 +197,8 @@
     try {
       for (const y of [...years].reverse()) {
         if (cache.has(y)) continue;
-        const res = await hzPost('peopleMonths', { year: y });
-        if (res && Array.isArray(res.months)) cache.set(y, res);
+        const res = await hzPost('peopleYear', { year: y });
+        if (res && Array.isArray(res.people)) cache.set(y, res);
       }
     } catch {
       // Background warming only; a failure costs nothing but the warmth.
@@ -202,12 +207,19 @@
     }
   }
 
+  function loadOrFail(y) {
+    load(y).catch(() => {
+      searchEl.placeholder = 'couldn’t load';
+      listEl.innerHTML = `<div class="pl-empty">couldn’t load ${y} — click its tab to retry</div>`;
+    });
+  }
+
   // Native calls this on every panel re-open: the webview SURVIVES hidden
-  // (panels keep state), so without it the year cache from the first open
-  // was the data forever — the server could move on and this page never
-  // asked again. Refetch is cheap (the server memoizes the heavy scan).
+  // (panels keep state), so without it the first open's data was the data
+  // forever. Refetch is cheap (the server memoizes the heavy scan).
   window.__hzRefresh = () => {
     cache.clear();
+    summaries.clear();
     prefetching = false;
     loadOrFail(year);
   };
@@ -222,6 +234,10 @@
     if (!row) return;
     const rk = row.getAttribute('data-rk');
     expanded = expanded === rk ? null : rk;
+    if (expanded !== null) {
+      const key = rk.slice(0, rk.lastIndexOf('|'));
+      requestSummary(key, year);
+    }
     render();
   });
   syncEl.addEventListener('click', () => { hzPost('openPeople').catch(() => {}); });
@@ -241,11 +257,5 @@
   searchEl.addEventListener('input', () => { clearTimeout(t); t = setTimeout(render, 90); });
   if (closeEl) closeEl.addEventListener('click', () => { hzSfx.close(); hzPost('close').catch(() => {}); });
 
-  function loadOrFail(y) {
-    load(y).catch(() => {
-      searchEl.placeholder = 'couldn’t load';
-      listEl.innerHTML = `<div class="pl-empty">couldn’t load ${y} — click its tab to retry</div>`;
-    });
-  }
   loadOrFail(year);
 })();

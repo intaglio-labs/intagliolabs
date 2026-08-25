@@ -106,3 +106,34 @@ body.plist .pm-msgs {
   white-space: nowrap;
 }
 body.plist .pm-chip-row { margin-top: 4px; }
+
+/* ---- the yearly rework (2026-08-25) ---- */
+/* The connector icons' hover hint, drawn by us: native title tooltips are
+   unreliable in a borderless non-activating panel. Below the icon, so the
+   list's own top edge cannot clip it. */
+body.plist .pm-src-ic { position: relative; }
+body.plist .pm-src-ic::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%; top: calc(100% + 5px);
+  transform: translateX(-50%);
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  white-space: nowrap;
+  background: rgba(20, 20, 18, 0.96);
+  border: 1px solid rgba(197, 165, 109, 0.3);
+  color: var(--hazelnut-light);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+  z-index: 5;
+}
+body.plist .pm-src-ic:hover::after { opacity: 1; }
+
+/* The model-written year summary in the expanded row — visually set apart
+   from the counted lines below it, and labeled, because unlike them it is
+   written, not counted. */
+body.plist .pm-sum { color: var(--secondary); }
+body.plist .pm-sum .pm-sum-tag { color: var(--muted); font-size: 10px; }
+body.plist .pm-sum-wait { animation: pm-pulse 1.2s ease-in-out infinite; }

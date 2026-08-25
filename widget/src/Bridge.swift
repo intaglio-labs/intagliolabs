@@ -98,7 +98,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                "openExternal"],
-    "people-months": ["close", "peopleMonths", "openPeople"],
+    "people-months": ["close", "peopleYear", "peopleSummary", "openPeople"],
     "ear": ["orbState", "voiceError", "voiceTranscript"],
   ]
 
@@ -905,12 +905,20 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       peopleCall("POST", "people/decide", json: ["a": a, "b": b, "verdict": verdict]) { [weak self] data in
         self?.reply(webView, id, data)
       }
-    case "peopleMonths":
-      // The timeline view: one year's months with per-month topics. Absent
+    case "peopleYear":
+      // The timeline view: one year of people with the year's topics. Absent
       // year = server default (the current year).
       let year = (payload["year"] as? Int) ?? Int(payload["year"] as? Double ?? 0)
-      let mPath = year > 0 ? "people/months?year=\(year)" : "people/months"
-      peopleCall("GET", mPath, json: nil) { [weak self] data in
+      let yPath = year > 0 ? "people/year?year=\(year)" : "people/year"
+      peopleCall("GET", yPath, json: nil) { [weak self] data in
+        self?.reply(webView, id, data)
+      }
+    case "peopleSummary":
+      // Model-written year summary for one person; generated on demand,
+      // served by hermes from the LOCAL model only.
+      let sKey = String(payload["key"] as? String ?? "")
+      let sYear = (payload["year"] as? Int) ?? Int(payload["year"] as? Double ?? 0)
+      peopleCall("POST", "people/summary", json: ["key": sKey, "year": sYear]) { [weak self] data in
         self?.reply(webView, id, data)
       }
     default:

@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { openDb, insertRows } from '../server/hermes.mjs';
 import { topicTallies, topTopics, topTerms, nameTokenSet, TOPIC_SIGNALS } from '../server/people/topics.mjs';
-import { yearRows, buildMap, buildMonths } from '../server/people/map.mjs';
+import { yearRows, buildMap, buildYear } from '../server/people/map.mjs';
 
 const NOW = new Date(2027, 0, 1).getTime();
 const DAY = 86_400_000;
@@ -166,7 +166,7 @@ test('weekdays, filler and taxonomy-duplicate terms never take a chip slot', () 
   assert.equal(docs.get('k|2026-02').terms.size, 0, 'weekdays and filler are stopped');
 });
 
-test('buildMonths: one year, months newest-first, sorted by that month engagement', () => {
+test('buildYear: one year of people by year engagement, with year topics', () => {
   const ctx = openDb(':memory:');
   const mar = new Date(2026, 2, 10).getTime();
   const jul = new Date(2026, 6, 10).getTime();
@@ -183,12 +183,13 @@ test('buildMonths: one year, months newest-first, sorted by that month engagemen
   ]);
   const spine = spineDb([[HANDLE, 'Sam Lee', 'phone'], ['+18085550200', 'Ana Chen', 'phone']]);
   const owner = { addresses: new Set(), names: [] };
-  const out = buildMonths(ctx, spine, { year: 2026, now: NOW, owner });
+  const out = buildYear(ctx, spine, { year: 2026, now: NOW, owner });
   assert.deepEqual(out.years, [2019, 2026], 'every active year listed for paging');
-  assert.deepEqual(out.months.map((m) => m.ym), ['2026-07', '2026-03'], 'newest month first');
-  assert.deepEqual(out.months[1].people.map((p) => p.name), ['Ana Chen', 'Sam Lee'], 'month engagement order');
-  assert.equal(out.months[1].people[0].topics[0].label, 'fundraising', 'taxonomy chip leads');
-  assert.equal(out.months[1].people[0].engagement, 5);
+  assert.deepEqual(out.people.map((p) => p.name), ['Ana Chen', 'Sam Lee'], 'year engagement order');
+  const ana = out.people.find((p) => p.name === 'Ana Chen');
+  assert.equal(ana.topics[0].label, 'fundraising', 'taxonomy chip leads');
+  assert.equal(ana.engagement, 5);
+  assert.ok(Array.isArray(ana.specifics) && Array.isArray(ana.taxonomy));
 });
 
 test('topTerms returns the specifics alone — no taxonomy labels, floors intact', () => {

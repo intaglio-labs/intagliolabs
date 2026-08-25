@@ -54,7 +54,8 @@ import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch } from './people/search.mjs';
 import { loadOwner } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
-import { buildMap, buildMonths } from './people/map.mjs';
+import { buildMap, buildYear } from './people/map.mjs';
+import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
@@ -2781,12 +2782,12 @@ function handle(db, req, res, cors, url, policy) {
   // map and WRITE the owner's merge decisions, neither of which is a browser
   // capability. The Origin channel is authenticated but not entitled here, so
   // 403 (not 401), matching handleAdmin's reasoning.
-  if (url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/months') {
+  if (url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary') {
     if (channel !== 'bearer') {
       send(res, 403, { error: 'people routes are bearer-only: call with the token from ~/.hazlie/secrets/hermes-token.txt and no Origin header.' }, cors);
       return;
     }
-    return handlePeople(db, req, res, cors, url);
+    return handlePeople(db, req, res, cors, url, policy);
   }
 
   send(res, 404, { error: `no route for ${req.method} ${url.pathname}` }, cors);
@@ -2797,11 +2798,12 @@ function handle(db, req, res, cors, url, policy) {
 // silently build the all-time map.
 const PEOPLE_INIT_FIELDS = Object.freeze(['days']);
 const PEOPLE_DECIDE_FIELDS = Object.freeze(['verdict', 'a', 'b']);
+const PEOPLE_SUMMARY_FIELDS = Object.freeze(['key', 'year']);
 
 // Phase 1 routes. init and review both build the people map and return the
 // pairs still needing the owner's eyes; decide records one call. Split out so
 // handle() stays a flat dispatch table.
-async function handlePeople(db, req, res, cors, url) {
+async function handlePeople(db, req, res, cors, url, policy) {
   const owner = loadOwner();
 
   // Timeframe in days back (0 = all time), from the popup's selector. Clamped to
@@ -2850,9 +2852,9 @@ async function handlePeople(db, req, res, cors, url) {
     return;
   }
 
-  // The timeline view: one year's months, each month's people by that
-  // month's engagement with that month's topics. Same auth posture as map.
-  if (req.method === 'GET' && url.pathname === '/people/months') {
+  // The timeline view: one year of people by that year's engagement, with
+  // the year's topics. Same auth posture as map.
+  if (req.method === 'GET' && url.pathname === '/people/year') {
     const raw = url.searchParams.get('year');
     const thisYear = new Date().getFullYear();
     const year = raw === null || raw === '' ? thisYear : Number(raw);
@@ -2861,7 +2863,36 @@ async function handlePeople(db, req, res, cors, url) {
     }
     const out = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
-      return buildMonths(db, state, { year, owner, aliases });
+      return buildYear(db, state, { year, owner, aliases });
+    });
+    send(res, 200, out, cors);
+    return;
+  }
+
+  // The year summary: model-written, LOCAL llama only, generated on demand
+  // for one person and cached against the corpus stamp (people/summary.mjs
+  // carries the boundary reasoning). POST because the person key is data,
+  // not a path.
+  if (req.method === 'POST' && url.pathname === '/people/summary') {
+    if (!hasJsonMediaType(req)) { send(res, 415, { error: 'content-type must be application/json' }, cors); return; }
+    const body = await readJson(req);
+    assertClosedFields(body, PEOPLE_SUMMARY_FIELDS);
+    if (typeof body?.key !== 'string' || body.key.length === 0 || body.key.length > 300) {
+      throw badRequest('"key" must be a person key');
+    }
+    const thisYear = new Date().getFullYear();
+    const year = Number(body?.year);
+    if (!Number.isInteger(year) || year < 1990 || year > thisYear + 1) {
+      throw badRequest(`"year" must be an integer 1990..${thisYear + 1}`);
+    }
+    // withPeopleDbs closes its handles in finally — safe here because every
+    // database read in summarizeYear happens in its SYNCHRONOUS prologue
+    // (graph + row gather); only the llama fetch is awaited, and it touches
+    // no handle. If summarizeYear ever grows an await before its reads, this
+    // call site must change with it.
+    const out = await withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      return summarizeYear(db, state, { personKey: body.key, year, owner, aliases, llama: policy.llama });
     });
     send(res, 200, out, cors);
     return;
