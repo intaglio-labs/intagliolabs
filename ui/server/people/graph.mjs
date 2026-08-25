@@ -353,8 +353,27 @@ export function buildGraph(
   return [...people.values()]
     .map((p) => {
       const messages = p.sent + p.received;
+      // THE SPINE FIRST, because it is the only source that knows a name for
+      // somebody who has never been named IN the data.
+      //
+      // p.names holds names carried by the events themselves -- a calendar
+      // attendee, a LinkedIn profile. A message carries a HANDLE and never a
+      // name, so for anyone known only through the address book that set is
+      // empty and this fell through to the raw identifier. That is why the
+      // timeline showed "ay@austinyoshino.com" for a person whose own key was
+      // already `name:austin yoshino`: the key had resolved him through the
+      // spine, and the label never asked.
+      //
+      // nameToIds keeps the ORIGINAL casing against the normalised key, so this
+      // renders "Austin Yoshino" rather than the flattened form the key carries.
+      const fromSpine = p.key.startsWith('name:')
+        ? spine.nameToIds.get(p.key.slice('name:'.length))?.name
+        : null;
       const display =
-        [...p.names].sort((a, b) => b.length - a.length)[0] ?? [...p.identifiers][0] ?? p.key;
+        fromSpine ??
+        [...p.names].sort((a, b) => b.length - a.length)[0] ??
+        [...p.identifiers][0] ??
+        p.key;
       return {
         // The canonical resolution key. Stable across rebuilds (derived from the
         // data, not the run), so the review queue's decisions key on it.
