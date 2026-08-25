@@ -54,10 +54,6 @@
     const chips = (p.topics || [])
       .map((t) => `<span class="pl-chip pl-topic">${esc(t.label)}</span>`)
       .join('');
-    const sub = [];
-    sub.push(`${p.messages} msg${p.messages === 1 ? '' : 's'}`);
-    if (p.met) sub.push(`met ${p.met}×`);
-    if (p.company) sub.push(esc(p.company));
     const rowKey = `${p.key}|${ym}`;
     const open = expanded === rowKey;
     // Which connectors know this person, as the same glyphs the connector
@@ -66,15 +62,18 @@
     const srcIcons = (p.channels || [])
       .map((c) => `<span class="pm-src-ic" title="${esc(CHAN_LABEL[c] || c)}">${hzGlyph(c)}</span>`)
       .join('');
+    // Line 1: name, message count, connector glyphs. Line 2: the topic
+    // chips. Met-count and company left the row (owner, 2026-08-25) — the
+    // expanded detail is where secondary facts live now.
     return (
       `<div class="pl-row${open ? ' open' : ''}" data-rk="${esc(rowKey)}">` +
         `<div class="pl-main">` +
           `<div class="pl-nameline">` +
             `<span class="pl-name">${esc(p.name)}</span>` +
+            `<span class="pm-msgs">${p.messages} msg${p.messages === 1 ? '' : 's'}</span>` +
             srcIcons +
-            `<span class="pl-src">${chips}</span>` +
           `</div>` +
-          `<div class="pl-sub">${sub.join(' · ')}</div>` +
+          (chips ? `<div class="pl-src pm-chip-row">${chips}</div>` : '') +
           (open ? detailHtml(p) : '') +
         `</div>` +
       `</div>`
