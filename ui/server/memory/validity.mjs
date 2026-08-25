@@ -22,6 +22,8 @@
 // are for claims written before that change and for a model that ignores it.
 const ISO = /\b(\d{4})-(\d{2})-(\d{2})\b/u;
 const MONTHS = 'january february march april may june july august september october november december';
+const DAYS = 'sunday monday tuesday wednesday thursday friday saturday'.split(' ');
+const WEEKDAY = new RegExp(`\\b(${DAYS.join('|')})\\b`, 'iu');
 const MONTH_DAY = new RegExp(
   `\\b(${MONTHS.split(' ').join('|')})\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(\\d{4}))?\\b`,
   'iu'
@@ -68,6 +70,33 @@ export function validToFor(claim, { observedAt = null } = {}) {
     if (Number.isNaN(said.getTime())) return null;
     const year = month < said.getUTCMonth() + 1 ? said.getUTCFullYear() + 1 : said.getUTCFullYear();
     return endOfDayUtc(year, month, day);
+  }
+  // A BARE WEEKDAY, resolved against when it was said.
+  //
+  // Measured on the re-distilled corpus: of 89 plan claims, 51 name no time at
+  // all, and of the 38 that do, 17 say only "on Tuesday". The model is told to
+  // resolve relative time into a date and largely does not -- an 8B following
+  // that instruction 1 time in 38 is a fact about the model, not the pipeline --
+  // so the largest recoverable group is the one it expresses most naturally.
+  //
+  // "Tuesday" in a message written on a Friday means the NEXT Tuesday, which is
+  // the ordinary English reading and the same shape as the month rule above.
+  // Same day-of-week as the message means a week ahead, not that morning: a plan
+  // is written before the thing it plans.
+  //
+  // A guess in the sense that any calendar reading is, and safe because valid_to
+  // is advisory -- it sorts a claim, never retires one, and the claim's own text
+  // still says "Tuesday" for the owner to read.
+  const wd = text.match(WEEKDAY);
+  if (wd && observedAt !== null) {
+    const said = new Date(Number(observedAt));
+    if (Number.isNaN(said.getTime())) return null;
+    const want = DAYS.indexOf(wd[1].toLowerCase());
+    if (want < 0) return null;
+    let ahead = (want - said.getUTCDay() + 7) % 7;
+    if (ahead === 0) ahead = 7;
+    const target = new Date(said.getTime() + ahead * 86_400_000);
+    return endOfDayUtc(target.getUTCFullYear(), target.getUTCMonth() + 1, target.getUTCDate());
   }
   return null;
 }

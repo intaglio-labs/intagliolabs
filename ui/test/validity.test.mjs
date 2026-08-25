@@ -77,3 +77,47 @@ test('junk does not throw', () => {
   assert.equal(validToFor({ kind: 'plan', text: 42 }), null);
   assert.equal(isExpired(null), false);
 });
+
+// A BARE WEEKDAY is how the model actually writes time. Measured on the
+// re-distilled corpus: of 89 plans, 51 name no time at all; of the 38 that do,
+// 17 say only "on Tuesday" and just 1 wrote the ISO date the prompt asks for.
+// Resolving those took valid_to coverage from 2% of intentions to 21%.
+const FRIDAY = Date.UTC(2026, 2, 6); // 2026-03-06 is a Friday
+
+test('a weekday resolves to the next such day after it was said', () => {
+  assert.equal(
+    validToFor({ kind: 'plan', text: 'The owner flies on Tuesday.' }, { observedAt: FRIDAY }),
+    Date.UTC(2026, 2, 10, 23, 59, 59, 999),
+    'Friday -> the following Tuesday'
+  );
+});
+
+// A plan is written before the thing it plans, so "Friday" said on a Friday
+// means the next one rather than that same morning.
+test('the same weekday means a week ahead, not today', () => {
+  assert.equal(
+    validToFor({ kind: 'plan', text: 'The owner flies on Friday.' }, { observedAt: FRIDAY }),
+    Date.UTC(2026, 2, 13, 23, 59, 59, 999)
+  );
+});
+
+test('a weekday needs an observation time, or it means nothing', () => {
+  assert.equal(validToFor({ kind: 'plan', text: 'The owner flies on Tuesday.' }), null);
+});
+
+test('an explicit date still wins over a weekday in the same sentence', () => {
+  assert.equal(
+    validToFor(
+      { kind: 'plan', text: 'The owner flies Tuesday 2026-04-02.' },
+      { observedAt: FRIDAY }
+    ),
+    Date.UTC(2026, 3, 2, 23, 59, 59, 999)
+  );
+});
+
+test('a weekday inside a standing fact still does not expire it', () => {
+  assert.equal(
+    validToFor({ kind: 'preference', text: 'The owner prefers Tuesday meetings.' }, { observedAt: FRIDAY }),
+    null
+  );
+});
