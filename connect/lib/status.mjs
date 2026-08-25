@@ -15,6 +15,27 @@ import { PLATFORMS, bridgeStatus } from './bridge.mjs';
 
 const SECRETS = (home) => join(home, '.hazlie', 'secrets');
 
+// A source the owner turned off with `run.mjs <name> --disable`. The daemon
+// checks this marker every tick (connectors/daemon.mjs), so a disabled source
+// never runs — and a row that still reported "connected" because its store
+// happens to be readable would be describing a poll that will not happen.
+// Readable is not the same as running.
+const disabledMarker = (home, id) =>
+  existsSync(join(home, '.hazlie', 'connectors', `${id}.disabled`));
+
+function withDisabled(row, home) {
+  if (!disabledMarker(home, row.id)) return row;
+  return {
+    ...row,
+    connected: false,
+    broken: false, // off on purpose is not a fault; it must never paint red
+    detail: 'turned off',
+    action: null,
+    fix: `re-enable with: rm ~/.hazlie/connectors/${row.id}.disabled`,
+    caveat: null,
+  };
+}
+
 // One app password per mailbox, filed under a slug of the address. Gmail
 // issues app passwords per-account, so there is no single credential that
 // could cover several mailboxes even in principle.
@@ -283,7 +304,11 @@ export function readStatus({ home = homedir() } = {}) {
   // Every source, always. This used to branch on a `role` naming which machine
   // this was in a two-machine split; that split and the roles are gone with it,
   // so there is one page and it shows everything this install can connect.
-  return fullStatus(home);
+  //
+  // The disable pass runs HERE rather than inside each row builder: it applies
+  // to every source by the same rule, and one place to apply it is one place
+  // for it to be forgotten from when a source is added.
+  return fullStatus(home).map((row) => withDisabled(row, home));
 }
 
 // Which calendar backend is configured. The row has to follow it: checking

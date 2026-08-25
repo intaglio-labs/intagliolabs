@@ -44,7 +44,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // its real content height (hzAutoFit on .conn-main), so the card fits snugly
   // instead of standing 500px tall with the shelf pinned to the bottom.
   private static let connectionsBase = NSSize(width: 312, height: 150)
-  private static let peopleBase = NSSize(width: 312, height: 300)
+  // Wider and taller than the other popups because this one is not a list: the
+  // connector ring needs its diameter in BOTH axes at once, and the title sits
+  // inside it. At 312x300 the ring filled the card and pushed "read specs" off
+  // the bottom edge — the height is a floor, but a floor the content cleared
+  // by so much that fitContent's answer was landing past the screen room above
+  // the widget (popupCeiling) and being clamped away.
+  private static let peopleBase = NSSize(width: 360, height: 430)
   private static let skyBase = NSSize(width: 520, height: 620)
 
   private let bridge = Bridge()
