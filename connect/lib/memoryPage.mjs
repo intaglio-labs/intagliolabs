@@ -60,14 +60,27 @@ const C = {
 const STYLE = `
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
+  /* The page renders inside the widget's side panel, whose window is
+     transparent — so the BODY stays transparent and .wrap is the rounded
+     card, the same dressing as the people popups (people-sky.css
+     .plist-win): near-black glass, hairline border, 16px corners. In a
+     plain browser tab the card still reads; only the page behind it is the
+     browser's own. */
   body {
     margin: 0; min-height: 100vh;
-    background: ${C.bg}; color: ${C.fg};
+    background: transparent; color: ${C.fg};
     font-family: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
-    display: flex; justify-content: center; padding: 56px 20px;
+    display: flex; justify-content: center; padding: 0;
   }
   ::selection { background: ${C.hazelnut}; color: ${C.bg}; }
-  .wrap { width: 100%; max-width: 640px; }
+  .wrap {
+    width: 100%; max-width: 640px;
+    height: 100vh; overflow-y: auto;
+    background: rgba(16, 16, 15, 0.92);
+    border: 1px solid rgba(234, 234, 234, 0.10);
+    border-radius: 16px;
+    padding: 26px 24px;
+  }
   .brand { font-size: 11px; color: ${C.muted}; letter-spacing: 0.08em; margin: 0 0 18px; }
   h1 { font-size: 20px; font-weight: 500; margin: 0 0 6px; letter-spacing: -0.01em; }
   .sub { margin: 0 0 4px; font-size: 13px; color: ${C.secondary}; line-height: 1.7; }
@@ -76,6 +89,7 @@ const STYLE = `
   .banner {
     border: 1px solid ${C.hazelnut}; color: ${C.hazelnutLight};
     padding: 10px 12px; font-size: 12px; margin: 0 0 20px;
+    border-radius: 10px;
   }
   ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 26px; }
   li { border-top: 1px solid ${C.hairline}; padding-top: 18px; }
@@ -97,7 +111,7 @@ const STYLE = `
   form { margin: 0; }
   button {
     font: inherit; font-size: 12px; cursor: pointer;
-    padding: 7px 16px; border-radius: 2px;
+    padding: 7px 16px; border-radius: 9px;
     background: transparent; color: ${C.hazelnut};
     border: 1px solid ${C.hazelnut};
   }

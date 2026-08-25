@@ -20,6 +20,8 @@
   if (!listEl) return;
 
   const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  // Hover hint per connector — the icon says which source knows this person.
+  const CHAN_LABEL = { imessage: 'iMessage', whatsapp: 'WhatsApp', mail: 'mail', calendar: 'calendar', linkedin: 'LinkedIn' };
   let year = new Date().getFullYear();
   let years = []; // every year with activity, from the server
   let expanded = null; // '<personKey>|<ym>' of the row showing its detail
@@ -58,11 +60,18 @@
     if (p.company) sub.push(esc(p.company));
     const rowKey = `${p.key}|${ym}`;
     const open = expanded === rowKey;
+    // Which connectors know this person, as the same glyphs the connector
+    // tiles use (bridge.js hzGlyph), directly after the name. title= is the
+    // hover hint; the glyph itself stays wordless.
+    const srcIcons = (p.channels || [])
+      .map((c) => `<span class="pm-src-ic" title="${esc(CHAN_LABEL[c] || c)}">${hzGlyph(c)}</span>`)
+      .join('');
     return (
       `<div class="pl-row${open ? ' open' : ''}" data-rk="${esc(rowKey)}">` +
         `<div class="pl-main">` +
           `<div class="pl-nameline">` +
             `<span class="pl-name">${esc(p.name)}</span>` +
+            srcIcons +
             `<span class="pl-src">${chips}</span>` +
           `</div>` +
           `<div class="pl-sub">${sub.join(' · ')}</div>` +

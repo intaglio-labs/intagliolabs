@@ -85,3 +85,15 @@ body.plist .pm-reset {
   cursor: pointer;
 }
 body.plist .pm-reset:hover { color: var(--hazelnut-light); filter: brightness(1.2); }
+
+/* Connector glyphs after the name: which sources know this person. Same
+   glyph set as the connector tiles (hzGlyph); muted so the name stays the
+   loudest thing on the line. The title attribute carries the hover hint. */
+body.plist .pm-src-ic {
+  flex: 0 0 auto;
+  display: inline-flex;
+  width: 14px; height: 14px;
+  color: var(--muted);
+}
+body.plist .pm-src-ic svg { width: 100%; height: 100%; display: block; }
+body.plist .pm-src-ic:hover { color: var(--hazelnut-light); }
