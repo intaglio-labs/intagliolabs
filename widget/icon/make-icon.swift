@@ -17,6 +17,17 @@ let img = NSImage(size: NSSize(width: S, height: S))
 img.lockFocus()
 guard let ctx = NSGraphicsContext.current?.cgContext else { fatalError("no context") }
 
+// A soft-black tile gives the icon the same grounding as the landing page.
+// Keep the orb inset inside it so the face remains the focal point at small
+// Finder sizes instead of reading as a floating sticker.
+let tileInset: CGFloat = S * 0.055
+let tileRect = CGRect(x: tileInset, y: tileInset,
+                      width: S - 2 * tileInset, height: S - 2 * tileInset)
+ctx.setFillColor(NSColor(red: 0.078, green: 0.078, blue: 0.071, alpha: 1).cgColor)
+ctx.addPath(CGPath(roundedRect: tileRect, cornerWidth: S * 0.19,
+                   cornerHeight: S * 0.19, transform: nil))
+ctx.fillPath()
+
 let inset: CGFloat = S * 0.10
 let orbRect = CGRect(x: inset, y: inset, width: S - 2 * inset, height: S - 2 * inset)
 let r = orbRect.width / 2

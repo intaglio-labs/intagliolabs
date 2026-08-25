@@ -248,6 +248,7 @@ try {
       claims: kept.map((c) => ({
         kind: c.kind,
         text: c.text,
+        when_phrase: c.when_phrase,
         p_claim: c.p,
         // The LINE. hermes resolves the row itself -- see the note on
         // APPLY_SOURCE_FIELDS; a caller-supplied context_id is refused.

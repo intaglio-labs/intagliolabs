@@ -67,6 +67,21 @@ to the nearest such day AFTER the written date, and write the full date. If the
 message is genuinely ambiguous about which one it means, that is a reason to
 lower `p`, not a reason to guess silently.
 
+## `when_phrase` — copy the time, never compute it
+
+Every claim carries `when_phrase`: **the words the message itself used for WHEN**,
+copied exactly from it. `"tomorrow"`. `"tuesday"`. `"the 14th"`. `"next week"`.
+
+**Do not turn it into a date.** Do not write 2026-03-05 because the message says
+"tomorrow". Copy the word. Something else resolves it against the written date,
+and it is better at that than you are — where it disagrees with you, it is right.
+
+If the message names no time at all, `when_phrase` is `""`. Most claims have no
+time in them, so `""` is the ordinary answer and not a failure.
+
+This is separate from `text`, which is still a full sentence written for a reader
+months later. `text` may say "on Tuesday"; `when_phrase` is just `"tuesday"`.
+
 ## The author prefix
 
 The row may arrive as `Name: text` — the name before the first colon is the

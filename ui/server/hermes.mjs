@@ -1388,7 +1388,11 @@ const APPLY_RUN_FIELDS = Object.freeze([
 // is read off the cited context row by this server. A model-supplied
 // observed_at would let a claim date itself, which is how "he said that in
 // March" stops being checkable against anything.
-const APPLY_CLAIM_FIELDS = Object.freeze(['kind', 'text', 'p_claim', 'source']);
+// when_phrase is the model's COPY of the time words in the message. It is not
+// stored: validity.mjs resolves it to valid_to here and the phrase itself has
+// no use afterwards, so keeping it would be a second, unversioned record of
+// what the message said.
+const APPLY_CLAIM_FIELDS = Object.freeze(['kind', 'text', 'when_phrase', 'p_claim', 'source']);
 const DECIDE_FIELDS = Object.freeze(['claim_id', 'action', 'reason']);
 const PENDING_PARAMS = Object.freeze(['limit']);
 const RECALL_PARAMS = Object.freeze(['q', 'limit']);
