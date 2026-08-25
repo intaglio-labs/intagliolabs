@@ -107,13 +107,11 @@ body.plist .pl-row {
 }
 body.plist .pl-row:hover { background: rgba(234, 234, 234, 0.05); }
 body.plist .pl-row.open { background: rgba(234, 234, 234, 0.06); }
-body.plist .pl-dot {
-  flex: 0 0 auto;
-  width: 8px; height: 8px;
-  border-radius: 50%;
-  margin-top: 5px;
-  box-shadow: 0 0 6px rgba(0, 0, 0, 0.4);
-}
+/* .pl-dot (the warmth dot) lived here until 2026-08-25. It was the sky list's,
+   its only colour came from a style attribute this page's CSP threw away, and
+   the timeline that replaced that list says the same thing in text — a message
+   count and source glyphs on .pl-nameline. Nothing has rendered the element
+   since 2026-08-24; the rule was styling markup that no longer exists. */
 body.plist .pl-main { min-width: 0; flex: 1 1 auto; }
 /* Name and source chips share one line: name on the left (ellipsizes if long),
    chips flowing to its right. */
@@ -179,9 +177,12 @@ body.plist .pl-empty {
 /* ---- the "by year" grouping (sort: by year) ----
    Year sections newest first; within a year, rows sort by that YEAR's
    engagement and carry that year's topic chips. The bar is scaled to the
-   year's own max so 2016 is legible next to 2021. Widths and dot colours are
-   painted through the CSSOM (people-sky.js paintBars/paintDots) because this
-   page's CSP blocks style attributes. */
+   year's own max so 2016 is legible next to 2021. Bar widths are painted
+   through the CSSOM rather than a style attribute, because this page's CSP
+   blocks style attributes (see widget/test/csp-inline-style.test.mjs).
+   (Said "people-sky.js paintBars/paintDots" until 2026-08-25. That file was
+   yeeted 2026-08-24 with the sky list, and the dots went with it — the
+   painting that survives is the bars', done from people-months.js.) */
 body.plist .pl-year {
   position: sticky;
   top: 0;
