@@ -1,0 +1,235 @@
+# Publish a release -> a notarized DMG appears on it.
+#
+# The DMG this produces is the same one widget/release.sh has always produced;
+# what is being removed is the remembering. Until now a release meant somebody
+# ran release.sh on their own Mac and dragged the result into the GitHub UI, and
+# the download page pointed at whatever they dragged.
+#
+# WHY A REAL MAC AND NOT A CONTAINER: the app is Swift compiled against the macOS
+# SDK, signed with Developer ID, and notarized by Apple. Every one of those needs
+# macOS, and notarization needs the network.
+#
+# WHAT THE OWNER HAS TO SET UP ONCE — the workflow fails with the exact
+# instructions if any is missing, rather than shipping something degraded:
+#
+#   secrets.MAC_DEVELOPER_ID_P12       base64 of a "Developer ID Application"
+#                                      .p12 export (cert + private key)
+#   secrets.MAC_DEVELOPER_ID_P12_PASS  its export password
+#   secrets.APPLE_ID                   Apple ID for notarization
+#   secrets.APPLE_TEAM_ID              the 10-character team id
+#   secrets.APPLE_APP_PASSWORD         an app-specific password, NOT the account one
+#   a `voice-assets` release            see "voice models" below
+#
+#   Export the .p12 from Keychain Access (the cert AND its key), then:
+#     base64 -i DeveloperID.p12 | pbcopy
+#
+# NO MARKETPLACE ACTIONS HOLD THE SIGNING KEY. Same reasoning as site.yml: one
+# fewer third party in the path that holds a credential, and the commands in the
+# log are the ones a person would type.
+name: release
+
+on:
+  release:
+    # `published` and not `created`: a draft release fires `created`, and a draft
+    # is exactly where somebody is still deciding whether this is a release at
+    # all. Publishing is the decision.
+    types: [published]
+  # So a failed notarization can be retried without cutting a new tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'existing release tag to build and attach to'
+        required: true
+
+permissions:
+  contents: write   # to upload the asset onto the release
+
+# One signing job at a time. Two concurrent runs would fight over the notary
+# queue and could attach two different DMGs to the same release.
+concurrency:
+  group: release-dmg
+  cancel-in-progress: false
+
+jobs:
+  dmg:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+          # release.sh refuses to build anything it cannot trace to a commit that
+          # is on main and pushed. It needs the full history and the main ref to
+          # establish that, and a shallow checkout has neither.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The tag alone does not prove the code is on main -- a tag can be pushed
+      # to any commit. release.sh checks it, and this fetch is what gives it
+      # something to check against.
+      - name: fetch main, so provenance can be established
+        run: |
+          git remote add upstream "https://github.com/${GITHUB_REPOSITORY}.git" 2>/dev/null || true
+          git fetch --no-tags upstream main:refs/remotes/origin/main
+
+      - name: refuse to build without the secrets, before doing any work
+        env:
+          P12: ${{ secrets.MAC_DEVELOPER_ID_P12 }}
+          P12_PASS: ${{ secrets.MAC_DEVELOPER_ID_P12_PASS }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          missing=""
+          for v in P12 P12_PASS APPLE_ID TEAM_ID APP_PASSWORD; do
+            eval "val=\$$v"
+            [ -n "$val" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "missing secrets:$missing"
+            echo "See the header of .github/workflows/release.yml for how to create them."
+            echo "Failing now rather than after a 40-minute build."
+            exit 1
+          fi
+
+      # VOICE MODELS: ~496 MB the runtime fails CLOSED without, and which CI
+      # cannot regenerate -- voice/setup-voice.sh needs npm, esbuild and sharp,
+      # and its own comment records that the install breaks on a current node
+      # even on a dev box.
+      #
+      # So they are fetched from a release the owner uploads ONCE, from the
+      # machine that can build them:
+      #
+      #   tar -C ~/.hazlie/models -czf voice-models.tgz voice
+      #   gh release create voice-assets voice-models.tgz \
+      #     --title 'voice models' --notes 'build input for the release workflow'
+      #
+      # Absent, this FAILS rather than building a DMG with no voice in it. A
+      # download page serving a quietly degraded app is worse than one serving
+      # nothing, because nobody finds out until a user does.
+      - name: fetch the voice models
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release download voice-assets --pattern 'voice-models.tgz' \
+                 --dir "$RUNNER_TEMP" --repo "$GITHUB_REPOSITORY"; then
+            echo "no 'voice-assets' release with voice-models.tgz in this repository."
+            echo "The app fails closed without these, so this will not ship a DMG"
+            echo "that silently has no voice. Create it once — see the comment above."
+            exit 1
+          fi
+          mkdir -p "$HOME/.hazlie/models"
+          tar -C "$HOME/.hazlie/models" -xzf "$RUNNER_TEMP/voice-models.tgz"
+          test -d "$HOME/.hazlie/models/voice" || { echo "tarball did not contain voice/"; exit 1; }
+          du -sh "$HOME/.hazlie/models/voice"
+
+      # build.sh bundles the node it finds on PATH, so the version here is the
+      # version users run. Pinned rather than "whatever the image ships".
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: install llama.cpp
+        run: |
+          brew install llama.cpp
+          llama-server --version 2>&1 | head -2 || true
+
+      # A DEDICATED KEYCHAIN, not the login one. It is created for this job,
+      # unlocked only here, and deleted on the way out whatever happened --
+      # the runner is ephemeral, but a signing key left in a default keychain is
+      # readable by every later step, and steps get added.
+      - name: import the Developer ID certificate
+        env:
+          P12: ${{ secrets.MAC_DEVELOPER_ID_P12 }}
+          P12_PASS: ${{ secrets.MAC_DEVELOPER_ID_P12_PASS }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          # A throwaway password for a throwaway keychain; it never protects
+          # anything beyond this job.
+          KP="$(openssl rand -hex 32)"
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          security create-keychain -p "$KP" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KP" "$KEYCHAIN"
+
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$P12_PASS" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          # Without this, codesign blocks on a GUI prompt that no one will answer
+          # and the job hangs until the timeout.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$KEYCHAIN" >/dev/null
+          # The search list, so `security find-identity` in build.sh sees it.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+
+          ID="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+                | awk '/Developer ID Application/ {print $2; exit}')"
+          if [ -z "$ID" ]; then
+            echo "the .p12 imported but contains no 'Developer ID Application' identity."
+            echo "Export the certificate AND its private key from Keychain Access."
+            exit 1
+          fi
+          # The hash only. The certificate's subject line names the team.
+          echo "signing identity: $ID"
+          echo "HAZLIE_SIGN_IDENTITY=$ID" >> "$GITHUB_ENV"
+
+      - name: store notary credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          # release.sh submits with `--keychain-profile hazlie-notary`, so the
+          # profile has to exist under that name and in the job's keychain.
+          xcrun notarytool store-credentials hazlie-notary \
+            --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PASSWORD" \
+            --keychain "$KEYCHAIN"
+
+      # The build itself is unchanged: the same script a person runs by hand,
+      # including its provenance guard, which on a tag build checks that the tag
+      # is this commit and that the commit is on main.
+      - name: build, sign, notarize, staple, DMG
+        env:
+          # Names the tag for release.sh's provenance guard. Passed explicitly
+          # rather than left to GITHUB_REF_*, which on a manual re-run describes
+          # the branch the workflow ran on and not the tag being built.
+          HZ_RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: ./widget/release.sh
+
+      - name: attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DMG="$(ls widget/build/dist/*.dmg)"
+          echo "built: $DMG"
+          case "$DMG" in
+            *NOT-A-RELEASE*)
+              echo "release.sh produced a non-release DMG; refusing to attach it."
+              exit 1;;
+          esac
+
+          # Gatekeeper's own answer, on the artifact as it will be downloaded.
+          # A DMG that fails this is one users see a scary dialog for, and it is
+          # far better to fail the job than to publish it.
+          spctl --assess --type open --context context:primary-signature -vv "$DMG"
+          xcrun stapler validate "$DMG"
+
+          # The site links to /releases/latest/download/IntaglioLabs.dmg, which
+          # matches on the asset's NAME. The versioned filename release.sh
+          # produces would break that permalink, so it is uploaded under the
+          # stable name. --clobber so a re-run replaces rather than fails.
+          cp "$DMG" "$RUNNER_TEMP/IntaglioLabs.dmg"
+          gh release upload "$TAG" "$RUNNER_TEMP/IntaglioLabs.dmg" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+          shasum -a 256 "$RUNNER_TEMP/IntaglioLabs.dmg" | sed 's|.*/||'
+
+      - name: remove the signing keychain
+        if: always()
+        run: |
+          security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+          security list-keychains -d user -s login.keychain-db 2>/dev/null || true
