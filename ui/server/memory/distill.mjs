@@ -60,11 +60,19 @@ export const CLAIM_SCHEMA = Object.freeze({
         items: {
           type: 'object',
           additionalProperties: false,
-          required: ['kind', 'text', 'quote', 'p'],
+          required: ['kind', 'text', 'quote', 'when_phrase', 'p'],
           properties: {
             kind: { enum: [...CLAIM_KINDS] },
             text: { type: 'string', minLength: 1, maxLength: 400 },
             quote: { type: 'string', minLength: 1, maxLength: 400 },
+            // THE WORDS THE MESSAGE USED FOR *WHEN*, copied, never computed.
+            // See the note on the episode schema below for why this is a
+            // grammar requirement rather than a line in the prompt.
+            //
+            // Here as well as there because THIS is the path the app runs:
+            // Distiller.swift schedules distill-once.mjs, so a fix that lived
+            // only in episode mode would never reach a single scheduled pass.
+            when_phrase: { type: 'string', maxLength: 40 },
             p: { type: 'number', minimum: 0, maximum: 1 },
           },
         },
@@ -177,6 +185,29 @@ export function parseClaims(raw) {
 // Hold the model to the prompt. Returns the claims that survive, plus a reason
 // for every one that did not, so a run can report WHY it produced little rather
 // than just that it did.
+// THE PHRASE MUST BE THE MESSAGE'S OWN WORDS, checked the same way the quote is.
+//
+// Without this, a model that invents "tomorrow" for an undated plan gets that
+// invention promoted straight into valid_to -- and validToFor TRUSTS the phrase
+// over the claim prose, so a fabricated expiry outranks the honest fallback and
+// the claim sorts itself away as PASSED. A hallucinated date is worse than no
+// date, because no date is visibly no date.
+//
+// Case-insensitive, unlike the quote check, and deliberately: the quote is a
+// receipt and must be byte-exact, while this is a lookup key the model routinely
+// lowercases ("Tuesday" -> "tuesday"). Substring, not equality, because the
+// phrase is a span of a longer message.
+//
+// An unverifiable phrase is DROPPED rather than the claim: the claim may be
+// perfectly good and simply lose its expiry, which is the safe direction.
+export function verifiedPhrase(phrase, sourceText) {
+  if (typeof phrase !== 'string') return '';
+  const trimmed = phrase.trim();
+  if (trimmed.length === 0) return '';
+  const hay = String(sourceText ?? '').toLowerCase();
+  return hay.includes(trimmed.toLowerCase()) ? trimmed : '';
+}
+
 export function validateRowClaims(row, claims) {
   if (claims.length > MAX_CLAIMS_PER_ROW) {
     return {
@@ -260,6 +291,10 @@ export function validateRowClaims(row, claims) {
       continue;
     }
     seen.add(key);
+    const when_phrase = verifiedPhrase(claim.when_phrase, row.text);
+    if (when_phrase === '' && typeof claim.when_phrase === 'string' && claim.when_phrase.trim()) {
+      dropped.push({ reason: 'when_phrase is not a span of the row', keptClaim: true });
+    }
     // A malformed or absent `p` does NOT drop the claim. The grammar makes it
     // required so a compliant model always sends one, but a build without
     // grammar support, an older cached answer, or a model that ignores the
@@ -272,6 +307,7 @@ export function validateRowClaims(row, claims) {
     kept.push({
       kind: claim.kind,
       text: claim.text.trim(),
+      when_phrase,
       p_claim: p,
       source: { context_id: Number(row.id), quote: claim.quote, content_hash: row.content_hash },
     });
@@ -338,10 +374,28 @@ export function episodeClaimSchema(lines) {
           items: {
             type: 'object',
             additionalProperties: false,
-            required: ['kind', 'text', 'line', 'quote', 'p'],
+            required: ['kind', 'text', 'line', 'quote', 'when_phrase', 'p'],
             properties: {
               kind: { enum: [...CLAIM_KINDS] },
               text: { type: 'string', minLength: 1, maxLength: 400 },
+              // THE WORDS THE MESSAGE USED FOR *WHEN*, copied, not computed.
+              //
+              // Required by the grammar rather than asked for in the prompt,
+              // and that distinction is the entire point. Across a full corpus
+              // pass the model obeyed the JSON schema on 1,030 of 1,030 calls
+              // and the prose instruction to resolve dates on 1 of 38. What a
+              // grammar requires, it emits.
+              //
+              // It must NOT resolve the date. Given a pattern-constrained date
+              // field it produced a well-formed date every time and still wrote
+              // the day the message was sent rather than the day "tomorrow"
+              // meant. Asked to copy the phrase it was right 6 times out of 6.
+              // memory/validity.mjs does the arithmetic, because arithmetic is
+              // code's job here.
+              //
+              // Empty string for a claim that names no time -- 57% of plans on
+              // the live corpus name none, so that is the common answer.
+              when_phrase: { type: 'string', maxLength: 40 },
               // The line the quote came from. Required, and checked against the
               // quotable set -- this is what makes citation a closed set rather
               // than a request.
@@ -485,6 +539,10 @@ export function validateEpisodeClaims(lines, claims) {
       kind: claim.kind,
       text: claim.text.trim(),
       quote: claim.quote,
+      // Against the CITED line only. A phrase lifted from a received line is
+      // somebody else's timing, and the whole point of the quotable set is that
+      // it cannot become part of the owner's claim.
+      when_phrase: verifiedPhrase(claim.when_phrase, line.text),
       p,
       // The LINE, not a context_id. Hermes resolves it; a caller-supplied row
       // id is never trusted.

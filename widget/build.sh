@@ -270,6 +270,11 @@ PYEOF
     ;;
 esac
 
+# Finder provenance/resource-fork metadata is harmless on source assets but
+# codesign rejects it inside an application bundle. Clear it only from the
+# generated bundle, never from the checkout.
+xattr -cr "$APP" 2>/dev/null || true
+
 if [ -n "$IDENTITY" ]; then
   # INSIDE-OUT: the bundled node runtime is nested Mach-O and must carry its
   # own Developer ID signature (with JIT entitlements for V8) BEFORE the app
@@ -327,6 +332,10 @@ fi
 DEST="/Applications/Intaglio Labs.app"
 rm -rf "$DEST" "/Applications/Hazlie.app" "$HOME/Applications/Hazlie.app" "$HOME/Applications/Intaglio Labs.app"
 cp -R "$APP" "$DEST"
+# Copying a bundle into /Applications can attach Finder provenance metadata to
+# the destination after it was signed. codesign rejects that metadata, so clear
+# it from this generated install copy before LaunchServices registers it.
+xattr -cr "$DEST" 2>/dev/null || true
 echo "installed: $DEST"
 
 LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
