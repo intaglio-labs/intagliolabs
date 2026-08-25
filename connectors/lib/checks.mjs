@@ -261,20 +261,65 @@ function checkOuraSecret(home) {
   return result(name, PASS, 'present, owner-only, carries access and refresh tokens');
 }
 
+// CHECK THE FILE THE CONNECTOR ACTUALLY OPENS.
+//
+// This checked `gmail-app-password.txt` — a single bare filename — while
+// sources/mail.mjs and connect/lib/status.mjs both read a PER-ACCOUNT
+// `gmail-app-password-<address>.txt`. Nothing anywhere reads the bare name, so
+// the prompt in ops/setup-connectors.sh wrote an orphan and this check then
+// reported PASS "present, owner-only" for a mail connector that could not run
+// and had no row in the UI. Verified 2026-08-25 by watching all three at once:
+// doctor PASS, connector "not ready", zero mail rows on the status surface.
+// A check that passes on a file no reader opens is worse than no check.
+//
+// Kept as WARN rather than FAIL throughout: mail is opt-in, and a machine that
+// never configured it is not broken.
+function mailSecretName(address) {
+  return `gmail-app-password-${String(address).toLowerCase().replace(/[^a-z0-9]+/gu, '-')}.txt`;
+}
+
 function checkGmailSecret(home) {
   const name = 'secret-gmail';
-  const p = join(home, '.hazlie', 'secrets', 'gmail-app-password.txt');
-  const problem = secretFileProblem(p);
-  if (problem === 'missing') {
+  const config = readConfigLeniently(home);
+  const accounts = Array.isArray(config?.mail?.accounts)
+    ? config.mail.accounts.filter((a) => typeof a?.user === 'string' && a.user.length > 0)
+    : [];
+
+  // No configured mailbox is the REAL blocker, and it is the one the old check
+  // could never report: with no `mail.accounts[]` there is no mail row on the
+  // connect page either, so there is no door to walk through.
+  if (accounts.length === 0) {
+    const stray = secretFileProblem(join(home, '.hazlie', 'secrets', 'gmail-app-password.txt'));
     return result(
       name,
       WARN,
-      `${p} is missing — mail connector disabled`,
-      're-run ops/setup-connectors.sh interactively to be prompted for the Gmail app password'
+      stray === 'missing'
+        ? 'no mail.accounts[] in config.json — mail connector disabled'
+        : 'no mail.accounts[] in config.json — mail connector disabled (and a stray '
+          + 'gmail-app-password.txt is present, which nothing reads)',
+      'add mail.accounts[] to ~/.hazlie/connectors/config.json (ops/CONNECTORS.md, '
+        + '"Configuration (config.json)"), then store each password from the connect page'
     );
   }
-  if (problem) return result(name, FAIL, `${p}: ${problem}`, `chmod 600 ${p} (and make it a plain owner-owned file)`);
-  return result(name, PASS, 'present, owner-only');
+
+  const missing = [];
+  for (const account of accounts) {
+    const p = join(home, '.hazlie', 'secrets', mailSecretName(account.user));
+    const problem = secretFileProblem(p);
+    if (problem === 'missing') missing.push(account.user);
+    else if (problem) {
+      return result(name, FAIL, `${p}: ${problem}`, `chmod 600 ${p} (and make it a plain owner-owned file)`);
+    }
+  }
+  if (missing.length > 0) {
+    return result(
+      name,
+      WARN,
+      `${missing.length} of ${accounts.length} configured mailbox(es) have no stored app password`,
+      'open the connect page and paste each account\'s 16-letter Google app password'
+    );
+  }
+  return result(name, PASS, `${accounts.length} configured mailbox(es), each with an owner-only app password`);
 }
 
 // --- hermes -------------------------------------------------------------------
