@@ -9,8 +9,10 @@
 #   widget/uninstall.sh --yes        no prompt (for scripts; still prints)
 #
 # What this touches, and only this:
-#   1. Every com.hazlie.* launchd agent in this user's domain (stopped and
-#      its plist removed).
+#   1. Every io.intaglio.* launchd agent in this user's domain (stopped and
+#      its plist removed) — AND every pre-rename com.hazlie.* one, because an
+#      uninstall that only knew the current namespace would leave the old
+#      agents running under launchd with nothing left to point at them.
 #   2. The Hazlie widget process and the app bundle — 'Intaglio Labs.app'
 #      (or a pre-rename 'Hazlie.app') in ~/Applications and /Applications.
 #   3. ~/.hazlie — the database, secrets, models, logs, caches. This is the
@@ -46,12 +48,12 @@ say ""
 
 # ── 1. launchd agents ────────────────────────────────────────────────────────
 FOUND_AGENTS=""
-for plist in "$AGENTS_DIR"/com.hazlie.*.plist; do
+for plist in "$AGENTS_DIR"/io.intaglio.*.plist "$AGENTS_DIR"/com.hazlie.*.plist; do
   [ -e "$plist" ] || continue
   FOUND_AGENTS="$FOUND_AGENTS $(basename "$plist" .plist)"
 done
 # Agents can be loaded without a plist on disk (a bootstrap from a repo path).
-LOADED=$(launchctl list 2>/dev/null | awk '$3 ~ /^com\.hazlie\./ {print $3}') || LOADED=""
+LOADED=$(launchctl list 2>/dev/null | awk '$3 ~ /^(io\.intaglio|com\.hazlie)\./ {print $3}') || LOADED=""
 for label in $LOADED; do
   case " $FOUND_AGENTS " in *" $label "*) ;; *) FOUND_AGENTS="$FOUND_AGENTS $label" ;; esac
 done
@@ -132,15 +134,20 @@ fi
 # only if it actually names one of our app bundles, so a corrupted default
 # can never aim this rm at something else — then drop the whole defaults
 # domain.
-STALE=$(defaults read com.hazlie.widget HazlieStaleCopyPath 2>/dev/null || true)
-case "$STALE" in
-  */Hazlie.app|*"/Intaglio Labs.app") [ -d "$STALE" ] && act "remove stale self-move copy $STALE" rm -rf "$STALE" ;;
-esac
-act "remove com.hazlie.widget preferences" defaults delete com.hazlie.widget 2>/dev/null
+# Both bundle ids: a pre-rename install wrote its defaults under com.hazlie.widget.
+for bundle in io.intaglio.widget com.hazlie.widget; do
+  STALE=$(defaults read "$bundle" HazlieStaleCopyPath 2>/dev/null || true)
+  case "$STALE" in
+    */Hazlie.app|*"/Intaglio Labs.app") [ -d "$STALE" ] && act "remove stale self-move copy $STALE" rm -rf "$STALE" ;;
+  esac
+  act "remove $bundle preferences" defaults delete "$bundle" 2>/dev/null
+done
 
 # Best-effort reset of the grants that CAN be reset per-bundle. Failures here
 # are normal (grant never given, or macOS refuses) and change nothing else.
-tccutil reset Microphone com.hazlie.widget >/dev/null 2>&1 && say "doing: reset microphone grant for com.hazlie.widget" || true
+for bundle in io.intaglio.widget com.hazlie.widget; do
+  tccutil reset Microphone "$bundle" >/dev/null 2>&1 && say "doing: reset microphone grant for $bundle" || true
+done
 
 say ""
 say "done. Two grants macOS only lets YOU revoke, in System Settings:"

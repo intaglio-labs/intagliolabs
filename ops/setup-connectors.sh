@@ -264,6 +264,33 @@ fi
 # ── (e) launchd agents ────────────────────────────────────────────────────────
 step "launchd agents"
 
+# THE PRE-RENAME AGENTS, RETIRED FIRST. The reverse-DNS namespace moved from
+# com.hazlie.* to io.intaglio.* on 2026-08-25, to derive from the domain the
+# project actually owns (intaglio.io). launchd keys a service on its LABEL, so
+# the old agents are not "replaced" by the new ones — they are simply a second
+# set, still loaded, still KeepAlive, still executing the same scripts against
+# the same database. Two hermes instances racing for port 51789 is the visible
+# failure; two connector daemons racing for the same cursors is the quiet one.
+# Retired here rather than in a migration note, because a note only helps the
+# person who reads it.
+# ONLY THE AGENTS THIS SCRIPT OWNS. llama-server is setup-llm.sh's, and
+# retiring it here left a machine with no llama-server at all: this script
+# booted the old one out and nothing in it installs the replacement, so
+# `/vault/ask` answered "fetch failed" until setup-llm.sh was re-run. An
+# uninstall step for an agent you do not install is a hole, not a migration.
+for old in hermes connect connectors whatsapp-keepalive; do
+  old_label="com.hazlie.$old"
+  old_plist="$HOME/Library/LaunchAgents/$old_label.plist"
+  if launchctl print "gui/$UID/$old_label" >/dev/null 2>&1; then
+    launchctl bootout "gui/$UID/$old_label" 2>/dev/null || true
+    echo "    retired pre-rename agent $old_label"
+  fi
+  if [[ -f "$old_plist" ]]; then
+    rm -f "$old_plist"
+    echo "    removed $old_plist"
+  fi
+done
+
 bootstrap_agent() {
   local plist_dst="$1" label="$2"
   for attempt in 1 2 3 4 5; do
@@ -326,8 +353,8 @@ install_agent() {
   fi
 }
 
-install_agent com.hazlie.hermes
-install_agent com.hazlie.connect
+install_agent io.intaglio.hermes
+install_agent io.intaglio.connect
 
 # WhatsApp Desktop only syncs while it is running, so the connector's freshness
 # is bounded by how often the owner opens the app (ops/PROBES.md measured the
@@ -341,17 +368,32 @@ install_agent com.hazlie.connect
 # awake for a connector that is not built would be a daily app launch for
 # nothing.
 if [[ -f "$REPO_ROOT/connectors/sources/whatsapp.mjs" ]]; then
-  install_agent com.hazlie.whatsapp-keepalive
+  install_agent io.intaglio.whatsapp-keepalive
 else
-  echo "    com.hazlie.whatsapp-keepalive: no whatsapp connector — skipping"
+  echo "    io.intaglio.whatsapp-keepalive: no whatsapp connector — skipping"
 fi
 
-if [[ -f "$REPO_ROOT/connectors/daemon.mjs" ]]; then
-  install_agent com.hazlie.connectors
-else
-  echo "    com.hazlie.connectors: connectors/daemon.mjs not present yet (a"
+# THE APP OWNS THE DAEMON WHEN THE APP IS INSTALLED, and installing this agent
+# anyway is not merely redundant — the two actively fight. `Provision
+# .retireConnectorsAgent()` boots out and DELETES this plist on every app
+# launch, by design: the daemon runs as a child of the app so TCC attributes
+# Full Disk Access to one row called Intaglio Labs instead of to a unix binary
+# nobody installed (widget/src/Connectors.swift). So a machine with the app got
+# an agent installed here, killed seconds later by the app, and a
+# "Bootstrap failed: 5: Input/output error" that looks like a launchd defect
+# and is really two components disagreeing about who owns the process.
+#
+# Observed 2026-08-25: the plist vanishing from ~/Library/LaunchAgents after
+# each attempt was read as macOS pruning a failing agent. It was the app.
+if [[ ! -f "$REPO_ROOT/connectors/daemon.mjs" ]]; then
+  echo "    io.intaglio.connectors: connectors/daemon.mjs not present yet (a"
   echo "    concurrent commit adds it) — skipping this agent; a KeepAlive job"
   echo "    pointing at a missing script would crash-loop. Re-run after it lands."
+elif [[ -d "/Applications/Intaglio Labs.app" ]]; then
+  echo "    io.intaglio.connectors: the app is installed and runs the daemon as"
+  echo "    its own child — skipping the agent, which the app would delete anyway."
+else
+  install_agent io.intaglio.connectors
 fi
 
 # The iMessage lanes are GONE (owner, 2026-08-21): Hazlie no longer texts its
@@ -385,7 +427,7 @@ for i in $(seq 1 15); do
 done
 if [[ "$healthy" != 1 ]]; then
   echo "ERROR: no Hermes health answer after 15s." >&2
-  echo "Check: launchctl print gui/$UID/com.hazlie.hermes" >&2
+  echo "Check: launchctl print gui/$UID/io.intaglio.hermes" >&2
   echo "       tail -50 $LOG_DIR/hermes.err.log" >&2
   echo "       lsof -nP -iTCP:${HERMES_PORT:-51789} -sTCP:LISTEN   # another process may hold the port" >&2
   exit 1
@@ -400,9 +442,9 @@ if [[ "$DOCTOR_STATUS" != 0 ]]; then
   echo "doctor reported FAILs (exit $DOCTOR_STATUS). fda-* rows failing HERE are"
   echo "expected: this shell — not launchd — is the responsible process, so the"
   echo "Full Disk Access grant does not apply to this run. Production truth:"
-  echo "    launchctl submit -l com.hazlie.doctor -o /tmp/doctor.out -e /tmp/doctor.err \\"
+  echo "    launchctl submit -l io.intaglio.doctor -o /tmp/doctor.out -e /tmp/doctor.err \\"
   echo "      -- $STABLE_NODE $REPO_ROOT/connectors/doctor.mjs --json"
-  echo "    (poll /tmp/doctor.out, then: launchctl remove com.hazlie.doctor)"
+  echo "    (poll /tmp/doctor.out, then: launchctl remove io.intaglio.doctor)"
   echo "Any non-fda FAIL above is real; act on its fix line."
 else
   echo "doctor is green."

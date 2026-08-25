@@ -8,6 +8,14 @@ body.people {
   background: transparent;
   font-family: var(--mono);
   color: var(--fg);
+  /* Belt-and-suspenders: native clamps a popup's height to the room actually
+     free above the widget (main.swift popupCeiling()), and the base `body`
+     rule (palette.css) hides overflow — a popup taller than that room would
+     have its bottom silently, unreachably clipped, with no scrollbar to say
+     so. The ring's own size already scales down for a short connector list
+     (see .p-ring), so this should rarely engage, but when the room is
+     genuinely too small it must be a scroll, never a disappearance. */
+  overflow-y: auto;
 }
 
 body.people .win {
@@ -23,7 +31,7 @@ body.people .win {
   background: rgba(20, 20, 18, 0.72);
   border: 1px solid rgba(234, 234, 234, 0.10);
   box-shadow: inset 0 1px 0 rgba(234, 234, 234, 0.08);
-  padding: 18px 20px 14px;
+  padding: 14px 20px 12px;
 }
 
 .people-main {
@@ -31,22 +39,17 @@ body.people .win {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
 }
 
 .p-title {
-  margin: 4px 0 0;
-  font-size: 17px;
+  margin: 0;
+  font-size: 19px;
+  line-height: 1.2;
   font-weight: 600;
   letter-spacing: -0.01em;
+  text-align: center;
   color: var(--fg);
-}
-
-.p-body {
-  margin: 0;
-  font-size: 12.5px;
-  line-height: 1.65;
-  color: var(--secondary);
 }
 
 .p-stay {
@@ -81,9 +84,18 @@ body.people .p-explain {
 }
 body.people .p-explain b { color: var(--secondary); font-weight: 600; }
 body.people .p-explain a { color: var(--hazelnut); text-decoration: underline; cursor: pointer; }
+/* The ring and the controls row sit centered under it — the timeframe
+   dropdown and the search button, side by side, no label row above them (the
+   dropdown's own text names the timeframe). */
+body.people .p-controls {
+  align-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 2px;
+}
 body.people .p-init {
-  margin-top: 10px;
-  align-self: flex-start;
   min-height: 40px;
   padding: 9px 26px;
   border-radius: 999px;
@@ -98,8 +110,8 @@ body.people .p-init {
 body.people .p-init:hover { filter: brightness(1.06); }
 body.people .p-init:disabled { opacity: 0.7; cursor: default; filter: none; }
 body.people .p-specs {
-  margin-top: 10px;
-  align-self: flex-start;
+  align-self: center;
+  margin-top: 2px;
   font-size: 12px;
   color: var(--secondary);
   text-decoration: underline;
@@ -107,32 +119,74 @@ body.people .p-specs {
 }
 body.people .p-specs:hover { color: var(--hazelnut); }
 
-/* Timeframe: a label over a dropdown. Tight to the connectors bar above it. */
-body.people .p-param {
-  margin-top: -4px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-body.people .p-param-label {
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
 body.people .p-select {
-  align-self: flex-start;
-  min-width: 130px;
+  min-width: 0;
   font-family: inherit;
   font-size: 12px;
   color: var(--fg);
   background: rgba(10, 10, 10, 0.5);
   border: 1px solid rgba(234, 234, 234, 0.14);
-  border-radius: 9px;
-  padding: 7px 10px;
+  border-radius: 999px;
+  padding: 9px 14px;
   cursor: pointer;
 }
 body.people .p-select:focus { outline: none; border-color: rgba(197, 165, 109, 0.5); }
+
+/* The ring: a stage the tiles sit on, centered in the popup, with the title
+   floating in the middle. --ring-r (and therefore the whole popup's height)
+   scales with --n (people.js), the actual connector count — a handful of
+   sources gets a small ring instead of every install always paying for the
+   worst case. The clamp's floor keeps a short list from looking cramped; its
+   ceiling is picked so even a full house of ~16 tiles (40px each) doesn't
+   overlap around the circle — see the chord-length math where .row's
+   transform is defined below before moving either number. */
+body.people .p-ring {
+  --ring-r: clamp(64px, calc(36px + var(--n, 8) * 4.4px), 104px);
+  position: relative;
+  width: calc(var(--ring-r) * 2 + 44px);
+  height: calc(var(--ring-r) * 2 + 44px);
+  margin: 0 auto;
+  flex: 0 0 auto;
+}
+body.people .p-ring-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 30px; /* keeps the two-line title clear of the ring of tiles */
+  pointer-events: none; /* only the tiles are interactive, not the stage */
+}
+/* Overrides the shared shelf (.list is normally a horizontal scroller): the
+   ring absolutely positions every tile via the --i/--n custom properties
+   people.js sets on each .row, evenly spaced by transform instead of flex
+   flow, so it holds up for any connector count without a rewrite. */
+body.people .p-ring .list {
+  position: absolute;
+  inset: 0;
+  display: block;
+  padding: 0;
+  margin: 0;
+  overflow: visible;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+body.people .p-ring .row {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  /* Half the 40px tile, so the transform's origin is the tile's own center
+     rather than its top-left corner. */
+  margin: -20px 0 0 -20px;
+  /* --ring-r is read from .p-ring (custom properties inherit down), the same
+     value that sizes the stage, so the tiles are always inscribed exactly on
+     its edge regardless of connector count. */
+  transform:
+    rotate(calc(360deg / var(--n, 1) * var(--i, 0)))
+    translate(0, calc(-1 * var(--ring-r, 96px)))
+    rotate(calc(-360deg / var(--n, 1) * var(--i, 0)));
+}
+
 body.people .p-what {
   margin: 6px 0 2px;
   padding-left: 16px;
@@ -268,18 +322,6 @@ body.people .tile-tip {
   opacity: 0; transition: opacity 0.12s ease;
 }
 body.people .tile-tip.on { opacity: 1; }
-
-/* The connections bar reuses the global .list/.row tiles, but .list carries
-   negative margins tuned for the settings shelf's shadow-bleed clip. Reset them
-   here and give the tile shadows their own room, so the bar sits cleanly inside
-   the popup and scrolls horizontally when there are more sources than fit. */
-body.people .list {
-  /* Sit right under the "connectors" label — negative margin cancels the
-     column's flex gap; the small padding is just shadow room for the tiles. */
-  margin: -12px 0 0;
-  padding: 6px 2px 4px;
-  max-width: 100%;
-}
 
 /* The connector's flow, as a left SIDE PANEL (same as settings). Hidden until a
    tile is clicked (global .hint-host:empty { display:none }); when a hint opens,

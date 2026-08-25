@@ -686,11 +686,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
               ])
               return
             }
-            Provision.installAgent("com.hazlie.llama-server")
-            Provision.kickstart("com.hazlie.llama-server")
+            Provision.installAgent("io.intaglio.llama-server")
+            Provision.kickstart("io.intaglio.llama-server")
             // hermes holds the llama base URL open; restart it so the first ask
             // after setup does not meet a proxy pointed at nothing.
-            Provision.kickstart("com.hazlie.hermes")
+            Provision.kickstart("io.intaglio.hermes")
             // REACH AN ENDING. Loading several GB of weights takes a while, so
             // wait -- but bounded, and then say which way it went. A screen that
             // says "checking" forever is the one state that is never true.

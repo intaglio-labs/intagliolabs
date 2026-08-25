@@ -15,26 +15,30 @@
     <div class="hint-host" id="phint"></div>
     <div class="people-main" id="pmain">
       <div class="eyebrow">people</div>
-      <h1 class="p-title">unify your circles</h1>
-      <p class="p-body">connectors</p>
-      <!-- The connections bar: same tiles as settings, disconnected first,
-           scrollable. Populated by people.js from /api/status. -->
-      <div class="list" id="pconn"></div>
+      <!-- The ring: the same connector tiles as settings, disconnected first,
+           laid out evenly around the centered title instead of a scrolling
+           shelf. Populated by people.js from /api/status, which also sets
+           the --i/--n custom properties each tile's position reads. -->
+      <div class="p-ring" id="pring">
+        <div class="list" id="pconn"></div>
+        <div class="p-ring-center">
+          <h1 class="p-title">unify your<br>circles</h1>
+        </div>
+      </div>
       <!-- Deep search: a timeframe selector, the kickoff button, and a "read
            specs" link that opens the full details as the side panel. -->
-      <div class="p-param">
-        <span class="p-param-label">timeframe</span>
-        <select class="p-select" id="ptime">
-          <option value="7">1 week</option>
-          <option value="30">1 month</option>
-          <option value="180">6 months</option>
-          <option value="365" selected>1 year</option>
-          <option value="1095">3 years</option>
-          <option value="1825">5 years</option>
+      <div class="p-controls">
+        <select class="p-select" id="ptime" aria-label="timeframe">
+          <option value="7">1 wk</option>
+          <option value="30">1 mo</option>
+          <option value="180">6 mo</option>
+          <option value="365" selected>1 yr</option>
+          <option value="1095">3 yr</option>
+          <option value="1825">5 yr</option>
           <option value="0">max</option>
         </select>
+        <button class="p-init" id="pinit">search</button>
       </div>
-      <button class="p-init" id="pinit">initialize search</button>
       <a href="#" class="p-specs" id="pspecs">read specs ↗</a>
     </div>
     <!-- Review mode: after "initialize search", the setup column above is

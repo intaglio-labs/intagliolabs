@@ -17,10 +17,10 @@ to the **responsible process** — so a probe run from a shell proves nothing
 about production. Run them the way the daemon runs:
 
 ```sh
-launchctl submit -l com.hazlie.probe-X -o /tmp/probe.out -e /tmp/probe.err \
+launchctl submit -l io.intaglio.probe-X -o /tmp/probe.out -e /tmp/probe.err \
   -- ~/.hazlie/bin/node /path/to/ops/probes/probe-X.mjs
 # poll /tmp/probe.out for the RESULT line, then:
-launchctl remove com.hazlie.probe-X
+launchctl remove io.intaglio.probe-X
 ```
 
 A probe run from a dev shell reporting "denied" is the expected result, not a
@@ -88,7 +88,7 @@ checked on every commit rather than only when someone runs a probe.
 **WhatsApp Desktop's local store prunes — it is not an archive.** Re-running
 the probe weeks apart showed *more chats and a thousand fewer messages*. Two
 consequences: the connector's freshness is bounded by how often the app is
-opened (hence `com.hazlie.whatsapp-keepalive`), and **the connector must never
+opened (hence `io.intaglio.whatsapp-keepalive`), and **the connector must never
 reconcile by absence** — messages that have vanished from the local store still
 exist on the user's phone, and deleting rows for them would destroy real
 history. It does not; keep it that way.

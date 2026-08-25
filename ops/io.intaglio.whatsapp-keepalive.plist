@@ -27,7 +27,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.hazlie.whatsapp-keepalive</string>
+  <string>io.intaglio.whatsapp-keepalive</string>
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/open</string>

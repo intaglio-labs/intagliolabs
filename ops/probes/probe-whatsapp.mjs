@@ -29,9 +29,9 @@
 // The store is Full Disk Access territory and FDA attributes per responsible
 // binary, so run via launchd:
 //
-//   launchctl submit -l com.hazlie.probe-whatsapp -o <out> -e <err> \
+//   launchctl submit -l io.intaglio.probe-whatsapp -o <out> -e <err> \
 //     -- ~/.hazlie/bin/node /path/to/ops/probes/probe-whatsapp.mjs
-//   (poll <out> for the RESULT line, then: launchctl remove com.hazlie.probe-whatsapp)
+//   (poll <out> for the RESULT line, then: launchctl remove io.intaglio.probe-whatsapp)
 //
 // Exit: 0 PASS · 2 BLOCKED (no FDA in this launch context, or no store) · 1 FAIL.
 

@@ -22,9 +22,9 @@
 // Both stores are Full Disk Access territory; FDA attributes per responsible
 // binary, so run via launchd:
 //
-//   launchctl submit -l com.hazlie.probe-calendar-contacts -o <out> -e <err> \
+//   launchctl submit -l io.intaglio.probe-calendar-contacts -o <out> -e <err> \
 //     -- ~/.hazlie/bin/node /path/to/ops/probes/probe-calendar-contacts.mjs
-//   (poll <out> for the RESULT line, then: launchctl remove com.hazlie.probe-calendar-contacts)
+//   (poll <out> for the RESULT line, then: launchctl remove io.intaglio.probe-calendar-contacts)
 //
 // No TTY assumed. Exit: 0 PASS · 2 BLOCKED (no FDA here) · 1 FAIL.
 

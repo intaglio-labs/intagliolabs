@@ -42,7 +42,7 @@ not appear in the profile at all. Signing with them is fine in either mode.
 system_profiler SPHardwareDataType | grep "Provisioning UDID"
 
 asc devices register --name "<machine>" --udid "<UDID>" --platform MAC_OS
-asc bundle-ids create --identifier com.hazlie.widget --name "Intaglio Labs Widget" --platform MAC_OS
+asc bundle-ids create --identifier io.intaglio.widget --name "Intaglio Labs Widget" --platform MAC_OS
 asc certificates list          # note the DEVELOPMENT certificate's id
 asc profiles create --name "Intaglio Labs Mac Dev" --profile-type MAC_APP_DEVELOPMENT \
   --bundle "<BUNDLE_ID>" --certificate "<CERT_ID>" --device "<DEVICE_ID>"

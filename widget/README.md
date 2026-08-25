@@ -83,18 +83,23 @@ two-character text marks in the mockups' own dashed placeholder boxes.
 ## Build & run
 
 ```sh
-widget/build.sh          # build + install to ~/Applications/Hazlie.app
+widget/build.sh          # build + install to /Applications/Intaglio Labs.app
 widget/build.sh --run    # ...and (re)launch
 ```
 
+(This said `~/Applications/Hazlie.app` until 2026-08-25 — stale since the
+bundle was renamed and the install moved to `/Applications` on 2026-08-23;
+see the note at `DEST` in build.sh. Rule 2: the code is what shipped, so the
+sentence is what gets fixed.)
+
 To start at login: System Settings → General → Login Items → add
-Hazlie.app. Deliberately manual for v1 (see the launchd warning above).
+Intaglio Labs.app. Deliberately manual for v1 (see the launchd warning above).
 
 Dev loop against a non-launchd connect:
 
 ```sh
 node connect/server.mjs --port 8790 &
-HAZLIE_CONNECT_PORT=8790 ~/Applications/Hazlie.app/Contents/MacOS/Hazlie
+HAZLIE_CONNECT_PORT=8790 "/Applications/Intaglio Labs.app/Contents/MacOS/Hazlie"
 ```
 
 ## Verified 2026-08-20 (first build)

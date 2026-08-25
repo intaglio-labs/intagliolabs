@@ -15,9 +15,10 @@ deletion only via the bearer-only `/admin/*` routes. No connector ever opens
 
 ## Network posture
 
-The connectors daemon (`connectors/daemon.mjs`, launchd label
-`com.hazlie.connectors`) is **loopback-only: it opens no listener of any
-kind.** Its sockets are outbound only:
+The connectors daemon (`connectors/daemon.mjs` — a child of the app via
+`widget/src/Connectors.swift`, or the `io.intaglio.connectors` launchd agent on
+a machine with no app installed) is **loopback-only: it opens no listener of
+any kind.** Its sockets are outbound only:
 
 - **loopback out** to Hermes (`127.0.0.1:51789`): `POST /ingest`, `/admin/*` —
   the only place corpus rows go.
@@ -269,8 +270,8 @@ chat.db, the Calendar store, and AddressBook sit behind TCC. The design is:
 - **Consequences:**
   - `doctor` run from a shell shows `fda-*` FAILs that production will not
     have. The production truth is one line:
-    `launchctl submit -l com.hazlie.doctor -o /tmp/doctor.out -e /tmp/doctor.err -- ~/.hazlie/bin/node <repo>/connectors/doctor.mjs --json`
-    — poll `/tmp/doctor.out`, then `launchctl remove com.hazlie.doctor`.
+    `launchctl submit -l io.intaglio.doctor -o /tmp/doctor.out -e /tmp/doctor.err -- ~/.hazlie/bin/node <repo>/connectors/doctor.mjs --json`
+    — poll `/tmp/doctor.out`, then `launchctl remove io.intaglio.doctor`.
   - Never wrap the binary in a shell script or another interpreter inside a
     plist; the wrapper becomes the responsible process and the grant stops
     applying.

@@ -171,8 +171,8 @@ fi
 # Plist templates (@HOME@/@REPO@ placeholders) — provision renders them:
 # @REPO@ -> this backend dir, @HOME@ -> the user's home.
 mkdir -p "$BE/agents"
-cp ../ops/com.hazlie.connect.plist ../ops/com.hazlie.hermes.plist \
-   ../ops/com.hazlie.connectors.plist ../ops/com.hazlie.llama-server.plist "$BE/agents/"
+cp ../ops/io.intaglio.connect.plist ../ops/io.intaglio.hermes.plist \
+   ../ops/io.intaglio.connectors.plist ../ops/io.intaglio.llama-server.plist "$BE/agents/"
 
 # SIGNING, AND WHY IT IS NOT AD-HOC ANY MORE.
 #
@@ -360,7 +360,7 @@ LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServic
 # that comes back is guaranteed to be reading the bundle just installed.
 # Failures are tolerated: a machine that has never provisioned the agents has
 # nothing to restart, which is a normal state and not a build error.
-for svc in com.hazlie.hermes com.hazlie.connect com.hazlie.llama-server; do
+for svc in io.intaglio.hermes io.intaglio.connect io.intaglio.llama-server; do
   if launchctl print "gui/$(id -u)/$svc" >/dev/null 2>&1; then
     launchctl kickstart -k "gui/$(id -u)/$svc" >/dev/null 2>&1 \
       && echo "restarted: $svc" \

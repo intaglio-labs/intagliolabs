@@ -90,6 +90,20 @@ function render(sources) {
     .sort((a, b) => (a.s.connected === b.s.connected ? a.i - b.i : a.s.connected ? 1 : -1))
     .map((x) => x.s);
   pconn.replaceChildren(...ordered.map(tile));
+  // The ring positions each tile by transform (people.css), reading these two
+  // custom properties: --n is the same on every tile, --i is its index, so an
+  // evenly-spaced angle falls out of pure CSS with no per-count stylesheet.
+  // --n also lands on the ring container itself, one level up, so the ring's
+  // own size (and therefore the popup's total height) can grow only as far
+  // as the actual connector count needs — a handful of sources gets a small
+  // ring instead of always paying for the worst case.
+  const rows = pconn.querySelectorAll('.row');
+  const pring = document.getElementById('pring');
+  if (pring) pring.style.setProperty('--n', rows.length);
+  rows.forEach((row, i) => {
+    row.style.setProperty('--i', i);
+    row.style.setProperty('--n', rows.length);
+  });
   if (typeof fitPeople === 'function') fitPeople();
 }
 
@@ -295,7 +309,7 @@ function renderDone() {
 document.getElementById('pinit').addEventListener('click', () => {
   const b = document.getElementById('pinit');
   b.disabled = true;
-  b.textContent = 'initializing…';
+  b.textContent = 'searching…';
   rDays = searchDays;
   rDecided = 0;
   rSkipped.clear();
@@ -310,12 +324,12 @@ document.getElementById('pinit').addEventListener('click', () => {
     })
     .catch(() => {
       b.textContent = 'couldn’t start — try again';
-      setTimeout(() => { b.textContent = 'initialize search'; }, 1800);
+      setTimeout(() => { b.textContent = 'search'; }, 1800);
     })
     .finally(() => {
       // Re-enable for next time; it is hidden while review mode is up anyway.
       b.disabled = false;
-      if (!preview.hidden) b.textContent = 'initialize search';
+      if (!preview.hidden) b.textContent = 'search';
     });
 });
 

@@ -382,7 +382,7 @@ export async function verifyHermesIdentity(base, { fetchImpl = fetch } = {}) {
     return {
       ok: false,
       detail: `${base}/health unreachable (${error?.cause?.code ?? error?.name ?? error})`,
-      fix: 'launchctl kickstart -k gui/$UID/com.hazlie.hermes (or bash ops/setup-connectors.sh)',
+      fix: 'launchctl kickstart -k gui/$UID/io.intaglio.hermes (or bash ops/setup-connectors.sh)',
     };
   }
   const text = await res.text().catch(() => '');
@@ -493,8 +493,8 @@ const FDA_SHELL_CAVEAT =
   'if the grant exists (System Settings > Privacy & Security > Full Disk Access > "intaglio labs"), ' +
   'this FAIL is expected from a dev shell — TCC attributes the grant to the responsible process, ' +
   'so only a run spawned by something that holds it proves anything: ' +
-  'launchctl submit -l com.hazlie.doctor -o /tmp/doctor.out -e /tmp/doctor.err -- ' +
-  '~/.hazlie/bin/node <repo>/connectors/doctor.mjs --json  (then launchctl remove com.hazlie.doctor). ' +
+  'launchctl submit -l io.intaglio.doctor -o /tmp/doctor.out -e /tmp/doctor.err -- ' +
+  '~/.hazlie/bin/node <repo>/connectors/doctor.mjs --json  (then launchctl remove io.intaglio.doctor). ' +
   'If it fails there too, switch on "intaglio labs" under Full Disk Access — the app opens that pane ' +
   'for you and puts itself on screen as a draggable icon; ops/CONNECTORS.md has the runbook.';
 
@@ -934,8 +934,8 @@ function connectBase(env) {
 // and is invisible from inside the repo because the repo's own copy is correct.
 const CONNECT_STALE_AGENT_FIX =
   'if this is ECONNREFUSED, suspect a launch agent that predates a port move: the installed plist is a ' +
-  'rendered COPY of ops/com.hazlie.connect.plist, so it keeps launching the old port forever. Confirm with ' +
-  "`grep -A1 -- --port ~/Library/LaunchAgents/com.hazlie.connect.plist` and `lsof -nP -iTCP -sTCP:LISTEN | grep node`. " +
+  'rendered COPY of ops/io.intaglio.connect.plist, so it keeps launching the old port forever. Confirm with ' +
+  "`grep -A1 -- --port ~/Library/LaunchAgents/io.intaglio.connect.plist` and `lsof -nP -iTCP -sTCP:LISTEN | grep node`. " +
   'Re-render it with `bash ops/setup-connectors.sh` RUN FROM THE TREE THE AGENT LAUNCHES - setup substitutes ' +
   '@REPO@ with wherever it is run, so running it from a dev checkout silently repoints production at a tree ' +
   'someone may later git-checkout out from under it.';

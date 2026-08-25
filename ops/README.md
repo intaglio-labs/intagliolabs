@@ -10,11 +10,11 @@ below keeps the browser surface loopback-only too.
 
 | Port | Process | Started by | Stays up? |
 |------|---------|-----------|-----------|
-| 51780 | Authenticated `llama-server` (Qwen3 Q4_K_M selected for host RAM, `--jinja --reasoning off`) | `launchd`, label `com.hazlie.llama-server` | Yes — `KeepAlive`, survives reboots |
-| 51789 (the canonical port since 2026-08-20 — an unrelated dev server commonly holds 8787 and answers 200 there, which made defaulted callers reach a stranger; per-machine override: `HAZLIE_HERMES_URL` or config `hermesUrl` for its callers. NOT `HERMES_PORT` in the plist — the plist carries no `EnvironmentVariables` block, and `install_agent` rewrites the file from the template on every run, so a hand-edit is reverted the next time setup runs) | `hermes.mjs` — local context DB plus the browser's authenticated streaming LLM proxy. Every route but `/health` requires an authorized caller | `launchd`, label `com.hazlie.hermes` (installed by `ops/setup-connectors.sh`; `npm run hermes` in `ui/` remains the pre-setup dev fallback — not both at once, the port is one) | Yes — `KeepAlive`, survives reboots |
-| — | connectors daemon — **loopback-only, no listener**: outbound pollers writing via `POST /ingest`, run under the FDA-granted stable binary `~/.hazlie/bin/node` | `launchd`, label `com.hazlie.connectors` (installed by `ops/setup-connectors.sh`) | Yes — `KeepAlive`, `ThrottleInterval` 60 |
-| 51788 | `connect/server.mjs` — the loopback onboarding page and the widget's `/api/*` read | `launchd`, label `com.hazlie.connect` (installed by `ops/setup-connectors.sh`) | Yes — `KeepAlive`, `ThrottleInterval` 60 |
-| — | `whatsapp-keepalive` — **the app deliberately does not install this.** `ops/com.hazlie.whatsapp-keepalive.plist` opens WhatsApp hidden every 4h so its local store syncs, and `ops/setup-connectors.sh` installs it for a repo-based setup. It was wired into the app's provisioning on 2026-08-23 and removed the same day (Rishab, explicitly): an installed app launching a different app behind the owner's back, on a timer, is not a trade this makes for fresher rows. | not installed by the app | — |
+| 51780 | Authenticated `llama-server` (Qwen3 Q4_K_M selected for host RAM, `--jinja --reasoning off`) | `launchd`, label `io.intaglio.llama-server` | Yes — `KeepAlive`, survives reboots |
+| 51789 (the canonical port since 2026-08-20 — an unrelated dev server commonly holds 8787 and answers 200 there, which made defaulted callers reach a stranger; per-machine override: `HAZLIE_HERMES_URL` or config `hermesUrl` for its callers. NOT `HERMES_PORT` in the plist — the plist carries no `EnvironmentVariables` block, and `install_agent` rewrites the file from the template on every run, so a hand-edit is reverted the next time setup runs) | `hermes.mjs` — local context DB plus the browser's authenticated streaming LLM proxy. Every route but `/health` requires an authorized caller | `launchd`, label `io.intaglio.hermes` (installed by `ops/setup-connectors.sh`; `npm run hermes` in `ui/` remains the pre-setup dev fallback — not both at once, the port is one) | Yes — `KeepAlive`, survives reboots |
+| — | connectors daemon — **loopback-only, no listener**: outbound pollers writing via `POST /ingest`, run under the FDA-granted stable binary `~/.hazlie/bin/node` | **A child of the app** (`widget/src/Connectors.swift`) when the app is installed — TCC then attributes Full Disk Access to one row called Intaglio Labs instead of to `node`. `ops/setup-connectors.sh` installs the `io.intaglio.connectors` launchd agent **only** on a machine with no app; where both exist the app boots out and deletes that plist on every launch (`Provision.retireConnectorsAgent()`) | Yes — respawned with a 60s throttle, matching the interval the agent carried |
+| 51788 | `connect/server.mjs` — the loopback onboarding page and the widget's `/api/*` read | `launchd`, label `io.intaglio.connect` (installed by `ops/setup-connectors.sh`) | Yes — `KeepAlive`, `ThrottleInterval` 60 |
+| — | `whatsapp-keepalive` — **the app deliberately does not install this.** `ops/io.intaglio.whatsapp-keepalive.plist` opens WhatsApp hidden every 4h so its local store syncs, and `ops/setup-connectors.sh` installs it for a repo-based setup. It was wired into the app's provisioning on 2026-08-23 and removed the same day (Rishab, explicitly): an installed app launching a different app behind the owner's back, on a timer, is not a trade this makes for fresher rows. | not installed by the app | — |
 
 **Known consequence, accepted:** the WhatsApp connector reads the desktop app's local
 store, and that store only syncs while WhatsApp is running. Without the keepalive its
@@ -74,9 +74,11 @@ dev tree becomes production without anyone deciding that it should.
 2. **Once per machine, after step 1:** `bash ops/setup-connectors.sh` —
    installs the stable node binary (`~/.hazlie/bin/node`, the one file the
    Full Disk Access grant attaches to), reasserts the `~/.hazlie` tree at
-   0700, prompts for the Gmail app password, renders and bootstraps the
-   `com.hazlie.hermes`, `com.hazlie.connect` and `com.hazlie.connectors` launchd
-   agents, then runs doctor. Re-run any time; it never replaces the stable binary without
+   0700, creates `~/.hazlie/connectors/config.json` if missing, prompts for the
+   Gmail app password, renders and bootstraps the `io.intaglio.hermes` and
+   `io.intaglio.connect` launchd agents (plus `io.intaglio.connectors` only when
+   no app is installed — see the table above), then runs doctor. Re-run any
+   time; it never replaces the stable binary without
    `--replace-node` (that can invalidate the FDA grant — the script explains
    before touching anything).
 3. **Once per voice-asset change:** `bash widget/voice/setup-voice.sh`. It runs
@@ -100,8 +102,8 @@ dev tree becomes production without anyone deciding that it should.
 
 llama-server and (after step 2) hermes and the connectors daemon need no
 per-session start — they are resident. Useful spells:
-`launchctl kickstart -k gui/$UID/com.hazlie.<label>` (restart),
-`launchctl bootout gui/$UID/com.hazlie.<label>` (stop), logs in
+`launchctl kickstart -k gui/$UID/io.intaglio.<label>` (restart),
+`launchctl bootout gui/$UID/io.intaglio.<label>` (stop), logs in
 `~/.hazlie/logs/`.
 
 ## Local trust boundary

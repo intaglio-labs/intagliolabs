@@ -111,7 +111,7 @@ const FDA_FIX =
 // launchd. Saying that is better than a cross the owner cannot act on.
 //
 // That caveat is also why `broken` is only trustworthy from the launchd-run
-// connect service (ops/com.hazlie.connect.plist runs it under
+// connect service (ops/io.intaglio.connect.plist runs it under
 // ~/.hazlie/bin/node). Verified 2026-08-22: the same code says FAIL from a dev
 // shell and PASS under launchd, on a machine whose grant was fine the whole
 // time. A shell-run status must never be what paints the shelf red.

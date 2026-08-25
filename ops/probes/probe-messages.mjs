@@ -22,9 +22,9 @@
 // chat.db is Full Disk Access territory and FDA attributes per responsible
 // binary, so run via launchd:
 //
-//   launchctl submit -l com.hazlie.probe-messages -o <out> -e <err> \
+//   launchctl submit -l io.intaglio.probe-messages -o <out> -e <err> \
 //     -- ~/.hazlie/bin/node /path/to/ops/probes/probe-messages.mjs
-//   (poll <out> for the RESULT line, then: launchctl remove com.hazlie.probe-messages)
+//   (poll <out> for the RESULT line, then: launchctl remove io.intaglio.probe-messages)
 //
 // No TTY assumed. Exit: 0 PASS · 2 BLOCKED (no FDA in this launch context)
 // · 1 FAIL.

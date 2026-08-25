@@ -81,7 +81,7 @@ LLAMA_API_KEY_FILE="$SECRET_DIR/llama-api-key.txt"
 HERMES_TOKEN_FILE="$SECRET_DIR/hermes-token.txt"
 ACTIVE_LLAMA_KEY_STAMP="$SECRET_DIR/active-llama-api-key.sha256"
 ACTIVE_MODEL_STAMP="$MODEL_DIR/active-model.txt"
-LABEL="com.hazlie.llama-server"
+LABEL="io.intaglio.llama-server"
 PLIST_SRC="$SCRIPT_DIR/$LABEL.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/$LABEL.plist"
 HEALTH_URL="http://127.0.0.1:51780/health"
@@ -275,6 +275,18 @@ echo "    model.gguf -> $MODEL_FILE"
 step "launchd agent ($LABEL)"
 [[ -f "$PLIST_SRC" ]] || { echo "ERROR: $PLIST_SRC missing." >&2; exit 1; }
 
+# Retire this script's own pre-rename agent (com.hazlie.* -> io.intaglio.*,
+# 2026-08-25). launchd keys a service on its label, so without this the old
+# agent stays loaded and KeepAlive'd, and TWO llama-servers race for port
+# 51780 — the loser crash-loops and the winner is whichever won the boot.
+OLD_LABEL="com.hazlie.llama-server"
+OLD_PLIST="$HOME/Library/LaunchAgents/$OLD_LABEL.plist"
+if launchctl print "gui/$UID/$OLD_LABEL" >/dev/null 2>&1; then
+  launchctl bootout "gui/$UID/$OLD_LABEL" 2>/dev/null || true
+  echo "    retired pre-rename agent $OLD_LABEL"
+fi
+[[ -f "$OLD_PLIST" ]] && { rm -f "$OLD_PLIST"; echo "    removed $OLD_PLIST"; }
+
 # --- hardening preflight (MEMORY-PLAN Day 0) --------------------------------
 # The template now passes --offline and --no-slots. Probe THIS binary for both
 # before rendering: on a build that lacks them, llama-server would refuse to
@@ -285,7 +297,7 @@ for required in --offline --no-slots; do
   if ! grep -qe "$required" <<<"$help_text"; then
     echo "ERROR: $LLAMA_BIN does not support $required; refusing to install a" >&2
     echo "plist it cannot boot. Upgrade llama-server or remove the flag from" >&2
-    echo "ops/com.hazlie.llama-server.plist together with this check." >&2
+    echo "ops/io.intaglio.llama-server.plist together with this check." >&2
     exit 1
   fi
 done
@@ -295,7 +307,7 @@ done
 # appearing in ProgramArguments. Owner-authored corpus text must not gain a
 # second, unmanaged on-disk representation as a side effect of a tuning flag.
 if grep -qe '--slot-save-path' -e 'LLAMA_ARG_SLOT_SAVE_PATH' -e 'LLAMA_ARG_CACHE_IDLE_SLOTS' "$PLIST_SRC"; then
-  echo "ERROR: ops/com.hazlie.llama-server.plist configures slot/prompt" >&2
+  echo "ERROR: ops/io.intaglio.llama-server.plist configures slot/prompt" >&2
   echo "persistence (slot-save-path or an LLAMA_ARG_* equivalent). That writes" >&2
   echo "prompt content to disk outside the managed stores. Remove it." >&2
   exit 1

@@ -23,7 +23,7 @@
   <string>intaglio labs listens only while the orb is armed; speech is transcribed on this Mac and never leaves it.</string>
   <key>CFBundleName</key>              <string>intaglio labs</string>
   <key>CFBundleDisplayName</key>       <string>intaglio labs</string>
-  <key>CFBundleIdentifier</key>        <string>com.hazlie.widget</string>
+  <key>CFBundleIdentifier</key>        <string>io.intaglio.widget</string>
   <key>CFBundleExecutable</key>        <string>Hazlie</string>
   <key>CFBundlePackageType</key>       <string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
