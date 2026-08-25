@@ -245,14 +245,34 @@ const AUTOMATED_DOMAIN = /@(mail|email|e|newsletter|news|updates?|notifications?
 // vocabulary every issue). Whole-domain match, so `x@substack.com` is dropped.
 const NEWSLETTER_PLATFORM = /@(substack\.com|beehiiv\.com|mailchimp|mailchimpapp|convertkit|ghost\.io|buttondown|revue|tinyletter|list-manage)/iu;
 
-// A non-person: an automated sender or role address, by name or by any of its
-// identifiers. Exported so the constellation (people/map.mjs) drops the same
-// newsletters and no-reply handles the ranker does, from one definition rather
-// than a second copy that drifts.
+// AN SMS SHORT CODE IS NOT A PERSON. Every rule above is an EMAIL shape, and on
+// a corpus that is 85% iMessage they caught nothing at all: 152 short codes were
+// sitting in the graph as people, 12% of it, contributing roughly 1,950
+// messages, their notification text becoming somebody's topic chips (a
+// pharmacy, a retailer, a bank, a weather alert).
+//
+// The test is length, and it is high precision because no real phone number is
+// this short once you have a country code: a bare run of digits, no `+`, six or
+// fewer. Measured over the owner's corpus, the identities this matches are 3, 4,
+// 5 and 6 digits long, NONE of them has a name from Contacts, and there are no
+// 7-, 8- or 9-digit bare identifiers at all -- so the local-number-without-a-
+// country-code case this could otherwise catch does not arise here. Anything
+// carrying a `+` or a letter is left alone, which is every international number
+// and every WhatsApp LID.
+const SHORT_CODE = /^\d{1,6}$/u;
+
+// A non-person: an automated sender, a role address, or an SMS short code, by
+// name or by any of its identifiers. Exported so the constellation
+// (people/map.mjs) drops the same newsletters and no-reply handles the ranker
+// does, from one definition rather than a second copy that drifts.
 export function isNonPerson(p) {
   if (NON_PERSON.test(p.name)) return true;
   return (p.identifiers ?? []).some(
-    (id) => AUTOMATED_DOMAIN.test(id) || NEWSLETTER_PLATFORM.test(id) || ROLE_LOCALPART.test(id)
+    (id) =>
+      AUTOMATED_DOMAIN.test(id) ||
+      NEWSLETTER_PLATFORM.test(id) ||
+      ROLE_LOCALPART.test(id) ||
+      SHORT_CODE.test(String(id).trim())
   );
 }
 

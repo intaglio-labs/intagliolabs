@@ -96,9 +96,60 @@ const STOPWORDS = new Set(
     'looking making getting taking coming trying saying telling asking thinking feeling talking texting waiting ' +
     // Laughter runs in every alphabet the corpus texts in — 'kkk' is how half
     // the world laughs and reads appallingly as a chip.
-    'kkk kkkk kkkkk jaja jajaja jajaj wkwk wkwkwk jeje interesting'
+    'kkk kkkk kkkkk jaja jajaja jajaj wkwk wkwkwk jeje interesting ' +
+    // VOCABULARY ABOUT THE MEDIUM, not about the subject. A chip that says
+    // "message" or "link" describes the fact that you were texting, which is
+    // already the only reason the row exists. Filler in the same pass.
+    'message messages msg msgs link links reply replied forward forwarded chat chats texts ' +
+    'tho through again per stay ready'
   ).split(/\s+/u)
 );
+
+// A MESSAGE FROM A ROBOT IS NOBODY'S TOPIC.
+//
+// Measured on the live corpus before this existed, four of the fifteen most
+// repeated non-taxonomy chips were unsubscribe boilerplate -- "reply stop" on
+// 22 person-years, then "msg data", "reply help", "txt stop", "terms apply".
+// They are distinctive by every measure the ranker has (rare across the corpus,
+// repeated within a thread) and they describe no relationship at all.
+//
+// This drops the ROW rather than blacklisting the words, and the distinction is
+// the whole design. "order", "ride", "share" and "join" were all chipping off
+// this same boilerplate; stoplisting them would also have silenced the friend
+// who ordered dinner or shared a ride. Dropping the row silences the robot and
+// leaves every one of those words available to a person who actually said it.
+//
+// Deliberately narrow: each pattern is compliance language that a person does
+// not write to another person. `isNonPerson` already drops automated SENDERS
+// from the graph; this catches the automated MESSAGE reaching a person who
+// stays -- a real business the owner talks to, or a forwarded notification.
+const AUTOMATED_ROW = [
+  /\b(reply|txt|text)\s+(stop|help)\b/iu,
+  /\bstop\s*(=|to)\s*(end|quit|cancel|unsubscribe|opt)/iu,
+  /\b(msg|message|text)\s*(&|and)?\s*data rates?\b/iu,
+  /\bstd (msg|message|text) rates?\b/iu,
+  /\bterms\s+(and conditions\s+)?apply\b/iu,
+  /\bunsubscribe\b/iu,
+  /\bopt[-\s]?out\b/iu,
+  /\b(do not|don'?t) reply\b/iu,
+  /\bno[-\s]?reply@/iu,
+  /\b(verification|security|confirmation|access) code\b/iu,
+  /\bone[-\s]?time (code|passcode|password|pin)\b/iu,
+  // A ONE-TIME CODE, by the thing that actually distinguishes one: a code word
+  // sitting next to a run of digits. Matching "your ... code" on its own would
+  // swallow "your code review is done"; requiring the digits means a real
+  // conversation about code is only ever caught if somebody also said a number
+  // in the same breath, which is a door code and no more a topic than the rest.
+  /\b(code|otp|passcode|pin)\b[^\n]{0,24}\b\d{4,8}\b/iu,
+  /\b\d{4,8}\b[^\n]{0,24}\b(code|otp|passcode|pin)\b/iu,
+  /\bhelp for help\b/iu,
+];
+
+export function isAutomatedRow(text) {
+  const t = String(text ?? '');
+  if (t.length === 0) return false;
+  return AUTOMATED_ROW.some((re) => re.test(t));
+}
 
 // One person-year of tallies.
 function emptyDoc() {
@@ -198,6 +249,9 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
     } catch {
       meta = {};
     }
+    // Compliance boilerplate is not a conversation. Dropped before the person
+    // is even resolved, so it costs nothing on the rows it does not match.
+    if (isAutomatedRow(row.text)) continue;
     const id = rowPersonId(row, meta);
     if (id === null) continue;
     const key = idToKey.get(id);
