@@ -55,10 +55,9 @@ enum ModelSetup {
     ),
   ]
 
-  // Same rule as setup-llm.sh: 8B above 8 GiB, 4B at or below it.
-  static var recommended: String {
-    ProcessInfo.processInfo.physicalMemory > 8 * 1024 * 1024 * 1024 ? "8b" : "4b"
-  }
+  // Default to the roughly 5 GB model. The smaller tier remains available as
+  // an explicit choice from Settings for machines that need it.
+  static var recommended: String { "8b" }
 
   /// The download outlives its screen — onboarding moves on after a few
   /// seconds and the fetch keeps going — so the ending has to find the owner

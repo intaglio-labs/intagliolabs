@@ -140,6 +140,32 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     set { UserDefaults.standard.set(newValue, forKey: onboardedDefaultsKey) }
   }
 
+  // WHICH FLOW SOMEBODY COMPLETED, recorded but NOT used to force a replay.
+  //
+  // This gate used to read `!onboarded || revision < current`, which replays the
+  // whole welcome for every existing install: `onboarded` is true for them and
+  // the revision key is absent, and UserDefaults reads a missing integer as 0,
+  // so 0 < 2 and the flow runs again on the next launch.
+  //
+  // Redesigning the flow is not a reason to make somebody sit through it. They
+  // have already granted the permissions, chosen a model and downloaded it --
+  // the whole point of the welcome -- and a finished setup that reopens itself
+  // reads as the app having lost their data, which is the single most alarming
+  // thing this app could imply. The gear replays it on demand for anyone who
+  // wants to see what changed.
+  //
+  // The stamp stays because it is worth knowing which flow a person saw, and
+  // because a future change that genuinely does need an existing install to
+  // revisit something can opt in HERE, deliberately, rather than by the side
+  // effect of a version bump.
+  static let onboardingRevisionDefaultsKey = "HazlieOnboardingRevision"
+  static let currentOnboardingRevision = 2
+  static var needsOnboarding: Bool { !onboarded }
+  static func completeOnboarding() {
+    onboarded = true
+    UserDefaults.standard.set(currentOnboardingRevision, forKey: onboardingRevisionDefaultsKey)
+  }
+
   // WHICH SCENE THE FLOW WAS ON, so a restart resumes rather than rewinds.
   //
   // Granting Full Disk Access to a running app makes macOS offer "Quit &
@@ -442,7 +468,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "onboardingDone":
       // Only the flow finishing sets this. Dismissing with Escape closes the
       // window without sending it, so a flow backed out of returns next time.
-      Bridge.onboarded = true
+      Bridge.completeOnboarding()
       // Nothing left to resume; a replay from settings starts at the welcome.
       Bridge.onboardingStep = nil
       // ...and the handoff arms: the gear will nudge until settings opens.
@@ -467,7 +493,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         "state": "ok",
         "motion": Bridge.motionAnyway,
         "sounds": Bridge.soundsOn,
-        "onboarded": Bridge.onboarded,
+        "onboarded": !Bridge.needsOnboarding,
         "scale": Bridge.scale,
         "scaleMin": Bridge.scaleRange.lowerBound,
         "scaleMax": Bridge.scaleRange.upperBound,

@@ -22,9 +22,8 @@
 #   Qwen/Qwen3-8B-GGUF -> 200, file Qwen3-8B-Q4_K_M.gguf, 5,027,783,488 bytes.
 # Qwen3-8B is the original HYBRID-thinking model, not a non-thinking instruct.
 # It also cannot complete a first decode on the target 8 GB M2: Metal exhausts
-# unified memory even with one slot and smaller batches. On hosts with <=8 GiB,
-# setup therefore selects the real 4B non-thinking 2507 instruct model. Larger
-# hosts keep the original 8B choice with "--reasoning off" (see the plist).
+# unified memory even with one slot and smaller batches. The default is now the
+# roughly 5 GB 8B model; 4B remains available as an explicit override.
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -48,11 +47,7 @@ HOST_MEMORY_BYTES="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
 MODEL_TIER_REQUEST="${HAZLIE_MODEL_TIER:-auto}"
 case "$MODEL_TIER_REQUEST" in
   auto)
-    if [[ "$HOST_MEMORY_BYTES" =~ ^[0-9]+$ ]] && [[ "$HOST_MEMORY_BYTES" -gt 0 ]] && [[ "$HOST_MEMORY_BYTES" -le 8589934592 ]]; then
-      MODEL_TIER="4B 2507 instruct (8 GB host fallback)"
-    else
-      MODEL_TIER="8B hybrid-thinking"
-    fi
+    MODEL_TIER="8B hybrid-thinking (default)"
     ;;
   4b) MODEL_TIER="4B 2507 instruct (explicit override)" ;;
   8b) MODEL_TIER="8B hybrid-thinking (explicit override)" ;;
