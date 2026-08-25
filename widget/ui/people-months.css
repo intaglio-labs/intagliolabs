@@ -262,7 +262,9 @@ body.plist .pm-core {
   animation: orb-breathe 7s ease-in-out infinite;
   pointer-events: none;
 }
-/* One topic. Width/height/left/top come from the page. */
+/* One topic. Width/height/left/top come from the page. Clicking it opens that
+   topic as a list, so it has to say it is a control — the dashed ring alone
+   reads as decoration. */
 body.plist .pm-cluster {
   position: absolute;
   transform: translate(-50%, -50%);
@@ -272,6 +274,47 @@ body.plist .pm-cluster {
   display: flex; flex-direction: column;
   align-items: center; justify-content: center;
   gap: 7px;
+  cursor: pointer;
+  transition: border-color 0.14s, background 0.14s;
+}
+body.plist .pm-cluster:hover {
+  border-color: rgba(197, 165, 109, 0.6);
+  background: radial-gradient(circle at 50% 40%, rgba(197, 165, 109, 0.14) 0%, transparent 70%);
+}
+body.plist .pm-cluster:hover .pm-cluster-label { color: var(--hazelnut-light); }
+
+/* The active-topic chip above the list. */
+body.plist .pm-filter {
+  display: flex;
+  align-items: center;
+  padding: 8px 14px 0;
+  flex: 0 0 auto;
+}
+body.plist .pm-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(197, 165, 109, 0.45);
+  background: rgba(197, 165, 109, 0.12);
+  color: var(--hazelnut-light);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+}
+body.plist .pm-filter-chip:hover { filter: brightness(1.2); }
+body.plist .pm-filter-x {
+  font-size: 13px;
+  line-height: 1;
+  letter-spacing: normal;
+  color: var(--muted);
+}
+body.plist .pm-filter-chip:hover .pm-filter-x { color: var(--fg); }
+
+@media (prefers-reduced-motion: reduce) {
+  body.plist .pm-cluster { transition: none; }
 }
 /* 78%, not 84%: the discs wrap to a second row, and a circle is narrower there
    than across its middle. At 84% the trailing "+N" chip sat on the dashed

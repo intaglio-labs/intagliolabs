@@ -29,12 +29,16 @@
   const syncEl = document.getElementById('sync');
   const skyEl = document.getElementById('sky');
   const cardsEl = document.getElementById('cards');
+  const filterEl = document.getElementById('filter');
   if (!listEl) return;
 
   // 'list' = the year by person, 'sky' = the same year by topic. A VIEW, not a
   // year: the year tabs stay live in both, so the globe is the last tab rather
   // than a second window.
   let view = 'list';
+  // The topic a bubble was clicked into, or null. Only the list honours it —
+  // filtering the constellation to one topic would just draw that one circle.
+  let topic = null;
 
   // Hover hint per connector — shown by our own CSS tooltip (data-tip),
   // because native title tooltips are unreliable in a borderless
@@ -105,14 +109,33 @@
     );
   }
 
-  // Search is the one narrowing control left; the filter row was yeeted
-  // (owner, 2026-08-25). Order is the server's: most engaged first. Both views
-  // narrow through this, so a search term thins the constellation too.
+  // Search narrows both views; a topic narrows only the list, because a
+  // constellation of one topic is a circle. Order is the server's: most
+  // engaged first.
   function visible(data) {
     const term = searchEl.value.trim().toLowerCase();
-    return term
-      ? data.people.filter((p) => (p.name || '').toLowerCase().includes(term))
-      : data.people;
+    let rows = data.people;
+    if (topic) rows = rows.filter((p) => (p.topics || []).some((t) => t && t.label === topic));
+    if (term) rows = rows.filter((p) => (p.name || '').toLowerCase().includes(term));
+    return rows;
+  }
+
+  // The chip that says which topic the list is standing in, and the way out of
+  // it. Without it a filtered list is indistinguishable from a short year.
+  function renderFilter(count) {
+    filterEl.hidden = !topic;
+    if (!topic) { filterEl.replaceChildren(); return; }
+    const chip = document.createElement('button');
+    chip.className = 'pm-filter-chip';
+    chip.type = 'button';
+    const label = document.createElement('span');
+    label.textContent = `${topic.toUpperCase()} · ${count}`;
+    const x = document.createElement('span');
+    x.className = 'pm-filter-x';
+    x.textContent = '×';
+    chip.append(label, x);
+    chip.addEventListener('click', () => { topic = null; render(); });
+    filterEl.replaceChildren(chip);
   }
 
   // One glyph per card kind. Keyed by the server's `kind`, with a fallback, so
@@ -159,14 +182,22 @@
   // row, which is the honest result rather than an empty frame.
   function renderCards(data) {
     const hs = Array.isArray(data.highlights) ? data.highlights : [];
-    const show = hs.length > 0 && !searchEl.value.trim() && view === 'list';
+    // Also stand down inside a topic: "person of the year" is a claim about the
+    // whole year, and sitting it above a list of six travel contacts reads as a
+    // claim about travel.
+    const show = hs.length > 0 && !searchEl.value.trim() && view === 'list' && !topic;
     cardsEl.hidden = !show;
     cardsEl.innerHTML = show ? hs.map(cardHtml).join('') : '';
   }
 
   function renderList(data, rows) {
-    listEl.innerHTML = rows.map(rowHtml).join('') || `<div class="pl-empty">no one matches in ${year}</div>`;
-    if (!searchEl.value.trim() && data.total > data.people.length) {
+    const empty = topic
+      ? `no one in ${esc(topic)} in ${year}`
+      : `no one matches in ${year}`;
+    listEl.innerHTML = rows.map(rowHtml).join('') || `<div class="pl-empty">${empty}</div>`;
+    // The overflow line counts the whole year, so it would be a non-sequitur
+    // under a topic-filtered or searched list.
+    if (!searchEl.value.trim() && !topic && data.total > data.people.length) {
       listEl.insertAdjacentHTML('beforeend',
         `<div class="pl-more">+ ${data.total - data.people.length} more in ${year} — search or filter to narrow</div>`);
     }
@@ -183,12 +214,22 @@
     return view === 'sky' ? skyEl : listEl;
   }
 
+  // Opening a bubble IS opening its list — the sky answers "about what", and
+  // the obvious next question is "who". Clearing the topic leaves you in the
+  // list rather than bouncing back to the globe: by then you came for a person.
+  function openTopic(label) {
+    topic = label;
+    view = 'list';
+    render();
+  }
+
   function render() {
     const data = cache.get(year);
     if (!data) return;
     const rows = visible(data);
     surface();
     renderCards(data);
+    renderFilter(rows.length);
     if (view === 'sky') renderSky(data, rows);
     else renderList(data, rows);
     searchEl.placeholder = `search ${year} (${rows.length} shown)…`;
@@ -225,22 +266,45 @@
   }
 
   // ---- the constellation ----
-  // FOUR, and the number is geometry rather than taste. Bubbles sit on a ring
-  // of radius r, so neighbours are 2*pi*r/n apart and must not be closer than a
-  // bubble is wide; the ring must also stay inside the panel, r <= W/2 - d/2.
-  // At the panel's ~400px those two bounds only both hold up to four. Six was
-  // tried first and measured: two bubbles ran past the panel edge and the rest
-  // overlapped. Anything dropped by this cap is reported in the footnote.
-  const MAX_CLUSTERS = 4;
+  // HOW MANY BUBBLES FIT IS SOLVED, NOT CHOSEN. This was a flat 4, which was
+  // only ever right for the ~400px panel it was measured on — a scaled-up
+  // window has room for more and was still being given four.
+  //
+  // n bubbles of diameter d on a ring of radius r are 2r*sin(pi/n) apart
+  // (chord, not arc — arc overstates the gap and lets them touch), and that
+  // must be at least d. The ring must also fit: r <= R - d/2 - margin, where R
+  // is the stage's half-minor-axis. Substituting one into the other and
+  // solving for d gives the most a given n can afford:
+  //
+  //     d(n) = 2*sin(pi/n) * (R - margin) / (1 + sin(pi/n))
+  //
+  // So: try the most bubbles we would ever want, shrink them to fit, and stop
+  // at the first n whose bubbles are still big enough to hold faces. On a
+  // 400px panel that lands back on 4, which is what the design shows.
+  const CLUSTER_HARD_CAP = 8; // past this the labels collide and it reads as confetti
   const MIN_CLUSTER = 2;
   const MAX_FACES = 5;
-  // Bubble diameter range, from the same two inequalities solved for d at
-  // n = 4 and the panel's ~400px: 0.6366d <= W/2 - d/2 - 6 gives d <= 170. 162
-  // takes that with a little slack. The floor is not cosmetic — six discs have
-  // to fit inside a CIRCLE, whose usable width at the second row is well under
-  // its diameter, and at 100px the "+N" chip pushed out through the border.
-  const D_MIN = 118;
-  const D_MAX = 162;
+  const RING_MARGIN = 8;
+  // The floor is not cosmetic — six discs wrap to a second row, where a circle
+  // is much narrower than its diameter, and below this the "+N" chip pushes out
+  // through the dashed border. Measured, not guessed.
+  const D_FLOOR = 118;
+  const D_CEIL = 162;
+
+  // { n, d }: how many bubbles this stage holds, and how big they may be.
+  function fitLayout(stageW, stageH, wanted) {
+    const R = Math.min(stageW, stageH) / 2;
+    const most = Math.max(1, Math.min(wanted, CLUSTER_HARD_CAP));
+    for (let n = most; n > 1; n -= 1) {
+      const s = Math.sin(Math.PI / n);
+      // 0.97 rather than the exact bound: the ring is an ELLIPSE, and the
+      // circle-based solve is only near-exact on a square stage. Measured gaps
+      // came out at 1-3px on tall panels without it.
+      const d = Math.min(D_CEIL, (2 * s * (R - RING_MARGIN) * 0.97) / (1 + s));
+      if (d >= D_FLOOR) return { n, d: Math.round(d) };
+    }
+    return { n: 1, d: Math.round(Math.min(D_CEIL, Math.max(D_FLOOR, R - RING_MARGIN))) };
+  }
 
   // Two words -> both initials, one word -> one letter. Never two letters off a
   // single name: "Je" reads as a truncation, "J" reads as a monogram.
@@ -300,14 +364,25 @@
       .sort((a, b) => b.members.length - a.members.length || a.label.localeCompare(b.label));
   }
 
-  function faceEl(p, maxEngagement) {
+  // Face sizes SCALE WITH THE BUBBLE, and that is load-bearing rather than
+  // tidy. Held at the design's flat 22..32 they stopped fitting once bubbles
+  // shrank to make room for more topics: three 32px discs need ~104px, more
+  // than a 127px circle offers at its second row, so they wrapped to three rows
+  // and pushed out through the border. Measured — the first cut had a dozen
+  // faces outside their circles at 400px. 0.20 * d reproduces 22..32 at the
+  // largest bubble, which is where the design's numbers came from.
+  function faceScale(d) {
+    const max = Math.max(16, Math.min(32, Math.round(d * 0.2)));
+    return { max, min: Math.round(max * 0.69) };
+  }
+
+  function faceEl(p, maxEngagement, fs) {
     const f = document.createElement('div');
     f.className = 'pm-face';
-    // 22..32px, the design's range, carrying this year's engagement.
-    const size = Math.round(22 + 10 * ((p.engagement || 0) / maxEngagement));
+    const size = Math.round(fs.min + (fs.max - fs.min) * ((p.engagement || 0) / maxEngagement));
     f.style.width = `${size}px`;
     f.style.height = `${size}px`;
-    f.style.fontSize = size >= 28 ? '10px' : '9px';
+    f.style.fontSize = size >= 28 ? '10px' : `${Math.max(7, Math.round(size * 0.34))}px`;
     f.textContent = initials(p.name);
     // data-tip, not title: native tooltips do not fire reliably in a
     // borderless non-activating panel (same reason as the connector glyphs).
@@ -315,24 +390,30 @@
     return f;
   }
 
-  // The ring the bubbles sit on, measured from the stage rather than assumed.
-  // The panel is native-sized and the user can scale it, so a hardcoded radius
-  // is a clipped bubble waiting to happen — which is exactly what 32% did.
-  function ringFor(stageW, stageH) {
-    const half = D_MAX / 2 + 6; // biggest bubble's reach, plus a hair of margin
+  // The ring the bubbles sit on, from the same solve — the widest ellipse that
+  // still keeps a bubble of diameter d wholly on the stage. The panel is
+  // native-sized and the owner can scale it, so a hardcoded radius is a clipped
+  // bubble waiting to happen, which is exactly what a fixed 32% did.
+  function ringFor(stageW, stageH, d) {
+    const half = d / 2 + RING_MARGIN;
     return {
-      rx: Math.max(0, Math.min(stageW / 2 - half, stageW * 0.32)),
-      ry: Math.max(0, Math.min(stageH / 2 - half, stageH * 0.30)),
+      rx: Math.max(0, stageW / 2 - half),
+      ry: Math.max(0, stageH / 2 - half),
     };
   }
 
-  function clusterEl(c, i, count, maxMembers, ring, stage) {
+  function clusterEl(c, i, count, maxMembers, ring, stage, dMax) {
     const el = document.createElement('div');
     el.className = 'pm-cluster' + (i === 0 ? ' lead' : '');
+    el.dataset.topic = c.label;
     // Evenly around the centre, starting upper-left so a four-topic year lands
     // on the diagonals the design draws.
     const ang = -Math.PI * 0.75 + (i * Math.PI * 2) / count;
-    const d = Math.round(D_MIN + (D_MAX - D_MIN) * (c.members.length / maxMembers));
+    // Smaller bubbles scale down from the fitted maximum rather than from a
+    // constant, so the whole field shrinks together on a tight panel instead of
+    // the big one clipping while the small ones sit in space.
+    const dMin = Math.min(dMax, D_FLOOR);
+    const d = Math.round(dMin + (dMax - dMin) * (c.members.length / maxMembers));
     el.style.width = `${d}px`;
     el.style.height = `${d}px`;
     // Percentages so the ring still tracks the panel if it is resized under us.
@@ -341,16 +422,17 @@
 
     const faces = document.createElement('div');
     faces.className = 'pm-faces';
+    const fs = faceScale(d);
     const shown = c.members.slice(0, MAX_FACES);
     const maxE = Math.max(1, ...shown.map((p) => p.engagement || 0));
-    for (const p of shown) faces.appendChild(faceEl(p, maxE));
+    for (const p of shown) faces.appendChild(faceEl(p, maxE, fs));
     const rest = c.members.length - shown.length;
     if (rest > 0) {
       const more = document.createElement('div');
       more.className = 'pm-face pm-face-more';
-      more.style.width = '22px';
-      more.style.height = '22px';
-      more.style.fontSize = '8px';
+      more.style.width = `${fs.min}px`;
+      more.style.height = `${fs.min}px`;
+      more.style.fontSize = `${Math.max(7, Math.round(fs.min * 0.36))}px`;
       more.textContent = `+${rest}`;
       faces.appendChild(more);
     }
@@ -367,7 +449,9 @@
     skyEl.replaceChildren();
     const marked = topicsAreMarked(people);
     const all = clustersFrom(people, marked);
-    const clusters = all.slice(0, MAX_CLUSTERS);
+    const stage = { w: skyEl.clientWidth || 400, h: skyEl.clientHeight || 420 };
+    const fit = fitLayout(stage.w, stage.h, all.length);
+    const clusters = all.slice(0, fit.n);
     if (!clusters.length) {
       const m = document.createElement('div');
       m.className = 'pm-sky-empty';
@@ -402,11 +486,10 @@
     core.className = 'pm-core';
     skyEl.appendChild(core);
 
-    const stage = { w: skyEl.clientWidth || 400, h: skyEl.clientHeight || 420 };
-    const ring = ringFor(stage.w, stage.h);
+    const ring = ringFor(stage.w, stage.h, fit.d);
     const maxMembers = clusters[0].members.length;
     clusters.forEach((c, i) => {
-      skyEl.appendChild(clusterEl(c, i, clusters.length, maxMembers, ring, stage));
+      skyEl.appendChild(clusterEl(c, i, clusters.length, maxMembers, ring, stage, fit.d));
     });
 
     // BOTH caps, said out loud. The server caps the year's rows, and the ring
@@ -503,6 +586,9 @@
     if (!b) return;
     if (b.dataset.view === 'sky') {
       view = 'sky';
+      // The globe is the whole year's topics; arriving with one still selected
+      // would show a field where every bubble but the chosen one was missing.
+      topic = null;
       render();
       return;
     }
@@ -525,6 +611,12 @@
       requestSummary(key, year);
     }
     render();
+  });
+  skyEl.addEventListener('click', (e) => {
+    const c = e.target.closest('.pm-cluster');
+    if (!c || !c.dataset.topic) return;
+    hzSfx.squish();
+    openTopic(c.dataset.topic);
   });
   syncEl.addEventListener('click', () => { hzPost('openPeople').catch(() => {}); });
   let t = null;
