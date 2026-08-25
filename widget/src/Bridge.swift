@@ -140,15 +140,27 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     set { UserDefaults.standard.set(newValue, forKey: onboardedDefaultsKey) }
   }
 
-  // A completed old flow must not suppress a materially redesigned welcome.
-  // Keep its revision separately from the Boolean so future flow changes can
-  // deliberately welcome existing installs once, without resetting any other
-  // app preferences or personal data.
+  // WHICH FLOW SOMEBODY COMPLETED, recorded but NOT used to force a replay.
+  //
+  // This gate used to read `!onboarded || revision < current`, which replays the
+  // whole welcome for every existing install: `onboarded` is true for them and
+  // the revision key is absent, and UserDefaults reads a missing integer as 0,
+  // so 0 < 2 and the flow runs again on the next launch.
+  //
+  // Redesigning the flow is not a reason to make somebody sit through it. They
+  // have already granted the permissions, chosen a model and downloaded it --
+  // the whole point of the welcome -- and a finished setup that reopens itself
+  // reads as the app having lost their data, which is the single most alarming
+  // thing this app could imply. The gear replays it on demand for anyone who
+  // wants to see what changed.
+  //
+  // The stamp stays because it is worth knowing which flow a person saw, and
+  // because a future change that genuinely does need an existing install to
+  // revisit something can opt in HERE, deliberately, rather than by the side
+  // effect of a version bump.
   static let onboardingRevisionDefaultsKey = "HazlieOnboardingRevision"
   static let currentOnboardingRevision = 2
-  static var needsOnboarding: Bool {
-    !onboarded || UserDefaults.standard.integer(forKey: onboardingRevisionDefaultsKey) < currentOnboardingRevision
-  }
+  static var needsOnboarding: Bool { !onboarded }
   static func completeOnboarding() {
     onboarded = true
     UserDefaults.standard.set(currentOnboardingRevision, forKey: onboardingRevisionDefaultsKey)
