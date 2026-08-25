@@ -121,3 +121,67 @@ test('a weekday inside a standing fact still does not expire it', () => {
     null
   );
 });
+
+// ── resolvePhrase ────────────────────────────────────────────────────────────
+//
+// The model copies the words; this does the arithmetic. That split exists
+// because the model obeyed the JSON grammar on 1,030 of 1,030 calls and the
+// prose instruction to resolve a date on 1 of 38 — and when handed a
+// pattern-constrained date field it emitted a well-formed date every time and
+// still wrote the day the message was SENT.
+import { resolvePhrase } from '../server/memory/validity.mjs';
+
+const WED = Date.UTC(2026, 2, 4); // 2026-03-04, a Wednesday
+const day = (y, m, d) => Date.UTC(y, m - 1, d, 23, 59, 59, 999);
+
+test('the everyday relative words', () => {
+  assert.equal(resolvePhrase('tomorrow', WED), day(2026, 3, 5));
+  assert.equal(resolvePhrase('today', WED), day(2026, 3, 4));
+  assert.equal(resolvePhrase('tonight', WED), day(2026, 3, 4), 'tonight is still today');
+  assert.equal(resolvePhrase('day after tomorrow', WED), day(2026, 3, 6));
+});
+
+test('a weekday goes forward, and its own day goes a week out', () => {
+  assert.equal(resolvePhrase('friday', WED), day(2026, 3, 6), 'two days ahead');
+  assert.equal(resolvePhrase('tuesday', WED), day(2026, 3, 10), 'not yesterday — the next one');
+  assert.equal(resolvePhrase('wednesday', WED), day(2026, 3, 11), 'a plan precedes its day');
+  assert.equal(resolvePhrase('next tuesday', WED), resolvePhrase('tuesday', WED), '"next" adds nothing');
+});
+
+// A vague span is over when the span is. Picking a day inside it would invent
+// precision the message never had.
+test('a vague span resolves to the end of the span', () => {
+  assert.equal(resolvePhrase('next week', WED), day(2026, 3, 15));
+  assert.equal(resolvePhrase('next week sometime', WED), day(2026, 3, 15));
+  assert.equal(resolvePhrase('the weekend', WED), day(2026, 3, 7), 'the Saturday it starts');
+});
+
+test('a day of the month rolls to the next occurrence', () => {
+  assert.equal(resolvePhrase('the 14th', WED), day(2026, 3, 14), 'still ahead this month');
+  assert.equal(resolvePhrase('the 2nd', WED), day(2026, 4, 2), 'already gone — next month');
+});
+
+test('an explicit date in the phrase beats every relative reading', () => {
+  assert.equal(resolvePhrase('2026-04-02', WED), day(2026, 4, 2));
+  assert.equal(resolvePhrase('march 20', WED), day(2026, 3, 20));
+  assert.equal(resolvePhrase('tuesday 2026-04-02', WED), day(2026, 4, 2));
+});
+
+test('nothing recognisable means no expiry, never a guess', () => {
+  assert.equal(resolvePhrase('', WED), null);
+  assert.equal(resolvePhrase('learn portuguese', WED), null);
+  assert.equal(resolvePhrase('tomorrow', null), null, 'no anchor, no answer');
+  assert.equal(resolvePhrase(null, WED), null);
+});
+
+// The phrase is trusted over the prose because the model paraphrases in `text`
+// and copies exactly in a field the grammar requires.
+test('the structured phrase wins over the claim prose', () => {
+  const claim = { kind: 'plan', text: 'The owner flies out on 2026-09-09.', when_phrase: 'tomorrow' };
+  assert.equal(validToFor(claim, { observedAt: WED }), day(2026, 3, 5));
+});
+
+test('an empty phrase falls back to scanning the prose', () => {
+  const claim = { kind: 'plan', text: 'The owner flies on 2026-04-02.', when_phrase: '' };
+  assert.equal(validToFor(claim, { observedAt: WED }), day(2026, 4, 2));
+});

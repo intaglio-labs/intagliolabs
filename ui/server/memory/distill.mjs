@@ -315,10 +315,28 @@ export function episodeClaimSchema(lines) {
           items: {
             type: 'object',
             additionalProperties: false,
-            required: ['kind', 'text', 'line', 'quote', 'p'],
+            required: ['kind', 'text', 'line', 'quote', 'when_phrase', 'p'],
             properties: {
               kind: { enum: [...CLAIM_KINDS] },
               text: { type: 'string', minLength: 1, maxLength: 400 },
+              // THE WORDS THE MESSAGE USED FOR *WHEN*, copied, not computed.
+              //
+              // Required by the grammar rather than asked for in the prompt,
+              // and that distinction is the entire point. Across a full corpus
+              // pass the model obeyed the JSON schema on 1,030 of 1,030 calls
+              // and the prose instruction to resolve dates on 1 of 38. What a
+              // grammar requires, it emits.
+              //
+              // It must NOT resolve the date. Given a pattern-constrained date
+              // field it produced a well-formed date every time and still wrote
+              // the day the message was sent rather than the day "tomorrow"
+              // meant. Asked to copy the phrase it was right 6 times out of 6.
+              // memory/validity.mjs does the arithmetic, because arithmetic is
+              // code's job here.
+              //
+              // Empty string for a claim that names no time -- 57% of plans on
+              // the live corpus name none, so that is the common answer.
+              when_phrase: { type: 'string', maxLength: 40 },
               // The line the quote came from. Required, and checked against the
               // quotable set -- this is what makes citation a closed set rather
               // than a request.
@@ -462,6 +480,9 @@ export function validateEpisodeClaims(lines, claims) {
       kind: claim.kind,
       text: claim.text.trim(),
       quote: claim.quote,
+      // Copied through unresolved. Anything unrecognised downstream simply
+      // yields no expiry, which is the safe direction.
+      when_phrase: typeof claim.when_phrase === 'string' ? claim.when_phrase.trim() : '',
       p,
       // The LINE, not a context_id. Hermes resolves it; a caller-supplied row
       // id is never trusted.
