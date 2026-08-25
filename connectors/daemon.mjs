@@ -498,7 +498,30 @@ export function createDaemon({
     entities: (args) => adminEntities(args, ingestOpts),
   };
 
-  const makeCtx = () => ({
+  // HISTORY RUNS IN THE BACKGROUND, NEWEST-FIRST, AND IT HAS TO BE SCHEDULED.
+  //
+  // `backfill: false` was hardcoded here, and a source's forward cursor only
+  // ever moves toward now -- so nothing in this daemon could ever reach a
+  // message older than the day it was first run. Measured on this machine:
+  // chat.db holds 479,967 messages across 2017-2026 and 9,603 had been
+  // ingested, all of them 2026. The years were not thin; they were never
+  // fetched.
+  //
+  // A HISTORY PASS is the same source running backwards over its own second
+  // cursor, one slice per turn. Scheduled rather than run at install, because
+  // this is somebody's daily machine: a consumer app must not spend an hour of
+  // their CPU before it is useful. Newest-first for the same reason -- last
+  // year matters more than 2017, and the screens fill visibly while it runs.
+  //
+  // ONE AT A TIME, never alongside that source's forward pass: both read the
+  // same store and each moves a cursor the other reads, so an overlap strands
+  // rows between them with nothing to notice it by.
+  // How long one cycle may spend walking history. Small enough to be invisible
+// on the owner's machine, large enough that a decade of messages arrives in
+// hours rather than days.
+const HISTORY_BUDGET_MS = 20_000;
+
+const makeCtx = ({ history = false } = {}) => ({
     state,
     ingest: (rows) => ingest(rows, ingestOpts),
     admin,
@@ -507,6 +530,7 @@ export function createDaemon({
     log,
     now,
     backfill: false,
+    history,
   });
 
   async function runSource(source) {
@@ -529,7 +553,54 @@ export function createDaemon({
     }
     const startedTs = now();
     try {
+      // The forward pass first, always: what arrived since last time is more
+      // urgent than what happened in 2019, and history must never delay it.
       const counts = runCounts((await source.run(makeCtx())) ?? {});
+
+      // Then ONE slice of history, if this source walks backwards and has not
+      // reached the beginning of its store. Sequential with the forward pass and
+      // never concurrent: both read the same store, and each moves a cursor the
+      // other reads, so an overlap strands rows between them invisibly.
+      //
+      // A history failure is logged and dropped rather than failing the run. The
+      // forward pass already succeeded and its counts are real; history is
+      // catch-up work that retries on the next interval regardless.
+      if (source.walksHistory === true && !state.getCursor(`${source.name}:history-done`)) {
+        // A TIME BUDGET, not a row count.
+        //
+        // One slice per cycle is too slow to be useful: 2,000 rows against a
+        // 15-minute interval is two and a half days to walk 470k messages, and
+        // an archive that arrives next week is not a feature. A row count is
+        // also the wrong dial -- it means something different on every machine.
+        //
+        // So: keep taking slices until the budget is spent. The budget is small
+        // enough that the owner never notices (this is their daily driver, and
+        // the forward pass has already run), and it self-tunes -- a fast Mac
+        // simply gets through more history per cycle.
+        const deadline = now() + HISTORY_BUDGET_MS;
+        let slices = 0;
+        let gained = 0;
+        try {
+          while (now() < deadline) {
+            const back = runCounts((await source.run(makeCtx({ history: true }))) ?? {});
+            slices += 1;
+            gained += back.inserted + back.updated;
+            // Nothing read means the walk reached the beginning of the store.
+            // The source records that itself; stop asking.
+            if (state.getCursor(`${source.name}:history-done`)) break;
+            if (back.inserted === 0 && back.updated === 0 && back.unchanged === 0) break;
+          }
+          if (slices > 0) {
+            log.info('history_pass', { connector: source.name, slices, gained });
+          }
+        } catch (error) {
+          log.warn('history_pass_failed', {
+            connector: source.name,
+            slices,
+            error: String(error?.message ?? error).slice(0, 200),
+          });
+        }
+      }
       state.recordRun({
         connector: source.name,
         startedTs,
