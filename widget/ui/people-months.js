@@ -44,6 +44,12 @@
   // year, and slicing them by year made the same friend appear and vanish
   // between tabs.
   let scope = 'year';
+  // Whether this is the first time this page has ever been opened, decided by
+  // native having no remembered view for it. Only ever true before the first
+  // fetch lands, and only trusted when the read SUCCEEDED — a bridge that threw
+  // tells us nothing, and guessing "first visit" there would route someone away
+  // from a page they have used for months.
+  let firstVisit = false;
   // The topic a bubble was clicked into, or null. Only the list honours it —
   // filtering the constellation to one topic would just draw that one circle.
   let topic = null;
@@ -766,6 +772,11 @@
     } catch {
       return null; // no memory is not an error; start on this year
     }
+    // Native replies with the empty string exactly when nothing was ever
+    // stored, which is the one signal on this page that means "never been
+    // here". A malformed reply leaves saved null and this false: unreadable is
+    // not the same as absent.
+    firstVisit = saved === '';
     if (!saved) return null;
     const [y, v, t, s] = saved.split('|');
     const n = Number(y);
@@ -782,6 +793,29 @@
     // and it is one line to refuse rather than reason about downstream.
     topic = view === 'list' && t ? t : null;
     return Number.isInteger(n) && n >= 1990 && n <= new Date().getFullYear() + 1 ? n : null;
+  }
+
+  // A first visit that finds NOTHING has nothing to show and no way to fix it
+  // from here: the year tabs, the search and the constellation are all views of
+  // a corpus, so with no corpus this page can only say "no one matches in 2026"
+  // — which reads as a broken year rather than as "you have not connected
+  // anything yet". Send them to unify-your-circles, which is where a corpus
+  // starts, and which the sync button already opens.
+  //
+  // Both halves of the condition carry weight. `years` is corpus-wide (buildYear
+  // walks every person's whole timeline, not the open year), so this fires on an
+  // empty install and never on someone who simply has a thin 2026. And
+  // firstVisit keeps a returning owner who opened this page on purpose from
+  // being bounced out of it.
+  function routeIfEmpty(res) {
+    if (!firstVisit) return false;
+    firstVisit = false; // decided once, whatever the answer was
+    if (!Array.isArray(res.years) || res.years.length > 0) return false;
+    hzPost('openPeople').catch(() => {});
+    // Leaving this popup open behind unify would mean closing an empty year to
+    // get back to the thing that fills it.
+    hzPost('close').catch(() => {});
+    return true;
   }
 
   // An uncached year is a server rebuild on first touch, so the click must
@@ -807,6 +841,7 @@
     if (!res || !Array.isArray(res.people)) throw new Error('bad year payload');
     cache.set(year, res);
     if (Array.isArray(res.years) && res.years.length) years = res.years;
+    if (routeIfEmpty(res)) return;
     render();
     prefetchRest();
   }

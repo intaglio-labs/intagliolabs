@@ -32,7 +32,6 @@ protocol BridgeDelegate: AnyObject {
   func widgetSpot() -> [String: Double]
   func widgetBoundsChanged()
   func spotlightWidget(_ on: Bool)
-  func openOnboarding()
   func setupProgress(_ payload: [String: Any])
   /// Drop the onboarding scrim below ordinary windows so a system prompt can be
   /// seen, and put it back afterwards.
@@ -74,7 +73,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
-                    "status", "setConnectorEnabled", "setMotion", "setScale", "setSounds", "openOnboarding",
+                    "status", "setConnectorEnabled", "setMotion", "setScale", "setSounds",
                     "markHandheld",
                     // Same setup controls, reachable from the gear after the
                     // flow — a skipped step must stay reachable.
@@ -494,9 +493,6 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       } catch {
         reply(webView, id, ["state": "error", "error": "copy failed: \(error.localizedDescription)"])
       }
-    case "openOnboarding":
-      delegate?.openOnboarding()
-      reply(webView, id, ["state": "ok"])
     case "onboardingDone":
       // Only the flow finishing sets this. Dismissing with Escape closes the
       // window without sending it, so a flow backed out of returns next time.

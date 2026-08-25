@@ -170,35 +170,11 @@ function rangeRow({ name, note, value, min, max, step, message, format }) {
   return el;
 }
 
-// A setting that DOES something rather than holding a value: same row, a pill
-// instead of a switch.
-function actionRow({ name, note, action, message }) {
-  const el = document.createElement('div');
-  el.className = 'setting';
-
-  const text = document.createElement('div');
-  text.className = 'setting-text';
-  const label = document.createElement('span');
-  label.className = 'setting-name';
-  label.textContent = name;
-  const sub = document.createElement('span');
-  sub.className = 'setting-note';
-  sub.textContent = note;
-  text.append(label, sub);
-
-  const btn = document.createElement('button');
-  btn.className = 'setting-action';
-  btn.textContent = action;
-  btn.addEventListener('click', () => {
-    hzPost(message).catch(() => {});
-    // The flow takes over the screen; leaving this popup open behind it just
-    // means finding it again afterwards.
-    hzPost('close').catch(() => {});
-  });
-
-  el.append(text, btn);
-  return el;
-}
+// A setting that DOES something rather than holding a value — same row, a pill
+// instead of a switch — went with its only caller, the onboarding row in
+// renderSettings(). Kept in history rather than in the file: the
+// `.setting-action` styling it used is still in palette.css, so the next
+// action row is a function away.
 
 // The answer model is a Settings choice, not an onboarding gate. Fresh installs
 // default to the roughly 5 GB tier; this row keeps the smaller option available
@@ -347,12 +323,17 @@ async function renderSettings() {
     hzPost('setScale', { scale: 1 }).catch(() => {});
   }
   rows.push(modelRow());
-  rows.push(actionRow({
-    name: 'onboarding',
-    note: 'replay the welcome flow',
-    action: 'run',
-    message: 'openOnboarding',
-  }));
+  // The onboarding row was yeeted (owner, 2026-08-25): ~~a `run` pill that
+  // replayed the welcome flow~~. Settings is where you change what the app
+  // does, not where you re-watch its introduction, and the one control here
+  // that took over the whole screen was the one nobody wanted twice.
+  //
+  // This page's `openOnboarding` grant and the bridge case behind it went too,
+  // because bridge-capabilities.test.mjs holds the map to exactly what the
+  // pages call: an ungranted case is an orphan and a granted-but-uncalled verb
+  // is a re-widened surface, and it fails on both. main.swift keeps its own
+  // openOnboarding, so first run and the two paths that still reach it — a
+  // resumed flow, and the `onboarding` URL scheme — are unchanged.
   settings.replaceChildren(...rows);
 }
 renderSettings();
