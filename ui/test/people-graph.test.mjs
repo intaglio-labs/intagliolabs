@@ -141,3 +141,39 @@ test('owner-sent mail attributes the recipient, not the owner', () => {
   assert.equal(p.sent, 1, 'the owner-sent one');
   assert.equal(p.received, 1);
 });
+
+// ── labels for people nobody named ───────────────────────────────────────────
+import { namelike, readableId } from '../server/people/graph.mjs';
+
+// `speaker` falls back to the handle when WhatsApp knows no name, so both of
+// these arrive looking like labels. Letting either through makes an identifier
+// somebody's display name.
+test('an identifier is never mistaken for a name', () => {
+  assert.equal(namelike('Kevin Wang'), true);
+  assert.equal(namelike('11107305521405@lid'), false, 'a LID');
+  assert.equal(namelike('+14047180236'), false, 'a phone number');
+  assert.equal(namelike('(808) 555-0100'), false, 'a formatted one');
+  assert.equal(namelike('ay@austinyoshino.com'), false, 'an address');
+  assert.equal(namelike(''), false);
+  assert.equal(namelike(null), false);
+});
+
+test('a name with digits or punctuation still reads as a name', () => {
+  assert.equal(namelike('Bella Pivo'), true);
+  assert.equal(namelike("O'Brien"), true);
+  assert.equal(namelike('Jimmy Nguyen 2'), true);
+});
+
+// A LID cannot be traced back to a person even by the owner -- WhatsApp mints
+// it so it cannot. Seventeen digits asks somebody to recognise a token.
+test('an unnameable LID renders as what it is, not as digits', () => {
+  assert.equal(readableId('11107305521405@lid'), 'WhatsApp contact');
+});
+
+// A phone number is unrecognisable too, but it is real and the owner can often
+// place it. It stays.
+test('a phone number survives, because it is something a person can place', () => {
+  assert.equal(readableId('+14047180236'), '+14047180236');
+  assert.equal(readableId('ay@austinyoshino.com'), 'ay@austinyoshino.com');
+  assert.equal(readableId(''), null);
+});

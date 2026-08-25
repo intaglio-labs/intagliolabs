@@ -34,6 +34,35 @@ function normName(s) {
 }
 
 // identifier (phone/email) -> canonical display name, from the spine.
+// Is this string a NAME, or an identifier wearing one? `speaker` falls back to
+// the handle when the store knows no name, so a WhatsApp LID
+// ("11107305521405@lid") and a bare phone number both arrive looking like
+// labels. Neither is one.
+// What to show when nobody, anywhere, knows this person's name.
+//
+// A raw WhatsApp LID is seventeen digits and an @lid suffix. It is not a
+// name, it is not recognisable, and it is not even a number the owner could
+// look up -- WhatsApp mints it precisely so it cannot be traced back to one.
+// Rendering it verbatim asks somebody to recognise an opaque token.
+//
+// A phone number is different: it is unrecognisable too, but it is REAL, and
+// an owner can often place it. So numbers stay, formatted; only the LID gets
+// replaced by an honest description of what it is.
+export function readableId(identifier) {
+  if (typeof identifier !== 'string' || identifier.length === 0) return null;
+  if (identifier.endsWith('@lid')) return 'WhatsApp contact';
+  return identifier;
+}
+
+export function namelike(value) {
+  if (typeof value !== 'string') return false;
+  const v = value.trim();
+  if (v.length === 0 || v.length > 80) return false;
+  if (v.includes('@')) return false; // an address or a LID, never a name
+  if (/^\+?[0-9()\s.-]+$/u.test(v)) return false; // a phone number
+  return /\p{L}/u.test(v); // has an actual letter in it
+}
+
 export function loadSpine(stateDb) {
   const map = new Map();
   const nameToIds = new Map();
@@ -63,14 +92,28 @@ function personSignalsForRow(row, meta, owner) {
       // only ever talked to in a group thread is now visible. The owner's own
       // group messages have no single counterparty and are still skipped; a
       // one-to-one message is credited to the chat handle as before.
+      // THE SPEAKER IS A NAME WHEN WHATSAPP KNOWS ONE, and for most of these
+      // people it is the only name there is. A group sender arrives as a privacy
+      // LID -- an opaque id WhatsApp uses instead of a phone number -- which the
+      // spine can never resolve, so the timeline rendered seventeen digits. The
+      // connector already joins ZWAGROUPMEMBER for a contact name and puts it in
+      // `speaker`; this is where it was being thrown away.
+      //
+      // Guarded, because `speaker` falls back to the handle itself when the
+      // store knows no name: a LID or a bare number is an identifier, and
+      // passing one through here would make it somebody's display name, which
+      // is the bug this whole pass exists to fix.
+      const speakerName = namelike(row.speaker) ? row.speaker : undefined;
       if (meta.is_group) {
         if (fromMe) return [];
         const sender = meta.sender_handle ?? meta.handle ?? null;
-        return sender ? [{ id: sender, channel: row.source, ts, fromMe: false }] : [];
+        return sender
+          ? [{ id: sender, channel: row.source, ts, fromMe: false, name: speakerName }]
+          : [];
       }
       const id = meta.chat_handle ?? meta.handle ?? null;
       if (!id) return [];
-      return [{ id, channel: row.source, ts, fromMe }];
+      return [{ id, channel: row.source, ts, fromMe, name: speakerName }];
     }
     case 'mail': {
       // EVERY non-owner address on the email is counted, not just the first
@@ -372,7 +415,7 @@ export function buildGraph(
       const display =
         fromSpine ??
         [...p.names].sort((a, b) => b.length - a.length)[0] ??
-        [...p.identifiers][0] ??
+        readableId([...p.identifiers][0]) ??
         p.key;
       return {
         // The canonical resolution key. Stable across rebuilds (derived from the
