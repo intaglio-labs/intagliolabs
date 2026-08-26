@@ -611,6 +611,65 @@ function card(src, keep) {
   // every later press, with native remembering which kinds were walked
   // through. The owner merged them (2026-08-22): the full story is short
   // enough to always show, and the panel's corner x is the only dismiss.
+  // The in-panel walkthrough (owner, 2026-08-25): the whole connect flow
+  // lives right here — open the site, make the credential, paste it back —
+  // instead of handing the owner to the connect page. Shared, because two
+  // connectors reach it by different routes now: granola through the plain
+  // hint, telegram from inside its bridge branch (its api keys must exist
+  // before its bot can be spoken to at all).
+  const walkthrough = (hint) => {
+    // lives right here — open the site, make a key, paste it — instead of
+  // handing the owner to the connect page. hint.url is the door;
+  // connectSecret (Bridge → POST /api/secret) is where the paste lands.
+  const open = document.createElement('button');
+  open.className = 'hold-ok';
+  open.textContent = `1 · open ${hint.link} ↗`;
+  open.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // The installed app first, the website only if it is not there —
+    // openApp answers notInstalled rather than failing silently.
+    if (hint.app) {
+      hzPost('openApp', { bundleId: hint.app })
+        .then((d) => {
+          if (!d || d.state !== 'ok') hzPost('openExternal', { url: hint.url }).catch(() => {});
+        })
+        .catch(() => { hzPost('openExternal', { url: hint.url }).catch(() => {}); });
+      return;
+    }
+    hzPost('openExternal', { url: hint.url }).catch(() => {});
+  });
+  const step2 = document.createElement('span');
+  step2.className = 'setup';
+  step2.textContent = `2 · ${hint.step2 || 'create an API key and copy it'}`;
+  const paste = document.createElement('textarea');
+  paste.className = 'bpaste';
+  paste.placeholder = hint.paste || '3 · paste the key here';
+  paste.setAttribute('spellcheck', 'false');
+  const send = document.createElement('button');
+  send.className = 'hold-ok';
+  send.textContent = 'connect';
+  const said = document.createElement('span');
+  said.className = 'setup';
+  send.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const val = paste.value.trim();
+    if (!val) return;
+    paste.value = ''; // gone from the page before anything else happens
+    send.disabled = true; send.textContent = 'connecting…';
+    hzPost('connectSecret', { p: kindOf(src.id), value: val })
+      .then((d) => {
+        if (d && d.state === 'ok') { refresh(); return; }
+        send.disabled = false; send.textContent = 'connect';
+        said.textContent = (d && d.error) || 'could not save the key';
+      })
+      .catch(() => {
+        send.disabled = false; send.textContent = 'connect';
+        said.textContent = 'could not reach the connect service';
+      });
+  });
+  tip.append(open, step2, paste, send, said);
+  };
+
   const renderTip = () => {
     tip.replaceChildren();
     tip.classList.add('hold');
@@ -796,64 +855,6 @@ function card(src, keep) {
           }
           return `please enter your ${field} for ${LABEL}`;
         };
-    // The in-panel walkthrough (owner, 2026-08-25): the whole connect flow
-    // lives right here — open the site, make the credential, paste it back —
-    // instead of handing the owner to the connect page. Shared, because two
-    // connectors reach it by different routes now: granola through the plain
-    // hint, telegram from inside its bridge branch (its api keys must exist
-    // before its bot can be spoken to at all).
-    const walkthrough = (hint) => {
-      // lives right here — open the site, make a key, paste it — instead of
-    // handing the owner to the connect page. hint.url is the door;
-    // connectSecret (Bridge → POST /api/secret) is where the paste lands.
-    const open = document.createElement('button');
-    open.className = 'hold-ok';
-    open.textContent = `1 · open ${hint.link} ↗`;
-    open.addEventListener('click', (e) => {
-      e.stopPropagation();
-      // The installed app first, the website only if it is not there —
-      // openApp answers notInstalled rather than failing silently.
-      if (hint.app) {
-        hzPost('openApp', { bundleId: hint.app })
-          .then((d) => {
-            if (!d || d.state !== 'ok') hzPost('openExternal', { url: hint.url }).catch(() => {});
-          })
-          .catch(() => { hzPost('openExternal', { url: hint.url }).catch(() => {}); });
-        return;
-      }
-      hzPost('openExternal', { url: hint.url }).catch(() => {});
-    });
-    const step2 = document.createElement('span');
-    step2.className = 'setup';
-    step2.textContent = `2 · ${hint.step2 || 'create an API key and copy it'}`;
-    const paste = document.createElement('textarea');
-    paste.className = 'bpaste';
-    paste.placeholder = hint.paste || '3 · paste the key here';
-    paste.setAttribute('spellcheck', 'false');
-    const send = document.createElement('button');
-    send.className = 'hold-ok';
-    send.textContent = 'connect';
-    const said = document.createElement('span');
-    said.className = 'setup';
-    send.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const val = paste.value.trim();
-      if (!val) return;
-      paste.value = ''; // gone from the page before anything else happens
-      send.disabled = true; send.textContent = 'connecting…';
-      hzPost('connectSecret', { p: kindOf(src.id), value: val })
-        .then((d) => {
-          if (d && d.state === 'ok') { refresh(); return; }
-          send.disabled = false; send.textContent = 'connect';
-          said.textContent = (d && d.error) || 'could not save the key';
-        })
-        .catch(() => {
-          send.disabled = false; send.textContent = 'connect';
-          said.textContent = 'could not reach the connect service';
-        });
-    });
-    tip.append(open, step2, paste, send, said);
-    };
     const askedFor = () => {
       if (!(data && Array.isArray(data.transcript))) return null;
       for (let i = data.transcript.length - 1; i >= 0; i--) {
