@@ -54,7 +54,15 @@ import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch } from './people/search.mjs';
 import { loadOwner } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
-import { buildMap, buildYear, buildSearchYears } from './people/map.mjs';
+import {
+  buildMap,
+  buildYear,
+  buildSearchYears,
+  yearCore,
+  peopleCoreFreshness,
+  useTallyStore,
+} from './people/map.mjs';
+import { openTallyStore } from './people/tallyStore.mjs';
 import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
@@ -2537,6 +2545,34 @@ function tryPersonSearch(db, question) {
 // context db (the main store) is the caller's already-open handle. Errors
 // propagate: unlike the ask-path helpers, these are explicit routes the widget
 // invoked, so a failure should surface as a 500, not a silent null.
+// Build the people core once, at boot, on the same handles a request would use.
+// Exported shape matches yearCore's so the caller can log a count without
+// reaching into it.
+// ON REQUEST. The owner asked for "recomputed... every day or on request", and
+// this is the second half: a blocking rebuild the page can ask for by hand when
+// it does not want to wait for the background one.
+//
+// Blocking on purpose. Everything else in this file goes out of its way NOT to
+// block -- but somebody who pressed refresh is asking to wait, and returning
+// instantly with the same stale numbers would read as the button doing nothing.
+function rebuildPeopleCore(db) {
+  try {
+    withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      return yearCore(db, state, { now: Date.now(), owner: loadOwner(), aliases, blocking: true });
+    });
+  } catch {
+    // A failed rebuild leaves the previous core in place: stale, not wrong.
+  }
+}
+
+function warmPeopleCore(db) {
+  return withPeopleDbs(db, (state, resDb) => {
+    const { aliases } = resolutionState(resDb);
+    return yearCore(db, state, { now: Date.now(), owner: loadOwner(), aliases, blocking: true });
+  });
+}
+
 function withPeopleDbs(db, fn) {
   let state = null;
   let resDb = null;
@@ -2888,9 +2924,43 @@ async function handlePeople(db, req, res, cors, url, policy) {
     const sinceTs = days > 0 ? Date.now() - days * 86_400_000 : null;
     const out = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
-      return buildMap(db, state, { owner, sinceTs, aliases });
+      if (url.searchParams.get('rebuild') === '1') rebuildPeopleCore(db);
+      const map = buildMap(db, state, { owner, sinceTs, aliases });
+      return { ...map, freshness: peopleCoreFreshness(db, state, aliases) };
     });
-    send(res, 200, out, cors);
+    // PROJECTED, NOT JUST STRIPPED.
+    //
+    // This route was CLI-only until the constellation started calling it from
+    // the panel. Its star carries 22 fields including every handle a person has
+    // -- 2,665 of them, 506 address-shaped and 1,859 phone-shaped -- and the page
+    // reads eight. So `?for=page` returns those eight.
+    //
+    // Two reasons, and the second is the one that bites. Identifiers have no
+    // business crossing into a webview: both sibling routes already strip them,
+    // /people/find explicitly and with a comment. And SIZE -- the full payload is
+    // 1.32 MB, and Bridge.reply hands it to evaluateJavaScript as one inlined
+    // string with completionHandler nil, so if the web view refuses it the
+    // failure is discarded and the page simply never receives its data. A
+    // surface that fails by going quiet is worth 5x less bytes on its own.
+    //
+    // Unprojected stays the default so the CLI and any existing caller are
+    // unchanged; the page asks for what it needs.
+    const forPage = url.searchParams.get('for') === 'page';
+    const people = (out.people ?? []).map(({ identifiers, ...star }) => {
+      if (!forPage) return star;
+      return {
+        key: star.key,
+        name: star.name,
+        channels: star.channels,
+        messages: star.messages,
+        roomMessages: star.roomMessages,
+        roomOnly: star.roomOnly,
+        presenceDays: star.presenceDays,
+        lastSeen: star.lastSeen,
+        years: star.years,
+      };
+    });
+    send(res, 200, { ...out, people }, cors);
     return;
   }
 
@@ -2934,7 +3004,12 @@ async function handlePeople(db, req, res, cors, url, policy) {
     }
     const out = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
-      return buildYear(db, state, { year, owner, aliases });
+      if (url.searchParams.get('rebuild') === '1') rebuildPeopleCore(db);
+      const year_ = buildYear(db, state, { year, owner, aliases });
+      // HOW OLD IS THIS ANSWER. The core serves stale and rebuilds behind the
+      // response, which is what makes the page instant -- but an answer that is
+      // one ingest behind must say so rather than pass as live.
+      return { ...year_, freshness: peopleCoreFreshness(db, state, aliases) };
     });
     send(res, 200, out, cors);
     return;
@@ -3103,6 +3178,42 @@ if (isMain) {
       console.log(
         `hermes listening on http://127.0.0.1:${port} (context rows: ${n})`
       );
+      // WARM THE PEOPLE CORE BEFORE ANYBODY ASKS.
+      //
+      // The first build is the one wait that cannot be served around: ~7.6s of
+      // synchronous work with nothing cached to hand back instead. Every hermes
+      // restart throws the memo away, and the app restarts hermes on every
+      // deploy — so without this, the first person to open the panel after a
+      // deploy pays it, every time, and while they wait hermes answers nothing
+      // at all (node:sqlite is synchronous; a 20ms timer got zero ticks during
+      // an 8s build).
+      //
+      // Deferred past listen so the port is open first: a request arriving
+      // during the warm is queued behind it, which is the same wait it would
+      // have paid anyway, and /health answers before it starts.
+      //
+      // Counts only in the log, and failure is not fatal: an unwarmed core is
+      // slow, not broken, and the next request builds it.
+      setTimeout(() => {
+        const t0 = Date.now();
+        try {
+          // A DERIVED CACHE, beside the corpus it is derived from -- the path
+          // asked of the handle rather than recomputed, so it always names the
+          // database actually open and an in-memory one (which reports no file)
+          // gets no cache at all. Deleting it costs one rescan and nothing
+          // else, which is the only property it needs to have. Opened here
+          // rather than at import so a test that imports the module never
+          // writes to the owner's disk.
+          const file = db.prepare('PRAGMA database_list').get()?.file ?? '';
+          if (file) useTallyStore(openTallyStore(`${file}.tallies`));
+          const core = warmPeopleCore(db);
+          console.log(
+            `people core warm in ${Date.now() - t0}ms (${core?.graph?.length ?? 0} people)`
+          );
+        } catch (e) {
+          console.error(`people core warm failed: ${e?.message ?? e}`);
+        }
+      }, 250).unref?.();
     },
     (e) => {
       console.error(`hermes failed to start: ${e.message ?? e}`);

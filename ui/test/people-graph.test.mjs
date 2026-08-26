@@ -94,12 +94,12 @@ test('lastSeen ignores future events regardless of row scan order', () => {
 test('calendar co-attendance merges by attendee email and counts meetings', () => {
   const ctx = openDb(':memory:');
   insertRows(ctx, [
-    { ts: NOW - 20 * DAY, source: 'calendar', entity_id: 'c:1', text: 'm1', meta: { attendees: [{ email: 'rishab@videa.com', name: 'Rishab Nayak' }] } },
-    { ts: NOW - 10 * DAY, source: 'calendar', entity_id: 'c:2', text: 'm2', meta: { attendees: [{ email: 'rishab@videa.com', name: 'Rishab Nayak' }] } },
+    { ts: NOW - 20 * DAY, source: 'calendar', entity_id: 'c:1', text: 'm1', meta: { attendees: [{ email: 'mika@example.com', name: 'Mika Tanaka' }] } },
+    { ts: NOW - 10 * DAY, source: 'calendar', entity_id: 'c:2', text: 'm2', meta: { attendees: [{ email: 'mika@example.com', name: 'Mika Tanaka' }] } },
     { ts: NOW - 15 * DAY, source: 'imessage', entity_id: 'i:1', text: 'hey', meta: { chat_handle: '+15555550123', is_from_me: false } },
   ]);
-  const spine = spineDb([['+15555550123', 'Rishab Nayak', 'phone'], ['rishab@videa.com', 'Rishab Nayak', 'email']]);
-  const r = buildGraph(ctx, spine, { now: NOW }).find((p) => p.name === 'Rishab Nayak');
+  const spine = spineDb([['+15555550123', 'Mika Tanaka', 'phone'], ['mika@example.com', 'Mika Tanaka', 'email']]);
+  const r = buildGraph(ctx, spine, { now: NOW }).find((p) => p.name === 'Mika Tanaka');
   assert.equal(r.metInPerson, 2);
   assert.ok(r.channels.includes('calendar') && r.channels.includes('imessage'));
 });

@@ -30,8 +30,16 @@ export function ymFromIndex(i) {
   return `${y}-${String(m).padStart(2, '0')}`;
 }
 
-function msgs(b) {
-  return (b.sent ?? 0) + (b.received ?? 0);
+// Same two questions as highlights.mjs isActive, same explicit answer -- and it
+// matters more here, because this feeds a HARD GATE in the ranker rather than a
+// headline. `withRoom: false` is correspondence (peak era, "when we actually
+// talked"); `withRoom: true` is presence (was this person around at all).
+//
+// This summed sent+received back when that WAS everything. Since rooms became
+// their own number it silently became direct-only for every caller.
+function msgs(b, { withRoom = false } = {}) {
+  const direct = (b.sent ?? 0) + (b.received ?? 0);
+  return withRoom ? direct + (b.room ?? 0) : direct;
 }
 
 function ymOfTs(ts) {

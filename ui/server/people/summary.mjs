@@ -110,6 +110,21 @@ function systemPrompt(year) {
 const REGEN_ABS = 20; // messages of drift before a regeneration...
 const REGEN_FRAC = 0.2; // ...or a fifth of the sample's basis, whichever is larger
 
+// WHAT THIS CACHE IS A CACHE OF.
+//
+// A stored summary is model prose written from a particular SAMPLE under a
+// particular PROMPT. The row-count drift check below notices the corpus growing;
+// it cannot notice the code changing what it reads. On 2026-08-26 rooms were
+// excluded from gatherRows, which changed the sample for every person who
+// shares a group chat -- and every cached summary stayed, because the row count
+// had not drifted far enough. Five had to be deleted by hand, and nothing would
+// have stopped the next change doing the same.
+//
+// BUMP THIS whenever gatherRows, the prompt file, or MIN_ROWS changes. A
+// mismatch invalidates as surely as drift does, which turns "delete the db by
+// hand and hope you remembered" into a one-line diff that reviews itself.
+export const SUMMARY_REVISION = 2; // 2: rooms excluded from the sample (2026-08-26)
+
 export function summaryStillValid(rowsSeen, rowsNow) {
   return Math.abs(rowsNow - rowsSeen) <= Math.max(REGEN_ABS, Math.floor(rowsSeen * REGEN_FRAC));
 }
@@ -130,8 +145,20 @@ export function openSummariesDb(path = summariesDbPath()) {
     'CREATE TABLE IF NOT EXISTS summaries (' +
       'person_key TEXT NOT NULL, year INTEGER NOT NULL, text TEXT NOT NULL, ' +
       'rows_seen INTEGER NOT NULL, generated_ms INTEGER NOT NULL, ' +
+      // Defaulted so an existing store opens without a migration: every row
+      // written before this column existed reads as revision 0 and is therefore
+      // stale, which is exactly right -- those are the pre-room-split summaries.
+      'code_rev INTEGER NOT NULL DEFAULT 0, ' +
       'PRIMARY KEY (person_key, year))'
   );
+  // AN EXISTING STORE DOES NOT GET THE COLUMN FROM THE CREATE ABOVE, because
+  // IF NOT EXISTS skips the whole statement. Guarded by a lookup rather than a
+  // caught error, so a real failure still surfaces; every pre-existing row lands
+  // on the DEFAULT 0 and is therefore correctly treated as stale.
+  const hasRev = db
+    .prepare("SELECT COUNT(*) AS n FROM pragma_table_info('summaries') WHERE name = 'code_rev'")
+    .get().n === 1;
+  if (!hasRev) db.exec('ALTER TABLE summaries ADD COLUMN code_rev INTEGER NOT NULL DEFAULT 0');
   return db;
 }
 
@@ -158,9 +185,9 @@ export async function summarizeYear(
   const sdb = summariesDb ?? openSummariesDb();
   try {
     const hit = sdb
-      .prepare('SELECT text, rows_seen, generated_ms FROM summaries WHERE person_key = ? AND year = ?')
+      .prepare('SELECT text, rows_seen, generated_ms, code_rev FROM summaries WHERE person_key = ? AND year = ?')
       .get(personKey, year);
-    if (hit && summaryStillValid(hit.rows_seen, rows.length)) {
+    if (hit && hit.code_rev === SUMMARY_REVISION && summaryStillValid(hit.rows_seen, rows.length)) {
       return { text: hit.text, sampled: null, of: rows.length, cached: true };
     }
 
@@ -197,11 +224,12 @@ export async function summarizeYear(
   if (text === null) return { text: null, reason: 'empty model output' };
     sdb
       .prepare(
-        'INSERT INTO summaries (person_key, year, text, rows_seen, generated_ms) VALUES (?,?,?,?,?) ' +
+        'INSERT INTO summaries (person_key, year, text, rows_seen, generated_ms, code_rev) VALUES (?,?,?,?,?,?) ' +
           'ON CONFLICT (person_key, year) DO UPDATE SET text = excluded.text, ' +
-          'rows_seen = excluded.rows_seen, generated_ms = excluded.generated_ms'
+          'rows_seen = excluded.rows_seen, generated_ms = excluded.generated_ms, ' +
+          'code_rev = excluded.code_rev'
       )
-      .run(personKey, year, text, rows.length, now);
+      .run(personKey, year, text, rows.length, now, SUMMARY_REVISION);
     return { text, sampled: sample.length, of: rows.length };
   } finally {
     if (summariesDb === null) {

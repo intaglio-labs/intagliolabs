@@ -240,6 +240,59 @@ test('a stopword between two words breaks the pair', () => {
   assert.equal(docs.get('k|2026-05').pairs.get('working app'), undefined);
 });
 
+// Machine-written mail is formal English, so isAutomatedRow -- aimed at SMS
+// compliance text and one-time codes -- lets an order confirmation straight
+// through. These are the exact PHRASES that chipped on real rows.
+//
+// Phrases, not words. Stopping the vocabulary instead (order, address,
+// reference...) was tried and reverted: it would have silenced the friend who
+// ordered dinner, which is the same reason isAutomatedRow drops rows rather
+// than blacklisting terms. A lone "order" chip is the accepted cost.
+test('automated-mail boilerplate never becomes a chip', () => {
+  const ctx = openDb(':memory:');
+  const y = new Date(2024, 3, 1).getTime();
+  // Enough repetitions to clear every floor: if the register were not stopped,
+  // these would be the most "distinctive" phrases this pair has.
+  const lines = [
+    'your order number is ready for future reference',
+    'your order number is ready for future reference',
+    'your order number is ready for future reference',
+    'we have received either your email address or your profile',
+    'we have received either your email address or your profile',
+    'we have received either your email address or your profile',
+    'would you mind providing the original confirmation',
+    'would you mind providing the original confirmation',
+    'would you mind providing the original confirmation',
+  ];
+  insertRows(ctx, lines.map((t, i) => ({ ...msg(y + i * DAY, t), entity_id: `b${i}` })));
+  const idToKey = new Map([[HANDLE, 'name:shop bot']]);
+  const { docs, docFreq, totalDocs } = topicTallies(ctx, idToKey);
+  const chips = topTopics(docs.get('name:shop bot|2024'), docFreq, totalDocs, { limit: 5 })
+    .map((c) => c.label);
+  for (const junk of ['order number', 'future reference', 'received either', 'email address',
+    'mind providing']) {
+    assert.ok(!chips.includes(junk), `"${junk}" must not be a chip, got ${JSON.stringify(chips)}`);
+  }
+});
+
+// The other half of the same change: stopping the register must not cost the
+// distinctive terms the backfill exists for.
+test('real distinctive terms still chip after the pair stoplist', () => {
+  const ctx = openDb(':memory:');
+  const y = new Date(2024, 3, 1).getTime();
+  const lines = [
+    'the tahoe cabin again in tahoe next month',
+    'tahoe cabin was unreal, tahoe cabin again?',
+    'booking the tahoe cabin, same tahoe cabin as before',
+  ];
+  insertRows(ctx, lines.map((t, i) => ({ ...msg(y + i * DAY, t), entity_id: `c${i}` })));
+  const idToKey = new Map([[HANDLE, 'name:pat kim']]);
+  const { docs, docFreq, totalDocs } = topicTallies(ctx, idToKey);
+  const chips = topTopics(docs.get('name:pat kim|2024'), docFreq, totalDocs, { limit: 5 })
+    .map((c) => c.label);
+  assert.ok(chips.some((c) => c.includes('tahoe')), `expected a tahoe chip, got ${JSON.stringify(chips)}`);
+});
+
 // ---- what a robot said is nobody's topic ----
 //
 // Measured before this filter existed: four of the fifteen most repeated
