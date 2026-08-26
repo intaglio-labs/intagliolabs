@@ -1497,6 +1497,15 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
   color: var(--hazelnut-light);
 }
 .row .mark svg { width: 20px; height: 20px; }
+/* NOT YET SHIPPING (SOON_CONNECTORS in connections.js). Greyed rather than
+   hidden: a tile that disappears reads as a connector that is not coming,
+   and this one is. The glyph loses its hazelnut and most of its contrast so
+   it sits back from the tiles that can actually be pressed into service —
+   but the tile keeps its shape and stays pressable, because pressing it is
+   how you find out why. Not opacity on .row: that would fade the dot and
+   the tile's own inset highlight into mush; this dims the mark alone. */
+.row.soon .mark { color: var(--muted); opacity: 0.55; }
+.row.soon { border-color: rgba(234, 234, 234, 0.06); }
 /* Long names (a mail address) get the middle eaten rather than the end, so
    the domain still identifies which account it is. */
 /* No label on the tile any more — at 40px a name is two illegible letters

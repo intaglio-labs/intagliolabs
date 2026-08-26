@@ -542,6 +542,21 @@ const CONNECTOR_ORDER = [
 // don't render. To restore one, delete it from this set. Nothing else keys
 // off it, so a hidden id still works everywhere else it appears.
 const HIDDEN_CONNECTORS = new Set(['oura', 'photos', 'files', 'notion', 'notes']);
+// NOT YET SHIPPING. A tile that is on the shelf and does not work is worse
+// than one that is not there — but so is a tile that vanishes, because the
+// owner then wonders whether Telegram is coming at all. So: greyed, present,
+// and says so when pressed.
+//
+// Telegram is here because its login is the only one that sends you to a
+// developer portal first. Every install has to register its own app at
+// my.telegram.org and paste api_id:api_hash before the bridge will start —
+// the flow works, and it is not a flow to hand anyone (owner, 2026-08-26).
+// The route out is written down at PLATFORMS.telegram in
+// connect/lib/bridge.mjs: one registered app shipped with the product, which
+// cannot be committed to this public repo and needs build-time injection.
+// Delete from this set when that lands; nothing else keys off it, and the
+// connector, its bridge and its walkthrough are all still wired underneath.
+const SOON_CONNECTORS = new Set(['telegram']);
 // WHAT NEEDS YOU COMES FIRST. The shelf scrolls, so anything past the fourth
 // tile is work to reach — and the tiles that need reaching are exactly the
 // ones not yet connected or broken. Those lead; everything healthy follows in
@@ -649,6 +664,14 @@ function card(src, keep) {
   // help, and the owner finds out when an answer is quietly missing its source.
   const dot = document.createElement('span');
   dot.className = 'dot' + (src.connected ? ' on' : src.broken ? ' bad' : ' off');
+
+  // Greyed, and the dot goes with it: an off dot on a tile that cannot be
+  // turned on is an invitation, and this tile is declining one.
+  const soon = SOON_CONNECTORS.has(kindOf(src.id));
+  if (soon) {
+    row.classList.add('soon');
+    dot.className = 'dot off';
+  }
 
   row.append(mark, name, dot);
 
@@ -1245,6 +1268,21 @@ function card(src, keep) {
       });
   };
 
+  // The whole card for a not-yet-shipping tile. A function because the kept
+  // strip at the end of card() re-renders after every refresh() and would
+  // otherwise fall through to renderTip and show a walkthrough for a
+  // connector the shelf has just said is not available.
+  const renderSoon = () => {
+    tip.replaceChildren();
+    tip.classList.add('hold');
+    const head = document.createElement('b');
+    head.textContent = src.label;
+    const say = document.createElement('span');
+    say.className = 'setup';
+    say.textContent = 'coming soon';
+    tip.append(head, say);
+  };
+
   const toggle = () => {
     // One strip at a time, by construction now: the host holds exactly one
     // child, so opening a tile evicts whatever was there. Ownership is
@@ -1256,6 +1294,15 @@ function card(src, keep) {
     hintHost.replaceChildren();
     for (const r of grid.querySelectorAll('.row')) r.classList.remove('open');
     if (!wasOpen) {
+      // BEFORE ANY LOGIN PATH. This tile's whole behaviour is the card, so it
+      // must not fall through to openBridgeLogin and start a bridge
+      // conversation nobody can finish.
+      if (soon) {
+        renderSoon();
+        hintHost.appendChild(tip);
+        row.classList.add('open');
+        return;
+      }
       // Unconnected social bridge: DON'T open the panel — the login spins the
       // tile dot and the panel opens later, only when there's a result
       // (openBridgeLogin owns that). Everything else opens the panel now:
@@ -1306,7 +1353,8 @@ function card(src, keep) {
     const typed = [...keep.querySelectorAll('textarea, input')].some((b) => b.value.trim());
     if (!typed) {
       hintHost.replaceChildren(tip);
-      if (src.action === 'bridge') openBridge();
+      if (soon) renderSoon();
+      else if (src.action === 'bridge') openBridge();
       else renderTip();
     }
     row.classList.add('open');
