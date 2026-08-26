@@ -69,3 +69,22 @@ test('opening straight into the globe still warms the year tabs', () => {
   assert.match(boot, /refreshYear\(year\)[\s\S]*prefetchRest\(\)/u,
     'the years are read behind the constellation, so the strip is not one tab wide');
 });
+
+// A COLD PAGE KNOWS ONE YEAR: today's. The rest of the strip arrives with the
+// first year payload, and the constellation does not repaint when one lands —
+// so opening the app straight into the globe left a strip of a single tab, and
+// every other year appeared only when something else forced a paint. Reported
+// from the shipped app, not theorised.
+test('the year list arriving redraws the strip, whichever surface is up', () => {
+  const refreshYear = /function refreshYear\(y\) \{([\s\S]*?)\n  \}/u.exec(source)?.[1] ?? '';
+  assert.match(refreshYear, /years = res\.years;[\s\S]*renderTabs\(\);/u,
+    'a payload that names the years redraws the tabs that show them');
+  // And it stays independent of the surface repaint, which the globe does not want.
+  assert.match(refreshYear, /scope === 'year'/u);
+});
+
+test('the strip homes to the newest year once it has more than one tab', () => {
+  const tabs = /function renderTabs\(\) \{([\s\S]*?)\n  \}/u.exec(source)?.[1] ?? '';
+  assert.match(tabs, /if \(!tabsHomed && ys\.length > 1\)/u,
+    'homing a one-tab placeholder spends the one homing on nothing');
+});

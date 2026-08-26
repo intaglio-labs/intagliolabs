@@ -44,8 +44,11 @@
   <div class="pm-tabrow" id="tabrow">
     <div class="pm-tabs" id="tabs"></div>
     <!-- Not built by people-months.js like the year tabs: it is one fixed
-         control, so it lives here and the script only lights it. -->
-    <button class="pm-tab pm-tab-globe" id="globe" data-view="sky"
+         control, so it lives here and the script only lights it. It is NOT a
+         .pm-tab: it stopped wearing tab chrome (owner, 2026-08-26) and is a
+         floating icon pinned to the right edge, so the class that carries the
+         chrome would be a lie the stylesheet then has to undo. -->
+    <button class="pm-globe" id="globe" data-view="sky"
             aria-label="every year by topic">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
            stroke-linecap="round" stroke-linejoin="round">

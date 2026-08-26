@@ -463,6 +463,19 @@
   // Browser-style year tabs: oldest left, newest right, the open one active,
   // and the globe last — all-years rather than a year, but on the same strip
   // because it is the same surface.
+  // WHICH END IS ACTUALLY HIDING SOMETHING. The strip's fade used to be painted
+  // on both ends at all times, which meant the tab at either end lost its edge
+  // to a gradient whether or not there was anything behind it — and the newest
+  // year, the one a fresh open selects, is always at an end. Marked from the
+  // scroll position instead: a strip with nothing to its left does not fade
+  // left. 1px of slack because scrollLeft is fractional on a scaled display.
+  function markTabFades() {
+    const max = tabsEl.scrollWidth - tabsEl.clientWidth;
+    tabsEl.classList.toggle('fade-l', tabsEl.scrollLeft > 1);
+    tabsEl.classList.toggle('fade-r', tabsEl.scrollLeft < max - 1);
+  }
+  tabsEl.addEventListener('scroll', markTabFades, { passive: true });
+
   function renderTabs() {
     const ys = years.length ? years : [year];
     tabsEl.replaceChildren();
@@ -504,12 +517,22 @@
     // is a no-op when the active tab is already visible, which parked a fresh
     // open on 2012 with the newest years off-screen.
     const active = tabsEl.querySelector('.pm-tab.active');
-    if (!tabsHomed) {
+    // ONCE THE STRIP IS A STRIP. `ys.length > 1` because the first paint of a
+    // cold page draws the open year alone, before any payload has said which
+    // years exist — homing to the right end of a single tab spends the one
+    // homing on nothing, and the real strip then arrives parked on the oldest
+    // year. Harmless in the list, where scrollIntoView on the active tab
+    // rescues it; visible in the globe, where no year tab is active and the
+    // strip simply sat on 2019.
+    if (!tabsHomed && ys.length > 1) {
       tabsHomed = true;
       tabsEl.scrollLeft = tabsEl.scrollWidth;
     } else if (active) {
       active.scrollIntoView({ inline: 'nearest', block: 'nearest' });
     }
+    // After the scroll above, not before: the fades describe where the strip
+    // ended up. The scroll listener covers every move after this one.
+    markTabFades();
   }
 
   // ---- the constellation ----
@@ -533,19 +556,6 @@
     if (!parts.length) return '?';
     const s = parts.length > 1 ? parts[0][0] + parts[parts.length - 1][0] : parts[0][0];
     return s.toUpperCase();
-  }
-
-  // Seeded PRNG (mulberry32). Math.random would reshuffle the background on
-  // every keystroke of a search, which reads as the sky twitching at you.
-  // Seeded by the year, so a year always comes back the same sky.
-  function mulberry32(seed) {
-    let a = seed >>> 0;
-    return () => {
-      a = (a + 0x6d2b79f5) >>> 0;
-      let t = Math.imul(a ^ (a >>> 15), 1 | a);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
   }
 
   // Does this payload carry the server's taxonomy mark at all? The app bundle
@@ -741,24 +751,18 @@
       return;
     }
 
-    const rnd = mulberry32(year * 2654435761);
+    // ~~48 seeded background specks, a starfield behind the topics.~~ Yeeted
+    // (owner, 2026-08-26). They were the only marks on this surface that meant
+    // nothing — every other dot here is a person — and at speck size the eye
+    // cannot tell decoration from a person too far out to read. The dashed
+    // orbits stay: they are decoration too, but they are visibly structure
+    // rather than data.
     for (const d of [180, 300, 420]) {
       const o = document.createElement('div');
       o.className = 'pm-orbit';
       o.style.width = `${d}px`;
       o.style.height = `${d}px`;
       skyEl.appendChild(o);
-    }
-    for (let i = 0; i < 48; i += 1) {
-      const s = document.createElement('span');
-      s.className = 'pm-speck';
-      const size = 2.5 + rnd() * 2.5;
-      s.style.width = `${size.toFixed(1)}px`;
-      s.style.height = `${size.toFixed(1)}px`;
-      s.style.left = `${(2 + rnd() * 96).toFixed(1)}%`;
-      s.style.top = `${(4 + rnd() * 92).toFixed(1)}%`;
-      s.style.opacity = (0.22 + rnd() * 0.3).toFixed(2);
-      skyEl.appendChild(s);
     }
 
     const core = document.createElement('div');
@@ -967,7 +971,18 @@
         if (!res || !Array.isArray(res.people)) throw new Error('bad year payload');
         cache.set(y, res);
         staleYears.delete(y);
-        if (Array.isArray(res.years) && res.years.length) years = res.years;
+        if (Array.isArray(res.years) && res.years.length) {
+          years = res.years;
+          // THE STRIP BELONGS TO BOTH SURFACES. `years` is corpus-wide and
+          // arrives with a year payload, so until one lands the strip can only
+          // draw the open year — one lonely tab. The constellation is painted
+          // from the map and does not repaint when a year lands, which left
+          // that placeholder strip on screen for the whole visit: the owner
+          // opened the app into the globe and saw a single 2026, with every
+          // other year appearing only once something else forced a paint.
+          // Redrawing the tabs is cheap and says nothing about the field.
+          renderTabs();
+        }
         // Only into the list. A background year check landing while the globe
         // is up used to repaint the constellation, which is built from the map
         // and had nothing to learn from it — the whole field blinked.
@@ -1075,7 +1090,8 @@
   };
 
   tabRowEl.addEventListener('click', (e) => {
-    const b = e.target.closest('.pm-tab');
+    // Two shapes, one strip: the year tabs and the globe icon beside them.
+    const b = e.target.closest('.pm-tab, .pm-globe');
     if (!b) return;
     if (b.dataset.view === 'sky') {
       view = 'sky';

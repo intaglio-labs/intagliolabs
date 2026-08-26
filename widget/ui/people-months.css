@@ -23,6 +23,15 @@ body.plist .pm-tabs {
   /* min-width: 0 or the strip refuses to shrink below its content and pushes
      the globe off the panel — the exact thing this layout exists to prevent. */
   min-width: 0;
+  /* SHRINK-TO-FIT, PUSHED RIGHT. ~~flex: 1 1 auto~~ made the strip eat the whole
+     row, so a year or two of history left a hand's width of nothing between the
+     last tab and the globe. Now the strip is only as wide as its tabs (up to
+     the room available) and margin-left: auto carries it over to sit against
+     the globe, whether it holds one year or fifteen.
+     margin-left: auto and not justify-content: flex-end — end-justified
+     content in a scroll container is the classic way to make the START of the
+     list unreachable in WebKit, and WebKit is this app's engine. */
+  margin-left: auto;
   overflow-x: auto;
   /* overflow-y MUST be explicit — same trap palette.css documents on
      .conn-main, from the other side: overflow-x: auto alone promotes the
@@ -31,7 +40,7 @@ body.plist .pm-tabs {
      row vertically scrollable. The strip scrolls SIDEWAYS only. */
   overflow-y: hidden;
   scrollbar-width: none;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
 }
 body.plist .pm-tabs::-webkit-scrollbar { display: none; }
 /* THE CLIPPED EDGE HAS TO READ AS SCROLLED, NOT BROKEN. Fifteen years need
@@ -47,8 +56,23 @@ body.plist .pm-tabs::-webkit-scrollbar { display: none; }
    Symmetric, because the strip scrolls both ways; the fade is 18px, about a
    third of a tab, which is enough to read as intent and not enough to hide a
    year. */
-body.plist .pm-tabs {
-  scroll-snap-type: x proximity;
+body.plist .pm-tabs { scroll-snap-type: x proximity; }
+/* ~~The fade was permanent, on both ends.~~ It cost the end tabs their edges
+   whether or not anything was hidden behind them, and paying for that at the
+   right-hand end meant holding the newest year 18px clear of the globe — the
+   gap the owner asked about. The page now says which side is actually cut
+   (markTabFades, on scroll and after every strip render), so a strip resting at
+   its newest end fades only on the left and the newest year can sit right
+   against the globe with its border intact. */
+body.plist .pm-tabs.fade-l {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 18px);
+  mask-image: linear-gradient(to right, transparent 0, #000 18px);
+}
+body.plist .pm-tabs.fade-r {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent 100%);
+}
+body.plist .pm-tabs.fade-l.fade-r {
   -webkit-mask-image: linear-gradient(
     to right, transparent 0, #000 18px, #000 calc(100% - 18px), transparent 100%
   );
@@ -57,15 +81,6 @@ body.plist .pm-tabs {
   );
 }
 body.plist .pm-tab { scroll-snap-align: start; }
-/* THE FADE MUST NOT EAT THE NEWEST YEAR. The mask above fades the last 18px of
-   the strip, and the strip now ends at the newest year rather than at the globe
-   — so scrolled fully right (which is where a fresh open puts it, on the year
-   it just selected) the selected tab sat inside the fade and came out washed
-   out. 18px of end margin parks it clear of the fade at rest, while a year
-   scrolled halfway past the edge still fades. Margin rather than padding on the
-   scroller: WebKit has a long history of dropping a flex scroll container's end
-   padding out of its scrollable area, and this is the app's engine. */
-body.plist .pm-tabs .pm-tab:last-child { margin-right: 18px; }
 /* (The globe used to need `scroll-snap-align: end` here, and the mask above
    faded it anyway — it sat inside the strip's own right-hand fade. Out of the
    scroller it is neither snapped nor masked, which is what "the one control
@@ -183,19 +198,29 @@ body.plist .pm-face[data-tip]:hover::after { opacity: 1; }
    The faces keep theirs — the sky stage is tall enough to absorb it, and
    initials without a name are a riddle.) */
 
-/* The globe tab: an icon where the others are a year, so it reads as a
-   different KIND of thing on the same strip. */
-body.plist .pm-tab-globe {
+/* THE GLOBE IS AN ICON, NOT A TAB (owner, 2026-08-26). ~~It wore the same
+   rounded top, border and fill as a year.~~ Dressing it as a tab said it was
+   another year, and it is not: it is the way out of years altogether. Bare
+   glyph, pinned to the right edge, tinted when it is the surface you are on.
+   The strip of years floats up against it. */
+body.plist .pm-globe {
   display: flex;
   align-items: center;
-  padding: 5px 10px 6px;
-  /* Beside the strip, never inside it. The gap is the strip's own 3px plus a
-     little, so the globe reads as a different kind of control rather than the
-     next year along. */
   flex: 0 0 auto;
-  margin-left: 6px;
+  /* Enough to read as its own control, not enough to look adrift. */
+  margin: 0 0 6px 8px;
+  padding: 4px 2px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.14s;
 }
-body.plist .pm-tab-globe svg { display: block; width: 14px; height: 14px; }
+body.plist .pm-globe svg { display: block; width: 15px; height: 15px; }
+body.plist .pm-globe:hover { color: var(--fg); }
+/* Lit rather than boxed: same signal the active year carries, without the
+   chrome the year needs to sit on the strip's line. */
+body.plist .pm-globe.active { color: var(--hazelnut-light); }
 /* The sky has no flow to put a loading line in, so centre it like the empty
    state rather than let it stick to the top-left corner. */
 body.plist .pm-sky .pm-loading {
@@ -323,14 +348,6 @@ body.plist .pm-orbit {
   transform: translate(-50%, -50%);
   border-radius: 50%;
   border: 1px dashed rgba(197, 165, 109, 0.22);
-  pointer-events: none;
-}
-/* Background specks. Deterministic per year (seeded PRNG in the page), so a
-   re-render or a search keystroke does not reshuffle the sky under the eye. */
-body.plist .pm-speck {
-  position: absolute;
-  border-radius: 50%;
-  background: var(--hazelnut-light);
   pointer-events: none;
 }
 /* The owner, at the centre — the one thing every topic is a relationship to.
@@ -620,7 +637,8 @@ body.plist .pm-filter[hidden] { display: none; }
 
 /* THE GLOBE TOGGLE STAYS REACHABLE — ten years plus the globe do not fit a
    520px panel, so as the last tab of a scrolling strip it lived past the right
-   edge and had to be hunted for.
+   edge and had to be hunted for. (It is no longer a tab at all; the history
+   below is why it is not inside the scroller, which still holds.)
    ~~Fixed by sticking it to the right edge with position: sticky and an opaque
    background, the years scrolling underneath it; opaque because a year sliding
    under a see-through button reads as a rendering fault. A second rule then had

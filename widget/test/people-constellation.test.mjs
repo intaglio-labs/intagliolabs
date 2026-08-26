@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 const WIDGET = join(dirname(fileURLToPath(import.meta.url)), '..');
 const page = readFileSync(join(WIDGET, 'ui', 'people-months.js'), 'utf8');
 const html = readFileSync(join(WIDGET, 'ui', 'people-months.html'), 'utf8');
+const css = readFileSync(join(WIDGET, 'ui', 'people-months.css'), 'utf8');
 // The geometry is a plain script for the page and a module here — same file,
 // so these assertions are about the arrangement that actually ships, not a
 // second copy of the math written to agree with the first.
@@ -142,4 +143,32 @@ test('new and drifting relationship cards use stock-style trend icons', () => {
 test('the globe does not include a recency-filter section', () => {
   assert.doesNotMatch(html, /id="recency"/u);
   assert.doesNotMatch(page, /renderRecency|pm-rec|RECENT_DAYS/u);
+});
+
+// Yeeted by the owner on 2026-08-26, and worth a tripwire: a starfield is the
+// one thing on this surface that means nothing, and every other dot here is a
+// person. If specks come back, someone is decorating a data display.
+test('the constellation draws no decorative specks', () => {
+  assert.doesNotMatch(page, /pm-speck|mulberry32/u);
+  assert.doesNotMatch(css, /pm-speck/u);
+});
+
+test('the globe is a floating icon, not a tab', () => {
+  assert.match(html, /class="pm-globe"/u);
+  assert.doesNotMatch(html, /pm-tab-globe/u);
+  assert.doesNotMatch(css, /pm-tab-globe/u);
+  // Both shapes still answer the one delegated click handler.
+  assert.match(page, /closest\('\.pm-tab, \.pm-globe'\)/u);
+});
+
+test('the strip fades only the end that is hiding tabs', () => {
+  assert.match(page, /function markTabFades\(\)/u);
+  assert.match(page, /classList\.toggle\('fade-l'/u);
+  assert.match(page, /classList\.toggle\('fade-r'/u);
+  assert.match(css, /\.pm-tabs\.fade-l \{/u);
+  assert.match(css, /\.pm-tabs\.fade-r \{/u);
+  // The 18px of rent that permanent fade charged is gone with it, so the
+  // newest year can sit against the globe.
+  assert.doesNotMatch(css, /pm-tab:last-child \{ margin-right/u);
+  assert.match(css, /margin-left: auto;/u);
 });
