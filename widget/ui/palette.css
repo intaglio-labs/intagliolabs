@@ -39,7 +39,13 @@ body {
   -webkit-user-select: none;
   user-select: none;
   cursor: default;
+  /* hidden AND clip, in that order: hidden is the fallback, clip is the
+     guarantee. An overflow: hidden box still scrolls programmatically — a
+     focus() or scrollIntoView on anything past an edge shifts the whole page
+     and CLIPS THE OTHER SIDE, with no scrollbar to say so; that is how the
+     settings column lost its left edge. clip forbids scrolling outright. */
   overflow: hidden;
+  overflow: clip;
 }
 ::selection { background: var(--hazelnut); color: var(--bg); }
 button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
@@ -1235,7 +1241,8 @@ body.widget.spotlight-widget .dream { display: none; }
   background: var(--bg);
   border: 1px solid rgba(234, 234, 234, 0.08);
   border-radius: 20px;
-  overflow: hidden;
+  overflow: hidden; /* fallback; clip forbids the programmatic scroll too */
+  overflow: clip;
   position: relative;
 }
 .close {
@@ -1696,9 +1703,12 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
    scale (17px) rather than the page-default 26px h1, so the two tabs read the
    same. Cream with the same shadow the eyebrow carries — this window is
    transparent, so headings need their own contrast off the wallpaper. */
+/* Same voice as the SETTINGS eyebrow above it (owner, 2026-08-25): two
+   section labels on one panel in two different typographies read as two
+   different products. ~~17px/600 in --fg~~ — now the eyebrow treatment. */
 body.connections .conn-title {
-  font-size: 17px; font-weight: 600; letter-spacing: -0.01em;
-  margin: 0 0 8px; color: var(--fg);
+  font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+  font-weight: 700; margin: 0 0 8px 2px; color: var(--hazelnut-light);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), 0 2px 12px rgba(0, 0, 0, 0.8);
 }
 /* "settings" eyebrow on the left, the close ring on the right, one row at the

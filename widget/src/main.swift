@@ -410,53 +410,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     panel.setFrame(frame, display: false)
   }
 
-  // The timeline sits BESIDE the widget, not above it: it is a tall reading
-  // surface, and the column of screen next to the widget is the only place a
-  // near-full-height panel can live without covering the widget it belongs
-  // to. Prefers the widget's left, falls back to the right when the widget
-  // hugs the left edge, clamps to the screen either way, and fills the
-  // screen's height top to bottom.
-  // Flush, not gapped: the timeline should read as attached to the widget
-  // (owner: "right next to each other"), so it uses a 2pt seam instead of the
-  // 12pt popupGap the stacked popups use.
-  private static let sideSeam: CGFloat = 2
-
-  private func sidePlacedFrame(_ size: NSSize) -> NSRect {
+  // ~~The timeline sat BESIDE the widget, flush against its edge, and
+  // settings hung beside it too (sideSeam, sidePlacedFrame,
+  // Bridge.widgetVisibleLeftCSS did the geometry).~~ Both moved ON TOP of the
+  // orb (owner, 2026-08-25): bottom edge pinned to the widget's bottom, right
+  // edge to the widget's right, so the panel may stand as tall as the screen
+  // instead of as tall as the room above the orb. Covering the widget is the
+  // point, not a hazard — the popup IS the interface while it is up, the
+  // popups draw at .normal level over the desktop-level widget, and
+  // click-outside, ESC and the × all still dismiss. The timeline stays wider
+  // than settings by their bases (520 vs 312).
+  private func overlayFrame(_ size: NSSize) -> NSRect {
     let wf = visibleWidgetFrame
     guard let v = (widgetWindow.screen ?? NSScreen.main)?.visibleFrame else {
-      return NSRect(origin: NSPoint(x: wf.minX - size.width - Self.sideSeam, y: wf.minY), size: size)
+      return NSRect(origin: NSPoint(x: wf.maxX - size.width, y: wf.minY), size: size)
     }
     var s = size
     s.height = min(s.height, v.height - Self.screenMargin * 2)
     s.width = min(s.width, v.width - Self.screenMargin * 2)
-    // The widget window is wider than the widget: the orb cluster is
-    // right-aligned inside a mostly-transparent window, so the window's minX
-    // can be ~160pt of empty glass left of anything visible. The page reports
-    // where the visible content starts (Bridge.widgetVisibleLeftCSS, CSS px,
-    // scaled to points here); fall back to the window edge until it has.
-    let visibleMinX = wf.minX + CGFloat((Bridge.widgetVisibleLeftCSS ?? 0) * Bridge.scale)
-    var x = visibleMinX - Self.sideSeam - s.width
-    if x < v.minX + 12 {
-      x = wf.maxX + Self.sideSeam
-      if x + s.width > v.maxX - 12 { x = v.maxX - s.width - 12 }
-    }
-    // Top-aligned to the widget so a short panel (settings) hangs beside it;
-    // a full-height panel (the timeline) clamps to the screen and fills it —
-    // the same expression serves both.
-    var y = min(wf.maxY, v.maxY - Self.screenMargin) - s.height
-    y = max(v.minY + Self.screenMargin, y)
+    var x = wf.maxX - s.width
+    x = max(v.minX + 12, min(x, v.maxX - s.width - 12))
+    var y = wf.minY
+    y = max(v.minY + Self.screenMargin, min(y, v.maxY - Self.screenMargin - s.height))
     return NSRect(origin: NSPoint(x: x, y: y), size: s)
   }
 
-  // The side-placed set: panels that sit BESIDE the widget rather than above
-  // it. Membership decides placement AND exempts them from popupCeiling —
-  // that ceiling measures room above the widget, where these do not live.
-  private func isSidePlaced(_ panel: PopupPanel) -> Bool {
+  // The overlay-placed set: panels that stand over the widget rather than in
+  // the strip above it. Membership decides placement AND exempts them from
+  // popupCeiling — that ceiling measures room above the widget, which stops
+  // mattering the moment a panel may cover the widget.
+  private func isOverlayPlaced(_ panel: PopupPanel) -> Bool {
     panel === monthsPanel || panel === connectionsPanel
   }
 
   private func chosenFrame(_ panel: PopupPanel, _ size: NSSize) -> NSRect {
-    isSidePlaced(panel) ? sidePlacedFrame(size) : placedFrame(size)
+    isOverlayPlaced(panel) ? overlayFrame(size) : placedFrame(size)
   }
 
   // The widget page re-measured its visible cluster (bar opened or closed,
@@ -464,7 +452,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // follow it.
   func widgetBoundsChanged() {
     for panel in edgePanels {
-      guard let panel, panel.isVisible, isSidePlaced(panel) else { continue }
+      guard let panel, panel.isVisible, isOverlayPlaced(panel) else { continue }
       place(panel)
     }
   }
@@ -896,7 +884,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
         width: base.width + (extraWidths[p] ?? 0),
         height: max(base.height, contentHeights[p] ?? 0))
       let fitted = Self.fit(Self.scaled(want, Bridge.scale), on: p)
-      let size = isSidePlaced(p) ? fitted : capped(fitted)
+      let size = isOverlayPlaced(p) ? fitted : capped(fitted)
       guard abs(size.height - p.frame.height) > 1
         || abs(size.width - p.frame.width) > 1 else { return } // no thrash
       resize(p, to: size)
@@ -1350,7 +1338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // that, scaled, rather than snapping back to the guess.
       let want = NSSize(width: base.width, height: max(base.height, contentHeights[p] ?? 0))
       let sized = Self.fit(Self.scaled(want, scale), on: p)
-      resize(p, to: isSidePlaced(p) ? sized : capped(sized))
+      resize(p, to: isOverlayPlaced(p) ? sized : capped(sized))
       (p.contentView as? WKWebView ?? p.contentView?.subviews.first as? WKWebView)?.pageZoom = scale
     }
     // Onboarding is full-screen by definition, so its FRAME must not scale —

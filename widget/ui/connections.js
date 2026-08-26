@@ -265,6 +265,12 @@ function fitConnections() {
     const host = document.querySelector('.hint-host');
     if (!main) return;
     const pad = 28; // .win vertical padding, 14 top + 14 bottom
+    // The column scrolls on purpose vertically, which means it CAN be
+    // scrolled sideways by a focus() on something past an edge (overflow-x
+    // hidden only hides the scrollbar, not the ability) — and a sideways
+    // scroll here is the settings cards losing their left edge. This fitter
+    // already wakes on every mutation, so it is the one place to undo that.
+    if (main.scrollLeft !== 0) main.scrollLeft = 0;
     const mh = main.scrollHeight;
     const hh = host && host.childElementCount ? host.scrollHeight : 0;
     const h = Math.ceil(Math.max(mh, hh) + pad);
@@ -629,7 +635,7 @@ function card(src, keep) {
         // connect page still uses it.
         const open = document.createElement('button');
         open.className = 'hold-ok';
-        open.textContent = 'Open Full Disk Access';
+        open.textContent = 'full disk access';
         open.addEventListener('click', (e) => {
           e.preventDefault();
           e.stopPropagation();
