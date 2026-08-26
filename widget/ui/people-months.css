@@ -497,3 +497,11 @@ body.plist .pm-room-msgs {
   opacity: 0.6;
   font-style: italic;
 }
+
+/* Belt and braces on `hidden`. `.pm-cards` and `.pm-filter` set `display: flex`
+   in an author-origin rule, which beats the user-agent `[hidden]` rule — so
+   setting el.hidden = true left the highlight cards on screen during a search
+   and left the topic chip clickable over results it was not filtering. Same
+   one-liner palette.css already uses for .ob-prog. */
+body.plist .pm-cards[hidden],
+body.plist .pm-filter[hidden] { display: none; }

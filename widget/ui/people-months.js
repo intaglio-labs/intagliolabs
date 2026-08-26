@@ -320,7 +320,12 @@
       listEl.hidden = false;
       skyEl.hidden = true;
       cardsEl.hidden = true;
+      // EMPTIED, not just flagged. `hidden` alone left the chip in the DOM and
+      // clickable (its author-origin `display: flex` beat the UA [hidden] rule --
+      // fixed in CSS too), so a click silently moved the page underneath a screen
+      // that does not change. A control that cannot act should not exist.
       filterEl.hidden = true;
+      filterEl.replaceChildren();
       renderFind();
       saveView();
       return;
@@ -720,13 +725,26 @@
           else byLabel.set(t.label, { label: t.label, n: t.n || 0, tax: t.tax });
         }
       }
+      // PRESENCE DECIDES WHETHER TO DRAW SOMEBODY, contact decides where.
+      //
+      // `messages` became direct-only, so `messages <= 0` quietly went from "we
+      // have no history" to "we have never exchanged a direct message" -- and
+      // dropped 552 people off this surface, 467 of them the room-only ones the
+      // badge exists to show. A globe of "everyone you know" that omits the
+      // people you only know from group chats is answering a different question
+      // than the one it is labelled with.
       const messages = p.messages || 0;
-      if (messages <= 0) continue;
+      const roomMessages = p.roomMessages || 0;
+      if (messages <= 0 && roomMessages <= 0) continue;
       people.push({
         key: p.key,
         name: p.name,
         channels: p.channels || [],
         messages,
+        roomMessages,
+        roomOnly: p.roomOnly === true,
+        // Ordering is still by direct contact: room volume must not buy a
+        // bigger star with other people's conversations.
         engagement: messages,
         // The FULL union, not a top-five slice: the chips show five, but the
         // clustering needs every topic a person belongs to or bubbles would

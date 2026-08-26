@@ -308,7 +308,22 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
   return value;
 }
 
+// Memoized like its two siblings, on the same corpus stamp. The globe is a full
+// synchronous scan -- measured 4.5 to 7 seconds on this corpus -- and it ran on
+// every open, including at app start when the last-used scope was restored.
+// yearCore and buildSearchYears have both paid for this lesson already.
+//
+// `sinceTs` joins the stamp key because it changes which rows are scanned: two
+// windows are two different answers and must not share one cache entry. `now` is
+// deliberately out, exactly as in yearCore -- it only gates future-dated rows,
+// and a cache minutes stale on that axis changes nothing a map can show.
+const mapMemo = new WeakMap();
+
 export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs = null, aliases = null } = {}) {
+  const stampRow = contextDb.prepare('SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM context').get();
+  const stamp = `${stampRow.n}|${stampRow.m}|${aliases ? aliases.size : 0}|${sinceTs ?? 'all'}`;
+  const memoHit = mapMemo.get(contextDb);
+  if (memoHit && memoHit.stamp === stamp) return memoHit.value;
   // Drop automated senders/role addresses (shared filter), then keep only the
   // people the owner actually has a relationship with — see hasRelationship.
   const graph = buildGraph(contextDb, stateDb, { now, owner, sinceTs, aliases })
@@ -371,6 +386,10 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
       // Carried onto the star so the constellation can mark it, and so this is
       // measurable from the payload rather than only from the graph behind it.
       roomOnly: p.roomOnly === true,
+      // The room count travels with the flag, because a consumer deciding
+      // whether to draw somebody needs to tell "no contact" from "not there at
+      // all" -- and `messages` alone can no longer make that distinction.
+      roomMessages: p.roomMessages ?? 0,
       warm: warmthOf(recencyDays),
       channels: p.channels ?? [],
       messages: p.messages ?? 0,
@@ -401,9 +420,11 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
   const active = people.filter((p) => p.recencyDays != null && p.recencyDays < 90).length;
   const dormant = people.filter((p) => p.recencyDays != null && p.recencyDays >= 365).length;
 
-  return {
+  const mapValue = {
     counts: { people: people.length, active, dormant, clusters: clusters.length },
     clusters,
     people,
   };
+  mapMemo.set(contextDb, { stamp, value: mapValue });
+  return mapValue;
 }

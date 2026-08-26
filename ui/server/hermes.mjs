@@ -2890,7 +2890,20 @@ async function handlePeople(db, req, res, cors, url, policy) {
       const { aliases } = resolutionState(resDb);
       return buildMap(db, state, { owner, sinceTs, aliases });
     });
-    send(res, 200, out, cors);
+    // IDENTIFIERS DO NOT CROSS INTO A WEBVIEW.
+    //
+    // This route was CLI-only until the constellation started calling it from
+    // the panel, and the star payload carries every handle a person has -- 2,665
+    // of them, 506 address-shaped and 1,859 phone-shaped, in a 1.31 MB response
+    // whose reader uses five fields. Both sibling routes already strip them:
+    // /people/find does it explicitly and says why. The page never reads one,
+    // so this costs nothing and closes the widest exposure the surface has.
+    send(
+      res,
+      200,
+      { ...out, people: (out.people ?? []).map(({ identifiers, ...star }) => star) },
+      cors
+    );
     return;
   }
 
