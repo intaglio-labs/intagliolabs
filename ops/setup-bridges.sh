@@ -107,7 +107,7 @@ bridge_rows() {
 cat <<'ROWS'
 meta      dock.mau.dev/mautrix/meta:v26.08      hazlie-meta      29319  mautrix-meta
 instagram dock.mau.dev/mautrix/meta:ig-v26.08   hazlie-instagram 29330  mautrix-instagram
-twitter   dock.mau.dev/mautrix/twitter:v26.08   hazlie-twitter   29327  mautrix-twitter
+twitter   dock.mau.dev/mautrix/twitter@sha256:a780515de3c7fa8f410e2d6355d4c69a0c439742c40bafeec8a3d8e61a94cbc4 hazlie-twitter 29327 mautrix-twitter
 telegram  dock.mau.dev/mautrix/telegram:latest  hazlie-telegram  29317  mautrix-telegram
 slack     dock.mau.dev/mautrix/slack:latest     hazlie-slack     29335  mautrix-slack
 linkedin  dock.mau.dev/mautrix/linkedin:latest  hazlie-linkedin  29336  mautrix-linkedin

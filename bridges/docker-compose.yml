@@ -80,7 +80,14 @@ services:
   # from the connect page, owner-gated (Austin said go, 2026-08-22 — this was
   # the "accept the account risk" item in SOCIAL-BRIDGES-PLAN.md).
   mautrix-twitter:
-    image: dock.mau.dev/mautrix/twitter:v26.08
+    # Pinned BY DIGEST to a 2026-08-25 dev build, not to :latest — the header
+    # rule against mutable tags stands, and a digest is the only immutable name
+    # a dev build has. Moved off the v26.08 release because that build could
+    # not complete an X login: registering the XChat public key returned HTTP
+    # 403 behind a Cloudflare challenge, every time, with correct cookies
+    # (owner, 2026-08-25). The previous pin is one line down if this regresses.
+    # ~~image: dock.mau.dev/mautrix/twitter:v26.08~~
+    image: dock.mau.dev/mautrix/twitter@sha256:a780515de3c7fa8f410e2d6355d4c69a0c439742c40bafeec8a3d8e61a94cbc4
     container_name: hazlie-twitter
     restart: unless-stopped
     depends_on:
