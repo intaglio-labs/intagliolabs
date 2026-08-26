@@ -259,7 +259,7 @@ export function openStateDb(path = defaultStateDbPath()) {
      * no picture, the two arrive from different fields of the same fetch, and
      * a name write must never be blocked by an image write.
      */
-    upsertAvatars(avatars, now = Date.now()) {
+    replaceAvatars(avatars, now = Date.now()) {
       const list = Array.isArray(avatars) ? avatars : [avatars];
       for (const [i, a] of list.entries()) {
         if (a === null || typeof a !== 'object') throw new Error(`avatars[${i}]: not an object`);
@@ -272,6 +272,10 @@ export function openStateDb(path = defaultStateDbPath()) {
       }
       db.exec('BEGIN');
       try {
+        // A Contacts-framework fetch is a complete snapshot. Replace rather
+        // than only upsert so deleting a contact or removing their photo also
+        // removes the old bytes from local state.
+        db.exec('DELETE FROM contact_avatars');
         for (const a of list) upsertAvatarStmt.run(a.identifier, a.jpeg, now);
         db.exec('COMMIT');
       } catch (e) {

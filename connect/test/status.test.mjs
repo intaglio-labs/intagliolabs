@@ -7,10 +7,10 @@
 // failing for real reasons while the role tests only ever restated the table.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readStatus } from '../lib/status.mjs';
+import { addMailAccount, readStatus } from '../lib/status.mjs';
 
 function home(t, config) {
   const dir = mkdtempSync(join(tmpdir(), 'connect-status-'));
@@ -108,4 +108,37 @@ test('WhatsApp stays explicitly disconnected until Intaglio Labs enables it', (t
   rmSync(marker);
   const enabled = readStatus({ home: dir }).find((r) => r.id === 'whatsapp');
   assert.equal(enabled.connected, true, 'the existing WhatsApp store is used only after consent');
+});
+
+test('shared connector disable markers apply to account and platform rows', (t) => {
+  const dir = home(t, { mail: { accounts: [{ user: 'owner@example.com' }] } });
+  const markerDir = join(dir, '.hazlie', 'connectors');
+  writeFileSync(join(markerDir, 'mail.disabled'), '', { mode: 0o600 });
+  writeFileSync(join(markerDir, 'matrix.disabled'), '', { mode: 0o600 });
+
+  const rows = readStatus({ home: dir });
+  const mail = rows.find((row) => row.id === 'mail:owner@example.com');
+  assert.equal(mail.connected, false);
+  assert.equal(mail.detail, 'turned off');
+  assert.match(mail.fix, /mail\.disabled/u);
+
+  for (const id of ['messenger', 'linkedin']) {
+    const platform = rows.find((row) => row.id === id);
+    assert.equal(platform.connected, false);
+    assert.equal(platform.detail, 'turned off');
+    assert.match(platform.fix, /matrix\.disabled/u);
+  }
+});
+
+test('adding a mailbox never replaces a corrupt connectors config', (t) => {
+  const dir = home(t, {});
+  const path = join(dir, '.hazlie', 'connectors', 'config.json');
+  const corrupt = '{ "calendar": ';
+  writeFileSync(path, corrupt, { mode: 0o600 });
+
+  assert.throws(
+    () => addMailAccount('owner@example.com', { home: dir }),
+    /refusing to replace/u
+  );
+  assert.equal(readFileSync(path, 'utf8'), corrupt);
 });

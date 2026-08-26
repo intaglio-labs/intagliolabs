@@ -39,6 +39,11 @@ if ! docker info >/dev/null 2>&1; then
   echo "docker is not running — open Docker Desktop first, then re-run." >&2
   exit 1
 fi
+if ! command -v yq >/dev/null 2>&1; then
+  echo "yq is required to generate and harden the bridge configs." >&2
+  echo "Install it first (Homebrew: brew install yq), then re-run." >&2
+  exit 1
+fi
 
 mkdir -p "$M" && chmod 700 "$M"
 printf 'HAZLIE_MATRIX=%s\n' "$M" > bridges/.env

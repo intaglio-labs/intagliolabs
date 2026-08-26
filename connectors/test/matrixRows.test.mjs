@@ -6,8 +6,16 @@
 // never become corpus rows. Everything else here is join-key plumbing.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { classifySender, eventToRow } from '../lib/matrixRows.mjs';
-import { invitesToJoin, readRoomMembers, syncToRows } from '../sources/matrix.mjs';
+import {
+  createMatrixSource,
+  invitesToJoin,
+  readRoomMembers,
+  syncToRows,
+} from '../sources/matrix.mjs';
 
 const msg = (sender, body, id, ts = 1_700_000_000_000) => ({
   type: 'm.room.message', sender, event_id: id, origin_server_ts: ts,
@@ -112,6 +120,28 @@ test('members resolve the partner and flag groups', () => {
   assert.equal(many.isGroup, true);
 });
 
+test('incremental message-only pages retain the room partner from prior state', () => {
+  const roomState = new Map();
+  syncToRows({ rooms: { join: { '!dm:hazlie.local': {
+    state: { events: [
+      { type: 'm.room.member', state_key: '@telegram_42:hazlie.local',
+        content: { membership: 'join', displayname: 'Lin' } },
+    ] },
+    timeline: { events: [] },
+  } } } }, { roomState });
+
+  const incremental = syncToRows({ next_batch: 's2', rooms: { join: {
+    '!dm:hazlie.local': {
+      state: { events: [] },
+      timeline: { events: [msg('@telegram_42:hazlie.local', 'still here', '$later')] },
+    },
+  } } }, { roomState });
+  assert.equal(incremental.rows.length, 1);
+  assert.equal(incremental.rows[0].source, 'telegram');
+  assert.equal(incremental.rows[0].speaker, 'Lin');
+  assert.equal(incremental.next, 's2');
+});
+
 test('only our own bridges\' invites are auto-joined', () => {
   const body = { rooms: { invite: {
     '!ours:hazlie.local': { invite_state: { events: [
@@ -131,3 +161,73 @@ test('only our own bridges\' invites are auto-joined', () => {
   assert.deepEqual(invitesToJoin(body).sort(), ['!ghost:hazlie.local', '!ours:hazlie.local']);
   assert.deepEqual(invitesToJoin({}), []);
 });
+
+test('a first run pages older room history before advancing its sync cursor', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'matrix-source-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const credentialsDir = join(dir, '.hazlie', 'matrix');
+  mkdirSync(credentialsDir, { recursive: true });
+  writeFileSync(join(credentialsDir, 'owner-credentials.json'), JSON.stringify({
+    homeserver: 'http://127.0.0.1:8008',
+    access_token: 'private-test-token',
+    user_id: '@you:hazlie.local',
+  }));
+
+  const fetched = [];
+  const fetchImpl = async (input) => {
+    const url = new URL(String(input));
+    fetched.push(url);
+    if (url.pathname.endsWith('/sync')) {
+      return jsonResponse({
+        next_batch: 's-first',
+        rooms: { join: { '!dm:hazlie.local': {
+          state: { events: [
+            { type: 'm.room.member', state_key: '@instagram_7:hazlie.local',
+              content: { membership: 'join', displayname: 'Mira' } },
+          ] },
+          timeline: {
+            prev_batch: 'back-1',
+            events: [msg('@instagram_7:hazlie.local', 'newest', '$new')],
+          },
+        } } },
+      });
+    }
+    if (url.pathname.endsWith('/messages')) {
+      assert.equal(url.searchParams.get('dir'), 'b');
+      assert.equal(url.searchParams.get('from'), 'back-1');
+      return jsonResponse({
+        chunk: [msg('@instagram_7:hazlie.local', 'older', '$old', 1_600_000_000_000)],
+      });
+    }
+    throw new Error(`unexpected Matrix URL ${url}`);
+  };
+
+  const cursors = new Map();
+  const ingested = [];
+  const source = createMatrixSource({ home: dir, fetchImpl });
+  const result = await source.run({
+    state: {
+      getCursor: (key) => cursors.get(key) ?? null,
+      setCursor: (key, value) => cursors.set(key, value),
+    },
+    ingest: async (rows) => {
+      ingested.push(...rows);
+      return { inserted: rows.length, updated: 0, unchanged: 0 };
+    },
+    config: { selfName: 'owner' },
+    backfill: false,
+  });
+
+  assert.equal(result.inserted, 2);
+  assert.deepEqual(ingested.map((row) => row.entity_id).sort(), [
+    'instagram:$new',
+    'instagram:$old',
+  ]);
+  assert.equal(cursors.get('matrix:since'), 's-first');
+  assert.match(cursors.get('matrix:room:!dm:hazlie.local'), /instagram_7/u);
+  assert.equal(fetched.filter((url) => url.pathname.endsWith('/messages')).length, 1);
+});
+
+function jsonResponse(body, status = 200) {
+  return { ok: status >= 200 && status < 300, status, json: async () => body };
+}

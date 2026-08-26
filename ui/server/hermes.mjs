@@ -1348,6 +1348,15 @@ export const KNOWN_SOURCES = Object.freeze([
   'notion',
   'linkedin',
   'whatsapp',
+  // Continuous DMs written by connectors/sources/matrix.mjs. These are named
+  // individually because "matrix" is transport, not provenance; keeping them
+  // in this same closed set makes every accepted row deletable again.
+  'messenger',
+  'instagram',
+  'twitter',
+  'telegram',
+  'discord',
+  'slack',
   'hazlie_digest',
   'seed',
 ]);

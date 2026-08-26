@@ -194,7 +194,7 @@ export function createContactsSource({ home } = {}) {
           let avatars = 0;
           try {
             const rows = avatarsFromContacts(contacts);
-            if (rows.length > 0) avatars = ctx.state.upsertAvatars(rows);
+            avatars = ctx.state.replaceAvatars(rows);
           } catch (e) {
             ctx.log.warn('contacts_avatars_failed', {
               connector: 'contacts',

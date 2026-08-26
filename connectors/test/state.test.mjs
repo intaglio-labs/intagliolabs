@@ -4,6 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { openStateDb } from '../lib/state.mjs';
+import { wipeLocalArtifacts } from '../retain.mjs';
 
 function sandbox(t) {
   const dir = mkdtempSync(join(tmpdir(), 'connectors-state-test-'));
@@ -130,4 +131,45 @@ test('a bad contact rejects the whole batch and writes none of it', (t) => {
     /contacts\[1\]/
   );
   assert.equal(Number(state.db.prepare('SELECT count(*) AS n FROM contact_ids').get().n), 0);
+});
+
+test('contact avatar snapshots remove stale and deleted photos', (t) => {
+  const state = openStateDb(join(sandbox(t), 'state.db'));
+  t.after(() => state.close());
+  state.replaceAvatars([
+    { identifier: '+14155550101', jpeg: new Uint8Array([1, 2, 3]) },
+    { identifier: '+14155550102', jpeg: new Uint8Array([4, 5, 6]) },
+  ]);
+  state.replaceAvatars([
+    { identifier: '+14155550102', jpeg: new Uint8Array([7, 8, 9]) },
+  ]);
+
+  const rows = state.db.prepare(
+    'SELECT identifier, jpeg FROM contact_avatars ORDER BY identifier'
+  ).all();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].identifier, '+14155550102');
+  assert.deepEqual([...rows[0].jpeg], [7, 8, 9]);
+
+  state.replaceAvatars([]);
+  assert.equal(Number(state.db.prepare('SELECT count(*) AS n FROM contact_avatars').get().n), 0);
+});
+
+test('a contacts purge removes names and private avatar bytes', (t) => {
+  const dir = sandbox(t);
+  const state = openStateDb(join(dir, 'state.db'));
+  t.after(() => state.close());
+  state.upsertContacts({
+    identifier: 'person@example.com',
+    displayName: 'Person',
+    kind: 'email',
+  });
+  state.replaceAvatars({
+    identifier: 'person@example.com',
+    jpeg: new Uint8Array([1, 2, 3]),
+  });
+
+  wipeLocalArtifacts('contacts', { state, cacheDir: join(dir, 'cache') });
+  assert.equal(Number(state.db.prepare('SELECT count(*) AS n FROM contact_ids').get().n), 0);
+  assert.equal(Number(state.db.prepare('SELECT count(*) AS n FROM contact_avatars').get().n), 0);
 });

@@ -20,8 +20,17 @@ const SECRETS = (home) => join(home, '.hazlie', 'secrets');
 // never runs — and a row that still reported "connected" because its store
 // happens to be readable would be describing a poll that will not happen.
 // Readable is not the same as running.
-const disabledMarker = (home, id) =>
-  existsSync(join(home, '.hazlie', 'connectors', `${id}.disabled`));
+function connectorForStatusRow(id) {
+  if (id.startsWith('mail:')) return 'mail';
+  // Seven status rows, one Matrix poller and therefore one disable marker.
+  if (Object.hasOwn(PLATFORMS, id)) return 'matrix';
+  return id;
+}
+
+const disabledMarker = (home, id) => {
+  const connector = connectorForStatusRow(id);
+  return existsSync(join(home, '.hazlie', 'connectors', `${connector}.disabled`));
+};
 
 function withDisabled(row, home) {
   if (!disabledMarker(home, row.id)) return row;
@@ -30,13 +39,14 @@ function withDisabled(row, home) {
   // source: their markers may have been created by run.mjs --disable, and the
   // native enable action is intentionally not authorized to mutate them.
   if (row.id !== 'whatsapp') {
+    const connector = connectorForStatusRow(row.id);
     return {
       ...row,
       connected: false,
       broken: false,
       detail: 'turned off',
       action: null,
-      fix: `re-enable with: rm ~/.hazlie/connectors/${row.id}.disabled`,
+      fix: `re-enable with: rm ~/.hazlie/connectors/${connector}.disabled`,
       caveat: null,
     };
   }
@@ -110,12 +120,13 @@ export function addMailAccount(address, { home = homedir() } = {}) {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) config = parsed;
-  } catch {
-    // Absent or corrupt. Absent is the normal first-run state; corrupt is rare
-    // and unrecoverable here, and refusing to write would leave the owner with
-    // a page whose button does nothing and no way to find out why. The old
-    // bytes are not discarded silently — the rename below is what replaces
-    // them, and a corrupt file was already yielding no mailboxes at all.
+  } catch (error) {
+    // Absence is the normal first-run state. Corrupt or unreadable is not: this
+    // file also holds calendar, retention and file-root settings, so replacing
+    // it with a mail-only object would silently destroy unrelated config.
+    if (error?.code !== 'ENOENT') {
+      throw new Error(`connectors config is unreadable; refusing to replace ${path}`, { cause: error });
+    }
   }
   const accounts = Array.isArray(config?.mail?.accounts) ? config.mail.accounts : [];
   if (accounts.some((a) => typeof a?.user === 'string' && a.user.toLowerCase() === user)) {
