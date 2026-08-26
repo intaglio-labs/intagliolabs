@@ -1134,8 +1134,14 @@ function card(src, keep) {
       // card that said "create" under "enter your email"). The bot's own
       // wording decides: it says "please create ..." when something is being
       // made, and anything else is an answer.
+      //
+      // ~~"send"~~ -> "continue" for that second case (owner, 2026-08-26).
+      // "send" described the mechanism — a message going to a bot the owner
+      // never asked to talk to — where the person is part-way through a login
+      // and wants the next step. Every one of these questions has a step after
+      // it, so the button says so.
       const asked = askedFor() || '';
-      send.textContent = /\bcreate\b/iu.test(asked) ? 'create' : 'send';
+      send.textContent = /\bcreate\b/iu.test(asked) ? 'create' : 'continue';
       const fire = () => {
         const val = box.value.trim();
         if (!val) return;
