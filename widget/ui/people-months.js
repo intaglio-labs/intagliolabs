@@ -121,6 +121,10 @@
             `<span class="pl-name">${esc(p.name)}</span>` +
             `<span class="pm-msgs">${p.messages} msg${p.messages === 1 ? '' : 's'}</span>` +
             (y === year ? '' : `<span class="pm-yr-badge">${y}</span>`) +
+            // ONLY EVER IN A ROOM. Until now these rendered exactly like people
+            // the owner actually talks to, which is what made every nudge about
+            // them untrustworthy.
+            (p.roomOnly ? '<span class="pm-room-badge" data-tip="you have never exchanged a direct message">only in group chats</span>' : '') +
             whyHtml(p) +
             srcIcons +
           `</div>` +

@@ -184,3 +184,20 @@ body.plist .pm-quote-text {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
+
+/* "only in group chats" — a person who has never sent the owner a direct
+   message. Deliberately not styled like a topic chip: the chips below a name
+   describe a conversation, and this says there wasn't one. Muted rather than
+   alarming; it is a fact about the relationship, not a warning. */
+body.plist .pm-room-badge {
+  flex: 0 0 auto;
+  position: relative;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--muted);
+  border: 1px solid color-mix(in srgb, var(--muted) 45%, transparent);
+  white-space: nowrap;
+}

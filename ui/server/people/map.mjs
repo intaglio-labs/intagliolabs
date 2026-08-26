@@ -213,6 +213,12 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
         channels: e.p.channels ?? [],
         messages: e.messages,
         engagement: e.engagement,
+        // ONLY EVER IN ROOMS. Relationship-level, not per-year: the question
+        // "do I actually know this person, or do we just share a group chat"
+        // is not a question about 2024. 458 people on the live store have
+        // never sent the owner a direct message and until now rendered
+        // identically to friends.
+        roomOnly: e.p.roomOnly === true,
         // Five chips, not three (owner, 2026-08-25) — and no separate
         // taxonomy or specifics fields: the chips ARE the topic surface, and
         // the expanded row's only extra is the model-written summary.
@@ -265,6 +271,7 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
         identifiers: p.identifiers ?? [],
         messages: v.messages,
         engagement,
+        roomOnly: p.roomOnly === true,
         // Each person-year doc is touched once across the whole loop, so this
         // is one pass over the docs rather than one per year.
         topics: topTopics(topics.docs.get(`${p.key}|${y}`), topics.docFreq, topics.totalDocs, { limit: 5 }),
