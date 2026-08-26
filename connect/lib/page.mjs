@@ -319,17 +319,9 @@ const HELP = {
       'One thing to know: the desktop app only syncs while it is open, so leave it running (or open it now and then) to keep WhatsApp fresh. Everything stays on this Mac.',
     ],
   },
-  linkedin: {
-    title: 'Import your LinkedIn connections',
-    body: [
-      'No login and no API — LinkedIn hands you the file. Go to linkedin.com → Settings → Data privacy → <em>Get a copy of your data</em>, pick Connections (and Messages if you want DM history), and download the archive when it arrives.',
-      'Then put the CSVs where intaglio labs looks:',
-    ],
-    code: 'mkdir -p ~/.hazlie/imports/linkedin && cp ~/Downloads/Connections.csv ~/Downloads/messages.csv ~/.hazlie/imports/linkedin/ 2>/dev/null; true',
-    after: [
-      'The <em>Connected On</em> dates are the point — they say how old each relationship is. Everything stays on this Mac.',
-    ],
-  },
+  // ~~linkedin: request the export, unzip Connections.csv into
+  // ~/.hazlie/imports/linkedin.~~ Gone with the export (owner, 2026-08-25):
+  // LinkedIn logs in through the bridge now, like every other social source.
   files: {
     title: 'Your cloud folders',
     body: [
@@ -338,7 +330,7 @@ const HELP = {
     ],
     code: null,
     after: [
-      'Files in folders named for keys or secrets, and files that look like credentials, are skipped entirely.',
+      'Files in folders named for keys or secrets, and files that look like credentials, are <em>skipped entirely</em>.',
     ],
   },
   granola: {

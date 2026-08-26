@@ -399,28 +399,9 @@ const HINTS = {
   // walkthrough now — open granola.ai, create a key, paste it right here.
   granola: { app: 'com.granola.app', url: 'https://granola.ai', link: 'Granola',
              walkthrough: true }, // the DESKTOP app first — the key lives in its settings
-  // LinkedIn had NO entry here at all, so its tile opened a card with nothing
-  // on it but the header — "when I click linkedin, nothing is happening"
-  // (owner, 2026-08-25). It is not a login: LinkedIn only lets you export,
-  // and the connector reads Connections.csv out of ~/.hazlie/imports/linkedin.
-  // Telegram needs the OWNER's own api_id/api_hash before its bridge will
-  // even start (my.telegram.org/apps). Same three-step shape as granola's:
-  // open the page, make the thing, paste it back — connectSecret writes it
-  // into the bridge config and starts the container.
-  telegram: {
-    url: 'https://my.telegram.org/apps',
-    link: 'my.telegram.org',
-    walkthrough: true,
-    step2: 'create an app, then copy its api_id and api_hash',
-    paste: 'paste api_id:api_hash',
-  },
-  linkedin: {
-    text: 'LinkedIn only exports — ask for your data, then unzip Connections.csv '
-      + 'into ~/.hazlie/imports/linkedin. The export email can take a few hours.',
-    url: 'https://www.linkedin.com/mypreferences/d/download-my-data',
-    link: 'request your export',
-    local: true, // one export per person; no "+ add account"
-  },
+  // ~~linkedin: how to request an export and where to unzip it.~~ Gone with
+  // the export itself (owner, 2026-08-25): LinkedIn is a bridge now, so its
+  // tile renders the ordinary cookie-login flow like Messenger's.
   // OAuth2 since Oura retired personal access tokens in Dec 2025: the PAT
   // page this used to link is a dead end, and there is no settings page to
   // send anyone to instead, so this one is text-only — the connect page
@@ -457,7 +438,7 @@ const CONNECT_PAGE = new Set(['mail', 'oura', 'notion']); // granola pastes in-p
 // decision and they disagreed about X, which had a login button here and no
 // matching host in the fence, so the window opened blank.
 const BRIDGE_FLOW = {
-  twitter: 'cookie', messenger: 'cookie', instagram: 'cookie',
+  twitter: 'cookie', messenger: 'cookie', instagram: 'cookie', linkedin: 'cookie',
   discord: 'token', slack: 'token', telegram: 'phone',
 };
 // ~~Each of these carried a `lead` sentence ("Slack logs in with two tokens
@@ -913,15 +894,17 @@ function card(src, keep) {
       box.setAttribute('spellcheck', 'false');
       const send = document.createElement('button');
       send.className = 'hold-ok';
-      send.textContent = 'send';
+      // "create", not "send" (owner, 2026-08-25): this box answers a login
+      // step — X's PIN is one being CREATED, not a message going anywhere.
+      send.textContent = 'create';
       const fire = () => {
         const val = box.value.trim();
         if (!val) return;
         box.value = ''; // gone from the page before anything else happens
-        send.disabled = true; send.textContent = 'sending…';
+        send.disabled = true; send.textContent = 'creating…';
         hzPost('bridgeCookies', { p: kindOf(src.id), cookies: val })
           .then(renderBridge)
-          .catch(() => { send.disabled = false; send.textContent = 'send'; });
+          .catch(() => { send.disabled = false; send.textContent = 'create'; });
       };
       send.addEventListener('click', (e) => { e.stopPropagation(); fire(); });
       if (!multiline) box.addEventListener('keydown', (e) => {

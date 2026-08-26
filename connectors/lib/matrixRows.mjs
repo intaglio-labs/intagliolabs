@@ -29,6 +29,10 @@ export const GHOST_SOURCE = Object.freeze({
   telegram: 'telegram',
   discord: 'discord',
   slack: 'slack',
+  // Same source name the CSV export used, deliberately: every people-graph
+  // join that already reads `linkedin` keeps working when the rows start
+  // arriving as DMs instead (owner, 2026-08-25).
+  linkedin: 'linkedin',
 });
 
 const OWNER = '@you:hazlie.local';

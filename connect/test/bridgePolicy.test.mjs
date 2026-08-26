@@ -90,7 +90,8 @@ test('a platform without a web login is one that genuinely cannot use one', () =
 
 test('the platforms that do have a web login are the ones we expect', () => {
   // A roster, so adding or removing one is a deliberate edit rather than a
-  // side effect. Three cookie flows today.
+  // side effect. Four cookie flows: LinkedIn joined 2026-08-25 when it stopped
+  // being a hand-unzipped CSV export and became a bridge like the others.
   const withWeb = entries.filter(([, p]) => p.webLogin).map(([id]) => id).sort();
-  assert.deepEqual(withWeb, ['instagram', 'messenger', 'twitter']);
+  assert.deepEqual(withWeb, ['instagram', 'linkedin', 'messenger', 'twitter']);
 });

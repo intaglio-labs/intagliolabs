@@ -50,6 +50,22 @@ if [ ! -f "$M/synapse/homeserver.yaml" ]; then
     -e SYNAPSE_SERVER_NAME=hazlie.local -e SYNAPSE_REPORT_STATS=no \
     "$SYNAPSE_IMAGE" generate
 fi
+# Every bridge's registration must be LISTED, not merely mounted. This check
+# used to be "does the block exist at all" — true after the first run, so a
+# bridge added later (linkedin, 2026-08-25) got its file mounted, its config
+# written and its container started, then crash-looped on "the as_token was
+# not accepted" because synapse had never been told to read it.
+NEEDS_SYNAPSE_RESTART=0
+if [ -f "$M/synapse/homeserver.yaml" ] && grep -q app_service_config_files "$M/synapse/homeserver.yaml"; then
+  for b in meta instagram twitter telegram discord slack linkedin; do
+    if ! grep -q "/registrations/$b.yaml" "$M/synapse/homeserver.yaml"; then
+      yq -i ".app_service_config_files += [\"/registrations/$b.yaml\"]" "$M/synapse/homeserver.yaml"
+      echo "synapse: registered $b"
+      NEEDS_SYNAPSE_RESTART=1
+    fi
+  done
+fi
+
 if ! grep -q app_service_config_files "$M/synapse/homeserver.yaml"; then
   python3 - "$M/synapse/homeserver.yaml" <<'PY'
 import sys
@@ -74,6 +90,7 @@ app_service_config_files:
   - /registrations/telegram.yaml
   - /registrations/discord.yaml
   - /registrations/slack.yaml
+  - /registrations/linkedin.yaml
 
 # The owner is created once via register_new_matrix_user (the shared secret
 # above); nobody else can sign up on a single-human bus.
@@ -93,6 +110,7 @@ instagram dock.mau.dev/mautrix/meta:ig-v26.08   hazlie-instagram 29330  mautrix-
 twitter   dock.mau.dev/mautrix/twitter:v26.08   hazlie-twitter   29327  mautrix-twitter
 telegram  dock.mau.dev/mautrix/telegram:latest  hazlie-telegram  29317  mautrix-telegram
 slack     dock.mau.dev/mautrix/slack:latest     hazlie-slack     29335  mautrix-slack
+linkedin  dock.mau.dev/mautrix/linkedin:latest  hazlie-linkedin  29336  mautrix-linkedin
 ROWS
 }
 
@@ -155,6 +173,11 @@ fi
 
 # --- up -----------------------------------------------------------------------
 ( cd bridges && docker compose up -d )
+# A newly listed appservice is only read at synapse startup.
+if [ "$NEEDS_SYNAPSE_RESTART" = "1" ]; then
+  ( cd bridges && docker compose restart synapse )
+  sleep 8
+fi
 # Synapse needs to be answering before the owner can be registered.
 i=0
 until curl -sf http://127.0.0.1:8008/health >/dev/null 2>&1; do

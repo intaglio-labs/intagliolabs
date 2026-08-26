@@ -132,17 +132,9 @@ const HZ_HINTS = {
   // in-app walkthrough — open granola.ai, create a key, paste it right here.
   granola: { app: 'com.granola.app', url: 'https://granola.ai', link: 'Granola',
              walkthrough: true }, // the DESKTOP app first — the key lives in its settings
-  // LinkedIn had NO entry here at all, so its tile opened a card with nothing
-  // on it but the header — "when I click linkedin, nothing is happening"
-  // (owner, 2026-08-25). It is not a login: LinkedIn only lets you export,
-  // and the connector reads Connections.csv out of ~/.hazlie/imports/linkedin.
-  linkedin: {
-    text: 'LinkedIn only exports — ask for your data, then unzip Connections.csv '
-      + 'into ~/.hazlie/imports/linkedin. The export email can take a few hours.',
-    url: 'https://www.linkedin.com/mypreferences/d/download-my-data',
-    link: 'request your export',
-    local: true, // one export per person; no "+ add account"
-  },
+  // ~~linkedin: how to request an export and where to unzip it.~~ Gone with
+  // the export itself (owner, 2026-08-25): LinkedIn is a bridge now, so its
+  // tile renders the ordinary cookie-login flow like Messenger's.
   // OAuth2 since Oura retired personal access tokens in Dec 2025: the PAT
   // page this used to link is a dead end, and there is no settings page to
   // send anyone to instead, so this one is text-only — the connect page

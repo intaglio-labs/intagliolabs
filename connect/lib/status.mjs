@@ -271,20 +271,13 @@ function bridgeRows({ home = homedir() } = {}) {
   });
 }
 
-function linkedinRow(home) {
-  // File-based on purpose — the export, never an API or a scrape. Connected
-  // means Connections.csv is in place; messages.csv is optional and not
-  // checked, because its absence is a choice rather than a fault.
-  const ok = existsSync(join(home, '.hazlie', 'imports', 'linkedin', 'Connections.csv'));
-  return {
-    id: 'linkedin',
-    label: 'LinkedIn',
-    connected: ok,
-    detail: ok ? 'export imported' : 'needs your LinkedIn data export',
-    action: ok ? null : 'linkedin',
-    caveat: null,
-  };
-}
+// ~~linkedinRow: connected meant Connections.csv was sitting in
+// ~/.hazlie/imports/linkedin, from an export the owner had to request,
+// wait hours for, download and unzip.~~ Yeeted (owner, 2026-08-25, asked
+// twice): LinkedIn is a social platform like the other six and now rides the
+// same bus — mautrix-linkedin in bridges/docker-compose.yml, listed by
+// bridgeRows() below from the PLATFORMS table. Its rows keep the SAME
+// `linkedin` source name the export wrote, so nothing downstream changed.
 
 function fullStatus(home) {
   return [
@@ -310,7 +303,6 @@ function fullStatus(home) {
     filesRow(home),
     ...cloudAccountRows(home),
     notionRow(home),
-    linkedinRow(home),
     whatsappRow(home),
     ...bridgeRows({ home }),
   ];

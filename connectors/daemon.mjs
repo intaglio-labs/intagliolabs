@@ -61,7 +61,6 @@ export const CONNECTOR_NAMES = Object.freeze([
   'contacts',
   'notion',
   'files',
-  'linkedin',
   'whatsapp',
   // The social bridges' DMs, read out of the local Matrix bus. One connector
   // for six platforms: the row's `source` comes from which bridge's ghost
@@ -85,7 +84,6 @@ export const CONNECTOR_HERMES_SOURCE = Object.freeze({
   contacts: null,
   notion: 'notion',
   files: 'files',
-  linkedin: 'linkedin',
   whatsapp: 'whatsapp',
   // null like contacts, but for the opposite reason: contacts writes no
   // corpus at all, matrix writes SIX sources and none of them is "matrix".
@@ -106,6 +104,7 @@ export const RETENTION_SOURCES = Object.freeze([
   'notes',
   'notion',
   'files',
+  // Still written — by the matrix connector now, not an import.
   'linkedin',
   'whatsapp',
   // Written by the matrix connector, one source per bridged platform.
@@ -163,7 +162,6 @@ const TOP_KEYS = Object.freeze([
   'photos',
   'notion',
   'files',
-  'linkedin',
   'matrix',
   'retention',
 ]);
@@ -195,11 +193,10 @@ const GRANOLA_KEYS = Object.freeze(['includeTranscripts']);
 const OURA_KEYS = Object.freeze(['backfillDays']);
 const PHOTOS_KEYS = Object.freeze(['backfillDays']);
 const NOTION_KEYS = Object.freeze([]);
-// Empty on purpose: the linkedin connector reads no config yet, so any key
-// inside a `"linkedin"` section is a misspelling or an expectation the
-// daemon cannot meet — it must fail loudly, not validate cleanly and do
-// nothing (the failure the header describes).
-const LINKEDIN_KEYS = Object.freeze([]);
+// ~~LINKEDIN_KEYS: the export connector took no config, so any key under
+// "linkedin" was a misspelling.~~ Gone with the connector (owner,
+// 2026-08-25) — LinkedIn is a bridge now and configures itself the way the
+// other six do, in ~/.hazlie/matrix/linkedin/config.yaml.
 // `roots` overrides the discovered cloud folders; `materializeDataless` is the
 // opt-in that lets the walk OPEN online-only files. It defaults false and the
 // validator states the cost, because turning it on on this Mac would pull
@@ -338,9 +335,6 @@ export function validateConfig(raw) {
   }
   if (raw.notion !== undefined) {
     assertClosedKeys(raw.notion, NOTION_KEYS, '"notion"');
-  }
-  if (raw.linkedin !== undefined) {
-    assertClosedKeys(raw.linkedin, LINKEDIN_KEYS, '"linkedin"');
   }
   if (raw.files !== undefined) {
     assertClosedKeys(raw.files, FILES_KEYS, '"files"');

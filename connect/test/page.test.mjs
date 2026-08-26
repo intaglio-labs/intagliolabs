@@ -133,12 +133,16 @@ test('the FDA page names the APP, not the binary underneath it', () => {
 });
 
 // Help prose is authored with inline markup in `body` and `after` alike —
-// linkedin.after carries <em>Connected On</em>. This page used to escape
-// `after`, so the user read a literal "<em>Connected On</em>" on the LinkedIn
-// help page while the same markup rendered fine one paragraph up.
+// This page used to escape `after`, so the reader saw a literal "<em>…</em>"
+// there while the same markup rendered fine one paragraph up.
+//
+// The fixture was linkedin.after ("<em>Connected On</em>") until that topic
+// went away with the CSV export (2026-08-25). Repointed at files rather than
+// dropped: the escaping bug is still possible, and a guard deleted because
+// its example moved is how a fixed bug comes back.
 test('after paragraphs render their markup instead of showing it', () => {
-  const html = renderHelpPage('linkedin', { token: 'TOK' });
-  assert.ok(html.includes('<em>Connected On</em>'), 'after markup must render as markup');
+  const html = renderHelpPage('files', { token: 'TOK' });
+  assert.ok(html.includes('<em>skipped entirely</em>'), 'after markup must render as markup');
   assert.ok(!html.includes('&lt;em&gt;'), 'no escaped tag may reach the reader as text');
 });
 

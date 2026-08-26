@@ -116,6 +116,23 @@ export const PLATFORMS = Object.freeze({
   // ~/.hazlie/matrix/telegram/config.yaml (my.telegram.org/apps) before its
   // container will even start. Discord and Slack are token logins: paste the
   // account token the bot asks for.
+  linkedin: {
+    id: 'linkedin',
+    label: 'LinkedIn',
+    bot: '@linkedinbot:hazlie.local',
+    dir: 'linkedin',
+    db: 'linkedin/mautrix-linkedin.db',
+    initial: 'login',
+    prefix: '!linkedin', // verified against the container's own config.yaml
+    site: 'linkedin.com',
+    loginUrl: 'https://www.linkedin.com/login',
+    cookieDomain: 'linkedin.com',
+    // li_at is the session cookie; JSESSIONID is the CSRF token the API calls
+    // need, and it lands separately — the same pair problem X has, solved the
+    // same way (requiredCookies, not a single signal).
+    webLogin: { allowedHosts: ['linkedin.com', 'www.linkedin.com'], sessionCookie: 'li_at',
+                requiredCookies: ['li_at', 'JSESSIONID'] },
+  },
   telegram: {
     id: 'telegram',
     label: 'Telegram',
