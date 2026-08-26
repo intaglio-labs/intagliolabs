@@ -1027,6 +1027,43 @@ function card(src, keep) {
         tip.appendChild(how);
       }
     };
+    // THE BOT CAN BE SLOWER THAN THE REQUEST THAT WOKE IT.
+    //
+    // relay() waits 9s for a reply and then returns whatever it has, which is
+    // right for an HTTP handler and wrong for this card: painting that answer
+    // unconditionally repaints the SAME question the owner just answered, and
+    // reads as the send having done nothing. Telegram's phone step is exactly
+    // the case — it goes out to Telegram, which sends a code to the app, and
+    // that took longer than the wait; the bot's "Please enter your Code" was
+    // sitting in the room while the card still said "please enter your Phone
+    // number" (owner, 2026-08-26: "i entered my phone number, nothing
+    // happened??").
+    //
+    // So: repaint only on an actual answer, and otherwise say we are waiting
+    // and keep asking. Polling here costs nothing, where holding the request
+    // open for 40s would tie up the connect service on every login step.
+    const settle = (d, had, send) => {
+      const answered = (x) => !!x && (x.connected === true
+        || (((x.transcript) || []).length > had));
+      if (answered(d)) { renderBridge(d); return; }
+      send.textContent = `waiting for ${src.label}…`;
+      let tries = 0;
+      const tick = () => {
+        // The card was closed or replaced — nothing to paint into.
+        if (!tip.isConnected) return;
+        // ~30s on top of relay's own 9. Past that the answer is not coming,
+        // and a card stuck on "waiting" with a dead button is worse than one
+        // showing the last thing that was true: repaint so it can be retried.
+        if (++tries > 15) { renderBridge(d); return; }
+        hzPost('bridgeStatus', { p: kindOf(src.id) })
+          .then((next) => {
+            if (answered(next)) renderBridge(next);
+            else setTimeout(tick, 2000);
+          })
+          .catch(() => setTimeout(tick, 2000));
+      };
+      setTimeout(tick, 2000);
+    };
     // A one-line input that relays whatever the bot last asked for (a token,
     // a phone number, then the code) and re-renders with the bot's reply.
     const relayInput = (placeholder, multiline) => {
@@ -1051,8 +1088,11 @@ function card(src, keep) {
         const busy = send.textContent === 'create' ? 'creating…' : 'sending…';
         const idle = send.textContent;
         send.disabled = true; send.textContent = busy;
+        // What the conversation looked like BEFORE this answer, so the reply
+        // can be told apart from the question it is answering.
+        const had = ((data && data.transcript) || []).length;
         hzPost('bridgeCookies', { p: kindOf(src.id), cookies: val })
-          .then(renderBridge)
+          .then((d) => settle(d, had, send))
           .catch(() => { send.disabled = false; send.textContent = idle; });
       };
       send.addEventListener('click', (e) => { e.stopPropagation(); fire(); });
