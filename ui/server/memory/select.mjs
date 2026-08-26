@@ -118,6 +118,19 @@ export const EXCLUDED_SOURCES = Object.freeze({
   // never as their message text.
   linkedin: 'export metadata + third-party messages; joins read it, claims never do',
   whatsapp: 'third-party message text; joins read it as handles/counts, claims never do',
+  // The bridged social platforms (connectors/sources/matrix.mjs), excluded on
+  // exactly WhatsApp's reasoning and inheriting it deliberately: these are
+  // other people's DMs, arriving continuously, and the graph wants them as
+  // names, handles and counts while the model must never read the words.
+  // Deciding this at the same commit that admits the sources is the point of
+  // the test that failed when it was not — a new source with no decision is a
+  // corpus the model reads by default.
+  messenger: 'third-party message text; joins read it as handles/counts, claims never do',
+  instagram: 'third-party message text; joins read it as handles/counts, claims never do',
+  twitter: 'third-party message text; joins read it as handles/counts, claims never do',
+  telegram: 'third-party message text; joins read it as handles/counts, claims never do',
+  discord: 'third-party message text; joins read it as handles/counts, claims never do',
+  slack: 'third-party message text; joins read it as handles/counts, claims never do',
   // RESERVED, NOT RETIRED — decided 2026-08-20 when the energy digest was
   // killed as a product surface. No row has ever carried this source (0 in the
   // live store, and the digest that closed the loop arrived as `imessage`

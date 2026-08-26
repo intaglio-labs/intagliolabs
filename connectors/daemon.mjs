@@ -63,6 +63,10 @@ export const CONNECTOR_NAMES = Object.freeze([
   'files',
   'linkedin',
   'whatsapp',
+  // The social bridges' DMs, read out of the local Matrix bus. One connector
+  // for six platforms: the row's `source` comes from which bridge's ghost
+  // sent it (lib/matrixRows.mjs), so messenger and slack land as themselves.
+  'matrix',
 ]);
 
 // Connector name → the hermes `source` its rows land under. Oura is the
@@ -83,6 +87,10 @@ export const CONNECTOR_HERMES_SOURCE = Object.freeze({
   files: 'files',
   linkedin: 'linkedin',
   whatsapp: 'whatsapp',
+  // null like contacts, but for the opposite reason: contacts writes no
+  // corpus at all, matrix writes SIX sources and none of them is "matrix".
+  // The bus is transport; the row says which platform it came from.
+  matrix: null,
 });
 
 // What retention config may name: hermes sources that connectors own rows
@@ -100,6 +108,13 @@ export const RETENTION_SOURCES = Object.freeze([
   'files',
   'linkedin',
   'whatsapp',
+  // Written by the matrix connector, one source per bridged platform.
+  'messenger',
+  'instagram',
+  'twitter',
+  'telegram',
+  'discord',
+  'slack',
   'hazlie_digest',
 ]);
 
@@ -149,6 +164,7 @@ const TOP_KEYS = Object.freeze([
   'notion',
   'files',
   'linkedin',
+  'matrix',
   'retention',
 ]);
 const MAIL_KEYS = Object.freeze([

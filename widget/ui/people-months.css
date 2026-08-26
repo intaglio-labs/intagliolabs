@@ -179,11 +179,12 @@ body.plist .pm-card {
 /* Person of the year is always first and always the loudest — it is the only
    card that is a plain maximum, so it is the one that is nearly always there
    and the one the eye should find first. */
-body.plist .pm-card.lead {
-  background: linear-gradient(160deg, rgba(242, 232, 212, 0.14) 0%,
-              rgba(197, 165, 109, 0.10) 55%, rgba(51, 255, 102, 0.08) 100%);
-  border-color: rgba(197, 165, 109, 0.30);
-}
+/* ~~The first card wore a gold-to-green wash and a lit border, and its face
+   a green glow.~~ Both yeeted (owner, 2026-08-25): person of the year is the
+   card that says so, and dressing it as well made the row of cards read as
+   one highlighted thing next to three dim ones. The .lead class still marks
+   it — the constellation's lead bubble still uses it — it just no longer
+   changes how this card is painted. */
 body.plist .pm-card-eyebrow {
   display: flex;
   align-items: center;
@@ -208,11 +209,7 @@ body.plist .pm-card-face {
   font-size: 9px;
   font-weight: 600;
 }
-body.plist .pm-card.lead .pm-card-face {
-  box-shadow: inset -2px -2px 5px rgba(0, 0, 0, 0.18),
-              inset 2px 2px 4px rgba(255, 255, 255, 0.35),
-              0 0 14px rgba(51, 255, 102, 0.35);
-}
+
 body.plist .pm-card-name {
   font-size: 12.5px;
   font-weight: 600;

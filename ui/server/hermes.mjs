@@ -1339,6 +1339,17 @@ export const KNOWN_SOURCES = Object.freeze([
   'notion',
   'linkedin',
   'whatsapp',
+  // The bridged social platforms, written by connectors/sources/matrix.mjs.
+  // One source per platform rather than a single "matrix": the bus is
+  // transport, and retention, purge and the people graph all reason about
+  // WHERE a message came from. Added with the connector (2026-08-25) —
+  // the note below is why omitting a real source is an outage, not safety.
+  'messenger',
+  'instagram',
+  'twitter',
+  'telegram',
+  'discord',
+  'slack',
   'hazlie_digest',
   'seed',
 ]);
