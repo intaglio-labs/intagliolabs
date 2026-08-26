@@ -99,7 +99,7 @@
     if (!e || !e.text) return '';
     return (
       `<div class="pm-quote">` +
-        `<span class="pm-quote-who">${e.fromMe ? 'you' : 'them'}</span>` +
+        `<span class="pm-quote-who">${e.fromMe ? 'you' : 'them'}${e.room ? ' · in a group' : ''}</span>` +
         `<span class="pm-quote-text">${esc(e.text)}</span>` +
       `</div>`
     );

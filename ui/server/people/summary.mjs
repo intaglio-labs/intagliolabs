@@ -21,7 +21,7 @@
 // messages this module refuses to call the model at all and says why.
 
 import { existsSync, mkdirSync, chmodSync } from 'node:fs';
-import { threadKind, GROUP } from '../memory/threadKind.mjs';
+import { threadKind, counterpartyFromThread, GROUP } from '../memory/threadKind.mjs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -68,7 +68,12 @@ export function gatherRows(contextDb, idToKey, personKey, year) {
     // person's group monologue, with the owner never appearing in it. 50 person-
     // years on the live store are entirely group rows.
     if (threadKind(r, m) === GROUP) continue;
-    const id = m.chat_handle ?? m.handle ?? null;
+    // Same thread fallback as the graph, chips and search. Without it this
+    // gathered only the rows Apple happened to address, so an outbound-only
+    // contact showed a message count on the row and nothing when expanded, and
+    // a mixed conversation handed the model a sample missing most of the
+    // owner's own side -- under a prompt that says it is reading both.
+    const id = m.chat_handle ?? m.handle ?? counterpartyFromThread(r, m);
     if (id === null || idToKey.get(id) !== personKey) continue;
     const text = String(r.text);
     if (text.length < MIN_TEXT_CHARS) continue;

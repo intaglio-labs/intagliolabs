@@ -86,3 +86,37 @@ test('counts split active (recent) from dormant (>= 1y)', () => {
   assert.ok(counts.active >= 2);   // the two acme contacts
   assert.ok(counts.dormant >= 1);  // the old gmail one
 });
+
+// ---- a room does not make somebody warm ----
+//
+// The dormancy fix left lastFromThem null for a room-only person, and buildMap
+// then fell back to lastSeen -- which ticks on any activity, room included. So
+// a group-only speaker who posted yesterday still came out at maximum warmth,
+// and the constellation behaviour the fix was for stayed broken. Caught by
+// codex on PR #17; this is the assertion that was missing.
+test('a recent group post does not make a stranger look like a close friend', () => {
+  const ctx = new DatabaseSync(':memory:');
+  ctx.exec('CREATE TABLE context (ts INTEGER, source TEXT, speaker TEXT, entity_id TEXT, text TEXT, meta TEXT)');
+  ctx.prepare('INSERT INTO context (ts, source, entity_id, text, meta) VALUES (?,?,?,?,?)').run(
+    NOW - DAY, 'imessage', 'g1', 'anyone free saturday',
+    JSON.stringify({ chat_guid: 'any;+;chat70707', handle: '+15550777', is_from_me: false })
+  );
+  const map = buildMap(ctx, null, { now: NOW, owner });
+  const p = map.people.find((x) => (x.identifiers ?? []).includes('+15550777'));
+  assert.ok(p, 'they are on the map — this is not a filter');
+  assert.equal(p.dormancyDays, null, 'they have never reached out');
+  assert.equal(p.recencyDays, null, 'and yesterday in a room is not recency with them');
+  assert.ok(p.warm < 1, `warmth must not be maximum, got ${p.warm}`);
+});
+
+test('a recent DIRECT message still makes somebody warm', () => {
+  const ctx = new DatabaseSync(':memory:');
+  ctx.exec('CREATE TABLE context (ts INTEGER, source TEXT, speaker TEXT, entity_id TEXT, text TEXT, meta TEXT)');
+  ctx.prepare('INSERT INTO context (ts, source, entity_id, text, meta) VALUES (?,?,?,?,?)').run(
+    NOW - DAY, 'imessage', 'd1', 'hey',
+    JSON.stringify({ chat_guid: 'any;-;+15550778', handle: '+15550778', is_from_me: false })
+  );
+  const p = buildMap(ctx, null, { now: NOW, owner }).people.find((x) => (x.identifiers ?? []).includes('+15550778'));
+  assert.equal(p.recencyDays, 1);
+  assert.equal(p.warm, 1, 'the fallback still works for real contact');
+});

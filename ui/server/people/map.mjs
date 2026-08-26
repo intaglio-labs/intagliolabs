@@ -339,7 +339,21 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
     // Days since last contact of any kind, for the personal field where there
     // may be no inbound to drive dormancy.
     const sinceSeen = Number.isFinite(p.lastSeen) ? Math.max(0, Math.floor((now - p.lastSeen) / DAY)) : null;
-    const recencyDays = p.dormancyDays != null ? p.dormancyDays : sinceSeen;
+    // A ROOM DOES NOT MAKE SOMEBODY WARM.
+    //
+    // dormancyDays is null for a person who has never sent a direct message,
+    // which is the fix -- but falling back to lastSeen put the room straight
+    // back in, because lastSeen ticks on any activity including a group post.
+    // A room-only speaker who posted yesterday came out at recencyDays 1 and
+    // maximum warmth, indistinguishable from a close friend, which is exactly
+    // the constellation behaviour the dormancy fix was supposed to correct.
+    //
+    // null rather than a large number: warmthOf already has a tier for "no
+    // recency to speak of" and this genuinely is that case. The lastSeen
+    // fallback stays for everybody else, where it is the only signal a
+    // calendar-only contact has.
+    const recencyDays =
+      p.dormancyDays != null ? p.dormancyDays : (p.roomOnly ? null : sinceSeen);
 
     return {
       key: p.key,
@@ -348,6 +362,9 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
       clusterLabel: c.label,
       strength: Math.round((depth / norm) * 1000) / 1000,
       recencyDays,
+      // Carried onto the star so the constellation can mark it, and so this is
+      // measurable from the payload rather than only from the graph behind it.
+      roomOnly: p.roomOnly === true,
       warm: warmthOf(recencyDays),
       channels: p.channels ?? [],
       messages: p.messages ?? 0,
