@@ -62,6 +62,48 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
   private let approval: Bool
   /// A browser string this platform insists on, or empty for the default.
   private let userAgent: String
+
+  /// The browser string this window presents when the policy names none.
+  ///
+  /// READ FROM THE SYSTEM, NEVER WRITTEN DOWN. ~~A literal "Version/17.4".~~
+  /// A user-agent that names a version is a dated assertion, and this one has
+  /// now expired into a user-visible bug twice: first as WKWebView's own
+  /// default (no Safari token at all, which served the owner a blank window on
+  /// x.com), then as a hardcoded 17.4, which by 2026-08 was old enough that
+  /// Slack served it the "your browser is not supported" page and cost this
+  /// app its entire Slack email login. Measured that day, straight off
+  /// slack.com/signin's own boot_data:
+  ///
+  ///     Version/17.4  is_deprecated_webclient_browser: true   (gate shown)
+  ///     Version/18.5  is_deprecated_webclient_browser: true   (gate shown)
+  ///     Chrome/126    is_deprecated_webclient_browser: true   (gate shown)
+  ///     Version/26.0  flag absent, 64 KB page, no gate
+  ///     Version/27.0  flag absent, 64 KB page, no gate
+  ///
+  /// Bumping the literal would reproduce the same bug with a longer fuse, so
+  /// the version comes from the Safari that is actually installed — this app
+  /// IS WebKit, so that string is a true statement about the engine rendering
+  /// the page, not a costume. It reaches no network and cannot go stale: the
+  /// system updates Safari and this follows.
+  ///
+  /// The fallback only runs if that read fails, which on macOS means Safari
+  /// has been removed from /Applications. It is deliberately a floor rather
+  /// than a guess at "current", and it WILL rot — if you are reading this
+  /// because something serves you an upgrade page, the fix is not to bump it,
+  /// it is to find out why the read failed.
+  private static let systemSafariUserAgent: String = {
+    let version = (Bundle(path: "/Applications/Safari.app")?
+      .infoDictionary?["CFBundleShortVersionString"] as? String)?
+      .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    // Digits and dots only. A malformed plist value would otherwise be spliced
+    // straight into a header, and a UA with a newline in it is a request
+    // nobody can debug.
+    let ok = !version.isEmpty
+      && version.range(of: "^[0-9]+(\\.[0-9]+)*$", options: .regularExpression) != nil
+    return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+      + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/"
+      + (ok ? version : "18.0") + " Safari/605.1.15"
+  }()
   private let allowedSuffixes: [String]
   private let done: (String?) -> Void
 
@@ -437,12 +479,10 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     // marketing token, and the big login SPAs — x.com most visibly — serve a
     // blank page to it (the owner saw an empty white window on X). A stock
     // desktop-Safari string makes them render their normal login flow.
-    // Per-platform when the policy names one (Slack's sniffer rejects Safari),
-    // the stock desktop-Safari string otherwise.
-    web.customUserAgent = userAgent.isEmpty
-      ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
-      : userAgent
+    // Per-platform when the policy names one, the system's own Safari version
+    // otherwise — see systemSafariUserAgent for why that is READ and not
+    // written down.
+    web.customUserAgent = userAgent.isEmpty ? Self.systemSafariUserAgent : userAgent
     web.load(URLRequest(url: url))
 
     // Poll the webview's own cookie store for the session cookie. When it

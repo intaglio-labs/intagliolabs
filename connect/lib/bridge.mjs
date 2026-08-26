@@ -288,17 +288,9 @@ export const PLATFORMS = Object.freeze({
     // email address), `token`, and `app`. EMAIL is the one a person wants and
     // the one Beeper uses; the token flow was never the only option, it was
     // just the one this table knew about.
-    // ~~login email~~ — the flow a person wants, and the one this app cannot
-    // finish. Slack will not email its code until a CAPTCHA is answered, and
-    // slack.com/signin refuses to render in the login window at all: it draws
-    // "your browser is not supported" over every user agent tried, including
-    // ones a plain fetch of the same page accepts (verified 2026-08-26). The
-    // check is client-side feature detection, so no browser string fixes it —
-    // Beeper gets away with the same flow because Electron IS Chromium, and
-    // this window is WKWebView. `token` is the flow that works here: a person
-    // already signed in to Slack in their own browser copies two values out
-    // of it, and no challenge is involved because they already passed one.
-    initial: 'login token',
+    // ~~login token~~ — the retreat, and it was based on a wrong finding. See
+    // webLogin below.
+    initial: 'login email',
     prefix: '!slack',
     site: 'slack.com',
     loginUrl: 'https://slack.com/signin',
@@ -312,9 +304,57 @@ export const PLATFORMS = Object.freeze({
     // token their solution produced; nothing here answers a challenge, and
     // nothing may. That is also the only reason this is a legitimate flow: the
     // point of the challenge is a human proving they are human, and one is.
-    // ~~A CAPTCHA window.~~ It could never open: see the note on `initial`.
-    webLogin: null,
-    noWebLogin: 'two tokens copied from a browser already signed in to Slack',
+    //
+    // ~~WITHDRAWN 2026-08-26: "slack.com/signin will not render in this app at
+    // all. It answers 'your browser is not supported' under every user agent
+    // tried — and a plain fetch of the same URL with those same agents is
+    // served the real page, so the check is client-side feature detection, not
+    // the string. No browser string fixes that. Beeper runs the identical flow
+    // because Electron IS Chromium; this window is WKWebView."~~
+    //
+    // WRONG, and restored the same day it was withdrawn. Every clause of that
+    // paragraph was a reasonable reading of two measurements and none of it
+    // survived a third. The gate is SERVER-SIDE and keyed on the User-Agent;
+    // what is client-side is only the mounting of the real form, which is why
+    // it looked like feature detection. From slack.com/signin's own boot_data:
+    //
+    //     Version/17.4  is_deprecated_webclient_browser: true   39 KB, gate
+    //     Version/18.5  is_deprecated_webclient_browser: true   39 KB, gate
+    //     Chrome/126    is_deprecated_webclient_browser: true   39 KB, gate
+    //     Version/26.0  flag absent                             64 KB, no gate
+    //     Version/27.0  flag absent                             64 KB, no gate
+    //     WKWebView's own default UA  is_unsupported...: true
+    //
+    // Both agents the withdrawal tested had aged onto Slack's deprecated list,
+    // which is exactly what makes "no browser string fixes it" look proven.
+    // The "not supported" block ships inside the HTML as the no-JS fallback
+    // and the real form is mounted over it, so a deprecated browser sees the
+    // fallback with no error in the console — a decision, not a crash. In a
+    // real WKWebView with a current Safari string: gate false, form present,
+    // 21 scripts, "Enter your email to sign in". The window works. It is the
+    // version we were claiming to be that did not.
+    //
+    // WHAT IS STILL UNPROVEN, said plainly because the next reader will want
+    // to know: nobody has watched Slack's challenge widget actually run in
+    // this window. It is lazy-loaded — with the form on screen and nothing
+    // submitted there is no grecaptcha global and no challenge frame, only the
+    // word "captcha" inside the bundles — and seeing it mount means submitting
+    // an address, which is the owner's login to start, not ours. So this entry
+    // restores a flow whose FIRST wall is measured gone; if the challenge
+    // itself cannot run here, the wall moved one step rather than fell, and
+    // the honest thing then is another strike-through under this one.
+    webLogin: {
+      allowedHosts: ['slack.com'],
+      // No cookie gate: this window is not harvesting a session, it is waiting
+      // for one value that appears when the challenge is answered.
+      sessionCookie: null,
+      requiredCookies: [],
+      fields: [{ id: 'captcha_token', from: 'captcha' }],
+      // No userAgent override. ~~Slack's sniffer rejects Safari~~ — it rejects
+      // a STALE Safari, and the window now presents the version of Safari that
+      // is actually installed (BridgeLogin.systemSafariUserAgent). A literal
+      // here would be the same dated assertion one file further away.
+    },
   },
 });
 

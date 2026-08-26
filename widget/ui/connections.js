@@ -494,22 +494,22 @@ const BRIDGE_HELP = {
   // runs. ~~"your Discord token" / "your Slack tokens"~~ described a command
   // (`login-token`) these bridges reject outright (2026-08-26).
   discord: { place: 'scan the QR with your Discord phone app' },
-  // Slack's own login page will not render in this window (see bridge.mjs
-  // PLATFORMS.slack), so the tokens come out of a browser already signed in.
+  // ~~Slack's own login page will not render in this window, so the tokens
+  // come out of a browser already signed in: xoxd from the cookie jar, xoxc
+  // from a request header, both dug out of devtools.~~ Gone, and good
+  // riddance — that card asked the owner to read two secrets out of devtools
+  // and paste them, which is the most alarming thing this app has ever put on
+  // screen, and it was only there because of a wrong finding about the login
+  // page (see bridge.mjs PLATFORMS.slack for the measurements that reversed
+  // it). Slack signs in with an email address now, like Beeper does.
   slack: {
-    place: 'your Slack tokens',
-    // WHY THIS ONE IS DIFFERENT, said on the card rather than left to feel
-    // arbitrary next to five platforms that just open a window. Verified in a
-    // real WKWebView (2026-08-26): slack.com/signin, /workspace-signin and
-    // app.slack.com/client each render "your browser is not supported", under
-    // both a Safari and a Chrome user agent, while a plain fetch of the same
-    // URLs is served the real page. Client-side detection, nothing a string
-    // can answer.
-    why: 'Slack’s login page refuses to open inside an app window, so this one '
-      + 'borrows the session from a browser you are already signed in to.',
-    steps: '1 · open slack.com in that browser  2 · devtools → Application → '
-      + 'Cookies → copy d (xoxd-…)  3 · Network → any api call → request '
-      + 'headers → copy token (xoxc-…)',
+    place: 'your Slack email address',
+    // Slack will not send its code until a challenge is answered, so a window
+    // opens on Slack's own page for that one step. Said on the card because a
+    // window appearing mid-flow is otherwise a surprise, and because "answer
+    // it yourself" is the point rather than an inconvenience.
+    why: 'Slack asks for a quick “are you human” check before it emails your '
+      + 'code — a window opens on Slack’s own page for you to answer it.',
   },
   telegram: { place: 'phone (+1…), then the code' },  // after its api keys are set
 };

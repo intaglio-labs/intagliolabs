@@ -112,11 +112,16 @@ test('the platforms that do have a web login are the ones we expect', () => {
   // side effect. Four cookie flows: LinkedIn joined 2026-08-25 when it stopped
   // being a hand-unzipped CSV export and became a bridge like the others.
   const withWeb = entries.filter(([, p]) => p.webLogin).map(([id]) => id).sort();
-  // Slack was briefly here for its CAPTCHA and was withdrawn the same day:
-  // slack.com/signin will not render in a WKWebView at all.
+  // ~~Slack was briefly here for its CAPTCHA and was withdrawn the same day:
+  // slack.com/signin will not render in a WKWebView at all.~~ It renders; the
+  // withdrawal was measured against two user-agent strings that had both aged
+  // onto Slack's deprecated list, and the gate is server-side and keyed on
+  // exactly that. Back on the roster 2026-08-26, with the evidence in
+  // PLATFORMS.slack. FIFTH member, and the one whose window harvests no
+  // cookies at all — it waits on a field.
   // Discord was briefly here as an approval window and was withdrawn the same
   // day: its approval is a QR the phone app scans, which needs no window.
-  assert.deepEqual(withWeb, ['instagram', 'linkedin', 'messenger', 'twitter']);
+  assert.deepEqual(withWeb, ['instagram', 'linkedin', 'messenger', 'slack', 'twitter']);
 });
 
 test('the QR-window roster is exactly the platforms with no page to drive', () => {
@@ -167,7 +172,10 @@ test('the field contract is declared per platform, for the two that need one', (
   // empty value from that same JSON — a login that looks done and is not
   // (2026-08-25).
   const withFields = entries.filter(([, p]) => p.webLogin?.fields).map(([id]) => id).sort();
-  assert.deepEqual(withFields, ['linkedin']);
+  // Slack's is the other shape entirely: one `captcha` field and no cookie
+  // harvest, because its window exists so a human can answer a challenge and
+  // hand back the token that answering produced.
+  assert.deepEqual(withFields, ['linkedin', 'slack']);
 
   // Every field must be one the login window knows how to satisfy. A `header`
   // field additionally names the header to capture — without it the window
