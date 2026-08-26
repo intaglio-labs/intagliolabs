@@ -655,7 +655,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // endpoint. The webview and its cookies never touch this bridge's own
       // views; only the harvested set is POSTed to the loopback server.
       let p = String((payload["p"] as? String ?? "").prefix(24))
-      bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { [weak self] begin in
+      // Fetch policy without beginning the Matrix-bot conversation. Beginning
+      // used to happen first, which meant a fresh install with no bridge state
+      // failed before the real Facebook/Instagram/X login window could even
+      // appear. The login window needs only the static, server-authored policy;
+      // start the bot immediately after cookies are available.
+      bridgeCall("GET", "api/bridge", query: ["p": p]) { [weak self] begin in
         guard let self else { return }
         guard begin["state"] as? String == "ok",
               let loginUrl = begin["loginUrl"] as? String,
@@ -672,24 +677,101 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // never fire. That blank window was the bug.
         let allowedHosts = (begin["allowedHosts"] as? [String])?.filter { !$0.isEmpty } ?? []
         let sessionCookie = begin["sessionCookie"] as? String ?? ""
-        guard !allowedHosts.isEmpty, !sessionCookie.isEmpty else {
+        let requiredCookies = (begin["requiredCookies"] as? [String])?.filter { !$0.isEmpty } ?? []
+        let cookieFormat = begin["cookieFormat"] as? String ?? "json"
+        // The bridge's field contract, flattened to strings — the login window
+        // fills it in without interpreting any of it.
+        let fields: [[String: String]] = (begin["fields"] as? [[String: Any]] ?? []).map { f in
+          var out: [String: String] = [:]
+          for (k, v) in f { if let sv = v as? String { out[k] = sv } }
+          return out
+        }
+        // A window needs a fence and SOMETHING to wait for. ~~That was read as
+        // "a session cookie", which is only one of the two shapes~~ — Slack's
+        // window harvests no session at all: it exists so the person can
+        // answer the CAPTCHA Slack demands before it will email a code, and it
+        // waits on the `fields` contract instead. Requiring a cookie here
+        // meant Slack replied "manual" and no window ever opened, which is
+        // exactly what the card kept showing (owner, 2026-08-26).
+        let approval = begin["approval"] as? Bool ?? false
+        let userAgent = String((begin["userAgent"] as? String ?? "").prefix(300))
+        // Subframe-only hosts: a challenge widget's iframes. Same server-authored
+        // shape as allowedHosts, enforced separately — see BridgeLogin's fence.
+        let allowedFrameHosts = (begin["allowedFrameHosts"] as? [String])?.filter { !$0.isEmpty } ?? []
+        // Where a storage field's value lives, when signing in does not land
+        // there. Server-authored like the rest; the window uses it at most once.
+        let storageUrl = String((begin["storageUrl"] as? String ?? "").prefix(300))
+        let label = begin["label"] as? String ?? p
+        // A QR LOGIN IS ALSO A WINDOW, just not a webview one. Discord has no
+        // login page to drive — its bridge posts a remote-auth QR and waits
+        // for the phone app — so it takes this branch before the webview
+        // guard below, which would send it to the card's manual path.
+        if begin["qrLogin"] as? Bool == true {
+          self.presentQrLogin(webView, id: id, p: p, label: label)
+          return
+        }
+        guard !allowedHosts.isEmpty, !sessionCookie.isEmpty || !fields.isEmpty || approval else {
+          // No window for this platform — Telegram signs in by phone number
+          // and a code, which is a conversation, not a page. The card runs it.
+          //
+          // ~~This branch ran `begin` itself, so one press opened on the bot's
+          // first question~~ (d88e56c). Withdrawn the same day: `begin` sends
+          // cancel-then-login, so a press on a tile whose login was ALREADY in
+          // flight destroyed it — and each press put six command messages into
+          // a sixteen-message transcript window, which scrolled the owner's own
+          // answer out of sight and left the card unable to see that anything
+          // had happened (owner, 2026-08-26: "i'm stuck here").
+          //
+          // The card begins the login instead, and it can do so safely because
+          // it is the side that already parses whether the bot is mid-question.
+          // One press still reaches the question; deciding here could not tell
+          // "nothing started" from "something is waiting for an answer".
           self.reply(webView, id, ["state": "manual", "transcript": begin["transcript"] ?? []])
           return
         }
-        let label = begin["label"] as? String ?? p
         DispatchQueue.main.async {
           BridgeLogin.present(
             label: label, loginUrl: loginUrl, cookieDomain: cookieDomain,
-            sessionCookie: sessionCookie, allowedHosts: allowedHosts
+            sessionCookie: sessionCookie, allowedHosts: allowedHosts,
+            requiredCookies: requiredCookies, cookieFormat: cookieFormat,
+            fields: fields, approval: approval, userAgent: userAgent,
+            allowedFrameHosts: allowedFrameHosts, storageUrl: storageUrl
           ) { cookiesJSON in
             guard let cookiesJSON else {
               self.reply(webView, id, ["state": "cancelled"])
               return
             }
-            self.bridgeCall(
-              "POST", "api/bridge/cookies", json: ["p": p, "cookies": cookiesJSON], timeout: 15
-            ) { done in
-              self.reply(webView, id, done)
+            // BEGIN FIRST, EXCEPT WHEN THE LOGIN IS ALREADY UNDERWAY. A cookie
+            // harvest is self-contained: the window collects the session and
+            // the conversation starts afterwards, which is why begin lives
+            // here rather than before the window (a fresh install with no
+            // bridge state used to fail before the window could appear).
+            //
+            // A CHALLENGE window is the opposite. It opens partway through a
+            // conversation the bot is already holding — Slack asked for the
+            // challenge because it had been given an email address — and
+            // begin's first act is `cancel`. Calling it here would throw away
+            // the very request whose answer this window just captured, and the
+            // bot would then be asked for an email address with a captcha
+            // token. Derived from the field contract, like the rest.
+            let midConversation = fields.contains { $0["from"] == "captcha" }
+            let sendValue = {
+              self.bridgeCall(
+                "POST", "api/bridge/cookies", json: ["p": p, "cookies": cookiesJSON], timeout: 15
+              ) { done in
+                self.reply(webView, id, done)
+              }
+            }
+            if midConversation {
+              sendValue()
+            } else {
+              self.bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { started in
+                guard started["state"] as? String == "ok" else {
+                  self.reply(webView, id, started)
+                  return
+                }
+                sendValue()
+              }
             }
           }
         }
@@ -762,11 +844,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
               ])
               return
             }
-            Provision.installAgent("com.hazlie.llama-server")
-            Provision.kickstart("com.hazlie.llama-server")
+            Provision.installAgent("io.intaglio.llama-server")
+            Provision.kickstart("io.intaglio.llama-server")
             // hermes holds the llama base URL open; restart it so the first ask
             // after setup does not meet a proxy pointed at nothing.
-            Provision.kickstart("com.hazlie.hermes")
+            Provision.kickstart("io.intaglio.hermes")
             // REACH AN ENDING. Loading several GB of weights takes a while, so
             // wait -- but bounded, and then say which way it went. A screen that
             // says "checking" forever is the one state that is never true.
@@ -1341,6 +1423,98 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // paste rides this once and is masked server-side out of every transcript;
   // nothing here stores or logs it. begin/cookies wait on a live bot, so they
   // get 15s where status gets 5.
+  /// Discord's login, end to end: open the window on the press, ask the bot
+  /// for a QR, show it, and poll the bridge until the phone approves it.
+  ///
+  /// THE WINDOW OPENS FIRST. `login` is a round trip to a bot in a container
+  /// (3.8s measured here), and doing that before showing anything is what made
+  /// the tile look dead on the first press — the owner pressed twice and read
+  /// the second press as the one that worked. Instagram's window is up
+  /// immediately because its policy is static; this one now opens on the same
+  /// press and fills in when the code lands.
+  ///
+  /// The QR is the bridge's own Matrix media, inlined as a data: URI by the
+  /// connect server (lib/bridge.mjs inlineMedia, images only and capped) —
+  /// this process fetches nothing to show it.
+  ///
+  /// WHAT COMES BACK to the page is deliberately not the transcript. A
+  /// finished attempt's QR is redacted by the bridge, so replaying the
+  /// conversation into the card is how the card ended up showing the words
+  /// around a code that was no longer there; the card gets a fresh status
+  /// instead, or `cancelled`, which is the state its begin button already
+  /// knows how to answer.
+  private func presentQrLogin(_ webView: WKWebView, id: Int, p: String, label: String) {
+    // A bot reply with no image — "You're already logged in", or a bridge that
+    // is down — is the card's to show, not this window's. Captured here so the
+    // close path can hand it back.
+    var fallback: [String: Any]?
+    // ENDING TAKES TWO POLLS IN A ROW. The bot posts "Error logging in:
+    // websocket: close sent" for a socket that lapsed, and on this machine
+    // that line was followed by "Successfully logged in" from the scan the
+    // owner had just done — so a window that closed on the first sighting
+    // would have closed a login that was about to succeed.
+    var endingStreak = 0
+    // Main thread: this is reached from a URLSession completion, and it puts a
+    // window on screen.
+    DispatchQueue.main.async {
+      BridgeLogin.presentQR(
+        label: label,
+        // Owner's wording (2026-08-26). Not "the Discord app": a phone camera
+        // recognises the code and offers the app itself, and naming a second
+        // piece of software to go and open first is a step that is not there.
+        instruction: "scan this with your phone camera",
+        fetch: { [weak self] deliver in
+          guard let self else { deliver(nil); return }
+          self.bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { begun in
+            guard begun["state"] as? String == "ok" else {
+              fallback = begun
+              deliver(nil)
+              return
+            }
+            // The LAST bot image: a retried login posts a second code, and the
+            // stale one is still above it in the transcript.
+            let transcript = begun["transcript"] as? [[String: Any]] ?? []
+            let qr = transcript.reversed().first { m in
+              (m["from"] as? String) == "bot"
+                && (m["image"] as? String)?.hasPrefix("data:image/") == true
+            }?["image"] as? String
+            if qr == nil {
+              fallback = ["state": "manual", "transcript": begun["transcript"] ?? []]
+            }
+            deliver(qr)
+          }
+        },
+        check: { [weak self] report in
+          guard let self else { return }
+          self.bridgeCall("GET", "api/bridge", query: ["p": p]) { st in
+            if st["connected"] as? Bool == true { report(.connected); return }
+            // The bridge says it is over in words, and they are the bot's own.
+            // Matching the shape rather than the sentence, because that string
+            // is the container's to change.
+            let lines = (st["transcript"] as? [[String: Any]] ?? [])
+              .compactMap { ($0["from"] as? String) == "bot" ? $0["body"] as? String : nil }
+            let last = lines.last?.lowercased() ?? ""
+            let over = last.contains("error logging in") || last.contains("websocket")
+              || last.contains("timed out") || last.contains("cancelled")
+            endingStreak = over ? endingStreak + 1 : 0
+            report(endingStreak >= 2 ? .ended : .waiting)
+          }
+        }
+      ) { [weak self] result in
+        guard let self else { return }
+        guard result != nil else {
+          self.reply(webView, id, fallback ?? ["state": "cancelled"])
+          return
+        }
+        // Linked. Re-read rather than reporting the poll's own copy, so the card
+        // paints from the same source every other path uses.
+        self.bridgeCall("GET", "api/bridge", query: ["p": p]) { done in
+          self.reply(webView, id, done)
+        }
+      }
+    }
+  }
+
   private func bridgeCall(
     _ method: String, _ path: String, query: [String: String] = [:],
     json: [String: Any]? = nil, timeout: TimeInterval = 5,
