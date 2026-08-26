@@ -30,7 +30,24 @@ new MutationObserver(() => {
     // the window no longer widens for it (the extraWidth post left with the
     // strip). Re-placed on every content change, because the anchor is the
     // one fixed point while async login replies grow the card.
-    hzPlacePop(hintHost, document.querySelector('#grid .row.open'));
+    // THE ANCHOR IS RESOLVED, NOT ASSUMED. Every appender is supposed to mark
+    // its row .open first, but an async painter can land after a close or a
+    // rebuild has unmarked the world — and hzPlacePop's null-anchor guard then
+    // silently skips placement, which shows the card wherever its stale styles
+    // left it. Fall back to the live row that owns the card (both carry
+    // dataset.id for exactly this kind of reunion), and if no live row owns
+    // it, close the host: an unplaceable pop-over must not render.
+    let anchor = document.querySelector('#grid .row.open');
+    if (!anchor) {
+      const cardEl = hintHost.querySelector('.hint');
+      const id = cardEl ? cardEl.dataset.id : null;
+      anchor = id
+        ? [...document.querySelectorAll('#grid .row')].find((r) => r.dataset.id === id) || null
+        : null;
+      if (anchor) anchor.classList.add('open'); // so the next tap closes, never relaunches
+    }
+    if (!anchor) { hintHost.replaceChildren(); return; }
+    hzPlacePop(hintHost, anchor);
     if (!hintHost.querySelector('.hint-x')) {
       const x = document.createElement('button');
       x.className = 'hint-x';
@@ -1186,6 +1203,16 @@ function card(src, keep) {
   // once there is a RESULT to show (linked, an error, or the login window
   // closed) — that is the "details" the owner said should still appear.
   const showBridgePanel = (data) => {
+    // A RESULT CAN OUTLIVE ITS TILE. The focus-refresh rebuilds the shelf
+    // (coming back from copying tokens fires it every time), so by the time a
+    // slow login promise lands, this closure's row can be a detached node. It
+    // still accepted the append: the card entered the live host anchored to a
+    // row no document query can find, hzPlacePop's null-anchor guard skipped
+    // placement, and the owner got a clipped card floating over the settings
+    // column (owner, 2026-08-26, after pressing x on Slack's card). The live
+    // tile re-derives everything in this card from status on its next tap, so
+    // a result held by a dead closure is dropped, not re-homed.
+    if (!row.isConnected) return;
     hintHost.replaceChildren();
     for (const r of grid.querySelectorAll('.row')) r.classList.remove('open');
     hintHost.appendChild(tip);
