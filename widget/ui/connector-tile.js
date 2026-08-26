@@ -130,7 +130,7 @@ const HZ_HINTS = {
           url: 'https://myaccount.google.com/apppasswords', link: 'Google app passwords' },
   // granola left the sentence behind (owner, 2026-08-25): its panel is the
   // in-app walkthrough — open granola.ai, create a key, paste it right here.
-  granola: { url: 'https://granola.ai', link: 'granola.ai', walkthrough: true },
+  granola: { url: 'granola://', link: 'Granola', walkthrough: true }, // the DESKTOP app — the key lives in its settings
   // OAuth2 since Oura retired personal access tokens in Dec 2025: the PAT
   // page this used to link is a dead end, and there is no settings page to
   // send anyone to instead, so this one is text-only — the connect page

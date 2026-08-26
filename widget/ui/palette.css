@@ -1558,6 +1558,9 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
 .hint.hold { padding: 10px 12px; }
 /* The connected-account line: who's linked, in cream, above the + add button. */
 .hint.hold .acct { display: block; color: var(--fg); font-size: 11px; margin: 2px 0 4px; }
+/* Walkthrough steps and how-to sentences each hold a line of their own —
+   "2 · create an API key" wrapped around the step-1 pill otherwise. */
+.hint.hold .setup { display: block; margin-top: 6px; }
 /* Every connected line leads with a green check (owner, 2026-08-25). One
    rule, not a per-site prefix: the check rides the .acct class, so it cannot
    be forgotten by the next connected state someone renders. */

@@ -397,7 +397,7 @@ const HINTS = {
           url: 'https://myaccount.google.com/apppasswords', link: 'Google app passwords' },
   // granola left this table (owner, 2026-08-25): its panel is the in-app
   // walkthrough now — open granola.ai, create a key, paste it right here.
-  granola: { url: 'https://granola.ai', link: 'granola.ai', walkthrough: true },
+  granola: { url: 'granola://', link: 'Granola', walkthrough: true }, // the DESKTOP app — the key lives in its settings
   // OAuth2 since Oura retired personal access tokens in Dec 2025: the PAT
   // page this used to link is a dead end, and there is no settings page to
   // send anyone to instead, so this one is text-only — the connect page
@@ -478,11 +478,15 @@ const CONNECTOR_ORDER = [
 const HIDDEN_CONNECTORS = new Set(['oura', 'photos', 'files', 'notion', 'notes']);
 // WHAT NEEDS YOU COMES FIRST. The shelf scrolls, so anything past the fourth
 // tile is work to reach — and the tiles that need reaching are exactly the
-// ones not yet connected, or connected with a caveat (a stale sync, a
-// permission that lapsed). Those lead; everything healthy follows in the
-// scan order below. The consequence is deliberate: connect something and it
-// MOVES, out of the way, which is the shelf telling you it is done.
-const needsYou = (s) => !s.connected || !!s.caveat;
+// ones not yet connected or broken. Those lead; everything healthy follows in
+// the scan order below. The consequence is deliberate: connect something and
+// it MOVES, out of the way, which is the shelf telling you it is done.
+// ~~`|| !!s.caveat` was the third term~~ — dropped (owner, 2026-08-25):
+// WhatsApp carries a PERMANENT disclosure caveat ("only as fresh as the last
+// time WhatsApp Desktop ran"), so a freshly connected WhatsApp sat pinned at
+// the front forever, which is the exact opposite of the move-out-of-the-way
+// promise above. A standing disclosure is not a call to action.
+const needsYou = (s) => !s.connected || s.broken === true;
 function orderSources(sources) {
   const rank = (s) => {
     const i = CONNECTOR_ORDER.indexOf(kindOf(s.id));

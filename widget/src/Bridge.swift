@@ -333,6 +333,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
     "https://myaccount.google.com/apppasswords",
     "https://granola.ai",
+    // The Granola DESKTOP app (owner, 2026-08-25): the API key lives in the
+    // app's own settings, so the walkthrough opens the app, not the website.
+    "granola://",
     "https://cloud.ouraring.com/oauth/applications",
     "https://www.notion.so/my-integrations",
     // The bridge token how-to links, for the Discord/Slack guided login flows.
