@@ -1,7 +1,8 @@
 // The timeline popup: ONE YEAR of your people, sorted by that year's
 // engagement, with the year's topic chips — month grouping was yeeted
 // (owner, 2026-08-25). Browser-style year tabs page between years; one fetch
-// per year (cached, dropped on every panel re-open via __hzRefresh). Search
+// per year (cached for the panel's lifetime and refreshed in the background
+// when the panel re-opens). Search
 // is SERVER-SIDE and crosses every year (the filter row was yeeted — owner,
 // 2026-08-25): filtering the open year's loaded list could not reach a person
 // in another year, nor one past the 250 that list holds, which is most of them
@@ -69,6 +70,8 @@
   let years = []; // every year with activity, from the server
   let expanded = null; // '<personKey>|<year>' of the row showing its detail
   const cache = new Map(); // year -> payload
+  const staleYears = new Set(); // cached years owed a silent freshness check
+  const refreshing = new Map(); // year -> in-flight refresh promise
   // Search state. `findRows` is null when not searching, so an empty ARRAY can
   // honestly mean "nobody matches" rather than "no search has run".
   let findTerm = '';
@@ -926,14 +929,22 @@
     return { people, total: people.length, allYears: true };
   }
 
-  function ensureMap() {
-    if (mapData) return Promise.resolve(mapData);
+  function refreshMap() {
     if (!mapPending) {
+      const repaint = mapData !== null;
       mapPending = hzPost('peopleMap')
-        .then((r) => { mapData = adaptMap(r || {}); return mapData; })
+        .then((r) => {
+          mapData = adaptMap(r || {});
+          if (repaint && scope === 'all' && !findTerm) render();
+          return mapData;
+        })
         .finally(() => { mapPending = null; });
     }
     return mapPending;
+  }
+
+  function ensureMap() {
+    return mapData ? Promise.resolve(mapData) : refreshMap();
   }
 
   // ---- remembering where you were ----
@@ -1019,10 +1030,36 @@
   // answer INSTANTLY with a loading state. reqId guards the race: only the
   // newest click's response may paint.
   let reqId = 0;
+  function refreshYear(y) {
+    const inFlight = refreshing.get(y);
+    if (inFlight) return inFlight;
+
+    // STALE-WHILE-REVALIDATE: the cached list stays painted while this request
+    // runs. A failed freshness check leaves the old answer in place and the
+    // year stale, so its next visit can try again without turning into an
+    // empty error screen.
+    const request = hzPost('peopleYear', { year: y })
+      .then((res) => {
+        if (!res || !Array.isArray(res.people)) throw new Error('bad year payload');
+        cache.set(y, res);
+        staleYears.delete(y);
+        if (Array.isArray(res.years) && res.years.length) years = res.years;
+        if (year === y && !findTerm) render();
+        return res;
+      })
+      .finally(() => refreshing.delete(y));
+    refreshing.set(y, request);
+    return request;
+  }
+
   async function load(y) {
     year = y;
     renderTabs();
-    if (cache.has(year)) return render();
+    if (cache.has(year)) {
+      render();
+      if (staleYears.has(year)) refreshYear(year).catch(() => {});
+      return;
+    }
     const my = ++reqId;
     searchEl.placeholder = `loading ${year}…`;
     // Into whichever surface is actually up. Writing it unconditionally to the
@@ -1037,6 +1074,7 @@
     if (my !== reqId) return; // superseded by a newer tab click
     if (!res || !Array.isArray(res.people)) throw new Error('bad year payload');
     cache.set(year, res);
+    staleYears.delete(year);
     if (Array.isArray(res.years) && res.years.length) years = res.years;
     if (routeIfEmpty(res)) return;
     render();
@@ -1054,7 +1092,10 @@
       for (const y of [...years].reverse()) {
         if (cache.has(y)) continue;
         const res = await hzPost('peopleYear', { year: y });
-        if (res && Array.isArray(res.people)) cache.set(y, res);
+        if (res && Array.isArray(res.people)) {
+          cache.set(y, res);
+          staleYears.delete(y);
+        }
       }
     } catch {
       // Background warming only; a failure costs nothing but the warmth.
@@ -1070,25 +1111,32 @@
     });
   }
 
-  // Native calls this on every panel re-open: the webview SURVIVES hidden
-  // (panels keep state), so without it the first open's data was the data
-  // forever. Refetch is cheap (the server memoizes the heavy scan).
+  // Native calls this on every panel re-open. The webview SURVIVES hidden, so
+  // keep its already-painted years and summaries, mark the year payloads stale,
+  // and refresh only the visible year behind the existing rows. Other years
+  // refresh silently when first revisited. This avoids both the blank loading
+  // screen and a fan-out request for every historical year on every open.
   window.__hzRefresh = () => {
-    cache.clear();
-    summaries.clear();
-    mapData = null;
-    prefetching = false;
-    // A re-open drops the search as well as the cache: a stale query over
-    // refetched years would be answering a question nobody is asking now.
+    for (const y of cache.keys()) staleYears.add(y);
+    // A re-open drops the search: a stale query over refreshed data would be
+    // answering a question nobody is asking now.
     findId++;
     findTerm = '';
     findRows = null;
     findState = 'idle';
     searchEl.value = '';
     // Re-open where the panel was left: in all-years the year fetch is not
-    // what is on screen, and loading it would flip the view back to a year.
-    if (scope === 'all') render();
-    else loadOrFail(year);
+    // what is on screen. Both paths paint their last good payload first, then
+    // revalidate just that visible surface behind it.
+    if (scope === 'all') {
+      render();
+      refreshMap().catch(() => {});
+    } else if (cache.has(year)) {
+      render();
+      refreshYear(year).catch(() => {});
+    } else {
+      loadOrFail(year);
+    }
   };
 
   tabsEl.addEventListener('click', (e) => {

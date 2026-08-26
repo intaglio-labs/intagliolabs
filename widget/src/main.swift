@@ -619,13 +619,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
         // escaped from scene 1, or the panel closed by any native path. At
         // its own level: below every window, exactly as it lives.
         self?.widgetWindow.orderFrontRegardless()
-        // The handoff: a FINISHED flow (and only a finished one — escape
-        // leaves onboarded false) sets the gear bouncing until settings is
-        // opened once. The next scene is behind that gear, and the nudge is
-        // this app's one gesture for "this wants you".
-        if Bridge.onboarded && !Bridge.connectorsIntroDone {
-          self?.widgetWeb?.evaluateJavaScript("window.__hzGearNudge && window.__hzGearNudge(true)")
-        }
+        // A finished flow opens People from onboarding.js after this scrim is
+        // gone. Escape still only restores the widget; it does not finish or
+        // open the next scene.
       }
       onboardingPanel = p
     }
@@ -798,11 +794,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       p.orderOut(nil)
       return
     }
+    let firstOpen = peoplePanel == nil
     if peoplePanel == nil {
       peoplePanel = makePanel(page: "people", size: capped(Self.scaled(Self.peopleBase, Bridge.scale)))
       peoplePanel!.hasShadow = false
     }
     present(peoplePanel!)
+    // A reused page already ran its initial prefs pull, so push the one-shot
+    // onboarding fact explicitly. A newly created page pulls it after load to
+    // avoid racing its script, exactly like the connections popup.
+    if !firstOpen {
+      let intro = Bridge.onboarded && !Bridge.connectorsIntroDone
+      (peoplePanel?.contentView as? WKWebView)?
+        .evaluateJavaScript("window.__hzPeopleIntro && window.__hzPeopleIntro(\(intro))")
+    }
   }
 
   // The timeline popup: the people list dressed by month, one year at a
