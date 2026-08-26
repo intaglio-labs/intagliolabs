@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { threadKind, isRoom, GROUP, DIRECT, UNKNOWN } from '../server/memory/threadKind.mjs';
+import { threadKind, isRoom, counterpartyFromThread, GROUP, DIRECT, UNKNOWN } from '../server/memory/threadKind.mjs';
 
 const im = (guid) => [{ source: 'imessage' }, { chat_guid: guid }];
 const wa = (meta) => [{ source: 'whatsapp' }, meta];
@@ -68,4 +68,42 @@ test('junk does not throw', () => {
   assert.equal(threadKind(null, null), DIRECT);
   assert.equal(threadKind(undefined, undefined), DIRECT);
   assert.equal(isRoom(null, null), false);
+});
+
+// ---- who an outbound message was sent to ----
+//
+// Apple leaves message.handle_id NULL on most outbound rows, so 109,380 of the
+// owner's own one-to-one messages carry no handle and were dropped entirely.
+// The recipient is the guid's third field the whole time.
+test('a one-to-one thread names its counterparty', () => {
+  assert.equal(counterpartyFromThread(...im('any;-;+15550100')), '+15550100');
+  assert.equal(counterpartyFromThread(...im('any;-;sam@example.com')), 'sam@example.com');
+  assert.equal(counterpartyFromThread(...im('SMS;-;+15550100')), '+15550100');
+});
+
+// THE TRAP, and the reason this lives behind the group test. A group guid's
+// third field is an opaque room id; deriving from it would mint rooms as people
+// with message counts, indistinguishable from real contacts. 21,644 live group
+// rows have no handle and would each have taken the bait.
+test('a room NEVER yields a counterparty', () => {
+  assert.equal(counterpartyFromThread(...im('any;+;chat488392016936725110')), null);
+  assert.equal(counterpartyFromThread(...im('iMessage;+;chat9')), null);
+});
+
+test('an unknown thread yields nothing rather than a guess', () => {
+  assert.equal(counterpartyFromThread(...im('')), null);
+  assert.equal(counterpartyFromThread(...im('garbage')), null);
+  assert.equal(counterpartyFromThread(...im('any;-;')), null, 'an empty id is not an identity');
+  assert.equal(counterpartyFromThread({ source: 'imessage' }, {}), null);
+});
+
+test('only iMessage guids are read this way', () => {
+  assert.equal(counterpartyFromThread({ source: 'whatsapp' }, { chat_guid: 'any;-;x' }), null);
+  assert.equal(counterpartyFromThread({ source: 'mail' }, { chat_guid: 'any;-;x' }), null);
+});
+
+test('an id containing a semicolon is not silently truncated', () => {
+  // Nothing in practice does, but a truncated identity is a wrong one, not a
+  // shorter one.
+  assert.equal(counterpartyFromThread(...im('any;-;odd;id')), 'odd;id');
 });

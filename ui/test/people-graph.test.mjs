@@ -328,3 +328,30 @@ test('a row with no thread is credited as before, and asserts no room', () => {
   assert.equal(p.roomOnly, false);
   assert.equal(p.roomMessages, 0);
 });
+
+// The owner's own side of their own conversations: Apple does not record who an
+// outbound message went to, so these were dropped and reciprocity was computed
+// against a sent side missing most of its evidence.
+test('an outbound message with no handle still finds its recipient', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - 3 * DAY, source: 'imessage', entity_id: 'o1', text: 'sent, unaddressed',
+      meta: { chat_guid: 'any;-;+15550444', is_from_me: true } },
+    { ts: NOW - 2 * DAY, source: 'imessage', entity_id: 'o2', text: 'their reply',
+      meta: { chat_guid: 'any;-;+15550444', handle: '+15550444', is_from_me: false } },
+  ]);
+  const p = buildGraph(ctx, spineDb([]), { now: NOW }).find((x) => x.identifiers.includes('+15550444'));
+  assert.equal(p.sent, 1, 'the outbound row is no longer dropped');
+  assert.equal(p.received, 1);
+  assert.equal(p.reciprocity, 1, 'which is what makes reciprocity mean anything');
+});
+
+test('an unaddressed message in a ROOM does not invent a person', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - DAY, source: 'imessage', entity_id: 'g9', text: 'said to the room',
+      meta: { chat_guid: 'any;+;chat488392016936725110', is_from_me: true } },
+  ]);
+  const g = buildGraph(ctx, spineDb([]), { now: NOW });
+  assert.equal(g.length, 0, 'a room id must never become a person with a message count');
+});

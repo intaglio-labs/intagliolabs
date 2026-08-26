@@ -79,3 +79,36 @@ export function threadKind(row, meta) {
 export function isRoom(row, meta) {
   return threadKind(row, meta) === GROUP;
 }
+
+// WHO AN OUTBOUND MESSAGE WAS SENT TO, when Apple did not say.
+//
+// `message.handle_id` is NULL on most outbound iMessage rows, so `meta.handle`
+// -- the field every consumer reads to answer "who is this row with" -- is
+// missing on 109,380 one-to-one rows the owner sent. Every one of them is
+// currently dropped on the floor, which is most of the owner's own side of their
+// own conversations.
+//
+// The counterparty was never actually missing: a one-to-one guid is
+// `<service>;-;<their handle>`, and the third field IS that handle. Checked
+// against the rows that DO carry one: it agrees on 210,505 and differs on 5
+// (0.002%, and those five are handle-format drift, not a different person).
+//
+// THE TRAP, and it is the reason this lives behind the group test rather than
+// beside it: a GROUP guid's third field is an opaque room id like
+// `chat488392016936725110`. Deriving from it without checking the marker first
+// would mint 351 rooms as people, complete with message counts, and they would
+// be indistinguishable from real contacts. 21,644 group rows have no handle and
+// would each have taken the bait. So this returns null for anything that is not
+// unambiguously a one-to-one thread -- UNKNOWN included, since a row with no
+// guid has no third field to read anyway.
+export function counterpartyFromThread(row, meta) {
+  if (threadKind(row, meta) !== DIRECT) return null;
+  if (row?.source !== 'imessage') return null;
+  const guid = typeof meta?.chat_guid === 'string' ? meta.chat_guid : '';
+  const parts = guid.split(';');
+  if (parts.length < 3) return null;
+  // rejoin: nothing in practice contains a ';', but an id that did would be
+  // silently truncated, and a truncated identity is a wrong one.
+  const id = parts.slice(2).join(';').trim();
+  return id.length > 0 ? id : null;
+}
