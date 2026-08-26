@@ -405,9 +405,25 @@
         cardsEl.hidden = true;
         filterEl.hidden = true;
         surface().innerHTML = '<div class="pm-loading">reading every year…</div>';
-        ensureMap().then(render).catch(() => {
-          surface().innerHTML = '<div class="pl-empty">couldn’t read your years</div>';
-        });
+        // A THROW INSIDE render() IS NOT A FETCH FAILURE, and this used to report
+        // it as one: any error from visible/renderSky/renderRecency arrived here
+        // and printed "couldn't read your years", which sends the reader to their
+        // network and their corpus for a bug in a renderer. The two causes now
+        // read differently, and the message carries the reason -- a globe that
+        // fails by going quiet costs more to diagnose than it does to build.
+        ensureMap()
+          .then(() => {
+            try {
+              render();
+            } catch (err) {
+              surface().innerHTML =
+                `<div class="pl-empty">couldn’t draw the globe — ${esc(String(err && err.message || err))}</div>`;
+            }
+          })
+          .catch((err) => {
+            surface().innerHTML =
+              `<div class="pl-empty">couldn’t read your years — ${esc(String(err && err.message || err))}</div>`;
+          });
         return;
       }
       return paint(mapData);

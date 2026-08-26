@@ -965,7 +965,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // which is why the constellation reads from here rather than summing the
       // year payloads: those are capped per year, and a sum of capped pages
       // would print topic counts that are quietly short.
-      peopleCall("GET", "people/map", json: nil) { [weak self] data in
+      peopleCall("GET", "people/map?for=page", json: nil) { [weak self] data in
         self?.reply(webView, id, data)
       }
 
