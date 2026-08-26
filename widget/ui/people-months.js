@@ -204,15 +204,20 @@
             `<span class="pl-face" data-avatar-key="${esc(p.key)}">${esc(initials(p.name))}</span>` +
             awardsHtml(p) +
             `<span class="pl-name">${esc(p.name)}</span>` +
-            // TWO NUMBERS, because they answer different questions. "msgs" is
-            // what passed between the two of you; "in rooms" is what they said
-            // in a group you were also in. Folding the second into the first is
-            // what made someone you have never messaged look like a friend.
+            // ONE NUMBER: what passed between the two of you.
+            //
+            // ~~Two, the second being "N in rooms" — what they said in a group
+            // you were also in.~~ The row no longer prints it (owner,
+            // 2026-08-26). The reason the split EXISTS is unchanged and still
+            // load-bearing: folding room volume into the direct count is what
+            // made someone you have never messaged look like a friend, so
+            // `roomMessages` stays separate everywhere it is counted, ranked
+            // and filtered — it is simply not a number the row says out loud.
+            // What survives on screen is the qualitative half: a person with no
+            // direct messages at all still wears the "only in group chats"
+            // badge below, which is the part that changes how you read the row.
             (p.messages > 0
               ? `<span class="pm-msgs">${p.messages} msg${p.messages === 1 ? '' : 's'}</span>`
-              : '') +
-            (p.roomMessages > 0
-              ? `<span class="pm-msgs pm-room-msgs">${p.roomMessages} in rooms</span>`
               : '') +
             (y === year ? '' : `<span class="pm-yr-badge">${y}</span>`) +
             // ONLY EVER IN A ROOM. Until now these rendered exactly like people

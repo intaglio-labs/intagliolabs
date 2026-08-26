@@ -567,10 +567,28 @@ const HZ_GLYPHS = {
   // Filled translucent petals, not outlines — the overlap is the art.
   photos: HZ_SVG38('<ellipse cx="19" cy="10" rx="5.2" ry="8.6" transform="rotate(0 19 19)" fill="currentColor" fill-opacity="0.45" stroke="none"/><ellipse cx="19" cy="10" rx="5.2" ry="8.6" transform="rotate(45 19 19)" fill="currentColor" fill-opacity="0.45" stroke="none"/><ellipse cx="19" cy="10" rx="5.2" ry="8.6" transform="rotate(90 19 19)" fill="currentColor" fill-opacity="0.45" stroke="none"/><ellipse cx="19" cy="10" rx="5.2" ry="8.6" transform="rotate(135 19 19)" fill="currentColor" fill-opacity="0.45" stroke="none"/><ellipse cx="19" cy="10" rx="5.2" ry="8.6" transform="rotate(180 19 19)" fill="currentColor" fill-opacity="0.45" stroke="none"/><ellipse cx="19" cy="10" rx="5.2" ry="8.6" transform="rotate(225 19 19)" fill="currentColor" fill-opacity="0.45" stroke="none"/><ellipse cx="19" cy="10" rx="5.2" ry="8.6" transform="rotate(270 19 19)" fill="currentColor" fill-opacity="0.45" stroke="none"/><ellipse cx="19" cy="10" rx="5.2" ry="8.6" transform="rotate(315 19 19)" fill="currentColor" fill-opacity="0.45" stroke="none"/><circle cx="19" cy="19" r="3.4" fill="currentColor" fill-opacity="0.9" stroke="none"/>'),
   files: HZ_SVG38('<path d="M5 12c0-2.2 1.8-4 4-4h6l3 4h11c2.2 0 4 1.8 4 4v12c0 2.2-1.8 4-4 4H9c-2.2 0-4-1.8-4-4z"/><path d="M5 17h28"/>'),
-  mail: HZ_SVG38('<rect x="5" y="9" width="28" height="20" rx="5"/><path d="M6.5 11.5 19 21l12.5-9.5"/>'),
+  // ~~An envelope.~~ The thing being connected is a GOOGLE ACCOUNT — one
+  // login, and the same account Calendar hangs off — and an envelope said
+  // "mail", which is the category rather than the account. The G is what the
+  // owner is about to be asked to sign in to (owner, 2026-08-26).
+  //
+  // MONOCHROME, unlike Google's own four-colour mark. Every brand on this
+  // shelf is drawn in one colour through currentColor — Slack, Discord,
+  // Telegram and X all are — because the tile tints its glyph to say
+  // connected, needs-you or broken, and a fixed four-colour logo would be the
+  // one mark on the shelf that could not answer that. Google's guidelines
+  // provide for a single-colour G where the full palette is unavailable.
+  //
+  // Authored on the brand's own 24 grid like Slack's, then padded out to 30 so
+  // it sits at the same visual weight as the 38-grid glyphs, which carry about
+  // 5 units of margin. Without the padding the G is edge-to-edge and reads a
+  // size larger than everything beside it.
+  google: HZ_SVGVB('-3 -3 30 30', '<path d="M12.24 10.285V14.4h6.806c-.275 1.765-2.056 5.174-6.806 5.174-4.095 0-7.439-3.389-7.439-7.574s3.344-7.574 7.439-7.574c2.33 0 3.891.989 4.785 1.849l3.254-3.138C17.885 1.191 15.29 0 12.24 0c-6.635 0-12 5.365-12 12s5.365 12 12 12c6.926 0 11.52-4.869 11.52-11.726 0-.788-.085-1.39-.189-1.989H12.24z"/>'),
   oura: HZ_SVG38('<circle cx="19" cy="23" r="9.5"/><path d="M12.5 8.5h13"/>', 2.8),
 };
 function hzGlyph(id) {
-  if (id.startsWith('mail:')) return HZ_GLYPHS.mail;
+  // Both the "add a mailbox" row (bare `mail`) and every configured one
+  // (`mail:<address>`) are the same Google account, so they wear the same mark.
+  if (id === 'mail' || id.startsWith('mail:')) return HZ_GLYPHS.google;
   return HZ_GLYPHS[id] || HZ_SVG('<circle cx="12" cy="12" r="7.5"/>');
 }

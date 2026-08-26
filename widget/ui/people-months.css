@@ -735,12 +735,11 @@ body.plist .pm-room-badge {
   white-space: nowrap;
 }
 
-/* Room volume, next to the direct count and quieter than it. The distinction is
-   the point: the first number is a conversation, the second is a room. */
-body.plist .pm-room-msgs {
-  opacity: 0.6;
-  font-style: italic;
-}
+/* ~~.pm-room-msgs: room volume, next to the direct count and quieter than it.~~
+   Yeeted with the number it painted (owner, 2026-08-26) rather than left as an
+   unused rule — a selector nothing renders is a trap for the next reader, who
+   has to prove it is dead before touching anything near it. The distinction it
+   drew still holds everywhere the counts are USED; see rowHtml. */
 
 /* Belt and braces on `hidden`. `.pm-cards` and `.pm-filter` set `display: flex`
    in an author-origin rule, which beats the user-agent `[hidden]` rule — so

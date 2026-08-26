@@ -28,7 +28,7 @@ import { secretResponse } from './lib/secretApi.mjs';
 import { PLATFORMS, bridgeStatus, beginCommand, beginLogin, loadPanel, relay } from './lib/bridge.mjs';
 import { bridgeApiResponse } from './lib/bridgeApi.mjs';
 import { decide, fetchPending } from './lib/memory.mjs';
-import { mailAccounts, mailSecretName, readStatus } from './lib/status.mjs';
+import { addMailAccount, mailAccounts, mailSecretName, readStatus } from './lib/status.mjs';
 import { sameOrigin } from './lib/origin.mjs';
 import { statusResponse } from './lib/statusApi.mjs';
 import { mintToken, validateToken } from './lib/tokens.mjs';
@@ -339,9 +339,10 @@ async function handleRequest(req, res) {
     return;
   }
   // /c/<token>            → the page
-  // /c/<token>/gmail      → POST the app password
+  // /c/<token>/mailbox    → POST the address to read (step 1 of Google)
+  // /c/<token>/gmail      → POST the app password  (step 2 of Google)
   // /c/<token>/memory     → GET the review queue, POST one decision
-  const match = /^\/c\/([A-Za-z0-9_-]{1,64})(?:\/(gmail|memory|bridge|help\/[a-z]+))?\/?$/u.exec(
+  const match = /^\/c\/([A-Za-z0-9_-]{1,64})(?:\/(mailbox|gmail|memory|bridge|help\/[a-z]+))?\/?$/u.exec(
     url.pathname
   );
   if (!match) {
@@ -432,6 +433,35 @@ async function handleRequest(req, res) {
       }
       await sendMemoryPage(res, token, { banner: `Nothing was recorded: ${message}` });
     }
+    return;
+  }
+
+  // STEP 1 OF GOOGLE: which mailbox to read. No secret passes through here —
+  // the address is not one — but it decides which mailbox the gmail route
+  // below will accept a password for, so it is validated as strictly as if it
+  // were, and by the same module that reads it back.
+  if (req.method === 'POST' && action === 'mailbox') {
+    if (!sameOrigin(req.headers)) {
+      send(res, 403, 'Cross-origin form post refused.', 'text/plain; charset=utf-8');
+      return;
+    }
+    let account = '';
+    try {
+      account = new URLSearchParams(await readBody(req)).get('account') ?? '';
+    } catch {
+      send(res, 413, 'Too large.', 'text/plain; charset=utf-8');
+      return;
+    }
+    const outcome = addMailAccount(account.trim());
+    // The address is echoed back in none of these. It is the owner's own and
+    // not a secret, but a banner is the wrong place to learn what someone
+    // typed into a form, and an unvalidated string must never reach the page.
+    const banner = {
+      added: 'Mailbox added. Now paste its app password below.',
+      duplicate: 'That mailbox is already on the list.',
+      invalid: 'That does not look like an email address. Nothing was saved.',
+    }[outcome];
+    send(res, 200, renderConnectPage(readStatus(), { token, banner }));
     return;
   }
 

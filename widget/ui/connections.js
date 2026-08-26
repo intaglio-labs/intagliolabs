@@ -630,6 +630,10 @@ function hideTileTip() { if (tileTip) tileTip.classList.remove('on'); }
 // Sources already refreshed once because the shelf disagreed with their own
 // bridge. Module scope, so it survives the card rebuild that refresh() causes.
 const staleRefreshed = new Set();
+// A card begins its login once. renderBridge repaints on every bot reply and
+// begin starts with `cancel`, so an unguarded auto-begin would cancel the
+// conversation it opened. Keyed by source id, for the life of the page.
+const autoBegun = new Set();
 
 function card(src, keep) {
   // Square tiles, four to a row. The old compact rows ruled out a 3-column
@@ -954,11 +958,21 @@ function card(src, keep) {
     // an error even while the login was succeeding. What the owner actually
     // needs is the bot's LAST question, which is the only line that ever asks
     // for anything (X's PIN prompt is exactly this). One line, plain, no log.
-    const LABEL = src.label;
         // mautrix builds this prompt by gluing "Please enter your " onto the
         // field's own name, so X's arrives as "Please enter your Create your
-        // PIN code" — two verbs, one sentence (owner, 2026-08-25). Unglue it
-        // and name the platform, so the card asks one clear thing.
+        // PIN code" — two verbs, one sentence (owner, 2026-08-25). Unglue it,
+        // so the card asks one clear thing.
+        //
+        // ~~and name the platform~~ — the " for <label>" suffix is gone
+        // (owner, 2026-08-26). The card's own header is the platform's name in
+        // bold two lines up, so "please enter your Phone number for Telegram"
+        // said Telegram twice and please once more than anyone needs. It is an
+        // instruction on a card that is already about one service.
+        //
+        // The field keeps mautrix's capitalisation EXCEPT its first word, and
+        // only when that word is not an acronym: "Phone number" reads as
+        // shouted mid-sentence, while PIN is how the thing is spelled.
+        const uncap = (t) => (/^[A-Z]{2,}\b/u.test(t) ? t : t.charAt(0).toLowerCase() + t.slice(1));
         const tidy = (line) => {
           const m = /^please enter your\s+(.+)$/iu.exec(line);
           if (!m) return line;
@@ -966,9 +980,9 @@ function card(src, keep) {
           const verb = /^(create|enter|choose|register)\b/iu.exec(field);
           if (verb) {
             const rest = field.slice(verb[0].length).trim();
-            return `please ${verb[0].toLowerCase()} ${rest} for ${LABEL}`;
+            return `${verb[0].toLowerCase()} ${uncap(rest)}`;
           }
-          return `please enter your ${field} for ${LABEL}`;
+          return `enter your ${uncap(field)}`;
         };
     const askedFor = () => {
       if (!(data && Array.isArray(data.transcript))) return null;
@@ -1250,7 +1264,34 @@ function card(src, keep) {
         // gives way to the ordinary phone-code conversation.
         walkthrough(hint);
       } else if (!started) {
-        beginButton('begin login');
+        // ONE PRESS, NOT TWO (owner, 2026-08-26: "as soon as i press slack it
+        // should automatically open up the login page"). A fresh card offered
+        // `begin login`, which is a button whose only meaning is the press that
+        // already happened — the tile press IS "log me in". The no-window
+        // bridges got this in d88e56c, natively; Slack reaches its card by a
+        // different road (its window is a step inside the conversation, not the
+        // way in) and arrived at the same dead button.
+        //
+        // ONCE PER SOURCE PER CARD. renderBridge repaints on every reply, and
+        // begin's first act is `cancel` — an unguarded call here would cancel
+        // the login it just started, on its own repaint. The flag is the same
+        // shape as staleRefreshed above and for the same reason.
+        //
+        // The button is still built, and it is what a FAILURE falls back to:
+        // if begin cannot reach the bot, the card must offer the retry rather
+        // than sit blank.
+        if (autoBegun.has(src.id)) {
+          beginButton('begin login');
+        } else {
+          autoBegun.add(src.id);
+          const starting = document.createElement('span');
+          starting.className = 'setup';
+          starting.textContent = 'starting…';
+          tip.appendChild(starting);
+          hzPost('bridgeBegin', { p: kindOf(src.id) })
+            .then(renderBridge)
+            .catch(() => renderBridge(data));
+        }
       } else if (qrIn(data)) {
         // A QR LOGIN ANSWERS WITH A PHONE, NOT A KEYBOARD. Discord posts the
         // code, the phone app scans it, and the bridge completes on its own —
