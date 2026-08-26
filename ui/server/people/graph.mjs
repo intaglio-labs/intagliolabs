@@ -67,20 +67,68 @@ export function namelike(value) {
   return /\p{L}/u.test(v); // has an actual letter in it
 }
 
+// THE SAME IDENTIFIER, WRITTEN TWO WAYS.
+//
+// Contacts and the message stores agree on E.164 for almost everything -- both
+// sides of this corpus are overwhelmingly `+1XXXXXXXXXX` -- so the exact match
+// below carries the load. This is for the tail that does not: a number typed
+// into the address book with punctuation, an address stored with different
+// case. Digits only, last ten, because a leading `+1` on one side and not the
+// other is the common disagreement and ten digits is where a NANP number
+// becomes unambiguous.
+export function normIdentifier(identifier) {
+  const v = String(identifier ?? '').trim();
+  if (v.length === 0) return '';
+  if (v.includes('@')) return v.toLowerCase();
+  const digits = v.replace(/\D/gu, '');
+  if (digits.length < 7) return ''; // a short code is not a person; never fold one
+  return digits.length > 10 ? digits.slice(-10) : digits;
+}
+
 export function loadSpine(stateDb) {
   const map = new Map();
   const nameToIds = new Map();
+  // Normalised identifier -> name, used ONLY when the exact lookup misses.
+  const loose = new Map();
+  const ambiguous = new Set();
   try {
     for (const r of stateDb.prepare('SELECT identifier, display_name FROM contact_ids').all()) {
       map.set(r.identifier, r.display_name);
       const key = normName(r.display_name);
       if (!nameToIds.has(key)) nameToIds.set(key, { name: r.display_name, ids: [] });
       nameToIds.get(key).ids.push(r.identifier);
+
+      const nid = normIdentifier(r.identifier);
+      if (nid === '') continue;
+      const seen = loose.get(nid);
+      // TWO PEOPLE, ONE NORMALISED NUMBER. Ten digits is not globally unique --
+      // two international numbers can share their last ten. Rather than pick
+      // one and put the wrong name on somebody, the loose index forgets the key
+      // entirely and that identifier falls back to the exact match or to no
+      // name at all. Being unnamed is recoverable; being named as someone else
+      // is not.
+      if (seen !== undefined && normName(seen) !== normName(r.display_name)) {
+        ambiguous.add(nid);
+      } else if (seen === undefined) {
+        loose.set(nid, r.display_name);
+      }
     }
   } catch {
     // No spine yet is a valid state — people just key by raw identifier.
   }
-  return { idToName: map, nameToIds };
+  for (const nid of ambiguous) loose.delete(nid);
+  return {
+    idToName: map,
+    nameToIds,
+    looseIdToName: loose,
+    /// The name Contacts has for this identifier, exact match first.
+    nameFor(identifier) {
+      const exact = map.get(identifier);
+      if (exact !== undefined) return exact;
+      const nid = normIdentifier(identifier);
+      return nid === '' ? undefined : loose.get(nid);
+    },
+  };
 }
 
 // The identifier a row is "about" — the counterparty, never the owner. Returns
@@ -337,7 +385,8 @@ export function buildGraph(
   const rawKeyForId = (id, name) => {
     // Spine name wins; then an exact-name LinkedIn/calendar match to a spine
     // person; then the raw id.
-    if (spine.idToName.has(id)) return `name:${normName(spine.idToName.get(id))}`;
+    const known = spine.nameFor(id);
+    if (known !== undefined) return `name:${normName(known)}`;
     if (name) {
       const nk = normName(name);
       if (spine.nameToIds.has(nk)) return `name:${nk}`;
@@ -402,7 +451,8 @@ export function buildGraph(
       p.identifiers.add(sig.id);
       p.channels.add(sig.channel);
       if (sig.name) p.names.add(sig.name);
-      if (spine.idToName.has(sig.id)) p.names.add(spine.idToName.get(sig.id));
+      const spineName = spine.nameFor(sig.id);
+      if (spineName !== undefined) p.names.add(spineName);
       // A calendar event is co-attendance, not contact — and it can be in the
       // FUTURE, which produced negative dormancy on the first live run. So
       // firstSeen spans everything, but lastSeen and the DORMANCY clock only
