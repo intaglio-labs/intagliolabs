@@ -542,3 +542,18 @@ body.plist .pm-rec:focus-visible {
   outline: 1px solid var(--hazelnut-light);
   outline-offset: 1px;
 }
+
+/* THE GLOBE TOGGLE STAYS REACHABLE. It is appended after every year tab, and ten
+   years plus the globe do not fit a 520px panel — so it lived past the right
+   edge of a scrolling strip and had to be hunted for. Stuck to the right edge
+   instead, with the years scrolling underneath it. The background is opaque
+   rather than translucent because a year tab sliding under a see-through button
+   reads as a rendering fault. */
+body.plist .pm-tabs .pm-tab-globe {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  margin-left: auto;
+  background: var(--bg);
+  box-shadow: -8px 0 8px -6px rgba(0, 0, 0, 0.55);
+}

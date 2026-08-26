@@ -546,8 +546,24 @@
     g.setAttribute('aria-label', 'every year by topic');
     g.innerHTML = GLOBE_SVG;
     tabsEl.appendChild(g);
+    // WHERE THE STRIP SITS.
+    //
+    // Years run oldest-to-newest, so the interesting end is the RIGHT one, and
+    // scrollIntoView({inline:'nearest'}) is a no-op whenever the active tab is
+    // already visible -- which on a fresh open means the strip stays pinned to
+    // 2019 with the newest years and the globe off the right edge. Ten tabs plus
+    // the globe do not fit 520px, so this is the normal case, not an edge one.
+    //
+    // The newest year is what a fresh open selects, so scroll to the far right
+    // and both it and the globe are in view. Only a deliberately older selection
+    // gets scrolled to.
     const active = tabsEl.querySelector('.pm-tab.active');
-    if (active) active.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+    const newest = years.length ? years[years.length - 1] : year;
+    if (scope === 'all' || year === newest) {
+      tabsEl.scrollLeft = tabsEl.scrollWidth;
+    } else if (active) {
+      active.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+    }
   }
 
   // ---- the constellation ----
