@@ -133,10 +133,19 @@ fi
 #
 #   llama runtime (~30 MB)  bundled. It is small, and building it otherwise
 #                           means Homebrew and a toolchain on the owner's Mac.
-#   voice models (~496 MB)  bundled. They CANNOT be produced on a user's
-#                           machine: setup-voice.sh needs npm and esbuild to
-#                           bundle the Kokoro worker, and sharp breaks the
-#                           install on a current node even on a dev box.
+#   voice models (~496 MB)  bundled, because producing them needs node, npm and
+#                           ~1.9 GB of downloads -- a toolchain and a wait no
+#                           end user should be handed. NOT because the build is
+#                           fragile: setup-voice.sh passes --ignore-scripts and
+#                           runs clean on a cold cache in about half a minute.
+#                           (This used to say "sharp breaks the install on a
+#                           current node even on a dev box". That was true of
+#                           the script as it stood BEFORE d447212, which fixed
+#                           it with --ignore-scripts -- and was committed
+#                           eleven minutes before this comment was written.
+#                           Measured 2026-08-25: the committed script exits 0
+#                           on node 22.21.1 with a cold cache and produces a
+#                           byte-identical tree.)
 #   the .gguf (2.5-4.7 GB)  DOWNLOADED, chosen in onboarding. One file, one
 #                           declared host (huggingface.co, already in
 #                           ops/EGRESS.json as model-asset), no toolchain — and
