@@ -56,6 +56,9 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 
 const SECRETS_DIR = join(homedir(), '.hazlie', 'secrets');
+// ~~Two fixed filenames.~~ Resolved through connectors/lib/googleClients.mjs
+// now, so --client picks a registered pair; the legacy files remain the client
+// named "default" and are what every existing grant was issued by.
 const CLIENT_ID_FILE = join(SECRETS_DIR, 'gcal-client-id.txt');
 const CLIENT_SECRET_FILE = join(SECRETS_DIR, 'gcal-client-secret.txt');
 // ~~const TOKENS_FILE = .../gcal-tokens.json~~ — gone with the single-account
@@ -77,6 +80,18 @@ const TIMEOUT_MS = 15 * 60 * 1000;
 // Print the authorize URL instead of opening a browser. Used by the connect
 // server, which hands it to the app's own sign-in window.
 const PRINT_URL = process.argv.includes('--print-url');
+// WHICH OAUTH CLIENT TO SIGN IN WITH. An Internal client reaches only its own
+// Workspace but never expires and has no cap; an External one reaches any
+// Google account and is limited to 100 sensitive-scope logins for the LIFETIME
+// of its project, never resettable, one spent per authorization. So the right
+// client differs per account, and the grant records which issued it — Google
+// will not renew a refresh token against a different one.
+const CLIENT_ARG = (() => {
+  const i = process.argv.indexOf('--client');
+  return i >= 0 && process.argv[i + 1] && !process.argv[i + 1].startsWith('--')
+    ? process.argv[i + 1]
+    : 'default';
+})();
 
 function fail(msg) {
   console.error(`gcal-auth: ${msg}`);
@@ -208,8 +223,31 @@ working in an hour, so this exits non-zero if one is absent.
   process.exit(0);
 }
 
-const clientId = readSecret(CLIENT_ID_FILE, 'gcal client id');
-const clientSecret = readSecret(CLIENT_SECRET_FILE, 'gcal client secret');
+// Resolved through the client registry so --client works, and so a legacy
+// install with only the two loose files keeps working untouched: they ARE the
+// client named "default".
+const chosen = (() => {
+  if (CLIENT_ARG === 'default') {
+    return {
+      id: readSecret(CLIENT_ID_FILE, 'gcal client id'),
+      secret: readSecret(CLIENT_SECRET_FILE, 'gcal client secret'),
+    };
+  }
+  const path = join(SECRETS_DIR, `google-client-${CLIENT_ARG}.json`);
+  if (!existsSync(path)) {
+    fail(`no OAuth client named "${CLIENT_ARG}" at ${path}\n` +
+      '  Register one, or omit --client to use the default pair.');
+  }
+  try {
+    const c = JSON.parse(readFileSync(path, 'utf8'));
+    if (!c.client_id || !c.client_secret) fail(`${path} needs client_id and client_secret`);
+    return { id: c.client_id, secret: c.client_secret };
+  } catch (error) {
+    return fail(`${path} is not readable JSON: ${error.message}`);
+  }
+})();
+const clientId = chosen.id;
+const clientSecret = chosen.secret;
 const state = randomBytes(16).toString('hex');
 
 // PKCE: the verifier never leaves this process; only its SHA-256 goes out in
@@ -323,6 +361,10 @@ const server = createServer(async (req, res) => {
 
   writeTokensAtomically({
     account_email: accountEmail,
+    // The client that issued this grant. Refreshing against any other one is
+    // refused by Google, so this is not bookkeeping — it is what makes a
+    // second client possible at all.
+    client: CLIENT_ARG,
     access_token: tokens.access_token,
     refresh_token: tokens.refresh_token,
     token_type: tokens.token_type ?? 'Bearer',

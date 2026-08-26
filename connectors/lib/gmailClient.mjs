@@ -17,11 +17,8 @@
 // and the failure modes (401 after refresh = revoked) are worth stating twice.
 
 import { homedir } from 'node:os';
-import { readSecretJson, readSecretLine } from './secrets.mjs';
-import {
-  defaultGcalClientIdPath as clientIdPathFor,
-  defaultGcalClientSecretPath as clientSecretPathFor,
-} from './gcalClient.mjs';
+import { readSecretJson } from './secrets.mjs';
+import { readGoogleClient } from './googleClients.mjs';
 import { googleTokensPath, markGoogleAccountStale } from './googleAccounts.mjs';
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -49,8 +46,12 @@ export function createGmailClient({
   // rotates the client secret or the refresh token must take effect without a
   // daemon restart, and a file that turned group-readable after startup has to
   // be caught on the next call rather than never.
-  const clientId = () => readSecretLine(clientIdPathFor(home), { label: 'google client id' });
-  const clientSecret = () => readSecretLine(clientSecretPathFor(home), { label: 'google client secret' });
+  // THE CLIENT THAT ISSUED THIS GRANT, not "the" client. Google will not renew
+  // a refresh token against a different client, so once this Mac holds more
+  // than one, the pairing is a property of the token rather than of the
+  // install. A grant written before clients were named carries no `client` and
+  // resolves to the legacy pair, which is exactly what issued it.
+  const issuer = () => readGoogleClient(readTokens().client, { home });
   const readTokens = () =>
     readSecretJson(path, {
       label: `google tokens for ${email ?? path}`,
@@ -74,12 +75,13 @@ export function createGmailClient({
       if (current.access_token !== staleAccessToken && Date.now() < expiresAt(current) - EXPIRY_SKEW_MS) {
         return current;
       }
+      const issued = issuer();
       const res = await fetchImpl(TOKEN_URL, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
-          client_id: clientId(),
-          client_secret: clientSecret(),
+          client_id: issued.id,
+          client_secret: issued.secret,
           refresh_token: current.refresh_token,
           grant_type: 'refresh_token',
         }),

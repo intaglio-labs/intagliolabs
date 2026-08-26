@@ -15,6 +15,7 @@
 
 import { existsSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { readGoogleClient } from './googleClients.mjs';
 import { CALENDAR_SCOPE, accountsWithScope, markGoogleAccountStale } from './googleAccounts.mjs';
 import { join } from 'node:path';
 import { readSecretJson, readSecretLine } from './secrets.mjs';
@@ -90,8 +91,20 @@ export function createGcalClient({
   // Re-reading also replays the full owner-only permission gauntlet on every
   // call, which is the other half of what the rule is for — a file that became
   // group-readable after startup would otherwise never be noticed.
-  const clientId = () => readSecretLine(clientIdPath, { label: 'gcal client id' });
-  const clientSecret = () => readSecretLine(clientSecretPath, { label: 'gcal client secret' });
+  // THE CLIENT THAT ISSUED THIS GRANT. Google refuses to renew a refresh token
+  // against a different client, so with more than one on the machine the
+  // pairing belongs to the token, not the install. A grant from before clients
+  // were named has no `client` and resolves to the legacy pair — which issued
+  // it, so nothing needs migrating.
+  //
+  // The clientIdPath/clientSecretPath parameters are kept as a test seam and
+  // still win when passed explicitly; production passes neither.
+  const issuer = () => (clientIdPath || clientSecretPath
+    ? {
+      id: readSecretLine(clientIdPath, { label: 'gcal client id' }),
+      secret: readSecretLine(clientSecretPath, { label: 'gcal client secret' }),
+    }
+    : readGoogleClient(readTokens().client, { home: homedir() }));
 
   function readTokens() {
     return readSecretJson(tokensPath, {
@@ -112,6 +125,7 @@ export function createGcalClient({
     // our caller read it, the pair on disk is the live one, and refreshing
     // from what we remember would write the stale grant back over it.
     const current = readTokens();
+    const issued = issuer();
     if (current.access_token !== staleAccessToken && Date.now() < expiresAt(current) - EXPIRY_SKEW_MS) {
       return current;
     }
@@ -121,8 +135,8 @@ export function createGcalClient({
       body: new URLSearchParams({
         grant_type: 'refresh_token',
         refresh_token: current.refresh_token,
-        client_id: clientId(),
-        client_secret: clientSecret(),
+        client_id: issued.id,
+        client_secret: issued.secret,
       }),
       // A 307/308 would re-POST this body — client_secret and refresh token —
       // to wherever the reply points. The token endpoint never legitimately
