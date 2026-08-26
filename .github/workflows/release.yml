@@ -15,13 +15,26 @@
 #   secrets.MAC_DEVELOPER_ID_P12       base64 of a "Developer ID Application"
 #                                      .p12 export (cert + private key)
 #   secrets.MAC_DEVELOPER_ID_P12_PASS  its export password
-#   secrets.APPLE_ID                   Apple ID for notarization
-#   secrets.APPLE_TEAM_ID              the 10-character team id
-#   secrets.APPLE_APP_PASSWORD         an app-specific password, NOT the account one
-#   a `voice-assets` release            see "voice models" below
+#   secrets.ASC_KEY_P8                 base64 of an App Store Connect API key
+#                                      (AuthKey_<KEYID>.p8)
+#   secrets.ASC_KEY_ID                 that key's Key ID
+#   secrets.ASC_ISSUER_ID              the Issuer UUID -- Team keys only, leave
+#                                      UNSET for an Individual key
 #
-#   Export the .p12 from Keychain Access (the cert AND its key), then:
-#     base64 -i DeveloperID.p12 | pbcopy
+# AN API KEY RATHER THAN AN APPLE ID AND APP-SPECIFIC PASSWORD. notarytool takes
+# either, and Apple's own interactive prompt says "We recommend using App Store
+# Connect API keys for authentication". The reasons that matter here: the key is
+# scoped to the API instead of carrying a whole Apple account, it is revocable on
+# its own without changing anything a human signs in with, it belongs to the team
+# rather than to a person, and it does not sit behind that person's 2FA. An
+# app-specific password is a credential for the Apple ID itself, wearing a
+# narrower name.
+#
+# Set them from stdin, never with --body (which puts the value in argv, visible
+# to `ps` and saved to shell history), and note gh has no --body-file:
+#     base64 -i AuthKey_XXXXXXXXXX.p8 | gh secret set ASC_KEY_P8 --repo <repo>
+# For the short ones, run `gh secret set ASC_KEY_ID --repo <repo>` in a real
+# terminal: with a TTY it prompts with the input masked.
 #
 # NO MARKETPLACE ACTIONS HOLD THE SIGNING KEY. Same reasoning as site.yml: one
 # fewer third party in the path that holds a credential, and the commands in the
@@ -75,16 +88,18 @@ jobs:
           git remote add upstream "https://github.com/${GITHUB_REPOSITORY}.git" 2>/dev/null || true
           git fetch --no-tags upstream main:refs/remotes/origin/main
 
+      # ASC_ISSUER_ID is deliberately NOT required: notarytool wants it for a Team
+      # API key and refuses it for an Individual one, so "unset" is a valid
+      # answer and the store-credentials step below branches on it.
       - name: refuse to build without the secrets, before doing any work
         env:
-          P12: ${{ secrets.MAC_DEVELOPER_ID_P12 }}
-          P12_PASS: ${{ secrets.MAC_DEVELOPER_ID_P12_PASS }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          MAC_DEVELOPER_ID_P12: ${{ secrets.MAC_DEVELOPER_ID_P12 }}
+          MAC_DEVELOPER_ID_P12_PASS: ${{ secrets.MAC_DEVELOPER_ID_P12_PASS }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
         run: |
           missing=""
-          for v in P12 P12_PASS APPLE_ID TEAM_ID APP_PASSWORD; do
+          for v in MAC_DEVELOPER_ID_P12 MAC_DEVELOPER_ID_P12_PASS ASC_KEY_P8 ASC_KEY_ID; do
             eval "val=\$$v"
             [ -n "$val" ] || missing="$missing $v"
           done
@@ -95,42 +110,65 @@ jobs:
             exit 1
           fi
 
-      # VOICE MODELS: ~496 MB the runtime fails CLOSED without, and which CI
-      # cannot regenerate -- voice/setup-voice.sh needs npm, esbuild and sharp,
-      # and its own comment records that the install breaks on a current node
-      # even on a dev box.
-      #
-      # So they are fetched from a release the owner uploads ONCE, from the
-      # machine that can build them:
-      #
-      #   tar -C ~/.hazlie/models -czf voice-models.tgz voice
-      #   gh release create voice-assets voice-models.tgz \
-      #     --title 'voice models' --notes 'build input for the release workflow'
-      #
-      # Absent, this FAILS rather than building a DMG with no voice in it. A
-      # download page serving a quietly degraded app is worse than one serving
-      # nothing, because nobody finds out until a user does.
-      - name: fetch the voice models
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if ! gh release download voice-assets --pattern 'voice-models.tgz' \
-                 --dir "$RUNNER_TEMP" --repo "$GITHUB_REPOSITORY"; then
-            echo "no 'voice-assets' release with voice-models.tgz in this repository."
-            echo "The app fails closed without these, so this will not ship a DMG"
-            echo "that silently has no voice. Create it once — see the comment above."
-            exit 1
-          fi
-          mkdir -p "$HOME/.hazlie/models"
-          tar -C "$HOME/.hazlie/models" -xzf "$RUNNER_TEMP/voice-models.tgz"
-          test -d "$HOME/.hazlie/models/voice" || { echo "tarball did not contain voice/"; exit 1; }
-          du -sh "$HOME/.hazlie/models/voice"
-
       # build.sh bundles the node it finds on PATH, so the version here is the
-      # version users run. Pinned rather than "whatever the image ships".
+      # version users run -- and setup-voice.sh below runs under it too. Pinned
+      # rather than "whatever the image ships", and FIRST, because everything
+      # after this point wants it.
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+
+      # VOICE MODELS, built here rather than downloaded.
+      #
+      # This step used to fetch a 496 MB tarball the owner uploaded by hand,
+      # because this file asserted CI could not produce one -- "setup-voice.sh
+      # needs npm and esbuild, and sharp breaks the install on a current node".
+      # That was wrong, and wrong in a way worth recording: sharp does break a
+      # plain `npm install` (reproduced on node 22.21.1 and on 26.6.0), but
+      # setup-voice.sh has passed --ignore-scripts since d447212 precisely to fix
+      # it, and the comment this file cited as evidence is that fix's own
+      # post-mortem -- it carries the fix inline two lines below the description
+      # of the bug. The claim was written two days after the thing it called
+      # impossible had been made routine.
+      #
+      # Measured on a cold npm cache, an isolated HOME, and only node 22.21.1 on
+      # PATH -- the node actions/setup-node@v4 resolves here: exits 0 in well
+      # under a minute and produces a tree byte-identical to the one that was
+      # being uploaded. ~1.9 GB of runner disk and a couple of minutes, against
+      # a 90-minute budget.
+      #
+      # It writes to $HOME/.hazlie/models/voice, which widget/build.sh already
+      # reads, so nothing downstream changes.
+      - name: build the voice assets
+        run: bash widget/voice/setup-voice.sh
+
+      # AND CHECK WHAT IT PRODUCED, because setup-voice.sh does not.
+      #
+      # Its bake-voice step ends in `|| echo "bake-voice skipped"`, which is a
+      # reasonable convenience for a developer and a trap for a release: the
+      # script exits 0 with the baked lines missing, and build.sh's existence
+      # check on the directory is satisfied by the three subdirectories that
+      # remain. The DMG would ship with its deterministic voice lines silently
+      # absent -- exactly the quietly-degraded download this workflow exists to
+      # refuse to publish.
+      #
+      # Asserted here rather than by editing setup-voice.sh, because a developer
+      # running it from a partial checkout has a real reason to skip that step.
+      # A release does not.
+      - name: check the voice assets are complete
+        run: |
+          DEST="$HOME/.hazlie/models/voice"
+          for d in models vendor voice workers; do
+            [ -d "$DEST/$d" ] || { echo "voice assets incomplete: $d/ is missing"; exit 1; }
+          done
+          # The baked lines are the part that fails open above.
+          [ -f "$DEST/voice/manifest.json" ] || {
+            echo "voice assets incomplete: no baked lines (bake-voice silently skipped)"
+            exit 1
+          }
+          WAVS=$(ls "$DEST"/voice/*.wav 2>/dev/null | wc -l | tr -d ' ')
+          [ "$WAVS" -gt 0 ] || { echo "voice assets incomplete: manifest but no .wav files"; exit 1; }
+          echo "voice assets: $WAVS baked lines, $(du -sh "$DEST" | cut -f1) total"
 
       - name: install llama.cpp
         run: |
@@ -177,17 +215,50 @@ jobs:
           echo "signing identity: $ID"
           echo "HAZLIE_SIGN_IDENTITY=$ID" >> "$GITHUB_ENV"
 
+      # THE API KEY GOES INTO A PROFILE, not onto release.sh's command line.
+      #
+      # notarytool accepts --key/--key-id/--issuer directly on `submit`, so this
+      # step could be skipped and release.sh taught to pass them. Storing a
+      # profile is better here for two reasons. release.sh does not change at
+      # all -- it already submits with `--keychain-profile hazlie-notary`, so the
+      # script a person runs by hand and the one CI runs stay the same script.
+      # And the .p8 exists on disk for the length of ONE short step instead of
+      # for the whole notarize, in a keychain this job already had to create for
+      # the signing certificate.
+      #
+      # A trap worth knowing if this is ever half-migrated: when both are given,
+      # --keychain-profile silently wins over --key, with no warning. A script
+      # that looks like it uses the new credential can quietly be using a stale
+      # profile.
       - name: store notary credentials
         env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
-          # release.sh submits with `--keychain-profile hazlie-notary`, so the
-          # profile has to exist under that name and in the job's keychain.
-          xcrun notarytool store-credentials hazlie-notary \
-            --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PASSWORD" \
-            --keychain "$KEYCHAIN"
+          KEYFILE="$RUNNER_TEMP/asc.p8"
+          # Removed on the way out whatever happens, and created unreadable to
+          # anyone else in the first place.
+          trap 'rm -f "$KEYFILE"' EXIT
+          ( umask 077; printf '%s' "$ASC_KEY_P8" | base64 --decode > "$KEYFILE" )
+          [ -s "$KEYFILE" ] || { echo "ASC_KEY_P8 did not decode to anything"; exit 1; }
+
+          # --issuer is required for a TEAM key and REFUSED for an Individual
+          # one, so it is passed only when set rather than always.
+          if [ -n "${ASC_ISSUER_ID:-}" ]; then
+            xcrun notarytool store-credentials hazlie-notary \
+              --key "$KEYFILE" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" \
+              --keychain "$KEYCHAIN"
+          else
+            xcrun notarytool store-credentials hazlie-notary \
+              --key "$KEYFILE" --key-id "$ASC_KEY_ID" \
+              --keychain "$KEYCHAIN"
+          fi
+
+          # store-credentials validates against Apple by default, so a wrong key
+          # or an insufficient role fails HERE, in seconds, rather than after the
+          # build in the notarize step.
+          echo "notary profile stored and validated"
 
       # The build itself is unchanged: the same script a person runs by hand,
       # including its provenance guard, which on a tag build checks that the tag
