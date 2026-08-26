@@ -105,6 +105,9 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
       + (ok ? version : "18.0") + " Safari/605.1.15"
   }()
   private let allowedSuffixes: [String]
+  /// Hosts allowed in SUBFRAMES only — a challenge widget's iframes. Never the
+  /// main frame: see the fence for why the two lists are not one.
+  private let allowedFrameSuffixes: [String]
   private let done: (String?) -> Void
 
   /// A QR WINDOW's two pieces: the image the bridge posted, and the closure
@@ -128,7 +131,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
   private init(
     label: String, cookieDomain: String, sessionCookie: String, allowedHosts: [String],
     requiredCookies: [String], cookieFormat: String, fields: [[String: String]],
-    approval: Bool, userAgent: String, done: @escaping (String?) -> Void
+    approval: Bool, userAgent: String, allowedFrameHosts: [String],
+    done: @escaping (String?) -> Void
   ) {
     self.label = label
     self.cookieDomain = cookieDomain
@@ -140,6 +144,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     self.fields = fields
     self.approval = approval
     self.userAgent = userAgent
+    self.allowedFrameSuffixes = allowedFrameHosts
     self.allowedSuffixes = allowedHosts
     self.done = done
   }
@@ -158,7 +163,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     label: String, loginUrl: String, cookieDomain: String,
     sessionCookie: String, allowedHosts: [String], requiredCookies: [String] = [],
     cookieFormat: String = "json", fields: [[String: String]] = [],
-    approval: Bool = false, userAgent: String = "",
+    approval: Bool = false, userAgent: String = "", allowedFrameHosts: [String] = [],
     done: @escaping (String?) -> Void
   ) {
     // A window must have something to wait for: a session cookie to appear, or
@@ -174,7 +179,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
       label: label, cookieDomain: cookieDomain,
       sessionCookie: sessionCookie, allowedHosts: allowedHosts,
       requiredCookies: requiredCookies, cookieFormat: cookieFormat,
-      fields: fields, approval: approval, userAgent: userAgent, done: done
+      fields: fields, approval: approval, userAgent: userAgent,
+      allowedFrameHosts: allowedFrameHosts, done: done
     )
     current = ctl
     ctl.show(url: url)
@@ -219,7 +225,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     let ctl = BridgeLogin(
       label: label, cookieDomain: "", sessionCookie: "", allowedHosts: [],
       requiredCookies: [], cookieFormat: "json", fields: [],
-      approval: false, userAgent: "", done: done
+      approval: false, userAgent: "", allowedFrameHosts: [], done: done
     )
     ctl.qrCheck = check
     current = ctl
@@ -669,7 +675,35 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     guard url.scheme == "https", let host = url.host else {
       decisionHandler(.cancel); return
     }
-    let ok = allowedSuffixes.contains { host == $0 || host.hasSuffix("." + $0) }
+    // TWO LISTS, BECAUSE A FRAME IS NOT A DESTINATION. The main frame is where
+    // the owner types a password, so what may appear THERE stays the platform
+    // and the identity providers its own login page offers. A subframe is a
+    // widget embedded by the page that is already allowed, and a CAPTCHA is
+    // made of them: a live reCAPTCHA loads www.google.com/recaptcha/api2/anchor
+    // (the checkbox) and .../bframe (the image challenge), both as subframes,
+    // measured on Google's own demo page in a fenced webview on 2026-08-26.
+    //
+    // Slack's challenge is reCAPTCHA — their boot_data carries
+    // recaptcha_enterprise_migration and spam_email_recaptcha_v3, both on — so
+    // without this split the fence cancels both iframes and the owner sees an
+    // empty box where the puzzle should be. That is the same invisible failure
+    // as the Google button one step earlier: a cancelled navigation renders as
+    // nothing at all.
+    //
+    // ~~Adding www.google.com to allowedHosts~~ would have done it in one line
+    // and is the wrong line: it lets the WINDOW ITSELF navigate to Google, in
+    // the one webview in this app where a password is typed. A challenge needs
+    // to render, not to take over the page.
+    //
+    // The subframe list is still an allowlist and still server-authored; it is
+    // not "subframes are fine". Everything unlisted is cancelled in both, which
+    // on Slack's own page means the doubleclick and contentsquare iframes their
+    // marketing stack loads.
+    let inMain = navigationAction.targetFrame?.isMainFrame ?? true
+    let matches = { (list: [String]) in
+      list.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+    let ok = matches(allowedSuffixes) || (!inMain && matches(allowedFrameSuffixes))
     decisionHandler(ok ? .allow : .cancel)
   }
 

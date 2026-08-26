@@ -399,6 +399,36 @@ export const PLATFORMS = Object.freeze({
       // silent way — the fix is to measure the hop and add it here, never to
       // widen this to google.com.
       allowedHosts: ['slack.com', 'accounts.google.com', 'accounts.youtube.com', 'appleid.apple.com'],
+      // THE CHALLENGE IS MADE OF IFRAMES. Slack's is reCAPTCHA (their boot_data
+      // carries recaptcha_enterprise_migration and spam_email_recaptcha_v3,
+      // both on), and a live reCAPTCHA loads two subframes:
+      //
+      //     www.google.com/recaptcha/api2/anchor   the checkbox
+      //     www.google.com/recaptcha/api2/bframe   the image challenge
+      //
+      // Measured on Google's own demo page inside a fenced WKWebView, so no
+      // Slack account was involved. www.gstatic.com is deliberately absent: the
+      // script is a subresource and the fence does not gate those, so listing
+      // it would be cargo.
+      //
+      // SUBFRAME ONLY, and that is the whole point of it being its own field.
+      // Putting www.google.com in allowedHosts above would let this window
+      // navigate ITSELF to Google, and this is the one webview in the app where
+      // a password gets typed. A challenge needs to render inside the page, not
+      // to replace it.
+      //
+      // TWO HOSTS, AND THEY ARE NOT EQUALLY EVIDENCED — labelled rather than
+      // blended, because the difference is the whole lesson of this entry:
+      //   www.google.com    MEASURED, as above.
+      //   www.recaptcha.net NOT observed here. It is Google's documented
+      //     alternate domain for the identical widget, chosen by whichever
+      //     script URL the site loads, and Slack loads that script lazily out
+      //     of a bundle this file's author could not cheaply reach. Listed
+      //     because the failure it prevents is invisible and would not
+      //     reproduce on the machine that shipped it — an empty box where the
+      //     puzzle should be, on someone else's network. It serves reCAPTCHA
+      //     and nothing else, so the cost of being wrong is one unused row.
+      allowedFrameHosts: ['www.google.com', 'www.recaptcha.net'],
       // No cookie gate: this window is not harvesting a session, it is waiting
       // for one value that appears when the challenge is answered.
       sessionCookie: null,

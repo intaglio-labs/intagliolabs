@@ -87,6 +87,11 @@ export async function bridgeApiResponse({
         // An approval window: no harvest, no fields — the person answers on
         // the platform's own page and the bridge reports the outcome itself.
         approval: platform.webLogin?.approval === true,
+        // SUBFRAMES ONLY: the hosts a challenge widget's iframes come from.
+        // Separate from allowedHosts because the main frame is where a password
+        // is typed and a widget is not a destination — BridgeLogin enforces the
+        // split, this file authors it.
+        allowedFrameHosts: platform.webLogin?.allowedFrameHosts ?? null,
         // A platform that refuses the default browser string gets its own.
         // Server-authored like the rest of this policy — Swift enforces it.
         userAgent: platform.webLogin?.userAgent ?? null,

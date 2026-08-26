@@ -143,6 +143,17 @@ test('a login window may leave the platform only for that platform\'s own SSO', 
   assert.deepEqual(fences.slack,
     ['accounts.google.com', 'accounts.youtube.com', 'appleid.apple.com', 'slack.com']);
 
+  // The SUBFRAME list is a second fence and is pinned like the first. Slack's
+  // challenge is reCAPTCHA and a live one renders two iframes off
+  // www.google.com; the alternate domain is there because the failure it
+  // prevents is invisible (see the entry).
+  const frames = Object.fromEntries(
+    entries.filter(([, p]) => p.webLogin).map(([id, p]) => [id, [...(p.webLogin.allowedFrameHosts ?? [])].sort()]));
+  assert.deepEqual(frames.slack, ['www.google.com', 'www.recaptcha.net']);
+  for (const [id, hosts] of Object.entries(frames)) {
+    if (id !== 'slack') assert.deepEqual(hosts, [], `${id}: a frame fence with no challenge behind it`);
+  }
+
   // Every other platform's window stays on the platform's own hosts. Said as an
   // assertion rather than a habit: an SSO detour is legitimate ONLY because the
   // platform's own login page offers it, and nothing else here does.
@@ -154,14 +165,30 @@ test('a login window may leave the platform only for that platform\'s own SSO', 
     }
   }
 
+  // AND NO IDENTITY PROVIDER IN A FRAME LIST, ANYWHERE — including Slack's. A
+  // subframe pointed at accounts.google.com is a login form in an iframe, which
+  // is the phishing shape the main-frame rule exists to prevent; the frame list
+  // is for widgets a page embeds, not for somewhere to sign in. Different axis,
+  // same rule. (www.google.com is here for /recaptcha/api2/, which is why this
+  // tests the sign-in subdomains rather than the string "google".)
+  for (const [id, hosts] of Object.entries(frames)) {
+    for (const h of hosts) {
+      assert.ok(!/^(accounts|login|signin|auth|appleid|id)\./i.test(h),
+        `${id}: sign-in host ${h} in a SUBFRAME allowlist — a login belongs in the main frame`);
+    }
+  }
+
   // And every host in every fence is declared in the egress ledger, which is
   // where the owner reads what this software may contact. The tripwire in
   // connectors/test/egress.test.mjs scans source for URLs and does not catch a
   // bare hostname in an array, so this is the half of that rule it cannot see.
   const ledger = JSON.parse(readFileSync(new URL('../../ops/EGRESS.json', import.meta.url), 'utf8'));
   const declared = new Set(ledger.paths.map((e) => e.host));
-  for (const [id, hosts] of Object.entries(fences)) {
-    for (const h of hosts) {
+  // BOTH lists. The frame hosts are just as much "somewhere this software
+  // connects to" as the main-frame ones, and they are the easier ones to add
+  // without thinking about it — which is exactly why they get walked here.
+  for (const [id, p] of entries) {
+    for (const h of [...(p.webLogin?.allowedHosts ?? []), ...(p.webLogin?.allowedFrameHosts ?? [])]) {
       assert.ok(declared.has(h), `${id}: fence host ${h} is not declared in ops/EGRESS.json`);
     }
   }
