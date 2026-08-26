@@ -690,6 +690,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // never fire. That blank window was the bug.
         let allowedHosts = (begin["allowedHosts"] as? [String])?.filter { !$0.isEmpty } ?? []
         let sessionCookie = begin["sessionCookie"] as? String ?? ""
+        let requiredCookies = (begin["requiredCookies"] as? [String])?.filter { !$0.isEmpty } ?? []
         guard !allowedHosts.isEmpty, !sessionCookie.isEmpty else {
           self.reply(webView, id, ["state": "manual", "transcript": begin["transcript"] ?? []])
           return
@@ -698,7 +699,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         DispatchQueue.main.async {
           BridgeLogin.present(
             label: label, loginUrl: loginUrl, cookieDomain: cookieDomain,
-            sessionCookie: sessionCookie, allowedHosts: allowedHosts
+            sessionCookie: sessionCookie, allowedHosts: allowedHosts,
+            requiredCookies: requiredCookies
           ) { cookiesJSON in
             guard let cookiesJSON else {
               self.reply(webView, id, ["state": "cancelled"])

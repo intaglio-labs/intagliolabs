@@ -68,6 +68,9 @@ export async function bridgeApiResponse({
         // does not decide it.
         allowedHosts: platform.webLogin?.allowedHosts ?? null,
         sessionCookie: platform.webLogin?.sessionCookie ?? null,
+        // Every cookie the bridge's login step demands (X wants auth_token AND
+        // ct0). Absent for platforms whose session cookie is the whole story.
+        requiredCookies: platform.webLogin?.requiredCookies ?? null,
       },
     };
   };

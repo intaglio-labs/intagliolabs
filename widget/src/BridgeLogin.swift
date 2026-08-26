@@ -36,6 +36,11 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
   private let label: String
   private let cookieDomain: String
   private let sessionCookie: String
+  // Every cookie that must exist before the harvest may fire. Defaults to just
+  // the session cookie; X needs [auth_token, ct0] because ct0 (its CSRF token)
+  // lands on X's own schedule and a harvest triggered by auth_token alone
+  // could snapshot before it existed ("Missing some keys: [ct0]").
+  private let requiredCookies: [String]
   private let allowedSuffixes: [String]
   private let done: (String?) -> Void
 
@@ -50,13 +55,14 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
 
   private init(
     label: String, cookieDomain: String, sessionCookie: String, allowedHosts: [String],
-    done: @escaping (String?) -> Void
+    requiredCookies: [String], done: @escaping (String?) -> Void
   ) {
     self.label = label
     self.cookieDomain = cookieDomain
     // Which cookie means "logged in", per the platform table. Harvest is the
     // whole domain regardless; this is only the signal to know the user is in.
     self.sessionCookie = sessionCookie
+    self.requiredCookies = requiredCookies.isEmpty ? [sessionCookie] : requiredCookies
     self.allowedSuffixes = allowedHosts
     self.done = done
   }
@@ -73,7 +79,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
   // so the URL is checked against the policy before it is ever loaded.
   static func present(
     label: String, loginUrl: String, cookieDomain: String,
-    sessionCookie: String, allowedHosts: [String], done: @escaping (String?) -> Void
+    sessionCookie: String, allowedHosts: [String], requiredCookies: [String] = [],
+    done: @escaping (String?) -> Void
   ) {
     guard let url = URL(string: loginUrl), let host = url.host, !allowedHosts.isEmpty,
           !sessionCookie.isEmpty,
@@ -83,7 +90,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     current?.finish(nil)
     let ctl = BridgeLogin(
       label: label, cookieDomain: cookieDomain,
-      sessionCookie: sessionCookie, allowedHosts: allowedHosts, done: done
+      sessionCookie: sessionCookie, allowedHosts: allowedHosts,
+      requiredCookies: requiredCookies, done: done
     )
     current = ctl
     ctl.show(url: url)
@@ -219,7 +227,10 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     store.getAllCookies { [weak self] cookies in
       guard let self, !self.finished else { return }
       let mine = cookies.filter { self.domainMatches($0.domain) }
-      guard mine.contains(where: { $0.name == self.sessionCookie && !$0.value.isEmpty }) else { return }
+      // ALL required cookies, not just the session signal — the poll simply
+      // keeps waiting until the platform has set every one.
+      let have = Set(mine.filter { !$0.value.isEmpty }.map { $0.name })
+      guard self.requiredCookies.allSatisfy({ have.contains($0) }) else { return }
       var bag: [String: String] = [:]
       for c in mine { bag[c.name] = c.value }
       guard let data = try? JSONSerialization.data(withJSONObject: bag),

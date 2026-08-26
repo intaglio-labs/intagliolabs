@@ -99,9 +99,16 @@ export const PLATFORMS = Object.freeze({
     loginUrl: 'https://x.com/login',
     cookieDomain: 'x.com',
     // twitter.com still redirects to x.com and some flows land there first.
-    // auth_token is the session cookie; the bridge also wants ct0, which the
-    // whole-domain harvest picks up alongside it.
-    webLogin: { allowedHosts: ['x.com', 'twitter.com'], sessionCookie: 'auth_token' },
+    // ~~auth_token is the session cookie; the bridge also wants ct0, which the
+    // whole-domain harvest picks up alongside it.~~ It did not, reliably: X
+    // sets auth_token at login completion and ct0 (its CSRF token) on its own
+    // schedule, so a harvest triggered by auth_token alone could snapshot
+    // before ct0 existed — the bot then answered "Missing some keys: [ct0]"
+    // (owner hit this 2026-08-25, first live login after the runtime rebuild).
+    // requiredCookies is the fix: the login window finishes only when every
+    // listed cookie is present, not when the first one is.
+    webLogin: { allowedHosts: ['x.com', 'twitter.com'], sessionCookie: 'auth_token',
+                requiredCookies: ['auth_token', 'ct0'] },
   },
   // Telegram, Discord, Slack (owner asked, 2026-08-22). Telegram logs in by
   // PHONE (the bot sends a code to the Telegram app), not cookies — so it
