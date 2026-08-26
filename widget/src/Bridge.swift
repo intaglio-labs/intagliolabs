@@ -74,8 +74,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
-                    "status", "setMotion", "setScale", "setSounds", "openOnboarding",
-                    "markHandheld",
+                    "status", "setConnectorEnabled", "setMotion", "setScale", "setSounds",
+                    "openOnboarding", "markHandheld",
                     // Same setup controls, reachable from the gear after the
                     // flow — a skipped step must stay reachable.
                     "setupState", "modelDownload", "modelCancel",

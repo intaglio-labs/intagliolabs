@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 const WIDGET = join(dirname(fileURLToPath(import.meta.url)), '..');
 const swift = readFileSync(join(WIDGET, 'src', 'Bridge.swift'), 'utf8');
 const bridgeLoginSwift = readFileSync(join(WIDGET, 'src', 'BridgeLogin.swift'), 'utf8');
+const connections = readFileSync(join(WIDGET, 'ui', 'connections.js'), 'utf8');
 
 // --- 1. what the dispatch handles -------------------------------------------
 const dispatchCases = new Set(
@@ -264,4 +265,16 @@ test('the credential reassurance stays middle-aligned in the native login header
     .exec(bridgeLoginSwift)?.[1];
   assert.ok(block, 'credential reassurance label not found');
   assert.match(block, /sub\.alignment = \.center/u);
+});
+
+test('Settings offers the explicit WhatsApp opt-in returned by connector status', () => {
+  const block = /if \(src\.disabled && src\.action === 'enable'\) \{([\s\S]*?)\n {4}\} else if/u
+    .exec(connections)?.[1];
+  assert.ok(block, 'disabled connector branch not found in Settings');
+  assert.match(block, /enable\.textContent = 'connect'/u);
+  assert.match(
+    block,
+    /hzPost\('setConnectorEnabled', \{ connector: src\.id, enabled: true \}\)/u
+  );
+  assert.match(block, /\.then\(refresh\)/u, 'successful opt-in repaints connector status');
 });

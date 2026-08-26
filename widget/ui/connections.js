@@ -639,7 +639,27 @@ function card(src, keep) {
     // A broken source states the problem BEFORE the WHY and the how-to. It is
     // the only thing on this panel the owner has to act on, and burying it
     // under an explanation of what Granola is would be the wrong order.
-    if (src.broken && src.fix) {
+    if (src.disabled && src.action === 'enable') {
+      // WhatsApp begins behind an explicit consent marker. This is the same
+      // opt-in action the shared People connector tile exposes; Settings must
+      // not describe the source as disconnected without offering the action
+      // that makes it usable.
+      const enable = document.createElement('button');
+      enable.className = 'hold-ok';
+      enable.textContent = 'connect';
+      enable.addEventListener('click', (e) => {
+        e.stopPropagation();
+        enable.disabled = true;
+        enable.textContent = 'connecting…';
+        hzPost('setConnectorEnabled', { connector: src.id, enabled: true })
+          .then(refresh)
+          .catch(() => {
+            enable.disabled = false;
+            enable.textContent = 'connect';
+          });
+      });
+      tip.appendChild(enable);
+    } else if (src.broken && src.fix) {
       const bad = document.createElement('span');
       bad.className = 'broken';
       const what = document.createElement('b');
