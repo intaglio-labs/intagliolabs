@@ -12,7 +12,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { PLATFORMS, bridgeStatus } from './bridge.mjs';
-import { GMAIL_SCOPE, accountsWithScope } from '../../connectors/lib/googleAccounts.mjs';
+import { GMAIL_SCOPE, accountsWithScopeIncludingStale } from '../../connectors/lib/googleAccounts.mjs';
 
 const SECRETS = (home) => join(home, '.hazlie', 'secrets');
 
@@ -76,7 +76,12 @@ export function mailSecretName(address) {
 // there to prevent, and this keeps that property on a better credential.
 export function googleMailAccounts({ home = homedir() } = {}) {
   try {
-    return accountsWithScope(GMAIL_SCOPE, { home });
+    // INCLUDING THE DEAD ONES. accountsWithScope hides a stale grant from the
+    // CONNECTORS, which is right — re-presenting a refused token every tick
+    // earns nothing but rate limiting. It would be exactly wrong here: a
+    // mailbox that has stopped working is the row this page most needs to
+    // draw, and hiding it is how a broken source becomes an invisible one.
+    return accountsWithScopeIncludingStale(GMAIL_SCOPE, { home });
   } catch {
     return []; // an unreadable secrets dir costs the mail rows, not the page
   }
@@ -401,14 +406,31 @@ function cloudAccountRows(home) {
     // no install had any — and it is the wrong shape now. Deleted rather than
     // left beside the new path: two ways in, one of which silently no longer
     // reaches the connector, is worse than the bug it fixed.
-    ...googleMailAccounts({ home }).map((account) => ({
-      id: `mail:${account.email}`,
-      label: account.email,
-      connected: true,
-      detail: 'authorized · Gmail API, read-only',
-      action: null,
-      caveat: null,
-    })),
+    // BROKEN IS NOT THE SAME AS NEVER SET UP, and this row is the one place
+    // that distinction has teeth: a grant dies silently — revoked, password
+    // changed, or simply expired on an OAuth client still in Testing — and the
+    // owner's experience is mail that stopped arriving with nothing to see.
+    // `broken: true` is what pins the tile to the front of the shelf.
+    ...googleMailAccounts({ home }).map((account) => (account.stale
+      ? {
+        id: `mail:${account.email}`,
+        label: account.email,
+        connected: false,
+        broken: true,
+        detail: 'sign in again — Google refused the saved grant',
+        action: 'gcal',
+        fix: 'Google will not renew this authorization. Sign in again from the Connections shelf; '
+          + 'the usual causes are a revoked app, a password change, or an OAuth client left in Testing.',
+        caveat: null,
+      }
+      : {
+        id: `mail:${account.email}`,
+        label: account.email,
+        connected: true,
+        detail: 'authorized · Gmail API, read-only',
+        action: null,
+        caveat: null,
+      })),
     // The way to add one (or the first one). Optional, so a page with no
     // mailbox still reaches "all set" — reading mail is a choice, not an
     // outstanding task, and the counter is what tells the owner they are done.

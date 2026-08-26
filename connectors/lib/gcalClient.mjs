@@ -15,7 +15,7 @@
 
 import { existsSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { CALENDAR_SCOPE, accountsWithScope } from './googleAccounts.mjs';
+import { CALENDAR_SCOPE, accountsWithScope, markGoogleAccountStale } from './googleAccounts.mjs';
 import { join } from 'node:path';
 import { readSecretJson, readSecretLine } from './secrets.mjs';
 
@@ -132,6 +132,11 @@ export function createGcalClient({
     if (!res.ok) {
       const body = await res.text();
       if (/invalid_grant/u.test(body)) {
+        // Written down as well as thrown (2026-08-26). This diagnosis was
+        // already excellent and already reached nobody: it goes to a daemon
+        // log, and the owner's experience is a calendar that stopped. The mark
+        // is what lets the connect page and the shelf say so instead.
+        markGoogleAccountStale(tokensPath, 'Google refused the refresh token (invalid_grant)');
         throw statusError(
           res.status,
           'Google refused the refresh token (invalid_grant): the grant is dead. Causes, in order of ' +

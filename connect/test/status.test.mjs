@@ -156,3 +156,22 @@ test('shared connector disable markers apply to account and platform rows', (t) 
 // OAuth grant now, so the connect page no longer registers a mailbox in that
 // file and nothing here writes it at all. A test for a writer that does not
 // exist cannot fail in a way that means anything.
+
+// The connect page's half of the same contract: a mailbox whose grant died
+// must render as BROKEN and still offer the way back, not vanish.
+test('a stale Google grant renders as broken, listed, and fixable', (t) => {
+  const dir = home(t, {});
+  grantMailbox(dir, 'owner@example.com');
+  const tok = join(dir, '.hazlie', 'secrets', 'google-tokens-owner-example-com.json');
+  const t0 = JSON.parse(readFileSync(tok, 'utf8'));
+  writeFileSync(tok, JSON.stringify({ ...t0, stale: { since: 1, reason: 'invalid_grant' } }),
+    { mode: 0o600 });
+
+  const row = readStatus({ home: dir }).find((r) => r.id === 'mail:owner@example.com');
+  assert.ok(row, 'a dead mailbox must still be drawn — hiding it is the silence this prevents');
+  assert.equal(row.connected, false);
+  assert.equal(row.broken, true, 'broken is what pins the tile to the front of the shelf');
+  assert.match(row.detail, /sign in again/u);
+  assert.equal(row.action, 'gcal', 'and the row must carry the way to fix it');
+  assert.match(row.fix, /revoked|password|Testing/u, 'the fix text should name the likely causes');
+});

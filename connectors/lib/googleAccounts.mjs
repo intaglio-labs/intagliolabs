@@ -19,7 +19,7 @@
 // NOT A SECRET, but these files hold refresh tokens, so every read goes
 // through the same owner-only gauntlet as every other credential here.
 
-import { readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readSecretJson } from './secrets.mjs';
@@ -81,6 +81,10 @@ export function listGoogleAccounts({ home = homedir() } = {}) {
         slug: googleAccountSlug(email),
         tokensPath,
         scopes: typeof t.scope === 'string' ? t.scope.split(/\s+/u).filter(Boolean) : [],
+        // Set once a connector has been refused by Google. See
+        // markGoogleAccountStale — nothing on disk reveals a dead grant, so
+        // this is the only way a status check can know.
+        stale: t.stale && typeof t.stale === 'object' ? t.stale : null,
         problem: null,
       });
     } catch (error) {
@@ -94,9 +98,61 @@ export function listGoogleAccounts({ home = homedir() } = {}) {
 // Accounts whose grant actually covers a capability. A token minted before a
 // scope was added is a real state — the owner re-authorizes to widen it — and
 // a connector must skip such an account rather than call and take a 403.
+/**
+ * Record that a grant is DEAD, so something other than a log can say so.
+ *
+ * A dead grant is invisible on disk. The token file still parses, still has
+ * both tokens, still names its account — everything a status check can see
+ * looks exactly like a working account, because the only way to learn
+ * otherwise is to ask Google and be refused. So the connector that gets
+ * refused is the one that has to write it down; nothing else is in a position
+ * to know.
+ *
+ * WHY THIS MATTERS MORE THAN IT LOOKS. Without it a revoked or expired grant
+ * is a mailbox that simply stops. No error the owner sees, no dot that
+ * changes, no new mail — and the failure is silent for exactly as long as
+ * nobody thinks to check. That is the worst shape a data connector can fail
+ * in, and it is the ordinary outcome of a password change, a revoked app, or
+ * an OAuth client still in Testing (where Google expires refresh tokens after
+ * seven days).
+ *
+ * The tokens are KEPT, not cleared. They are useless, but the file is also
+ * what remembers WHICH ACCOUNT this was — delete it and the row vanishes
+ * instead of asking to be fixed, which is the same silence by another route.
+ * A fresh authorization overwrites the whole file, so the mark clears itself.
+ */
+export function markGoogleAccountStale(tokensPath, reason) {
+  try {
+    const t = JSON.parse(readFileSync(tokensPath, 'utf8'));
+    if (t.stale) return false; // already recorded; keep the FIRST time it broke
+    const next = { ...t, stale: { since: Date.now(), reason: String(reason).slice(0, 200) } };
+    const tmp = `${tokensPath}.${process.pid}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    renameSync(tmp, tokensPath);
+    return true;
+  } catch {
+    // The file is gone or unreadable. That is its own kind of broken and the
+    // status check reports it directly; failing here would turn a diagnosable
+    // problem into a crash inside the connector that found it.
+    return false;
+  }
+}
+
 export const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 export const CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
 
+// Accounts a connector can actually USE: scoped, readable, and not already
+// known dead. A stale account is deliberately excluded rather than retried —
+// re-presenting a refused refresh token every tick earns nothing but rate
+// limiting, and the owner has already been told. It comes back the moment a
+// fresh authorization overwrites the file.
 export function accountsWithScope(scope, opts = {}) {
+  return listGoogleAccounts(opts)
+    .filter((a) => !a.problem && !a.stale && a.scopes.includes(scope));
+}
+
+// Every account with the scope, dead ones included. The connect page needs
+// this: a grant that has died is exactly the row it must still draw.
+export function accountsWithScopeIncludingStale(scope, opts = {}) {
   return listGoogleAccounts(opts).filter((a) => !a.problem && a.scopes.includes(scope));
 }

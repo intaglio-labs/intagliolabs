@@ -22,7 +22,7 @@ import {
   defaultGcalClientIdPath as clientIdPathFor,
   defaultGcalClientSecretPath as clientSecretPathFor,
 } from './gcalClient.mjs';
-import { googleTokensPath } from './googleAccounts.mjs';
+import { googleTokensPath, markGoogleAccountStale } from './googleAccounts.mjs';
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 // The same host the calendar client uses. gmail.googleapis.com serves the
@@ -85,6 +85,23 @@ export function createGmailClient({
         }),
       });
       if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        // invalid_grant IS THE DEAD-GRANT SIGNAL, and it is not retryable.
+        // Google returns it when the refresh token has been revoked, the
+        // password changed, the app was removed from the account, or the
+        // OAuth client is still in Testing and seven days have passed.
+        //
+        // Recorded rather than only thrown: a thrown error reaches a log, and
+        // a log is not where the owner looks. Written down, the connect page
+        // and the shelf can say this mailbox needs signing in again — which is
+        // the difference between a source that asks to be fixed and one that
+        // just quietly stops.
+        if (/invalid_grant/u.test(body)) {
+          markGoogleAccountStale(path, 'Google refused the refresh token (invalid_grant)');
+          throw statusError(res.status,
+            `Google refused the refresh token for ${email ?? path} (invalid_grant): the grant is dead. ` +
+            'Sign in again from the Connections shelf, or run `node ops/gcal-auth.mjs`.');
+        }
         throw statusError(res.status, `google token refresh failed: HTTP ${res.status}`);
       }
       const payload = await res.json();
