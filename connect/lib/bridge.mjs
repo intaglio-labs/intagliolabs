@@ -130,8 +130,15 @@ export const PLATFORMS = Object.freeze({
     // li_at is the session cookie; JSESSIONID is the CSRF token the API calls
     // need, and it lands separately — the same pair problem X has, solved the
     // same way (requiredCookies, not a single signal).
+    // COOKIE HEADER, not the JSON every other platform takes. mautrix-linkedin's
+    // login step is a single field, `fi.mau.linkedin.login.cookie_header`, whose
+    // own regex demands `\bJSESSIONID=[^;]+` — a raw Cookie header. The Meta and
+    // X bridges instead name each cookie as its own field, so a JSON object
+    // keyed by cookie name lands correctly there and arrives EMPTY here: the bot
+    // looks for its field id, finds nothing, and rejects the blank (owner hit
+    // this on the first real LinkedIn login, 2026-08-25).
     webLogin: { allowedHosts: ['linkedin.com', 'www.linkedin.com'], sessionCookie: 'li_at',
-                requiredCookies: ['li_at', 'JSESSIONID'] },
+                requiredCookies: ['li_at', 'JSESSIONID'], cookieFormat: 'header' },
   },
   telegram: {
     id: 'telegram',

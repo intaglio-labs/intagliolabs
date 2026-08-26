@@ -71,6 +71,9 @@ export async function bridgeApiResponse({
         // Every cookie the bridge's login step demands (X wants auth_token AND
         // ct0). Absent for platforms whose session cookie is the whole story.
         requiredCookies: platform.webLogin?.requiredCookies ?? null,
+        // 'header' -> "a=1; b=2" (LinkedIn); anything else -> a JSON object
+        // keyed by cookie name, which is what the Meta and X bridges parse.
+        cookieFormat: platform.webLogin?.cookieFormat ?? 'json',
       },
     };
   };

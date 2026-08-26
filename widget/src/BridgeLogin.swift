@@ -41,6 +41,11 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
   // lands on X's own schedule and a harvest triggered by auth_token alone
   // could snapshot before it existed ("Missing some keys: [ct0]").
   private let requiredCookies: [String]
+  /// How the bridge wants the harvested cookies: "header" for a raw Cookie
+  /// string, anything else for a JSON object keyed by cookie name. Server
+  /// authored (lib/bridge.mjs webLogin.cookieFormat) — enforced here, never
+  /// decided here, the same rule allowedHosts follows.
+  private let cookieFormat: String
   private let allowedSuffixes: [String]
   private let done: (String?) -> Void
 
@@ -55,7 +60,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
 
   private init(
     label: String, cookieDomain: String, sessionCookie: String, allowedHosts: [String],
-    requiredCookies: [String], done: @escaping (String?) -> Void
+    requiredCookies: [String], cookieFormat: String, done: @escaping (String?) -> Void
   ) {
     self.label = label
     self.cookieDomain = cookieDomain
@@ -63,6 +68,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     // whole domain regardless; this is only the signal to know the user is in.
     self.sessionCookie = sessionCookie
     self.requiredCookies = requiredCookies.isEmpty ? [sessionCookie] : requiredCookies
+    self.cookieFormat = cookieFormat
     self.allowedSuffixes = allowedHosts
     self.done = done
   }
@@ -80,7 +86,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
   static func present(
     label: String, loginUrl: String, cookieDomain: String,
     sessionCookie: String, allowedHosts: [String], requiredCookies: [String] = [],
-    done: @escaping (String?) -> Void
+    cookieFormat: String = "json", done: @escaping (String?) -> Void
   ) {
     guard let url = URL(string: loginUrl), let host = url.host, !allowedHosts.isEmpty,
           !sessionCookie.isEmpty,
@@ -91,7 +97,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     let ctl = BridgeLogin(
       label: label, cookieDomain: cookieDomain,
       sessionCookie: sessionCookie, allowedHosts: allowedHosts,
-      requiredCookies: requiredCookies, done: done
+      requiredCookies: requiredCookies, cookieFormat: cookieFormat, done: done
     )
     current = ctl
     ctl.show(url: url)
@@ -231,6 +237,16 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
       // keeps waiting until the platform has set every one.
       let have = Set(mine.filter { !$0.value.isEmpty }.map { $0.name })
       guard self.requiredCookies.allSatisfy({ have.contains($0) }) else { return }
+      if self.cookieFormat == "header" {
+        // "name=value; name=value" — the shape a browser would send, which is
+        // what a bridge asking for a cookie_header field parses. Values are
+        // passed through unaltered: LinkedIn's JSESSIONID carries its own
+        // quotes and the regex on the far side expects to see them.
+        let header = mine.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+        guard !header.isEmpty else { return }
+        self.finish(header)
+        return
+      }
       var bag: [String: String] = [:]
       for c in mine { bag[c.name] = c.value }
       guard let data = try? JSONSerialization.data(withJSONObject: bag),

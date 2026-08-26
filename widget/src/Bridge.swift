@@ -703,6 +703,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         let allowedHosts = (begin["allowedHosts"] as? [String])?.filter { !$0.isEmpty } ?? []
         let sessionCookie = begin["sessionCookie"] as? String ?? ""
         let requiredCookies = (begin["requiredCookies"] as? [String])?.filter { !$0.isEmpty } ?? []
+        let cookieFormat = begin["cookieFormat"] as? String ?? "json"
         guard !allowedHosts.isEmpty, !sessionCookie.isEmpty else {
           self.reply(webView, id, ["state": "manual", "transcript": begin["transcript"] ?? []])
           return
@@ -712,7 +713,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           BridgeLogin.present(
             label: label, loginUrl: loginUrl, cookieDomain: cookieDomain,
             sessionCookie: sessionCookie, allowedHosts: allowedHosts,
-            requiredCookies: requiredCookies
+            requiredCookies: requiredCookies, cookieFormat: cookieFormat
           ) { cookiesJSON in
             guard let cookiesJSON else {
               self.reply(webView, id, ["state": "cancelled"])

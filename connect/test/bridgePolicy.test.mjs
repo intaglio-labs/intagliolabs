@@ -95,3 +95,22 @@ test('the platforms that do have a web login are the ones we expect', () => {
   const withWeb = entries.filter(([, p]) => p.webLogin).map(([id]) => id).sort();
   assert.deepEqual(withWeb, ['instagram', 'linkedin', 'messenger', 'twitter']);
 });
+
+test('cookie format is declared per platform, and only LinkedIn wants a header', () => {
+  // The shape the harvested cookies are sent in is the SERVER's call — Swift
+  // enforces it and never decides it, same as allowedHosts. Pinned as a roster
+  // because getting it wrong is silent: the Meta and X bridges name each cookie
+  // as its own field, so a JSON object lands correctly there, while
+  // mautrix-linkedin has ONE field wanting a raw Cookie header and receives an
+  // empty value from that same JSON — a login that looks done and is not
+  // (2026-08-25).
+  const header = entries
+    .filter(([, p]) => p.webLogin?.cookieFormat === 'header')
+    .map(([id]) => id).sort();
+  assert.deepEqual(header, ['linkedin']);
+  for (const [id, p] of entries) {
+    if (!p.webLogin) continue;
+    const fmt = p.webLogin.cookieFormat ?? 'json';
+    assert.ok(['json', 'header'].includes(fmt), `${id}: unknown cookieFormat ${fmt}`);
+  }
+});
