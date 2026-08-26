@@ -17,10 +17,11 @@
 
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { renderConnectPage, renderHelpPage } from './lib/page.mjs';
 import { renderMemoryPage } from './lib/memoryPage.mjs';
 import { renderBridgePage } from './lib/bridgePage.mjs';
@@ -252,6 +253,67 @@ async function handleRequest(req, res) {
       authorization: req.headers.authorization,
     });
     send(res, status, JSON.stringify(body), 'application/json; charset=utf-8');
+    return;
+  }
+
+  // /api/google-auth — START THE GOOGLE SIGN-IN, from a button rather than a
+  // terminal.
+  //
+  // The connect page's Google rows used to say "run `node ops/gcal-auth.mjs`",
+  // which asked the owner to open a terminal in a repo — and ops/ was never
+  // copied into the app bundle, so on a downloaded install that instruction
+  // named a file that did not exist. This spawns it instead: the script starts
+  // its own loopback listener and opens Google in the default browser, exactly
+  // as it does from a shell.
+  //
+  // DETACHED AND UNWAITED, deliberately. The flow lives as long as the owner
+  // takes to approve (15 minutes at the outside), and an HTTP request must not
+  // hold that open — the answer here is "the browser is opening", not "you are
+  // signed in". Whether the grant landed is a question the status rows answer
+  // afterwards, because they read the tokens on disk.
+  //
+  // NOTHING FROM THE REQUEST REACHES THE COMMAND LINE. The script path is a
+  // constant resolved against this file, and the only variable is which of two
+  // fixed names — a request cannot name a third. That is the whole reason this
+  // is an allowlist of literals rather than a parameter.
+  if (url.pathname === '/api/google-auth') {
+    if (req.method !== 'POST') {
+      send(res, 405, JSON.stringify({ error: 'POST only' }), 'application/json; charset=utf-8');
+      return;
+    }
+    let which = 'google';
+    try {
+      which = JSON.parse((await readBody(req, 4 * 1024)) || '{}').flow ?? 'google';
+    } catch {
+      which = 'google';
+    }
+    const SCRIPTS = { google: 'gcal-auth.mjs', oura: 'oura-auth.mjs' };
+    const script = SCRIPTS[which];
+    if (!script) {
+      send(res, 400, JSON.stringify({ error: 'unknown flow' }), 'application/json; charset=utf-8');
+      return;
+    }
+    const scriptPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'ops', script);
+    if (!existsSync(scriptPath)) {
+      send(res, 501, JSON.stringify({
+        error: 'the authorization helper is not installed beside this server',
+      }), 'application/json; charset=utf-8');
+      return;
+    }
+    try {
+      const child = spawn(process.execPath, [scriptPath], {
+        detached: true,
+        stdio: 'ignore',
+        // The script writes into ~/.hazlie/secrets and reads the client
+        // credential from there; it needs nothing from this request.
+        env: process.env,
+      });
+      child.unref();
+      send(res, 200, JSON.stringify({ ok: true, started: which }), 'application/json; charset=utf-8');
+    } catch (error) {
+      send(res, 500, JSON.stringify({ error: 'could not start the authorization helper' }),
+        'application/json; charset=utf-8');
+    }
     return;
   }
 

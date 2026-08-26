@@ -85,6 +85,15 @@ cp -R ../ui/server "$BE/ui/server"
 cp -R ../ui/scripts "$BE/ui/scripts"
 cp -R ../prompts "$BE/prompts"
 cp -R ../connectors "$BE/connectors"
+# THE AUTH SCRIPTS, because a downloaded install has no repo to run them from.
+# The connect page's Google and Oura rows told the owner to run
+# `node ops/gcal-auth.mjs`, and ops/ was never copied into the bundle — so that
+# instruction worked for whoever had cloned the repo and for nobody else. The
+# connect server spawns these directly now (POST /api/google-auth), and it
+# resolves them at ../ops relative to itself, which is this path in the bundle
+# and the repo root in a checkout. Same relative path, both layouts.
+mkdir -p "$BE/ops"
+cp ../ops/gcal-auth.mjs ../ops/oura-auth.mjs "$BE/ops/"
 
 # THE TELEGRAM APP CREDENTIAL, if this build machine has one.
 #

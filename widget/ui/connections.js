@@ -410,8 +410,14 @@ const HINTS = {
   imessage: FDA_HINT, photos: FDA_HINT, notes: FDA_HINT,
   files: { text: 'Sign in to iCloud Drive, Box, or Dropbox on this Mac — any one of them counts.' },
   calendar: { text: 'Connect your Google account on the connect page and approve read-only calendar access.' },
-  mail: { text: 'Create a 16-letter Google app password, then paste it on the connect page.',
-          url: 'https://myaccount.google.com/apppasswords', link: 'Google app passwords' },
+  // ~~"Create a 16-letter Google app password, then paste it on the connect
+  // page", linking myaccount.google.com/apppasswords.~~ False since the
+  // connector moved to OAuth (2026-08-26): there is no app password to make,
+  // the page it pointed at no longer leads anywhere useful, and the form on
+  // the connect page that would have accepted one is deleted. A hint that
+  // describes a flow the product no longer has is worse than no hint — it
+  // sends the owner off to do work that cannot succeed.
+  mail: { text: 'Sign in to Google and approve read-only access to your mail. Run it again with another account to add a second mailbox.' },
   // granola left this table (owner, 2026-08-25): its panel is the in-app
   // walkthrough now — open granola.ai, create a key, paste it right here.
   granola: { app: 'com.granola.app', url: 'https://granola.ai', link: 'Granola',
@@ -462,7 +468,11 @@ function hintFor(id) {
 
 // Connectors finished on the loopback connect page (paste an app password or
 // token there). They get an "open the connect page" door in their hint.
-const CONNECT_PAGE = new Set(['mail', 'oura', 'notion']); // granola pastes in-panel now
+const CONNECT_PAGE = new Set(['oura', 'notion']); // granola pastes in-panel now
+// One Google account covers both, and both take the same grant — so both tiles
+// start the same flow rather than sending the owner somewhere to read about it.
+// `mail` left CONNECT_PAGE above when it stopped having anything to paste.
+const GOOGLE_AUTH = new Set(['mail', 'calendar']);
 
 // How each social bridge authenticates — it is NOT the same for all of them,
 // and the web-cookie-harvest button only fits the cookie ones. The token and
@@ -906,7 +916,35 @@ function card(src, keep) {
       // the token / app password there). Give it a door: the page opens from
       // the tokened link the connect server wrote, read natively — no repo, no
       // terminal, which is what a fresh install needs.
-      if (CONNECT_PAGE.has(kindOf(src.id))) {
+      // GOOGLE SIGNS IN FROM HERE, not from a page and never from a terminal.
+      // Mail and Calendar are one Google account, and the grant is taken by
+      // ops/gcal-auth.mjs, which opens Google in the browser and listens for
+      // the callback itself. Pressing the tile starts exactly that (owner,
+      // 2026-08-26: "when i click on the icon it should just open up the login
+      // screen"). The connect page stays reachable underneath for the rows
+      // that genuinely paste something, but Google is not one of them any more.
+      if (GOOGLE_AUTH.has(kindOf(src.id))) {
+        const go = document.createElement('button');
+        go.className = 'hold-ok';
+        go.textContent = src.connected ? 'add another account ↗' : 'sign in with Google ↗';
+        go.addEventListener('click', (e) => {
+          e.stopPropagation();
+          go.disabled = true;
+          go.textContent = 'opening Google…';
+          hzPost('googleAuth', { flow: 'google' })
+            .then(() => {
+              // The grant lands minutes later, in a browser this panel cannot
+              // see, so there is nothing here to await. Say where to look
+              // instead of pretending to know the outcome.
+              go.textContent = 'approve it in your browser';
+            })
+            .catch(() => {
+              go.disabled = false;
+              go.textContent = 'could not start — try the connect page';
+            });
+        });
+        tip.appendChild(go);
+      } else if (CONNECT_PAGE.has(kindOf(src.id))) {
         const open = document.createElement('button');
         open.className = 'hold-ok';
         open.textContent = 'open the connect page ↗';

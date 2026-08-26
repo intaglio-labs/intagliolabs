@@ -81,6 +81,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     "openFullDiskAccess", "startSources",
                     // The in-panel API-key walkthrough (granola first).
                     "connectSecret", "openApp",
+                    // Google signs in from the tile: mail and calendar are one
+                    // account and one grant, taken by ops/gcal-auth.mjs, which
+                    // opens the browser itself. Without this grant the button
+                    // renders and silently does nothing, which is exactly the
+                    // class widget/test/bridge-capabilities.test.mjs exists to
+                    // catch — and did catch, here.
+                    "googleAuth",
                    "permissionState", "requestPermission"],
     "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
                    "widgetSpot", "openPeople",
@@ -653,6 +660,17 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "bridgeBegin":
       let p = String((payload["p"] as? String ?? "").prefix(24))
       bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { [weak self] d in
+        self?.reply(webView, id, d)
+      }
+    case "googleAuth":
+      // START THE GOOGLE SIGN-IN FROM THE TILE, with no terminal in the way.
+      // The connect service spawns ops/gcal-auth.mjs, which opens Google in the
+      // default browser and listens on its own loopback port for the callback.
+      // Nothing sensitive crosses this bridge: the request carries only which
+      // of two fixed flows to run, and the grant is written by that helper
+      // straight into ~/.hazlie/secrets.
+      let gf = String(payload["flow"] as? String ?? "google")
+      bridgeCall("POST", "api/google-auth", json: ["flow": gf], timeout: 10) { [weak self] d in
         self?.reply(webView, id, d)
       }
     case "connectSecret":

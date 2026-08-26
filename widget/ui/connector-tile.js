@@ -126,8 +126,14 @@ const HZ_HINTS = {
   contacts: { text: 'Allow Contacts for intaglio labs when it asks, or in System Settings → Privacy & Security → Contacts.' },
   files: { text: 'Sign in to iCloud Drive, Box, or Dropbox on this Mac — any one of them counts.' },
   calendar: { text: 'Connect your Google account on the connect page and approve read-only calendar access.' },
-  mail: { text: 'Create a 16-letter Google app password, then paste it on the connect page.',
-          url: 'https://myaccount.google.com/apppasswords', link: 'Google app passwords' },
+  // ~~"Create a 16-letter Google app password, then paste it on the connect
+  // page", linking myaccount.google.com/apppasswords.~~ False since the
+  // connector moved to OAuth (2026-08-26): there is no app password to make,
+  // the page it pointed at no longer leads anywhere useful, and the form on
+  // the connect page that would have accepted one is deleted. A hint that
+  // describes a flow the product no longer has is worse than no hint — it
+  // sends the owner off to do work that cannot succeed.
+  mail: { text: 'Sign in to Google and approve read-only access to your mail. Run it again with another account to add a second mailbox.' },
   // granola left the sentence behind (owner, 2026-08-25): its panel is the
   // in-app walkthrough — open granola.ai, create a key, paste it right here.
   granola: { app: 'com.granola.app', url: 'https://granola.ai', link: 'Granola',
