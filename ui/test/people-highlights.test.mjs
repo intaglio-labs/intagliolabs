@@ -30,22 +30,25 @@ test('no entries yields no cards rather than empty ones', () => {
   assert.deepEqual(buildHighlights(null, { year: 2026, now: NOW }), []);
 });
 
-test('most engaged is ranked by engagement and names the measured activity', () => {
+test('person of the year claims "next three combined" only when it is true', () => {
   const runaway = buildHighlights([
     entry('a', 1000, tl('2026-01')),
     entry('b', 100, tl('2026-01')),
     entry('c', 100, tl('2026-01')),
     entry('d', 100, tl('2026-01')),
   ], { year: 2026, now: NOW });
-  const card = find(runaway, 'person-of-the-year');
-  assert.equal(card.label, 'most engaged');
-  assert.match(card.line, /1,000 messages — most engagement this year/);
+  assert.match(find(runaway, 'person-of-the-year').line, /more than your next three combined/);
 
-  const engagementWins = buildHighlights([
-    entry('chatty', 500, tl('2026-01'), 500),
-    entry('met-often', 100, tl('2026-01'), 700),
+  // 400 is NOT more than 300+300+300 — the sentence must change, not soften.
+  const close = buildHighlights([
+    entry('a', 400, tl('2026-01')),
+    entry('b', 300, tl('2026-01')),
+    entry('c', 300, tl('2026-01')),
+    entry('d', 300, tl('2026-01')),
   ], { year: 2026, now: NOW });
-  assert.equal(find(engagementWins, 'person-of-the-year').name, 'met-often');
+  const line = find(close, 'person-of-the-year').line;
+  assert.doesNotMatch(line, /next three/);
+  assert.match(line, /your most this year/);
 });
 
 test('a person with no messages earns no card at all', () => {

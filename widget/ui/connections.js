@@ -19,18 +19,10 @@ const closeHint = () => {
 };
 new MutationObserver(() => {
   const open = [...hintHost.children].some((el) => !el.classList.contains('hint-x'));
-  // Structural :not(:empty) animation restarted on every replaceChildren(),
-  // so switching connector details looked like the whole UI reloaded. Keep a
-  // stable state class instead: it animates only closed -> open, not content ->
-  // different content while the pop-over remains open.
-  hintHost.classList.toggle('open', open);
+  document.body.classList.toggle('hint-open', open);
   if (open) {
-    // A POP-OVER, not a side strip (owner, 2026-08-25): anchored to the tile
-    // that was pressed — toggle() marks it .open just before appending — and
-    // the window no longer widens for it (the extraWidth post left with the
-    // strip). Re-placed on every content change, because the anchor is the
-    // one fixed point while async login replies grow the card.
-    hzPlacePop(hintHost, document.querySelector('#grid .row.open'));
+    const main = document.querySelector('.conn-main');
+    if (main) hintHost.style.height = `${Math.round(main.getBoundingClientRect().height)}px`;
     if (!hintHost.querySelector('.hint-x')) {
       const x = document.createElement('button');
       x.className = 'hint-x';
@@ -41,7 +33,9 @@ new MutationObserver(() => {
     }
   } else {
     hintHost.replaceChildren(); // drop an orphaned x so :empty hides the host
+    hintHost.style.height = '';
   }
+  hzPost('fitContent', { height: 0, extraWidth: open ? 248 : 0 }).catch(() => {});
 }).observe(hintHost, { childList: true });
 const notice = document.getElementById('notice');
 const settings = document.getElementById('settings');
@@ -58,16 +52,10 @@ function settingRow({ name, note, on, message }) {
   const label = document.createElement('span');
   label.className = 'setting-name';
   label.textContent = name;
-  text.appendChild(label);
-  // The note is optional now — both switch rows shed theirs (owner,
-  // 2026-08-25): "Reduce Motion is on for this Mac" and "presses, sending
-  // and replies" explained controls whose names already say it.
-  if (note) {
-    const sub = document.createElement('span');
-    sub.className = 'setting-note';
-    sub.textContent = note;
-    text.appendChild(sub);
-  }
+  const sub = document.createElement('span');
+  sub.className = 'setting-note';
+  sub.textContent = note;
+  text.append(label, sub);
 
   const sw = document.createElement('button');
   sw.className = 'switch' + (on ? ' on' : '');
@@ -177,11 +165,35 @@ function rangeRow({ name, note, value, min, max, step, message, format }) {
   return el;
 }
 
-// A setting that DOES something rather than holding a value — same row, a pill
-// instead of a switch — went with its only caller, the onboarding row in
-// renderSettings(). Kept in history rather than in the file: the
-// `.setting-action` styling it used is still in palette.css, so the next
-// action row is a function away.
+// A setting that DOES something rather than holding a value: same row, a pill
+// instead of a switch.
+function actionRow({ name, note, action, message }) {
+  const el = document.createElement('div');
+  el.className = 'setting';
+
+  const text = document.createElement('div');
+  text.className = 'setting-text';
+  const label = document.createElement('span');
+  label.className = 'setting-name';
+  label.textContent = name;
+  const sub = document.createElement('span');
+  sub.className = 'setting-note';
+  sub.textContent = note;
+  text.append(label, sub);
+
+  const btn = document.createElement('button');
+  btn.className = 'setting-action';
+  btn.textContent = action;
+  btn.addEventListener('click', () => {
+    hzPost(message).catch(() => {});
+    // The flow takes over the screen; leaving this popup open behind it just
+    // means finding it again afterwards.
+    hzPost('close').catch(() => {});
+  });
+
+  el.append(text, btn);
+  return el;
+}
 
 // The answer model is a Settings choice, not an onboarding gate. Fresh installs
 // default to the roughly 5 GB tier; this row keeps the smaller option available
@@ -193,10 +205,10 @@ function modelRow() {
   head.className = 'setting-head';
   const name = document.createElement('span');
   name.className = 'setting-name';
-  name.textContent = 'local model size';
-  // The corner GB readout was yeeted (owner, 2026-08-25): the highlighted
-  // tier button says the same thing one line lower.
-  head.append(name);
+  name.textContent = 'model';
+  const value = document.createElement('span');
+  value.className = 'setting-value';
+  head.append(name, value);
   const choices = document.createElement('div');
   choices.className = 'model-pick';
   const status = document.createElement('span');
@@ -220,6 +232,7 @@ function modelRow() {
   function paint() {
     if (!state) return;
     const active = state.model || '';
+    value.textContent = active ? (active === '8b' ? '5.0 GB' : '2.5 GB') : 'not installed';
     choices.replaceChildren();
     for (const tier of state.tiers || []) {
       const b = document.createElement('button');
@@ -269,18 +282,12 @@ function fitConnections() {
   requestAnimationFrame(() => {
     fitQueued = false;
     const main = document.querySelector('.conn-main');
+    const host = document.querySelector('.hint-host');
     if (!main) return;
     const pad = 28; // .win vertical padding, 14 top + 14 bottom
-    // The column scrolls on purpose vertically, which means it CAN be
-    // scrolled sideways by a focus() on something past an edge (overflow-x
-    // hidden only hides the scrollbar, not the ability) — and a sideways
-    // scroll here is the settings cards losing their left edge. This fitter
-    // already wakes on every mutation, so it is the one place to undo that.
-    if (main.scrollLeft !== 0) main.scrollLeft = 0;
     const mh = main.scrollHeight;
-    // The hint no longer joins the measure: a pop-over floats over the page
-    // and sizes itself to the room its tile leaves it (hzPlacePop).
-    const h = Math.ceil(mh + pad);
+    const hh = host && host.childElementCount ? host.scrollHeight : 0;
+    const h = Math.ceil(Math.max(mh, hh) + pad);
     if (Math.abs(h - fitLast) < 3) return; // deadband, or the resize re-measures forever
     fitLast = h;
     hzPost('fitContent', { height: h }).catch(() => {});
@@ -314,6 +321,7 @@ async function renderSettings() {
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     rows.push(settingRow({
       name: 'animations',
+      note: 'Reduce Motion is on for this Mac',
       on: p && p.motion === true,
       message: 'setMotion',
     }));
@@ -322,6 +330,7 @@ async function renderSettings() {
   // the only place they can be turned off.
   rows.push(settingRow({
     name: 'sounds',
+    note: 'presses, sending and replies',
     on: !p || p.sounds !== false,
     message: 'setSounds',
   }));
@@ -333,17 +342,12 @@ async function renderSettings() {
     hzPost('setScale', { scale: 1 }).catch(() => {});
   }
   rows.push(modelRow());
-  // The onboarding row was yeeted (owner, 2026-08-25): ~~a `run` pill that
-  // replayed the welcome flow~~. Settings is where you change what the app
-  // does, not where you re-watch its introduction, and the one control here
-  // that took over the whole screen was the one nobody wanted twice.
-  //
-  // This page's `openOnboarding` grant and the bridge case behind it went too,
-  // because bridge-capabilities.test.mjs holds the map to exactly what the
-  // pages call: an ungranted case is an orphan and a granted-but-uncalled verb
-  // is a re-widened surface, and it fails on both. main.swift keeps its own
-  // openOnboarding, so first run and the two paths that still reach it — a
-  // resumed flow, and the `onboarding` URL scheme — are unchanged.
+  rows.push(actionRow({
+    name: 'onboarding',
+    note: 'replay the welcome flow',
+    action: 'run',
+    message: 'openOnboarding',
+  }));
   settings.replaceChildren(...rows);
 }
 renderSettings();
@@ -369,10 +373,7 @@ hzPost('prefs')
 // One sentence per source on how to connect it. Links open in the default
 // browser via the native bridge — the webview itself can navigate nowhere.
 const FDA_HINT = {
-  // ~~text: the sentence walking through the grant.~~ Yeeted (owner,
-  // 2026-08-25), same call as the broken-branch steps: the link IS the
-  // walkthrough — it opens the exact pane with the right row to switch on.
-  text: '',
+  text: 'Switch on intaglio labs under System Settings → Privacy & Security → Full Disk Access.',
   url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles',
   link: 'Open System Settings',
   // One per Mac: there is no second Messages, Notes or photo library to add.
@@ -395,30 +396,8 @@ const HINTS = {
   calendar: { text: 'Connect your Google account on the connect page and approve read-only calendar access.' },
   mail: { text: 'Create a 16-letter Google app password, then paste it on the connect page.',
           url: 'https://myaccount.google.com/apppasswords', link: 'Google app passwords' },
-  // granola left this table (owner, 2026-08-25): its panel is the in-app
-  // walkthrough now — open granola.ai, create a key, paste it right here.
-  granola: { app: 'com.granola.app', url: 'https://granola.ai', link: 'Granola',
-             walkthrough: true }, // the DESKTOP app first — the key lives in its settings
-  // Telegram needs the OWNER's own api_id/api_hash before its bridge will
-  // even start (my.telegram.org/apps). Same three-step shape as granola's:
-  // open the page, make the thing, paste it back — connectSecret writes it
-  // into the bridge config and starts the container.
-  //
-  // RESTORED (2026-08-26): this entry was collateral damage when the LinkedIn
-  // export card was deleted a commit later, and losing it turned Telegram's
-  // card back into a "begin login" that hangs forever against a container
-  // that will not start. The walkthrough is the only thing on this card that
-  // can make that container run.
-  telegram: {
-    url: 'https://my.telegram.org/apps',
-    link: 'my.telegram.org',
-    walkthrough: true,
-    step2: 'create an app, then copy its api_id and api_hash',
-    paste: 'paste api_id:api_hash',
-  },
-  // ~~linkedin: how to request an export and where to unzip it.~~ Gone with
-  // the export itself (owner, 2026-08-25): LinkedIn is a bridge now, so its
-  // tile renders the ordinary cookie-login flow like Messenger's.
+  granola: { text: 'Copy your API key from Granola settings, then paste it on the connect page.',
+             url: 'https://granola.ai', link: 'granola.ai' },
   // OAuth2 since Oura retired personal access tokens in Dec 2025: the PAT
   // page this used to link is a dead end, and there is no settings page to
   // send anyone to instead, so this one is text-only — the connect page
@@ -431,16 +410,37 @@ function hintFor(id) {
   return id.startsWith('mail:') ? HINTS.mail : HINTS[id];
 }
 
-// The WHY table — one sentence per connector on what data it reads, shown as a
-// subheader under the panel title — was yeeted for every connector (owner,
-// 2026-08-25). The hint's how-to and the caveat lines already say what is read
-// where it matters, and the subheader had become a second copy that each panel
-// paid a line of height for. The privacy line (STAY, below) survives — it is a
-// promise, not a description, and nothing else on the panel makes it.
+// Why each connector is worth connecting — one or two sentences, shown the
+// FIRST time its tile is pressed, with the privacy line under it. Keyed by
+// kind (both mail accounts are one "mail"); the fallback keeps an unknown
+// future source from arriving with no story at all.
+// One sentence, factual: WHAT DATA this source gives access to. Not a pitch —
+// the owner wants the subheader to say plainly what is read.
+const WHY = {
+  imessage: "your text messages and who they're with.",
+  photos: "photo dates, places, and the people your library has tagged.",
+  notes: "the notes you've written.",
+  files: "pdfs, docs, and downloads on this Mac.",
+  calendar: "your events — titles, times, and who's invited.",
+  mail: "your email — senders, subjects, and message text.",
+  granola: "your meeting notes and transcripts.",
+  oura: "your sleep, readiness, and activity data.",
+  notion: "the pages you share with the integration.",
+  linkedin: "your connections and their details, from your export.",
+  whatsapp: "your WhatsApp chats and who they're with.",
+  messenger: "your Messenger DMs.",
+  instagram: "your Instagram DMs.",
+  twitter: "your X DMs.",
+  telegram: "your Telegram chats and channels.",
+  discord: "your Discord DMs and servers.",
+  slack: "your Slack messages and channels.",
+  contacts: "names, phone numbers, and email addresses.",
+};
+const WHY_FALLBACK = "the data from this source, read on your Mac.";
 
 // Connectors finished on the loopback connect page (paste an app password or
 // token there). They get an "open the connect page" door in their hint.
-const CONNECT_PAGE = new Set(['mail', 'oura', 'notion']); // granola pastes in-panel now
+const CONNECT_PAGE = new Set(['mail', 'oura', 'notion', 'granola']);
 
 // How each social bridge authenticates — it is NOT the same for all of them,
 // and the web-cookie-harvest button only fits the cookie ones. The token and
@@ -455,25 +455,26 @@ const CONNECT_PAGE = new Set(['mail', 'oura', 'notion']); // granola pastes in-p
 // decision and they disagreed about X, which had a login button here and no
 // matching host in the fence, so the window opened blank.
 const BRIDGE_FLOW = {
-  twitter: 'cookie', messenger: 'cookie', instagram: 'cookie', linkedin: 'cookie',
-  // ~~discord/slack: 'token'~~ — neither pastes a token any more (2026-08-26).
-  // `flow` decides two things: whether the cookie login button is offered, and
-  // whether the reply box is a textarea. Discord approves a link in its phone
-  // app and Slack answers with an email address; both are one short line.
-  discord: 'link', slack: 'email', telegram: 'phone',
+  twitter: 'cookie', messenger: 'cookie', instagram: 'cookie',
+  discord: 'token', slack: 'token', telegram: 'phone',
 };
-// ~~Each of these carried a `lead` sentence ("Slack logs in with two tokens
-// from your browser (xoxc and xoxd).") and a how-to link into the mautrix
-// docs.~~ Yeeted for all three (owner, 2026-08-25), same shape as every other
-// explainer this panel has shed: the input's placeholder names exactly what
-// to paste, and that is the whole briefing the flow needs.
 const BRIDGE_HELP = {
-  // What the bot is about to ask for, in the words of the flow it actually
-  // runs. ~~"your Discord token" / "your Slack tokens"~~ described a command
-  // (`login-token`) these bridges reject outright (2026-08-26).
-  discord: { place: 'approve the link in your Discord app' },
-  slack: { place: 'your Slack email address' },
-  telegram: { place: 'phone (+1…), then the code' },  // after its api keys are set
+  discord: {
+    lead: "Discord logs in with your account token, not a password.",
+    place: 'your Discord token',
+    url: 'https://docs.mau.fi/bridges/go/discord/authentication.html',
+    link: 'how to find your token',
+  },
+  slack: {
+    lead: "Slack logs in with two tokens from your browser (xoxc and xoxd).",
+    place: 'your Slack tokens',
+    url: 'https://docs.mau.fi/bridges/go/slack/authentication.html',
+    link: 'how to find your tokens',
+  },
+  telegram: {
+    lead: "Telegram texts a code to your app. Send your phone number first, then the code.",
+    place: 'phone (+1…), then the code',
+  },
 };
 // The claim the system actually keeps, not the one it doesn't. This line
 // renders under EVERY tile including the social bridges, which hold a live
@@ -481,7 +482,7 @@ const BRIDGE_HELP = {
 // mac" was false there (the ops/EGRESS.json ledger enumerates the real
 // paths). What IS true everywhere: hazlie reasons over it locally and no
 // cloud model sees it.
-const STAY = "data stored locally";
+const STAY = "no cloud model ever sees it";
 
 const kindOf = (id) => (id.startsWith('mail:') ? 'mail' : id);
 
@@ -506,15 +507,11 @@ const CONNECTOR_ORDER = [
 const HIDDEN_CONNECTORS = new Set(['oura', 'photos', 'files', 'notion', 'notes']);
 // WHAT NEEDS YOU COMES FIRST. The shelf scrolls, so anything past the fourth
 // tile is work to reach — and the tiles that need reaching are exactly the
-// ones not yet connected or broken. Those lead; everything healthy follows in
-// the scan order below. The consequence is deliberate: connect something and
-// it MOVES, out of the way, which is the shelf telling you it is done.
-// ~~`|| !!s.caveat` was the third term~~ — dropped (owner, 2026-08-25):
-// WhatsApp carries a PERMANENT disclosure caveat ("only as fresh as the last
-// time WhatsApp Desktop ran"), so a freshly connected WhatsApp sat pinned at
-// the front forever, which is the exact opposite of the move-out-of-the-way
-// promise above. A standing disclosure is not a call to action.
-const needsYou = (s) => !s.connected || s.broken === true;
+// ones not yet connected, or connected with a caveat (a stale sync, a
+// permission that lapsed). Those lead; everything healthy follows in the
+// scan order below. The consequence is deliberate: connect something and it
+// MOVES, out of the way, which is the shelf telling you it is done.
+const needsYou = (s) => !s.connected || !!s.caveat;
 function orderSources(sources) {
   const rank = (s) => {
     const i = CONNECTOR_ORDER.indexOf(kindOf(s.id));
@@ -531,10 +528,6 @@ function orderSources(sources) {
 
 // Fixed strings only — the widget reports states, it never invents them.
 const NOTICES = {
-  // The social bridges need their local engine running (ops/setup-bridges.sh
-  // starts it). Named separately from `down` because the remedy is different
-  // and specific: this is not "unknown", it is "start it".
-  nobridge: 'the social bridge engine is not running — open Docker, then: bash ops/setup-bridges.sh',
   down: 'connect service unreachable — status unknown',
   auth: 'token mismatch — status unknown',
   noroute: 'connect service predates /api/status — status unknown',
@@ -562,17 +555,9 @@ function showTileTip(row, label) {
   const x = Math.min(Math.max(4, r.left + r.width / 2 - w / 2),
     window.innerWidth - w - 4);
   tileTip.style.left = `${x}px`;
-  // Above the tile, not below (owner, 2026-08-25): the shelf lives at the
-  // bottom of both panels, so a below-the-tile tip landed on the window's
-  // bottom edge and clipped to its top half.
-  tileTip.style.top = 'auto';
-  tileTip.style.bottom = `${Math.round(window.innerHeight - r.top + 6)}px`;
+  tileTip.style.top = `${r.bottom + 6}px`;
 }
 function hideTileTip() { if (tileTip) tileTip.classList.remove('on'); }
-
-// Sources already refreshed once because the shelf disagreed with their own
-// bridge. Module scope, so it survives the card rebuild that refresh() causes.
-const staleRefreshed = new Set();
 
 function card(src, keep) {
   // Square tiles, four to a row. The old compact rows ruled out a 3-column
@@ -639,131 +624,48 @@ function card(src, keep) {
   // every later press, with native remembering which kinds were walked
   // through. The owner merged them (2026-08-22): the full story is short
   // enough to always show, and the panel's corner x is the only dismiss.
-  // The in-panel walkthrough (owner, 2026-08-25): the whole connect flow
-  // lives right here — open the site, make the credential, paste it back —
-  // instead of handing the owner to the connect page. Shared, because two
-  // connectors reach it by different routes now: granola through the plain
-  // hint, telegram from inside its bridge branch (its api keys must exist
-  // before its bot can be spoken to at all).
-  const walkthrough = (hint) => {
-    // lives right here — open the site, make a key, paste it — instead of
-  // handing the owner to the connect page. hint.url is the door;
-  // connectSecret (Bridge → POST /api/secret) is where the paste lands.
-  const open = document.createElement('button');
-  open.className = 'hold-ok';
-  open.textContent = `1 · open ${hint.link} ↗`;
-  open.addEventListener('click', (e) => {
-    e.stopPropagation();
-    // The installed app first, the website only if it is not there —
-    // openApp answers notInstalled rather than failing silently.
-    if (hint.app) {
-      hzPost('openApp', { bundleId: hint.app })
-        .then((d) => {
-          if (!d || d.state !== 'ok') hzPost('openExternal', { url: hint.url }).catch(() => {});
-        })
-        .catch(() => { hzPost('openExternal', { url: hint.url }).catch(() => {}); });
-      return;
-    }
-    hzPost('openExternal', { url: hint.url }).catch(() => {});
-  });
-  const step2 = document.createElement('span');
-  step2.className = 'setup';
-  step2.textContent = `2 · ${hint.step2 || 'create an API key and copy it'}`;
-  const paste = document.createElement('textarea');
-  paste.className = 'bpaste';
-  paste.placeholder = hint.paste || '3 · paste the key here';
-  paste.setAttribute('spellcheck', 'false');
-  const send = document.createElement('button');
-  send.className = 'hold-ok';
-  send.textContent = 'connect';
-  const said = document.createElement('span');
-  said.className = 'setup';
-  send.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const val = paste.value.trim();
-    if (!val) return;
-    paste.value = ''; // gone from the page before anything else happens
-    send.disabled = true; send.textContent = 'connecting…';
-    hzPost('connectSecret', { p: kindOf(src.id), value: val })
-      .then((d) => {
-        if (d && d.state === 'ok') { refresh(); return; }
-        send.disabled = false; send.textContent = 'connect';
-        said.textContent = (d && d.error) || 'could not save the key';
-      })
-      .catch(() => {
-        send.disabled = false; send.textContent = 'connect';
-        said.textContent = 'could not reach the connect service';
-      });
-  });
-  tip.append(open, step2, paste, send, said);
-  };
-
   const renderTip = () => {
     tip.replaceChildren();
     tip.classList.add('hold');
     const head = document.createElement('b');
     head.textContent = src.label;
     tip.appendChild(head);
-    // The privacy line sits under the NAME, not at the card's foot (owner,
-    // 2026-08-25): it is the promise the whole card stands on, and at the
-    // bottom it dangled under whatever the flow happened to end with.
-    const stay = document.createElement('span');
-    stay.className = 'stay';
-    stay.textContent = STAY;
-    tip.appendChild(stay);
+    {
+      const why = document.createElement('span');
+      why.className = 'why';
+      why.textContent = WHY[kindOf(src.id)] || WHY_FALLBACK;
+      tip.appendChild(why);
+    }
     // A broken source states the problem BEFORE the WHY and the how-to. It is
     // the only thing on this panel the owner has to act on, and burying it
     // under an explanation of what Granola is would be the wrong order.
-    if (src.disabled && src.action === 'enable') {
-      // No sentence above the button (owner, 2026-08-25): "has not connected
-      // this source yet" restated what the button already says.
-      const enable = document.createElement('button');
-      enable.className = 'hold-ok';
-      enable.textContent = 'connect';
-      enable.addEventListener('click', (e) => {
-        e.stopPropagation();
-        enable.disabled = true;
-        enable.textContent = 'connecting…';
-        hzPost('setConnectorEnabled', { connector: src.id, enabled: true })
-          .then(refresh)
-          .catch(() => { enable.disabled = false; enable.textContent = 'connect'; });
-      });
-      tip.appendChild(enable);
-    } else if (src.broken && src.fix) {
-      // Full Disk Access is not a failure, it is the setup step every local
-      // store starts at — so it lost its red block (owner, 2026-08-25): the
-      // alarm heading, the tinted panel, the red-outlined button, all of it.
-      // Now it reads like every other not-yet-connected source: the steps in
-      // plain text, then the same button style the rest of the panel uses.
+    if (src.broken && src.fix) {
+      const bad = document.createElement('span');
+      bad.className = 'broken';
+      const what = document.createElement('b');
+      what.textContent = src.detail || 'not working';
+      bad.append(what, document.createTextNode(' ' + src.fix));
+
+      // Full Disk Access is the one failure with a place to send them, so it
+      // gets a button rather than a paragraph to follow by hand.
       if (src.action === 'fda') {
-        // ~~The written steps (src.fix) rendered above the button.~~ Yeeted
-        // (owner, 2026-08-25): the button IS the walkthrough — it lands on the
-        // exact Settings pane — and a paragraph of directions above it made
-        // the panel read like homework. The server still sends the text; the
-        // connect page still uses it.
         const open = document.createElement('button');
-        open.className = 'hold-ok';
-        open.textContent = 'full disk access';
+        open.className = 'broken-fix';
+        open.textContent = 'Open Full Disk Access';
         open.addEventListener('click', (e) => {
           e.preventDefault();
           e.stopPropagation();
-          // The primed verb, not the bare pane URL: openFullDiskAccess
-          // attempts a protected read first, which is what puts "intaglio
-          // labs" in the pane's list ready to switch on (Permissions.swift
-          // primeFullDisk carries the reasoning).
-          hzPost('openFullDiskAccess').catch(() => {});
+          // Degrades on purpose: until this URL is in Bridge.swift's
+          // allowedExternal the bridge answers "url not in allowlist", and the
+          // written steps above are already on screen — so the worst case is a
+          // button that does nothing visible, never a dead end.
+          hzPost('openExternal', {
+            url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles',
+          }).catch(() => {});
         });
-        tip.appendChild(open);
-      } else {
-        // Everything else that is broken stays loud: red is for a thing that
-        // worked and stopped, and those still exist.
-        const bad = document.createElement('span');
-        bad.className = 'broken';
-        const what = document.createElement('b');
-        what.textContent = src.detail || 'not working';
-        bad.append(what, document.createTextNode(' ' + src.fix));
-        tip.appendChild(bad);
+        bad.appendChild(open);
       }
+      tip.appendChild(bad);
     } else if (src.connected) {
       // CONNECTED: one line naming what's connected, and a + to add another
       // account (owner). Mail carries the address in its id; the local stores
@@ -793,8 +695,6 @@ function card(src, keep) {
         });
         tip.appendChild(add);
       }
-    } else if (hint && hint.walkthrough) {
-      walkthrough(hint);
     } else if (hint) {
       // Not connected: the one-sentence how-to to set it up.
       const setup = document.createElement('span');
@@ -826,6 +726,12 @@ function card(src, keep) {
         tip.appendChild(open);
       }
     }
+    {
+      const stay = document.createElement('span');
+      stay.className = 'stay';
+      stay.textContent = STAY;
+      tip.appendChild(stay);
+    }
   };
 
   // The social bridges (Messenger/Instagram) log in INSIDE this popup —
@@ -841,27 +747,10 @@ function card(src, keep) {
   // stays grey while the account is plainly linked — the owner's "why isn't
   // it green". Re-reading status on the success we can actually see closes
   // the race from the only side that knows.
-  // ~~A once-only flag, pre-set to true on the adopt path to stop a refresh
-  // loop.~~ It stopped the loop by stopping the SECOND refresh too, and the
-  // second is the one that matters: a bridge whose login finishes after the
-  // shelf last rendered (X, whose PIN step lands minutes later) reported
-  // "connected · content_printer" in the panel while its tile kept a grey dot
-  // (owner, 2026-08-25).
-  //
-  // The staleness test replaces it and cannot loop by construction: it fires
-  // only when the panel knows connected and the TILE's own row does not, and
-  // one refresh makes that false. No flag to get stuck.
+  let refreshedOnConnect = false;
   const renderBridge = (data) => {
-    // ONCE PER SOURCE, and the bound is the whole design. The bare staleness
-    // test loops: refresh() rebuilds the shelf, the rebuilt tile adopts the
-    // strip, the strip re-reads "connected", and if the status row still
-    // disagrees it refreshes again — 108k times in a harness that held the
-    // disagreement still (2026-08-25). The shelf and the bridge read the same
-    // database, so one refresh is enough to reconcile them; a second would
-    // mean the server is answering differently from itself, and hammering it
-    // is not how that gets fixed.
-    if (data && data.connected && !src.connected && !staleRefreshed.has(src.id)) {
-      staleRefreshed.add(src.id);
+    if (data && data.connected && !refreshedOnConnect) {
+      refreshedOnConnect = true;
       refresh();
     }
     tip.replaceChildren();
@@ -869,67 +758,23 @@ function card(src, keep) {
     const head = document.createElement('b');
     head.textContent = src.label;
     tip.appendChild(head);
-    // The privacy line sits under the NAME, not at the card's foot (owner,
-    // 2026-08-25): it is the promise the whole card stands on, and at the
-    // bottom it dangled under whatever the flow happened to end with.
-    const stay = document.createElement('span');
-    stay.className = 'stay';
-    stay.textContent = STAY;
-    tip.appendChild(stay);
+    const why = document.createElement('span');
+    why.className = 'why';
+    why.textContent = WHY[kindOf(src.id)] || WHY_FALLBACK;
+    tip.appendChild(why);
 
-    // ~~The whole bot transcript rendered as a grey log.~~ Yeeted (owner,
-    // 2026-08-25: "don't show that shit on any of the connectors"). It was a
-    // machine conversation shown verbatim: the bridge's cookie-format example,
-    // its "Login URL:" echo, its cancel acknowledgements — noise that read as
-    // an error even while the login was succeeding. What the owner actually
-    // needs is the bot's LAST question, which is the only line that ever asks
-    // for anything (X's PIN prompt is exactly this). One line, plain, no log.
-    const LABEL = src.label;
-        // mautrix builds this prompt by gluing "Please enter your " onto the
-        // field's own name, so X's arrives as "Please enter your Create your
-        // PIN code" — two verbs, one sentence (owner, 2026-08-25). Unglue it
-        // and name the platform, so the card asks one clear thing.
-        const tidy = (line) => {
-          const m = /^please enter your\s+(.+)$/iu.exec(line);
-          if (!m) return line;
-          const field = m[1].replace(/\.$/u, '').trim();
-          const verb = /^(create|enter|choose|register)\b/iu.exec(field);
-          if (verb) {
-            const rest = field.slice(verb[0].length).trim();
-            return `please ${verb[0].toLowerCase()} ${rest} for ${LABEL}`;
-          }
-          return `please enter your ${field} for ${LABEL}`;
-        };
-    const askedFor = () => {
-      if (!(data && Array.isArray(data.transcript))) return null;
-      for (let i = data.transcript.length - 1; i >= 0; i--) {
-        const m = data.transcript[i];
-        if (m.from !== 'bot') continue;
-        // The example blob and the URL echo are instructions to a machine, not
-        // to a person; the last real prompt is behind them.
-        const body = String(m.body || '').trim();
-        if (!body || body.startsWith('Login URL:') || body.includes('`{')) continue;
-        // Keep it to the sentence that asks, not the paragraph around it.
-        // A QUESTION, or nothing. ~~Fell back to the bot's first line.~~ That
-        // made any chatter look like a pending step: after the engine
-        // restarted under a half-finished login, the bot answered the PIN
-        // with "Unknown command, use the `help` command" — no login was in
-        // progress any more — and the panel dutifully offered a box to answer
-        // it with (owner, 2026-08-25). No prompt means no pending step, which
-        // is exactly when the log in button should come back.
-        const ask = body.split('\n').map((l) => l.trim()).filter(Boolean)
-          .find((l) => l.endsWith('?') || /^(please|enter|register|create|choose)\b/iu.test(l));
-        return ask ? tidy(ask) : null;
-      }
-      return null;
-    };
+    // Any bot chatter shows so the owner sees what the bridge said/asked.
     const appendTranscript = () => {
-      const ask = askedFor();
-      if (!ask) return;
-      const line = document.createElement('span');
-      line.className = 'setup';
-      line.textContent = ask; // server-masked; text only, never HTML
-      tip.appendChild(line);
+      if (!(data && data.transcript && data.transcript.length)) return;
+      const log = document.createElement('div');
+      log.className = 'blog';
+      for (const m of data.transcript) {
+        const line = document.createElement('div');
+        line.className = 'bline' + (m.from === 'you' ? ' you' : '');
+        line.textContent = m.body; // server-masked; text only, never HTML
+        log.appendChild(line);
+      }
+      tip.appendChild(log);
     };
     // A one-line input that relays whatever the bot last asked for (a token,
     // a phone number, then the code) and re-renders with the bot's reply.
@@ -940,24 +785,15 @@ function card(src, keep) {
       box.setAttribute('spellcheck', 'false');
       const send = document.createElement('button');
       send.className = 'hold-ok';
-      // THE VERB FOLLOWS THE QUESTION. "create" is right for X's PIN, which is
-      // being made rather than sent (owner, 2026-08-25) — and wrong for Slack's
-      // email address, which is being given (owner, 2026-08-26, looking at a
-      // card that said "create" under "enter your email"). The bot's own
-      // wording decides: it says "please create ..." when something is being
-      // made, and anything else is an answer.
-      const asked = askedFor() || '';
-      send.textContent = /\bcreate\b/iu.test(asked) ? 'create' : 'send';
+      send.textContent = 'send';
       const fire = () => {
         const val = box.value.trim();
         if (!val) return;
         box.value = ''; // gone from the page before anything else happens
-        const busy = send.textContent === 'create' ? 'creating…' : 'sending…';
-        const idle = send.textContent;
-        send.disabled = true; send.textContent = busy;
+        send.disabled = true; send.textContent = 'sending…';
         hzPost('bridgeCookies', { p: kindOf(src.id), cookies: val })
           .then(renderBridge)
-          .catch(() => { send.disabled = false; send.textContent = idle; });
+          .catch(() => { send.disabled = false; send.textContent = 'send'; });
       };
       send.addEventListener('click', (e) => { e.stopPropagation(); fire(); });
       if (!multiline) box.addEventListener('keydown', (e) => {
@@ -1005,83 +841,94 @@ function card(src, keep) {
       // devtools, no paste. See ops/WIDGET-WEBVIEW-LOGIN-SPEC.md.
       const login = document.createElement('button');
       login.className = 'hold-ok';
-      login.textContent = 'log in';
+      login.textContent = `log in to ${src.label}`;
       login.addEventListener('click', (e) => {
         e.stopPropagation();
         login.disabled = true; login.textContent = 'opening login…';
         hzPost('bridgeWebLogin', { p: kindOf(src.id) })
           .then(renderBridge)
-          .catch(() => { login.disabled = false; login.textContent = 'log in'; });
+          .catch(() => { login.disabled = false; login.textContent = `log in to ${src.label}`; });
       });
-      // Only when the bot is NOT mid-question (owner, 2026-08-25): pressing
-      // "log in" during the PIN step cancels the login and restarts it, so
-      // offering it beside the question is offering to undo the progress the
-      // question represents. The answer box below is the only way forward.
-      if (!askedFor()) tip.appendChild(login);
-      // ~~A 'cancelled' state appended "login window closed — tap to try
-      // again."~~ Yeeted (owner, 2026-08-25): the card already shows the same
-      // log in button either way, and the sentence squeezed in beside the
-      // pill saying what the owner just did themselves.
-      appendTranscript();
-      // A COOKIE LOGIN CAN HAVE A SECOND STEP, and until now this branch had
-      // no way to answer one. X accepted the harvested cookies and advanced to
-      // its encrypted-DM PIN (step fi.mau.twitter.login.juicebox_pin, owner
-      // hit it 2026-08-25) — the bot asked, nothing on this card could reply,
-      // and the login looked like it had failed when it had actually got
-      // further than ever. The relay input is the same one the token/phone
-      // flows use; it appears only when the bot is mid-conversation and not
-      // yet connected, so the ordinary one-shot cookie login is unchanged.
-      if (askedFor() && !(data && data.connected)) {
-        // The bot's question is already on screen directly above; the box only
-        // has to say it is the place to answer it.
-        relayInput('type your answer', false);
+      tip.appendChild(login);
+      if (data && data.state === 'cancelled') {
+        const note = document.createElement('span');
+        note.className = 'why';
+        note.textContent = 'login window closed — tap to try again.';
+        tip.appendChild(note);
       }
-      // The manual cookie-paste fallback ("having trouble? paste cookies
-      // manually") was yeeted (owner, 2026-08-25): the webview login is the
-      // flow, and a devtools-grade escape hatch under every login button made
-      // the panel read as if the button were expected to fail. bridgeCookies
-      // stays in the bridge for the token/phone conversation below.
+      appendTranscript();
+      // Advanced fallback, tucked away: paste cookies by hand (the old flow).
+      const adv = document.createElement('details');
+      const sum = document.createElement('summary');
+      sum.className = 'why';
+      sum.textContent = 'having trouble? paste cookies manually';
+      sum.addEventListener('click', (e) => e.stopPropagation());
+      adv.appendChild(sum);
+      const begin = document.createElement('button');
+      begin.className = 'hold-ok';
+      begin.textContent = 'begin manual login';
+      begin.addEventListener('click', (e) => {
+        e.stopPropagation();
+        begin.disabled = true; begin.textContent = 'starting…';
+        hzPost('bridgeBegin', { p: kindOf(src.id) })
+          .then(renderBridge)
+          .catch(() => { begin.disabled = false; begin.textContent = 'begin manual login'; });
+      });
+      const paste = document.createElement('textarea');
+      paste.className = 'bpaste';
+      paste.placeholder = 'paste cookies (JSON or Copy-as-cURL)';
+      paste.setAttribute('spellcheck', 'false');
+      const send = document.createElement('button');
+      send.className = 'hold-ok';
+      send.textContent = 'send';
+      send.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const val = paste.value.trim();
+        if (!val) return;
+        paste.value = '';
+        send.disabled = true; send.textContent = 'sending…';
+        hzPost('bridgeCookies', { p: kindOf(src.id), cookies: val })
+          .then(renderBridge)
+          .catch(() => { send.disabled = false; send.textContent = 'send'; });
+      });
+      adv.append(begin, paste, send);
+      tip.appendChild(adv);
     } else {
       // TOKEN (discord/slack) and PHONE (telegram): a guided conversation with
       // the bridge bot, because these do not authenticate by cookie harvest.
       // begin sends the login command; then the input relays whatever the bot
       // asks for (a token, or a phone number and then the code).
       const help = BRIDGE_HELP[kindOf(src.id)];
+      if (help) {
+        const lead = document.createElement('span');
+        lead.className = 'why';
+        lead.textContent = help.lead;
+        tip.appendChild(lead);
+        if (help.url) {
+          const a = document.createElement('a');
+          a.href = '#';
+          a.textContent = help.link + ' ↗';
+          a.addEventListener('click', (e) => {
+            e.preventDefault();
+            hzPost('openExternal', { url: help.url });
+          });
+          tip.appendChild(a);
+        }
+      }
       const started = data && data.transcript && data.transcript.length;
-      if (!started && hint && hint.walkthrough) {
-        // Telegram cannot begin at all until the owner's own api_id/api_hash
-        // are in its bridge config — the container refuses to start on the
-        // example pair mautrix ships, so "begin login" sat on "starting…"
-        // with no bot on the other end (owner, 2026-08-25). Its walkthrough
-        // comes first; once the keys land the bot answers and this branch
-        // gives way to the ordinary phone-code conversation.
-        walkthrough(hint);
-      } else if (!started) {
-        beginButton('begin login');
+      if (!started) {
+        beginButton(`begin ${src.label} login`);
       } else {
         appendTranscript();
         // The bot is waiting for the next thing. Token pastes want room;
         // a phone number or a code is one short line.
-        //
-        // The ask goes ABOVE the box, not inside it (owner, 2026-08-25): a
-        // placeholder is clipped by the input's own width — "enter phone
-        // (+1…), then the code" showed as "enter phone (+1…), t" — and it
-        // vanishes the moment typing starts, which is exactly when someone
-        // rereads it.
-        // OUR line only when the bot has not asked in its own words. Both at
-        // once printed the same instruction twice — "please enter your Email
-        // for Slack" directly above "enter your Slack email address" (owner,
-        // 2026-08-26). The bot's wording wins; ours is the fallback for a
-        // step that arrives without a question.
-        if (!askedFor() && help && help.place) {
-          const say = document.createElement('span');
-          say.className = 'setup';
-          say.textContent = `enter ${help.place}`;
-          tip.appendChild(say);
-        }
-        relayInput('type your answer', flow === 'token');
+        relayInput(`enter ${help ? help.place : 'your reply'}`, flow === 'token');
       }
     }
+    const stay = document.createElement('span');
+    stay.className = 'stay';
+    stay.textContent = STAY;
+    tip.appendChild(stay);
   };
 
   const openBridge = () => {
@@ -1143,21 +990,6 @@ function card(src, keep) {
         openBridgeLogin();
         return;
       }
-      // FDA tile (owner, 2026-08-25): the card had exactly one thing on it —
-      // the full disk access button — so the tile press IS the button press.
-      // openFullDiskAccess rather than the bare pane URL, because it touches a
-      // protected path first: that failed read is what makes macOS list
-      // "intaglio labs" in the pane, already there with its switch waiting —
-      // the closest to highlighting the row that macOS allows.
-      if (src.action === 'fda') {
-        hzPost('openFullDiskAccess').catch(() => {});
-        return;
-      }
-      // ~~The disabled-connector (WhatsApp) tile press auto-connected for a
-      // few hours on 2026-08-25.~~ Reverted the same day: connecting silently
-      // read as a false alarm — the dot just turned green with nothing
-      // explaining why that was enough — so the card with its connect button
-      // is back, and the press is the owner's, on the button.
       hintHost.appendChild(tip);
       row.classList.add('open');
       if (src.action === 'bridge') openBridge(); // connected → show status
@@ -1184,7 +1016,7 @@ function card(src, keep) {
     const typed = [...keep.querySelectorAll('textarea, input')].some((b) => b.value.trim());
     if (!typed) {
       hintHost.replaceChildren(tip);
-      if (src.action === 'bridge') openBridge();
+      if (src.action === 'bridge') { refreshedOnConnect = true; openBridge(); }
       else renderTip();
     }
     row.classList.add('open');

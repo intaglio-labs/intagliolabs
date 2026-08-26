@@ -54,7 +54,16 @@ import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch } from './people/search.mjs';
 import { loadOwner } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
-import { buildAvatars, buildMap, buildYear, buildSearchYears, yearCore, peopleCoreFreshness } from './people/map.mjs';
+import {
+  buildAvatars,
+  buildMap,
+  buildYear,
+  buildSearchYears,
+  yearCore,
+  peopleCoreFreshness,
+  useTallyStore,
+} from './people/map.mjs';
+import { openTallyStore } from './people/tallyStore.mjs';
 import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
@@ -1339,17 +1348,6 @@ export const KNOWN_SOURCES = Object.freeze([
   'notion',
   'linkedin',
   'whatsapp',
-  // The bridged social platforms, written by connectors/sources/matrix.mjs.
-  // One source per platform rather than a single "matrix": the bus is
-  // transport, and retention, purge and the people graph all reason about
-  // WHERE a message came from. Added with the connector (2026-08-25) —
-  // the note below is why omitting a real source is an outage, not safety.
-  'messenger',
-  'instagram',
-  'twitter',
-  'telegram',
-  'discord',
-  'slack',
   'hazlie_digest',
   'seed',
 ]);
@@ -2863,7 +2861,7 @@ function handle(db, req, res, cors, url, policy) {
   // map and WRITE the owner's merge decisions, neither of which is a browser
   // capability. The Origin channel is authenticated but not entitled here, so
   // 403 (not 401), matching handleAdmin's reasoning.
-  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary' || url.pathname === '/people/avatars') {
+  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary') {
     if (channel !== 'bearer') {
       send(res, 403, { error: 'people routes are bearer-only: call with the token from ~/.hazlie/secrets/hermes-token.txt and no Origin header.' }, cors);
       return;
@@ -3018,15 +3016,8 @@ async function handlePeople(db, req, res, cors, url, policy) {
     return;
   }
 
-  // The year summary: model-written, LOCAL llama only, generated on demand
-  // for one person and cached against the corpus stamp (people/summary.mjs
-  // carries the boundary reasoning). POST because the person key is data,
-  // not a path.
-  // The People page's faces. POST because it carries a list of person keys,
-  // and keys are data. Returns base64 per key rather than a URL per key: the
-  // widget's pages have no bearer and cannot fetch hermes directly — every
-  // byte reaches them through the native bridge — so a URL would be a link
-  // nothing on that side could follow.
+  // Contact photos are delivered through the native bridge: widget pages have
+  // no bearer token and therefore cannot fetch Hermes URLs themselves.
   if (req.method === 'POST' && url.pathname === '/people/avatars') {
     if (!hasJsonMediaType(req)) { send(res, 415, { error: 'content-type must be application/json' }, cors); return; }
     const body = await readJson(req);
@@ -3034,9 +3025,8 @@ async function handlePeople(db, req, res, cors, url, policy) {
     const keys = Array.isArray(body.keys) ? body.keys.filter((k) => typeof k === 'string').slice(0, 400) : [];
     const out = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
-      const found = buildAvatars(db, state, { keys, owner, aliases });
       const avatars = {};
-      for (const [key, jpeg] of found) {
+      for (const [key, jpeg] of buildAvatars(db, state, { keys, owner, aliases })) {
         avatars[key] = Buffer.from(jpeg).toString('base64');
       }
       return { avatars };
@@ -3045,6 +3035,10 @@ async function handlePeople(db, req, res, cors, url, policy) {
     return;
   }
 
+  // The year summary: model-written, LOCAL llama only, generated on demand
+  // for one person and cached against the corpus stamp (people/summary.mjs
+  // carries the boundary reasoning). POST because the person key is data,
+  // not a path.
   if (req.method === 'POST' && url.pathname === '/people/summary') {
     if (!hasJsonMediaType(req)) { send(res, 415, { error: 'content-type must be application/json' }, cors); return; }
     const body = await readJson(req);
@@ -3223,6 +3217,15 @@ if (isMain) {
       setTimeout(() => {
         const t0 = Date.now();
         try {
+          // A DERIVED CACHE, beside the corpus it is derived from -- the path
+          // asked of the handle rather than recomputed, so it always names the
+          // database actually open and an in-memory one (which reports no file)
+          // gets no cache at all. Deleting it costs one rescan and nothing
+          // else, which is the only property it needs to have. Opened here
+          // rather than at import so a test that imports the module never
+          // writes to the owner's disk.
+          const file = db.prepare('PRAGMA database_list').get()?.file ?? '';
+          if (file) useTallyStore(openTallyStore(`${file}.tallies`));
           const core = warmPeopleCore(db);
           console.log(
             `people core warm in ${Date.now() - t0}ms (${core?.graph?.length ?? 0} people)`
