@@ -630,7 +630,12 @@
     // is a no-op when the active tab is already visible, which parked a fresh
     // open on 2012 with the newest years off-screen.
     const active = tabsEl.querySelector('.pm-tab.active');
-    if (!tabsHomed) {
+    // NOT HOMED UNTIL THERE IS SOMETHING TO HOME TO. The first renderTabs runs
+    // before any payload has arrived, when the strip holds the current year and
+    // the globe and there is nothing to scroll -- marking it homed there spent
+    // the one-shot on an empty strip, so when the real years arrived the newest
+    // one was off the right edge and stayed there.
+    if (!tabsHomed && years.length > 0) {
       tabsHomed = true;
       tabsEl.scrollLeft = tabsEl.scrollWidth;
     } else if (active) {
@@ -1077,8 +1082,10 @@
     if (res.freshness) lastFreshness = res.freshness;
     cache.set(year, res);
     if (routeIfEmpty(res)) return;
-    render();
+    // Before the render, so the first paint of a fresh open already has every
+    // year in the strip rather than acquiring them a frame later.
     noteYears(res.years);
+    render();
   }
 
   // EVERY PATH THAT LEARNS THE YEAR LIST WARMS THE REST.
@@ -1094,7 +1101,15 @@
   // year the reader is not looking at can never queue ahead of the surface they
   // are (hermes is single-threaded; a queued scan is a frozen panel).
   function noteYears(list) {
-    if (Array.isArray(list) && list.length) years = list;
+    if (Array.isArray(list) && list.length && list.join(',') !== years.join(',')) {
+      years = list;
+      // REDRAW THE STRIP, HERE. The year list arrives with a payload, which is
+      // always after the surface has been rendered at least once -- so the tabs
+      // were drawn while `years` was still empty and nothing drew them again.
+      // The strip showed the current year alone, which is exactly one tab, and
+      // every other year was unreachable until something else forced a render.
+      renderTabs();
+    }
     if (years.length) prefetchRest();
   }
 

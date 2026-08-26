@@ -68,7 +68,7 @@ import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
 import { contentMatches } from './people/content.mjs';
-import { rebuildEpisodes } from './memory/episodeStore.mjs';
+import { rebuildEpisodes, EPISODE_SOURCES } from './memory/episodeStore.mjs';
 import { loadSpine } from './people/graph.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
@@ -1386,7 +1386,26 @@ const RETAIN_FIELDS = Object.freeze(['source', 'keep_days']);
 const PURGE_FIELDS = Object.freeze(['source']);
 const DELETE_ENTITIES_FIELDS = Object.freeze(['source', 'entity_ids']);
 const MAINTAIN_FIELDS = Object.freeze([]);
-const EPISODE_REBUILD_FIELDS = Object.freeze([]);
+const EPISODE_REBUILD_FIELDS = Object.freeze(['force']);
+
+// The episodic corpus in one string: what rebuildEpisodes actually reads. Count
+// and high-water id together catch both arrivals and deletions, and the source
+// list is the same EPISODE_SOURCES the rebuild selects on, so the two cannot
+// drift apart. Deliberately not a hash of the rows -- reading them is the work
+// this exists to avoid.
+function episodeSourceFingerprint(db) {
+  const holes = EPISODE_SOURCES.map(() => '?').join(',');
+  const r = db
+    .prepare(
+      `SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m FROM context WHERE source IN (${holes})`
+    )
+    .get(...EPISODE_SOURCES);
+  return `${r.n}|${r.m}`;
+}
+
+// The last rebuild this process performed, and the fingerprint it was for. In
+// memory only: a restart rebuilds once.
+let lastEpisodeBuild = null;
 const ENTITIES_PARAMS = Object.freeze(['source', 'from_ts', 'to_ts']);
 const APPLY_FIELDS = Object.freeze(['run', 'claims']);
 const APPLY_RUN_FIELDS = Object.freeze([
@@ -2151,7 +2170,29 @@ async function handleAdmin(db, req, res, cors, url, channel) {
     if (url.pathname === '/admin/episodes/rebuild') {
       const body = await readJson(req);
       assertClosedFields(body, EPISODE_REBUILD_FIELDS);
+      // NOTHING NEW MEANS NOTHING TO REBUILD.
+      //
+      // The distiller POSTs this before every pass, and a pass runs every 45
+      // seconds while it is catching up -- so on a 36,975-episode corpus this
+      // was deleting and reinserting all of them, twice a minute, to arrive at
+      // byte-identical rows. hermes is single-threaded, so that is not just
+      // wasted CPU: every route is frozen for the duration of each one.
+      //
+      // The index is a pure function of the episodic rows, so (count, high-water
+      // id) over exactly those sources decides it. Held in memory rather than on
+      // disk on purpose -- a restart rebuilds once, which is cheap and is the
+      // conservative direction to be wrong in.
+      //
+      // `force` is the way to demand one anyway, since the fingerprint cannot
+      // see a change in the BUILDER (a different gap rule cuts the same rows
+      // differently). Nothing calls it on a timer.
+      const fp = episodeSourceFingerprint(db);
+      if (!body.force && lastEpisodeBuild !== null && lastEpisodeBuild.fingerprint === fp) {
+        send(res, 200, { ...lastEpisodeBuild.out, skipped: 'unchanged' }, cors);
+        return;
+      }
       const out = withPeopleDbs(db, (state) => rebuildEpisodes(db, { spine: state ? loadSpine(state) : null }));
+      lastEpisodeBuild = { fingerprint: fp, out };
       // COUNTS ONLY: thread_key holds a chat guid, a chat guid holds a handle,
       // and counterparty_key holds a person's name. None of them may be logged
       // or returned.
@@ -2538,7 +2579,7 @@ function tryPersonSearch(db, question) {
   let state = null;
   try {
     const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
-    state = existsSync(statePath) ? new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true }) : null;
+    state = existsSync(statePath) ? openStateReadOnly(statePath) : null;
     return answerPersonSearch(db, state, question, { owner: loadOwner() });
   } catch {
     return null;
@@ -2583,12 +2624,33 @@ function warmPeopleCore(db) {
   });
 }
 
+// WAIT FOR THE WRITER; DO NOT GIVE UP AND CALL IT AN ANSWER.
+//
+// state.db is the connectors' database and it runs journal_mode=DELETE, on
+// purpose -- contact names must not survive legibly in a -wal sidecar. So a
+// writer excludes readers, and the contacts connector upserts ~2,000 rows into
+// it about once a minute. With SQLite's default busy timeout of ZERO, a read
+// landing inside that window fails instantly.
+//
+// That failure used to be swallowed into an empty contacts spine, and an empty
+// spine is not a smaller answer -- it is a different one. Every person known
+// only through the address book loses their name and reverts to a raw handle,
+// and worse, two handles belonging to one person stop merging, so they split
+// into two people with the messages divided between them. Then yearCore
+// memoised it. Observed exactly that way: 11,716 messages became 8,148 plus a
+// second "person" holding the other 3,568.
+function openStateReadOnly(statePath) {
+  const db = new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true });
+  db.exec('PRAGMA busy_timeout = 5000');
+  return db;
+}
+
 function withPeopleDbs(db, fn) {
   let state = null;
   let resDb = null;
   try {
     const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
-    state = existsSync(statePath) ? new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true }) : null;
+    state = existsSync(statePath) ? openStateReadOnly(statePath) : null;
     resDb = openResolutionsDb();
     return fn(state, resDb);
   } finally {
@@ -2607,7 +2669,7 @@ function trySyncStatus(db, question) {
   let state = null;
   try {
     const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
-    state = existsSync(statePath) ? new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true }) : null;
+    state = existsSync(statePath) ? openStateReadOnly(statePath) : null;
     return answerSyncStatus(db, state, {});
   } catch {
     return null;

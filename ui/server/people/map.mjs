@@ -319,6 +319,22 @@ export function yearCore(contextDb, stateDb, { now, owner, aliases, blocking = f
     return hit.core;
   }
 
+  // A BLOCKING REBUILD THAT FAILS MUST NOT COST THE GOOD ANSWER.
+  //
+  // loadSpine now raises when it cannot read the contacts spine rather than
+  // reporting an empty address book, so this can throw where it used to return
+  // a nameless graph. Stale is the right thing to serve then -- the alternative
+  // is a panel that shows everyone as a phone number, which is what this whole
+  // change exists to stop.
+  try {
+    return buildYearCore(contextDb, stateDb, { now, owner, aliases, stamp });
+  } catch (error) {
+    if (hit) return hit.core;
+    throw error;
+  }
+}
+
+function buildYearCore(contextDb, stateDb, { now, owner, aliases, stamp }) {
   const graph = buildGraph(contextDb, stateDb, { now, owner, aliases })
     .filter((p) => !isNonPerson(p) && hasRelationship(p));
   const idToKey = new Map(graph.flatMap((p) => (p.identifiers ?? []).map((id) => [id, p.key])));

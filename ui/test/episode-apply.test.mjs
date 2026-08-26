@@ -208,3 +208,85 @@ test('a row-mode run still requires at least one claim', () => {
   assert.throws(() => applyMemoryBatch(db, { run: rowRun, claims: [] }), /array of 1 to/);
   db.close();
 });
+
+// ---- the index is updated, not rewritten ----
+//
+// The rebuild used to DELETE both tables and reinsert every episode, which held
+// the corpus write lock for the whole job -- 94 seconds against the live server
+// while the distiller held it, with hermes answering nothing throughout. These
+// pin the property that replaced it: the same index, written differentially.
+test('a second rebuild over an unchanged corpus writes nothing', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    { ts: Date.UTC(2025, 0, 1, 9, 0), source: 'imessage', entity_id: 'r1', text: 'morning',
+      meta: { chat_guid: 'any;-;+15550100', handle: '+15550100', is_from_me: true } },
+    { ts: Date.UTC(2025, 0, 1, 9, 5), source: 'imessage', entity_id: 'r2', text: 'hello back',
+      meta: { chat_guid: 'any;-;+15550100', handle: '+15550100', is_from_me: false } },
+  ]);
+  const first = rebuildEpisodes(db);
+  assert.ok(first.inserted > 0);
+  const ids = db.prepare('SELECT id FROM episode ORDER BY id').all().map((r) => r.id);
+
+  const second = rebuildEpisodes(db);
+  assert.equal(second.inserted, 0, 'nothing new');
+  assert.equal(second.deleted, 0, 'nothing gone');
+  assert.equal(second.episodes, first.episodes);
+  // IDS SURVIVE, which is the correctness half: distill_run joins on
+  // member_hash and topics counts one hit per episode id, and a rebuild that
+  // renumbered everything invalidated both for no reason.
+  assert.deepEqual(db.prepare('SELECT id FROM episode ORDER BY id').all().map((r) => r.id), ids);
+  db.close();
+});
+
+test('a new conversation is added without touching the others', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    { ts: Date.UTC(2025, 0, 1, 9, 0), source: 'imessage', entity_id: 'a1', text: 'first thread',
+      meta: { chat_guid: 'any;-;+15550100', handle: '+15550100', is_from_me: true } },
+  ]);
+  rebuildEpisodes(db);
+  const before = db.prepare('SELECT id, member_hash FROM episode ORDER BY id').all();
+
+  insertRows(db, [
+    { ts: Date.UTC(2025, 5, 2, 9, 0), source: 'imessage', entity_id: 'b1', text: 'a different thread',
+      meta: { chat_guid: 'any;-;+15550199', handle: '+15550199', is_from_me: true } },
+  ]);
+  const out = rebuildEpisodes(db);
+  assert.equal(out.inserted, 1, 'exactly the new one');
+  assert.equal(out.deleted, 0);
+  const after = db.prepare('SELECT id, member_hash FROM episode ORDER BY id').all();
+  for (const row of before) {
+    assert.ok(after.some((r) => r.id === row.id && r.member_hash === row.member_hash),
+      'an untouched conversation keeps its id');
+  }
+  db.close();
+});
+
+// A message landing inside an existing episode re-cuts it: the old one is gone
+// and a new one takes its place. That MUST be a delete plus an insert, or the
+// index would carry two episodes claiming the same rows.
+test('a message joining an existing conversation replaces that episode', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    { ts: Date.UTC(2025, 0, 1, 9, 0), source: 'imessage', entity_id: 'c1', text: 'one',
+      meta: { chat_guid: 'any;-;+15550100', handle: '+15550100', is_from_me: true } },
+  ]);
+  rebuildEpisodes(db);
+  const firstHash = db.prepare('SELECT member_hash FROM episode').get().member_hash;
+
+  insertRows(db, [
+    { ts: Date.UTC(2025, 0, 1, 9, 10), source: 'imessage', entity_id: 'c2', text: 'two, same hour',
+      meta: { chat_guid: 'any;-;+15550100', handle: '+15550100', is_from_me: true } },
+  ]);
+  const out = rebuildEpisodes(db);
+  assert.equal(out.deleted, 1, 'the old cut is gone');
+  assert.equal(out.inserted, 1, 'the new cut is in');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM episode').get().n, 1, 'not two claiming the same rows');
+  assert.notEqual(db.prepare('SELECT member_hash FROM episode').get().member_hash, firstHash);
+  // And no orphaned members left behind by the delete.
+  assert.equal(
+    db.prepare('SELECT COUNT(*) n FROM episode_member m LEFT JOIN episode e ON e.id=m.episode_id WHERE e.id IS NULL').get().n,
+    0, 'cascade cleaned up'
+  );
+  db.close();
+});
