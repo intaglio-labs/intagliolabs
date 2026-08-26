@@ -1,7 +1,17 @@
-// One-time Google Calendar OAuth2 authorization for the calendar connector.
+// One-time Google OAuth2 authorization for the calendar AND mail connectors.
 //
 // Run it on the Mac (`node ops/gcal-auth.mjs`), approve in the browser tab it
 // opens, and it writes ~/.hazlie/secrets/gcal-tokens.json.
+//
+// THE NAME IS NARROWER THAN THE JOB, and knowingly so for now. This grants one
+// Google account — calendar and mail — and `gcal-*` says calendar. The honest
+// name is google-auth.mjs with google-tokens.json, and the reason it has not
+// been renamed yet is blast radius, not disagreement: fifteen tracked files
+// name `gcal`, including two that another session had open. The rename is
+// cheapest while nothing is authorized (there is no token file to migrate), so
+// it should happen soon — but a refactor across three sessions' files is not
+// the same change as widening a scope, and running them together would make
+// both harder to review. Documented rather than done (owner, 2026-08-26).
 //
 // WHY THIS EXISTS AT ALL (ui/AGENTS.md egress path 5, owner-decided
 // 2026-08-19): the owner's calendar lives in Notion Calendar, which talks to
@@ -11,8 +21,27 @@
 // reach Calendar. OAuth is the only remaining mechanism.
 //
 // SCOPE IS READ-ONLY AND STAYS READ-ONLY. `calendar.readonly` means the
-// connector cannot create, move or delete an event even if a bug tried to.
-// Widening this scope is an egress-policy change, not a code change.
+// connector cannot create, move or delete an event even if a bug tried to;
+// `gmail.readonly` means it cannot send, delete, or so much as mark a message
+// read. Widening this scope is an egress-policy change, not a code change —
+// so ops/EGRESS.json moved in the same commit that added the mail scope.
+//
+// WHY gmail.readonly AND NOT IMAP. The mail connector used to reach
+// imap.gmail.com with a 16-character app password, which is a worse credential
+// on both counts: the owner has to mint it by hand, and it carries the whole
+// account rather than a scope. The obvious swap — keep IMAP, authenticate with
+// XOAUTH2 — does not work here, and the reason is worth writing down because
+// it is not obvious: Google does not accept `gmail.readonly` over IMAP. IMAP
+// requires the full-mailbox scope instead — the bare mail domain, spelled as a
+// URL, which is why it is described here rather than quoted: it looks exactly
+// like a host to connectors/test/egress.test.mjs, and naming a host in order
+// to say we do NOT reach it is how the ledger acquires a lie. That scope is
+// read, write, delete and send. Taking that route would have handed this app the
+// power to delete the owner's mail in order to gain the power to read it,
+// which is the exact opposite of the promise in CLAUDE.md rule 5 and of what
+// the calendar entry in the ledger already claims. So the mail connector moved
+// off IMAP and onto the Gmail REST API instead, where read-only is real.
+// (Owner decision 2026-08-26, presented as the trade it is.)
 //
 // Google requires the redirect URI to be HTTPS with exactly one exemption:
 // loopback. That is why this binds 127.0.0.1 and why the connect flow is
@@ -29,13 +58,21 @@ import { join, dirname } from 'node:path';
 const SECRETS_DIR = join(homedir(), '.hazlie', 'secrets');
 const CLIENT_ID_FILE = join(SECRETS_DIR, 'gcal-client-id.txt');
 const CLIENT_SECRET_FILE = join(SECRETS_DIR, 'gcal-client-secret.txt');
-const TOKENS_FILE = join(SECRETS_DIR, 'gcal-tokens.json');
+// ~~const TOKENS_FILE = .../gcal-tokens.json~~ — gone with the single-account
+// assumption. The path is now derived per account at write time; see
+// writeTokensAtomically below and connectors/lib/googleAccounts.mjs.
 
 const AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const PORT = 8818; // 8817 is Oura's; running both at once must not collide
 const REDIRECT_URI = `http://127.0.0.1:${PORT}/callback`;
-const SCOPES = 'https://www.googleapis.com/auth/calendar.readonly';
+// Space-separated, which is what the OAuth2 spec and Google both expect. One
+// grant covering both connectors: the owner signs in to Google once, not once
+// per source, and there is a single refresh token to keep alive.
+const SCOPES = [
+  'https://www.googleapis.com/auth/calendar.readonly',
+  'https://www.googleapis.com/auth/gmail.readonly',
+].join(' ');
 const TIMEOUT_MS = 15 * 60 * 1000;
 
 function fail(msg) {
@@ -65,26 +102,89 @@ function readSecret(path, label) {
   return value;
 }
 
-function writeTokensAtomically(tokens) {
-  const tmp = `${TOKENS_FILE}.tmp`;
+// ONE FILE PER ACCOUNT (owner, 2026-08-26: "i need to be able to add multiple
+// mailboxes"). A Google grant authorizes ONE account — one mailbox, one
+// calendar — so several mailboxes means several grants, and a single fixed
+// TOKENS_FILE could only ever hold the last one. Re-running this script now
+// ADDS an account instead of replacing the previous one.
+//
+// The address is written INTO the file as `account_email`, not just encoded in
+// its name: the name is a slug and slugs are lossy (a.b@x.co and a-b@x.co slug
+// alike), so reading an address back out of a filename would eventually label
+// a row with the wrong mailbox. See connectors/lib/googleAccounts.mjs, which
+// is the reader half of this contract.
+function writeTokensAtomically(tokens, tokensFile) {
+  const tmp = `${tokensFile}.tmp`;
   writeFileSync(tmp, JSON.stringify(tokens, null, 2) + '\n', { mode: 0o600 });
-  if (existsSync(TOKENS_FILE)) renameSync(TOKENS_FILE, `${TOKENS_FILE}.prev`);
-  renameSync(tmp, TOKENS_FILE);
+  if (existsSync(tokensFile)) renameSync(tokensFile, `${tokensFile}.prev`);
+  renameSync(tmp, tokensFile);
 }
 
+// WHICH ACCOUNT DID THE OWNER JUST APPROVE? Google does not say in the token
+// response unless `openid`/`email` are among the scopes, and adding those to
+// widen a read-only grant would be a scope change for a label. Both APIs we
+// already hold answer it for free: Gmail's profile returns emailAddress, and
+// the primary calendar's id IS the account address. Gmail first, calendar as
+// the fallback, so a calendar-only grant still knows its own name.
+async function discoverAccountEmail(accessToken) {
+  const H = { Authorization: `Bearer ${accessToken}` };
+  try {
+    const r = await fetch('https://www.googleapis.com/gmail/v1/users/me/profile', { headers: H });
+    if (r.ok) {
+      const j = await r.json();
+      if (typeof j.emailAddress === 'string' && j.emailAddress.includes('@')) return j.emailAddress;
+    }
+  } catch {}
+  try {
+    const r = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary', { headers: H });
+    if (r.ok) {
+      const j = await r.json();
+      if (typeof j.id === 'string' && j.id.includes('@')) return j.id;
+    }
+  } catch {}
+  return null;
+}
+
+const accountSlug = (email) =>
+  String(email).toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-+|-+$/gu, '');
+
 if (process.argv.includes('--help')) {
-  console.log(`gcal-auth — one-time Google Calendar authorization
+  console.log(`gcal-auth — one-time Google authorization (Calendar + Gmail, read-only)
 
 Before running this, create an OAuth client (once, in a browser):
 
   1. https://console.cloud.google.com/ → create or pick a project
-  2. APIs & Services → Library → enable "Google Calendar API"
+  2. APIs & Services → Library → enable BOTH:
+       "Google Calendar API"
+       "Gmail API"   <- the plain one. "Gmail MCP API" is a different
+                        product and does not grant mailbox access here.
   3. APIs & Services → OAuth consent screen
-       User type: External. Fill app name + your email.
-       Add yourself under "Test users" — an app in Testing mode only
-       authorizes its listed test users, and skipping this is the usual
-       cause of "access_denied" at the consent screen.
-       Scope: ${SCOPES}
+       User type depends on the account, and the difference is not cosmetic:
+
+       INTERNAL — offered only when the project sits under a Google Workspace
+         organisation, and the right answer when it is. No test-user list, no
+         verification gate on a restricted scope, and REFRESH TOKENS DO NOT
+         EXPIRE. It authorizes only accounts inside that org.
+
+       EXTERNAL — the only option for a personal @gmail.com account. Fill app
+         name + your email, then add yourself under "Test users": an app in
+         Testing mode authorizes only its listed test users, and skipping that
+         is the usual cause of "access_denied" at the consent screen.
+         ~~This runbook said "User type: External" flatly.~~ That was written
+         against a personal account and is wrong for a Workspace one, where
+         External costs you a REFRESH TOKEN THAT EXPIRES EVERY 7 DAYS — which
+         for a background connector means re-authorizing weekly, forever
+         (found 2026-08-26, before it shipped, by reading the console rather
+         than the instruction).
+       Scopes (both):
+         https://www.googleapis.com/auth/calendar.readonly
+         https://www.googleapis.com/auth/gmail.readonly
+       Google flags gmail.readonly as a RESTRICTED scope. On an EXTERNAL app
+       it will mention verification; that applies to publishing to other
+       people, and an app in Testing mode authorizes its listed test users
+       without it. On an INTERNAL app the gate does not apply at all — the
+       console says so: "Verification is not required since your app is
+       configured with an Internal user type".
   4. APIs & Services → Credentials → Create credentials
        → OAuth client ID → Application type: **Desktop app**
        Desktop is required: Google allows a loopback redirect only for that
@@ -204,14 +304,29 @@ const server = createServer(async (req, res) => {
     );
   }
 
+  // Ask WHO before writing, because the answer decides the filename. A grant
+  // whose account cannot be identified is refused rather than filed under a
+  // guess: an unnamed token file is one no connector can attribute a row to,
+  // and a mailbox mislabelled is worse than a mailbox missing.
+  const accountEmail = await discoverAccountEmail(tokens.access_token);
+  if (!accountEmail) {
+    finish(500, 'Authorized, but Google would not say which account. Nothing was saved.');
+    clearTimeout(timeout);
+    server.close();
+    fail('could not determine the account address from either Gmail or Calendar; nothing written');
+  }
+  const tokensFile = join(SECRETS_DIR, `google-tokens-${accountSlug(accountEmail)}.json`);
+  const replacing = existsSync(tokensFile);
+
   writeTokensAtomically({
+    account_email: accountEmail,
     access_token: tokens.access_token,
     refresh_token: tokens.refresh_token,
     token_type: tokens.token_type ?? 'Bearer',
     expires_in: tokens.expires_in ?? null,
     scope: tokens.scope ?? SCOPES,
     obtained_at: Date.now(),
-  });
+  }, tokensFile);
 
   // Prove the grant works, and report how many calendars it can see — the
   // whole point of this connector is that Calendar.app could see none.
@@ -227,10 +342,19 @@ const server = createServer(async (req, res) => {
     }
   }
 
-  finish(200, 'Hazlie is connected to Google Calendar. You can close this tab.');
+  // ~~"Hazlie is connected to Google Calendar."~~ Two corrections in one
+  // string (owner, 2026-08-26): the product is Intaglio Labs, which is what
+  // the bundle has been called since it was renamed, and this grant is no
+  // longer calendar-only — it carries gmail.readonly too, so naming one of
+  // the two would understate what the owner just approved.
+  finish(200, 'Intaglio Labs is connected to your Google account (Calendar and Gmail, read-only). You can close this tab.');
   clearTimeout(timeout);
   server.close();
-  console.log(`gcal-auth: tokens written to ${TOKENS_FILE} (0600, .prev backup kept)`);
+  console.log(
+    `gcal-auth: ${replacing ? 're-authorized' : 'added'} ${accountEmail}` +
+    ` -> ${tokensFile} (0600, .prev backup kept)`
+  );
+  console.log('gcal-auth: run this again to add another mailbox; each account keeps its own file');
   console.log(`gcal-auth: verification calendarList -> HTTP ${verify.status}`);
   if (calendarCount !== null) console.log(`gcal-auth: ${calendarCount} calendars visible to this grant`);
   process.exit(verify.ok ? 0 : 1);

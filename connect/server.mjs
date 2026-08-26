@@ -28,7 +28,7 @@ import { secretResponse } from './lib/secretApi.mjs';
 import { PLATFORMS, bridgeStatus, beginCommand, beginLogin, loadPanel, relay } from './lib/bridge.mjs';
 import { bridgeApiResponse } from './lib/bridgeApi.mjs';
 import { decide, fetchPending } from './lib/memory.mjs';
-import { addMailAccount, mailAccounts, mailSecretName, readStatus } from './lib/status.mjs';
+import { readStatus } from './lib/status.mjs';
 import { sameOrigin } from './lib/origin.mjs';
 import { statusResponse } from './lib/statusApi.mjs';
 import { mintToken, validateToken } from './lib/tokens.mjs';
@@ -339,10 +339,8 @@ async function handleRequest(req, res) {
     return;
   }
   // /c/<token>            → the page
-  // /c/<token>/mailbox    → POST the address to read (step 1 of Google)
-  // /c/<token>/gmail      → POST the app password  (step 2 of Google)
   // /c/<token>/memory     → GET the review queue, POST one decision
-  const match = /^\/c\/([A-Za-z0-9_-]{1,64})(?:\/(mailbox|gmail|memory|bridge|help\/[a-z]+))?\/?$/u.exec(
+  const match = /^\/c\/([A-Za-z0-9_-]{1,64})(?:\/(memory|bridge|help\/[a-z]+))?\/?$/u.exec(
     url.pathname
   );
   if (!match) {
@@ -436,80 +434,13 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // STEP 1 OF GOOGLE: which mailbox to read. No secret passes through here —
-  // the address is not one — but it decides which mailbox the gmail route
-  // below will accept a password for, so it is validated as strictly as if it
-  // were, and by the same module that reads it back.
-  if (req.method === 'POST' && action === 'mailbox') {
-    if (!sameOrigin(req.headers)) {
-      send(res, 403, 'Cross-origin form post refused.', 'text/plain; charset=utf-8');
-      return;
-    }
-    let account = '';
-    try {
-      account = new URLSearchParams(await readBody(req)).get('account') ?? '';
-    } catch {
-      send(res, 413, 'Too large.', 'text/plain; charset=utf-8');
-      return;
-    }
-    const outcome = addMailAccount(account.trim());
-    // The address is echoed back in none of these. It is the owner's own and
-    // not a secret, but a banner is the wrong place to learn what someone
-    // typed into a form, and an unvalidated string must never reach the page.
-    const banner = {
-      added: 'Mailbox added. Now paste its app password below.',
-      duplicate: 'That mailbox is already on the list.',
-      invalid: 'That does not look like an email address. Nothing was saved.',
-    }[outcome];
-    send(res, 200, renderConnectPage(readStatus(), { token, banner }));
-    return;
-  }
-
-  if (req.method === 'POST' && action === 'gmail') {
-    if (!sameOrigin(req.headers)) {
-      send(res, 403, 'Cross-origin form post refused.', 'text/plain; charset=utf-8');
-      return;
-    }
-    let value = '';
-    let account = '';
-    try {
-      const form = new URLSearchParams(await readBody(req));
-      value = form.get('appPassword') ?? '';
-      account = form.get('account') ?? '';
-    } catch {
-      send(res, 413, 'Too large.', 'text/plain; charset=utf-8');
-      return;
-    }
-    // The address must be one this machine is configured for. Accepting an
-    // arbitrary string would let a form post choose the filename a secret is
-    // written under, which is a path-traversal primitive dressed as a feature.
-    const known = mailAccounts().some((a) => a.user === account);
-    if (!known) {
-      send(
-        res,
-        200,
-        renderConnectPage(readStatus(), { token,
-          banner: 'Unknown mailbox. Nothing was saved.',
-        })
-      );
-      return;
-    }
-    // Google app passwords are 16 letters, usually shown in four groups.
-    const normalized = value.replace(/\s+/gu, '');
-    if (!/^[a-z]{16}$/iu.test(normalized)) {
-      send(
-        res,
-        200,
-        renderConnectPage(readStatus(), { token,
-          banner: 'That does not look like a 16-letter Google app password. Nothing was saved.',
-        })
-      );
-      return;
-    }
-    writeSecret(mailSecretName(account), normalized);
-    send(res, 200, renderConnectPage(readStatus(), { token, banner: `${account} connected.` }));
-    return;
-  }
+  // ~~POST /c/<token>/mailbox and POST /c/<token>/gmail.~~ Both gone with the
+  // app password (2026-08-26). Mail is an OAuth grant now, so there is no
+  // address to register and no secret to post — and a route that still accepted
+  // a 16-character password would write it to a file no connector reads, which
+  // is worse than dead code: it looks like it worked. The route regex below no
+  // longer matches either path, so a stale bookmark gets a 404 rather than a
+  // form that silently achieves nothing.
 
   // Social bridge login, relayed to the local bot. The message may be a cookie
   // blob (several KB), so the body limit is raised from the credential-form

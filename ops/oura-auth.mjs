@@ -162,7 +162,9 @@ const server = createServer(async (req, res) => {
     headers: { Authorization: `Bearer ${tokens.access_token}` },
   });
 
-  finish(200, 'Hazlie is connected to Oura. You can close this tab.');
+  // The product is Intaglio Labs; "Hazlie" is the old name the bundle stopped
+  // carrying. Same string, same fix, so the two callback pages do not drift.
+  finish(200, 'Intaglio Labs is connected to Oura. You can close this tab.');
   clearTimeout(timeout);
   server.close();
   console.log(`oura-auth: tokens written to ${TOKENS_FILE} (0600, .prev backup kept)`);

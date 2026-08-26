@@ -182,43 +182,12 @@ function row(item, index, formBase) {
 
   const caveat = item.caveat ? `<div class="caveat">${escapeHtml(item.caveat)}</div>` : '';
 
-  // THE FIRST STEP OF THE SAME CONNECTION: which address to read. Google is
-  // one account to a person but two credentials to us — IMAP wants a 16-letter
-  // app password per mailbox, Calendar wants an OAuth grant — so this row and
-  // the `gmail` row below are two steps of one connection rather than two
-  // things to connect. The address is not a secret and there is nothing to
-  // hide, but it still POSTs same-origin like every other write on this page.
-  if (item.action === 'mailbox') {
-    return `<li class="has-form">${idx}<span class="name"><b>${escapeHtml(
-      item.label
-    )}</b><span class="note">${escapeHtml(item.detail)}</span>
-      <form method="post" action="${escapeHtml(formBase)}/mailbox">
-        <input name="account" type="email" autocomplete="off" spellcheck="false"
-               placeholder="you@gmail.com" aria-label="Gmail address to read" required>
-        <button class="cta secondary" type="submit">Add</button>
-        <div class="hint">Then Google asks for an app password. Calendar is the same account, authorized separately.</div>
-      </form>${caveat}</span></li>`;
-  }
-
-  // Gmail is the one row that takes a secret, so it renders a form that POSTs
-  // same-origin. The value goes straight to a 0600 file on this machine and is
-  // never echoed back into the page. The account rides in a hidden field, not
-  // the URL: an app password must never land in browser history or a referer.
-  if (item.action === 'gmail') {
-    const account = item.id.startsWith('mail:') ? item.id.slice('mail:'.length) : '';
-    return `<li class="has-form">${idx}<span class="name"><b>${escapeHtml(
-      item.label
-    )}</b><span class="note">${escapeHtml(item.detail)}</span>
-      <form method="post" action="${escapeHtml(formBase)}/gmail">
-        <input type="hidden" name="account" value="${escapeHtml(account)}">
-        <input name="appPassword" type="password" autocomplete="off" spellcheck="false"
-               placeholder="16-character app password" aria-label="App password for ${escapeHtml(
-                 item.label
-               )}" required>
-        <button class="cta" type="submit">Connect</button>
-        <div class="hint">myaccount.google.com &rarr; Security &rarr; App passwords. Stored 0600 on this Mac only.</div>
-      </form>${caveat}</span></li>`;
-  }
+  // ~~Two form branches here: an address field that POSTed to /mailbox, and an
+  // app-password field that POSTed to /gmail.~~ Both deleted with the app
+  // password (2026-08-26). Mail is a Google grant now, so its row is an
+  // ordinary Connect button like Calendar's — same account, same consent
+  // screen, nothing to type on this page. The forms' routes are gone from
+  // server.mjs in the same commit.
 
   // Outline, not the gradient. This row is `optional` — it is a standing
   // invitation rather than outstanding work — so it is excluded from

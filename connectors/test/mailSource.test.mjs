@@ -1,122 +1,136 @@
+// The mail connector, after it moved off IMAP.
+//
+// ~~This file tested a per-folder UID cursor guarded by UIDVALIDITY, an app
+// password per mailbox, and resolveAccounts() reading mail.accounts[].~~ All
+// three were IMAP's shape and none of them exists now (2026-08-26): Gmail's
+// API has no folders and no UIDs, the credential is an OAuth grant rather than
+// a password, and an authorized account IS a configured one.
+//
+// What carried over is the PROPERTY each of those tests was really defending,
+// re-aimed at the mechanism that replaced it:
+//
+//   UIDVALIDITY discards the cursor  ->  the cursor advances only from rows
+//                                        that actually ingested
+//   secret file per mailbox          ->  token file per account, and an
+//                                        address cannot escape its directory
+//   needs() per-mailbox app password ->  needs() per-account grant
+//
+// The one thing that did NOT change is mailRows.mjs, which takes parsed fields
+// rather than IMAP objects — so the adapter below is the new seam worth
+// pinning, and the row builder keeps its own tests.
+
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  createMailSource,
-  mailSecretName,
-  planFolderScan,
-  resolveAccounts,
-} from '../sources/mail.mjs';
+import { accountSettings, createMailSource, gmailMessageToParsed } from '../sources/mail.mjs';
+import { googleAccountSlug, googleTokensPath } from '../lib/googleAccounts.mjs';
 
-// THE SILENT-STALL TEST. If UIDVALIDITY changes and the cursor is kept, every
-// renumbered UID is below it, the search returns nothing, and the connector
-// stops fetching forever without erroring. Nothing else in this file matters
-// as much.
-test('a UIDVALIDITY change discards the cursor instead of advancing past it', () => {
-  const plan = planFolderScan({
-    storedValidity: '111',
-    serverValidity: '222',
-    storedUid: '5000',
-    backfill: false,
-  });
-  assert.equal(plan.fromUid, 1, 'must re-scan, not resume above renumbered UIDs');
-  assert.equal(plan.resetReason, 'uidvalidity-changed');
+const b64url = (s) => Buffer.from(s, 'utf8').toString('base64')
+  .replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=+$/u, '');
+
+const msg = (headers, parts, internalDate = '1700000000000') => ({
+  internalDate,
+  payload: {
+    mimeType: parts ? 'multipart/alternative' : 'text/plain',
+    headers: Object.entries(headers).map(([name, value]) => ({ name, value })),
+    ...(parts ? { parts } : { body: { data: b64url('plain body') } }),
+  },
 });
 
-test('an unchanged UIDVALIDITY resumes just past the cursor', () => {
-  const plan = planFolderScan({
-    storedValidity: '111',
-    serverValidity: '111',
-    storedUid: '42',
-    backfill: false,
-  });
-  assert.equal(plan.fromUid, 43);
-  assert.equal(plan.resetReason, null);
+test('gmail headers are read case-insensitively, as the API returns them', () => {
+  const p = gmailMessageToParsed(msg({
+    'Message-ID': '<a@b>', From: 'x@y.co', TO: 'z@w.co', Subject: 'hi', Cc: 'c@d.co',
+  }));
+  assert.equal(p.messageId, '<a@b>');
+  assert.equal(p.from, 'x@y.co');
+  assert.equal(p.to, 'z@w.co', 'an all-caps header name must still be found');
+  assert.equal(p.cc, 'c@d.co');
+  assert.equal(p.subject, 'hi');
 });
 
-test('a first run and an explicit backfill both start at 1', () => {
-  assert.equal(planFolderScan({ storedValidity: null, serverValidity: '1', storedUid: undefined, backfill: false }).fromUid, 1);
-  assert.equal(planFolderScan({ storedValidity: '1', serverValidity: '1', storedUid: '900', backfill: true }).fromUid, 1);
+test('the timestamp comes from internalDate, not the Date header', () => {
+  // A message with a wrong clock must not reorder the corpus. internalDate is
+  // what Gmail itself sorts and filters by, so it is what the cursor compares.
+  const p = gmailMessageToParsed(msg({ Date: 'Tue, 01 Jan 1990 00:00:00 +0000' }, null, '1700000000000'));
+  assert.ok(p.date instanceof Date);
+  assert.equal(p.date.getTime(), 1700000000000);
 });
 
-test('a corrupt cursor re-scans rather than resuming from garbage', () => {
-  for (const bad of ['', 'abc', '0', '-3', null]) {
-    assert.equal(
-      planFolderScan({ storedValidity: '1', serverValidity: '1', storedUid: bad, backfill: false }).fromUid,
-      1,
-      `expected a reset for stored cursor ${JSON.stringify(bad)}`
-    );
+test('a message with no internalDate falls back to the Date header', () => {
+  const m = msg({ Date: 'Tue, 01 Jan 1990 00:00:00 +0000' });
+  delete m.internalDate;
+  assert.equal(gmailMessageToParsed(m).date, 'Tue, 01 Jan 1990 00:00:00 +0000');
+});
+
+test('text/plain is preferred over text/html, and both decode from base64url', () => {
+  const p = gmailMessageToParsed(msg({}, [
+    { mimeType: 'text/html', body: { data: b64url('<p>html &amp; more</p>') } },
+    { mimeType: 'text/plain', body: { data: b64url('the plain one') } },
+  ]));
+  assert.equal(p.text, 'the plain one', 'plain must win even when html comes first');
+  assert.equal(p.textAsHtml, '<p>html &amp; more</p>');
+});
+
+test('an html-only message still yields a body for mailRows to strip', () => {
+  const p = gmailMessageToParsed(msg({}, [
+    { mimeType: 'text/html', body: { data: b64url('<p>only html</p>') } },
+  ]));
+  assert.equal(p.text, '');
+  assert.equal(p.textAsHtml, '<p>only html</p>');
+});
+
+test('a nested multipart is walked, not just its top level', () => {
+  // multipart/mixed wrapping multipart/alternative is the ordinary shape of a
+  // message with an attachment; a shallow reader finds no body at all.
+  const p = gmailMessageToParsed(msg({}, [
+    { mimeType: 'multipart/alternative', parts: [
+      { mimeType: 'text/plain', body: { data: b64url('nested plain') } },
+    ] },
+    { mimeType: 'application/pdf', body: { attachmentId: 'x' } },
+  ]));
+  assert.equal(p.text, 'nested plain');
+});
+
+test('a body-less message does not throw, it just has no text', () => {
+  for (const junk of [undefined, null, {}, { payload: null }, { payload: { headers: null } }]) {
+    const p = gmailMessageToParsed(junk);
+    assert.equal(p.text, '');
+    assert.equal(p.subject, null);
   }
 });
 
-// Gmail issues app passwords per account; two mailboxes must never collide on
-// one secret file.
-test('each mailbox resolves to its own secret filename', () => {
-  assert.equal(mailSecretName('ay@austinyoshino.com'), 'gmail-app-password-ay-austinyoshino-com.txt');
-  assert.notEqual(mailSecretName('a@b.co'), mailSecretName('c@d.co'));
-  for (const evil of ['../../etc/passwd', 'a/../b']) {
-    assert.ok(!mailSecretName(evil).includes('/'));
-    assert.ok(!mailSecretName(evil).includes('..'));
-  }
+test('settings fall back defaults -> per-account, and an unknown account still gets defaults', () => {
+  const config = { mail: { backfillDays: 10, accounts: [{ user: 'A@Example.com', backfillDays: 90 }] } };
+  assert.equal(accountSettings(config, 'a@example.com').backfillDays, 90, 'matched case-insensitively');
+  assert.equal(accountSettings(config, 'other@example.com').backfillDays, 10, 'falls back to the mail default');
+  assert.equal(accountSettings({}, 'x@y.co').backfillDays, 30, 'and to the built-in default');
+  assert.ok(accountSettings({}, 'x@y.co').maxBodyBytes > 0);
 });
 
-test('accounts inherit mail defaults and override them per account', () => {
-  const accounts = resolveAccounts({
-    mail: {
-      folders: ['INBOX', 'Sent'],
-      backfillDays: 90,
-      accounts: [{ user: 'a@b.co' }, { user: 'c@d.co', folders: ['INBOX'] }],
-    },
-  });
-  assert.deepEqual(accounts[0].folders, ['INBOX', 'Sent'], 'inherits');
-  assert.deepEqual(accounts[1].folders, ['INBOX'], 'overrides');
-  assert.equal(accounts[0].backfillDays, 90);
-  assert.equal(accounts[0].host, 'imap.gmail.com', 'default host');
-});
-
-test('the single-account spelling still resolves', () => {
-  const accounts = resolveAccounts({ mail: { user: 'solo@x.com' } });
-  assert.equal(accounts.length, 1);
-  assert.equal(accounts[0].user, 'solo@x.com');
-});
-
-test('no mail config resolves to no accounts, not a crash', () => {
-  assert.deepEqual(resolveAccounts({}), []);
-  assert.deepEqual(resolveAccounts(undefined), []);
-  assert.deepEqual(resolveAccounts({ mail: { accounts: [] } }), []);
-});
-
-// An unprovisioned source should wait at the gate, not fail mid-run with a
-// socket already open.
-test('needs() names the missing app password per mailbox', () => {
-  const source = createMailSource();
-  const missing = source.needs({
-    config: { mail: { accounts: [{ user: 'nobody@nowhere.invalid' }] } },
-  });
-  assert.equal(missing.length, 1);
-  assert.ok(missing[0].includes('nobody@nowhere.invalid'));
-});
-
-test('needs() says so when no mailbox is configured at all', () => {
-  const missing = createMailSource().needs({ config: {} });
-  assert.equal(missing.length, 1);
-  assert.ok(missing[0].includes('mail.accounts'));
-});
-
-// One provisioned mailbox is enough to run. Gating on the least-ready account
-// would mean adding a second mailbox silently switches the connector off —
-// which is exactly what happened the first time a real app password landed.
-test('needs() blocks only when NO mailbox is provisioned', (t) => {
+test('needs() blocks only when NO account is authorized for mail', (t) => {
   const home = mkdtempSync(join(tmpdir(), 'mail-needs-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
-  mkdirSync(join(home, '.hazlie', 'secrets'), { recursive: true, mode: 0o700 });
-  const config = { mail: { accounts: [{ user: 'has@pw.com' }, { user: 'no@pw.com' }] } };
-  const source = createMailSource();
+  const src = createMailSource();
+  const blocked = src.needs({ home });
+  assert.equal(blocked.length, 1);
+  assert.match(blocked[0], /gcal-auth|connect page/u, 'the message must say how to fix it');
+});
 
-  assert.equal(source.needs({ config, home }).length, 2, 'neither provisioned → blocked, both named');
+test('an address cannot steer its token file out of the secrets directory', () => {
+  // Same property the app-password filename had, on the credential that
+  // replaced it: whatever an address contains, the file it names is [a-z0-9-].
+  for (const evil of ['../../etc/passwd', 'a/../../b', 'x y@z.co', './../../root']) {
+    const slug = googleAccountSlug(evil);
+    assert.doesNotMatch(slug, /[/.]/u, `slug must not contain a separator or dot: ${slug}`);
+    assert.ok(!googleTokensPath(evil, '/home').includes('..'));
+    assert.ok(googleTokensPath(evil, '/home').startsWith('/home/.hazlie/secrets/'));
+  }
+});
 
-  writeFileSync(join(home, '.hazlie', 'secrets', mailSecretName('has@pw.com')), 'x\n', { mode: 0o600 });
-  assert.deepEqual(source.needs({ config, home }), [], 'one provisioned → the run may start');
+test('two addresses that differ only in case are one account, not two', () => {
+  // Gmail does not distinguish them, and two token files for one grant means
+  // one of them silently goes stale.
+  assert.equal(googleAccountSlug('A@Intaglio.IO'), googleAccountSlug('a@intaglio.io'));
 });

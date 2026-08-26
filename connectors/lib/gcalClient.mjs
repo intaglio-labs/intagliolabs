@@ -15,6 +15,7 @@
 
 import { existsSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { CALENDAR_SCOPE, accountsWithScope } from './googleAccounts.mjs';
 import { join } from 'node:path';
 import { readSecretJson, readSecretLine } from './secrets.mjs';
 
@@ -23,8 +24,25 @@ const API_BASE = 'https://www.googleapis.com/calendar/v3';
 // Refresh this far before nominal expiry so a long scan cannot straddle it.
 const EXPIRY_SKEW_MS = 120_000;
 
-export const defaultGcalTokensPath = (home = homedir()) =>
-  join(home, '.hazlie', 'secrets', 'gcal-tokens.json');
+// THE FIRST AUTHORIZED CALENDAR ACCOUNT, not a fixed filename.
+//
+// ~~.../gcal-tokens.json.~~ Tokens moved to one file per Google account on
+// 2026-08-26, because a grant authorizes ONE account and the owner needs
+// several mailboxes (connectors/lib/googleAccounts.mjs). This helper keeps the
+// calendar connector's existing shape — it asks for a default path and gets
+// one — while that path now comes from the account store.
+//
+// FIRST, not "the" one: calendar is still single-account by design here, so
+// when several accounts are authorized this picks the first with the calendar
+// scope, in the store's stable address order. If reading several calendars
+// ever becomes the ask, this is the line that has to grow a caller-supplied
+// account rather than a rule invented here. Falls back to the legacy filename
+// when nothing is authorized, so the error a caller sees is still the familiar
+// "run gcal-auth" rather than a path that never existed.
+export const defaultGcalTokensPath = (home = homedir()) => {
+  const [first] = accountsWithScope(CALENDAR_SCOPE, { home });
+  return first?.tokensPath ?? join(home, '.hazlie', 'secrets', 'gcal-tokens.json');
+};
 export const defaultGcalClientIdPath = (home = homedir()) =>
   join(home, '.hazlie', 'secrets', 'gcal-client-id.txt');
 export const defaultGcalClientSecretPath = (home = homedir()) =>

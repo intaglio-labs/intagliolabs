@@ -96,19 +96,9 @@
       "evidence": "connectors/lib/ouraClient.mjs"
     },
     {
-      "host": "imap.gmail.com",
-      "kind": "api",
-      "component": "connectors/sources/mail.mjs",
-      "direction": "inbound-fetch",
-      "purpose": "fetch the owner's own mailbox down to this Mac",
-      "credential": "gmail app password",
-      "decision": "ui/AGENTS.md egress policy, 2026-08-19",
-      "evidence": "connectors/sources/mail.mjs:32 DEFAULT_HOST"
-    },
-    {
       "host": "oauth2.googleapis.com",
       "kind": "api",
-      "component": "connectors/lib/gcalClient.mjs",
+      "component": "connectors/lib/gcalClient.mjs, connectors/lib/gmailClient.mjs",
       "direction": "outbound-send",
       "purpose": "google oauth2 token exchange and refresh",
       "credential": "google refresh token",
@@ -130,8 +120,8 @@
       "kind": "api",
       "component": "connectors/lib/gcalClient.mjs",
       "direction": "inbound-fetch",
-      "purpose": "read the owner's own calendar; the owner's calendar lives in Notion Calendar, which speaks to Google directly and never syncs into Calendar.app",
-      "credential": "google access token, scope calendar.readonly (cannot create, move or delete an event)",
+      "purpose": "read the owner's own calendar and mailbox. Calendar: the owner's calendar lives in Notion Calendar, which speaks to Google directly and never syncs into Calendar.app. Mail: replaced IMAP on 2026-08-26 — Google will not accept gmail.readonly over IMAP, which demands the full-mailbox scope (read, write, delete and send), so reaching mail over REST is what keeps the grant read-only",
+      "credential": "google access token, scopes calendar.readonly and gmail.readonly — read-only in both: cannot create, move or delete an event, and cannot send, delete or even mark a message read",
       "decision": "ui/AGENTS.md egress policy, amended 2026-08-19",
       "evidence": "connectors/lib/gcalClient.mjs"
     },
