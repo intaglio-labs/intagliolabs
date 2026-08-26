@@ -1245,6 +1245,31 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
               obj["sources"] is [[String: Any]]
         else { done(["state": "error", "error": "unparseable status"]); return }
         var out = obj
+        // THE FDA ROWS ARE OVERRIDDEN WITH THE APP'S OWN ANSWER, and the
+        // reason is a TCC attribution split (found 2026-08-25, the day a
+        // freshly granted Messages tile stayed red): the connectors daemon is
+        // a CHILD of this app, so the owner's "intaglio labs" grant covers
+        // the process that actually reads the stores — 26k message rows
+        // landed minutes after the grant — but the connect service that
+        // computes these rows runs under launchd, where the responsible
+        // process is ~/.hazlie/bin/node itself, which no grant to this app
+        // can ever satisfy. Its canReadSqlite is therefore the wrong witness
+        // on exactly the machines that are set up correctly. fullDisk() reads
+        // chat.db AS THIS APP — the same identity the daemon inherits — so
+        // when it says granted, the FDA rows are made to say what the daemon
+        // will actually do. When it says denied, the server's rows stand.
+        if Permissions.fullDisk() == .granted,
+           var rows = out["sources"] as? [[String: Any]] {
+          for i in rows.indices where (rows[i]["action"] as? String) == "fda" {
+            rows[i]["connected"] = true
+            rows[i]["broken"] = false
+            rows[i]["detail"] = "connected"
+            rows[i]["action"] = NSNull()
+            rows[i]["fix"] = NSNull()
+            rows[i]["caveat"] = NSNull()
+          }
+          out["sources"] = rows
+        }
         out["state"] = "ok"
         done(out)
       case 401: done(["state": "auth"])

@@ -32,7 +32,11 @@ function hzShowTileTip(row, label) {
   const w = hzTileTip.offsetWidth;
   const x = Math.min(Math.max(4, r.left + r.width / 2 - w / 2), window.innerWidth - w - 4);
   hzTileTip.style.left = `${x}px`;
-  hzTileTip.style.top = `${r.bottom + 6}px`;
+  // Above the tile, not below (owner, 2026-08-25): the shelf lives at the
+  // bottom of both panels, so a below-the-tile tip landed on the window's
+  // bottom edge and clipped to its top half.
+  hzTileTip.style.top = 'auto';
+  hzTileTip.style.bottom = `${Math.round(window.innerHeight - r.top + 6)}px`;
 }
 function hzHideTileTip() {
   if (hzTileTip) hzTileTip.classList.remove('on');
