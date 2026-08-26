@@ -90,10 +90,10 @@ test('topTopics: taxonomy first by count, distinctive terms backfill to 3', () =
 
 test('yearRows collapses the month timeline with the declared meeting weight', () => {
   const timeline = [
-    { ym: '2020-03', sent: 5, received: 5, met: 0 },
-    { ym: '2020-11', sent: 0, received: 2, met: 2 },
-    { ym: '2022-01', sent: 0, received: 0, met: 1 },
-    { ym: '2023-01', sent: 0, received: 0, met: 0 }, // empty year: dropped
+    { ym: '2020-03', sent: 5, received: 5, met: 0, room: 0 },
+    { ym: '2020-11', sent: 0, received: 2, met: 2, room: 0 },
+    { ym: '2022-01', sent: 0, received: 0, met: 1, room: 0 },
+    { ym: '2023-01', sent: 0, received: 0, met: 0, room: 0 }, // empty year: dropped
   ];
   assert.deepEqual(yearRows(timeline), [
     { year: 2020, messages: 12, met: 2, engagement: 18 },

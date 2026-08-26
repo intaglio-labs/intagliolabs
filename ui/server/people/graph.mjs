@@ -22,6 +22,10 @@
 //
 // Reads two databases (context + the spine's state.db) and writes nothing.
 
+// Whether a row happened in a room or in a conversation. Derived from the
+// thread, never stored -- see memory/threadKind.mjs for why it is not a field.
+import { threadKind, isRoom, counterpartyFromThread, GROUP } from '../memory/threadKind.mjs';
+
 const DAY = 86_400_000;
 
 function normName(s) {
@@ -104,14 +108,29 @@ function personSignalsForRow(row, meta, owner) {
       // passing one through here would make it somebody's display name, which
       // is the bug this whole pass exists to fix.
       const speakerName = namelike(row.speaker) ? row.speaker : undefined;
-      if (meta.is_group) {
+      // A ROOM IS NOT A CONVERSATION, and until now nothing here could tell the
+      // difference: `meta.is_group` is written only by WhatsApp, so this branch
+      // was dead for all 360,320 iMessage rows and 22.3% of them are group
+      // threads. threadKind derives it from the chat_guid marker instead.
+      //
+      // The flag rides ALONG with the signal rather than changing which signals
+      // are emitted -- deliberately. Every consumer keeps receiving exactly the
+      // rows it received before, and each opts in separately to caring. That is
+      // what lets the clocks below be corrected without a single message count
+      // moving.
+      const room = isRoom(row, meta);
+      if (threadKind(row, meta) === GROUP) {
         if (fromMe) return [];
         const sender = meta.sender_handle ?? meta.handle ?? null;
         return sender
-          ? [{ id: sender, channel: row.source, ts, fromMe: false, name: speakerName }]
+          ? [{ id: sender, channel: row.source, ts, fromMe: false, name: speakerName, room }]
           : [];
       }
-      const id = meta.chat_handle ?? meta.handle ?? null;
+      // ...falling back to the THREAD when Apple did not record a handle, which
+      // it does not on most outbound rows. See counterpartyFromThread: this is
+      // 109,380 of the owner's own one-to-one messages that were being dropped,
+      // and it is deliberately unreachable for group threads.
+      const id = meta.chat_handle ?? meta.handle ?? counterpartyFromThread(row, meta);
       if (!id) return [];
       // ONE-TO-ONE, where the id is the chat rather than the sender -- so the
       // speaker of an OUTBOUND row is the owner, and passing it here would file
@@ -125,7 +144,7 @@ function personSignalsForRow(row, meta, owner) {
       // reachable below the is_group branch above.
       const oneToOneName = (!fromMe && speakerName)
         || (namelike(meta.chat_name) ? meta.chat_name : undefined);
-      return [{ id, channel: row.source, ts, fromMe, name: oneToOneName || undefined }];
+      return [{ id, channel: row.source, ts, fromMe, name: oneToOneName || undefined, room }];
     }
     case 'mail': {
       // EVERY non-owner address on the email is counted, not just the first
@@ -259,7 +278,20 @@ function addContentSignals(contextDb, people, keyResolver, signals) {
       row.source === 'mail'
         ? (Array.isArray(meta.from) ? meta.from[0]?.toLowerCase() : null)
         : (meta.chat_handle ?? meta.handle ?? null);
-    if (!id || meta.is_group) continue;
+    // ROOMS COUNT HERE, deliberately, and the opposite of the chips rule.
+    //
+    // This scan asks "does this PERSON talk about investor topics" -- a fact
+    // about them, not about their relationship with the owner. Somebody
+    // discussing a term sheet in a group said it; where they stood when they
+    // said it does not make it less true of them. A chip is different, because a
+    // chip claims to describe a conversation the two of you had.
+    //
+    // The `meta.is_group` test that used to sit here never fired for iMessage
+    // (the key is WhatsApp-only), so groups have in fact been counted all along.
+    // Rather than make a dead gate live and quietly drop 24.8% of the credited
+    // rows off this scan -- which would push people off the investor list -- the
+    // behaviour is kept and the intent is now written down.
+    if (!id) continue;
     const key = keyResolver(id);
     const person = people.get(key);
     if (!person) continue;
@@ -358,6 +390,8 @@ export function buildGraph(
           sent: 0,
           received: 0,
           metInPerson: 0,
+          roomMessages: 0,
+          directMessages: 0,
           linkedin: null,
           content: {},
           timeline: new Map(),
@@ -381,19 +415,41 @@ export function buildGraph(
       if (Number.isFinite(sig.ts)) {
         if (sig.ts < p.firstSeen) p.firstSeen = sig.ts;
         if (sig.ts <= now && (p.lastSeen === null || sig.ts > p.lastSeen)) p.lastSeen = sig.ts;
-        if (isMessage && !sig.fromMe && sig.ts <= now && (p.lastFromThem === null || sig.ts > p.lastFromThem)) {
+        // NOT IN A ROOM. "They reached out" has to mean they addressed the
+        // owner; somebody posting in a group both happen to be in is not that,
+        // and 205 of 1,869 people had this clock set by room chatter -- 143 of
+        // them have never sent a direct message at all, so their entire "they
+        // reached out" history was other people's group threads. Dormancy feeds
+        // the mentor band, constellation warmth and open-loop detection, so this
+        // was three wrong answers from one wrong clock.
+        if (isMessage && !sig.fromMe && !sig.room && sig.ts <= now
+            && (p.lastFromThem === null || sig.ts > p.lastFromThem)) {
           p.lastFromThem = sig.ts;
         }
         // The owner's side of the same clock, for open-loop detection ("they
         // wrote last and I never answered"). Message channels only, like
         // lastFromThem -- a calendar invite neither opens nor closes a loop.
-        if (isMessage && sig.fromMe && sig.ts <= now && (p.lastFromOwner === null || sig.ts > p.lastFromOwner)) {
+        // Same rule on the owner's side: answering in a group is not answering
+        // this person, so it must not close an open loop with them.
+        if (isMessage && sig.fromMe && !sig.room && sig.ts <= now
+            && (p.lastFromOwner === null || sig.ts > p.lastFromOwner)) {
           p.lastFromOwner = sig.ts;
         }
       }
+      // SENT AND RECEIVED MEAN DIRECT, because that is what every consumer of
+      // them already assumes. reciprocity is documented as "do they write back --
+      // 1.0 is a balanced two-way thread", and counting a room made that read
+      // 1.0 for two people who have never addressed each other and merely posted
+      // the same number of times into the same group. Somebody answering in a
+      // group chat did not answer YOU.
+      //
+      // Room volume is not discarded, it is counted as itself. The two numbers
+      // answer different questions and neither one is the other's approximation.
       if (sig.channel === 'calendar') p.metInPerson += 1;
+      else if (sig.room) p.roomMessages += 1;
       else if (sig.fromMe) p.sent += 1;
       else p.received += 1;
+      if (sig.channel !== 'calendar' && !sig.linkedin && !sig.room) p.directMessages += 1;
       // The activity TIMELINE: the same counts, bucketed by calendar month, so
       // downstream code (people/profile.mjs) can see WHEN a relationship lived
       // -- peak era, cadence, "active in 2020-2022" -- not just its lifetime
@@ -404,10 +460,13 @@ export function buildGraph(
         const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
         let bucket = p.timeline.get(ym);
         if (bucket === undefined) {
-          bucket = { sent: 0, received: 0, met: 0 };
+          bucket = { sent: 0, received: 0, met: 0, room: 0 };
           p.timeline.set(ym, bucket);
         }
+        // Same split as the totals: the year view sums these, so a room counted
+        // here would put the old number back on the one screen that shows it.
         if (sig.channel === 'calendar') bucket.met += 1;
+        else if (sig.room) bucket.room += 1;
         else if (sig.fromMe) bucket.sent += 1;
         else bucket.received += 1;
       }
@@ -464,6 +523,14 @@ export function buildGraph(
             ? Math.round((100 * Math.min(p.sent, p.received)) / Math.max(p.sent, p.received)) / 100
             : 0,
         metInPerson: p.metInPerson,
+        // THE SECOND AXIS. messages/sent/received above are unchanged -- these
+        // say how much of it was addressed to the owner and how much was said in
+        // a room they also happened to be in. `roomOnly` is the case worth a
+        // badge: 143 people have never sent a direct message and today render
+        // identically to friends on every screen in the app.
+        roomMessages: p.roomMessages,
+        directMessages: p.directMessages,
+        roomOnly: p.directMessages === 0 && p.roomMessages > 0,
         firstSeen: p.firstSeen,
         lastSeen: p.lastSeen,
         // The dormancy clock the whole build was for: days since THEY last

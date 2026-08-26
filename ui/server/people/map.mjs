@@ -186,15 +186,25 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
   for (const p of graph) {
     let messages = 0;
     let met = 0;
+    let roomMessages = 0;
     for (const b of p.timeline ?? []) {
       yearsSet.add(Number(b.ym.slice(0, 4)));
       if (!b.ym.startsWith(prefix)) continue;
+      // `messages` is DIRECT, because that is what the row's label claims. Room
+      // volume is its own number, next to it, not folded into it.
       messages += (b.sent ?? 0) + (b.received ?? 0);
       met += b.met ?? 0;
+      roomMessages += b.room ?? 0;
     }
     const engagement = messages + MEETING_WEIGHT * met;
-    if (engagement === 0) continue;
-    entries.push({ p, messages, met, engagement });
+    // A YEAR SPENT ONLY IN ROOMS STILL HAPPENED. Ordering is by direct
+    // engagement, so somebody the owner never addressed sorts below everybody
+    // they did -- but they stay ON the list, because "you were in three group
+    // chats with this person and never messaged them" is the answer, and a row
+    // that vanishes cannot give it. Room volume deliberately does NOT enter
+    // engagement: it would buy rank with other people's conversations.
+    if (engagement === 0 && roomMessages === 0) continue;
+    entries.push({ p, messages, met, engagement, roomMessages });
   }
   entries.sort((a, b) => b.engagement - a.engagement);
 
@@ -212,7 +222,14 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
         name: e.p.name,
         channels: e.p.channels ?? [],
         messages: e.messages,
+        roomMessages: e.roomMessages,
         engagement: e.engagement,
+        // ONLY EVER IN ROOMS. Relationship-level, not per-year: the question
+        // "do I actually know this person, or do we just share a group chat"
+        // is not a question about 2024. 458 people on the live store have
+        // never sent the owner a direct message and until now rendered
+        // identically to friends.
+        roomOnly: e.p.roomOnly === true,
         // Five chips, not three (owner, 2026-08-25) — and no separate
         // taxonomy or specifics fields: the chips ARE the topic surface, and
         // the expanded row's only extra is the model-written summary.
@@ -249,14 +266,17 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
     for (const b of p.timeline ?? []) {
       const y = Number(String(b.ym).slice(0, 4));
       if (!Number.isInteger(y)) continue;
-      const cur = per.get(y) ?? { messages: 0, met: 0 };
+      const cur = per.get(y) ?? { messages: 0, met: 0, roomMessages: 0 };
       cur.messages += (b.sent ?? 0) + (b.received ?? 0);
       cur.met += b.met ?? 0;
+      cur.roomMessages += b.room ?? 0;
       per.set(y, cur);
     }
     for (const [y, v] of per) {
       const engagement = v.messages + MEETING_WEIGHT * v.met;
-      if (engagement === 0) continue; // a year they do not appear in
+      // Reachable by search even in a year that was only rooms -- search is
+      // about finding somebody, and they were there.
+      if (engagement === 0 && v.roomMessages === 0) continue;
       if (!byYear.has(y)) byYear.set(y, []);
       byYear.get(y).push({
         key: p.key,
@@ -264,7 +284,9 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
         channels: p.channels ?? [],
         identifiers: p.identifiers ?? [],
         messages: v.messages,
+        roomMessages: v.roomMessages,
         engagement,
+        roomOnly: p.roomOnly === true,
         // Each person-year doc is touched once across the whole loop, so this
         // is one pass over the docs rather than one per year.
         topics: topTopics(topics.docs.get(`${p.key}|${y}`), topics.docFreq, topics.totalDocs, { limit: 5 }),
@@ -317,7 +339,21 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
     // Days since last contact of any kind, for the personal field where there
     // may be no inbound to drive dormancy.
     const sinceSeen = Number.isFinite(p.lastSeen) ? Math.max(0, Math.floor((now - p.lastSeen) / DAY)) : null;
-    const recencyDays = p.dormancyDays != null ? p.dormancyDays : sinceSeen;
+    // A ROOM DOES NOT MAKE SOMEBODY WARM.
+    //
+    // dormancyDays is null for a person who has never sent a direct message,
+    // which is the fix -- but falling back to lastSeen put the room straight
+    // back in, because lastSeen ticks on any activity including a group post.
+    // A room-only speaker who posted yesterday came out at recencyDays 1 and
+    // maximum warmth, indistinguishable from a close friend, which is exactly
+    // the constellation behaviour the dormancy fix was supposed to correct.
+    //
+    // null rather than a large number: warmthOf already has a tier for "no
+    // recency to speak of" and this genuinely is that case. The lastSeen
+    // fallback stays for everybody else, where it is the only signal a
+    // calendar-only contact has.
+    const recencyDays =
+      p.dormancyDays != null ? p.dormancyDays : (p.roomOnly ? null : sinceSeen);
 
     return {
       key: p.key,
@@ -326,6 +362,9 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
       clusterLabel: c.label,
       strength: Math.round((depth / norm) * 1000) / 1000,
       recencyDays,
+      // Carried onto the star so the constellation can mark it, and so this is
+      // measurable from the payload rather than only from the graph behind it.
+      roomOnly: p.roomOnly === true,
       warm: warmthOf(recencyDays),
       channels: p.channels ?? [],
       messages: p.messages ?? 0,
