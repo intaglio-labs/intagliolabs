@@ -985,6 +985,18 @@ function card(src, keep) {
         hzPost('openFullDiskAccess').catch(() => {});
         return;
       }
+      // Same shortcut for a disabled connector (WhatsApp today): its card
+      // held exactly one control — connect — so the tile press presses it
+      // (owner, 2026-08-25). The dot spins while the daemon flips it on; the
+      // refreshed status is the answer, green or a card that explains.
+      if (src.disabled && src.action === 'enable') {
+        row.classList.add('logging-in');
+        hzPost('setConnectorEnabled', { connector: src.id, enabled: true })
+          .then(refresh)
+          .catch(() => {})
+          .finally(() => row.classList.remove('logging-in'));
+        return;
+      }
       hintHost.appendChild(tip);
       row.classList.add('open');
       if (src.action === 'bridge') openBridge(); // connected → show status
