@@ -376,6 +376,31 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
     const recencyDays =
       p.dormancyDays != null ? p.dormancyDays : (p.roomOnly ? null : sinceSeen);
 
+    // AND A SECOND CLOCK, WHICH DELIBERATELY DOES ACCEPT THE ROOM.
+    //
+    // Read the comment directly above before changing this: it argues at length
+    // for refusing the lastSeen fallback, and this line reinstates it under a
+    // different name. That is not a contradiction, it is two questions:
+    //
+    //   recencyDays  — "how warm is this relationship?" A room must not answer
+    //                  it, because posting in a group you are both in is not
+    //                  contact, and treating it as contact is what put strangers
+    //                  at maximum warmth.
+    //   presenceDays — "when did I last come across this person at all?" A room
+    //                  absolutely answers that. Seeing somebody in a group chat
+    //                  is seeing them.
+    //
+    // The 467 room-only people are the ENTIRE difference between the two fields
+    // and that is the point of having both. It is what lets a filter offer "in
+    // touch" and "gone quiet" without deleting the cohort the room work just
+    // made visible -- a filter built on recencyDays would silently drop every
+    // one of them, since theirs is null by design.
+    //
+    // NOT called effRecencyDays or anything else that reads as a better
+    // recencyDays: a name like that invites the next reader to collapse the two,
+    // which would undo the fix above.
+    const presenceDays = p.dormancyDays != null ? p.dormancyDays : sinceSeen;
+
     return {
       key: p.key,
       name: p.name,
@@ -390,6 +415,8 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
       // whether to draw somebody needs to tell "no contact" from "not there at
       // all" -- and `messages` alone can no longer make that distinction.
       roomMessages: p.roomMessages ?? 0,
+      // Presence, not warmth. See the two-clocks comment above.
+      presenceDays,
       warm: warmthOf(recencyDays),
       channels: p.channels ?? [],
       messages: p.messages ?? 0,

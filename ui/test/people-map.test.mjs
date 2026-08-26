@@ -120,3 +120,56 @@ test('a recent DIRECT message still makes somebody warm', () => {
   assert.equal(p.recencyDays, 1);
   assert.equal(p.warm, 1, 'the fallback still works for real contact');
 });
+
+// ---- two clocks, and why there are two ----
+//
+// recencyDays answers "how warm is this relationship" and refuses the room.
+// presenceDays answers "when did I last come across this person at all" and
+// accepts it. The 467 room-only people on the live corpus are the entire
+// difference, which is what lets a recency filter offer "in touch" without
+// deleting the cohort the room work just made visible.
+test('a room counts for presence and not for warmth', () => {
+  const ctx = new DatabaseSync(':memory:');
+  ctx.exec('CREATE TABLE context (ts INTEGER, source TEXT, speaker TEXT, entity_id TEXT, text TEXT, meta TEXT)');
+  ctx.prepare('INSERT INTO context (ts, source, entity_id, text, meta) VALUES (?,?,?,?,?)').run(
+    NOW - DAY, 'imessage', 'g1', 'anyone free saturday',
+    JSON.stringify({ chat_guid: 'any;+;chat70707', handle: '+15550999', is_from_me: false })
+  );
+  const p = buildMap(ctx, null, { now: NOW, owner }).people
+    .find((x) => (x.identifiers ?? []).includes('+15550999'));
+  assert.ok(p);
+  assert.equal(p.recencyDays, null, 'a room is not contact');
+  assert.ok(p.warm < 1, 'so it cannot make them warm');
+  assert.equal(p.presenceDays, 1, 'but you did come across them yesterday');
+  assert.equal(p.roomOnly, true);
+});
+
+test('a direct message drives both clocks', () => {
+  const ctx = new DatabaseSync(':memory:');
+  ctx.exec('CREATE TABLE context (ts INTEGER, source TEXT, speaker TEXT, entity_id TEXT, text TEXT, meta TEXT)');
+  ctx.prepare('INSERT INTO context (ts, source, entity_id, text, meta) VALUES (?,?,?,?,?)').run(
+    NOW - 5 * DAY, 'imessage', 'd1', 'hey',
+    JSON.stringify({ chat_guid: 'any;-;+15550998', handle: '+15550998', is_from_me: false })
+  );
+  const p = buildMap(ctx, null, { now: NOW, owner }).people
+    .find((x) => (x.identifiers ?? []).includes('+15550998'));
+  assert.equal(p.recencyDays, 5);
+  assert.equal(p.presenceDays, 5, 'the two agree whenever there IS direct contact');
+});
+
+// The whole point: a filter built on recencyDays would drop every room-only
+// person, because theirs is null by design.
+test('presence is the only field a recency filter can honestly use', () => {
+  const ctx = new DatabaseSync(':memory:');
+  ctx.exec('CREATE TABLE context (ts INTEGER, source TEXT, speaker TEXT, entity_id TEXT, text TEXT, meta TEXT)');
+  const ins = ctx.prepare('INSERT INTO context (ts, source, entity_id, text, meta) VALUES (?,?,?,?,?)');
+  ins.run(NOW - 2 * DAY, 'imessage', 'r1', 'in the room',
+    JSON.stringify({ chat_guid: 'any;+;chatA', handle: '+15550111', is_from_me: false }));
+  ins.run(NOW - 3 * DAY, 'imessage', 'd2', 'to me',
+    JSON.stringify({ chat_guid: 'any;-;+15550222', handle: '+15550222', is_from_me: false }));
+  const people = buildMap(ctx, null, { now: NOW, owner }).people;
+  const byRecency = people.filter((p) => p.recencyDays != null && p.recencyDays < 365);
+  const byPresence = people.filter((p) => p.presenceDays != null && p.presenceDays < 365);
+  assert.equal(byRecency.length, 1, 'recency sees only the direct contact');
+  assert.equal(byPresence.length, 2, 'presence sees both, which is what "in touch" means');
+});

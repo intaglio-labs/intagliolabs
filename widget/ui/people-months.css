@@ -505,3 +505,40 @@ body.plist .pm-room-msgs {
    one-liner palette.css already uses for .ob-prog. */
 body.plist .pm-cards[hidden],
 body.plist .pm-filter[hidden] { display: none; }
+
+/* THE RECENCY SEGMENTS, globe only. Its own row rather than sharing .pm-filter,
+   because renderFilter replaceChildren()s that node and hides it whenever the
+   view is not a list — which is exactly when this control matters. Reads as a
+   tab strip (a view you are standing in) rather than as a chip (a thing you can
+   dismiss), because "everyone" is a state and not the absence of one. */
+body.plist .pm-recency {
+  display: flex;
+  gap: 4px;
+  padding: 0 10px 6px;
+  flex: 0 0 auto;
+}
+body.plist .pm-recency[hidden] { display: none; }
+body.plist .pm-rec {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 5px;
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+body.plist .pm-rec:hover { color: var(--fg); }
+body.plist .pm-rec.active {
+  color: var(--hazelnut-light);
+  border-color: color-mix(in srgb, var(--hazelnut-light) 32%, transparent);
+  background: color-mix(in srgb, var(--hazelnut-light) 10%, transparent);
+}
+body.plist .pm-rec:focus-visible {
+  outline: 1px solid var(--hazelnut-light);
+  outline-offset: 1px;
+}

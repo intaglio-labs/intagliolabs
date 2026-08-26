@@ -27,6 +27,7 @@
   const listEl = document.getElementById('list');
   const searchEl = document.getElementById('search');
   const closeEl = document.getElementById('close');
+  const recencyEl = document.getElementById('recency');
   const tabsEl = document.getElementById('tabs');
   const syncEl = document.getElementById('sync');
   const skyEl = document.getElementById('sky');
@@ -43,6 +44,11 @@
   // person's topics are a thing about the relationship, not about a calendar
   // year, and slicing them by year made the same friend appear and vanish
   // between tabs.
+  // 'all' | 'in' | 'quiet'. Defaults to 'all': the globe's identity is
+  // everyone-you-know, so the chip's job is to ASK the recency question, not to
+  // answer it on the owner's behalf. Defaulting to 'in' would open on 759 of
+  // 2,604 stars and read as a much emptier corpus than it is.
+  let recency = 'all';
   let scope = 'year';
   // The topic a bubble was clicked into, or null. Only the list honours it —
   // filtering the constellation to one topic would just draw that one circle.
@@ -193,7 +199,69 @@
     if (topic && view === 'list') {
       rows = rows.filter((p) => (p.topics || []).some((t) => t && t.label === topic));
     }
+    // RECENCY APPLIES TO BOTH VIEWS, unlike topic. visible() is the single input
+    // to the list and to the sky, so filtering here is what makes the two agree
+    // by construction rather than by two call sites remembering to match.
+    //
+    // On presenceDays, never recencyDays: recencyDays is null for all 467
+    // room-only people by design, so a filter on it would silently delete the
+    // exact cohort the room work made visible. See the two-clocks comment in
+    // ui/server/people/map.mjs.
+    if (recency === 'in') {
+      rows = rows.filter((p) => presenceOf(p) != null && presenceOf(p) < RECENT_DAYS);
+    } else if (recency === 'quiet') {
+      rows = rows.filter((p) => { const d = presenceOf(p); return d == null || d >= RECENT_DAYS; });
+    }
     return rows;
+  }
+
+  // A YEAR, because that is the boundary the eye already uses ("did I see them
+  // this year") and because it splits this corpus into two usable halves rather
+  // than one big one and a sliver.
+  const RECENT_DAYS = 365;
+
+  // Server-computed, with a client fallback for a payload that predates the
+  // field — the same shape as the topicsAreMarked detect below, and the reason
+  // for it is the same: an app bundle and a backend ship by different routes, so
+  // one can be newer than the other. Treating `undefined` as a value would put
+  // every star in "gone quiet" on an older server.
+  function presenceOf(p) {
+    if (typeof p.presenceDays === 'number') return p.presenceDays;
+    if (typeof p.recencyDays === 'number') return p.recencyDays;
+    if (typeof p.lastSeen === 'number') return Math.max(0, Math.floor((Date.now() - p.lastSeen) / 86400000));
+    return null;
+  }
+
+  // THE RECENCY SEGMENTS. Three states, each printing its own count, so the
+  // control can never be silently on -- a filtered globe that looks like a small
+  // corpus is the failure this is guarding against.
+  //
+  // Globe only: yearCore's rows carry no recency field at all (the year view is
+  // built from month buckets, not from the graph person), so the chip would have
+  // nothing to filter on inside a year tab. Gated rather than hidden-and-hoped.
+  function renderRecency(data) {
+    const show = scope === 'all' && !findTerm && Array.isArray(data?.people);
+    recencyEl.hidden = !show;
+    if (!show) { recencyEl.replaceChildren(); return; }
+    const all = data.people;
+    const n = (f) => all.filter(f).length;
+    const states = [
+      { id: 'all', label: 'everyone', count: all.length },
+      { id: 'in', label: 'in touch', count: n((p) => presenceOf(p) != null && presenceOf(p) < RECENT_DAYS) },
+      { id: 'quiet', label: 'gone quiet', count: n((p) => { const d = presenceOf(p); return d == null || d >= RECENT_DAYS; }) },
+    ];
+    recencyEl.replaceChildren(...states.map((st) => {
+      const b = document.createElement('button');
+      b.className = `pm-rec${st.id === recency ? ' active' : ''}`;
+      b.dataset.rec = st.id;
+      b.textContent = `${st.label} ${st.count}`;
+      // "in touch" means seen anywhere, group chats included -- say so, because
+      // the number is bigger than a reader expecting direct contact would guess.
+      b.title = st.id === 'in' ? 'seen in the last year, group chats included'
+        : st.id === 'quiet' ? 'nothing for a year or more, anywhere'
+        : 'no recency filter';
+      return b;
+    }));
   }
 
   // The chip that says which topic the list is standing in, and the way out of
@@ -326,6 +394,7 @@
       // that does not change. A control that cannot act should not exist.
       filterEl.hidden = true;
       filterEl.replaceChildren();
+      renderRecency(null);
       renderFind();
       saveView();
       return;
@@ -353,6 +422,9 @@
     surface();
     renderCards(data);
     renderFilter(rows.length);
+    // Counts come from the UNFILTERED data so each segment says how many it
+    // would show, not how many are showing now.
+    renderRecency(data);
     if (view === 'sky') renderSky(data, rows);
     else renderList(data, rows);
     // One placeholder, because search now means the same thing everywhere:
@@ -653,7 +725,14 @@
       const m = document.createElement('div');
       m.className = 'pm-sky-empty';
       m.textContent = people.length
-        ? `nothing shared enough to group in ${year} — a topic needs at least ${MIN_CLUSTER} people`
+        // NAME THE CAUSE. The old sentence blamed the year, which is wrong on an
+        // all-years globe and wrong again when a filter is what emptied it —
+        // leaving the owner to conclude the corpus is thin.
+        ? (recency !== 'all'
+            ? `nothing to group among the ${recency === 'in' ? 'in touch' : 'gone quiet'} — try everyone`
+            : scope === 'all'
+              ? `nothing shared enough to group — a topic needs at least ${MIN_CLUSTER} people`
+              : `nothing shared enough to group in ${year} — a topic needs at least ${MIN_CLUSTER} people`)
         : `no one to place in ${year}`;
       skyEl.appendChild(m);
       return;
@@ -743,6 +822,9 @@
         messages,
         roomMessages,
         roomOnly: p.roomOnly === true,
+        // Whitelisted through, or the recency filter has nothing to read.
+        presenceDays: typeof p.presenceDays === 'number' ? p.presenceDays : null,
+        lastSeen: typeof p.lastSeen === 'number' ? p.lastSeen : null,
         // Ordering is still by direct contact: room volume must not buy a
         // bigger star with other people's conversations.
         engagement: messages,
@@ -782,7 +864,7 @@
     // Debounced: render() runs on every keystroke of a search, and each save is
     // a UserDefaults write.
     saveTimer = setTimeout(() => {
-      hzPost('monthsView', { state: `${year}|${view}|${topic || ''}|${scope}` }).catch(() => {});
+      hzPost('monthsView', { state: `${year}|${view}|${topic || ''}|${scope}|${recency}` }).catch(() => {});
     }, 250);
   }
 
@@ -798,7 +880,7 @@
       return null; // no memory is not an error; start on this year
     }
     if (!saved) return null;
-    const [y, v, t, s] = saved.split('|');
+    const [y, v, t, s, r] = saved.split('|');
     const n = Number(y);
     // Trust nothing that came back: the value outlives the code that wrote it,
     // and a year the corpus no longer has would strand the page on an empty
@@ -812,6 +894,10 @@
     // saveView cannot produce that pair, but a hand-edited or older value can,
     // and it is one line to refuse rather than reason about downstream.
     topic = view === 'list' && t ? t : null;
+    // A fifth field is absent from every value written before this existed, and
+    // anything unrecognised means no filter -- the safe state, since it is the
+    // one that hides nobody.
+    recency = r === 'in' || r === 'quiet' ? r : 'all';
     return Number.isInteger(n) && n >= 1990 && n <= new Date().getFullYear() + 1 ? n : null;
   }
 
@@ -934,6 +1020,12 @@
     if (!c || !c.dataset.topic) return;
     hzSfx.squish();
     openTopic(c.dataset.topic);
+  });
+  recencyEl.addEventListener('click', (e) => {
+    const b = e.target.closest('.pm-rec');
+    if (!b || !b.dataset.rec || b.dataset.rec === recency) return;
+    recency = b.dataset.rec;
+    render();
   });
   syncEl.addEventListener('click', () => { hzPost('openPeople').catch(() => {}); });
   let t = null;
