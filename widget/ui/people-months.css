@@ -542,64 +542,69 @@ body.plist .pm-filter[hidden] { display: none; }
    dismiss), because "everyone" is a state and not the absence of one. */
 body.plist .pm-recency {
   display: flex;
-  gap: 4px;
-  padding: 0 10px 6px;
+  align-items: center;
+  gap: 8px;
+  /* Room above as well as below. Flush against the tab strip's border the row
+     read as an overflow of the tabs rather than its own control. */
+  padding: 7px 12px 8px;
   flex: 0 0 auto;
 }
 body.plist .pm-recency[hidden] { display: none; }
+
+/* THE GROOVE. What makes three buttons read as one control: a single recessed
+   track they all sit in, so the selected one is raised OUT of a surface rather
+   than being the only one with a box. */
+body.plist .pm-rec-track {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: rgba(234, 234, 234, 0.035);
+  border: 1px solid rgba(234, 234, 234, 0.07);
+}
 body.plist .pm-rec {
   appearance: none;
-  border: 1px solid transparent;
+  border: 0;
   background: transparent;
-  border-radius: 5px;
-  padding: 2px 8px;
+  border-radius: 6px;
+  padding: 3px 9px;
   font: inherit;
   font-size: 10px;
+  line-height: 1.4;
   letter-spacing: 0.02em;
   color: var(--muted);
   cursor: pointer;
   white-space: nowrap;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  transition: color 120ms ease, background-color 120ms ease;
+}
+/* The count is evidence, not part of the name. Tabular so the three numbers
+   do not jitter the track's width as the year changes under them. */
+body.plist .pm-rec-n {
+  font-size: 9px;
+  opacity: 0.55;
   font-variant-numeric: tabular-nums;
 }
-body.plist .pm-rec:hover { color: var(--fg); }
+body.plist .pm-rec:hover { color: var(--secondary); }
 body.plist .pm-rec.active {
   color: var(--hazelnut-light);
-  border-color: color-mix(in srgb, var(--hazelnut-light) 32%, transparent);
-  background: color-mix(in srgb, var(--hazelnut-light) 10%, transparent);
+  background: rgba(234, 234, 234, 0.09);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
 }
+body.plist .pm-rec.active .pm-rec-n { opacity: 0.75; }
 body.plist .pm-rec:focus-visible {
   outline: 1px solid var(--hazelnut-light);
   outline-offset: 1px;
 }
 
-/* THE GLOBE TOGGLE STAYS REACHABLE. It is appended after every year tab, and ten
-   years plus the globe do not fit a 520px panel — so it lived past the right
-   edge of a scrolling strip and had to be hunted for. Stuck to the right edge
-   instead, with the years scrolling underneath it. The background is opaque
-   rather than translucent because a year tab sliding under a see-through button
-   reads as a rendering fault. */
-body.plist .pm-tabs .pm-tab-globe {
-  position: sticky;
-  right: 0;
-  z-index: 2;
-  margin-left: auto;
-  /* Opaque, because a year tab sliding under a translucent button reads as a
-     rendering fault. The shadow is what says "the strip continues underneath". */
-  background: var(--bg);
-  box-shadow: -8px 0 8px -6px rgba(0, 0, 0, 0.55);
-}
-/* AND IT MUST STILL LOOK SELECTED. The opaque background above beats
-   .pm-tab.active's own, so the globe's selected state became indistinguishable
-   from its unselected one — defeating the point of making it reachable. Restated
-   at the specificity it now needs, keeping the real .active treatment: the
-   hazelnut tint and border, plus the 1px punch-through shadow, combined with the
-   left-edge shadow that says the strip continues underneath. */
-body.plist .pm-tabs .pm-tab-globe.active {
-  border-color: rgba(197, 165, 109, 0.35);
-  color: var(--hazelnut-light);
-  background: color-mix(in srgb, var(--hazelnut-light) 7%, var(--bg));
-  box-shadow: 0 1px 0 rgba(16, 16, 15, 0.92), -8px 0 8px -6px rgba(0, 0, 0, 0.55);
-}
+/* The globe sits in the strip like any other tab, immediately after the newest
+   year. It was stuck to the right edge for a while — reachable, but floating
+   apart from the years and reading as a separate right-aligned control rather
+   than the last thing in the row. The strip opens scrolled to its right-hand
+   end, which puts the newest year and the globe together in view without
+   pinning either. */
 
 /* HOW OLD THE ANSWER IS, and the way to ask for a newer one. Pushed to the far
    end of the row so it never competes with the recency segments — it is a

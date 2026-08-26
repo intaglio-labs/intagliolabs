@@ -54,7 +54,15 @@ import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch } from './people/search.mjs';
 import { loadOwner } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
-import { buildMap, buildYear, buildSearchYears, yearCore, peopleCoreFreshness } from './people/map.mjs';
+import {
+  buildMap,
+  buildYear,
+  buildSearchYears,
+  yearCore,
+  peopleCoreFreshness,
+  useTallyStore,
+} from './people/map.mjs';
+import { openTallyStore } from './people/tallyStore.mjs';
 import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
@@ -3189,6 +3197,15 @@ if (isMain) {
       setTimeout(() => {
         const t0 = Date.now();
         try {
+          // A DERIVED CACHE, beside the corpus it is derived from -- the path
+          // asked of the handle rather than recomputed, so it always names the
+          // database actually open and an in-memory one (which reports no file)
+          // gets no cache at all. Deleting it costs one rescan and nothing
+          // else, which is the only property it needs to have. Opened here
+          // rather than at import so a test that imports the module never
+          // writes to the owner's disk.
+          const file = db.prepare('PRAGMA database_list').get()?.file ?? '';
+          if (file) useTallyStore(openTallyStore(`${file}.tallies`));
           const core = warmPeopleCore(db);
           console.log(
             `people core warm in ${Date.now() - t0}ms (${core?.graph?.length ?? 0} people)`

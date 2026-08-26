@@ -291,11 +291,28 @@
       { id: 'in', label: 'in touch', count: n((p) => presenceOf(p) != null && presenceOf(p) < RECENT_DAYS) },
       { id: 'quiet', label: 'gone quiet', count: n((p) => { const d = presenceOf(p); return d == null || d >= RECENT_DAYS; }) },
     ];
-    recencyEl.replaceChildren(...states.map((st) => {
+    // The three live in a TRACK. Rendered as three bare buttons they read as
+    // one pill and two loose words -- a label someone forgot to style, not a
+    // control -- because only the selected one had any box at all. A shared
+    // groove is what says "these are the three states of one thing, and you are
+    // standing in this one".
+    const track = document.createElement('div');
+    track.className = 'pm-rec-track';
+    track.append(...states.map((st) => {
       const b = document.createElement('button');
+      b.type = 'button';
       b.className = `pm-rec${st.id === recency ? ' active' : ''}`;
       b.dataset.rec = st.id;
-      b.textContent = `${st.label} ${st.count}`;
+      b.setAttribute('aria-pressed', String(st.id === recency));
+      const label = document.createElement('span');
+      label.textContent = st.label;
+      // The count is evidence for the label, not part of its name: same row,
+      // quieter, and its own element so "everyone" and "1793" stop running
+      // together into one string.
+      const num = document.createElement('span');
+      num.className = 'pm-rec-n';
+      num.textContent = String(st.count);
+      b.append(label, num);
       // "in touch" means seen anywhere, group chats included -- say so, because
       // the number is bigger than a reader expecting direct contact would guess.
       b.title = st.id === 'in' ? 'seen in the last year, group chats included'
@@ -304,7 +321,7 @@
       return b;
     }));
     const chip = freshnessChip(fresh);
-    if (chip) recencyEl.appendChild(chip);
+    recencyEl.replaceChildren(...(chip ? [track, chip] : [track]));
   }
 
   // The chip that says which topic the list is standing in, and the way out of
@@ -535,8 +552,8 @@
         findRows = res.people;
         findState = 'done';
         findCapped = res.capped === true;
-        if (Array.isArray(res.years) && res.years.length) years = res.years;
         render();
+        noteYears(res.years);
       })
       .catch(() => {
         if (my !== findId) return;
@@ -875,11 +892,17 @@
 
   function adaptMap(payload) {
     const people = [];
+    // The years with anyone in them, gathered while walking the stars. The map
+    // payload has no year list of its own, and this is the only surface a
+    // globe-first session ever loads -- without it the tab strip has nothing to
+    // draw but the current year.
+    const seenYears = new Set();
     for (const p of payload.people || []) {
       const byLabel = new Map();
       let latestYear = null;
       for (const y of p.years || []) {
         if (latestYear === null || y.year > latestYear) latestYear = y.year;
+        if (Number.isInteger(y.year)) seenYears.add(y.year);
         for (const t of y.topics || []) {
           if (!t || !t.label) continue;
           const cur = byLabel.get(t.label);
@@ -920,7 +943,7 @@
       });
     }
     people.sort((a, b) => b.engagement - a.engagement);
-    return { people, total: people.length, allYears: true };
+    return { people, total: people.length, allYears: true, years: [...seenYears].sort((a, b) => a - b) };
   }
 
   function ensureMap({ rebuild = false } = {}) {
@@ -931,6 +954,11 @@
           if (r && r.freshness) lastFreshness = r.freshness;
           mapData = adaptMap(r || {});
           mapData.freshness = r?.freshness ?? null;
+          // The map knows every year with activity -- adaptMap gathers it from
+          // the stars, since the payload carries no list of its own. Taking it
+          // here is what fills the tab strip for a session that never opened a
+          // year, and starts warming them now the constellation itself is drawn.
+          noteYears(mapData.years);
           return mapData;
         })
         .finally(() => { mapPending = null; });
@@ -1012,9 +1040,25 @@
     if (!res || !Array.isArray(res.people)) throw new Error('bad year payload');
     if (res.freshness) lastFreshness = res.freshness;
     cache.set(year, res);
-    if (Array.isArray(res.years) && res.years.length) years = res.years;
     render();
-    prefetchRest();
+    noteYears(res.years);
+  }
+
+  // EVERY PATH THAT LEARNS THE YEAR LIST WARMS THE REST.
+  //
+  // The warming used to be reachable only from load(), and boot calls load()
+  // only when it is opening a YEAR -- restoring to the constellation renders
+  // and returns. So a session that opened on the globe (or searched first) left
+  // every year tab cold, and clicking the newest year was the only thing that
+  // started the warming: which is why past years appeared to need a click on
+  // the latest one before they would show.
+  //
+  // Called after the thing on screen has its data, never before, so warming a
+  // year the reader is not looking at can never queue ahead of the surface they
+  // are (hermes is single-threaded; a queued scan is a frozen panel).
+  function noteYears(list) {
+    if (Array.isArray(list) && list.length) years = list;
+    if (years.length) prefetchRest();
   }
 
   // Warm the remaining years in the background, newest first — the server

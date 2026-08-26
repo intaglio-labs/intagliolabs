@@ -262,6 +262,41 @@ export function peopleCoreFreshness(contextDb, stateDb, aliases = null) {
   };
 }
 
+// THE SAME QUESTION, ASKED OF THE CORPUS ALONE.
+//
+// corpusStamp above is what the PEOPLE core depends on, spine included. The
+// topic scan depends on strictly less than that: it is a pure function of the
+// rows and the episode index, now that both the person key and the name filter
+// happen at the fold. Giving it its own stamp is what lets a contacts sync --
+// 188,508 rows in a day -- reuse a scan it cannot possibly have changed.
+export function corpusOnlyStamp(contextDb) {
+  const c = contextDb
+    .prepare('SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM context')
+    .get();
+  const dv = contextDb.prepare('PRAGMA data_version').get();
+  let eps = 0;
+  try {
+    eps = Number(contextDb.prepare('SELECT COUNT(*) AS n FROM episode_member').get().n) || 0;
+  } catch {
+    eps = 0;
+  }
+  return `${c.n}|${c.m}|${dv ? Object.values(dv)[0] : 0}|${eps}`;
+}
+
+// THE DISK CACHE, OPT-IN.
+//
+// Null unless the server hands one over, so importing this module never touches
+// the filesystem: tests and scripts get the pure function and the owner's cache
+// is never written by a test run. hermes calls this once at boot with a store
+// beside its own context.db -- see people/tallyStore.mjs for what is kept and
+// why it is all-or-nothing, and why a stamp that lives across restarts cannot
+// be this one (data_version is a per-connection session counter).
+let tallyStore = null;
+
+export function useTallyStore(store) {
+  tallyStore = store ?? null;
+}
+
 export function yearCore(contextDb, stateDb, { now, owner, aliases, blocking = false }) {
   const stamp = corpusStamp(contextDb, stateDb, String(aliases ? aliases.size : 0));
   const hit = yearMemo.get(contextDb);
@@ -288,7 +323,16 @@ export function yearCore(contextDb, stateDb, { now, owner, aliases, blocking = f
     .filter((p) => !isNonPerson(p) && hasRelationship(p));
   const idToKey = new Map(graph.flatMap((p) => (p.identifiers ?? []).map((id) => [id, p.key])));
   const nameTokens = nameTokenSet([...graph.map((p) => p.name), ...(owner?.names ?? [])]);
-  const topics = topicTallies(contextDb, idToKey, { nameTokens, bucketBy: 'year' });
+  const topics = topicTallies(contextDb, idToKey, {
+    nameTokens,
+    bucketBy: 'year',
+    // The scan is cached on the corpus alone; the fold re-runs on every spine
+    // change, which is 28ms against a 3,494ms rescan.
+    scanStamp: corpusOnlyStamp(contextDb),
+    // ...and cached on disk between runs, so a restart that changed nothing
+    // loads the scan instead of repeating it.
+    store: tallyStore,
+  });
 
   // idToKey rides along because people/content.mjs needs exactly this
   // resolution to credit a corpus hit to the same person their message count
@@ -480,6 +524,7 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
     ? shared.topics
     : topicTallies(contextDb, idToKey, {
         nameTokens: nameTokenSet([...graph.map((p) => p.name), ...(owner?.names ?? [])]),
+        scanStamp: corpusOnlyStamp(contextDb),
       });
 
   // Strength is depth (volume + reciprocity + reach), normalized to 0..1 across
