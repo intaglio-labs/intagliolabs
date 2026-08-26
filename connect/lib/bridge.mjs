@@ -297,7 +297,30 @@ async function ensureBotRoom(creds, botMxid) {
     direct = {};
   }
   const existing = direct?.[botMxid];
-  if (Array.isArray(existing) && existing.length > 0) return existing[existing.length - 1];
+  if (Array.isArray(existing) && existing.length > 0) {
+    // A REMEMBERED ROOM THE BOT NEVER JOINED IS A DEAD ROOM, and it looks
+    // exactly like a working one from here. If the bridge was not registered
+    // with synapse when the room was made — the window a newly added bridge
+    // sits in while its as_token is still being rejected — it never saw the
+    // invite, and synapse then rightly considers it uninterested in every
+    // event there. Commands go in, nothing comes out, forever (LinkedIn spent
+    // an evening like this, 2026-08-25). Checking membership costs one call
+    // and turns a permanent silence into a fresh room.
+    const roomId = existing[existing.length - 1];
+    try {
+      const members = await mx(creds, 'GET', `/rooms/${encodeURIComponent(roomId)}/joined_members`);
+      if (members?.joined && Object.hasOwn(members.joined, botMxid)) return roomId;
+    } catch {
+      return roomId; // cannot tell — the remembered room is still the best guess
+    }
+    // Fall through: forget it and make one the bot can actually accept.
+    try {
+      await mx(creds, 'POST', `/rooms/${encodeURIComponent(roomId)}/leave`, {});
+      await mx(creds, 'POST', `/rooms/${encodeURIComponent(roomId)}/forget`, {});
+    } catch {
+      // Leaving is best-effort; a fresh room is created either way.
+    }
+  }
 
   const created = await mx(creds, 'POST', '/createRoom', {
     is_direct: true,

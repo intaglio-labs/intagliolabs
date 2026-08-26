@@ -360,10 +360,18 @@ body.plist .pl-face {
    letters are the fallback, not a caption. Covered and centred so a
    non-square thumbnail fills the circle instead of squashing into it, and the
    gradient is dropped so a photo with transparency does not sit on gold. */
-.has-photo {
+/* SCOPED, and that is the whole point. A bare `.has-photo` (0,1,0) loses to
+   `body.plist .pl-face` (0,2,1), so the photo rendered at its natural 96px
+   inside a 20px circle — a blurry zoomed crop — with the initials still dark
+   on top of it. Written with !important first, then "cleaned up" to remove
+   them, which is what broke it (2026-08-25). Matching the base rules'
+   specificity is the fix; !important would only have hidden the question. */
+body.plist .pl-face.has-photo,
+body.plist .pm-face.has-photo,
+body.plist .pm-card-face.has-photo {
   /* The photo itself is an inline background-image set by paintAvatars, which
-     also replaces the gradient the base rule painted — nothing here needs to
-     unset it. These are the framing rules the inline style cannot carry. */
+     replaces the gradient the base rule painted. These are the framing rules
+     the inline style cannot carry. */
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
