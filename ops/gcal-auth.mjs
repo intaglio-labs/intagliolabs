@@ -74,6 +74,9 @@ const SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
 ].join(' ');
 const TIMEOUT_MS = 15 * 60 * 1000;
+// Print the authorize URL instead of opening a browser. Used by the connect
+// server, which hands it to the app's own sign-in window.
+const PRINT_URL = process.argv.includes('--print-url');
 
 function fail(msg) {
   console.error(`gcal-auth: ${msg}`);
@@ -362,6 +365,21 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log('gcal-auth: waiting for the browser approval (15 minute limit)…');
-  console.log(`gcal-auth: if no tab opened, visit:\n${authorizeUrl}`);
-  spawn('open', [authorizeUrl], { stdio: 'ignore', detached: true }).unref();
+  // --print-url: hand the URL to a CALLER that will show it, and open nothing.
+  //
+  // The app opens Google in its own window (widget/src/GoogleLogin.swift)
+  // rather than kicking the owner out to their default browser, which is the
+  // shape every other login in this product already has. The listener below is
+  // unchanged either way — whatever renders the consent screen, Google
+  // redirects to this process's loopback callback and the code is exchanged
+  // here. The window is a viewport, not a participant.
+  //
+  // Printed on its own line with a fixed prefix so a caller can read it without
+  // parsing prose, and flushed before anything else is logged.
+  if (PRINT_URL) {
+    console.log(`AUTHORIZE_URL ${authorizeUrl}`);
+  } else {
+    console.log(`gcal-auth: if no tab opened, visit:\n${authorizeUrl}`);
+    spawn('open', [authorizeUrl], { stdio: 'ignore', detached: true }).unref();
+  }
 });

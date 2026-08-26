@@ -670,8 +670,27 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // of two fixed flows to run, and the grant is written by that helper
       // straight into ~/.hazlie/secrets.
       let gf = String(payload["flow"] as? String ?? "google")
-      bridgeCall("POST", "api/google-auth", json: ["flow": gf], timeout: 10) { [weak self] d in
-        self?.reply(webView, id, d)
+      bridgeCall("POST", "api/google-auth", json: ["flow": gf], timeout: 15) { [weak self] d in
+        guard let self else { return }
+        // The service started the helper and handed back the URL to show. The
+        // consent screen opens HERE rather than in the default browser, which
+        // is what every other login in this app already does — see
+        // GoogleLogin.swift for why that window is a viewport and not a
+        // participant in the grant.
+        if let url = (d as? [String: Any])?["url"] as? String, !url.isEmpty {
+          DispatchQueue.main.async {
+            GoogleLogin.present(url: url) { ok in
+              // `ok` says the window saw Google redirect to the loopback
+              // callback, which is the helper taking the code — not that the
+              // tokens are written. The shelf re-reads status either way,
+              // because the file on disk is the only thing that actually
+              // settles it.
+              self.reply(webView, id, ["ok": ok, "opened": true])
+            }
+          }
+        } else {
+          self.reply(webView, id, d)
+        }
       }
     case "connectSecret":
       // The in-panel walkthrough's paste: {p, value} → POST /api/secret on the

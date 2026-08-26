@@ -932,11 +932,19 @@ function card(src, keep) {
           go.disabled = true;
           go.textContent = 'opening Google…';
           hzPost('googleAuth', { flow: 'google' })
-            .then(() => {
-              // The grant lands minutes later, in a browser this panel cannot
-              // see, so there is nothing here to await. Say where to look
-              // instead of pretending to know the outcome.
-              go.textContent = 'approve it in your browser';
+            .then((r) => {
+              // ~~"approve it in your browser".~~ The consent screen opens in
+              // the app's own window now, not the default browser, so that
+              // sentence sent the owner looking in the wrong place.
+              //
+              // A resolved call means the window saw Google redirect to the
+              // loopback callback — the helper taking the code — which is as
+              // close to "done" as this panel can honestly get. The tokens
+              // land a beat later and only the status rows can confirm them,
+              // so refresh and let the row speak rather than claiming here.
+              go.textContent = (r && r.ok) ? 'signed in — checking…' : 'sign in with Google ↗';
+              go.disabled = false;
+              refresh();
             })
             .catch(() => {
               go.disabled = false;

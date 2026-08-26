@@ -300,16 +300,48 @@ async function handleRequest(req, res) {
       }), 'application/json; charset=utf-8');
       return;
     }
+    // THE URL COMES BACK, so the app can show Google in its own window instead
+    // of throwing the owner out to their default browser. The helper is still
+    // the one that holds the loopback listener and exchanges the code — the
+    // window only renders the consent screen, and Google redirects into that
+    // listener exactly as it would from Safari.
+    //
+    // Stdout is READ, not ignored, so the child cannot be fully detached until
+    // the URL has arrived. It is unref'd immediately after: the flow outlives
+    // this request by however long consent takes, and the response says "here
+    // is where to send them", never "they are signed in".
+    //
+    // Scanned for the AUTHORIZE_URL prefix rather than read as line 1 — the
+    // helper logs "waiting for approval" first, and pinning a line number
+    // would break the moment anyone adds a line above it.
     try {
-      const child = spawn(process.execPath, [scriptPath], {
-        detached: true,
-        stdio: 'ignore',
-        // The script writes into ~/.hazlie/secrets and reads the client
-        // credential from there; it needs nothing from this request.
+      const child = spawn(process.execPath, [scriptPath, '--print-url'], {
+        stdio: ['ignore', 'pipe', 'ignore'],
         env: process.env,
       });
+      const url = await new Promise((resolve) => {
+        let buf = '';
+        // If the helper cannot start — a missing client credential is the
+        // ordinary case — it exits without ever printing. Resolve null rather
+        // than hang the request, and let the caller say so.
+        const done = (v) => { clearTimeout(t); resolve(v); };
+        const t = setTimeout(() => done(null), 10_000);
+        child.stdout.on('data', (d) => {
+          buf += d;
+          const m = /^AUTHORIZE_URL (\S+)$/mu.exec(buf);
+          if (m) done(m[1]);
+        });
+        child.once('exit', () => done(null));
+        child.once('error', () => done(null));
+      });
       child.unref();
-      send(res, 200, JSON.stringify({ ok: true, started: which }), 'application/json; charset=utf-8');
+      if (!url) {
+        send(res, 502, JSON.stringify({
+          error: 'the authorization helper did not start; check that the Google client credential is installed',
+        }), 'application/json; charset=utf-8');
+        return;
+      }
+      send(res, 200, JSON.stringify({ ok: true, started: which, url }), 'application/json; charset=utf-8');
     } catch (error) {
       send(res, 500, JSON.stringify({ error: 'could not start the authorization helper' }),
         'application/json; charset=utf-8');
