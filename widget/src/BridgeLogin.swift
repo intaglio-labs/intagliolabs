@@ -268,6 +268,13 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     decisionHandler(ok ? .allow : .cancel)
   }
 
+  /// Is `window` the live login window? The dismiss monitor asks, so a click
+  /// inside this app's own login window never dismisses the panel behind it.
+  static func isPresenting(_ window: NSWindow?) -> Bool {
+    guard let window, let cur = current else { return false }
+    return cur.window === window
+  }
+
   // The user closed the window before logging in.
   func windowWillClose(_ notification: Notification) {
     if !finished { finish(nil) }

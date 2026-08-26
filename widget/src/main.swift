@@ -502,6 +502,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       if event.window === self.widgetWindow { return }
       // Onboarding covers the screen and owns its own dismissal.
       if self.onboardingPanel?.isVisible == true { return }
+      // THE BRIDGE LOGIN WINDOW IS THIS APP'S OWN, and it is where the whole
+      // connect flow happens (owner, 2026-08-25: settings must not auto-close
+      // on a successful connect). It is a separate NSWindow, so every click
+      // inside it — typing a password, entering X's PIN, pressing continue —
+      // read as an "outside click" and ordered settings out from under the
+      // flow that opened it. The panel must still be there when the login
+      // finishes, because that is where the result is shown.
+      if BridgeLogin.isPresenting(event.window) { return }
       // A SCREENSHOT IS NOT AN OUTSIDE CLICK.
       //
       // ⇧⌘4 drags a selection, and that mouse-down reaches this global monitor

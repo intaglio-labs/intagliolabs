@@ -295,16 +295,25 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
       // again."~~ Yeeted (owner, 2026-08-25): the card already shows the same
       // log in button either way, and the sentence squeezed in beside the
       // pill saying what the owner just did themselves.
-      if (data && data.transcript && data.transcript.length) {
-        const log = document.createElement('div');
-        log.className = 'blog';
-        for (const m of data.transcript) {
-          const line = document.createElement('div');
-          line.className = 'bline' + (m.from === 'you' ? ' you' : '');
-          line.textContent = m.body;
-          log.appendChild(line);
+      // The bot's last QUESTION only — never the transcript (owner,
+      // 2026-08-25); connections.js carries the reasoning at askedFor().
+      {
+        const t = (data && Array.isArray(data.transcript)) ? data.transcript : [];
+        let ask = null;
+        for (let i = t.length - 1; i >= 0 && !ask; i--) {
+          if (t[i].from !== 'bot') continue;
+          const body = String(t[i].body || '').trim();
+          if (!body || body.startsWith('Login URL:') || body.includes('`{')) continue;
+          ask = body.split('\n').map((l) => l.trim()).filter(Boolean)
+            .find((l) => l.endsWith('?') || /^(please|enter|register)/iu.test(l))
+            || body.split('\n')[0].trim();
         }
-        tip.appendChild(log);
+        if (ask) {
+          const line = document.createElement('span');
+          line.className = 'setup';
+          line.textContent = ask;
+          tip.appendChild(line);
+        }
       }
       // Token (discord/slack) and phone (telegram) connectors keep the guided
       // conversation — it is their only way in. The cookie-paste fallback the

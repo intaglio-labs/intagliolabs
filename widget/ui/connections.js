@@ -805,18 +805,36 @@ function card(src, keep) {
     stay.textContent = STAY;
     tip.appendChild(stay);
 
-    // Any bot chatter shows so the owner sees what the bridge said/asked.
-    const appendTranscript = () => {
-      if (!(data && data.transcript && data.transcript.length)) return;
-      const log = document.createElement('div');
-      log.className = 'blog';
-      for (const m of data.transcript) {
-        const line = document.createElement('div');
-        line.className = 'bline' + (m.from === 'you' ? ' you' : '');
-        line.textContent = m.body; // server-masked; text only, never HTML
-        log.appendChild(line);
+    // ~~The whole bot transcript rendered as a grey log.~~ Yeeted (owner,
+    // 2026-08-25: "don't show that shit on any of the connectors"). It was a
+    // machine conversation shown verbatim: the bridge's cookie-format example,
+    // its "Login URL:" echo, its cancel acknowledgements — noise that read as
+    // an error even while the login was succeeding. What the owner actually
+    // needs is the bot's LAST question, which is the only line that ever asks
+    // for anything (X's PIN prompt is exactly this). One line, plain, no log.
+    const askedFor = () => {
+      if (!(data && Array.isArray(data.transcript))) return null;
+      for (let i = data.transcript.length - 1; i >= 0; i--) {
+        const m = data.transcript[i];
+        if (m.from !== 'bot') continue;
+        // The example blob and the URL echo are instructions to a machine, not
+        // to a person; the last real prompt is behind them.
+        const body = String(m.body || '').trim();
+        if (!body || body.startsWith('Login URL:') || body.includes('`{')) continue;
+        // Keep it to the sentence that asks, not the paragraph around it.
+        const ask = body.split('\n').map((l) => l.trim()).filter(Boolean)
+          .find((l) => l.endsWith('?') || /^(please|enter|register)/iu.test(l));
+        return ask || body.split('\n')[0].trim();
       }
-      tip.appendChild(log);
+      return null;
+    };
+    const appendTranscript = () => {
+      const ask = askedFor();
+      if (!ask) return;
+      const line = document.createElement('span');
+      line.className = 'setup';
+      line.textContent = ask; // server-masked; text only, never HTML
+      tip.appendChild(line);
     };
     // A one-line input that relays whatever the bot last asked for (a token,
     // a phone number, then the code) and re-renders with the bot's reply.
@@ -897,6 +915,17 @@ function card(src, keep) {
       // log in button either way, and the sentence squeezed in beside the
       // pill saying what the owner just did themselves.
       appendTranscript();
+      // A COOKIE LOGIN CAN HAVE A SECOND STEP, and until now this branch had
+      // no way to answer one. X accepted the harvested cookies and advanced to
+      // its encrypted-DM PIN (step fi.mau.twitter.login.juicebox_pin, owner
+      // hit it 2026-08-25) — the bot asked, nothing on this card could reply,
+      // and the login looked like it had failed when it had actually got
+      // further than ever. The relay input is the same one the token/phone
+      // flows use; it appears only when the bot is mid-conversation and not
+      // yet connected, so the ordinary one-shot cookie login is unchanged.
+      if (askedFor() && !(data && data.connected)) {
+        relayInput('enter what X asked for above', false);
+      }
       // The manual cookie-paste fallback ("having trouble? paste cookies
       // manually") was yeeted (owner, 2026-08-25): the webview login is the
       // flow, and a devtools-grade escape hatch under every login button made
