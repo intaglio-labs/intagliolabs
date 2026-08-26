@@ -2569,7 +2569,7 @@ function tryPersonSearch(db, question) {
   let state = null;
   try {
     const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
-    state = existsSync(statePath) ? new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true }) : null;
+    state = existsSync(statePath) ? openStateReadOnly(statePath) : null;
     return answerPersonSearch(db, state, question, { owner: loadOwner() });
   } catch {
     return null;
@@ -2614,12 +2614,33 @@ function warmPeopleCore(db) {
   });
 }
 
+// WAIT FOR THE WRITER; DO NOT GIVE UP AND CALL IT AN ANSWER.
+//
+// state.db is the connectors' database and it runs journal_mode=DELETE, on
+// purpose -- contact names must not survive legibly in a -wal sidecar. So a
+// writer excludes readers, and the contacts connector upserts ~2,000 rows into
+// it about once a minute. With SQLite's default busy timeout of ZERO, a read
+// landing inside that window fails instantly.
+//
+// That failure used to be swallowed into an empty contacts spine, and an empty
+// spine is not a smaller answer -- it is a different one. Every person known
+// only through the address book loses their name and reverts to a raw handle,
+// and worse, two handles belonging to one person stop merging, so they split
+// into two people with the messages divided between them. Then yearCore
+// memoised it. Observed exactly that way: 11,716 messages became 8,148 plus a
+// second "person" holding the other 3,568.
+function openStateReadOnly(statePath) {
+  const db = new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true });
+  db.exec('PRAGMA busy_timeout = 5000');
+  return db;
+}
+
 function withPeopleDbs(db, fn) {
   let state = null;
   let resDb = null;
   try {
     const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
-    state = existsSync(statePath) ? new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true }) : null;
+    state = existsSync(statePath) ? openStateReadOnly(statePath) : null;
     resDb = openResolutionsDb();
     return fn(state, resDb);
   } finally {
@@ -2638,7 +2659,7 @@ function trySyncStatus(db, question) {
   let state = null;
   try {
     const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
-    state = existsSync(statePath) ? new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true }) : null;
+    state = existsSync(statePath) ? openStateReadOnly(statePath) : null;
     return answerSyncStatus(db, state, {});
   } catch {
     return null;

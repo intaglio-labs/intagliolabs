@@ -85,14 +85,48 @@ export function normIdentifier(identifier) {
   return digits.length > 10 ? digits.slice(-10) : digits;
 }
 
+function emptySpine() {
+  return {
+    idToName: new Map(),
+    nameToIds: new Map(),
+    looseIdToName: new Map(),
+    nameFor() {
+      return undefined;
+    },
+  };
+}
+
 export function loadSpine(stateDb) {
+  if (!stateDb) return emptySpine();
   const map = new Map();
   const nameToIds = new Map();
   // Normalised identifier -> name, used ONLY when the exact lookup misses.
   const loose = new Map();
   const ambiguous = new Set();
+  // AN EMPTY SPINE IS AN ANSWER, NOT AN ERROR CODE.
+  //
+  // This used to wrap the whole read in a catch that returned an empty spine for
+  // ANY failure, on the reasoning that a fresh install has no contacts yet. That
+  // is true and it is worth keeping -- but it made a transient failure
+  // indistinguishable from a genuinely empty address book, and the two have
+  // opposite consequences. With no spine, every person known only through
+  // Contacts reverts to a raw handle AND their handles stop merging, so one
+  // person becomes several with their messages split between them. Cached, that
+  // is the whole app quietly wrong until something else moves the stamp.
+  //
+  // So: a missing table is still the valid empty case. Anything else -- a lock
+  // held by the connector mid-upsert, an unreadable file -- is raised, because a
+  // caller that cannot get names must be able to tell that it could not, rather
+  // than serve a nameless graph as though it were the truth.
+  let rows;
   try {
-    for (const r of stateDb.prepare('SELECT identifier, display_name FROM contact_ids').all()) {
+    rows = stateDb.prepare('SELECT identifier, display_name FROM contact_ids').all();
+  } catch (error) {
+    if (/no such table/iu.test(String(error?.message ?? ''))) return emptySpine();
+    throw error;
+  }
+  {
+    for (const r of rows) {
       map.set(r.identifier, r.display_name);
       const key = normName(r.display_name);
       if (!nameToIds.has(key)) nameToIds.set(key, { name: r.display_name, ids: [] });
@@ -113,8 +147,6 @@ export function loadSpine(stateDb) {
         loose.set(nid, r.display_name);
       }
     }
-  } catch {
-    // No spine yet is a valid state — people just key by raw identifier.
   }
   for (const nid of ambiguous) loose.delete(nid);
   return {
