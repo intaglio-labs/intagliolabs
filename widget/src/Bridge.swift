@@ -23,6 +23,10 @@ protocol BridgeDelegate: AnyObject {
   func openPeople()
   func openMonths()
   func openConnectRoot() -> Bool
+  /// The review queue at /c/<token>/memory — the same tokened link, one
+  /// path deeper. Separate from openConnectRoot because it is a different
+  /// destination, not a different way of reaching the same one.
+  func openMemoryReview() -> Bool
   func closeWindow(of webView: WKWebView)
   func dragWindow(of webView: WKWebView)
   func motionAnywayChanged(_ on: Bool)
@@ -73,7 +77,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                "openMonths", "voiceArm", "widgetBounds"],
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
-                    "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
+                    "close", "connectorsIntroSeen", "openConnectLink", "openMemoryReview", "openExternal",
                     "status", "setConnectorEnabled", "setMotion", "setScale", "setSounds",
                     "openOnboarding", "markHandheld",
                     // Same setup controls, reachable from the gear after the
@@ -680,13 +684,22 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // participant in the grant.
         if let url = (d as? [String: Any])?["url"] as? String, !url.isEmpty {
           DispatchQueue.main.async {
-            GoogleLogin.present(url: url) { ok in
+            GoogleLogin.present(url: url) { ok, why in
               // `ok` says the window saw Google redirect to the loopback
               // callback, which is the helper taking the code — not that the
               // tokens are written. The shelf re-reads status either way,
               // because the file on disk is the only thing that actually
               // settles it.
-              self.reply(webView, id, ["ok": ok, "opened": true])
+              //
+              // `why` is set when Google REFUSED rather than the owner closing
+              // the window: an account outside the org, a declined consent, an
+              // admin policy. That distinction is worth carrying — "you picked
+              // the wrong account" and "you changed your mind" look identical
+              // from here otherwise, and only one of them is fixable by trying
+              // again the same way.
+              var out: [String: Any] = ["ok": ok, "opened": true]
+              if let why { out["refused"] = why }
+              self.reply(webView, id, out)
             }
           }
         } else {
@@ -1102,6 +1115,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         DispatchQueue.main.async {
           self?.reply(webView, id, error == nil ? ["state": "ok"] : ["state": "notInstalled"])
         }
+      }
+    case "openMemoryReview":
+      // What the app has learned about its owner, and the place to correct it.
+      // The page and its server never went anywhere; the route in from the app
+      // did, when the memory card was retired.
+      if delegate?.openMemoryReview() == true {
+        reply(webView, id, ["state": "ok"])
+      } else {
+        reply(webView, id, ["state": "error", "error": "no connect link yet"])
       }
     case "openConnectLink":
       // The cloud-connector setup door: the connect page's ROOT, in the

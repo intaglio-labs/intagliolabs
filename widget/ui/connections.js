@@ -342,6 +342,25 @@ async function renderSettings() {
     hzPost('setScale', { scale: 1 }).catch(() => {});
   }
   rows.push(modelRow());
+  // THE REVIEW QUEUE'S WAY BACK IN.
+  //
+  // ~~A memory-progress card sat here.~~ Retired on purpose in 36e8d9f, and
+  // this does not bring it back: no counts, no progress bar, no explainer.
+  // What went with it by accident was the only route from inside the app to
+  // the review queue — the queue, its page and its server are all intact, and
+  // have been reachable since only by knowing the URL.
+  //
+  // That matters more than a missing link usually would. This loop is how the
+  // thing learns what is true about its owner; leaving it discoverable only to
+  // someone who reads the source makes it decorative. One row, the same shape
+  // as onboarding's, opening the page the connect server already serves and
+  // already links from its own footer.
+  rows.push(actionRow({
+    name: 'what i have learned',
+    note: 'review and correct it',
+    action: 'open',
+    message: 'openMemoryReview',
+  }));
   rows.push(actionRow({
     name: 'onboarding',
     note: 'replay the welcome flow',
@@ -1063,6 +1082,28 @@ function card(src, keep) {
       });
   };
 
+// A one-line notice in the hint strip, for something that happened OUTSIDE
+// this panel and left no other trace — today only a Google sign-in Google
+// refused. Built from the same pieces a hint card is so it closes the same way.
+function showTileNotice(row, src, text) {
+  closeHint();
+  const tip = document.createElement('div');
+  tip.className = 'hint';
+  tip.dataset.id = src.id;
+  tip.classList.add('hold');
+  // The same pieces a hint card is built from — a bold label and a .why line.
+  // Inventing classes for this would mean inventing the CSS too, and a notice
+  // that renders unstyled is a notice that reads as a rendering fault.
+  const head = document.createElement('b');
+  head.textContent = src.label;
+  const body = document.createElement('span');
+  body.className = 'why';
+  body.textContent = text;
+  tip.append(head, body);
+  hintHost.appendChild(tip);
+  row.classList.add('open');
+}
+
   const toggle = () => {
     // One strip at a time, by construction now: the host holds exactly one
     // child, so opening a tile evicts whatever was there. Ownership is
@@ -1097,7 +1138,23 @@ function card(src, keep) {
       // Only while unconnected. An authorized mailbox row still opens its card,
       // because there the press means "tell me about this", not "sign me in".
       if (GOOGLE_AUTH.has(kindOf(src.id)) && !src.connected && src.action !== 'fda') {
-        hzPost('googleAuth', { flow: 'google' }).catch(() => {});
+        hzPost('googleAuth', { flow: 'google' })
+          .then((r) => {
+            // A REFUSAL IS NOT A CLOSED WINDOW. Google declines some sign-ins
+            // without ever redirecting — an account outside the org is the
+            // one the owner hit repeatedly — so the window shuts with nothing
+            // having happened and no reason given. Say which it was: trying
+            // the same account again cannot fix the first, and only the owner
+            // knows which account they meant.
+            // Shown in the hint strip this shelf already owns, rather than a
+            // toast it does not have: the strip is where every other thing
+            // this tile has to say already appears, and it persists until
+            // dismissed — which a refusal should, because the fix is to pick a
+            // different account and that takes a moment's thought.
+            if (r && r.refused) showTileNotice(row, src, r.refused);
+            refresh();
+          })
+          .catch(() => {});
         return;
       }
       // FDA tile (owner, 2026-08-25): the card had exactly one thing on it —

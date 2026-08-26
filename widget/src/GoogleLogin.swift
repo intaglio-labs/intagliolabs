@@ -30,7 +30,8 @@ final class GoogleLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
   private var window: NSWindow?
   private var web: WKWebView?
   private var finished = false
-  private let done: (Bool) -> Void
+  private var reason: String?
+  private let done: (Bool, String?) -> Void
 
   // Google's sign-in walks through several of its own hosts, and a consent
   // screen that cannot reach them is a dead window. The loopback host is the
@@ -40,11 +41,11 @@ final class GoogleLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     "google.com", "gstatic.com", "googleusercontent.com", "googleapis.com",
   ]
 
-  private init(done: @escaping (Bool) -> Void) { self.done = done }
+  private init(done: @escaping (Bool, String?) -> Void) { self.done = done }
 
-  static func present(url: String, done: @escaping (Bool) -> Void) {
+  static func present(url: String, done: @escaping (Bool, String?) -> Void) {
     guard let u = URL(string: url), let host = u.host,
-          host == "accounts.google.com" else { done(false); return }
+          host == "accounts.google.com" else { done(false, nil); return }
     current?.finish(false)
     let ctl = GoogleLogin(done: done)
     current = ctl
@@ -89,6 +90,36 @@ final class GoogleLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
            "(KHTML, like Gecko) Version/17.0 Safari/605.1.15"
   }
 
+  // GOOGLE'S REFUSALS DO NOT REDIRECT, which is why they have to be read off
+  // the page. A consent screen that succeeds sends the browser to the loopback
+  // callback and the helper takes it from there; a consent screen that REFUSES
+  // just renders an error and stops. Nothing arrives at the listener, so the
+  // helper waits its full fifteen minutes and this window sits on a dead page
+  // — which is exactly what the owner hit signing in with an account outside
+  // the org (2026-08-26), three times, each one leaving a stranded process.
+  //
+  // Read from the URL rather than the rendered text: Google puts the reason in
+  // the query string, and matching visible prose would break in every language
+  // but this one.
+  private static func refusal(in url: URL) -> String? {
+    guard let host = url.host, host == "accounts.google.com" else { return nil }
+    let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+      .queryItems?.first(where: { $0.name == "error" })?.value
+    switch q {
+    case "org_internal":
+      return "That account is outside this organization. This sign-in only accepts "
+           + "accounts in the Workspace the app was registered to."
+    case "access_denied":
+      return "Sign-in was declined."
+    case "admin_policy_enforced":
+      return "A Workspace admin policy blocks this app for that account."
+    case .some(let other):
+      return "Google refused the sign-in (\(other))."
+    case .none:
+      return nil
+    }
+  }
+
   func webView(
     _ webView: WKWebView,
     decidePolicyFor navigationAction: WKNavigationAction,
@@ -106,6 +137,16 @@ final class GoogleLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
       finish(true)
       return
     }
+    // A refusal ends the window as surely as a success does — the difference
+    // is only what the owner is told. Letting it render and waiting would leave
+    // them reading Google's page with nothing here acting on it.
+    if let why = Self.refusal(in: url) {
+      decisionHandler(.allow) // let them SEE Google's own words too
+      DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+        self?.refused(why)
+      }
+      return
+    }
     let ok = Self.allowed.contains { host == $0 || host.hasSuffix("." + $0) }
     // A fenced window, like the bridge logins: a consent screen that wanders
     // off to an arbitrary host is either a mistake or something worse, and
@@ -114,6 +155,12 @@ final class GoogleLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
   }
 
   func windowWillClose(_ notification: Notification) { finish(false) }
+
+  private func refused(_ why: String) {
+    guard !finished else { return }
+    reason = why
+    finish(false)
+  }
 
   private func finish(_ ok: Bool) {
     guard !finished else { return }
@@ -124,6 +171,6 @@ final class GoogleLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     if Self.current === self { Self.current = nil }
     w?.delegate = nil
     w?.close()
-    done(ok)
+    done(ok, reason)
   }
 }
