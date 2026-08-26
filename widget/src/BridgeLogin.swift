@@ -29,7 +29,7 @@
 import AppKit
 import WebKit
 
-final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScriptMessageHandler {
+final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate, WKScriptMessageHandler {
   // Held for the life of the window so ARC doesn't reclaim it mid-login.
   private static var current: BridgeLogin?
 
@@ -449,6 +449,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     let web = WKWebView(frame: NSRect(x: 0, y: 0, width: W, height: webH), configuration: config)
     web.autoresizingMask = [.width, .height]
     web.navigationDelegate = self // OUR delegate, never Bridge's
+    web.uiDelegate = self          // and the one that catches popups
     self.web = web
 
     // Hazlie chrome above the real login page. A login window is the most
@@ -705,6 +706,34 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     }
     let ok = matches(allowedSuffixes) || (!inMain && matches(allowedFrameSuffixes))
     decisionHandler(ok ? .allow : .cancel)
+  }
+
+  // A POPUP IS STILL A NAVIGATION, and WKWebView's default answer to one is
+  // silence. Without this method, `target="_blank"` and window.open() do
+  // NOTHING AT ALL: no new window, no navigation, no error — the click lands
+  // and the page sits there. The owner reported exactly that shape on Slack's
+  // workspace list ("clicking open doesn't do anything", 2026-08-26), and it is
+  // the third time in this flow that a silently dropped navigation has been
+  // mistaken for a dead control.
+  //
+  // Opened IN PLACE rather than in a second window. A login window's whole
+  // premise is that the owner can see which site they are on — the header names
+  // the domain — and a second window would be an unlabelled webview with a
+  // password field in it, which is the shape this app must never produce.
+  //
+  // The fence is not bypassed: this hands the request back to load(), and every
+  // load goes through decidePolicyFor. A popup to a host that is not allowed is
+  // cancelled there, exactly as a link to it would be.
+  func webView(
+    _ webView: WKWebView,
+    createWebViewWith configuration: WKWebViewConfiguration,
+    for navigationAction: WKNavigationAction,
+    windowFeatures: WKWindowFeatures
+  ) -> WKWebView? {
+    if let url = navigationAction.request.url, navigationAction.targetFrame == nil {
+      webView.load(URLRequest(url: url))
+    }
+    return nil // never a second window
   }
 
   /// Is a bridge login on screen right now? The dismiss monitor asks.
