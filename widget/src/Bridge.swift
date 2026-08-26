@@ -732,7 +732,30 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           return
         }
         guard !allowedHosts.isEmpty, !sessionCookie.isEmpty || !fields.isEmpty || approval else {
-          self.reply(webView, id, ["state": "manual", "transcript": begin["transcript"] ?? []])
+          // NO WINDOW, BUT STILL ONE PRESS. Telegram signs in by phone number
+          // and a code, so there is nothing to render in a webview — but the
+          // press still means "log me in", and it used to mean "show me a
+          // button that means log me in". The card opened on `begin login`
+          // and the owner had to press a second time to reach the question
+          // (2026-08-26, re-running the flow as a new user).
+          //
+          // So this branch does what the button did. `begin` sends the login
+          // command and waits for the bot, and the panel opens on the bot's
+          // first real question — the same shape as every other tile here:
+          // the dot spins, and the card appears when there is something to
+          // answer. ~~["state": "manual", transcript]~~ returned the
+          // conversation as it stood, which for a fresh or finished login is
+          // no conversation at all.
+          self.bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { begun in
+            // A failure still has to reach the card: a bridge that is down
+            // says so there, and `manual` with whatever transcript exists is
+            // what that branch already knows how to render.
+            guard begun["state"] as? String == "ok" else {
+              self.reply(webView, id, ["state": "manual", "transcript": begin["transcript"] ?? []])
+              return
+            }
+            self.reply(webView, id, begun)
+          }
           return
         }
         DispatchQueue.main.async {
