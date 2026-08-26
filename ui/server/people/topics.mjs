@@ -255,7 +255,7 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
             "WHERE source IN ('imessage','whatsapp','mail','linkedin') AND text IS NOT NULL"
     )
     .all();
-  const docs = new Map();
+  const byIdentifier = new Map();
   const topicNames = Object.keys(TOPIC_SIGNALS);
   for (const row of rows) {
     let meta = {};
@@ -269,8 +269,24 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
     if (isAutomatedRow(row.text)) continue;
     const id = rowPersonId(row, meta);
     if (id === null) continue;
-    const key = idToKey.get(id);
-    if (key === undefined) continue;
+    // TALLIED BY IDENTIFIER, FOLDED TO PEOPLE AT THE END.
+    //
+    // This used to resolve the person key here and tally straight into their
+    // doc, which made the whole scan a function of idToKey -- and idToKey moves
+    // whenever the contacts spine does, which on this store was 188,508 rows in
+    // a day. Every one of those invalidated an 8-second scan of 425,000 rows
+    // that had not changed.
+    //
+    // An identifier is the stable thing: a handle belongs to whoever it belongs
+    // to regardless of what Contacts learns later. So the expensive pass keys on
+    // it, and the cheap fold below regroups into people using the CURRENT
+    // resolution. A spine change now costs the fold, not the scan -- and the
+    // per-identifier tallies are what a persisted, incremental store can hold,
+    // because rows only ever arrive.
+    //
+    // Rows whose identifier resolves to nobody are still tallied: they cost
+    // little, and dropping them here would mean a person who becomes resolvable
+    // later needs the full rescan this exists to avoid.
     const ts = Number(row.ts);
     if (!Number.isFinite(ts)) continue;
     const d = new Date(ts);
@@ -278,11 +294,11 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
       bucketBy === 'month'
         ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
         : String(d.getFullYear());
-    const docKey = `${key}|${bucket}`;
-    let doc = docs.get(docKey);
+    const docKey = `${id}|${bucket}`;
+    let doc = byIdentifier.get(docKey);
     if (doc === undefined) {
       doc = emptyDoc();
-      docs.set(docKey, doc);
+      byIdentifier.set(docKey, doc);
     }
     // ONE HIT PER CONVERSATION, not per message.
     //
@@ -325,6 +341,16 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
       }
     }
   }
+  // THE FOLD: identifier-buckets into person-buckets, using the CURRENT
+  // resolution. Two handles that Contacts now says are one person merge here,
+  // and the merge is a walk over ~3,300 identifier buckets rather than a rescan
+  // of 425,000 rows.
+  //
+  // countedIn merges as a union, which is what keeps "one hit per conversation"
+  // true across a merge: if the same episode was seen under two handles of the
+  // same person, it must still count once.
+  const docs = foldToPeople(byIdentifier, idToKey);
+
   // Document frequency over person-buckets — singles and pairs share one map
   // (the space in a pair key keeps the namespaces apart).
   const docFreq = new Map();
@@ -332,7 +358,33 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
     for (const t of doc.terms.keys()) docFreq.set(t, (docFreq.get(t) ?? 0) + 1);
     for (const pr of doc.pairs.keys()) docFreq.set(pr, (docFreq.get(pr) ?? 0) + 1);
   }
-  return { docs, docFreq, totalDocs: docs.size };
+  return { docs, docFreq, totalDocs: docs.size, byIdentifier };
+}
+
+// Regroup per-identifier tallies under the person each identifier currently
+// resolves to. Cheap: one pass over the identifier buckets.
+export function foldToPeople(byIdentifier, idToKey) {
+  const docs = new Map();
+  for (const [idBucket, src] of byIdentifier) {
+    const cut = idBucket.lastIndexOf('|');
+    const id = idBucket.slice(0, cut);
+    const bucket = idBucket.slice(cut + 1);
+    const key = idToKey.get(id);
+    if (key === undefined) continue; // resolves to nobody today
+    const docKey = `${key}|${bucket}`;
+    let doc = docs.get(docKey);
+    if (doc === undefined) {
+      doc = emptyDoc();
+      docs.set(docKey, doc);
+    }
+    for (const [name, n] of Object.entries(src.taxonomy)) {
+      doc.taxonomy[name] = (doc.taxonomy[name] ?? 0) + n;
+    }
+    for (const [t, n] of src.terms) doc.terms.set(t, (doc.terms.get(t) ?? 0) + n);
+    for (const [pr, n] of src.pairs) doc.pairs.set(pr, (doc.pairs.get(pr) ?? 0) + n);
+    for (const c of src.countedIn) doc.countedIn.add(c);
+  }
+  return docs;
 }
 
 // The token set of every name in play, so "sarah" is never Sarah's topic.
@@ -420,7 +472,12 @@ export function topTopics(doc, docFreq, totalDocs, { limit = 3, minTaxonomy = 2,
   const taken = new Set();
   const tax = Object.entries(doc.taxonomy)
     .filter(([, n]) => n >= minTaxonomy)
-    .sort((a, b) => b[1] - a[1]);
+    // Count first, then the LABEL — a stable sort leaves ties in insertion
+    // order, which is the order the corpus scan happened to encounter them.
+    // That made two chips on the same count swap places whenever the tallies
+    // were grouped differently, so a contacts sync could reorder somebody's
+    // chips for no reason a reader could see.
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   // `tax` marks the chip as coming from the FIXED vocabulary above rather than
   // from this pair's distinctive words. Both render identically as chips, but
   // only the fixed set is comparable ACROSS people — "food & drinks" means the
