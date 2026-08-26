@@ -600,3 +600,31 @@ body.plist .pm-tabs .pm-tab-globe.active {
   background: color-mix(in srgb, var(--hazelnut-light) 7%, var(--bg));
   box-shadow: 0 1px 0 rgba(16, 16, 15, 0.92), -8px 0 8px -6px rgba(0, 0, 0, 0.55);
 }
+
+/* HOW OLD THE ANSWER IS, and the way to ask for a newer one. Pushed to the far
+   end of the row so it never competes with the recency segments — it is a
+   footnote, not a control you reach for. It only becomes prominent when the
+   answer is actually behind. */
+body.plist .pm-fresh {
+  appearance: none;
+  margin-left: auto;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 5px;
+  padding: 2px 6px;
+  font: inherit;
+  font-size: 9px;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  opacity: 0.7;
+  cursor: pointer;
+  white-space: nowrap;
+}
+body.plist .pm-fresh:hover:not(:disabled) { opacity: 1; color: var(--fg); }
+body.plist .pm-fresh.stale {
+  opacity: 1;
+  color: var(--hazelnut-light);
+  border-color: color-mix(in srgb, var(--hazelnut-light) 28%, transparent);
+}
+body.plist .pm-fresh:disabled { cursor: default; opacity: 0.55; }
+body.plist .pm-fresh:focus-visible { outline: 1px solid var(--hazelnut-light); outline-offset: 1px; }

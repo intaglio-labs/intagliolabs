@@ -51,6 +51,8 @@
   let recency = 'all';
   // The strip is homed to its right-hand end once, not on every render.
   let tabsHomed = false;
+  let lastFreshness = null;
+  let rebuilding = false;
   let scope = 'year';
   // The topic a bubble was clicked into, or null. Only the list honours it —
   // filtering the constellation to one topic would just draw that one circle.
@@ -241,10 +243,47 @@
   // Globe only: yearCore's rows carry no recency field at all (the year view is
   // built from month buckets, not from the graph person), so the chip would have
   // nothing to filter on inside a year tab. Gated rather than hidden-and-hoped.
+  // How old the answer is, and the way to ask for a newer one.
+  //
+  // The core serves STALE and rebuilds behind the response -- that is what makes
+  // the page instant -- so an answer can be one ingest behind. Saying so is the
+  // difference between a cache and a lie. Clicking rebuilds on request, which is
+  // the one place the app deliberately makes the reader wait, because they asked.
+  function freshnessChip(fresh) {
+    if (!fresh) return null;
+    const b = document.createElement('button');
+    const age = fresh.builtAt ? Date.now() - fresh.builtAt : null;
+    const ago = age == null ? '' :
+      age < 60_000 ? 'just now' :
+      age < 3_600_000 ? `${Math.floor(age / 60_000)}m ago` :
+      age < 86_400_000 ? `${Math.floor(age / 3_600_000)}h ago` :
+      `${Math.floor(age / 86_400_000)}d ago`;
+    b.className = 'pm-fresh' + (fresh.stale ? ' stale' : '');
+    b.dataset.rebuild = '1';
+    b.textContent = rebuilding ? 'recomputing…' : (fresh.stale ? `${ago} · refresh` : ago);
+    b.title = rebuilding
+      ? 'recomputing from every message'
+      : fresh.stale
+        ? 'new messages have arrived since this was built — click to recompute'
+        : 'up to date with every message — click to recompute anyway';
+    b.disabled = rebuilding;
+    return b;
+  }
+
   function renderRecency(data) {
-    const show = scope === 'all' && !findTerm && Array.isArray(data?.people);
+    // The row shows freshness in BOTH views; the segments are the globe's own,
+    // because a year tab's rows carry no recency field to filter on.
+    const segments = scope === 'all' && !findTerm && Array.isArray(data?.people);
+    const fresh = data?.freshness ?? lastFreshness;
+    if (data?.freshness) lastFreshness = data.freshness;
+    const show = (segments || fresh) && !findTerm;
     recencyEl.hidden = !show;
     if (!show) { recencyEl.replaceChildren(); return; }
+    if (!segments) {
+      const chip = freshnessChip(fresh);
+      recencyEl.replaceChildren(...(chip ? [chip] : []));
+      return;
+    }
     const all = data.people;
     const n = (f) => all.filter(f).length;
     const states = [
@@ -264,6 +303,8 @@
         : 'no recency filter';
       return b;
     }));
+    const chip = freshnessChip(fresh);
+    if (chip) recencyEl.appendChild(chip);
   }
 
   // The chip that says which topic the list is standing in, and the way out of
@@ -882,11 +923,16 @@
     return { people, total: people.length, allYears: true };
   }
 
-  function ensureMap() {
-    if (mapData) return Promise.resolve(mapData);
+  function ensureMap({ rebuild = false } = {}) {
+    if (mapData && !rebuild) return Promise.resolve(mapData);
     if (!mapPending) {
-      mapPending = hzPost('peopleMap')
-        .then((r) => { mapData = adaptMap(r || {}); return mapData; })
+      mapPending = hzPost('peopleMap', rebuild ? { rebuild: true } : {})
+        .then((r) => {
+          if (r && r.freshness) lastFreshness = r.freshness;
+          mapData = adaptMap(r || {});
+          mapData.freshness = r?.freshness ?? null;
+          return mapData;
+        })
         .finally(() => { mapPending = null; });
     }
     return mapPending;
@@ -947,10 +993,10 @@
   // answer INSTANTLY with a loading state. reqId guards the race: only the
   // newest click's response may paint.
   let reqId = 0;
-  async function load(y) {
+  async function load(y, { rebuild = false } = {}) {
     year = y;
     renderTabs();
-    if (cache.has(year)) return render();
+    if (cache.has(year) && !rebuild) return render();
     const my = ++reqId;
     searchEl.placeholder = `loading ${year}…`;
     // Into whichever surface is actually up. Writing it unconditionally to the
@@ -961,9 +1007,10 @@
     cardsEl.hidden = true;
     cardsEl.innerHTML = '';
     surface().innerHTML = `<div class="pm-loading">loading ${year}…</div>`;
-    const res = await hzPost('peopleYear', { year });
+    const res = await hzPost('peopleYear', rebuild ? { year, rebuild: true } : { year });
     if (my !== reqId) return; // superseded by a newer tab click
     if (!res || !Array.isArray(res.people)) throw new Error('bad year payload');
+    if (res.freshness) lastFreshness = res.freshness;
     cache.set(year, res);
     if (Array.isArray(res.years) && res.years.length) years = res.years;
     render();
@@ -1064,6 +1111,20 @@
     openTopic(c.dataset.topic);
   });
   recencyEl.addEventListener('click', (e) => {
+    const f = e.target.closest('.pm-fresh');
+    if (f) {
+      if (rebuilding) return;
+      rebuilding = true;
+      render();
+      // Drops both caches and re-asks with rebuild=1, which blocks on the
+      // server. The reader pressed refresh; they are asking to wait.
+      cache.clear();
+      mapData = null;
+      (scope === 'all' ? ensureMap({ rebuild: true }) : load(year, { rebuild: true }))
+        .catch(() => {})
+        .finally(() => { rebuilding = false; render(); });
+      return;
+    }
     const b = e.target.closest('.pm-rec');
     if (!b || !b.dataset.rec || b.dataset.rec === recency) return;
     recency = b.dataset.rec;

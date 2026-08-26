@@ -946,7 +946,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // The timeline view: one year of people with the year's topics. Absent
       // year = server default (the current year).
       let year = (payload["year"] as? Int) ?? Int(payload["year"] as? Double ?? 0)
-      let yPath = year > 0 ? "people/year?year=\(year)" : "people/year"
+      // A refresh the reader asked for: the server rebuilds before answering.
+      let wantsRebuild = payload["rebuild"] as? Bool == true
+      let yBase = year > 0 ? "people/year?year=\(year)" : "people/year?"
+      let yPath = wantsRebuild ? yBase + "&rebuild=1" : yBase
       peopleCall("GET", yPath, json: nil) { [weak self] data in
         self?.reply(webView, id, data)
       }
@@ -965,7 +968,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // which is why the constellation reads from here rather than summing the
       // year payloads: those are capped per year, and a sum of capped pages
       // would print topic counts that are quietly short.
-      peopleCall("GET", "people/map?for=page", json: nil) { [weak self] data in
+      peopleCall("GET", "people/map?for=page" + ((payload["rebuild"] as? Bool == true) ? "&rebuild=1" : ""), json: nil) { [weak self] data in
         self?.reply(webView, id, data)
       }
 

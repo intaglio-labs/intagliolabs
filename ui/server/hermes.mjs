@@ -54,7 +54,7 @@ import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch } from './people/search.mjs';
 import { loadOwner } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
-import { buildMap, buildYear, buildSearchYears, yearCore } from './people/map.mjs';
+import { buildMap, buildYear, buildSearchYears, yearCore, peopleCoreFreshness } from './people/map.mjs';
 import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
@@ -2540,6 +2540,24 @@ function tryPersonSearch(db, question) {
 // Build the people core once, at boot, on the same handles a request would use.
 // Exported shape matches yearCore's so the caller can log a count without
 // reaching into it.
+// ON REQUEST. The owner asked for "recomputed... every day or on request", and
+// this is the second half: a blocking rebuild the page can ask for by hand when
+// it does not want to wait for the background one.
+//
+// Blocking on purpose. Everything else in this file goes out of its way NOT to
+// block -- but somebody who pressed refresh is asking to wait, and returning
+// instantly with the same stale numbers would read as the button doing nothing.
+function rebuildPeopleCore(db) {
+  try {
+    withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      return yearCore(db, state, { now: Date.now(), owner: loadOwner(), aliases, blocking: true });
+    });
+  } catch {
+    // A failed rebuild leaves the previous core in place: stale, not wrong.
+  }
+}
+
 function warmPeopleCore(db) {
   return withPeopleDbs(db, (state, resDb) => {
     const { aliases } = resolutionState(resDb);
@@ -2898,7 +2916,9 @@ async function handlePeople(db, req, res, cors, url, policy) {
     const sinceTs = days > 0 ? Date.now() - days * 86_400_000 : null;
     const out = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
-      return buildMap(db, state, { owner, sinceTs, aliases });
+      if (url.searchParams.get('rebuild') === '1') rebuildPeopleCore(db);
+      const map = buildMap(db, state, { owner, sinceTs, aliases });
+      return { ...map, freshness: peopleCoreFreshness(db, state, aliases) };
     });
     // PROJECTED, NOT JUST STRIPPED.
     //
@@ -2976,7 +2996,12 @@ async function handlePeople(db, req, res, cors, url, policy) {
     }
     const out = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
-      return buildYear(db, state, { year, owner, aliases });
+      if (url.searchParams.get('rebuild') === '1') rebuildPeopleCore(db);
+      const year_ = buildYear(db, state, { year, owner, aliases });
+      // HOW OLD IS THIS ANSWER. The core serves stale and rebuilds behind the
+      // response, which is what makes the page instant -- but an answer that is
+      // one ingest behind must say so rather than pass as live.
+      return { ...year_, freshness: peopleCoreFreshness(db, state, aliases) };
     });
     send(res, 200, out, cors);
     return;
