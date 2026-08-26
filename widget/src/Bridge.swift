@@ -732,30 +732,22 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           return
         }
         guard !allowedHosts.isEmpty, !sessionCookie.isEmpty || !fields.isEmpty || approval else {
-          // NO WINDOW, BUT STILL ONE PRESS. Telegram signs in by phone number
-          // and a code, so there is nothing to render in a webview — but the
-          // press still means "log me in", and it used to mean "show me a
-          // button that means log me in". The card opened on `begin login`
-          // and the owner had to press a second time to reach the question
-          // (2026-08-26, re-running the flow as a new user).
+          // No window for this platform — Telegram signs in by phone number
+          // and a code, which is a conversation, not a page. The card runs it.
           //
-          // So this branch does what the button did. `begin` sends the login
-          // command and waits for the bot, and the panel opens on the bot's
-          // first real question — the same shape as every other tile here:
-          // the dot spins, and the card appears when there is something to
-          // answer. ~~["state": "manual", transcript]~~ returned the
-          // conversation as it stood, which for a fresh or finished login is
-          // no conversation at all.
-          self.bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { begun in
-            // A failure still has to reach the card: a bridge that is down
-            // says so there, and `manual` with whatever transcript exists is
-            // what that branch already knows how to render.
-            guard begun["state"] as? String == "ok" else {
-              self.reply(webView, id, ["state": "manual", "transcript": begin["transcript"] ?? []])
-              return
-            }
-            self.reply(webView, id, begun)
-          }
+          // ~~This branch ran `begin` itself, so one press opened on the bot's
+          // first question~~ (d88e56c). Withdrawn the same day: `begin` sends
+          // cancel-then-login, so a press on a tile whose login was ALREADY in
+          // flight destroyed it — and each press put six command messages into
+          // a sixteen-message transcript window, which scrolled the owner's own
+          // answer out of sight and left the card unable to see that anything
+          // had happened (owner, 2026-08-26: "i'm stuck here").
+          //
+          // The card begins the login instead, and it can do so safely because
+          // it is the side that already parses whether the bot is mid-question.
+          // One press still reaches the question; deciding here could not tell
+          // "nothing started" from "something is waiting for an answer".
+          self.reply(webView, id, ["state": "manual", "transcript": begin["transcript"] ?? []])
           return
         }
         DispatchQueue.main.async {
