@@ -214,6 +214,10 @@ fi
 # The generated config ships mautrix's EXAMPLE credentials (api_id 12345), and
 # the bridge refuses to start on them — so the example id is the reliable
 # "not yet configured" signal, not an empty key.
+# If this ever ships a default pair instead of stopping here, read the note at
+# PLATFORMS.telegram in connect/lib/bridge.mjs FIRST: the credential cannot be
+# committed to this repo (Telegram refuses logins from published api_ids), and
+# this is the line that would write the bundled one.
 if [ "$(yq '.network.api_id // 0' "$M/telegram/config.yaml" 2>/dev/null)" = "12345" ]; then
   ( cd bridges && docker compose stop mautrix-telegram >/dev/null 2>&1 ) || true
   echo "telegram: stopped — it needs api_id + api_hash from my.telegram.org/apps"

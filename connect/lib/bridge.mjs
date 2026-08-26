@@ -183,6 +183,48 @@ export const PLATFORMS = Object.freeze({
     // Phone login: the bot sends a code to the Telegram app. No cookie flow.
     webLogin: null,
     noWebLogin: 'signs in by phone number and a code sent to the Telegram app',
+    // WHAT THE OWNER WANTS HERE, and what it would cost. Documented rather
+    // than built (owner, 2026-08-26) — the first step is not ours to take.
+    //
+    // Today every install registers its OWN app at my.telegram.org and pastes
+    // api_id:api_hash into the connect card (connectSecret → secretApi SINKS →
+    // config.yaml → docker start). That is three steps and a developer portal
+    // in front of a connector whose actual login is a phone number and a code.
+    // The owner wants Telegram to feel like Instagram: press the tile, log in,
+    // done.
+    //
+    // THE SHAPE OF THE FIX. One api_id registered once — Beeper does exactly
+    // this — shipped with the product, so the bridge starts configured and the
+    // card drops straight to the phone-and-code conversation it already has.
+    // Concretely: the pair is injected at BUILD time from a repository secret
+    // (the same shape as FIREBASE_SERVICE_ACCOUNT, which this tree already
+    // keeps out of itself), ops/setup-bridges.sh writes it into config.yaml
+    // when one is present instead of stopping the container on the example
+    // 12345, and the paste path stays as an OVERRIDE — HINTS.telegram's
+    // walkthrough rendering only when no default is configured.
+    //
+    // WHY THE PAIR MUST NOT LAND IN THIS TREE, which is the whole reason this
+    // is a note and not a commit. Telegram flags api_ids that appear in public
+    // code and refuses logins made with them — API_ID_PUBLISHED_FLOOD, the
+    // named error that killed the sample credentials in Telegram's own docs
+    // (core.telegram.org/api/obtaining_api_id, read 2026-08-26). THIS
+    // REPOSITORY IS PUBLIC. Committing the pair does not degrade Telegram
+    // slowly; it breaks every install at once, on Telegram's schedule.
+    //
+    // WHAT ANYONE BUILDING IT SHOULD WEIGH FIRST:
+    //   • A binary is not a hiding place. `strings` reads it, so a shipped
+    //     api_id is published eventually — build-time injection buys exposure
+    //     time, not secrecy. Keep the per-user paste so a flagged default
+    //     degrades to today's behaviour instead of bricking the connector.
+    //   • The failure becomes SHARED. Per-user credentials fail one user at a
+    //     time; one default fails everyone simultaneously, and rotating it
+    //     means shipping a build.
+    //   • One api_id per phone number (same page). The credential is tied to
+    //     the registering person's own Telegram account, and inherits whatever
+    //     happens to it.
+    //   • Accounts on unofficial clients are put under automatic observation.
+    //     True of the per-user path too, so it is not an argument either way —
+    //     but under a shared id, every user is under it together.
   },
   discord: {
     id: 'discord',
