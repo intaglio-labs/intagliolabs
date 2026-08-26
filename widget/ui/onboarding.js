@@ -305,7 +305,7 @@ document.getElementById('cta').addEventListener('click', () => {
   showScreen(2);
 });
 
-function finish({ then } = {}) {
+function finish() {
   // Put the widget back under the windows before anything else. Native does
   // this too when the panel closes, because a desktop widget left floating
   // above everything would be the worst bug this app could ship — but asking
@@ -315,10 +315,12 @@ function finish({ then } = {}) {
   // torn down mid-message and the flow reappears on the next launch.
   hzPost('onboardingDone')
     .catch(() => {})
-    .then(() => {
-      if (then) hzPost(then).catch(() => {});
-      return hzPost('close');
-    });
+    // Close the full-screen scrim first, then open the real People popup it was
+    // leading toward. The onboarding webview survives orderOut, so this second
+    // message remains deliverable after close resolves.
+    .then(() => hzPost('close'))
+    .then(() => hzPost('openPeople'))
+    .catch(() => {});
 }
 
 // Escape leaves but does NOT mark it done — dismissing is not finishing, and a

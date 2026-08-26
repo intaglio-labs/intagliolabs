@@ -1,7 +1,8 @@
 // The People popup. Screen 1 of the People/network feature: a short line, then
 // the CONNECTIONS BAR — the same connector tiles as the settings screen (same
-// .list/.row/.mark/.dot classes, same hzGlyph), but sorted DISCONNECTED/errored
-// first, so the popup reads as "connect these to search your people deeper."
+// .list/.row/.mark/.dot classes, same hzGlyph). Messages, Contacts and Calendar
+// own the top-clockwise positions; remaining disconnected/errored sources lead
+// the rest, so the popup reads as "connect these to search your people deeper."
 // Clicking a tile hands off to the settings connections popup, where the connect
 // flow already lives. bridge.js provides hzPost, hzGlyph, hzAutoFit.
 'use strict';
@@ -16,6 +17,7 @@ document.getElementById('close').addEventListener('click', () => {
 const pconn = document.getElementById('pconn');
 const phint = document.getElementById('phint');
 let openId = null; // which connector's flow is showing, for toggle
+let onboardingAttention = false; // this open is the handoff from onboarding
 
 // Search parameters. Timeframe in days back; 0 = max (all time). Default 1 year.
 const TIME_LABEL = { 7: '1 week', 30: '1 month', 180: '6 months', 365: '1 year', 1095: '3 years', 1825: '5 years', 0: 'all time' };
@@ -79,10 +81,12 @@ function openConnector(src, row) {
 // The tile is the SHARED component (connector-tile.js): same markup, status
 // dot, and hover label as the settings shelf. Only the click handler is ours.
 // Wrapped in .rowwrap to match the shelf's markup.
-function tile(src) {
+function tile(src, nudgeImessage) {
   const wrap = document.createElement('div');
   wrap.className = 'rowwrap';
-  wrap.appendChild(hzConnectorTile(src, { onOpen: openConnector }));
+  const row = hzConnectorTile(src, { onOpen: openConnector });
+  if (nudgeImessage && kindOf(src.id) === 'imessage') row.classList.add('p-imessage-nudge');
+  wrap.appendChild(row);
   return wrap;
 }
 
@@ -90,15 +94,29 @@ function tile(src) {
 const HIDDEN_CONNECTORS = new Set(['oura', 'photos', 'files', 'notion', 'notes']);
 const kindOf = (id) => (id.startsWith('mail:') ? 'mail' : id);
 
+// The first three positions are spatial, not merely a scan order: index zero
+// is twelve o'clock, then the ring proceeds clockwise. Messages is the door;
+// Contacts and Calendar sit immediately to its right. Everything after those
+// anchors keeps the old needs-attention-first ordering.
+const PEOPLE_ANCHORS = ['imessage', 'contacts', 'calendar'];
+const anchorRank = (src) => {
+  const i = PEOPLE_ANCHORS.indexOf(kindOf(src.id));
+  return i === -1 ? PEOPLE_ANCHORS.length : i;
+};
+
 function render(sources) {
-  // Hide the non-people connectors, then disconnected/errored first (surface
-  // what still needs connecting), stable within each group.
-  const ordered = sources
-    .filter((s) => !HIDDEN_CONNECTORS.has(kindOf(s.id)))
+  // Hide the non-people connectors. The three spatial anchors stay fixed;
+  // remaining disconnected/errored sources lead the rest, stable within each
+  // group. Connecting something must never rotate Messages away from the top.
+  const visible = sources.filter((s) => !HIDDEN_CONNECTORS.has(kindOf(s.id)));
+  const nudgeImessage = onboardingAttention || !visible.some((s) => s.connected);
+  const ordered = visible
     .map((s, i) => ({ s, i }))
-    .sort((a, b) => (a.s.connected === b.s.connected ? a.i - b.i : a.s.connected ? 1 : -1))
+    .sort((a, b) =>
+      anchorRank(a.s) - anchorRank(b.s)
+      || (a.s.connected === b.s.connected ? a.i - b.i : a.s.connected ? 1 : -1))
     .map((x) => x.s);
-  pconn.replaceChildren(...ordered.map(tile));
+  pconn.replaceChildren(...ordered.map((src) => tile(src, nudgeImessage)));
   // The ring positions each tile by transform (people.css), reading these two
   // custom properties: --n is the same on every tile, --i is its index, so an
   // evenly-spaced angle falls out of pure CSS with no per-count stylesheet.
@@ -122,6 +140,29 @@ function reload() {
   hzPost('status')
     .then((d) => { if (d && d.state === 'ok' && Array.isArray(d.sources)) render(d.sources); })
     .catch(() => {});
+}
+
+// A fresh People page pulls the handoff flag itself; a reused page receives
+// the same fact from native through __hzPeopleIntro. In both cases, record the
+// intro only after this page is actually alive to show it. The local boolean
+// deliberately stays true for this visit, so an existing install replaying
+// onboarding still sees Messages jump even if several connectors are linked.
+function enterFromOnboarding(on) {
+  onboardingAttention = on === true;
+  reload();
+  if (onboardingAttention) hzPost('connectorsIntroSeen').catch(() => {});
+}
+window.__hzPeopleIntro = enterFromOnboarding;
+
+function firstLoad() {
+  Promise.all([
+    hzPost('status').catch(() => null),
+    hzPost('prefs').catch(() => null),
+  ]).then(([d, p]) => {
+    onboardingAttention = !!(p && p.onboarded === true && p.connectorsIntroDone === false);
+    if (d && d.state === 'ok' && Array.isArray(d.sources)) render(d.sources);
+    if (onboardingAttention) hzPost('connectorsIntroSeen').catch(() => {});
+  });
 }
 
 // ---------------- deep search controls ----------------
@@ -402,7 +443,7 @@ function capRing() {
 // here — that is the moment the granted height is knowable.
 window.addEventListener('resize', capRing);
 
-reload();
+firstLoad();
 // No hzAutoFit here — see fitPeople's header for why the two cannot both run.
 requestAnimationFrame(fitPeople);
 // rAF does not fire in a window that is ordered out, and this page loads while

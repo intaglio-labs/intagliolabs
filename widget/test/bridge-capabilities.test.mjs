@@ -179,12 +179,7 @@ test('every page yields at least one readable call of its own', () => {
 
 test('no page calls the bridge in a way this scanner cannot read', () => {
   // A dynamic first argument means a capability nobody can check statically.
-  // onboarding.js has one — `hzPost(then)` inside finish({ then }) — and it is
-  // dead: finish() is only ever called with no argument, so `then` is always
-  // undefined and the call never fires. It is listed rather than ignored,
-  // because the next one might not be dead.
   const KNOWN_DYNAMIC = new Set([
-    'onboarding.js: then', // dead: finish() is only called with no argument
     'connections.js: message', // resolved via the `message: 'setX'` literals above
   ]);
   const surprises = [];

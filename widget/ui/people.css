@@ -209,6 +209,31 @@ body.people .p-ring .row {
     rotate(calc(-360deg / var(--n, 1) * var(--i, 0)));
 }
 
+/* Messages is the first-run door into the people map. During the onboarding
+   handoff (or whenever no people connector is attached) it keeps a warm halo
+   and hops as a whole tile. `translate` is the independent transform property,
+   so the animation composes with the ring-positioning `transform` above rather
+   than replacing it and snapping the tile into the centre. */
+body.people .p-ring .row.p-imessage-nudge {
+  border-color: rgba(229, 204, 158, 0.9);
+  box-shadow:
+    inset 0 2px 3px rgba(255, 244, 222, 0.2),
+    inset 0 -4px 8px rgba(0, 0, 0, 0.55),
+    0 0 0 3px rgba(197, 165, 109, 0.18),
+    0 7px 22px rgba(229, 204, 158, 0.38);
+  animation: p-imessage-jump 1.35s cubic-bezier(0.3, 0.75, 0.3, 1) infinite;
+}
+body.people .p-ring .row.p-imessage-nudge .mark { color: #f2dfbb; }
+@keyframes p-imessage-jump {
+  0%, 58%, 100% { translate: 0 0; }
+  18% { translate: 0 -8px; }
+  32% { translate: 0 1px; }
+  43% { translate: 0 -3px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.people .p-ring .row.p-imessage-nudge { animation: none; }
+}
+
 body.people .p-what {
   margin: 6px 0 2px;
   padding-left: 16px;

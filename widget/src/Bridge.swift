@@ -83,7 +83,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     "connectSecret", "openApp",
                    "permissionState", "requestPermission"],
     "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
-                   "widgetSpot",
+                   "widgetSpot", "openPeople",
                    // The setup scenes: choosing and fetching the answer model,
                    // and turning on the first data source.
                    "setupState", "modelDownload", "modelCancel",
@@ -97,7 +97,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // map from the wrong file cost one broken popup in review.
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
-               "openExternal", "setConnectorEnabled", "connectSecret", "openApp",
+               "connectorsIntroSeen", "openExternal", "setConnectorEnabled", "connectSecret", "openApp",
                // The FDA tile press opens the primed Settings pane directly.
                "openFullDiskAccess"],
     // peopleFind: search across every year, server-ranked. peopleMap: the
@@ -261,10 +261,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     return min(max(v, scaleRange.lowerBound), scaleRange.upperBound)
   }
 
-  // The handoff out of onboarding: after the flow finishes, the widget's
-  // gear nudges until settings is opened once, and that first open runs the
-  // connectors intro. Reset by every completed flow, so replay hands off
-  // like the first time.
+  // The handoff out of onboarding: after the flow finishes, the People popup
+  // uses this one-shot flag to emphasize Messages. Reset by every completed
+  // flow, so replay hands off like the first time.
   static let connectorsIntroKey = "HazlieConnectorsIntro"
   static var connectorsIntroDone: Bool {
     get { UserDefaults.standard.bool(forKey: connectorsIntroKey) }
@@ -525,13 +524,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       Bridge.completeOnboarding()
       // Nothing left to resume; a replay from settings starts at the welcome.
       Bridge.onboardingStep = nil
-      // ...and the handoff arms: the gear will nudge until settings opens.
+      // ...and arm the People popup's one-time Messages emphasis.
       Bridge.connectorsIntroDone = false
       reply(webView, id, ["state": "ok"])
     case "connectorsIntroSeen":
-      // The settings page reports it actually SHOWED the intro — the mark
-      // lives there, not at window-open, so a race with the page's first
-      // load cannot burn the intro unseen.
+      // The People or settings page reports it actually showed the intro. The
+      // mark lives in the page, not at window-open, so a first-load race cannot
+      // burn the handoff unseen.
       Bridge.connectorsIntroDone = true
       reply(webView, id, ["state": "ok"])
     case "markHandheld":
