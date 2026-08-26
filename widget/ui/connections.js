@@ -925,11 +925,31 @@ function card(src, keep) {
     };
     const appendTranscript = () => {
       const ask = askedFor();
-      if (!ask) return;
-      const line = document.createElement('span');
-      line.className = 'setup';
-      line.textContent = ask; // server-masked; text only, never HTML
-      tip.appendChild(line);
+      if (ask) {
+        const line = document.createElement('span');
+        line.className = 'setup';
+        line.textContent = ask; // server-masked; text only, never HTML
+        tip.appendChild(line);
+      }
+      // THE QR IS THE STEP, for Discord. Its login is remote-auth: the bot
+      // posts a QR, you scan it with the phone app, and it redacts the image
+      // when the attempt ends. The panel showed the words around it and not
+      // the one thing to act on, so the websocket timed out unapproved
+      // ("Error logging in: websocket: close sent", owner 2026-08-26).
+      const shot = [...((data && data.transcript) || [])].reverse()
+        .find((m) => m.from === 'bot' && typeof m.image === 'string'
+                  && m.image.startsWith('data:image/'));
+      if (shot) {
+        const img = document.createElement('img');
+        img.className = 'bqr';
+        img.src = shot.image; // a data URI the server built; never composed here
+        img.alt = 'login QR code';
+        tip.appendChild(img);
+        const how = document.createElement('span');
+        how.className = 'setup';
+        how.textContent = 'scan this with the app on your phone';
+        tip.appendChild(how);
+      }
     };
     // A one-line input that relays whatever the bot last asked for (a token,
     // a phone number, then the code) and re-renders with the bot's reply.

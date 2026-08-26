@@ -1667,6 +1667,13 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
    the paste box. The transcript is capped and scrolls — a login exchange is
    a few lines, an old one can be long, and the popup must not grow to fit
    history. */
+/* A login QR, inline in the hint card. Sized so a phone camera can read it
+   off the screen without the card outgrowing the popup. */
+.hint.hold .bqr {
+  display: block; margin: 8px 0 4px;
+  width: 168px; height: 168px;
+  border-radius: 6px; background: #fff; padding: 6px;
+}
 .hint.hold .blog {
   max-height: 110px; overflow-y: auto;
   display: flex; flex-direction: column; gap: 4px;

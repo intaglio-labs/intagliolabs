@@ -718,6 +718,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // meant Slack replied "manual" and no window ever opened, which is
         // exactly what the card kept showing (owner, 2026-08-26).
         let approval = begin["approval"] as? Bool ?? false
+        let userAgent = String((begin["userAgent"] as? String ?? "").prefix(300))
         guard !allowedHosts.isEmpty, !sessionCookie.isEmpty || !fields.isEmpty || approval else {
           self.reply(webView, id, ["state": "manual", "transcript": begin["transcript"] ?? []])
           return
@@ -728,7 +729,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
             label: label, loginUrl: loginUrl, cookieDomain: cookieDomain,
             sessionCookie: sessionCookie, allowedHosts: allowedHosts,
             requiredCookies: requiredCookies, cookieFormat: cookieFormat,
-            fields: fields, approval: approval
+            fields: fields, approval: approval, userAgent: userAgent
           ) { cookiesJSON in
             guard let cookiesJSON else {
               self.reply(webView, id, ["state": "cancelled"])

@@ -23,6 +23,10 @@ function safeTranscript(transcript) {
     from: m.from,
     body: m.from === 'you' ? maskOwn(m.body) : m.body,
     ts: m.ts,
+    // Only the BOT's images travel. The owner never sends one in this flow,
+    // and an echo of something they pasted is exactly what maskOwn exists to
+    // prevent — so the rule is the same for pixels as for text.
+    ...(m.image && m.from === 'bot' ? { image: m.image } : {}),
   }));
 }
 
@@ -81,6 +85,9 @@ export async function bridgeApiResponse({
         // An approval window: no harvest, no fields — the person answers on
         // the platform's own page and the bridge reports the outcome itself.
         approval: platform.webLogin?.approval === true,
+        // A platform that refuses the default browser string gets its own.
+        // Server-authored like the rest of this policy — Swift enforces it.
+        userAgent: platform.webLogin?.userAgent ?? null,
       },
     };
   };

@@ -60,6 +60,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
   /// the outcome itself — so this window's whole job is to show the page, and
   /// closing it is the end of its part.
   private let approval: Bool
+  /// A browser string this platform insists on, or empty for the default.
+  private let userAgent: String
   private let allowedSuffixes: [String]
   private let done: (String?) -> Void
 
@@ -75,7 +77,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
   private init(
     label: String, cookieDomain: String, sessionCookie: String, allowedHosts: [String],
     requiredCookies: [String], cookieFormat: String, fields: [[String: String]],
-    approval: Bool, done: @escaping (String?) -> Void
+    approval: Bool, userAgent: String, done: @escaping (String?) -> Void
   ) {
     self.label = label
     self.cookieDomain = cookieDomain
@@ -86,6 +88,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     self.cookieFormat = cookieFormat
     self.fields = fields
     self.approval = approval
+    self.userAgent = userAgent
     self.allowedSuffixes = allowedHosts
     self.done = done
   }
@@ -104,7 +107,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     label: String, loginUrl: String, cookieDomain: String,
     sessionCookie: String, allowedHosts: [String], requiredCookies: [String] = [],
     cookieFormat: String = "json", fields: [[String: String]] = [],
-    approval: Bool = false, done: @escaping (String?) -> Void
+    approval: Bool = false, userAgent: String = "",
+    done: @escaping (String?) -> Void
   ) {
     // A window must have something to wait for: a session cookie to appear, or
     // the fields a bridge named. Slack's has only fields — it is there so the
@@ -119,7 +123,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
       label: label, cookieDomain: cookieDomain,
       sessionCookie: sessionCookie, allowedHosts: allowedHosts,
       requiredCookies: requiredCookies, cookieFormat: cookieFormat,
-      fields: fields, approval: approval, done: done
+      fields: fields, approval: approval, userAgent: userAgent, done: done
     )
     current = ctl
     ctl.show(url: url)
@@ -243,9 +247,12 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     // marketing token, and the big login SPAs — x.com most visibly — serve a
     // blank page to it (the owner saw an empty white window on X). A stock
     // desktop-Safari string makes them render their normal login flow.
-    web.customUserAgent =
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
-      "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+    // Per-platform when the policy names one (Slack's sniffer rejects Safari),
+    // the stock desktop-Safari string otherwise.
+    web.customUserAgent = userAgent.isEmpty
+      ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+      : userAgent
     web.load(URLRequest(url: url))
 
     // Poll the webview's own cookie store for the session cookie. When it

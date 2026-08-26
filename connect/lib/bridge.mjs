@@ -246,6 +246,14 @@ export const PLATFORMS = Object.freeze({
       sessionCookie: null,
       requiredCookies: [],
       fields: [{ id: 'captcha_token', from: 'captcha' }],
+      // SLACK REFUSES THE DEFAULT BROWSER STRING. The login window's Safari
+      // 17.4 user agent is a real, current Safari — and slack.com answered it
+      // with "We're very sorry, but your browser is not supported!" and a page
+      // of app-store links, so the CAPTCHA never appeared (owner, 2026-08-26).
+      // Chrome is the string their sniffer is happiest with; nothing else
+      // about the window changes, and no other platform is affected.
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+        + '(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
     },
   },
 });
@@ -428,13 +436,47 @@ async function readTranscript(creds, roomId, limit = 16) {
   const out = [];
   for (const e of data.chunk ?? []) {
     if (e.type !== 'm.room.message') continue;
-    out.push({
+    const entry = {
       from: e.sender === creds.userId ? 'you' : 'bot',
       body: String(e.content?.body ?? ''),
       ts: Number(e.origin_server_ts ?? 0),
-    });
+    };
+    // A QR CODE IS A MESSAGE TOO. Discord's login is remote-auth: the bot
+    // posts a QR image, you scan it with the phone app, and it redacts the
+    // image once the attempt ends. Dropping non-text left the panel showing an
+    // empty line where the only actionable thing in the whole flow was, and
+    // then "websocket: close sent" when nobody approved in time (owner,
+    // 2026-08-26). Inlined as a data URI rather than a URL: these pages hold
+    // no bearer and cannot fetch the homeserver themselves.
+    if (e.content?.msgtype === 'm.image' && typeof e.content?.url === 'string') {
+      const inline = await inlineMedia(creds, e.content.url);
+      if (inline) entry.image = inline;
+    }
+    out.push(entry);
   }
   return out.reverse();
+}
+
+// One mxc:// → a data URI, or null. Bounded hard: a login QR is a few KB, and
+// anything large enough to be worth streaming is not a thing this panel shows.
+const MAX_INLINE_BYTES = 512 * 1024;
+async function inlineMedia(creds, mxc) {
+  const m = /^mxc:\/\/([^/]+)\/(.+)$/u.exec(mxc);
+  if (!m) return null;
+  try {
+    const res = await fetch(
+      `${creds.base}/_matrix/client/v1/media/download/${encodeURIComponent(m[1])}/${encodeURIComponent(m[2])}`,
+      { headers: { Authorization: `Bearer ${creds.token}` }, signal: AbortSignal.timeout(8000) }
+    );
+    if (!res.ok) return null;
+    const type = res.headers.get('content-type') ?? '';
+    if (!/^image\//u.test(type)) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length === 0 || buf.length > MAX_INLINE_BYTES) return null;
+    return `data:${type.split(';')[0]};base64,${buf.toString('base64')}`;
+  } catch {
+    return null; // a QR we cannot fetch is a panel without one, not an error
+  }
 }
 
 // GET side: ensure the room and return its current transcript, without sending
