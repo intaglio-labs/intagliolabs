@@ -1210,6 +1210,37 @@ function card(src, keep) {
       // undefined, which is falsey, so this only ever gates the one that
       // declares it — granola's walkthrough is a plain hint and unaffected.
       const needsKeys = kindOf(src.id) !== 'telegram' || data?.needsAppCredential === true;
+      // AND THE CHALLENGE STEP OPENS THE WINDOW. Slack answers an email address
+      // with "complete the embedded challenge to continue" and a Login URL: the
+      // one step in this conversation that cannot be typed into a box, because
+      // what it wants is the receipt of a challenge a human passed. The button
+      // opens the same fenced window every cookie login uses; BridgeLogin polls
+      // for the token reCAPTCHA writes when the owner passes it, and sends that
+      // as the answer to this pending question.
+      //
+      // Matched on the bot's own words rather than on policy the card does not
+      // hold. Deliberately narrow: two independent markers, so an unrelated
+      // sentence mentioning a captcha does not put a login window on screen.
+      const wantsChallenge = () => {
+        if (!(data && Array.isArray(data.transcript))) return false;
+        const bot = data.transcript.filter((m) => m.from === 'bot');
+        const last = bot.length ? String(bot[bot.length - 1].body || '') : '';
+        const recent = bot.slice(-3).map((m) => String(m.body || '')).join(' ');
+        return /captcha|challenge/i.test(last) && /Login URL:|embedded/i.test(recent);
+      };
+      if (wantsChallenge() && !(data && data.connected)) {
+        const answer = document.createElement('button');
+        answer.className = 'hold-ok';
+        answer.textContent = 'answer the check ↗';
+        answer.addEventListener('click', (e) => {
+          e.stopPropagation();
+          answer.disabled = true; answer.textContent = 'opening…';
+          hzPost('bridgeWebLogin', { p: kindOf(src.id) })
+            .then(renderBridge)
+            .catch(() => { answer.disabled = false; answer.textContent = 'answer the check ↗'; });
+        });
+        tip.appendChild(answer);
+      }
       if (!started && hint && hint.walkthrough && needsKeys) {
         // Telegram cannot begin at all until the owner's own api_id/api_hash
         // are in its bridge config — the container refuses to start on the
@@ -1241,6 +1272,22 @@ function card(src, keep) {
         // one move available and the button already is it. The BRANCH stays:
         // it is what swaps a dead conversation and its input box for a fresh
         // start, which is the part that was actually load-bearing.
+        beginButton('begin login');
+      } else if (!askedFor()) {
+        // NO PROMPT MEANS NO PENDING STEP, and the log in button is what comes
+        // back. That rule is askedFor()'s own — written 2026-08-25 when the
+        // bot answered a half-finished login with "Unknown command" and the
+        // panel offered a box to answer it with — but it was only ever applied
+        // in the cookie branch. Here a FINISHED conversation still counts as
+        // `started`, so the card kept showing an answer box under a bot that
+        // had stopped asking anything: after a logout it read "Logged out" and
+        // then "type your answer", with nothing on the card able to begin a
+        // new login (owner, 2026-08-26, re-running the flow as a new user).
+        //
+        // A genuinely new install never saw this — its transcript is empty, so
+        // it gets the begin button from the branch above. It takes a
+        // conversation that ENDED to reach here, which is exactly the state a
+        // second run starts from.
         beginButton('begin login');
       } else {
         appendTranscript();
@@ -1394,7 +1441,21 @@ function card(src, keep) {
       // (openBridgeLogin owns that). Everything else opens the panel now:
       // attach BEFORE rendering, because the async bridge/status openers paint
       // into this node when their promise lands.
-      if (src.action === 'bridge' && !src.connected) {
+      // THE WINDOW IS THE ENTRY POINT ONLY WHERE IT IS THE WHOLE LOGIN. For a
+      // cookie harvest it is: the owner signs in on the platform's page and the
+      // session IS the answer. For a conversation flow it is a STEP INSIDE the
+      // login, and opening it first skips the conversation entirely — Slack's
+      // bot has to be given an email address before it will ask for anything
+      // else, and a window opened ahead of that is the owner signing into
+      // Slack's website while no part of this app is waiting on it (owner,
+      // 2026-08-26, three screenshots deep into exactly that).
+      //
+      // ~~Every unconnected bridge tile opened the window.~~ That was harmless
+      // only because the conversation platforms had no webLogin policy and the
+      // window degraded to this card; restoring Slack's made the wrong path
+      // reachable for the first time.
+      if (src.action === 'bridge' && !src.connected
+          && (BRIDGE_FLOW[kindOf(src.id)] || 'cookie') === 'cookie') {
         openBridgeLogin();
         return;
       }
