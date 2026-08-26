@@ -108,6 +108,38 @@ export function readStore(db) {
 // path uses. That is the whole reason the split is drawn there: an identifier
 // normalised two different ways is two different people to the resolver, and a
 // backend switch would silently orphan every identifier already in the spine.
+/**
+ * The same contacts, as avatar rows — one per identifier that has a photo.
+ *
+ * Keyed per IDENTIFIER rather than per contact, deliberately: the people graph
+ * resolves a person to identifiers, so this is the join that already exists.
+ * A contact with three numbers and a photo stores three small rows; a contact
+ * with no photo stores none, which is most of them.
+ */
+export function avatarsFromContacts(contacts) {
+  const out = [];
+  for (const c of Array.isArray(contacts) ? contacts : []) {
+    const b64 = typeof c?.thumbnail === 'string' ? c.thumbnail : '';
+    if (!b64) continue;
+    let jpeg;
+    try {
+      jpeg = Buffer.from(b64, 'base64');
+    } catch {
+      continue; // a thumbnail that will not decode is not worth a failed run
+    }
+    if (jpeg.length === 0) continue;
+    for (const raw of Array.isArray(c.phones) ? c.phones : []) {
+      const identifier = normalizePhone(raw);
+      if (identifier) out.push({ identifier, jpeg });
+    }
+    for (const raw of Array.isArray(c.emails) ? c.emails : []) {
+      const identifier = normalizeEmail(raw);
+      if (identifier) out.push({ identifier, jpeg });
+    }
+  }
+  return out;
+}
+
 export function entriesFromContacts(contacts) {
   const entries = [];
   for (const c of Array.isArray(contacts) ? contacts : []) {
@@ -153,12 +185,27 @@ export function createContactsSource({ home } = {}) {
       // a missing helper falls through to it too.
       if (ctx.config?.contacts?.backend !== 'local' && helperAvailable()) {
         try {
-          const entries = entriesFromContacts(await readContacts());
+          const contacts = await readContacts();
+          const entries = entriesFromContacts(contacts);
           if (entries.length > 0) ctx.state.upsertContacts(entries);
+          // Photos are a nice-to-have on top of the spine: a failure here must
+          // never cost the run its names, which are the thing the graph cannot
+          // work without.
+          let avatars = 0;
+          try {
+            const rows = avatarsFromContacts(contacts);
+            if (rows.length > 0) avatars = ctx.state.upsertAvatars(rows);
+          } catch (e) {
+            ctx.log.warn('contacts_avatars_failed', {
+              connector: 'contacts',
+              code: String(e?.code ?? ''),
+            });
+          }
           ctx.log.info('contacts_scan', {
             connector: 'contacts',
             backend: 'contacts-framework',
             identifiers: entries.length,
+            avatars,
           });
           return { inserted: entries.length, updated: 0, unchanged: 0, skipped: 0 };
         } catch (error) {

@@ -105,7 +105,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // their per-year topics. monthsView: where the popup was left, so a restart
     // resumes on it rather than snapping back to this year.
     "people-months": ["close", "peopleYear", "peopleFind", "peopleSummary",
-                      "openPeople", "monthsView", "peopleMap"],
+                      "openPeople", "monthsView", "peopleMap", "peopleAvatars"],
     "ear": ["orbState", "voiceError", "voiceTranscript"],
   ]
 
@@ -1080,6 +1080,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
       reply(webView, id, ["state": Bridge.monthsView ?? ""])
 
+    case "peopleAvatars":
+      // Contact photos for the rows on screen, base64 per person key. Asked
+      // for separately from the year itself: a year is 250 rows and the
+      // thumbnails would be megabytes of payload the page mostly scrolls past.
+      let avKeys = (payload["keys"] as? [String])?.prefix(400).map { String($0.prefix(200)) } ?? []
+      peopleCall("POST", "people/avatars", json: ["keys": Array(avKeys)]) { [weak self] data in
+        self?.reply(webView, id, data)
+      }
     case "peopleSummary":
       // Model-written year summary for one person; generated on demand,
       // served by hermes from the LOCAL model only.

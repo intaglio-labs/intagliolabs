@@ -340,6 +340,38 @@ body.plist .pm-faces {
 /* A person: their initials on a hazelnut disc, lit from the upper left so a
    crowd of them reads as beads rather than flat dots. Diameter is set from
    the page — it carries that year's engagement. */
+/* The list row's own face (owner, 2026-08-25: photos on the names too, not
+   just the awarded ones). Same treatment as the constellation's and the
+   cards', at the size a dense list can carry. */
+body.plist .pl-face {
+  flex: 0 0 auto;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  margin-right: 7px;
+  background: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 60%, #a8854c 100%);
+  box-shadow: inset -2px -2px 5px rgba(0, 0, 0, 0.18),
+              inset 2px 2px 4px rgba(255, 255, 255, 0.35);
+  color: #141412;
+  font-size: 8px; font-weight: 600; letter-spacing: 0;
+}
+
+/* A REAL PHOTO REPLACES THE INITIALS, and the text must go with it: the
+   letters are the fallback, not a caption. Covered and centred so a
+   non-square thumbnail fills the circle instead of squashing into it, and the
+   gradient is dropped so a photo with transparency does not sit on gold. */
+.has-photo {
+  /* The photo itself is an inline background-image set by paintAvatars, which
+     also replaces the gradient the base rule painted — nothing here needs to
+     unset it. These are the framing rules the inline style cannot carry. */
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  /* The initials stay in the DOM as the fallback and as the accessible name;
+     they must not show THROUGH the face they were standing in for. */
+  color: transparent;
+}
+
 body.plist .pm-face {
   position: relative;
   flex: 0 0 auto;

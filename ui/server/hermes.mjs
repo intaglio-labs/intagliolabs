@@ -54,7 +54,7 @@ import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch } from './people/search.mjs';
 import { loadOwner } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
-import { buildMap, buildYear, buildSearchYears } from './people/map.mjs';
+import { buildAvatars, buildMap, buildYear, buildSearchYears } from './people/map.mjs';
 import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
@@ -2835,7 +2835,7 @@ function handle(db, req, res, cors, url, policy) {
   // map and WRITE the owner's merge decisions, neither of which is a browser
   // capability. The Origin channel is authenticated but not entitled here, so
   // 403 (not 401), matching handleAdmin's reasoning.
-  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary') {
+  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary' || url.pathname === '/people/avatars') {
     if (channel !== 'bearer') {
       send(res, 403, { error: 'people routes are bearer-only: call with the token from ~/.hazlie/secrets/hermes-token.txt and no Origin header.' }, cors);
       return;
@@ -2955,6 +2955,29 @@ async function handlePeople(db, req, res, cors, url, policy) {
   // for one person and cached against the corpus stamp (people/summary.mjs
   // carries the boundary reasoning). POST because the person key is data,
   // not a path.
+  // The People page's faces. POST because it carries a list of person keys,
+  // and keys are data. Returns base64 per key rather than a URL per key: the
+  // widget's pages have no bearer and cannot fetch hermes directly — every
+  // byte reaches them through the native bridge — so a URL would be a link
+  // nothing on that side could follow.
+  if (req.method === 'POST' && url.pathname === '/people/avatars') {
+    if (!hasJsonMediaType(req)) { send(res, 415, { error: 'content-type must be application/json' }, cors); return; }
+    const body = await readJson(req);
+    assertClosedFields(body, ['keys']);
+    const keys = Array.isArray(body.keys) ? body.keys.filter((k) => typeof k === 'string').slice(0, 400) : [];
+    const out = withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      const found = buildAvatars(db, state, { keys, owner, aliases });
+      const avatars = {};
+      for (const [key, jpeg] of found) {
+        avatars[key] = Buffer.from(jpeg).toString('base64');
+      }
+      return { avatars };
+    });
+    send(res, 200, out, cors);
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/people/summary') {
     if (!hasJsonMediaType(req)) { send(res, 415, { error: 'content-type must be application/json' }, cors); return; }
     const body = await readJson(req);

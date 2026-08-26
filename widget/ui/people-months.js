@@ -158,6 +158,7 @@
       `<div class="pl-row${open ? ' open' : ''}" role="button" data-rk="${esc(rowKey)}">` +
         `<div class="pl-main">` +
           `<div class="pl-nameline">` +
+            `<span class="pl-face" data-avatar-key="${esc(p.key)}">${esc(initials(p.name))}</span>` +
             `<span class="pl-name">${esc(p.name)}</span>` +
             `<span class="pm-msgs">${p.messages} msg${p.messages === 1 ? '' : 's'}</span>` +
             (y === year ? '' : `<span class="pm-yr-badge">${y}</span>`) +
@@ -243,7 +244,8 @@
           `<span>${esc(h.label)}</span>` +
         '</div>' +
         '<div class="pm-card-who">' +
-          `<span class="pm-card-face">${esc(initials(h.name))}</span>` +
+          `<span class="pm-card-face"${h.key ? ` data-avatar-key="${esc(h.key)}"` : ''}>` +
+            `${esc(initials(h.name))}</span>` +
           `<span class="pm-card-name">${esc(h.name)}</span>` +
         '</div>' +
         `<div class="pm-card-line">${esc(h.line)}</div>` +
@@ -348,6 +350,8 @@
     // here would say the box only reaches it.
     searchEl.placeholder = 'search everyone, every year…';
     renderTabs();
+    // After the paint, never during it — see paintAvatars.
+    paintAvatars();
     saveView();
   }
 
@@ -375,6 +379,8 @@
       || `<div class="pl-empty">no one matches “${esc(findTerm)}”</div>`);
     searchEl.placeholder = 'search everyone, every year…';
     renderTabs();
+    // After the paint, never during it — see paintAvatars.
+    paintAvatars();
   }
 
   // Ask the server. reqId guards the race the same way the year loader does:
@@ -561,6 +567,47 @@
     return { max, min: Math.round(max * 0.69) };
   }
 
+  // Contact photos, key -> data URI, or null once we know there is none.
+  // Cached for the life of the popup: a face does not change while it is open,
+  // and re-asking on every tab switch would be a round trip per year.
+  const avatarCache = new Map();
+
+  /**
+   * Fill in the faces for whatever is on screen.
+   *
+   * Fetched AFTER the list paints, never before: the names and counts are the
+   * page, and a photo arriving a beat later is invisible, while a list that
+   * waits for photos is a list that stutters.
+   */
+  async function paintAvatars() {
+    // cardsEl sits OUTSIDE the scrolling surface (it must stay put while the
+    // list moves), so both roots are swept or the award faces never fill in.
+    const holders = [
+      ...surface().querySelectorAll('[data-avatar-key]'),
+      ...cardsEl.querySelectorAll('[data-avatar-key]'),
+    ];
+    const need = [...new Set(holders.map((el) => el.dataset.avatarKey))]
+      .filter((k) => k && !avatarCache.has(k));
+    if (need.length) {
+      try {
+        const d = await hzPost('peopleAvatars', { keys: need });
+        const got = (d && d.avatars) || {};
+        for (const k of need) {
+          avatarCache.set(k, got[k] ? `data:image/jpeg;base64,${got[k]}` : null);
+        }
+      } catch {
+        // No faces is a fine page; mark them known so we do not ask again.
+        for (const k of need) avatarCache.set(k, null);
+      }
+    }
+    for (const el of holders) {
+      const uri = avatarCache.get(el.dataset.avatarKey);
+      if (!uri) continue;
+      el.style.backgroundImage = `url("${uri}")`;
+      el.classList.add('has-photo');
+    }
+  }
+
   function faceEl(p, maxEngagement, fs) {
     const f = document.createElement('div');
     f.className = 'pm-face';
@@ -569,6 +616,7 @@
     f.style.height = `${size}px`;
     f.style.fontSize = size >= 28 ? '10px' : `${Math.max(7, Math.round(size * 0.34))}px`;
     f.textContent = initials(p.name);
+    if (p.key) f.dataset.avatarKey = p.key;
     // data-tip, not title: native tooltips do not fire reliably in a
     // borderless non-activating panel (same reason as the connector glyphs).
     f.setAttribute('data-tip', `${p.name} · ${p.messages} msg${p.messages === 1 ? '' : 's'}`);

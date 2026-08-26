@@ -178,6 +178,41 @@ export function yearCore(contextDb, stateDb, { now, owner, aliases }) {
   return core;
 }
 
+/**
+ * Person key → their contact photo, for the keys asked for.
+ *
+ * Rides yearCore's memoised graph rather than rebuilding it: this is called
+ * right after the list it decorates, so the stamp is almost always a hit.
+ * A person's identifiers are tried in order and the first photo wins — the
+ * same face is on all of them when a contact has one, so "first" is not a
+ * ranking, just a stop condition.
+ *
+ * Returns raw bytes; the caller decides how to frame them. Missing keys are
+ * simply absent: no photo is the common case, not an error.
+ */
+export function buildAvatars(contextDb, stateDb, { keys, now = Date.now(), owner, aliases = null } = {}) {
+  const want = new Set(Array.isArray(keys) ? keys : []);
+  if (want.size === 0 || !stateDb) return new Map();
+  let stmt;
+  try {
+    stmt = stateDb.prepare('SELECT jpeg FROM contact_avatars WHERE identifier = ?');
+  } catch {
+    // A state.db written before avatars existed has no such table. Nothing to
+    // show is the honest answer, and it must not take the page down with it.
+    return new Map();
+  }
+  const { graph } = yearCore(contextDb, stateDb, { now, owner, aliases });
+  const out = new Map();
+  for (const p of graph) {
+    if (!want.has(p.key) || out.has(p.key)) continue;
+    for (const id of p.identifiers ?? []) {
+      const row = stmt.get(id);
+      if (row?.jpeg) { out.set(p.key, row.jpeg); break; }
+    }
+  }
+  return out;
+}
+
 export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, aliases = null, cap = 250 } = {}) {
   const { graph, topics } = yearCore(contextDb, stateDb, { now, owner, aliases });
 
