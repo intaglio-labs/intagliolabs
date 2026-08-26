@@ -399,6 +399,23 @@ const HINTS = {
   // walkthrough now — open granola.ai, create a key, paste it right here.
   granola: { app: 'com.granola.app', url: 'https://granola.ai', link: 'Granola',
              walkthrough: true }, // the DESKTOP app first — the key lives in its settings
+  // Telegram needs the OWNER's own api_id/api_hash before its bridge will
+  // even start (my.telegram.org/apps). Same three-step shape as granola's:
+  // open the page, make the thing, paste it back — connectSecret writes it
+  // into the bridge config and starts the container.
+  //
+  // RESTORED (2026-08-26): this entry was collateral damage when the LinkedIn
+  // export card was deleted a commit later, and losing it turned Telegram's
+  // card back into a "begin login" that hangs forever against a container
+  // that will not start. The walkthrough is the only thing on this card that
+  // can make that container run.
+  telegram: {
+    url: 'https://my.telegram.org/apps',
+    link: 'my.telegram.org',
+    walkthrough: true,
+    step2: 'create an app, then copy its api_id and api_hash',
+    paste: 'paste api_id:api_hash',
+  },
   // ~~linkedin: how to request an export and where to unzip it.~~ Gone with
   // the export itself (owner, 2026-08-25): LinkedIn is a bridge now, so its
   // tile renders the ordinary cookie-login flow like Messenger's.
