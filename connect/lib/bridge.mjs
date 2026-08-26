@@ -464,6 +464,13 @@ export const PLATFORMS = Object.freeze({
         { id: 'auth_token', from: 'storage', match: 'xoxc-' },
         { id: 'cookie_token', from: 'cookie', cookie: 'd' },
       ],
+      // SIGNING IN DOES NOT LAND ON THE TOKEN. Slack finishes on an
+      // interstitial — "Click Open Slack to launch the desktop app… or use
+      // Slack in your browser" — and that page has no token in it, because the
+      // token belongs to the web client its own link points at. The owner sat
+      // on that page with nothing to press (2026-08-26). The window walks here
+      // itself, once, after the cookies prove the sign-in worked.
+      storageUrl: 'https://app.slack.com/client',
       // No userAgent override. ~~Slack's sniffer rejects Safari~~ — it rejects
       // a STALE Safari, and the window now presents the version of Safari that
       // is actually installed (BridgeLogin.systemSafariUserAgent). A literal

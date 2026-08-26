@@ -308,7 +308,15 @@ test('the field contract is declared per platform, for the two that need one', (
       // matches — the window reads one pattern and reports nothing else, so an
       // unnamed one would be either inert or a general reader of the page.
       if (f.from === 'cookie') assert.ok(f.cookie, `${id}: cookie field ${f.id} names no cookie`);
-      if (f.from === 'storage') assert.ok(f.match, `${id}: storage field ${f.id} names no pattern`);
+      if (f.from === 'storage') {
+        assert.ok(f.match, `${id}: storage field ${f.id} names no pattern`);
+        // And somewhere to find it. Slack's sign-in ends on a page that holds
+        // no token, so without this the window waits on a value that page will
+        // never have — which is a stuck window with nothing on it to press.
+        assert.ok(p.webLogin.storageUrl, `${id}: storage field ${f.id} with no storageUrl`);
+        assert.ok(p.webLogin.allowedHosts.some((h) => new URL(p.webLogin.storageUrl).hostname.endsWith(h)),
+          `${id}: storageUrl is outside its own fence`);
+      }
     }
   }
 });

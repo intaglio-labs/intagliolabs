@@ -87,6 +87,12 @@ export async function bridgeApiResponse({
         // An approval window: no harvest, no fields — the person answers on
         // the platform's own page and the bridge reports the outcome itself.
         approval: platform.webLogin?.approval === true,
+        // WHERE A STORAGE FIELD'S VALUE LIVES. Slack's sign-in ends on a page
+        // that offers to launch the desktop app and holds no token; the token
+        // belongs to the web client behind its own link. The window walks there
+        // itself once the cookies are in, rather than leaving the owner on a
+        // page with nothing on it to press.
+        storageUrl: platform.webLogin?.storageUrl ?? null,
         // SUBFRAMES ONLY: the hosts a challenge widget's iframes come from.
         // Separate from allowedHosts because the main frame is where a password
         // is typed and a widget is not a destination — BridgeLogin enforces the

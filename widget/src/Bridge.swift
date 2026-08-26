@@ -722,6 +722,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // Subframe-only hosts: a challenge widget's iframes. Same server-authored
         // shape as allowedHosts, enforced separately — see BridgeLogin's fence.
         let allowedFrameHosts = (begin["allowedFrameHosts"] as? [String])?.filter { !$0.isEmpty } ?? []
+        // Where a storage field's value lives, when signing in does not land
+        // there. Server-authored like the rest; the window uses it at most once.
+        let storageUrl = String((begin["storageUrl"] as? String ?? "").prefix(300))
         let label = begin["label"] as? String ?? p
         // A QR LOGIN IS ALSO A WINDOW, just not a webview one. Discord has no
         // login page to drive — its bridge posts a remote-auth QR and waits
@@ -756,7 +759,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
             sessionCookie: sessionCookie, allowedHosts: allowedHosts,
             requiredCookies: requiredCookies, cookieFormat: cookieFormat,
             fields: fields, approval: approval, userAgent: userAgent,
-            allowedFrameHosts: allowedFrameHosts
+            allowedFrameHosts: allowedFrameHosts, storageUrl: storageUrl
           ) { cookiesJSON in
             guard let cookiesJSON else {
               self.reply(webView, id, ["state": "cancelled"])

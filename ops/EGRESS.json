@@ -156,6 +156,16 @@
       "evidence": "connect/lib/bridge.mjs PLATFORMS.slack; bridges/docker-compose.yml image dock.mau.dev/mautrix/slack"
     },
     {
+      "host": "app.slack.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift + connect/lib/bridge.mjs PLATFORMS.slack",
+      "direction": "bidirectional",
+      "purpose": "Slack's web client, which the login window walks to after a successful sign-in because it is where the session's client token lives.",
+      "credential": "the owner's own Slack session, already established by the sign-in they just completed in that window.",
+      "decision": "Already covered by the slack.com entry in substance — the fence matches by suffix and app.slack.com is inside it — and listed separately because the tripwire reads literals, and because the reason this particular subdomain is named in source deserves to be findable. Slack's sign-in ends on an interstitial offering to launch the desktop app; that page holds no token, so the window walks to the web client once, after the required cookies prove the sign-in worked. Not a workaround for a failed login: it is the last step the owner would otherwise have to know to take, and one of them sat on that page with nothing to press (2026-08-26).",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.slack.webLogin.storageUrl"
+    },
+    {
       "host": "accounts.google.com",
       "kind": "login-webview",
       "component": "widget/src/BridgeLogin.swift + connect/lib/bridge.mjs PLATFORMS.slack",
