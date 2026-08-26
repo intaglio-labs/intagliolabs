@@ -158,6 +158,25 @@ body.plist .pm-src-ic {
 body.plist .pm-src-ic svg { width: 100%; height: 100%; display: block; }
 body.plist .pm-src-ic:hover { color: var(--hazelnut-light); }
 
+/* THE CATEGORY MARKS, in front of the name: this person is in the top five of
+   a card's category this year. Same glyph the card uses, at row size — the mark
+   is only readable because the card above taught it, so a second icon set for
+   the same five ideas would have to be learned twice. Hazelnut rather than
+   muted, because unlike the connector glyphs after the name these are the
+   uncommon thing on a line and they are what the eye is meant to catch; the
+   label arrives with the data and shows on hover. */
+body.plist .pl-award {
+  flex: 0 0 auto;
+  position: relative;
+  display: inline-flex;
+  width: 14px; height: 14px;
+  margin-right: 1px;
+  color: var(--hazelnut-light);
+  opacity: 0.75;
+}
+body.plist .pl-award svg { width: 100%; height: 100%; display: block; }
+body.plist .pl-award:hover { opacity: 1; }
+
 /* Line 1's message count, directly after the name; line 2 is the chips. */
 body.plist .pm-msgs {
   flex: 0 0 auto;
@@ -173,6 +192,7 @@ body.plist .pm-chip-row { margin-top: 4px; }
    list's own top edge cannot clip it. */
 body.plist .pm-src-ic { position: relative; }
 body.plist .pm-src-ic::after,
+body.plist .pl-award::after,
 body.plist .pm-face[data-tip]::after {
   content: attr(data-tip);
   position: absolute;
@@ -191,6 +211,7 @@ body.plist .pm-face[data-tip]::after {
   z-index: 5;
 }
 body.plist .pm-src-ic:hover::after,
+body.plist .pl-award:hover::after,
 body.plist .pm-face[data-tip]:hover::after { opacity: 1; }
 /* (The globe tab had this tooltip too, until 2026-08-25 the same day: its
    bubble laid out 25px past the strip's box, and with overflow-y promoted to

@@ -151,6 +151,40 @@
     );
   }
 
+  // WHO WEARS WHICH MARK. Rebuilt per paint from the open year's payload, so it
+  // is always the year on screen that decides — a trophy that survived a tab
+  // change would be a claim about the wrong year. Empty on the all-years
+  // surface, which has no awards to give: they are a fact about ONE year, and
+  // the map payload does not compute them.
+  function awardIndex(data) {
+    const by = new Map();
+    for (const a of (data && data.awards) || []) {
+      for (const key of a.keys || []) {
+        if (!by.has(key)) by.set(key, []);
+        // The order categories arrive in is the cards' order, and the row wears
+        // them in that order too, so two people with the same pair of marks
+        // never wear them in a different sequence.
+        by.get(key).push(a);
+      }
+    }
+    return by;
+  }
+  let awardsByKey = new Map();
+
+  // The card's own glyph, at row size, in front of the name. Same icon as the
+  // card above it on purpose: the mark is only legible because the card taught
+  // it, and a second icon set for the same five ideas would have to be learned
+  // twice.
+  function awardsHtml(p) {
+    const mine = awardsByKey.get(p.key);
+    if (!mine || !mine.length) return '';
+    return mine.map((a) =>
+      `<span class="pl-award" data-tip="${esc(a.label)}">` +
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+      `stroke-linecap="round" stroke-linejoin="round">${CARD_ICON[a.kind] || FALLBACK_ICON}</svg>` +
+      '</span>').join('');
+  }
+
   function rowHtml(p, y) {
     // Five chips is the row's budget. The all-years union can carry more than
     // that, so the slice lives here rather than in the data — clustering needs
@@ -168,6 +202,7 @@
         `<div class="pl-main">` +
           `<div class="pl-nameline">` +
             `<span class="pl-face" data-avatar-key="${esc(p.key)}">${esc(initials(p.name))}</span>` +
+            awardsHtml(p) +
             `<span class="pl-name">${esc(p.name)}</span>` +
             // TWO NUMBERS, because they answer different questions. "msgs" is
             // what passed between the two of you; "in rooms" is what they said
@@ -383,6 +418,9 @@
   function paint(data) {
     const rows = visible(data);
     surface();
+    // Before anything draws a row: rowHtml reads this, and a stale index would
+    // put the last year's marks on this year's names.
+    awardsByKey = awardIndex(data);
     renderCards(data);
     renderFilter(rows.length);
     if (view === 'sky') renderSky(data, rows);
@@ -408,6 +446,11 @@
       renderTabs();
       return;
     }
+    // NO MARKS ON A SEARCH. Results span every year, and the marks belong to
+    // one: a row found in 2021 would wear whichever year happened to be open
+    // behind the search box. The categories are still readable one tab at a
+    // time, which is where they mean something.
+    awardsByKey = new Map();
     const head = findState === 'degraded'
       ? `<div class="pl-more">couldn’t reach search — showing matches from the years already loaded</div>`
       : '';

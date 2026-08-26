@@ -12,7 +12,7 @@
 import { buildGraph, namelike } from './graph.mjs';
 import { depthScore, isNonPerson } from './rank.mjs';
 import { topicTallies, topTopics, nameTokenSet } from './topics.mjs';
-import { buildHighlights } from './highlights.mjs';
+import { buildYearAwards } from './highlights.mjs';
 
 const DAY = 86_400_000;
 
@@ -365,15 +365,22 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
   }
   entries.sort((a, b) => b.engagement - a.engagement);
 
+  // Computed over the FULL ranked set, deliberately before the display cap
+  // below: a streak or a return is worth surfacing even when the person sits
+  // past row 250, and capping first would have quietly made the highlights a
+  // fact about the first page rather than about the year.
+  const { cards, awards } = buildYearAwards(entries, { year, now });
+
   return {
     year,
     years: [...yearsSet].sort((a, b) => a - b),
     total: entries.length,
-    // Computed over the FULL ranked set, deliberately before the display cap
-    // below: a streak or a return is worth surfacing even when the person sits
-    // past row 250, and capping first would have quietly made the highlights a
-    // fact about the first page rather than about the year.
-    highlights: buildHighlights(entries, { year, now }),
+    highlights: cards,
+    // WHO THE LIST MARKS. Each category's top five, by key, with the label the
+    // card uses. Sent alongside the rows rather than folded into them: the same
+    // person can be in two categories, the rows are memoised, and a key list is
+    // cheaper to join in the page than five flags per row are to carry.
+    awards,
     people: entries.slice(0, cap).map((e) => {
       const doc = topics.docs.get(`${e.p.key}|${year}`);
       // The row carries only what the page still shows: the company, status

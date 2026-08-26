@@ -175,3 +175,20 @@ test('the strip fades only the end that is hiding tabs', () => {
   assert.doesNotMatch(css, /pm-tab:last-child \{ margin-right/u);
   assert.match(css, /margin-left: auto;/u);
 });
+
+// The row marks are the cards' own glyphs, joined to the rows by key from the
+// year payload — never a second icon set, and never a label the page keeps its
+// own copy of.
+test('the list marks a row with the card icon of every category it is top five in', () => {
+  assert.match(page, /function awardIndex\(data\)/u);
+  assert.match(page, /data\.awards/u);
+  assert.match(page, /CARD_ICON\[a\.kind\] \|\| FALLBACK_ICON/u,
+    'the mark reuses the card glyph rather than introducing another');
+  assert.match(page, /data-tip="\$\{esc\(a\.label\)\}"/u,
+    'the label comes from the payload, not from a copy in the page');
+  // In front of the name, after the face.
+  assert.match(page, /pl-face[\s\S]{0,200}awardsHtml\(p\) \+\n\s*`<span class="pl-name">/u);
+  // And the index is rebuilt per paint, so a year change cannot leave marks behind.
+  assert.match(page, /awardsByKey = awardIndex\(data\);/u);
+  assert.match(page, /awardsByKey = new Map\(\);/u, 'a search carries no marks');
+});
