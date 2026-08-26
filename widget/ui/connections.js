@@ -397,7 +397,8 @@ const HINTS = {
           url: 'https://myaccount.google.com/apppasswords', link: 'Google app passwords' },
   // granola left this table (owner, 2026-08-25): its panel is the in-app
   // walkthrough now — open granola.ai, create a key, paste it right here.
-  granola: { url: 'granola://', link: 'Granola', walkthrough: true }, // the DESKTOP app — the key lives in its settings
+  granola: { app: 'com.granola.app', url: 'https://granola.ai', link: 'Granola',
+             walkthrough: true }, // the DESKTOP app first — the key lives in its settings
   // LinkedIn had NO entry here at all, so its tile opened a card with nothing
   // on it but the header — "when I click linkedin, nothing is happening"
   // (owner, 2026-08-25). It is not a login: LinkedIn only lets you export,
@@ -514,6 +515,10 @@ function orderSources(sources) {
 
 // Fixed strings only — the widget reports states, it never invents them.
 const NOTICES = {
+  // The social bridges need their local engine running (ops/setup-bridges.sh
+  // starts it). Named separately from `down` because the remedy is different
+  // and specific: this is not "unknown", it is "start it".
+  nobridge: 'the social bridge engine is not running — open Docker, then: bash ops/setup-bridges.sh',
   down: 'connect service unreachable — status unknown',
   auth: 'token mismatch — status unknown',
   noroute: 'connect service predates /api/status — status unknown',
@@ -719,6 +724,16 @@ function card(src, keep) {
       open.textContent = `1 · open ${hint.link} ↗`;
       open.addEventListener('click', (e) => {
         e.stopPropagation();
+        // The installed app first, the website only if it is not there —
+        // openApp answers notInstalled rather than failing silently.
+        if (hint.app) {
+          hzPost('openApp', { bundleId: hint.app })
+            .then((d) => {
+              if (!d || d.state !== 'ok') hzPost('openExternal', { url: hint.url }).catch(() => {});
+            })
+            .catch(() => { hzPost('openExternal', { url: hint.url }).catch(() => {}); });
+          return;
+        }
         hzPost('openExternal', { url: hint.url }).catch(() => {});
       });
       const step2 = document.createElement('span');
@@ -849,9 +864,16 @@ function card(src, keep) {
         const body = String(m.body || '').trim();
         if (!body || body.startsWith('Login URL:') || body.includes('`{')) continue;
         // Keep it to the sentence that asks, not the paragraph around it.
+        // A QUESTION, or nothing. ~~Fell back to the bot's first line.~~ That
+        // made any chatter look like a pending step: after the engine
+        // restarted under a half-finished login, the bot answered the PIN
+        // with "Unknown command, use the `help` command" — no login was in
+        // progress any more — and the panel dutifully offered a box to answer
+        // it with (owner, 2026-08-25). No prompt means no pending step, which
+        // is exactly when the log in button should come back.
         const ask = body.split('\n').map((l) => l.trim()).filter(Boolean)
-          .find((l) => l.endsWith('?') || /^(please|enter|register)/iu.test(l));
-        return tidy(ask || body.split('\n')[0].trim());
+          .find((l) => l.endsWith('?') || /^(please|enter|register|create|choose)\b/iu.test(l));
+        return ask ? tidy(ask) : null;
       }
       return null;
     };
@@ -936,7 +958,11 @@ function card(src, keep) {
           .then(renderBridge)
           .catch(() => { login.disabled = false; login.textContent = 'log in'; });
       });
-      tip.appendChild(login);
+      // Only when the bot is NOT mid-question (owner, 2026-08-25): pressing
+      // "log in" during the PIN step cancels the login and restarts it, so
+      // offering it beside the question is offering to undo the progress the
+      // question represents. The answer box below is the only way forward.
+      if (!askedFor()) tip.appendChild(login);
       // ~~A 'cancelled' state appended "login window closed — tap to try
       // again."~~ Yeeted (owner, 2026-08-25): the card already shows the same
       // log in button either way, and the sentence squeezed in beside the

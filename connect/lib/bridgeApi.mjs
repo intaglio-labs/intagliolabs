@@ -113,6 +113,18 @@ export async function bridgeApiResponse({
     }
     return { status: 404, body: { error: 'no such bridge route' } };
   } catch (e) {
-    return { status: 502, body: { error: String(e?.message ?? e) } };
+    // NAME THE ACTUAL FAILURE. Every error here collapsed into the widget's
+    // generic "status unavailable" — which is what the owner saw after a
+    // complete X login (2026-08-25) when Docker Desktop had quit underneath
+    // the stack: the cookies were fine, the homeserver simply was not there.
+    // A login that cannot be delivered must say WHY, because the remedy
+    // (start the engine) is nothing like the remedy for a bad password.
+    const msg = String(e?.message ?? e);
+    const unreachable = /ECONNREFUSED|EHOSTUNREACH|ENOTFOUND|fetch failed|socket hang up/iu.test(msg)
+      || /credentials incomplete|ENOENT/iu.test(msg);
+    if (unreachable) {
+      return { status: 503, body: { error: 'bridge engine is not running', state: 'nobridge' } };
+    }
+    return { status: 502, body: { error: msg } };
   }
 }

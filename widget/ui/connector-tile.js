@@ -130,7 +130,8 @@ const HZ_HINTS = {
           url: 'https://myaccount.google.com/apppasswords', link: 'Google app passwords' },
   // granola left the sentence behind (owner, 2026-08-25): its panel is the
   // in-app walkthrough — open granola.ai, create a key, paste it right here.
-  granola: { url: 'granola://', link: 'Granola', walkthrough: true }, // the DESKTOP app — the key lives in its settings
+  granola: { app: 'com.granola.app', url: 'https://granola.ai', link: 'Granola',
+             walkthrough: true }, // the DESKTOP app first — the key lives in its settings
   // LinkedIn had NO entry here at all, so its tile opened a card with nothing
   // on it but the header — "when I click linkedin, nothing is happening"
   // (owner, 2026-08-25). It is not a login: LinkedIn only lets you export,
@@ -155,6 +156,8 @@ const HZ_HINT_FOR = (id) => (id.startsWith('mail:') ? HZ_HINTS.mail : HZ_HINTS[i
 // in connections.js (owner, 2026-08-25); the note there carries the reasoning.
 const HZ_STAY = "data stored locally";
 const HZ_NOTICES = {
+  // See connections.js NOTICES.nobridge — the engine, not the connection.
+  nobridge: 'the social bridge engine is not running — open Docker, then: bash ops/setup-bridges.sh',
   down: 'connect service unreachable — status unknown',
   auth: 'token mismatch — status unknown',
   noroute: 'connect service predates /api/status — status unknown',
@@ -205,6 +208,16 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
       open.textContent = `1 · open ${hint.link} ↗`;
       open.addEventListener('click', (e) => {
         e.stopPropagation();
+        // The installed app first, the website only if it is not there —
+        // openApp answers notInstalled rather than failing silently.
+        if (hint.app) {
+          hzPost('openApp', { bundleId: hint.app })
+            .then((d) => {
+              if (!d || d.state !== 'ok') hzPost('openExternal', { url: hint.url }).catch(() => {});
+            })
+            .catch(() => { hzPost('openExternal', { url: hint.url }).catch(() => {}); });
+          return;
+        }
         hzPost('openExternal', { url: hint.url }).catch(() => {});
       });
       const step2 = document.createElement('span');
@@ -283,6 +296,28 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
     } else if (data && data.state !== 'ok' && data.state !== 'cancelled' && !manual && !data.transcript) {
       tip.append(HZ_NOTICES[data.state] || data.error || HZ_NOTICES.error);
     } else {
+      // The bot's pending QUESTION, computed first because the log in button
+      // below is hidden while one is outstanding (owner, 2026-08-25).
+      // connections.js askedFor()/tidy() carries the full reasoning.
+      const askText = (() => {
+        const t = (data && Array.isArray(data.transcript)) ? data.transcript : [];
+        for (let i = t.length - 1; i >= 0; i--) {
+          if (t[i].from !== 'bot') continue;
+          const body = String(t[i].body || '').trim();
+          if (!body || body.startsWith('Login URL:') || body.includes('`{')) continue;
+          const line = body.split('\n').map((l) => l.trim()).filter(Boolean)
+            .find((l) => l.endsWith('?') || /^(please|enter|register|create|choose)\b/iu.test(l));
+          if (!line) return null; // chatter, not a step: no question pending
+          const m = /^please enter your\s+(.+)$/iu.exec(line);
+          if (!m) return line;
+          const field = m[1].replace(/\.$/u, '').trim();
+          const verb = /^(create|enter|choose|register)\b/iu.exec(field);
+          return verb
+            ? `please ${verb[0].toLowerCase()} ${field.slice(verb[0].length).trim()} for ${src.label}`
+            : `please enter your ${field} for ${src.label}`;
+        }
+        return null;
+      })();
       if (manual) {
         const note = document.createElement('span');
         note.className = 'why';
@@ -299,41 +334,20 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
           .then(renderBridge)
           .catch(() => { login.disabled = false; login.textContent = 'log in'; });
       });
-      tip.appendChild(login);
+      // Hidden while the bot is mid-question — see connections.js: pressing
+      // it would cancel the login the question belongs to.
+      if (!askText) tip.appendChild(login);
       }
 
       // ~~A 'cancelled' state appended "login window closed — tap to try
       // again."~~ Yeeted (owner, 2026-08-25): the card already shows the same
       // log in button either way, and the sentence squeezed in beside the
       // pill saying what the owner just did themselves.
-      // The bot's last QUESTION only — never the transcript (owner,
-      // 2026-08-25); connections.js carries the reasoning at askedFor().
-      {
-        const t = (data && Array.isArray(data.transcript)) ? data.transcript : [];
-        let ask = null;
-        for (let i = t.length - 1; i >= 0 && !ask; i--) {
-          if (t[i].from !== 'bot') continue;
-          const body = String(t[i].body || '').trim();
-          if (!body || body.startsWith('Login URL:') || body.includes('`{')) continue;
-          ask = body.split('\n').map((l) => l.trim()).filter(Boolean)
-            .find((l) => l.endsWith('?') || /^(please|enter|register)/iu.test(l))
-            || body.split('\n')[0].trim();
-          // Same unglueing as connections.js askedFor()/tidy().
-          const m = /^please enter your\s+(.+)$/iu.exec(ask);
-          if (m) {
-            const field = m[1].replace(/\.$/u, '').trim();
-            const verb = /^(create|enter|choose|register)\b/iu.exec(field);
-            ask = verb
-              ? `please ${verb[0].toLowerCase()} ${field.slice(verb[0].length).trim()} for ${src.label}`
-              : `please enter your ${field} for ${src.label}`;
-          }
-        }
-        if (ask) {
-          const line = document.createElement('span');
-          line.className = 'setup';
-          line.textContent = ask;
-          tip.appendChild(line);
-        }
+      if (askText) {
+        const line = document.createElement('span');
+        line.className = 'setup';
+        line.textContent = askText;
+        tip.appendChild(line);
       }
       // Token (discord/slack) and phone (telegram) connectors keep the guided
       // conversation — it is their only way in. The cookie-paste fallback the

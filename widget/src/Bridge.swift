@@ -80,7 +80,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     "setupState", "modelDownload", "modelCancel",
                     "openFullDiskAccess", "startSources",
                     // The in-panel API-key walkthrough (granola first).
-                    "connectSecret",
+                    "connectSecret", "openApp",
                    "permissionState", "requestPermission"],
     "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
                    "widgetSpot",
@@ -97,7 +97,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // map from the wrong file cost one broken popup in review.
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
-               "openExternal", "setConnectorEnabled", "connectSecret",
+               "openExternal", "setConnectorEnabled", "connectSecret", "openApp",
                // The FDA tile press opens the primed Settings pane directly.
                "openFullDiskAccess"],
     // peopleFind: search across every year, server-ranked. peopleMap: the
@@ -329,13 +329,21 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // one launches the default browser (or System Settings) — the app itself
   // still opens no socket beyond loopback; the user's click on a fixed help
   // link is what leaves, same posture as the connect page's help topics.
+  // Desktop apps a walkthrough may launch, by BUNDLE ID.
+  //
+  // ~~"granola://" sat in allowedExternal.~~ It parsed, it was allowed, and
+  // NSWorkspace.open still did nothing (owner, 2026-08-25: "this isn't
+  // actually opening my granola app") — a scheme URL with no host is not
+  // something NSWorkspace will launch, though `open(1)` accepts it. Launching
+  // by bundle id is the API that actually means "open this app", and it also
+  // answers whether the app is INSTALLED, so the page can fall back to the
+  // website instead of a button that silently does nothing.
+  private let allowedApps: Set<String> = ["com.granola.app"]
+
   private let allowedExternal: Set<String> = [
     "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
     "https://myaccount.google.com/apppasswords",
     "https://granola.ai",
-    // The Granola DESKTOP app (owner, 2026-08-25): the API key lives in the
-    // app's own settings, so the walkthrough opens the app, not the website.
-    "granola://",
     "https://cloud.ouraring.com/oauth/applications",
     "https://www.notion.so/my-integrations",
     // LinkedIn's export request page — the connector reads the CSV it emails.
@@ -975,6 +983,24 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       } else {
         reply(webView, id, ["state": "error", "error": "url not in allowlist"])
       }
+    case "openApp":
+      // Launch an allowlisted desktop app; reply notInstalled so the page can
+      // fall back to the platform's website rather than doing nothing.
+      let bundleId = String((payload["bundleId"] as? String ?? "").prefix(96))
+      guard allowedApps.contains(bundleId),
+            let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId)
+      else {
+        reply(webView, id, ["state": "notInstalled"])
+        return
+      }
+      let cfg = NSWorkspace.OpenConfiguration()
+      cfg.activates = true
+      NSWorkspace.shared.openApplication(at: appURL, configuration: cfg) { [weak self] _, err in
+        DispatchQueue.main.async {
+          self?.reply(webView, id, err == nil
+            ? ["state": "ok"] : ["state": "notInstalled"])
+        }
+      }
     case "openConnectLink":
       // The cloud-connector setup door: the connect page's ROOT, in the
       // browser — a full setup flow (tokens, app passwords) that wants a real
@@ -1322,6 +1348,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
       }
       switch http.statusCode {
+      case 503:
+        // The connect service naming its own outage (lib/bridgeApi.mjs): the
+        // bridge engine is not running. Passed through by NAME so the panel
+        // can print the remedy instead of "status unavailable".
+        done(["state": (body?["state"] as? String) ?? "nobridge",
+              "error": (body?["error"] as? String) ?? "bridge engine is not running"])
       case 200:
         guard var out = body else { done(["state": "error", "error": "unparseable"]); return }
         out["state"] = "ok"
