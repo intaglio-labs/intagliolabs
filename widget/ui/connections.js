@@ -511,7 +511,11 @@ const BRIDGE_HELP = {
     why: 'Slack asks for a quick “are you human” check before it emails your '
       + 'code — a window opens on Slack’s own page for you to answer it.',
   },
-  telegram: { place: 'phone (+1…), then the code' },  // after its api keys are set
+  // ~~'phone (+1…), then the code'~~ — the owner's wording (2026-08-26). It was
+  // trying to teach the whole two-step flow in one line before the first step
+  // had happened, and the country-code hint duplicated the bot's own "Include
+  // the country code with +" that lands directly above the box anyway.
+  telegram: { place: 'phone number' },
 };
 // The claim the system actually keeps, not the one it doesn't. This line
 // renders under EVERY tile including the social bridges, which hold a live
