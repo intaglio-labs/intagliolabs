@@ -201,3 +201,10 @@ body.plist .pm-room-badge {
   border: 1px solid color-mix(in srgb, var(--muted) 45%, transparent);
   white-space: nowrap;
 }
+
+/* Room volume, next to the direct count and quieter than it. The distinction is
+   the point: the first number is a conversation, the second is a room. */
+body.plist .pm-room-msgs {
+  opacity: 0.6;
+  font-style: italic;
+}

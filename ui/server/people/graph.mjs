@@ -436,17 +436,20 @@ export function buildGraph(
           p.lastFromOwner = sig.ts;
         }
       }
+      // SENT AND RECEIVED MEAN DIRECT, because that is what every consumer of
+      // them already assumes. reciprocity is documented as "do they write back --
+      // 1.0 is a balanced two-way thread", and counting a room made that read
+      // 1.0 for two people who have never addressed each other and merely posted
+      // the same number of times into the same group. Somebody answering in a
+      // group chat did not answer YOU.
+      //
+      // Room volume is not discarded, it is counted as itself. The two numbers
+      // answer different questions and neither one is the other's approximation.
       if (sig.channel === 'calendar') p.metInPerson += 1;
+      else if (sig.room) p.roomMessages += 1;
       else if (sig.fromMe) p.sent += 1;
       else p.received += 1;
-      // A SECOND AXIS, not a reclassification. `messages`, `sent` and `received`
-      // keep counting exactly what they counted before -- this is the split
-      // alongside them, so "do I actually know this person, or do we just share
-      // a room" becomes answerable without any existing number moving.
-      if (sig.channel !== 'calendar' && !sig.linkedin) {
-        if (sig.room) p.roomMessages += 1;
-        else p.directMessages += 1;
-      }
+      if (sig.channel !== 'calendar' && !sig.linkedin && !sig.room) p.directMessages += 1;
       // The activity TIMELINE: the same counts, bucketed by calendar month, so
       // downstream code (people/profile.mjs) can see WHEN a relationship lived
       // -- peak era, cadence, "active in 2020-2022" -- not just its lifetime
@@ -457,10 +460,13 @@ export function buildGraph(
         const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
         let bucket = p.timeline.get(ym);
         if (bucket === undefined) {
-          bucket = { sent: 0, received: 0, met: 0 };
+          bucket = { sent: 0, received: 0, met: 0, room: 0 };
           p.timeline.set(ym, bucket);
         }
+        // Same split as the totals: the year view sums these, so a room counted
+        // here would put the old number back on the one screen that shows it.
         if (sig.channel === 'calendar') bucket.met += 1;
+        else if (sig.room) bucket.room += 1;
         else if (sig.fromMe) bucket.sent += 1;
         else bucket.received += 1;
       }

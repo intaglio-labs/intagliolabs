@@ -270,11 +270,11 @@ test('somebody speaking in a room has not reached out to you', () => {
   ]);
   const p = buildGraph(ctx, spineDb([]), { now: NOW }).find((x) => x.identifiers.includes('+15550444'));
   assert.ok(p, 'they are still a person -- this is not a filter');
-  assert.equal(p.messages, 1, 'and their message still counts');
-  assert.equal(p.dormancyDays, null, 'but they have never reached out');
+  assert.equal(p.messages, 0, 'but you have exchanged nothing with them');
+  assert.equal(p.received, 0, 'they did not write to YOU');
+  assert.equal(p.roomMessages, 1, 'what they did is counted as what it was');
+  assert.equal(p.dormancyDays, null, 'and they have never reached out');
   assert.equal(p.roomOnly, true);
-  assert.equal(p.roomMessages, 1);
-  assert.equal(p.directMessages, 0);
 });
 
 test('a direct message still starts the clock', () => {
@@ -289,9 +289,12 @@ test('a direct message still starts the clock', () => {
   assert.equal(p.directMessages, 1);
 });
 
-// THE CONSTRAINT. If this ever fails, the room flag has leaked out of the
-// clocks and into an accumulator, and everyone's numbers have quietly moved.
-test('the room split rides ALONGSIDE the counts, it does not reclassify them', () => {
+// WHAT SENT AND RECEIVED MEAN. reciprocity is documented as "do they write back
+// -- 1.0 is a balanced two-way thread". Counting rooms made that read 1.0 for two
+// people who had never addressed each other and merely posted the same number of
+// times into the same group. Somebody answering in a group chat did not answer
+// YOU, and these numbers now say so.
+test('sent and received count what was addressed to you, rooms count separately', () => {
   const ctx = openDb(':memory:');
   insertRows(ctx, [
     { ts: NOW - 9 * DAY, source: 'imessage', entity_id: 'm1', text: 'in the room',
@@ -304,14 +307,14 @@ test('the room split rides ALONGSIDE the counts, it does not reclassify them', (
       meta: { chat_guid: DIRECT_GUID, handle: '+15550444', is_from_me: true } },
   ]);
   const p = buildGraph(ctx, spineDb([]), { now: NOW }).find((x) => x.identifiers.includes('+15550444'));
-  assert.equal(p.messages, 4, 'every message still counts, room or not');
-  assert.equal(p.received, 3);
+  // Two direct (one each way), two in a room.
+  assert.equal(p.received, 1, 'only what they addressed to the owner');
   assert.equal(p.sent, 1);
-  assert.equal(p.reciprocity, 0.33, 'reciprocity is computed from the unchanged counts');
-  // The second axis, which is additive and sums back to the same total.
-  assert.equal(p.roomMessages, 2);
+  assert.equal(p.messages, 2, 'the exchange between the two of you');
+  assert.equal(p.reciprocity, 1, 'one each way IS balanced — the rooms do not dilute it');
+  assert.equal(p.roomMessages, 2, 'and the room volume is not lost, it is just not this');
   assert.equal(p.directMessages, 2);
-  assert.equal(p.roomMessages + p.directMessages, p.messages);
+  assert.equal(p.roomOnly, false);
   assert.equal(p.dormancyDays, 5, 'the clock uses the DIRECT message, not the newer room one');
 });
 

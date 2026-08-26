@@ -119,7 +119,16 @@
         `<div class="pl-main">` +
           `<div class="pl-nameline">` +
             `<span class="pl-name">${esc(p.name)}</span>` +
-            `<span class="pm-msgs">${p.messages} msg${p.messages === 1 ? '' : 's'}</span>` +
+            // TWO NUMBERS, because they answer different questions. "msgs" is
+            // what passed between the two of you; "in rooms" is what they said
+            // in a group you were also in. Folding the second into the first is
+            // what made someone you have never messaged look like a friend.
+            (p.messages > 0
+              ? `<span class="pm-msgs">${p.messages} msg${p.messages === 1 ? '' : 's'}</span>`
+              : '') +
+            (p.roomMessages > 0
+              ? `<span class="pm-msgs pm-room-msgs">${p.roomMessages} in rooms</span>`
+              : '') +
             (y === year ? '' : `<span class="pm-yr-badge">${y}</span>`) +
             // ONLY EVER IN A ROOM. Until now these rendered exactly like people
             // the owner actually talks to, which is what made every nudge about

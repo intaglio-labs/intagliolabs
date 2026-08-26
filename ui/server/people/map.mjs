@@ -186,15 +186,25 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
   for (const p of graph) {
     let messages = 0;
     let met = 0;
+    let roomMessages = 0;
     for (const b of p.timeline ?? []) {
       yearsSet.add(Number(b.ym.slice(0, 4)));
       if (!b.ym.startsWith(prefix)) continue;
+      // `messages` is DIRECT, because that is what the row's label claims. Room
+      // volume is its own number, next to it, not folded into it.
       messages += (b.sent ?? 0) + (b.received ?? 0);
       met += b.met ?? 0;
+      roomMessages += b.room ?? 0;
     }
     const engagement = messages + MEETING_WEIGHT * met;
-    if (engagement === 0) continue;
-    entries.push({ p, messages, met, engagement });
+    // A YEAR SPENT ONLY IN ROOMS STILL HAPPENED. Ordering is by direct
+    // engagement, so somebody the owner never addressed sorts below everybody
+    // they did -- but they stay ON the list, because "you were in three group
+    // chats with this person and never messaged them" is the answer, and a row
+    // that vanishes cannot give it. Room volume deliberately does NOT enter
+    // engagement: it would buy rank with other people's conversations.
+    if (engagement === 0 && roomMessages === 0) continue;
+    entries.push({ p, messages, met, engagement, roomMessages });
   }
   entries.sort((a, b) => b.engagement - a.engagement);
 
@@ -212,6 +222,7 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
         name: e.p.name,
         channels: e.p.channels ?? [],
         messages: e.messages,
+        roomMessages: e.roomMessages,
         engagement: e.engagement,
         // ONLY EVER IN ROOMS. Relationship-level, not per-year: the question
         // "do I actually know this person, or do we just share a group chat"
@@ -255,14 +266,17 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
     for (const b of p.timeline ?? []) {
       const y = Number(String(b.ym).slice(0, 4));
       if (!Number.isInteger(y)) continue;
-      const cur = per.get(y) ?? { messages: 0, met: 0 };
+      const cur = per.get(y) ?? { messages: 0, met: 0, roomMessages: 0 };
       cur.messages += (b.sent ?? 0) + (b.received ?? 0);
       cur.met += b.met ?? 0;
+      cur.roomMessages += b.room ?? 0;
       per.set(y, cur);
     }
     for (const [y, v] of per) {
       const engagement = v.messages + MEETING_WEIGHT * v.met;
-      if (engagement === 0) continue; // a year they do not appear in
+      // Reachable by search even in a year that was only rooms -- search is
+      // about finding somebody, and they were there.
+      if (engagement === 0 && v.roomMessages === 0) continue;
       if (!byYear.has(y)) byYear.set(y, []);
       byYear.get(y).push({
         key: p.key,
@@ -270,6 +284,7 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
         channels: p.channels ?? [],
         identifiers: p.identifiers ?? [],
         messages: v.messages,
+        roomMessages: v.roomMessages,
         engagement,
         roomOnly: p.roomOnly === true,
         // Each person-year doc is touched once across the whole loop, so this
