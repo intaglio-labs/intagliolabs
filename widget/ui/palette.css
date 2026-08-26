@@ -1695,7 +1695,12 @@ body.connections .conn-title {
    very top of the panel (owner: X inline with settings, top-right corner). */
 body.connections .conn-head {
   display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 10px;
+  /* Negative top margin pulls the row up into the card's 14px top padding
+     rather than reducing that padding: the same padding also sets the inset
+     for the hint strip beside this column, so trimming it there moved the
+     strip too. Owner asked for a tighter header specifically. */
+  margin-top: -4px;
+  margin-bottom: 6px;
 }
 body.connections .conn-head .eyebrow { margin: 0 0 0 2px; }
 body.connections .close { position: static; flex: 0 0 auto; }
@@ -2043,11 +2048,20 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
 }
 .model-pick-button.on { color: var(--bg); background: var(--hazelnut); }
 .model-pick-button:hover { border-color: var(--hazelnut); color: var(--fg); }
+/* Idle, neither of these has anything to say, and both were still charging
+   rent under the tier buttons: 3px of bar + 14px of reserved status text +
+   two 6px column gaps, ~29px of dead space every time Settings opened.
+   display: none rather than height/opacity because a flex gap is paid for a
+   zero-height child too. .busy comes from say() in connections.js, so they
+   reappear together with the text — the min-height still holds the line open
+   during a download, which is where it was earning its keep. */
 .model-progress {
-  display: block; width: 0; height: 3px; border-radius: 2px;
+  display: none; width: 0; height: 3px; border-radius: 2px;
   background: var(--hazelnut); transition: width 240ms ease;
 }
-.model-status { min-height: 14px; }
+.model-status { display: none; min-height: 14px; }
+.model-setting.busy .model-progress,
+.model-setting.busy .model-status { display: block; }
 
 /* ---------------- onboarding screen 2: the chat demo ----------------
    It plays itself: the message types, sends, and the bubble is swallowed by

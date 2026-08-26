@@ -12,6 +12,15 @@
 // row's own chips are the whole counted topic surface, five of them.
 // (The file keeps its historical name; renaming the page id would ripple
 // through the bridge allowlist and panel factory for no behavioral gain.)
+//
+// TWO VIEWS OF ONE YEAR (2026-08-25). The list answers "who did I talk to";
+// the globe tab answers "about what" — the same people regrouped into topic
+// bubbles. A view, not a fetch: the constellation is built from the year
+// already in the cache, so the globe opens instantly and a search narrows
+// both. Its positions and sizes are assigned through element.style and NEVER
+// a style attribute, because this page ships style-src 'self' with no
+// 'unsafe-inline' — an inline style attribute is parsed, dropped, and fails
+// in total silence. See widget/test/csp-inline-style.test.mjs.
 'use strict';
 
 (function () {
@@ -20,7 +29,24 @@
   const closeEl = document.getElementById('close');
   const tabsEl = document.getElementById('tabs');
   const syncEl = document.getElementById('sync');
+  const skyEl = document.getElementById('sky');
+  const cardsEl = document.getElementById('cards');
+  const filterEl = document.getElementById('filter');
   if (!listEl) return;
+
+  // 'list' = the year by person, 'sky' = the same year by topic. A VIEW, not a
+  // year: the year tabs stay live in both, so the globe is the last tab rather
+  // than a second window.
+  let view = 'list';
+  // 'year' = one year, from /people/year. 'all' = every year at once, from
+  // /people/map. The constellation is ALWAYS 'all' (owner, 2026-08-25): a
+  // person's topics are a thing about the relationship, not about a calendar
+  // year, and slicing them by year made the same friend appear and vanish
+  // between tabs.
+  let scope = 'year';
+  // The topic a bubble was clicked into, or null. Only the list honours it —
+  // filtering the constellation to one topic would just draw that one circle.
+  let topic = null;
 
   // Hover hint per connector — shown by our own CSS tooltip (data-tip),
   // because native title tooltips are unreliable in a borderless
@@ -62,10 +88,15 @@
     const bits = [];
     const sk = `${p.key}|${y}`;
     const sum = summaries.get(sk);
+    // The summary is always ABOUT ONE YEAR — that is what /people/summary
+    // takes. Outside a year tab it covers the last year this person was
+    // active, and says so, because an unlabelled paragraph under an all-years
+    // row would read as a summary of the whole relationship.
+    const tag = scope === 'all' ? `· ${y}, written by the local model` : '· written by the local model';
     if (sum && sum.state === 'pending') {
-      bits.push('<div class="pl-d pm-sum pm-sum-wait">summarizing this year…</div>');
+      bits.push(`<div class="pl-d pm-sum pm-sum-wait">summarizing ${y}…</div>`);
     } else if (sum && sum.state === 'done') {
-      bits.push(`<div class="pl-d pm-sum">${esc(sum.text)} <span class="pm-sum-tag">· written by the local model</span></div>`);
+      bits.push(`<div class="pl-d pm-sum">${esc(sum.text)} <span class="pm-sum-tag">${tag}</span></div>`);
     } else if (sum && sum.state === 'none') {
       bits.push(`<div class="pl-d pl-dim">no summary — ${esc(sum.reason)}</div>`);
     }
@@ -106,7 +137,10 @@
   }
 
   function rowHtml(p, y) {
-    const chips = (p.topics || [])
+    // Five chips is the row's budget. The all-years union can carry more than
+    // that, so the slice lives here rather than in the data — clustering needs
+    // every topic a person belongs to, the row only needs the loudest five.
+    const chips = (p.topics || []).slice(0, 5)
       .map((t) => `<span class="pl-chip pl-topic">${esc(t.label)}</span>`)
       .join('');
     const rowKey = `${p.key}|${y}`;
@@ -145,20 +179,193 @@
     );
   }
 
-  function render() {
-    if (findTerm) return renderFind();
-    const data = cache.get(year);
-    if (!data) return;
-    // Order is the server's: most engaged first.
-    listEl.innerHTML = data.people.map((p) => rowHtml(p, year)).join('')
-      || `<div class="pl-empty">no one in ${year}</div>`;
-    searchEl.placeholder = `search everyone, every year…`;
-    if (data.total > data.people.length) {
+  // A topic narrows the list only — a constellation of one topic is a circle.
+  // NAME MATCHING IS NOT HERE ANY MORE: search is server-side and crosses every
+  // year, so filtering the loaded rows would quietly re-impose the limit that
+  // change removed. Order is the server's: most engaged first.
+  function visible(data) {
+    let rows = data.people;
+    // The topic applies to the LIST ONLY. Filtering the sky by one topic
+    // leaves a constellation with a single circle in it — and when a restored
+    // state paired 'sky' with a topic, it left NO circles and the page claimed
+    // the year had nothing to group. Enforced here rather than trusted to
+    // every caller clearing it at the right moment.
+    if (topic && view === 'list') {
+      rows = rows.filter((p) => (p.topics || []).some((t) => t && t.label === topic));
+    }
+    return rows;
+  }
+
+  // The chip that says which topic the list is standing in, and the way out of
+  // it. Without it a filtered list is indistinguishable from a short year.
+  function renderFilter(count) {
+    // Same rule as visible(): a topic is a thing the list is standing in, so
+    // the chip has no business hanging over the constellation.
+    const show = topic && view === 'list';
+    filterEl.hidden = !show;
+    if (!show) { filterEl.replaceChildren(); return; }
+    const chip = document.createElement('button');
+    chip.className = 'pm-filter-chip';
+    chip.type = 'button';
+    const label = document.createElement('span');
+    label.textContent = `${topic.toUpperCase()} · ${count}`;
+    const x = document.createElement('span');
+    x.className = 'pm-filter-x';
+    x.textContent = '×';
+    chip.append(label, x);
+    // Back to the constellation, not to a bare list: without the topic this
+    // list is every person in every year, which is thousands of rows nobody
+    // asked for. You came from the sky; the way out is back to it.
+    chip.addEventListener('click', () => { topic = null; view = 'sky'; render(); });
+    filterEl.replaceChildren(chip);
+  }
+
+  // One glyph per card kind. Keyed by the server's `kind`, with a fallback, so
+  // a server that grows a sixth card renders as a nameless-but-present card
+  // rather than throwing.
+  const CARD_ICON = {
+    'person-of-the-year':
+      '<path d="M8 4h8v5a4 4 0 0 1-8 0V4Z"></path><path d="M8 5H5v2a3 3 0 0 0 3 3"></path>' +
+      '<path d="M16 5h3v2a3 3 0 0 1-3 3"></path><path d="M12 13v4"></path><path d="M9 20h6"></path>',
+    'back-from-your-past':
+      '<circle cx="12" cy="12" r="8"></circle><path d="M12 7v5l3 2"></path>',
+    'rising-star':
+      '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z"></path>',
+    drifting:
+      '<path d="M4 8h10"></path><path d="M4 13h7"></path><path d="M4 18h4"></path>' +
+      '<path d="M17 13v6"></path><path d="M14.5 16.5 17 19l2.5-2.5"></path>',
+    streak:
+      '<path d="M12 3s5 4.2 5 9a5 5 0 0 1-10 0c0-4.8 5-9 5-9Z"></path>' +
+      '<path d="M12 20a2.6 2.6 0 0 1-2.6-2.6c0-1.6 2.6-3.9 2.6-3.9s2.6 2.3 2.6 3.9A2.6 2.6 0 0 1 12 20Z"></path>',
+  };
+  const FALLBACK_ICON = '<circle cx="12" cy="12" r="7"></circle>';
+
+  function cardHtml(h, i) {
+    const icon = CARD_ICON[h.kind] || FALLBACK_ICON;
+    return (
+      `<div class="pm-card${i === 0 ? ' lead' : ''}">` +
+        '<div class="pm-card-eyebrow">' +
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+          `stroke-linecap="round" stroke-linejoin="round">${icon}</svg>` +
+          `<span>${esc(h.label)}</span>` +
+        '</div>' +
+        '<div class="pm-card-who">' +
+          `<span class="pm-card-face">${esc(initials(h.name))}</span>` +
+          `<span class="pm-card-name">${esc(h.name)}</span>` +
+        '</div>' +
+        `<div class="pm-card-line">${esc(h.line)}</div>` +
+      '</div>'
+    );
+  }
+
+  // Cards describe the YEAR, not the filtered set, so they step aside while a
+  // search is running — a card about someone the search excluded reads as a
+  // bug. An older backend sends no highlights at all; then there is simply no
+  // row, which is the honest result rather than an empty frame.
+  function renderCards(data) {
+    const hs = Array.isArray(data.highlights) ? data.highlights : [];
+    // Also stand down inside a topic and in all-years: the cards are claims
+    // about ONE year — that is what the server computed them over — and
+    // sitting them above an all-years or topic list misattributes them.
+    const show = hs.length > 0 && !findTerm && view === 'list'
+      && !topic && scope === 'year';
+    cardsEl.hidden = !show;
+    cardsEl.innerHTML = show ? hs.map(cardHtml).join('') : '';
+  }
+
+  function renderList(data, rows) {
+    const where = scope === 'all' ? 'any year' : String(year);
+    const empty = topic
+      ? `no one in ${esc(topic)} in ${where}`
+      : `no one matches in ${where}`;
+    // The row's own year: in all-years each person carries the last year they
+    // were active, so their summary is fetched for a year they appear in.
+    listEl.innerHTML = rows.map((pp) => rowHtml(pp, scope === 'all' ? (pp.latestYear || year) : year)).join('')
+      || `<div class="pl-empty">${empty}</div>`;
+    // The overflow line counts one year's rows, so it has no meaning under a
+    // topic-filtered list, a search, or the uncapped all-years set.
+    if (scope === 'year' && !findTerm && !topic && data.total > data.people.length) {
       listEl.insertAdjacentHTML('beforeend',
         `<div class="pl-more">+ ${data.total - data.people.length} more in ${year} — search reaches all of them</div>`);
     }
-    renderTabs();
   }
+
+  // The surface currently on screen. Both views share the search box, the
+  // tabs, and the loading and failure states, so those need to know which one
+  // they are talking to.
+  function surface() {
+    // hidden, not display juggling: the list keeps its scroll position while
+    // the globe is up, so coming back lands where it was left.
+    listEl.hidden = view !== 'list';
+    skyEl.hidden = view !== 'sky';
+    return view === 'sky' ? skyEl : listEl;
+  }
+
+  // Opening a bubble IS opening its list — the sky answers "about what", and
+  // the obvious next question is "who". Stays in scope 'all', so the list is
+  // everyone who has ever talked to you about it and the count matches the
+  // number printed on the bubble.
+  function openTopic(label) {
+    topic = label;
+    view = 'list';
+    scope = 'all';
+    render();
+  }
+
+  function render() {
+    // A SEARCH TAKES OVER, whatever was up. It is server-side and spans every
+    // year, so it belongs to neither the open tab nor the constellation — and
+    // a sky filtered to one query would be a single circle.
+    if (findTerm) {
+      listEl.hidden = false;
+      skyEl.hidden = true;
+      cardsEl.hidden = true;
+      filterEl.hidden = true;
+      renderFind();
+      saveView();
+      return;
+    }
+    if (scope === 'all') {
+      if (!mapData) {
+        renderTabs();
+        cardsEl.hidden = true;
+        filterEl.hidden = true;
+        surface().innerHTML = '<div class="pm-loading">reading every year…</div>';
+        ensureMap().then(render).catch(() => {
+          surface().innerHTML = '<div class="pl-empty">couldn’t read your years</div>';
+        });
+        return;
+      }
+      return paint(mapData);
+    }
+    const data = cache.get(year);
+    if (!data) return;
+    paint(data);
+  }
+
+  function paint(data) {
+    const rows = visible(data);
+    surface();
+    renderCards(data);
+    renderFilter(rows.length);
+    if (view === 'sky') renderSky(data, rows);
+    else renderList(data, rows);
+    // One placeholder, because search now means the same thing everywhere:
+    // every person, every year, ranked by the server. Naming the open year
+    // here would say the box only reaches it.
+    searchEl.placeholder = 'search everyone, every year…';
+    renderTabs();
+    saveView();
+  }
+
+  // Browser-style year tabs: oldest left, newest right, the open one active,
+  // and the globe last — a view rather than a year, but it lives on the same
+  // strip because it shows the same year.
+  const GLOBE_SVG =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+    'stroke-linecap="round" stroke-linejoin="round">' +
+    '<circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path>' +
+    '<path d="M12 3a14 14 0 0 0 0 18a14 14 0 0 0 0-18"></path></svg>';
 
   // Search results: ranked by the server across every year, each row carrying
   // the year it was found in.
@@ -218,14 +425,376 @@
       });
   }
 
-  // Browser-style year tabs: oldest left, newest right, the open one active.
+  // Browser-style year tabs: oldest left, newest right, the open one active,
+  // and the globe last — all-years rather than a year, but on the same strip
+  // because it is the same surface.
   function renderTabs() {
     const ys = years.length ? years : [year];
-    tabsEl.innerHTML = ys
-      .map((y) => `<button class="pm-tab${y === year ? ' active' : ''}" data-y="${y}">${y}</button>`)
-      .join('');
+    tabsEl.replaceChildren();
+    for (const y of ys) {
+      const b = document.createElement('button');
+      // Lit only when a YEAR is what is on screen. The globe and everything
+      // reached from it are all-years, so no single year is the answer there —
+      // an earlier cut marked one anyway and it read as though clicking a
+      // bubble had moved you to that year.
+      b.className = 'pm-tab' + (y === year && scope === 'year' ? ' active' : '');
+      b.dataset.y = String(y);
+      b.textContent = String(y);
+      tabsEl.appendChild(b);
+    }
+    const g = document.createElement('button');
+    // Stays lit for the topic LIST as well as the constellation: both are
+    // all-years and both were reached through here, so this is where you are.
+    // No data-tip — its hover bubble is laid out 25px below the strip, which
+    // (with overflow-y promoted to auto by the horizontal scroll) made the
+    // whole tab row vertically scrollable.
+    g.className = 'pm-tab pm-tab-globe' + (scope === 'all' ? ' active' : '');
+    g.dataset.view = 'sky';
+    g.setAttribute('aria-label', 'every year by topic');
+    g.innerHTML = GLOBE_SVG;
+    tabsEl.appendChild(g);
     const active = tabsEl.querySelector('.pm-tab.active');
     if (active) active.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+  }
+
+  // ---- the constellation ----
+  // HOW MANY BUBBLES FIT IS SOLVED, NOT CHOSEN. This was a flat 4, which was
+  // only ever right for the ~400px panel it was measured on — a scaled-up
+  // window has room for more and was still being given four.
+  //
+  // n bubbles of diameter d on a ring of radius r are 2r*sin(pi/n) apart
+  // (chord, not arc — arc overstates the gap and lets them touch), and that
+  // must be at least d. The ring must also fit: r <= R - d/2 - margin, where R
+  // is the stage's half-minor-axis. Substituting one into the other and
+  // solving for d gives the most a given n can afford:
+  //
+  //     d(n) = 2*sin(pi/n) * (R - margin) / (1 + sin(pi/n))
+  //
+  // So: try the most bubbles we would ever want, shrink them to fit, and stop
+  // at the first n whose bubbles are still big enough to hold faces. On a
+  // 400px panel that lands back on 4, which is what the design shows.
+  const CLUSTER_HARD_CAP = 8; // past this the labels collide and it reads as confetti
+  const MIN_CLUSTER = 2;
+  const MAX_FACES = 5;
+  const RING_MARGIN = 8;
+  // The floor is not cosmetic — six discs wrap to a second row, where a circle
+  // is much narrower than its diameter, and below this the "+N" chip pushes out
+  // through the dashed border. Measured, not guessed.
+  const D_FLOOR = 118;
+  const D_CEIL = 162;
+
+  // { n, d }: how many bubbles this stage holds, and how big they may be.
+  function fitLayout(stageW, stageH, wanted) {
+    const R = Math.min(stageW, stageH) / 2;
+    const most = Math.max(1, Math.min(wanted, CLUSTER_HARD_CAP));
+    for (let n = most; n > 1; n -= 1) {
+      const s = Math.sin(Math.PI / n);
+      // 0.97 rather than the exact bound: the ring is an ELLIPSE, and the
+      // circle-based solve is only near-exact on a square stage. Measured gaps
+      // came out at 1-3px on tall panels without it.
+      const d = Math.min(D_CEIL, (2 * s * (R - RING_MARGIN) * 0.97) / (1 + s));
+      if (d >= D_FLOOR) return { n, d: Math.round(d) };
+    }
+    return { n: 1, d: Math.round(Math.min(D_CEIL, Math.max(D_FLOOR, R - RING_MARGIN))) };
+  }
+
+  // Two words -> both initials, one word -> one letter. Never two letters off a
+  // single name: "Je" reads as a truncation, "J" reads as a monogram.
+  function initials(name) {
+    const parts = String(name == null ? '' : name).trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return '?';
+    const s = parts.length > 1 ? parts[0][0] + parts[parts.length - 1][0] : parts[0][0];
+    return s.toUpperCase();
+  }
+
+  // Seeded PRNG (mulberry32). Math.random would reshuffle the background on
+  // every keystroke of a search, which reads as the sky twitching at you.
+  // Seeded by the year, so a year always comes back the same sky.
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // Does this payload carry the server's taxonomy mark at all? The app bundle
+  // and the backend the launchd agents run are updated by DIFFERENT routes —
+  // widget/build.sh installs the bundle, ops/promote.sh installs the backend —
+  // so a newer page talking to an older server is a normal state here, not a
+  // broken one. Detected rather than assumed, because the first cut assumed it
+  // and rendered an empty sky that read as "you have no topics" when it meant
+  // "this server never told me which ones were comparable".
+  function topicsAreMarked(people) {
+    return people.some((p) => (p.topics || []).some((t) => t && typeof t.tax === 'boolean'));
+  }
+
+  // Group by topic. Prefer the server's `tax` mark: the other chips are terms
+  // distinctive to a single pair ("tokyo station"), which by construction
+  // cannot be shared, so clustering on them yields a bubble of one wearing a
+  // stranger's word. Without the mark, fall back to "a label at least
+  // MIN_CLUSTER people share" — the same line drawn approximately, since a
+  // term distinctive to one pair cannot clear that bar either.
+  // A person joins every topic they carry: people are not one thing.
+  function clustersFrom(people, marked) {
+    const by = new Map();
+    for (const p of people) {
+      for (const t of p.topics || []) {
+        if (!t || !t.label) continue;
+        if (marked && !t.tax) continue;
+        let c = by.get(t.label);
+        if (!c) by.set(t.label, (c = { label: t.label, members: [] }));
+        c.members.push(p);
+      }
+    }
+    // Not sliced here — renderSky needs the full count to say how many topics
+    // the cap left out.
+    return [...by.values()]
+      .filter((c) => c.members.length >= MIN_CLUSTER)
+      .sort((a, b) => b.members.length - a.members.length || a.label.localeCompare(b.label));
+  }
+
+  // Face sizes SCALE WITH THE BUBBLE, and that is load-bearing rather than
+  // tidy. Held at the design's flat 22..32 they stopped fitting once bubbles
+  // shrank to make room for more topics: three 32px discs need ~104px, more
+  // than a 127px circle offers at its second row, so they wrapped to three rows
+  // and pushed out through the border. Measured — the first cut had a dozen
+  // faces outside their circles at 400px. 0.20 * d reproduces 22..32 at the
+  // largest bubble, which is where the design's numbers came from.
+  function faceScale(d) {
+    const max = Math.max(16, Math.min(32, Math.round(d * 0.2)));
+    return { max, min: Math.round(max * 0.69) };
+  }
+
+  function faceEl(p, maxEngagement, fs) {
+    const f = document.createElement('div');
+    f.className = 'pm-face';
+    const size = Math.round(fs.min + (fs.max - fs.min) * ((p.engagement || 0) / maxEngagement));
+    f.style.width = `${size}px`;
+    f.style.height = `${size}px`;
+    f.style.fontSize = size >= 28 ? '10px' : `${Math.max(7, Math.round(size * 0.34))}px`;
+    f.textContent = initials(p.name);
+    // data-tip, not title: native tooltips do not fire reliably in a
+    // borderless non-activating panel (same reason as the connector glyphs).
+    f.setAttribute('data-tip', `${p.name} · ${p.messages} msg${p.messages === 1 ? '' : 's'}`);
+    return f;
+  }
+
+  // The ring the bubbles sit on, from the same solve — the widest ellipse that
+  // still keeps a bubble of diameter d wholly on the stage. The panel is
+  // native-sized and the owner can scale it, so a hardcoded radius is a clipped
+  // bubble waiting to happen, which is exactly what a fixed 32% did.
+  function ringFor(stageW, stageH, d) {
+    const half = d / 2 + RING_MARGIN;
+    return {
+      rx: Math.max(0, stageW / 2 - half),
+      ry: Math.max(0, stageH / 2 - half),
+    };
+  }
+
+  function clusterEl(c, i, count, maxMembers, ring, stage, dMax) {
+    const el = document.createElement('div');
+    el.className = 'pm-cluster' + (i === 0 ? ' lead' : '');
+    el.dataset.topic = c.label;
+    // Evenly around the centre, starting upper-left so a four-topic year lands
+    // on the diagonals the design draws.
+    const ang = -Math.PI * 0.75 + (i * Math.PI * 2) / count;
+    // Smaller bubbles scale down from the fitted maximum rather than from a
+    // constant, so the whole field shrinks together on a tight panel instead of
+    // the big one clipping while the small ones sit in space.
+    const dMin = Math.min(dMax, D_FLOOR);
+    const d = Math.round(dMin + (dMax - dMin) * (c.members.length / maxMembers));
+    el.style.width = `${d}px`;
+    el.style.height = `${d}px`;
+    // Percentages so the ring still tracks the panel if it is resized under us.
+    el.style.left = `${(50 + (Math.cos(ang) * ring.rx * 100) / stage.w).toFixed(1)}%`;
+    el.style.top = `${(51 + (Math.sin(ang) * ring.ry * 100) / stage.h).toFixed(1)}%`;
+
+    const faces = document.createElement('div');
+    faces.className = 'pm-faces';
+    const fs = faceScale(d);
+    const shown = c.members.slice(0, MAX_FACES);
+    const maxE = Math.max(1, ...shown.map((p) => p.engagement || 0));
+    for (const p of shown) faces.appendChild(faceEl(p, maxE, fs));
+    const rest = c.members.length - shown.length;
+    if (rest > 0) {
+      const more = document.createElement('div');
+      more.className = 'pm-face pm-face-more';
+      more.style.width = `${fs.min}px`;
+      more.style.height = `${fs.min}px`;
+      more.style.fontSize = `${Math.max(7, Math.round(fs.min * 0.36))}px`;
+      more.textContent = `+${rest}`;
+      faces.appendChild(more);
+    }
+
+    const label = document.createElement('div');
+    label.className = 'pm-cluster-label';
+    label.textContent = `${c.label.toUpperCase()} · ${c.members.length}`;
+
+    el.append(faces, label);
+    return el;
+  }
+
+  function renderSky(data, people) {
+    skyEl.replaceChildren();
+    const marked = topicsAreMarked(people);
+    const all = clustersFrom(people, marked);
+    const stage = { w: skyEl.clientWidth || 400, h: skyEl.clientHeight || 420 };
+    const fit = fitLayout(stage.w, stage.h, all.length);
+    const clusters = all.slice(0, fit.n);
+    if (!clusters.length) {
+      const m = document.createElement('div');
+      m.className = 'pm-sky-empty';
+      m.textContent = people.length
+        ? `nothing shared enough to group in ${year} — a topic needs at least ${MIN_CLUSTER} people`
+        : `no one to place in ${year}`;
+      skyEl.appendChild(m);
+      return;
+    }
+
+    const rnd = mulberry32(year * 2654435761);
+    for (const d of [180, 300, 420]) {
+      const o = document.createElement('div');
+      o.className = 'pm-orbit';
+      o.style.width = `${d}px`;
+      o.style.height = `${d}px`;
+      skyEl.appendChild(o);
+    }
+    for (let i = 0; i < 48; i += 1) {
+      const s = document.createElement('span');
+      s.className = 'pm-speck';
+      const size = 2.5 + rnd() * 2.5;
+      s.style.width = `${size.toFixed(1)}px`;
+      s.style.height = `${size.toFixed(1)}px`;
+      s.style.left = `${(2 + rnd() * 96).toFixed(1)}%`;
+      s.style.top = `${(4 + rnd() * 92).toFixed(1)}%`;
+      s.style.opacity = (0.22 + rnd() * 0.3).toFixed(2);
+      skyEl.appendChild(s);
+    }
+
+    const core = document.createElement('div');
+    core.className = 'pm-core';
+    skyEl.appendChild(core);
+
+    const ring = ringFor(stage.w, stage.h, fit.d);
+    const maxMembers = clusters[0].members.length;
+    clusters.forEach((c, i) => {
+      skyEl.appendChild(clusterEl(c, i, clusters.length, maxMembers, ring, stage, fit.d));
+    });
+
+    // BOTH caps, said out loud. The server caps the year's rows, and the ring
+    // holds four bubbles — either one silently makes this picture look like the
+    // whole year when it is a top slice of it.
+    // NO FOOTNOTE (owner, 2026-08-25). It carried two disclosures and both had
+    // stopped being true of this surface: the row cap belonged to /people/year
+    // and the constellation no longer reads from there, and the year belonged
+    // to a per-year sky that no longer exists. What remains is the topic cap,
+    // and the bubbles that fit are the largest ones — see fitLayout.
+  }
+
+  // ---- every year at once ----
+  // /people/map is the whole graph: every person, UNCAPPED, each carrying
+  // their per-year topic chips. The constellation reads from here rather than
+  // summing the year payloads, and the reason is arithmetic — /people/year
+  // caps at 250 rows, so a sum of capped pages would print topic counts that
+  // are quietly short while looking exact.
+  //
+  // Adapted into the row shape the year payload already uses, so one renderer
+  // serves both surfaces.
+  let mapData = null;
+  let mapPending = null;
+
+  function adaptMap(payload) {
+    const people = [];
+    for (const p of payload.people || []) {
+      const byLabel = new Map();
+      let latestYear = null;
+      for (const y of p.years || []) {
+        if (latestYear === null || y.year > latestYear) latestYear = y.year;
+        for (const t of y.topics || []) {
+          if (!t || !t.label) continue;
+          const cur = byLabel.get(t.label);
+          if (cur) cur.n += t.n || 0;
+          else byLabel.set(t.label, { label: t.label, n: t.n || 0, tax: t.tax });
+        }
+      }
+      const messages = p.messages || 0;
+      if (messages <= 0) continue;
+      people.push({
+        key: p.key,
+        name: p.name,
+        channels: p.channels || [],
+        messages,
+        engagement: messages,
+        // The FULL union, not a top-five slice: the chips show five, but the
+        // clustering needs every topic a person belongs to or bubbles would
+        // lose members for no reason a reader could see.
+        topics: [...byLabel.values()].sort((a, b) => b.n - a.n),
+        // Which year to summarise when a row is opened outside a year tab.
+        latestYear,
+      });
+    }
+    people.sort((a, b) => b.engagement - a.engagement);
+    return { people, total: people.length, allYears: true };
+  }
+
+  function ensureMap() {
+    if (mapData) return Promise.resolve(mapData);
+    if (!mapPending) {
+      mapPending = hzPost('peopleMap')
+        .then((r) => { mapData = adaptMap(r || {}); return mapData; })
+        .finally(() => { mapPending = null; });
+    }
+    return mapPending;
+  }
+
+  // ---- remembering where you were ----
+  // Closing the popup already returns you here, because the panel survives
+  // hidden with its page state intact. A RESTART does not: the page is built
+  // again and `year` goes back to today's, which is why quitting and reopening
+  // landed on this year with nothing selected.
+  //
+  // One compact string rather than a JSON blob: native stores it opaquely and
+  // bounds its length, and three fields do not need a schema on the far side.
+  let saveTimer = null;
+  function saveView() {
+    clearTimeout(saveTimer);
+    // Debounced: render() runs on every keystroke of a search, and each save is
+    // a UserDefaults write.
+    saveTimer = setTimeout(() => {
+      hzPost('monthsView', { state: `${year}|${view}|${topic || ''}|${scope}` }).catch(() => {});
+    }, 250);
+  }
+
+  // Returns the remembered year, or null. view/topic are applied as a side
+  // effect because they need no validation against the server's answer — a
+  // stale topic simply filters to nothing and the chip offers the way out.
+  async function restoreView() {
+    let saved = null;
+    try {
+      const r = await hzPost('monthsView', {});
+      saved = r && typeof r.state === 'string' ? r.state : null;
+    } catch {
+      return null; // no memory is not an error; start on this year
+    }
+    if (!saved) return null;
+    const [y, v, t, s] = saved.split('|');
+    const n = Number(y);
+    // Trust nothing that came back: the value outlives the code that wrote it,
+    // and a year the corpus no longer has would strand the page on an empty
+    // tab it cannot explain. A three-field value predates the scope field and
+    // reads as scope 'year', which is what it meant.
+    if (v === 'sky' || v === 'list') view = v;
+    scope = s === 'all' ? 'all' : 'year';
+    // The constellation IS all-years, so these two cannot disagree.
+    if (view === 'sky') scope = 'all';
+    // A topic belongs to the list. Never restore one alongside the globe —
+    // saveView cannot produce that pair, but a hand-edited or older value can,
+    // and it is one line to refuse rather than reason about downstream.
+    topic = view === 'list' && t ? t : null;
+    return Number.isInteger(n) && n >= 1990 && n <= new Date().getFullYear() + 1 ? n : null;
   }
 
   // An uncached year is a server rebuild on first touch, so the click must
@@ -238,7 +807,14 @@
     if (cache.has(year)) return render();
     const my = ++reqId;
     searchEl.placeholder = `loading ${year}…`;
-    listEl.innerHTML = `<div class="pm-loading">loading ${year}…</div>`;
+    // Into whichever surface is actually up. Writing it unconditionally to the
+    // list meant a tab click from the constellation looked like nothing had
+    // happened — the old year's bubbles just sat there until the fetch landed.
+    // The cards belong to the year being replaced, so they go with it rather
+    // than sitting over a loading list making last year's claims.
+    cardsEl.hidden = true;
+    cardsEl.innerHTML = '';
+    surface().innerHTML = `<div class="pm-loading">loading ${year}…</div>`;
     const res = await hzPost('peopleYear', { year });
     if (my !== reqId) return; // superseded by a newer tab click
     if (!res || !Array.isArray(res.people)) throw new Error('bad year payload');
@@ -271,7 +847,7 @@
   function loadOrFail(y) {
     load(y).catch(() => {
       searchEl.placeholder = 'couldn’t load';
-      listEl.innerHTML = `<div class="pl-empty">couldn’t load ${y} — click its tab to retry</div>`;
+      surface().innerHTML = `<div class="pl-empty">couldn’t load ${y} — click its tab to retry</div>`;
     });
   }
 
@@ -281,19 +857,44 @@
   window.__hzRefresh = () => {
     cache.clear();
     summaries.clear();
+    mapData = null;
     prefetching = false;
+    // A re-open drops the search as well as the cache: a stale query over
+    // refetched years would be answering a question nobody is asking now.
     findId++;
     findTerm = '';
     findRows = null;
     findState = 'idle';
     searchEl.value = '';
-    loadOrFail(year);
+    // Re-open where the panel was left: in all-years the year fetch is not
+    // what is on screen, and loading it would flip the view back to a year.
+    if (scope === 'all') render();
+    else loadOrFail(year);
   };
 
   tabsEl.addEventListener('click', (e) => {
     const b = e.target.closest('.pm-tab');
-    if (!b || !b.dataset.y) return;
-    loadOrFail(Number(b.dataset.y));
+    if (!b) return;
+    if (b.dataset.view === 'sky') {
+      view = 'sky';
+      scope = 'all';
+      // Arriving with a topic still selected would show a field where every
+      // bubble but the chosen one was missing.
+      topic = null;
+      render();
+      return;
+    }
+    if (!b.dataset.y) return;
+    // A year tab is also the way BACK from the globe, so it has to switch both
+    // the view and the scope even when the year itself has not changed —
+    // otherwise clicking the already-open year from the constellation does
+    // nothing at all.
+    view = 'list';
+    scope = 'year';
+    topic = null;
+    const y = Number(b.dataset.y);
+    if (y === year && cache.has(y)) { render(); return; }
+    loadOrFail(y);
   });
   listEl.addEventListener('click', (e) => {
     const row = e.target.closest('.pl-row');
@@ -309,6 +910,12 @@
       requestSummary(key, rowYear);
     }
     render();
+  });
+  skyEl.addEventListener('click', (e) => {
+    const c = e.target.closest('.pm-cluster');
+    if (!c || !c.dataset.topic) return;
+    hzSfx.squish();
+    openTopic(c.dataset.topic);
   });
   syncEl.addEventListener('click', () => { hzPost('openPeople').catch(() => {}); });
   let t = null;
@@ -329,5 +936,15 @@
   });
   if (closeEl) closeEl.addEventListener('click', () => { hzSfx.close(); hzPost('close').catch(() => {}); });
 
-  loadOrFail(year);
+  // Resume where the popup was left, then fetch. The restore has to land
+  // BEFORE the first load or the page would fetch this year, paint it, and
+  // then visibly jump to the remembered one.
+  restoreView()
+    .then((y) => { if (y !== null) year = y; })
+    .catch(() => {})
+    .finally(() => {
+      // All-years does not want the year fetch painted over it.
+      if (scope === 'all') render();
+      else loadOrFail(year);
+    });
 })();

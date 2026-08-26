@@ -209,16 +209,23 @@ function modelRow() {
   const value = document.createElement('span');
   value.className = 'setting-value';
   head.append(name, value);
-  const note = document.createElement('span');
-  note.className = 'setting-note';
-  note.textContent = 'the local model that answers your questions';
   const choices = document.createElement('div');
   choices.className = 'model-pick';
   const status = document.createElement('span');
   status.className = 'setting-note model-status';
   const bar = document.createElement('span');
   bar.className = 'model-progress';
-  el.append(head, note, choices, bar, status);
+  el.append(head, choices, bar, status);
+
+  // The bar and the status line have nothing to say until a download is in
+  // flight, but they still held their height (and their flex gaps) under the
+  // tier buttons on every visit to Settings. Route every status write through
+  // here so .busy — which is what gives them their height back — can never
+  // drift out of sync with whether there is actually text to show.
+  const say = (text) => {
+    status.textContent = text;
+    el.classList.toggle('busy', text !== '');
+  };
 
   let state = null;
   const gb = (bytes) => `${(bytes / 1e9).toFixed(1)} GB`;
@@ -233,10 +240,10 @@ function modelRow() {
       b.textContent = `${tier.label} · ${gb(tier.bytes)}`;
       b.title = tier.detail;
       b.addEventListener('click', () => {
-        status.textContent = tier.id === active ? 'already selected' : 'starting download…';
+        say(tier.id === active ? 'already selected' : 'starting download…');
         bar.style.width = tier.id === active ? '100%' : '0%';
         hzPost('modelDownload', { tier: tier.id }).catch(() => {
-          status.textContent = 'could not start the download';
+          say('could not start the download');
         });
       });
       choices.appendChild(b);
@@ -246,15 +253,15 @@ function modelRow() {
     if (!d || typeof d !== 'object') return;
     if (d.phase === 'downloading' && d.total > 0) {
       bar.style.width = `${Math.min(100, (d.got / d.total) * 100)}%`;
-      status.textContent = `${gb(d.got)} of ${gb(d.total)}`;
+      say(`${gb(d.got)} of ${gb(d.total)}`);
     } else if (d.phase === 'installing') {
       bar.style.width = '100%';
-      status.textContent = 'starting the local engine…';
+      say('starting the local engine…');
     } else if (d.phase === 'ready') {
-      status.textContent = 'ready';
+      say('ready');
       hzPost('setupState').then((next) => { state = next; paint(); }).catch(() => {});
     } else if (d.phase === 'failed') {
-      status.textContent = d.error || 'download failed';
+      say(d.error || 'download failed');
     }
   };
   hzPost('setupState').then((next) => { state = next; paint(); }).catch(() => {});

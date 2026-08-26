@@ -261,18 +261,28 @@ const NEWSLETTER_PLATFORM = /@(substack\.com|beehiiv\.com|mailchimp|mailchimpapp
 // and every WhatsApp LID.
 const SHORT_CODE = /^\d{1,6}$/u;
 
-// A non-person: an automated sender, a role address, or an SMS short code, by
-// name or by any of its identifiers. Exported so the constellation
-// (people/map.mjs) drops the same newsletters and no-reply handles the ranker
-// does, from one definition rather than a second copy that drifts.
+// APPLE MESSAGES FOR BUSINESS is the other half of the same gap, arrived at
+// independently: a sender whose iMessage handle is "urn:biz:<uuid>" is a company
+// texting through Apple's business channel. Unlike the short code this needs no
+// heuristic at all — the URN is Apple's OWN declaration that the sender is not a
+// person. Seven sat in the owner's list as people (2026-08-25), one wearing
+// order-confirmation topic chips.
+const BUSINESS_URN = /^urn:biz:/iu;
+
+// A non-person: an automated sender, a role address, an SMS short code, or a
+// Messages-for-Business URN, by name or by any of its identifiers. Exported so
+// the constellation (people/map.mjs) drops the same newsletters and no-reply
+// handles the ranker does, from one definition rather than a second copy that
+// drifts.
 export function isNonPerson(p) {
-  if (NON_PERSON.test(p.name)) return true;
+  if (NON_PERSON.test(p.name) || BUSINESS_URN.test(p.name)) return true;
   return (p.identifiers ?? []).some(
     (id) =>
       AUTOMATED_DOMAIN.test(id) ||
       NEWSLETTER_PLATFORM.test(id) ||
       ROLE_LOCALPART.test(id) ||
-      SHORT_CODE.test(String(id).trim())
+      SHORT_CODE.test(String(id).trim()) ||
+      BUSINESS_URN.test(id)
   );
 }
 

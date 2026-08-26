@@ -97,7 +97,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                "openExternal"],
-    "people-months": ["close", "peopleYear", "peopleFind", "peopleSummary", "openPeople"],
+    // peopleFind: search across every year, server-ranked. peopleMap: the
+    // ALL-YEARS source behind the constellation — every person, uncapped, with
+    // their per-year topics. monthsView: where the popup was left, so a restart
+    // resumes on it rather than snapping back to this year.
+    "people-months": ["close", "peopleYear", "peopleFind", "peopleSummary",
+                      "openPeople", "monthsView", "peopleMap"],
     "ear": ["orbState", "voiceError", "voiceTranscript"],
   ]
 
@@ -175,6 +180,27 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // walk the whole flow again, having just done the hardest step in it. The
   // page reports each scene as it opens; a first-run launch resumes on the
   // last one reported, and finishing clears it.
+  // WHERE THE TIMELINE POPUP WAS LEFT: the year, whether the list or the globe
+  // was up, and the topic it was filtered to. Remembered for the same reason
+  // onboardingStep is — the panel survives hidden with its page state intact,
+  // so closing and reopening already returns you where you were, but a RESTART
+  // recreates the page and it came back on the current year with nothing
+  // selected. Landing somewhere other than where you left reads as the app
+  // having thrown your place away.
+  //
+  // One opaque string, written and parsed by people-months.js. Native does not
+  // interpret it: what "where you were" means belongs to the page, and giving
+  // this key a schema would mean changing Swift every time the page grows a
+  // fourth thing to remember.
+  static let monthsViewKey = "HazlieMonthsView"
+  static var monthsView: String? {
+    get { UserDefaults.standard.string(forKey: monthsViewKey) }
+    set {
+      if let v = newValue { UserDefaults.standard.set(v, forKey: monthsViewKey) }
+      else { UserDefaults.standard.removeObject(forKey: monthsViewKey) }
+    }
+  }
+
   static let stepDefaultsKey = "HazlieOnboardingStep"
   static var onboardingStep: String? {
     get { UserDefaults.standard.string(forKey: stepDefaultsKey) }
@@ -933,6 +959,26 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       peopleCall("GET", "people/find?q=\(esc)", json: nil) { [weak self] data in
         self?.reply(webView, id, data)
       }
+
+    case "peopleMap":
+      // Every person across every year, with per-year topics and NO row cap —
+      // which is why the constellation reads from here rather than summing the
+      // year payloads: those are capped per year, and a sum of capped pages
+      // would print topic counts that are quietly short.
+      peopleCall("GET", "people/map", json: nil) { [weak self] data in
+        self?.reply(webView, id, data)
+      }
+
+    case "monthsView":
+      // Both directions on one verb: a payload with "state" saves, a bare call
+      // reads. Bounded for the same reason onboardingStep is — this is a
+      // UserDefaults write driven by a webview message, and an unbounded string
+      // there is a disk write whose size the page chooses.
+      if let s = payload["state"] as? String {
+        Bridge.monthsView = s.count <= 120 ? s : nil
+      }
+      reply(webView, id, ["state": Bridge.monthsView ?? ""])
+
     case "peopleSummary":
       // Model-written year summary for one person; generated on demand,
       // served by hermes from the LOCAL model only.

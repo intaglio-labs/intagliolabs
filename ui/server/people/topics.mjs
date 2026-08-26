@@ -349,6 +349,26 @@ export function nameTokenSet(names) {
 const PAIR_STOP = new Set([
   'fair enough', 'makes sense', 'take care', 'thank you', 'thanks man',
   'sounds like', 'kind regards', 'talk soon', 'miss you', 'appreciate it',
+  // FORMAL-MAIL BOILERPLATE, as PHRASES rather than words (owner, 2026-08-25).
+  // These chipped on real rows: "order number", "future reference", "received
+  // either", "mind providing", "profile accept", "email address".
+  //
+  // isAutomatedRow above is the primary defence and catches the bulk of it, but
+  // it is aimed at SMS compliance text and one-time codes — an order
+  // confirmation or a LinkedIn notification is ordinary formal English and
+  // passes it. A first attempt stopped the transactional VOCABULARY instead
+  // (order, address, invoice, reference…) and was wrong for exactly the reason
+  // isAutomatedRow's own comment gives: it would have silenced the friend who
+  // ordered dinner. The phrase is the boilerplate; the words are not.
+  //
+  // Precision over recall on purpose. This cannot catch a phrase nobody has
+  // seen yet, and that is the correct trade against deleting real vocabulary
+  // from every conversation in the corpus.
+  'order number', 'future reference', 'email address', 'mailing address',
+  'contact information', 'customer service', 'privacy policy', 'terms conditions',
+  'confirmation number', 'tracking number', 'reference number', 'account number',
+  'received either', 'mind providing', 'profile accept', 'view profile',
+  'click here', 'please note', 'best regards', 'original trade',
 ]);
 
 // The candidate list under both chip backfill and the specifics line.
@@ -401,9 +421,16 @@ export function topTopics(doc, docFreq, totalDocs, { limit = 3, minTaxonomy = 2,
   const tax = Object.entries(doc.taxonomy)
     .filter(([, n]) => n >= minTaxonomy)
     .sort((a, b) => b[1] - a[1]);
+  // `tax` marks the chip as coming from the FIXED vocabulary above rather than
+  // from this pair's distinctive words. Both render identically as chips, but
+  // only the fixed set is comparable ACROSS people — "food & drinks" means the
+  // same thing on every row, "tokyo station" means it on exactly one. The
+  // constellation groups by topic, so it needs that distinction; without the
+  // flag the page would have to keep its own copy of the vocabulary and the
+  // two would drift.
   for (const [label, n] of tax) {
     if (out.length >= limit) break;
-    out.push({ label, n });
+    out.push({ label, n, tax: true });
     taken.add(label);
   }
   if (out.length < limit) {
@@ -412,7 +439,8 @@ export function topTopics(doc, docFreq, totalDocs, { limit = 3, minTaxonomy = 2,
     // the shown topics' own signals match. Learned from the first live run.
     const shownSignals = [...taken].map((label) => TOPIC_SIGNALS[label]).filter(Boolean);
     const skip = (label) => taken.has(label) || shownSignals.some((re) => re.test(label));
-    out.push(...pickTerms(doc, docFreq, totalDocs, { limit: limit - out.length, minCount, skip }));
+    out.push(...pickTerms(doc, docFreq, totalDocs, { limit: limit - out.length, minCount, skip })
+      .map((t) => ({ ...t, tax: false })));
   }
   return out;
 }

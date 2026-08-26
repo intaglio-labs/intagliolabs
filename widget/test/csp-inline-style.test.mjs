@@ -8,6 +8,17 @@
 // rgba(0,0,0,0). Verified in a real engine: the styled dot and an unstyled one
 // had identical computed backgrounds while the attribute sat in the DOM.
 //
+// THAT INSTANCE IS GONE. people-sky.js and its warmth dot were yeeted
+// 2026-08-24 when the timeline (people-months) absorbed the list's job; rows
+// carry a message count and source glyphs now, and nothing renders .pl-dot.
+// A second test used to pin that dot specifically and was left reading the
+// deleted file, so it failed with ENOENT on a clean checkout — red for
+// everyone, for a feature that no longer exists. Deleted rather than
+// repointed: no current page paints a dot, so any file it was aimed at would
+// have passed by accident and pinned nothing. The class check below is the
+// part that was always the point, and it still scans every page. Its .pl-dot
+// rule and six other orphaned selectors went from people-sky.css with it.
+//
 // The failure is invisible by construction. CSP writes one line to a console,
 // inside a native app, with no devtools — so nothing surfaces, nothing throws,
 // and the feature is just quietly absent. That is the class this test closes,
@@ -83,8 +94,3 @@ test('no page generates a style attribute its CSP would block', () => {
       `instead — CSP gates the parsed attribute, not the CSSOM:\n  ${offences.join('\n  ')}`
   );
 });
-
-// The warmth-dot regression test lived here. The dot itself went with the sky
-// view (#8), which deleted people-sky.js -- the file this test read -- so it has
-// been failing on ENOENT ever since rather than guarding anything. Its .pl-dot
-// rule and six other orphaned selectors are gone from people-sky.css with it.
