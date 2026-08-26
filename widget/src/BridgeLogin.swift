@@ -29,7 +29,7 @@
 import AppKit
 import WebKit
 
-final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
+final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScriptMessageHandler {
   // Held for the life of the window so ARC doesn't reclaim it mid-login.
   private static var current: BridgeLogin?
 
@@ -46,6 +46,15 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
   /// authored (lib/bridge.mjs webLogin.cookieFormat) — enforced here, never
   /// decided here, the same rule allowedHosts follows.
   private let cookieFormat: String
+  /// The bridge's full field contract, when it wants more than a cookie jar:
+  /// [{id, from: "cookies"|"header", header}]. Server authored — this window
+  /// fills it in and never interprets it. Empty for the platforms whose login
+  /// really is only cookies.
+  private let fields: [[String: String]]
+  /// Request headers seen on the live page, by lowercased name. LinkedIn's
+  /// X-LI-Track and X-LI-Page-Instance are set by its own JavaScript on XHRs,
+  /// so they exist nowhere else — not in the cookie jar, not on a navigation.
+  private var seenHeaders: [String: String] = [:]
   private let allowedSuffixes: [String]
   private let done: (String?) -> Void
 
@@ -60,7 +69,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
 
   private init(
     label: String, cookieDomain: String, sessionCookie: String, allowedHosts: [String],
-    requiredCookies: [String], cookieFormat: String, done: @escaping (String?) -> Void
+    requiredCookies: [String], cookieFormat: String, fields: [[String: String]],
+    done: @escaping (String?) -> Void
   ) {
     self.label = label
     self.cookieDomain = cookieDomain
@@ -69,6 +79,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     self.sessionCookie = sessionCookie
     self.requiredCookies = requiredCookies.isEmpty ? [sessionCookie] : requiredCookies
     self.cookieFormat = cookieFormat
+    self.fields = fields
     self.allowedSuffixes = allowedHosts
     self.done = done
   }
@@ -86,7 +97,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
   static func present(
     label: String, loginUrl: String, cookieDomain: String,
     sessionCookie: String, allowedHosts: [String], requiredCookies: [String] = [],
-    cookieFormat: String = "json", done: @escaping (String?) -> Void
+    cookieFormat: String = "json", fields: [[String: String]] = [],
+    done: @escaping (String?) -> Void
   ) {
     guard let url = URL(string: loginUrl), let host = url.host, !allowedHosts.isEmpty,
           !sessionCookie.isEmpty,
@@ -97,7 +109,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     let ctl = BridgeLogin(
       label: label, cookieDomain: cookieDomain,
       sessionCookie: sessionCookie, allowedHosts: allowedHosts,
-      requiredCookies: requiredCookies, cookieFormat: cookieFormat, done: done
+      requiredCookies: requiredCookies, cookieFormat: cookieFormat,
+      fields: fields, done: done
     )
     current = ctl
     ctl.show(url: url)
@@ -107,6 +120,53 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     let W: CGFloat = 480, webH: CGFloat = 680, headH: CGFloat = 62
     let config = WKWebViewConfiguration()
     config.websiteDataStore = .nonPersistent() // isolated + discarded on teardown
+
+    // HEADER CAPTURE, only when the bridge asked for headers. LinkedIn's login
+    // step wants X-LI-Track and X-LI-Page-Instance, which its own JavaScript
+    // attaches to its XHRs — they are in no cookie jar and on no navigation, so
+    // the only place they exist is the moment the page sets them. This wraps
+    // XMLHttpRequest.setRequestHeader and fetch to report the ones named in the
+    // contract, and nothing else: the allow-list is built from `fields`, so the
+    // script cannot become a general reader of the page's traffic.
+    let wanted = fields.compactMap { $0["from"] == "header" ? $0["header"] : nil }
+    if !wanted.isEmpty {
+      config.userContentController.add(self, name: Self.headerHandler)
+      let names = (try? JSONSerialization.data(withJSONObject: wanted.map { $0.lowercased() }))
+        .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+      let js = """
+      (function () {
+        var want = new Set(\(names));
+        function say(n, v) {
+          try {
+            if (!want.has(String(n).toLowerCase()) || !v) return;
+            window.webkit.messageHandlers.\(Self.headerHandler)
+              .postMessage({ name: String(n), value: String(v) });
+          } catch (e) {}
+        }
+        var setH = XMLHttpRequest.prototype.setRequestHeader;
+        XMLHttpRequest.prototype.setRequestHeader = function (n, v) {
+          say(n, v);
+          return setH.apply(this, arguments);
+        };
+        var f = window.fetch;
+        if (f) {
+          window.fetch = function (input, init) {
+            try {
+              var h = (init && init.headers) || (input && input.headers);
+              if (h) {
+                if (typeof h.forEach === 'function') h.forEach(function (v, k) { say(k, v); });
+                else Object.keys(h).forEach(function (k) { say(k, h[k]); });
+              }
+            } catch (e) {}
+            return f.apply(this, arguments);
+          };
+        }
+      })();
+      """
+      config.userContentController.addUserScript(
+        WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+      )
+    }
     let web = WKWebView(frame: NSRect(x: 0, y: 0, width: W, height: webH), configuration: config)
     web.autoresizingMask = [.width, .height]
     web.navigationDelegate = self // OUR delegate, never Bridge's
@@ -228,6 +288,29 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     blink = t
   }
 
+  /// The message-handler name the injected script posts to. One constant so
+  /// the script and the registration cannot drift.
+  fileprivate static let headerHandler = "hzHeader"
+
+  func userContentController(
+    _ controller: WKUserContentController, didReceive message: WKScriptMessage
+  ) {
+    guard message.name == Self.headerHandler,
+          let body = message.body as? [String: Any],
+          let name = body["name"] as? String,
+          let value = body["value"] as? String,
+          !value.isEmpty
+    else { return }
+    // Bounded: a header this window was not told to collect is dropped by the
+    // script already, and an absurd value is not worth keeping either.
+    guard value.count <= 4096 else { return }
+    seenHeaders[name.lowercased()] = value
+    // A header can arrive after the cookies are already in place, which is the
+    // usual order — the session cookie lands at login, the XHR headers on the
+    // first page the app renders afterwards.
+    checkCookies()
+  }
+
   private func checkCookies() {
     guard let store = web?.configuration.websiteDataStore.httpCookieStore else { return }
     store.getAllCookies { [weak self] cookies in
@@ -237,14 +320,32 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
       // keeps waiting until the platform has set every one.
       let have = Set(mine.filter { !$0.value.isEmpty }.map { $0.name })
       guard self.requiredCookies.allSatisfy({ have.contains($0) }) else { return }
-      if self.cookieFormat == "header" {
-        // "name=value; name=value" — the shape a browser would send, which is
-        // what a bridge asking for a cookie_header field parses. Values are
-        // passed through unaltered: LinkedIn's JSESSIONID carries its own
-        // quotes and the regex on the far side expects to see them.
-        let header = mine.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-        guard !header.isEmpty else { return }
-        self.finish(header)
+      // THE FIELD CONTRACT, when the bridge declared one. Every field must be
+      // satisfied before the window finishes: a partial payload is a login
+      // that looks done and is refused on the far side, which is the failure
+      // mode this whole path has been walking through.
+      if !self.fields.isEmpty {
+        // "name=value; name=value" — values unaltered, because LinkedIn's
+        // JSESSIONID carries its own quotes and the regex expects them.
+        let cookieHeader = mine.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+        var payload: [String: String] = [:]
+        for f in self.fields {
+          guard let id = f["id"] else { continue }
+          switch f["from"] {
+          case "cookies":
+            payload[id] = cookieHeader
+          case "header":
+            guard let name = f["header"],
+                  let v = self.seenHeaders[name.lowercased()], !v.isEmpty else { return }
+            payload[id] = v
+          default:
+            return
+          }
+        }
+        guard payload.count == self.fields.count,
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else { return }
+        self.finish(json)
         return
       }
       var bag: [String: String] = [:]

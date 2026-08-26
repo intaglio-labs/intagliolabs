@@ -96,7 +96,7 @@ test('the platforms that do have a web login are the ones we expect', () => {
   assert.deepEqual(withWeb, ['instagram', 'linkedin', 'messenger', 'twitter']);
 });
 
-test('cookie format is declared per platform, and only LinkedIn wants a header', () => {
+test('the field contract is declared per platform, and only LinkedIn has one', () => {
   // The shape the harvested cookies are sent in is the SERVER's call — Swift
   // enforces it and never decides it, same as allowedHosts. Pinned as a roster
   // because getting it wrong is silent: the Meta and X bridges name each cookie
@@ -104,13 +104,17 @@ test('cookie format is declared per platform, and only LinkedIn wants a header',
   // mautrix-linkedin has ONE field wanting a raw Cookie header and receives an
   // empty value from that same JSON — a login that looks done and is not
   // (2026-08-25).
-  const header = entries
-    .filter(([, p]) => p.webLogin?.cookieFormat === 'header')
-    .map(([id]) => id).sort();
-  assert.deepEqual(header, ['linkedin']);
+  const withFields = entries.filter(([, p]) => p.webLogin?.fields).map(([id]) => id).sort();
+  assert.deepEqual(withFields, ['linkedin']);
+
+  // Every field must be one the login window knows how to satisfy. A `header`
+  // field additionally names the header to capture — without it the window
+  // would wait forever for something it was never told to look for.
   for (const [id, p] of entries) {
-    if (!p.webLogin) continue;
-    const fmt = p.webLogin.cookieFormat ?? 'json';
-    assert.ok(['json', 'header'].includes(fmt), `${id}: unknown cookieFormat ${fmt}`);
+    for (const f of p.webLogin?.fields ?? []) {
+      assert.ok(f.id, `${id}: a field with no id`);
+      assert.ok(['cookies', 'header'].includes(f.from), `${id}: unknown field source ${f.from}`);
+      if (f.from === 'header') assert.ok(f.header, `${id}: header field ${f.id} names no header`);
+    }
   }
 });

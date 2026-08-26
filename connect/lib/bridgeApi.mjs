@@ -74,6 +74,10 @@ export async function bridgeApiResponse({
         // 'header' -> "a=1; b=2" (LinkedIn); anything else -> a JSON object
         // keyed by cookie name, which is what the Meta and X bridges parse.
         cookieFormat: platform.webLogin?.cookieFormat ?? 'json',
+        // The full field contract when a bridge wants more than a cookie jar:
+        // [{id, from: 'cookies'|'header', header?}]. Null for the platforms
+        // whose login is cookies alone.
+        fields: platform.webLogin?.fields ?? null,
       },
     };
   };

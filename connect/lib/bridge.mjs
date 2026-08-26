@@ -137,8 +137,28 @@ export const PLATFORMS = Object.freeze({
     // keyed by cookie name lands correctly there and arrives EMPTY here: the bot
     // looks for its field id, finds nothing, and rejects the blank (owner hit
     // this on the first real LinkedIn login, 2026-08-25).
-    webLogin: { allowedHosts: ['linkedin.com', 'www.linkedin.com'], sessionCookie: 'li_at',
-                requiredCookies: ['li_at', 'JSESSIONID'], cookieFormat: 'header' },
+    // LINKEDIN WANTS REQUEST HEADERS, NOT COOKIES — three of them, and the
+    // bridge's own login step says so: every field is type "request_header"
+    // sourced from the platform's own API requests. Learned one refusal
+    // at a time (2026-08-25): JSON keyed by cookie name left cookie_header
+    // empty, a bare header failed "parse input as JSON", and the wrapped
+    // header then got as far as "x_li_track: `` doesn't match clientVersion".
+    //
+    // X-LI-Track and X-LI-Page-Instance are set by LinkedIn's own JavaScript
+    // on its XHRs, so no cookie jar contains them — which is exactly why the
+    // bot suggests pasting a cURL command. The login window captures them
+    // from the live page instead; `fields` is the whole contract, and Swift
+    // fills it in without knowing what any of it means.
+    webLogin: {
+      allowedHosts: ['linkedin.com', 'www.linkedin.com'],
+      sessionCookie: 'li_at',
+      requiredCookies: ['li_at', 'JSESSIONID'],
+      fields: [
+        { id: 'fi.mau.linkedin.login.cookie_header', from: 'cookies' },
+        { id: 'fi.mau.linkedin.login.x_li_track', from: 'header', header: 'X-LI-Track' },
+        { id: 'fi.mau.linkedin.login.x_li_page_instance', from: 'header', header: 'X-LI-Page-Instance' },
+      ],
+    },
   },
   telegram: {
     id: 'telegram',

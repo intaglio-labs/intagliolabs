@@ -704,6 +704,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         let sessionCookie = begin["sessionCookie"] as? String ?? ""
         let requiredCookies = (begin["requiredCookies"] as? [String])?.filter { !$0.isEmpty } ?? []
         let cookieFormat = begin["cookieFormat"] as? String ?? "json"
+        // The bridge's field contract, flattened to strings — the login window
+        // fills it in without interpreting any of it.
+        let fields: [[String: String]] = (begin["fields"] as? [[String: Any]] ?? []).map { f in
+          var out: [String: String] = [:]
+          for (k, v) in f { if let sv = v as? String { out[k] = sv } }
+          return out
+        }
         guard !allowedHosts.isEmpty, !sessionCookie.isEmpty else {
           self.reply(webView, id, ["state": "manual", "transcript": begin["transcript"] ?? []])
           return
@@ -713,7 +720,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           BridgeLogin.present(
             label: label, loginUrl: loginUrl, cookieDomain: cookieDomain,
             sessionCookie: sessionCookie, allowedHosts: allowedHosts,
-            requiredCookies: requiredCookies, cookieFormat: cookieFormat
+            requiredCookies: requiredCookies, cookieFormat: cookieFormat,
+            fields: fields
           ) { cookiesJSON in
             guard let cookiesJSON else {
               self.reply(webView, id, ["state": "cancelled"])

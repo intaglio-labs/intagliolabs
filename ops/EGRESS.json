@@ -188,6 +188,26 @@
       "note": "The bare domain is declared separately under login-webview: the embedded login navigates the apex and its subdomains, not just this www host."
     },
     {
+      "host": "linkedin.com",
+      "kind": "bridge",
+      "component": "bridges/ mautrix-linkedin + connect/lib/bridge.mjs",
+      "direction": "inbound-fetch",
+      "purpose": "LinkedIn DMs through a local Matrix bridge — replaced the hand-unzipped CSV export (owner, 2026-08-25)",
+      "credential": "the owner's own LinkedIn session, captured by the login webview",
+      "decision": "Owner asked for LinkedIn to sync like every other social source, 2026-08-25. Same posture as the Meta and X bridges: read-only, no host port, double puppeting off.",
+      "evidence": "bridges/docker-compose.yml mautrix-linkedin; connect/lib/bridge.mjs PLATFORMS.linkedin"
+    },
+    {
+      "host": "www.linkedin.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift (fence from connect/lib/bridge.mjs)",
+      "direction": "inbound-fetch",
+      "purpose": "LinkedIn cookie + request-header login, in the fenced in-app window",
+      "credential": "the owner's own LinkedIn session",
+      "decision": "Same decision as the Meta and X login webviews: the owner logs in to their own account, in a window fenced to that platform's hosts.",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.linkedin.webLogin.allowedHosts"
+    },
+    {
       "host": "x.com",
       "kind": "bridge",
       "component": "bridges/ mautrix-twitter + connect/lib/bridge.mjs",
