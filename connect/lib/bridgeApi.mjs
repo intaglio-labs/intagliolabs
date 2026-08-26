@@ -12,7 +12,7 @@
 //   POST /api/bridge/cookies {p, cookies}  → send the pasted cookies/cURL
 
 import { homedir } from 'node:os';
-import { PLATFORMS, bridgeStatus, beginLogin, relay, loginUrlFrom } from './bridge.mjs';
+import { PLATFORMS, bridgeStatus, beginLogin, relay, loadPanel, loginUrlFrom } from './bridge.mjs';
 import { maskOwn } from './bridgePage.mjs';
 import { bearerAuthorized } from './statusApi.mjs';
 
@@ -79,12 +79,27 @@ export async function bridgeApiResponse({
     if (method === 'GET' && subpath === '') {
       const st = bridgeStatus(platformId, { home });
       if (st.connected) return wrap([]);
-      // Policy/status is useful before the Matrix stack exists: it is enough
-      // for the native app to open the platform's real, fenced login window.
-      // Requiring loadPanel() here made a fresh install fail on missing Matrix
-      // credentials before Facebook/Instagram/X could even be shown. Bot
-      // transcript work remains in begin/cookies, where the bridge is needed.
-      return wrap([]);
+      // BEST-EFFORT TRANSCRIPT, not none (owner hit the gap 2026-08-25).
+      //
+      // This returned [] unconditionally, and the reasoning was sound as far
+      // as it went: requiring loadPanel() here made a fresh install fail on
+      // missing Matrix credentials before Facebook/Instagram/X could even be
+      // shown, so policy/status was made to stand alone. What it missed is
+      // that a login can PAUSE mid-conversation — X accepts cookies and then
+      // asks for its encrypted-DM PIN — and this route is what the panel
+      // re-reads every time it reopens. Answering "no transcript" threw away
+      // a live question the bridge was still waiting on: the prompt and its
+      // input vanished on the next render while the login sat half-finished.
+      //
+      // So: try, and fall back to [] on ANY failure, which keeps the fresh-
+      // install path exactly as it was — no Matrix stack, no credentials, or
+      // an unreachable homeserver all still answer with policy alone.
+      try {
+        const { transcript } = await loadPanel(platformId, { home });
+        return wrap(transcript);
+      } catch {
+        return wrap([]);
+      }
     }
     if (method === 'POST' && subpath === 'begin') {
       const { transcript } = await beginLogin(platformId, { home });

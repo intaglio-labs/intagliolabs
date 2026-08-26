@@ -924,7 +924,9 @@ function card(src, keep) {
       // flows use; it appears only when the bot is mid-conversation and not
       // yet connected, so the ordinary one-shot cookie login is unchanged.
       if (askedFor() && !(data && data.connected)) {
-        relayInput('enter what X asked for above', false);
+        // The bot's question is already on screen directly above; the box only
+        // has to say it is the place to answer it.
+        relayInput('type your answer', false);
       }
       // The manual cookie-paste fallback ("having trouble? paste cookies
       // manually") was yeeted (owner, 2026-08-25): the webview login is the
