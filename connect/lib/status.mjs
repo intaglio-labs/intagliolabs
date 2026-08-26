@@ -404,12 +404,15 @@ function cloudAccountRows(home) {
     // outstanding task, and the counter is what tells the owner they are done.
     {
       id: 'mail',
-      label: googleMailAccounts({ home }).length === 0 ? 'Gmail' : 'Another mailbox',
+      // "Google account", not "Another mailbox": one grant brings mail AND
+      // calendar, so naming it after the mailbox undersells what the button
+      // does and reads as a second, separate thing to connect.
+      label: 'Google account',
       connected: false,
       optional: true,
       detail: googleMailAccounts({ home }).length === 0
-        ? 'sign in to Google to read your mail'
-        : 'sign in with another Google account',
+        ? 'sign in to read your mail and calendar'
+        : 'add another Google account',
       action: 'gcal',
       caveat: null,
     },

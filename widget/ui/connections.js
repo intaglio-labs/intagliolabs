@@ -1707,6 +1707,23 @@ function card(src, keep) {
         openBridgeLogin();
         return;
       }
+      // GOOGLE TILE: the press IS the sign-in (owner, 2026-08-26 — "i thought
+      // its supposed to directly open the sign in page"). Same call the bridge
+      // tiles above make, for the same reason: the card had one control on it,
+      // so showing the card first is a press the owner has to spend to reach
+      // the press they meant.
+      //
+      // NOT the WhatsApp case struck through below. That was reverted because
+      // connecting SILENTLY read as a false alarm — a dot turning green with
+      // nothing to explain it. This is the opposite: what appears is Google's
+      // own sign-in screen, which is unmistakably the thing that was asked for.
+      //
+      // Only while unconnected. An authorized mailbox row still opens its card,
+      // because there the press means "tell me about this", not "sign me in".
+      if (GOOGLE_AUTH.has(kindOf(src.id)) && !src.connected && src.action !== 'fda') {
+        hzPost('googleAuth', { flow: 'google' }).catch(() => {});
+        return;
+      }
       // FDA tile (owner, 2026-08-25): the card had exactly one thing on it —
       // the full disk access button — so the tile press IS the button press.
       // openFullDiskAccess rather than the bare pane URL, because it touches a
