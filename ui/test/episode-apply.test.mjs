@@ -290,3 +290,117 @@ test('a message joining an existing conversation replaces that episode', () => {
   );
   db.close();
 });
+
+// ---- only the conversations that moved ----
+//
+// A full pass reads every episodic row (418,698 here, ~3s, ~384MB) just to
+// discover which threads changed, because a thread key is computed from `meta`
+// and is not a column anything can filter on. context_thread is that missing
+// index. These pin the property that makes it safe to use: the narrow pass must
+// land on exactly the index a full pass would.
+const msg = (id, guid, ts, fromMe = true) => ({
+  ts, source: 'imessage', entity_id: id, text: 'a message',
+  meta: { chat_guid: `any;-;${guid}`, handle: guid, guid: id, is_from_me: fromMe },
+});
+
+// The whole index as CONTENT, ids aside — what a caller downstream depends on.
+function indexShape(db) {
+  return db
+    .prepare('SELECT member_hash, thread_key, started_at, ended_at, row_count, owner_row_count, counterparty_key FROM episode ORDER BY member_hash')
+    .all()
+    .map((e) => {
+      const mem = db.prepare('SELECT context_id, line_no, quotable FROM episode_member m JOIN episode e ON e.id=m.episode_id WHERE e.member_hash=? ORDER BY line_no')
+        .all(e.member_hash).map((m) => `${m.context_id}:${m.line_no}:${m.quotable}`).join(',');
+      return `${e.member_hash}|${e.thread_key}|${e.started_at}|${e.ended_at}|${e.row_count}|${e.owner_row_count}|${e.counterparty_key ?? ''}|${mem}`;
+    })
+    .join('\n');
+}
+
+const NOW = Date.UTC(2026, 0, 1);
+
+test('the narrow pass lands on exactly the index a full pass would', () => {
+  const seed = [
+    msg('s1', '+15550100', Date.UTC(2025, 0, 1, 9, 0)),
+    msg('s2', '+15550100', Date.UTC(2025, 0, 1, 9, 5), false),
+    msg('s3', '+15550200', Date.UTC(2025, 0, 2, 9, 0)),
+    msg('s4', '+15550300', Date.UTC(2025, 0, 3, 9, 0)),
+  ];
+  const inc = openDb(':memory:');
+  const full = openDb(':memory:');
+  insertRows(inc, seed); insertRows(full, seed);
+  rebuildEpisodes(inc, { now: NOW });
+  rebuildEpisodes(full, { now: NOW });
+  assert.equal(indexShape(inc), indexShape(full), 'same starting point');
+
+  // One message joining an existing conversation, one opening a new thread, and
+  // one thread left completely alone.
+  const arrivals = [
+    msg('n1', '+15550100', Date.UTC(2025, 0, 1, 9, 20)),   // re-cuts s1/s2
+    msg('n2', '+15550400', Date.UTC(2025, 0, 4, 9, 0)),    // a new thread
+  ];
+  insertRows(inc, arrivals); insertRows(full, arrivals);
+
+  const narrow = rebuildEpisodes(inc, { now: NOW });
+  assert.ok(String(narrow.scope).startsWith('threads:'), `expected a narrow pass, got ${narrow.scope}`);
+
+  full.exec('DELETE FROM context_thread');  // force the full path
+  const wide = rebuildEpisodes(full, { now: NOW });
+  assert.equal(wide.scope, 'full');
+
+  assert.equal(indexShape(inc), indexShape(full), 'narrow and full agree exactly');
+  inc.close(); full.close();
+});
+
+test('a pass with nothing new touches nothing', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [msg('q1', '+15550100', Date.UTC(2025, 0, 1, 9, 0))]);
+  rebuildEpisodes(db, { now: NOW });
+  const before = indexShape(db);
+  const out = rebuildEpisodes(db, { now: NOW });
+  assert.equal(out.scope, 'nothing-new');
+  assert.equal(out.inserted, 0);
+  assert.equal(out.deleted, 0);
+  assert.equal(indexShape(db), before);
+  db.close();
+});
+
+// A watermark cannot see a deletion, and hermes is the corpus's sole DELETER.
+// The index must notice it has more rows than the corpus and start over rather
+// than leave episodes standing for rows that are gone.
+test('rows deleted out from under the index force a full pass', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    msg('d1', '+15550100', Date.UTC(2025, 0, 1, 9, 0)),
+    msg('d2', '+15550200', Date.UTC(2025, 0, 2, 9, 0)),
+  ]);
+  rebuildEpisodes(db, { now: NOW });
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM context_thread').get().n, 2);
+
+  db.exec("DELETE FROM context WHERE entity_id = 'd2'");
+  const out = rebuildEpisodes(db, { now: NOW });
+  assert.equal(out.scope, 'full', 'a deletion is not something a watermark can see');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM context_thread').get().n, 1, 'index re-derived');
+  // And no episode survives for the removed row.
+  const orphans = db.prepare(
+    'SELECT COUNT(*) n FROM episode_member m LEFT JOIN context c ON c.id = m.context_id WHERE c.id IS NULL'
+  ).get().n;
+  assert.equal(orphans, 0);
+  db.close();
+});
+
+test('an untouched conversation is not rebuilt and keeps its id', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    msg('k1', '+15550100', Date.UTC(2025, 0, 1, 9, 0)),
+    msg('k2', '+15550200', Date.UTC(2025, 0, 2, 9, 0)),
+  ]);
+  rebuildEpisodes(db, { now: NOW });
+  const quiet = db.prepare("SELECT id, member_hash FROM episode WHERE thread_key LIKE '%+15550200'").get();
+
+  insertRows(db, [msg('k3', '+15550100', Date.UTC(2025, 0, 1, 9, 30))]);
+  const out = rebuildEpisodes(db, { now: NOW });
+  assert.ok(String(out.scope).startsWith('threads:'));
+  const after = db.prepare("SELECT id, member_hash FROM episode WHERE thread_key LIKE '%+15550200'").get();
+  assert.deepEqual(after, quiet, 'the other conversation was never touched');
+  db.close();
+});
