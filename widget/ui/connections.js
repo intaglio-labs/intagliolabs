@@ -641,6 +641,16 @@ const staleRefreshed = new Set();
 // begin starts with `cancel`, so an unguarded auto-begin would cancel the
 // conversation it opened. Keyed by source id, for the life of the page.
 const autoBegun = new Set();
+// A CONNECTED BRIDGE IS STILL A BRIDGE. The server sets `action: 'bridge'` only
+// while a bridge is NOT connected (connect/lib/status.mjs), so keying the
+// widget's routing off `action` sent every connected bridge to the generic
+// connector card — the one that knows about local stores and external setup
+// pages. That card says "connected" with nothing after it and offers no way to
+// add a second account, which is what the owner saw the moment Slack linked
+// (2026-08-26). Ask what the source IS, not what it currently needs doing to
+// it: a platform this file knows a login flow for is a bridge, connected or
+// not. BRIDGE_FLOW is that list.
+const isBridge = (src) => src.action === 'bridge' || !!BRIDGE_FLOW[kindOf(src.id)];
 
 function card(src, keep) {
   // Square tiles, four to a row. The old compact rows ruled out a 3-column
@@ -1243,14 +1253,27 @@ function card(src, keep) {
     if (data && data.connected) {
       const acct = document.createElement('span');
       acct.className = 'acct';
-      acct.textContent = `connected · ${data.name || 'your account'}`;
+      // NAME THE THING THAT IS CONNECTED, not the fact that something is
+      // (owner, 2026-08-26). The dot on the tile already says connected; this
+      // line is the only place that can say WHICH workspace, and with a second
+      // account one press away it is about to be the thing that tells them
+      // apart.
+      //
+      // mautrix hands back "<workspace> - <account email>" for Slack. The
+      // address is the owner's own and they know it; the workspace is the
+      // answer. Split on the LAST " - " and only when the tail is an address,
+      // so a workspace whose own name contains a dash survives intact.
+      const whole = String(data.name || '').trim();
+      const cut = whole.lastIndexOf(' - ');
+      const tail = cut > 0 ? whole.slice(cut + 3) : '';
+      acct.textContent = (cut > 0 && tail.includes('@')) ? whole.slice(0, cut) : (whole || 'connected');
       tip.appendChild(acct);
       // + add ANOTHER account: re-run the login. mautrix bridges hold more
       // than one login per user, so a second account lands alongside the
       // first rather than replacing it.
       const add = document.createElement('button');
       add.className = 'hold-ok add-acct';
-      add.textContent = '+ add another account';
+      add.textContent = '+ add account';
       add.addEventListener('click', (e) => {
         e.stopPropagation();
         openBridgeLogin();
@@ -1641,7 +1664,7 @@ function card(src, keep) {
       // only because the conversation platforms had no webLogin policy and the
       // window degraded to this card; restoring Slack's made the wrong path
       // reachable for the first time.
-      if (src.action === 'bridge' && !src.connected
+      if (isBridge(src) && !src.connected
           && (BRIDGE_FLOW[kindOf(src.id)] || 'cookie') === 'cookie') {
         openBridgeLogin();
         return;
@@ -1663,7 +1686,7 @@ function card(src, keep) {
       // is back, and the press is the owner's, on the button.
       hintHost.appendChild(tip);
       row.classList.add('open');
-      if (src.action === 'bridge') openBridge(); // connected → show status
+      if (isBridge(src)) openBridge(); // connected → show status
       else renderTip();
       // Scroll the TILE into view, not the strip: the row scrolls sideways
       // and the strip is already below it, so the thing that can be off
@@ -1688,7 +1711,7 @@ function card(src, keep) {
     if (!typed) {
       hintHost.replaceChildren(tip);
       if (soon) renderSoon();
-      else if (src.action === 'bridge') openBridge();
+      else if (isBridge(src)) openBridge();
       else renderTip();
     }
     row.classList.add('open');

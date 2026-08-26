@@ -54,7 +54,7 @@ test('the pop-over resolves its anchor and refuses to render without one', () =>
 // hours earlier. The window belongs partway through the conversation, at the
 // moment the bot asks for a challenge it cannot ask for in a text box.
 test('only a cookie login opens its window from the tile press', () => {
-  const toggleBody = /if \(src\.action === 'bridge' && !src\.connected[\s\S]{0,120}?\) \{\n\s*openBridgeLogin\(\);/u
+  const toggleBody = /if \(isBridge\(src\) && !src\.connected[\s\S]{0,120}?\) \{\n\s*openBridgeLogin\(\);/u
     .exec(page)?.[0] ?? '';
   assert.ok(toggleBody, 'the tile press still has a bridge branch');
   assert.match(toggleBody, /BRIDGE_FLOW\[kindOf\(src\.id\)\][\s\S]{0,40}=== 'cookie'/u,
@@ -107,4 +107,25 @@ test('a pending challenge is never offered a begin-login beside it', () => {
   const fallback = page.indexOf('} else if (!askedFor())');
   assert.ok(order > 0 && fallback > order,
     'the no-prompt fallback must come after, or it claims a live login');
+});
+
+// A CONNECTED BRIDGE IS STILL A BRIDGE. The server drops `action: 'bridge'` the
+// moment one connects, so routing on `action` sent every linked bridge to the
+// generic connector card — which says "connected" with nothing after it and
+// offers no second account (owner, 2026-08-26, the moment Slack linked).
+test('routing asks what a source is, not what it currently needs', () => {
+  assert.match(page, /const isBridge = \(src\) =>[\s\S]{0,120}BRIDGE_FLOW\[kindOf\(src\.id\)\]/u);
+  // No routing decision may be left keyed on the action alone.
+  assert.doesNotMatch(page, /if \(src\.action === 'bridge'\) openBridge\(\)/u);
+  assert.doesNotMatch(page, /else if \(src\.action === 'bridge'\) openBridge\(\)/u);
+});
+
+test('the connected line names the workspace, and offers a second account', () => {
+  const branch = /if \(data && data\.connected\) \{([\s\S]*?)\n    \} else if/u.exec(page)?.[1] ?? '';
+  assert.ok(branch, 'the connected branch exists');
+  assert.match(branch, /lastIndexOf\(' - '\)/u, 'the account tail is split off the workspace');
+  assert.match(branch, /tail\.includes\('@'\)/u,
+    'and only when it is an address, so a dash in a workspace name survives');
+  assert.match(branch, /'\+ add account'/u);
+  assert.doesNotMatch(branch, /`connected · /u, 'the line names the workspace, not the state');
 });
