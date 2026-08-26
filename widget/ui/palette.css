@@ -1628,6 +1628,19 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
 /* Walkthrough steps and how-to sentences each hold a line of their own —
    "2 · create an API key" wrapped around the step-1 pill otherwise. */
 .hint.hold .setup { display: block; margin-top: 6px; }
+/* Step 1 of a walkthrough: a button that reads as one of the numbered lines
+   around it, because that is what it is. It wore .hold-ok — the pill this
+   card uses for its ONE action — and a capsule with an arrow at the top of
+   three plain steps claimed a prominence step 1 does not have (owner,
+   2026-08-26). Matched to .setup, tinted so it still reads as pressable. */
+.hint.hold .step-open {
+  display: block; margin-top: 6px; padding: 0;
+  border: none; background: none;
+  color: var(--hazelnut-light);
+  font: inherit; text-align: left;
+  cursor: pointer;
+}
+.hint.hold .step-open:hover { color: var(--fg); }
 /* Every connected line leads with a green check (owner, 2026-08-25). One
    rule, not a per-site prefix: the check rides the .acct class, so it cannot
    be forgotten by the next connected state someone renders. */

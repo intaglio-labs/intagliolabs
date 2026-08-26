@@ -415,7 +415,12 @@ const HINTS = {
   // granola left this table (owner, 2026-08-25): its panel is the in-app
   // walkthrough now — open granola.ai, create a key, paste it right here.
   granola: { app: 'com.granola.app', url: 'https://granola.ai', link: 'Granola',
-             walkthrough: true }, // the DESKTOP app first — the key lives in its settings
+             walkthrough: true, // the DESKTOP app first — the key lives in its settings
+             // The ROUTE, not the goal. "create an API key and copy it" (the
+             // shared default) describes what you want, which is no help when
+             // the thing is four levels into another app's settings — the
+             // owner walked it and gave the path (2026-08-26).
+             step2: 'settings → API → personal API keys → create new key' },
   // Telegram needs the OWNER's own api_id/api_hash before its bridge will
   // even start (my.telegram.org/apps). Same three-step shape as granola's:
   // open the page, make the thing, paste it back — connectSecret writes it
@@ -683,8 +688,13 @@ function card(src, keep) {
   // handing the owner to the connect page. hint.url is the door;
   // connectSecret (Bridge → POST /api/secret) is where the paste lands.
   const open = document.createElement('button');
-  open.className = 'hold-ok';
-  open.textContent = `1 · open ${hint.link} ↗`;
+  // PLAIN TEXT, not a pill (owner, 2026-08-26). Step 1 sits directly above
+  // steps 2 and 3, which are plain lines — a bordered capsule with an arrow
+  // on the first of three made it read as the card's primary control rather
+  // than as the first line of a list. It is still a button: it does something,
+  // and a span would lose the keyboard and the focus ring.
+  open.className = 'step-open';
+  open.textContent = `1 · open ${hint.link}`;
   open.addEventListener('click', (e) => {
     e.stopPropagation();
     // The installed app first, the website only if it is not there —
