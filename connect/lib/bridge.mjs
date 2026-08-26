@@ -221,6 +221,19 @@ export const PLATFORMS = Object.freeze({
     qrLogin: true,
     noWebLogin: 'a QR posted by the bot, shown in its own window and scanned '
       + 'with the Discord phone app',
+    // THE LEGACY SCHEMA. mautrix-discord predates bridgev2 and has no
+    // user_login table — its session is a `user` row carrying dcid and a
+    // token, and the human-readable name lives in `puppet`, keyed by that
+    // dcid. The default query threw here and was read as "not connected" for
+    // as long as this entry has existed.
+    //
+    // username, not global_name: the bot's own success line says
+    // "Successfully logged in as @<username>", and the card saying something
+    // else than the bridge said is how you end up unsure which one to trust.
+    statusSql: 'SELECT COALESCE(NULLIF(p.username, \'\'), NULLIF(p.global_name, \'\'),'
+      + ' NULLIF(p.name, \'\')) AS remote_name'
+      + ' FROM "user" u LEFT JOIN puppet p ON p.id = u.dcid'
+      + " WHERE u.dcid IS NOT NULL AND u.dcid != '' LIMIT 1",
   },
   slack: {
     id: 'slack',
@@ -337,17 +350,38 @@ export function loadCreds({ home = homedir() } = {}) {
   return { base, token: raw.access_token, userId: raw.user_id };
 }
 
-// Is this platform logged in? Read straight from the bridge's own DB — a row in
-// user_login means a live session, and remote_name is the account it linked.
+// The bridgev2 answer, and the DEFAULT rather than the only one. A row in
+// user_login is a live session and remote_name is the account it linked.
+//
+// WHICH IS NOT A UNIVERSAL SCHEMA, and believing it was cost Discord its
+// entire status (owner, 2026-08-26: "i went through the scan QR code process
+// on my phone but doesn't seem like it actually worked"). It had worked —
+// the bot said "Successfully logged in", the user row was written, portals
+// were backfilling — but mautrix-discord is the pre-bridgev2 generation and
+// has no user_login table at all, so this query threw, the catch below read
+// the exception as "not connected", and the tile stayed grey through a
+// perfectly good login. ops/setup-bridges.sh has always said Discord is the
+// legacy one; nothing here asked.
+//
+// An override must return a column named remote_name, and the row's existence
+// is what "connected" means.
+const LOGIN_SQL = 'SELECT remote_name FROM user_login LIMIT 1';
+
+// Is this platform logged in? Read straight from the bridge's own DB.
 // Read-only and best-effort: any error (DB missing, locked) reads as "not
 // connected", never a crash, because the page has other rows to render.
+//
+// THAT CATCH IS ALSO THE TRAP. It cannot distinguish "no session" from "this
+// query does not belong to this schema", and the second is silent forever.
+// If a bridge reports disconnected while its bot says otherwise, run the
+// query by hand against its .db before believing this function.
 export function bridgeStatus(platformId, { home = homedir() } = {}) {
   const p = PLATFORMS[platformId];
   if (!p) return { connected: false };
   let db;
   try {
     db = new DatabaseSync(join(matrixDir(home), p.db), { readOnly: true });
-    const row = db.prepare('SELECT remote_name FROM user_login LIMIT 1').get();
+    const row = db.prepare(p.statusSql ?? LOGIN_SQL).get();
     return row ? { connected: true, name: row.remote_name ?? null } : { connected: false };
   } catch {
     return { connected: false };

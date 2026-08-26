@@ -1419,9 +1419,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // paste rides this once and is masked server-side out of every transcript;
   // nothing here stores or logs it. begin/cookies wait on a live bot, so they
   // get 15s where status gets 5.
-  /// Discord's login, end to end: send `login`, take the QR the bot answers
-  /// with, show it in its own window, and ask the bridge every couple of
-  /// seconds whether the phone has approved it.
+  /// Discord's login, end to end: open the window on the press, ask the bot
+  /// for a QR, show it, and poll the bridge until the phone approves it.
+  ///
+  /// THE WINDOW OPENS FIRST. `login` is a round trip to a bot in a container
+  /// (3.8s measured here), and doing that before showing anything is what made
+  /// the tile look dead on the first press — the owner pressed twice and read
+  /// the second press as the one that worked. Instagram's window is up
+  /// immediately because its policy is static; this one now opens on the same
+  /// press and fills in when the code lands.
   ///
   /// The QR is the bridge's own Matrix media, inlined as a data: URI by the
   /// connect server (lib/bridge.mjs inlineMedia, images only and capped) —
@@ -1434,57 +1440,72 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// instead, or `cancelled`, which is the state its begin button already
   /// knows how to answer.
   private func presentQrLogin(_ webView: WKWebView, id: Int, p: String, label: String) {
-    bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { [weak self] begun in
-      guard let self else { return }
-      guard begun["state"] as? String == "ok" else {
-        self.reply(webView, id, begun)
-        return
-      }
-      // The LAST bot image: a retried login posts a second code, and the
-      // stale one is still above it in the transcript.
-      let transcript = begun["transcript"] as? [[String: Any]] ?? []
-      let qr = transcript.reversed().first { m in
-        (m["from"] as? String) == "bot"
-          && (m["image"] as? String)?.hasPrefix("data:image/") == true
-      }?["image"] as? String
-      guard let qr else {
-        // No image means the bot said something else — a bridge that is down,
-        // or a login that is already live. The card can show that; a window
-        // with nothing in it cannot.
-        self.reply(webView, id, ["state": "manual", "transcript": begun["transcript"] ?? []])
-        return
-      }
-      DispatchQueue.main.async {
-        BridgeLogin.presentQR(
-          label: label, qrDataURI: qr,
-          instruction: "scan this with the \(label) app on your phone",
-          check: { [weak self] report in
-            guard let self else { return }
-            self.bridgeCall("GET", "api/bridge", query: ["p": p]) { st in
-              if st["connected"] as? Bool == true { report(.connected); return }
-              // ENDED, not failed: the bridge says so in words, and they are
-              // the bot's own — "Error logging in: websocket: close sent"
-              // when a code lapses unscanned. Matching the shape rather than
-              // the sentence, because that string is the container's to
-              // change.
-              let lines = (st["transcript"] as? [[String: Any]] ?? [])
-                .compactMap { ($0["from"] as? String) == "bot" ? $0["body"] as? String : nil }
-              let last = lines.last?.lowercased() ?? ""
-              let over = last.contains("error logging in") || last.contains("websocket")
-                || last.contains("timed out") || last.contains("cancelled")
-              report(over ? .ended : .waiting)
+    // A bot reply with no image — "You're already logged in", or a bridge that
+    // is down — is the card's to show, not this window's. Captured here so the
+    // close path can hand it back.
+    var fallback: [String: Any]?
+    // ENDING TAKES TWO POLLS IN A ROW. The bot posts "Error logging in:
+    // websocket: close sent" for a socket that lapsed, and on this machine
+    // that line was followed by "Successfully logged in" from the scan the
+    // owner had just done — so a window that closed on the first sighting
+    // would have closed a login that was about to succeed.
+    var endingStreak = 0
+    // Main thread: this is reached from a URLSession completion, and it puts a
+    // window on screen.
+    DispatchQueue.main.async {
+      BridgeLogin.presentQR(
+        label: label,
+        // Owner's wording (2026-08-26). Not "the Discord app": a phone camera
+      // recognises the code and offers the app itself, and naming a second
+      // piece of software to go and open first is a step that is not there.
+      instruction: "scan this with your phone camera",
+        fetch: { [weak self] deliver in
+          guard let self else { deliver(nil); return }
+          self.bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { begun in
+            guard begun["state"] as? String == "ok" else {
+              fallback = begun
+              deliver(nil)
+              return
             }
+            // The LAST bot image: a retried login posts a second code, and the
+            // stale one is still above it in the transcript.
+            let transcript = begun["transcript"] as? [[String: Any]] ?? []
+            let qr = transcript.reversed().first { m in
+              (m["from"] as? String) == "bot"
+                && (m["image"] as? String)?.hasPrefix("data:image/") == true
+            }?["image"] as? String
+            if qr == nil {
+              fallback = ["state": "manual", "transcript": begun["transcript"] ?? []]
+            }
+            deliver(qr)
           }
-        ) { result in
-          guard result != nil else {
-            self.reply(webView, id, ["state": "cancelled"])
-            return
+        },
+        check: { [weak self] report in
+          guard let self else { return }
+          self.bridgeCall("GET", "api/bridge", query: ["p": p]) { st in
+            if st["connected"] as? Bool == true { report(.connected); return }
+            // The bridge says it is over in words, and they are the bot's own.
+            // Matching the shape rather than the sentence, because that string
+            // is the container's to change.
+            let lines = (st["transcript"] as? [[String: Any]] ?? [])
+              .compactMap { ($0["from"] as? String) == "bot" ? $0["body"] as? String : nil }
+            let last = lines.last?.lowercased() ?? ""
+            let over = last.contains("error logging in") || last.contains("websocket")
+              || last.contains("timed out") || last.contains("cancelled")
+            endingStreak = over ? endingStreak + 1 : 0
+            report(endingStreak >= 2 ? .ended : .waiting)
           }
-          // Linked. Re-read rather than reporting the poll's own copy, so the
-          // card paints from the same source every other path uses.
-          self.bridgeCall("GET", "api/bridge", query: ["p": p]) { done in
-            self.reply(webView, id, done)
-          }
+        }
+      ) { [weak self] result in
+        guard let self else { return }
+        guard result != nil else {
+          self.reply(webView, id, fallback ?? ["state": "cancelled"])
+          return
+        }
+        // Linked. Re-read rather than reporting the poll's own copy, so the card
+        // paints from the same source every other path uses.
+        self.bridgeCall("GET", "api/bridge", query: ["p": p]) { done in
+          self.reply(webView, id, done)
         }
       }
     }

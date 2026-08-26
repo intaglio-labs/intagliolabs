@@ -70,6 +70,9 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
   /// ordinary web login — the two modes share this window's chrome and its
   /// single-exit teardown, and nothing else.
   private var qrCheck: ((@escaping (QRProgress) -> Void) -> Void)?
+  private var qrView: NSImageView?
+  private var qrSpinner: NSProgressIndicator?
+  private var qrHow: NSTextField?
 
   private var window: NSWindow?
   private var web: WKWebView?
@@ -145,23 +148,31 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
   /// A QR LOGIN WINDOW. Discord's bridge does not have a login page to drive:
   /// it posts a remote-auth QR and waits for the Discord phone app to approve
   /// it. So this window loads nothing, fences nothing, and harvests nothing —
-  /// it shows the image the bridge already sent and asks the bridge, on a
-  /// timer, whether the scan landed.
+  /// it shows the image the bridge sent and asks the bridge, on a timer,
+  /// whether the scan landed.
   ///
   /// It is a WINDOW rather than a card in the settings panel because the owner
   /// asked for one (2026-08-26, "a separate pop-up like how instagram login
   /// is"), and because a QR is a thing you point a camera at: on the card it
   /// was 168px standing over the settings it was launched from.
   ///
-  /// `qrDataURI` is a data: URI the connect server built from the bridge's own
-  /// Matrix media — no URL is fetched here, and a non-image or unparseable one
-  /// refuses to open rather than showing an empty frame.
+  /// IT OPENS BEFORE IT HAS A CODE, and that is the point. Asking the bridge
+  /// for one means sending `login` and waiting on a bot in a container —
+  /// measured at 3.8s on this machine — and a tile that sits there for four
+  /// seconds after a press reads as a tile that did not register the press
+  /// (owner, 2026-08-26: "when i first tap discord icon nothing happens").
+  /// Instagram's window is up in 30ms because its policy is static; this one
+  /// opens on the same press and fills in.
+  ///
+  /// `fetch` hands back a data: URI the connect server built from the bridge's
+  /// own Matrix media — no URL is fetched here — or nil, which closes the
+  /// window rather than leaving an empty frame up.
   static func presentQR(
-    label: String, qrDataURI: String, instruction: String,
+    label: String, instruction: String,
+    fetch: @escaping (@escaping (String?) -> Void) -> Void,
     check: @escaping (@escaping (QRProgress) -> Void) -> Void,
     done: @escaping (String?) -> Void
   ) {
-    guard let image = decodeDataImage(qrDataURI) else { done(nil); return }
     current?.finish(nil) // one login window at a time, whichever kind
     let ctl = BridgeLogin(
       label: label, cookieDomain: "", sessionCookie: "", allowedHosts: [],
@@ -170,7 +181,14 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     )
     ctl.qrCheck = check
     current = ctl
-    ctl.showQR(image: image, instruction: instruction)
+    ctl.showQR(instruction: instruction)
+    fetch { [weak ctl] uri in
+      DispatchQueue.main.async {
+        guard let ctl, !ctl.finished else { return }
+        guard let uri, let image = decodeDataImage(uri) else { ctl.finish(nil); return }
+        ctl.fillQR(image)
+      }
+    }
   }
 
   /// data:image/<type>;base64,<...> → NSImage. Deliberately narrow: only a
@@ -189,10 +207,11 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     return image
   }
 
-  private func showQR(image: NSImage, instruction: String) {
-    // Sized to the content, top down: 34 under the header, the code, then two
-    // lines. A QR window with room left over reads as a window still loading.
-    let W: CGFloat = 420, headH: CGFloat = 62, bodyH: CGFloat = 392
+  private func showQR(instruction: String) {
+    // Sized to the content, top down: 34 under the header, the code, then the
+    // one line that says what to do with it. A QR window with room left over
+    // reads as a window still loading.
+    let W: CGFloat = 420, headH: CGFloat = 62, bodyH: CGFloat = 358
     func color(_ r: Int, _ g: Int, _ b: Int) -> NSColor {
       NSColor(red: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255, alpha: 1)
     }
@@ -203,7 +222,9 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     content.layer?.backgroundColor = color(0x14, 0x14, 0x12).cgColor
 
     // The code on WHITE, always — a QR reader needs the quiet zone and the
-    // contrast, and this app's surfaces are all dark.
+    // contrast, and this app's surfaces are all dark. The card is drawn before
+    // the code exists so the window has its final shape from the first frame
+    // and nothing jumps when the image lands.
     let side: CGFloat = 260
     let cardY = bodyH - 34 - side
     let card = NSView(frame: NSRect(x: (W - side) / 2, y: cardY, width: side, height: side))
@@ -211,35 +232,45 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     card.layer?.backgroundColor = NSColor.white.cgColor
     card.layer?.cornerRadius = 10
     let shot = NSImageView(frame: NSRect(x: 10, y: 10, width: side - 20, height: side - 20))
-    shot.image = image
     shot.imageScaling = .scaleProportionallyUpOrDown
     card.addSubview(shot)
+    qrView = shot
 
-    func note(_ text: String, y: CGFloat, c: NSColor) -> NSTextField {
-      let t = NSTextField(wrappingLabelWithString: text)
-      t.font = mono
-      t.textColor = c
-      t.backgroundColor = .clear
-      t.isBordered = false
-      t.isEditable = false
-      t.alignment = .center
-      t.frame = NSRect(x: 24, y: y, width: W - 48, height: 40)
-      return t
-    }
-    // Both labels are 40pt tall so a longer platform name can wrap; text draws
-    // from the TOP of that frame, which is what the offsets are measured to.
-    let how = note(instruction, y: cardY - 56, c: color(0xc5, 0xa5, 0x6d))
-    // Says what the window is doing while it appears to do nothing. A code
-    // with no progress line reads as a window that has stopped.
-    let waiting = note("waiting for the scan — this closes itself", y: cardY - 90,
-                       c: color(0x8a, 0x8a, 0x8a))
+    // Something is turning while the bridge is asked for a code. It sits ON
+    // the white card, where the code is about to be, and goes away with it.
+    let spin = NSProgressIndicator(frame: NSRect(x: side / 2 - 16, y: side / 2 - 16, width: 32, height: 32))
+    spin.style = .spinning
+    spin.controlSize = .regular
+    // AQUA, against the app's dark appearance. A spinner inherits the window's
+    // appearance and draws light spokes under a dark one — invisible on the
+    // white card it sits on, which is what the first build of this window
+    // showed: a blank white square for four seconds.
+    spin.appearance = NSAppearance(named: .aqua)
+    spin.startAnimation(nil)
+    card.addSubview(spin)
+    qrSpinner = spin
+
+    let how = NSTextField(wrappingLabelWithString: instruction)
+    how.font = mono
+    how.textColor = color(0xc5, 0xa5, 0x6d)
+    how.backgroundColor = .clear
+    how.isBordered = false
+    how.isEditable = false
+    how.alignment = .center
+    // 40pt tall so a longer platform name can wrap; text draws from the TOP of
+    // that frame, which is what this offset is measured to.
+    how.frame = NSRect(x: 24, y: cardY - 56, width: W - 48, height: 40)
+    // ~~"waiting for the scan — this closes itself" under it.~~ Yeeted (owner,
+    // 2026-08-26). The window is one instruction and one code; a second line
+    // narrating that the window is still a window earns nothing.
+    how.isHidden = true // nothing to instruct until there is a code to scan
+    qrHow = how
 
     let header = makeHeader(width: W, height: headH)
     header.frame = NSRect(x: 0, y: bodyH, width: W, height: headH)
     header.autoresizingMask = [.width, .minYMargin]
     content.addSubview(card)
     content.addSubview(how)
-    content.addSubview(waiting)
     content.addSubview(header)
 
     let win = NSWindow(
@@ -255,6 +286,17 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     self.window = win
     NSApp.activate(ignoringOtherApps: true)
     win.makeKeyAndOrderFront(nil)
+  }
+
+  /// The code arrived: swap it for the spinner and say what to do with it.
+  /// The poll starts HERE rather than at open, because there is nothing to
+  /// approve until there is a code on screen.
+  private func fillQR(_ image: NSImage) {
+    qrSpinner?.stopAnimation(nil)
+    qrSpinner?.removeFromSuperview()
+    qrSpinner = nil
+    qrView?.image = image
+    qrHow?.isHidden = false
 
     // 2.5s: the remote-auth code lives about two minutes, so this is dozens of
     // asks over its whole life, not a busy loop.
@@ -616,6 +658,10 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     blink?.invalidate(); blink = nil
     headerTitle = nil
     qrCheck = nil
+    qrView = nil
+    qrSpinner?.stopAnimation(nil)
+    qrSpinner = nil
+    qrHow = nil
     let cb = done
     let win = window
     web?.navigationDelegate = nil

@@ -137,6 +137,27 @@ test('the QR-window roster is exactly the platforms with no page to drive', () =
   }
 });
 
+test('the platforms on a non-bridgev2 schema are the ones we expect', () => {
+  // bridgeStatus reads a bridge's own DB, and its default query is bridgev2's
+  // (`user_login`). A platform on an older schema must override it, and
+  // getting that wrong is INVISIBLE: the query throws, the read is best-effort,
+  // and the exception comes back as "not connected". Discord spent its whole
+  // existence in this repo reporting disconnected while logged in, portals
+  // backfilling, because mautrix-discord predates bridgev2 (owner, 2026-08-26:
+  // "doesn't seem like it actually worked" — it had).
+  const overridden = entries.filter(([, p]) => p.statusSql).map(([id]) => id).sort();
+  assert.deepEqual(overridden, ['discord']);
+
+  // An override has to answer the same question the default does, or
+  // bridgeStatus reads undefined and calls it an unnamed account.
+  for (const [id, p] of entries) {
+    if (!p.statusSql) continue;
+    assert.match(p.statusSql, /\bAS remote_name\b/u,
+      `${id}: statusSql must project a remote_name column — bridgeStatus reads ` +
+        `row.remote_name and nothing else`);
+  }
+});
+
 test('the field contract is declared per platform, for the two that need one', () => {
   // The shape the harvested cookies are sent in is the SERVER's call — Swift
   // enforces it and never decides it, same as allowedHosts. Pinned as a roster
