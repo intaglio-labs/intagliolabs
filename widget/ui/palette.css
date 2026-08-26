@@ -1345,6 +1345,17 @@ body.connections .win {
 body.connections .conn-main {
   display: flex; flex-direction: column;
   flex: 1 1 auto; min-width: 0;
+  /* THE COLUMN KEEPS ITS WIDTH WHEN THE WINDOW GROWS. 272 = the 312pt window
+     less its 20px side padding, and it is the number every measurement on
+     this page is already drawn against — four 62px tiles and three 8px gaps
+     come to exactly 272. While a hint card is open the window is wider by the
+     card (connections.js posts extraWidth) and native pins its RIGHT edge to
+     the widget, so the new space arrives on the left; without a cap, grow
+     handed that space to this column instead and the shelf and the settings
+     stretched sideways every time a card opened. The auto left margin holds
+     the column against the right edge, which is where the widget is, and
+     leaves the new width for the card. */
+  max-width: 272px; margin-left: auto;
   /* ~~max-height: 100% + overflow-y: auto, the scroll-inside constraint for
      big scales.~~ Settings does not scroll vertically any more (owner,
      2026-08-25): the page must always FIT, and the window grows to hold it —
@@ -1420,24 +1431,26 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
 }
 /* The hint no longer lives IN the row — a full-width strip cannot be a cell
    of a horizontal shelf. It renders below, in its own host. */
-/* 236px wide; the +12px .win gap makes the 248 the page posts as
-   extraWidth (connections.js) — change one, change both. Scrolls on its own
-   if a hand-hold outgrows the window rather than growing it. Its height is
-   set by connections.js to match .conn-main exactly, so with both columns
-   bottom-anchored the panel's TOP lines up with the CONNECTIONS eyebrow. */
-/* ~~The hint host was a LEFT SIDE STRIP: flex: 0 1 236px in the .win row,
-   the window widening by 248 to reveal it, a book-fold rotateY on open.~~
-   Re-shaped into a POP-OVER (owner, 2026-08-25): the flow floats over the
-   page, anchored to the tile that was pressed — bridge.js hzPlacePop sets
-   left/top/bottom/max-height from the tile's rect — and the window never
-   changes size for it. position: fixed keeps it out of the body's
-   overflow: clip; the card scrolls inside itself when the flow is taller
-   than the room the tile leaves it. */
+/* ~~The hint host was a LEFT SIDE STRIP: flex: 0 1 236px in the .win row, the
+   window widening by 248 to reveal it, a book-fold rotateY on open.~~
+   Re-shaped into a POP-OVER anchored to the tile, the window never changing
+   size for it (owner, 2026-08-25).~~ A SIDE CARD again (owner, 2026-08-26),
+   though not the old in-flow strip: it stays position: fixed, and bridge.js
+   hzPlacePop({side}) parks it in the window's left margin instead of over the
+   tile. What sent it back is Discord's QR — a login whose whole content is an
+   image a phone has to read, tall enough over the tile to hide the settings
+   and the shelf underneath it.
+   The 236 lives in hzPlacePop now, as a max-width rather than a width, and
+   the ~~248 both files had to agree on~~ is measured off the rendered card
+   (fitConnections). position: fixed still keeps it out of the body's
+   overflow: clip, and it still scrolls inside itself when a flow is taller
+   than the window. */
 .hint-host {
   position: fixed; z-index: 40;
   /* Sized to the card's own content: a two-line connect card should be a
      small card, not 280px of mostly empty room (owner, 2026-08-25). The
-     placer (hzPlacePop) sets only max-width; long flows wrap at the cap. */
+     placer (hzPlacePop) sets only max-width; long flows wrap at the cap. This
+     is also what the window widens by, so a small card costs a small window. */
   width: max-content;
   overflow-y: auto;
   display: flex; flex-direction: column; align-items: stretch;
