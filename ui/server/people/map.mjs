@@ -9,7 +9,7 @@
 // model. The owner can audit every grouping — a star's cluster is its work
 // domain or LinkedIn company, nothing inferred.
 
-import { buildGraph } from './graph.mjs';
+import { buildGraph, namelike } from './graph.mjs';
 import { depthScore, isNonPerson } from './rank.mjs';
 import { topicTallies, topTopics, nameTokenSet } from './topics.mjs';
 import { buildHighlights } from './highlights.mjs';
@@ -125,13 +125,42 @@ function warmthOf(recencyDays) {
 // marketing). A mail-only, inbound-only, never-answered, never-met contact is a
 // newsletter or a cold pitch — not a person on the map. This is a visual floor,
 // not a claim they don't exist; the review/search paths still see everyone.
+// A RELATIONSHIP NEEDS SOME SUBSTANCE, not just a channel.
+//
+// The old rule admitted anyone carrying an imessage or whatsapp channel, full
+// stop — and on a corpus that is 415,447 iMessage rows and zero mail rows, that
+// clause passed 100% of everyone who survived isNonPerson. It removed nobody.
+// 1,778 of 2,604 people (68%) qualified on it and nothing else; 1,543 of the
+// 2,519 drawn (61%) have two or fewer direct messages EVER, and 864 have exactly
+// one. That is the owner's "showing too many people im definitely not connected
+// to this many".
+//
+// Each clause below is a different way of being real, and any one is enough:
+//
+//   named        the contacts app knows them. Whatever the volume, the owner
+//                deliberately wrote them down. Never filtered.
+//   met          you were in a room together. One meeting outweighs any number
+//                of messages for saying you know somebody.
+//   two-way      they wrote and you wrote back, or the reverse. A single
+//                exchange is a conversation; a lone message is a notification.
+//   volume       enough direct messages that it cannot be a one-off.
+//   room regular not just present in a group chat but a repeated voice in one.
+//
+// What this removes is the long tail of one-message handles: delivery codes that
+// isNonPerson's shape rules missed, a business that texted once, a wrong number.
+// What it keeps is everyone the contacts app knows, everyone met in person, and
+// every two-way thread — so the risk of dropping somebody real is bounded by the
+// fact that being real leaves one of those marks.
+const MIN_DIRECT_MESSAGES = 3;
+const MIN_ROOM_MESSAGES = 5;
+
 function hasRelationship(p) {
-  if ((p.metInPerson ?? 0) > 0) return true;                                    // in a room together
-  if ((p.channels ?? []).some((c) => c === 'imessage' || c === 'whatsapp')) return true; // personal channel
-  // On mail, a relationship means it went BOTH ways. A lone outbound (sent=1,
-  // received=0) is an unsubscribe click or a cold send, not a person on the
-  // map; a lone inbound is a newsletter. Reciprocity > 0 needs both directions.
-  return (p.reciprocity ?? 0) > 0;
+  if (namelike(p.name)) return true;                       // the contacts app knows them
+  if ((p.metInPerson ?? 0) > 0) return true;               // in a room together
+  if ((p.reciprocity ?? 0) > 0) return true;               // it went both ways
+  if ((p.directMessages ?? 0) >= MIN_DIRECT_MESSAGES) return true;
+  if ((p.roomMessages ?? 0) >= MIN_ROOM_MESSAGES) return true;
+  return false;
 }
 
 // The TIMELINE view's payload: one YEAR of people, sorted by that year's
@@ -157,11 +186,103 @@ const yearMemo = new WeakMap();
 
 // Exported for people/summary.mjs, which needs the same graph and pays the
 // same memo.
-export function yearCore(contextDb, stateDb, { now, owner, aliases }) {
-  const c = contextDb.prepare('SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM context').get();
-  const stamp = `${c.n}|${c.m}|${aliases ? aliases.size : 0}`;
+// THE STAMP, in one place, because it was wrong in three.
+//
+// It was (row count, max rowid, alias count) on `context` alone, and it missed
+// two of its own inputs:
+//
+//   * THE CONTACTS SPINE. buildGraph resolves every identifier to a person key
+//     through it, so a contacts sync changes who the graph's people ARE — and
+//     188,508 spine rows landed in one day without moving the stamp by one bit.
+//   * episode_member. topicTallies LEFT JOINs it to count a topic once per
+//     conversation, so rebuilding the episode index changes the chips.
+//
+// And COUNT(*) with MAX(rowid) cannot see an UPDATE at all: the 405,952-row
+// history backfill was updates, which move neither. Adding the store's own
+// change counter fixes that -- SQLite's data_version bumps on any committed
+// write by another connection.
+//
+// This mattered little while the memos lived for seconds. It is the prerequisite
+// for caching anything longer: a stale answer is a delay, a WRONG answer served
+// from cache is a bug you cannot see.
+export function corpusStamp(contextDb, stateDb, extra = '') {
+  const c = contextDb
+    .prepare('SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM context')
+    .get();
+  const dv = contextDb.prepare('PRAGMA data_version').get();
+  let eps = 0;
+  try {
+    eps = Number(contextDb.prepare('SELECT COUNT(*) AS n FROM episode_member').get().n) || 0;
+  } catch {
+    eps = 0; // a corpus with no episode index is a valid state
+  }
+  let spine = 0;
+  try {
+    if (stateDb) {
+      spine = Number(stateDb.prepare('SELECT COUNT(*) AS n FROM contact_ids').get().n) || 0;
+    }
+  } catch {
+    spine = 0;
+  }
+  const version = dv ? Object.values(dv)[0] : 0;
+  return `${c.n}|${c.m}|${version}|${eps}|${spine}|${extra}`;
+}
+
+// SERVE THE LAST GOOD ANSWER, THEN CATCH UP.
+//
+// A cold core is ~7.6s of SYNCHRONOUS work, and node:sqlite is synchronous in a
+// single-threaded process: measured, a 20ms interval timer got ZERO ticks during
+// an 8-second build. So a rebuild does not merely make one request slow, it
+// stops hermes answering anything at all -- every route and the connector ingest
+// with it. That is the "it says loading on mostly every screen" the owner
+// reported, and it is why staleness is worth having.
+//
+// So: a stamp mismatch no longer blocks. The previous core is returned
+// immediately, marked stale, and the rebuild is scheduled to run after the
+// response has gone out. The reader gets an answer in milliseconds that is at
+// most one ingest behind, instead of waiting eight seconds for one that is
+// current to the millisecond.
+//
+// The FIRST build still blocks, because there is nothing to serve instead. That
+// is the one unavoidable wait and it is what warmPeopleCore() at boot exists to
+// spend before anybody asks.
+//
+// `staleSince` is the timestamp of the data being served, so a caller can say
+// how old it is rather than implying it is live.
+let coreRebuildScheduled = false;
+
+export function peopleCoreFreshness(contextDb, stateDb, aliases = null) {
+  const hit = yearMemo.get(contextDb);
+  if (!hit) return { state: 'cold', builtAt: null, stale: true };
+  const stamp = corpusStamp(contextDb, stateDb, String(aliases ? aliases.size : 0));
+  return {
+    state: hit.stamp === stamp ? 'fresh' : 'stale',
+    builtAt: hit.builtAt ?? null,
+    stale: hit.stamp !== stamp,
+  };
+}
+
+export function yearCore(contextDb, stateDb, { now, owner, aliases, blocking = false }) {
+  const stamp = corpusStamp(contextDb, stateDb, String(aliases ? aliases.size : 0));
   const hit = yearMemo.get(contextDb);
   if (hit && hit.stamp === stamp) return hit.core;
+
+  // Stale but usable: hand it back now and rebuild behind the response.
+  if (hit && !blocking) {
+    if (!coreRebuildScheduled) {
+      coreRebuildScheduled = true;
+      setTimeout(() => {
+        coreRebuildScheduled = false;
+        try {
+          yearCore(contextDb, stateDb, { now: Date.now(), owner, aliases, blocking: true });
+        } catch {
+          // A failed rebuild leaves the previous core in place, which is stale
+          // rather than wrong. The next request schedules another.
+        }
+      }, 0).unref?.();
+    }
+    return hit.core;
+  }
 
   const graph = buildGraph(contextDb, stateDb, { now, owner, aliases })
     .filter((p) => !isNonPerson(p) && hasRelationship(p));
@@ -174,7 +295,7 @@ export function yearCore(contextDb, stateDb, { now, owner, aliases }) {
   // already belongs to -- recomputing it there would be a second copy free to
   // drift from this one.
   const core = { graph, topics, idToKey };
-  yearMemo.set(contextDb, { stamp, core });
+  yearMemo.set(contextDb, { stamp, core, builtAt: Date.now() });
   return core;
 }
 
@@ -260,8 +381,7 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
 const searchMemo = new WeakMap();
 
 export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, aliases = null } = {}) {
-  const c = contextDb.prepare('SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM context').get();
-  const stamp = `${c.n}|${c.m}|${aliases ? aliases.size : 0}`;
+  const stamp = corpusStamp(contextDb, stateDb, String(aliases ? aliases.size : 0));
   const hit = searchMemo.get(contextDb);
   if (hit && hit.stamp === stamp) return hit.value;
 
@@ -320,22 +440,47 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
 const mapMemo = new WeakMap();
 
 export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs = null, aliases = null } = {}) {
-  const stampRow = contextDb.prepare('SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM context').get();
-  const stamp = `${stampRow.n}|${stampRow.m}|${aliases ? aliases.size : 0}|${sinceTs ?? 'all'}`;
+  const stamp = corpusStamp(contextDb, stateDb, `${aliases ? aliases.size : 0}|${sinceTs ?? 'all'}`);
   const memoHit = mapMemo.get(contextDb);
   if (memoHit && memoHit.stamp === stamp) return memoHit.value;
   // Drop automated senders/role addresses (shared filter), then keep only the
   // people the owner actually has a relationship with — see hasRelationship.
-  const graph = buildGraph(contextDb, stateDb, { now, owner, sinceTs, aliases })
-    .filter((p) => !isNonPerson(p) && hasRelationship(p));
+  // SHARE THE CORE when there is no window. buildMap was calling buildGraph
+  // directly and rebuilding an identical 2,604-person population into its own
+  // memo -- 6,496ms of pure duplication after yearCore had already paid for it,
+  // which was half the cost of a first visit to the panel.
+  //
+  // Only when sinceTs is null, because a window changes WHICH ROWS the graph is
+  // built from and yearCore has no notion of one. That is the globe's own case,
+  // so the sharing covers the path that actually hurts.
+  // SHARE THE WHOLE CORE when there is no window -- the graph AND the topic
+  // tallies. buildMap was calling buildGraph and topicTallies itself, rebuilding
+  // an identical 2,604-person population and rescanning the whole corpus for
+  // chips that yearCore had already computed: 6,496ms of pure duplication, half
+  // the cost of a first visit to the panel. topicTallies alone is 57-68% of a
+  // cold build, so sharing it is the larger half.
+  //
+  // Only when sinceTs is null, because a window changes WHICH ROWS the graph is
+  // built from and yearCore has no notion of one. That is the globe's own case,
+  // so the sharing covers the path that actually hurts.
+  const shared = sinceTs == null ? yearCore(contextDb, stateDb, { now, owner, aliases }) : null;
+  const graph = (shared
+    ? shared.graph
+    : buildGraph(contextDb, stateDb, { now, owner, sinceTs, aliases })
+  ).filter((p) => !isNonPerson(p) && hasRelationship(p));
 
   // Per-year topic chips (people/topics.mjs): one corpus scan, keyed by the
   // SAME resolution the graph just produced (identifier -> person key), so a
   // merged person tallies as one. Name tokens — everyone's, plus the
   // owner's — are excluded up front: a person's own name is never their topic.
-  const idToKey = new Map(graph.flatMap((p) => (p.identifiers ?? []).map((id) => [id, p.key])));
-  const nameTokens = nameTokenSet([...graph.map((p) => p.name), ...(owner?.names ?? [])]);
-  const topics = topicTallies(contextDb, idToKey, { nameTokens });
+  const idToKey = shared
+    ? shared.idToKey
+    : new Map(graph.flatMap((p) => (p.identifiers ?? []).map((id) => [id, p.key])));
+  const topics = shared
+    ? shared.topics
+    : topicTallies(contextDb, idToKey, {
+        nameTokens: nameTokenSet([...graph.map((p) => p.name), ...(owner?.names ?? [])]),
+      });
 
   // Strength is depth (volume + reciprocity + reach), normalized to 0..1 across
   // the whole map so the client sizes stars on a stable scale.

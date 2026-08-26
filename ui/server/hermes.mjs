@@ -54,7 +54,7 @@ import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch } from './people/search.mjs';
 import { loadOwner } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
-import { buildMap, buildYear, buildSearchYears } from './people/map.mjs';
+import { buildMap, buildYear, buildSearchYears, yearCore } from './people/map.mjs';
 import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
@@ -2537,6 +2537,16 @@ function tryPersonSearch(db, question) {
 // context db (the main store) is the caller's already-open handle. Errors
 // propagate: unlike the ask-path helpers, these are explicit routes the widget
 // invoked, so a failure should surface as a 500, not a silent null.
+// Build the people core once, at boot, on the same handles a request would use.
+// Exported shape matches yearCore's so the caller can log a count without
+// reaching into it.
+function warmPeopleCore(db) {
+  return withPeopleDbs(db, (state, resDb) => {
+    const { aliases } = resolutionState(resDb);
+    return yearCore(db, state, { now: Date.now(), owner: loadOwner(), aliases, blocking: true });
+  });
+}
+
 function withPeopleDbs(db, fn) {
   let state = null;
   let resDb = null;
@@ -3135,6 +3145,33 @@ if (isMain) {
       console.log(
         `hermes listening on http://127.0.0.1:${port} (context rows: ${n})`
       );
+      // WARM THE PEOPLE CORE BEFORE ANYBODY ASKS.
+      //
+      // The first build is the one wait that cannot be served around: ~7.6s of
+      // synchronous work with nothing cached to hand back instead. Every hermes
+      // restart throws the memo away, and the app restarts hermes on every
+      // deploy — so without this, the first person to open the panel after a
+      // deploy pays it, every time, and while they wait hermes answers nothing
+      // at all (node:sqlite is synchronous; a 20ms timer got zero ticks during
+      // an 8s build).
+      //
+      // Deferred past listen so the port is open first: a request arriving
+      // during the warm is queued behind it, which is the same wait it would
+      // have paid anyway, and /health answers before it starts.
+      //
+      // Counts only in the log, and failure is not fatal: an unwarmed core is
+      // slow, not broken, and the next request builds it.
+      setTimeout(() => {
+        const t0 = Date.now();
+        try {
+          const core = warmPeopleCore(db);
+          console.log(
+            `people core warm in ${Date.now() - t0}ms (${core?.graph?.length ?? 0} people)`
+          );
+        } catch (e) {
+          console.error(`people core warm failed: ${e?.message ?? e}`);
+        }
+      }, 250).unref?.();
     },
     (e) => {
       console.error(`hermes failed to start: ${e.message ?? e}`);

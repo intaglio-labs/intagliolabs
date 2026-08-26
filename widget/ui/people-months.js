@@ -49,6 +49,8 @@
   // answer it on the owner's behalf. Defaulting to 'in' would open on 759 of
   // 2,604 stars and read as a much emptier corpus than it is.
   let recency = 'all';
+  // The strip is homed to its right-hand end once, not on every render.
+  let tabsHomed = false;
   let scope = 'year';
   // The topic a bubble was clicked into, or null. Only the list honours it —
   // filtering the constellation to one topic would just draw that one circle.
@@ -557,9 +559,17 @@
     // The newest year is what a fresh open selects, so scroll to the far right
     // and both it and the globe are in view. Only a deliberately older selection
     // gets scrolled to.
+    // ONCE, ON THE FIRST PAINT. Re-homing to the right on every render meant any
+    // click while the newest year was selected yanked the strip back under the
+    // owner's hand — a scroll position the reader set is theirs to keep.
+    //
+    // Why the right end at all: years run oldest-to-newest and ten tabs need
+    // ~646px against 490px of strip, so 8 fit. scrollIntoView({inline:'nearest'})
+    // is a no-op when the active tab is already visible, which parked a fresh
+    // open on 2012 with the newest years off-screen.
     const active = tabsEl.querySelector('.pm-tab.active');
-    const newest = years.length ? years[years.length - 1] : year;
-    if (scope === 'all' || year === newest) {
+    if (!tabsHomed) {
+      tabsHomed = true;
       tabsEl.scrollLeft = tabsEl.scrollWidth;
     } else if (active) {
       active.scrollIntoView({ inline: 'nearest', block: 'nearest' });
