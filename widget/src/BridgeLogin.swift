@@ -60,6 +60,13 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   /// the outcome itself — so this window's whole job is to show the page, and
   /// closing it is the end of its part.
   private let approval: Bool
+  /// Where a STORAGE field's value actually lives, when signing in does not
+  /// land there. Empty for platforms that need no such nudge.
+  private let storageUrl: String
+  /// Driven there at most once, so a page that simply has no token cannot put
+  /// the window in a navigation loop.
+  private var nudged = false
+
   /// A browser string this platform insists on, or empty for the default.
   private let userAgent: String
 
@@ -132,7 +139,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     label: String, cookieDomain: String, sessionCookie: String, allowedHosts: [String],
     requiredCookies: [String], cookieFormat: String, fields: [[String: String]],
     approval: Bool, userAgent: String, allowedFrameHosts: [String],
-    done: @escaping (String?) -> Void
+    storageUrl: String, done: @escaping (String?) -> Void
   ) {
     self.label = label
     self.cookieDomain = cookieDomain
@@ -145,6 +152,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     self.approval = approval
     self.userAgent = userAgent
     self.allowedFrameSuffixes = allowedFrameHosts
+    self.storageUrl = storageUrl
     self.allowedSuffixes = allowedHosts
     self.done = done
   }
@@ -164,6 +172,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     sessionCookie: String, allowedHosts: [String], requiredCookies: [String] = [],
     cookieFormat: String = "json", fields: [[String: String]] = [],
     approval: Bool = false, userAgent: String = "", allowedFrameHosts: [String] = [],
+    storageUrl: String = "",
     done: @escaping (String?) -> Void
   ) {
     // A window must have something to wait for: a session cookie to appear, or
@@ -180,7 +189,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
       sessionCookie: sessionCookie, allowedHosts: allowedHosts,
       requiredCookies: requiredCookies, cookieFormat: cookieFormat,
       fields: fields, approval: approval, userAgent: userAgent,
-      allowedFrameHosts: allowedFrameHosts, done: done
+      allowedFrameHosts: allowedFrameHosts, storageUrl: storageUrl, done: done
     )
     current = ctl
     ctl.show(url: url)
@@ -225,7 +234,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     let ctl = BridgeLogin(
       label: label, cookieDomain: "", sessionCookie: "", allowedHosts: [],
       requiredCookies: [], cookieFormat: "json", fields: [],
-      approval: false, userAgent: "", allowedFrameHosts: [], done: done
+      approval: false, userAgent: "", allowedFrameHosts: [], storageUrl: "", done: done
     )
     ctl.qrCheck = check
     current = ctl
@@ -502,8 +511,9 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     // Hazlie chrome above the real login page. A login window is the most
     // impersonation-shaped surface this app has, so the FRAME must read as
     // Hazlie (terminal palette, mono) — a fake with default system chrome then
-    // stands out. It also names the real domain, so the owner can see they're on
-    // the genuine site, and states plainly that Hazlie never sees the password.
+    // stands out. It names the real domain — the header's host line, kept
+    // current as the page navigates — so the owner can see they're on the
+    // genuine site, and states plainly that Hazlie never sees the password.
     let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: webH + headH))
     content.wantsLayer = true
     web.frame = NSRect(x: 0, y: 0, width: W, height: webH)
@@ -537,6 +547,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     // otherwise — see systemSafariUserAgent for why that is READ and not
     // written down.
     web.customUserAgent = userAgent.isEmpty ? Self.systemSafariUserAgent : userAgent
+    showHost(url.host)
     web.load(URLRequest(url: url))
 
     // Poll the webview's own cookie store for the session cookie. When it
@@ -548,6 +559,10 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     self.poll = timer
   }
 
+  /// The domain line under the title. Updated as the page navigates, so it
+  /// names where you ACTUALLY are rather than where the window started.
+  private var headerHost: NSTextField?
+
   // The terminal-palette, mono header. Values mirror the connect page's
   // "Terminal Palette v0.2" so Hazlie's login window is visually of a piece with
   // the rest of the app.
@@ -557,6 +572,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     }
     let bg = color(0x14, 0x14, 0x12)
     let muted = color(0x8a, 0x8a, 0x8a)
+    let hazelnutDim = color(0xc5, 0xa5, 0x6d)
     let mono = NSFont(name: "Menlo", size: 12) ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
 
     let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
@@ -583,12 +599,27 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     title.autoresizingMask = [.width]
     headerTitle = title
     startBlink()
-    // State the trust fact plainly.
+    // THE DOMAIN, and it was claimed here before it was shown. The comment at
+    // show(url:) has said this header "names the real domain, so the owner can
+    // see they're on the genuine site" since it was written; the header showed
+    // the platform's LABEL and nothing else, so the one fact that distinguishes
+    // the genuine site from a convincing copy was the one it left out
+    // (2026-08-26).
+    //
+    // It also does real work for a password manager. 1Password's universal
+    // autofill reads a browser's address bar to pick an item and cannot read
+    // one here, because this is an app window rather than a browser — so the
+    // owner searches, and the domain is the search term.
+    let host = makeLabel("", font: mono, color: hazelnutDim, y: 8)
+    headerHost = host
+    // State the trust fact plainly, beside it.
     let sub = makeLabel(
       "your credentials stay local",
       font: mono, color: muted, y: 8
     )
+    sub.alignment = .right
     view.addSubview(title)
+    view.addSubview(host)
     view.addSubview(sub)
     return view
   }
@@ -695,7 +726,24 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
           case "storage":
             // Read from inside the page by the poller above, because this half
             // of the session is not in any cookie jar.
-            guard let v = self.seenHeaders[Self.storagePrefix + id], !v.isEmpty else { return }
+            guard let v = self.seenHeaders[Self.storagePrefix + id], !v.isEmpty else {
+              // SIGNED IN, ON THE WRONG PAGE. Slack's sign-in ends on an
+              // interstitial that offers to launch the desktop app — "Click
+              // Open Slack... or use Slack in your browser" — and that page
+              // holds no token, because the token belongs to the web client
+              // the link goes to. The cookies are already set, so the window
+              // was silently waiting for a value that page was never going to
+              // have (owner, 2026-08-26: "what do i do on this page? it seems
+              // stuck").
+              //
+              // Nothing here is a workaround for a login that failed: the
+              // login SUCCEEDED, and this walks the last step the owner would
+              // otherwise have to know to take. Once, and only once the
+              // required cookies are in hand, so it cannot loop and cannot
+              // fire on a page where nobody has signed in.
+              self.nudgeToStorage()
+              return
+            }
             payload[id] = v
           default:
             return
@@ -730,6 +778,21 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   // public host regardless of what this returns -- which is exactly why it is
   // gone: dead permissiveness on a credential surface becomes live the day someone
   // adds an unrelated ATS exception. The loopback bases do not come through here.
+  /// Write the host into the header. Trimmed of a leading www., which is
+  /// noise in every one of these and pushes the part that identifies the site.
+  private func showHost(_ host: String?) {
+    guard let host, !host.isEmpty else { return }
+    headerHost?.stringValue = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+  }
+
+  // The domain follows the page. A login can hop hosts inside its own fence —
+  // Slack's SSO buttons reach accounts.google.com and appleid.apple.com — and
+  // a header still naming slack.com there would be a claim about where you are
+  // that is no longer true, which is the opposite of what it is for.
+  func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+    showHost(webView.url?.host)
+  }
+
   func webView(
     _ webView: WKWebView,
     decidePolicyFor navigationAction: WKNavigationAction,
@@ -798,6 +861,13 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
       webView.load(URLRequest(url: url))
     }
     return nil // never a second window
+  }
+
+  /// Walk a signed-in window to the page that actually holds the token.
+  private func nudgeToStorage() {
+    guard !nudged, !storageUrl.isEmpty, let url = URL(string: storageUrl) else { return }
+    nudged = true
+    DispatchQueue.main.async { [weak self] in self?.web?.load(URLRequest(url: url)) }
   }
 
   /// Is a bridge login on screen right now? The dismiss monitor asks.
