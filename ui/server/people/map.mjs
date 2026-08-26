@@ -12,7 +12,7 @@
 import { buildGraph, namelike } from './graph.mjs';
 import { depthScore, isNonPerson } from './rank.mjs';
 import { topicTallies, topTopics, nameTokenSet } from './topics.mjs';
-import { buildYearAwards } from './highlights.mjs';
+import { buildHighlights } from './highlights.mjs';
 
 const DAY = 86_400_000;
 
@@ -262,6 +262,41 @@ export function peopleCoreFreshness(contextDb, stateDb, aliases = null) {
   };
 }
 
+// THE SAME QUESTION, ASKED OF THE CORPUS ALONE.
+//
+// corpusStamp above is what the PEOPLE core depends on, spine included. The
+// topic scan depends on strictly less than that: it is a pure function of the
+// rows and the episode index, now that both the person key and the name filter
+// happen at the fold. Giving it its own stamp is what lets a contacts sync --
+// 188,508 rows in a day -- reuse a scan it cannot possibly have changed.
+export function corpusOnlyStamp(contextDb) {
+  const c = contextDb
+    .prepare('SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM context')
+    .get();
+  const dv = contextDb.prepare('PRAGMA data_version').get();
+  let eps = 0;
+  try {
+    eps = Number(contextDb.prepare('SELECT COUNT(*) AS n FROM episode_member').get().n) || 0;
+  } catch {
+    eps = 0;
+  }
+  return `${c.n}|${c.m}|${dv ? Object.values(dv)[0] : 0}|${eps}`;
+}
+
+// THE DISK CACHE, OPT-IN.
+//
+// Null unless the server hands one over, so importing this module never touches
+// the filesystem: tests and scripts get the pure function and the owner's cache
+// is never written by a test run. hermes calls this once at boot with a store
+// beside its own context.db -- see people/tallyStore.mjs for what is kept and
+// why it is all-or-nothing, and why a stamp that lives across restarts cannot
+// be this one (data_version is a per-connection session counter).
+let tallyStore = null;
+
+export function useTallyStore(store) {
+  tallyStore = store ?? null;
+}
+
 export function yearCore(contextDb, stateDb, { now, owner, aliases, blocking = false }) {
   const stamp = corpusStamp(contextDb, stateDb, String(aliases ? aliases.size : 0));
   const hit = yearMemo.get(contextDb);
@@ -284,11 +319,36 @@ export function yearCore(contextDb, stateDb, { now, owner, aliases, blocking = f
     return hit.core;
   }
 
+  // A BLOCKING REBUILD THAT FAILS MUST NOT COST THE GOOD ANSWER.
+  //
+  // loadSpine now raises when it cannot read the contacts spine rather than
+  // reporting an empty address book, so this can throw where it used to return
+  // a nameless graph. Stale is the right thing to serve then -- the alternative
+  // is a panel that shows everyone as a phone number, which is what this whole
+  // change exists to stop.
+  try {
+    return buildYearCore(contextDb, stateDb, { now, owner, aliases, stamp });
+  } catch (error) {
+    if (hit) return hit.core;
+    throw error;
+  }
+}
+
+function buildYearCore(contextDb, stateDb, { now, owner, aliases, stamp }) {
   const graph = buildGraph(contextDb, stateDb, { now, owner, aliases })
     .filter((p) => !isNonPerson(p) && hasRelationship(p));
   const idToKey = new Map(graph.flatMap((p) => (p.identifiers ?? []).map((id) => [id, p.key])));
   const nameTokens = nameTokenSet([...graph.map((p) => p.name), ...(owner?.names ?? [])]);
-  const topics = topicTallies(contextDb, idToKey, { nameTokens, bucketBy: 'year' });
+  const topics = topicTallies(contextDb, idToKey, {
+    nameTokens,
+    bucketBy: 'year',
+    // The scan is cached on the corpus alone; the fold re-runs on every spine
+    // change, which is 28ms against a 3,494ms rescan.
+    scanStamp: corpusOnlyStamp(contextDb),
+    // ...and cached on disk between runs, so a restart that changed nothing
+    // loads the scan instead of repeating it.
+    store: tallyStore,
+  });
 
   // idToKey rides along because people/content.mjs needs exactly this
   // resolution to credit a corpus hit to the same person their message count
@@ -299,36 +359,25 @@ export function yearCore(contextDb, stateDb, { now, owner, aliases, blocking = f
   return core;
 }
 
-/**
- * Person key → their contact photo, for the keys asked for.
- *
- * Rides yearCore's memoised graph rather than rebuilding it: this is called
- * right after the list it decorates, so the stamp is almost always a hit.
- * A person's identifiers are tried in order and the first photo wins — the
- * same face is on all of them when a contact has one, so "first" is not a
- * ranking, just a stop condition.
- *
- * Returns raw bytes; the caller decides how to frame them. Missing keys are
- * simply absent: no photo is the common case, not an error.
- */
+// Person key → contact image bytes for explicitly requested people. This
+// reuses the memoised graph and treats a missing legacy avatar table as no
+// photo, rather than as a failed People page.
 export function buildAvatars(contextDb, stateDb, { keys, now = Date.now(), owner, aliases = null } = {}) {
-  const want = new Set(Array.isArray(keys) ? keys : []);
-  if (want.size === 0 || !stateDb) return new Map();
-  let stmt;
+  const wanted = new Set(Array.isArray(keys) ? keys : []);
+  if (wanted.size === 0 || !stateDb) return new Map();
+  let avatarFor;
   try {
-    stmt = stateDb.prepare('SELECT jpeg FROM contact_avatars WHERE identifier = ?');
+    avatarFor = stateDb.prepare('SELECT jpeg FROM contact_avatars WHERE identifier = ?');
   } catch {
-    // A state.db written before avatars existed has no such table. Nothing to
-    // show is the honest answer, and it must not take the page down with it.
     return new Map();
   }
   const { graph } = yearCore(contextDb, stateDb, { now, owner, aliases });
   const out = new Map();
-  for (const p of graph) {
-    if (!want.has(p.key) || out.has(p.key)) continue;
-    for (const id of p.identifiers ?? []) {
-      const row = stmt.get(id);
-      if (row?.jpeg) { out.set(p.key, row.jpeg); break; }
+  for (const person of graph) {
+    if (!wanted.has(person.key)) continue;
+    for (const identifier of person.identifiers ?? []) {
+      const row = avatarFor.get(identifier);
+      if (row?.jpeg) { out.set(person.key, row.jpeg); break; }
     }
   }
   return out;
@@ -369,18 +418,11 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
   // below: a streak or a return is worth surfacing even when the person sits
   // past row 250, and capping first would have quietly made the highlights a
   // fact about the first page rather than about the year.
-  const { cards, awards } = buildYearAwards(entries, { year, now });
-
   return {
     year,
     years: [...yearsSet].sort((a, b) => a - b),
     total: entries.length,
-    highlights: cards,
-    // WHO THE LIST MARKS. Each category's top five, by key, with the label the
-    // card uses. Sent alongside the rows rather than folded into them: the same
-    // person can be in two categories, the rows are memoised, and a key list is
-    // cheaper to join in the page than five flags per row are to carry.
-    awards,
+    highlights: buildHighlights(entries, { year, now }),
     people: entries.slice(0, cap).map((e) => {
       const doc = topics.docs.get(`${e.p.key}|${year}`);
       // The row carries only what the page still shows: the company, status
@@ -522,6 +564,7 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
     ? shared.topics
     : topicTallies(contextDb, idToKey, {
         nameTokens: nameTokenSet([...graph.map((p) => p.name), ...(owner?.names ?? [])]),
+        scanStamp: corpusOnlyStamp(contextDb),
       });
 
   // Strength is depth (volume + reciprocity + reach), normalized to 0..1 across

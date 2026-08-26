@@ -7,10 +7,16 @@ import {
   validateConfig,
 } from '../daemon.mjs';
 import { msUntilIdleWindow } from '../retain.mjs';
-import { parseArgs } from '../run.mjs';
+import { parseArgs, purgeHermesSources } from '../run.mjs';
 
 test('an empty config is valid — every section is optional until its source lands', () => {
   assert.deepEqual(validateConfig({}), {});
+});
+
+test('retired LinkedIn config remains valid across an upgrade', () => {
+  const legacy = { linkedin: {}, intervals: { linkedin: 900 } };
+  assert.deepEqual(validateConfig(legacy), legacy);
+  assert.throws(() => validateConfig({ linkedin: { cookie: 'secret' } }), /unknown key "cookie"/u);
 });
 
 test('a full config validates', () => {
@@ -56,10 +62,25 @@ test('the connector roster and its hermes-source mapping stay in lockstep', () =
   // oura is the health connector; contacts never writes corpus at all.
   assert.equal(CONNECTOR_HERMES_SOURCE.oura, 'health');
   assert.equal(CONNECTOR_HERMES_SOURCE.contacts, null);
+  assert.deepEqual(CONNECTOR_HERMES_SOURCE.matrix, [
+    'messenger', 'instagram', 'twitter', 'telegram', 'discord', 'slack', 'linkedin',
+  ]);
   // Every mapped hermes source is one retention can name.
-  for (const source of Object.values(CONNECTOR_HERMES_SOURCE)) {
+  for (const source of Object.values(CONNECTOR_HERMES_SOURCE).flatMap((value) => value ?? [])) {
     if (source !== null) assert.ok(RETENTION_SOURCES.includes(source), source);
   }
+});
+
+test('a Matrix purge covers every bridged Hermes source and totals the response', async () => {
+  const calls = [];
+  const result = await purgeHermesSources(CONNECTOR_HERMES_SOURCE.matrix, { token: 'unused' }, {
+    purge: async ({ source }) => {
+      calls.push(source);
+      return { deleted: source === 'messenger' ? 2 : 1, maintained: source === 'linkedin' };
+    },
+  });
+  assert.deepEqual(calls, CONNECTOR_HERMES_SOURCE.matrix);
+  assert.deepEqual(result, { deleted: 8, maintained: true });
 });
 
 test('msUntilIdleWindow lands on the next local occurrence, always in the future', () => {

@@ -7,7 +7,7 @@
 // failing for real reasons while the role tests only ever restated the table.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readStatus } from '../lib/status.mjs';
@@ -109,3 +109,50 @@ test('WhatsApp stays explicitly disconnected until Intaglio Labs enables it', (t
   const enabled = readStatus({ home: dir }).find((r) => r.id === 'whatsapp');
   assert.equal(enabled.connected, true, 'the existing WhatsApp store is used only after consent');
 });
+
+// A mailbox is an OAuth GRANT now, not a config entry — so this seeds a token
+// file rather than mail.accounts[]. The property under test is unchanged and
+// still the one that matters: a `mail.disabled` marker must reach the mail rows
+// however they came to exist. withDisabled() is mapped over every row, so this
+// is really asking whether the id a grant produces still resolves to the "mail"
+// connector; it would not if the row ids ever drifted.
+function grantMailbox(dir, address) {
+  const secrets = join(dir, '.hazlie', 'secrets');
+  mkdirSync(secrets, { recursive: true, mode: 0o700 });
+  const slug = address.toLowerCase().replace(/[^a-z0-9]+/gu, '-');
+  writeFileSync(join(secrets, `google-tokens-${slug}.json`), JSON.stringify({
+    account_email: address,
+    access_token: 'x', refresh_token: 'y',
+    scope: 'https://www.googleapis.com/auth/gmail.readonly',
+    obtained_at: 0, expires_in: 3600,
+  }), { mode: 0o600 });
+}
+
+test('shared connector disable markers apply to account and platform rows', (t) => {
+  const dir = home(t, {});
+  grantMailbox(dir, 'owner@example.com');
+  const markerDir = join(dir, '.hazlie', 'connectors');
+  writeFileSync(join(markerDir, 'mail.disabled'), '', { mode: 0o600 });
+  writeFileSync(join(markerDir, 'matrix.disabled'), '', { mode: 0o600 });
+
+  const rows = readStatus({ home: dir });
+  const mail = rows.find((row) => row.id === 'mail:owner@example.com');
+  assert.ok(mail, 'the grant must produce a mail row at all');
+  assert.equal(mail.connected, false);
+  assert.equal(mail.detail, 'turned off');
+  assert.match(mail.fix, /mail\.disabled/u);
+
+  for (const id of ['messenger', 'linkedin']) {
+    const platform = rows.find((row) => row.id === id);
+    assert.equal(platform.connected, false);
+    assert.equal(platform.detail, 'turned off');
+  }
+});
+
+// ~~"adding a mailbox never replaces a corrupt connectors config".~~ Removed in
+// the merge (2026-08-26), and the catch behind it was RIGHT: addMailAccount as
+// first written would silently overwrite a corrupt config.json, and this test
+// was added to stop it. Both are gone because the function is — mail is an
+// OAuth grant now, so the connect page no longer registers a mailbox in that
+// file and nothing here writes it at all. A test for a writer that does not
+// exist cannot fail in a way that means anything.

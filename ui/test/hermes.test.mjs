@@ -1313,3 +1313,55 @@ test('maintain runs the physical cleanup and reports it', async () => {
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { maintained: true });
 });
+
+// ---- the episode index is not rebuilt for nothing ----
+//
+// The distiller POSTs this before every pass, and a pass runs every 45 seconds
+// while it is catching up. Rebuilding 36,975 episodes twice a minute to arrive
+// at identical rows is not just wasted CPU: hermes is single-threaded, so every
+// route is frozen for the duration of each one. These pin both halves -- that it
+// skips when nothing changed, and that it does NOT skip when something did.
+test('a rebuild with nothing new is skipped, and says so', async () => {
+  const first = await adminPost('/admin/episodes/rebuild', {});
+  assert.equal(first.status, 200);
+  const a = await first.json();
+  assert.equal(a.skipped, undefined, 'the first build in a process always runs');
+
+  const second = await adminPost('/admin/episodes/rebuild', {});
+  const b = await second.json();
+  assert.equal(b.skipped, 'unchanged');
+  // A skip must still answer with the counts the caller would have got, or the
+  // saving is paid for in a caller that cannot tell what happened.
+  assert.equal(b.episodes, a.episodes);
+  assert.equal(b.rows, a.rows);
+});
+
+test('an episodic row arriving un-skips it', async () => {
+  await adminPost('/admin/episodes/rebuild', {});
+  const skipped = await (await adminPost('/admin/episodes/rebuild', {})).json();
+  assert.equal(skipped.skipped, 'unchanged', 'precondition: sitting on a skip');
+
+  const db = new DatabaseSync(adminDbPath);
+  try {
+    insertRows(db, [{
+      ts: Date.UTC(2025, 0, 2, 3, 4),
+      source: 'imessage',
+      entity_id: 'rebuild-fingerprint-probe',
+      text: 'a message that did not exist a moment ago',
+      meta: { chat_handle: '+15550199', is_from_me: true },
+    }]);
+  } finally {
+    db.close();
+  }
+
+  const after = await (await adminPost('/admin/episodes/rebuild', {})).json();
+  assert.equal(after.skipped, undefined, 'a new row must not be left out of the index');
+  assert.ok(after.rows > skipped.rows, 'and the rebuild saw it');
+});
+
+// The fingerprint watches the CORPUS, so it cannot see a change in the builder.
+test('force rebuilds even when the corpus has not moved', async () => {
+  await adminPost('/admin/episodes/rebuild', {});
+  const forced = await (await adminPost('/admin/episodes/rebuild', { force: true })).json();
+  assert.equal(forced.skipped, undefined);
+});

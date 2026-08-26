@@ -35,10 +35,15 @@ final class Distiller {
   /// Rows per pass. Small enough that a pass finishes in a visible amount of time
   /// on a local model, big enough that a long backlog still drains.
   private let batch = 40
+  /// The same pass, sized for a machine that is running on its own battery.
+  private let trickleBatch = 8
   /// Between passes while catching up, and while idle. Catching up is not urgent
   /// enough to saturate the machine the owner is using.
   private let busyInterval: TimeInterval = 45
   private let idleInterval: TimeInterval = 900
+  /// How often to look again while paused. The power notifications below are the
+  /// real wake-up; this is the backstop for one that never arrives.
+  private let pausedInterval: TimeInterval = 300
 
   private var fm: FileManager { .default }
   private var home: URL { fm.homeDirectoryForCurrentUser }
@@ -51,6 +56,17 @@ final class Distiller {
   /// Begin supervising. Safe to call repeatedly.
   func start() {
     guard timer == nil, !stopping else { return }
+    PowerBudget.startWatching()
+    // Re-decide the moment conditions change rather than serving out an interval
+    // chosen under the old ones: plugging in should start the backlog draining,
+    // and the machine getting hot should stop it, without waiting up to fifteen
+    // minutes to notice either.
+    NotificationCenter.default.addObserver(
+      forName: PowerBudget.didChange, object: nil, queue: .main
+    ) { [weak self] _ in
+      guard let self, !self.stopping, !self.isRunning else { return }
+      self.schedule(after: PowerBudget.current == .paused ? self.pausedInterval : 1)
+    }
     schedule(after: 20) // let hermes and llama-server settle first
   }
 
@@ -72,6 +88,13 @@ final class Distiller {
 
   private func runOnce() {
     guard !isRunning, !stopping else { schedule(after: busyInterval); return }
+    // NOT WHILE THE MACHINE CANNOT AFFORD IT. Checked here rather than at
+    // schedule() time because the answer can change during an interval, and the
+    // decision that matters is the one taken the instant before the work starts.
+    if PowerBudget.current == .paused {
+      schedule(after: pausedInterval)
+      return
+    }
     let node = home.appendingPathComponent(".hazlie/bin/node")
     // TWO STEPS, IN ORDER. The episode index is derived from context, so it has
     // to be rebuilt before anything reads it -- otherwise a conversation that
@@ -163,7 +186,20 @@ final class Distiller {
     // --backfill with a wide window and a row cap: the window says "all of
     // history is in scope", the cap says "not all of it at once", and the
     // watermark makes the next pass continue instead of repeat.
-    p.arguments = [script.path, "--limit", String(batch)]
+    // On battery the pass is a fifth of the size: enough that the backlog still
+    // moves and anything that just arrived gets distilled, small enough that it
+    // is not what drains the charge.
+    let size = PowerBudget.current == .trickle ? trickleBatch : batch
+    p.arguments = [script.path, "--limit", String(size)]
+    // OFF THE PERFORMANCE CORES. Without this the child inherits the app's
+    // default QoS, so macOS schedules fifteen hours of inference on the same
+    // cores as everything the owner is actually doing.
+    //
+    // .utility rather than .background deliberately: background adds aggressive
+    // I/O throttling, and this pass holds a write lock on the corpus for its
+    // duration -- making it slower there makes every reader wait longer, which
+    // is the opposite of the intent.
+    p.qualityOfService = .utility
     // The script resolves prompts/ relative to the backend root, so it has to run
     // from ui/ exactly as its own usage block says.
     p.currentDirectoryURL = backend.appendingPathComponent("ui")
@@ -198,7 +234,17 @@ final class Distiller {
         NSLog("Intaglio Labs: distilled \(rowsIn) conversations")
       }
       DispatchQueue.main.async {
-        self.schedule(after: drained ? self.idleInterval : self.busyInterval)
+        // A trickle pass waits the long interval whether or not there is more to
+        // do -- that IS the trickle. Anything else comes back promptly while
+        // there is a backlog, and slowly once there is not.
+        let budget = PowerBudget.current
+        let next: TimeInterval
+        switch budget {
+        case .paused: next = self.pausedInterval
+        case .trickle: next = self.idleInterval
+        case .full: next = drained ? self.idleInterval : self.busyInterval
+        }
+        self.schedule(after: next)
       }
     }
 

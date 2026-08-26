@@ -54,12 +54,21 @@ import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch } from './people/search.mjs';
 import { loadOwner } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
-import { buildAvatars, buildMap, buildYear, buildSearchYears, yearCore, peopleCoreFreshness } from './people/map.mjs';
+import {
+  buildAvatars,
+  buildMap,
+  buildYear,
+  buildSearchYears,
+  yearCore,
+  peopleCoreFreshness,
+  useTallyStore,
+} from './people/map.mjs';
+import { openTallyStore } from './people/tallyStore.mjs';
 import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
 import { contentMatches } from './people/content.mjs';
-import { rebuildEpisodes } from './memory/episodeStore.mjs';
+import { rebuildEpisodes, EPISODE_SOURCES } from './memory/episodeStore.mjs';
 import { loadSpine } from './people/graph.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
@@ -1339,11 +1348,9 @@ export const KNOWN_SOURCES = Object.freeze([
   'notion',
   'linkedin',
   'whatsapp',
-  // The bridged social platforms, written by connectors/sources/matrix.mjs.
-  // One source per platform rather than a single "matrix": the bus is
-  // transport, and retention, purge and the people graph all reason about
-  // WHERE a message came from. Added with the connector (2026-08-25) —
-  // the note below is why omitting a real source is an outage, not safety.
+  // Continuous DMs written by connectors/sources/matrix.mjs. These are named
+  // individually because "matrix" is transport, not provenance; keeping them
+  // in this same closed set makes every accepted row deletable again.
   'messenger',
   'instagram',
   'twitter',
@@ -1379,7 +1386,26 @@ const RETAIN_FIELDS = Object.freeze(['source', 'keep_days']);
 const PURGE_FIELDS = Object.freeze(['source']);
 const DELETE_ENTITIES_FIELDS = Object.freeze(['source', 'entity_ids']);
 const MAINTAIN_FIELDS = Object.freeze([]);
-const EPISODE_REBUILD_FIELDS = Object.freeze([]);
+const EPISODE_REBUILD_FIELDS = Object.freeze(['force']);
+
+// The episodic corpus in one string: what rebuildEpisodes actually reads. Count
+// and high-water id together catch both arrivals and deletions, and the source
+// list is the same EPISODE_SOURCES the rebuild selects on, so the two cannot
+// drift apart. Deliberately not a hash of the rows -- reading them is the work
+// this exists to avoid.
+function episodeSourceFingerprint(db) {
+  const holes = EPISODE_SOURCES.map(() => '?').join(',');
+  const r = db
+    .prepare(
+      `SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m FROM context WHERE source IN (${holes})`
+    )
+    .get(...EPISODE_SOURCES);
+  return `${r.n}|${r.m}`;
+}
+
+// The last rebuild this process performed, and the fingerprint it was for. In
+// memory only: a restart rebuilds once.
+let lastEpisodeBuild = null;
 const ENTITIES_PARAMS = Object.freeze(['source', 'from_ts', 'to_ts']);
 const APPLY_FIELDS = Object.freeze(['run', 'claims']);
 const APPLY_RUN_FIELDS = Object.freeze([
@@ -2144,7 +2170,29 @@ async function handleAdmin(db, req, res, cors, url, channel) {
     if (url.pathname === '/admin/episodes/rebuild') {
       const body = await readJson(req);
       assertClosedFields(body, EPISODE_REBUILD_FIELDS);
+      // NOTHING NEW MEANS NOTHING TO REBUILD.
+      //
+      // The distiller POSTs this before every pass, and a pass runs every 45
+      // seconds while it is catching up -- so on a 36,975-episode corpus this
+      // was deleting and reinserting all of them, twice a minute, to arrive at
+      // byte-identical rows. hermes is single-threaded, so that is not just
+      // wasted CPU: every route is frozen for the duration of each one.
+      //
+      // The index is a pure function of the episodic rows, so (count, high-water
+      // id) over exactly those sources decides it. Held in memory rather than on
+      // disk on purpose -- a restart rebuilds once, which is cheap and is the
+      // conservative direction to be wrong in.
+      //
+      // `force` is the way to demand one anyway, since the fingerprint cannot
+      // see a change in the BUILDER (a different gap rule cuts the same rows
+      // differently). Nothing calls it on a timer.
+      const fp = episodeSourceFingerprint(db);
+      if (!body.force && lastEpisodeBuild !== null && lastEpisodeBuild.fingerprint === fp) {
+        send(res, 200, { ...lastEpisodeBuild.out, skipped: 'unchanged' }, cors);
+        return;
+      }
       const out = withPeopleDbs(db, (state) => rebuildEpisodes(db, { spine: state ? loadSpine(state) : null }));
+      lastEpisodeBuild = { fingerprint: fp, out };
       // COUNTS ONLY: thread_key holds a chat guid, a chat guid holds a handle,
       // and counterparty_key holds a person's name. None of them may be logged
       // or returned.
@@ -2531,7 +2579,7 @@ function tryPersonSearch(db, question) {
   let state = null;
   try {
     const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
-    state = existsSync(statePath) ? new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true }) : null;
+    state = existsSync(statePath) ? openStateReadOnly(statePath) : null;
     return answerPersonSearch(db, state, question, { owner: loadOwner() });
   } catch {
     return null;
@@ -2576,12 +2624,33 @@ function warmPeopleCore(db) {
   });
 }
 
+// WAIT FOR THE WRITER; DO NOT GIVE UP AND CALL IT AN ANSWER.
+//
+// state.db is the connectors' database and it runs journal_mode=DELETE, on
+// purpose -- contact names must not survive legibly in a -wal sidecar. So a
+// writer excludes readers, and the contacts connector upserts ~2,000 rows into
+// it about once a minute. With SQLite's default busy timeout of ZERO, a read
+// landing inside that window fails instantly.
+//
+// That failure used to be swallowed into an empty contacts spine, and an empty
+// spine is not a smaller answer -- it is a different one. Every person known
+// only through the address book loses their name and reverts to a raw handle,
+// and worse, two handles belonging to one person stop merging, so they split
+// into two people with the messages divided between them. Then yearCore
+// memoised it. Observed exactly that way: 11,716 messages became 8,148 plus a
+// second "person" holding the other 3,568.
+function openStateReadOnly(statePath) {
+  const db = new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true });
+  db.exec('PRAGMA busy_timeout = 5000');
+  return db;
+}
+
 function withPeopleDbs(db, fn) {
   let state = null;
   let resDb = null;
   try {
     const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
-    state = existsSync(statePath) ? new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true }) : null;
+    state = existsSync(statePath) ? openStateReadOnly(statePath) : null;
     resDb = openResolutionsDb();
     return fn(state, resDb);
   } finally {
@@ -2600,7 +2669,7 @@ function trySyncStatus(db, question) {
   let state = null;
   try {
     const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
-    state = existsSync(statePath) ? new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true }) : null;
+    state = existsSync(statePath) ? openStateReadOnly(statePath) : null;
     return answerSyncStatus(db, state, {});
   } catch {
     return null;
@@ -2863,7 +2932,7 @@ function handle(db, req, res, cors, url, policy) {
   // map and WRITE the owner's merge decisions, neither of which is a browser
   // capability. The Origin channel is authenticated but not entitled here, so
   // 403 (not 401), matching handleAdmin's reasoning.
-  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary' || url.pathname === '/people/avatars') {
+  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary') {
     if (channel !== 'bearer') {
       send(res, 403, { error: 'people routes are bearer-only: call with the token from ~/.hazlie/secrets/hermes-token.txt and no Origin header.' }, cors);
       return;
@@ -3018,15 +3087,8 @@ async function handlePeople(db, req, res, cors, url, policy) {
     return;
   }
 
-  // The year summary: model-written, LOCAL llama only, generated on demand
-  // for one person and cached against the corpus stamp (people/summary.mjs
-  // carries the boundary reasoning). POST because the person key is data,
-  // not a path.
-  // The People page's faces. POST because it carries a list of person keys,
-  // and keys are data. Returns base64 per key rather than a URL per key: the
-  // widget's pages have no bearer and cannot fetch hermes directly — every
-  // byte reaches them through the native bridge — so a URL would be a link
-  // nothing on that side could follow.
+  // Contact photos are delivered through the native bridge: widget pages have
+  // no bearer token and therefore cannot fetch Hermes URLs themselves.
   if (req.method === 'POST' && url.pathname === '/people/avatars') {
     if (!hasJsonMediaType(req)) { send(res, 415, { error: 'content-type must be application/json' }, cors); return; }
     const body = await readJson(req);
@@ -3034,9 +3096,8 @@ async function handlePeople(db, req, res, cors, url, policy) {
     const keys = Array.isArray(body.keys) ? body.keys.filter((k) => typeof k === 'string').slice(0, 400) : [];
     const out = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
-      const found = buildAvatars(db, state, { keys, owner, aliases });
       const avatars = {};
-      for (const [key, jpeg] of found) {
+      for (const [key, jpeg] of buildAvatars(db, state, { keys, owner, aliases })) {
         avatars[key] = Buffer.from(jpeg).toString('base64');
       }
       return { avatars };
@@ -3045,6 +3106,10 @@ async function handlePeople(db, req, res, cors, url, policy) {
     return;
   }
 
+  // The year summary: model-written, LOCAL llama only, generated on demand
+  // for one person and cached against the corpus stamp (people/summary.mjs
+  // carries the boundary reasoning). POST because the person key is data,
+  // not a path.
   if (req.method === 'POST' && url.pathname === '/people/summary') {
     if (!hasJsonMediaType(req)) { send(res, 415, { error: 'content-type must be application/json' }, cors); return; }
     const body = await readJson(req);
@@ -3223,6 +3288,15 @@ if (isMain) {
       setTimeout(() => {
         const t0 = Date.now();
         try {
+          // A DERIVED CACHE, beside the corpus it is derived from -- the path
+          // asked of the handle rather than recomputed, so it always names the
+          // database actually open and an in-memory one (which reports no file)
+          // gets no cache at all. Deleting it costs one rescan and nothing
+          // else, which is the only property it needs to have. Opened here
+          // rather than at import so a test that imports the module never
+          // writes to the owner's disk.
+          const file = db.prepare('PRAGMA database_list').get()?.file ?? '';
+          if (file) useTallyStore(openTallyStore(`${file}.tallies`));
           const core = warmPeopleCore(db);
           console.log(
             `people core warm in ${Date.now() - t0}ms (${core?.graph?.length ?? 0} people)`

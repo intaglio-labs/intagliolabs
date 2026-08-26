@@ -24,6 +24,8 @@ import { fileURLToPath } from 'node:url';
 
 const WIDGET = join(dirname(fileURLToPath(import.meta.url)), '..');
 const swift = readFileSync(join(WIDGET, 'src', 'Bridge.swift'), 'utf8');
+const bridgeLoginSwift = readFileSync(join(WIDGET, 'src', 'BridgeLogin.swift'), 'utf8');
+const connections = readFileSync(join(WIDGET, 'ui', 'connections.js'), 'utf8');
 
 // --- 1. what the dispatch handles -------------------------------------------
 const dispatchCases = new Set(
@@ -234,4 +236,45 @@ test('every page in the map is a real page', () => {
   const real = new Set(pageScripts.keys());
   const phantom = [...declared.keys()].filter((p) => !real.has(p));
   assert.deepEqual(phantom, [], `the map names pages with no ui/<page>.html: ${phantom.join(', ')}`);
+});
+
+test('native web login carries every server-authored policy feature to the login window', () => {
+  const block = /case "bridgeWebLogin":([\s\S]*?)\n {4}\/\/ ---- setup:/u.exec(swift)?.[1];
+  assert.ok(block, 'bridgeWebLogin handler not found');
+
+  for (const field of [
+    'requiredCookies', 'cookieFormat', 'fields', 'approval', 'userAgent',
+    'allowedFrameHosts', 'storageUrl',
+  ]) {
+    assert.match(block, new RegExp(`begin\\["${field}"\\]`, 'u'), `${field} is read from server policy`);
+    assert.match(block, new RegExp(`${field}: ${field}`, 'u'), `${field} is passed to BridgeLogin`);
+    assert.match(bridgeLoginSwift, new RegExp(`\\b${field}:`, 'u'), `BridgeLogin accepts ${field}`);
+  }
+  assert.match(block, /begin\["qrLogin"\]/u, 'QR policy is handled by the native QR window');
+});
+
+test('model setup restarts the launch agents provisioning actually installs', () => {
+  assert.match(swift, /Provision\.installAgent\("io\.intaglio\.llama-server"\)/u);
+  assert.match(swift, /Provision\.kickstart\("io\.intaglio\.llama-server"\)/u);
+  assert.match(swift, /Provision\.kickstart\("io\.intaglio\.hermes"\)/u);
+  assert.doesNotMatch(swift, /com\.hazlie\.(?:llama-server|hermes)/u);
+});
+
+test('the credential reassurance stays middle-aligned in the native login header', () => {
+  const block = /let sub = makeLabel\(\s*"your credentials stay local",([\s\S]*?)view\.addSubview\(sub\)/u
+    .exec(bridgeLoginSwift)?.[1];
+  assert.ok(block, 'credential reassurance label not found');
+  assert.match(block, /sub\.alignment = \.center/u);
+});
+
+test('Settings offers the explicit WhatsApp opt-in returned by connector status', () => {
+  const block = /if \(src\.disabled && src\.action === 'enable'\) \{([\s\S]*?)\n {4}\} else if/u
+    .exec(connections)?.[1];
+  assert.ok(block, 'disabled connector branch not found in Settings');
+  assert.match(block, /enable\.textContent = 'connect'/u);
+  assert.match(
+    block,
+    /hzPost\('setConnectorEnabled', \{ connector: src\.id, enabled: true \}\)/u
+  );
+  assert.match(block, /\.then\(refresh\)/u, 'successful opt-in repaints connector status');
 });

@@ -617,7 +617,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
       "your credentials stay local",
       font: mono, color: muted, y: 8
     )
-    sub.alignment = .right
+    sub.alignment = .center
     view.addSubview(title)
     view.addSubview(host)
     view.addSubview(sub)

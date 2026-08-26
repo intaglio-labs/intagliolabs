@@ -4,7 +4,7 @@
 // are negative tests for that reason.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildHighlights, buildYearAwards } from '../server/people/highlights.mjs';
+import { buildHighlights } from '../server/people/highlights.mjs';
 
 // A month-bucketed timeline from 'YYYY-MM' strings, all inbound.
 const tl = (...yms) => yms.map((ym) => ({ ym, sent: 0, received: 10, met: 0 }));
@@ -30,22 +30,25 @@ test('no entries yields no cards rather than empty ones', () => {
   assert.deepEqual(buildHighlights(null, { year: 2026, now: NOW }), []);
 });
 
-test('the favorite is ranked by engagement and names the measured activity', () => {
+test('person of the year claims "next three combined" only when it is true', () => {
   const runaway = buildHighlights([
     entry('a', 1000, tl('2026-01')),
     entry('b', 100, tl('2026-01')),
     entry('c', 100, tl('2026-01')),
     entry('d', 100, tl('2026-01')),
   ], { year: 2026, now: NOW });
-  const card = find(runaway, 'person-of-the-year');
-  assert.equal(card.label, 'favorite');
-  assert.match(card.line, /1,000 messages — most engagement this year/);
+  assert.match(find(runaway, 'person-of-the-year').line, /more than your next three combined/);
 
-  const engagementWins = buildHighlights([
-    entry('chatty', 500, tl('2026-01'), 500),
-    entry('met-often', 100, tl('2026-01'), 700),
+  // 400 is NOT more than 300+300+300 — the sentence must change, not soften.
+  const close = buildHighlights([
+    entry('a', 400, tl('2026-01')),
+    entry('b', 300, tl('2026-01')),
+    entry('c', 300, tl('2026-01')),
+    entry('d', 300, tl('2026-01')),
   ], { year: 2026, now: NOW });
-  assert.equal(find(engagementWins, 'person-of-the-year').name, 'met-often');
+  const line = find(close, 'person-of-the-year').line;
+  assert.doesNotMatch(line, /next three/);
+  assert.match(line, /your most this year/);
 });
 
 test('a person with no messages earns no card at all', () => {
@@ -148,64 +151,4 @@ test('a rich year can earn every card, and keeps them in mock order', () => {
     ['person-of-the-year', 'back-from-your-past', 'rising-star', 'drifting', 'streak']);
   // Each card names someone, and never the same slot twice by accident.
   for (const c of h) assert.ok(c.name && c.key && c.line, `card ${c.kind} is incomplete`);
-});
-
-// ---- who the LIST marks (2026-08-26) ----
-// The cards name one person each; the rows mark a category's top five. Same
-// scan, same predicates — the point of these is that the second answer cannot
-// drift away from the first.
-
-test('each category marks at most its top five, in rank order', () => {
-  const entries = [];
-  for (let i = 0; i < 9; i += 1) {
-    // Nine people, descending engagement, each with a long live streak so the
-    // streak category is crowded too.
-    entries.push(entry(`p${i}`, 900 - i * 50, tl(...monthsOf(2025, 1, 12), ...monthsOf(2026, 1, 12))));
-  }
-  const { cards, awards } = buildYearAwards(entries, { year: 2026, now: NOW });
-  const fav = awards.find((a) => a.kind === 'person-of-the-year');
-  assert.equal(fav.keys.length, 5, 'five, not nine');
-  assert.deepEqual(fav.keys, ['p0', 'p1', 'p2', 'p3', 'p4'], 'in the order the card ranked them');
-  // The card's winner is always the first key of its own category.
-  for (const card of cards) {
-    const a = awards.find((x) => x.kind === card.kind);
-    assert.equal(a.keys[0], card.key, `${card.kind}: the card names its own top mark`);
-  }
-});
-
-test('a category nobody earns marks nobody', () => {
-  // One person, active all year, never absent and never returning: the favorite
-  // and the streak are earnable, a reconnection is not.
-  const entries = [entry('solo', 400, tl(...monthsOf(2025, 1, 12), ...monthsOf(2026, 1, 12)))];
-  const { cards, awards } = buildYearAwards(entries, { year: 2026, now: NOW });
-  assert.equal(kinds(cards).includes('back-from-your-past'), false);
-  assert.equal(awards.some((a) => a.kind === 'back-from-your-past'), false,
-    'no card means no label, and no label means no mark the page could explain');
-});
-
-test('a mark carries the same label its card shows', () => {
-  const entries = [entry('a', 300, tl(...monthsOf(2026, 1, 12)))];
-  const { cards, awards } = buildYearAwards(entries, { year: 2026, now: NOW });
-  for (const a of awards) {
-    assert.equal(a.label, find(cards, a.kind).label,
-      'the label travels with the keys so the page never keeps its own copy');
-  }
-});
-
-test('fewer than five qualifiers marks fewer, and never pads', () => {
-  const entries = [
-    entry('back', 200, tl('2019-05', ...monthsOf(2026, 3, 8))),
-    entry('steady', 500, tl(...monthsOf(2025, 1, 12), ...monthsOf(2026, 1, 12))),
-  ];
-  const { awards } = buildYearAwards(entries, { year: 2026, now: NOW });
-  const back = awards.find((a) => a.kind === 'back-from-your-past');
-  assert.equal(back.keys.length, 1);
-  assert.deepEqual(back.keys, ['back']);
-});
-
-test('buildHighlights still returns the cards alone', () => {
-  const entries = [entry('a', 300, tl(...monthsOf(2026, 1, 12)))];
-  const cards = buildHighlights(entries, { year: 2026, now: NOW });
-  assert.ok(Array.isArray(cards));
-  assert.deepEqual(cards, buildYearAwards(entries, { year: 2026, now: NOW }).cards);
 });

@@ -61,6 +61,24 @@ export function parseArgs(argv) {
   return { name, flag: [...flags][0] ?? null };
 }
 
+/** Purge every Hermes source owned by one connector, returning one total. */
+export async function purgeHermesSources(
+  hermesSource,
+  ingestOpts,
+  { purge = adminPurge } = {}
+) {
+  const sources = hermesSource === null
+    ? []
+    : (Array.isArray(hermesSource) ? hermesSource : [hermesSource]);
+  const purged = { deleted: 0, maintained: false };
+  for (const source of sources) {
+    const result = await purge({ source }, ingestOpts);
+    purged.deleted += result.deleted ?? 0;
+    purged.maintained = purged.maintained || result.maintained === true;
+  }
+  return purged;
+}
+
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isMain) {
@@ -107,8 +125,10 @@ if (isMain) {
       // holds. contacts maps to no hermes source (resolution state only) —
       // its purge is entirely local.
       const hermesSource = CONNECTOR_HERMES_SOURCE[name];
-      const purged =
-        hermesSource === null ? { deleted: 0, maintained: false } : await adminPurge({ source: hermesSource }, ingestOpts);
+      // Matrix is one connector but seven Hermes sources. Purge them all before
+      // forgetting any local cursor; if one request fails, the catch below
+      // preserves local state and a retry safely re-deletes the earlier ones.
+      const purged = await purgeHermesSources(hermesSource, ingestOpts);
       const local = wipeLocalArtifacts(name, { state, cacheDir, log });
       console.log(JSON.stringify({ connector: name, hermesSource, ...purged, ...local }));
     } else {

@@ -190,42 +190,11 @@ else
   echo "    disabled until the key from the Granola app is saved there (0600)."
 fi
 
-# Gmail app password: the one secret a human has to type. read -s so it never
-# lands in shell history or process listings; written via mktemp + mv so a
-# crash mid-write cannot leave a world-readable partial file.
-GMAIL_FILE="$SECRET_DIR/gmail-app-password.txt"
-if [[ -L "$GMAIL_FILE" ]] || [[ -e "$GMAIL_FILE" && ! -f "$GMAIL_FILE" ]]; then
-  echo "ERROR: $GMAIL_FILE must be a regular, non-symlink file." >&2
-  exit 1
-fi
-if [[ -f "$GMAIL_FILE" ]]; then
-  chmod 600 "$GMAIL_FILE"
-  echo "    gmail-app-password.txt present (mode 0600 reasserted)"
-elif [[ -t 0 ]]; then
-  echo "    gmail-app-password.txt is missing. Create one at"
-  echo "    https://myaccount.google.com/apppasswords and paste it here"
-  echo "    (input hidden; press Enter alone to skip — mail stays disabled):"
-  read -rs -p "    app password: " GMAIL_APP_PASSWORD
-  echo
-  GMAIL_APP_PASSWORD="${GMAIL_APP_PASSWORD// /}"  # Google displays it in spaced groups
-  if [[ -n "$GMAIL_APP_PASSWORD" ]]; then
-    gmail_tmp=$(mktemp "$SECRET_DIR/.gmail-app-password.XXXXXX")
-    trap 'rm -f "${gmail_tmp:-}"' EXIT
-    printf '%s\n' "$GMAIL_APP_PASSWORD" > "$gmail_tmp"
-    chmod 600 "$gmail_tmp"
-    mv "$gmail_tmp" "$GMAIL_FILE"
-    gmail_tmp=
-    trap - EXIT
-    unset GMAIL_APP_PASSWORD
-    echo "    saved owner-only gmail-app-password.txt"
-  else
-    unset GMAIL_APP_PASSWORD
-    echo "    skipped — mail connector disabled until it exists"
-  fi
-else
-  echo "    gmail-app-password.txt is missing and stdin is not a terminal —"
-  echo "    skipping the prompt (mail connector disabled); re-run interactively."
-fi
+# Gmail uses Google OAuth now; no password belongs in this installer or in a
+# file it creates. The app owns the ordinary path, while the helper remains a
+# direct option for a repository-based setup.
+echo "    Gmail: sign in to Google from the Connections shelf in the app,"
+echo "    or run: node $REPO_ROOT/ops/gcal-auth.mjs"
 
 # Oura tokens are OAuth2 artifacts, not a value a human can type: a separate
 # helper mints ~/.hazlie/secrets/oura-tokens.json after the browser consent

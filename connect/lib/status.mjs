@@ -21,8 +21,17 @@ const SECRETS = (home) => join(home, '.hazlie', 'secrets');
 // never runs — and a row that still reported "connected" because its store
 // happens to be readable would be describing a poll that will not happen.
 // Readable is not the same as running.
-const disabledMarker = (home, id) =>
-  existsSync(join(home, '.hazlie', 'connectors', `${id}.disabled`));
+function connectorForStatusRow(id) {
+  if (id.startsWith('mail:')) return 'mail';
+  // Seven status rows, one Matrix poller and therefore one disable marker.
+  if (Object.hasOwn(PLATFORMS, id)) return 'matrix';
+  return id;
+}
+
+const disabledMarker = (home, id) => {
+  const connector = connectorForStatusRow(id);
+  return existsSync(join(home, '.hazlie', 'connectors', `${connector}.disabled`));
+};
 
 function withDisabled(row, home) {
   if (!disabledMarker(home, row.id)) return row;
@@ -31,13 +40,14 @@ function withDisabled(row, home) {
   // source: their markers may have been created by run.mjs --disable, and the
   // native enable action is intentionally not authorized to mutate them.
   if (row.id !== 'whatsapp') {
+    const connector = connectorForStatusRow(row.id);
     return {
       ...row,
       connected: false,
       broken: false,
       detail: 'turned off',
       action: null,
-      fix: `re-enable with: rm ~/.hazlie/connectors/${row.id}.disabled`,
+      fix: `re-enable with: rm ~/.hazlie/connectors/${connector}.disabled`,
       caveat: null,
     };
   }

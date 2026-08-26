@@ -32,6 +32,7 @@ protocol BridgeDelegate: AnyObject {
   func widgetSpot() -> [String: Double]
   func widgetBoundsChanged()
   func spotlightWidget(_ on: Bool)
+  func openOnboarding()
   func setupProgress(_ payload: [String: Any])
   /// Drop the onboarding scrim below ordinary windows so a system prompt can be
   /// seen, and put it back afterwards.
@@ -74,27 +75,23 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
                     "status", "setConnectorEnabled", "setMotion", "setScale", "setSounds",
-                    "markHandheld",
+                    "openOnboarding", "markHandheld",
                     // Same setup controls, reachable from the gear after the
                     // flow — a skipped step must stay reachable.
                     "setupState", "modelDownload", "modelCancel",
                     "openFullDiskAccess", "startSources",
-                    // The in-panel API-key walkthrough (granola first).
-                    "connectSecret", "openApp",
-                    // Google signs in from the tile: mail and calendar are one
-                    // account and one grant, taken by ops/gcal-auth.mjs, which
-                    // opens the browser itself. Without this grant the button
-                    // renders and silently does nothing, which is exactly the
-                    // class widget/test/bridge-capabilities.test.mjs exists to
-                    // catch — and did catch, here.
-                    "googleAuth",
+                      // Google signs in from the tile: mail and calendar are one
+                      // account and one grant. Without this grant the button
+                      // renders and silently does nothing, which is exactly the
+                      // class widget/test/bridge-capabilities.test.mjs catches.
+                      "googleAuth",
                    "permissionState", "requestPermission"],
     "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
-                   "widgetSpot", "openPeople",
+                   "widgetSpot",
                    // The setup scenes: choosing and fetching the answer model,
                    // and turning on the first data source.
                    "setupState", "modelDownload", "modelCancel",
-                   "openFullDiskAccess", "startSources",
+                    "openFullDiskAccess", "startSources", "openPeople",
                     "permissionState", "requestPermission",
                     // Which scene is up, remembered so a restart resumes on it.
                     "onboardingStep"],
@@ -105,7 +102,6 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                "connectorsIntroSeen", "openExternal", "setConnectorEnabled", "connectSecret", "openApp",
-               // The FDA tile press opens the primed Settings pane directly.
                "openFullDiskAccess"],
     // peopleFind: search across every year, server-ranked. peopleMap: the
     // ALL-YEARS source behind the constellation — every person, uncapped, with
@@ -138,21 +134,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   static let orbFaces: Set<String> = ["idle", "notify", "listening", "talking"]
 
   // The per-app Reduce Motion override. macOS Reduce Motion is a SYSTEM
-  // accessibility setting; this is the ordinary per-app answer to it. Both
-  // prefs live in native storage because the webviews are configured
+  // accessibility setting and the widget honours it by default; this is the
+  // ordinary per-app opt-back-in for someone who wants the animation anyway.
+  // Both prefs live in native storage because the webviews are configured
   // .nonPersistent() (Windows.swift), so nothing a page stores survives a
-  // relaunch. ~~Default false: a fresh install always respects the setting.~~
-  // Flipped to default TRUE (owner, 2026-08-25): the widget's animation is the
-  // product, not a flourish, and a fresh install was arriving frozen on any
-  // Mac with Reduce Motion on — which reads as broken, not as respectful. The
-  // switch in Settings still appears whenever the system setting is on, so
-  // turning the animation off remains one visible toggle away; only the
-  // starting position changed. Distinguish "never set" from "set to false" via
-  // object(forKey:), because bool(forKey:) collapses both to false — which is
-  // exactly the old default this is undoing.
+  // relaunch. Default false: a fresh install always respects the setting.
   static let motionDefaultsKey = "HazlieMotionAnyway"
   static var motionAnyway: Bool {
-    get { UserDefaults.standard.object(forKey: motionDefaultsKey) as? Bool ?? true }
+    get { UserDefaults.standard.bool(forKey: motionDefaultsKey) }
     set { UserDefaults.standard.set(newValue, forKey: motionDefaultsKey) }
   }
 
@@ -268,9 +257,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     return min(max(v, scaleRange.lowerBound), scaleRange.upperBound)
   }
 
-  // The handoff out of onboarding: after the flow finishes, the People popup
-  // uses this one-shot flag to emphasize Messages. Reset by every completed
-  // flow, so replay hands off like the first time.
+  // The handoff out of onboarding: after the flow finishes, the widget's
+  // gear nudges until settings is opened once, and that first open runs the
+  // connectors intro. Reset by every completed flow, so replay hands off
+  // like the first time.
   static let connectorsIntroKey = "HazlieConnectorsIntro"
   static var connectorsIntroDone: Bool {
     get { UserDefaults.standard.bool(forKey: connectorsIntroKey) }
@@ -331,21 +321,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // delivered one ask at a time).
   private var pendingVoiceUtterance: String?
 
+  // Only desktop applications named by the connector UI may be launched.
+  private let allowedApps: Set<String> = ["com.granola.app"]
+
   // The only external destinations this app will hand to the OS. Opening
   // one launches the default browser (or System Settings) — the app itself
   // still opens no socket beyond loopback; the user's click on a fixed help
   // link is what leaves, same posture as the connect page's help topics.
-  // Desktop apps a walkthrough may launch, by BUNDLE ID.
-  //
-  // ~~"granola://" sat in allowedExternal.~~ It parsed, it was allowed, and
-  // NSWorkspace.open still did nothing (owner, 2026-08-25: "this isn't
-  // actually opening my granola app") — a scheme URL with no host is not
-  // something NSWorkspace will launch, though `open(1)` accepts it. Launching
-  // by bundle id is the API that actually means "open this app", and it also
-  // answers whether the app is INSTALLED, so the page can fall back to the
-  // website instead of a button that silently does nothing.
-  private let allowedApps: Set<String> = ["com.granola.app"]
-
   private let allowedExternal: Set<String> = [
     "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
     "https://myaccount.google.com/apppasswords",
@@ -353,9 +335,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "https://cloud.ouraring.com/oauth/applications",
     "https://www.notion.so/my-integrations",
     // Telegram's app registration — each install gets its own api_id/api_hash.
+    // RESTORED IN THE MERGE (2026-08-26): this entry and the walkthrough that
+    // sends the owner to it were both present at the merge base and both lost
+    // on origin when the People-tab PR reverted connections.js and Bridge.swift
+    // to older copies. connectors/test/openExternal.test.mjs is what caught it
+    // — the walkthrough survived on this side, its allowlist entry did not, and
+    // the symptom would have been a link that does nothing.
     "https://my.telegram.org/apps",
-    // LinkedIn's export request page — the connector reads the CSV it emails.
-    "https://www.linkedin.com/mypreferences/d/download-my-data",
     // The bridge token how-to links, for the Discord/Slack guided login flows.
     "https://docs.mau.fi/bridges/go/discord/authentication.html",
     "https://docs.mau.fi/bridges/go/slack/authentication.html",
@@ -525,19 +511,22 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       } catch {
         reply(webView, id, ["state": "error", "error": "copy failed: \(error.localizedDescription)"])
       }
+    case "openOnboarding":
+      delegate?.openOnboarding()
+      reply(webView, id, ["state": "ok"])
     case "onboardingDone":
       // Only the flow finishing sets this. Dismissing with Escape closes the
       // window without sending it, so a flow backed out of returns next time.
       Bridge.completeOnboarding()
       // Nothing left to resume; a replay from settings starts at the welcome.
       Bridge.onboardingStep = nil
-      // ...and arm the People popup's one-time Messages emphasis.
+      // ...and the handoff arms: the gear will nudge until settings opens.
       Bridge.connectorsIntroDone = false
       reply(webView, id, ["state": "ok"])
     case "connectorsIntroSeen":
-      // The People or settings page reports it actually showed the intro. The
-      // mark lives in the page, not at window-open, so a first-load race cannot
-      // burn the handoff unseen.
+      // The settings page reports it actually SHOWED the intro — the mark
+      // lives there, not at window-open, so a race with the page's first
+      // load cannot burn the intro unseen.
       Bridge.connectorsIntroDone = true
       reply(webView, id, ["state": "ok"])
     case "markHandheld":
@@ -627,9 +616,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "status":
       fetchStatus { [weak self] data in self?.reply(webView, id, data) }
     case "setConnectorEnabled":
-      // Passive local stores require explicit product-level consent even when
-      // another app's database already exists. Keep the filename allow-listed:
-      // this message crosses from JS to a filesystem mutation.
+      // This webview-controlled write is deliberately limited to the passive
+      // WhatsApp connector marker; no arbitrary path reaches the filesystem.
       let connector = payload["connector"] as? String ?? ""
       guard connector == "whatsapp" else {
         reply(webView, id, ["state": "error", "error": "unknown connector"])
@@ -639,13 +627,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         .appendingPathComponent(".hazlie/connectors/\(connector).disabled")
       do {
         if payload["enabled"] as? Bool == true {
-          if FileManager.default.fileExists(atPath: marker.path) {
-            try FileManager.default.removeItem(at: marker)
-          }
+          if FileManager.default.fileExists(atPath: marker.path) { try FileManager.default.removeItem(at: marker) }
         } else {
           try Data().write(to: marker, options: .atomic)
-          try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600], ofItemAtPath: marker.path)
+          try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: marker.path)
         }
         Connectors.shared.start()
         reply(webView, id, ["state": "ok"])
@@ -693,12 +678,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         }
       }
     case "connectSecret":
-      // The in-panel walkthrough's paste: {p, value} → POST /api/secret on the
-      // connect service (lib/secretApi.mjs holds the sink allowlist). The
-      // value passes through this process and is never logged or stored here.
-      let sp = String(payload["p"] as? String ?? "")
-      let sv = String(payload["value"] as? String ?? "")
-      bridgeCall("POST", "api/secret", json: ["p": sp, "value": sv], timeout: 10) { [weak self] d in
+      let p = String(payload["p"] as? String ?? "")
+      let value = String(payload["value"] as? String ?? "")
+      bridgeCall("POST", "api/secret", json: ["p": p, "value": value], timeout: 10) { [weak self] d in
         self?.reply(webView, id, d)
       }
     case "bridgeCookies":
@@ -970,7 +952,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // the local Apple stores turn on together the moment Full Disk Access
       // lands. The config is what makes the daemon boot AT ALL -- without it
       // the agent parks at exit 1 -- so writing it is the whole action.
-      let ok = Provision.ensureConnectorDefaults()
+      let ok = writeConnectorsConfigIfMissing()
       // Started as a CHILD of this app, not bootstrapped into launchd, so the
       // reader inherits this app's permissions instead of needing its own.
       Provision.retireConnectorsAgent()
@@ -1091,8 +1073,6 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         reply(webView, id, ["state": "error", "error": "url not in allowlist"])
       }
     case "openApp":
-      // Launch an allowlisted desktop app; reply notInstalled so the page can
-      // fall back to the platform's website rather than doing nothing.
       let bundleId = String((payload["bundleId"] as? String ?? "").prefix(96))
       guard allowedApps.contains(bundleId),
             let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId)
@@ -1100,25 +1080,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         reply(webView, id, ["state": "notInstalled"])
         return
       }
-      // ACTIVATE, don't just launch. An app that is already running — Granola
-      // lives in the menu bar and is usually up — treats "open" as a no-op if
-      // it has no window to show, which is indistinguishable from nothing
-      // happening (owner, 2026-08-25, twice). Ask for activation explicitly
-      // after the launch resolves, and if the app is already running, activate
-      // it directly rather than routing through a launch at all.
-      if let running = NSRunningApplication
-        .runningApplications(withBundleIdentifier: bundleId).first {
-        running.activate(options: [.activateAllWindows])
-        reply(webView, id, ["state": "ok"])
-        return
-      }
-      let cfg = NSWorkspace.OpenConfiguration()
-      cfg.activates = true
-      NSWorkspace.shared.openApplication(at: appURL, configuration: cfg) { [weak self] app, err in
+      let config = NSWorkspace.OpenConfiguration()
+      config.activates = true
+      NSWorkspace.shared.openApplication(at: appURL, configuration: config) { [weak self] _, error in
         DispatchQueue.main.async {
-          app?.activate(options: [.activateAllWindows])
-          self?.reply(webView, id, err == nil
-            ? ["state": "ok"] : ["state": "notInstalled"])
+          self?.reply(webView, id, error == nil ? ["state": "ok"] : ["state": "notInstalled"])
         }
       }
     case "openConnectLink":
@@ -1189,11 +1155,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": Bridge.monthsView ?? ""])
 
     case "peopleAvatars":
-      // Contact photos for the rows on screen, base64 per person key. Asked
-      // for separately from the year itself: a year is 250 rows and the
-      // thumbnails would be megabytes of payload the page mostly scrolls past.
-      let avKeys = (payload["keys"] as? [String])?.prefix(400).map { String($0.prefix(200)) } ?? []
-      peopleCall("POST", "people/avatars", json: ["keys": Array(avKeys)]) { [weak self] data in
+      let keys = (payload["keys"] as? [String])?.prefix(400).map { String($0.prefix(200)) } ?? []
+      peopleCall("POST", "people/avatars", json: ["keys": Array(keys)]) { [weak self] data in
         self?.reply(webView, id, data)
       }
     case "peopleSummary":
@@ -1376,6 +1339,35 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     }.resume()
   }
 
+  /// The connectors daemon refuses to start without ~/.hazlie/connectors/config.json
+  /// and says so; on a fresh install nothing writes it, so the agent parks at
+  /// exit 1 forever and no data ever arrives. This writes the minimum valid one.
+  ///
+  /// Deliberately almost empty. There is no "enabled sources" list to fill in --
+  /// every install runs every connector it has credentials for, and each source's
+  /// needs() decides whether it can run this pass. So the file's job here is to
+  /// exist and to parse; every key in it is an override nobody has asked for yet.
+  ///
+  /// Held to the same file standard as a secret (0600 inside the 0700 tree),
+  /// because daemon.mjs checks: it is the file whose silent replacement would
+  /// redirect what gets polled.
+  @discardableResult
+  private func writeConnectorsConfigIfMissing() -> Bool {
+    let fm = FileManager.default
+    let dir = fm.homeDirectoryForCurrentUser.appendingPathComponent(".hazlie/connectors")
+    let file = dir.appendingPathComponent("config.json")
+    if fm.fileExists(atPath: file.path) { return true }
+    do {
+      try fm.createDirectory(at: dir, withIntermediateDirectories: true,
+                             attributes: [.posixPermissions: 0o700])
+      try "{}\n".write(to: file, atomically: true, encoding: .utf8)
+      try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+      return true
+    } catch {
+      return false
+    }
+  }
+
   // Messages that arrived before chat.js finished loading queue one by one
   // (main.swift). chatReady hands the page the first; each settled ask pulls
   // the next through __hzIncoming, so every queued message becomes its own
@@ -1457,31 +1449,6 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
               obj["sources"] is [[String: Any]]
         else { done(["state": "error", "error": "unparseable status"]); return }
         var out = obj
-        // THE FDA ROWS ARE OVERRIDDEN WITH THE APP'S OWN ANSWER, and the
-        // reason is a TCC attribution split (found 2026-08-25, the day a
-        // freshly granted Messages tile stayed red): the connectors daemon is
-        // a CHILD of this app, so the owner's "intaglio labs" grant covers
-        // the process that actually reads the stores — 26k message rows
-        // landed minutes after the grant — but the connect service that
-        // computes these rows runs under launchd, where the responsible
-        // process is ~/.hazlie/bin/node itself, which no grant to this app
-        // can ever satisfy. Its canReadSqlite is therefore the wrong witness
-        // on exactly the machines that are set up correctly. fullDisk() reads
-        // chat.db AS THIS APP — the same identity the daemon inherits — so
-        // when it says granted, the FDA rows are made to say what the daemon
-        // will actually do. When it says denied, the server's rows stand.
-        if Permissions.fullDisk() == .granted,
-           var rows = out["sources"] as? [[String: Any]] {
-          for i in rows.indices where (rows[i]["action"] as? String) == "fda" {
-            rows[i]["connected"] = true
-            rows[i]["broken"] = false
-            rows[i]["detail"] = "connected"
-            rows[i]["action"] = NSNull()
-            rows[i]["fix"] = NSNull()
-            rows[i]["caveat"] = NSNull()
-          }
-          out["sources"] = rows
-        }
         out["state"] = "ok"
         done(out)
       case 401: done(["state": "auth"])
@@ -1536,9 +1503,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       BridgeLogin.presentQR(
         label: label,
         // Owner's wording (2026-08-26). Not "the Discord app": a phone camera
-      // recognises the code and offers the app itself, and naming a second
-      // piece of software to go and open first is a step that is not there.
-      instruction: "scan this with your phone camera",
+        // recognises the code and offers the app itself, and naming a second
+        // piece of software to go and open first is a step that is not there.
+        instruction: "scan this with your phone camera",
         fetch: { [weak self] deliver in
           guard let self else { deliver(nil); return }
           self.bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { begun in
@@ -1619,12 +1586,6 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
       }
       switch http.statusCode {
-      case 503:
-        // The connect service naming its own outage (lib/bridgeApi.mjs): the
-        // bridge engine is not running. Passed through by NAME so the panel
-        // can print the remedy instead of "status unavailable".
-        done(["state": (body?["state"] as? String) ?? "nobridge",
-              "error": (body?["error"] as? String) ?? "bridge engine is not running"])
       case 200:
         guard var out = body else { done(["state": "error", "error": "unparseable"]); return }
         out["state"] = "ok"

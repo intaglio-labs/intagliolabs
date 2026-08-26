@@ -25,6 +25,7 @@
 
 import { approximateConversationKey } from '../memory/episodes.mjs';
 import { threadKind, counterpartyFromThread, GROUP } from '../memory/threadKind.mjs';
+import { digest, readTallies, writeTallies, scanFingerprint } from './tallyStore.mjs';
 
 // Curated topic signals. Word-boundary, case-insensitive, one hit counted per
 // ROW containing the signal (a message that says "coffee" five times is one
@@ -230,7 +231,69 @@ function rowPersonId(row, meta) {
 // denominator that makes "tahoe" beat "tuesday". `bucketBy` picks the time
 // grain: 'year' ('key|2021', the year view) or 'month' ('key|2021-03', for a
 // months-of-one-year view where a year would blur the story).
-export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucketBy = 'year' } = {}) {
+// THE SCAN, CACHED ON THE CORPUS ALONE.
+//
+// Keyed on what the scan actually reads -- the rows -- and nothing else. It used
+// to be rebuilt whenever the contacts spine moved, because both the person key
+// and the name-token filter were applied inside it; both now happen at the fold,
+// so a contacts sync costs 28ms of regrouping instead of a 3,494ms rescan of
+// 425,000 unchanged rows. Measured: the fold is 0.8% of the scan.
+//
+// Keyed per database handle like its siblings, and on bucketBy because a month
+// scan and a year scan are different tallies.
+const scanMemo = new WeakMap();
+
+export function topicScan(contextDb, { bucketBy = 'year', stamp, store = null } = {}) {
+  const hit = scanMemo.get(contextDb);
+  if (hit && hit.stamp === stamp && hit.bucketBy === bucketBy) return hit.byIdentifier;
+
+  // The disk cache, when the caller supplied one. Absent by default: tests and
+  // scripts get the pure function, and only the server passes a store.
+  const print = store ? scanFingerprint(contextDb, { bucketBy, signature: signalSignature() }) : null;
+  let byIdentifier = print ? readTallies(store, print) : null;
+  const loaded = byIdentifier !== null;
+  if (!loaded) byIdentifier = runTopicScan(contextDb, { bucketBy });
+
+  if (stamp !== undefined) scanMemo.set(contextDb, { stamp, bucketBy, byIdentifier });
+  if (print && !loaded) writeTallies(store, print, byIdentifier);
+  return byIdentifier;
+}
+
+// THE SIGNAL PATTERNS THEMSELVES, hashed.
+//
+// Editing a TOPIC_SIGNALS regex changes what a stored tally MEANS while leaving
+// every count and timestamp the fingerprint watches untouched -- the exact way a
+// derived store goes quietly stale (the summaries.db lesson). Hashing the
+// patterns makes that edit invalidate the cache with no one having to remember
+// to bump anything.
+let signatureMemo = null;
+export function signalSignature() {
+  if (signatureMemo === null) {
+    signatureMemo = digest(
+      Object.entries(TOPIC_SIGNALS)
+        .map(([name, re]) => `${name}=${String(re)}`)
+        .join('\n')
+    );
+  }
+  return signatureMemo;
+}
+
+export function topicTallies(
+  contextDb,
+  idToKey,
+  { nameTokens = new Set(), bucketBy = 'year', scanStamp, store = null } = {}
+) {
+  const byIdentifier = topicScan(contextDb, { bucketBy, stamp: scanStamp, store });
+  const docs = foldToPeople(byIdentifier, idToKey, nameTokens);
+  const docFreq = new Map();
+  for (const doc of docs.values()) {
+    for (const t of doc.terms.keys()) docFreq.set(t, (docFreq.get(t) ?? 0) + 1);
+    for (const pr of doc.pairs.keys()) docFreq.set(pr, (docFreq.get(pr) ?? 0) + 1);
+  }
+  return { docs, docFreq, totalDocs: docs.size, byIdentifier };
+}
+
+function runTopicScan(contextDb, { bucketBy = 'year' } = {}) {
   // Cheap and honest: ask the schema rather than catching a query failure,
   // which would also swallow a real error in the join.
   const hasEpisodes =
@@ -256,6 +319,7 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
     )
     .all();
   const byIdentifier = new Map();
+  const convoKeys = new Map();
   const topicNames = Object.keys(TOPIC_SIGNALS);
   for (const row of rows) {
     let meta = {};
@@ -315,10 +379,23 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
     // run the owner never spoke in, and mail has no thread at all -- and keying
     // those on the row turned each one back into its own conversation, quietly
     // restoring the message-counting this whole block exists to replace.
-    const convo =
-      row.episode_id === null || row.episode_id === undefined
-        ? approximateConversationKey(row, meta, Number(row.ts))
-        : `ep:${row.episode_id}`;
+    // The conversation this row belongs to. An episode id is an integer and
+    // says nothing; the APPROXIMATE key is built from a chat guid or a handle,
+    // and this set gets written to a cache file, so that form is reduced to a
+    // digest. It is only ever tested for membership, so a digest is as good as
+    // the string -- and memoised per conversation, so a 243-message thread
+    // hashes once rather than 243 times.
+    let convo;
+    if (row.episode_id === null || row.episode_id === undefined) {
+      const raw = approximateConversationKey(row, meta, Number(row.ts));
+      convo = convoKeys.get(raw);
+      if (convo === undefined) {
+        convo = digest(raw);
+        convoKeys.set(raw, convo);
+      }
+    } else {
+      convo = `ep:${row.episode_id}`;
+    }
     for (const name of topicNames) {
       if (!TOPIC_SIGNALS[name].test(row.text)) continue;
       const seen = `${convo}|${name}`;
@@ -329,41 +406,30 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
     for (const clause of clauseTokens(row.text)) {
       for (let i = 0; i < clause.length; i++) {
         const t = clause[i];
-        if (t === null || nameTokens.has(t)) continue;
+        if (t === null) continue;
+        // NAMES ARE DROPPED AT THE FOLD, NOT HERE. Excluding them inline made
+        // this scan depend on the set of people's names, which is a function of
+        // the contacts spine -- so learning one new name invalidated a scan of
+        // 425,000 unchanged rows. The scan is now a pure function of the corpus,
+        // and the spine is applied where it is cheap.
         doc.terms.set(t, (doc.terms.get(t) ?? 0) + 1);
         // The pair: this word and the next, only when the next is also a
-        // meaningful word (a stopword or name in between breaks adjacency).
+        // meaningful word (a stopword in between breaks adjacency; a NAME in
+        // between is broken at the fold, which drops any pair containing one).
         const u = clause[i + 1];
-        if (u !== null && u !== undefined && !nameTokens.has(u)) {
+        if (u !== null && u !== undefined) {
           const pair = `${t} ${u}`;
           doc.pairs.set(pair, (doc.pairs.get(pair) ?? 0) + 1);
         }
       }
     }
   }
-  // THE FOLD: identifier-buckets into person-buckets, using the CURRENT
-  // resolution. Two handles that Contacts now says are one person merge here,
-  // and the merge is a walk over ~3,300 identifier buckets rather than a rescan
-  // of 425,000 rows.
-  //
-  // countedIn merges as a union, which is what keeps "one hit per conversation"
-  // true across a merge: if the same episode was seen under two handles of the
-  // same person, it must still count once.
-  const docs = foldToPeople(byIdentifier, idToKey);
-
-  // Document frequency over person-buckets — singles and pairs share one map
-  // (the space in a pair key keeps the namespaces apart).
-  const docFreq = new Map();
-  for (const doc of docs.values()) {
-    for (const t of doc.terms.keys()) docFreq.set(t, (docFreq.get(t) ?? 0) + 1);
-    for (const pr of doc.pairs.keys()) docFreq.set(pr, (docFreq.get(pr) ?? 0) + 1);
-  }
-  return { docs, docFreq, totalDocs: docs.size, byIdentifier };
+  return byIdentifier;
 }
 
 // Regroup per-identifier tallies under the person each identifier currently
 // resolves to. Cheap: one pass over the identifier buckets.
-export function foldToPeople(byIdentifier, idToKey) {
+export function foldToPeople(byIdentifier, idToKey, nameTokens = new Set()) {
   const docs = new Map();
   for (const [idBucket, src] of byIdentifier) {
     const cut = idBucket.lastIndexOf('|');
@@ -380,8 +446,19 @@ export function foldToPeople(byIdentifier, idToKey) {
     for (const [name, n] of Object.entries(src.taxonomy)) {
       doc.taxonomy[name] = (doc.taxonomy[name] ?? 0) + n;
     }
-    for (const [t, n] of src.terms) doc.terms.set(t, (doc.terms.get(t) ?? 0) + n);
-    for (const [pr, n] of src.pairs) doc.pairs.set(pr, (doc.pairs.get(pr) ?? 0) + n);
+    // A person's own name is never their topic -- applied here rather than in
+    // the scan, so the scan does not depend on the spine. A pair is dropped when
+    // EITHER half is a name, which is what the inline check used to achieve by
+    // never forming it.
+    for (const [t, n] of src.terms) {
+      if (nameTokens.has(t)) continue;
+      doc.terms.set(t, (doc.terms.get(t) ?? 0) + n);
+    }
+    for (const [pr, n] of src.pairs) {
+      const sp = pr.indexOf(' ');
+      if (nameTokens.has(pr.slice(0, sp)) || nameTokens.has(pr.slice(sp + 1))) continue;
+      doc.pairs.set(pr, (doc.pairs.get(pr) ?? 0) + n);
+    }
     for (const c of src.countedIn) doc.countedIn.add(c);
   }
   return docs;

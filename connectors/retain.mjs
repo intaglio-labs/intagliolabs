@@ -127,7 +127,11 @@ export async function maintainPass({ log, ingestOpts }) {
 export function wipeLocalArtifacts(connector, { state, cacheDir, log }) {
   const cursorsDeleted = state.deleteCursors(connector);
   if (connector === 'imessage') state.db.exec('DELETE FROM imessage_undecoded');
-  if (connector === 'contacts') state.db.exec('DELETE FROM contact_ids');
+  if (connector === 'contacts') {
+    // Contact thumbnails are household-private state too. Leaving them behind
+    // made an explicit contacts purge remove the names but retain every face.
+    state.db.exec('DELETE FROM contact_avatars; DELETE FROM contact_ids');
+  }
   rmSync(join(cacheDir, connector), { recursive: true, force: true });
   log?.info('local_artifacts_wiped', { connector, cursorsDeleted });
   return { cursorsDeleted };

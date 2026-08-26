@@ -58,6 +58,43 @@ enum Provision {
       NSLog("Intaglio Labs: retired the \(label) launchd agent; it runs as a child now")
     }
   }
+
+  /// Retire the backend jobs installed before the bundle identifier moved
+  /// from com.hazlie.* to io.intaglio.*. The new plists are installed first;
+  /// only then are these working fallbacks removed, so a failed upgrade never
+  /// trades a running backend for none at all.
+  private static func retireLegacyBackendAgents() -> Bool {
+    var retired = false
+    let migrations = [
+      ("com.hazlie.hermes", "io.intaglio.hermes"),
+      ("com.hazlie.llama-server", "io.intaglio.llama-server"),
+      ("com.hazlie.connect", "io.intaglio.connect"),
+    ]
+    for (legacy, replacement) in migrations {
+      let plist = launchAgents.appendingPathComponent("\(legacy).plist")
+      let replacementPlist = launchAgents.appendingPathComponent("\(replacement).plist")
+      guard fm.fileExists(atPath: plist.path),
+            fm.fileExists(atPath: replacementPlist.path) else { continue }
+      let p = Process()
+      p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+      p.arguments = ["bootout", "gui/\(getuid())/\(legacy)"]
+      try? p.run()
+      p.waitUntilExit()
+      try? fm.removeItem(at: plist)
+      retired = true
+      NSLog("Intaglio Labs: retired legacy backend agent \(legacy)")
+    }
+    return retired
+  }
+
+  /// Jobs may have attempted to start while their legacy counterparts still
+  /// owned the ports. Restart every installed new job after migration.
+  private static func restartInstalledBackendAgents() {
+    for label in agentsInOrder {
+      let plist = launchAgents.appendingPathComponent("\(label).plist")
+      if fm.fileExists(atPath: plist.path) { kickstart(label) }
+    }
+  }
   // The llama plist hard-codes Homebrew's binary path; provision points it at
   // the stable copy instead.
   private static let brewLlama = "/opt/homebrew/bin/llama-server"
@@ -112,13 +149,17 @@ enum Provision {
         // Existing files are never touched, so this is a no-op when healthy.
         do { try ensureSecrets() }
         catch { NSLog("Intaglio Labs: secret provisioning failed: \(error)") }
+        if retireLegacyBackendAgents() { restartInstalledBackendAgents() }
         return
       }
       guard fm.fileExists(atPath: backend.appendingPathComponent("connect/server.mjs").path) else {
         NSLog("Intaglio Labs: no bundled backend — a dev build without it, skipping provision")
         return
       }
-      do { try provision() }
+      do {
+        try provision()
+        if retireLegacyBackendAgents() { restartInstalledBackendAgents() }
+      }
       catch { NSLog("Intaglio Labs: provisioning failed: \(error)") }
     }
   }

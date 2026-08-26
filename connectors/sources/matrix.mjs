@@ -1,7 +1,7 @@
 // The matrix connector: the social bridges' DMs → hermes.
 //
 // THE MISSING HALF OF THE BRIDGE STACK, and it had been missing the whole
-// time. bridges/ has run Synapse and six mautrix bridges since 2026-08; the
+// time. bridges/ has run Synapse and seven mautrix bridges since 2026-08; the
 // connect page could log Facebook and Instagram in; and not one message ever
 // reached the corpus, because nothing read Matrix. bridges/README listed this
 // under "Next (not yet built)" and the context store proved it: 324k iMessage
@@ -9,11 +9,11 @@
 //
 //   entity messenger:<event_id>   one DM, one platform per row
 //
-// WHY /sync AND NOT PER-ROOM PAGING. Matrix's own incremental primitive is a
-// sync token: hand back `next_batch` and the server returns exactly what has
-// happened since. One request covers every portal room of every bridge, new
-// rooms included, with no per-room cursor bookkeeping and no way to miss a
-// room that appeared between runs. The token is the cursor.
+// WHY /sync. Matrix's own incremental primitive is a sync token: hand back
+// `next_batch` and the server returns exactly what has happened since. One
+// request covers every portal room of every bridge, new rooms included, with
+// no way to miss a room that appeared between runs. Per-room /messages paging
+// is used only on the first run, to walk beyond /sync's bounded timeline tail.
 //
 // FIRST RUN IS A FULL SYNC, deliberately: `since` absent means Synapse returns
 // the current state plus a timeline tail per room, which is the backfilled
@@ -28,10 +28,28 @@ import { join } from 'node:path';
 import { classifySender, eventToRow } from '../lib/matrixRows.mjs';
 
 const CURSOR_KEY = 'matrix:since';
-// One page is plenty per tick: the daemon comes back every few minutes, and a
-// bigger page on first run just means a longer single request against a
-// loopback server.
 const TIMELINE_LIMIT = 500;
+const INITIAL_HISTORY_LIMIT = 10_000;
+
+const roomCursorKey = (roomId) => `matrix:room:${roomId}`;
+
+function decodeRoomMembers(value) {
+  if (!value) return new Map();
+  try {
+    const entries = JSON.parse(value);
+    if (!Array.isArray(entries)) return new Map();
+    return new Map(entries.filter(
+      (entry) => Array.isArray(entry) && entry.length === 2
+        && typeof entry[0] === 'string' && typeof entry[1] === 'string'
+    ));
+  } catch {
+    return new Map();
+  }
+}
+
+function encodeRoomMembers(members) {
+  return JSON.stringify([...members.entries()]);
+}
 
 export function credentialsPath(home) {
   return join(home, '.hazlie', 'matrix', 'owner-credentials.json');
@@ -61,17 +79,27 @@ export function readCredentials(home) {
  * the room (a room with no ghost is a bridge management room — login
  * transcripts, never ingested) and supplies the names rows carry.
  */
-export function readRoomMembers(state) {
+export function readRoomMembers(state, previousMembers = new Map()) {
+  const members = new Map(previousMembers);
+  for (const ev of state ?? []) {
+    if (ev?.type !== 'm.room.member' || typeof ev.state_key !== 'string') continue;
+    const membership = ev.content?.membership;
+    if (membership !== undefined && membership !== 'join') {
+      members.delete(ev.state_key);
+      continue;
+    }
+    const display = ev.content?.displayname;
+    members.set(
+      ev.state_key,
+      typeof display === 'string' && display ? display : (members.get(ev.state_key) ?? '')
+    );
+  }
+
   const names = new Map();
   let partner = null;
   let ghosts = 0;
-  for (const ev of state ?? []) {
-    if (ev?.type !== 'm.room.member') continue;
-    const mxid = ev.state_key;
-    const display = ev.content?.displayname;
-    if (typeof mxid === 'string' && typeof display === 'string' && display) {
-      names.set(mxid, display);
-    }
+  for (const [mxid, display] of members) {
+    if (display) names.set(mxid, display);
     const who = classifySender(mxid);
     if (who?.kind === 'ghost') {
       ghosts += 1;
@@ -80,7 +108,7 @@ export function readRoomMembers(state) {
       if (!partner) partner = { mxid, source: who.source, handle: who.handle };
     }
   }
-  return { names, partner, isGroup: ghosts > 1 };
+  return { names, partner, isGroup: ghosts > 1, members };
 }
 
 /**
@@ -88,7 +116,7 @@ export function readRoomMembers(state) {
  *
  * This is the step the whole stack was missing. mautrix creates one room per
  * conversation and invites the owner; until that invite is accepted the room
- * is not in `rooms.join`, so a sync returns six management rooms and nothing
+ * is not in `rooms.join`, so a sync returns bridge management rooms and nothing
  * else — which is exactly what this machine looked like with Facebook and
  * Instagram both "connected" (owner, 2026-08-25). A bridge client is expected
  * to accept its own bridges' invites; there was no client.
@@ -111,19 +139,21 @@ export function invitesToJoin(body) {
 }
 
 /** A /sync response → rows, newest-token included. */
-export function syncToRows(body, { selfName = 'me' } = {}) {
+export function syncToRows(body, { selfName = 'me', roomState = new Map() } = {}) {
   const rows = [];
   let rooms = 0;
   const joined = body?.rooms?.join ?? {};
   for (const [roomId, room] of Object.entries(joined)) {
     const events = room?.timeline?.events ?? [];
-    if (events.length === 0) continue;
     // State comes from the sync page when present; on an incremental sync the
     // membership is usually absent, so member events in the timeline carry it.
-    const { names, partner, isGroup } = readRoomMembers([
-      ...(room?.state?.events ?? []),
-      ...events,
-    ]);
+    const resolved = readRoomMembers(
+      [...(room?.state?.events ?? []), ...events],
+      roomState.get(roomId)
+    );
+    roomState.set(roomId, resolved.members);
+    if (events.length === 0) continue;
+    const { names, partner, isGroup } = resolved;
     if (!partner) continue; // management room, or a room with no bridged human
     rooms += 1;
     for (const ev of events) {
@@ -134,10 +164,15 @@ export function syncToRows(body, { selfName = 'me' } = {}) {
       if (row) rows.push(row);
     }
   }
-  return { rows, rooms, next: typeof body?.next_batch === 'string' ? body.next_batch : null };
+  return {
+    rows,
+    rooms,
+    roomState,
+    next: typeof body?.next_batch === 'string' ? body.next_batch : null,
+  };
 }
 
-export function createMatrixSource({ home } = {}) {
+export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
   return {
     name: 'matrix',
 
@@ -168,18 +203,18 @@ export function createMatrixSource({ home } = {}) {
       }));
       if (since) url.searchParams.set('since', since);
       // FULL STATE ON THE FIRST SYNC, and this is not belt-and-braces: a
-      // since-less sync returned only the six management rooms while
-      // /joined_rooms listed twelve, because Synapse serves a room's state in
+      // since-less sync returned only management rooms while /joined_rooms
+      // listed more, because Synapse serves a room's state in
       // an initial sync only when it has something new to report for it —
       // rooms joined moments earlier came back empty and were skipped as
-      // "no partner". With full_state the same call returned all twelve and
+      // "no partner". With full_state the same call returned them all and
       // the portal rooms mapped (verified 2026-08-25: 5 rooms, 9 rows).
       // Incremental syncs carry their own deltas and must NOT ask for it.
       else url.searchParams.set('full_state', 'true');
 
       let body;
       try {
-        const res = await fetch(url, {
+        const res = await fetchImpl(url, {
           headers: { Authorization: `Bearer ${creds.token}` },
           signal: AbortSignal.timeout(60_000),
         });
@@ -203,7 +238,7 @@ export function createMatrixSource({ home } = {}) {
       let joined = 0;
       for (const roomId of invitesToJoin(body)) {
         try {
-          const r = await fetch(
+          const r = await fetchImpl(
             `${creds.base}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`,
             { method: 'POST',
               headers: { Authorization: `Bearer ${creds.token}`, 'Content-Type': 'application/json' },
@@ -217,14 +252,90 @@ export function createMatrixSource({ home } = {}) {
       }
       if (joined) ctx.log?.info?.(`matrix: joined ${joined} portal room(s)`);
 
-      const { rows, rooms, next } = syncToRows(body, { selfName: ctx.config?.selfName ?? 'me' });
-      const totals = rows.length ? await ingestAll(ctx, rows) : { inserted: 0, updated: 0, unchanged: 0 };
-      ctx.log?.info?.(`matrix: ${rows.length} rows from ${rooms} room(s)`);
+      // Matrix omits unchanged membership state from incremental syncs. Keep a
+      // private per-room member snapshot so a message-only page can still be
+      // attributed to its bridge and conversation partner.
+      const joinedRooms = body?.rooms?.join ?? {};
+      const roomState = new Map();
+      for (const roomId of Object.keys(joinedRooms)) {
+        roomState.set(roomId, decodeRoomMembers(ctx.state.getCursor(roomCursorKey(roomId))));
+      }
+      const mapped = syncToRows(body, {
+        selfName: ctx.config?.selfName ?? 'me',
+        roomState,
+      });
+      const totals = mapped.rows.length
+        ? await ingestAll(ctx, mapped.rows)
+        : { inserted: 0, updated: 0, unchanged: 0 };
+      let rowCount = mapped.rows.length;
 
-      // The token advances only after a successful ingest, so a failed ship
-      // is retried rather than skipped — the same rule every cursor here
-      // follows, and the reason this one is written last.
-      if (next) ctx.state.setCursor(CURSOR_KEY, next);
+      // A since-less /sync includes at most TIMELINE_LIMIT events per room.
+      // Walk backwards from prev_batch on that first run so older bridge
+      // history is not silently capped at 500 messages. Bound each room to
+      // keep a first launch finite; a --purge/--backfill safely repeats it.
+      if (!since) {
+        for (const [roomId, room] of Object.entries(joinedRooms)) {
+          const members = mapped.roomState.get(roomId) ?? new Map();
+          const resolved = readRoomMembers([], members);
+          let from = room?.timeline?.prev_batch;
+          let observed = room?.timeline?.events?.length ?? 0;
+          if (!resolved.partner || typeof from !== 'string' || !from) continue;
+
+          while (observed < INITIAL_HISTORY_LIMIT) {
+            const pageUrl = new URL(
+              `${creds.base}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages`
+            );
+            pageUrl.searchParams.set('dir', 'b');
+            pageUrl.searchParams.set('from', from);
+            pageUrl.searchParams.set(
+              'limit',
+              String(Math.min(TIMELINE_LIMIT, INITIAL_HISTORY_LIMIT - observed))
+            );
+            let page;
+            try {
+              const res = await fetchImpl(pageUrl, {
+                headers: { Authorization: `Bearer ${creds.token}` },
+                signal: AbortSignal.timeout(60_000),
+              });
+              if (!res.ok) throw new Error(`homeserver answered ${res.status}`);
+              page = await res.json();
+            } catch (error) {
+              throw new Error(
+                `matrix: initial history failed for one portal room (${error?.message ?? 'error'})`,
+                { cause: error }
+              );
+            }
+
+            const events = Array.isArray(page?.chunk)
+              ? page.chunk.slice(0, INITIAL_HISTORY_LIMIT - observed)
+              : [];
+            if (events.length === 0) break;
+            const rows = [];
+            for (const ev of events) {
+              const row = eventToRow(
+                { ...ev, __partner: resolved.partner, __isGroup: resolved.isGroup },
+                { roomId, names: resolved.names, selfName: ctx.config?.selfName ?? 'me' }
+              );
+              if (row) rows.push(row);
+            }
+            if (rows.length) mergeTotals(totals, await ingestAll(ctx, rows));
+            rowCount += rows.length;
+            observed += events.length;
+            if (typeof page.end !== 'string' || !page.end || page.end === from) break;
+            from = page.end;
+          }
+        }
+      }
+
+      ctx.log?.info?.(`matrix: ${rowCount} rows from ${mapped.rooms} room(s)`);
+
+      // Every cursor advances only after all ingestion and initial paging
+      // succeeds. A partial failure therefore retries idempotent entity IDs
+      // instead of forgetting either history or room attribution state.
+      for (const [roomId, members] of mapped.roomState) {
+        ctx.state.setCursor(roomCursorKey(roomId), encodeRoomMembers(members));
+      }
+      if (mapped.next) ctx.state.setCursor(CURSOR_KEY, mapped.next);
       return { ...totals, skipped: 0 };
     },
   };
@@ -239,6 +350,13 @@ async function ingestAll(ctx, rows, batchSize = 500) {
     totals.unchanged += t.unchanged ?? 0;
   }
   return totals;
+}
+
+function mergeTotals(into, add) {
+  into.inserted += add.inserted ?? 0;
+  into.updated += add.updated ?? 0;
+  into.unchanged += add.unchanged ?? 0;
+  return into;
 }
 
 export default createMatrixSource();

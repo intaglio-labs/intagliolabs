@@ -215,6 +215,27 @@ private func dumpContacts() -> Never {
     fail("contacts access not granted\(authError.map { ": \($0.localizedDescription)" } ?? "")", code: 2)
   }
 
+  // GRANTED IS NOT THE SAME AS ALL OF THEM.
+  //
+  // Recent macOS has limited contacts access: the owner picks a subset and the
+  // app sees only those. requestAccess reports success for it, enumerateContacts
+  // quietly returns the subset, and nothing anywhere says so -- which reads,
+  // downstream, as an address book that simply does not contain people the owner
+  // knows perfectly well it contains. Reported here so contacts.mjs can log it
+  // and the connect page can say it out loud; nothing in this process can widen
+  // it, and pretending otherwise is how the last silent failure got shipped.
+  var access = "full"
+  if #available(macOS 15.0, *) {
+    switch CNContactStore.authorizationStatus(for: .contacts) {
+    case .limited: access = "limited"
+    case .authorized: access = "full"
+    case .denied: access = "denied"
+    case .restricted: access = "restricted"
+    case .notDetermined: access = "notDetermined"
+    @unknown default: access = "unknown"
+    }
+  }
+
   let keys: [CNKeyDescriptor] = [
     CNContactFormatter.descriptorForRequiredKeys(for: .fullName),
     CNContactPhoneNumbersKey as CNKeyDescriptor,
@@ -253,7 +274,10 @@ private func dumpContacts() -> Never {
   } catch {
     fail("enumerating contacts failed: \(error.localizedDescription)")
   }
-  FileHandle.standardError.write(Data("apple-data: contacts=\(out.count)\n".utf8))
+  FileHandle.standardError.write(Data("apple-data: contacts=\(out.count) access=\(access)\n".utf8))
+  // A marker record rather than a wrapper object, so every existing reader of
+  // this array keeps working and only a reader that looks for it sees it.
+  out.append(["__access": access])
   emit(out)
 }
 
