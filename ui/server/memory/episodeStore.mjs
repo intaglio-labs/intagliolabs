@@ -9,7 +9,7 @@
 // than merge: an episode is an index, not evidence. The evidence is still the
 // context row, claim_source still points at a row, and no claim points here.
 
-import { buildEpisodes, DEFAULT_GAP_MS } from './episodes.mjs';
+import { buildEpisodes, threadKeyFor, DEFAULT_GAP_MS } from './episodes.mjs';
 import { isRoom } from './threadKind.mjs';
 
 // Sources that have conversations. calendar/photos/files are events and
@@ -118,18 +118,147 @@ function safeMeta(meta) {
 // correctness property and not only a saving: distill_run joins on member_hash,
 // people/topics.mjs counts one topic per conversation using the episode id, and
 // both used to be invalidated wholesale by a rebuild that changed nothing.
-export function rebuildEpisodes(db, { gapMs = DEFAULT_GAP_MS, now = Date.now(), spine = null } = {}) {
+// WHICH CONVERSATION EACH ROW BELONGS TO, written down.
+//
+// The rebuild's remaining cost was that it had to read every episodic row --
+// 418,698 of them, ~3s and ~384MB -- just to discover which threads had moved,
+// because a thread key is computed from `meta` and is not a column anything can
+// filter on. This is that missing index: derived, rebuildable, and the only
+// thing that makes "just the threads that changed" expressible as a query.
+//
+// Its own table rather than a column on `context`: the corpus is evidence and
+// this is an index over it, the same separation `episode` already keeps. Drop it
+// and the next pass rebuilds it.
+const THREAD_INDEX_SCHEMA = `
+CREATE TABLE IF NOT EXISTS context_thread(
+  context_id INTEGER PRIMARY KEY REFERENCES context(id) ON DELETE CASCADE,
+  thread_key TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS context_thread_key ON context_thread(thread_key);
+`;
+
+// What the index currently holds, for the passes that did not build all of it.
+function indexTotals(db, now) {
+  const t = db
+    .prepare(
+      'SELECT COUNT(*) AS n, COALESCE(SUM(settled_at <= ?), 0) AS s, ' +
+        'COALESCE(SUM(counterparty_key IS NOT NULL), 0) AS c FROM episode'
+    )
+    .get(now);
+  return {
+    episodes: Number(t.n) || 0,
+    settled: Number(t.s) || 0,
+    withCounterparty: Number(t.c) || 0,
+  };
+}
+
+function ensureThreadIndex(db) {
+  db.exec(THREAD_INDEX_SCHEMA);
+}
+
+// The rows the index has not seen yet, keyed and recorded. Returns the thread
+// keys they touch -- the set of conversations that need re-cutting.
+function indexNewRows(db, holes) {
+  const watermark = Number(
+    db.prepare('SELECT COALESCE(MAX(context_id), 0) AS m FROM context_thread').get().m
+  );
+  const fresh = db
+    .prepare(
+      'SELECT id, source, meta, entity_id FROM context ' +
+        `WHERE source IN (${holes}) AND id > ? ORDER BY id`
+    )
+    .all(...EPISODE_SOURCES, watermark);
+  const touched = new Set();
+  const ins = db.prepare('INSERT OR REPLACE INTO context_thread(context_id, thread_key) VALUES (?, ?)');
+  for (const row of fresh) {
+    const key = threadKeyFor(row);
+    if (!key) continue;
+    ins.run(row.id, key);
+    touched.add(key);
+  }
+  return { watermark, touched, seen: fresh.length };
+}
+
+// Is the index still a faithful picture of the corpus? Rows only ever arrive in
+// normal operation, but hermes is also the corpus's sole DELETER -- a purge or a
+// retention pass removes rows, and a watermark cannot see that. One count
+// settles it, and a mismatch means a full pass rather than a guess.
+function threadIndexIsWhole(db, holes) {
+  const rows = Number(
+    db.prepare(`SELECT COUNT(*) AS n FROM context WHERE source IN (${holes})`).get(...EPISODE_SOURCES).n
+  );
+  const indexed = Number(db.prepare('SELECT COUNT(*) AS n FROM context_thread').get().n);
+
+  // THE INDEX CANNOT REPORT ITS OWN LOSSES. context_thread cascades from
+  // context, so deleting a row deletes its index entry too and the two counts
+  // still agree -- while the EPISODE built from that row is still standing, now
+  // one member short. episode_member cascades the same way, which is what makes
+  // it detectable: an episode records the row_count it was cut with, so the
+  // members that survive must still add up to it.
+  const members = Number(db.prepare('SELECT COUNT(*) AS n FROM episode_member').get().n);
+  const claimed = Number(db.prepare('SELECT COALESCE(SUM(row_count), 0) AS n FROM episode').get().n);
+
+  return { whole: rows === indexed && members === claimed, rows, indexed, members, claimed };
+}
+
+export function rebuildEpisodes(
+  db,
+  { gapMs = DEFAULT_GAP_MS, now = Date.now(), spine = null, full = false } = {}
+) {
   const holes = EPISODE_SOURCES.map(() => '?').join(',');
+
+  // JUST THE CONVERSATIONS THAT MOVED, when the index can vouch for itself.
+  //
+  // A full pass reads every episodic row to find out which threads changed. With
+  // context_thread that question is a query, so a quiet corpus reads nothing and
+  // an ingest reads only the threads it touched. Everything below is a strict
+  // narrowing of the full pass: same builder, same member_hash diff, restricted
+  // to a set of threads. When anything is unclear -- no index yet, rows deleted
+  // out from under it -- it falls through to the full pass rather than guessing.
+  ensureThreadIndex(db);
+  const whole = threadIndexIsWhole(db, holes);
+  let indexWhole = whole.whole && whole.indexed > 0;
+  if (!full && whole.indexed > 0) {
+    const { touched } = indexNewRows(db, holes);
+    const after = threadIndexIsWhole(db, holes);
+    if (after.whole) {
+      if (touched.size === 0) {
+        // The same shape a rebuild answers with. A caller reading `episodes`
+        // must get the number of episodes, not a null meaning "I did not look".
+        return { ...indexTotals(db, now), rows: after.rows, inserted: 0, deleted: 0, rekeyed: 0,
+          scope: 'nothing-new' };
+      }
+      return rebuildThreads(db, [...touched], { gapMs, now, spine, totalRows: after.rows });
+    }
+    // The index and the corpus disagree: rows were removed. It is rebuilt below
+    // as part of the full pass.
+    indexWhole = false;
+  }
+
   // Read and build BEFORE opening the transaction: this is the slow half and
   // none of it needs the write lock.
   const rows = db
     .prepare(
-      'SELECT id, ts, source, speaker, text, meta, entity_id, content_hash ' +
+      // NO `text`. Cutting a conversation is arithmetic over timestamps and
+      // thread keys -- nothing here reads a message body, and episodeLines
+      // fetches text per episode for the distiller when it is actually needed.
+      // Carrying it here materialised 418,698 message bodies to look at their
+      // clocks: 507MB against 384MB, measured, for a field with zero readers in
+      // this path.
+      'SELECT id, ts, source, speaker, meta, entity_id, content_hash ' +
         `FROM context WHERE source IN (${holes}) ORDER BY id`
     )
     .all(...EPISODE_SOURCES);
 
   const episodes = buildEpisodes(rows, { gapMs, now });
+
+  // The full pass has every row keyed already, so this is the cheapest possible
+  // moment to write the index that lets the next one be narrow.
+  // Plain INSERT: the table was just emptied, so there is nothing to replace and
+  // the conflict check is pure cost.
+  const insThreadFast = db.prepare(
+    'INSERT INTO context_thread(context_id, thread_key) VALUES (?, ?)'
+  );
 
   // What each episode is WITH, computed once. The old code called
   // counterpartyFor twice per episode -- once to store it and once again to
@@ -157,6 +286,32 @@ export function rebuildEpisodes(db, { gapMs = DEFAULT_GAP_MS, now = Date.now(), 
   let inserted = 0;
   let deleted = 0;
   let rekeyed = 0;
+
+  // THE INDEX IS REBUILT ONLY WHEN IT IS ACTUALLY BROKEN, and never inside the
+  // episode transaction. Writing all 418,715 rows on every full pass added a
+  // second bulk write to the one place that must be short -- measured at 158s
+  // against the live server, worse than the whole thing was before it existed.
+  if (!indexWhole) {
+    db.exec('BEGIN');
+    try {
+      // The secondary index comes OFF for the bulk load and goes back on after.
+      // Maintaining a b-tree per row across 418,715 inserts is most of the cost
+      // of building this: 26s with it, a fraction of that without. The table is
+      // empty of readers inside this transaction, so there is nothing to serve
+      // from it meanwhile.
+      db.exec('DROP INDEX IF EXISTS context_thread_key');
+      db.exec('DELETE FROM context_thread');
+      for (const row of rows) {
+        const key = threadKeyFor(row);
+        if (key) insThreadFast.run(row.id, key);
+      }
+      db.exec('CREATE INDEX IF NOT EXISTS context_thread_key ON context_thread(thread_key)');
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  }
 
   db.exec('BEGIN');
   try {
@@ -216,6 +371,94 @@ export function rebuildEpisodes(db, { gapMs = DEFAULT_GAP_MS, now = Date.now(), 
     inserted,
     deleted,
     rekeyed,
+    scope: 'full',
+  };
+}
+
+// Re-cut exactly these threads, leaving every other conversation alone.
+//
+// The rows come from context_thread, so this reads only the threads named --
+// and it reads ALL of their rows, not only the new ones, because a message
+// landing in an existing conversation re-cuts it and the builder needs the
+// whole thread to do that correctly.
+function rebuildThreads(db, threadKeys, { gapMs, now, spine, totalRows }) {
+  const holes = threadKeys.map(() => '?').join(',');
+  const rows = db
+    .prepare(
+      'SELECT c.id, c.ts, c.source, c.speaker, c.meta, c.entity_id, c.content_hash ' +
+        'FROM context c JOIN context_thread t ON t.context_id = c.id ' +
+        `WHERE t.thread_key IN (${holes}) ORDER BY c.id`
+    )
+    .all(...threadKeys);
+
+  const episodes = buildEpisodes(rows, { gapMs, now });
+  const keyFor = new Map();
+  for (const ep of episodes) keyFor.set(ep.member_hash, counterpartyFor(ep, spine));
+
+  // Only what is stored FOR THESE THREADS may be deleted here. An episode of a
+  // conversation nobody touched is not missing from `episodes` because it went
+  // away -- it is missing because it was never rebuilt.
+  const stored = new Map();
+  for (const r of db
+    .prepare(`SELECT id, member_hash, counterparty_key FROM episode WHERE thread_key IN (${holes})`)
+    .all(...threadKeys)) {
+    stored.set(r.member_hash, r);
+  }
+
+  const insEp = db.prepare(
+    'INSERT INTO episode(source, thread_key, started_at, ended_at, row_count, owner_row_count, ' +
+      'counterparty_key, built_by, gap_ms, member_hash, settled_at, built_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  );
+  const insMem = db.prepare(
+    'INSERT INTO episode_member(episode_id, context_id, line_no, quotable) VALUES (?, ?, ?, ?)'
+  );
+  const delEp = db.prepare('DELETE FROM episode WHERE id = ?');
+  const setKey = db.prepare('UPDATE episode SET counterparty_key = ? WHERE id = ?');
+
+  let inserted = 0;
+  let deleted = 0;
+  let rekeyed = 0;
+  db.exec('BEGIN');
+  try {
+    for (const [hash, row] of stored) {
+      if (keyFor.has(hash)) continue;
+      delEp.run(row.id);
+      deleted += 1;
+    }
+    for (const ep of episodes) {
+      const key = keyFor.get(ep.member_hash);
+      const already = stored.get(ep.member_hash);
+      if (already !== undefined) {
+        if ((already.counterparty_key ?? null) !== (key ?? null)) {
+          setKey.run(key, already.id);
+          rekeyed += 1;
+        }
+        continue;
+      }
+      const id = Number(
+        insEp.run(ep.source, ep.thread_key, ep.started_at, ep.ended_at, ep.row_count,
+          ep.owner_row_count, key, ep.built_by, ep.gap_ms, ep.member_hash, ep.settled_at,
+          ep.built_at).lastInsertRowid
+      );
+      for (const m of ep.members) insMem.run(id, m.context_id, m.line_no, m.quotable);
+      inserted += 1;
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+
+  // COUNTS ONLY, and the episode/settled totals are of the whole index rather
+  // than of this slice, so a caller reading them means the same thing either way.
+  return {
+    ...indexTotals(db, now),
+    rows: totalRows,
+    inserted,
+    deleted,
+    rekeyed,
+    scope: `threads:${threadKeys.length}`,
   };
 }
 
