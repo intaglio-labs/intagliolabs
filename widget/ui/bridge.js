@@ -404,31 +404,10 @@ function hzApplyPrefs() {
 // below it otherwise; always clamped inside the viewport, scrolling inside
 // itself rather than growing past an edge. position: fixed, so the body's
 // overflow: clip cannot shave it.
-function hzPlacePop(host, anchor, opts) {
-  if (!host) return;
-  const vw = window.innerWidth, vh = window.innerHeight;
-  // A SIDE CARD rather than a pop-over over the tile, for callers whose
-  // window can make room beside itself. Connections asks for this because its
-  // cards are the tall ones: Discord's login is a QR a phone camera has to
-  // read off the screen, so 168px of code plus its caption stood the card up
-  // across the settings and the shelf, and the panel it was launched from was
-  // the one thing you could not see while using it (owner, 2026-08-26).
-  //
-  // The geometry only works because that popup grows LEFTWARD — overlayFrame
-  // pins its right edge to the widget — so the width the page asks for
-  // (extraWidth) appears as a left-hand margin the card can sit in without
-  // moving anything already on screen. Anchor-free on purpose: there is one
-  // place to be, and it does not move when the flow switches tiles.
-  if (opts && opts.side) {
-    host.style.maxWidth = `${Math.min(236, vw - 16)}px`;
-    host.style.left = '8px';
-    host.style.top = 'auto';
-    host.style.bottom = '14px'; // .win's own bottom padding: the card's foot lines up with the shelf's
-    host.style.maxHeight = `${Math.max(120, vh - 28)}px`;
-    return;
-  }
-  if (!anchor) return;
+function hzPlacePop(host, anchor) {
+  if (!host || !anchor) return;
   const r = anchor.getBoundingClientRect();
+  const vw = window.innerWidth, vh = window.innerHeight;
   // Cap, don't dictate: the host is width: max-content, so a short connect
   // card stays a small card; only the ceiling comes from here. The real width
   // is then measured back for the clamp — content just changed, so this

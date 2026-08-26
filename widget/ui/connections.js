@@ -2,24 +2,17 @@
 const grid = document.getElementById('grid');
 const hintHost = document.getElementById('hintHost');
 
-// The card opens BESIDE the page, not over it. The native window grows
-// leftward to make room (overlayFrame pins the popup's right edge to the
-// widget) and .conn-main is capped at the 272px it always drew itself
-// against, so the new width lands on the left and neither the shelf nor the
-// settings move when a card opens. One observer catches every open/close
-// path — toggle, re-render, eviction — because they all mutate hintHost's
-// children.
+// The strip opens as a section BESIDE the shelf, not a band under it. The
+// native window grows leftward to make room (placedFrame pins the popup's
+// right edge to the widget), so opening a hint never reflows the tiles or
+// walks the footer down. One observer catches every open/close path —
+// toggle, re-render, eviction — because they all mutate hintHost's children.
+// 248 = the .hint-host CSS width (236) plus the .win column gap (12).
 //
-// ~~248 = the .hint-host CSS width (236) plus the .win column gap (12).~~ The
-// width is MEASURED now (fitConnections) instead of agreed between two files:
-// the card is width: max-content, and a two-line connect card has no business
-// asking for as much window as a QR does.
-//
-// ~~On open the host takes .conn-main's exact height, so the panel's TOP lines
-// up with the CONNECTIONS eyebrow.~~ Gone with the in-flow strip: the card is
-// position: fixed and clamps itself to the window. It still grows a corner x
-// on open — chrome, not content, so it is re-added after every
-// replaceChildren() wipe.
+// On open the host also (1) takes .conn-main's exact height, so with both
+// columns bottom-anchored the panel's TOP lines up with the CONNECTIONS
+// eyebrow, and (2) grows a corner x — chrome, not content, so it is
+// re-added after every replaceChildren() wipe.
 const closeHint = () => {
   hintHost.replaceChildren();
   for (const r of document.querySelectorAll('#grid .row')) r.classList.remove('open');
@@ -32,16 +25,12 @@ new MutationObserver(() => {
   // different content while the pop-over remains open.
   hintHost.classList.toggle('open', open);
   if (open) {
-    // ~~A POP-OVER anchored to the tile that was pressed, the window no longer
-    // widening for it (owner, 2026-08-25).~~ Back to a SIDE CARD (owner,
-    // 2026-08-26). Over the tile it covered the panel it belongs to, and
-    // Discord is where that stopped being cosmetic: its login is a QR, the
-    // card is as tall as the code plus its caption, and it stood across the
-    // settings and the shelf. Beside the page, the window widens by the
-    // card's own measured width (fitConnections) and nothing is hidden.
-    // Re-placed on every content change, because an async login reply
-    // changes the card's size under it.
-    hzPlacePop(hintHost, document.querySelector('#grid .row.open'), { side: true });
+    // A POP-OVER, not a side strip (owner, 2026-08-25): anchored to the tile
+    // that was pressed — toggle() marks it .open just before appending — and
+    // the window no longer widens for it (the extraWidth post left with the
+    // strip). Re-placed on every content change, because the anchor is the
+    // one fixed point while async login replies grow the card.
+    hzPlacePop(hintHost, document.querySelector('#grid .row.open'));
     if (!hintHost.querySelector('.hint-x')) {
       const x = document.createElement('button');
       x.className = 'hint-x';
@@ -270,10 +259,9 @@ function modelRow() {
 // is innerHeight + overflow, and overflow is 0 once the window is big enough),
 // so a tall window stayed stuck above short content — the dead space up top the
 // owner flagged. Measuring the column's own scrollHeight lets the window shrink
-// to fit. The card column, when open, can be taller than the settings column,
+// to fit. The hint column, when open, can be taller than the settings column,
 // so the window follows whichever is taller.
 let fitLast = 0;
-let fitLastW = -1;
 let fitQueued = false;
 function fitConnections() {
   if (fitQueued) return; // coalesce a burst of DOM mutations into one measure
@@ -290,26 +278,12 @@ function fitConnections() {
     // already wakes on every mutation, so it is the one place to undo that.
     if (main.scrollLeft !== 0) main.scrollLeft = 0;
     const mh = main.scrollHeight;
-    // BOTH COLUMNS COUNT, now that the card is one. scrollHeight, not the
-    // rendered height: hzPlacePop clamps the card to the window, so measuring
-    // what is on screen would only ever report the window back and a card
-    // taller than the panel would sit there scrolling inside itself with the
-    // room to grow going unused. The content height converges — it does not
-    // change when the window does — so this settles in one step rather than
-    // chasing itself.
-    const cardH = hintHost.scrollHeight;
-    const h = Math.ceil(Math.max(mh, cardH) + pad);
-    // WIDTH is the card's, and it is measured rather than assumed: the host
-    // is width: max-content. 8px of left margin, the card, then 12 before the
-    // column. Zero when nothing is open — which is the post that gives the
-    // window its base 312 back, so closing a card has to run this too.
-    const card = hintHost.getBoundingClientRect().width;
-    const w = card > 0 ? Math.ceil(card) + 20 : 0;
-    // Deadband on BOTH, or the resize this triggers re-measures forever.
-    if (Math.abs(h - fitLast) < 3 && w === fitLastW) return;
+    // The hint no longer joins the measure: a pop-over floats over the page
+    // and sizes itself to the room its tile leaves it (hzPlacePop).
+    const h = Math.ceil(mh + pad);
+    if (Math.abs(h - fitLast) < 3) return; // deadband, or the resize re-measures forever
     fitLast = h;
-    fitLastW = w;
-    hzPost('fitContent', { height: h, extraWidth: w }).catch(() => {});
+    hzPost('fitContent', { height: h }).catch(() => {});
   });
 }
 new MutationObserver(fitConnections).observe(document.querySelector('.win'), {
@@ -323,15 +297,7 @@ new MutationObserver(fitConnections).observe(document.querySelector('.win'), {
   // and would re-measure every few seconds for nothing.
   attributes: true, attributeFilter: ['hidden', 'class'],
 });
-window.addEventListener('resize', () => {
-  fitConnections();
-  // The window just changed width underneath an open card. Re-place it, or a
-  // card measured against the base 312 keeps a max-width and a max-height cut
-  // for a window that is no longer the one it is in.
-  if (hintHost.firstChild) {
-    hzPlacePop(hintHost, document.querySelector('#grid .row.open'), { side: true });
-  }
-});
+window.addEventListener('resize', fitConnections);
 fitConnections();
 
 async function renderSettings() {
