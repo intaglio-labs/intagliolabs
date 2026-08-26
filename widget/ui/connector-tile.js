@@ -265,7 +265,10 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
     // server's answer means the decision lives in one place instead of three.
     const manual = data && data.state === 'manual';
     if (data && data.connected) {
-      tip.append(`linked as ${data.name || 'you'}`);
+      const acct = document.createElement('span');
+      acct.className = 'acct';
+      acct.textContent = `linked as ${data.name || 'you'}`;
+      tip.appendChild(acct);
     } else if (data && data.state !== 'ok' && data.state !== 'cancelled' && !manual && !data.transcript) {
       tip.append(HZ_NOTICES[data.state] || data.error || HZ_NOTICES.error);
     } else {

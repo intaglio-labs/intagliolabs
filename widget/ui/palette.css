@@ -1558,6 +1558,10 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
 .hint.hold { padding: 10px 12px; }
 /* The connected-account line: who's linked, in cream, above the + add button. */
 .hint.hold .acct { display: block; color: var(--fg); font-size: 11px; margin: 2px 0 4px; }
+/* Every connected line leads with a green check (owner, 2026-08-25). One
+   rule, not a per-site prefix: the check rides the .acct class, so it cannot
+   be forgotten by the next connected state someone renders. */
+.hint.hold .acct::before { content: '✓ '; color: var(--status-ok); font-weight: 700; }
 .hint.hold .add-acct { font-size: 11px; }
 /* Sits under the card's NAME now (owner, 2026-08-25), so the margin flips:
    tight to the header above it, a breath before the flow below it. */

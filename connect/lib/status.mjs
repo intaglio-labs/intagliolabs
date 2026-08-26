@@ -290,7 +290,7 @@ function fullStatus(home) {
   return [
     localStoreRow({
       id: 'imessage',
-      label: 'Messages',
+      label: 'iMessage', // owner (2026-08-25): the store's own name, not the app's
       path: join(home, 'Library', 'Messages', 'chat.db'),
       reads: 'reading your message history',
     }),
@@ -356,7 +356,7 @@ function calendarRow(home) {
   }
   return localStoreRow({
     id: 'calendar',
-    label: 'Calendar',
+    label: 'Apple Calendar', // owner (2026-08-25): names WHICH calendar this reads
     path: join(home, 'Library', 'Group Containers', 'group.com.apple.calendar', 'Calendar.sqlitedb'),
     reads: 'reading the local calendar store',
   });
