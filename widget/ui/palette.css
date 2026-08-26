@@ -1464,7 +1464,26 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--muted);
 }
-.row .dot.on { background: var(--status-ok); }
+/* CONNECTED IS A CHECK MARK, not a dot (owner, 2026-08-26). A filled green
+   circle says "a state"; a tick says "done", which is what a connected source
+   is. Drawn as a glyph rather than another element so nothing about the tile's
+   markup changes — and so the spinner rule below, which owns .dot while a
+   bridge is connecting, still wins by being later.
+
+   The dot grows to fit the glyph and drops its own fill: at 6px a tick is a
+   smudge. Everything else on this shelf stays a dot, because only `on` earned
+   a mark. */
+.row .dot.on {
+  width: 12px; height: 12px; top: 2px; right: 2px;
+  background: none;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--status-ok);
+  font-size: 11px; font-weight: 700; line-height: 1;
+  /* A dark rim so the tick reads against a pale contact photo or a bright
+     glyph underneath it, the same job the dot's fill used to do for free. */
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), 0 0 4px rgba(0, 0, 0, 0.8);
+}
+.row .dot.on::after { content: '✓'; }
 .row .dot.off { background: transparent; border: 1px solid var(--disabled); }
 /* `bad` = set up and not working, as distinct from `off` = never linked. It is
    the only thing on this shelf that asks for attention, so it is the only thing
@@ -1501,6 +1520,9 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
   border-top-color: var(--hazelnut-light);
   animation: tile-spin 0.7s linear infinite;
 }
+/* And the tick goes with it: a reconnect can carry `on` and `logging-in` at
+   once, and a check mark spinning inside its own spinner is not a state. */
+.row.logging-in .dot::after { content: none; }
 @keyframes tile-spin { to { transform: rotate(360deg); } }
 /* The whole tile is the hint affordance now — a 14px ring inside a 62px
    square was a needlessly small target — so the ⓘ is gone. */
