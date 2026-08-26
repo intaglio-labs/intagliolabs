@@ -6,12 +6,23 @@
    active year lifted (its bottom border punches through the strip line via
    -1px margin) and tinted hazelnut. Oldest year left, newest right; the strip
    scrolls sideways when a life outgrows the window. */
+/* The row is the strip PLUS the globe: the years scroll inside .pm-tabs, the
+   globe sits beside them in its own cell. The padding and the baseline line
+   belong here so both read as one strip; only the years move. */
+body.plist .pm-tabrow {
+  display: flex;
+  align-items: flex-end;
+  padding: 8px 14px 0;
+  border-bottom: 1px solid rgba(234, 234, 234, 0.12);
+  flex: 0 0 auto;
+}
 body.plist .pm-tabs {
   display: flex;
   align-items: flex-end;
   gap: 3px;
-  padding: 8px 14px 0;
-  border-bottom: 1px solid rgba(234, 234, 234, 0.12);
+  /* min-width: 0 or the strip refuses to shrink below its content and pushes
+     the globe off the panel — the exact thing this layout exists to prevent. */
+  min-width: 0;
   overflow-x: auto;
   /* overflow-y MUST be explicit — same trap palette.css documents on
      .conn-main, from the other side: overflow-x: auto alone promotes the
@@ -20,7 +31,7 @@ body.plist .pm-tabs {
      row vertically scrollable. The strip scrolls SIDEWAYS only. */
   overflow-y: hidden;
   scrollbar-width: none;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
 }
 body.plist .pm-tabs::-webkit-scrollbar { display: none; }
 /* THE CLIPPED EDGE HAS TO READ AS SCROLLED, NOT BROKEN. Fifteen years need
@@ -46,9 +57,19 @@ body.plist .pm-tabs {
   );
 }
 body.plist .pm-tab { scroll-snap-align: start; }
-/* The globe is stuck to the right edge, so it must never be the thing that
-   fades — it is the one control that has to stay legible at all times. */
-body.plist .pm-tabs .pm-tab-globe { scroll-snap-align: end; }
+/* THE FADE MUST NOT EAT THE NEWEST YEAR. The mask above fades the last 18px of
+   the strip, and the strip now ends at the newest year rather than at the globe
+   — so scrolled fully right (which is where a fresh open puts it, on the year
+   it just selected) the selected tab sat inside the fade and came out washed
+   out. 18px of end margin parks it clear of the fade at rest, while a year
+   scrolled halfway past the edge still fades. Margin rather than padding on the
+   scroller: WebKit has a long history of dropping a flex scroll container's end
+   padding out of its scrollable area, and this is the app's engine. */
+body.plist .pm-tabs .pm-tab:last-child { margin-right: 18px; }
+/* (The globe used to need `scroll-snap-align: end` here, and the mask above
+   faded it anyway — it sat inside the strip's own right-hand fade. Out of the
+   scroller it is neither snapped nor masked, which is what "the one control
+   that has to stay legible at all times" actually required.) */
 body.plist .pm-tab {
   flex: 0 0 auto;
   /* 9px rather than 12: a year is four fixed-width glyphs, so the padding is
@@ -168,6 +189,11 @@ body.plist .pm-tab-globe {
   display: flex;
   align-items: center;
   padding: 5px 10px 6px;
+  /* Beside the strip, never inside it. The gap is the strip's own 3px plus a
+     little, so the globe reads as a different kind of control rather than the
+     next year along. */
+  flex: 0 0 auto;
+  margin-left: 6px;
 }
 body.plist .pm-tab-globe svg { display: block; width: 14px; height: 14px; }
 /* The sky has no flow to put a loading line in, so centre it like the empty
@@ -195,7 +221,20 @@ body.plist .pm-cards {
 body.plist .pm-cards::-webkit-scrollbar { display: none; }
 body.plist .pm-card {
   flex: 0 0 auto;
-  width: 168px;
+  /* WIDE ENOUGH FOR THE EYEBROW, which is the one line here that cannot be
+     made narrower: it is nowrap by design (a two-line eyebrow above a one-line
+     name unbalances the row) and its labels come from the server, not from
+     this file. ~~168px.~~ That left a 142px content box, and the longest
+     labels overran it — "longest monthly streak" needs 164px and "reconnected
+     after a gap" 171px (measured) — so the text crossed the card's right
+     border and painted over the next card.
+     202 gives the widest of them 5px of slack. Fixed rather than sized to
+     content: a content-sized card takes its width from the longest line in it,
+     and the line under the name is free text, so the cards came out different
+     widths from each other (209 against 198, measured). A label longer than
+     any of today's ellipsizes inside its own card — the eyebrow rule below is
+     what makes sure of it. */
+  width: 202px;
   box-sizing: border-box;
   padding: 12px;
   border-radius: 12px;
@@ -218,6 +257,11 @@ body.plist .pm-card-eyebrow {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* Belt and braces on the width above: if a label ever outgrows even a card
+     sized to it, it truncates inside its own card rather than over the next
+     one. Overflow here is a bug either way — this only decides which kind. */
+  min-width: 0;
+  overflow: hidden;
   font-size: 9px;
   letter-spacing: 0.13em;
   color: var(--muted);
@@ -225,6 +269,7 @@ body.plist .pm-card-eyebrow {
   text-transform: uppercase;
 }
 body.plist .pm-card-eyebrow svg { flex: 0 0 auto; width: 13px; height: 13px; display: block; }
+body.plist .pm-card-eyebrow span { overflow: hidden; text-overflow: ellipsis; }
 body.plist .pm-card-who { display: flex; align-items: center; gap: 7px; min-width: 0; }
 body.plist .pm-card-face {
   flex: 0 0 auto;
@@ -573,59 +618,15 @@ body.plist .pm-room-msgs {
 body.plist .pm-cards[hidden],
 body.plist .pm-filter[hidden] { display: none; }
 
-/* THE GLOBE TOGGLE STAYS REACHABLE. It is appended after every year tab, and ten
-   years plus the globe do not fit a 520px panel — so it lived past the right
-   edge of a scrolling strip and had to be hunted for. Stuck to the right edge
-   instead, with the years scrolling underneath it. The background is opaque
-   rather than translucent because a year tab sliding under a see-through button
-   reads as a rendering fault. */
-body.plist .pm-tabs .pm-tab-globe {
-  position: sticky;
-  right: 0;
-  z-index: 2;
-  margin-left: auto;
-  /* Opaque, because a year tab sliding under a translucent button reads as a
-     rendering fault. The shadow is what says "the strip continues underneath". */
-  background: var(--bg);
-  box-shadow: -8px 0 8px -6px rgba(0, 0, 0, 0.55);
-}
-/* AND IT MUST STILL LOOK SELECTED. The opaque background above beats
-   .pm-tab.active's own, so the globe's selected state became indistinguishable
-   from its unselected one — defeating the point of making it reachable. Restated
-   at the specificity it now needs, keeping the real .active treatment: the
-   hazelnut tint and border, plus the 1px punch-through shadow, combined with the
-   left-edge shadow that says the strip continues underneath. */
-body.plist .pm-tabs .pm-tab-globe.active {
-  border-color: rgba(197, 165, 109, 0.35);
-  color: var(--hazelnut-light);
-  background: color-mix(in srgb, var(--hazelnut-light) 7%, var(--bg));
-  box-shadow: 0 1px 0 rgba(16, 16, 15, 0.92), -8px 0 8px -6px rgba(0, 0, 0, 0.55);
-}
-
-/* HOW OLD THE ANSWER IS, and the way to ask for a newer one. Pushed to the far
-   end of the row so it never competes with the recency segments — it is a
-   footnote, not a control you reach for. It only becomes prominent when the
-   answer is actually behind. */
-body.plist .pm-fresh {
-  appearance: none;
-  margin-left: auto;
-  border: 1px solid transparent;
-  background: transparent;
-  border-radius: 5px;
-  padding: 2px 6px;
-  font: inherit;
-  font-size: 9px;
-  letter-spacing: 0.03em;
-  color: var(--muted);
-  opacity: 0.7;
-  cursor: pointer;
-  white-space: nowrap;
-}
-body.plist .pm-fresh:hover:not(:disabled) { opacity: 1; color: var(--fg); }
-body.plist .pm-fresh.stale {
-  opacity: 1;
-  color: var(--hazelnut-light);
-  border-color: color-mix(in srgb, var(--hazelnut-light) 28%, transparent);
-}
-body.plist .pm-fresh:disabled { cursor: default; opacity: 0.55; }
-body.plist .pm-fresh:focus-visible { outline: 1px solid var(--hazelnut-light); outline-offset: 1px; }
+/* THE GLOBE TOGGLE STAYS REACHABLE — ten years plus the globe do not fit a
+   520px panel, so as the last tab of a scrolling strip it lived past the right
+   edge and had to be hunted for.
+   ~~Fixed by sticking it to the right edge with position: sticky and an opaque
+   background, the years scrolling underneath it; opaque because a year sliding
+   under a see-through button reads as a rendering fault. A second rule then had
+   to restate .active, because that opaque background beat the shared one.~~
+   Both yeeted (owner, 2026-08-26): a year sliding under an OPAQUE button reads
+   as a rendering fault too — the covered year keeps its own left corner and its
+   first glyphs and looks half-eaten, not scrolled ("20" of 2023, 22px covered,
+   measured). It is a sibling of the strip now, so it is always reachable, never
+   overlaps anything, and .pm-tab.active paints it like every other tab. */

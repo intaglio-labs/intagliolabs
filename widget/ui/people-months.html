@@ -31,8 +31,29 @@
     <button class="close" id="close" title="Close">×</button>
   </div>
   <!-- Year tabs, browser-style: every year with activity, oldest to newest,
-       the open year lifted and connected to the list below. -->
-  <div class="pm-tabs" id="tabs"></div>
+       the open year lifted and connected to the list below.
+       The globe is a SIBLING of the scrolling strip, not the last tab inside
+       it. ~~It used to live in the strip, stuck to the right edge with
+       position: sticky and an opaque background, on the reasoning that the
+       years should scroll underneath it.~~ They did, and it looked broken: at
+       most scroll positions a year sat half-covered (2023 measured 22px under
+       the globe, showing "20"), and a year sliced mid-glyph reads as a
+       rendering fault rather than as a strip that continues. Outside the
+       scroller it overlaps nothing, and the strip's own fading edge is what
+       says there is more to the left. -->
+  <div class="pm-tabrow" id="tabrow">
+    <div class="pm-tabs" id="tabs"></div>
+    <!-- Not built by people-months.js like the year tabs: it is one fixed
+         control, so it lives here and the script only lights it. -->
+    <button class="pm-tab pm-tab-globe" id="globe" data-view="sky"
+            aria-label="every year by topic">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path>
+        <path d="M12 3a14 14 0 0 0 0 18a14 14 0 0 0 0-18"></path>
+      </svg>
+    </button>
+  </div>
   <!-- The year's highlight cards, from the server's own arithmetic over the
        month timeline (ui/server/people/highlights.mjs). A card only exists
        when its sentence is true, so this row is often shorter than five and

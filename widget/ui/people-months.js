@@ -29,6 +29,10 @@
   const searchEl = document.getElementById('search');
   const closeEl = document.getElementById('close');
   const tabsEl = document.getElementById('tabs');
+  // The strip and the globe are separate boxes now, so clicks are caught on
+  // the row that holds both.
+  const tabRowEl = document.getElementById('tabrow');
+  const globeEl = document.getElementById('globe');
   const syncEl = document.getElementById('sync');
   const skyEl = document.getElementById('sky');
   const cardsEl = document.getElementById('cards');
@@ -396,12 +400,6 @@
   // Browser-style year tabs: oldest left, newest right, the open one active,
   // and the globe last — a view rather than a year, but it lives on the same
   // strip because it shows the same year.
-  const GLOBE_SVG =
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
-    'stroke-linecap="round" stroke-linejoin="round">' +
-    '<circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path>' +
-    '<path d="M12 3a14 14 0 0 0 0 18a14 14 0 0 0 0-18"></path></svg>';
-
   // Search results: ranked by the server across every year, each row carrying
   // the year it was found in.
   function renderFind() {
@@ -479,17 +477,13 @@
       b.textContent = String(y);
       tabsEl.appendChild(b);
     }
-    const g = document.createElement('button');
-    // Stays lit for the topic LIST as well as the constellation: both are
+    // The globe is in the HTML, outside the scroller, so a render only lights
+    // it. Lit for the topic LIST as well as the constellation: both are
     // all-years and both were reached through here, so this is where you are.
     // No data-tip — its hover bubble is laid out 25px below the strip, which
     // (with overflow-y promoted to auto by the horizontal scroll) made the
     // whole tab row vertically scrollable.
-    g.className = 'pm-tab pm-tab-globe' + (scope === 'all' ? ' active' : '');
-    g.dataset.view = 'sky';
-    g.setAttribute('aria-label', 'every year by topic');
-    g.innerHTML = GLOBE_SVG;
-    tabsEl.appendChild(g);
+    globeEl.classList.toggle('active', scope === 'all');
     // WHERE THE STRIP SITS.
     //
     // Years run oldest-to-newest, so the interesting end is the RIGHT one, and
@@ -1093,7 +1087,7 @@
     }
   };
 
-  tabsEl.addEventListener('click', (e) => {
+  tabRowEl.addEventListener('click', (e) => {
     const b = e.target.closest('.pm-tab');
     if (!b) return;
     if (b.dataset.view === 'sky') {
