@@ -395,6 +395,37 @@ function hzApplyPrefs() {
     .catch(() => {}); // no bridge: honour the system setting, keep sound on
 }
 
+// ---------------- placing the connector pop-over ----------------
+// The connector flows open as a POP-OVER anchored to the tile that was
+// pressed (owner, 2026-08-25) — tooltip-style, floating over the page —
+// ~~instead of the left side strip the window had to widen for~~. Shared here
+// because settings and the People popup both host the same tiles. Above the
+// tile when there is room (the shelf lives at the bottom of both pages),
+// below it otherwise; always clamped inside the viewport, scrolling inside
+// itself rather than growing past an edge. position: fixed, so the body's
+// overflow: clip cannot shave it.
+function hzPlacePop(host, anchor) {
+  if (!host || !anchor) return;
+  const r = anchor.getBoundingClientRect();
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const w = Math.min(280, vw - 16);
+  host.style.width = `${w}px`;
+  const left = Math.round(Math.min(Math.max(8, r.left + r.width / 2 - w / 2), vw - w - 8));
+  host.style.left = `${left}px`;
+  const above = r.top, below = vh - r.bottom;
+  if (above >= 160 || above >= below) {
+    // Bottom-anchored to the tile's top edge: async content (a login reply
+    // landing) grows the card UPWARD, away from the tile it points at.
+    host.style.bottom = `${Math.round(vh - r.top + 8)}px`;
+    host.style.top = 'auto';
+    host.style.maxHeight = `${Math.max(120, Math.floor(above) - 16)}px`;
+  } else {
+    host.style.top = `${Math.round(r.bottom + 8)}px`;
+    host.style.bottom = 'auto';
+    host.style.maxHeight = `${Math.max(120, Math.floor(below) - 16)}px`;
+  }
+}
+
 // ---------------- fitting a popup to its content ----------------
 // A fixed window height is a GUESS ABOUT CONTENT, and every guess in this app
 // has expired at least once: the connector grid gained a third row and the

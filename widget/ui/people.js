@@ -31,8 +31,8 @@ function closeHint() {
   openId = null;
   for (const r of pconn.querySelectorAll('.row')) r.classList.remove('open');
   phint.replaceChildren();
-  hzPost('fitContent', { height: 0, extraWidth: 0 }).catch(() => {});
-  fitPeople();
+  // No fitContent here any more: the pop-over floats, so opening and closing
+  // it never changed the window's size to restore.
 }
 
 // A corner × on the side panel, like settings.
@@ -45,16 +45,12 @@ function addHintClose() {
   phint.appendChild(x);
 }
 
-// Open the side panel WITHOUT letting it grow the popup taller than the main
-// column. A tall panel (the specs) that stretched the row would drag the whole
-// popup up past the top of the screen and clip its header — so we cap the panel
-// to the main column's height and let it scroll inside. The popup's total
-// height then never changes when a panel opens, so it can't be pushed off-screen.
-function growPanel() {
-  const main = document.getElementById('pmain');
-  if (main) phint.style.maxHeight = Math.round(main.getBoundingClientRect().height) + 'px';
-  hzPost('fitContent', { height: 0, extraWidth: 248 }).catch(() => {});
-  fitPeople();
+// ~~growPanel: cap the side panel to the main column and widen the window by
+// 248 to reveal it.~~ The flow is a POP-OVER now (owner, 2026-08-25): anchored
+// to whatever was pressed, clamped to the viewport by the shared placer, and
+// the window never resizes for it.
+function growPanel(anchor) {
+  hzPlacePop(phint, anchor);
 }
 
 function openConnector(src, row) {
@@ -66,7 +62,7 @@ function openConnector(src, row) {
   row.classList.add('open');
   hzConnectorHint(src, phint, { refresh: reload });
   addHintClose();
-  growPanel();
+  growPanel(row);
   row.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
 }
 
@@ -149,7 +145,7 @@ function openSearchDetails() {
   tip.appendChild(stay);
   phint.appendChild(tip);
   addHintClose();
-  growPanel();
+  growPanel(document.getElementById('pspecs'));
 }
 document.getElementById('pspecs').addEventListener('click', (e) => {
   e.preventDefault();

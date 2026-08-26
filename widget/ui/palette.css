@@ -1372,35 +1372,33 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
    if a hand-hold outgrows the window rather than growing it. Its height is
    set by connections.js to match .conn-main exactly, so with both columns
    bottom-anchored the panel's TOP lines up with the CONNECTIONS eyebrow. */
+/* ~~The hint host was a LEFT SIDE STRIP: flex: 0 1 236px in the .win row,
+   the window widening by 248 to reveal it, a book-fold rotateY on open.~~
+   Re-shaped into a POP-OVER (owner, 2026-08-25): the flow floats over the
+   page, anchored to the tile that was pressed — bridge.js hzPlacePop sets
+   left/top/bottom/max-height from the tile's rect — and the window never
+   changes size for it. position: fixed keeps it out of the body's
+   overflow: clip; the card scrolls inside itself when the flow is taller
+   than the room the tile leaves it. */
 .hint-host {
-  /* Shrinkable (0 1, not 0 0): a rigid 236px in a window that has not
-     widened yet is exactly the overflow the .win comment above describes.
-     Squeezing the strip for a beat, until native's extraWidth resize lands,
-     beats clipping the settings column. The auto margin is the right-hug —
-     see the .win comment. */
-  flex: 0 1 236px; min-width: 0; margin-left: auto;
-  max-height: 100%; overflow-y: auto;
-  position: relative;
+  position: fixed; z-index: 40;
+  overflow-y: auto;
   display: flex; flex-direction: column; align-items: stretch;
-  /* Bottom-aligned so the pop-up sits in-line to the LEFT of the connectors
-     shelf (which lives at the bottom of the settings column now), not floating
-     up by the settings header. */
-  justify-content: flex-end;
-  /* Hinged on the right edge — the side it meets the main column on — so it
-     unfolds outward like a page. */
-  transform-origin: right center;
+  background: rgba(20, 20, 18, 0.97);
+  border: 1px solid rgba(234, 234, 234, 0.14);
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
 }
-/* Delightful open: a book page folding out from underneath the main panel
-   (owner). Hinged on the right edge, it swings from nearly edge-on (tucked
-   behind the column) to flat, with a soft settle. Runs every time the host
-   goes from empty (display:none) to filled, i.e. each time a tile opens. */
-@keyframes hint-book-open {
-  0%   { transform: perspective(900px) rotateY(-80deg); opacity: 0; }
-  55%  { opacity: 1; }
-  100% { transform: perspective(900px) rotateY(0deg); opacity: 1; }
+/* A quick rise into place — the pop-over equivalent of the old book fold. */
+@keyframes hint-pop-open {
+  from { transform: translateY(6px) scale(0.97); opacity: 0; }
+  to   { transform: translateY(0) scale(1); opacity: 1; }
 }
 .hint-host.open {
-  animation: hint-book-open 0.34s cubic-bezier(0.22, 0.72, 0.24, 1) both;
+  animation: hint-pop-open 0.18s cubic-bezier(0.22, 0.72, 0.24, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  body:not(.motion-anyway) .hint-host.open { animation: none; }
 }
 .hint-host:empty { display: none; }
 /* The panel's own close. Same gesture as pressing the tile again, one
@@ -1615,7 +1613,10 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
 .hint.hold .hold-ok + .binput { margin-top: 8px; }
 .hint.hold .hold-ok {
   display: inline-block; margin-top: 8px;
-  height: 22px; padding: 0 12px;
+  /* min-height, not height: a label that wraps ("full disk access" in a
+     narrow card) must grow the pill, not hang below its border. */
+  min-height: 22px; padding: 3px 12px;
+  line-height: 1.5;
   border: 1px solid rgba(197, 165, 109, 0.4); border-radius: 999px;
   background: rgba(20, 20, 18, 0.9); color: var(--hazelnut-light);
   font-size: 10px; letter-spacing: 0.1em;

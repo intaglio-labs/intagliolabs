@@ -355,31 +355,8 @@ body.people .tile-tip {
 }
 body.people .tile-tip.on { opacity: 1; }
 
-/* The connector's flow, as a left SIDE PANEL (same as settings). Hidden until a
-   tile is clicked (global .hint-host:empty { display:none }); when a hint opens,
-   people.js posts extraWidth and the popup grows left to reveal it. */
-/* The side panel folds open like a page turning, hinged on its right edge
-   (where it meets the main column), instead of the old hard slide-in that read
-   as glitchy. A short 3D rotateY with a soft settle. */
-@keyframes hz-fold-in {
-  from { transform: perspective(700px) rotateY(-82deg); opacity: 0; }
-  60%  { opacity: 1; }
-  to   { transform: perspective(700px) rotateY(0deg); opacity: 1; }
-}
-body.people .hint-host:not(:empty) {
-  transform-origin: right center;
-  animation: hz-fold-in 0.34s cubic-bezier(0.2, 0.7, 0.2, 1) both;
-}
-@media (prefers-reduced-motion: reduce) {
-  body.people .hint-host:not(:empty) { animation: none; }
-}
-body.people .hint-host {
-  position: relative; /* anchors the corner × */
-  flex: 0 0 236px;
-  /* Size to its OWN content, capped — no align-self:stretch, which let a tall
-     panel drag the whole popup up past the screen (top clipped) and leave the
-     shorter main column with dead space below. Overflow scrolls if it's taller. */
-  align-self: flex-start;
-  max-height: 300px;
-  overflow-y: auto;
-}
+/* ~~The connector's flow was a left SIDE PANEL here too — flex 236px,
+   extraWidth grew the popup leftward, hz-fold-in turned it like a page.~~
+   The flow is a POP-OVER now (owner, 2026-08-25), anchored to the pressed
+   tile by bridge.js hzPlacePop; the shared .hint-host rules in palette.css
+   carry all of it, so this page needs no override at all. */

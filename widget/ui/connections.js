@@ -19,15 +19,18 @@ const closeHint = () => {
 };
 new MutationObserver(() => {
   const open = [...hintHost.children].some((el) => !el.classList.contains('hint-x'));
-  document.body.classList.toggle('hint-open', open);
   // Structural :not(:empty) animation restarted on every replaceChildren(),
   // so switching connector details looked like the whole UI reloaded. Keep a
   // stable state class instead: it animates only closed -> open, not content ->
-  // different content while the side panel remains open.
+  // different content while the pop-over remains open.
   hintHost.classList.toggle('open', open);
   if (open) {
-    const main = document.querySelector('.conn-main');
-    if (main) hintHost.style.height = `${Math.round(main.getBoundingClientRect().height)}px`;
+    // A POP-OVER, not a side strip (owner, 2026-08-25): anchored to the tile
+    // that was pressed — toggle() marks it .open just before appending — and
+    // the window no longer widens for it (the extraWidth post left with the
+    // strip). Re-placed on every content change, because the anchor is the
+    // one fixed point while async login replies grow the card.
+    hzPlacePop(hintHost, document.querySelector('#grid .row.open'));
     if (!hintHost.querySelector('.hint-x')) {
       const x = document.createElement('button');
       x.className = 'hint-x';
@@ -38,9 +41,7 @@ new MutationObserver(() => {
     }
   } else {
     hintHost.replaceChildren(); // drop an orphaned x so :empty hides the host
-    hintHost.style.height = '';
   }
-  hzPost('fitContent', { height: 0, extraWidth: open ? 248 : 0 }).catch(() => {});
 }).observe(hintHost, { childList: true });
 const notice = document.getElementById('notice');
 const settings = document.getElementById('settings');
@@ -262,7 +263,6 @@ function fitConnections() {
   requestAnimationFrame(() => {
     fitQueued = false;
     const main = document.querySelector('.conn-main');
-    const host = document.querySelector('.hint-host');
     if (!main) return;
     const pad = 28; // .win vertical padding, 14 top + 14 bottom
     // The column scrolls on purpose vertically, which means it CAN be
@@ -272,8 +272,9 @@ function fitConnections() {
     // already wakes on every mutation, so it is the one place to undo that.
     if (main.scrollLeft !== 0) main.scrollLeft = 0;
     const mh = main.scrollHeight;
-    const hh = host && host.childElementCount ? host.scrollHeight : 0;
-    const h = Math.ceil(Math.max(mh, hh) + pad);
+    // The hint no longer joins the measure: a pop-over floats over the page
+    // and sizes itself to the room its tile leaves it (hzPlacePop).
+    const h = Math.ceil(mh + pad);
     if (Math.abs(h - fitLast) < 3) return; // deadband, or the resize re-measures forever
     fitLast = h;
     hzPost('fitContent', { height: h }).catch(() => {});
