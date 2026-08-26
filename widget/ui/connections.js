@@ -640,13 +640,11 @@ function card(src, keep) {
         open.addEventListener('click', (e) => {
           e.preventDefault();
           e.stopPropagation();
-          // Degrades on purpose: until this URL is in Bridge.swift's
-          // allowedExternal the bridge answers "url not in allowlist", and the
-          // written steps above are already on screen — so the worst case is a
-          // button that does nothing visible, never a dead end.
-          hzPost('openExternal', {
-            url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles',
-          }).catch(() => {});
+          // The primed verb, not the bare pane URL: openFullDiskAccess
+          // attempts a protected read first, which is what puts "intaglio
+          // labs" in the pane's list ready to switch on (Permissions.swift
+          // primeFullDisk carries the reasoning).
+          hzPost('openFullDiskAccess').catch(() => {});
         });
         tip.appendChild(open);
       } else {
@@ -967,6 +965,16 @@ function card(src, keep) {
       // into this node when their promise lands.
       if (src.action === 'bridge' && !src.connected) {
         openBridgeLogin();
+        return;
+      }
+      // FDA tile (owner, 2026-08-25): the card had exactly one thing on it —
+      // the full disk access button — so the tile press IS the button press.
+      // openFullDiskAccess rather than the bare pane URL, because it touches a
+      // protected path first: that failed read is what makes macOS list
+      // "intaglio labs" in the pane, already there with its switch waiting —
+      // the closest to highlighting the row that macOS allows.
+      if (src.action === 'fda') {
+        hzPost('openFullDiskAccess').catch(() => {});
         return;
       }
       hintHost.appendChild(tip);

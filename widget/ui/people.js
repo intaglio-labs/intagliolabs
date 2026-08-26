@@ -58,6 +58,14 @@ function openConnector(src, row) {
   phint.replaceChildren();
   for (const r of pconn.querySelectorAll('.row')) r.classList.remove('open');
   if (wasOpen) { closeHint(); return; }
+  // Same shortcut as the settings shelf (owner, 2026-08-25): an FDA tile's
+  // card held only the one button, so pressing the tile presses it — and the
+  // primed verb lands "intaglio labs" in the pane's list before opening it.
+  if (src.action === 'fda') {
+    openId = null;
+    hzPost('openFullDiskAccess').catch(() => {});
+    return;
+  }
   openId = src.id;
   row.classList.add('open');
   hzConnectorHint(src, phint, { refresh: reload });

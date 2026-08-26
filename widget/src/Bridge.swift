@@ -97,7 +97,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // map from the wrong file cost one broken popup in review.
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
-               "openExternal", "setConnectorEnabled", "connectSecret"],
+               "openExternal", "setConnectorEnabled", "connectSecret",
+               // The FDA tile press opens the primed Settings pane directly.
+               "openFullDiskAccess"],
     // peopleFind: search across every year, server-ranked. peopleMap: the
     // ALL-YEARS source behind the constellation — every person, uncapped, with
     // their per-year topics. monthsView: where the popup was left, so a restart

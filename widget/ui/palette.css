@@ -1300,11 +1300,14 @@ body.connections .win {
 body.connections .conn-main {
   display: flex; flex-direction: column;
   flex: 1 1 auto; min-width: 0;
-  /* overflow-x MUST be explicit: setting only overflow-y: auto promotes the
-     unset overflow-x from visible to auto (the CSS "one axis clipped forces
-     the other to auto" rule), which let the whole settings column scroll
-     sideways. Only the .list shelf inside it is meant to scroll horizontally. */
-  max-height: 100%; overflow-y: auto; overflow-x: hidden;
+  /* ~~max-height: 100% + overflow-y: auto, the scroll-inside constraint for
+     big scales.~~ Settings does not scroll vertically any more (owner,
+     2026-08-25): the page must always FIT, and the window grows to hold it —
+     fitConnections measures the column and native sizes the window to the
+     answer, with the whole screen available now that the panel stands over
+     the orb. overflow-x stays clipped: only the .list shelf inside is meant
+     to scroll sideways. */
+  overflow-x: hidden;
 }
 /* Bottom-anchoring WITHOUT justify-content: flex-end — on a scrollable
    flex column, flex-end makes overflow past the start edge unreachable
