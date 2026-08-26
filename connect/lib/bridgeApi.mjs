@@ -88,6 +88,11 @@ export async function bridgeApiResponse({
         // A platform that refuses the default browser string gets its own.
         // Server-authored like the rest of this policy — Swift enforces it.
         userAgent: platform.webLogin?.userAgent ?? null,
+        // A QR WINDOW instead of a web login: the bridge posts an image, the
+        // window shows it, a phone scans it, and the bridge reports the
+        // outcome itself. Nothing is navigated to and nothing is harvested,
+        // which is why it is its own flag rather than a shape of webLogin.
+        qrLogin: platform.qrLogin === true,
       },
     };
   };

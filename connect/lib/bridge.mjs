@@ -206,10 +206,21 @@ export const PLATFORMS = Object.freeze({
     // Discord app, which is not the same thing as approving THIS login — the
     // owner ended up logged in on the web with the bridge still waiting, and
     // the remote-auth socket timed out unapproved. The approval belongs to
-    // the QR, and the QR belongs on the card: the bot posts it, the phone app
-    // scans it, and the bridge completes. No window is part of that.
+    // the QR. ~~and the QR belongs on the card~~ — it belongs in a WINDOW
+    // (owner, 2026-08-26): "a separate pop-up like how instagram login is".
+    // On the card the QR was 168px of code standing over the settings and the
+    // shelf; in its own window it is the whole window, which is what a thing
+    // you have to point a phone camera at wants to be.
     webLogin: null,
-    noWebLogin: 'a QR posted by the bot, scanned with the Discord phone app',
+    // NOT a webLogin, and the distinction is the whole point of that field:
+    // webLogin means "this platform can be linked by DRIVING ITS REAL LOGIN
+    // PAGE in a webview", which Discord cannot. qrLogin means the window shows
+    // an image the bridge posted and waits — no navigation, no cookie jar, no
+    // third-party page at all. The widget enforces this; it does not decide
+    // it, the same rule allowedHosts follows.
+    qrLogin: true,
+    noWebLogin: 'a QR posted by the bot, shown in its own window and scanned '
+      + 'with the Discord phone app',
   },
   slack: {
     id: 'slack',

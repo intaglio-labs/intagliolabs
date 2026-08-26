@@ -119,6 +119,24 @@ test('the platforms that do have a web login are the ones we expect', () => {
   assert.deepEqual(withWeb, ['instagram', 'linkedin', 'messenger', 'twitter']);
 });
 
+test('the QR-window roster is exactly the platforms with no page to drive', () => {
+  // A THIRD SHAPE, and it is not a webLogin: qrLogin means the window shows an
+  // image the bridge posted and waits, with nothing navigated to and nothing
+  // harvested. Pinned as a roster for the same reason webLogin is — turning it
+  // on opens a window at someone, and that should be an edit you can see in a
+  // diff rather than a truthy field that appeared.
+  const withQr = entries.filter(([, p]) => p.qrLogin).map(([id]) => id).sort();
+  assert.deepEqual(withQr, ['discord']);
+
+  // The two are mutually exclusive by construction: a platform whose real
+  // login page can be driven has no business showing a QR instead, and one
+  // that has no such page cannot also declare hosts to fence.
+  for (const [id, p] of entries) {
+    assert.ok(!(p.qrLogin && p.webLogin),
+      `${id}: declares both a web login and a QR window — one window, one flow`);
+  }
+});
+
 test('the field contract is declared per platform, for the two that need one', () => {
   // The shape the harvested cookies are sent in is the SERVER's call — Swift
   // enforces it and never decides it, same as allowedHosts. Pinned as a roster
