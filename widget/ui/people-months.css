@@ -207,9 +207,13 @@ body.plist .pm-globe {
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  /* Enough to read as its own control, not enough to look adrift. */
-  margin: 0 0 6px 8px;
-  padding: 4px 2px;
+  /* SITS ON THE STRIP'S LINE. The row is flex-end aligned, so a bottom margin
+     or bottom padding on this button lifts the glyph off the baseline every
+     tab sits on — it read as floating above 2026 rather than beside it. Nothing
+     below the icon: its box bottom IS the line the tabs end on. The left margin
+     is the only spacing left, and it is what holds it off the newest year. */
+  margin: 0 0 0 8px;
+  padding: 0 2px;
   border: none;
   background: none;
   color: var(--muted);
