@@ -37,7 +37,7 @@
     "SCOPE. This ledger describes THIS repository. One entry was removed when the",
     "code was extracted for open source: the outbound iMessage lane, which was the",
     "courier's send path and is not here. A ledger that over-declares is as",
-    "misleading as one that under-declares \u2014 it invites a reader to believe a",
+    "misleading as one that under-declares — it invites a reader to believe a",
     "capability exists.",
     "",
     "2026-08-24. The marketing site MOVED INTO this repository, at site/. It reaches",
@@ -82,7 +82,7 @@
       "direction": "inbound-fetch",
       "purpose": "fetch the owner's own Notion pages",
       "credential": "notion internal integration token",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
       "evidence": "connectors/lib/notionClient.mjs:18 NOTION_BASE_URL"
     },
     {
@@ -142,7 +142,7 @@
       "direction": "bidirectional",
       "purpose": "Discord DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
       "evidence": "connect/lib/bridge.mjs PLATFORMS.discord; bridges/docker-compose.yml image dock.mau.dev/mautrix/discord"
     },
     {
@@ -152,8 +152,38 @@
       "direction": "bidirectional",
       "purpose": "Slack DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
       "evidence": "connect/lib/bridge.mjs PLATFORMS.slack; bridges/docker-compose.yml image dock.mau.dev/mautrix/slack"
+    },
+    {
+      "host": "accounts.google.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift + connect/lib/bridge.mjs PLATFORMS.slack",
+      "direction": "bidirectional",
+      "purpose": "Google's OAuth sign-in, when the owner chooses \"Sign In With Google\" on Slack's own login page inside the bridge login window.",
+      "credential": "the owner's Google password and second factor, typed on Google's own page in that window; this app never reads them",
+      "decision": "Slack's login page offers email, Google and Apple, and the window's fence allowed only slack.com -- so the Google button reached slack.com/signin/oauth/google/start and the next hop was cancelled with no error, which reads as a dead button (owner, 2026-08-26). Allowed because it IS Slack's sign-in, not a detour from it. Measured with a fenceless probe that clicked the button and logged every main-frame host; the enumeration stops at Google's \"Email or phone\" screen, because going further means typing an address and a password, which is the owner's to do. A later 2FA hop through a host not listed here will die the same silent way, and the fix is to measure that hop and name it, never to widen this to google.com.",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.slack.webLogin.allowedHosts; widget/src/BridgeLogin.swift navigation fence"
+    },
+    {
+      "host": "accounts.youtube.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift + connect/lib/bridge.mjs PLATFORMS.slack",
+      "direction": "bidirectional",
+      "purpose": "Google's cross-domain session sync, a hop inside the same Google sign-in.",
+      "credential": "none of its own -- it carries Google's session cookies, set by the step before it",
+      "decision": "Part of Google's sign-in rather than a separate destination: the probe above logged it between accounts.google.com and the return to Slack. Listed separately because the fence matches hosts, and a reader who finds youtube.com in a login window's allowlist deserves to find the reason next to it.",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.slack.webLogin.allowedHosts"
+    },
+    {
+      "host": "appleid.apple.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift + connect/lib/bridge.mjs PLATFORMS.slack",
+      "direction": "bidirectional",
+      "purpose": "Apple's sign-in, when the owner chooses \"Apple\" on Slack's login page inside the bridge login window.",
+      "credential": "the owner's Apple ID credentials, typed on Apple's own page in that window; this app never reads them",
+      "decision": "Same cancelled-navigation bug as Google and fixed in the same commit. One hop, measured the same way: slack.com -> appleid.apple.com. Included because leaving one of Slack's three sign-in buttons dead while fixing the other two is the kind of half-fix that reads as a different bug later.",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.slack.webLogin.allowedHosts"
     },
     {
       "host": "web.telegram.org",
@@ -162,7 +192,7 @@
       "direction": "bidirectional",
       "purpose": "Telegram DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
       "evidence": "connect/lib/bridge.mjs PLATFORMS.telegram; bridges/docker-compose.yml image dock.mau.dev/mautrix/telegram"
     },
     {
@@ -422,7 +452,7 @@
       "purpose": "the IBM Plex Mono stylesheet the landing page links",
       "credential": "none",
       "decision": "Public marketing site. The visitor's browser loads this, not any Hazlie process; it carries no credential and sees only that someone opened the page.",
-      "evidence": "site/index.html:11 <link href=\"https://fonts.googleapis.com/css2?family=IBM+Plex+Mono\u2026\" rel=\"stylesheet\">"
+      "evidence": "site/index.html:11 <link href=\"https://fonts.googleapis.com/css2?family=IBM+Plex+Mono…\" rel=\"stylesheet\">"
     },
     {
       "host": "fonts.gstatic.com",
@@ -452,7 +482,7 @@
       "purpose": "the two builder credits in the page footer",
       "credential": "none",
       "decision": "Public marketing site. A link the visitor may click; nothing is fetched unless they do. No credential, no automatic request.",
-      "evidence": "site/index.html:349 built by <a href=\"https://www.linkedin.com/in/\u2026\">"
+      "evidence": "site/index.html:349 built by <a href=\"https://www.linkedin.com/in/…\">"
     },
     {
       "host": "github.com",
@@ -482,7 +512,7 @@
       "purpose": "mautrix project homepage",
       "credential": null,
       "decision": "allowed",
-      "evidence": "site/privacy/index.html -- \u00a76 links the mautrix project when naming the bridges that reach the chat platforms, so the reader can see whose software runs on their Mac"
+      "evidence": "site/privacy/index.html -- §6 links the mautrix project when naming the bridges that reach the chat platforms, so the reader can see whose software runs on their Mac"
     }
   ],
   "_loopback": [

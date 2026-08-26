@@ -15,6 +15,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { PLATFORMS } from '../lib/bridge.mjs';
 
@@ -122,6 +123,44 @@ test('the platforms that do have a web login are the ones we expect', () => {
   // Discord was briefly here as an approval window and was withdrawn the same
   // day: its approval is a QR the phone app scans, which needs no window.
   assert.deepEqual(withWeb, ['instagram', 'linkedin', 'messenger', 'slack', 'twitter']);
+});
+
+test('a login window may leave the platform only for that platform\'s own SSO', () => {
+  // WIDENING THIS FENCE IS THE SERIOUS EDIT IN THIS FILE. It is the list of
+  // hosts an in-app webview may navigate to while the owner is typing a
+  // password into it, so it is pinned host by host: a new one has to be added
+  // here on purpose, in the same commit, next to the reason.
+  //
+  // Slack's page offers Google and Apple alongside email, and until 2026-08-26
+  // the fence cancelled both silently — a dead button with no error anywhere.
+  // These four are what a fenceless probe measured the flows touching.
+  const fences = Object.fromEntries(
+    entries.filter(([, p]) => p.webLogin).map(([id, p]) => [id, [...p.webLogin.allowedHosts].sort()]));
+  assert.deepEqual(fences.slack,
+    ['accounts.google.com', 'accounts.youtube.com', 'appleid.apple.com', 'slack.com']);
+
+  // Every other platform's window stays on the platform's own hosts. Said as an
+  // assertion rather than a habit: an SSO detour is legitimate ONLY because the
+  // platform's own login page offers it, and nothing else here does.
+  for (const [id, hosts] of Object.entries(fences)) {
+    if (id === 'slack') continue;
+    for (const h of hosts) {
+      assert.ok(!/google|apple|microsoft|okta/i.test(h),
+        `${id}: identity-provider host ${h} in a fence that has no SSO button behind it`);
+    }
+  }
+
+  // And every host in every fence is declared in the egress ledger, which is
+  // where the owner reads what this software may contact. The tripwire in
+  // connectors/test/egress.test.mjs scans source for URLs and does not catch a
+  // bare hostname in an array, so this is the half of that rule it cannot see.
+  const ledger = JSON.parse(readFileSync(new URL('../../ops/EGRESS.json', import.meta.url), 'utf8'));
+  const declared = new Set(ledger.paths.map((e) => e.host));
+  for (const [id, hosts] of Object.entries(fences)) {
+    for (const h of hosts) {
+      assert.ok(declared.has(h), `${id}: fence host ${h} is not declared in ops/EGRESS.json`);
+    }
+  }
 });
 
 test('the QR-window roster is exactly the platforms with no page to drive', () => {

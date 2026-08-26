@@ -344,7 +344,36 @@ export const PLATFORMS = Object.freeze({
     // itself cannot run here, the wall moved one step rather than fell, and
     // the honest thing then is another strike-through under this one.
     webLogin: {
-      allowedHosts: ['slack.com'],
+      // SLACK'S OWN SIGN-IN OPTIONS ARE PART OF SLACK'S SIGN-IN. The page
+      // offers email, Google and Apple, and a fence of ['slack.com'] alone
+      // silently cancelled the second and third: the button worked, the flow
+      // reached slack.com/signin/oauth/google/start, and the very next hop was
+      // killed with no error anywhere (owner, 2026-08-26: "clicking on sign in
+      // w google doesn't work"). A cancelled navigation looks exactly like a
+      // dead button.
+      //
+      // MEASURED, not guessed at — a fenceless probe clicked each button and
+      // logged every main-frame host the flow touched:
+      //
+      //   Google  slack.com -> accounts.google.com -> accounts.youtube.com
+      //   Apple   slack.com -> appleid.apple.com
+      //
+      // accounts.youtube.com is Google's cross-domain session sync and is part
+      // of their sign-in, not a detour. The return leg lands on
+      // oauth2.slack.com, which the slack.com suffix already covers.
+      //
+      // THIS IS THE WHOLE LIST AND IT IS A CEILING, NOT A GUESS. Only the
+      // identity providers Slack itself offers, named exactly; the fence still
+      // cancels everything else, which on this page includes the doubleclick
+      // and contentsquare trackers Slack's own marketing page loads.
+      //
+      // NOT ENUMERATED PAST THE FIRST STEP: the probe stops at Google's
+      // "Email or phone" screen, because going further means typing an address
+      // and a password, which is the owner's to do and not ours. If a 2FA
+      // challenge bounces through a host not on this list it will die the same
+      // silent way — the fix is to measure the hop and add it here, never to
+      // widen this to google.com.
+      allowedHosts: ['slack.com', 'accounts.google.com', 'accounts.youtube.com', 'appleid.apple.com'],
       // No cookie gate: this window is not harvesting a session, it is waiting
       // for one value that appears when the challenge is answered.
       sessionCookie: null,
