@@ -159,11 +159,14 @@ const HZ_NOTICES = {
   manual: 'this one links with a token, not a browser login — use the steps below.',
 };
 
+// See connections.js staleRefreshed — bounded, and module scope so it survives
+// the rebuild a refresh causes.
+const hzStaleRefreshed = new Set();
+
 function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
   const tip = document.createElement('div');
   tip.className = 'hint';
   const hint = HZ_HINT_FOR(src.id);
-  let refreshedOnConnect = false;
 
   // Non-bridge (and connected) connectors: why it matters, its status, the how.
   const renderTip = () => {
@@ -257,7 +260,12 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
   // Social bridges: the in-popup login (Beeper-style window) + a manual paste
   // fallback. On a successful link, repaint the surface once.
   const renderBridge = (data) => {
-    if (data && data.connected && !refreshedOnConnect) { refreshedOnConnect = true; refresh(); }
+    // Staleness, bounded to once per source — see connections.js renderBridge
+    // for why the unbounded version loops.
+    if (data && data.connected && !src.connected && !hzStaleRefreshed.has(src.id)) {
+      hzStaleRefreshed.add(src.id);
+      refresh();
+    }
     tip.replaceChildren();
     tip.classList.add('hold');
     const head = document.createElement('b');

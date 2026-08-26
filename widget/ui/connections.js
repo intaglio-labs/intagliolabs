@@ -546,6 +546,10 @@ function showTileTip(row, label) {
 }
 function hideTileTip() { if (tileTip) tileTip.classList.remove('on'); }
 
+// Sources already refreshed once because the shelf disagreed with their own
+// bridge. Module scope, so it survives the card rebuild that refresh() causes.
+const staleRefreshed = new Set();
+
 function card(src, keep) {
   // Square tiles, four to a row. The old compact rows ruled out a 3-column
   // grid because every connection had to stay visible at once; at four
@@ -813,10 +817,27 @@ function card(src, keep) {
   // stays grey while the account is plainly linked — the owner's "why isn't
   // it green". Re-reading status on the success we can actually see closes
   // the race from the only side that knows.
-  let refreshedOnConnect = false;
+  // ~~A once-only flag, pre-set to true on the adopt path to stop a refresh
+  // loop.~~ It stopped the loop by stopping the SECOND refresh too, and the
+  // second is the one that matters: a bridge whose login finishes after the
+  // shelf last rendered (X, whose PIN step lands minutes later) reported
+  // "connected · content_printer" in the panel while its tile kept a grey dot
+  // (owner, 2026-08-25).
+  //
+  // The staleness test replaces it and cannot loop by construction: it fires
+  // only when the panel knows connected and the TILE's own row does not, and
+  // one refresh makes that false. No flag to get stuck.
   const renderBridge = (data) => {
-    if (data && data.connected && !refreshedOnConnect) {
-      refreshedOnConnect = true;
+    // ONCE PER SOURCE, and the bound is the whole design. The bare staleness
+    // test loops: refresh() rebuilds the shelf, the rebuilt tile adopts the
+    // strip, the strip re-reads "connected", and if the status row still
+    // disagrees it refreshes again — 108k times in a harness that held the
+    // disagreement still (2026-08-25). The shelf and the bridge read the same
+    // database, so one refresh is enough to reconcile them; a second would
+    // mean the server is answering differently from itself, and hammering it
+    // is not how that gets fixed.
+    if (data && data.connected && !src.connected && !staleRefreshed.has(src.id)) {
+      staleRefreshed.add(src.id);
       refresh();
     }
     tip.replaceChildren();
@@ -1127,7 +1148,7 @@ function card(src, keep) {
     const typed = [...keep.querySelectorAll('textarea, input')].some((b) => b.value.trim());
     if (!typed) {
       hintHost.replaceChildren(tip);
-      if (src.action === 'bridge') { refreshedOnConnect = true; openBridge(); }
+      if (src.action === 'bridge') openBridge();
       else renderTip();
     }
     row.classList.add('open');
