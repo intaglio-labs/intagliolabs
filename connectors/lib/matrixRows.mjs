@@ -104,6 +104,12 @@ export function eventToRow(event, { roomId, names = new Map(), selfName = 'me' }
       // The join key for the people spine, same role as WhatsApp's
       // chat_handle: who this conversation is WITH, not who spoke.
       chat_handle: partner?.handle ?? handle ?? null,
+      // In a group, the first ghost is only the room's stable partner marker;
+      // the sender may be any ghost in it. People credits the actual speaker,
+      // exactly as it does for iMessage and WhatsApp group rows.
+      ...(Boolean(event.__isGroup) && !fromMe && handle
+        ? { sender_handle: handle }
+        : {}),
       ...(partner && names.get(partner.mxid) ? { chat_name: names.get(partner.mxid) } : {}),
     },
   };

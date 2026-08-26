@@ -24,6 +24,10 @@ const SENIORITY_TIERS = [
   { re: /\b(vp|vice president|head of|director|gm|general manager)\b/iu, points: 3 },
   { re: /\b(lead|principal engineer|staff|senior manager|founding)\b/iu, points: 2 },
 ];
+const DIRECT_MESSAGE_CHANNELS = new Set([
+  'imessage', 'whatsapp', 'messenger', 'instagram', 'twitter',
+  'telegram', 'discord', 'slack', 'mail',
+]);
 
 export function seniorityScore(linkedin) {
   const hay = `${linkedin?.position ?? ''} ${linkedin?.company ?? ''}`;
@@ -44,11 +48,14 @@ export function depthScore(p) {
   );
 }
 
-// Can the owner actually reach them tomorrow? A LinkedIn-only tie cannot be
-// texted; a phone/mail thread can. The mentor need REQUIRES this — "could
-// text tomorrow without it being weird" is in the card.
+// Can the owner actually reach them tomorrow? A LinkedIn connection-export
+// tie alone cannot be messaged; a real DM or mail thread can. The mentor need
+// REQUIRES this — "could text tomorrow without it being weird" is in the card.
 export function reachable(p) {
-  return p.channels.some((c) => c === 'imessage' || c === 'whatsapp' || c === 'mail');
+  if (p.channels.some((channel) => DIRECT_MESSAGE_CHANNELS.has(channel))) return true;
+  // A LinkedIn connection export is still not a message channel. A Matrix
+  // LinkedIn DM is: graph metrics prove that at least one direct message exists.
+  return p.channels.includes('linkedin') && (p.directMessages ?? 0) > 0;
 }
 
 // The mentor preset. Weights are declared here, once, so tuning is a visible
