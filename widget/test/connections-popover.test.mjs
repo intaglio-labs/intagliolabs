@@ -83,3 +83,28 @@ test('a fresh conversation card begins its login itself, once', () => {
   // conversation it just opened on its own repaint.
   assert.match(page, /renderBridge repaints on every bot reply and\n\/\/ begin starts with `cancel`/u);
 });
+
+// THE BOT'S QUESTION IS NOT ITS LAST LINE. Slack answers an email address with
+// two messages — the CAPTCHA sentence, then "Login URL: <…>" — so a matcher
+// that read only the last one never fired, and the card showed no way to answer
+// a question the bridge was actively holding (owner, 2026-08-26: "i'm just
+// waiting for slack?"). Worse, askedFor() then read the silence as a finished
+// conversation and offered `begin login`, whose first act is `cancel`.
+test('a pending challenge is recognised across the bot two-line reply', () => {
+  const fn = /const wantsChallenge = \(\) => \{([\s\S]*?)\n      \};/u.exec(page)?.[1] ?? '';
+  assert.ok(fn, 'the matcher exists');
+  assert.doesNotMatch(fn, /bot\[bot\.length - 1\]/u,
+    'the last line is a URL, not the question');
+  assert.match(fn, /slice\(-3\)/u, 'both markers are sought across the same window');
+  assert.match(fn, /captcha\|challenge/u);
+  assert.match(fn, /Login URL:\|embedded/u);
+});
+
+test('a pending challenge is never offered a begin-login beside it', () => {
+  assert.match(page, /\} else if \(wantsChallenge\(\)\) \{[\s\S]{0,600}?appendTranscript\(\);/u,
+    'the challenge branch runs before the no-prompt fallback');
+  const order = page.indexOf('} else if (wantsChallenge())');
+  const fallback = page.indexOf('} else if (!askedFor())');
+  assert.ok(order > 0 && fallback > order,
+    'the no-prompt fallback must come after, or it claims a live login');
+});

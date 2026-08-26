@@ -927,6 +927,9 @@ function card(src, keep) {
   // The staleness test replaces it and cannot loop by construction: it fires
   // only when the panel knows connected and the TILE's own row does not, and
   // one refresh makes that false. No flag to get stuck.
+  // One automatic login attempt per card. Set by the branch below rather than
+  // reset per render, because renderBridge runs several times for one card.
+  let autoBegun = false;
   const renderBridge = (data) => {
     // ONCE PER SOURCE, and the bound is the whole design. The bare staleness
     // test loops: refresh() rebuilds the shelf, the rebuilt tile adopts the
@@ -1062,9 +1065,17 @@ function card(src, keep) {
     // So: repaint only on an actual answer, and otherwise say we are waiting
     // and keep asking. Polling here costs nothing, where holding the request
     // open for 40s would tie up the connect service on every login step.
+    // WHAT THE CONVERSATION LOOKED LIKE, not how long it was. The transcript
+    // is the last SIXTEEN messages (readTranscript in lib/bridge.mjs), so once
+    // it is full its length never changes again: a new bot line pushes an old
+    // one off the front and the count stays 16. A `length > had` test is then
+    // permanently false, and the card sits on "waiting for Telegram…" through
+    // an answer that already arrived (owner, 2026-08-26: "i'm stuck here").
+    // A signature of the window changes whenever anything shifts, full or not.
+    const signature = (x) => ((x && x.transcript) || [])
+      .map((m) => `${m.from}|${m.body || ''}`).join('\u0000');
     const settle = (d, had) => {
-      const answered = (x) => !!x && (x.connected === true
-        || (((x.transcript) || []).length > had));
+      const answered = (x) => !!x && (x.connected === true || signature(x) !== had);
       if (answered(d)) { renderBridge(d); return; }
       // THE WAIT IS THE WHOLE CARD, not a caption on a button. Leaving the
       // question and the filled-in box on screen under "waiting for
@@ -1151,7 +1162,7 @@ function card(src, keep) {
         send.disabled = true; send.textContent = busy;
         // What the conversation looked like BEFORE this answer, so the reply
         // can be told apart from the question it is answering.
-        const had = ((data && data.transcript) || []).length;
+        const had = signature(data);
         hzPost('bridgeCookies', { p: kindOf(src.id), cookies: val })
           .then((d) => settle(d, had))
           .catch(() => { send.disabled = false; send.textContent = idle; });
@@ -1267,9 +1278,20 @@ function card(src, keep) {
       const wantsChallenge = () => {
         if (!(data && Array.isArray(data.transcript))) return false;
         const bot = data.transcript.filter((m) => m.from === 'bot');
-        const last = bot.length ? String(bot[bot.length - 1].body || '') : '';
+        // THE LAST LINE IS NOT THE ONE THAT ASKS. Slack's bot answers an email
+        // address with two messages, in this order:
+        //
+        //   "Slack requires a CAPTCHA before it can email the confirmation
+        //    code. Complete the embedded challenge to continue."
+        //   "Login URL: <https://slack.com/signin>"
+        //
+        // so testing bot[last] for the word never matched, and the card showed
+        // no way to answer a question the bridge was actively holding (owner,
+        // 2026-08-26: "i'm just waiting for slack?"). Both markers are looked
+        // for across the same recent window; still two independent markers, so
+        // a stray sentence mentioning a captcha cannot summon a login window.
         const recent = bot.slice(-3).map((m) => String(m.body || '')).join(' ');
-        return /captcha|challenge/i.test(last) && /Login URL:|embedded/i.test(recent);
+        return /captcha|challenge/i.test(recent) && /Login URL:|embedded/i.test(recent);
       };
       if (wantsChallenge() && !(data && data.connected)) {
         const answer = document.createElement('button');
@@ -1343,22 +1365,50 @@ function card(src, keep) {
         // it is what swaps a dead conversation and its input box for a fresh
         // start, which is the part that was actually load-bearing.
         beginButton('begin login');
+      } else if (wantsChallenge()) {
+        // ALREADY HANDLED ABOVE, and this branch must not also run. A pending
+        // challenge is a live login, so the "no prompt means no pending step"
+        // rule below reads it wrong: the bot's last line is a URL and its
+        // question is a sentence that does not end in a question mark, so
+        // askedFor() returns null and the card offered `begin login` — a button
+        // whose first act is `cancel`, beside the step it would cancel.
+        appendTranscript();
       } else if (!askedFor()) {
-        // NO PROMPT MEANS NO PENDING STEP, and the log in button is what comes
-        // back. That rule is askedFor()'s own — written 2026-08-25 when the
-        // bot answered a half-finished login with "Unknown command" and the
-        // panel offered a box to answer it with — but it was only ever applied
-        // in the cookie branch. Here a FINISHED conversation still counts as
-        // `started`, so the card kept showing an answer box under a bot that
-        // had stopped asking anything: after a logout it read "Logged out" and
-        // then "type your answer", with nothing on the card able to begin a
-        // new login (owner, 2026-08-26, re-running the flow as a new user).
+        // NO PROMPT MEANS NO PENDING STEP — askedFor()'s own rule, from
+        // 2026-08-25, when a bot answered a half-finished login with "Unknown
+        // command" and the panel offered a box to answer it with. A FINISHED
+        // conversation still counts as `started`, so without this the card
+        // showed an input under a bot that had stopped asking anything.
         //
-        // A genuinely new install never saw this — its transcript is empty, so
-        // it gets the begin button from the branch above. It takes a
-        // conversation that ENDED to reach here, which is exactly the state a
-        // second run starts from.
-        beginButton('begin login');
+        // ~~beginButton('begin login')~~ — the card starts the login itself
+        // (owner, 2026-08-26: "this page should start on the enter phone
+        // number"). A press on an unconnected tile already means "log me in";
+        // making the first thing it produces a button that means "log me in"
+        // was a press charged for nothing.
+        //
+        // AND THIS IS WHERE THE DECISION BELONGS, not in Swift. ~~The native
+        // side ran begin on every press~~ (d88e56c), which cancels and
+        // restarts whatever login is in flight — so pressing the tile to look
+        // at a login in progress destroyed it, and each press pushed six
+        // command messages into a SIXTEEN-message window, scrolling the
+        // owner's own answer out of view. Here the same test that decides
+        // whether to show a question decides whether to ask for one, so a
+        // conversation that is mid-flight is opened rather than restarted.
+        //
+        // Once per card, because a bridge that answers begin with no question
+        // at all would otherwise loop.
+        if (!autoBegun) {
+          autoBegun = true;
+          const say = document.createElement('span');
+          say.className = 'setup';
+          say.textContent = 'starting…';
+          tip.appendChild(say);
+          hzPost('bridgeBegin', { p: kindOf(src.id) })
+            .then(renderBridge)
+            .catch(() => { say.textContent = NOTICES.down; });
+        } else {
+          beginButton('begin login');
+        }
       } else {
         appendTranscript();
         // The bot is waiting for the next thing. Token pastes want room;
