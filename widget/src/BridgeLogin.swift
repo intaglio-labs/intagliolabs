@@ -55,6 +55,11 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
   /// X-LI-Track and X-LI-Page-Instance are set by its own JavaScript on XHRs,
   /// so they exist nowhere else — not in the cookie jar, not on a navigation.
   private var seenHeaders: [String: String] = [:]
+  /// An APPROVAL window: nothing to harvest and nothing to wait for. Discord's
+  /// remote-auth link is approved on Discord's own page, and the bridge learns
+  /// the outcome itself — so this window's whole job is to show the page, and
+  /// closing it is the end of its part.
+  private let approval: Bool
   private let allowedSuffixes: [String]
   private let done: (String?) -> Void
 
@@ -70,7 +75,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
   private init(
     label: String, cookieDomain: String, sessionCookie: String, allowedHosts: [String],
     requiredCookies: [String], cookieFormat: String, fields: [[String: String]],
-    done: @escaping (String?) -> Void
+    approval: Bool, done: @escaping (String?) -> Void
   ) {
     self.label = label
     self.cookieDomain = cookieDomain
@@ -80,6 +85,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     self.requiredCookies = requiredCookies.isEmpty ? [sessionCookie] : requiredCookies
     self.cookieFormat = cookieFormat
     self.fields = fields
+    self.approval = approval
     self.allowedSuffixes = allowedHosts
     self.done = done
   }
@@ -98,13 +104,13 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     label: String, loginUrl: String, cookieDomain: String,
     sessionCookie: String, allowedHosts: [String], requiredCookies: [String] = [],
     cookieFormat: String = "json", fields: [[String: String]] = [],
-    done: @escaping (String?) -> Void
+    approval: Bool = false, done: @escaping (String?) -> Void
   ) {
     // A window must have something to wait for: a session cookie to appear, or
     // the fields a bridge named. Slack's has only fields — it is there so the
     // person can answer a CAPTCHA, and harvests no session at all.
     guard let url = URL(string: loginUrl), let host = url.host, !allowedHosts.isEmpty,
-          !sessionCookie.isEmpty || !fields.isEmpty,
+          !sessionCookie.isEmpty || !fields.isEmpty || approval,
           allowedHosts.contains(where: { host == $0 || host.hasSuffix("." + $0) })
     else { done(nil); return }
     // Only one login window at a time; a second request supersedes the first.
@@ -113,7 +119,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
       label: label, cookieDomain: cookieDomain,
       sessionCookie: sessionCookie, allowedHosts: allowedHosts,
       requiredCookies: requiredCookies, cookieFormat: cookieFormat,
-      fields: fields, done: done
+      fields: fields, approval: approval, done: done
     )
     current = ctl
     ctl.show(url: url)
@@ -348,6 +354,9 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
   }
 
   private func checkCookies() {
+    // An approval window has no finish condition to poll for: the person is
+    // done when they say so, and the bridge reports the result.
+    if approval { return }
     guard let store = web?.configuration.websiteDataStore.httpCookieStore else { return }
     store.getAllCookies { [weak self] cookies in
       guard let self, !self.finished else { return }

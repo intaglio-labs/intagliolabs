@@ -56,10 +56,14 @@ test('a platform with a web login has hosts, a session cookie, and a reachable U
     // never closes.
     const waitsForCookie = typeof sessionCookie === 'string' && sessionCookie.length > 0;
     const waitsForFields = Array.isArray(p.webLogin.fields) && p.webLogin.fields.length > 0;
+    // The third shape: an APPROVAL window waits for nothing on purpose. The
+    // person approves on the platform's own page and the bridge reports the
+    // outcome itself, so the only way out is closing the window — which is
+    // correct here and would be a hang anywhere else.
     assert.ok(
-      waitsForCookie || waitsForFields,
+      waitsForCookie || waitsForFields || p.webLogin.approval === true,
       `${id}: webLogin waits for nothing — name the cookie that means "logged ` +
-        `in", or the fields the bridge asks for, or the window never finishes`
+        `in", the fields the bridge asks for, or mark it approval: true`
     );
 
     // THE ONE THAT CAUGHT X: the page the webview is pointed at must be inside
@@ -111,7 +115,10 @@ test('the platforms that do have a web login are the ones we expect', () => {
   // Slack joined 2026-08-26 — not to harvest a session, but because Slack
   // will not email its confirmation code until a CAPTCHA is answered, and
   // answering one needs a window with a person in front of it.
-  assert.deepEqual(withWeb, ['instagram', 'linkedin', 'messenger', 'slack', 'twitter']);
+  // Discord joined 2026-08-26 as an approval window: its remote-auth link is
+  // approved on Discord's own page, which needs a window and no harvest.
+  assert.deepEqual(withWeb,
+    ['discord', 'instagram', 'linkedin', 'messenger', 'slack', 'twitter']);
 });
 
 test('the field contract is declared per platform, for the two that need one', () => {

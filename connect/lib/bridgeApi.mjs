@@ -78,6 +78,9 @@ export async function bridgeApiResponse({
         // [{id, from: 'cookies'|'header', header?}]. Null for the platforms
         // whose login is cookies alone.
         fields: platform.webLogin?.fields ?? null,
+        // An approval window: no harvest, no fields — the person answers on
+        // the platform's own page and the bridge reports the outcome itself.
+        approval: platform.webLogin?.approval === true,
       },
     };
   };

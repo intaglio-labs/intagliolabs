@@ -201,9 +201,18 @@ export const PLATFORMS = Object.freeze({
     site: 'discord.com',
     loginUrl: 'https://discord.com/login',
     cookieDomain: 'discord.com',
-    // Not a cookie harvest: the bot's own reply carries the link to approve.
-    webLogin: null,
-    noWebLogin: 'approved from the Discord phone app over a QR remote-auth link',
+    // AN APPROVAL WINDOW — the third shape. Discord's login is remote-auth:
+    // the bot hands back a discordapp.com/ra/ link and then waits for that
+    // link to be approved, which happens on Discord's own site. So the window
+    // harvests nothing and waits for nothing; it exists to put the approval
+    // page in front of the person, and the BRIDGE reports the result on its
+    // own once they are done. The panel picks that up on its next read.
+    webLogin: {
+      allowedHosts: ['discord.com', 'discordapp.com'],
+      sessionCookie: null,
+      requiredCookies: [],
+      approval: true,
+    },
   },
   slack: {
     id: 'slack',
@@ -249,6 +258,15 @@ export function loginUrlFrom(transcript, platform) {
     if (m.from !== 'bot') continue;
     const hit = m.body.match(/Login URL:\s*<?(https?:\/\/[^\s>]+)>?/iu);
     if (hit) return hit[1];
+    // A BARE URL ON ITS OWN IS ALSO THE ANSWER. mautrix-discord's login
+    // replies with nothing but its remote-auth link — no "Login URL:" label to
+    // match — so the labelled pattern above fell through to the static page,
+    // and the window opened somewhere that could not finish the login the bot
+    // had already started (2026-08-26). Fenced twice over: the whole message
+    // must be the URL, and the caller checks it against allowedHosts before
+    // loading it, because this is content from a container.
+    const bare = m.body.trim().match(/^<?(https?:\/\/[^\s>]+)>?$/u);
+    if (bare) return bare[1];
   }
   return platform.loginUrl;
 }

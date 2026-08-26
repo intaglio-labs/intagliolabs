@@ -710,7 +710,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           for (k, v) in f { if let sv = v as? String { out[k] = sv } }
           return out
         }
-        guard !allowedHosts.isEmpty, !sessionCookie.isEmpty else {
+        // A window needs a fence and SOMETHING to wait for. ~~That was read as
+        // "a session cookie", which is only one of the two shapes~~ — Slack's
+        // window harvests no session at all: it exists so the person can
+        // answer the CAPTCHA Slack demands before it will email a code, and it
+        // waits on the `fields` contract instead. Requiring a cookie here
+        // meant Slack replied "manual" and no window ever opened, which is
+        // exactly what the card kept showing (owner, 2026-08-26).
+        let approval = begin["approval"] as? Bool ?? false
+        guard !allowedHosts.isEmpty, !sessionCookie.isEmpty || !fields.isEmpty || approval else {
           self.reply(webView, id, ["state": "manual", "transcript": begin["transcript"] ?? []])
           return
         }
@@ -720,7 +728,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
             label: label, loginUrl: loginUrl, cookieDomain: cookieDomain,
             sessionCookie: sessionCookie, allowedHosts: allowedHosts,
             requiredCookies: requiredCookies, cookieFormat: cookieFormat,
-            fields: fields
+            fields: fields, approval: approval
           ) { cookiesJSON in
             guard let cookiesJSON else {
               self.reply(webView, id, ["state": "cancelled"])
