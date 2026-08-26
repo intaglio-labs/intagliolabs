@@ -23,9 +23,38 @@ body.plist .pm-tabs {
   flex: 0 0 auto;
 }
 body.plist .pm-tabs::-webkit-scrollbar { display: none; }
+/* THE CLIPPED EDGE HAS TO READ AS SCROLLED, NOT BROKEN. Fifteen years need
+   ~951px against 490px of strip, so a tab is always half-cut at one end — and a
+   year sliced mid-glyph ("919") looks like a rendering fault rather than a
+   scroll position. Two changes make it legible:
+
+   snapping, so the strip comes to rest on a tab boundary instead of through the
+   middle of one. `proximity` rather than `mandatory` — mandatory fights a
+   deliberate drag halfway along the strip.
+
+   and a mask that fades both ends, so whatever is cut is visibly fading out.
+   Symmetric, because the strip scrolls both ways; the fade is 18px, about a
+   third of a tab, which is enough to read as intent and not enough to hide a
+   year. */
+body.plist .pm-tabs {
+  scroll-snap-type: x proximity;
+  -webkit-mask-image: linear-gradient(
+    to right, transparent 0, #000 18px, #000 calc(100% - 18px), transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right, transparent 0, #000 18px, #000 calc(100% - 18px), transparent 100%
+  );
+}
+body.plist .pm-tab { scroll-snap-align: start; }
+/* The globe is stuck to the right edge, so it must never be the thing that
+   fades — it is the one control that has to stay legible at all times. */
+body.plist .pm-tabs .pm-tab-globe { scroll-snap-align: end; }
 body.plist .pm-tab {
   flex: 0 0 auto;
-  padding: 5px 12px 6px;
+  /* 9px rather than 12: a year is four fixed-width glyphs, so the padding is
+     most of a tab's width. This fits ~10 of 15 years instead of ~8, which is
+     the difference between scrolling for a recent year and not. */
+  padding: 5px 9px 6px;
   border: 1px solid rgba(234, 234, 234, 0.10);
   border-bottom: none;
   border-radius: 8px 8px 0 0;
@@ -555,6 +584,20 @@ body.plist .pm-tabs .pm-tab-globe {
   right: 0;
   z-index: 2;
   margin-left: auto;
+  /* Opaque, because a year tab sliding under a translucent button reads as a
+     rendering fault. The shadow is what says "the strip continues underneath". */
   background: var(--bg);
   box-shadow: -8px 0 8px -6px rgba(0, 0, 0, 0.55);
+}
+/* AND IT MUST STILL LOOK SELECTED. The opaque background above beats
+   .pm-tab.active's own, so the globe's selected state became indistinguishable
+   from its unselected one — defeating the point of making it reachable. Restated
+   at the specificity it now needs, keeping the real .active treatment: the
+   hazelnut tint and border, plus the 1px punch-through shadow, combined with the
+   left-edge shadow that says the strip continues underneath. */
+body.plist .pm-tabs .pm-tab-globe.active {
+  border-color: rgba(197, 165, 109, 0.35);
+  color: var(--hazelnut-light);
+  background: color-mix(in srgb, var(--hazelnut-light) 7%, var(--bg));
+  box-shadow: 0 1px 0 rgba(16, 16, 15, 0.92), -8px 0 8px -6px rgba(0, 0, 0, 0.55);
 }
