@@ -36,6 +36,19 @@ Docker contains that, and every mautrix path targets it.
 - All runtime state (configs, session cookies, message DBs) lives under
   `~/.hazlie/matrix/` (0700), **outside the repo**. Only this dir is committed.
 
+## Setting it up from nothing
+
+`bash ops/setup-bridges.sh` — idempotent, resumable, and the ONLY recipe for a
+fresh machine. It generates synapse's config (client-only, no federation, all
+six appservices registered), each bridge's config and registration (hardened:
+backfill on, double puppeting off), brings the stack up, and creates the owner
+user + `~/.hazlie/matrix/owner-credentials.json`. Written 2026-08-25, the day
+a wipe proved the original stack's recipe lived in nobody's head: the widget's
+login windows harvested cookies with no bridge behind them to take the
+hand-off. Telegram alone stays stopped until you put your own api_id/api_hash
+from my.telegram.org/apps into its config — the script says exactly this when
+it happens.
+
 ## Operating it
 
 ```sh
