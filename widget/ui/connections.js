@@ -1068,6 +1068,20 @@ function card(src, keep) {
       };
       setTimeout(tick, 2000);
     };
+    // THE PLACEHOLDER FOLLOWS THE QUESTION, the same way the button's verb
+    // does. One box serves every step of every bridge — a phone number, then
+    // the code, then X's PIN, then Slack's email — so a single fixed string
+    // has to be vague enough to fit all of them, and "type your answer" is
+    // what that vagueness costs: it tells you nothing at the one moment a
+    // FORMAT is the thing you are unsure about (owner, 2026-08-26, on the
+    // phone step). The bot's own wording decides; anything it asks for that
+    // has no obvious shape falls back to the vague line, which is the right
+    // answer there.
+    const answerHint = () => {
+      const asked = askedFor() || '';
+      if (/\bphone\b/iu.test(asked)) return '+1 xxx xxx xxxx';
+      return 'type your answer';
+    };
     // A one-line input that relays whatever the bot last asked for (a token,
     // a phone number, then the code) and re-renders with the bot's reply.
     const relayInput = (placeholder, multiline) => {
@@ -1174,7 +1188,7 @@ function card(src, keep) {
       if (askedFor() && !(data && data.connected)) {
         // The bot's question is already on screen directly above; the box only
         // has to say it is the place to answer it.
-        relayInput('type your answer', false);
+        relayInput(answerHint(), false);
       }
       // The manual cookie-paste fallback ("having trouble? paste cookies
       // manually") was yeeted (owner, 2026-08-25): the webview login is the
@@ -1266,7 +1280,7 @@ function card(src, keep) {
           how.textContent = help.steps;
           tip.appendChild(how);
         }
-        relayInput('type your answer', flow === 'token');
+        relayInput(answerHint(), flow === 'token');
       }
     }
   };
