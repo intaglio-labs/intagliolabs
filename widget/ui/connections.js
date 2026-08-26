@@ -476,8 +476,18 @@ const BRIDGE_HELP = {
   // PLATFORMS.slack), so the tokens come out of a browser already signed in.
   slack: {
     place: 'your Slack tokens',
-    steps: 'open slack.com in your browser, signed in · devtools → Application '
-      + '→ Cookies → copy d (xoxd-…) · Network → any api call → copy token (xoxc-…)',
+    // WHY THIS ONE IS DIFFERENT, said on the card rather than left to feel
+    // arbitrary next to five platforms that just open a window. Verified in a
+    // real WKWebView (2026-08-26): slack.com/signin, /workspace-signin and
+    // app.slack.com/client each render "your browser is not supported", under
+    // both a Safari and a Chrome user agent, while a plain fetch of the same
+    // URLs is served the real page. Client-side detection, nothing a string
+    // can answer.
+    why: 'Slack’s login page refuses to open inside an app window, so this one '
+      + 'borrows the session from a browser you are already signed in to.',
+    steps: '1 · open slack.com in that browser  2 · devtools → Application → '
+      + 'Cookies → copy d (xoxd-…)  3 · Network → any api call → request '
+      + 'headers → copy token (xoxc-…)',
   },
   telegram: { place: 'phone (+1…), then the code' },  // after its api keys are set
 };
@@ -929,6 +939,16 @@ function card(src, keep) {
       }
       return null;
     };
+    // A live QR in the transcript: the login is waiting to be scanned.
+    const qrIn = (d) => ((d && d.transcript) || []).some(
+      (m) => m.from === 'bot' && typeof m.image === 'string' && m.image.startsWith('data:image/')
+    );
+    // The bridge said the attempt ended. Its QR is redacted by then, so the
+    // card must offer a fresh one rather than a conversation that is over.
+    const expiredIn = (d) => {
+      const last = [...((d && d.transcript) || [])].reverse().find((m) => m.from === 'bot' && m.body);
+      return !!last && /error logging in|websocket|timed? out|cancelled/iu.test(last.body);
+    };
     const appendTranscript = () => {
       const ask = askedFor();
       if (ask) {
@@ -1084,6 +1104,23 @@ function card(src, keep) {
         walkthrough(hint);
       } else if (!started) {
         beginButton('begin login');
+      } else if (qrIn(data)) {
+        // A QR LOGIN ANSWERS WITH A PHONE, NOT A KEYBOARD. Discord posts the
+        // code, the phone app scans it, and the bridge completes on its own —
+        // so this card shows the image and nothing to type into. Offering a
+        // box here produced "enter scan the QR with your Discord phone app"
+        // above an empty field, which is an instruction to do the impossible
+        // (owner, 2026-08-26).
+        appendTranscript();
+      } else if (expiredIn(data)) {
+        // The QR is REDACTED the moment the attempt ends, so a card reopened
+        // after one timed out has the words and not the code. Start over is
+        // the only move, and saying so beats a stale conversation.
+        const gone = document.createElement('span');
+        gone.className = 'setup';
+        gone.textContent = 'that code expired — start again and scan it promptly';
+        tip.appendChild(gone);
+        beginButton('begin login');
       } else {
         appendTranscript();
         // The bot is waiting for the next thing. Token pastes want room;
@@ -1104,6 +1141,15 @@ function card(src, keep) {
           say.className = 'setup';
           say.textContent = `enter ${help.place}`;
           tip.appendChild(say);
+        }
+        // Why a platform is asking for something odd, before it asks. A
+        // flow that differs from its neighbours without saying why reads as
+        // broken rather than as constrained.
+        if (help && help.why) {
+          const why = document.createElement('span');
+          why.className = 'setup';
+          why.textContent = help.why;
+          tip.appendChild(why);
         }
         // Where to find them, for the flows whose values live somewhere the
         // owner has to go and look.

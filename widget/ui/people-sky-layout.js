@@ -28,7 +28,7 @@
   var HARD_CAP = 8;
   // Daylight between the stage edge and a bubble, and between two bubbles.
   var RING_MARGIN = 8;
-  var GAP = 12;
+  var GAP = 14;
   // The core is 54px, and a bubble that touches it reads as belonging to it.
   var CORE_CLEAR = 27 + 12;
   // The largest a bubble may be, from the design.
@@ -181,6 +181,21 @@
     return hits;
   }
 
+  // A LABEL IS WIDER THAN ITS BUBBLE AND THAT IS FINE — the design draws it
+  // that way, a topic name being worth more than a tidy silhouette. Running off
+  // the STAGE is not fine: "ENGINEERING · 47" on a bubble parked at the left
+  // edge lost its first letters to the panel border. So the ring is pulled in
+  // horizontally by the widest overhang any bubble carries. Vertically nothing
+  // changes; the label sits inside the bubble's own height.
+  function overhangFor(clusters, diameters) {
+    var worst = 0;
+    for (var i = 0; i < clusters.length; i += 1) {
+      var w = Number(clusters[i].labelWidth) || 0;
+      worst = Math.max(worst, (w - diameters[i]) / 2);
+    }
+    return Math.max(0, Math.round(worst));
+  }
+
   function attempt(stageW, stageH, clusters, scale, pull, start) {
     var dMax = Math.max(D_SMALL, Math.round(ceilingFor(stageW, stageH) * scale));
     var maxMembers = Math.max.apply(null, clusters.map(function (c) {
@@ -189,8 +204,18 @@
     var diameters = clusters.map(function (c) {
       return diameterFor(Number(c.members) || 0, maxMembers, dMax);
     });
-    var ring = ringFor(stageW, stageH, dMax);
+    var ring = ringFor(stageW - 2 * overhangFor(clusters, diameters), stageH, dMax);
     var radials = radialsFor(clusters, diameters, ring, pull);
+    // THE CORE IS A BUBBLE TOO, and on a stage this small the ring itself can
+    // pass through it: the radial floor is a fraction of the ring, so when the
+    // ring is shorter than the core plus a bubble's own radius, "as far out as
+    // it goes" is still on top of the owner. Fail here instead, and let the
+    // ladder shrink until there is room. The short axis is the worst case, so
+    // checking it covers every angle.
+    var inner = Math.min(ring.rx, ring.ry);
+    for (var q = 0; q < diameters.length; q += 1) {
+      if (inner * radials[q] < CORE_CLEAR + diameters[q] / 2) return null;
+    }
     var angles = anglesFor(diameters, radials, ring, start);
     if (!angles) return null;
     var spots = clusters.map(function (c, i) {

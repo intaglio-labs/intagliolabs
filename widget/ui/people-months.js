@@ -656,6 +656,12 @@
     return f;
   }
 
+  // Written once: the layout sizes the stage against this string's width, and
+  // a second copy of the format is a second chance for the two to disagree.
+  function labelFor(topic, members) {
+    return `${String(topic).toUpperCase()} · ${members}`;
+  }
+
   function clusterEl(spot, i, stage) {
     const c = spot.cluster;
     const d = spot.d;
@@ -696,7 +702,7 @@
 
     const label = document.createElement('div');
     label.className = 'pm-cluster-label';
-    label.textContent = `${c.label.toUpperCase()} · ${c.members}`;
+    label.textContent = labelFor(c.label, c.members);
 
     el.append(faces, label);
     return el;
@@ -715,6 +721,12 @@
       members: c.members.length,
       activity: c.activity,
       people: c.members,
+      // What the label will measure, so the layout can keep it on the stage.
+      // Arithmetic rather than a measuring pass: the face is monospaced, and
+      // .pm-cluster-label is 10px with 0.1em of letter-spacing — 6px of advance
+      // plus 1px of tracking, 7px a character. Checked against the rendered
+      // width of the longest label this corpus produces; they agree exactly.
+      labelWidth: labelFor(c.label, c.members.length).length * 7,
     })));
     const clusters = placed.spots;
     if (!clusters.length) {
