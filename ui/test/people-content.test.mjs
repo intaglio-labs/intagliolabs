@@ -92,7 +92,7 @@ test('one excerpt per person, from a row that matched, and never a transcript', 
   assert.equal(typeof stat.excerpt.text, 'string');
   assert.ok(stat.excerpt.text.includes('sunday'), 'the most recent match wins');
   assert.ok(!stat.excerpt.text.includes('unrelated'), 'only rows that matched');
-  assert.deepEqual(Object.keys(stat.excerpt).sort(), ['fromMe', 'text', 'ts']);
+  assert.deepEqual(Object.keys(stat.excerpt).sort(), ['fromMe', 'room', 'text', 'ts']);
 });
 
 test('an excerpt is capped however long the message is', () => {
@@ -166,4 +166,44 @@ test('a group message credits its sender, and the owner speaks for nobody', () =
     null,
     'the owner in a group has no single counterparty'
   );
+});
+
+// ---- a room is findable, but it does not pretend to be a conversation ----
+//
+// The opposite call from chips, on purpose: search exists to FIND somebody, and
+// "who was in that thread" is a real question. What must not happen is the
+// excerpt implying the two of you said it to each other.
+const GROUP_GUID = 'any;+;chat70707';
+
+test('someone who only spoke in a room is still findable', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW, source: 'imessage', entity_id: 'r1', text: 'pickleball at six?',
+      meta: { chat_guid: GROUP_GUID, handle: HANDLE, is_from_me: false } },
+  ]);
+  const stat = contentMatches(ctx, idToKey, 'pickleball').stats.get(`${KEY}|2025`);
+  assert.equal(stat.messages, 1, 'search still reaches them');
+  assert.equal(stat.excerpt.room, true, 'and the row says where it was said');
+});
+
+test('a one-to-one excerpt is not marked as a room', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW, source: 'imessage', entity_id: 'd1', text: 'pickleball at six?',
+      meta: { chat_guid: 'any;-;+15550100', handle: HANDLE, is_from_me: false } },
+  ]);
+  assert.equal(contentMatches(ctx, idToKey, 'pickleball').stats.get(`${KEY}|2025`).excerpt.room, false);
+});
+
+// The 656 guid-less rows must keep behaving exactly as before, and must never
+// be able to claim a room.
+test('a row with no thread is credited, and claims no room', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW, source: 'imessage', entity_id: 'u1', text: 'pickleball at six?',
+      meta: { handle: HANDLE, is_from_me: false } },
+  ]);
+  const stat = contentMatches(ctx, idToKey, 'pickleball').stats.get(`${KEY}|2025`);
+  assert.equal(stat.messages, 1);
+  assert.equal(stat.excerpt.room, false);
 });

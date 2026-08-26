@@ -94,12 +94,12 @@ test('lastSeen ignores future events regardless of row scan order', () => {
 test('calendar co-attendance merges by attendee email and counts meetings', () => {
   const ctx = openDb(':memory:');
   insertRows(ctx, [
-    { ts: NOW - 20 * DAY, source: 'calendar', entity_id: 'c:1', text: 'm1', meta: { attendees: [{ email: 'rishab@videa.com', name: 'Rishab Nayak' }] } },
-    { ts: NOW - 10 * DAY, source: 'calendar', entity_id: 'c:2', text: 'm2', meta: { attendees: [{ email: 'rishab@videa.com', name: 'Rishab Nayak' }] } },
+    { ts: NOW - 20 * DAY, source: 'calendar', entity_id: 'c:1', text: 'm1', meta: { attendees: [{ email: 'mika@example.com', name: 'Mika Tanaka' }] } },
+    { ts: NOW - 10 * DAY, source: 'calendar', entity_id: 'c:2', text: 'm2', meta: { attendees: [{ email: 'mika@example.com', name: 'Mika Tanaka' }] } },
     { ts: NOW - 15 * DAY, source: 'imessage', entity_id: 'i:1', text: 'hey', meta: { chat_handle: '+15555550123', is_from_me: false } },
   ]);
-  const spine = spineDb([['+15555550123', 'Rishab Nayak', 'phone'], ['rishab@videa.com', 'Rishab Nayak', 'email']]);
-  const r = buildGraph(ctx, spine, { now: NOW }).find((p) => p.name === 'Rishab Nayak');
+  const spine = spineDb([['+15555550123', 'Mika Tanaka', 'phone'], ['mika@example.com', 'Mika Tanaka', 'email']]);
+  const r = buildGraph(ctx, spine, { now: NOW }).find((p) => p.name === 'Mika Tanaka');
   assert.equal(r.metInPerson, 2);
   assert.ok(r.channels.includes('calendar') && r.channels.includes('imessage'));
 });
@@ -250,4 +250,111 @@ test('a calendar organizer absent from the attendee list is still a person', () 
   const chair = graph.find((x) => x.identifiers.includes('chair@corp.com'));
   assert.ok(chair, 'the person who called the meeting is in the graph');
   assert.equal(chair.name, 'Chair Person');
+});
+
+// ---- a room is not a conversation ----
+//
+// 22.3% of iMessage rows are group threads, and until 2026-08-26 nothing here
+// could tell: the branch that asked "is this a group" read meta.is_group, which
+// only WhatsApp writes. These pin both halves of the fix -- the clocks stop
+// ticking on room chatter, and the counts do NOT move while that happens.
+const GROUP_GUID = 'any;+;chat90210';
+const DIRECT_GUID = 'any;-;+15550444';
+
+test('somebody speaking in a room has not reached out to you', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    // Their only inbound is a group post, two days ago.
+    { ts: NOW - 2 * DAY, source: 'imessage', entity_id: 'g1', text: 'anyone free saturday',
+      meta: { chat_guid: GROUP_GUID, handle: '+15550444', is_from_me: false } },
+  ]);
+  const p = buildGraph(ctx, spineDb([]), { now: NOW }).find((x) => x.identifiers.includes('+15550444'));
+  assert.ok(p, 'they are still a person -- this is not a filter');
+  assert.equal(p.messages, 0, 'but you have exchanged nothing with them');
+  assert.equal(p.received, 0, 'they did not write to YOU');
+  assert.equal(p.roomMessages, 1, 'what they did is counted as what it was');
+  assert.equal(p.dormancyDays, null, 'and they have never reached out');
+  assert.equal(p.roomOnly, true);
+});
+
+test('a direct message still starts the clock', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - 2 * DAY, source: 'imessage', entity_id: 'd1', text: 'hey',
+      meta: { chat_guid: DIRECT_GUID, handle: '+15550444', is_from_me: false } },
+  ]);
+  const p = buildGraph(ctx, spineDb([]), { now: NOW }).find((x) => x.identifiers.includes('+15550444'));
+  assert.equal(p.dormancyDays, 2);
+  assert.equal(p.roomOnly, false);
+  assert.equal(p.directMessages, 1);
+});
+
+// WHAT SENT AND RECEIVED MEAN. reciprocity is documented as "do they write back
+// -- 1.0 is a balanced two-way thread". Counting rooms made that read 1.0 for two
+// people who had never addressed each other and merely posted the same number of
+// times into the same group. Somebody answering in a group chat did not answer
+// YOU, and these numbers now say so.
+test('sent and received count what was addressed to you, rooms count separately', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - 9 * DAY, source: 'imessage', entity_id: 'm1', text: 'in the room',
+      meta: { chat_guid: GROUP_GUID, handle: '+15550444', is_from_me: false } },
+    { ts: NOW - 8 * DAY, source: 'imessage', entity_id: 'm2', text: 'also the room',
+      meta: { chat_guid: GROUP_GUID, handle: '+15550444', is_from_me: false } },
+    { ts: NOW - 5 * DAY, source: 'imessage', entity_id: 'm3', text: 'direct to me',
+      meta: { chat_guid: DIRECT_GUID, handle: '+15550444', is_from_me: false } },
+    { ts: NOW - 4 * DAY, source: 'imessage', entity_id: 'm4', text: 'my reply',
+      meta: { chat_guid: DIRECT_GUID, handle: '+15550444', is_from_me: true } },
+  ]);
+  const p = buildGraph(ctx, spineDb([]), { now: NOW }).find((x) => x.identifiers.includes('+15550444'));
+  // Two direct (one each way), two in a room.
+  assert.equal(p.received, 1, 'only what they addressed to the owner');
+  assert.equal(p.sent, 1);
+  assert.equal(p.messages, 2, 'the exchange between the two of you');
+  assert.equal(p.reciprocity, 1, 'one each way IS balanced — the rooms do not dilute it');
+  assert.equal(p.roomMessages, 2, 'and the room volume is not lost, it is just not this');
+  assert.equal(p.directMessages, 2);
+  assert.equal(p.roomOnly, false);
+  assert.equal(p.dormancyDays, 5, 'the clock uses the DIRECT message, not the newer room one');
+});
+
+// 656 live rows carry no chat_guid. They must keep behaving exactly as they did.
+test('a row with no thread is credited as before, and asserts no room', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - 3 * DAY, source: 'imessage', entity_id: 'u1', text: 'no guid here',
+      meta: { handle: '+15550444', is_from_me: false } },
+  ]);
+  const p = buildGraph(ctx, spineDb([]), { now: NOW }).find((x) => x.identifiers.includes('+15550444'));
+  assert.equal(p.messages, 1);
+  assert.equal(p.dormancyDays, 3, 'unknown is credited as direct, so nothing moved');
+  assert.equal(p.roomOnly, false);
+  assert.equal(p.roomMessages, 0);
+});
+
+// The owner's own side of their own conversations: Apple does not record who an
+// outbound message went to, so these were dropped and reciprocity was computed
+// against a sent side missing most of its evidence.
+test('an outbound message with no handle still finds its recipient', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - 3 * DAY, source: 'imessage', entity_id: 'o1', text: 'sent, unaddressed',
+      meta: { chat_guid: 'any;-;+15550444', is_from_me: true } },
+    { ts: NOW - 2 * DAY, source: 'imessage', entity_id: 'o2', text: 'their reply',
+      meta: { chat_guid: 'any;-;+15550444', handle: '+15550444', is_from_me: false } },
+  ]);
+  const p = buildGraph(ctx, spineDb([]), { now: NOW }).find((x) => x.identifiers.includes('+15550444'));
+  assert.equal(p.sent, 1, 'the outbound row is no longer dropped');
+  assert.equal(p.received, 1);
+  assert.equal(p.reciprocity, 1, 'which is what makes reciprocity mean anything');
+});
+
+test('an unaddressed message in a ROOM does not invent a person', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - DAY, source: 'imessage', entity_id: 'g9', text: 'said to the room',
+      meta: { chat_guid: 'any;+;chat488392016936725110', is_from_me: true } },
+  ]);
+  const g = buildGraph(ctx, spineDb([]), { now: NOW });
+  assert.equal(g.length, 0, 'a room id must never become a person with a message count');
 });
