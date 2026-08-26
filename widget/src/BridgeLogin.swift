@@ -100,8 +100,11 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     cookieFormat: String = "json", fields: [[String: String]] = [],
     done: @escaping (String?) -> Void
   ) {
+    // A window must have something to wait for: a session cookie to appear, or
+    // the fields a bridge named. Slack's has only fields — it is there so the
+    // person can answer a CAPTCHA, and harvests no session at all.
     guard let url = URL(string: loginUrl), let host = url.host, !allowedHosts.isEmpty,
-          !sessionCookie.isEmpty,
+          !sessionCookie.isEmpty || !fields.isEmpty,
           allowedHosts.contains(where: { host == $0 || host.hasSuffix("." + $0) })
     else { done(nil); return }
     // Only one login window at a time; a second request supersedes the first.
@@ -128,6 +131,34 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     // XMLHttpRequest.setRequestHeader and fetch to report the ones named in the
     // contract, and nothing else: the allow-list is built from `fields`, so the
     // script cannot become a general reader of the page's traffic.
+    // A CAPTCHA field watches the challenge widget's own output. reCAPTCHA
+    // writes its response token into a hidden field once the person passes;
+    // this polls for it and reports nothing else. It cannot answer a
+    // challenge and is not trying to — it reads the receipt of one that a
+    // human already answered, which is exactly what the bridge asks for.
+    if fields.contains(where: { $0["from"] == "captcha" }) {
+      config.userContentController.add(self, name: Self.headerHandler)
+      let js = """
+      (function () {
+        var sent = '';
+        setInterval(function () {
+          try {
+            var el = document.querySelector('textarea[name="g-recaptcha-response"], #g-recaptcha-response');
+            var v = el && el.value;
+            if (v && v !== sent) {
+              sent = v;
+              window.webkit.messageHandlers.\(Self.headerHandler)
+                .postMessage({ name: '\(Self.captchaKey)', value: String(v) });
+            }
+          } catch (e) {}
+        }, 500);
+      })();
+      """
+      config.userContentController.addUserScript(
+        WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: false)
+      )
+    }
+
     let wanted = fields.compactMap { $0["from"] == "header" ? $0["header"] : nil }
     if !wanted.isEmpty {
       config.userContentController.add(self, name: Self.headerHandler)
@@ -291,6 +322,9 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
   /// The message-handler name the injected script posts to. One constant so
   /// the script and the registration cannot drift.
   fileprivate static let headerHandler = "hzHeader"
+  /// Where a captured CAPTCHA token is filed. Not a header name, so it cannot
+  /// collide with one a contract asks for.
+  fileprivate static let captchaKey = "__captcha"
 
   func userContentController(
     _ controller: WKUserContentController, didReceive message: WKScriptMessage
@@ -303,7 +337,9 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
     else { return }
     // Bounded: a header this window was not told to collect is dropped by the
     // script already, and an absurd value is not worth keeping either.
-    guard value.count <= 4096 else { return }
+    // reCAPTCHA tokens run long — several KB is normal, and truncating one
+    // would fail validation on the far side for no visible reason.
+    guard value.count <= 16384 else { return }
     seenHeaders[name.lowercased()] = value
     // A header can arrive after the cookies are already in place, which is the
     // usual order — the session cookie lands at login, the XHR headers on the
@@ -317,7 +353,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
       guard let self, !self.finished else { return }
       let mine = cookies.filter { self.domainMatches($0.domain) }
       // ALL required cookies, not just the session signal — the poll simply
-      // keeps waiting until the platform has set every one.
+      // keeps waiting until the platform has set every one. An empty list is
+      // a login that waits on its fields instead (Slack's CAPTCHA window).
       let have = Set(mine.filter { !$0.value.isEmpty }.map { $0.name })
       guard self.requiredCookies.allSatisfy({ have.contains($0) }) else { return }
       // THE FIELD CONTRACT, when the bridge declared one. Every field must be
@@ -337,6 +374,11 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScr
           case "header":
             guard let name = f["header"],
                   let v = self.seenHeaders[name.lowercased()], !v.isEmpty else { return }
+            payload[id] = v
+          case "captcha":
+            // The token the PERSON's answer produced. Nothing here answers a
+            // challenge — the window shows the platform's own page and waits.
+            guard let v = self.seenHeaders[Self.captchaKey], !v.isEmpty else { return }
             payload[id] = v
           default:
             return

@@ -221,10 +221,23 @@ export const PLATFORMS = Object.freeze({
     site: 'slack.com',
     loginUrl: 'https://slack.com/signin',
     cookieDomain: 'slack.com',
-    // The bot asks for the address, then the code Slack emails — a guided
-    // conversation, not a cookie harvest.
-    webLogin: null,
-    noWebLogin: 'signs in by email address and an emailed code, not by session cookie',
+    // A WINDOW, but not for a password. After the email address, Slack refuses
+    // to send its confirmation code until a CAPTCHA is solved — the bot says so
+    // in as many words and hands back a Login URL. Its next step then asks for
+    // one field, `captcha_token`, which is the value the challenge produces.
+    //
+    // THE PERSON SOLVES IT. The window shows Slack's own page and carries the
+    // token their solution produced; nothing here answers a challenge, and
+    // nothing may. That is also the only reason this is a legitimate flow: the
+    // point of the challenge is a human proving they are human, and one is.
+    webLogin: {
+      allowedHosts: ['slack.com'],
+      // No cookie gate: this window is not harvesting a session, it is waiting
+      // for one value that appears when the challenge is answered.
+      sessionCookie: null,
+      requiredCookies: [],
+      fields: [{ id: 'captcha_token', from: 'captcha' }],
+    },
   },
 });
 

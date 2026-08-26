@@ -47,10 +47,19 @@ test('a platform with a web login has hosts, a session cookie, and a reachable U
       assert.ok(typeof h === 'string' && h.length > 0 && !h.startsWith('.') && !h.includes('/'),
         `${id}: "${h}" is not a bare host`);
     }
+    // TWO SHAPES OF WEB LOGIN, and each needs its own finish condition.
+    // A HARVEST waits for a session cookie to appear. A FIELD login waits for
+    // the values its `fields` contract names — Slack's window exists only to
+    // let the person answer a CAPTCHA, and harvests no session at all, so
+    // demanding a sessionCookie of it would be demanding the wrong thing.
+    // What both must have is SOMETHING to wait for; a window with neither
+    // never closes.
+    const waitsForCookie = typeof sessionCookie === 'string' && sessionCookie.length > 0;
+    const waitsForFields = Array.isArray(p.webLogin.fields) && p.webLogin.fields.length > 0;
     assert.ok(
-      typeof sessionCookie === 'string' && sessionCookie.length > 0,
-      `${id}: webLogin needs the cookie name that means "logged in", or the poll ` +
-        `never fires`
+      waitsForCookie || waitsForFields,
+      `${id}: webLogin waits for nothing — name the cookie that means "logged ` +
+        `in", or the fields the bridge asks for, or the window never finishes`
     );
 
     // THE ONE THAT CAUGHT X: the page the webview is pointed at must be inside
@@ -63,11 +72,13 @@ test('a platform with a web login has hosts, a session cookie, and a reachable U
     );
 
     // The harvest domain has to be real too, since it selects which cookies
-    // get sent to the bridge.
-    assert.ok(
-      typeof p.cookieDomain === 'string' && p.cookieDomain.length > 0,
-      `${id}: a cookie flow needs a cookieDomain to harvest from`
-    );
+    // get sent to the bridge — but only for the flows that harvest one.
+    if (waitsForCookie) {
+      assert.ok(
+        typeof p.cookieDomain === 'string' && p.cookieDomain.length > 0,
+        `${id}: a cookie flow needs a cookieDomain to harvest from`
+      );
+    }
   }
 });
 
@@ -97,10 +108,13 @@ test('the platforms that do have a web login are the ones we expect', () => {
   // side effect. Four cookie flows: LinkedIn joined 2026-08-25 when it stopped
   // being a hand-unzipped CSV export and became a bridge like the others.
   const withWeb = entries.filter(([, p]) => p.webLogin).map(([id]) => id).sort();
-  assert.deepEqual(withWeb, ['instagram', 'linkedin', 'messenger', 'twitter']);
+  // Slack joined 2026-08-26 — not to harvest a session, but because Slack
+  // will not email its confirmation code until a CAPTCHA is answered, and
+  // answering one needs a window with a person in front of it.
+  assert.deepEqual(withWeb, ['instagram', 'linkedin', 'messenger', 'slack', 'twitter']);
 });
 
-test('the field contract is declared per platform, and only LinkedIn has one', () => {
+test('the field contract is declared per platform, for the two that need one', () => {
   // The shape the harvested cookies are sent in is the SERVER's call — Swift
   // enforces it and never decides it, same as allowedHosts. Pinned as a roster
   // because getting it wrong is silent: the Meta and X bridges name each cookie
@@ -109,7 +123,7 @@ test('the field contract is declared per platform, and only LinkedIn has one', (
   // empty value from that same JSON — a login that looks done and is not
   // (2026-08-25).
   const withFields = entries.filter(([, p]) => p.webLogin?.fields).map(([id]) => id).sort();
-  assert.deepEqual(withFields, ['linkedin']);
+  assert.deepEqual(withFields, ['linkedin', 'slack']);
 
   // Every field must be one the login window knows how to satisfy. A `header`
   // field additionally names the header to capture — without it the window
@@ -117,7 +131,8 @@ test('the field contract is declared per platform, and only LinkedIn has one', (
   for (const [id, p] of entries) {
     for (const f of p.webLogin?.fields ?? []) {
       assert.ok(f.id, `${id}: a field with no id`);
-      assert.ok(['cookies', 'header'].includes(f.from), `${id}: unknown field source ${f.from}`);
+      assert.ok(['cookies', 'header', 'captcha'].includes(f.from),
+        `${id}: unknown field source ${f.from}`);
       if (f.from === 'header') assert.ok(f.header, `${id}: header field ${f.id} names no header`);
     }
   }
