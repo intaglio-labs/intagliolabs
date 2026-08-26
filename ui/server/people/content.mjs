@@ -1,4 +1,5 @@
 import { approximateConversationKey } from '../memory/episodes.mjs';
+import { threadKind, isRoom, counterpartyFromThread, GROUP } from '../memory/threadKind.mjs';
 
 // WHO DID I TALK TO ABOUT THIS? — the corpus half of person search.
 //
@@ -105,8 +106,19 @@ export function rowPersonId(row, meta) {
   }
   if (row.source === 'linkedin') return null;
   const fromMe = meta.is_from_me === true || meta.is_from_me === 1;
-  if (meta.is_group) return fromMe ? null : (meta.sender_handle ?? meta.handle ?? null);
-  return meta.chat_handle ?? meta.handle ?? null;
+  // ROOMS ARE KEPT HERE, and that is the opposite call from chips -- on purpose.
+  //
+  // Search is about FINDING somebody. "Who was in that pickleball thread" is a
+  // real question, and answering it from a room is useful in a way that
+  // CHARACTERISING a relationship from a room is not. So the row still credits
+  // whoever spoke; what changes is that the excerpt stops implying the two of you
+  // said it to each other (see the excerpt's `room` flag below).
+  if (threadKind(row, meta) === GROUP) {
+    return fromMe ? null : (meta.sender_handle ?? meta.handle ?? null);
+  }
+  // Same thread fallback as the graph: an outbound row Apple left unaddressed
+  // is still a row in a conversation with somebody, and it is 109,380 of them.
+  return meta.chat_handle ?? meta.handle ?? counterpartyFromThread(row, meta);
 }
 
 // Per (person, year), how much of this subject is theirs.
@@ -171,7 +183,15 @@ export function contentMatches(db, idToKey, query, { maxRows = 6000 } = {}) {
     if (stat.excerpt === null) {
       const text = trimExcerpt(row.snip);
       if (text) {
-        stat.excerpt = { text, ts, fromMe: meta.is_from_me === true || meta.is_from_me === 1 };
+        stat.excerpt = {
+          text,
+          ts,
+          fromMe: meta.is_from_me === true || meta.is_from_me === 1,
+          // WHERE it was said. Without this the row reads "you and X talked about
+          // weddings" over a line X said to a room of nine people -- true that
+          // they said it, false about who they said it to.
+          room: isRoom(row, meta),
+        };
       }
     }
     out.set(bucket, stat);

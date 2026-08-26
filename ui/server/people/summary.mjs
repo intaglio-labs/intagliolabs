@@ -21,6 +21,7 @@
 // messages this module refuses to call the model at all and says why.
 
 import { existsSync, mkdirSync, chmodSync } from 'node:fs';
+import { threadKind, GROUP } from '../memory/threadKind.mjs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -47,7 +48,9 @@ export function gatherRows(contextDb, idToKey, personKey, year) {
   const y1 = new Date(year + 1, 0, 1).getTime();
   const rows = contextDb
     .prepare(
-      "SELECT ts, text, meta FROM context WHERE source IN ('imessage','whatsapp') " +
+      // `source` is selected because threadKind dispatches on it. It was not
+      // needed while the group test read a meta key; it is now.
+      "SELECT ts, source, text, meta FROM context WHERE source IN ('imessage','whatsapp') " +
         'AND ts >= ? AND ts < ? AND text IS NOT NULL ORDER BY ts'
     )
     .all(y0, y1);
@@ -59,7 +62,12 @@ export function gatherRows(contextDb, idToKey, personKey, year) {
     } catch {
       continue;
     }
-    if (m.is_group) continue;
+    // NOT WHAT THEY SAID IN A ROOM. The prompt this feeds tells the model it is
+    // reading messages "between you and one other person", and `m.is_group` made
+    // that true only for WhatsApp -- so a year summary could be written from one
+    // person's group monologue, with the owner never appearing in it. 50 person-
+    // years on the live store are entirely group rows.
+    if (threadKind(r, m) === GROUP) continue;
     const id = m.chat_handle ?? m.handle ?? null;
     if (id === null || idToKey.get(id) !== personKey) continue;
     const text = String(r.text);

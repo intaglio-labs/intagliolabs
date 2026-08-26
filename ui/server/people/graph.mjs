@@ -24,7 +24,7 @@
 
 // Whether a row happened in a room or in a conversation. Derived from the
 // thread, never stored -- see memory/threadKind.mjs for why it is not a field.
-import { threadKind, isRoom, GROUP } from '../memory/threadKind.mjs';
+import { threadKind, isRoom, counterpartyFromThread, GROUP } from '../memory/threadKind.mjs';
 
 const DAY = 86_400_000;
 
@@ -126,7 +126,11 @@ function personSignalsForRow(row, meta, owner) {
           ? [{ id: sender, channel: row.source, ts, fromMe: false, name: speakerName, room }]
           : [];
       }
-      const id = meta.chat_handle ?? meta.handle ?? null;
+      // ...falling back to the THREAD when Apple did not record a handle, which
+      // it does not on most outbound rows. See counterpartyFromThread: this is
+      // 109,380 of the owner's own one-to-one messages that were being dropped,
+      // and it is deliberately unreachable for group threads.
+      const id = meta.chat_handle ?? meta.handle ?? counterpartyFromThread(row, meta);
       if (!id) return [];
       // ONE-TO-ONE, where the id is the chat rather than the sender -- so the
       // speaker of an OUTBOUND row is the owner, and passing it here would file
@@ -274,7 +278,20 @@ function addContentSignals(contextDb, people, keyResolver, signals) {
       row.source === 'mail'
         ? (Array.isArray(meta.from) ? meta.from[0]?.toLowerCase() : null)
         : (meta.chat_handle ?? meta.handle ?? null);
-    if (!id || meta.is_group) continue;
+    // ROOMS COUNT HERE, deliberately, and the opposite of the chips rule.
+    //
+    // This scan asks "does this PERSON talk about investor topics" -- a fact
+    // about them, not about their relationship with the owner. Somebody
+    // discussing a term sheet in a group said it; where they stood when they
+    // said it does not make it less true of them. A chip is different, because a
+    // chip claims to describe a conversation the two of you had.
+    //
+    // The `meta.is_group` test that used to sit here never fired for iMessage
+    // (the key is WhatsApp-only), so groups have in fact been counted all along.
+    // Rather than make a dead gate live and quietly drop 24.8% of the credited
+    // rows off this scan -- which would push people off the investor list -- the
+    // behaviour is kept and the intent is now written down.
+    if (!id) continue;
     const key = keyResolver(id);
     const person = people.get(key);
     if (!person) continue;
