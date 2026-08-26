@@ -1060,18 +1060,33 @@ function card(src, keep) {
     // So: repaint only on an actual answer, and otherwise say we are waiting
     // and keep asking. Polling here costs nothing, where holding the request
     // open for 40s would tie up the connect service on every login step.
-    const settle = (d, had, send) => {
+    const settle = (d, had) => {
       const answered = (x) => !!x && (x.connected === true
         || (((x.transcript) || []).length > had));
       if (answered(d)) { renderBridge(d); return; }
-      send.textContent = `waiting for ${src.label}…`;
+      // THE WAIT IS THE WHOLE CARD, not a caption on a button. Leaving the
+      // question and the filled-in box on screen under "waiting for
+      // Telegram…" showed the owner a form to fill in that had already been
+      // filled in and sent — an invitation to answer a question that is no
+      // longer being asked (owner, 2026-08-26). Nothing here is actionable
+      // until the bot speaks, so nothing here should look actionable.
+      tip.replaceChildren();
+      const head = document.createElement('b');
+      head.textContent = src.label;
+      const stay = document.createElement('span');
+      stay.className = 'stay';
+      stay.textContent = STAY;
+      const say = document.createElement('span');
+      say.className = 'setup';
+      say.textContent = `waiting for ${src.label}…`;
+      tip.append(head, stay, say);
       let tries = 0;
       const tick = () => {
         // The card was closed or replaced — nothing to paint into.
         if (!tip.isConnected) return;
         // ~30s on top of relay's own 9. Past that the answer is not coming,
-        // and a card stuck on "waiting" with a dead button is worse than one
-        // showing the last thing that was true: repaint so it can be retried.
+        // and a card stuck on "waiting" forever is worse than one showing the
+        // last thing that was true: repaint, so it can be retried.
         if (++tries > 15) { renderBridge(d); return; }
         hzPost('bridgeStatus', { p: kindOf(src.id) })
           .then((next) => {
@@ -1124,7 +1139,7 @@ function card(src, keep) {
         // can be told apart from the question it is answering.
         const had = ((data && data.transcript) || []).length;
         hzPost('bridgeCookies', { p: kindOf(src.id), cookies: val })
-          .then((d) => settle(d, had, send))
+          .then((d) => settle(d, had))
           .catch(() => { send.disabled = false; send.textContent = idle; });
       };
       send.addEventListener('click', (e) => { e.stopPropagation(); fire(); });
