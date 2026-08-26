@@ -513,45 +513,18 @@
   }
 
   // ---- the constellation ----
-  // HOW MANY BUBBLES FIT IS SOLVED, NOT CHOSEN. This was a flat 4, which was
-  // only ever right for the ~400px panel it was measured on — a scaled-up
-  // window has room for more and was still being given four.
-  //
-  // n bubbles of diameter d on a ring of radius r are 2r*sin(pi/n) apart
-  // (chord, not arc — arc overstates the gap and lets them touch), and that
-  // must be at least d. The ring must also fit: r <= R - d/2 - margin, where R
-  // is the stage's half-minor-axis. Substituting one into the other and
-  // solving for d gives the most a given n can afford:
-  //
-  //     d(n) = 2*sin(pi/n) * (R - margin) / (1 + sin(pi/n))
-  //
-  // So: try the most bubbles we would ever want, shrink them to fit, and stop
-  // at the first n whose bubbles are still big enough to hold faces. On a
-  // 400px panel that lands back on 4, which is what the design shows.
-  const CLUSTER_HARD_CAP = 8; // past this the labels collide and it reads as confetti
+  // ~~HOW MANY BUBBLES FIT IS SOLVED, NOT CHOSEN: n equal circles on one ring,
+  // d(n) = 2*sin(pi/n)*(R - margin)/(1 + sin(pi/n)).~~ The solve was right and
+  // its premise was wrong — the bubbles are neither equal nor on one ring, so
+  // it guaranteed spacing for a picture the page never drew. That is where the
+  // overlap came from. See people-sky-layout.js, which places each bubble on
+  // its own radius and proves the result has no intersections.
   const MIN_CLUSTER = 2;
-  const MAX_FACES = 5;
-  const RING_MARGIN = 8;
-  // The floor is not cosmetic — six discs wrap to a second row, where a circle
-  // is much narrower than its diameter, and below this the "+N" chip pushes out
-  // through the dashed border. Measured, not guessed.
-  const D_FLOOR = 118;
-  const D_CEIL = 162;
-
-  // { n, d }: how many bubbles this stage holds, and how big they may be.
-  function fitLayout(stageW, stageH, wanted) {
-    const R = Math.min(stageW, stageH) / 2;
-    const most = Math.max(1, Math.min(wanted, CLUSTER_HARD_CAP));
-    for (let n = most; n > 1; n -= 1) {
-      const s = Math.sin(Math.PI / n);
-      // 0.97 rather than the exact bound: the ring is an ELLIPSE, and the
-      // circle-based solve is only near-exact on a square stage. Measured gaps
-      // came out at 1-3px on tall panels without it.
-      const d = Math.min(D_CEIL, (2 * s * (R - RING_MARGIN) * 0.97) / (1 + s));
-      if (d >= D_FLOOR) return { n, d: Math.round(d) };
-    }
-    return { n: 1, d: Math.round(Math.min(D_CEIL, Math.max(D_FLOOR, R - RING_MARGIN))) };
-  }
+  // The stage geometry — how big each bubble is, how far out it sits, and where
+  // around the core it goes — lives in people-sky-layout.js, which has no DOM in
+  // it and is imported by widget/test/people-constellation.test.mjs so the
+  // arrangement can be checked with numbers. This file draws what it returns.
+  const SKY = globalThis.HzSkyLayout;
 
   // Two words -> both initials, one word -> one letter. Never two letters off a
   // single name: "Je" reads as a truncation, "J" reads as a monogram.
@@ -683,62 +656,34 @@
     return f;
   }
 
-  // The ring the bubbles sit on, from the same solve — the widest ellipse that
-  // still keeps a bubble of diameter d wholly on the stage. The panel is
-  // native-sized and the owner can scale it, so a hardcoded radius is a clipped
-  // bubble waiting to happen, which is exactly what a fixed 32% did.
-  function ringFor(stageW, stageH, d) {
-    const half = d / 2 + RING_MARGIN;
-    return {
-      rx: Math.max(0, stageW / 2 - half),
-      ry: Math.max(0, stageH / 2 - half),
-    };
-  }
-
-  // More people makes a larger circle. Square-root scaling preserves a visible
-  // difference between small groups without letting the largest one crowd the
-  // whole constellation off the stage.
-  function clusterDiameter(c, maxMembers, dMax) {
-    const dMin = Math.min(dMax, D_FLOOR);
-    const share = Math.sqrt(c.members.length / Math.max(1, maxMembers));
-    return Math.round(dMin + (dMax - dMin) * share);
-  }
-
-  // More conversation brings a topic nearer the owner. The core and the
-  // bubble's own radius set a hard inner limit, so small panels stay legible
-  // instead of letting a high-activity topic cover the owner.
-  function activityRadius(c, ang, range, ring, d) {
-    const outer = Math.hypot(Math.cos(ang) * ring.rx, Math.sin(ang) * ring.ry);
-    const floor = Math.min(1, (27 + d / 2 + 12) / Math.max(1, outer));
-    if (range.max === range.min) return 1;
-    const activity = Math.log1p(Math.max(0, c.activity || 0));
-    const intensity = (activity - range.min) / (range.max - range.min);
-    return floor + (1 - Math.max(0, Math.min(1, intensity))) * (1 - floor);
-  }
-
-  function clusterEl(c, i, count, maxMembers, activityRange, ring, stage, dMax) {
+  function clusterEl(spot, i, stage) {
+    const c = spot.cluster;
+    const d = spot.d;
     const el = document.createElement('div');
     el.className = 'pm-cluster' + (i === 0 ? ' lead' : '');
     el.dataset.topic = c.label;
-    // Evenly around the centre, starting upper-left so a four-topic year lands
-    // on the diagonals the design draws.
-    const ang = -Math.PI * 0.75 + (i * Math.PI * 2) / count;
-    const d = clusterDiameter(c, maxMembers, dMax);
-    const radial = activityRadius(c, ang, activityRange, ring, d);
     el.style.width = `${d}px`;
     el.style.height = `${d}px`;
     // Percentages so the field still tracks the panel if it is resized under us.
-    // `radial` is data: higher-activity topics sit closer to the core.
-    el.style.left = `${(50 + (Math.cos(ang) * ring.rx * radial * 100) / stage.w).toFixed(1)}%`;
-    el.style.top = `${(51 + (Math.sin(ang) * ring.ry * radial * 100) / stage.h).toFixed(1)}%`;
+    // The centre is the stage's, a hair above the core's own 51% — the offset is
+    // the core's alone, and borrowing it here would push the lowest bubble
+    // through the bottom edge on a tall panel.
+    el.style.left = `${(50 + (spot.x * 100) / stage.w).toFixed(1)}%`;
+    el.style.top = `${(50 + (spot.y * 100) / stage.h).toFixed(1)}%`;
 
     const faces = document.createElement('div');
     faces.className = 'pm-faces';
     const fs = faceScale(d);
-    const shown = c.members.slice(0, MAX_FACES);
+    // SEATS COME FROM THE BUBBLE, not from a constant. Five faces plus a "+N"
+    // chip is what the largest bubble holds; a small one holds three, and
+    // pretending otherwise is how discs ended up outside their own ring. The
+    // people are sorted by engagement, so a smaller bubble is still showing the
+    // ones who matter most in it.
+    const seats = SKY.facesFor(d, fs.max);
+    const shown = c.people.slice(0, seats);
     const maxE = Math.max(1, ...shown.map((p) => p.engagement || 0));
     for (const p of shown) faces.appendChild(faceEl(p, maxE, fs));
-    const rest = c.members.length - shown.length;
+    const rest = c.people.length - shown.length;
     if (rest > 0) {
       const more = document.createElement('div');
       more.className = 'pm-face pm-face-more';
@@ -751,7 +696,7 @@
 
     const label = document.createElement('div');
     label.className = 'pm-cluster-label';
-    label.textContent = `${c.label.toUpperCase()} · ${c.members.length}`;
+    label.textContent = `${c.label.toUpperCase()} · ${c.members}`;
 
     el.append(faces, label);
     return el;
@@ -762,8 +707,16 @@
     const marked = topicsAreMarked(people);
     const all = clustersFrom(people, marked);
     const stage = { w: skyEl.clientWidth || 400, h: skyEl.clientHeight || 420 };
-    const fit = fitLayout(stage.w, stage.h, all.length);
-    const clusters = all.slice(0, fit.n);
+    // The layout takes counts, not people: it is geometry, and handing it the
+    // corpus would let a change here reach into it. `people` rides along for
+    // the faces this file draws.
+    const placed = SKY.place(stage.w, stage.h, all.map((c) => ({
+      label: c.label,
+      members: c.members.length,
+      activity: c.activity,
+      people: c.members,
+    })));
+    const clusters = placed.spots;
     if (!clusters.length) {
       const m = document.createElement('div');
       m.className = 'pm-sky-empty';
@@ -800,14 +753,8 @@
     core.className = 'pm-core';
     skyEl.appendChild(core);
 
-    const ring = ringFor(stage.w, stage.h, fit.d);
-    const maxMembers = clusters[0].members.length;
-    const activityRange = {
-      min: Math.log1p(Math.max(0, clusters[clusters.length - 1].activity || 0)),
-      max: Math.log1p(Math.max(0, clusters[0].activity || 0)),
-    };
-    clusters.forEach((c, i) => {
-      skyEl.appendChild(clusterEl(c, i, clusters.length, maxMembers, activityRange, ring, stage, fit.d));
+    clusters.forEach((spot, i) => {
+      skyEl.appendChild(clusterEl(spot, i, stage));
     });
 
     // BOTH caps, said out loud. The server caps the year's rows, and the ring
@@ -817,7 +764,8 @@
     // stopped being true of this surface: the row cap belonged to /people/year
     // and the constellation no longer reads from there, and the year belonged
     // to a per-year sky that no longer exists. What remains is the topic cap,
-    // and the bubbles that fit are the largest ones — see fitLayout.
+    // and the bubbles that fit are the largest ones — see people-sky-layout.js,
+    // which gives ground on size and on distance before it drops a topic at all.
   }
 
   // ---- every year at once ----
@@ -831,6 +779,12 @@
   // serves both surfaces.
   let mapData = null;
   let mapPending = null;
+  // The globe's half of the year tabs' contract. `staleYears` marks every
+  // cached year for a silent freshness check on its next visit; the map had no
+  // such mark, so once it had been read the globe showed that first answer for
+  // the life of the webview — and the webview survives every close of the
+  // panel. A day of new conversation could not reach it.
+  let mapStale = false;
 
   function adaptMap(payload) {
     const people = [];
@@ -887,6 +841,7 @@
       mapPending = hzPost('peopleMap')
         .then((r) => {
           mapData = adaptMap(r || {});
+          mapStale = false;
           if (repaint && scope === 'all' && !findTerm) render();
           return mapData;
         })
@@ -897,6 +852,15 @@
 
   function ensureMap() {
     return mapData ? Promise.resolve(mapData) : refreshMap();
+  }
+
+  // Entering the globe, exactly as `load` enters a year: paint what is in hand,
+  // and check it behind the picture rather than in front of it. A cold globe
+  // still shows "reading every year…" once, because there is nothing to paint.
+  function visitMap() {
+    if (!mapData) return ensureMap();
+    if (mapStale) refreshMap().catch(() => {});
+    return Promise.resolve(mapData);
   }
 
   // ---- remembering where you were ----
@@ -992,7 +956,10 @@
         cache.set(y, res);
         staleYears.delete(y);
         if (Array.isArray(res.years) && res.years.length) years = res.years;
-        if (year === y && !findTerm) render();
+        // Only into the list. A background year check landing while the globe
+        // is up used to repaint the constellation, which is built from the map
+        // and had nothing to learn from it — the whole field blinked.
+        if (year === y && !findTerm && scope === 'year') render();
         return res;
       })
       .finally(() => refreshing.delete(y));
@@ -1045,6 +1012,13 @@
           staleYears.delete(y);
         }
       }
+      // AND THE GLOBE, last. Every year tab is warmed so its click is instant;
+      // the globe was the one tab on the strip that always paid for its own
+      // first open, and it is the most expensive read of the lot. It goes last
+      // because the years are what is on screen, and /people/map rides the same
+      // memoised graph the year scans just built on the server, so by now it is
+      // the cheap end of this loop rather than the dear one.
+      if (!mapData) await ensureMap();
     } catch {
       // Background warming only; a failure costs nothing but the warmth.
     } finally {
@@ -1066,6 +1040,7 @@
   // screen and a fan-out request for every historical year on every open.
   window.__hzRefresh = () => {
     for (const y of cache.keys()) staleYears.add(y);
+    mapStale = true;
     // A re-open drops the search: a stale query over refreshed data would be
     // answering a question nobody is asking now.
     findId++;
@@ -1097,6 +1072,7 @@
       // bubble but the chosen one was missing.
       topic = null;
       render();
+      visitMap().catch(() => {});
       return;
     }
     if (!b.dataset.y) return;
@@ -1159,7 +1135,14 @@
     .catch(() => {})
     .finally(() => {
       // All-years does not want the year fetch painted over it.
-      if (scope === 'all') render();
-      else loadOrFail(year);
+      if (scope === 'all') {
+        render();
+        // Reopened INTO the globe, the page used to warm nothing: no year was
+        // ever fetched, so `years` stayed empty, the tab strip carried a single
+        // year, and the first click on any tab was a cold server rebuild. Read
+        // the remembered year quietly behind the constellation — it is what
+        // fills the strip — and let the usual warming follow it.
+        refreshYear(year).then(() => prefetchRest()).catch(() => {});
+      } else loadOrFail(year);
     });
 })();

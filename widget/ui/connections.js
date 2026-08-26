@@ -471,8 +471,14 @@ const BRIDGE_HELP = {
   // What the bot is about to ask for, in the words of the flow it actually
   // runs. ~~"your Discord token" / "your Slack tokens"~~ described a command
   // (`login-token`) these bridges reject outright (2026-08-26).
-  discord: { place: 'approve the link in your Discord app' },
-  slack: { place: 'your Slack email address' },
+  discord: { place: 'scan the QR with your Discord phone app' },
+  // Slack's own login page will not render in this window (see bridge.mjs
+  // PLATFORMS.slack), so the tokens come out of a browser already signed in.
+  slack: {
+    place: 'your Slack tokens',
+    steps: 'open slack.com in your browser, signed in · devtools → Application '
+      + '→ Cookies → copy d (xoxd-…) · Network → any api call → copy token (xoxc-…)',
+  },
   telegram: { place: 'phone (+1…), then the code' },  // after its api keys are set
 };
 // The claim the system actually keeps, not the one it doesn't. This line
@@ -1098,6 +1104,14 @@ function card(src, keep) {
           say.className = 'setup';
           say.textContent = `enter ${help.place}`;
           tip.appendChild(say);
+        }
+        // Where to find them, for the flows whose values live somewhere the
+        // owner has to go and look.
+        if (help && help.steps) {
+          const how = document.createElement('span');
+          how.className = 'setup';
+          how.textContent = help.steps;
+          tip.appendChild(how);
         }
         relayInput('type your answer', flow === 'token');
       }

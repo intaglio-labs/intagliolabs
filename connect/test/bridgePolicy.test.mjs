@@ -112,13 +112,11 @@ test('the platforms that do have a web login are the ones we expect', () => {
   // side effect. Four cookie flows: LinkedIn joined 2026-08-25 when it stopped
   // being a hand-unzipped CSV export and became a bridge like the others.
   const withWeb = entries.filter(([, p]) => p.webLogin).map(([id]) => id).sort();
-  // Slack joined 2026-08-26 — not to harvest a session, but because Slack
-  // will not email its confirmation code until a CAPTCHA is answered, and
-  // answering one needs a window with a person in front of it.
-  // Discord joined 2026-08-26 as an approval window: its remote-auth link is
-  // approved on Discord's own page, which needs a window and no harvest.
-  assert.deepEqual(withWeb,
-    ['discord', 'instagram', 'linkedin', 'messenger', 'slack', 'twitter']);
+  // Slack was briefly here for its CAPTCHA and was withdrawn the same day:
+  // slack.com/signin will not render in a WKWebView at all.
+  // Discord was briefly here as an approval window and was withdrawn the same
+  // day: its approval is a QR the phone app scans, which needs no window.
+  assert.deepEqual(withWeb, ['instagram', 'linkedin', 'messenger', 'twitter']);
 });
 
 test('the field contract is declared per platform, for the two that need one', () => {
@@ -130,7 +128,7 @@ test('the field contract is declared per platform, for the two that need one', (
   // empty value from that same JSON — a login that looks done and is not
   // (2026-08-25).
   const withFields = entries.filter(([, p]) => p.webLogin?.fields).map(([id]) => id).sort();
-  assert.deepEqual(withFields, ['linkedin', 'slack']);
+  assert.deepEqual(withFields, ['linkedin']);
 
   // Every field must be one the login window knows how to satisfy. A `header`
   // field additionally names the header to capture — without it the window

@@ -201,18 +201,15 @@ export const PLATFORMS = Object.freeze({
     site: 'discord.com',
     loginUrl: 'https://discord.com/login',
     cookieDomain: 'discord.com',
-    // AN APPROVAL WINDOW — the third shape. Discord's login is remote-auth:
-    // the bot hands back a discordapp.com/ra/ link and then waits for that
-    // link to be approved, which happens on Discord's own site. So the window
-    // harvests nothing and waits for nothing; it exists to put the approval
-    // page in front of the person, and the BRIDGE reports the result on its
-    // own once they are done. The panel picks that up on its next read.
-    webLogin: {
-      allowedHosts: ['discord.com', 'discordapp.com'],
-      sessionCookie: null,
-      requiredCookies: [],
-      approval: true,
-    },
+    // ~~An approval window onto discord.com.~~ Withdrawn the same day it was
+    // added (owner, 2026-08-26): opening Discord in a fresh webview shows the
+    // Discord app, which is not the same thing as approving THIS login — the
+    // owner ended up logged in on the web with the bridge still waiting, and
+    // the remote-auth socket timed out unapproved. The approval belongs to
+    // the QR, and the QR belongs on the card: the bot posts it, the phone app
+    // scans it, and the bridge completes. No window is part of that.
+    webLogin: null,
+    noWebLogin: 'a QR posted by the bot, scanned with the Discord phone app',
   },
   slack: {
     id: 'slack',
@@ -225,7 +222,17 @@ export const PLATFORMS = Object.freeze({
     // email address), `token`, and `app`. EMAIL is the one a person wants and
     // the one Beeper uses; the token flow was never the only option, it was
     // just the one this table knew about.
-    initial: 'login email',
+    // ~~login email~~ — the flow a person wants, and the one this app cannot
+    // finish. Slack will not email its code until a CAPTCHA is answered, and
+    // slack.com/signin refuses to render in the login window at all: it draws
+    // "your browser is not supported" over every user agent tried, including
+    // ones a plain fetch of the same page accepts (verified 2026-08-26). The
+    // check is client-side feature detection, so no browser string fixes it —
+    // Beeper gets away with the same flow because Electron IS Chromium, and
+    // this window is WKWebView. `token` is the flow that works here: a person
+    // already signed in to Slack in their own browser copies two values out
+    // of it, and no challenge is involved because they already passed one.
+    initial: 'login token',
     prefix: '!slack',
     site: 'slack.com',
     loginUrl: 'https://slack.com/signin',
@@ -239,22 +246,9 @@ export const PLATFORMS = Object.freeze({
     // token their solution produced; nothing here answers a challenge, and
     // nothing may. That is also the only reason this is a legitimate flow: the
     // point of the challenge is a human proving they are human, and one is.
-    webLogin: {
-      allowedHosts: ['slack.com'],
-      // No cookie gate: this window is not harvesting a session, it is waiting
-      // for one value that appears when the challenge is answered.
-      sessionCookie: null,
-      requiredCookies: [],
-      fields: [{ id: 'captcha_token', from: 'captcha' }],
-      // SLACK REFUSES THE DEFAULT BROWSER STRING. The login window's Safari
-      // 17.4 user agent is a real, current Safari — and slack.com answered it
-      // with "We're very sorry, but your browser is not supported!" and a page
-      // of app-store links, so the CAPTCHA never appeared (owner, 2026-08-26).
-      // Chrome is the string their sniffer is happiest with; nothing else
-      // about the window changes, and no other platform is affected.
-      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
-        + '(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-    },
+    // ~~A CAPTCHA window.~~ It could never open: see the note on `initial`.
+    webLogin: null,
+    noWebLogin: 'two tokens copied from a browser already signed in to Slack',
   },
 });
 
