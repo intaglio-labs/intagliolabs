@@ -482,7 +482,12 @@ const BRIDGE_FLOW = {
   // `flow` decides two things: whether the cookie login button is offered, and
   // whether the reply box is a textarea. Discord approves a link in its phone
   // app and Slack answers with an email address; both are one short line.
-  discord: 'link', slack: 'email', telegram: 'phone',
+  // ~~slack: 'email'~~ — Slack signs in through the WINDOW again (owner,
+  // 2026-08-26: "when someone hits the icon it should open the login window
+  // directly"). It is a cookie flow in the sense this map means: the press
+  // opens the window, the window collects the session, and there is nothing to
+  // type on the card. See bridge.mjs PLATFORMS.slack for what it collects.
+  discord: 'link', slack: 'cookie', telegram: 'phone',
 };
 // ~~Each of these carried a `lead` sentence ("Slack logs in with two tokens
 // from your browser (xoxc and xoxd).") and a how-to link into the mautrix
@@ -1166,6 +1171,15 @@ function card(src, keep) {
       // question. The example is a real, public address on the owner's own
       // domain rather than the sort of example@example.com nobody reads.
       if (/\bemail\b/iu.test(asked)) return 'hi@intaglio.io';
+      // A CODE IS A SHAPE, not a value. Telegram's is five digits, and x's
+      // say "this many characters" without offering something typeable —
+      // an example code would be the one hint a person could paste by
+      // mistake (owner, 2026-08-26).
+      // NOT X's PIN, which also contains the word "code" ("Please enter your
+      // Create your PIN code"). That one is a secret the person CHOOSES, of a
+      // length this file has never verified, so it keeps the vague line rather
+      // than being told a shape that might be wrong.
+      if (/\bcode\b/iu.test(asked) && !/\bpin\b/iu.test(asked)) return 'xxxxx';
       return 'type your answer';
     };
     // A one-line input that relays whatever the bot last asked for (a token,
