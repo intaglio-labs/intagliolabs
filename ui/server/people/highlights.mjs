@@ -1,6 +1,6 @@
 // THE YEAR'S HIGHLIGHT CARDS: the five claims the timeline can make about a
-// year without a model — person of the year, a return from the past, a rising
-// star, someone drifting, and the longest unbroken streak.
+// year without a model — most engaged, a reconnection, someone new, someone
+// with no recent contact, and the longest monthly streak.
 //
 // Same rule as the rest of ui/server/people: CODE decides, no model. Every
 // line these produce is arithmetic over the month-bucketed timeline
@@ -124,24 +124,21 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 // The most engaged person of the year. The only card that is a plain maximum,
 // so it is the only one that is nearly always available.
 function personOfTheYear(entries) {
-  // RANK BY THE THING THE SENTENCE NAMES. `entries` arrive sorted by
-  // engagement, which is messages + 3x meetings -- so taking entries[0] and
-  // then writing "N messages, more than your next three combined" could state
-  // two falsehoods at once: neither the superlative nor the comparison is about
-  // the order the list was in. A meeting-heavy contact can outrank a chattier
-  // one on engagement and lose on messages.
-  const byMessages = [...entries].sort((a, b) => (b.messages ?? 0) - (a.messages ?? 0));
-  const top = byMessages[0];
-  const entriesRanked = byMessages;
-  if (!top || top.messages <= 0) return null;
-  // The mock's line ("more than your next three combined") is a CLAIM. Written
-  // only when it holds; otherwise a different true sentence, never this one
-  // softened.
-  const nextThree = entriesRanked.slice(1, 4).reduce((n, e) => n + (e.messages ?? 0), 0);
-  const line = entriesRanked.length > 1 && top.messages > nextThree
-    ? `${top.messages.toLocaleString('en-US')} messages — more than your next three combined`
-    : `${top.messages.toLocaleString('en-US')} messages — your most this year`;
-  return { kind: 'person-of-the-year', label: 'person of the year', key: top.p.key, name: top.p.name, line };
+  const ranked = [...entries].sort((a, b) => (b.engagement ?? 0) - (a.engagement ?? 0));
+  const top = ranked[0];
+  if (!top || top.engagement <= 0) return null;
+  const messages = top.messages ?? 0;
+  const meetings = top.met ?? 0;
+  const activity = meetings > 0
+    ? `${messages.toLocaleString('en-US')} messages · ${plural(meetings, 'meeting')}`
+    : `${messages.toLocaleString('en-US')} messages`;
+  return {
+    kind: 'person-of-the-year',
+    label: 'most engaged',
+    key: top.p.key,
+    name: top.p.name,
+    line: `${activity} — most engagement this year`,
+  };
 }
 
 // Someone who went quiet for years and came back this one.
@@ -163,7 +160,7 @@ function backFromYourPast(entries, year) {
   if (!best) return null;
   return {
     kind: 'back-from-your-past',
-    label: 'back from your past',
+    label: 'reconnected after a gap',
     key: best.e.p.key,
     name: best.e.p.name,
     line: `quiet since ${best.lastPrior} — then ${best.e.messages.toLocaleString('en-US')} messages`,
@@ -190,7 +187,7 @@ function risingStar(entries, year, now) {
   const every = best.active === best.since;
   return {
     kind: 'rising-star',
-    label: 'rising star',
+    label: 'new this year',
     key: best.e.p.key,
     name: best.e.p.name,
     line: every
@@ -226,7 +223,7 @@ function drifting(entries, year, now) {
     : `${plural(best.months.length, 'month')} up to ${monthName(best.lastActive)}`;
   return {
     kind: 'drifting',
-    label: 'drifting',
+    label: 'no recent contact',
     key: best.e.p.key,
     name: best.e.p.name,
     line: `${lead} — quiet for ${plural(best.silent, 'month')} since`,
@@ -248,7 +245,7 @@ function streak(entries, year) {
   const from = fromIndex(best.s.start);
   return {
     kind: 'streak',
-    label: 'streak',
+    label: 'longest monthly streak',
     key: best.e.p.key,
     name: best.e.p.name,
     line: `${plural(best.s.len, 'month')} unbroken since ${monthName(from.month)} ${from.year}`,

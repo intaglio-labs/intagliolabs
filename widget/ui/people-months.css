@@ -226,8 +226,9 @@ body.plist .pm-card-line {
 
 /* ---- the constellation (the globe tab, 2026-08-25) ----
    The same year's people, grouped by TOPIC instead of listed by engagement:
-   one dashed bubble per topic, the people in it as initial discs, sized by
-   that year's engagement. The list answers "who"; this answers "about what".
+   one dashed bubble per topic, the people in it as initial discs. A bubble's
+   distance encodes conversation activity; its size encodes people in it. The
+   list answers "who"; this answers "about what".
 
    EVERY POSITION AND SIZE HERE IS SET FROM JAVASCRIPT through element.style,
    never a style attribute — this page ships style-src 'self' with no
@@ -407,8 +408,8 @@ body.plist .pm-cluster-label {
   text-align: center;
   white-space: nowrap;
 }
-/* The biggest topic of the year gets the hazelnut, so the eye has somewhere
-   to land first. */
+/* The most-talked-about topic gets the hazelnut, so the eye has somewhere to
+   land first. */
 body.plist .pm-cluster.lead .pm-cluster-label { color: var(--hazelnut-light); }
 body.plist .pm-cluster.lead { border-color: rgba(197, 165, 109, 0.45); }
 /* Said plainly rather than drawn: a constellation of nothing is just an empty
@@ -542,43 +543,6 @@ body.plist .pm-room-msgs {
    one-liner palette.css already uses for .ob-prog. */
 body.plist .pm-cards[hidden],
 body.plist .pm-filter[hidden] { display: none; }
-
-/* THE RECENCY SEGMENTS, globe only. Its own row rather than sharing .pm-filter,
-   because renderFilter replaceChildren()s that node and hides it whenever the
-   view is not a list — which is exactly when this control matters. Reads as a
-   tab strip (a view you are standing in) rather than as a chip (a thing you can
-   dismiss), because "everyone" is a state and not the absence of one. */
-body.plist .pm-recency {
-  display: flex;
-  gap: 4px;
-  padding: 0 10px 6px;
-  flex: 0 0 auto;
-}
-body.plist .pm-recency[hidden] { display: none; }
-body.plist .pm-rec {
-  appearance: none;
-  border: 1px solid transparent;
-  background: transparent;
-  border-radius: 5px;
-  padding: 2px 8px;
-  font: inherit;
-  font-size: 10px;
-  letter-spacing: 0.02em;
-  color: var(--muted);
-  cursor: pointer;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-body.plist .pm-rec:hover { color: var(--fg); }
-body.plist .pm-rec.active {
-  color: var(--hazelnut-light);
-  border-color: color-mix(in srgb, var(--hazelnut-light) 32%, transparent);
-  background: color-mix(in srgb, var(--hazelnut-light) 10%, transparent);
-}
-body.plist .pm-rec:focus-visible {
-  outline: 1px solid var(--hazelnut-light);
-  outline-offset: 1px;
-}
 
 /* THE GLOBE TOGGLE STAYS REACHABLE. It is appended after every year tab, and ten
    years plus the globe do not fit a 520px panel — so it lived past the right
