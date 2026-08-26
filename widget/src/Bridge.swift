@@ -457,7 +457,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": "ok"])
     case "orbState":
       // The ear now names the face it wants — idle, listening or talking —
-      // because a single boolean could not tell "Hazlie is speaking" from
+      // because a single boolean could not tell "Intaglio Labs is speaking" from
       // "the mic is open and the owner is". The boolean is still read as the
       // fallback, so an older ear page keeps working unchanged.
       if let face = payload["state"] as? String, Bridge.orbFaces.contains(face) {
@@ -879,7 +879,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
             if Provision.waitForLlama() {
               self.delegate?.setupProgress(["phase": "ready", "tier": tier])
               ModelSetup.notify(
-                title: "Hazlie can answer now",
+                title: "Intaglio Labs can answer now",
                 body: "The model finished downloading and is ready.")
             } else {
               let why = "The model is saved but didn’t start. Reopen the app to try again."

@@ -1284,7 +1284,7 @@ function card(src, keep) {
       tip.append(NOTICES[data.state] || data.error || NOTICES.error);
     } else if (flow === 'cookie' && !(data && data.state === 'manual')) {
       // PRIMARY, Beeper-style: one button opens the platform's real login page
-      // in a Hazlie-framed window; native harvests the session cookies. No
+      // in a Intaglio Labs-framed window; native harvests the session cookies. No
       // devtools, no paste. See ops/WIDGET-WEBVIEW-LOGIN-SPEC.md.
       const login = document.createElement('button');
       login.className = 'hold-ok';

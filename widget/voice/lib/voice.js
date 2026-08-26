@@ -1,6 +1,6 @@
 import { Animated, Platform } from './rn-shim.js';
 
-// Hazlie's voice: the Kokoro worker on one side, the speaker on the other.
+// Intaglio Labs' voice: the Kokoro worker on one side, the speaker on the other.
 //
 // Everything audible passes through one AudioContext and one node chain --
 // sources -> master gain -> analyser -> destination -- so pre-baked WAVs and

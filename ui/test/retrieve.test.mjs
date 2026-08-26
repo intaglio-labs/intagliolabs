@@ -160,7 +160,7 @@ test('search stems, so a question in English matches a claim in English', () => 
   // The bug this pins was measured, not imagined: "any allergies?" abstained
   // against an accepted claim reading "allergic to penicillin", because FTS5's
   // default tokenizer does no stemming. An abstention with the evidence
-  // sitting right there reads to the owner as "Hazlie forgot".
+  // sitting right there reads to the owner as "Intaglio Labs forgot".
   const db = openDb(':memory:');
   const [row] = seed(db, [
     { ts: NOW, source: 'notes', entity_id: 'n:1', text: 'im allergic to penicillin' },

@@ -86,7 +86,7 @@ async function ensureVoice() {
 }
 
 // The greeting: "hey" on every arm, spoken BEFORE the microphone opens so
-// Moonshine can't transcribe Intaglio Labs's own hello as the owner's utterance.
+// Moonshine can't transcribe Intaglio Labs' own hello as the owner's utterance.
 // A nicety, not a gate — if TTS isn't ready the arm proceeds silently.
 async function speakGreeting() {
   try {

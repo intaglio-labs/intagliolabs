@@ -11,7 +11,7 @@
 set -eu
 cd "$(dirname "$0")"
 
-# Hazlie's copied node is the pinned toolchain (>=22.13 required; the copy
+# Intaglio Labs' copied node is the pinned toolchain (>=22.13 required; the copy
 # is v25 with FTS5). Fall back to PATH node with a version note.
 NODE="$HOME/.hazlie/bin/node"
 [ -x "$NODE" ] || NODE="$(command -v node)"

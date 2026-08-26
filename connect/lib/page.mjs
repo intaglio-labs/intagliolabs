@@ -138,7 +138,7 @@ const STYLE = `
   }
   .caveat { font-size: 11px; color: ${C.muted}; line-height: 1.7; margin-top: 6px; }
 
-  /* Hazlie's voice, not a section label — lowercase like the welcome. */
+  /* Intaglio Labs' voice, not a section label — lowercase like the welcome. */
   .foot { font-size: 11px; color: ${C.muted}; letter-spacing: 0.02em; margin: 4px 0 0; }
   .banner {
     padding: 12px 16px; border-radius: 12px; font-size: 12px;
@@ -200,7 +200,7 @@ function row(item, index, formBase) {
   // the design permits one filled button per view.
   const primary = item.primary === true;
   const label = item.action === 'fda' ? 'How' : 'Connect';
-  // The social bridges open Hazlie's OWN login panel (/bridge?p=…), not a help
+  // The social bridges open Intaglio Labs' OWN login panel (/bridge?p=…), not a help
   // page — the whole point is that linking happens in this surface. Everything
   // else links to its help topic at /help/<id>.
   const href =

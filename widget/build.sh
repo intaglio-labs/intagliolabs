@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the Hazlie desktop widget: one swiftc invocation, a bundle assembled
+# Build the Intaglio Labs desktop widget: one swiftc invocation, a bundle assembled
 # by hand, an ad-hoc signature. No Xcode project, no SwiftPM, no third-party
 # code — the same shape as the ops/setup-*.sh scripts.
 #
@@ -421,7 +421,7 @@ done
 #
 # The comment above is careful about three background services and then left the
 # app itself behind a flag, which is the half of the install that is actually on
-# screen. A running Hazlie holds the bundle it launched with -- its webviews keep
+# screen. A running Intaglio Labs holds the bundle it launched with -- its webviews keep
 # serving the HTML and JS from that copy -- so overwriting /Applications changes
 # nothing it displays. On 2026-08-25 that meant an hour of testing a panel whose
 # JS was 73 minutes old, and the symptom was the worst kind: the feature looked
@@ -441,7 +441,7 @@ if pgrep -x Hazlie >/dev/null 2>&1; then
     sleep 0.1
   done
   if pgrep -x Hazlie >/dev/null 2>&1; then
-    echo "WARNING: Hazlie would not quit; it is still showing the old bundle" >&2
+    echo "WARNING: Intaglio Labs would not quit; it is still showing the old bundle" >&2
   else
     # REAP THE CONNECTOR DAEMON, which is the app's CHILD and not a launchd
     # agent, so killing the app orphans it (reparented to launchd) rather than

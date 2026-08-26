@@ -123,7 +123,7 @@ step "model weights ($MODEL_TIER; $MODEL_FILE, $(( MODEL_SIZE / 1000000000 )) GB
 mkdir -p "$MODEL_DIR" "$LOG_DIR" "$SECRET_DIR"
 # ~/.hazlie itself can predate this script (or have been created under a
 # permissive default umask). Lock the runtime root as well as its children;
-# every current child is Hazlie-private state.
+# every current child is Intaglio Labs-private state.
 chmod 700 "$HOME/.hazlie"
 chmod 700 "$MODEL_DIR" "$LOG_DIR" "$SECRET_DIR"
 MODEL_PATH="$MODEL_DIR/$MODEL_FILE"

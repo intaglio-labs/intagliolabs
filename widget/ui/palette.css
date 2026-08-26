@@ -1909,7 +1909,7 @@ body.chat .close { position: static; }
 /* The thinking state: three dots that travel, iMessage-style.
 
    Replaces a blinking green underscore. The cursor read as a terminal prompt
-   waiting for INPUT — the opposite of what it meant, which is that Hazlie is
+   waiting for INPUT — the opposite of what it meant, which is that Intaglio Labs is
    busy and the person should wait. Dots are the gesture everyone already
    knows, and they carry the one bit that matters (something is coming) without
    implying a text field. */
@@ -2397,7 +2397,7 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
 .orb.gulp { animation: orb-gulp 0.9s ease-in-out; }
 
 /* ---------------- the pipe: scene 2's exit ----------------
-   The orb is Hazlie, and Hazlie is about to live in the bottom-right corner
+   The orb is Intaglio Labs, and Intaglio Labs is about to live in the bottom-right corner
    — so it TRAVELS there: sucked into an invisible pipe, vanishing exactly
    where the real widget surfaces a beat later (scene 3's spotlight). The
    reveal becomes causal — the thing you talked to went THERE — instead of a

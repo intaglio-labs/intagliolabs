@@ -112,7 +112,7 @@ function aimAtOrb(fly) {
 }
 
 // Armed once the line is typed: the demo stops and waits for the send to be
-// pressed. The typing is Hazlie's half of the rehearsal; the send is yours.
+// pressed. The typing is Intaglio Labs' half of the rehearsal; the send is yours.
 let demoArmed = false;
 
 function runDemo() {

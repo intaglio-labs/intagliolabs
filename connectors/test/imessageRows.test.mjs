@@ -108,12 +108,12 @@ const DIGEST_SPECIMEN = [
 
 const PINNED = 'any;-;austiny808@gmail.com';
 
-test('the pinned Hazlie thread never becomes a corpus row', () => {
+test('the pinned Intaglio Labs thread never becomes a corpus row', () => {
   const digest = raw({ guid: 'D1', text: DIGEST_SPECIMEN, is_from_me: 1, chat_guid: PINNED });
   assert.equal(messageToRow(digest, { excludeChatGuids: [PINNED] }), null);
 
-  // Both directions: the owner's own question to Hazlie is conversation with
-  // Hazlie too, and `hz ask` would otherwise write every question into the
+  // Both directions: the owner's own question to Intaglio Labs is conversation with
+  // Intaglio Labs too, and `hz ask` would otherwise write every question into the
   // corpus the answer is drawn from.
   const question = raw({ guid: 'D2', text: 'hz ask what did i commit to', is_from_me: 1, chat_guid: PINNED });
   assert.equal(messageToRow(question, { excludeChatGuids: [PINNED] }), null);
@@ -139,7 +139,7 @@ test('an attachment with no caption is not an empty row', () => {
 
 // THE SELF-ECHO TEST. A self-thread records every send twice — is_from_me=1
 // and is_from_me=0, ~140 ms apart, identical text, different guids. Ingesting
-// both doubles everything Hazlie ever sent.
+// both doubles everything Intaglio Labs ever sent.
 test('the received copy of a self-sent message is dropped', () => {
   const t = Date.parse('2026-08-18T12:00:00Z');
   const out = { ts: t, text: 'digest', meta: { is_from_me: true, chat_guid: 'C' } };

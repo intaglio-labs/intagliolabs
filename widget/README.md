@@ -1,4 +1,4 @@
-# Hazlie desktop widget
+# Intaglio Labs desktop widget
 
 A native macOS desktop widget: Swift/AppKit + WKWebView, zero third-party
 dependencies, compiled by one `swiftc` invocation in `build.sh`. It is the

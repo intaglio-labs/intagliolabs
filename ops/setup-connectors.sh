@@ -46,7 +46,7 @@ step() { printf '\n==> %s\n' "$*"; }
 step "runtime directory tree (~/.hazlie)"
 mkdir -p "$BIN_DIR" "$LIB_DIR" "$HAZLIE/cache" "$HAZLIE/connectors" "$SECRET_DIR" "$LOG_DIR"
 # ~/.hazlie can predate this script or have been created under a permissive
-# umask. Everything under it is Hazlie-private state, so reassert the whole
+# umask. Everything under it is Intaglio Labs-private state, so reassert the whole
 # tree on every run rather than trusting whichever run created each piece.
 chmod 700 "$HAZLIE" "$BIN_DIR" "$LIB_DIR" "$HAZLIE/cache" "$HAZLIE/connectors" "$SECRET_DIR" "$LOG_DIR"
 echo "    0700 asserted on ~/.hazlie and children"
@@ -396,7 +396,7 @@ else
   install_agent io.intaglio.connectors
 fi
 
-# The iMessage lanes are GONE (owner, 2026-08-21): Hazlie no longer texts its
+# The iMessage lanes are GONE (owner, 2026-08-21): Intaglio Labs no longer texts its
 # user and no longer takes `hz` commands from a pinned thread — everything
 # goes through the widget. If an old install still has the agents loaded:
 #   launchctl bootout gui/$UID/com.hazlie.listen

@@ -508,12 +508,12 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     web.uiDelegate = self          // and the one that catches popups
     self.web = web
 
-    // Hazlie chrome above the real login page. A login window is the most
+    // Intaglio Labs chrome above the real login page. A login window is the most
     // impersonation-shaped surface this app has, so the FRAME must read as
-    // Hazlie (terminal palette, mono) — a fake with default system chrome then
+    // Intaglio Labs (terminal palette, mono) — a fake with default system chrome then
     // stands out. It names the real domain — the header's host line, kept
     // current as the page navigates — so the owner can see they're on the
-    // genuine site, and states plainly that Hazlie never sees the password.
+    // genuine site, and states plainly that Intaglio Labs never sees the password.
     let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: webH + headH))
     content.wantsLayer = true
     web.frame = NSRect(x: 0, y: 0, width: W, height: webH)
@@ -564,7 +564,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   private var headerHost: NSTextField?
 
   // The terminal-palette, mono header. Values mirror the connect page's
-  // "Terminal Palette v0.2" so Hazlie's login window is visually of a piece with
+  // "Terminal Palette v0.2" so Intaglio Labs' login window is visually of a piece with
   // the rest of the app.
   private func makeHeader(width: CGFloat, height: CGFloat) -> NSView {
     func color(_ r: Int, _ g: Int, _ b: Int) -> NSColor {

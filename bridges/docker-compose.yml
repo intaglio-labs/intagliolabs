@@ -170,7 +170,7 @@ services:
     networks:
       - bus
 
-# Login is driven NATIVELY from Hazlie's own connect page (connect/lib/bridge.mjs
+# Login is driven NATIVELY from Intaglio Labs' own connect page (connect/lib/bridge.mjs
 # + bridgePage.mjs), which talks to the bridge bots over the local Matrix API —
 # so there is no third-party Matrix client in the stack. An earlier build ran an
 # Element web container here as a scaffold; it was removed once the connect-page

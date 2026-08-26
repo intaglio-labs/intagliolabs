@@ -272,7 +272,7 @@ function whatsappRow(home) {
 
 // The social bridges (Messenger, Instagram). "Connected" is read from each
 // bridge's own DB — a live login row — so the page tells the truth without
-// touching Meta. Not yet linked → a row that opens Hazlie's own login panel
+// touching Meta. Not yet linked → a row that opens Intaglio Labs' own login panel
 // (action 'bridge'), never a third-party client.
 function bridgeRows({ home = homedir() } = {}) {
   return Object.values(PLATFORMS).map((p) => {

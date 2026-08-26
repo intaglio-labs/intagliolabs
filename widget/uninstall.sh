@@ -1,5 +1,5 @@
 #!/bin/sh
-# Remove Hazlie from this Mac, completely and loudly. The counterpart to
+# Remove Intaglio Labs from this Mac, completely and loudly. The counterpart to
 # build.sh and ops/setup-connectors.sh, in the same shape: POSIX sh, no
 # dependencies, every step printed as it happens.
 #
@@ -13,13 +13,13 @@
 #      its plist removed) — AND every pre-rename com.hazlie.* one, because an
 #      uninstall that only knew the current namespace would leave the old
 #      agents running under launchd with nothing left to point at them.
-#   2. The Hazlie widget process and the app bundle — 'Intaglio Labs.app'
+#   2. The Intaglio Labs widget process and the app bundle — 'Intaglio Labs.app'
 #      (or a pre-rename 'Hazlie.app') in ~/Applications and /Applications.
 #   3. ~/.hazlie — the database, secrets, models, logs, caches. This is the
 #      irreversible one: there are no backups by design, and nobody has a
 #      copy (see the privacy policy). Hence the typed confirmation.
 #
-# What it NEVER touches: your Messages/Notes/Photos/Mail data (Hazlie only
+# What it NEVER touches: your Messages/Notes/Photos/Mail data (Intaglio Labs only
 # ever read those in place), your Time Machine or cloud backups, and the TCC
 # permission grants — macOS does not let a script revoke those, so the exact
 # System Settings paths are printed at the end instead.
@@ -43,7 +43,7 @@ act() { # act <description> <cmd...> — print always, execute unless dry run
   if [ "$DRY" = 1 ]; then say "would: $desc"; else say "doing: $desc"; "$@" || say "  !! failed (continuing): $desc" >&2; fi
 }
 
-say "Hazlie uninstall — plan for this machine:"
+say "Intaglio Labs uninstall — plan for this machine:"
 say ""
 
 # ── 1. launchd agents ────────────────────────────────────────────────────────
@@ -120,7 +120,7 @@ for label in $FOUND_AGENTS; do
   [ -e "$AGENTS_DIR/$label.plist" ] && act "remove $AGENTS_DIR/$label.plist" rm -f "$AGENTS_DIR/$label.plist"
 done
 
-pgrep -x Hazlie >/dev/null 2>&1 && act "quit the Hazlie widget" pkill -x Hazlie
+pgrep -x Hazlie >/dev/null 2>&1 && act "quit the Intaglio Labs widget" pkill -x Hazlie
 printf '%s' "$APPS" | while IFS= read -r a; do
   act "remove $a" rm -rf "$a"
 done
@@ -154,6 +154,6 @@ say "done. Two grants macOS only lets YOU revoke, in System Settings:"
 say "  - Privacy & Security > Full Disk Access: remove 'node' (~/.hazlie/bin/node)"
 say "    if listed. The binary is already gone; the stale row is cosmetic but"
 say "    worth clearing."
-say "  - Privacy & Security > Automation: any leftover Hazlie rows."
-say "If Hazlie ever texted you (pre-2026-08-21 installs), those messages live"
+say "  - Privacy & Security > Automation: any leftover Intaglio Labs rows."
+say "If Intaglio Labs ever texted you (pre-2026-08-21 installs), those messages live"
 say "in Messages under your Apple ID and are yours to delete there."

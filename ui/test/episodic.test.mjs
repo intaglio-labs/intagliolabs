@@ -105,7 +105,7 @@ test('received messages are never selected, whatever the row says', () => {
   assert.deepEqual(rows.filter((r) => r.source === 'imessage').map((r) => r.entity_id), ['i:sent']);
 });
 
-test('the pinned Hazlie thread stays out of the episodic shelf too', () => {
+test('the pinned Intaglio Labs thread stays out of the episodic shelf too', () => {
   const d = db();
   insertRows(d, [
     { ts: NOW - DAY, source: 'imessage', entity_id: 'i:hz', text: 'hz ask about my messages', meta: { is_from_me: true, chat_guid: PINNED } },

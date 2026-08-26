@@ -76,8 +76,8 @@ test('a never-ingested source is omitted, not reported as behind', () => {
   state.close();
 });
 
-// The status is written as Hazlie — lowercase, plain, no monitoring vocabulary.
-test('the status reads like Hazlie', () => {
+// The status is written as Intaglio Labs — lowercase, plain, no monitoring vocabulary.
+test('the status reads like Intaglio Labs', () => {
   const { ctx, state } = stores({
     rows: { imessage: daysAgo(0), whatsapp: daysAgo(40) },
   });

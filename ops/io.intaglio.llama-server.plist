@@ -84,7 +84,7 @@
     <string>--flash-attn</string>
     <string>on</string>
     <!-- Auto parallelism created four 8K slots on an 8 GB M2 and exhausted
-         unified GPU memory before the first token. Hazlie serves one household
+         unified GPU memory before the first token. Intaglio Labs serves one household
          turn at a time, so one slot is both sufficient and deterministic. -->
     <string>--parallel</string>
     <string>1</string>

@@ -471,7 +471,7 @@
       "direction": "inbound-fetch",
       "purpose": "the IBM Plex Mono stylesheet the landing page links",
       "credential": "none",
-      "decision": "Public marketing site. The visitor's browser loads this, not any Hazlie process; it carries no credential and sees only that someone opened the page.",
+      "decision": "Public marketing site. The visitor's browser loads this, not any Intaglio Labs process; it carries no credential and sees only that someone opened the page.",
       "evidence": "site/index.html:11 <link href=\"https://fonts.googleapis.com/css2?family=IBM+Plex+Mono…\" rel=\"stylesheet\">"
     },
     {
@@ -481,7 +481,7 @@
       "direction": "inbound-fetch",
       "purpose": "the font files that stylesheet then pulls",
       "credential": "none",
-      "decision": "Public marketing site. The visitor's browser loads this, not any Hazlie process; it carries no credential and sees only that someone opened the page.",
+      "decision": "Public marketing site. The visitor's browser loads this, not any Intaglio Labs process; it carries no credential and sees only that someone opened the page.",
       "evidence": "site/index.html:10 <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>"
     },
     {

@@ -72,7 +72,7 @@ enum Provision {
   ///
   /// A newly-created connector identity also starts WhatsApp OFF. WhatsApp's
   /// Desktop database belongs to WhatsApp, not to Intaglio Labs, and survives a
-  /// Hazlie wipe. Treating its mere presence as prior consent made a truly fresh
+  /// Intaglio Labs wipe. Treating its mere presence as prior consent made a truly fresh
   /// install paint WhatsApp green before the owner had selected it. The marker
   /// is removed only by the explicit Connect button in the connections UI.
   @discardableResult

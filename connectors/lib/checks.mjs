@@ -124,7 +124,7 @@ function checkSqliteBackup() {
 
 // --- ~/.hazlie tree permissions -----------------------------------------------
 
-// Everything under ~/.hazlie is Hazlie-private state (secrets, the context DB,
+// Everything under ~/.hazlie is Intaglio Labs-private state (secrets, the context DB,
 // connector cursors, store snapshots in cache/). One group-readable directory
 // quietly widens all of it, so the tree is checked as a whole rather than
 // trusting whichever setup run created each piece.
@@ -842,7 +842,7 @@ function backfillState(text) {
 // reader will otherwise re-derive and re-apply: backfill was disabled to keep
 // the bridge invisible on the remote account, since a bulk history pull marks
 // many conversations READ on the real Meta/X/Slack account. That cost was
-// accepted knowingly in exchange for Hazlie having message history to reason
+// accepted knowingly in exchange for Intaglio Labs having message history to reason
 // over -- a bridge that starts empty is a memory that starts empty.
 //
 // So this probe now FAILS on backfill being off, which is the exact inverse of
@@ -851,7 +851,7 @@ function backfillState(text) {
 //
 // The other two are unchanged and still WARN: they are about the bridge's
 // footprint on the remote account (never acting as you, never broadcasting that
-// you are online), not about what Hazlie gets to read, and nothing in the
+// you are online), not about what Intaglio Labs gets to read, and nothing in the
 // backfill decision touches them.
 // NOT CHECKED: homeserver.presence. bridges/README.md tells you to set it, and
 // this probe used to warn when it was missing — but the key DOES NOT EXIST in

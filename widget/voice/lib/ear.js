@@ -314,7 +314,7 @@ export function createEar(callbacks = {}, options = {}) {
       if (stale()) return false;
 
       // All three constraints explicitly true: echo cancellation is what
-      // strips Hazlie's own playback out of the mic so a real barge-in still
+      // strips Intaglio Labs' own playback out of the mic so a real barge-in still
       // reaches the ear, and browsers merely *usually* default it on --
       // "usually" is not a contract (the Realtime-era hook learned this the
       // hard way; see useRealtimeVoice.js in git history).
@@ -421,7 +421,7 @@ export function createEar(callbacks = {}, options = {}) {
     if (phase !== 'destroyed') phase = 'idle';
   }
 
-  // The voice layer calls setSuppressed(true) whenever Hazlie is audible.
+  // The voice layer calls setSuppressed(true) whenever Intaglio Labs is audible.
   // Where the mic track VERIFIED echo cancellation, her playback cannot reach
   // maybeStartTurn's gate, so the suppression request is ignored and a real
   // barge-in can still interrupt her. Where EC is unverified, suppression is

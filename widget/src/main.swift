@@ -1,4 +1,4 @@
-// Hazlie desktop widget — entry point and window wiring.
+// Intaglio Labs desktop widget — entry point and window wiring.
 //
 // One process, no Dock icon (.accessory), three windows: the desktop-pinned
 // widget panel plus two popups. All HTTP lives in Bridge.swift; this file

@@ -24,12 +24,12 @@
   <key>CFBundleName</key>              <string>intaglio labs</string>
   <key>CFBundleDisplayName</key>       <string>intaglio labs</string>
   <key>CFBundleIdentifier</key>        <string>io.intaglio.widget</string>
-  <key>CFBundleExecutable</key>        <string>Hazlie</string>
+  <key>CFBundleExecutable</key>        <string>Intaglio Labs</string>
   <key>CFBundlePackageType</key>       <string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key>           <string>1</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleIconFile</key>            <string>Hazlie</string>
+  <key>CFBundleIconFile</key>            <string>Intaglio Labs</string>
   <key>LSMinimumSystemVersion</key>    <string>13.0</string>
   <!-- Accessory app: no Dock icon, no menu bar. The activation policy is
        also set in code; LSUIElement covers the launch itself. -->

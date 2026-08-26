@@ -1,4 +1,4 @@
-// Talking to the social bridge bots from Hazlie's own connect page — so the
+// Talking to the social bridge bots from Intaglio Labs' own connect page — so the
 // owner links Messenger/Instagram inside a surface they trust, never a
 // third-party Matrix client.
 //
