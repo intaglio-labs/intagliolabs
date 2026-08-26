@@ -17,7 +17,8 @@
 
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { renderConnectPage, renderHelpPage } from './lib/page.mjs';
@@ -162,6 +163,27 @@ async function sendMemoryPage(res, token, opts = {}) {
   send(res, 200, html, 'text/html; charset=utf-8', { csp: memoryCsp(nonce) });
 }
 
+// Put the owner's own Telegram api_id/api_hash into that bridge's generated
+// config, then start the container that has been refusing to run without them.
+// Line replacement, not a YAML round trip: the generated config is ~700 lines
+// of comments that a rewrite would flatten, and these two keys appear once.
+// The container start is best-effort — docker may not be running, and the
+// credentials are still saved either way, so the next setup-bridges run picks
+// them up.
+function writeBridgeConfig(bridge, { apiId, apiHash }) {
+  const path = join(homedir(), '.hazlie', 'matrix', bridge, 'config.yaml');
+  const text = readFileSync(path, 'utf8');
+  const next = text
+    .replace(/^(\s*api_id:).*$/mu, `$1 ${apiId}`)
+    .replace(/^(\s*api_hash:).*$/mu, `$1 "${apiHash}"`);
+  writeFileSync(path, next, { mode: 0o600 });
+  try {
+    execFileSync('docker', ['start', `hazlie-${bridge}`], { stdio: 'ignore', timeout: 15000 });
+  } catch {
+    // Not running, not installed, or already up — the credentials landed.
+  }
+}
+
 function writeSecret(name, value) {
   const path = join(homedir(), '.hazlie', 'secrets', name);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -260,6 +282,7 @@ async function handleRequest(req, res) {
       authorization: req.headers.authorization,
       body,
       write: writeSecret,
+      writeConfig: writeBridgeConfig,
     });
     send(res, status, JSON.stringify(out), 'application/json; charset=utf-8');
     return;

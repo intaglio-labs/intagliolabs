@@ -403,6 +403,17 @@ const HINTS = {
   // on it but the header — "when I click linkedin, nothing is happening"
   // (owner, 2026-08-25). It is not a login: LinkedIn only lets you export,
   // and the connector reads Connections.csv out of ~/.hazlie/imports/linkedin.
+  // Telegram needs the OWNER's own api_id/api_hash before its bridge will
+  // even start (my.telegram.org/apps). Same three-step shape as granola's:
+  // open the page, make the thing, paste it back — connectSecret writes it
+  // into the bridge config and starts the container.
+  telegram: {
+    url: 'https://my.telegram.org/apps',
+    link: 'my.telegram.org',
+    walkthrough: true,
+    step2: 'create an app, then copy its api_id and api_hash',
+    paste: 'paste api_id:api_hash',
+  },
   linkedin: {
     text: 'LinkedIn only exports — ask for your data, then unzip Connections.csv '
       + 'into ~/.hazlie/imports/linkedin. The export email can take a few hours.',
@@ -457,7 +468,7 @@ const BRIDGE_FLOW = {
 const BRIDGE_HELP = {
   discord: { place: 'your Discord token' },
   slack: { place: 'your Slack tokens' },
-  telegram: { place: 'phone (+1…), then the code' },
+  telegram: { place: 'phone (+1…), then the code' },  // after its api keys are set
 };
 // The claim the system actually keeps, not the one it doesn't. This line
 // renders under EVERY tile including the social bridges, which hold a live
@@ -715,57 +726,7 @@ function card(src, keep) {
         tip.appendChild(add);
       }
     } else if (hint && hint.walkthrough) {
-      // The in-panel walkthrough (owner, 2026-08-25): the whole connect flow
-      // lives right here — open the site, make a key, paste it — instead of
-      // handing the owner to the connect page. hint.url is the door;
-      // connectSecret (Bridge → POST /api/secret) is where the paste lands.
-      const open = document.createElement('button');
-      open.className = 'hold-ok';
-      open.textContent = `1 · open ${hint.link} ↗`;
-      open.addEventListener('click', (e) => {
-        e.stopPropagation();
-        // The installed app first, the website only if it is not there —
-        // openApp answers notInstalled rather than failing silently.
-        if (hint.app) {
-          hzPost('openApp', { bundleId: hint.app })
-            .then((d) => {
-              if (!d || d.state !== 'ok') hzPost('openExternal', { url: hint.url }).catch(() => {});
-            })
-            .catch(() => { hzPost('openExternal', { url: hint.url }).catch(() => {}); });
-          return;
-        }
-        hzPost('openExternal', { url: hint.url }).catch(() => {});
-      });
-      const step2 = document.createElement('span');
-      step2.className = 'setup';
-      step2.textContent = '2 · create an API key and copy it';
-      const paste = document.createElement('textarea');
-      paste.className = 'bpaste';
-      paste.placeholder = '3 · paste the key here';
-      paste.setAttribute('spellcheck', 'false');
-      const send = document.createElement('button');
-      send.className = 'hold-ok';
-      send.textContent = 'connect';
-      const said = document.createElement('span');
-      said.className = 'setup';
-      send.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const val = paste.value.trim();
-        if (!val) return;
-        paste.value = ''; // gone from the page before anything else happens
-        send.disabled = true; send.textContent = 'connecting…';
-        hzPost('connectSecret', { p: kindOf(src.id), value: val })
-          .then((d) => {
-            if (d && d.state === 'ok') { refresh(); return; }
-            send.disabled = false; send.textContent = 'connect';
-            said.textContent = (d && d.error) || 'could not save the key';
-          })
-          .catch(() => {
-            send.disabled = false; send.textContent = 'connect';
-            said.textContent = 'could not reach the connect service';
-          });
-      });
-      tip.append(open, step2, paste, send, said);
+      walkthrough(hint);
     } else if (hint) {
       // Not connected: the one-sentence how-to to set it up.
       const setup = document.createElement('span');
@@ -854,6 +815,64 @@ function card(src, keep) {
           }
           return `please enter your ${field} for ${LABEL}`;
         };
+    // The in-panel walkthrough (owner, 2026-08-25): the whole connect flow
+    // lives right here — open the site, make the credential, paste it back —
+    // instead of handing the owner to the connect page. Shared, because two
+    // connectors reach it by different routes now: granola through the plain
+    // hint, telegram from inside its bridge branch (its api keys must exist
+    // before its bot can be spoken to at all).
+    const walkthrough = (hint) => {
+      // lives right here — open the site, make a key, paste it — instead of
+    // handing the owner to the connect page. hint.url is the door;
+    // connectSecret (Bridge → POST /api/secret) is where the paste lands.
+    const open = document.createElement('button');
+    open.className = 'hold-ok';
+    open.textContent = `1 · open ${hint.link} ↗`;
+    open.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // The installed app first, the website only if it is not there —
+      // openApp answers notInstalled rather than failing silently.
+      if (hint.app) {
+        hzPost('openApp', { bundleId: hint.app })
+          .then((d) => {
+            if (!d || d.state !== 'ok') hzPost('openExternal', { url: hint.url }).catch(() => {});
+          })
+          .catch(() => { hzPost('openExternal', { url: hint.url }).catch(() => {}); });
+        return;
+      }
+      hzPost('openExternal', { url: hint.url }).catch(() => {});
+    });
+    const step2 = document.createElement('span');
+    step2.className = 'setup';
+    step2.textContent = `2 · ${hint.step2 || 'create an API key and copy it'}`;
+    const paste = document.createElement('textarea');
+    paste.className = 'bpaste';
+    paste.placeholder = hint.paste || '3 · paste the key here';
+    paste.setAttribute('spellcheck', 'false');
+    const send = document.createElement('button');
+    send.className = 'hold-ok';
+    send.textContent = 'connect';
+    const said = document.createElement('span');
+    said.className = 'setup';
+    send.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const val = paste.value.trim();
+      if (!val) return;
+      paste.value = ''; // gone from the page before anything else happens
+      send.disabled = true; send.textContent = 'connecting…';
+      hzPost('connectSecret', { p: kindOf(src.id), value: val })
+        .then((d) => {
+          if (d && d.state === 'ok') { refresh(); return; }
+          send.disabled = false; send.textContent = 'connect';
+          said.textContent = (d && d.error) || 'could not save the key';
+        })
+        .catch(() => {
+          send.disabled = false; send.textContent = 'connect';
+          said.textContent = 'could not reach the connect service';
+        });
+    });
+    tip.append(open, step2, paste, send, said);
+    };
     const askedFor = () => {
       if (!(data && Array.isArray(data.transcript))) return null;
       for (let i = data.transcript.length - 1; i >= 0; i--) {
@@ -993,13 +1012,33 @@ function card(src, keep) {
       // asks for (a token, or a phone number and then the code).
       const help = BRIDGE_HELP[kindOf(src.id)];
       const started = data && data.transcript && data.transcript.length;
-      if (!started) {
+      if (!started && hint && hint.walkthrough) {
+        // Telegram cannot begin at all until the owner's own api_id/api_hash
+        // are in its bridge config — the container refuses to start on the
+        // example pair mautrix ships, so "begin login" sat on "starting…"
+        // with no bot on the other end (owner, 2026-08-25). Its walkthrough
+        // comes first; once the keys land the bot answers and this branch
+        // gives way to the ordinary phone-code conversation.
+        walkthrough(hint);
+      } else if (!started) {
         beginButton('begin login');
       } else {
         appendTranscript();
         // The bot is waiting for the next thing. Token pastes want room;
         // a phone number or a code is one short line.
-        relayInput(`enter ${help ? help.place : 'your reply'}`, flow === 'token');
+        //
+        // The ask goes ABOVE the box, not inside it (owner, 2026-08-25): a
+        // placeholder is clipped by the input's own width — "enter phone
+        // (+1…), then the code" showed as "enter phone (+1…), t" — and it
+        // vanishes the moment typing starts, which is exactly when someone
+        // rereads it.
+        if (help && help.place) {
+          const say = document.createElement('span');
+          say.className = 'setup';
+          say.textContent = `enter ${help.place}`;
+          tip.appendChild(say);
+        }
+        relayInput('type your answer', flow === 'token');
       }
     }
   };

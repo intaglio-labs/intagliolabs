@@ -355,6 +355,16 @@
       "note": "Added by the ledger tripwire on the commit that introduced it, which is the point of the tripwire. FOUND AT THE SAME TIME, and since fixed: this host was missing from Bridge.swift's allowedExternal, an exact-match allowlist (Bridge.swift's case \"openExternal\" handler), so both links failed with 'url not in allowlist'. Both URLs are now in allowedExternal."
     },
     {
+      "host": "my.telegram.org",
+      "kind": "user-browser-link",
+      "component": "widget/src/Bridge.swift openExternal allowlist",
+      "direction": "none",
+      "purpose": "send the owner to Telegram to register their OWN api_id/api_hash -- mautrix-telegram refuses to start on the example pair it ships, and Telegram bans app ids shared across unrelated accounts, so each install registers its own (owner, 2026-08-25)",
+      "credential": "none -- this process opens no socket here",
+      "decision": "n/a",
+      "evidence": "widget/src/Bridge.swift allowedExternal https://my.telegram.org/apps"
+    },
+    {
       "host": "granola.ai",
       "kind": "user-browser-link",
       "component": "widget/src/Bridge.swift openExternal allowlist",

@@ -346,6 +346,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "https://granola.ai",
     "https://cloud.ouraring.com/oauth/applications",
     "https://www.notion.so/my-integrations",
+    // Telegram's app registration — each install gets its own api_id/api_hash.
+    "https://my.telegram.org/apps",
     // LinkedIn's export request page — the connector reads the CSV it emails.
     "https://www.linkedin.com/mypreferences/d/download-my-data",
     // The bridge token how-to links, for the Discord/Slack guided login flows.
@@ -993,10 +995,23 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         reply(webView, id, ["state": "notInstalled"])
         return
       }
+      // ACTIVATE, don't just launch. An app that is already running — Granola
+      // lives in the menu bar and is usually up — treats "open" as a no-op if
+      // it has no window to show, which is indistinguishable from nothing
+      // happening (owner, 2026-08-25, twice). Ask for activation explicitly
+      // after the launch resolves, and if the app is already running, activate
+      // it directly rather than routing through a launch at all.
+      if let running = NSRunningApplication
+        .runningApplications(withBundleIdentifier: bundleId).first {
+        running.activate(options: [.activateAllWindows])
+        reply(webView, id, ["state": "ok"])
+        return
+      }
       let cfg = NSWorkspace.OpenConfiguration()
       cfg.activates = true
-      NSWorkspace.shared.openApplication(at: appURL, configuration: cfg) { [weak self] _, err in
+      NSWorkspace.shared.openApplication(at: appURL, configuration: cfg) { [weak self] app, err in
         DispatchQueue.main.async {
+          app?.activate(options: [.activateAllWindows])
           self?.reply(webView, id, err == nil
             ? ["state": "ok"] : ["state": "notInstalled"])
         }
