@@ -1306,8 +1306,13 @@ body.connections .conn-main {
      fitConnections measures the column and native sizes the window to the
      answer, with the whole screen available now that the panel stands over
      the orb. overflow-x stays clipped: only the .list shelf inside is meant
-     to scroll sideways. */
-  overflow-x: hidden;
+     to scroll sideways.
+     clip, NOT hidden — and this is the second time this exact pair rule has
+     bitten this block, once per direction: overflow-x: hidden silently
+     promotes the unset overflow-y from visible to AUTO, which re-created the
+     vertical scroll everything above says is gone. clip is the one value
+     that leaves the other axis truly visible. */
+  overflow-x: clip;
 }
 /* Bottom-anchoring WITHOUT justify-content: flex-end — on a scrollable
    flex column, flex-end makes overflow past the start edge unreachable
