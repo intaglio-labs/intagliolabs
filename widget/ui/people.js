@@ -126,6 +126,11 @@ function openSearchDetails() {
   const head = document.createElement('b');
   head.textContent = 'what deep search does';
   tip.appendChild(head);
+  // Under the header, same as every connector card (owner, 2026-08-25).
+  const stay = document.createElement('span');
+  stay.className = 'stay';
+  stay.textContent = 'data stored locally';
+  tip.appendChild(stay);
   const ul = document.createElement('ul');
   ul.className = 'p-what';
   for (const line of [
@@ -139,10 +144,6 @@ function openSearchDetails() {
     ul.appendChild(li);
   }
   tip.appendChild(ul);
-  const stay = document.createElement('span');
-  stay.className = 'stay';
-  stay.textContent = 'data stored locally';
-  tip.appendChild(stay);
   phint.appendChild(tip);
   addHintClose();
   growPanel(document.getElementById('pspecs'));

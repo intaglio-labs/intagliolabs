@@ -162,6 +162,11 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
     const head = document.createElement('b');
     head.textContent = src.label;
     tip.appendChild(head);
+    // Under the NAME, not the card's foot — same move as connections.js.
+    const stay = document.createElement('span');
+    stay.className = 'stay';
+    stay.textContent = HZ_STAY;
+    tip.appendChild(stay);
     if (src.disabled && src.action === 'enable') {
       // No sentence above the button (owner, 2026-08-25): "has not connected
       // this source yet" restated what the button already says.
@@ -227,10 +232,6 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
         tip.appendChild(a);
       }
     }
-    const stay = document.createElement('span');
-    stay.className = 'stay';
-    stay.textContent = HZ_STAY;
-    tip.appendChild(stay);
   };
 
   // Social bridges: the in-popup login (Beeper-style window) + a manual paste
@@ -242,6 +243,11 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
     const head = document.createElement('b');
     head.textContent = src.label;
     tip.appendChild(head);
+    // Under the NAME, not the card's foot — same move as connections.js.
+    const stay = document.createElement('span');
+    stay.className = 'stay';
+    stay.textContent = HZ_STAY;
+    tip.appendChild(stay);
 
     // WHETHER THERE IS AN EMBEDDED LOGIN AT ALL IS THE SERVER'S CALL.
     //
@@ -337,10 +343,6 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
         tip.appendChild(adv);
       }
     }
-    const stay = document.createElement('span');
-    stay.className = 'stay';
-    stay.textContent = HZ_STAY;
-    tip.appendChild(stay);
   };
 
   const openBridge = () => {

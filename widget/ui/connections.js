@@ -597,6 +597,13 @@ function card(src, keep) {
     const head = document.createElement('b');
     head.textContent = src.label;
     tip.appendChild(head);
+    // The privacy line sits under the NAME, not at the card's foot (owner,
+    // 2026-08-25): it is the promise the whole card stands on, and at the
+    // bottom it dangled under whatever the flow happened to end with.
+    const stay = document.createElement('span');
+    stay.className = 'stay';
+    stay.textContent = STAY;
+    tip.appendChild(stay);
     // A broken source states the problem BEFORE the WHY and the how-to. It is
     // the only thing on this panel the owner has to act on, and burying it
     // under an explanation of what Granola is would be the wrong order.
@@ -754,12 +761,6 @@ function card(src, keep) {
         tip.appendChild(open);
       }
     }
-    {
-      const stay = document.createElement('span');
-      stay.className = 'stay';
-      stay.textContent = STAY;
-      tip.appendChild(stay);
-    }
   };
 
   // The social bridges (Messenger/Instagram) log in INSIDE this popup —
@@ -786,6 +787,13 @@ function card(src, keep) {
     const head = document.createElement('b');
     head.textContent = src.label;
     tip.appendChild(head);
+    // The privacy line sits under the NAME, not at the card's foot (owner,
+    // 2026-08-25): it is the promise the whole card stands on, and at the
+    // bottom it dangled under whatever the flow happened to end with.
+    const stay = document.createElement('span');
+    stay.className = 'stay';
+    stay.textContent = STAY;
+    tip.appendChild(stay);
 
     // Any bot chatter shows so the owner sees what the bridge said/asked.
     const appendTranscript = () => {
@@ -900,10 +908,6 @@ function card(src, keep) {
         relayInput(`enter ${help ? help.place : 'your reply'}`, flow === 'token');
       }
     }
-    const stay = document.createElement('span');
-    stay.className = 'stay';
-    stay.textContent = STAY;
-    tip.appendChild(stay);
   };
 
   const openBridge = () => {
