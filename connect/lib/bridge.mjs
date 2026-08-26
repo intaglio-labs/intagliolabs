@@ -37,11 +37,20 @@ const matrixDir = (home) => join(home, '.hazlie', 'matrix');
 // until the owner closed it -- no error, and a cookie poll that could never
 // fire. Two copies of one decision, four platforms out of date.
 //
-// Note WHY the four are absent rather than merely unlisted: Discord and Slack
-// are token logins (`login-token` -- you paste the account token the bot asks
-// for) and Telegram logs in by phone. None of the three can consume harvested
-// cookies at all, so the right answer is not a wider fence, it is not offering
-// the flow. Their `loginUrl` stays as the page a person opens themselves.
+// Note WHY the four are absent rather than merely unlisted: none of them
+// authenticates by cookie harvest, so the right answer is not a wider fence,
+// it is not offering that flow. What they DO take was wrong here for months
+// and is corrected in place (2026-08-26, after the owner pointed out Beeper
+// asks Slack for credentials, not a token):
+//
+//   Discord  `login` -> a discordapp.com/ra/ link, approved in the phone app.
+//   Slack    `login email` -> sign in with the Slack email address.
+//   Telegram `login` -> phone number, then the code.
+//
+// ~~"Discord and Slack are token logins (`login-token`)"~~ — that command is
+// not even valid on these bridges; they answer "Unknown command" and always
+// did. The token flow exists on Slack as one of three, and was simply the
+// only one this table knew about.
 //
 // The platforms this page can link, and everything that differs between
 // them. `initial` is the first command that starts login: Messenger lists four
@@ -173,6 +182,7 @@ export const PLATFORMS = Object.freeze({
     cookieDomain: null,
     // Phone login: the bot sends a code to the Telegram app. No cookie flow.
     webLogin: null,
+    noWebLogin: 'signs in by phone number and a code sent to the Telegram app',
   },
   discord: {
     id: 'discord',
@@ -180,13 +190,20 @@ export const PLATFORMS = Object.freeze({
     bot: '@discordbot:hazlie.local',
     dir: 'discord',
     db: 'discord/mautrix-discord.db',
-    initial: 'login-token',
+    // ~~login-token~~ — this bridge answers "Unknown command" to that, and has
+    // for as long as the entry has been wrong. Its real command is `login`
+    // [flow], and asked plainly it hands back a discordapp.com/ra/ URL: the
+    // QR REMOTE-AUTH flow, approved from the Discord app on a phone. No token
+    // to dig out of devtools at all (verified against the running bridge,
+    // 2026-08-26, after the owner pointed out Beeper does not ask for one).
+    initial: 'login',
     prefix: '!discord',
     site: 'discord.com',
     loginUrl: 'https://discord.com/login',
     cookieDomain: 'discord.com',
-    // Token login (`login-token`). Cookies are not what this bridge wants.
+    // Not a cookie harvest: the bot's own reply carries the link to approve.
     webLogin: null,
+    noWebLogin: 'approved from the Discord phone app over a QR remote-auth link',
   },
   slack: {
     id: 'slack',
@@ -194,13 +211,20 @@ export const PLATFORMS = Object.freeze({
     bot: '@slackbot:hazlie.local',
     dir: 'slack',
     db: 'slack/mautrix-slack.db',
-    initial: 'login-token',
+    // ~~login-token~~ — rejected as "Unknown command" by this bridge, which
+    // takes `login <flow>` and offers three: `email` (sign in with your Slack
+    // email address), `token`, and `app`. EMAIL is the one a person wants and
+    // the one Beeper uses; the token flow was never the only option, it was
+    // just the one this table knew about.
+    initial: 'login email',
     prefix: '!slack',
     site: 'slack.com',
     loginUrl: 'https://slack.com/signin',
     cookieDomain: 'slack.com',
-    // Token login (`login-token`). Cookies are not what this bridge wants.
+    // The bot asks for the address, then the code Slack emails — a guided
+    // conversation, not a cookie harvest.
     webLogin: null,
+    noWebLogin: 'signs in by email address and an emailed code, not by session cookie',
   },
 });
 

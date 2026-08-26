@@ -71,19 +71,23 @@ test('a platform with a web login has hosts, a session cookie, and a reachable U
   }
 });
 
-test('a platform without a web login is one that genuinely cannot use one', () => {
-  // The honest half. Discord and Slack are token logins and Telegram is a phone
-  // code; none can consume harvested cookies, so the answer is not a wider fence
-  // but no embedded flow at all. If a platform lands here with a cookie-shaped
-  // login command, somebody disabled a flow that should work.
+test('a platform without a web login says why, in words', () => {
+  // The honest half: no embedded flow must be a decision, not a gap.
+  //
+  // ~~This inferred the reason from the login command, passing anything whose
+  // command matched /token|^login$/.~~ That heuristic was written when token
+  // and phone were the only non-cookie flows, and it aged badly: Slack's real
+  // flow is `login email`, which the pattern reads as cookie-shaped and
+  // rejects, while a genuinely wrong `login-token` sailed through for months
+  // because it contained the word "token" (2026-08-26). A sentence cannot be
+  // satisfied by accident.
   for (const [id, p] of entries) {
     if (p.webLogin) continue;
-    const tokenOrPhone = /token|^login$/u.test(p.initial) || p.cookieDomain === null;
     assert.ok(
-      tokenOrPhone,
-      `${id}: webLogin is null but its login command is "${p.initial}" and it has a ` +
-        `cookieDomain — that looks like a cookie flow, so either give it a webLogin ` +
-        `or say here why it cannot have one`
+      typeof p.noWebLogin === 'string' && p.noWebLogin.length > 12,
+      `${id}: webLogin is null with no noWebLogin reason — say in one line what ` +
+        `this platform signs in with instead, so the next reader knows whether ` +
+        `it is a decision or an omission`
     );
   }
 });

@@ -464,8 +464,11 @@ const BRIDGE_FLOW = {
 // explainer this panel has shed: the input's placeholder names exactly what
 // to paste, and that is the whole briefing the flow needs.
 const BRIDGE_HELP = {
-  discord: { place: 'your Discord token' },
-  slack: { place: 'your Slack tokens' },
+  // What the bot is about to ask for, in the words of the flow it actually
+  // runs. ~~"your Discord token" / "your Slack tokens"~~ described a command
+  // (`login-token`) these bridges reject outright (2026-08-26).
+  discord: { place: 'approve the link in your Discord app' },
+  slack: { place: 'your Slack email address' },
   telegram: { place: 'phone (+1…), then the code' },  // after its api keys are set
 };
 // The claim the system actually keeps, not the one it doesn't. This line
