@@ -200,9 +200,9 @@ test('identical first+last but unmerged is a weaker (score 2) candidate', () => 
 
 test('a personal domain spelling the name proposes that pair', () => {
   const { pairs } = candidatePairs([
-    person('name:rishab nayak', 'Rishab Nayak'),
-    person('id:rishab@rishabnayak.com', 'rishab@rishabnayak.com',
-      { names: ['rishab@rishabnayak.com'], identifiers: ['rishab@rishabnayak.com'] }),
+    person('name:mika tanaka', 'Mika Tanaka'),
+    person('id:mika@mikatanaka.com', 'mika@mikatanaka.com',
+      { names: ['mika@mikatanaka.com'], identifiers: ['mika@mikatanaka.com'] }),
   ]);
   assert.equal(pairs.length, 1);
   assert.equal(pairs[0].reason, 'the address spells this name');
@@ -229,7 +229,7 @@ test('short concatenations and unrelated domains propose nothing', () => {
   assert.equal(short.length, 0);
   // A company domain that spells nobody's name stays a stranger.
   const { pairs: none } = candidatePairs([
-    person('name:rishab nayak', 'Rishab Nayak'),
+    person('name:mika tanaka', 'Mika Tanaka'),
     person('id:orders@acmestore.com', 'orders@acmestore.com',
       { names: ['orders@acmestore.com'], identifiers: ['orders@acmestore.com'] }),
   ]);
@@ -237,11 +237,11 @@ test('short concatenations and unrelated domains propose nothing', () => {
 });
 
 test('signal 3 respects prior decisions like every other signal', () => {
-  const a = 'name:rishab nayak', b = 'id:rishab@rishabnayak.com';
+  const a = 'name:mika tanaka', b = 'id:mika@mikatanaka.com';
   const { pairs } = candidatePairs([
-    person(a, 'Rishab Nayak'),
-    person(b, 'rishab@rishabnayak.com',
-      { names: ['rishab@rishabnayak.com'], identifiers: ['rishab@rishabnayak.com'] }),
+    person(a, 'Mika Tanaka'),
+    person(b, 'mika@mikatanaka.com',
+      { names: ['mika@mikatanaka.com'], identifiers: ['mika@mikatanaka.com'] }),
   ], { decided: new Set([pairId(a, b)]) });
   assert.equal(pairs.length, 0);
 });

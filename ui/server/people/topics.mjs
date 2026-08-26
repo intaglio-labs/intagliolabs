@@ -24,6 +24,7 @@
 // reads as the story it is.
 
 import { approximateConversationKey } from '../memory/episodes.mjs';
+import { threadKind, counterpartyFromThread, GROUP } from '../memory/threadKind.mjs';
 
 // Curated topic signals. Word-boundary, case-insensitive, one hit counted per
 // ROW containing the signal (a message that says "coffee" five times is one
@@ -202,8 +203,20 @@ function rowPersonId(row, meta) {
   const id =
     row.source === 'mail'
       ? (Array.isArray(meta.from) ? meta.from[0]?.toLowerCase() : null)
-      : (meta.chat_handle ?? meta.handle ?? null);
-  return !id || meta.is_group ? null : id;
+      : (meta.chat_handle ?? meta.handle ?? counterpartyFromThread(row, meta));
+  // ROOMS ARE DROPPED, and this is a decision rather than a substitution.
+  //
+  // A chip sits under a person's name and claims to say what the two of you talk
+  // about. Something said in a room you both happen to be in is not that. The
+  // gate was already here for WhatsApp; it just never fired for iMessage, so
+  // 61,163 group messages have been characterising people who never said them to
+  // the owner. 216 person-years exist ONLY because of that leak and will lose
+  // their chips entirely -- which is the honest outcome: their whole
+  // "conversation" was other people's group threads.
+  //
+  // UNKNOWN is credited, exactly as before, so the 656 guid-less rows move nothing.
+  if (threadKind(row, meta) === GROUP) return null;
+  return id || null;
 }
 
 // Scan the prose sources once and tally, per (person, year): taxonomy topic

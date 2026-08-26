@@ -50,16 +50,30 @@ function monthIndex(ym) {
   return Number(ym.slice(0, 4)) * 12 + (Number(ym.slice(5, 7)) - 1);
 }
 
-function isActive(b) {
-  return ((b.sent ?? 0) + (b.received ?? 0) + (b.met ?? 0)) > 0;
+// ACTIVE IN WHICH SENSE? The two questions this file asks are different and the
+// answer is not the same, so the caller says which it means.
+//
+// `withRoom: false` — did the two of us exchange anything this month? That is
+// what a volume superlative is about.
+// `withRoom: true`  — was this person AROUND this month? A group chat is being
+// around. Silence and first-sight are about presence, not correspondence.
+//
+// This predicate predates the room split, so it summed sent+received+met and
+// that WAS the whole story. Since rooms became their own number it is only the
+// direct half, and every caller silently inherited "direct" whether it meant it
+// or not — which is how the drifting card came to call somebody quiet for two
+// months while they posted 113 times in shared group chats.
+function isActive(b, { withRoom = false } = {}) {
+  const direct = (b.sent ?? 0) + (b.received ?? 0) + (b.met ?? 0);
+  return (withRoom ? direct + (b.room ?? 0) : direct) > 0;
 }
 
 // The months of `year` this person was active in, ascending, 1-based.
-function activeMonths(timeline, year) {
+function activeMonths(timeline, year, opts) {
   const prefix = `${year}-`;
   const set = new Set();
   for (const b of timeline ?? []) {
-    if (b.ym.startsWith(prefix) && isActive(b)) set.add(Number(b.ym.slice(5, 7)));
+    if (b.ym.startsWith(prefix) && isActive(b, opts)) set.add(Number(b.ym.slice(5, 7)));
   }
   return [...set].sort((a, b) => a - b);
 }
@@ -73,10 +87,14 @@ function lastMonthOf(year, now) {
 }
 
 // Years before `year` in which this person was active at all.
+// PRESENCE, so rooms count. This answers "have I come across this person
+// before", and a year spent together in a group chat is emphatically yes --
+// without it, somebody the owner has shared a room with since 2019 can be
+// announced as newly "met in March".
 function priorYears(timeline, year) {
   const set = new Set();
   for (const b of timeline ?? []) {
-    if (!isActive(b)) continue;
+    if (!isActive(b, { withRoom: true })) continue;
     const y = Number(b.ym.slice(0, 4));
     if (y < year) set.add(y);
   }
@@ -106,13 +124,21 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 // The most engaged person of the year. The only card that is a plain maximum,
 // so it is the only one that is nearly always available.
 function personOfTheYear(entries) {
-  const top = entries[0];
+  // RANK BY THE THING THE SENTENCE NAMES. `entries` arrive sorted by
+  // engagement, which is messages + 3x meetings -- so taking entries[0] and
+  // then writing "N messages, more than your next three combined" could state
+  // two falsehoods at once: neither the superlative nor the comparison is about
+  // the order the list was in. A meeting-heavy contact can outrank a chattier
+  // one on engagement and lose on messages.
+  const byMessages = [...entries].sort((a, b) => (b.messages ?? 0) - (a.messages ?? 0));
+  const top = byMessages[0];
+  const entriesRanked = byMessages;
   if (!top || top.messages <= 0) return null;
   // The mock's line ("more than your next three combined") is a CLAIM. Written
   // only when it holds; otherwise a different true sentence, never this one
   // softened.
-  const nextThree = entries.slice(1, 4).reduce((n, e) => n + e.messages, 0);
-  const line = entries.length > 1 && top.messages > nextThree
+  const nextThree = entriesRanked.slice(1, 4).reduce((n, e) => n + (e.messages ?? 0), 0);
+  const line = entriesRanked.length > 1 && top.messages > nextThree
     ? `${top.messages.toLocaleString('en-US')} messages — more than your next three combined`
     : `${top.messages.toLocaleString('en-US')} messages — your most this year`;
   return { kind: 'person-of-the-year', label: 'person of the year', key: top.p.key, name: top.p.name, line };
@@ -122,7 +148,12 @@ function personOfTheYear(entries) {
 function backFromYourPast(entries, year) {
   let best = null;
   for (const e of entries) {
-    if (e.messages < RETURN_MIN_MESSAGES) continue;
+    // MEASURED AGAINST WHAT IT MEANT. "Came back with something to show" was
+    // tuned when `messages` included room volume; direct-only made the same
+    // constant gate roughly a third as much traffic, and 87 person-years fell
+    // under it that had cleared it before. Presence is the right quantity for a
+    // card about somebody reappearing at all.
+    if ((e.messages ?? 0) + (e.roomMessages ?? 0) < RETURN_MIN_MESSAGES) continue;
     const prior = priorYears(e.p.timeline, year);
     if (!prior.length) continue; // never here before: new, not returned
     const lastPrior = prior[prior.length - 1];
@@ -173,20 +204,32 @@ function drifting(entries, year, now) {
   const lastMonth = lastMonthOf(year, now);
   let best = null;
   for (const e of entries) {
-    const months = activeMonths(e.p.timeline, year);
+    // PRESENCE, not correspondence. Somebody posting in a group chat every week
+    // has not gone quiet, and saying they have is a false statement about the
+    // owner's own life. This card fired on exactly that: 41 direct messages in
+    // June, then 52 and 61 in rooms across July and August, reported as "quiet
+    // for 2 months".
+    const months = activeMonths(e.p.timeline, year, { withRoom: true });
     if (months.length < DRIFT_MIN_ACTIVE_MONTHS) continue;
     const lastActive = months[months.length - 1];
     const silent = lastMonth - lastActive;
     if (silent < DRIFT_MIN_SILENT_MONTHS) continue;
-    if (!best || e.engagement > best.e.engagement) best = { e, lastActive, silent };
+    // "EVERY MONTH TO X" HAS TO BE TRUE. Nothing checked that the active months
+    // were contiguous, so a person seen in January and June read as "every month
+    // to june". The card either says the true thing or says a different one.
+    const contiguous = months.length === lastActive - months[0] + 1;
+    if (!best || e.engagement > best.e.engagement) best = { e, lastActive, silent, contiguous, months };
   }
   if (!best) return null;
+  const lead = best.contiguous
+    ? `every month to ${monthName(best.lastActive)}`
+    : `${plural(best.months.length, 'month')} up to ${monthName(best.lastActive)}`;
   return {
     kind: 'drifting',
     label: 'drifting',
     key: best.e.p.key,
     name: best.e.p.name,
-    line: `every month to ${monthName(best.lastActive)} — quiet for ${plural(best.silent, 'month')} since`,
+    line: `${lead} — quiet for ${plural(best.silent, 'month')} since`,
   };
 }
 

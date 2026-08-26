@@ -10,6 +10,7 @@
 // context row, claim_source still points at a row, and no claim points here.
 
 import { buildEpisodes, DEFAULT_GAP_MS } from './episodes.mjs';
+import { isRoom } from './threadKind.mjs';
 
 // Sources that have conversations. calendar/photos/files are events and
 // artefacts, not exchanges -- they have no thread to cut and no author to quote.
@@ -20,6 +21,23 @@ const norm = (s) =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/gu, ' ')
     .trim();
+
+// Does this episode's THREAD belong to a room?
+//
+// Reads the episode's own thread_key (`chat:<source>:<guid>`) rather than any
+// one member, because group-ness is a property of the conversation and not of
+// who happened to speak in one window. Falls back to the first member's row when
+// a caller passes an episode that has not been keyed yet.
+function episodeIsRoom(episode) {
+  const key = typeof episode?.thread_key === 'string' ? episode.thread_key : '';
+  const cut = key.indexOf(':', key.indexOf(':') + 1);
+  if (key.startsWith('chat:') && cut > 0) {
+    const source = key.slice('chat:'.length, cut);
+    return isRoom({ source }, { chat_guid: key.slice(cut + 1), chat_handle: key.slice(cut + 1) });
+  }
+  const first = episode?.members?.[0];
+  return first ? isRoom(first.row ?? {}, safeMeta(first.row?.meta) ?? {}) : false;
+}
 
 // WHO THIS EPISODE IS WITH, or null.
 //
@@ -33,6 +51,21 @@ const norm = (s) =>
 // so an episode and the people graph agree about who somebody is without this
 // module needing to know how that graph is built.
 export function counterpartyFor(episode, spine) {
+  // A ROOM HAS NO COUNTERPARTY, however few people happened to speak in it.
+  //
+  // The handle test below is a proxy for "is this a group" -- more than one
+  // voice means a room -- and it is a proxy that fails in the common case: 1,680
+  // of 5,285 group episodes on the live store have exactly ONE non-owner
+  // speaking inside their 60-minute window, so they were stamped with that
+  // person's key as though the owner had been talking to them privately. 85
+  // `plan` claims were distilled under that premise.
+  //
+  // Group-ness belongs to the THREAD, not to the window. thread_key already
+  // carries the chat guid, so the question is answerable without adding a
+  // column: episodes are rebuilt by REPLACE, so this needs no migration and no
+  // backfill beyond the rebuild that already runs.
+  if (episodeIsRoom(episode)) return null;
+
   const handles = new Set();
   for (const m of episode.members) {
     if (m.quotable === 1) continue; // the owner is not their own counterparty

@@ -2901,7 +2901,39 @@ async function handlePeople(db, req, res, cors, url, policy) {
       const { aliases } = resolutionState(resDb);
       return buildMap(db, state, { owner, sinceTs, aliases });
     });
-    send(res, 200, out, cors);
+    // PROJECTED, NOT JUST STRIPPED.
+    //
+    // This route was CLI-only until the constellation started calling it from
+    // the panel. Its star carries 22 fields including every handle a person has
+    // -- 2,665 of them, 506 address-shaped and 1,859 phone-shaped -- and the page
+    // reads eight. So `?for=page` returns those eight.
+    //
+    // Two reasons, and the second is the one that bites. Identifiers have no
+    // business crossing into a webview: both sibling routes already strip them,
+    // /people/find explicitly and with a comment. And SIZE -- the full payload is
+    // 1.32 MB, and Bridge.reply hands it to evaluateJavaScript as one inlined
+    // string with completionHandler nil, so if the web view refuses it the
+    // failure is discarded and the page simply never receives its data. A
+    // surface that fails by going quiet is worth 5x less bytes on its own.
+    //
+    // Unprojected stays the default so the CLI and any existing caller are
+    // unchanged; the page asks for what it needs.
+    const forPage = url.searchParams.get('for') === 'page';
+    const people = (out.people ?? []).map(({ identifiers, ...star }) => {
+      if (!forPage) return star;
+      return {
+        key: star.key,
+        name: star.name,
+        channels: star.channels,
+        messages: star.messages,
+        roomMessages: star.roomMessages,
+        roomOnly: star.roomOnly,
+        presenceDays: star.presenceDays,
+        lastSeen: star.lastSeen,
+        years: star.years,
+      };
+    });
+    send(res, 200, { ...out, people }, cors);
     return;
   }
 
