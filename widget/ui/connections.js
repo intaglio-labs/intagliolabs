@@ -989,6 +989,44 @@ function card(src, keep) {
           }
           return `enter your ${uncap(field)}`;
         };
+    // BEGIN'S OWN ECHOES. beginLogin sends set-management-room, cancel and the
+    // login verb before anything a person did, so three of the bot's replies
+    // are always answers to the machine. They are not news and must not be
+    // mistaken for the bot's last word.
+    const BOT_NOISE = /^(this room (is already|has been marked)|login cancelled|no ongoing command)/iu;
+    // The last thing the bot actually said to the OWNER, question or not.
+    const botSaid = () => {
+      for (const m of [...((data && data.transcript) || [])].reverse()) {
+        if (m.from !== 'bot') continue;
+        const body = String(m.body || '').trim();
+        if (!body || body.startsWith('Login URL:') || body.includes('`{')) continue;
+        if (BOT_NOISE.test(body)) continue;
+        return body;
+      }
+      return null;
+    };
+    // A REJECTED VALUE IS NOT THE END OF THE STEP. mautrix answers a malformed
+    // answer by complaining and waiting for another — the step stays open — so
+    // this is the one "not a question" that must keep the box on screen.
+    // Austin's number went in without its country code, the bot said "Invalid
+    // value: phone number must start with +", and the card threw that away and
+    // offered to start over (2026-08-26). The single most useful line on the
+    // screen was the one being discarded.
+    const RETRYABLE = /^invalid\b|must start with|not a valid|please try again/iu;
+    // The last thing the bot ASKED, wherever it is in the window — which is one
+    // message further back when a complaint sits on top of it.
+    const lastQuestion = () => {
+      for (const m of [...((data && data.transcript) || [])].reverse()) {
+        if (m.from !== 'bot') continue;
+        const body = String(m.body || '').trim();
+        if (!body || body.startsWith('Login URL:') || body.includes('`{')) continue;
+        if (BOT_NOISE.test(body)) continue;
+        const ask = body.split('\n').map((l) => l.trim()).filter(Boolean)
+          .find((l) => l.endsWith('?') || /^(please|enter|register|create|choose)\b/iu.test(l));
+        if (ask) return tidy(ask);
+      }
+      return null;
+    };
     const askedFor = () => {
       if (!(data && Array.isArray(data.transcript))) return null;
       for (let i = data.transcript.length - 1; i >= 0; i--) {
@@ -1120,7 +1158,7 @@ function card(src, keep) {
     // has no obvious shape falls back to the vague line, which is the right
     // answer there.
     const answerHint = () => {
-      const asked = askedFor() || '';
+      const asked = askedFor() || lastQuestion() || '';
       if (/\bphone\b/iu.test(asked)) return '+1 xxx xxx xxxx';
       // An ADDRESS looks like an address. "type your answer" under "enter your
       // email" is the box describing itself instead of the answer (owner,
@@ -1373,6 +1411,21 @@ function card(src, keep) {
         // askedFor() returns null and the card offered `begin login` — a button
         // whose first act is `cancel`, beside the step it would cancel.
         appendTranscript();
+      } else if (!askedFor() && RETRYABLE.test(botSaid() || '')) {
+        // The step is still open: show what was asked, what was wrong with the
+        // answer, and a box to answer it again.
+        const q = lastQuestion();
+        if (q) {
+          const say = document.createElement('span');
+          say.className = 'setup';
+          say.textContent = q;
+          tip.appendChild(say);
+        }
+        const why = document.createElement('span');
+        why.className = 'setup';
+        why.textContent = botSaid(); // server-masked; text only, never HTML
+        tip.appendChild(why);
+        relayInput(answerHint(), false);
       } else if (!askedFor()) {
         // NO PROMPT MEANS NO PENDING STEP — askedFor()'s own rule, from
         // 2026-08-25, when a bot answered a half-finished login with "Unknown
