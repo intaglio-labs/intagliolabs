@@ -251,3 +251,80 @@ test('a calendar organizer absent from the attendee list is still a person', () 
   assert.ok(chair, 'the person who called the meeting is in the graph');
   assert.equal(chair.name, 'Chair Person');
 });
+
+// ---- a room is not a conversation ----
+//
+// 22.3% of iMessage rows are group threads, and until 2026-08-26 nothing here
+// could tell: the branch that asked "is this a group" read meta.is_group, which
+// only WhatsApp writes. These pin both halves of the fix -- the clocks stop
+// ticking on room chatter, and the counts do NOT move while that happens.
+const GROUP_GUID = 'any;+;chat90210';
+const DIRECT_GUID = 'any;-;+15550444';
+
+test('somebody speaking in a room has not reached out to you', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    // Their only inbound is a group post, two days ago.
+    { ts: NOW - 2 * DAY, source: 'imessage', entity_id: 'g1', text: 'anyone free saturday',
+      meta: { chat_guid: GROUP_GUID, handle: '+15550444', is_from_me: false } },
+  ]);
+  const p = buildGraph(ctx, spineDb([]), { now: NOW }).find((x) => x.identifiers.includes('+15550444'));
+  assert.ok(p, 'they are still a person -- this is not a filter');
+  assert.equal(p.messages, 1, 'and their message still counts');
+  assert.equal(p.dormancyDays, null, 'but they have never reached out');
+  assert.equal(p.roomOnly, true);
+  assert.equal(p.roomMessages, 1);
+  assert.equal(p.directMessages, 0);
+});
+
+test('a direct message still starts the clock', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - 2 * DAY, source: 'imessage', entity_id: 'd1', text: 'hey',
+      meta: { chat_guid: DIRECT_GUID, handle: '+15550444', is_from_me: false } },
+  ]);
+  const p = buildGraph(ctx, spineDb([]), { now: NOW }).find((x) => x.identifiers.includes('+15550444'));
+  assert.equal(p.dormancyDays, 2);
+  assert.equal(p.roomOnly, false);
+  assert.equal(p.directMessages, 1);
+});
+
+// THE CONSTRAINT. If this ever fails, the room flag has leaked out of the
+// clocks and into an accumulator, and everyone's numbers have quietly moved.
+test('the room split rides ALONGSIDE the counts, it does not reclassify them', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - 9 * DAY, source: 'imessage', entity_id: 'm1', text: 'in the room',
+      meta: { chat_guid: GROUP_GUID, handle: '+15550444', is_from_me: false } },
+    { ts: NOW - 8 * DAY, source: 'imessage', entity_id: 'm2', text: 'also the room',
+      meta: { chat_guid: GROUP_GUID, handle: '+15550444', is_from_me: false } },
+    { ts: NOW - 5 * DAY, source: 'imessage', entity_id: 'm3', text: 'direct to me',
+      meta: { chat_guid: DIRECT_GUID, handle: '+15550444', is_from_me: false } },
+    { ts: NOW - 4 * DAY, source: 'imessage', entity_id: 'm4', text: 'my reply',
+      meta: { chat_guid: DIRECT_GUID, handle: '+15550444', is_from_me: true } },
+  ]);
+  const p = buildGraph(ctx, spineDb([]), { now: NOW }).find((x) => x.identifiers.includes('+15550444'));
+  assert.equal(p.messages, 4, 'every message still counts, room or not');
+  assert.equal(p.received, 3);
+  assert.equal(p.sent, 1);
+  assert.equal(p.reciprocity, 0.33, 'reciprocity is computed from the unchanged counts');
+  // The second axis, which is additive and sums back to the same total.
+  assert.equal(p.roomMessages, 2);
+  assert.equal(p.directMessages, 2);
+  assert.equal(p.roomMessages + p.directMessages, p.messages);
+  assert.equal(p.dormancyDays, 5, 'the clock uses the DIRECT message, not the newer room one');
+});
+
+// 656 live rows carry no chat_guid. They must keep behaving exactly as they did.
+test('a row with no thread is credited as before, and asserts no room', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - 3 * DAY, source: 'imessage', entity_id: 'u1', text: 'no guid here',
+      meta: { handle: '+15550444', is_from_me: false } },
+  ]);
+  const p = buildGraph(ctx, spineDb([]), { now: NOW }).find((x) => x.identifiers.includes('+15550444'));
+  assert.equal(p.messages, 1);
+  assert.equal(p.dormancyDays, 3, 'unknown is credited as direct, so nothing moved');
+  assert.equal(p.roomOnly, false);
+  assert.equal(p.roomMessages, 0);
+});
