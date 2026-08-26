@@ -94,15 +94,34 @@ function safeMeta(meta) {
   }
 }
 
-// Rebuild the episode index from context, in one transaction.
+// Bring the episode index up to date with context.
 //
-// REPLACE, not merge. An episode's identity is its members, and a message
-// arriving late can move a boundary that a previous build already wrote --
-// merging would leave two overlapping episodes claiming the same row, and
-// episode_member(context_id, episode_id) is UNIQUE precisely so that cannot
-// happen quietly. A full rebuild over 12,782 rows takes well under a second.
+// WRITES ONLY THE DIFFERENCE. This used to DELETE both tables and reinsert
+// every episode -- 36,978 episodes and 360,367 members -- to arrive, almost
+// always, at exactly the rows that were already there. Two costs, and the
+// second is the one that hurt:
+//
+//   the write itself, and
+//   the LOCK. The corpus runs journal_mode=DELETE, so a writer excludes every
+//   reader for the whole transaction, and hermes is single-threaded on top of
+//   that. Measured against the live server while the distiller held the corpus:
+//   94 SECONDS, during which the app answered nothing. The rebuild in isolation
+//   is six.
+//
+// An episode's identity is its members, and `member_hash` already says so --
+// episodeStore has always used it to recognise work across a rebuild, and it is
+// unique across all 36,978 on this corpus. So the build runs in memory, off the
+// lock, and only genuinely new episodes are inserted and genuinely gone ones
+// deleted. A quiet corpus writes nothing at all.
+//
+// Ids therefore SURVIVE for episodes that did not change, which is a
+// correctness property and not only a saving: distill_run joins on member_hash,
+// people/topics.mjs counts one topic per conversation using the episode id, and
+// both used to be invalidated wholesale by a rebuild that changed nothing.
 export function rebuildEpisodes(db, { gapMs = DEFAULT_GAP_MS, now = Date.now(), spine = null } = {}) {
   const holes = EPISODE_SOURCES.map(() => '?').join(',');
+  // Read and build BEFORE opening the transaction: this is the slow half and
+  // none of it needs the write lock.
   const rows = db
     .prepare(
       'SELECT id, ts, source, speaker, text, meta, entity_id, content_hash ' +
@@ -112,6 +131,18 @@ export function rebuildEpisodes(db, { gapMs = DEFAULT_GAP_MS, now = Date.now(), 
 
   const episodes = buildEpisodes(rows, { gapMs, now });
 
+  // What each episode is WITH, computed once. The old code called
+  // counterpartyFor twice per episode -- once to store it and once again to
+  // count it in the return -- which is 360,367 members walked and their meta
+  // JSON parsed, twice.
+  const keyFor = new Map();
+  for (const ep of episodes) keyFor.set(ep.member_hash, counterpartyFor(ep, spine));
+
+  const stored = new Map();
+  for (const r of db.prepare('SELECT id, member_hash, counterparty_key FROM episode').all()) {
+    stored.set(r.member_hash, r);
+  }
+
   const insEp = db.prepare(
     'INSERT INTO episode(source, thread_key, started_at, ended_at, row_count, owner_row_count, ' +
       'counterparty_key, built_by, gap_ms, member_hash, settled_at, built_at) ' +
@@ -120,13 +151,36 @@ export function rebuildEpisodes(db, { gapMs = DEFAULT_GAP_MS, now = Date.now(), 
   const insMem = db.prepare(
     'INSERT INTO episode_member(episode_id, context_id, line_no, quotable) VALUES (?, ?, ?, ?)'
   );
+  const delEp = db.prepare('DELETE FROM episode WHERE id = ?');
+  const setKey = db.prepare('UPDATE episode SET counterparty_key = ? WHERE id = ?');
+
+  let inserted = 0;
+  let deleted = 0;
+  let rekeyed = 0;
 
   db.exec('BEGIN');
   try {
-    db.exec('DELETE FROM episode_member');
-    db.exec('DELETE FROM episode');
+    // Gone: an episode whose members were re-cut, or whose rows were removed.
+    for (const [hash, row] of stored) {
+      if (keyFor.has(hash)) continue;
+      delEp.run(row.id); // episode_member cascades
+      deleted += 1;
+    }
     for (const ep of episodes) {
-      const key = counterpartyFor(ep, spine);
+      const key = keyFor.get(ep.member_hash);
+      const already = stored.get(ep.member_hash);
+      if (already !== undefined) {
+        // UNCHANGED CONTENT CAN STILL HAVE A NEW ANSWER. The counterparty is
+        // resolved through the contacts spine, so an episode nobody touched
+        // acquires a name the moment Contacts learns one. Cheap to check and
+        // almost always a no-op, but skipping it would freeze every existing
+        // episode at whatever the address book knew on the day it was cut.
+        if ((already.counterparty_key ?? null) !== (key ?? null)) {
+          setKey.run(key, already.id);
+          rekeyed += 1;
+        }
+        continue;
+      }
       const id = Number(
         insEp.run(
           ep.source,
@@ -144,6 +198,7 @@ export function rebuildEpisodes(db, { gapMs = DEFAULT_GAP_MS, now = Date.now(), 
         ).lastInsertRowid
       );
       for (const m of ep.members) insMem.run(id, m.context_id, m.line_no, m.quotable);
+      inserted += 1;
     }
     db.exec('COMMIT');
   } catch (error) {
@@ -157,7 +212,10 @@ export function rebuildEpisodes(db, { gapMs = DEFAULT_GAP_MS, now = Date.now(), 
     episodes: episodes.length,
     settled: episodes.filter((e) => e.settled).length,
     rows: rows.length,
-    withCounterparty: episodes.filter((e) => counterpartyFor(e, spine) !== null).length,
+    withCounterparty: [...keyFor.values()].filter((k) => k !== null).length,
+    inserted,
+    deleted,
+    rekeyed,
   };
 }
 

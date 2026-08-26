@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import { openDb, insertRows } from '../server/hermes.mjs';
-import { buildGraph } from '../server/people/graph.mjs';
+import { buildGraph, loadSpine } from '../server/people/graph.mjs';
 
 const NOW = new Date(2027, 0, 1).getTime();
 const DAY = 86_400_000;
@@ -357,4 +357,71 @@ test('an unaddressed message in a ROOM does not invent a person', () => {
   ]);
   const g = buildGraph(ctx, spineDb([]), { now: NOW });
   assert.equal(g.length, 0, 'a room id must never become a person with a message count');
+});
+
+// ---- a spine that cannot be read is not an empty address book ----
+//
+// Observed live: every name in the panel became a raw phone number and one
+// person's 11,716 messages became 8,148 plus a second "person" holding the
+// other 3,568. state.db runs journal_mode=DELETE, the contacts connector
+// upserts ~2,000 rows into it about once a minute, and hermes read it with
+// SQLite's default busy timeout of zero -- so a read landing in that window
+// failed, and loadSpine turned the failure into an empty spine.
+//
+// Empty is not merely a smaller answer. Without it two handles belonging to one
+// person stop resolving to the same key, so they split and the messages divide.
+test('a read failure raises rather than reporting an empty address book', () => {
+  const broken = {
+    prepare() {
+      throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+    },
+  };
+  assert.throws(() => loadSpine(broken), /locked/i);
+});
+
+test('a missing table is still the valid empty case', () => {
+  const fresh = new DatabaseSync(':memory:');
+  const spine = loadSpine(fresh);
+  assert.equal(spine.idToName.size, 0);
+  assert.equal(spine.nameFor('+15550100'), undefined);
+  fresh.close();
+});
+
+test('losing the spine would split one person in two — so it must never be silent', () => {
+  const ctx = openDb(':memory:');
+  const rows = [];
+  // One person, two handles, as Contacts knows them.
+  for (let i = 0; i < 4; i += 1) {
+    rows.push({
+      ts: Date.UTC(2025, 0, 1 + i, 9), source: 'imessage', entity_id: `p1-${i}`, text: 'from handle one',
+      meta: { chat_guid: 'any;-;+15550100', handle: '+15550100', is_from_me: false },
+    });
+  }
+  for (let i = 0; i < 3; i += 1) {
+    rows.push({
+      ts: Date.UTC(2025, 1, 1 + i, 9), source: 'imessage', entity_id: `p2-${i}`, text: 'from handle two',
+      meta: { chat_guid: 'any;-;+15550101', handle: '+15550101', is_from_me: false },
+    });
+  }
+  insertRows(ctx, rows);
+
+  const withSpine = new DatabaseSync(':memory:');
+  withSpine.exec('CREATE TABLE contact_ids (identifier TEXT PRIMARY KEY, display_name TEXT, kind TEXT, updated_ts INTEGER)');
+  const ins = withSpine.prepare('INSERT INTO contact_ids VALUES (?,?,?,?)');
+  ins.run('+15550100', 'Mika Tanaka', 'phone', 1);
+  ins.run('+15550101', 'Mika Tanaka', 'phone', 1);
+
+  const named = buildGraph(ctx, withSpine, { now: Date.UTC(2025, 6, 1) });
+  const mika = named.filter((p) => p.name === 'Mika Tanaka');
+  assert.equal(mika.length, 1, 'one person, both handles');
+  assert.equal(mika[0].messages, 7, 'and all seven messages');
+
+  // The same corpus with no spine at all: two people, messages divided. This is
+  // the shape of the bug, pinned so the difference stays visible.
+  const nameless = buildGraph(ctx, new DatabaseSync(':memory:'), { now: Date.UTC(2025, 6, 1) });
+  const split = nameless.filter((p) => /^\+1555010[01]$/.test(p.name));
+  assert.equal(split.length, 2, 'two "people" where there is one');
+  assert.deepEqual(split.map((p) => p.messages).sort((a, b) => a - b), [3, 4], 'seven, divided');
+
+  ctx.close(); withSpine.close();
 });

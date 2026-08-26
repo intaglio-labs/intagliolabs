@@ -66,6 +66,11 @@ final class Connectors {
 
     let p = Process()
     p.executableURL = node
+    // Same reasoning as the distiller: a scheduled ingest is background work and
+    // has no business competing for performance cores with what the owner is
+    // doing. Not paused on battery -- an ingest is short and keeping the corpus
+    // current is the point of the app -- just scheduled politely.
+    p.qualityOfService = .utility
     p.arguments = [script.path]
     // Same log files the agent wrote, so nothing that reads them has to change.
     let logs = home.appendingPathComponent(".hazlie/logs")
