@@ -214,15 +214,57 @@ fi
 # The generated config ships mautrix's EXAMPLE credentials (api_id 12345), and
 # the bridge refuses to start on them — so the example id is the reliable
 # "not yet configured" signal, not an empty key.
-# If this ever ships a default pair instead of stopping here, read the note at
-# PLATFORMS.telegram in connect/lib/bridge.mjs FIRST: the credential cannot be
-# committed to this repo (Telegram refuses logins from published api_ids), and
-# this is the line that would write the bundled one.
+# The generated config ships mautrix's EXAMPLE credentials (api_id 12345) and
+# the bridge refuses to start on them, so the example id is the reliable
+# "not yet configured" signal rather than an empty key.
+#
+# THREE PLACES A REAL PAIR CAN COME FROM, in this order. None of them is this
+# repository, and that is deliberate: it is public, and Telegram refuses logins
+# made with any api_id it finds in public code (API_ID_PUBLISHED_FLOOD). See
+# the note at PLATFORMS.telegram in connect/lib/bridge.mjs.
+#   1. $HZ_TELEGRAM_APP        — an explicit run, or CI from a repo secret
+#   2. ~/.hazlie/secrets/telegram-app.txt — this machine's own copy (0600)
+#   3. the installed app's bundled copy   — what widget/build.sh baked in, so
+#      a user who never registered anything still gets a working bridge
+# The per-user walkthrough in the widget stays live underneath all three: it
+# writes the same two keys through the same path, so a flagged shipped id
+# degrades to "register your own" instead of to nothing.
+telegram_app_credential() {
+  if [ -n "${HZ_TELEGRAM_APP:-}" ]; then printf '%s' "$HZ_TELEGRAM_APP"; return; fi
+  if [ -f "$HOME/.hazlie/secrets/telegram-app.txt" ]; then
+    tr -d '[:space:]' < "$HOME/.hazlie/secrets/telegram-app.txt"; return
+  fi
+  for app in "/Applications/Intaglio Labs.app" "$HOME/Applications/Intaglio Labs.app"; do
+    if [ -f "$app/Contents/Resources/backend/telegram-app" ]; then
+      tr -d '[:space:]' < "$app/Contents/Resources/backend/telegram-app"; return
+    fi
+  done
+  printf ''
+}
+
 if [ "$(yq '.network.api_id // 0' "$M/telegram/config.yaml" 2>/dev/null)" = "12345" ]; then
-  ( cd bridges && docker compose stop mautrix-telegram >/dev/null 2>&1 ) || true
-  echo "telegram: stopped — it needs api_id + api_hash from my.telegram.org/apps"
-  echo "          set network.api_id / network.api_hash in $M/telegram/config.yaml,"
-  echo "          then: cd bridges && docker compose up -d mautrix-telegram"
+  TG_APP="$(telegram_app_credential)"
+  # Shape-checked before it is written. A malformed pair produces a container
+  # that crash-loops with nothing on the machine naming the cause — which is
+  # the exact failure this whole block exists to end.
+  if printf '%s' "$TG_APP" | grep -Eq '^[0-9]{1,12}:[0-9a-fA-F]{32}$'; then
+    TG_ID="${TG_APP%%:*}"
+    TG_HASH="${TG_APP#*:}"
+    # Targeted line replacement, not a yq round trip: mautrix's generated
+    # config carries ~700 lines of comments that a re-serialise would flatten.
+    /usr/bin/sed -i '' \
+      -e "s/^\([[:space:]]*api_id:\).*/\1 $TG_ID/" \
+      -e "s/^\([[:space:]]*api_hash:\).*/\1 \"$TG_HASH\"/" \
+      "$M/telegram/config.yaml"
+    ( cd bridges && docker compose up -d mautrix-telegram >/dev/null 2>&1 ) || true
+    echo "telegram: configured from a shipped app credential"
+  else
+    ( cd bridges && docker compose stop mautrix-telegram >/dev/null 2>&1 ) || true
+    echo "telegram: stopped — it needs api_id + api_hash from my.telegram.org/apps"
+    echo "          the widget's Telegram tile walks you through it, or set them"
+    echo "          by hand in $M/telegram/config.yaml and then:"
+    echo "          cd bridges && docker compose up -d mautrix-telegram"
+  fi
 fi
 
 echo "bridge runtime is up:"

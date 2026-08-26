@@ -12,7 +12,9 @@
 //   POST /api/bridge/cookies {p, cookies}  → send the pasted cookies/cURL
 
 import { homedir } from 'node:os';
-import { PLATFORMS, bridgeStatus, beginLogin, relay, loadPanel, loginUrlFrom } from './bridge.mjs';
+import {
+  PLATFORMS, bridgeStatus, bridgeNeedsAppCredential, beginLogin, relay, loadPanel, loginUrlFrom,
+} from './bridge.mjs';
 import { maskOwn } from './bridgePage.mjs';
 import { bearerAuthorized } from './statusApi.mjs';
 
@@ -93,6 +95,12 @@ export async function bridgeApiResponse({
         // outcome itself. Nothing is navigated to and nothing is harvested,
         // which is why it is its own flag rather than a shape of webLogin.
         qrLogin: platform.qrLogin === true,
+        // Telegram's bridge will not start until an api_id/api_hash exists,
+        // and a build may have shipped one. True means the card should walk
+        // the owner through registering their own; false means it is already
+        // configured and the card goes straight to the login conversation.
+        // Read off the config, so the same card is right either way.
+        needsAppCredential: bridgeNeedsAppCredential(platformId, { home }),
       },
     };
   };

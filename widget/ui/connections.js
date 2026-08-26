@@ -556,7 +556,7 @@ const HIDDEN_CONNECTORS = new Set(['oura', 'photos', 'files', 'notion', 'notes']
 // cannot be committed to this public repo and needs build-time injection.
 // Delete from this set when that lands; nothing else keys off it, and the
 // connector, its bridge and its walkthrough are all still wired underneath.
-const SOON_CONNECTORS = new Set(['telegram']);
+const SOON_CONNECTORS = new Set();
 // WHAT NEEDS YOU COMES FIRST. The shelf scrolls, so anything past the fourth
 // tile is work to reach — and the tiles that need reaching are exactly the
 // ones not yet connected or broken. Those lead; everything healthy follows in
@@ -1144,7 +1144,15 @@ function card(src, keep) {
       // asks for (a token, or a phone number and then the code).
       const help = BRIDGE_HELP[kindOf(src.id)];
       const started = data && data.transcript && data.transcript.length;
-      if (!started && hint && hint.walkthrough) {
+      // `needsAppCredential` is the SERVER's answer, read off the bridge's own
+      // config — not a guess from this file. A build that shipped an app
+      // credential has already configured Telegram, and showing the paste
+      // walkthrough there would offer to overwrite a working pair with
+      // whatever someone typed. Undeclared (every other platform) is
+      // undefined, which is falsey, so this only ever gates the one that
+      // declares it — granola's walkthrough is a plain hint and unaffected.
+      const needsKeys = kindOf(src.id) !== 'telegram' || data?.needsAppCredential === true;
+      if (!started && hint && hint.walkthrough && needsKeys) {
         // Telegram cannot begin at all until the owner's own api_id/api_hash
         // are in its bridge config — the container refuses to start on the
         // example pair mautrix ships, so "begin login" sat on "starting…"
@@ -1244,12 +1252,32 @@ function card(src, keep) {
     // placement, and the owner got a clipped card floating over the settings
     // column (owner, 2026-08-26, after pressing x on Slack's card). The live
     // tile re-derives everything in this card from status on its next tap, so
-    // a result held by a dead closure is dropped, not re-homed.
-    if (!row.isConnected) return;
+    // a result held by a dead closure is ~~dropped, not re-homed~~ RE-HOMED to
+    // the live tile with the same id.
+    //
+    // Dropping was right about the hazard and wrong about the cost, because a
+    // detached row is not evidence of a stale result. The FIRST press into an
+    // unfocused panel detaches it every time: that click both focuses the
+    // window (which fires refresh, which rebuilds the shelf) and hits the
+    // tile, so the reply lands holding a row the rebuild has already replaced.
+    // Measured in a harness — one grid rebuild, row.isConnected false, no card
+    // — and it is exactly the "first tap does nothing, I have to press it
+    // again" the owner reported on 2026-08-26 and had seen "for other icons
+    // too": every bridge tile behaves this way.
+    //
+    // Re-homing keeps the invariant that mattered — never append a card
+    // anchored to a node no document query can find, which is what left a
+    // clipped card floating over the settings column — while charging nobody a
+    // press for it. The id is what identifies a tile across a rebuild;
+    // everything this card renders comes from `data`, which is fresh.
+    const live = row.isConnected
+      ? row
+      : grid.querySelector(`.row[data-id="${CSS.escape(src.id)}"]`);
+    if (!live) return; // the source really is gone from the payload
     hintHost.replaceChildren();
     for (const r of grid.querySelectorAll('.row')) r.classList.remove('open');
     hintHost.appendChild(tip);
-    row.classList.add('open');
+    live.classList.add('open');
     renderBridge(data);
   };
   const openBridgeLogin = () => {

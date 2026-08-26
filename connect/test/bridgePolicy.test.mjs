@@ -17,7 +17,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { PLATFORMS } from '../lib/bridge.mjs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { PLATFORMS, bridgeNeedsAppCredential } from '../lib/bridge.mjs';
 
 const entries = Object.entries(PLATFORMS);
 
@@ -200,6 +204,51 @@ test('the platforms on a non-bridgev2 schema are the ones we expect', () => {
       `${id}: statusSql must project a remote_name column — bridgeStatus reads ` +
         `row.remote_name and nothing else`);
   }
+});
+
+test('the app-credential roster, and what it answers', () => {
+  // A platform declares `appCredential` when its bridge cannot start until
+  // someone supplies a credential the PRODUCT may ship (widget/build.sh bakes
+  // one in, ops/setup-bridges.sh writes it). Pinned as a roster because the
+  // answer drives whether the card shows a paste walkthrough, and offering to
+  // overwrite a working pair is worse than not offering at all.
+  const withApp = entries.filter(([, p]) => p.appCredential).map(([id]) => id).sort();
+  assert.deepEqual(withApp, ['telegram']);
+
+  for (const [id, p] of entries) {
+    if (!p.appCredential) continue;
+    assert.ok(typeof p.appCredential.file === 'string' && p.appCredential.file.length > 0,
+      `${id}: appCredential needs the config file to read`);
+    assert.ok(p.appCredential.unset instanceof RegExp,
+      `${id}: appCredential.unset must be a RegExp — it is matched against the file`);
+  }
+
+  // The four answers, because only the first one puts a paste box on screen
+  // and the other three must not. "Cannot see the config" is deliberately
+  // FALSE: guessing yes would ask someone to configure a bridge that may
+  // already be working (owner, 2026-08-26).
+  const home = mkdtempSync(join(tmpdir(), 'hz-appcred-'));
+  mkdirSync(join(home, '.hazlie', 'matrix', 'telegram'), { recursive: true });
+  const cfg = join(home, '.hazlie', 'matrix', 'telegram', 'config.yaml');
+
+  // mautrix ships api_id 12345 as its example and refuses to start on it, so
+  // that value is the "nobody configured this" signal — an empty key never
+  // appears, which is why this matches a placeholder rather than emptiness.
+  writeFileSync(cfg, 'network:\n  api_id: 12345\n  api_hash: "tbd"\n');
+  assert.equal(bridgeNeedsAppCredential('telegram', { home }), true, 'placeholder → needs one');
+
+  // A MADE-UP id on purpose. The real one is a credential, and Telegram
+  // refuses logins made with any api_id it finds in public code — putting the
+  // product's own into a fixture would break every install, which is the same
+  // trap the note at PLATFORMS.telegram exists to warn about. Any number that
+  // is not 12345 exercises this branch.
+  writeFileSync(cfg, 'network:\n  api_id: 99999999\n  api_hash: "real"\n');
+  assert.equal(bridgeNeedsAppCredential('telegram', { home }), false, 'configured → does not');
+
+  assert.equal(bridgeNeedsAppCredential('telegram', { home: join(home, 'nope') }), false,
+    'no config → false, not a guess');
+  assert.equal(bridgeNeedsAppCredential('discord', { home }), false,
+    'a platform that declares nothing is never asked for a credential');
 });
 
 test('the field contract is declared per platform, for the two that need one', () => {

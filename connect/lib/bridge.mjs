@@ -175,7 +175,32 @@ export const PLATFORMS = Object.freeze({
     bot: '@telegrambot:hazlie.local',
     dir: 'telegram',
     db: 'telegram/mautrix-telegram.db',
-    initial: 'login',
+    // ~~`login`~~ — the bot answers that with a MENU: "Please specify a login
+    // flow, e.g. `login phone`", offering phone, qr and bot. So the card
+    // relayed into a conversation waiting for a word it never sends, and the
+    // login could not complete (verified against the running bridge,
+    // 2026-08-26 — the first day it ran at all; it had crash-looped on the
+    // example api_id since it was provisioned).
+    //
+    // FOURTH TIME FOR THE SAME MISTAKE: `login-token` on Discord, `login-token`
+    // on Slack, `login token` on Slack as the retreat from a wrong finding,
+    // and this. Every one was a verb written into this table against a bridge
+    // nobody could talk to. THE RULE: mautrix login verbs take a flow
+    // argument, and the only way to know which is to ask a running bot.
+    //
+    // `phone` because the owner asked for a credential login. `qr` is also on
+    // that menu and the QR window from e2d5c65 would drive it unchanged
+    // (qrLogin: true; the poll's connected check is platform-agnostic) — worth
+    // knowing if phone auth turns out worse than it looks, not a proposal.
+    initial: 'login phone',
+    // WHETHER THE WALKTHROUGH IS STILL NEEDED, read off the bridge's own
+    // config rather than assumed. mautrix ships api_id 12345 as its example
+    // and the bridge refuses to start on it, so that value IS the "nobody has
+    // configured this" signal — an empty key never appears. When a build ships
+    // an app credential (widget/build.sh → ops/setup-bridges.sh) this is
+    // already real by the time anyone opens the card, and the card must not
+    // ask for a paste that would overwrite a working pair.
+    appCredential: { file: 'telegram/config.yaml', unset: /^\s*api_id:\s*12345\s*$/mu },
     prefix: '!tg',
     site: 'telegram.org',
     loginUrl: 'https://web.telegram.org/',
@@ -503,6 +528,23 @@ export function bridgeStatus(platformId, { home = homedir() } = {}) {
   }
 }
 
+// Does this bridge still need the owner to register an app of their own?
+// True only for a platform that declares `appCredential` AND whose config
+// still carries the placeholder. Everything else — no declaration, no config,
+// an unreadable file — is false, because the question only has a useful answer
+// when we can actually see the placeholder: guessing "yes" would put a paste
+// box in front of a bridge that is already working.
+export function bridgeNeedsAppCredential(platformId, { home = homedir() } = {}) {
+  const p = PLATFORMS[platformId];
+  if (!p?.appCredential) return false;
+  try {
+    const text = readFileSync(join(matrixDir(home), p.appCredential.file), 'utf8');
+    return p.appCredential.unset.test(text);
+  } catch {
+    return false;
+  }
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function mx(creds, method, path, body) {
@@ -522,7 +564,13 @@ async function mx(creds, method, path, body) {
     json = null;
   }
   if (!res.ok) {
-    throw new Error(json?.error ?? `homeserver returned ${res.status}`);
+    // The status rides along. Without it every caller's catch has to treat
+    // "you are not in that room" (a decisive 403) the same as "the homeserver
+    // did not answer" (unknowable), and ensureBotRoom below did exactly that
+    // for as long as it has existed.
+    const err = new Error(json?.error ?? `homeserver returned ${res.status}`);
+    err.status = res.status;
+    throw err;
   }
   return json ?? {};
 }
@@ -550,8 +598,15 @@ async function ensureBotRoom(creds, botMxid) {
     try {
       const members = await mx(creds, 'GET', `/rooms/${encodeURIComponent(roomId)}/joined_members`);
       if (members?.joined && Object.hasOwn(members.joined, botMxid)) return roomId;
-    } catch {
-      return roomId; // cannot tell — the remembered room is still the best guess
+    } catch (err) {
+      // ~~Cannot tell — the remembered room is still the best guess.~~ Only
+      // when the homeserver failed to answer. A 403 or 404 from joined_members
+      // IS the answer: you are not in that room, so nothing you send there
+      // will ever be read. Returning it anyway turned a recoverable state into
+      // a permanent 502 — Telegram's begin failed on "User @you not in room
+      // …, and room previews are disabled" every time, and would have kept
+      // failing forever (owner, 2026-08-26).
+      if (err?.status !== 403 && err?.status !== 404) return roomId;
     }
     // Fall through: forget it and make one the bot can actually accept.
     try {
@@ -571,7 +626,15 @@ async function ensureBotRoom(creds, botMxid) {
   try {
     await mx(creds, 'PUT', `/user/${encodeURIComponent(creds.userId)}/account_data/m.direct`, {
       ...(direct ?? {}),
-      [botMxid]: [...(existing ?? []), roomId],
+      // REPLACE, don't append. ~~[...(existing ?? []), roomId]~~ grew this
+      // list by one every time a room had to be remade, and only the LAST
+      // entry is ever read — so the rest were pure sediment. A bridge that is
+      // down remakes a room per attempt: Telegram's list had reached TEN dead
+      // rooms while its container crash-looped on the example api_id, and the
+      // one at the end was the one nobody could join (owner, 2026-08-26).
+      // Everything being dropped here is a room we just left and forgot, or a
+      // pointer we already judged unusable.
+      [botMxid]: [roomId],
     });
   } catch {
     // Non-fatal: the room still works this session; worst case we make another

@@ -14,11 +14,29 @@ import { fileURLToPath } from 'node:url';
 const UI = join(dirname(fileURLToPath(import.meta.url)), '..', 'ui');
 const page = readFileSync(join(UI, 'connections.js'), 'utf8');
 
-test('a login result whose tile was rebuilt is dropped, not re-homed', () => {
+test('a login result whose tile was rebuilt is re-homed, never rendered unanchored', () => {
+  // ~~"...is dropped, not re-homed", asserting `if (!row.isConnected) return;`.~~
+  // The hazard was right and the remedy overshot (2026-08-26, same day). A
+  // detached row is not evidence of a stale result: the FIRST press into an
+  // unfocused panel detaches it every time, because that one click both
+  // focuses the window — firing refresh, which rebuilds the shelf — and hits
+  // the tile. Measured in a harness: one grid rebuild, row.isConnected false,
+  // no card. That is the owner's "first tap does nothing, I have to press it
+  // again", and it was true of every bridge tile.
+  //
+  // So the invariant this file exists to defend is unchanged — a card must
+  // never reach the live host without a live anchor — and it is now met by
+  // finding the tile that replaced this one rather than by throwing the
+  // result away. Only a source that has genuinely left the payload drops.
   const show = /const showBridgePanel = \(data\) => \{([\s\S]*?)\n  \};/u.exec(page)?.[1] ?? '';
   assert.ok(show, 'showBridgePanel exists');
-  assert.match(show, /if \(!row\.isConnected\) return;/u,
-    'a dead closure must not append a card no document query can anchor');
+  assert.match(show, /row\.isConnected/u, 'still notices that its own row died');
+  assert.match(show, /grid\.querySelector\(`\.row\[data-id="\$\{CSS\.escape\(src\.id\)\}"\]`\)/u,
+    're-homes by the id both the old tile and its replacement carry');
+  assert.match(show, /if \(!live\) return;/u,
+    'a source that really is gone still drops rather than drawing unanchored');
+  assert.match(show, /live\.classList\.add\('open'\)/u,
+    'the LIVE row is what gets marked open — hzPlacePop anchors on it');
 });
 
 test('the pop-over resolves its anchor and refuses to render without one', () => {
