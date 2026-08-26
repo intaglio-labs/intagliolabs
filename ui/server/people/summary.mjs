@@ -50,7 +50,8 @@ export function gatherRows(contextDb, idToKey, personKey, year) {
     .prepare(
       // `source` is selected because threadKind dispatches on it. It was not
       // needed while the group test read a meta key; it is now.
-      "SELECT ts, source, text, meta FROM context WHERE source IN ('imessage','whatsapp') " +
+      "SELECT ts, source, text, meta FROM context WHERE source IN ('imessage','whatsapp'," +
+        "'messenger','instagram','twitter','telegram','discord','slack','linkedin') " +
         'AND ts >= ? AND ts < ? AND text IS NOT NULL ORDER BY ts'
     )
     .all(y0, y1);
@@ -123,7 +124,7 @@ const REGEN_FRAC = 0.2; // ...or a fifth of the sample's basis, whichever is lar
 // BUMP THIS whenever gatherRows, the prompt file, or MIN_ROWS changes. A
 // mismatch invalidates as surely as drift does, which turns "delete the db by
 // hand and hope you remembered" into a one-line diff that reviews itself.
-export const SUMMARY_REVISION = 2; // 2: rooms excluded from the sample (2026-08-26)
+export const SUMMARY_REVISION = 3; // 3: bridged social conversations included (2026-08-26)
 
 export function summaryStillValid(rowsSeen, rowsNow) {
   return Math.abs(rowsNow - rowsSeen) <= Math.max(REGEN_ABS, Math.floor(rowsSeen * REGEN_FRAC));

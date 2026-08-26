@@ -93,6 +93,33 @@ test('a portal room yields rows on both sides, named and attributed', () => {
   assert.equal(mine.meta.chat_name, 'Dana');
 });
 
+test('a group row keeps the room partner but credits the actual sender', () => {
+  const body = {
+    rooms: { join: { '!group:hazlie.local': {
+      state: { events: [
+        { type: 'm.room.member', state_key: '@discord_5:hazlie.local',
+          content: { displayname: 'Ari' } },
+        { type: 'm.room.member', state_key: '@discord_6:hazlie.local',
+          content: { displayname: 'Bo' } },
+        { type: 'm.room.member', state_key: '@you:hazlie.local',
+          content: { displayname: 'me' } },
+      ] },
+      timeline: { events: [
+        msg('@discord_6:hazlie.local', 'from the second member', '$g1'),
+        msg('@you:hazlie.local', 'to the whole room', '$g2'),
+      ] },
+    } } },
+  };
+  const { rows } = syncToRows(body, { selfName: 'owner' });
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].meta.is_group, true);
+  assert.equal(rows[0].meta.chat_handle, 'discord_5', 'the room keeps its stable partner');
+  assert.equal(rows[0].meta.sender_handle, 'discord_6', 'People gets the actual speaker');
+  assert.equal(rows[0].speaker, 'Bo');
+  assert.equal(rows[1].meta.is_group, true);
+  assert.equal(rows[1].meta.sender_handle, undefined, 'owner room posts name no single counterparty');
+});
+
 test('non-text events are skipped rather than ingested as filenames', () => {
   const partner = { mxid: '@slack_1:hazlie.local', source: 'slack', handle: 'slack_1' };
   const image = { type: 'm.room.message', sender: '@slack_1:hazlie.local',

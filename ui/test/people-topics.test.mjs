@@ -43,6 +43,43 @@ test('taxonomy tallies key on (person, year): one row = one hit, years stay sepa
   assert.equal(docs.get('name:sam lee|2021').taxonomy.fundraising, 1);
 });
 
+test('every Matrix social DM contributes topics, while social rooms do not', () => {
+  const ctx = openDb(':memory:');
+  const y = new Date(2025, 5, 1).getTime();
+  const sources = ['messenger', 'instagram', 'twitter', 'telegram', 'discord', 'slack', 'linkedin'];
+  const idToKey = new Map();
+  const rows = [];
+  for (const [i, source] of sources.entries()) {
+    const handle = `${source}_direct`;
+    idToKey.set(handle, `name:${source} direct`);
+    rows.push({
+      ts: y + i * DAY,
+      source,
+      entity_id: `${source}:topic-direct`,
+      text: 'the seed round term sheet arrived',
+      meta: { chat_handle: handle, is_group: false, is_from_me: false },
+    });
+  }
+  idToKey.set('discord_group_sender', 'name:discord group sender');
+  rows.push({
+    ts: y + 20 * DAY,
+    source: 'discord',
+    entity_id: 'discord:topic-group',
+    text: 'the seed round term sheet arrived',
+    meta: {
+      chat_handle: 'discord_room', sender_handle: 'discord_group_sender',
+      is_group: true, is_from_me: false,
+    },
+  });
+  insertRows(ctx, rows);
+
+  const { docs } = topicTallies(ctx, idToKey);
+  for (const source of sources) {
+    assert.equal(docs.get(`name:${source} direct|2025`)?.taxonomy.fundraising, 1, source);
+  }
+  assert.equal(docs.has('name:discord group sender|2025'), false, 'a room never becomes a topic chip');
+});
+
 test('stopwords, names, urls and one-off words never become chips', () => {
   const ctx = openDb(':memory:');
   const y = new Date(2021, 2, 1).getTime();
