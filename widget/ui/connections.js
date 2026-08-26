@@ -58,10 +58,16 @@ function settingRow({ name, note, on, message }) {
   const label = document.createElement('span');
   label.className = 'setting-name';
   label.textContent = name;
-  const sub = document.createElement('span');
-  sub.className = 'setting-note';
-  sub.textContent = note;
-  text.append(label, sub);
+  text.appendChild(label);
+  // The note is optional now — both switch rows shed theirs (owner,
+  // 2026-08-25): "Reduce Motion is on for this Mac" and "presses, sending
+  // and replies" explained controls whose names already say it.
+  if (note) {
+    const sub = document.createElement('span');
+    sub.className = 'setting-note';
+    sub.textContent = note;
+    text.appendChild(sub);
+  }
 
   const sw = document.createElement('button');
   sw.className = 'switch' + (on ? ' on' : '');
@@ -308,7 +314,6 @@ async function renderSettings() {
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     rows.push(settingRow({
       name: 'animations',
-      note: 'Reduce Motion is on for this Mac',
       on: p && p.motion === true,
       message: 'setMotion',
     }));
@@ -317,7 +322,6 @@ async function renderSettings() {
   // the only place they can be turned off.
   rows.push(settingRow({
     name: 'sounds',
-    note: 'presses, sending and replies',
     on: !p || p.sounds !== false,
     message: 'setSounds',
   }));

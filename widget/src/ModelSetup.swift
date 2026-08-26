@@ -46,7 +46,7 @@ enum ModelSetup {
     ),
     ModelTier(
       id: "8b",
-      label: "Best",
+      label: "Smartest",
       detail: "Noticeably better answers. Wants 16 GB or more.",
       file: "Qwen3-8B-Q4_K_M.gguf",
       repo: "Qwen/Qwen3-8B-GGUF",
