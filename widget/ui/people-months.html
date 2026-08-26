@@ -67,14 +67,22 @@
        the way back out. Hidden when the list is the whole year. -->
   <div class="pm-filter" id="filter" hidden></div>
   <div class="pl-list" id="list"></div>
-  <!-- The constellation: the same year seen by topic instead of by person.
+  <!-- The constellation: every year seen by topic instead of by person.
        A sibling of the list rather than a second window — the year tabs above
-       belong to both, and the globe is just the last tab. Hidden until it is
-       the chosen view; people-months.js fills it from the year already in
-       hand, so opening it costs no fetch. -->
+       belong to both. ~~"and the globe is just the last tab"~~: it stopped
+       being a tab on 2026-08-26 (see the tabrow comment above, which had
+       already recorded it) and this sentence was left describing the old
+       arrangement. Filled by people-months.js from /people/map, which it
+       caches for the panel's life, so re-opening it costs no fetch. -->
   <div class="pm-sky" id="sky" hidden></div>
   </div>
   <script src="bridge.js"></script>
+  <!-- The constellation's core wears the SAME mood as the home orb, and this
+       is the file that decides what that mood is — blended continuously
+       between the five bands rather than snapped at their edges, so the two
+       orbs cannot land a shade apart. widget.html loads it for the same
+       reason. -->
+  <script src="orb-tod.js"></script>
   <!-- The constellation's geometry, before the page that draws with it. -->
   <script src="people-sky-layout.js"></script>
   <script src="people-months.js"></script>

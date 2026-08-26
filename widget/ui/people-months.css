@@ -172,7 +172,10 @@ body.plist .pl-award {
   width: 14px; height: 14px;
   margin-right: 1px;
   color: var(--hazelnut-light);
-  opacity: 0.75;
+  /* ~~0.75.~~ Lifted once the glyphs stopped all being hazelnut: the tint is
+     the mark's identity now (see the tod-band block below), and a quarter of
+     it dropped on the way to the eye. */
+  opacity: 0.9;
 }
 body.plist .pl-award svg { width: 100%; height: 100%; display: block; }
 body.plist .pl-award:hover { opacity: 1; }
@@ -330,6 +333,44 @@ body.plist .pm-card-eyebrow {
   text-transform: uppercase;
 }
 body.plist .pm-card-eyebrow svg { flex: 0 0 auto; width: 13px; height: 13px; display: block; }
+
+/* ---- A COLOUR PER CARD, FROM THE ORB'S OWN FIVE MOODS (owner, 2026-08-26) ----
+   Five highlight kinds and five time-of-day bands, and the pairings are the
+   moods' own descriptions in palette.css §time of day, not a rotation:
+
+     favorite     <- power hour     "the brand gradient at full saturation"
+     reconnected  <- early morning  "pre-dawn quiet", something coming back
+     new          <- late morning   "energetic · fresh spring green"
+     streak       <- happy hour     "hazelnut ripens into golden-hour amber"
+     drifting     <- night          "the one band that goes DARKER"
+
+   One declaration each: the eyebrow's `color` is inherited by its label AND by
+   the glyph, which is stroked with currentColor, so the icon and the title
+   cannot come out different colours.
+
+   WHICH STOP OF THE BAND. Each gradient has three or four, and these take the
+   one that is legible as INK on the card rather than the one that is furthest
+   along the ramp — a gradient stop is chosen to sit next to its neighbours on
+   a lit sphere, which is not the same job. Against the card's own background
+   (#191918, the 4% white over the panel) the greys these replace measure 2.63
+   to 1, and the four bands' chosen stops run 7.52 to 9.52 — arithmetic on the
+   WCAG relative-luminance formula, not a guess.
+
+   Night is the exception and it could not be otherwise: its brightest stop is
+   #6e3a5c at 2.03 to 1, darker than the grey it would replace, because the
+   band is defined as going darker than what it sits on. Mixed toward the
+   foreground until it clears 5 to 1 — still the dimmest of the five, which is
+   the right end of the row for the card that says a friendship is fading. */
+body.plist .pm-card[data-kind="person-of-the-year"] .pm-card-eyebrow,
+body.plist .pl-award[data-kind="person-of-the-year"] { color: #c5a56d; }
+body.plist .pm-card[data-kind="back-from-your-past"] .pm-card-eyebrow,
+body.plist .pl-award[data-kind="back-from-your-past"] { color: #cbb8d6; }
+body.plist .pm-card[data-kind="rising-star"] .pm-card-eyebrow,
+body.plist .pl-award[data-kind="rising-star"] { color: #7fc46a; }
+body.plist .pm-card[data-kind="streak"] .pm-card-eyebrow,
+body.plist .pl-award[data-kind="streak"] { color: #e0a35c; }
+body.plist .pm-card[data-kind="drifting"] .pm-card-eyebrow,
+body.plist .pl-award[data-kind="drifting"] { color: color-mix(in srgb, #6e3a5c 55%, var(--fg)); }
 body.plist .pm-card-eyebrow span { overflow: hidden; text-overflow: ellipsis; }
 body.plist .pm-card-who { display: flex; align-items: center; gap: 7px; min-width: 0; }
 body.plist .pm-card-face {
@@ -376,27 +417,42 @@ body.plist .pm-sky {
   min-height: 380px;
   overflow: hidden;
 }
-/* The three dashed orbits. Decoration, not data: they do not encode distance
-   or count, they give the field a centre to be arranged around. */
-body.plist .pm-orbit {
+/* The spokes: one line from the core to each bubble, its weight and opacity
+   the same normalised activity that set the bubble's distance. ~~Three dashed
+   orbits at fixed pixel radii.~~ They were decoration on a data display, and
+   they read as a scale they were not — see the note in people-months.js.
+   Stretched to the stage (preserveAspectRatio: none) so a resize moves the
+   line ends with the bubbles they point at. */
+body.plist .pm-spokes {
   position: absolute;
-  left: 50%; top: 51%;
-  transform: translate(-50%, -50%);
-  border-radius: 50%;
-  border: 1px dashed rgba(197, 165, 109, 0.22);
+  inset: 0;
+  width: 100%; height: 100%;
   pointer-events: none;
 }
 /* The owner, at the centre — the one thing every topic is a relationship to.
    Same blob and breathing as the widget's own orb so it reads as the same
-   creature, with the brand gradient running cream -> hazelnut -> green. */
+   creature.
+
+   AND NOW THE SAME MOOD (owner, 2026-08-26). ~~The gradient and the glow were
+   written out longhand here: cream -> hazelnut -> green, with a green halo.~~
+   That is one of the orb's five time-of-day bands — power hour — frozen into a
+   second stylesheet. The home orb has drifted through the other four since the
+   day it was written, so for most of any given day the two orbs were different
+   colours while claiming to be the same creature, and at night they were a
+   deep-magenta one and a bright green one.
+   The vars come from orb-tod.js, which the page now loads and which blends
+   between bands continuously; `tod-orb` on the element is what opts it in.
+   The literals stay as var() FALLBACKS rather than being deleted: they are what
+   paints if that script is ever absent, and a core with no background at all is
+   an invisible centre to a picture that is arranged around it. */
 body.plist .pm-core {
   position: absolute;
   left: 50%; top: 51%;
   transform: translate(-50%, -50%);
   width: 54px; height: 54px;
   border-radius: 49% 51% 52% 48% / 51% 49% 51% 49%;
-  background: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 45%, #33ff66 100%);
-  box-shadow: 0 0 34px rgba(51, 255, 102, 0.25),
+  background: var(--tod-grad, linear-gradient(160deg, #f2e8d4 0%, #c5a56d 45%, #33ff66 100%));
+  box-shadow: 0 0 34px var(--tod-glow, rgba(51, 255, 102, 0.30)),
               inset -4px -4px 10px rgba(0, 0, 0, 0.18),
               inset 4px 4px 9px rgba(255, 255, 255, 0.30);
   animation: orb-breathe 7s ease-in-out infinite;
@@ -404,16 +460,18 @@ body.plist .pm-core {
 }
 /* One topic. Width/height/left/top come from the page. Clicking it opens that
    topic as a list, so it has to say it is a control — the dashed ring alone
-   reads as decoration. */
+   reads as decoration.
+   ~~A centred flex column: the faces, then the label under them.~~ The faces
+   are PACKED now, each one at a spot people-sky-layout.js solved for, so they
+   are positioned against this box rather than flowed inside it. The label went
+   with them, out to the bubble's bottom edge. */
 body.plist .pm-cluster {
   position: absolute;
+  box-sizing: border-box;
   transform: translate(-50%, -50%);
   border-radius: 50%;
   border: 1.5px dashed rgba(197, 165, 109, 0.28);
   background: radial-gradient(circle at 50% 40%, rgba(197, 165, 109, 0.07) 0%, transparent 70%);
-  display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
-  gap: 7px;
   cursor: pointer;
   transition: border-color 0.14s, background 0.14s;
 }
@@ -455,15 +513,6 @@ body.plist .pm-filter-chip:hover .pm-filter-x { color: var(--fg); }
 
 @media (prefers-reduced-motion: reduce) {
   body.plist .pm-cluster { transition: none; }
-}
-/* 78%, not 84%: the discs wrap to a second row, and a circle is narrower there
-   than across its middle. At 84% the trailing "+N" chip sat on the dashed
-   border and looked like it had fallen out of the bubble. */
-body.plist .pm-faces {
-  display: flex; flex-wrap: wrap;
-  align-items: center; justify-content: center;
-  gap: 4px;
-  max-width: 78%;
 }
 /* A person: their initials on a hazelnut disc, lit from the upper left so a
    crowd of them reads as beads rather than flat dots. Diameter is set from
@@ -508,9 +557,17 @@ body.plist .pm-card-face.has-photo {
   color: transparent;
 }
 
+/* Absolutely placed, never flowed: left/top/width/height are the packer's
+   answer for this face in this bubble.
+   NO `overflow: hidden` here, and it is worth saying why not, because the
+   design's artboard has it: the artboard puts a real <img> inside the circle
+   and has to clip it. This draws the photo as a BACKGROUND, which border-radius
+   already clips on its own — and the face's hover tooltip is an ::after that
+   lives 5px BELOW the circle, so hiding overflow would silently swallow it and
+   leave a crowd of initials with no way to learn a name. */
 body.plist .pm-face {
-  position: relative;
-  flex: 0 0 auto;
+  position: absolute;
+  transform: translate(-50%, -50%);
   border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
   background: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 60%, #a8854c 100%);
@@ -521,15 +578,37 @@ body.plist .pm-face {
   cursor: default;
 }
 /* The people this bubble could not fit. Hollow on purpose: it is a count, not
-   a person, and must never be mistaken for one. */
+   a person, and must never be mistaken for one. It sits IN the crowd now
+   rather than after it, so it also carries the panel's own background — a
+   dashed ring alone reads as one more face at this size. */
 body.plist .pm-face-more {
-  background: none;
+  background: rgba(13, 13, 12, 0.85);
   box-shadow: none;
   border: 1px dashed rgba(234, 234, 234, 0.25);
   color: var(--muted);
+  /* NOT CLIPPED, unlike every other face. The base rule hides overflow so a
+     contact photo cannot paint the corners outside its circle; a chip has no
+     photo, and what it has instead is a NUMBER. A four-digit count in a 13px
+     seat sits a pixel or so wider than the dashed ring — which is what the
+     design's own artboard draws, and it reads fine — but clipped to the ring
+     it would read as a different, smaller number. A wrong count is worse than
+     an untidy one. */
+  overflow: visible;
 }
+/* A PILL ON THE BUBBLE'S HEM, not a line under the faces. It has to stay
+   legible over whatever face the packer put at the bottom of the crowd, which
+   is what the opaque background and the border are for; the layout module
+   reserves the 8px it hangs below the circle (LABEL_DROP) so the lowest bubble
+   on the stage does not lose it to the panel edge. */
 body.plist .pm-cluster-label {
-  font-size: 10px;
+  position: absolute;
+  left: 50%; bottom: -8px;
+  transform: translateX(-50%);
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(20, 20, 18, 0.92);
+  border: 1px solid rgba(197, 165, 109, 0.3);
+  font-size: 9px;
   letter-spacing: 0.1em;
   color: var(--muted);
   text-align: center;

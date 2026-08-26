@@ -179,7 +179,7 @@
     const mine = awardsByKey.get(p.key);
     if (!mine || !mine.length) return '';
     return mine.map((a) =>
-      `<span class="pl-award" data-tip="${esc(a.label)}">` +
+      `<span class="pl-award" data-kind="${esc(a.kind)}" data-tip="${esc(a.label)}">` +
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
       `stroke-linecap="round" stroke-linejoin="round">${CARD_ICON[a.kind] || FALLBACK_ICON}</svg>` +
       '</span>').join('');
@@ -273,7 +273,10 @@
 
   // One glyph per card kind. Keyed by the server's `kind`, with a fallback, so
   // a server that grows a sixth card renders as a nameless-but-present card
-  // rather than throwing.
+  // rather than throwing. The same `kind` also picks the card's colour — see
+  // the tod-band block in people-months.css — which is why it rides onto both
+  // the card and the row glyph as a data attribute rather than being switched
+  // on here.
   const CARD_ICON = {
     'person-of-the-year':
       '<path d="M8 4h8v5a4 4 0 0 1-8 0V4Z"></path><path d="M8 5H5v2a3 3 0 0 0 3 3"></path>' +
@@ -293,7 +296,7 @@
   function cardHtml(h, i) {
     const icon = CARD_ICON[h.kind] || FALLBACK_ICON;
     return (
-      `<div class="pm-card${i === 0 ? ' lead' : ''}">` +
+      `<div class="pm-card${i === 0 ? ' lead' : ''}" data-kind="${esc(h.kind)}">` +
         '<div class="pm-card-eyebrow">' +
           '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
           `stroke-linecap="round" stroke-linejoin="round">${icon}</svg>` +
@@ -622,6 +625,20 @@
   // is the sum of the topic's message counts across those people; this is the
   // value that determines proximity to the owner, not merely how many people
   // happen to share the label.
+  //
+  // EACH MEMBER KEEPS THE COUNT THAT PUT THEM IN THIS BUBBLE, and the members
+  // are ordered by it. ~~Both came from the person's GLOBAL engagement: the
+  // roster arrives sorted by total messages, and the faces were sized from
+  // p.engagement.~~ That was defensible while a bubble showed five faces and
+  // meant "the biggest names who are in here". It stopped being defensible the
+  // moment the bubble started carrying its whole cast: inside a circle labelled
+  // FAMILY, a face sized by how much somebody talks to you about WORK is a
+  // false statement about family, and the seats went to whoever was loudest
+  // elsewhere rather than to whoever actually carries the topic. Measured on a
+  // synthetic corpus of eight topics: the global ordering seated five faces in
+  // one bubble and fourteen in another of nearly the same size, because a cast
+  // of uniformly-loud people is a cast of uniformly-large faces, and large
+  // faces do not fit. The per-topic count decays the way topics actually do.
   function clustersFrom(people, marked) {
     const by = new Map();
     for (const p of people) {
@@ -630,9 +647,18 @@
         if (marked && !t.tax) continue;
         let c = by.get(t.label);
         if (!c) by.set(t.label, (c = { label: t.label, members: [], activity: 0 }));
-        c.members.push(p);
-        c.activity += Math.max(0, Number(t.n) || 0);
+        const n = Math.max(0, Number(t.n) || 0);
+        c.members.push({ person: p, n });
+        c.activity += n;
       }
+    }
+    for (const c of by.values()) {
+      // Ties broken by the global order the roster arrived in, which is stable,
+      // so a bubble does not reshuffle itself between two renders of the same
+      // data. `n` alone is not stable: a topic where everyone sent four
+      // messages is entirely ties.
+      c.members.forEach((m, i) => { m.at = i; });
+      c.members.sort((a, b) => b.n - a.n || a.at - b.at);
     }
     // Not sliced here — renderSky needs the full count to say how many topics
     // the cap left out.
@@ -641,17 +667,11 @@
       .sort((a, b) => b.activity - a.activity || b.members.length - a.members.length || a.label.localeCompare(b.label));
   }
 
-  // Face sizes SCALE WITH THE BUBBLE, and that is load-bearing rather than
-  // tidy. Held at the design's flat 22..32 they stopped fitting once bubbles
-  // shrank to make room for more topics: three 32px discs need ~104px, more
-  // than a 127px circle offers at its second row, so they wrapped to three rows
-  // and pushed out through the border. Measured — the first cut had a dozen
-  // faces outside their circles at 400px. 0.20 * d reproduces 22..32 at the
-  // largest bubble, which is where the design's numbers came from.
-  function faceScale(d) {
-    const max = Math.max(16, Math.min(32, Math.round(d * 0.2)));
-    return { max, min: Math.round(max * 0.69) };
-  }
+  // How far down the cluster's roster the faces are sized before the packer is
+  // asked. Well past what any bubble on this panel seats — the largest one
+  // measured seats twenty-one — and it keeps a four-hundred-person topic from
+  // sizing four hundred faces to draw twenty.
+  const FACE_CANDIDATES = 48;
 
   // Contact photos, key -> data URI, or null once we know there is none.
   // Cached for the life of the popup: a face does not change while it is open,
@@ -694,13 +714,24 @@
     }
   }
 
-  function faceEl(p, maxEngagement, fs) {
+  // A FACE'S DIAMETER IS ITS PERSON'S SHARE OF THIS TOPIC — their messages
+  // under this label, against the busiest person under it. The band it moves in
+  // comes from the bubble (people-sky-layout.js owns the ratios), so the
+  // encoding survives a topic being drawn small.
+  function faceSize(n, maxN, fs) {
+    return Math.round(fs.min + (fs.max - fs.min) * (Math.max(0, n) / maxN));
+  }
+
+  // `at` is the spot the packer solved for: centre offsets from the middle of
+  // the bubble, in bubble pixels.
+  function faceEl(p, at) {
     const f = document.createElement('div');
     f.className = 'pm-face';
-    const size = Math.round(fs.min + (fs.max - fs.min) * ((p.engagement || 0) / maxEngagement));
-    f.style.width = `${size}px`;
-    f.style.height = `${size}px`;
-    f.style.fontSize = size >= 28 ? '10px' : `${Math.max(7, Math.round(size * 0.34))}px`;
+    f.style.width = `${at.d}px`;
+    f.style.height = `${at.d}px`;
+    f.style.left = `calc(50% + ${at.x.toFixed(1)}px)`;
+    f.style.top = `calc(50% + ${at.y.toFixed(1)}px)`;
+    f.style.fontSize = at.d >= 28 ? '10px' : `${Math.max(6, Math.round(at.d * 0.34))}px`;
     f.textContent = initials(p.name);
     if (p.key) f.dataset.avatarKey = p.key;
     // data-tip, not title: native tooltips do not fire reliably in a
@@ -712,7 +743,7 @@
   // Written once: the layout sizes the stage against this string's width, and
   // a second copy of the format is a second chance for the two to disagree.
   function labelFor(topic, members) {
-    return `${String(topic).toUpperCase()} · ${members}`;
+    return `${String(topic).toUpperCase()} (${members})`;
   }
 
   function clusterEl(spot, i, stage) {
@@ -730,35 +761,108 @@
     el.style.left = `${(50 + (spot.x * 100) / stage.w).toFixed(1)}%`;
     el.style.top = `${(50 + (spot.y * 100) / stage.h).toFixed(1)}%`;
 
-    const faces = document.createElement('div');
-    faces.className = 'pm-faces';
-    const fs = faceScale(d);
-    // SEATS COME FROM THE BUBBLE, not from a constant. Five faces plus a "+N"
-    // chip is what the largest bubble holds; a small one holds three, and
-    // pretending otherwise is how discs ended up outside their own ring. The
-    // people are sorted by engagement, so a smaller bubble is still showing the
-    // ones who matter most in it.
-    const seats = SKY.facesFor(d, fs.max);
-    const shown = c.people.slice(0, seats);
-    const maxE = Math.max(1, ...shown.map((p) => p.engagement || 0));
-    for (const p of shown) faces.appendChild(faceEl(p, maxE, fs));
-    const rest = c.people.length - shown.length;
-    if (rest > 0) {
+    // SEATS COME FROM THE BUBBLE, not from a constant, and the packer decides
+    // how many there are — see people-sky-layout.js. Sizes are computed for the
+    // whole candidate list before anything is placed, because a face's size is
+    // its engagement against the busiest person in the TOPIC; recomputing it
+    // against whoever happened to be seated would make the same person a
+    // different size in a bubble that dropped its tail.
+    const fs = SKY.faceScaleFor(d);
+    const cast = c.cast.slice(0, FACE_CANDIDATES);
+    const maxN = Math.max(1, ...cast.map((m) => m.n));
+    let packed = SKY.packFaces(d, cast.map((m) => faceSize(m.n, maxN, fs)));
+    let chip = null;
+    // THE "+N" CHIP TAKES A SEAT, it does not sit on top of the crowd — a seat
+    // is the only placement that cannot land on a face. It takes one of the
+    // LAST seats, which are the smallest and outermost, so the faces it costs
+    // are the least active in the topic and the crowd stays a clean prefix of
+    // the roster: everyone drawn is busier here than everyone counted.
+    //
+    // Which of the last seats depends on the number. Seats run down to a 13px
+    // floor, and "+1408" does not fit a 13px circle at a legible size — the
+    // first cut drew exactly that, four digits smeared across a disc the width
+    // of three. So walk out from the last seat until the text fits at 6px, the
+    // smallest the design sets this chip, and give up at four seats: past that
+    // the chip is eating people to describe them.
+    if (c.cast.length > packed.seated && packed.seated > 1) {
+      const digits = `+${c.cast.length - packed.seated + 1}`.length;
+      let k = packed.spots.length - 1;
+      // 0.6em per character is the monospace advance; 3px keeps the text off
+      // the dashed ring it sits inside.
+      const fits = (spot) => spot.d >= digits * 6 * 0.6 + 3;
+      while (k > 1 && k > packed.spots.length - 5 && !fits(packed.spots[k])) k -= 1;
+      chip = packed.spots[k];
+      packed = { spots: packed.spots.slice(0, k), seated: k };
+    }
+    packed.spots.forEach((at, n) => { el.appendChild(faceEl(cast[n].person, at)); });
+    const rest = c.cast.length - packed.seated;
+    if (chip && rest > 0) {
       const more = document.createElement('div');
       more.className = 'pm-face pm-face-more';
-      more.style.width = `${fs.min}px`;
-      more.style.height = `${fs.min}px`;
-      more.style.fontSize = `${Math.max(7, Math.round(fs.min * 0.36))}px`;
+      more.style.width = `${chip.d}px`;
+      more.style.height = `${chip.d}px`;
+      more.style.left = `calc(50% + ${chip.x.toFixed(1)}px)`;
+      more.style.top = `calc(50% + ${chip.y.toFixed(1)}px)`;
+      // Shrunk to the text when the seat is tight, never below 6px — the seat
+      // walk above is what keeps that floor from being reached with a number
+      // too long to sit in it.
+      more.style.fontSize =
+        `${Math.max(6, Math.min(Math.round(chip.d * 0.36), Math.floor((chip.d - 3) / (`+${rest}`.length * 0.6))))}px`;
       more.textContent = `+${rest}`;
-      faces.appendChild(more);
+      el.appendChild(more);
     }
 
     const label = document.createElement('div');
     label.className = 'pm-cluster-label';
     label.textContent = labelFor(c.label, c.members);
-
-    el.append(faces, label);
+    el.appendChild(label);
     return el;
+  }
+
+  // The spokes. SVG rather than eight rotated divs: a rotated div's hairline
+  // ends are square and visibly clipped at low opacity, and the transform
+  // origin has to be re-derived from every bubble's own offset.
+  //
+  // PARSED, NOT createElementNS, and that is not a style preference. That call
+  // takes the SVG namespace as an argument, and the namespace is spelled as a
+  // URL — so connectors/test/egress.test.mjs, which scans tracked source for
+  // host-shaped literals, reads it as a host this software may contact. It is
+  // not one: an XML namespace is an identifier and nothing ever fetches it.
+  // But that scan is a tripwire rather than a document (CLAUDE.md rule 3), and
+  // declaring the standards body in ops/EGRESS.json to quiet it would put a
+  // non-host in the ledger and cost the ledger the one property that makes it
+  // worth keeping. The HTML parser applies the namespace on its own, so going
+  // through innerHTML needs no such literal anywhere — and it is what every
+  // other SVG on this page is already built with. (The prose is worded around
+  // the string too, deliberately: the scan matches comments, exactly like the
+  // inline-style tripwire does, and for the same reason.)
+  //
+  // The geometry rides as ATTRIBUTES, which the page's CSP does not gate; only
+  // a style attribute is thrown away (see the note at .pm-sky in
+  // people-months.css), and there is none here.
+  function spokesEl(clusters, stage) {
+    const lines = clusters.map((spot) => {
+      // Weight and opacity both ride `heat`, the normalised activity the
+      // layout used for the bubble's distance. The two ends of each range are
+      // the design's.
+      const heat = Math.max(0, Math.min(1, Number(spot.heat) || 0));
+      return '<line ' +
+        // From the CORE's centre, which sits at 51% like the element does — a
+        // spoke that starts at 50% leaves a visible stub above the orb.
+        `x1="${stage.w / 2}" y1="${stage.h * 0.51}" ` +
+        `x2="${(stage.w / 2 + spot.x).toFixed(1)}" y2="${(stage.h / 2 + spot.y).toFixed(1)}" ` +
+        `stroke="rgba(197,165,109,${(0.12 + 0.38 * heat).toFixed(2)})" ` +
+        `stroke-width="${(1 + 5 * heat).toFixed(1)}"></line>`;
+    }).join('');
+    const holder = document.createElement('div');
+    // Every value in here is arithmetic on numbers this file computed; nothing
+    // reaches it from the corpus, so there is no name or label to escape.
+    holder.innerHTML =
+      `<svg class="pm-spokes" viewBox="0 0 ${stage.w} ${stage.h}" ` +
+      'preserveAspectRatio="none"></svg>';
+    const svg = holder.firstElementChild;
+    svg.innerHTML = lines;
+    return svg;
   }
 
   function renderSky(data, people) {
@@ -773,13 +877,20 @@
       label: c.label,
       members: c.members.length,
       activity: c.activity,
-      people: c.members,
+      // {person, n} pairs, busiest in this topic first — clusterEl needs both
+      // halves, and handing it bare people would put the sizes back on the
+      // global engagement this stopped using. Named apart from `members` above,
+      // which the layout reads as a COUNT: one object cannot carry the same key
+      // twice, and the silent winner was the array.
+      cast: c.members,
       // What the label will measure, so the layout can keep it on the stage.
       // Arithmetic rather than a measuring pass: the face is monospaced, and
-      // .pm-cluster-label is 10px with 0.1em of letter-spacing — 6px of advance
-      // plus 1px of tracking, 7px a character. Checked against the rendered
-      // width of the longest label this corpus produces; they agree exactly.
-      labelWidth: labelFor(c.label, c.members.length).length * 7,
+      // .pm-cluster-label is 9px with 0.1em of letter-spacing — 5.4px of
+      // advance plus 0.9px of tracking, 6.3px a character. It is a PILL now
+      // rather than bare text, so its 9px of side padding and 1px of border
+      // count twice each on top. Checked against the rendered width of the
+      // longest label this corpus produces; they agree to a pixel.
+      labelWidth: Math.ceil(labelFor(c.label, c.members.length).length * 6.3) + 20,
     })));
     const clusters = placed.spots;
     if (!clusters.length) {
@@ -797,20 +908,30 @@
     // ~~48 seeded background specks, a starfield behind the topics.~~ Yeeted
     // (owner, 2026-08-26). They were the only marks on this surface that meant
     // nothing — every other dot here is a person — and at speck size the eye
-    // cannot tell decoration from a person too far out to read. The dashed
-    // orbits stay: they are decoration too, but they are visibly structure
-    // rather than data.
-    for (const d of [180, 300, 420]) {
-      const o = document.createElement('div');
-      o.className = 'pm-orbit';
-      o.style.width = `${d}px`;
-      o.style.height = `${d}px`;
-      skyEl.appendChild(o);
-    }
+    // cannot tell decoration from a person too far out to read.
+    //
+    // ~~Three dashed orbits at 180/300/420px.~~ Yeeted with them, one design
+    // later: they were decoration on a data display, and worse, they read as a
+    // distance SCALE they were not — a bubble sitting between two rings looked
+    // like it had been measured against them, when the rings were three fixed
+    // pixel values and the bubble's distance was a log of its message count.
+    //
+    // What replaces them is a spoke per topic, core to bubble, carrying the
+    // distance encoding a second time as weight and opacity. A line between two
+    // marks is the one piece of decoration here that states a fact — this topic
+    // is a relationship of yours — and it gives the eye the radial order the
+    // rings only pretended to.
+    skyEl.appendChild(spokesEl(clusters, stage));
 
     const core = document.createElement('div');
-    core.className = 'pm-core';
+    // `tod-orb` is the opt-in that puts this blob on the same clock as the
+    // home orb (orb-tod.js). Then ask for the mood straight away: that file
+    // ran at page load and re-runs on a minute's timer, and this element did
+    // not exist for either — without the nudge the core wears the
+    // stylesheet's fallback band until the next tick.
+    core.className = 'pm-core tod-orb';
     skyEl.appendChild(core);
+    if (typeof globalThis.__hzTodApply === 'function') globalThis.__hzTodApply();
 
     clusters.forEach((spot, i) => {
       skyEl.appendChild(clusterEl(spot, i, stage));

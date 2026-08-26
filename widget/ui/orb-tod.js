@@ -88,8 +88,12 @@
     const glow = `rgba(${g[0]}, ${g[1]}, ${g[2]}, ${ga.toFixed(3)})`;
     const glowArm = `rgba(${g[0]}, ${g[1]}, ${g[2]}, ${gaArm.toFixed(3)})`;
 
-    // Set on every .orb present (widget orb today; harmless if more appear).
-    for (const orb of document.querySelectorAll('.orb')) {
+    // Set on every orb present. `.tod-orb` is the opt-in for something that
+    // wants the band WITHOUT the .orb chrome — the constellation's core
+    // (people-months.css .pm-core) is a 54px blob with no face, no blobs and
+    // no button around it, so it takes the mood and none of the machinery.
+    // ~~"widget orb today; harmless if more appear"~~ — one appeared.
+    for (const orb of document.querySelectorAll('.orb, .tod-orb')) {
       const s = orb.style;
       s.setProperty('--tod-grad', grad);
       s.setProperty('--tod-mid', mid);
@@ -105,4 +109,10 @@
   // laptop that slept across a band edge catches up the moment it wakes.
   setInterval(apply, 60000);
   window.addEventListener('focus', apply);
+  // Exposed so a page that BUILDS its orb after load can ask for the current
+  // mood the moment it exists, instead of showing the stylesheet's fallback
+  // band for up to a minute. The constellation's core is drawn on every render
+  // of the globe, which is long after this file ran. (bridge.js's
+  // hzApplyTimeOfDay returns its apply function for the same reason.)
+  window.__hzTodApply = apply;
 })();

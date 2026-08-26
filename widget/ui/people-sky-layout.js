@@ -34,14 +34,33 @@
   // The largest a bubble may be, from the design.
   var D_CEIL = 162;
   // The smallest. ~~118, on a measurement taken when faces were a flat 22..32px
-  // and six discs stopped fitting below it.~~ Faces have scaled with the bubble
-  // (0.20 * d) since, so that floor was describing code that no longer exists —
-  // and it cost the size encoding its whole range: on the owner's own corpus
-  // eight topics spanning 48 to 183 people came out 120px to 122px, a 3.8x
-  // difference in the data drawn as 2px. Re-measured against the faces the page
-  // actually draws now: at 78px a five-face bubble with its "+N" chip and its
-  // label still sits inside its own ring.
-  var D_SMALL = 78;
+  // and six discs stopped fitting below it.~~ ~~78, once faces scaled with the
+  // bubble at 0.20 * d.~~ Both were the same mistake made twice: a floor set by
+  // what the FACES needed, left behind each time the faces changed, quietly
+  // spending the size encoding's range to pay for it. That range is the whole
+  // point — eight topics spanning 48 to 183 people came out 120px to 122px
+  // under the first floor, a 3.8x difference in the data drawn as 2px, and
+  // 119px to 159px under the second, still 3.8x drawn as 1.3x.
+  //
+  // 63 is not another guess at what faces need. It is the smallest bubble the
+  // design's own artboard draws (People Constellation.dc.html, the FITNESS
+  // circle), and the packer fills it: at 63px the face band is 16px down to the
+  // 13px floor, and packFaces seats seven of them inside the ring with the
+  // label still legible on the hem. The floor is a DESIGN limit now — below
+  // this a circle stops reading as a group — so the next change to the faces
+  // does not silently move it a third time.
+  var D_SMALL = 63;
+
+  // THE LABEL HANGS BELOW ITS BUBBLE NOW. It used to be the last item of the
+  // bubble's own flex column, inside the circle and costing the ring nothing.
+  // The design hangs it off the bottom edge as a pill (bottom: -8px in
+  // people-months.css), so the lowest bubble on the stage reaches 8px further
+  // down than its circle does, and a ring sized to the circle alone clips it.
+  // Taken off BOTH ends of the vertical radius rather than the bottom only:
+  // the ring is centred on the stage, so an asymmetric allowance would have to
+  // move the centre too, and 8px of unused sky at the top costs nothing a
+  // reader can see.
+  var LABEL_DROP = 8;
 
   // The ellipse the bubble CENTRES ride, sized so a bubble of diameter d stays
   // wholly on the stage. The panel is native-sized and the owner can scale it,
@@ -50,7 +69,7 @@
     var half = d / 2 + RING_MARGIN;
     return {
       rx: Math.max(0, stageW / 2 - half),
-      ry: Math.max(0, stageH / 2 - half),
+      ry: Math.max(0, stageH / 2 - half - LABEL_DROP),
     };
   }
 
@@ -60,14 +79,25 @@
     return Math.max(D_SMALL, Math.min(D_CEIL, Math.round(room)));
   }
 
-  // SIZE IS PEOPLE. Square root rather than linear: linear scaling lets one
-  // enormous topic eat the stage while everything else collapses onto the
-  // floor, and the reader loses the differences among the small ones, which is
-  // where most topics live.
+  // SIZE IS PEOPLE, and specifically the circle's AREA is its people. Square
+  // root rather than linear: a disc drawn at linear diameter overstates the big
+  // topic by its own factor again, because the eye reads the area.
+  //
+  // ~~lo + (dMax - lo) * share.~~ That is a square root with an OFFSET under
+  // it, and the offset is the thing that has been quietly eating this
+  // encoding's range for two floors running. It makes D_SMALL a baseline every
+  // bubble is measured up from rather than a limit — so no bubble is ever drawn
+  // small, areas stop being comparable to each other at all, and the reader is
+  // invited to compare them anyway. On eight topics spanning 48 to 183 people
+  // it drew 119px to 159px: a 3.8x difference in the data rendered as 1.3x,
+  // and the 63px end of the range unreachable by any real corpus.
+  //
+  // The floor is a CLAMP now. Areas are proportional over the whole range above
+  // it, and a topic small enough to be clamped is one the reader can see has
+  // hit the bottom, rather than one silently pulled up toward the middle.
   function diameterFor(members, maxMembers, dMax) {
-    var lo = Math.min(D_SMALL, dMax);
     var share = Math.sqrt(Math.max(0, members) / Math.max(1, maxMembers));
-    return Math.round(lo + (dMax - lo) * Math.min(1, share));
+    return Math.max(Math.min(D_SMALL, dMax), Math.round(dMax * Math.min(1, share)));
   }
 
   // DISTANCE IS CONVERSATION. log1p because message counts are heavy-tailed:
@@ -92,12 +122,18 @@
     });
     var lo = Math.min.apply(null, acts);
     var hi = Math.max.apply(null, acts);
+    // `heat` is that same normalised activity handed back for the SPOKE the
+    // page draws from the core to each bubble. It is deliberately a second,
+    // redundant rendering of the distance encoding rather than a new one: the
+    // spoke is what makes distance legible at all on a field of eight circles,
+    // and giving it any other variable would make the picture say two things
+    // along one line. Kept here so the two can never drift apart.
     return clusters.map(function (c, i) {
       var floor = Math.min(1, (CORE_CLEAR + diameters[i] / 2) / inner);
-      if (hi === lo) return 1;
-      var t = (acts[i] - lo) / (hi - lo);
-      var full = floor + (1 - Math.max(0, Math.min(1, t))) * (1 - floor);
-      return 1 - (1 - full) * pull;
+      if (hi === lo) return { radial: 1, heat: 1 };
+      var t = Math.max(0, Math.min(1, (acts[i] - lo) / (hi - lo)));
+      var full = floor + (1 - t) * (1 - floor);
+      return { radial: 1 - (1 - full) * pull, heat: t };
     });
   }
 
@@ -205,7 +241,8 @@
       return diameterFor(Number(c.members) || 0, maxMembers, dMax);
     });
     var ring = ringFor(stageW - 2 * overhangFor(clusters, diameters), stageH, dMax);
-    var radials = radialsFor(clusters, diameters, ring, pull);
+    var reach = radialsFor(clusters, diameters, ring, pull);
+    var radials = reach.map(function (r) { return r.radial; });
     // THE CORE IS A BUBBLE TOO, and on a stage this small the ring itself can
     // pass through it: the radial floor is a fraction of the ring, so when the
     // ring is shorter than the core plus a bubble's own radius, "as far out as
@@ -225,6 +262,7 @@
         d: diameters[i],
         ang: angles[i],
         radial: radials[i],
+        heat: reach[i].heat,
         x: at.x,
         y: at.y,
       };
@@ -265,26 +303,132 @@
     return { spots: [], shown: 0, dropped: clusters.length };
   }
 
-  // How many faces a bubble of this diameter can hold without pushing them out
-  // through its own ring: two rows of whatever fits across the faces' 78% band,
-  // one slot of which becomes the "+N" chip when there are more people than
-  // seats. Derived from the same numbers the stylesheet uses, so a change there
-  // is a change here.
-  function facesFor(d, faceMax) {
-    var perRow = Math.max(1, Math.floor((d * 0.78 + 4) / (faceMax + 4)));
-    return Math.max(1, Math.min(5, perRow * 2 - 1));
+  // ---- the faces inside a bubble ----
+  //
+  // ~~Two flex-wrapped rows of up to five discs, centred.~~ That is a row of
+  // avatars, not a crowd: a 174px bubble seated five people and spent the rest
+  // of itself on empty gradient, and the "+N" chip carried the other eighty-
+  // seven. The design packs the bubble instead — the whole cast visible as a
+  // cloud, largest at the centre — so the bubble's AREA reads as its people
+  // rather than a number in a chip does.
+  //
+  // A FACE'S DIAMETER IS ITS PERSON'S SHARE OF THE TOPIC — their messages under
+  // this label against the busiest person under it; the page owns that
+  // arithmetic (faceSize in people-months.js) and this file owns the band it
+  // moves in. It is an encoding on the same footing as the two above and just
+  // as unavailable for tidying. The ceiling and the floor are the design's,
+  // read off the drawn artboard: 0.26 * d for the busiest face and 0.09 * d
+  // for the quietest, never under 13px, which is where two initials stop being
+  // legible.
+  var FACE_MAX = 0.26;
+  var FACE_MIN = 0.09;
+  var FACE_FLOOR = 13;
+  // Daylight between two faces, and between the outermost face and the bubble's
+  // own dashed ring.
+  var FACE_GAP = 2;
+  var FACE_INSET = 5;
+
+  function faceScaleFor(d) {
+    var max = Math.max(FACE_FLOOR, Math.round(d * FACE_MAX));
+    return { max: max, min: Math.min(max, Math.max(FACE_FLOOR, Math.round(d * FACE_MIN))) };
+  }
+
+  /**
+   * Pack faces into a bubble of diameter `d`.
+   *
+   * `sizes` are face DIAMETERS, largest first — the caller has already sorted
+   * its people by their share of this topic, and size is monotone in that
+   * share, so the sequence does not change when the tail is cut off. Returns
+   * the spots that fit, in the order they were given; `seated` is how many of
+   * `sizes` were placed, and everyone past it is the caller's "+N".
+   *
+   * Biggest face at the middle, then each next one at the SMALLEST radius that
+   * clears everything already down. ~~Concentric rings, each one starting
+   * outside the last one's extent.~~ That is easy to prove correct and it
+   * wastes most of the bubble: a ring's faces are narrower than the ring it
+   * sits outside, so the next ring began past a circle of empty gradient it
+   * could have nested into. Measured on the design's own largest bubble — 174px
+   * holding twenty-three people — strict rings seated eight.
+   *
+   * The radius is SOLVED rather than searched. Along a fixed heading the
+   * forbidden band around each placed face is the interval between the roots of
+   * |r*u - C|^2 = need^2, a quadratic in r; walking a candidate radius past
+   * each band it lands in, until a pass changes nothing, lands on the smallest
+   * radius that clears them all. A few dozen headings then compete on that
+   * radius. Exact where it matters and no iteration to tune.
+   */
+  function packFaces(d, sizes) {
+    var room = d / 2 - FACE_INSET;
+    var spots = [];
+    if (!sizes.length || sizes[0] / 2 > room) return { spots: spots, seated: 0 };
+    spots.push({ x: 0, y: 0, d: sizes[0] });
+    // 5 degrees. The face is then nudged by the solve rather than the scan, so
+    // a finer sweep buys a fraction of a pixel and costs a whole pass.
+    var STEP = Math.PI / 36;
+    for (var i = 1; i < sizes.length; i += 1) {
+      var rf = sizes[i] / 2;
+      var best = null;
+      for (var k = 0; k < 72; k += 1) {
+        // The heading each face starts from walks by the golden angle, so a
+        // tie among equal radii — which is most of them early on — does not
+        // hand every face the same side of the bubble.
+        var ang = i * 2.399963 + k * STEP;
+        var ux = Math.cos(ang);
+        var uy = Math.sin(ang);
+        var r = 0;
+        for (var pass = 0; pass < 8; pass += 1) {
+          var moved = false;
+          for (var j = 0; j < spots.length; j += 1) {
+            var need = rf + spots[j].d / 2 + FACE_GAP;
+            var proj = spots[j].x * ux + spots[j].y * uy;
+            var disc = proj * proj - (spots[j].x * spots[j].x + spots[j].y * spots[j].y) + need * need;
+            if (disc <= 0) continue; // this heading misses the face entirely
+            var out = proj + Math.sqrt(disc);
+            if (r < out - 1e-9 && r > proj - Math.sqrt(disc) - 1e-9) { r = out; moved = true; }
+          }
+          if (!moved) break;
+        }
+        if (r + rf > room) continue;
+        if (best === null || r < best.r) best = { r: r, x: r * ux, y: r * uy };
+      }
+      // No heading on this bubble has room for a face this size, and every face
+      // after it is smaller — but not by enough to be worth another sweep each.
+      if (best === null) break;
+      spots.push({ x: best.x, y: best.y, d: sizes[i] });
+    }
+    return { spots: spots, seated: spots.length };
+  }
+
+  // The check the tests run on a packing: exact, in bubble pixels. Returns the
+  // pairs that touch and the faces that reach outside the bubble's own ring.
+  function faceFaults(d, spots) {
+    var bad = [];
+    for (var i = 0; i < spots.length; i += 1) {
+      if (Math.hypot(spots[i].x, spots[i].y) + spots[i].d / 2 > d / 2 + 0.01) {
+        bad.push({ i: i, out: true });
+      }
+      for (var j = i + 1; j < spots.length; j += 1) {
+        var need = (spots[i].d + spots[j].d) / 2;
+        var dist = Math.hypot(spots[i].x - spots[j].x, spots[i].y - spots[j].y);
+        if (dist < need - 0.01) bad.push({ i: i, j: j, by: need - dist });
+      }
+    }
+    return bad;
   }
 
   var api = {
     place: place,
     ringFor: ringFor,
     overlaps: overlaps,
-    facesFor: facesFor,
+    packFaces: packFaces,
+    faceScaleFor: faceScaleFor,
+    faceFaults: faceFaults,
     diameterFor: diameterFor,
     HARD_CAP: HARD_CAP,
     D_CEIL: D_CEIL,
     D_SMALL: D_SMALL,
     GAP: GAP,
+    FACE_FLOOR: FACE_FLOOR,
   };
 
   // The page loads this as a plain script; the tests import the same file.
