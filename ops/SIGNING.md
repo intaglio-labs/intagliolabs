@@ -79,14 +79,37 @@ security import widget/signing/devid.key -k ~/Library/Keychains/login.keychain-d
 security find-identity -v -p codesigning | grep "Developer ID"
 ```
 
-Then notarization credentials, once per machine. The password is an
-**app-specific password** from appleid.apple.com → Sign-In and Security, not the
-Apple ID password:
+Then notarization credentials, once per machine, from an **App Store Connect API
+key** — App Store Connect → Users and Access → Integrations → App Store Connect
+API, under team `5K43Q6FF67`. The `.p8` is offered for download exactly once.
 
 ```sh
 xcrun notarytool store-credentials hazlie-notary \
-  --apple-id <apple-id> --team-id 5K43Q6FF67 --password <app-specific-password>
+  --key AuthKey_<KEYID>.p8 --key-id <KEYID> --issuer <ISSUER-UUID>
 ```
+
+`--issuer` is required for a **Team** key and refused for an **Individual** one.
+
+This used to say to use an Apple ID and an app-specific password. Both work, and
+notarytool's own prompt recommends the key: *"We recommend using App Store
+Connect API keys for authentication."* The reason is not convenience. An
+app-specific password is a credential for the Apple ID itself under a narrower
+name — it authenticates the human, and revoking it means going into that
+person's account. The API key is scoped to the API, revocable on its own without
+touching anything anyone signs in with, belongs to the team rather than to a
+person, and is not behind that person's 2FA. The same key is what CI uses
+(`ASC_KEY_P8` / `ASC_KEY_ID` / `ASC_ISSUER_ID` — see
+`.github/workflows/release.yml`), so there is one credential to reason about
+rather than two.
+
+Check the key's role is sufficient before relying on it — this answers it in one
+command instead of at the end of a release:
+
+```sh
+xcrun notarytool history --key AuthKey_<KEYID>.p8 --key-id <KEYID> --issuer <ISSUER-UUID>
+```
+
+A history listing means the role is enough; 401 or 403 means raise it.
 
 `release.sh` then signs, notarizes, staples, and builds the DMG. Verified
 end to end 2026-08-23: app and DMG both Accepted, stapled, and
