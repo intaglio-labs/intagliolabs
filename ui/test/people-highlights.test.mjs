@@ -30,7 +30,7 @@ test('no entries yields no cards rather than empty ones', () => {
   assert.deepEqual(buildHighlights(null, { year: 2026, now: NOW }), []);
 });
 
-test('most engaged is ranked by engagement and names the measured activity', () => {
+test('the favorite is ranked by engagement and names the measured activity', () => {
   const runaway = buildHighlights([
     entry('a', 1000, tl('2026-01')),
     entry('b', 100, tl('2026-01')),
@@ -38,7 +38,7 @@ test('most engaged is ranked by engagement and names the measured activity', () 
     entry('d', 100, tl('2026-01')),
   ], { year: 2026, now: NOW });
   const card = find(runaway, 'person-of-the-year');
-  assert.equal(card.label, 'most engaged');
+  assert.equal(card.label, 'favorite');
   assert.match(card.line, /1,000 messages — most engagement this year/);
 
   const engagementWins = buildHighlights([

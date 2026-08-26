@@ -1,5 +1,5 @@
 // THE YEAR'S HIGHLIGHT CARDS: the five claims the timeline can make about a
-// year without a model — most engaged, a reconnection, someone new, someone
+// year without a model — a favorite, a reconnection, someone new, someone
 // with no recent contact, and the longest monthly streak.
 //
 // Same rule as the rest of ui/server/people: CODE decides, no model. Every
@@ -134,7 +134,12 @@ function personOfTheYear(entries) {
     : `${messages.toLocaleString('en-US')} messages`;
   return {
     kind: 'person-of-the-year',
-    label: 'most engaged',
+    // ~~"most engaged".~~ Renamed to "favorite" (owner, 2026-08-26). The card
+    // still measures exactly what it measured — the year's maximum engagement,
+    // see `line` — but "most engaged" described the arithmetic to the reader
+    // instead of telling them what it means. The KIND is unchanged: it is the
+    // key the page draws an icon from and the name the tests know it by.
+    label: 'favorite',
     key: top.p.key,
     name: top.p.name,
     line: `${activity} — most engagement this year`,
@@ -160,7 +165,10 @@ function backFromYourPast(entries, year) {
   if (!best) return null;
   return {
     kind: 'back-from-your-past',
-    label: 'reconnected after a gap',
+    // ~~"reconnected after a gap".~~ Shortened (owner, 2026-08-26): the gap is
+    // already spelled out underneath, in "quiet since YEAR — then N messages",
+    // so the label was repeating the line below it.
+    label: 'reconnected',
     key: best.e.p.key,
     name: best.e.p.name,
     line: `quiet since ${best.lastPrior} — then ${best.e.messages.toLocaleString('en-US')} messages`,

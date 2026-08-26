@@ -262,10 +262,13 @@ body.plist .pm-card {
      made narrower: it is nowrap by design (a two-line eyebrow above a one-line
      name unbalances the row) and its labels come from the server, not from
      this file. ~~168px.~~ That left a 142px content box, and the longest
-     labels overran it — "longest monthly streak" needs 164px and "reconnected
-     after a gap" 171px (measured) — so the text crossed the card's right
-     border and painted over the next card.
-     202 gives the widest of them 5px of slack. Fixed rather than sized to
+     labels overran it — "longest monthly streak" needs 164px, and the widest
+     of them, then "reconnected after a gap", needed 171px (measured) — so the
+     text crossed the card's right border and painted over the next card.
+     202 gave that widest label 5px of slack; since the 2026-08-26 renames
+     ("favorite", "reconnected") the widest is "longest monthly streak" and the
+     slack is 12px. Left at 202 rather than retuned: a card narrow enough to
+     fit today's labels exactly is a card the next label overruns. Fixed rather than sized to
      content: a content-sized card takes its width from the longest line in it,
      and the line under the name is free text, so the cards came out different
      widths from each other (209 against 198, measured). A label longer than
