@@ -338,6 +338,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "granola://",
     "https://cloud.ouraring.com/oauth/applications",
     "https://www.notion.so/my-integrations",
+    // LinkedIn's export request page — the connector reads the CSV it emails.
+    "https://www.linkedin.com/mypreferences/d/download-my-data",
     // The bridge token how-to links, for the Discord/Slack guided login flows.
     "https://docs.mau.fi/bridges/go/discord/authentication.html",
     "https://docs.mau.fi/bridges/go/slack/authentication.html",

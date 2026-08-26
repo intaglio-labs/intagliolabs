@@ -268,12 +268,16 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     decisionHandler(ok ? .allow : .cancel)
   }
 
-  /// Is `window` the live login window? The dismiss monitor asks, so a click
-  /// inside this app's own login window never dismisses the panel behind it.
-  static func isPresenting(_ window: NSWindow?) -> Bool {
-    guard let window, let cur = current else { return false }
-    return cur.window === window
-  }
+  /// Is a bridge login on screen right now? The dismiss monitor asks.
+  ///
+  /// ~~Was isPresenting(window), matching the click's window against this
+  /// one.~~ Widened to the whole flow (owner, 2026-08-25, still losing the
+  /// panel): window identity only covers clicks the monitor can attribute to
+  /// THIS window, and a login is not one window — X bounces through its own
+  /// popups and sheets, and the global monitor sees a nil window for anything
+  /// outside the app. The panel behind the login is where the result lands,
+  /// so nothing may dismiss it while a login is running.
+  static var isActive: Bool { current != nil }
 
   // The user closed the window before logging in.
   func windowWillClose(_ notification: Notification) {

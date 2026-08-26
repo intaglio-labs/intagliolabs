@@ -131,6 +131,17 @@ const HZ_HINTS = {
   // granola left the sentence behind (owner, 2026-08-25): its panel is the
   // in-app walkthrough — open granola.ai, create a key, paste it right here.
   granola: { url: 'granola://', link: 'Granola', walkthrough: true }, // the DESKTOP app — the key lives in its settings
+  // LinkedIn had NO entry here at all, so its tile opened a card with nothing
+  // on it but the header — "when I click linkedin, nothing is happening"
+  // (owner, 2026-08-25). It is not a login: LinkedIn only lets you export,
+  // and the connector reads Connections.csv out of ~/.hazlie/imports/linkedin.
+  linkedin: {
+    text: 'LinkedIn only exports — ask for your data, then unzip Connections.csv '
+      + 'into ~/.hazlie/imports/linkedin. The export email can take a few hours.',
+    url: 'https://www.linkedin.com/mypreferences/d/download-my-data',
+    link: 'request your export',
+    local: true, // one export per person; no "+ add account"
+  },
   // OAuth2 since Oura retired personal access tokens in Dec 2025: the PAT
   // page this used to link is a dead end, and there is no settings page to
   // send anyone to instead, so this one is text-only — the connect page
@@ -307,6 +318,15 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
           ask = body.split('\n').map((l) => l.trim()).filter(Boolean)
             .find((l) => l.endsWith('?') || /^(please|enter|register)/iu.test(l))
             || body.split('\n')[0].trim();
+          // Same unglueing as connections.js askedFor()/tidy().
+          const m = /^please enter your\s+(.+)$/iu.exec(ask);
+          if (m) {
+            const field = m[1].replace(/\.$/u, '').trim();
+            const verb = /^(create|enter|choose|register)\b/iu.exec(field);
+            ask = verb
+              ? `please ${verb[0].toLowerCase()} ${field.slice(verb[0].length).trim()} for ${src.label}`
+              : `please enter your ${field} for ${src.label}`;
+          }
         }
         if (ask) {
           const line = document.createElement('span');

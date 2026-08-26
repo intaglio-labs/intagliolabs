@@ -398,6 +398,17 @@ const HINTS = {
   // granola left this table (owner, 2026-08-25): its panel is the in-app
   // walkthrough now — open granola.ai, create a key, paste it right here.
   granola: { url: 'granola://', link: 'Granola', walkthrough: true }, // the DESKTOP app — the key lives in its settings
+  // LinkedIn had NO entry here at all, so its tile opened a card with nothing
+  // on it but the header — "when I click linkedin, nothing is happening"
+  // (owner, 2026-08-25). It is not a login: LinkedIn only lets you export,
+  // and the connector reads Connections.csv out of ~/.hazlie/imports/linkedin.
+  linkedin: {
+    text: 'LinkedIn only exports — ask for your data, then unzip Connections.csv '
+      + 'into ~/.hazlie/imports/linkedin. The export email can take a few hours.',
+    url: 'https://www.linkedin.com/mypreferences/d/download-my-data',
+    link: 'request your export',
+    local: true, // one export per person; no "+ add account"
+  },
   // OAuth2 since Oura retired personal access tokens in Dec 2025: the PAT
   // page this used to link is a dead end, and there is no settings page to
   // send anyone to instead, so this one is text-only — the connect page
@@ -812,6 +823,22 @@ function card(src, keep) {
     // an error even while the login was succeeding. What the owner actually
     // needs is the bot's LAST question, which is the only line that ever asks
     // for anything (X's PIN prompt is exactly this). One line, plain, no log.
+    const LABEL = src.label;
+        // mautrix builds this prompt by gluing "Please enter your " onto the
+        // field's own name, so X's arrives as "Please enter your Create your
+        // PIN code" — two verbs, one sentence (owner, 2026-08-25). Unglue it
+        // and name the platform, so the card asks one clear thing.
+        const tidy = (line) => {
+          const m = /^please enter your\s+(.+)$/iu.exec(line);
+          if (!m) return line;
+          const field = m[1].replace(/\.$/u, '').trim();
+          const verb = /^(create|enter|choose|register)\b/iu.exec(field);
+          if (verb) {
+            const rest = field.slice(verb[0].length).trim();
+            return `please ${verb[0].toLowerCase()} ${rest} for ${LABEL}`;
+          }
+          return `please enter your ${field} for ${LABEL}`;
+        };
     const askedFor = () => {
       if (!(data && Array.isArray(data.transcript))) return null;
       for (let i = data.transcript.length - 1; i >= 0; i--) {
@@ -824,7 +851,7 @@ function card(src, keep) {
         // Keep it to the sentence that asks, not the paragraph around it.
         const ask = body.split('\n').map((l) => l.trim()).filter(Boolean)
           .find((l) => l.endsWith('?') || /^(please|enter|register)/iu.test(l));
-        return ask || body.split('\n')[0].trim();
+        return tidy(ask || body.split('\n')[0].trim());
       }
       return null;
     };
