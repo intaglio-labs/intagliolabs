@@ -456,7 +456,11 @@ const CONNECT_PAGE = new Set(['mail', 'oura', 'notion']); // granola pastes in-p
 // matching host in the fence, so the window opened blank.
 const BRIDGE_FLOW = {
   twitter: 'cookie', messenger: 'cookie', instagram: 'cookie', linkedin: 'cookie',
-  discord: 'token', slack: 'token', telegram: 'phone',
+  // ~~discord/slack: 'token'~~ — neither pastes a token any more (2026-08-26).
+  // `flow` decides two things: whether the cookie login button is offered, and
+  // whether the reply box is a textarea. Discord approves a link in its phone
+  // app and Slack answers with an email address; both are one short line.
+  discord: 'link', slack: 'email', telegram: 'phone',
 };
 // ~~Each of these carried a `lead` sentence ("Slack logs in with two tokens
 // from your browser (xoxc and xoxd).") and a how-to link into the mautrix
@@ -936,17 +940,24 @@ function card(src, keep) {
       box.setAttribute('spellcheck', 'false');
       const send = document.createElement('button');
       send.className = 'hold-ok';
-      // "create", not "send" (owner, 2026-08-25): this box answers a login
-      // step — X's PIN is one being CREATED, not a message going anywhere.
-      send.textContent = 'create';
+      // THE VERB FOLLOWS THE QUESTION. "create" is right for X's PIN, which is
+      // being made rather than sent (owner, 2026-08-25) — and wrong for Slack's
+      // email address, which is being given (owner, 2026-08-26, looking at a
+      // card that said "create" under "enter your email"). The bot's own
+      // wording decides: it says "please create ..." when something is being
+      // made, and anything else is an answer.
+      const asked = askedFor() || '';
+      send.textContent = /\bcreate\b/iu.test(asked) ? 'create' : 'send';
       const fire = () => {
         const val = box.value.trim();
         if (!val) return;
         box.value = ''; // gone from the page before anything else happens
-        send.disabled = true; send.textContent = 'creating…';
+        const busy = send.textContent === 'create' ? 'creating…' : 'sending…';
+        const idle = send.textContent;
+        send.disabled = true; send.textContent = busy;
         hzPost('bridgeCookies', { p: kindOf(src.id), cookies: val })
           .then(renderBridge)
-          .catch(() => { send.disabled = false; send.textContent = 'create'; });
+          .catch(() => { send.disabled = false; send.textContent = idle; });
       };
       send.addEventListener('click', (e) => { e.stopPropagation(); fire(); });
       if (!multiline) box.addEventListener('keydown', (e) => {
@@ -1057,7 +1068,12 @@ function card(src, keep) {
         // (+1…), then the code" showed as "enter phone (+1…), t" — and it
         // vanishes the moment typing starts, which is exactly when someone
         // rereads it.
-        if (help && help.place) {
+        // OUR line only when the bot has not asked in its own words. Both at
+        // once printed the same instruction twice — "please enter your Email
+        // for Slack" directly above "enter your Slack email address" (owner,
+        // 2026-08-26). The bot's wording wins; ours is the fallback for a
+        // step that arrives without a question.
+        if (!askedFor() && help && help.place) {
           const say = document.createElement('span');
           say.className = 'setup';
           say.textContent = `enter ${help.place}`;
