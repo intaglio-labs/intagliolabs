@@ -398,14 +398,14 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
   }
   entries.sort((a, b) => b.engagement - a.engagement);
 
+  // Computed over the FULL ranked set, deliberately before the display cap
+  // below: a streak or a return is worth surfacing even when the person sits
+  // past row 250, and capping first would have quietly made the highlights a
+  // fact about the first page rather than about the year.
   return {
     year,
     years: [...yearsSet].sort((a, b) => a - b),
     total: entries.length,
-    // Computed over the FULL ranked set, deliberately before the display cap
-    // below: a streak or a return is worth surfacing even when the person sits
-    // past row 250, and capping first would have quietly made the highlights a
-    // fact about the first page rather than about the year.
     highlights: buildHighlights(entries, { year, now }),
     people: entries.slice(0, cap).map((e) => {
       const doc = topics.docs.get(`${e.p.key}|${year}`);

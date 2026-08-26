@@ -12,7 +12,9 @@
 //   POST /api/bridge/cookies {p, cookies}  → send the pasted cookies/cURL
 
 import { homedir } from 'node:os';
-import { PLATFORMS, bridgeStatus, beginLogin, relay, loadPanel, loginUrlFrom } from './bridge.mjs';
+import {
+  PLATFORMS, bridgeStatus, bridgeNeedsAppCredential, beginLogin, relay, loadPanel, loginUrlFrom,
+} from './bridge.mjs';
 import { maskOwn } from './bridgePage.mjs';
 import { bearerAuthorized } from './statusApi.mjs';
 
@@ -23,6 +25,10 @@ function safeTranscript(transcript) {
     from: m.from,
     body: m.from === 'you' ? maskOwn(m.body) : m.body,
     ts: m.ts,
+    // Only the BOT's images travel. The owner never sends one in this flow,
+    // and an echo of something they pasted is exactly what maskOwn exists to
+    // prevent — so the rule is the same for pixels as for text.
+    ...(m.image && m.from === 'bot' ? { image: m.image } : {}),
   }));
 }
 
@@ -78,6 +84,34 @@ export async function bridgeApiResponse({
         // [{id, from: 'cookies'|'header', header?}]. Null for the platforms
         // whose login is cookies alone.
         fields: platform.webLogin?.fields ?? null,
+        // An approval window: no harvest, no fields — the person answers on
+        // the platform's own page and the bridge reports the outcome itself.
+        approval: platform.webLogin?.approval === true,
+        // WHERE A STORAGE FIELD'S VALUE LIVES. Slack's sign-in ends on a page
+        // that offers to launch the desktop app and holds no token; the token
+        // belongs to the web client behind its own link. The window walks there
+        // itself once the cookies are in, rather than leaving the owner on a
+        // page with nothing on it to press.
+        storageUrl: platform.webLogin?.storageUrl ?? null,
+        // SUBFRAMES ONLY: the hosts a challenge widget's iframes come from.
+        // Separate from allowedHosts because the main frame is where a password
+        // is typed and a widget is not a destination — BridgeLogin enforces the
+        // split, this file authors it.
+        allowedFrameHosts: platform.webLogin?.allowedFrameHosts ?? null,
+        // A platform that refuses the default browser string gets its own.
+        // Server-authored like the rest of this policy — Swift enforces it.
+        userAgent: platform.webLogin?.userAgent ?? null,
+        // A QR WINDOW instead of a web login: the bridge posts an image, the
+        // window shows it, a phone scans it, and the bridge reports the
+        // outcome itself. Nothing is navigated to and nothing is harvested,
+        // which is why it is its own flag rather than a shape of webLogin.
+        qrLogin: platform.qrLogin === true,
+        // Telegram's bridge will not start until an api_id/api_hash exists,
+        // and a build may have shipped one. True means the card should walk
+        // the owner through registering their own; false means it is already
+        // configured and the card goes straight to the login conversation.
+        // Read off the config, so the same card is right either way.
+        needsAppCredential: bridgeNeedsAppCredential(platformId, { home }),
       },
     };
   };

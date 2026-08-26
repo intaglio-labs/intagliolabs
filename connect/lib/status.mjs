@@ -8,7 +8,7 @@
 // rows say so, instead of rendering a red X the owner cannot act on.
 
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { PLATFORMS, bridgeStatus } from './bridge.mjs';
@@ -60,9 +60,10 @@ export function mailSecretName(address) {
 }
 
 // The configured mailboxes, read from the connectors config so the connect
-// page and the (still unbuilt) mail connector cannot disagree about which
-// accounts exist. An absent or unreadable config means no mail rows, not a
-// crash — the page has three other sources to render.
+// page and the mail connector cannot disagree about which accounts exist.
+// (~~"the (still unbuilt) mail connector"~~ — connectors/sources/mail.mjs has
+// shipped since; the sentence outlived the fact.) An absent or unreadable
+// config means no mail rows, not a crash — the page has others to render.
 export function mailAccounts({ home = homedir() } = {}) {
   const path = join(home, '.hazlie', 'connectors', 'config.json');
   try {
@@ -73,6 +74,62 @@ export function mailAccounts({ home = homedir() } = {}) {
   } catch {
     return [];
   }
+}
+
+// A Gmail address, strictly. This value decides which mailbox the app-password
+// route will then accept a secret for, so it is a security boundary and not a
+// politeness check — see the `known` test in server.mjs's gmail handler, which
+// exists to stop a form post choosing the filename a secret lands under.
+// mailSecretName() already sanitises to [a-z0-9-], so traversal is closed
+// twice over; this keeps a nonsense entry out of the config in the first place.
+// Deliberately narrow: local@domain.tld, no spaces, no quotes, no comments.
+// RFC 5322 permits far stranger addresses than Google will ever issue.
+const ADDRESS = /^[a-z0-9](?:[a-z0-9._%+-]{0,62}[a-z0-9])?@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z]{2,24})+$/iu;
+
+export function isMailAddress(value) {
+  return typeof value === 'string' && value.length <= 254 && ADDRESS.test(value);
+}
+
+/**
+ * Add a mailbox to the connectors config, creating the file if it is absent.
+ *
+ * Returns 'added', 'duplicate', or 'invalid' — never throws for a bad address,
+ * because the caller is a form post and the answer is a banner, not a 500.
+ *
+ * READ-MODIFY-WRITE, and it preserves everything it does not understand: this
+ * file is the connectors' config, not ours. The daemon, the calendar backend
+ * switch and anything added later all live in the same object, so a write that
+ * serialised only `mail` would silently delete them.
+ */
+export function addMailAccount(address, { home = homedir() } = {}) {
+  if (!isMailAddress(address)) return 'invalid';
+  const user = address.toLowerCase();
+  const dir = join(home, '.hazlie', 'connectors');
+  const path = join(dir, 'config.json');
+  let config = {};
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) config = parsed;
+  } catch {
+    // Absent or corrupt. Absent is the normal first-run state; corrupt is rare
+    // and unrecoverable here, and refusing to write would leave the owner with
+    // a page whose button does nothing and no way to find out why. The old
+    // bytes are not discarded silently — the rename below is what replaces
+    // them, and a corrupt file was already yielding no mailboxes at all.
+  }
+  const accounts = Array.isArray(config?.mail?.accounts) ? config.mail.accounts : [];
+  if (accounts.some((a) => typeof a?.user === 'string' && a.user.toLowerCase() === user)) {
+    return 'duplicate';
+  }
+  const next = { ...config, mail: { ...(config.mail ?? {}), accounts: [...accounts, { user }] } };
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Written to a PID-suffixed temp and renamed, the same shape ouraClient and
+  // gcalClient use: a half-written config.json is a config the daemon reads as
+  // corrupt, and rename is the only atomic step available.
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  renameSync(tmp, path);
+  return 'added';
 }
 
 function ownerOnlyFileExists(path) {
@@ -357,6 +414,41 @@ function calendarRow(home) {
 function cloudAccountRows(home) {
   return [
     calendarRow(home),
+    // THE WAY IN, when there is no way in yet.
+    //
+    // Mail rows are generated from the mailboxes in the connectors config, so
+    // an install that has never been hand-edited produced NO mail rows at all
+    // — and with no row there was no button, and with no button no way to add
+    // the first address. The connector, its tile, its glyph, its help text and
+    // the app-password form were all built and all unreachable. Verified on
+    // this machine 2026-08-26: readStatus() returned 17 rows and not one of
+    // them was mail.
+    //
+    // So the page gets an "add a mailbox" row. It carries the bare id `mail`
+    // rather than `mail:<address>` because it is not an account yet — that is
+    // exactly what it is for.
+    //
+    // ALWAYS PRESENT, not only while the list is empty. ~~Shown at zero
+    // mailboxes and withdrawn after the first.~~ That made the second mailbox
+    // unreachable by the same mechanism the first one was: this design is
+    // explicitly one row and one app password PER mailbox (see just below),
+    // and an install with two Gmail accounts is the case it was written for.
+    //
+    // `optional` keeps it out of the "N left" count at the foot of the page.
+    // Without that the page can never say "all set" — there is always another
+    // mailbox you have not added — which would turn the one number on the page
+    // that means "you are done" into a number that never reaches zero.
+    {
+      id: 'mail',
+      label: mailAccounts({ home }).length === 0 ? 'Gmail' : 'Another mailbox',
+      connected: false,
+      optional: true,
+      detail: mailAccounts({ home }).length === 0
+        ? 'add the address you want read'
+        : 'add a second Gmail address',
+      action: 'mailbox',
+      caveat: null,
+    },
     // One row per configured mailbox rather than a single "Gmail" row: each
     // needs its own app password, so collapsing them would hide which of the
     // two is actually connected.

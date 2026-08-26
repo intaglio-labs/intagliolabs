@@ -86,6 +86,42 @@ cp -R ../ui/scripts "$BE/ui/scripts"
 cp -R ../prompts "$BE/prompts"
 cp -R ../connectors "$BE/connectors"
 
+# THE TELEGRAM APP CREDENTIAL, if this build machine has one.
+#
+# Telegram issues api_id/api_hash per ACCOUNT, and its bridge refuses to start
+# without a real pair — so until now every install had to register its own app
+# at my.telegram.org and paste the pair in before Telegram would do anything.
+# Shipping one pair with the product is what turns that into an ordinary
+# phone-and-code login (it is what Beeper does).
+#
+# IT CANNOT LIVE IN THE REPO, and this is the whole reason it arrives here
+# rather than as a file in ops/: this repository is PUBLIC, and Telegram
+# refuses logins made with any api_id it finds in public code
+# (API_ID_PUBLISHED_FLOOD). Committing the pair would not degrade Telegram
+# slowly, it would break every install at once. So the build reads it from the
+# machine's own secret store (or CI's, from a repository secret) and writes it
+# into the bundle, the same shape the site's Firebase credentials already use.
+#
+# A build WITHOUT the secret is not an error — it produces an app whose
+# Telegram falls back to the per-user walkthrough, which is exactly today's
+# behaviour. That fallback is the point: a shipped api_id is extractable from
+# any binary with `strings`, so "published" is a matter of when, and when
+# Telegram flags this one the per-user path is what everybody lands on.
+TG_APP="${HZ_TELEGRAM_APP:-}"
+if [ -z "$TG_APP" ] && [ -f "$HOME/.hazlie/secrets/telegram-app.txt" ]; then
+  TG_APP="$(tr -d '[:space:]' < "$HOME/.hazlie/secrets/telegram-app.txt")"
+fi
+# Shape-checked here as well as at the reader, because a malformed pair
+# produces a bridge that crash-loops at the user with no line naming why.
+if printf '%s' "$TG_APP" | grep -Eq '^[0-9]{1,12}:[0-9a-fA-F]{32}$'; then
+  printf '%s\n' "$TG_APP" > "$BE/telegram-app"
+  chmod 600 "$BE/telegram-app"
+  echo "telegram: app credential baked in (ops/setup-bridges.sh will use it)"
+else
+  [ -n "$TG_APP" ] && echo "telegram: ignoring a malformed credential — expected <api_id>:<api_hash>" >&2
+  echo "telegram: no app credential on this machine; installs will use the per-user walkthrough"
+fi
+
 # The Calendar/Contacts helper. Node cannot call EventKit or the Contacts
 # framework, so without this both sources can only reach their data by reading
 # the backing sqlite stores -- which is Full Disk Access, a grant far larger than

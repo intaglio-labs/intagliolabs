@@ -230,8 +230,13 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
   --tod-grad: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 45%, var(--status-ok) 100%);
   --tod-mid: #c5a56d;
   --tod-far: var(--status-ok);
-  --tod-glow: rgba(51, 255, 102, 0.10);
-  --tod-glow-armed: rgba(51, 255, 102, 0.30);
+  /* 0.30 at rest, not 0.10. The canvas draws power hour with accentGlow30
+     — the STRONGEST halo of the five, because it is the band captioned "the
+     brand gradient at full saturation". The widget had it at 0.10, the
+     weakest of the five, which inverted the one thing the band is named for.
+     Armed follows the +0.20 step every other band uses. */
+  --tod-glow: rgba(51, 255, 102, 0.30);
+  --tod-glow-armed: rgba(51, 255, 102, 0.50);
   /* The catchlight. Cream in four of the five bands, exactly as the canvas
      draws it — but it is a variable because it sits top-left, which is where
      a 160deg gradient puts its FIRST stop. When that stop is not warm, a
@@ -253,10 +258,15 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
     inset 3px 3px 7px rgba(255, 255, 255, 0.30);
   transition: box-shadow .4s ease;
 }
+/* The blush was a HARDCODED hazelnut, rgba(197, 165, 109, 0.55), on every
+   band. On the two warm bands nobody noticed; on lavender, spring green and
+   deep magenta it read as two tan thumbprints stuck to the face — visible as
+   dots in the 120px onboarding orb, which is where it was caught. It takes
+   the band's own mid tone now, at an alpha that tints rather than paints. */
 .blush {
   position: absolute; top: 58%;
   width: 7px; height: 4px; border-radius: 50%;
-  background: rgba(197, 165, 109, 0.55);
+  background: color-mix(in srgb, var(--tod-mid) 28%, transparent);
   filter: blur(1px);
 }
 .blush.bl { left: 12%; }
@@ -916,8 +926,9 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 .orb.tod-power {
   --tod-grad: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 45%, var(--status-ok) 100%);
   --tod-mid: #c5a56d; --tod-far: var(--status-ok);
-  --tod-glow: rgba(51, 255, 102, 0.10);
-  --tod-glow-armed: rgba(51, 255, 102, 0.30);
+  /* See the fallback block for why this is 0.30 and not 0.10. */
+  --tod-glow: rgba(51, 255, 102, 0.30);
+  --tod-glow-armed: rgba(51, 255, 102, 0.50);
 }
 .orb.tod-happy {
   --tod-grad: linear-gradient(160deg, #f5d9a8 0%, #e0a35c 45%, #c56d4a 100%);
@@ -980,24 +991,58 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 .orb-layer.lb { animation: orb-spin-rev 3.5s linear infinite; }
 .orb-layer.lc { animation: orb-spin 6s linear infinite; }
 .orb-blob { position: absolute; display: block; }
+/* THE BLOBS ARE WEATHER, NOT PAINT.
+ *
+ * The canvas draws each mood orb as its gradient plus ONE white catchlight —
+ * nothing else. The widget adds three drifting blobs on top, and it should:
+ * they are the only reason a 42px disc looks alive rather than printed. But
+ * they were mixed at paint strength, and three washes over a gradient is a
+ * gradient you can no longer see. Held next to the canvas, every band had
+ * lost its mood: early's lavender came out bone white, late's purple half
+ * vanished before it could turn green, night's plum lifted to a grey pink,
+ * and power hour — the band whose caption is "full saturation" — was the
+ * palest of the lot.
+ *
+ * The gradient carries the colour now and the blobs only modulate it. Two
+ * rules came out of matching them back to the canvas:
+ *
+ *   1. NOTHING PAINTS OFF-PALETTE. `ba` washed the top-left in cream at full
+ *      opacity, which is exactly where a 160deg gradient puts its FIRST and
+ *      most saturated stop; `bc` carried a hardcoded hazelnut mid-stop that
+ *      put a tan cast under all five bands. Every stop is derived from a
+ *      --tod-* var, so a blob can only ever deepen the mood it is in.
+ *   2. ALPHA IS THE DIAL, NOT COLOUR. Motion survives at low alpha — it is
+ *      movement the eye catches, not opacity. Saturation does not survive
+ *      being covered. So the blobs were taken down until the canvas's colour
+ *      came back, and the drift is still perfectly legible at 42px.
+ *
+ * The catchlight the canvas DOES draw is .orb-hl, and it is untouched. */
 .orb-blob.ba {
-  width: 75%; height: 75%; top: 0; left: 8%;
-  background: radial-gradient(circle, var(--tod-light) 0%, color-mix(in srgb, var(--tod-light) 40%, transparent) 40%, transparent 70%);
-  filter: blur(3.5px);
+  /* The sheen. Smaller and far fainter than it was: at 75% and full cream it
+     was not a highlight, it was a second light source painted over the
+     gradient's warmest stop. */
+  width: 55%; height: 55%; top: 0; left: 15%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--tod-light) 12%, transparent) 0%, color-mix(in srgb, var(--tod-light) 4%, transparent) 40%, transparent 55%);
+  filter: blur(3.5px); mix-blend-mode: screen;
   animation: orb-drift 2.25s ease-in-out infinite;
 }
-/* Both blobs read from the time-of-day vars: leaving them on the fixed green
-   and hazelnut made the orb's body drift while its innards stayed at midday,
-   which showed up as a green cast under the lavender and magenta bands. */
+/* All three blobs read from the time-of-day vars: leaving them on the fixed
+   green and hazelnut made the orb's body drift while its innards stayed at
+   midday, which showed up as a green cast under the lavender and magenta
+   bands. */
 .orb-blob.bb {
+  /* The band's far stop, pooled where the gradient already lands it. Its
+     mid-stop used to be --tod-glow — a SHADOW alpha (0.10–0.28 depending on
+     band) borrowed as a colour, so how far this blob reached varied by band
+     for no reason anyone chose. It is a stated fraction of --tod-far now. */
   width: 80%; height: 80%; bottom: 0; right: 5%;
-  background: radial-gradient(circle, var(--tod-far) 0%, var(--tod-glow) 45%, transparent 72%);
+  background: radial-gradient(circle, color-mix(in srgb, var(--tod-far) 42%, transparent) 0%, color-mix(in srgb, var(--tod-far) 14%, transparent) 45%, transparent 70%);
   filter: blur(4px); mix-blend-mode: screen;
   animation: orb-drift 1.75s ease-in-out infinite 0.6s;
 }
 .orb-blob.bc {
   width: 70%; height: 70%; top: 12%; right: 0;
-  background: radial-gradient(circle, var(--tod-mid) 0%, rgba(197, 165, 109, 0.4) 45%, transparent 72%);
+  background: radial-gradient(circle, color-mix(in srgb, var(--tod-mid) 30%, transparent) 0%, color-mix(in srgb, var(--tod-mid) 10%, transparent) 45%, transparent 70%);
   filter: blur(3.5px); mix-blend-mode: soft-light;
   animation: orb-drift 2.75s ease-in-out infinite 1.2s;
 }
@@ -1452,6 +1497,15 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
   color: var(--hazelnut-light);
 }
 .row .mark svg { width: 20px; height: 20px; }
+/* NOT YET SHIPPING (SOON_CONNECTORS in connections.js). Greyed rather than
+   hidden: a tile that disappears reads as a connector that is not coming,
+   and this one is. The glyph loses its hazelnut and most of its contrast so
+   it sits back from the tiles that can actually be pressed into service —
+   but the tile keeps its shape and stays pressable, because pressing it is
+   how you find out why. Not opacity on .row: that would fade the dot and
+   the tile's own inset highlight into mush; this dims the mark alone. */
+.row.soon .mark { color: var(--muted); opacity: 0.55; }
+.row.soon { border-color: rgba(234, 234, 234, 0.06); }
 /* Long names (a mail address) get the middle eaten rather than the end, so
    the domain still identifies which account it is. */
 /* No label on the tile any more — at 40px a name is two illegible letters
@@ -1583,6 +1637,19 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
 /* Walkthrough steps and how-to sentences each hold a line of their own —
    "2 · create an API key" wrapped around the step-1 pill otherwise. */
 .hint.hold .setup { display: block; margin-top: 6px; }
+/* Step 1 of a walkthrough: a button that reads as one of the numbered lines
+   around it, because that is what it is. It wore .hold-ok — the pill this
+   card uses for its ONE action — and a capsule with an arrow at the top of
+   three plain steps claimed a prominence step 1 does not have (owner,
+   2026-08-26). Matched to .setup, tinted so it still reads as pressable. */
+.hint.hold .step-open {
+  display: block; margin-top: 6px; padding: 0;
+  border: none; background: none;
+  color: var(--hazelnut-light);
+  font: inherit; text-align: left;
+  cursor: pointer;
+}
+.hint.hold .step-open:hover { color: var(--fg); }
 /* Every connected line leads with a green check (owner, 2026-08-25). One
    rule, not a per-site prefix: the check rides the .acct class, so it cannot
    be forgotten by the next connected state someone renders. */
@@ -1622,6 +1689,13 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
    the paste box. The transcript is capped and scrolls — a login exchange is
    a few lines, an old one can be long, and the popup must not grow to fit
    history. */
+/* A login QR, inline in the hint card. Sized so a phone camera can read it
+   off the screen without the card outgrowing the popup. */
+.hint.hold .bqr {
+  display: block; margin: 8px 0 4px;
+  width: 168px; height: 168px;
+  border-radius: 6px; background: #fff; padding: 6px;
+}
 .hint.hold .blog {
   max-height: 110px; overflow-y: auto;
   display: flex; flex-direction: column; gap: 4px;

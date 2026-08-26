@@ -182,6 +182,24 @@ function row(item, index, formBase) {
 
   const caveat = item.caveat ? `<div class="caveat">${escapeHtml(item.caveat)}</div>` : '';
 
+  // THE FIRST STEP OF THE SAME CONNECTION: which address to read. Google is
+  // one account to a person but two credentials to us — IMAP wants a 16-letter
+  // app password per mailbox, Calendar wants an OAuth grant — so this row and
+  // the `gmail` row below are two steps of one connection rather than two
+  // things to connect. The address is not a secret and there is nothing to
+  // hide, but it still POSTs same-origin like every other write on this page.
+  if (item.action === 'mailbox') {
+    return `<li class="has-form">${idx}<span class="name"><b>${escapeHtml(
+      item.label
+    )}</b><span class="note">${escapeHtml(item.detail)}</span>
+      <form method="post" action="${escapeHtml(formBase)}/mailbox">
+        <input name="account" type="email" autocomplete="off" spellcheck="false"
+               placeholder="you@gmail.com" aria-label="Gmail address to read" required>
+        <button class="cta secondary" type="submit">Add</button>
+        <div class="hint">Then Google asks for an app password. Calendar is the same account, authorized separately.</div>
+      </form>${caveat}</span></li>`;
+  }
+
   // Gmail is the one row that takes a secret, so it renders a form that POSTs
   // same-origin. The value goes straight to a 0600 file on this machine and is
   // never echoed back into the page. The account rides in a hidden field, not
@@ -202,6 +220,13 @@ function row(item, index, formBase) {
       </form>${caveat}</span></li>`;
   }
 
+  // Outline, not the gradient. This row is `optional` — it is a standing
+  // invitation rather than outstanding work — so it is excluded from
+  // firstActionable above, and a filled button here would put two accents on a
+  // page whose stated rule is one. (The app-password form below keeps its
+  // filled button: by the time it renders, an address has been added and
+  // finishing it IS the outstanding work.)
+
   // Primary gradient for the first actionable row, hazelnut outline after it:
   // the design permits one filled button per view.
   const primary = item.primary === true;
@@ -220,11 +245,14 @@ function row(item, index, formBase) {
 }
 
 export function renderConnectPage(items, { banner = null, token = null } = {}) {
-  const remaining = items.filter((i) => !i.connected && !i.soon).length;
+  // `optional` rows are standing invitations rather than outstanding work —
+  // "add another mailbox" is never finished, and counting it would mean this
+  // number never reaches zero and the page never says "all set".
+  const remaining = items.filter((i) => !i.connected && !i.soon && !i.optional).length;
   const formBase = token === null ? '' : `/c/${token}`;
   // One filled button per view, per the palette's "one accent" rule: the
   // first row that needs an action gets it, the rest are outlines.
-  const firstActionable = items.findIndex((i) => !i.connected && !i.soon);
+  const firstActionable = items.findIndex((i) => !i.connected && !i.soon && !i.optional);
   const decorated = items.map((item, i) => ({ ...item, primary: i === firstActionable }));
 
   return `<!doctype html>
