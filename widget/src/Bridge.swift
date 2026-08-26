@@ -747,15 +747,36 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
               self.reply(webView, id, ["state": "cancelled"])
               return
             }
-            self.bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { started in
-              guard started["state"] as? String == "ok" else {
-                self.reply(webView, id, started)
-                return
-              }
+            // BEGIN FIRST, EXCEPT WHEN THE LOGIN IS ALREADY UNDERWAY. A cookie
+            // harvest is self-contained: the window collects the session and
+            // the conversation starts afterwards, which is why begin lives
+            // here rather than before the window (a fresh install with no
+            // bridge state used to fail before the window could appear).
+            //
+            // A CHALLENGE window is the opposite. It opens partway through a
+            // conversation the bot is already holding — Slack asked for the
+            // challenge because it had been given an email address — and
+            // begin's first act is `cancel`. Calling it here would throw away
+            // the very request whose answer this window just captured, and the
+            // bot would then be asked for an email address with a captcha
+            // token. Derived from the field contract, like the rest.
+            let midConversation = fields.contains { $0["from"] == "captcha" }
+            let sendValue = {
               self.bridgeCall(
                 "POST", "api/bridge/cookies", json: ["p": p, "cookies": cookiesJSON], timeout: 15
               ) { done in
                 self.reply(webView, id, done)
+              }
+            }
+            if midConversation {
+              sendValue()
+            } else {
+              self.bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { started in
+                guard started["state"] as? String == "ok" else {
+                  self.reply(webView, id, started)
+                  return
+                }
+                sendValue()
               }
             }
           }

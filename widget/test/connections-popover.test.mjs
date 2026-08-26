@@ -46,3 +46,25 @@ test('the pop-over resolves its anchor and refuses to render without one', () =>
   assert.match(page, /if \(!anchor\) \{ hintHost\.replaceChildren\(\); return; \}/u,
     'an unplaceable pop-over closes instead of drawing unanchored');
 });
+
+// SLACK'S WINDOW IS A STEP, NOT AN ENTRY POINT. The owner spent three
+// screenshots inside a login window that nothing was waiting on: pressing the
+// tile opened it before the bot had been told anything, so he signed into
+// Slack's website in a private session while the bridge sat in a login started
+// hours earlier. The window belongs partway through the conversation, at the
+// moment the bot asks for a challenge it cannot ask for in a text box.
+test('only a cookie login opens its window from the tile press', () => {
+  const toggleBody = /if \(src\.action === 'bridge' && !src\.connected[\s\S]{0,120}?\) \{\n\s*openBridgeLogin\(\);/u
+    .exec(page)?.[0] ?? '';
+  assert.ok(toggleBody, 'the tile press still has a bridge branch');
+  assert.match(toggleBody, /BRIDGE_FLOW\[kindOf\(src\.id\)\][\s\S]{0,40}=== 'cookie'/u,
+    'a conversation flow must reach its card, not a window');
+});
+
+test('the challenge step offers the window, on two independent markers', () => {
+  assert.match(page, /const wantsChallenge = \(\) => \{/u);
+  assert.match(page, /captcha\|challenge/u, 'the bot names the challenge');
+  assert.match(page, /Login URL:\|embedded/u,
+    'and a second marker, so a stray sentence cannot summon a login window');
+  assert.match(page, /answer the check/u);
+});
