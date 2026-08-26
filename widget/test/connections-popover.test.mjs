@@ -68,3 +68,18 @@ test('the challenge step offers the window, on two independent markers', () => {
     'and a second marker, so a stray sentence cannot summon a login window');
   assert.match(page, /answer the check/u);
 });
+
+// ONE PRESS MEANS "LOG ME IN". A card that opens on a `begin login` button is
+// asking for the press that already happened (owner, 2026-08-26). The
+// no-window bridges got this natively in d88e56c; Slack reaches its card by a
+// different road and arrived at the same dead button.
+test('a fresh conversation card begins its login itself, once', () => {
+  assert.match(page, /const autoBegun = new Set\(\);/u, 'guarded by source id');
+  assert.match(page, /autoBegun\.has\(src\.id\)[\s\S]{0,120}beginButton\('begin login'\)/u,
+    'a second pass falls back to the button rather than beginning again');
+  assert.match(page, /autoBegun\.add\(src\.id\);[\s\S]{0,220}hzPost\('bridgeBegin'/u,
+    'the flag is set before the call, not after it');
+  // begin's first act is `cancel`, so an unguarded auto-begin would cancel the
+  // conversation it just opened on its own repaint.
+  assert.match(page, /renderBridge repaints on every bot reply and\n\/\/ begin starts with `cancel`/u);
+});
