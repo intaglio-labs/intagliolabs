@@ -66,17 +66,8 @@ function openConnector(src, row) {
     hzPost('openFullDiskAccess').catch(() => {});
     return;
   }
-  // Disabled connector (WhatsApp): the tile press IS its connect button,
-  // same as the settings shelf.
-  if (src.disabled && src.action === 'enable') {
-    openId = null;
-    row.classList.add('logging-in');
-    hzPost('setConnectorEnabled', { connector: src.id, enabled: true })
-      .then(reload)
-      .catch(() => {})
-      .finally(() => row.classList.remove('logging-in'));
-    return;
-  }
+  // The disabled-connector shortcut was reverted with its settings-shelf
+  // twin (owner, 2026-08-25): the card and its connect button are back.
   openId = src.id;
   row.classList.add('open');
   hzConnectorHint(src, phint, { refresh: reload });
