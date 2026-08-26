@@ -23,6 +23,7 @@ import { dirname, join } from 'node:path';
 import { renderConnectPage, renderHelpPage } from './lib/page.mjs';
 import { renderMemoryPage } from './lib/memoryPage.mjs';
 import { renderBridgePage } from './lib/bridgePage.mjs';
+import { secretResponse } from './lib/secretApi.mjs';
 import { PLATFORMS, bridgeStatus, beginCommand, beginLogin, loadPanel, relay } from './lib/bridge.mjs';
 import { bridgeApiResponse } from './lib/bridgeApi.mjs';
 import { decide, fetchPending } from './lib/memory.mjs';
@@ -229,6 +230,38 @@ async function handleRequest(req, res) {
       authorization: req.headers.authorization,
     });
     send(res, status, JSON.stringify(body), 'application/json; charset=utf-8');
+    return;
+  }
+
+  // /api/secret — the widget's NATIVE channel for pasting a connector's API
+  // key (the in-panel walkthrough; lib/secretApi.mjs carries the allowlist and
+  // the rules). Above the /c/<token> gate like its siblings: that gate 404s
+  // everything it doesn't match.
+  if (url.pathname === '/api/secret') {
+    let body = {};
+    if (req.method === 'POST') {
+      let raw = '';
+      try {
+        raw = await readBody(req, 16 * 1024);
+      } catch {
+        send(res, 413, JSON.stringify({ error: 'too large' }), 'application/json; charset=utf-8');
+        return;
+      }
+      try {
+        body = JSON.parse(raw || '{}');
+      } catch {
+        send(res, 400, JSON.stringify({ error: 'bad json' }), 'application/json; charset=utf-8');
+        return;
+      }
+    }
+    const { status, body: out } = secretResponse({
+      method: req.method,
+      origin: req.headers.origin,
+      authorization: req.headers.authorization,
+      body,
+      write: writeSecret,
+    });
+    send(res, status, JSON.stringify(out), 'application/json; charset=utf-8');
     return;
   }
 

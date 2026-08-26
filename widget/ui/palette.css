@@ -1382,6 +1382,10 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
    than the room the tile leaves it. */
 .hint-host {
   position: fixed; z-index: 40;
+  /* Sized to the card's own content: a two-line connect card should be a
+     small card, not 280px of mostly empty room (owner, 2026-08-25). The
+     placer (hzPlacePop) sets only max-width; long flows wrap at the cap. */
+  width: max-content;
   overflow-y: auto;
   display: flex; flex-direction: column; align-items: stretch;
   background: rgba(20, 20, 18, 0.97);

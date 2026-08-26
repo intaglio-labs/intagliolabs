@@ -408,8 +408,12 @@ function hzPlacePop(host, anchor) {
   if (!host || !anchor) return;
   const r = anchor.getBoundingClientRect();
   const vw = window.innerWidth, vh = window.innerHeight;
-  const w = Math.min(280, vw - 16);
-  host.style.width = `${w}px`;
+  // Cap, don't dictate: the host is width: max-content, so a short connect
+  // card stays a small card; only the ceiling comes from here. The real width
+  // is then measured back for the clamp — content just changed, so this
+  // layout read is fresh, not a stale rect.
+  host.style.maxWidth = `${Math.min(280, vw - 16)}px`;
+  const w = host.getBoundingClientRect().width || Math.min(280, vw - 16);
   const left = Math.round(Math.min(Math.max(8, r.left + r.width / 2 - w / 2), vw - w - 8));
   host.style.left = `${left}px`;
   const above = r.top, below = vh - r.bottom;

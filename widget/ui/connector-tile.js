@@ -124,8 +124,9 @@ const HZ_HINTS = {
   calendar: { text: 'Connect your Google account on the connect page and approve read-only calendar access.' },
   mail: { text: 'Create a 16-letter Google app password, then paste it on the connect page.',
           url: 'https://myaccount.google.com/apppasswords', link: 'Google app passwords' },
-  granola: { text: 'Copy your API key from Granola settings, then paste it on the connect page.',
-             url: 'https://granola.ai', link: 'granola.ai' },
+  // granola left the sentence behind (owner, 2026-08-25): its panel is the
+  // in-app walkthrough — open granola.ai, create a key, paste it right here.
+  granola: { url: 'https://granola.ai', link: 'granola.ai', walkthrough: true },
   // OAuth2 since Oura retired personal access tokens in Dec 2025: the PAT
   // page this used to link is a dead end, and there is no settings page to
   // send anyone to instead, so this one is text-only — the connect page
@@ -176,6 +177,46 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
           .catch(() => { enable.disabled = false; enable.textContent = 'connect'; });
       });
       tip.appendChild(enable);
+    } else if (hint && hint.walkthrough) {
+      // The in-panel walkthrough — the same three steps as connections.js
+      // (both copies corrected together, per the note on these tables).
+      const open = document.createElement('button');
+      open.className = 'hold-ok';
+      open.textContent = `1 · open ${hint.link} ↗`;
+      open.addEventListener('click', (e) => {
+        e.stopPropagation();
+        hzPost('openExternal', { url: hint.url }).catch(() => {});
+      });
+      const step2 = document.createElement('span');
+      step2.className = 'setup';
+      step2.textContent = '2 · create an API key and copy it';
+      const paste = document.createElement('textarea');
+      paste.className = 'bpaste';
+      paste.placeholder = '3 · paste the key here';
+      paste.setAttribute('spellcheck', 'false');
+      const send = document.createElement('button');
+      send.className = 'hold-ok';
+      send.textContent = 'connect';
+      const said = document.createElement('span');
+      said.className = 'setup';
+      send.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const val = paste.value.trim();
+        if (!val) return;
+        paste.value = ''; // gone from the page before anything else happens
+        send.disabled = true; send.textContent = 'connecting…';
+        hzPost('connectSecret', { p: HZ_KIND(src.id), value: val })
+          .then((d) => {
+            if (d && d.state === 'ok') { refresh(); return; }
+            send.disabled = false; send.textContent = 'connect';
+            said.textContent = (d && d.error) || 'could not save the key';
+          })
+          .catch(() => {
+            send.disabled = false; send.textContent = 'connect';
+            said.textContent = 'could not reach the connect service';
+          });
+      });
+      tip.append(open, step2, paste, send, said);
     } else if (hint) {
       tip.append(hint.text + ' ');
       if (hint.url) {
@@ -237,12 +278,10 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
       tip.appendChild(login);
       }
 
-      if (data && data.state === 'cancelled') {
-        const note = document.createElement('span');
-        note.className = 'why';
-        note.textContent = 'login window closed — tap to try again.';
-        tip.appendChild(note);
-      }
+      // ~~A 'cancelled' state appended "login window closed — tap to try
+      // again."~~ Yeeted (owner, 2026-08-25): the card already shows the same
+      // log in button either way, and the sentence squeezed in beside the
+      // pill saying what the owner just did themselves.
       if (data && data.transcript && data.transcript.length) {
         const log = document.createElement('div');
         log.className = 'blog';

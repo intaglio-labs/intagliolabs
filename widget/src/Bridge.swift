@@ -79,6 +79,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     // flow — a skipped step must stay reachable.
                     "setupState", "modelDownload", "modelCancel",
                     "openFullDiskAccess", "startSources",
+                    // The in-panel API-key walkthrough (granola first).
+                    "connectSecret",
                    "permissionState", "requestPermission"],
     "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
                    "widgetSpot",
@@ -95,7 +97,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // map from the wrong file cost one broken popup in review.
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
-               "openExternal", "setConnectorEnabled"],
+               "openExternal", "setConnectorEnabled", "connectSecret"],
     // peopleFind: search across every year, server-ranked. peopleMap: the
     // ALL-YEARS source behind the constellation — every person, uncapped, with
     // their per-year topics. monthsView: where the popup was left, so a restart
@@ -635,6 +637,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "bridgeBegin":
       let p = String((payload["p"] as? String ?? "").prefix(24))
       bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { [weak self] d in
+        self?.reply(webView, id, d)
+      }
+    case "connectSecret":
+      // The in-panel walkthrough's paste: {p, value} → POST /api/secret on the
+      // connect service (lib/secretApi.mjs holds the sink allowlist). The
+      // value passes through this process and is never logged or stored here.
+      let sp = String(payload["p"] as? String ?? "")
+      let sv = String(payload["value"] as? String ?? "")
+      bridgeCall("POST", "api/secret", json: ["p": sp, "value": sv], timeout: 10) { [weak self] d in
         self?.reply(webView, id, d)
       }
     case "bridgeCookies":

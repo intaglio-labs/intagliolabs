@@ -391,8 +391,9 @@ const HINTS = {
   calendar: { text: 'Connect your Google account on the connect page and approve read-only calendar access.' },
   mail: { text: 'Create a 16-letter Google app password, then paste it on the connect page.',
           url: 'https://myaccount.google.com/apppasswords', link: 'Google app passwords' },
-  granola: { text: 'Copy your API key from Granola settings, then paste it on the connect page.',
-             url: 'https://granola.ai', link: 'granola.ai' },
+  // granola left this table (owner, 2026-08-25): its panel is the in-app
+  // walkthrough now — open granola.ai, create a key, paste it right here.
+  granola: { url: 'https://granola.ai', link: 'granola.ai', walkthrough: true },
   // OAuth2 since Oura retired personal access tokens in Dec 2025: the PAT
   // page this used to link is a dead end, and there is no settings page to
   // send anyone to instead, so this one is text-only — the connect page
@@ -414,7 +415,7 @@ function hintFor(id) {
 
 // Connectors finished on the loopback connect page (paste an app password or
 // token there). They get an "open the connect page" door in their hint.
-const CONNECT_PAGE = new Set(['mail', 'oura', 'notion', 'granola']);
+const CONNECT_PAGE = new Set(['mail', 'oura', 'notion']); // granola pastes in-panel now
 
 // How each social bridge authenticates — it is NOT the same for all of them,
 // and the web-cookie-harvest button only fits the cookie ones. The token and
@@ -432,23 +433,15 @@ const BRIDGE_FLOW = {
   twitter: 'cookie', messenger: 'cookie', instagram: 'cookie',
   discord: 'token', slack: 'token', telegram: 'phone',
 };
+// ~~Each of these carried a `lead` sentence ("Slack logs in with two tokens
+// from your browser (xoxc and xoxd).") and a how-to link into the mautrix
+// docs.~~ Yeeted for all three (owner, 2026-08-25), same shape as every other
+// explainer this panel has shed: the input's placeholder names exactly what
+// to paste, and that is the whole briefing the flow needs.
 const BRIDGE_HELP = {
-  discord: {
-    lead: "Discord logs in with your account token, not a password.",
-    place: 'your Discord token',
-    url: 'https://docs.mau.fi/bridges/go/discord/authentication.html',
-    link: 'how to find your token',
-  },
-  slack: {
-    lead: "Slack logs in with two tokens from your browser (xoxc and xoxd).",
-    place: 'your Slack tokens',
-    url: 'https://docs.mau.fi/bridges/go/slack/authentication.html',
-    link: 'how to find your tokens',
-  },
-  telegram: {
-    lead: "Telegram texts a code to your app. Send your phone number first, then the code.",
-    place: 'phone (+1…), then the code',
-  },
+  discord: { place: 'your Discord token' },
+  slack: { place: 'your Slack tokens' },
+  telegram: { place: 'phone (+1…), then the code' },
 };
 // The claim the system actually keeps, not the one it doesn't. This line
 // renders under EVERY tile including the social bridges, which hold a live
@@ -688,6 +681,48 @@ function card(src, keep) {
         });
         tip.appendChild(add);
       }
+    } else if (hint && hint.walkthrough) {
+      // The in-panel walkthrough (owner, 2026-08-25): the whole connect flow
+      // lives right here — open the site, make a key, paste it — instead of
+      // handing the owner to the connect page. hint.url is the door;
+      // connectSecret (Bridge → POST /api/secret) is where the paste lands.
+      const open = document.createElement('button');
+      open.className = 'hold-ok';
+      open.textContent = `1 · open ${hint.link} ↗`;
+      open.addEventListener('click', (e) => {
+        e.stopPropagation();
+        hzPost('openExternal', { url: hint.url }).catch(() => {});
+      });
+      const step2 = document.createElement('span');
+      step2.className = 'setup';
+      step2.textContent = '2 · create an API key and copy it';
+      const paste = document.createElement('textarea');
+      paste.className = 'bpaste';
+      paste.placeholder = '3 · paste the key here';
+      paste.setAttribute('spellcheck', 'false');
+      const send = document.createElement('button');
+      send.className = 'hold-ok';
+      send.textContent = 'connect';
+      const said = document.createElement('span');
+      said.className = 'setup';
+      send.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const val = paste.value.trim();
+        if (!val) return;
+        paste.value = ''; // gone from the page before anything else happens
+        send.disabled = true; send.textContent = 'connecting…';
+        hzPost('connectSecret', { p: kindOf(src.id), value: val })
+          .then((d) => {
+            if (d && d.state === 'ok') { refresh(); return; }
+            send.disabled = false; send.textContent = 'connect';
+            said.textContent = (d && d.error) || 'could not save the key';
+          })
+          .catch(() => {
+            send.disabled = false; send.textContent = 'connect';
+            said.textContent = 'could not reach the connect service';
+          });
+      });
+      tip.append(open, step2, paste, send, said);
     } else if (hint) {
       // Not connected: the one-sentence how-to to set it up.
       const setup = document.createElement('span');
@@ -839,12 +874,10 @@ function card(src, keep) {
           .catch(() => { login.disabled = false; login.textContent = 'log in'; });
       });
       tip.appendChild(login);
-      if (data && data.state === 'cancelled') {
-        const note = document.createElement('span');
-        note.className = 'why';
-        note.textContent = 'login window closed — tap to try again.';
-        tip.appendChild(note);
-      }
+      // ~~A 'cancelled' state appended "login window closed — tap to try
+      // again."~~ Yeeted (owner, 2026-08-25): the card already shows the same
+      // log in button either way, and the sentence squeezed in beside the
+      // pill saying what the owner just did themselves.
       appendTranscript();
       // The manual cookie-paste fallback ("having trouble? paste cookies
       // manually") was yeeted (owner, 2026-08-25): the webview login is the
@@ -857,22 +890,6 @@ function card(src, keep) {
       // begin sends the login command; then the input relays whatever the bot
       // asks for (a token, or a phone number and then the code).
       const help = BRIDGE_HELP[kindOf(src.id)];
-      if (help) {
-        const lead = document.createElement('span');
-        lead.className = 'why';
-        lead.textContent = help.lead;
-        tip.appendChild(lead);
-        if (help.url) {
-          const a = document.createElement('a');
-          a.href = '#';
-          a.textContent = help.link + ' ↗';
-          a.addEventListener('click', (e) => {
-            e.preventDefault();
-            hzPost('openExternal', { url: help.url });
-          });
-          tip.appendChild(a);
-        }
-      }
       const started = data && data.transcript && data.transcript.length;
       if (!started) {
         beginButton('begin login');
