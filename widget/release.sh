@@ -10,9 +10,15 @@
 #   1. Apple Developer Program membership on the shipping entity.
 #   2. A "Developer ID Application" certificate in the login keychain
 #      (Xcode > Settings > Accounts > Manage Certificates, or the portal).
-#   3. Notary credentials stored once:
+#   3. Notary credentials stored once, from an App Store Connect API key
+#      (Users and Access > Integrations). NOT an Apple ID and app-specific
+#      password: that is a credential for the whole Apple account wearing a
+#      narrower name, while the key is scoped to the API, revocable on its own,
+#      owned by the team rather than a person, and not behind anyone's 2FA.
 #        xcrun notarytool store-credentials hazlie-notary \
-#          --apple-id <appleid> --team-id <TEAMID> --password <app-specific>
+#          --key AuthKey_<KEYID>.p8 --key-id <KEYID> --issuer <ISSUER-UUID>
+#      Omit --issuer for an Individual key; notarytool requires it for a Team
+#      key and refuses it for an Individual one.
 set -eu
 cd "$(dirname "$0")"
 
