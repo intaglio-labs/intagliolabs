@@ -287,9 +287,12 @@ test('the field contract is declared per platform, for the two that need one', (
   // empty value from that same JSON — a login that looks done and is not
   // (2026-08-25).
   const withFields = entries.filter(([, p]) => p.webLogin?.fields).map(([id]) => id).sort();
-  // Slack's is the other shape entirely: one `captcha` field and no cookie
-  // harvest, because its window exists so a human can answer a challenge and
-  // hand back the token that answering produced.
+  // ~~Slack's is the other shape entirely: one `captcha` field and no cookie
+  // harvest.~~ Slack's window went back to harvesting on 2026-08-26 (the owner
+  // wanted the press to open a window, not a conversation), and its pair is the
+  // reason two new sources exist: a NAMED cookie, because the bridge wants `d`
+  // on its own rather than a cookie header it cannot split, and STORAGE,
+  // because the other half of a Slack session is not a cookie at all.
   assert.deepEqual(withFields, ['linkedin', 'slack']);
 
   // Every field must be one the login window knows how to satisfy. A `header`
@@ -298,9 +301,14 @@ test('the field contract is declared per platform, for the two that need one', (
   for (const [id, p] of entries) {
     for (const f of p.webLogin?.fields ?? []) {
       assert.ok(f.id, `${id}: a field with no id`);
-      assert.ok(['cookies', 'header', 'captcha'].includes(f.from),
+      assert.ok(['cookies', 'header', 'captcha', 'cookie', 'storage'].includes(f.from),
         `${id}: unknown field source ${f.from}`);
       if (f.from === 'header') assert.ok(f.header, `${id}: header field ${f.id} names no header`);
+      // A named cookie must say WHICH, and a storage field must say what it
+      // matches — the window reads one pattern and reports nothing else, so an
+      // unnamed one would be either inert or a general reader of the page.
+      if (f.from === 'cookie') assert.ok(f.cookie, `${id}: cookie field ${f.id} names no cookie`);
+      if (f.from === 'storage') assert.ok(f.match, `${id}: storage field ${f.id} names no pattern`);
     }
   }
 });

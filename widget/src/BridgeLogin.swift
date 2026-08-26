@@ -407,6 +407,53 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
       )
     }
 
+    // A STORAGE FIELD READS ONE PATTERN OUT OF THE PAGE'S OWN localStorage, and
+    // it exists because Slack's session is two halves that live in two places.
+    // The `d` cookie is in the cookie jar and native can read it; the client
+    // token is not a cookie at all — Slack's web app keeps it in localStorage —
+    // so the ONLY way to obtain it is from inside the page.
+    //
+    // This is the same value the card used to ask the owner to copy out of
+    // devtools by hand, which was the most alarming thing this app has ever put
+    // on screen. Reading it here is strictly less exposure than that: it never
+    // appears on screen, never goes through the clipboard, and goes straight to
+    // the local bridge that needs it.
+    //
+    // NARROW BY CONSTRUCTION, and it has to stay that way. It matches ONE
+    // pattern, named by the server's field contract; it reports the first
+    // match and then only reports changes; it reads localStorage and nothing
+    // else — no cookies, no DOM, no traffic. It cannot become a general reader
+    // of the page, which is the same rule the header capture above follows.
+    for f in fields where f["from"] == "storage" {
+      guard let id = f["id"], let pattern = f["match"], !pattern.isEmpty else { continue }
+      config.userContentController.add(self, name: Self.headerHandler)
+      let esc = pattern.replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "'", with: "\\'")
+      let js = """
+      (function () {
+        var sent = '';
+        var re = new RegExp('\(esc)[A-Za-z0-9._-]+');
+        setInterval(function () {
+          try {
+            for (var i = 0; i < localStorage.length; i += 1) {
+              var v = localStorage.getItem(localStorage.key(i));
+              if (typeof v !== 'string') continue;
+              var m = v.match(re);
+              if (m && m[0] && m[0] !== sent) {
+                sent = m[0];
+                window.webkit.messageHandlers.\(Self.headerHandler)
+                  .postMessage({ name: '\(Self.storagePrefix)\(id)', value: m[0] });
+                return;
+              }
+            }
+          } catch (e) {}
+        }, 700);
+      })();
+      """
+      config.userContentController.addUserScript(
+        WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+    }
+
     let wanted = fields.compactMap { $0["from"] == "header" ? $0["header"] : nil }
     if !wanted.isEmpty {
       config.userContentController.add(self, name: Self.headerHandler)
@@ -575,6 +622,9 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   /// Where a captured CAPTCHA token is filed. Not a header name, so it cannot
   /// collide with one a contract asks for.
   fileprivate static let captchaKey = "__captcha"
+  /// Storage-field values arrive under this prefix plus the field id, so one
+  /// handler serves headers, the captcha and storage without them colliding.
+  fileprivate static let storagePrefix = "__storage:"
 
   func userContentController(
     _ controller: WKUserContentController, didReceive message: WKScriptMessage
@@ -632,6 +682,20 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
             // The token the PERSON's answer produced. Nothing here answers a
             // challenge — the window shows the platform's own page and waits.
             guard let v = self.seenHeaders[Self.captchaKey], !v.isEmpty else { return }
+            payload[id] = v
+          case "cookie":
+            // ONE NAMED COOKIE, not the whole header. Slack's bridge wants the
+            // `d` cookie's value on its own, under its own key, beside a token
+            // that is not a cookie at all — a cookie HEADER would hand it a
+            // string it has no way to split.
+            guard let name = f["cookie"],
+                  let c = mine.first(where: { $0.name == name }), !c.value.isEmpty
+            else { return }
+            payload[id] = c.value
+          case "storage":
+            // Read from inside the page by the poller above, because this half
+            // of the session is not in any cookie jar.
+            guard let v = self.seenHeaders[Self.storagePrefix + id], !v.isEmpty else { return }
             payload[id] = v
           default:
             return

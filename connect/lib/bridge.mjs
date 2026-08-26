@@ -308,14 +308,27 @@ export const PLATFORMS = Object.freeze({
     bot: '@slackbot:hazlie.local',
     dir: 'slack',
     db: 'slack/mautrix-slack.db',
-    // ~~login-token~~ — rejected as "Unknown command" by this bridge, which
-    // takes `login <flow>` and offers three: `email` (sign in with your Slack
-    // email address), `token`, and `app`. EMAIL is the one a person wants and
-    // the one Beeper uses; the token flow was never the only option, it was
-    // just the one this table knew about.
-    // ~~login token~~ — the retreat, and it was based on a wrong finding. See
-    // webLogin below.
-    initial: 'login email',
+    // BACK TO `login token`, and this time nobody types one. The owner signs
+    // in to Slack in the login window — email code, Google, Apple, whichever —
+    // and the window takes the session it just created: the `d` cookie from the
+    // jar, the client token out of the page's own storage.
+    //
+    // ~~login email~~ — the flow Beeper uses and the one this app restored on
+    // 2026-08-26 once the "browser not supported" gate turned out to be a stale
+    // user agent. It works: the bot asks for an address, sends the CAPTCHA
+    // step, and Slack emails a code. What it is NOT is what the owner asked
+    // for, twice, looking at a card that was talking to him instead of a
+    // window: "i thought this was a separate login pop-up like instagram" and
+    // "when someone hits the icon it should open the login window directly".
+    // A conversation is a worse login than a window when the window is
+    // available — and it is available, which he proved by signing all the way
+    // into a workspace inside it while the bridge sat waiting for a captcha
+    // token it was never going to get.
+    //
+    // ~~login-token~~ (the original) was rejected as "Unknown command": the
+    // command is `login token`, and this table had the hyphen. That mistake is
+    // what sent this entry round the houses in the first place.
+    initial: 'login token',
     prefix: '!slack',
     site: 'slack.com',
     loginUrl: 'https://slack.com/signin',
@@ -429,11 +442,28 @@ export const PLATFORMS = Object.freeze({
       //     puzzle should be, on someone else's network. It serves reCAPTCHA
       //     and nothing else, so the cost of being wrong is one unused row.
       allowedFrameHosts: ['www.google.com', 'www.recaptcha.net'],
-      // No cookie gate: this window is not harvesting a session, it is waiting
-      // for one value that appears when the challenge is answered.
-      sessionCookie: null,
-      requiredCookies: [],
-      fields: [{ id: 'captcha_token', from: 'captcha' }],
+      // `d` IS THE SIGNAL AND HALF THE ANSWER. It appears when the sign-in
+      // completes, whichever way the owner signed in, so it is what the window
+      // waits on — and its value is the cookie_token the bridge asks for.
+      sessionCookie: 'd',
+      requiredCookies: ['d'],
+      // THE TWO HALVES OF A SLACK SESSION, in the shape the bot asked for in
+      // its own words: {"auth_token":"xoxc-…","cookie_token":"xoxd-…"}.
+      //
+      // They come from two different places and that is the whole reason this
+      // entry needed new machinery. `d` is a cookie and native reads it from
+      // the jar. The xoxc token is NOT a cookie — Slack's web client keeps it
+      // in localStorage — so it is read from inside the page by a poller that
+      // matches this one pattern and reports nothing else.
+      //
+      // This is the same pair the card used to ask the owner to copy out of
+      // devtools by hand. Taking them here is less exposure, not more: neither
+      // is displayed, neither goes through the clipboard, and both go straight
+      // to the bridge on this machine.
+      fields: [
+        { id: 'auth_token', from: 'storage', match: 'xoxc-' },
+        { id: 'cookie_token', from: 'cookie', cookie: 'd' },
+      ],
       // No userAgent override. ~~Slack's sniffer rejects Safari~~ — it rejects
       // a STALE Safari, and the window now presents the version of Safari that
       // is actually installed (BridgeLogin.systemSafariUserAgent). A literal
