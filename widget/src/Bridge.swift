@@ -335,12 +335,28 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "https://cloud.ouraring.com/oauth/applications",
     "https://www.notion.so/my-integrations",
     // Telegram's app registration — each install gets its own api_id/api_hash.
-    // RESTORED IN THE MERGE (2026-08-26): this entry and the walkthrough that
-    // sends the owner to it were both present at the merge base and both lost
-    // on origin when the People-tab PR reverted connections.js and Bridge.swift
-    // to older copies. connectors/test/openExternal.test.mjs is what caught it
-    // — the walkthrough survived on this side, its allowlist entry did not, and
-    // the symptom would have been a link that does nothing.
+    //
+    // RESTORED IN THE MERGE (2026-08-26). This entry and the walkthrough that
+    // sends the owner to it were both present at 72b5960 and both absent by
+    // 91e8285, and 72b5960 is an ancestor of it — so they were lost, not never
+    // written. The loss is in `0f17d26` "Merge updated connector onboarding
+    // branch": its two parents were 2e58f17 (no walkthrough) and 72b5960 (two),
+    // and it resolved widget/ui/connections.js and this file toward the side
+    // that had neither.
+    //
+    // ~~"lost when the People-tab PR (9176ef8) reverted these files".~~ WRONG,
+    // and corrected here rather than left standing: 9176ef8 is innocent, its
+    // connections.js diff is +17/-10 and touches neither. A reviewer traced it
+    // properly and I had blamed the wrong commit. Worth the correction because
+    // the true cause is a different KIND of bug — not a PR overwriting a file,
+    // but a merge silently choosing the older side — and `git log -S` will not
+    // find it, because it skips merge commits by default. That is exactly where
+    // a loss like this hides.
+    //
+    // None of it was ever on main; it is branch work. connectors/test/
+    // openExternal.test.mjs is what caught the survivor half — the walkthrough
+    // came through the merge, its allowlist entry did not, and the symptom
+    // would have been a link that does nothing.
     "https://my.telegram.org/apps",
     // The bridge token how-to links, for the Discord/Slack guided login flows.
     "https://docs.mau.fi/bridges/go/discord/authentication.html",
