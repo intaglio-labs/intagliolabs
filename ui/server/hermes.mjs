@@ -67,7 +67,7 @@ import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
 import { contentMatches } from './people/content.mjs';
-import { rebuildEpisodes } from './memory/episodeStore.mjs';
+import { rebuildEpisodes, EPISODE_SOURCES } from './memory/episodeStore.mjs';
 import { loadSpine } from './people/graph.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
@@ -1376,7 +1376,26 @@ const RETAIN_FIELDS = Object.freeze(['source', 'keep_days']);
 const PURGE_FIELDS = Object.freeze(['source']);
 const DELETE_ENTITIES_FIELDS = Object.freeze(['source', 'entity_ids']);
 const MAINTAIN_FIELDS = Object.freeze([]);
-const EPISODE_REBUILD_FIELDS = Object.freeze([]);
+const EPISODE_REBUILD_FIELDS = Object.freeze(['force']);
+
+// The episodic corpus in one string: what rebuildEpisodes actually reads. Count
+// and high-water id together catch both arrivals and deletions, and the source
+// list is the same EPISODE_SOURCES the rebuild selects on, so the two cannot
+// drift apart. Deliberately not a hash of the rows -- reading them is the work
+// this exists to avoid.
+function episodeSourceFingerprint(db) {
+  const holes = EPISODE_SOURCES.map(() => '?').join(',');
+  const r = db
+    .prepare(
+      `SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m FROM context WHERE source IN (${holes})`
+    )
+    .get(...EPISODE_SOURCES);
+  return `${r.n}|${r.m}`;
+}
+
+// The last rebuild this process performed, and the fingerprint it was for. In
+// memory only: a restart rebuilds once.
+let lastEpisodeBuild = null;
 const ENTITIES_PARAMS = Object.freeze(['source', 'from_ts', 'to_ts']);
 const APPLY_FIELDS = Object.freeze(['run', 'claims']);
 const APPLY_RUN_FIELDS = Object.freeze([
@@ -2141,7 +2160,29 @@ async function handleAdmin(db, req, res, cors, url, channel) {
     if (url.pathname === '/admin/episodes/rebuild') {
       const body = await readJson(req);
       assertClosedFields(body, EPISODE_REBUILD_FIELDS);
+      // NOTHING NEW MEANS NOTHING TO REBUILD.
+      //
+      // The distiller POSTs this before every pass, and a pass runs every 45
+      // seconds while it is catching up -- so on a 36,975-episode corpus this
+      // was deleting and reinserting all of them, twice a minute, to arrive at
+      // byte-identical rows. hermes is single-threaded, so that is not just
+      // wasted CPU: every route is frozen for the duration of each one.
+      //
+      // The index is a pure function of the episodic rows, so (count, high-water
+      // id) over exactly those sources decides it. Held in memory rather than on
+      // disk on purpose -- a restart rebuilds once, which is cheap and is the
+      // conservative direction to be wrong in.
+      //
+      // `force` is the way to demand one anyway, since the fingerprint cannot
+      // see a change in the BUILDER (a different gap rule cuts the same rows
+      // differently). Nothing calls it on a timer.
+      const fp = episodeSourceFingerprint(db);
+      if (!body.force && lastEpisodeBuild !== null && lastEpisodeBuild.fingerprint === fp) {
+        send(res, 200, { ...lastEpisodeBuild.out, skipped: 'unchanged' }, cors);
+        return;
+      }
       const out = withPeopleDbs(db, (state) => rebuildEpisodes(db, { spine: state ? loadSpine(state) : null }));
+      lastEpisodeBuild = { fingerprint: fp, out };
       // COUNTS ONLY: thread_key holds a chat guid, a chat guid holds a handle,
       // and counterparty_key holds a person's name. None of them may be logged
       // or returned.
