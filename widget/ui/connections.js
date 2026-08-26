@@ -1115,11 +1115,16 @@ function card(src, keep) {
       } else if (expiredIn(data)) {
         // The QR is REDACTED the moment the attempt ends, so a card reopened
         // after one timed out has the words and not the code. Start over is
-        // the only move, and saying so beats a stale conversation.
-        const gone = document.createElement('span');
-        gone.className = 'setup';
-        gone.textContent = 'that code expired — start again and scan it promptly';
-        tip.appendChild(gone);
+        // the only move ~~and saying so beats a stale conversation~~.
+        //
+        // The saying-so is withdrawn (owner, 2026-08-26). The card printed
+        // "that code expired — start again and scan it promptly" above the
+        // button, which reads as a reprimand for something that is not the
+        // person's doing — Discord's remote-auth code has a short life and
+        // reopening the panel after it lapses is ordinary. There is exactly
+        // one move available and the button already is it. The BRANCH stays:
+        // it is what swaps a dead conversation and its input box for a fresh
+        // start, which is the part that was actually load-bearing.
         beginButton('begin login');
       } else {
         appendTranscript();
