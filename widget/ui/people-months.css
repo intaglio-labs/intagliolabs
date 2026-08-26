@@ -207,12 +207,20 @@ body.plist .pm-globe {
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  /* SITS ON THE STRIP'S LINE. The row is flex-end aligned, so a bottom margin
-     or bottom padding on this button lifts the glyph off the baseline every
-     tab sits on — it read as floating above 2026 rather than beside it. Nothing
-     below the icon: its box bottom IS the line the tabs end on. The left margin
-     is the only spacing left, and it is what holds it off the newest year. */
-  margin: 0 0 0 8px;
+  /* SITS ON THE YEARS' BASELINE — the bottom of the circle level with the
+     bottom of "2026", not with the bottom of the tab that holds it (owner,
+     2026-08-26). ~~The tab's box edge was the first reading of this~~ and it
+     looked wrong: the eye lines an icon up against the digits beside it, not
+     against the chrome around them.
+     7px, and it is two measured numbers rather than a nudge. The baseline is
+     9.0px above the tab's box bottom — 6px of the tab's own bottom padding plus
+     ~3px of descent under 12px IBM Plex Mono — and the circle's ink stops
+     1.87px short of the svg's box bottom, because an r=9 circle in a 24 viewBox
+     drawn at 15px leaves that much air beneath it. 9.0 - 1.87 = 7.13, rounded
+     to 7; the remainder is a tenth of a pixel and false precision to write
+     down. Change the tab's padding, the font size, or that viewBox and this
+     number is wrong — measure it again rather than nudging it. */
+  margin: 0 0 7px 8px;
   padding: 0 2px;
   border: none;
   background: none;

@@ -159,9 +159,9 @@ test('the globe is a floating icon, not a tab', () => {
   assert.doesNotMatch(css, /pm-tab-globe/u);
   // Both shapes still answer the one delegated click handler.
   assert.match(page, /closest\('\.pm-tab, \.pm-globe'\)/u);
-  // And it sits ON the strip's line: the row is flex-end aligned, so anything
-  // below the icon lifts it off the baseline the tabs end on.
-  assert.match(css, /\.pm-globe \{[\s\S]*?margin: 0 0 0 8px;[\s\S]*?padding: 0 2px;/u);
+  // And its ink lands on the years' BASELINE, not on the tab's box edge —
+  // 7px of lift, measured, with the arithmetic in the rule above it.
+  assert.match(css, /\.pm-globe \{[\s\S]*?margin: 0 0 7px 8px;[\s\S]*?padding: 0 2px;/u);
 });
 
 test('the strip fades only the end that is hiding tabs', () => {
