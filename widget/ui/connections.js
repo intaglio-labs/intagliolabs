@@ -504,12 +504,14 @@ const BRIDGE_HELP = {
   // it). Slack signs in with an email address now, like Beeper does.
   slack: {
     place: 'your Slack email address',
-    // Slack will not send its code until a challenge is answered, so a window
-    // opens on Slack's own page for that one step. Said on the card because a
-    // window appearing mid-flow is otherwise a surprise, and because "answer
-    // it yourself" is the point rather than an inconvenience.
-    why: 'Slack asks for a quick “are you human” check before it emails your '
-      + 'code — a window opens on Slack’s own page for you to answer it.',
+    // ~~A `why` line: "Slack asks for a quick 'are you human' check before it
+    // emails your code — a window opens on Slack's own page for you to answer
+    // it."~~ Yeeted (owner, 2026-08-26), and it is the same lesson the `lead`
+    // sentences and the walkthrough links were yeeted for: it explained a step
+    // that had not happened yet, above a box asking for something else. The
+    // check announces itself when it arrives — that is what the button at that
+    // step is for — and a card that narrates the whole flow in advance is a
+    // card nobody finishes reading.
   },
   // ~~'phone (+1…), then the code'~~ — the owner's wording (2026-08-26). It was
   // trying to teach the whole two-step flow in one line before the first step
@@ -1109,6 +1111,12 @@ function card(src, keep) {
     const answerHint = () => {
       const asked = askedFor() || '';
       if (/\bphone\b/iu.test(asked)) return '+1 xxx xxx xxxx';
+      // An ADDRESS looks like an address. "type your answer" under "enter your
+      // email" is the box describing itself instead of the answer (owner,
+      // 2026-08-26) — the same note that put "+1 xxx xxx xxxx" under the phone
+      // question. The example is a real, public address on the owner's own
+      // domain rather than the sort of example@example.com nobody reads.
+      if (/\bemail\b/iu.test(asked)) return 'hi@intaglio.io';
       return 'type your answer';
     };
     // A one-line input that relays whatever the bot last asked for (a token,
