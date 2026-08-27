@@ -263,37 +263,36 @@ test('model setup restarts the launch agents provisioning actually installs', ()
   assert.doesNotMatch(swift, /com\.hazlie\.(?:llama-server|hermes)/u);
 });
 
-// ~~The credential reassurance is middle-aligned.~~ It was, while it shared a
-// line with the domain. The domain became a real address bar on its own row
-// (2026-08-27), because dim text beside a sentence did not read as an address and
-// the owner went looking for one. The reassurance moved up beside the title,
-// where centre would run into it — it is a promise about this app, not a property
-// of the page, and next to the address it read as a claim about the SITE.
-test('the credential reassurance sits beside the title, clear of the address', () => {
-  const block = /let sub = makeLabel\(\s*"your credentials stay local",([\s\S]*?)view\.addSubview\(sub\)/u
-    .exec(bridgeLoginSwift)?.[1];
-  assert.ok(block, 'credential reassurance label not found');
-  assert.match(block, /sub\.alignment = \.right/u, 'it shares the title line now, so it aligns away from it');
-  assert.match(block, /y: height - 30/u, 'and sits on the title row, not the address row');
+// ~~The credential reassurance is middle-aligned.~~ It was, while the domain sat
+// beside it at the same weight. The domain now carries the weight and the full
+// foreground -- it is the one fact in this header worth reading -- and the
+// reassurance moved to the opposite end, quieter, so the two do not compete and
+// cannot collide as a domain grows.
+test('the domain leads the header and the reassurance stays out of its way', () => {
+  const block = /let host = makeLabel\(([\s\S]*?)view\.addSubview\(sub\)/u.exec(bridgeLoginSwift)?.[1];
+  assert.ok(block, 'header block not found');
+  assert.match(block, /font: monoBold, color: fg/u, 'the domain is the emphasised element');
+  assert.match(block, /sub\.alignment = \.right/u, 'the reassurance sits opposite it');
+  assert.match(block, /color: muted/u, 'and stays quieter than the domain');
 });
 
-// THE ADDRESS BAR IS A SECURITY SURFACE, so what it claims must come from the
-// live URL rather than from the platform we intended to open.
-test('the login window shows a live, scheme-aware address', () => {
-  assert.match(bridgeLoginSwift, /func showAddress\(_ url: URL\?\)/u, 'it reads a URL, not a bare host');
+// THE DOMAIN IS A SECURITY SURFACE, so what it claims must come from the live URL
+// rather than from the platform we intended to open.
+test('the login window shows a live, scheme-aware domain', () => {
+  assert.match(bridgeLoginSwift, /func showHost\(_ url: URL\?\)/u, 'it reads a URL, so it can judge the scheme');
   assert.match(bridgeLoginSwift, /url\.scheme\?\.lowercased\(\) == "https"/u, 'it checks the scheme');
-  // THE WHOLE URL, not a summary of it. A lock is something the reader has to
-  // take on trust, and the path is the half of a phishing URL that usually gives
-  // it away.
-  assert.match(bridgeLoginSwift, /stringValue = url\.absoluteString/u, 'it shows the full address');
-  assert.doesNotMatch(bridgeLoginSwift, /"🔒/u, 'a glyph is not an address');
-  // didCommit is what makes it live: a login that hops hosts must rename the bar.
+  assert.match(bridgeLoginSwift, /dropFirst\(4\)/u, 'www. is noise and is dropped');
+  // didCommit is what makes it live: a login that hops hosts must rename it.
   assert.match(
     bridgeLoginSwift,
-    /didCommit navigation[\s\S]{0,120}showAddress\(webView\.url\)/u,
-    'the address must follow the page, or it is a claim that goes stale'
+    /didCommit navigation[\s\S]{0,120}showHost\(webView\.url\)/u,
+    'the domain must follow the page, or it is a claim that goes stale'
   );
-  assert.doesNotMatch(bridgeLoginSwift, /showHost\(/u, 'the host-only version is gone');
+  // ~~A lock glyph, then the whole url.~~ Both tried, both reverted: a lock is a
+  // summary somebody has to be trusted for, and a full url in mono is a wall of
+  // text that reads as less trustworthy in a window this size.
+  assert.doesNotMatch(bridgeLoginSwift, /absoluteString/u, 'the full-url version is gone');
+  assert.doesNotMatch(bridgeLoginSwift, /"🔒/u, 'the lock glyph is gone');
 });
 
 test('Google OAuth opens in the system browser, never an embedded webview', () => {

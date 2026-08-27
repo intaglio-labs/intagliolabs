@@ -547,7 +547,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     // otherwise — see systemSafariUserAgent for why that is READ and not
     // written down.
     web.customUserAgent = userAgent.isEmpty ? Self.systemSafariUserAgent : userAgent
-    showAddress(url)
+    showHost(url)
     web.load(URLRequest(url: url))
 
     // Poll the webview's own cookie store for the session cookie. When it
@@ -572,8 +572,12 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     }
     let bg = color(0x14, 0x14, 0x12)
     let muted = color(0x8a, 0x8a, 0x8a)
-    let hazelnutDim = color(0xc5, 0xa5, 0x6d)
     let mono = NSFont(name: "Menlo", size: 12) ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    // The domain is the one fact in this header worth reading, so it gets the
+    // weight and the full-strength foreground; everything around it stays quiet.
+    let monoBold = NSFont(name: "Menlo Bold", size: 12)
+      ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+    let fg = color(0xea, 0xea, 0xea)
 
     let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
     view.wantsLayer = true
@@ -610,54 +614,35 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     // autofill reads a browser's address bar to pick an item and cannot read
     // one here, because this is an app window rather than a browser — so the
     // owner searches, and the domain is the search term.
-    // AN ADDRESS BAR, NOT A CAPTION.
+    // THE DOMAIN, on its own line under the title.
     //
-    // The domain was already live and already correct -- didCommit updates it on
-    // every navigation, so a login that hops hosts renames the header. What it
-    // was not, was legible AS an address: dim hazelnut at the same weight as the
-    // sentence beside it, reading as decoration rather than as the one fact that
-    // separates the genuine site from a convincing copy. The owner looked for an
-    // address bar and did not find one.
+    // ~~A boxed bar with a lock, then the whole url.~~ Both tried and both
+    // reverted (owner, 2026-08-27): the lock is a summary somebody has to be
+    // trusted for, and a full url in a mono face is a wall of text that reads as
+    // less trustworthy, not more, in a window this size. The domain is the fact
+    // that matters and it is the one a reader can actually check at a glance.
     //
-    // So it is drawn as a bar: boxed, brighter than its surroundings, carrying a
-    // lock and the scheme, on its own line. Everything it claims is read from the
-    // live URL rather than from the platform we THINK we opened.
-    let bar = NSView(frame: NSRect(x: 16, y: 4, width: width - 32, height: 22))
-    bar.wantsLayer = true
-    bar.layer?.backgroundColor = color(0x0f, 0x0f, 0x0e).cgColor
-    bar.layer?.borderColor = color(0x3a, 0x3a, 0x36).cgColor
-    bar.layer?.borderWidth = 1
-    bar.layer?.cornerRadius = 5
-    bar.autoresizingMask = [.width]
-
-    let host = NSTextField(labelWithString: "")
-    host.font = NSFont(name: "Menlo Bold", size: 12) ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
-    host.textColor = color(0xea, 0xea, 0xea)
-    host.backgroundColor = .clear
-    host.isBordered = false
-    host.frame = NSRect(x: 8, y: 3, width: bar.frame.width - 16, height: 16)
-    host.autoresizingMask = [.width]
-    // TRUNCATE THE MIDDLE, never the end: a long URL's tail is where a lookalike
-    // hides ("…/login" vs "…/login.evil.tld"), so the end must survive.
-    host.lineBreakMode = .byTruncatingMiddle
-    // Selectable so it can be copied out and checked somewhere else. A read-only
-    // field, not an editable one: this window navigates where the login takes it
-    // and nowhere the owner types, which is the fence the allowedHosts policy
-    // enforces.
-    host.isSelectable = true
+    // It is live either way -- didCommit renames it on every navigation, so a
+    // login that hops hosts (Slack's SSO reaches accounts.google.com) never
+    // leaves a stale claim on screen.
+    //
+    // It also does real work for a password manager. 1Password's universal
+    // autofill reads a browser's address bar and cannot read one here, because
+    // this is an app window rather than a browser -- so the owner searches, and
+    // the domain is the search term.
+    let host = makeLabel("", font: monoBold, color: fg, y: 10)
     headerHost = host
-    bar.addSubview(host)
-
-    // The trust fact moves up beside the title: it is a promise about this app,
-    // not a property of the page, and sitting next to the address it read as a
-    // claim about the SITE.
+    // The trust fact, quieter and to the right: it is a promise about this app,
+    // not a property of the page, so it must not compete with the domain for the
+    // eye. Same line, opposite end -- which is also what stops the two of them
+    // colliding as a domain grows.
     let sub = makeLabel(
       "your credentials stay local",
-      font: mono, color: muted, y: height - 30
+      font: mono, color: muted, y: 10
     )
     sub.alignment = .right
     view.addSubview(title)
-    view.addSubview(bar)
+    view.addSubview(host)
     view.addSubview(sub)
     return view
   }
@@ -818,21 +803,15 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   // adds an unrelated ATS exception. The loopback bases do not come through here.
   /// Write the host into the header. Trimmed of a leading www., which is
   /// noise in every one of these and pushes the part that identifies the site.
-  /// The address line: the WHOLE url, as a browser would show it.
+  /// The domain, as the page reports it. `www.` is noise and is dropped.
   ///
-  /// ~~A lock glyph and the bare host.~~ The owner asked for the address bar
-  /// itself (2026-08-27): a lock is a summary somebody else has to trust, and the
-  /// thing it summarises -- scheme, host, path, query -- is exactly what tells a
-  /// real login from a convincing copy. Showing the host alone also hides the
-  /// half of a phishing URL that usually gives it away, which is the path.
-  ///
-  /// Read from the LIVE url, never from the one we intended to open, and updated
-  /// on every committed navigation.
-  private func showAddress(_ url: URL?) {
+  /// Not the full url and not a lock glyph -- both were tried and both were
+  /// worse to read (see the header). The one thing kept from that attempt is the
+  /// COLOUR: an unencrypted page turns the domain red, because that is the
+  /// single fact a reader should not have to go looking for.
+  private func showHost(_ url: URL?) {
     guard let url, let host = url.host, !host.isEmpty else { return }
-    headerHost?.stringValue = url.absoluteString
-    // The scheme still colours it, because "not encrypted" is the one thing a
-    // reader should not have to notice for themselves in a string this long.
+    headerHost?.stringValue = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
     let secure = url.scheme?.lowercased() == "https"
     headerHost?.textColor = secure
       ? NSColor(red: 0xea / 255, green: 0xea / 255, blue: 0xea / 255, alpha: 1)
@@ -844,7 +823,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   // a header still naming slack.com there would be a claim about where you are
   // that is no longer true, which is the opposite of what it is for.
   func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-    showAddress(webView.url)
+    showHost(webView.url)
   }
 
   func webView(
