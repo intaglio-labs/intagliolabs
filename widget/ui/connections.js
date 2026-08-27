@@ -948,16 +948,18 @@ function card(src, keep) {
       // account" -- on a one-per-Mac store, wired to open the Full Disk Access
       // pane. The condition the comment above always described is a property of
       // the source, not of its current error state.
+      // GOOGLE IS PARKED (owner, 2026-08-27). Sign-in reached a "Which Google
+      // account?" picker -- a second small menu inside the panel, where every other
+      // tile loads its login straight away -- and an inconsistent flow for a connector
+      // that is not finished is not worth keeping wired. Both surfaces say the same
+      // thing now. Nothing underneath is removed: startGoogleAuth, showClientChoice and
+      // the OAuth path are intact, so this is a handful of conditions to delete when it
+      // ships.
       if (GOOGLE_AUTH.has(kindOf(src.id))) {
-        const add = document.createElement('button');
-        add.className = 'hold-ok add-acct';
-        add.textContent = '+ add account';
-        add.addEventListener('click', (e) => {
-          e.stopPropagation();
-          if ((src.clients || []).length > 1) showClientChoice(row, src);
-          else startGoogleAuth(add, (src.clients || [{}])[0].name || 'default');
-        });
-        tip.appendChild(add);
+        const soon = document.createElement('span');
+        soon.className = 'setup';
+        soon.textContent = 'coming soon';
+        tip.appendChild(soon);
       } else if (hint && hint.url && !hint.local) {
         const add = document.createElement('button');
         add.className = 'hold-ok add-acct';
@@ -1000,15 +1002,10 @@ function card(src, keep) {
       // screen"). The connect page stays reachable underneath for the rows
       // that genuinely paste something, but Google is not one of them any more.
       if (GOOGLE_AUTH.has(kindOf(src.id))) {
-        const go = document.createElement('button');
-        go.className = 'hold-ok google-auth';
-        go.textContent = src.connected ? 'add another account ↗' : 'sign in with Google ↗';
-        go.addEventListener('click', (e) => {
-          e.stopPropagation();
-          if ((src.clients || []).length > 1) showClientChoice(row, src);
-          else startGoogleAuth(go, (src.clients || [{}])[0].name || 'default');
-        });
-        tip.appendChild(go);
+        const soon = document.createElement('span');
+        soon.className = 'setup';
+        soon.textContent = 'coming soon';
+        tip.appendChild(soon);
       } else if (CONNECT_PAGE.has(kindOf(src.id))) {
         const open = document.createElement('button');
         open.className = 'hold-ok';
@@ -1881,21 +1878,10 @@ function showTileNotice(row, src, text) {
       // Nothing here can infer which the owner meant — the account they are
       // about to pick is the only thing that decides it, and it does not exist
       // yet at press time.
-      if (GOOGLE_AUTH.has(kindOf(src.id)) && !src.connected && src.action !== 'fda'
-          && (src.clients || []).length > 1) {
-        showClientChoice(row, src);
-        return;
-      }
-      if (GOOGLE_AUTH.has(kindOf(src.id)) && !src.connected && src.action !== 'fda') {
-        row.classList.add('open');
-        renderTip();
-        hintHost.appendChild(tip);
-        startGoogleAuth(
-          tip.querySelector('.google-auth'),
-          (src.clients || [{}])[0].name || 'default'
-        );
-        return;
-      }
+      // ~~A press started sign-in, or opened the account picker first.~~ Parked
+      // with the card branches above: the tile opens the ordinary card, which
+      // says "coming soon". The picker and startGoogleAuth stay defined, so this
+      // is one block to restore when Google ships.
       // FDA tile (owner, 2026-08-25): the card had exactly one thing on it —
       // the full disk access button — so the tile press IS the button press.
       // openFullDiskAccess rather than the bare pane URL, because it touches a

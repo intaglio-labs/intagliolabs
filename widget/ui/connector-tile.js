@@ -201,11 +201,31 @@ const HZ_NOTICES = {
 // the rebuild a refresh causes.
 const hzStaleRefreshed = new Set();
 
-function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
+// `onClose` is how the CARD tells its HOST to close, and it matters because the
+// two surfaces close differently: Settings drops one hint host, the People ring
+// also clears the open row, the open id and the ring's own state. Emptying this
+// node was enough for Settings and left the People panel holding an open,
+// half-empty card -- the same close, done twice, disagreeing.
+function hzConnectorHint(src, host, { refresh = () => {}, onClose = null } = {}) {
   const tip = document.createElement('div');
   tip.className = 'hint';
   tip.dataset.id = src.id;
   const hint = HZ_HINT_FOR(src.id);
+
+  // GOOGLE IS PARKED, and the shared card is where both surfaces read it from --
+  // Settings says the same (owner, 2026-08-27). The OAuth path underneath is
+  // untouched; this is one condition to delete when it ships.
+  if (HZ_GOOGLE_AUTH.has(HZ_KIND(src.id)) && !src.connected) {
+    tip.classList.add('hold');
+    const head = document.createElement('b');
+    head.textContent = src.label;
+    const soon = document.createElement('span');
+    soon.className = 'setup';
+    soon.textContent = 'coming soon';
+    tip.append(head, soon);
+    host.appendChild(tip);
+    return tip;
+  }
 
   // Non-bridge (and connected) connectors: why it matters, its status, the how.
   const renderTip = () => {
@@ -389,6 +409,9 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
         login.disabled = true; login.textContent = 'opening…';
         hzPost('bridgeWebLogin', { p: HZ_KIND(src.id) })
           .then((data) => hzAfterLoginAttempt(data, renderBridge, () => {
+            // The HOST closes it. Emptying this node alone leaves the panel
+            // around it open, which is what the People ring was doing.
+            if (onClose) { onClose(); return; }
             tip.replaceChildren();
             tip.classList.remove('hold');
           }))
@@ -467,6 +490,7 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
     tip.append(head, ' — opening login…');
     hzPost('bridgeWebLogin', { p: HZ_KIND(src.id) })
       .then((data) => hzAfterLoginAttempt(data, renderBridge, () => {
+        if (onClose) { onClose(); return; }
         tip.replaceChildren();
         tip.classList.remove('hold');
       }))

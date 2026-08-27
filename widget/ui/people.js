@@ -72,16 +72,20 @@ function openConnector(src, row) {
   // opens sign-in directly instead of presenting instructions with no action.
   // Calendar's local/FDA row remains local because base backend selection is
   // authoritative; only a row already advertising the Google action gets here.
-  if (HZ_GOOGLE_AUTH.has(HZ_KIND(src.id)) && !src.connected && src.action !== 'fda') {
-    openId = null;
-    hzPost('googleAuth', { flow: 'google' }).catch(() => {});
-    return;
-  }
+  // ~~Pressing a Google tile started sign-in directly.~~ Parked with the Settings
+  // shelf (owner, 2026-08-27): the flow reached a "Which Google account?" picker,
+  // a second menu inside a panel where every other tile loads its login straight
+  // away. The card below now says "coming soon" for these, which is the same
+  // answer both surfaces give.
+
   // The disabled-connector shortcut was reverted with its settings-shelf
   // twin (owner, 2026-08-25): the card and its connect button are back.
   openId = src.id;
   row.classList.add('open');
-  hzConnectorHint(src, phint, { refresh: reload });
+  // The ring closes with everything the ring owns -- the open row, the open id,
+  // the hint host -- so a cancelled login here ends exactly where it does in
+  // Settings, rather than leaving an open card with nothing in it.
+  hzConnectorHint(src, phint, { refresh: reload, onClose: closeHint });
   addHintClose();
   growPanel(row);
   row.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });

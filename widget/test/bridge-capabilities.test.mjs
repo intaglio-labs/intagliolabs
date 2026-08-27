@@ -29,6 +29,8 @@ const googleLoginSwift = readFileSync(join(WIDGET, 'src', 'GoogleLogin.swift'), 
 const connections = readFileSync(join(WIDGET, 'ui', 'connections.js'), 'utf8');
 const connectorTile = readFileSync(join(WIDGET, 'ui', 'connector-tile.js'), 'utf8');
 const people = readFileSync(join(WIDGET, 'ui', 'people.js'), 'utf8');
+// The shared tile/card both surfaces render from.
+const tile = readFileSync(join(WIDGET, 'ui', 'connector-tile.js'), 'utf8');
 
 // --- 1. what the dispatch handles -------------------------------------------
 const dispatchCases = new Set(
@@ -310,9 +312,30 @@ test('Settings mounts its controls without the retired memory-review row', () =>
   assert.doesNotMatch(swift, /openMemoryReview/u);
 });
 
-test('People starts the same Google authorization action as Settings', () => {
-  assert.match(people, /HZ_GOOGLE_AUTH\.has\(HZ_KIND\(src\.id\)\)/u);
-  assert.match(people, /hzPost\('googleAuth', \{ flow: 'google' \}\)/u);
+// ~~People starts the same Google authorization action as Settings.~~ It did, and
+// the shared behaviour is still the point -- it is just that both now say
+// "coming soon" (owner, 2026-08-27). Sign-in reached a "Which Google account?"
+// picker, a second small menu inside a panel where every other tile loads its
+// login straight away, and an inconsistent flow for an unfinished connector is
+// not worth keeping wired.
+test('People and Settings park Google the same way', () => {
+  // Neither surface may start the flow from a tile any more.
+  assert.ok(!/hzPost\('googleAuth'/u.test(people), 'the People ring must not start sign-in');
+  assert.ok(
+    !/startGoogleAuth\(\s*tip\.querySelector/u.test(connections),
+    'the Settings tile press must not start sign-in'
+  );
+  // And both must actually SAY so, from the shared card and from Settings' own.
+  assert.match(tile, /HZ_GOOGLE_AUTH\.has\(HZ_KIND\(src\.id\)\)[\s\S]{0,400}coming soon/u,
+    'the shared card says it, which is what the People ring renders');
+  assert.match(connections, /GOOGLE_AUTH\.has\(kindOf\(src\.id\)\)[\s\S]{0,300}coming soon/u,
+    'and Settings says it too');
+});
+
+// The machinery stays defined so restoring it is one block, not a rewrite.
+test('the Google OAuth path is parked, not deleted', () => {
+  assert.match(connections, /function showClientChoice/u);
+  assert.match(connections, /function startGoogleAuth|const startGoogleAuth/u);
 });
 
 test('Settings offers the explicit WhatsApp opt-in returned by connector status', () => {
