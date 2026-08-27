@@ -260,39 +260,31 @@ IDENTITY="${HAZLIE_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/
 
 # THE PROVISIONING PROFILE, embedded before signing.
 #
-# A development-signed Mac app carries one or it is not validly signed for any
-# machine, and `spctl -a` says rejected. The profile names this team, this bundle
-# id and the Macs allowed to run it, and lives at
-# Contents/embedded.provisionprofile by convention.
-#
-# This comment used to go on to blame the missing profile for the silent
-# Contacts/Calendar/Photos prompt failure. That was the wrong diagnosis, and it is
-# corrected here rather than deleted because it sent the search in the wrong
-# direction for days. The app that would not prompt HAD a valid profile and both
-# identifier entitlements. What it lacked was the per-service hardened-runtime
-# entitlements — see Hazlie.entitlements, which now carries all four and quotes
-# tccd's own refusal. A profile is what lets you hand the app to someone else; it
-# is not what earns a TCC prompt.
-#
-# Absent is not fatal: an ad-hoc or unprofiled build still runs for whoever
-# built it. It just cannot be handed to anyone.
 # TWO SIGNING MODES, AND THEY ARE NOT COMPATIBLE.
 #
-#   Apple Development  -> embed a provisioning profile, and carry the two
-#                         identifier entitlements it asserts. Runs only on the
-#                         Macs the profile lists. Without the profile the app is
-#                         not validly signed for ANY machine.
-#   Developer ID       -> NO profile, and NOT those entitlements. A Developer ID
-#                         app is signed for everyone, so a per-machine profile is
-#                         meaningless and application-identifier is invalid
-#                         without one; codesign rejects the combination.
+#   Apple Development  -> signs for the machine that built it. `spctl -a` rejects
+#                         it, which is expected and sufficient.
+#   Developer ID       -> signed for everyone, notarized and stapled by
+#                         release.sh. This is the artifact anyone else gets.
 #
 # release.sh sets HAZLIE_SIGN_IDENTITY to the Developer ID hash and calls this
-# script, so the mode has to be decided HERE from the identity actually in use
-# rather than assumed. Getting this wrong produces a bundle that signs fine and
-# is refused at launch, which is a slow way to find out.
+# script, so the mode is decided HERE from the identity actually in use rather
+# than assumed. Getting this wrong produces a bundle that signs fine and is
+# refused at launch, which is a slow way to find out.
+#
+# ~~The development arm used to embed signing/mac-dev.provisionprofile and lift
+# `application-identifier` + `team-identifier` out of it, which is what let a
+# development build run on other listed Macs.~~ Removed 2026-08-27 with the
+# instructions in ops/SIGNING.md: it required registering an App ID and every
+# machine's UDID, and bought nothing -- release.sh already produces something
+# that runs anywhere, and the entitlements carry no get-task-allow so it was
+# never a debugging aid either. See ops/SIGNING.md, "There is no shareable
+# development build, on purpose".
+#
+# The Developer ID arm still clears a stale embedded profile: an older build in
+# the same tree could have left one, and a Developer ID signature with a
+# per-machine profile is refused.
 ENTS="Hazlie.entitlements"
-PROFILE="signing/mac-dev.provisionprofile"
 IDENTITY_NAME="$(security find-identity -v -p codesigning 2>/dev/null | grep -F "$IDENTITY" | head -1)"
 case "$IDENTITY_NAME" in
   *"Developer ID"*)
@@ -300,27 +292,8 @@ case "$IDENTITY_NAME" in
     echo "signing for distribution: no provisioning profile, base entitlements"
     ;;
   *)
-    if [ -f "$PROFILE" ]; then
-      cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
-      # The identifier entitlements are only valid alongside the profile that
-      # asserts them, so they are added here rather than living in the file.
-      ENTS="build/dev.entitlements"
-      python3 - "$PROFILE" "$ENTS" <<'PYEOF'
-import plistlib, subprocess, sys
-raw = subprocess.run(["security", "cms", "-D", "-i", sys.argv[1]],
-                     capture_output=True).stdout
-ents = plistlib.loads(raw).get("Entitlements", {})
-base = plistlib.load(open("Hazlie.entitlements", "rb"))
-for k in ("com.apple.application-identifier", "com.apple.developer.team-identifier"):
-    if k in ents:
-        base[k] = ents[k]
-plistlib.dump(base, open(sys.argv[2], "wb"))
-PYEOF
-      echo "embedded $PROFILE (development build)"
-    else
-      echo "NOTE: no $PROFILE — this build runs only for whoever built" >&2
-      echo "      it, and cannot be handed to anyone. See ops/SIGNING.md." >&2
-    fi
+    rm -f "$APP/Contents/embedded.provisionprofile"
+    echo "signing for this machine (development identity, no profile)"
     ;;
 esac
 

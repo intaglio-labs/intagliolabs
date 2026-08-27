@@ -1,57 +1,62 @@
 # Signing, and the two certificates that are not interchangeable
 
-`widget/build.sh` produces something you can run. `widget/release.sh` produces
-something you can *give to somebody else*. They need different certificates, and
-conflating them wastes a day.
+`widget/build.sh` produces something you can run on the machine that built it.
+`widget/release.sh` produces something you can *give to somebody else*. They need
+different certificates, and conflating them wastes a day.
 
 | | build.sh | release.sh |
 |---|---|---|
 | certificate | Apple Development | Developer ID Application |
-| provisioning profile | required, per-machine | none |
-| runs on | Macs listed in the profile | any Mac |
+| provisioning profile | none | none |
+| runs on | the machine that built it | any Mac |
 | Gatekeeper (`spctl -a`) | rejected — expected | accepted |
 | notarized | no | yes, and stapled |
 
-## Why a development build needs a profile
+## There is no shareable development build, on purpose
 
-A development-signed Mac app with no `Contents/embedded.provisionprofile` is not
-validly signed **for any machine**. It runs for whoever built it and little else.
+~~A development-signed app can be handed to other Macs by embedding a
+`MAC_APP_DEVELOPMENT` provisioning profile, which requires registering an App ID
+and each machine's UDID.~~ **Removed 2026-08-27 (Rishab, explicitly: "remove it
+if its useless").** The reasoning is kept because the setup instructions were
+here for a while and somebody will wonder where they went.
 
-The profile names the team, the bundle id, and the Macs allowed to run the build.
-It asserts three keys — `application-identifier`, `team-identifier` and
-`keychain-access-groups` — and `build.sh` copies the first two out of it into the
-signing entitlements, because those two are only valid alongside the profile that
-asserts them.
+It bought nothing this project needs:
+
+- **Not distribution.** `release.sh` already produces a notarized, stapled build
+  that runs on any Mac with no App ID, no registered devices and no profile. That
+  is the artifact to hand anyone — and it is the one users actually get, so it is
+  the one worth testing.
+- **Not debugging.** `Hazlie.entitlements` carries no `get-task-allow`, so a
+  development-signed build cannot be attached to by a debugger either way.
+- Its only remaining use was running an *un-notarized* build on a second Mac you
+  own, to skip a ~5 minute notarization round trip — against the recurring cost of
+  re-creating the profile every time a machine is added, because a profile is a
+  snapshot, not a rule.
+
+So `build.sh` signs with Apple Development and embeds nothing. The build is valid
+for the machine that made it, `spctl -a` rejects it, and that is the expected and
+sufficient state. To put the app on another Mac, cut a release and install the
+DMG.
+
+Nothing needs registering with Apple for any of this. Developer ID signs whatever
+bundle identifier the app declares; notarization checks the signature and the
+hardened runtime, not an App ID record. (Should the profile path ever be wanted
+back, it is in the history of this file and of `widget/build.sh`.)
+
+## The entitlements, and what a profile never had to do with them
 
 The hardened-runtime resource entitlements in `Hazlie.entitlements`
-(`personal-information.*`, `device.audio-input`) are NOT profile-restricted and do
-not appear in the profile at all. Signing with them is fine in either mode.
+(`personal-information.*`, `device.audio-input`) are NOT profile-restricted and
+never were. Signing with them is fine in either mode.
 
-> An earlier version of this file said the missing profile was why privacy prompts
-> never appeared. **That was wrong.** The app that would not prompt had a valid
-> profile. The cause was the missing hardened-runtime entitlements above: with the
-> hardened runtime on, `tccd` refuses to *display* the consent dialog for a service
-> whose entitlement is absent, logging `Policy disallows prompt`. `Hazlie.entitlements`
-> carries the full mechanism. A profile lets you hand the app to someone else; it is
-> not what earns a TCC prompt.
-
-### Setting one up (no Xcode required)
-
-```sh
-# the Mac's provisioning UDID, not its hardware UUID
-system_profiler SPHardwareDataType | grep "Provisioning UDID"
-
-asc devices register --name "<machine>" --udid "<UDID>" --platform MAC_OS
-asc bundle-ids create --identifier io.intaglio.widget --name "Intaglio Labs Widget" --platform MAC_OS
-asc certificates list          # note the DEVELOPMENT certificate's id
-asc profiles create --name "Intaglio Labs Mac Dev" --profile-type MAC_APP_DEVELOPMENT \
-  --bundle "<BUNDLE_ID>" --certificate "<CERT_ID>" --device "<DEVICE_ID>"
-asc profiles download --id "<PROFILE_ID>" --output widget/signing/mac-dev.provisionprofile
-```
-
-`build.sh` embeds `widget/signing/mac-dev.provisionprofile` when it is there and
-says so when it is not. Adding a second Mac means re-creating the profile with
-both device ids and downloading it again — a profile is a snapshot, not a rule.
+> An earlier version of this file said a missing profile was why privacy prompts
+> never appeared. **That was wrong**, and it is kept here because it sent the
+> search in the wrong direction for days. The app that would not prompt HAD a
+> valid profile. The cause was the missing hardened-runtime entitlements above:
+> with the hardened runtime on, `tccd` refuses to *display* the consent dialog for
+> a service whose entitlement is absent, logging `Policy disallows prompt`.
+> `Hazlie.entitlements` carries the full mechanism. A profile let you hand the app
+> to someone else; it was never what earned a TCC prompt.
 
 ## Developer ID: the one you cannot script
 
