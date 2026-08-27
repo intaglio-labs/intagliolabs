@@ -106,14 +106,44 @@ New releases: `widget/release.sh`, then attach the DMG to a GitHub release as
 
 ## Trina — settled 2026-08-21
 
-The sleeping orb's z's are set in **Trina**. The licence was confirmed by the
+The orb's z's are set in **Trina**. The licence was confirmed by the
 owner, and the font is vendored: subset to the single glyph the page uses
 (lowercase `z`, which in Trina draws the display capital), converted to woff2,
 and served from the site's own origin at `site/fonts/trina-z.woff2` — 576 bytes,
 with an `@font-face` block in `index.html`.
 
+~~The z's are the orb's idle state: it is asleep.~~ Not since the 2026-08-27
+landing redesign — that orb is awake, and the z's are invisible until the
+jackpot easter egg borrows them as coins off the top of the machine. The font
+still ships, and is still the only thing the woff2 is there for.
+
 The mono fallback is kept in the stack on purpose, so a visitor who blocks the
 font still gets readable z's rather than tofu.
+
+## Download counter — added 2026-08-27
+
+The number under the try-now button is GitHub's own `download_count` for the
+DMG assets, read straight from `api.github.com` by the visitor's browser. There
+is no counter of ours behind it and nothing is written anywhere.
+
+~~A counter of button clicks.~~ Considered and not built: it needs a server
+this project does not have, it would be a number about visitors rather than a
+measurement, and anyone with `curl` could inflate it. What the button click
+does do is roll the odometer immediately, because the real count lands at
+GitHub later and the digit would otherwise sit still at the one moment it
+should move; the next page load re-reads the true number, so the optimistic
+roll cannot drift.
+
+Two consequences worth knowing:
+
+- **GitHub sees every visitor.** This is a fetch on page load, not a link, so
+  GitHub receives each visitor's IP and user agent whether or not they ever
+  click download. `site/privacy/index.html` §3 discloses it alongside the same
+  exposure to Google Fonts, and `ops/EGRESS.json` carries the entry.
+- **Unauthenticated GitHub allows 60 requests an hour per IP.** One visit
+  spends one. If a visitor somehow exhausts it, or GitHub is down, the readout
+  stays hidden rather than showing a wrong or invented number — which is also
+  what happens on localhost, where the counter is switched off entirely.
 
 ## Domain — done
 
