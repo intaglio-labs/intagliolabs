@@ -413,6 +413,16 @@ if pgrep -x Hazlie >/dev/null 2>&1; then
     # alive is by definition an orphan, and the replacement has not started yet.
     pkill -f 'connectors/daemon\.mjs' 2>/dev/null \
       && echo "reaped: orphaned connector daemon" || true
+    # AND THE DISTILLER, for exactly the same reason and with worse consequences.
+    # It is also a child of the app, so killing the app reparents it to launchd
+    # rather than stopping it -- Distiller.stop() only runs on a clean quit.
+    # Observed right after distillation was switched off: a pass from the
+    # PREVIOUS bundle was still running two minutes later, holding the corpus
+    # write lock and the model, under an app that had been told not to distil.
+    # An orphan also outlives the switch that disabled it, which makes the switch
+    # look broken.
+    pkill -f 'ui/scripts/distill-(episodes|once)\.mjs' 2>/dev/null \
+      && echo "reaped: orphaned distiller pass" || true
     open "$DEST" && echo "restarted: Intaglio Labs.app"
   fi
 elif [ "${1:-}" = "--run" ]; then
