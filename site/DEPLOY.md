@@ -27,17 +27,46 @@ Still works by hand, unchanged, when that is what you want:
 
 ### The deploy credential — already set up
 
-Done on 2026-08-24. Recorded because the next person will want to know what
-exists, not how to create it again.
+Done on 2026-08-24, moved to the `intagliolabs` project on 2026-08-27. Recorded
+because the next person will want to know what exists, not how to create it
+again.
 
-- Service account **`gh-deploy-site@hazlie-prod.iam.gserviceaccount.com`**,
+- Service account **`gh-deploy-site@intagliolabs.iam.gserviceaccount.com`**,
   holding exactly one role: `roles/firebasehosting.admin`. That is the narrowest
   role that can deploy — not Editor, not Owner — and it was verified by deploying
   as the service account rather than assumed from the docs.
-- One user-managed key, stored as the repository secret
-  **`FIREBASE_SERVICE_ACCOUNT`**. GitHub will not read a secret back out, so if it
-  is ever lost the fix is a new key and a `gcloud ... keys delete` on the old one,
-  not a recovery.
+
+  ~~`gh-deploy-site@hazlie-prod.iam.gserviceaccount.com`.~~ The site moved
+  projects; see "Which project serves the site" below.
+- ~~One user-managed key, stored as the repository secret
+  `FIREBASE_SERVICE_ACCOUNT`.~~ **There is no key and no secret any more.** The
+  `intaglio.io` organization enforces
+  `constraints/iam.disableServiceAccountKeyCreation`, so `keys create` fails with
+  FAILED_PRECONDITION and a downloadable key cannot be minted at all. Deploys use
+  **Workload Identity Federation** instead: GitHub mints a short-lived OIDC token
+  for the workflow run, Google exchanges it for an access token that expires in an
+  hour, and nothing long-lived exists to leak. A better position than the key it
+  replaced, arrived at by being refused the key.
+
+  The pieces, all in the `intagliolabs` project: workload identity pool `github`,
+  OIDC provider `github` trusting `https://token.actions.githubusercontent.com`
+  under the attribute condition
+  `assertion.repository=='intaglio-labs/intagliolabs'`, and a
+  `roles/iam.workloadIdentityUser` binding on the service account restricted to
+  that same repository's principalSet. A fork cannot use it; another repository in
+  the org cannot use it.
+
+  The file the workflow writes is **not** a credential — it is the public recipe
+  for the exchange. The one sensitive value is the per-run bearer GitHub puts in
+  `ACTIONS_ID_TOKEN_REQUEST_TOKEN`, scoped to that job and dead with it.
+
+  Two spellings of the provider appear in that file and they are not
+  interchangeable: the credential's `audience` uses `//iam.googleapis.com/…`
+  (matching what `gcloud iam workload-identity-pools create-cred-config` emits),
+  while the audience GitHub is asked to mint the token for uses
+  `https://iam.googleapis.com/…`, which is what the provider validates. Getting
+  the second wrong fails at token exchange, not at deploy, so the error does not
+  name the cause.
 
 `firebase init hosting:github` does all of this in one command and is the usual
 way. It was not used here for two reasons: it needs an interactive GitHub OAuth
@@ -46,24 +75,30 @@ alongside `site.yml` deploying the same site on overlapping triggers. The
 equivalent, non-interactively:
 
     gcloud iam service-accounts create gh-deploy-site \
-        --project hazlie-prod --display-name "GitHub Actions — site deploy"
+        --project intagliolabs --display-name "GitHub Actions — site deploy"
 
-    gcloud projects add-iam-policy-binding hazlie-prod \
-        --member "serviceAccount:gh-deploy-site@hazlie-prod.iam.gserviceaccount.com" \
+    gcloud projects add-iam-policy-binding intagliolabs \
+        --member "serviceAccount:gh-deploy-site@intagliolabs.iam.gserviceaccount.com" \
         --role roles/firebasehosting.admin --condition=None
 
-    KEY=$(mktemp -d)/key.json
-    gcloud iam service-accounts keys create "$KEY" \
-        --iam-account gh-deploy-site@hazlie-prod.iam.gserviceaccount.com
-    gh secret set FIREBASE_SERVICE_ACCOUNT \
-        --repo intaglio-labs/intagliolabs < "$KEY"
-    rm -f "$KEY"
+    gcloud iam workload-identity-pools create github \
+        --project intagliolabs --location global --display-name "GitHub Actions"
 
-**Delete the key file, and check `keys list` afterwards.** Removing the local copy
-does not remove the key from the service account — a key whose material nobody
-holds is still a credential that can be issued against. Verifying a permission by
-minting a second key leaves exactly that behind, which is why the check above ends
-with a delete.
+    gcloud iam workload-identity-pools providers create-oidc github \
+        --project intagliolabs --location global --workload-identity-pool github \
+        --issuer-uri "https://token.actions.githubusercontent.com" \
+        --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner" \
+        --attribute-condition "assertion.repository=='intaglio-labs/intagliolabs'"
+
+    gcloud iam service-accounts add-iam-policy-binding \
+        gh-deploy-site@intagliolabs.iam.gserviceaccount.com \
+        --project intagliolabs --role roles/iam.workloadIdentityUser \
+        --member "principalSet://iam.googleapis.com/projects/132328050370/locations/global/workloadIdentityPools/github/attribute.repository/intaglio-labs/intagliolabs"
+
+**The attribute condition is the fence.** Without it the provider would trust an
+assertion from any repository on GitHub, and the principalSet binding would be all
+that stood between a stranger's workflow and this service account. Set both, not
+one.
 
 ### What it refuses to publish
 
@@ -103,6 +138,35 @@ routing layer. If a real link turns up in the wild, one entry brings it back.
 
 New releases: `widget/release.sh`, then attach the DMG to a GitHub release as
 `IntaglioLabs.dmg`. No site deploy is needed for a new version.
+
+## Which project serves the site — moved 2026-08-27
+
+The site is served by the **`intagliolabs`** Firebase project, in the
+`intaglio.io` organization, under **austin@intaglio.io**. The hosting site id is
+also `intagliolabs` (`https://intagliolabs.web.app`).
+
+~~`hazlie-prod`, under ay@austinyoshino.com.~~ Moved so that everything lives in
+one organization under the company account instead of a personal one. Note the
+two ids that had to move together: `.firebaserc` names the **project**,
+`firebase.json` names the hosting **site**. They happen to share a name in both
+the old and the new setup, which makes it easy to change one and miss the other
+— and missing one fails the deploy with a site-not-found rather than anything
+that names the real cause.
+
+Two things learned doing it, both of which cost time:
+
+- **`projects:addFirebase` cannot be done from the CLI for the first project in
+  an organization.** It returns a bare `PERMISSION_DENIED` with no detail even
+  when the caller holds `roles/owner` and `testIamPermissions` confirms
+  `firebase.projects.update`. The cause is the org-level terms of service, which
+  only the console can present. Enabling `firebase`, `firebasehosting`,
+  `cloudresourcemanager` and `serviceusage` first is necessary but not
+  sufficient.
+- **`gcloud auth print-access-token` does not carry the Firebase scope.** Its
+  default scope set includes `cloud-platform`, which sounds sufficient and is
+  not; the Firebase Management API wants
+  `https://www.googleapis.com/auth/firebase`. Use the Firebase CLI, which asks
+  for the right scopes, rather than curl with a gcloud token.
 
 ## Trina — settled 2026-08-21
 
@@ -156,6 +220,23 @@ repository did not deploy — so the apex served a release pushed by hand while
 deploys landed somewhere else. The domain now sits on `hazlie-prod`, the project's
 default site and the one `firebase.json` names, and `intaglio-landing` is deleted.
 One site, one deploy target, one URL.
+
+**That last sentence is temporarily false, and knowingly so.** As of 2026-08-27
+deploys go to `intagliolabs` while the apex is still attached to `hazlie-prod`,
+so a push to `main` updates `intagliolabs.web.app` and leaves intaglio.io on the
+last build the old project received. Moving a custom domain is console-only and
+re-provisions a certificate on the receiving site, so it is done last and by
+hand rather than folded into the commit that repoints the config. Until it is
+done, **intaglio.io is stale** and `intagliolabs.web.app` is current.
+
+The cutover, in the order that keeps the apex up: add `intaglio.io` to the
+`intagliolabs` site, add the `hosting-site=intagliolabs` TXT record *alongside*
+the existing `hosting-site=hazlie-prod` one, wait for the new site to report
+Connected, and only then remove the domain from `hazlie-prod` and drop the stale
+TXT. Both TXT records may coexist; that overlap is what avoids a gap. DNS is
+Google Cloud DNS (`ns-cloud-c1..c4.googledomains.com`) and the apex A record is
+`199.36.158.100`. Do not touch the `google-site-verification`, SPF or
+`anthropic-domain-verification` TXT records that share the apex.
 
 ~~intaglio.io's apex is host-routed by an external HTTPS load balancer in a
 separate GCP project that this project does not own... the planned swap needs

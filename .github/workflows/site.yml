@@ -29,6 +29,9 @@ on:
 
 permissions:
   contents: read
+  # Required to mint the OIDC token that stands in for a service-account key.
+  # See the deploy step: the intaglio.io organization forbids downloadable keys.
+  id-token: write
 
 # Never let two deploys race: a half-finished hosting release is worse than a
 # slightly delayed one, so let the running deploy land before starting the next.
@@ -90,36 +93,68 @@ jobs:
           echo "status: $code"
           [ "$code" = "200" ] || { echo "the download link does not resolve"; exit 1; }
 
-      # The credential never lands in the repository and never reaches a log:
-      # written to a file the runner discards, passed by path, and the deploy
-      # itself prints only what it changed.
+      # THERE IS NO LONGER A KEY. The intaglio.io organization enforces
+      # constraints/iam.disableServiceAccountKeyCreation, so a downloadable
+      # service-account key cannot be minted at all -- `keys create` fails with
+      # FAILED_PRECONDITION. That is a better position than the one it replaced:
+      # what runs here now is Workload Identity Federation, where GitHub mints a
+      # short-lived OIDC token for this workflow and Google exchanges it for an
+      # access token that expires in an hour. Nothing long-lived exists to leak,
+      # and there is no FIREBASE_SERVICE_ACCOUNT secret any more.
+      #
+      # The file written below is NOT a credential. It is the public recipe for
+      # that exchange -- project number, pool, provider, and where to fetch the
+      # OIDC token from. Google's auth libraries, which firebase-tools uses,
+      # understand `external_account` natively, so no marketplace action holds
+      # anything. That keeps the property the previous comment cared about: one
+      # fewer third party in the path.
+      #
+      # The provider only trusts assertions whose `repository` claim is exactly
+      # intaglio-labs/intagliolabs, and only gh-deploy-site can be impersonated,
+      # holding only roles/firebasehosting.admin.
       - name: deploy
-        env:
-          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: |
-          if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then
-            echo "FIREBASE_SERVICE_ACCOUNT is not set — see site/DEPLOY.md for how to create it."
-            exit 1
-          fi
-          # INSTALL FIRST, THEN WRITE THE KEY. `npm install` runs install scripts
-          # from a dependency tree of its own; with the key already on disk, any
-          # one of them could read it. The window is not zero either way — the
-          # deploy tool is handed the credential by design — but it does not need
-          # to be open during the install as well.
-          #
           # Pinned: an unpinned deploy tool is an unreviewed change to the thing
           # that publishes the site. The pin covers the top level only; npm
           # re-resolves the tree beneath it.
           npm install --no-fund --no-audit --global firebase-tools@15.11.0
 
-          # And removed on the way out, whatever happened. The runner is
-          # ephemeral, but a key left readable for the rest of the job is a key
-          # every later step can read, and steps get added.
-          trap 'rm -f "$RUNNER_TEMP/sa.json"' EXIT
-          printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
-          chmod 600 "$RUNNER_TEMP/sa.json"
-          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          # Written by python rather than a heredoc with placeholders: the
+          # request URL and its bearer are per-run values from the environment,
+          # and substituting into pre-baked JSON is a step that can silently
+          # half-succeed. This either writes a complete file or fails.
+          python3 - "$RUNNER_TEMP/wif.json" <<'PY'
+          import json, os, sys
+          PROJECT_NUMBER = "132328050370"
+          POOL, PROVIDER = "github", "github"
+          SA = "gh-deploy-site@intagliolabs.iam.gserviceaccount.com"
+          resource = (f"projects/{PROJECT_NUMBER}/locations/global"
+                      f"/workloadIdentityPools/{POOL}/providers/{PROVIDER}")
+          # Two spellings of the same provider, and they are not interchangeable.
+          # The credential's `audience` takes the //iam.googleapis.com form that
+          # gcloud's own create-cred-config emits; the audience GitHub is asked
+          # to mint the token for takes the https:// form, which is what the
+          # provider validates against.
+          audience = "//iam.googleapis.com/" + resource
+          token_audience = "https://iam.googleapis.com/" + resource
+          json.dump({
+              "type": "external_account",
+              "audience": audience,
+              "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+              "token_url": "https://sts.googleapis.com/v1/token",
+              "service_account_impersonation_url":
+                  f"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{SA}:generateAccessToken",
+              "credential_source": {
+                  "url": os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=" + token_audience,
+                  "headers": {"Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]},
+                  "format": {"type": "json", "subject_token_field_name": "value"},
+              },
+          }, open(sys.argv[1], "w"))
+          PY
+          trap 'rm -f "$RUNNER_TEMP/wif.json"' EXIT
+          chmod 600 "$RUNNER_TEMP/wif.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/wif.json"
 
           firebase deploy --only hosting --non-interactive \
-            --project hazlie-prod \
+            --project intagliolabs \
             --message "${GITHUB_SHA::7} ${GITHUB_EVENT_NAME}"
