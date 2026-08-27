@@ -18,6 +18,15 @@
 // Fixed because the shelf scrolls with overflow hidden — a tooltip inside the
 // scroller would clip.
 let hzTileTip = null;
+// Closing the login window without signing in returns you to the shelf; only a
+// login that FAILED leaves something on screen. Same rule as connections.js --
+// see afterLoginAttempt there for why it is a helper rather than a check written
+// out at each call site.
+function hzAfterLoginAttempt(data, show, close) {
+  if (data && data.state === 'cancelled') { if (close) close(); return; }
+  show(data);
+}
+
 function hzShowTileTip(row, label) {
   // NOT OVER ITS OWN OPEN CARD. The card names the source in its heading, so a
   // floating label repeating it is redundant, and it is positioned over the
@@ -379,7 +388,10 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
         e.stopPropagation();
         login.disabled = true; login.textContent = 'opening…';
         hzPost('bridgeWebLogin', { p: HZ_KIND(src.id) })
-          .then(renderBridge)
+          .then((data) => hzAfterLoginAttempt(data, renderBridge, () => {
+            tip.replaceChildren();
+            tip.classList.remove('hold');
+          }))
           .catch(() => { login.disabled = false; login.textContent = 'log in ⧉'; });
       });
       // Hidden while the bot is mid-question — see connections.js: pressing
@@ -453,7 +465,12 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
     tip.replaceChildren(); tip.classList.add('hold');
     const head = document.createElement('b'); head.textContent = src.label;
     tip.append(head, ' — opening login…');
-    hzPost('bridgeWebLogin', { p: HZ_KIND(src.id) }).then(renderBridge).catch(() => renderBridge({ state: 'down' }));
+    hzPost('bridgeWebLogin', { p: HZ_KIND(src.id) })
+      .then((data) => hzAfterLoginAttempt(data, renderBridge, () => {
+        tip.replaceChildren();
+        tip.classList.remove('hold');
+      }))
+      .catch(() => renderBridge({ state: 'down' }));
   };
 
   // Attach BEFORE rendering — the bridge openers finish async and paint into

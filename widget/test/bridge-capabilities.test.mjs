@@ -282,7 +282,11 @@ test('the credential reassurance sits beside the title, clear of the address', (
 test('the login window shows a live, scheme-aware address', () => {
   assert.match(bridgeLoginSwift, /func showAddress\(_ url: URL\?\)/u, 'it reads a URL, not a bare host');
   assert.match(bridgeLoginSwift, /url\.scheme\?\.lowercased\(\) == "https"/u, 'it checks the scheme');
-  assert.match(bridgeLoginSwift, /not secure/u, 'and says so when the page is not encrypted');
+  // THE WHOLE URL, not a summary of it. A lock is something the reader has to
+  // take on trust, and the path is the half of a phishing URL that usually gives
+  // it away.
+  assert.match(bridgeLoginSwift, /stringValue = url\.absoluteString/u, 'it shows the full address');
+  assert.doesNotMatch(bridgeLoginSwift, /"🔒/u, 'a glyph is not an address');
   // didCommit is what makes it live: a login that hops hosts must rename the bar.
   assert.match(
     bridgeLoginSwift,

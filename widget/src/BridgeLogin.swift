@@ -637,7 +637,14 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     host.isBordered = false
     host.frame = NSRect(x: 8, y: 3, width: bar.frame.width - 16, height: 16)
     host.autoresizingMask = [.width]
+    // TRUNCATE THE MIDDLE, never the end: a long URL's tail is where a lookalike
+    // hides ("…/login" vs "…/login.evil.tld"), so the end must survive.
     host.lineBreakMode = .byTruncatingMiddle
+    // Selectable so it can be copied out and checked somewhere else. A read-only
+    // field, not an editable one: this window navigates where the login takes it
+    // and nowhere the owner types, which is the fence the allowedHosts policy
+    // enforces.
+    host.isSelectable = true
     headerHost = host
     bar.addSubview(host)
 
@@ -811,14 +818,22 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   // adds an unrelated ATS exception. The loopback bases do not come through here.
   /// Write the host into the header. Trimmed of a leading www., which is
   /// noise in every one of these and pushes the part that identifies the site.
-  /// The address line. Reads the LIVE url -- never the one we intended to open --
-  /// and says plainly when a page is not encrypted, because "looks like a login
-  /// form" is exactly what a copy also looks like.
+  /// The address line: the WHOLE url, as a browser would show it.
+  ///
+  /// ~~A lock glyph and the bare host.~~ The owner asked for the address bar
+  /// itself (2026-08-27): a lock is a summary somebody else has to trust, and the
+  /// thing it summarises -- scheme, host, path, query -- is exactly what tells a
+  /// real login from a convincing copy. Showing the host alone also hides the
+  /// half of a phishing URL that usually gives it away, which is the path.
+  ///
+  /// Read from the LIVE url, never from the one we intended to open, and updated
+  /// on every committed navigation.
   private func showAddress(_ url: URL?) {
     guard let url, let host = url.host, !host.isEmpty else { return }
-    let shown = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    headerHost?.stringValue = url.absoluteString
+    // The scheme still colours it, because "not encrypted" is the one thing a
+    // reader should not have to notice for themselves in a string this long.
     let secure = url.scheme?.lowercased() == "https"
-    headerHost?.stringValue = secure ? "🔒 \(shown)" : "⚠ not secure — \(shown)"
     headerHost?.textColor = secure
       ? NSColor(red: 0xea / 255, green: 0xea / 255, blue: 0xea / 255, alpha: 1)
       : NSColor(red: 0xff / 255, green: 0x53 / 255, blue: 0x47 / 255, alpha: 1)
