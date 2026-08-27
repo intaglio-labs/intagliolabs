@@ -212,24 +212,33 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
       // Incremental syncs carry their own deltas and must NOT ask for it.
       else url.searchParams.set('full_state', 'true');
 
-      let body;
+      // A FAILED RUN IS RECORDED AS A FAILED RUN.
+      //
+      // Both of these used to warn and return zeros, on the reasoning that a
+      // dead homeserver is the ordinary state whenever Docker is not running and
+      // the other connectors have nothing to do with it. The second half is
+      // right and is why this throws rather than aborting the pass: daemon.mjs
+      // records ok:false for THIS connector alone and the others are untouched.
+      // The first half is what went wrong -- returning zeros made runSource
+      // write ok:true, so run_log showed an unbroken line of successful empty
+      // runs while the entire bridge stack was down, and nothing anywhere said
+      // otherwise. The never-set-up install is already covered by the `!creds`
+      // return above, so this only fires when the bridges ARE provisioned.
+      //
+      // The fetch is hoisted out of the try on purpose: leaving the !res.ok
+      // throw inside it would land in the same catch and re-label a decisive
+      // HTTP status as "unreachable".
+      let res;
       try {
-        const res = await fetchImpl(url, {
+        res = await fetchImpl(url, {
           headers: { Authorization: `Bearer ${creds.token}` },
           signal: AbortSignal.timeout(60_000),
         });
-        if (!res.ok) {
-          // A dead homeserver is the ordinary state of this machine whenever
-          // Docker is not running. Reported, not thrown: the other connectors
-          // have nothing to do with it.
-          ctx.log?.warn?.(`matrix: homeserver answered ${res.status}`);
-          return { inserted: 0, updated: 0, unchanged: 0, skipped: 0 };
-        }
-        body = await res.json();
       } catch (e) {
-        ctx.log?.warn?.(`matrix: homeserver unreachable (${e?.name ?? 'error'})`);
-        return { inserted: 0, updated: 0, unchanged: 0, skipped: 0 };
+        throw new Error(`matrix: homeserver unreachable (${e?.name ?? 'error'})`, { cause: e });
       }
+      if (!res.ok) throw new Error(`matrix: homeserver answered ${res.status}`);
+      const body = await res.json();
 
       // Accept the bridges' portal invites BEFORE mapping this page. A newly
       // joined room's history arrives on the next sync, which the daemon runs

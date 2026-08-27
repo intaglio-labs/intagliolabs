@@ -196,7 +196,18 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
     stay.className = 'stay';
     stay.textContent = HZ_STAY;
     tip.appendChild(stay);
-    if (src.disabled && src.action === 'enable') {
+    if (src.disabled && src.action !== 'enable') {
+      // TURNED OFF BY HAND, and not re-enablable from here: the marker belongs
+      // to run.mjs --disable and the native action is deliberately not
+      // authorized to remove it. Say so, rather than drawing the tile as a
+      // source waiting to be connected and offering a sign-in that would change
+      // nothing. The connect page has said "turned off" since 2026-08-26; this
+      // shelf renders from the row's shape and could not tell.
+      const off = document.createElement('span');
+      off.className = 'stay';
+      off.textContent = src.fix || 'turned off';
+      tip.appendChild(off);
+    } else if (src.disabled && src.action === 'enable') {
       // No sentence above the button (owner, 2026-08-25): "has not connected
       // this source yet" restated what the button already says.
       const enable = document.createElement('button');

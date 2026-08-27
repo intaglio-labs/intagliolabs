@@ -16,7 +16,7 @@
 import { existsSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { readGoogleClient } from './googleClients.mjs';
-import { CALENDAR_SCOPE, accountsWithScope, markGoogleAccountStale } from './googleAccounts.mjs';
+import { CALENDAR_SCOPE, accountsWithScope, markGoogleAccountStale , accountsWithScopeIncludingStale } from './googleAccounts.mjs';
 import { join } from 'node:path';
 import { readSecretJson, readSecretLine } from './secrets.mjs';
 
@@ -41,7 +41,18 @@ const EXPIRY_SKEW_MS = 120_000;
 // when nothing is authorized, so the error a caller sees is still the familiar
 // "run gcal-auth" rather than a path that never existed.
 export const defaultGcalTokensPath = (home = homedir()) => {
-  const [first] = accountsWithScope(CALENDAR_SCOPE, { home });
+  // INCLUDING A DEAD GRANT, DELIBERATELY.
+  //
+  // Selecting from the healthy list meant a revoked or expired primary silently
+  // handed the calendar to the next account in ADDRESS ORDER: the connector kept
+  // reporting success, against somebody else's calendar, and the only signal was
+  // that the events changed. A stale grant must keep the calendar pointed at
+  // itself and fail with the re-authorization runbook, which is what the caller
+  // already does when the token will not refresh (markGoogleAccountStale below).
+  //
+  // The connect page still announces the death from the account list, so the
+  // owner is told; the connector simply stops rather than moving.
+  const [first] = accountsWithScopeIncludingStale(CALENDAR_SCOPE, { home });
   return first?.tokensPath ?? join(home, '.hazlie', 'secrets', 'gcal-tokens.json');
 };
 export const defaultGcalClientIdPath = (home = homedir()) =>

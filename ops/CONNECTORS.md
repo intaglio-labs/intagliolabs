@@ -22,8 +22,8 @@ any kind.** Its sockets are outbound only:
 
 - **loopback out** to Hermes (`127.0.0.1:51789`): `POST /ingest`, `/admin/*` —
   the only place corpus rows go.
-- **outbound HTTPS/IMAPS** to the approved remote endpoints (Granola, Oura,
-  Notion, Gmail IMAP, Google Calendar + its OAuth host), **enumerated in
+- **outbound HTTPS** to the approved remote endpoints (Granola, Oura, Notion,
+  the Gmail and Google Calendar APIs + their OAuth host), **enumerated in
   [`EGRESS.json`](EGRESS.json) and nowhere else** — the table that used to sit
   here restated the hosts and drifted (it omitted the two Google Calendar
   hosts while the connector reached them), which is exactly the failure the
@@ -68,7 +68,7 @@ is a fully valid config and every connector runs with its defaults.
 | `ownerEmails` | — | The owner's own addresses beyond `mail.accounts`, read by the people graph, not the connectors themselves. |
 | `hermesUrl` | string | HTTP loopback origin, e.g. `"http://127.0.0.1:51789"` — for a machine where 51789 is taken. Env (`HAZLIE_HERMES_URL`) wins under launchd; this is what a hand-run `node run.mjs <source>` reads instead. |
 | `intervals` | `{ <source>: seconds }` | 60–86400; per-source poll interval override. |
-| `mail` | `{ host, port, user, folders, backfillDays, maxBodyBytes, accounts: [...] }` | `accounts[]` takes the same keys (minus `accounts`) for more than one mailbox. The Gmail app password itself is a secret (`gmail-app-password.txt`), not part of this file. |
+| `mail` | `{ host, port, user, folders, backfillDays, maxBodyBytes, accounts: [...] }` | `accounts[]` takes the same keys (minus `accounts`) for more than one mailbox. Mail is selected by Google sign-in, not by this file: `accounts[]` survives only as per-account overrides (`backfillDays`, `maxBodyBytes`), and an entry here for an address with no grant reads nothing. The grant is a secret (`google-tokens-<account>.json`), not part of this file. |
 | `imessage` | `{ backfillDays }` | |
 | `calendar` | `{ backend: "local" \| "google" }` | Never both — see `sources/calendar.mjs` `run()`. |
 | `granola` | `{ includeTranscripts }` | |
@@ -83,6 +83,23 @@ is a fully valid config and every connector runs with its defaults.
 Every level is closed: an unrecognized key throws rather than being silently
 ignored, so a typo (`interval` for `intervals`) fails loudly at startup
 instead of quietly running with defaults.
+
+
+## Matrix (the bridged platforms)
+
+Messenger, Instagram, Twitter/X, Telegram, Discord, Slack and LinkedIn arrive
+through a local Matrix homeserver with one bridge per platform, not through a
+connector per service. `connectors/sources/matrix.mjs` syncs the homeserver and
+writes one hermes source per bridge -- the full set is in
+`CONNECTOR_HERMES_SOURCE.matrix` (`connectors/daemon.mjs`), which `run.mjs
+--purge` reads too, so a purge covers every bridged platform rather than
+reporting success and leaving the messages behind.
+
+A homeserver that is provisioned and then unreachable is a FAILED run, not a
+quiet empty one: it throws, the daemon records `ok: false` for this connector
+alone, and the other sources are untouched. An install with no credentials at
+all returns without touching anything, because not being set up is not a
+failure.
 
 ## Source registry
 
@@ -124,7 +141,7 @@ row text.
 |---|---|---|
 | `imessage` | chat.db `ROWID` high-water mark | first run pins to `MAX(ROWID)` unless backfilling |
 | `calendar` | none — **window reconciliation** | scan −7d..+30d (backfill −90d..+60d); see below |
-| `mail` | per-folder IMAP `UID` cursor + `UIDVALIDITY` guard | a `UIDVALIDITY` change invalidates the cursor for that folder; re-scan |
+| `mail` | Gmail `historyId` cursor | a history window Google has expired forces a bounded re-read; see `connectors/lib/gmailClient.mjs`. Was a per-folder IMAP `UID` cursor + `UIDVALIDITY` guard until mail moved to the Gmail API (2026-08-26). |
 | `granola` | `updated_after` timestamp, rewound 60 s | the skew absorbs clock drift; upsert makes the overlap free |
 | `health` (Oura) | last completed poll day + **trailing 7-day re-poll** | Oura corrects daily summaries retroactively; the re-poll window catches corrections, and upsert lands them as `updated`/`unchanged` |
 | `whatsapp` | `ZMESSAGEDATE` high-water mark (Apple-epoch seconds) | reads a snapshot of WhatsApp Desktop's store; freshness is bounded by when the app last ran, and the store **prunes** — never reconcile by absence (see `PROBES.md`) |
@@ -302,7 +319,7 @@ corpus sitting outside every guard this system builds — outside Hermes'
 sole-writer boundary, outside `secure_delete`, outside retention and purge (a
 purged source would live on in every snapshot). And it buys nothing: the
 corpus is *derived state* — every source re-ingests from its system of record
-(chat.db, IMAP, the Granola and Oura APIs), and entity upsert makes re-ingest
+(chat.db, the Gmail, Granola and Oura APIs), and entity upsert makes re-ingest
 converge.
 
 Opt-in, if a backup is ever truly wanted: take it with node:sqlite `backup()`
@@ -334,11 +351,11 @@ Stated once, so "private" is not assumed to mean more than it delivers:
 node connectors/doctor.mjs             # human-readable
 node connectors/doctor.mjs --json      # machine-readable
 node connectors/doctor.mjs --network   # + Granola auth (200 expected),
-                                       #   api.ouraring.com and IMAP reachability
+                                       #   api.ouraring.com and Google API reachability
 ```
 
 Exit 0 iff no FAIL. WARNs name connectors disabled by design (missing Oura
-tokens or Gmail app password) or edges the store readers handle. Network
+tokens or Google grants) or edges the store readers handle. Network
 checks are opt-in so a local diagnosis opens no third-party sockets as a side
 effect. Remember the attribution caveat above when reading `fda-*` rows from
 a shell.

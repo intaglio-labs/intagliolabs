@@ -261,65 +261,126 @@ function checkOuraSecret(home) {
   return result(name, PASS, 'present, owner-only, carries access and refresh tokens');
 }
 
-// CHECK THE FILE THE CONNECTOR ACTUALLY OPENS.
+// CHECK THE THING THE CONNECTOR ACTUALLY GATES ON.
 //
-// This checked `gmail-app-password.txt` — a single bare filename — while
-// sources/mail.mjs and connect/lib/status.mjs both read a PER-ACCOUNT
-// `gmail-app-password-<address>.txt`. Nothing anywhere reads the bare name, so
-// the prompt in ops/setup-connectors.sh wrote an orphan and this check then
-// reported PASS "present, owner-only" for a mail connector that could not run
-// and had no row in the UI. Verified 2026-08-25 by watching all three at once:
-// doctor PASS, connector "not ready", zero mail rows on the status surface.
-// A check that passes on a file no reader opens is worse than no check.
+// Twice now this has checked a credential nobody reads. First a bare
+// `gmail-app-password.txt` while everything else read a per-account
+// `gmail-app-password-<address>.txt`; that was fixed on 2026-08-25 by moving to
+// the per-account name. Then mail moved to Google OAuth on 2026-08-26 --
+// sources/mail.mjs's needs() reads accountsWithScope(GMAIL_SCOPE) and nothing
+// else, and connect/ deleted the routes that wrote a password -- and this was
+// left checking the pair that no longer decides anything.
 //
-// Kept as WARN rather than FAIL throughout: mail is opt-in, and a machine that
-// never configured it is not broken.
-function mailSecretName(address) {
-  return `gmail-app-password-${String(address).toLowerCase().replace(/[^a-z0-9]+/gu, '-')}.txt`;
+// So it lied in BOTH directions on every install this branch produces: a working
+// OAuth mailbox got "no mail.accounts[] in config.json -- mail connector
+// disabled", with a fix line pointing at a password form that no longer exists;
+// and an upgraded install with a leftover file got a PASS for a connector that
+// runs on something else entirely. The first version of this comment was written
+// to kill exactly that failure. Gating on the grant is what actually ends it.
+//
+// mail.accounts[] still exists, but only as per-account overrides
+// (sources/mail.mjs) -- backfillDays and maxBodyBytes. It selects nothing, so it
+// answers nothing here.
+//
+// Kept as WARN rather than FAIL: mail is opt-in, and a machine that never
+// authorized it is not broken.
+const GMAIL_SCOPE_URL = 'https://www.googleapis.com/auth/gmail.readonly';
+
+// Read straight from disk rather than importing googleAccounts: this module is
+// built-ins only by design (see its header), so the filename convention is
+// re-stated here rather than reaching across for it.
+function googleGrantFiles(home) {
+  const dir = join(home, '.hazlie', 'secrets');
+  try {
+    return readdirSync(dir)
+      .filter((n) => n.startsWith('google-tokens-') && n.endsWith('.json'))
+      .map((n) => join(dir, n));
+  } catch {
+    return [];
+  }
+}
+
+function grantHasScope(path, scope) {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    const scopes = parsed?.scope ?? parsed?.scopes ?? '';
+    const list = Array.isArray(scopes) ? scopes : String(scopes).split(/\s+/u);
+    return { ok: list.includes(scope), stale: parsed?.stale === true || parsed?.problem != null };
+  } catch {
+    return { ok: false, stale: false, unreadable: true };
+  }
 }
 
 function checkGmailSecret(home) {
   const name = 'secret-gmail';
-  const config = readConfigLeniently(home);
-  const accounts = Array.isArray(config?.mail?.accounts)
-    ? config.mail.accounts.filter((a) => typeof a?.user === 'string' && a.user.length > 0)
-    : [];
+  const authorized = [];
+  const stale = [];
+  const unreadable = [];
 
-  // No configured mailbox is the REAL blocker, and it is the one the old check
-  // could never report: with no `mail.accounts[]` there is no mail row on the
-  // connect page either, so there is no door to walk through.
-  if (accounts.length === 0) {
-    const stray = secretFileProblem(join(home, '.hazlie', 'secrets', 'gmail-app-password.txt'));
-    return result(
-      name,
-      WARN,
-      stray === 'missing'
-        ? 'no mail.accounts[] in config.json — mail connector disabled'
-        : 'no mail.accounts[] in config.json — mail connector disabled (and a stray '
-          + 'gmail-app-password.txt is present, which nothing reads)',
-      'add mail.accounts[] to ~/.hazlie/connectors/config.json (ops/CONNECTORS.md, '
-        + '"Configuration (config.json)"), then store each password from the connect page'
-    );
-  }
-
-  const missing = [];
-  for (const account of accounts) {
-    const p = join(home, '.hazlie', 'secrets', mailSecretName(account.user));
+  for (const p of googleGrantFiles(home)) {
+    // FAIL is daemon-fatal, so it stays reserved for a credential file that is
+    // genuinely unsafe to hold -- not for one that is merely expired.
     const problem = secretFileProblem(p);
-    if (problem === 'missing') missing.push(account.user);
-    else if (problem) {
+    if (problem && problem !== 'missing') {
       return result(name, FAIL, `${p}: ${problem}`, `chmod 600 ${p} (and make it a plain owner-owned file)`);
     }
+    const scoped = grantHasScope(p, GMAIL_SCOPE_URL);
+    if (scoped.unreadable) unreadable.push(p);
+    else if (!scoped.ok) continue;
+    else if (scoped.stale) stale.push(p);
+    else authorized.push(p);
   }
-  if (missing.length > 0) {
+
+  // A LEFTOVER PASSWORD IS A NOTE, NOT A VERDICT. It is no longer a credential
+  // this product uses, so its presence says nothing about whether mail works --
+  // but a secret sitting on disk that nothing reads is worth naming once.
+  const strayCount = ['gmail-app-password.txt']
+    .concat(
+      (() => {
+        try {
+          return readdirSync(join(home, '.hazlie', 'secrets'))
+            .filter((n) => n.startsWith('gmail-app-password-'));
+        } catch {
+          return [];
+        }
+      })()
+    )
+    .filter((n) => secretFileProblem(join(home, '.hazlie', 'secrets', n)) !== 'missing').length;
+  const stray = strayCount > 0
+    ? ` (${strayCount} leftover app-password file(s) are present, which nothing reads any more)`
+    : '';
+
+  if (unreadable.length > 0) {
     return result(
       name,
       WARN,
-      `${missing.length} of ${accounts.length} configured mailbox(es) have no stored app password`,
-      'open the connect page and paste each account\'s 16-letter Google app password'
+      `${unreadable.length} Google grant file(s) could not be parsed${stray}`,
+      'run: node ops/gcal-auth.mjs   (re-authorize; a half-written token file is not recoverable)'
     );
   }
-  return result(name, PASS, `${accounts.length} configured mailbox(es), each with an owner-only app password`);
+  if (authorized.length > 0) {
+    return result(
+      name,
+      PASS,
+      `${authorized.length} Google account(s) authorized for Gmail${
+        stale.length > 0 ? `, ${stale.length} needing re-authorization` : ''
+      }${stray}`
+    );
+  }
+  if (stale.length > 0) {
+    return result(
+      name,
+      WARN,
+      `${stale.length} Google account(s) had Gmail access and it has since been revoked or expired${stray}`,
+      'open the connect page and sign in with Google again'
+    );
+  }
+  return result(
+    name,
+    WARN,
+    `no Google account is authorized for Gmail — mail connector disabled${stray}`,
+    'open the connect page and use "sign in with Google" to authorize mail'
+  );
 }
 
 // --- hermes -------------------------------------------------------------------
@@ -751,11 +812,69 @@ async function checkNetOura() {
   return result(name, FAIL, `api.ouraring.com:443 ${r.detail}`, 'check network/DNS; the oura poller will stall until this recovers');
 }
 
-async function checkNetImap() {
-  const name = 'net-imap';
-  const r = await tcpProbe('imap.gmail.com', 993);
+// IS THE ANSWER MODEL THERE?
+//
+// There was no check for llama-server at all, on a doctor that checks hermes,
+// connect, every secret and four network hosts. hermes now distinguishes three
+// states for it -- unreachable (503), reached-and-errored (502), and
+// reached-and-silent (504) -- and none of them reached this surface, so an
+// owner whose model was down had a green doctor and a chat that could not
+// answer.
+//
+// /health is unauthenticated and answers 200 only when the weights are loaded;
+// while loading it answers 503 "Loading model", which is a WAIT, not a fault.
+// Measured on this machine: refused at t+0, 503 from t+0.25s, 200 at t+2.94s.
+async function checkLlama({ fetchImpl = fetch } = {}) {
+  const name = 'llama';
+  const base = process.env.HAZLIE_LLAMA_URL ?? 'http://127.0.0.1:51780';
+  let res;
+  try {
+    res = await fetchImpl(`${base}/health`, { signal: AbortSignal.timeout(4000) });
+  } catch {
+    // WARN, not FAIL: the model is not required for ingestion, and a machine
+    // that has not finished setting one up is not broken. The chat says so for
+    // itself now.
+    return result(
+      name,
+      WARN,
+      'llama-server is not answering — questions will report the model as down',
+      'launchctl kickstart -k gui/$UID/io.intaglio.llama-server   (or run ops/setup-llm.sh)'
+    );
+  }
+  if (res.status === 503) {
+    return result(name, PASS, 'llama-server is loading its weights (answers in a few seconds)');
+  }
+  if (!res.ok) {
+    return result(
+      name,
+      WARN,
+      `llama-server answered ${res.status}`,
+      'check ~/.hazlie/logs/llama-server.err.log'
+    );
+  }
+  return result(name, PASS, 'llama-server is loaded and answering');
+}
+
+// PROBE THE HOST THE CONNECTOR ACTUALLY REACHES.
+//
+// This probed imap.gmail.com:993 -- correct while mail was IMAP, and a
+// permanent FAIL the moment it was not. Mail moved to the Gmail API over
+// www.googleapis.com on 2026-08-26, and imap.gmail.com went out of
+// ops/EGRESS.json in the same change, so this was probing a host the project
+// had just declared it does not talk to, and failing the doctor over it.
+//
+// Renamed with it: a check called `net-imap` that probes an HTTPS API is the
+// same lie one layer down.
+async function checkNetGmail() {
+  const name = 'net-gmail';
+  const r = await tcpProbe('www.googleapis.com', 443);
   if (r.ok) return result(name, PASS, r.detail);
-  return result(name, FAIL, `imap.gmail.com:993 ${r.detail}`, 'check network/DNS; the mail connector will stall until this recovers');
+  return result(
+    name,
+    FAIL,
+    `www.googleapis.com:443 ${r.detail}`,
+    'check network/DNS; the mail and calendar connectors will stall until this recovers'
+  );
 }
 
 // --- runner ---------------------------------------------------------------------
@@ -1052,13 +1171,17 @@ export async function runChecks({ network = false, home = homedir(), env = proce
     () => checkHermesHealth(env, config),
     () => checkHermesStats(env, home, config),
     () => checkConnectHealth(env),
+    // Local, like hermes and connect: it is a loopback service this machine runs,
+    // not a host on the network, so it belongs in the default set rather than
+    // behind --network.
+    () => checkLlama(),
     () => checkFdaImessage(home),
     () => checkFdaCalendar(home),
     () => checkFdaContacts(home),
     () => checkBridgeHardening(home),
   ];
   if (network) {
-    checks.push(() => checkNetGranola(home), () => checkNetOura(), () => checkNetImap());
+    checks.push(() => checkNetGranola(home), () => checkNetOura(), () => checkNetGmail());
   }
   const results = [];
   for (const run of checks) {

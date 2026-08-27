@@ -51,6 +51,16 @@ function withDisabled(row, home) {
       ...row,
       connected: false,
       broken: false,
+      // THE FLAG, NOT ONLY THE WORDS. `detail: 'turned off'` fixed the connect
+      // page, which renders the sentence -- but the widget's shelf renders from
+      // the row's SHAPE, so a disabled source still drew as merely un-set-up and
+      // still offered to sign the owner into it. A surface cannot tell "off"
+      // from "not yet connected" out of prose. connector-tile.js already reads
+      // this flag for the WhatsApp case below; this is the same signal for the
+      // CLI-disabled ones, without the enable button, because those markers are
+      // run.mjs' and the native action is deliberately not authorized to remove
+      // them.
+      disabled: true,
       detail: 'turned off',
       action: null,
       fix: `re-enable with: rm ~/.hazlie/connectors/${connector}.disabled`,
@@ -387,12 +397,28 @@ function calendarRow(home) {
     // The singleton gcal-tokens.json was retired when Google grants became
     // per-account. Use the same account store as the connector itself, and
     // require the Calendar scope rather than treating any Google token as one.
-    const ok = accountsWithScope(CALENDAR_SCOPE, { home }).length > 0;
+    // A REVOKED GRANT IS NOT "CONNECTED", AND IT IS NOT "NEVER SET UP" EITHER.
+    //
+    // accountsWithScope filters stale accounts out, so a calendar whose grant
+    // had been revoked or expired fell into the same row as one that was never
+    // authorized: "needs authorizing", no broken flag, and the tile read as an
+    // ordinary un-set-up source. The mail rows already make this distinction
+    // (accountsWithScopeIncludingStale, above); the calendar was left behind
+    // when grants went per-account.
+    const live = accountsWithScope(CALENDAR_SCOPE, { home });
+    const anyGrant = accountsWithScopeIncludingStale(CALENDAR_SCOPE, { home });
+    const ok = live.length > 0;
+    const revoked = !ok && anyGrant.length > 0;
     return {
       id: 'calendar',
       label: 'Calendar',
       connected: ok,
-      detail: ok ? 'authorized · Google Calendar API' : 'needs authorizing',
+      broken: revoked,
+      detail: ok
+        ? 'authorized · Google Calendar API'
+        : revoked
+          ? 'access was revoked or expired — sign in again'
+          : 'needs authorizing',
       action: ok ? null : 'gcal',
       caveat: null,
     };

@@ -277,8 +277,19 @@ export function createContactsSource({ home } = {}) {
         try {
           snapshotPath = await snapshotStore(src, cacheDir);
           db = new DatabaseSync(snapshotPath, { readOnly: true });
-          const { entries } = readStore(db);
-          storesRead += 1;
+          // A STORE THAT DID NOT YIELD A USABLE READ IS NOT A STORE THAT WAS
+          // READ. Counting it made a PARTIAL failure look total-success: the
+          // 403 below only fires when EVERY store failed, and the cursor at the
+          // end advanced past the one that broke -- after which the mtime
+          // short-circuit skipped the whole connector on every later run. One
+          // silent failure masked itself permanently.
+          const { entries, reason } = readStore(db);
+          if (reason) {
+            attempts.push(`${src} (${reason})`);
+            ctx.log.info('contacts_store_skipped', { connector: 'contacts', code: reason });
+          } else {
+            storesRead += 1;
+          }
           // Later stores win on collision — Sources/* are the synced accounts
           // and are fresher than the legacy top-level store.
           for (const e of entries) byIdentifier.set(`${e.kind}:${e.identifier}`, e);
@@ -317,7 +328,18 @@ export function createContactsSource({ home } = {}) {
         storesRead,
         identifiers: entries.length,
       });
-      if (stores.length > 0) ctx.state.setCursor(CURSOR_KEY, String(newestMtime));
+      // ONLY WHEN EVERY STORE WAS READ. newestMtime is the max over stores that
+      // merely STATTED, including any whose read failed, so advancing on a
+      // partial pass writes a watermark covering data nobody looked at.
+      //
+      // Deliberate trade: a permanently unreadable store (a stale Sources/<uuid>
+      // with a corrupt database) now means the cursor never advances and the
+      // full read repeats each pass. That is the cheap direction to be wrong in
+      // -- contacts is a small, whole-file read, and repeating it costs seconds
+      // where skipping it costs an address book.
+      if (stores.length > 0 && storesRead === stores.length) {
+        ctx.state.setCursor(CURSOR_KEY, String(newestMtime));
+      }
       // The daemon's run_log wants ingest-shaped counts; identifiers landed in
       // state.db, not hermes, and `ingested` reports them so the run is
       // visible in the log rather than reading as a permanent no-op.
