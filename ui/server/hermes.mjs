@@ -69,6 +69,13 @@ import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
 import { contentMatches } from './people/content.mjs';
 import { rebuildEpisodes, EPISODE_SOURCES } from './memory/episodeStore.mjs';
+import {
+  isUnreachable,
+  unreachableError,
+  isTimeout,
+  timeoutError,
+  LLAMA_UNREACHABLE_STATUS,
+} from './llamaReady.mjs';
 import { loadSpine } from './people/graph.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
@@ -1442,6 +1449,15 @@ const DECISION_ACTIONS = Object.freeze(['accept', 'reject', 'retract']);
 // The review page is the v1 product surface and it has to show the receipt, so
 // this cap is about one sitting's reading, not about safety.
 const PENDING_CAP = 200;
+
+// HOW LONG THE OWNER'S QUESTION MAY TAKE.
+//
+// Just inside the widget's own 120s (Bridge.swift's timeoutIntervalForRequest),
+// so hermes is the one that answers: a status the widget can render rather than
+// a transport error it cannot. Overridable only through start(), so the suite can
+// exercise this path in a quarter of a second instead of two minutes -- the real
+// code path, a hundredth of the patience.
+export const ASK_TIMEOUT_MS = 110_000;
 // Row mode names the row; EPISODE mode names the LINE and hermes resolves the
 // row itself. Both are listed so the closed-field check accepts either shape,
 // and the staging code below refuses the combination -- see the note there.
@@ -2499,7 +2515,13 @@ async function proxyLlama(req, res, cors, { baseUrl, apiKey }) {
   } catch (error) {
     res.off('close', clientClosed);
     if (abort.signal.aborted) return;
-    throw Object.assign(new Error('local llama-server is unreachable'), { status: 502 });
+    // 503, matching /vault/ask, so that 502 means one thing only: the model was
+    // REACHED and answered with an error. This route used 502 for both, which
+    // made the two indistinguishable to any caller trying to tell "wait for it"
+    // from "something is actually wrong".
+    throw Object.assign(new Error('local llama-server is unreachable'), {
+      status: LLAMA_UNREACHABLE_STATUS,
+    });
   }
 
   if (!upstream.ok) {
@@ -2784,7 +2806,21 @@ async function handleVaultAsk(db, req, res, cors, policy) {
         max_tokens: 300,
         stream: false,
       }),
-      signal: controller.signal,
+      // A CEILING, as well as the owner's Cancel. This had only the disconnect
+      // signal, so a model that never answered held this request -- and the
+      // single-slot server behind it -- open for as long as the socket lived.
+      // 110s sits just inside the widget's own 120s (Bridge.swift's
+      // timeoutIntervalForRequest), so hermes is the one that answers: a clean
+      // status the widget can render rather than a transport error it cannot.
+      signal: AbortSignal.any([
+        controller.signal,
+        AbortSignal.timeout(policy.askTimeoutMs ?? ASK_TIMEOUT_MS),
+      ]),
+      // A compromised or misconfigured loopback service must not redirect a
+      // household prompt (or its Authorization header) onto the network. Every
+      // other llama call in the tree says this; this one -- which carries the
+      // retrieved context AND the key -- did not.
+      redirect: 'error',
     });
     if (!llamaRes.ok) {
       // Unread, the error body pins this keep-alive connection to the
@@ -2820,6 +2856,15 @@ async function handleVaultAsk(db, req, res, cors, policy) {
     // the fact of it; writing to a destroyed socket would throw over the top of
     // the real reason.
     if (controller.signal.aborted) return;
+    // "The model is not running" is not an application error, and it is the one
+    // failure here the owner can be told something true about. Unshaped, it
+    // reached them as "something went wrong on this app's side".
+    if (isUnreachable(error)) throw unreachableError();
+    // NOR IS "it did not answer in time". The ceiling above aborts the COMBINED
+    // signal, so the disconnect controller reads as not-aborted and the guard
+    // above misses it -- which sent a 110s wait to the owner as an app bug,
+    // arriving before the widget's own 120s would have said anything at all.
+    if (isTimeout(error)) throw timeoutError();
     throw error;
   } finally {
     res.off('close', onClose);
@@ -3127,10 +3172,32 @@ async function handlePeople(db, req, res, cors, url, policy) {
     // (graph + row gather); only the llama fetch is awaited, and it touches
     // no handle. If summarizeYear ever grows an await before its reads, this
     // call site must change with it.
-    const out = await withPeopleDbs(db, (state, resDb) => {
-      const { aliases } = resolutionState(resDb);
-      return summarizeYear(db, state, { personKey: body.key, year, owner, aliases, llama: policy.llama });
-    });
+    // A CLOSED ROW STOPS THE WORK. The reader can collapse a person, or close
+    // the panel, while the model is still writing their summary -- and the
+    // single-slot server means whatever generates next is queued behind it.
+    // Same wiring as /vault/ask: `res`, not `req`, because readJson has already
+    // consumed the request stream and its 'close' has fired.
+    const summaryAbort = new AbortController();
+    const onSummaryClose = () => {
+      if (!res.writableEnded) summaryAbort.abort();
+    };
+    res.once('close', onSummaryClose);
+    let out;
+    try {
+      out = await withPeopleDbs(db, (state, resDb) => {
+        const { aliases } = resolutionState(resDb);
+        return summarizeYear(db, state, {
+          personKey: body.key, year, owner, aliases, llama: policy.llama,
+          signal: summaryAbort.signal,
+        });
+      });
+    } catch (error) {
+      if (summaryAbort.signal.aborted) return;
+      if (isUnreachable(error)) throw unreachableError();
+      throw error;
+    } finally {
+      res.off('close', onSummaryClose);
+    }
     send(res, 200, out, cors);
     return;
   }
@@ -3176,6 +3243,9 @@ export async function start({
   llamaBaseUrl = process.env.HERMES_LLAMA_URL ?? DEFAULT_LLAMA_BASE_URL,
   llamaApiKey,
   llamaApiKeyFile = process.env.HERMES_LLAMA_API_KEY_FILE ?? DEFAULT_LLAMA_API_KEY_PATH,
+  // Test seam only: the ask's ceiling. Production never passes it, so the
+  // constant is the one number that matters and there is no env var to drift.
+  askTimeoutMs = ASK_TIMEOUT_MS,
   bearerToken: fixedBearerToken,
   bearerTokenFile = process.env.HERMES_TOKEN_FILE ?? DEFAULT_HERMES_TOKEN_PATH,
 } = {}) {
@@ -3207,6 +3277,9 @@ export async function start({
     baseUrl: canonicalLoopbackBase(llamaBaseUrl),
     apiKey,
   };
+  const askCeilingMs = Number.isFinite(askTimeoutMs) && askTimeoutMs > 0
+    ? askTimeoutMs
+    : ASK_TIMEOUT_MS;
   const db = openDb(dbPath ?? process.env.HERMES_DB ?? DEFAULT_DB_PATH);
 
   const server = createServer(async (req, res) => {

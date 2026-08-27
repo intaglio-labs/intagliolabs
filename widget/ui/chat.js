@@ -19,6 +19,7 @@ const FAILURES = {
   auth: 'intaglio labs could not unlock its own memory. Quitting and reopening usually fixes it.',
   identity: 'something else is using the port this app needs',
   down: "memory isn't running — it should come back on its own in a moment",
+  slow: 'that took longer than the model could manage — ask again, or ask for something narrower',
   error: 'something went wrong on this app’s side',
 };
 

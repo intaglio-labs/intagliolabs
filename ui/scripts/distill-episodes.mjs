@@ -97,6 +97,7 @@ async function resolveModel() {
   const res = await fetch(`${llamaBase}/v1/models`, {
     headers: { Authorization: `Bearer ${llamaKey}` },
     signal: AbortSignal.timeout(10_000),
+    redirect: 'error',
   });
   if (!res.ok) throw new Error(`llama-server /v1/models returned ${res.status}`);
   const body = await res.json();
@@ -111,6 +112,12 @@ async function askModel(episode, lines, model) {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${llamaKey}` },
     body: JSON.stringify(buildEpisodeRequest({ system, episode, lines, model, context: withContext })),
     signal: AbortSignal.timeout(180_000),
+    // A compromised or misconfigured loopback service must not redirect a
+    // household conversation (or the API key) onto the network. hermes and
+    // people/summary.mjs both state this rule -- summary.mjs's comment even
+    // calls it "the same rule as every other llama call here" -- and these two,
+    // which send whole conversations, were the exceptions.
+    redirect: 'error',
   });
   if (!res.ok) throw new Error(`llama-server returned ${res.status}`);
   const body = await res.json();
