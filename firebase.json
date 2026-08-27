@@ -1,7 +1,7 @@
 {
   "hosting": [
     {
-      "site": "hazlie-prod",
+      "site": "intagliolabs",
       "public": "site",
       "ignore": [
         "firebase.json",
