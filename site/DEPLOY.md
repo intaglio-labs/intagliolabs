@@ -229,14 +229,32 @@ re-provisions a certificate on the receiving site, so it is done last and by
 hand rather than folded into the commit that repoints the config. Until it is
 done, **intaglio.io is stale** and `intagliolabs.web.app` is current.
 
-The cutover, in the order that keeps the apex up: add `intaglio.io` to the
-`intagliolabs` site, add the `hosting-site=intagliolabs` TXT record *alongside*
-the existing `hosting-site=hazlie-prod` one, wait for the new site to report
-Connected, and only then remove the domain from `hazlie-prod` and drop the stale
-TXT. Both TXT records may coexist; that overlap is what avoids a gap. DNS is
-Google Cloud DNS (`ns-cloud-c1..c4.googledomains.com`) and the apex A record is
-`199.36.158.100`. Do not touch the `google-site-verification`, SPF or
+The cutover: add `intaglio.io` to the `intagliolabs` site, then **replace**
+`hosting-site=hazlie-prod` with `hosting-site=intagliolabs`, wait for the new
+site to report Connected, and only then remove the domain from `hazlie-prod`.
+The apex A record is `199.36.158.100` — already a Firebase IP, so it likely does
+not change. Do not touch the `google-site-verification`, SPF or
 `anthropic-domain-verification` TXT records that share the apex.
+
+~~Both `hosting-site=` TXT records may coexist, and that overlap is what avoids
+a gap.~~ **False, and it was asserted here before anyone tried it.** Firebase's
+"Prepare domain" step for a domain already in use explicitly instructs you to
+*remove* the other site's record, and it will not reveal the direct-to-hosting
+step until that verification passes. Replacing is the only path.
+
+That is safe regardless, for a reason worth keeping: the `hosting-site=` record
+governs **verification, not serving**. The apex serves via its A record plus
+Firebase's internal domain-to-site mapping, and that mapping survives until the
+domain is explicitly detached from the old site — which is the last step, not
+the first.
+
+~~DNS is Google Cloud DNS.~~ **The registrar and DNS host is Squarespace**
+(`account.squarespace.com/domains/managed/intaglio.io`). The nameservers really
+do read `ns-cloud-c1..c4.googledomains.com`, because Squarespace runs its DNS on
+Google Cloud DNS infrastructure — so the NS records look exactly like a Cloud DNS
+managed zone and are not one. Searching every GCP project across both accounts
+for a zone finds nothing. `_domainconnect.intaglio.io` CNAMEs to
+`domains.squarespace.com`, which is the tell.
 
 ~~intaglio.io's apex is host-routed by an external HTTPS load balancer in a
 separate GCP project that this project does not own... the planned swap needs
