@@ -119,6 +119,25 @@ function fetchStatus({ headers = {}, hostHeader } = {}) {
   });
 }
 
+function startGoogleAuth({ headers = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({ flow: 'google' });
+    const req = httpRequest(
+      {
+        host: '127.0.0.1', port: PORT, path: '/api/google-auth', method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), ...headers },
+      },
+      (res) => {
+        let responseBody = '';
+        res.on('data', (c) => (responseBody += c));
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: responseBody }));
+      }
+    );
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
 test('the route is reachable above the /c/ gate and end-to-end correct', async (t) => {
   const home = fakeHome(t);
   await startServer(t, home);
@@ -136,6 +155,21 @@ test('the route is reachable above the /c/ gate and end-to-end correct', async (
 
   const noAuth = await fetchStatus();
   assert.equal(noAuth.status, 401);
+
+  // Starting an OAuth helper is a side effect and therefore follows the same
+  // native-only bearer contract. These fail before any child is spawned.
+  const googleNoAuth = await startGoogleAuth();
+  assert.equal(googleNoAuth.status, 401);
+  assert.deepEqual(JSON.parse(googleNoAuth.body), { error: 'unauthorized' });
+  const googleBrowser = await startGoogleAuth({
+    headers: { authorization: `Bearer ${TOKEN}`, origin: `http://127.0.0.1:${PORT}` },
+  });
+  assert.equal(googleBrowser.status, 403);
+  assert.deepEqual(JSON.parse(googleBrowser.body), { error: 'browser channel refused' });
+  const googleNative = await startGoogleAuth({
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+  assert.equal(googleNative.status, 502, 'auth passes; the scratch home has no Google client credential');
 
   // Wrong Host is a rebinding refusal (403 before auth) — assert it so a
   // future failure here is not misread as bearer plumbing.

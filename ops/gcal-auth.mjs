@@ -1,7 +1,8 @@
 // One-time Google OAuth2 authorization for the calendar AND mail connectors.
 //
 // Run it on the Mac (`node ops/gcal-auth.mjs`), approve in the browser tab it
-// opens, and it writes ~/.hazlie/secrets/gcal-tokens.json.
+// opens, and it writes one account-specific token file under
+// ~/.hazlie/secrets/.
 //
 // THE NAME IS NARROWER THAN THE JOB, and knowingly so for now. This grants one
 // Google account — calendar and mail — and `gcal-*` says calendar. The honest
@@ -54,6 +55,7 @@ import { lstatSync, readFileSync, writeFileSync, renameSync, existsSync } from '
 import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
+import { googleTokensPath, listGoogleAccounts } from '../connectors/lib/googleAccounts.mjs';
 
 const SECRETS_DIR = join(homedir(), '.hazlie', 'secrets');
 // ~~Two fixed filenames.~~ Resolved through connectors/lib/googleClients.mjs
@@ -78,7 +80,8 @@ const SCOPES = [
 ].join(' ');
 const TIMEOUT_MS = 15 * 60 * 1000;
 // Print the authorize URL instead of opening a browser. Used by the connect
-// server, which hands it to the app's own sign-in window.
+// server, which hands the validated URL to the app for opening in the system
+// browser.
 const PRINT_URL = process.argv.includes('--print-url');
 // WHICH OAUTH CLIENT TO SIGN IN WITH. An Internal client reaches only its own
 // Workspace but never expires and has no cap; an External one reaches any
@@ -162,9 +165,6 @@ async function discoverAccountEmail(accessToken) {
   } catch {}
   return null;
 }
-
-const accountSlug = (email) =>
-  String(email).toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-+|-+$/gu, '');
 
 if (process.argv.includes('--help')) {
   console.log(`gcal-auth — one-time Google authorization (Calendar + Gmail, read-only)
@@ -356,7 +356,14 @@ const server = createServer(async (req, res) => {
     server.close();
     fail('could not determine the account address from either Gmail or Calendar; nothing written');
   }
-  const tokensFile = join(SECRETS_DIR, `google-tokens-${accountSlug(accountEmail)}.json`);
+  // Keep an existing account on its current path so token files created by
+  // the first per-account release are upgraded in place. New accounts use the
+  // collision-resistant path; this is what lets two addresses whose readable
+  // slugs match coexist instead of the second overwriting the first.
+  const existing = listGoogleAccounts().find(
+    (account) => account.email?.toLowerCase() === accountEmail.toLowerCase()
+  );
+  const tokensFile = existing?.tokensPath ?? googleTokensPath(accountEmail);
   const replacing = existsSync(tokensFile);
 
   writeTokensAtomically({
@@ -409,12 +416,10 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('gcal-auth: waiting for the browser approval (15 minute limit)…');
   // --print-url: hand the URL to a CALLER that will show it, and open nothing.
   //
-  // The app opens Google in its own window (widget/src/GoogleLogin.swift)
-  // rather than kicking the owner out to their default browser, which is the
-  // shape every other login in this product already has. The listener below is
-  // unchanged either way — whatever renders the consent screen, Google
-  // redirects to this process's loopback callback and the code is exchanged
-  // here. The window is a viewport, not a participant.
+  // The app hands this URL to the system browser (widget/src/GoogleLogin.swift),
+  // as Google's OAuth policy requires. The listener below is unchanged either
+  // way: Google redirects back to this process's loopback callback and the code
+  // is exchanged here.
   //
   // Printed on its own line with a fixed prefix so a caller can read it without
   // parsing prose, and flushed before anything else is logged.

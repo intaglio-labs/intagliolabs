@@ -1308,28 +1308,14 @@ body.widget.spotlight-widget .dream { display: none; }
    window, but flex-end closes the gap for free. */
 body.connections .win {
   padding: 14px 20px 14px;
-  /* A unifying CARD, matching the People popup: the hint side panel and the
-     shelf read as one connected surface over the glass, instead of each
-     floating on it separately. */
+  /* A unifying card behind Settings; connector hints float above it. */
   background: rgba(20, 20, 18, 0.72);
   border: 1px solid rgba(234, 234, 234, 0.10);
   border-radius: 16px;
   box-shadow: inset 0 1px 0 rgba(234, 234, 234, 0.08);
-  /* A row, not a column: the hint strip is a SIDE section on the left and
-     the shelf keeps the right, pinned to the widget by native placement.
-     align-items: flex-end hugs the bottom — content-shaped windows grow up,
-     never push down. ~~justify-content: flex-end hugged the right too~~ —
-     replaced by the auto left margin on .hint-host (owner, 2026-08-25), the
-     same trade this file already makes for the vertical axis below: with
-     flex-end, any moment the row is wider than the window (a hint opening
-     before the extraWidth resize lands, a scale snap mid-flight) shoves the
-     overflow past the START edge, where it is clipped and unreachable — the
-     settings column lost its first characters off the window's left edge. An
-     auto margin hugs right identically when content fits and resolves to
-     zero under overflow, so the excess falls off the RIGHT, where the very
-     next resize brings it back. */
-  flex-direction: row; align-items: flex-end;
-  gap: 12px;
+  /* The hint is fixed-position overlay content, so the window itself remains
+     one Settings column at its normal width. */
+  flex-direction: column;
 }
 /* The column the window used to be: everything except the hint strip.
    flex 1 1 REQUIRED: with shrink 0 this column sizes to the shelf's
@@ -1420,11 +1406,6 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
 }
 /* The hint no longer lives IN the row — a full-width strip cannot be a cell
    of a horizontal shelf. It renders below, in its own host. */
-/* 236px wide; the +12px .win gap makes the 248 the page posts as
-   extraWidth (connections.js) — change one, change both. Scrolls on its own
-   if a hand-hold outgrows the window rather than growing it. Its height is
-   set by connections.js to match .conn-main exactly, so with both columns
-   bottom-anchored the panel's TOP lines up with the CONNECTIONS eyebrow. */
 /* ~~The hint host was a LEFT SIDE STRIP: flex: 0 1 236px in the .win row,
    the window widening by 248 to reveal it, a book-fold rotateY on open.~~
    Re-shaped into a POP-OVER (owner, 2026-08-25): the flow floats over the

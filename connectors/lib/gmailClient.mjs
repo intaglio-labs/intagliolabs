@@ -19,7 +19,7 @@
 import { homedir } from 'node:os';
 import { readSecretJson } from './secrets.mjs';
 import { readGoogleClient } from './googleClients.mjs';
-import { googleTokensPath, markGoogleAccountStale } from './googleAccounts.mjs';
+import { googleTokensPath, listGoogleAccounts, markGoogleAccountStale } from './googleAccounts.mjs';
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 // The same host the calendar client uses. gmail.googleapis.com serves the
@@ -41,7 +41,16 @@ export function createGmailClient({
   tokensPath = null,
   fetchImpl = fetch,
 } = {}) {
-  const path = tokensPath ?? googleTokensPath(email, home);
+  // Reuse the path discovered from disk first. The first per-account release
+  // used slug-only filenames; new grants use a collision-resistant suffix.
+  // Reading both keeps an existing authorization live without renaming a
+  // credential behind a running daemon.
+  const existing = tokensPath === null
+    ? listGoogleAccounts({ home }).find(
+        (account) => account.email?.toLowerCase() === String(email).toLowerCase()
+      )
+    : null;
+  const path = tokensPath ?? existing?.tokensPath ?? googleTokensPath(email, home);
   // READ AT USE TIME, never cached (connectors/AGENTS.md). A re-auth that
   // rotates the client secret or the refresh token must take effect without a
   // daemon restart, and a file that turned group-readable after startup has to

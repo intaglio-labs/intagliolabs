@@ -133,4 +133,17 @@ test('two addresses that differ only in case are one account, not two', () => {
   // Gmail does not distinguish them, and two token files for one grant means
   // one of them silently goes stale.
   assert.equal(googleAccountSlug('A@Intaglio.IO'), googleAccountSlug('a@intaglio.io'));
+  assert.equal(
+    googleTokensPath('A@Intaglio.IO', '/home'),
+    googleTokensPath('a@intaglio.io', '/home')
+  );
+});
+
+test('distinct addresses with the same readable slug get different token files', () => {
+  assert.equal(googleAccountSlug('a.b@x.co'), googleAccountSlug('a-b@x.co'));
+  assert.notEqual(
+    googleTokensPath('a.b@x.co', '/home'),
+    googleTokensPath('a-b@x.co', '/home'),
+    'the full address, not the lossy slug, must participate in credential identity'
+  );
 });

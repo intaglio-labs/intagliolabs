@@ -12,7 +12,12 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { PLATFORMS, bridgeStatus } from './bridge.mjs';
-import { GMAIL_SCOPE, accountsWithScopeIncludingStale } from '../../connectors/lib/googleAccounts.mjs';
+import {
+  CALENDAR_SCOPE,
+  GMAIL_SCOPE,
+  accountsWithScope,
+  accountsWithScopeIncludingStale,
+} from '../../connectors/lib/googleAccounts.mjs';
 
 const SECRETS = (home) => join(home, '.hazlie', 'secrets');
 
@@ -369,8 +374,10 @@ function calendarBackend(home) {
 
 function calendarRow(home) {
   if (calendarBackend(home) === 'google') {
-    const tokens = join(SECRETS(home), 'gcal-tokens.json');
-    const ok = ownerOnlyFileExists(tokens);
+    // The singleton gcal-tokens.json was retired when Google grants became
+    // per-account. Use the same account store as the connector itself, and
+    // require the Calendar scope rather than treating any Google token as one.
+    const ok = accountsWithScope(CALENDAR_SCOPE, { home }).length > 0;
     return {
       id: 'calendar',
       label: 'Calendar',

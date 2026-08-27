@@ -6,7 +6,7 @@
 // SOURCE OF TRUTH: the settings shelf (connections.js). This is that tile's
 // markup and its custom hover tooltip, lifted verbatim so behaviour matches.
 // What differs by surface — what a CLICK does — is passed in as onOpen, because
-// settings opens an inline hint strip while other surfaces hand off elsewhere.
+// settings opens an anchored hint pop-over while other surfaces hand off elsewhere.
 //
 // Depends only on hzGlyph (bridge.js). No network. Load this BEFORE the page
 // script that calls hzConnectorTile.
@@ -99,6 +99,16 @@ function hzConnectorTile(src, { onOpen } = {}) {
 // settings. Renders a .hint strip into `host`; call refresh() to repaint the
 // surface after a successful link.
 const HZ_KIND = (id) => (id.startsWith('mail:') ? 'mail' : id);
+// `action` describes what needs doing now, not what a source is. Once a social
+// bridge connects, /api/status clears action; routing on action alone then
+// falls into the generic connector card and loses the account/workspace name.
+const HZ_BRIDGES = new Set([
+  'twitter', 'messenger', 'instagram', 'linkedin', 'discord', 'slack', 'telegram',
+]);
+const HZ_IS_BRIDGE = (src) => src.action === 'bridge' || HZ_BRIDGES.has(HZ_KIND(src.id));
+// Same grant the Settings shelf starts directly. Keeping this set beside the
+// shared kind normalizer lets every surface make the same first-press decision.
+const HZ_GOOGLE_AUTH = new Set(['mail', 'calendar']);
 
 const HZ_FDA_HINT = {
   // ~~text: the sentence walking through the grant.~~ Yeeted (owner,
@@ -297,8 +307,15 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
     if (data && data.connected) {
       const acct = document.createElement('span');
       acct.className = 'acct';
-      acct.textContent = `linked as ${data.name || 'you'}`;
-      tip.appendChild(acct);
+      // The green dot already says connected. Use this line to name the actual
+      // account/workspace, matching the Settings connector card.
+      const whole = String(data.name || '').trim();
+      const cut = whole.lastIndexOf(' - ');
+      const tail = cut > 0 ? whole.slice(cut + 3) : '';
+      if (whole) {
+        acct.textContent = (cut > 0 && tail.includes('@')) ? whole.slice(0, cut) : whole;
+        tip.appendChild(acct);
+      }
     } else if (data && data.state !== 'ok' && data.state !== 'cancelled' && !manual && !data.transcript) {
       tip.append(HZ_NOTICES[data.state] || data.error || HZ_NOTICES.error);
     } else {
@@ -417,7 +434,7 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
   // Attach BEFORE rendering — the bridge openers finish async and paint into
   // this node, so it has to already be in the document.
   host.appendChild(tip);
-  if (src.action === 'bridge') {
+  if (HZ_IS_BRIDGE(src)) {
     if (src.connected) openBridge(); else openBridgeLogin();
   } else {
     renderTip();

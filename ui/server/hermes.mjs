@@ -2932,7 +2932,7 @@ function handle(db, req, res, cors, url, policy) {
   // map and WRITE the owner's merge decisions, neither of which is a browser
   // capability. The Origin channel is authenticated but not entitled here, so
   // 403 (not 401), matching handleAdmin's reasoning.
-  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary') {
+  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary' || url.pathname === '/people/avatars') {
     if (channel !== 'bearer') {
       send(res, 403, { error: 'people routes are bearer-only: call with the token from ~/.hazlie/secrets/hermes-token.txt and no Origin header.' }, cors);
       return;

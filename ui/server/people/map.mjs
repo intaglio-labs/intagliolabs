@@ -12,7 +12,7 @@
 import { buildGraph, namelike } from './graph.mjs';
 import { depthScore, isNonPerson } from './rank.mjs';
 import { topicTallies, topTopics, nameTokenSet } from './topics.mjs';
-import { buildHighlights } from './highlights.mjs';
+import { buildYearAwards } from './highlights.mjs';
 
 const DAY = 86_400_000;
 
@@ -418,11 +418,16 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
   // below: a streak or a return is worth surfacing even when the person sits
   // past row 250, and capping first would have quietly made the highlights a
   // fact about the first page rather than about the year.
+  const { cards, awards } = buildYearAwards(entries, { year, now });
+
   return {
     year,
     years: [...yearsSet].sort((a, b) => a - b),
     total: entries.length,
-    highlights: buildHighlights(entries, { year, now }),
+    highlights: cards,
+    // Each category's top five. The page joins these compact key lists onto
+    // the visible rows and reuses the category card's own icon and label.
+    awards,
     people: entries.slice(0, cap).map((e) => {
       const doc = topics.docs.get(`${e.p.key}|${year}`);
       // The row carries only what the page still shows: the company, status

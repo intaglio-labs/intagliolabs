@@ -31,7 +31,7 @@ import { bridgeApiResponse } from './lib/bridgeApi.mjs';
 import { decide, fetchPending } from './lib/memory.mjs';
 import { readStatus } from './lib/status.mjs';
 import { sameOrigin } from './lib/origin.mjs';
-import { statusResponse } from './lib/statusApi.mjs';
+import { bearerAuthorized, statusResponse } from './lib/statusApi.mjs';
 import { mintToken, validateToken } from './lib/tokens.mjs';
 
 const DEFAULT_PORT = 51788;
@@ -277,6 +277,20 @@ async function handleRequest(req, res) {
   // fixed names — a request cannot name a third. That is the whole reason this
   // is an allowlist of literals rather than a parameter.
   if (url.pathname === '/api/google-auth') {
+    // Native-only, exactly like /api/status, /api/secret and /api/bridge. A
+    // browser can issue a blind POST to loopback even without CORS permission;
+    // without these checks any page could occupy the helper's fixed callback
+    // port and keep the owner's real sign-in from starting.
+    if (req.headers.origin !== undefined) {
+      send(res, 403, JSON.stringify({ error: 'browser channel refused' }),
+        'application/json; charset=utf-8');
+      return;
+    }
+    if (!bearerAuthorized(req.headers.authorization)) {
+      send(res, 401, JSON.stringify({ error: 'unauthorized' }),
+        'application/json; charset=utf-8');
+      return;
+    }
     if (req.method !== 'POST') {
       send(res, 405, JSON.stringify({ error: 'POST only' }), 'application/json; charset=utf-8');
       return;
@@ -300,11 +314,10 @@ async function handleRequest(req, res) {
       }), 'application/json; charset=utf-8');
       return;
     }
-    // THE URL COMES BACK, so the app can show Google in its own window instead
-    // of throwing the owner out to their default browser. The helper is still
-    // the one that holds the loopback listener and exchanges the code — the
-    // window only renders the consent screen, and Google redirects into that
-    // listener exactly as it would from Safari.
+    // THE URL COMES BACK so native code can validate the fixed Google host and
+    // hand it to the system browser. The helper still holds the loopback
+    // listener and exchanges the code; the browser follows Google's redirect
+    // into that listener normally.
     //
     // Stdout is READ, not ignored, so the child cannot be fully detached until
     // the URL has arrived. It is unref'd immediately after: the flow outlives

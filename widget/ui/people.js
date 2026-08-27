@@ -68,6 +68,15 @@ function openConnector(src, row) {
     hzPost('openFullDiskAccess').catch(() => {});
     return;
   }
+  // Match the Settings shelf: for an unconnected Google row, the tile press
+  // opens sign-in directly instead of presenting instructions with no action.
+  // Calendar's local/FDA row remains local because base backend selection is
+  // authoritative; only a row already advertising the Google action gets here.
+  if (HZ_GOOGLE_AUTH.has(HZ_KIND(src.id)) && !src.connected && src.action !== 'fda') {
+    openId = null;
+    hzPost('googleAuth', { flow: 'google' }).catch(() => {});
+    return;
+  }
   // The disabled-connector shortcut was reverted with its settings-shelf
   // twin (owner, 2026-08-25): the card and its connect button are back.
   openId = src.id;

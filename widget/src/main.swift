@@ -867,19 +867,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // the scale can change afterwards and the measurement is about content, not
   // about how big it is being drawn.
   private var contentHeights: [PopupPanel: CGFloat] = [:]
-  // Extra width past the base, same CSS-px convention. Only the connections
-  // page sets this today (its hint strip opens as a side section).
-  private var extraWidths: [PopupPanel: CGFloat] = [:]
-
   private func capped(_ size: NSSize) -> NSSize {
     NSSize(width: size.width, height: min(size.height, popupCeiling()))
   }
 
-  func fitPopup(_ webView: WKWebView, contentHeight: Double, extraWidth: Double) {
-    // Either dimension may arrive alone: height 0 means "keep what you had"
-    // (the hint panel opening posts only extraWidth), extraWidth < 0 likewise
-    // (every hzAutoFit height report posts no width at all).
-    guard contentHeight > 0 || extraWidth >= 0 else { return }
+  func fitPopup(_ webView: WKWebView, contentHeight: Double) {
+    guard contentHeight > 0 else { return }
     // Remember it, but do not act on it mid-drag: the height a page reports
     // while the scale is moving is a measurement of a layout that is about to
     // change again, and acting on it is what turned one drag into a stream of
@@ -888,8 +881,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       for (panel, _) in [(connectionsPanel, 0), (chatPanel, 0), (peoplePanel, 0), (monthsPanel, 0)] {
         guard let p = panel, p.contentView === webView
           || p.contentView?.subviews.first === webView else { continue }
-        if contentHeight > 0 { contentHeights[p] = CGFloat(contentHeight) }
-        if extraWidth >= 0 { extraWidths[p] = CGFloat(extraWidth) }
+        contentHeights[p] = CGFloat(contentHeight)
         return
       }
       return
@@ -901,10 +893,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     for (panel, base) in panels {
       guard let p = panel, p.contentView === webView
         || p.contentView?.subviews.first === webView else { continue }
-      if contentHeight > 0 { contentHeights[p] = CGFloat(contentHeight) }
-      if extraWidth >= 0 { extraWidths[p] = CGFloat(extraWidth) }
+      contentHeights[p] = CGFloat(contentHeight)
       let want = NSSize(
-        width: base.width + (extraWidths[p] ?? 0),
+        width: base.width,
         height: max(base.height, contentHeights[p] ?? 0))
       let fitted = Self.fit(Self.scaled(want, Bridge.scale), on: p)
       let size = isOverlayPlaced(p) ? fitted : capped(fitted)

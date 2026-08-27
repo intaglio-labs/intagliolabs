@@ -1075,6 +1075,7 @@ test('every people route refuses the browser channel with a 403', async () => {
     ['POST', '/people/init', { days: 0 }],
     ['GET', '/people/review?days=0', undefined],
     ['GET', '/people/map', undefined],
+    ['POST', '/people/avatars', { keys: [] }],
     ['POST', '/people/decide', { verdict: 'skip', a: 'x', b: 'y' }],
   ];
   for (const [method, path, body] of attempts) {
@@ -1138,6 +1139,13 @@ test('people routes reject unknown fields, and the bearer channel answers', asyn
   const out = await res.json();
   assert.equal(typeof out.people, 'number');
   assert.ok(Array.isArray(out.pairs));
+
+  // This route used to exist inside handlePeople but was absent from the outer
+  // People allowlist, making it unreachable and forcing every real photo to
+  // fall back to initials.
+  const avatars = await post('/people/avatars', { keys: [] });
+  assert.equal(avatars.status, 200);
+  assert.deepEqual(await avatars.json(), { avatars: {} });
 });
 
 test('admin operations validate source against the closed allowlist', async () => {
