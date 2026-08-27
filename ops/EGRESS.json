@@ -455,6 +455,16 @@
       "evidence": "site/index.html -- COUNTER.endpoint, https://api.github.com/repos/intaglio-labs/intagliolabs/releases"
     },
     {
+      "host": "intaglio.io",
+      "kind": "website",
+      "component": "site/index.html",
+      "direction": "self",
+      "purpose": "the site's own canonical URL and link-preview image, named absolutely in the og: and twitter: tags",
+      "credential": "none",
+      "decision": "This is the site talking about itself, not reaching anywhere new -- og:url and og:image have to be absolute because a crawler resolves them without a document base, so the origin appears as a literal here. No visitor request goes anywhere it was not already going. Listed because the tripwire scans for host literals, not for intent, and a reader who finds intaglio.io in the source should be able to see it accounted for rather than wonder.",
+      "evidence": "site/index.html -- og:url, og:image, twitter:image (https://intaglio.io/ and https://intaglio.io/og.png)"
+    },
+    {
       "host": "www.apache.org",
       "kind": "website",
       "component": "site/index.html",
