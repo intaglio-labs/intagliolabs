@@ -211,9 +211,10 @@ Two consequences worth knowing:
 
 ## Domain — done
 
-**intaglio.io is live on the default site.** Moved 2026-08-24 and verified from
-outside: `HTTP/2 200`, serving this repository's page, with the download button
-pointing at the GitHub release.
+**intaglio.io is live on the `intagliolabs` site.** Moved there 2026-08-27 (and
+to `hazlie-prod`'s default site before that, on 2026-08-24). Verified from the
+Hosting API, not from a fetch — see the cutover note below for why the
+distinction matters.
 
 The move: the domain was attached to a second site, `intaglio-landing`, which this
 repository did not deploy — so the apex served a release pushed by hand while
@@ -221,20 +222,41 @@ deploys landed somewhere else. The domain now sits on `hazlie-prod`, the project
 default site and the one `firebase.json` names, and `intaglio-landing` is deleted.
 One site, one deploy target, one URL.
 
-**That last sentence is temporarily false, and knowingly so.** As of 2026-08-27
-deploys go to `intagliolabs` while the apex is still attached to `hazlie-prod`,
-so a push to `main` updates `intagliolabs.web.app` and leaves intaglio.io on the
-last build the old project received. Moving a custom domain is console-only and
-re-provisions a certificate on the receiving site, so it is done last and by
-hand rather than folded into the commit that repoints the config. Until it is
-done, **intaglio.io is stale** and `intagliolabs.web.app` is current.
+~~That last sentence is temporarily false: deploys go to `intagliolabs` while the
+apex is still attached to `hazlie-prod`, so intaglio.io is stale.~~ **Resolved
+2026-08-27.** The domain moved to the `intagliolabs` site and the sentence is
+true again — one site, one deploy target, one URL. Verified against the Hosting
+API rather than by fetching the page: `sites/intagliolabs/domains` reports
+`status: DOMAIN_ACTIVE`, `certStatus: CERT_ACTIVE`, `dnsStatus: DNS_MATCH`,
+`expectedIps: [199.36.158.100]`.
 
-The cutover: add `intaglio.io` to the `intagliolabs` site, then **replace**
-`hosting-site=hazlie-prod` with `hosting-site=intagliolabs`, wait for the new
-site to report Connected, and only then remove the domain from `hazlie-prod`.
-The apex A record is `199.36.158.100` — already a Firebase IP, so it likely does
-not change. Do not touch the `google-site-verification`, SPF or
-`anthropic-domain-verification` TXT records that share the apex.
+The cutover, as performed: added `intaglio.io` to the `intagliolabs` site,
+**replaced** `hosting-site=hazlie-prod` with `hosting-site=intagliolabs` in
+Squarespace, waited for Connected — about two hours, inside the old record's
+four-hour TTL — then removed the domain from `hazlie-prod`. Firebase never
+asked for an A record: it went straight from TXT verification to Connected,
+because `199.36.158.100` was already its own IP. The
+`google-site-verification`, SPF and `anthropic-domain-verification` TXT records
+that share the apex were left untouched, and the apex TXT went from six values
+to six values with exactly one substituted.
+
+**Do not verify a hosting cutover by fetching the page.** During this migration
+the apex, `intagliolabs.web.app` and `hazlie-prod.web.app` all served
+byte-identical content with matching ETags, so a successful fetch proved
+nothing about which site answered. Worse, Firebase Hosting sits behind a CDN
+that caches per host (`vary: x-fh-requested-host`): `curl https://intaglio.io/`
+returned 200 from a stale `x-cache: HIT` after the binding had moved, and a
+cache-busted request to the same host returned Firebase's 404 "Site Not Found"
+while the binding was `DOMAIN_ACTIVE` the whole time. Both readings were wrong
+in opposite directions, and acting on the second would have rolled back a
+working migration. The control plane is the source of truth:
+
+    curl -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+         -H "x-goog-user-project: intagliolabs" \
+         https://firebasehosting.googleapis.com/v1beta1/sites/intagliolabs/domains
+
+Expect edge nodes to serve 404 for a while after a binding moves. That is
+propagation, not an outage, and it resolves without intervention.
 
 ~~Both `hosting-site=` TXT records may coexist, and that overlap is what avoids
 a gap.~~ **False, and it was asserted here before anyone tried it.** Firebase's
@@ -268,6 +290,12 @@ domain ever has to move again it is four manual steps, and two of them bite:
 the certificate is re-provisioned on the receiving site, so the apex serves a
 warning or stale content until it lands; and deleting a site while a domain is
 still attached takes that domain down.
+
+~~The apex serves a certificate warning while the new one provisions.~~ It did
+not, on 2026-08-27, and the reason is worth copying: the domain stayed attached
+to the old site the whole time the new certificate was being issued, so the old
+site's certificate kept answering. Detaching came last. Sequenced the other way
+round the warning is real — which is what the original claim was reaching for.
 
 ### The .web.app URLs
 
