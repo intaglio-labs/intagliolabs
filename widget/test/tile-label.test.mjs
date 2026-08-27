@@ -69,3 +69,38 @@ test('both the tile and its card carry the source id', () => {
     assert.match(text, /tip\.dataset\.id = src\.id/u, `${file}: the card must stamp its id`);
   }
 });
+
+// Pressing a bridge tile opens its login — it does not describe opening it.
+//
+// The press used to put up a card reading "— opening login…" and start the login
+// behind it. The card was never the point: the login WINDOW is what the press is
+// for. When the bridge stack is unreachable that card sat on the sentence for the
+// full 22s bridgeCall timeout, describing something that was not happening.
+//
+// Settings settled this already — palette.css says so in its own words: the tile
+// "becomes a spinner in place — the owner's ask, instead of opening the hint
+// panel to a transitional 'opening login…'". The People ring never got it. This
+// keeps them together.
+test('a bridge press starts the login without a card', () => {
+  const tileSrc = readFileSync(join(WIDGET, 'ui/connector-tile.js'), 'utf8');
+  const block = /if \(HZ_IS_BRIDGE\(src\) && !src\.connected\) \{([\s\S]*?)\n {2}\}/u.exec(tileSrc)?.[1];
+  assert.ok(block, 'the un-connected bridge path must be its own branch');
+  assert.match(block, /hzPost\('bridgeWebLogin'/u, 'it goes straight to the login');
+  assert.match(block, /onBusy\(true\)/u, 'the TILE carries the wait');
+  // The card is built only where there is something to say.
+  assert.ok(
+    !/opening login…'\)/u.test(block),
+    'no card may describe the wait — that is what the spinner is for'
+  );
+});
+
+test('the People ring shows the wait on the tile, as Settings does', () => {
+  const peopleSrc = readFileSync(join(WIDGET, 'ui/people.js'), 'utf8');
+  assert.match(peopleSrc, /onBusy: \(on\) => row\.classList\.toggle\('logging-in', on\)/u);
+  // The spinner rule is unscoped in palette.css, which people.html also loads —
+  // so the ring gets the same look without a second copy of it.
+  const palette = readFileSync(join(WIDGET, 'ui/palette.css'), 'utf8');
+  assert.match(palette, /^\.row\.logging-in \.dot \{/mu, 'the rule must stay unscoped, or the ring loses it');
+  const html = readFileSync(join(WIDGET, 'ui/people.html'), 'utf8');
+  assert.match(html, /palette\.css/u, 'people.html must keep loading palette.css');
+});

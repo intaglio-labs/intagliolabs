@@ -85,7 +85,13 @@ function openConnector(src, row) {
   // The ring closes with everything the ring owns -- the open row, the open id,
   // the hint host -- so a cancelled login here ends exactly where it does in
   // Settings, rather than leaving an open card with nothing in it.
-  hzConnectorHint(src, phint, { refresh: reload, onClose: closeHint });
+  hzConnectorHint(src, phint, {
+    refresh: reload,
+    onClose: closeHint,
+    // The TILE carries the wait, not a card: a bridge press opens its login
+    // window and says nothing until there is something to say.
+    onBusy: (on) => row.classList.toggle('logging-in', on),
+  });
   addHintClose();
   growPanel(row);
   row.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });

@@ -206,7 +206,7 @@ const hzStaleRefreshed = new Set();
 // also clears the open row, the open id and the ring's own state. Emptying this
 // node was enough for Settings and left the People panel holding an open,
 // half-empty card -- the same close, done twice, disagreeing.
-function hzConnectorHint(src, host, { refresh = () => {}, onClose = null } = {}) {
+function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy = null } = {}) {
   const tip = document.createElement('div');
   tip.className = 'hint';
   tip.dataset.id = src.id;
@@ -484,24 +484,45 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null } = {})
     tip.append(head, 'checking…');
     hzPost('bridgeStatus', { p: HZ_KIND(src.id) }).then(renderBridge).catch(() => renderBridge({ state: 'down' }));
   };
-  const openBridgeLogin = () => {
-    tip.replaceChildren(); tip.classList.add('hold');
-    const head = document.createElement('b'); head.textContent = src.label;
-    tip.append(head, ' — opening login…');
+  // ~~openBridgeLogin: put up a card reading "— opening login…", then started the
+  // login.~~ Gone with the card (owner, 2026-08-27, third time of asking). The
+  // press goes straight to the login now and the tile spins; see the block at
+  // the bottom of this function.
+
+  if (HZ_IS_BRIDGE(src) && !src.connected) {
+    // NO CARD WHILE THE LOGIN OPENS.
+    //
+    // Pressing a bridge tile started the login AND put up a card saying
+    // "— opening login…". The card was never the point: the login WINDOW is what
+    // the press is for, and the card only described the wait. When the bridge
+    // stack is unreachable that wait is the 22s bridgeCall timeout, so the panel
+    // sat on a sentence about something that was not happening -- which is the
+    // popup the owner asked three times to be rid of.
+    //
+    // So the press goes straight to the login. The tile carries the waiting
+    // (onBusy), the way it already did in Settings, and a card is materialised
+    // only when there is something to SAY: a failure. Cancelled says nothing,
+    // because closing a window you opened needs no reply.
+    if (onBusy) onBusy(true);
+    const speak = (data) => {
+      if (onBusy) onBusy(false);
+      host.appendChild(tip);
+      renderBridge(data);
+    };
     hzPost('bridgeWebLogin', { p: HZ_KIND(src.id) })
-      .then((data) => hzAfterLoginAttempt(data, renderBridge, () => {
-        if (onClose) { onClose(); return; }
-        tip.replaceChildren();
-        tip.classList.remove('hold');
+      .then((data) => hzAfterLoginAttempt(data, speak, () => {
+        if (onBusy) onBusy(false);
+        if (onClose) onClose();
       }))
-      .catch(() => renderBridge({ state: 'down' }));
-  };
+      .catch(() => speak({ state: 'down' }));
+    return tip;
+  }
 
   // Attach BEFORE rendering — the bridge openers finish async and paint into
   // this node, so it has to already be in the document.
   host.appendChild(tip);
   if (HZ_IS_BRIDGE(src)) {
-    if (src.connected) openBridge(); else openBridgeLogin();
+    openBridge();
   } else {
     renderTip();
   }
