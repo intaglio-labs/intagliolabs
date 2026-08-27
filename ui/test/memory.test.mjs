@@ -793,3 +793,38 @@ test('a question with an answer to give reports the model as down, not as a bug'
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// The other half of the pair above: a model that ACCEPTS and never answers.
+// hermes must answer before the widget's own 120s does, with a status the widget
+// can render — not a 500 that reads as an app bug.
+test('a model that accepts and never answers is reported as slow, not as a bug', async () => {
+  const stalled = createServer((req, res) => { req.resume(); }); // never responds
+  await new Promise((r) => stalled.listen(0, '127.0.0.1', r));
+  const dir = mkdtempSync(join(tmpdir(), 'hermes-llamaslow-test-'));
+  const dbPath = join(dir, 'context.db');
+  seedAcceptedClaim(dbPath);
+  const server = await start({
+    port: 0,
+    dbPath,
+    llamaApiKey: 'd'.repeat(64),
+    llamaBaseUrl: `http://127.0.0.1:${stalled.address().port}`,
+    bearerToken: TOKEN,
+    // The production ceiling is 110s; the suite cannot wait that long, so the
+    // route reads it from here. Same code path, a hundredth of the patience.
+    askTimeoutMs: 250,
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/vault/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ utterance: 'how do you get to work?' }),
+    });
+    assert.equal(res.status, 504, 'a silent model must not read as an app bug');
+    const body = await res.json();
+    assert.match(body.error, /did not answer in time/);
+  } finally {
+    await server.close();
+    stalled.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

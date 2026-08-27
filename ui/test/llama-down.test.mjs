@@ -45,3 +45,48 @@ test('the status is the one the widget maps to "down"', () => {
   assert.equal(err.status, 503);
   assert.match(err.message, /llama-server is unreachable/);
 });
+
+// ---- reached, and then silent ----
+//
+// The ask carries a 110s ceiling. That ceiling aborts the COMBINED signal, so
+// the disconnect controller reads as not-aborted and isUnreachable is
+// deliberately false -- which left a model that accepted the connection and
+// never answered arriving as `500 {"error":"fetch failed"}`, i.e. the app-bug
+// string, for the one failure where asking again is the whole remedy.
+import {
+  isTimeout,
+  timeoutError,
+  LLAMA_TIMEOUT_STATUS,
+} from '../server/llamaReady.mjs';
+
+test('a ceiling that fires is recognised, and is not confused with anything else', async () => {
+  // The real shape, produced rather than hand-written: AbortSignal.any surfaces
+  // the timeout's reason, and fetch rejects with it.
+  const controller = new AbortController();
+  const combined = AbortSignal.any([controller.signal, AbortSignal.timeout(20)]);
+  const { createServer } = await import('node:http');
+  const server = createServer((req, res) => { req.resume(); }); // accept, never answer
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  let caught;
+  try {
+    await fetch(`http://127.0.0.1:${server.address().port}/`, {
+      method: 'POST', body: '{}', signal: combined,
+    });
+  } catch (error) {
+    caught = error;
+  } finally {
+    server.close();
+  }
+  assert.ok(caught, 'the ceiling must fire');
+  assert.equal(caught.name, 'TimeoutError');
+  // The guard that used to be the only one: it does not see this.
+  assert.equal(controller.signal.aborted, false, 'which is why it fell through');
+  assert.ok(isTimeout(caught), 'so it needs its own test');
+  assert.equal(isUnreachable(caught), false, 'and must not read as "not running"');
+});
+
+test('the timeout status is the one the widget maps to "slow"', () => {
+  assert.equal(LLAMA_TIMEOUT_STATUS, 504);
+  assert.equal(timeoutError().status, 504);
+  assert.match(timeoutError().message, /did not answer in time/);
+});

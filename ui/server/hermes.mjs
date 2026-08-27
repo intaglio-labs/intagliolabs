@@ -68,7 +68,13 @@ import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
 import { contentMatches } from './people/content.mjs';
 import { rebuildEpisodes, EPISODE_SOURCES } from './memory/episodeStore.mjs';
-import { isUnreachable, unreachableError } from './llamaReady.mjs';
+import {
+  isUnreachable,
+  unreachableError,
+  isTimeout,
+  timeoutError,
+  LLAMA_UNREACHABLE_STATUS,
+} from './llamaReady.mjs';
 import { loadSpine } from './people/graph.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
@@ -1433,6 +1439,15 @@ const DECISION_ACTIONS = Object.freeze(['accept', 'reject', 'retract']);
 // The review page is the v1 product surface and it has to show the receipt, so
 // this cap is about one sitting's reading, not about safety.
 const PENDING_CAP = 200;
+
+// HOW LONG THE OWNER'S QUESTION MAY TAKE.
+//
+// Just inside the widget's own 120s (Bridge.swift's timeoutIntervalForRequest),
+// so hermes is the one that answers: a status the widget can render rather than
+// a transport error it cannot. Overridable only through start(), so the suite can
+// exercise this path in a quarter of a second instead of two minutes -- the real
+// code path, a hundredth of the patience.
+export const ASK_TIMEOUT_MS = 110_000;
 // Row mode names the row; EPISODE mode names the LINE and hermes resolves the
 // row itself. Both are listed so the closed-field check accepts either shape,
 // and the staging code below refuses the combination -- see the note there.
@@ -2490,7 +2505,13 @@ async function proxyLlama(req, res, cors, { baseUrl, apiKey }) {
   } catch (error) {
     res.off('close', clientClosed);
     if (abort.signal.aborted) return;
-    throw Object.assign(new Error('local llama-server is unreachable'), { status: 502 });
+    // 503, matching /vault/ask, so that 502 means one thing only: the model was
+    // REACHED and answered with an error. This route used 502 for both, which
+    // made the two indistinguishable to any caller trying to tell "wait for it"
+    // from "something is actually wrong".
+    throw Object.assign(new Error('local llama-server is unreachable'), {
+      status: LLAMA_UNREACHABLE_STATUS,
+    });
   }
 
   if (!upstream.ok) {
@@ -2781,7 +2802,10 @@ async function handleVaultAsk(db, req, res, cors, policy) {
       // 110s sits just inside the widget's own 120s (Bridge.swift's
       // timeoutIntervalForRequest), so hermes is the one that answers: a clean
       // status the widget can render rather than a transport error it cannot.
-      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(110_000)]),
+      signal: AbortSignal.any([
+        controller.signal,
+        AbortSignal.timeout(policy.askTimeoutMs ?? ASK_TIMEOUT_MS),
+      ]),
       // A compromised or misconfigured loopback service must not redirect a
       // household prompt (or its Authorization header) onto the network. Every
       // other llama call in the tree says this; this one -- which carries the
@@ -2826,6 +2850,11 @@ async function handleVaultAsk(db, req, res, cors, policy) {
     // failure here the owner can be told something true about. Unshaped, it
     // reached them as "something went wrong on this app's side".
     if (isUnreachable(error)) throw unreachableError();
+    // NOR IS "it did not answer in time". The ceiling above aborts the COMBINED
+    // signal, so the disconnect controller reads as not-aborted and the guard
+    // above misses it -- which sent a 110s wait to the owner as an app bug,
+    // arriving before the widget's own 120s would have said anything at all.
+    if (isTimeout(error)) throw timeoutError();
     throw error;
   } finally {
     res.off('close', onClose);
@@ -3185,6 +3214,9 @@ export async function start({
   llamaBaseUrl = process.env.HERMES_LLAMA_URL ?? DEFAULT_LLAMA_BASE_URL,
   llamaApiKey,
   llamaApiKeyFile = process.env.HERMES_LLAMA_API_KEY_FILE ?? DEFAULT_LLAMA_API_KEY_PATH,
+  // Test seam only: the ask's ceiling. Production never passes it, so the
+  // constant is the one number that matters and there is no env var to drift.
+  askTimeoutMs = ASK_TIMEOUT_MS,
   bearerToken: fixedBearerToken,
   bearerTokenFile = process.env.HERMES_TOKEN_FILE ?? DEFAULT_HERMES_TOKEN_PATH,
 } = {}) {
@@ -3216,6 +3248,9 @@ export async function start({
     baseUrl: canonicalLoopbackBase(llamaBaseUrl),
     apiKey,
   };
+  const askCeilingMs = Number.isFinite(askTimeoutMs) && askTimeoutMs > 0
+    ? askTimeoutMs
+    : ASK_TIMEOUT_MS;
   const db = openDb(dbPath ?? process.env.HERMES_DB ?? DEFAULT_DB_PATH);
 
   const server = createServer(async (req, res) => {

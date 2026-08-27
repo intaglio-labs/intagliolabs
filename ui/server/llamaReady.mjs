@@ -34,3 +34,24 @@ export function unreachableError() {
     status: LLAMA_UNREACHABLE_STATUS,
   });
 }
+
+// A MODEL THAT ACCEPTED THE CONNECTION AND THEN SAID NOTHING.
+//
+// Distinct from unreachable, and distinct from an app bug. The ceiling on the ask
+// rejects with a TimeoutError DOMException from the COMBINED signal, so the
+// disconnect controller reads as not-aborted and isUnreachable is deliberately
+// false -- which left it falling through to a 500 and the app-bug string, for the
+// one failure where the owner's best move is simply to ask again.
+export const LLAMA_TIMEOUT_STATUS = 504;
+export const LLAMA_TIMEOUT_MESSAGE = 'local llama-server did not answer in time';
+
+export function isTimeout(error) {
+  if (!error) return false;
+  // Matched on the name rather than the message: DOMException's text is not a
+  // contract, and AbortSignal.any surfaces the reason's name faithfully.
+  return error.name === 'TimeoutError' || error.cause?.name === 'TimeoutError';
+}
+
+export function timeoutError() {
+  return Object.assign(new Error(LLAMA_TIMEOUT_MESSAGE), { status: LLAMA_TIMEOUT_STATUS });
+}
