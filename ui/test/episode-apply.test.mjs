@@ -7,9 +7,11 @@
 // cited", and the row a claim finally points at is the server's decision.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 
 import { openDb, insertRows, applyMemoryBatch } from '../server/hermes.mjs';
 import { rebuildEpisodes } from '../server/memory/episodeStore.mjs';
+import { loadSpine } from '../server/people/graph.mjs';
 
 const T0 = Date.UTC(2026, 2, 4, 12, 0, 0);
 
@@ -474,4 +476,91 @@ test('an index with no mark is rebuilt rather than trusted', () => {
   assert.equal(out.scope, 'full', 'no mark means no narrow pass');
   assert.ok(db.prepare('SELECT COUNT(*) n FROM context_thread_mark').get().n > 0, 'and it writes one');
   db.close();
+});
+
+// ---- the cursor may not outrun the work it describes ----
+//
+// The index rows and the mark used to be written on autocommit, before
+// rebuildThreads opened its own transaction. A crash in between left an advanced
+// watermark, matching counts and no touched threads: `nothing-new` for ever, over
+// episodes that permanently omit the arrivals.
+test('a failed re-cut leaves the cursor where it was', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [msg('a1', '+15550100', Date.UTC(2025, 0, 1, 9, 0))]);
+  rebuildEpisodes(db, { now: NOW });
+  const markBefore = db.prepare('SELECT changed_at, context_id FROM context_thread_mark').get();
+  const indexedBefore = db.prepare('SELECT COUNT(*) n FROM context_thread').get().n;
+
+  insertRows(db, [msg('a2', '+15550200', Date.UTC(2025, 0, 2, 9, 0))]);
+  // Make the episode write fail partway: a trigger that refuses the insert.
+  db.exec(
+    'CREATE TRIGGER refuse_episode BEFORE INSERT ON episode BEGIN ' +
+    "SELECT RAISE(ABORT, 'refused'); END"
+  );
+  assert.throws(() => rebuildEpisodes(db, { now: NOW }), /refused/);
+  db.exec('DROP TRIGGER refuse_episode');
+
+  // Nothing may have moved: not the mark, not the index.
+  assert.deepEqual(db.prepare('SELECT changed_at, context_id FROM context_thread_mark').get(), markBefore,
+    'the cursor must not survive a rollback');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM context_thread').get().n, indexedBefore,
+    'nor may the index rows');
+
+  // And the next pass still sees the arrival as work to do.
+  const out = rebuildEpisodes(db, { now: NOW });
+  assert.notEqual(out.scope, 'nothing-new', 'the arrival is still pending, not lost');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM episode').get().n, 2);
+  db.close();
+});
+
+// ---- the gap rule is part of the answer ----
+test('asking for a different gap re-cuts even an unchanged corpus', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    msg('g1', '+15550100', Date.UTC(2025, 0, 1, 9, 0)),
+    msg('g2', '+15550100', Date.UTC(2025, 0, 1, 9, 40)), // 40 min apart
+  ]);
+  rebuildEpisodes(db, { now: NOW }); // default 60min gap: one episode
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM episode').get().n, 1);
+
+  // Nothing arrived, but the RULE changed: 30 minutes cuts these in two. This
+  // is what build-episodes.mjs --gap-minutes exists to do, and it returned
+  // 'nothing-new' before.
+  const out = rebuildEpisodes(db, { now: NOW, gapMs: 30 * 60_000 });
+  assert.equal(out.scope, 'full', 'a new rule cannot be applied by a narrow pass');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM episode').get().n, 2, 'cut by the rule asked for');
+  assert.equal(db.prepare('SELECT DISTINCT gap_ms n FROM episode').get().n, 30 * 60_000);
+  db.close();
+});
+
+// ---- a name learned later reaches conversations nobody touched ----
+test('an episode keyed by a raw handle is re-keyed when Contacts learns the name', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    // The one that will be named, and never touched again.
+    msg('q1', '+15550100', Date.UTC(2025, 0, 1, 9, 0)),
+    msg('q2', '+15550100', Date.UTC(2025, 0, 1, 9, 5), false),
+    msg('o1', '+15550200', Date.UTC(2025, 0, 2, 9, 0)),
+  ]);
+  const empty = new DatabaseSync(':memory:');
+  empty.exec('CREATE TABLE contact_ids (identifier TEXT PRIMARY KEY, display_name TEXT, kind TEXT, updated_ts INTEGER)');
+  rebuildEpisodes(db, { now: NOW, spine: loadSpine(empty) });
+  const before = db.prepare(
+    "SELECT counterparty_key k FROM episode WHERE thread_key LIKE '%+15550100'"
+  ).get();
+  assert.equal(before.k, 'id:+15550100', 'unknown handle, keyed raw');
+
+  // Contacts learns the name. Nothing arrives in THAT conversation -- a message
+  // lands in the other one, which is what triggers the narrow pass.
+  empty.prepare('INSERT INTO contact_ids VALUES (?,?,?,?)').run('+15550100', 'Mika Tanaka', 'phone', 1);
+  insertRows(db, [msg('o2', '+15550200', Date.UTC(2025, 0, 2, 9, 5))]);
+  const out = rebuildEpisodes(db, { now: NOW, spine: loadSpine(empty) });
+  assert.ok(String(out.scope).startsWith('threads:'), 'a narrow pass, over the OTHER thread');
+  assert.equal(
+    db.prepare("SELECT counterparty_key k FROM episode WHERE thread_key LIKE '%+15550100'").get().k,
+    'name:mika tanaka',
+    'the untouched conversation was re-keyed anyway'
+  );
+  assert.ok(out.rekeyed > 0, 'and the pass says it happened');
+  db.close(); empty.close();
 });

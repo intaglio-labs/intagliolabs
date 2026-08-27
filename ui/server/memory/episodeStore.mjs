@@ -80,7 +80,11 @@ export function counterpartyFor(episode, spine) {
   }
   if (handles.size !== 1) return null;
   const handle = [...handles][0];
-  const name = spine?.idToName?.get(handle);
+  // nameFor when the spine has it: it falls back to a normalised identifier on
+  // an exact miss, which is what people/graph.mjs resolves people by. Plain
+  // idToName is the older shape and is still accepted so a caller holding one
+  // keeps working.
+  const name = spine?.nameFor ? spine.nameFor(handle) : spine?.idToName?.get(handle);
   return name ? `name:${norm(name)}` : `id:${handle}`;
 }
 
@@ -223,8 +227,15 @@ function indexNewRows(db, holes, mark0) {
         'ORDER BY COALESCE(store_changed_at, 0), id'
     )
     .all(...EPISODE_SOURCES, mark0.changedAt, mark0.changedAt, mark0.id);
+  // WRITES NOTHING. It plans them and hands them back, so the caller can put the
+  // index rows, the cursor and the episodes they imply in ONE transaction. The
+  // first cut wrote the index and advanced the mark here, on autocommit, before
+  // rebuildThreads opened its own -- so a crash in between left an advanced
+  // watermark, matching counts and no touched threads: `nothing-new` for ever,
+  // over episodes that permanently omit the arrivals.
   const touched = new Set();
-  const ins = db.prepare('INSERT OR REPLACE INTO context_thread(context_id, thread_key) VALUES (?, ?)');
+  const writes = [];
+  let newlyIndexed = 0;
   const prev = db.prepare('SELECT thread_key FROM context_thread WHERE context_id = ?');
   let mark = { changedAt: mark0.changedAt, id: mark0.id };
   for (const row of fresh) {
@@ -234,20 +245,66 @@ function indexNewRows(db, holes, mark0) {
     // BOTH SIDES OF A MOVE. An updated row can land in a different conversation
     // than it was in -- its chat metadata is part of what an update rewrites --
     // and the thread it LEFT needs re-cutting just as much as the one it joined.
-    // The old key is whatever the index held before this overwrites it, so it
-    // has to be read first.
+    // The old key is whatever the index holds now, so it is read before the
+    // planned overwrite replaces it.
     const before = prev.get(row.id)?.thread_key;
-    if (before && before !== key) touched.add(before);
-    ins.run(row.id, key);
+    if (before === undefined) newlyIndexed += 1;
+    else if (before !== key) touched.add(before);
+    writes.push([Number(row.id), key]);
     touched.add(key);
   }
-  return { touched, seen: fresh.length, mark };
+  return { touched, seen: fresh.length, mark, writes, newlyIndexed };
 }
 
 // Is the index still a faithful picture of the corpus? Rows only ever arrive in
 // normal operation, but hermes is also the corpus's sole DELETER -- a purge or a
 // retention pass removes rows, and a watermark cannot see that. One count
 // settles it, and a mismatch means a full pass rather than a guess.
+// WAS THE STORED INDEX CUT BY THE RULE BEING ASKED FOR?
+//
+// `gap_ms` is what decides where one conversation ends and the next begins, and
+// every episode records the value it was cut with. A narrow pass re-cuts only
+// the threads that moved, so a caller asking for a DIFFERENT gap over an
+// unchanged corpus would get `nothing-new` and keep boundaries drawn by the old
+// rule -- which makes `build-episodes.mjs --gap-minutes N` silently ineffective
+// in precisely the case it exists for. Checked over MIN and MAX so a half-cut
+// index (two rules present at once) also fails it.
+function storedGapMatches(db, gapMs) {
+  const r = db.prepare('SELECT MIN(gap_ms) AS mn, MAX(gap_ms) AS mx FROM episode').get();
+  if (r?.mn === null || r?.mn === undefined) return true; // no episodes yet
+  return Number(r.mn) === Number(gapMs) && Number(r.mx) === Number(gapMs);
+}
+
+// A NAME LEARNED LATER REACHES EPISODES NOBODY TOUCHED.
+//
+// counterparty_key is resolved through the contacts spine, so an episode cut
+// before Contacts knew a handle carries `id:<handle>` for ever. The full pass
+// re-keys unchanged episodes for exactly this reason; a narrow pass only visits
+// the threads that moved, and the index survives restarts, so without this the
+// stale key can outlive every future pass over other conversations.
+//
+// Cheap because it needs no members: the key already carries the handle, so this
+// is a lookup per DISTINCT unresolved key -- a handful, not 36,984 episodes.
+function rekeyResolvedCounterparties(db, spine) {
+  if (!spine) return 0;
+  const lookup = spine.nameFor
+    ? (h) => spine.nameFor(h)
+    : (h) => spine.idToName?.get(h);
+  const stale = db
+    .prepare("SELECT DISTINCT counterparty_key AS k FROM episode WHERE counterparty_key LIKE 'id:%'")
+    .all();
+  if (stale.length === 0) return 0;
+  const set = db.prepare('UPDATE episode SET counterparty_key = ? WHERE counterparty_key = ?');
+  let moved = 0;
+  for (const { k } of stale) {
+    const handle = String(k).slice('id:'.length);
+    const name = lookup(handle);
+    if (!name) continue;
+    moved += Number(set.run(`name:${norm(name)}`, k).changes) || 0;
+  }
+  return moved;
+}
+
 function threadIndexIsWhole(db, holes) {
   const rows = Number(
     db.prepare(`SELECT COUNT(*) AS n FROM context WHERE source IN (${holes})`).get(...EPISODE_SOURCES).n
@@ -286,23 +343,45 @@ export function rebuildEpisodes(
   // No mark means an index built before this cursor existed: it cannot say what
   // it has read, so it is rebuilt rather than trusted.
   let indexWhole = whole.whole && whole.indexed > 0 && mark !== null;
-  if (!full && whole.indexed > 0 && mark !== null) {
-    const { touched, mark: advanced } = indexNewRows(db, holes, mark);
-    writeMark(db, advanced);
-    const after = threadIndexIsWhole(db, holes);
-    if (after.whole) {
+  // ROWS WERE REMOVED. episode_member cascades from context, so a deleted row
+  // takes its membership with it and leaves the episode short of the row_count
+  // it was cut with. Checked BEFORE planning, because it is a fact about what is
+  // already stored and no plan of ours can repair it.
+  const lostRows = whole.members !== whole.claimed;
+  // Whether the index can be reconciled with the corpus at all. Set inside the
+  // branch below when the plan's arithmetic fails, because until the plan exists
+  // there is nothing to reconcile against -- new arrivals are a normal state, not
+  // a broken index.
+  let unreconcilable = false;
+  const gapMatches = storedGapMatches(db, gapMs);
+  if (!full && gapMatches && whole.indexed > 0 && mark !== null && !lostRows) {
+    const { touched, mark: advanced, writes, newlyIndexed } = indexNewRows(db, holes, mark);
+    // PREDICTED, not re-read. The plan is not applied yet -- that happens inside
+    // rebuildThreads' transaction -- so the question is whether the index WILL
+    // cover the corpus once it is. If the arithmetic does not close, the index is
+    // missing rows the cursor already claims to have passed, and only a full pass
+    // can say which.
+    if (whole.indexed + newlyIndexed === whole.rows) {
       if (touched.size === 0) {
-        // The same shape a rebuild answers with. A caller reading `episodes`
+        // Nothing to index and nothing to re-cut, so nothing to make durable
+        // either -- the mark cannot have moved past a row that does not exist.
+        // The same shape a rebuild answers with: a caller reading `episodes`
         // must get the number of episodes, not a null meaning "I did not look".
-        return { ...indexTotals(db, now), rows: after.rows, inserted: 0, deleted: 0, rekeyed: 0,
+        return { ...indexTotals(db, now), rows: whole.rows, inserted: 0, deleted: 0, rekeyed: 0,
           scope: 'nothing-new' };
       }
-      return rebuildThreads(db, [...touched], { gapMs, now, spine, totalRows: after.rows });
+      return rebuildThreads(db, [...touched], {
+        gapMs, now, spine, totalRows: whole.rows, writes, mark: advanced,
+      });
     }
-    // The index and the corpus disagree: rows were removed. It is rebuilt below
-    // as part of the full pass.
-    indexWhole = false;
+    // The plan does not close the gap: the index is missing rows the cursor
+    // already claims to have passed, so it cannot be trusted or patched.
+    unreconcilable = true;
   }
+  // Either a deletion or an unreconcilable index. Both mean the index below is
+  // rebuilt rather than kept -- keeping a known-bad index is how the next narrow
+  // pass inherits the same wrong answer.
+  if (lostRows || unreconcilable) indexWhole = false;
 
   // Read and build BEFORE opening the transaction: this is the slow half and
   // none of it needs the write lock.
@@ -388,6 +467,12 @@ export function rebuildEpisodes(
 
   db.exec('BEGIN');
   try {
+    // The same sweep the narrow pass runs. Redundant for episodes this pass
+    // rebuilds anyway, and not redundant for the ones whose member_hash is
+    // unchanged -- those keep their stored key and would otherwise keep a handle
+    // Contacts can now name.
+    rekeyed += rekeyResolvedCounterparties(db, spine);
+
     // Gone: an episode whose members were re-cut, or whose rows were removed.
     for (const [hash, row] of stored) {
       if (keyFor.has(hash)) continue;
@@ -454,29 +539,16 @@ export function rebuildEpisodes(
 // and it reads ALL of their rows, not only the new ones, because a message
 // landing in an existing conversation re-cuts it and the builder needs the
 // whole thread to do that correctly.
-function rebuildThreads(db, threadKeys, { gapMs, now, spine, totalRows }) {
+function rebuildThreads(db, threadKeys, { gapMs, now, spine, totalRows, writes = [], mark = null }) {
   const holes = threadKeys.map(() => '?').join(',');
-  const rows = db
-    .prepare(
-      'SELECT c.id, c.ts, c.source, c.speaker, c.meta, c.entity_id, c.content_hash ' +
-        'FROM context c JOIN context_thread t ON t.context_id = c.id ' +
-        `WHERE t.thread_key IN (${holes}) ORDER BY c.id`
-    )
-    .all(...threadKeys);
-
-  const episodes = buildEpisodes(rows, { gapMs, now });
-  const keyFor = new Map();
-  for (const ep of episodes) keyFor.set(ep.member_hash, counterpartyFor(ep, spine));
-
-  // Only what is stored FOR THESE THREADS may be deleted here. An episode of a
-  // conversation nobody touched is not missing from `episodes` because it went
-  // away -- it is missing because it was never rebuilt.
-  const stored = new Map();
-  for (const r of db
-    .prepare(`SELECT id, member_hash, counterparty_key FROM episode WHERE thread_key IN (${holes})`)
-    .all(...threadKeys)) {
-    stored.set(r.member_hash, r);
-  }
+  const readRows = db.prepare(
+    'SELECT c.id, c.ts, c.source, c.speaker, c.meta, c.entity_id, c.content_hash ' +
+      'FROM context c JOIN context_thread t ON t.context_id = c.id ' +
+      `WHERE t.thread_key IN (${holes}) ORDER BY c.id`
+  );
+  const readStored = db.prepare(
+    `SELECT id, member_hash, counterparty_key FROM episode WHERE thread_key IN (${holes})`
+  );
 
   const insEp = db.prepare(
     'INSERT INTO episode(source, thread_key, started_at, ended_at, row_count, owner_row_count, ' +
@@ -492,8 +564,45 @@ function rebuildThreads(db, threadKeys, { gapMs, now, spine, totalRows }) {
   let inserted = 0;
   let deleted = 0;
   let rekeyed = 0;
+  let episodes = [];
+  let keyFor = new Map();
   db.exec('BEGIN');
   try {
+    // THE CURSOR MOVES WITH THE WORK IT DESCRIBES, or not at all. These three --
+    // the index rows for the arrivals, the mark that says they have been read,
+    // and the episodes they re-cut -- are one fact, and a crash between any two
+    // of them leaves the index claiming to have done something it did not.
+    //
+    // The index writes come FIRST because the row read below joins through them:
+    // planning them and applying them after the read left the arrivals out of
+    // the very episodes they were supposed to join. The read and the build are
+    // inside the lock as a consequence, which is affordable here and only here
+    // -- this is one conversation's rows, not the corpus. The full pass still
+    // builds outside.
+    if (writes.length > 0) {
+      const insThread = db.prepare(
+        'INSERT OR REPLACE INTO context_thread(context_id, thread_key) VALUES (?, ?)'
+      );
+      for (const [id, key] of writes) insThread.run(id, key);
+    }
+    if (mark !== null) writeMark(db, mark);
+
+    // Episodes nobody touched, whose handle Contacts has since learned. Runs on
+    // every narrow pass because a spine change is invisible to the corpus
+    // cursor: no row arrives when Contacts syncs, so nothing else here would
+    // ever revisit them.
+    rekeyed += rekeyResolvedCounterparties(db, spine);
+
+    const rows = readRows.all(...threadKeys);
+    episodes = buildEpisodes(rows, { gapMs, now });
+    for (const ep of episodes) keyFor.set(ep.member_hash, counterpartyFor(ep, spine));
+
+    // Only what is stored FOR THESE THREADS may be deleted here. An episode of a
+    // conversation nobody touched is not missing from `episodes` because it went
+    // away -- it is missing because it was never rebuilt.
+    const stored = new Map();
+    for (const r of readStored.all(...threadKeys)) stored.set(r.member_hash, r);
+
     for (const [hash, row] of stored) {
       if (keyFor.has(hash)) continue;
       delEp.run(row.id);
