@@ -45,6 +45,41 @@ final class Distiller {
   /// real wake-up; this is the backstop for one that never arrives.
   private let pausedInterval: TimeInterval = 300
 
+  // OFF UNTIL THE OUTPUT HAS A DOOR. (Rishab, 2026-08-27, explicitly: "stop the
+  // distiller from running until we have a way to surface this to the user.")
+  //
+  // The pass works. It has produced 3,810 claims on this install -- 3,243 plan,
+  // 252 fact, 155 constraint, 147 preference, 13 commitment -- and NONE of them
+  // can answer a question, because /vault/ask reads v_claim_accepted and nothing
+  // has been accepted. Acceptance needs a human, by design.
+  //
+  // There are two places a human could do that and neither is in the app:
+  //
+  //   * the review queue at the connect page's /memory ("review what i have
+  //     learned"), which works -- 198 claims a page with accept/reject on each
+  //     -- but lives behind a tokenised link that expires daily, below the fold,
+  //     and nothing in the widget, chat, people panel or connections page
+  //     mentions or links to it;
+  //   * one claim at a time in the chat, offered only when a question happens to
+  //     abstain, via /admin/memory/suggest?limit=1.
+  //
+  // So a pass costs hours of local inference at the front of the queue of a
+  // machine somebody is using, to grow a pile nobody is shown. Turn it back on
+  // when the queue has an entrance from inside the product, not before.
+  //
+  // WHAT THIS DOES NOT STOP: the episode index rebuild below. That is arithmetic
+  // rather than inference, it is cheap now that it writes only the difference,
+  // and the topic chips on the people panel are counted per CONVERSATION from
+  // it -- so leaving it off would quietly staleness the one part of this pipeline
+  // the owner does see.
+  private var distillationEnabled: Bool { fm.fileExists(atPath: enableMarker.path) }
+
+  /// Create this file to run passes again, matching the connectors' marker idiom
+  /// (`~/.hazlie/connectors/<name>.disabled`) with the polarity reversed: theirs
+  /// records an owner's choice to stop something that works, this one records
+  /// that the product is not ready for the output yet.
+  private var enableMarker: URL { home.appendingPathComponent(".hazlie/distill.enabled") }
+
   private var fm: FileManager { .default }
   private var home: URL { fm.homeDirectoryForCurrentUser }
   private var backend: URL {
@@ -136,8 +171,28 @@ final class Distiller {
     // so this proceeds either way.
     rebuildIndex { [weak self] in
       guard let self, !self.stopping else { return }
+      guard self.distillationEnabled else {
+        self.announceDisabledOnce()
+        // The long interval: with no passes running there is no backlog to
+        // chase, and the index only needs to keep up with what arrives.
+        self.schedule(after: self.idleInterval)
+        return
+      }
       self.startDistiller(node: node, script: script)
     }
+  }
+
+  private var saidDisabled = false
+
+  /// Once per launch, not once per pass -- a log line every fifteen minutes
+  /// saying nothing happened is how a log stops being read.
+  private func announceDisabledOnce() {
+    guard !saidDisabled else { return }
+    saidDisabled = true
+    NSLog(
+      "Intaglio Labs: distillation is off (no in-app way to review claims yet); "
+        + "episode index still rebuilding. Create \(enableMarker.path) to re-enable."
+    )
   }
 
   /// POST /admin/episodes/rebuild, then call `done` on the main queue whatever

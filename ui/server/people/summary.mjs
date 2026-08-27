@@ -168,7 +168,7 @@ export function openSummariesDb(path = summariesDbPath()) {
 export async function summarizeYear(
   contextDb,
   stateDb,
-  { personKey, year, now = Date.now(), owner, aliases = null, llama, fetchFn = fetch, summariesDb = null } = {}
+  { personKey, year, now = Date.now(), owner, aliases = null, llama, fetchFn = fetch, summariesDb = null, signal = null } = {}
 ) {
   const { graph } = yearCore(contextDb, stateDb, { now, owner, aliases });
   const person = graph.find((p) => p.key === personKey);
@@ -210,6 +210,15 @@ export async function summarizeYear(
       max_tokens: 140,
       stream: false,
     }),
+    // A BUDGET. This had no signal at all: no ceiling and no way for a viewer
+    // who closed the row to stop it, so an abandoned summary generated to
+    // completion against the single-slot server while the next request waited.
+    // Shorter than the ask's ceiling on purpose -- a summary is a nicety beside
+    // a question somebody typed, and it must not be what a question queues
+    // behind.
+    signal: AbortSignal.any(
+      [signal, AbortSignal.timeout(45_000)].filter(Boolean)
+    ),
     // A compromised loopback service must not redirect the sample (or the
     // key) onto the network — same rule as every other llama call here.
     redirect: 'error',
