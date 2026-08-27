@@ -1330,6 +1330,12 @@ test('a rebuild with nothing new is skipped, and says so', async () => {
   const second = await adminPost('/admin/episodes/rebuild', {});
   const b = await second.json();
   assert.equal(b.skipped, 'unchanged');
+  // A call that did nothing must not report what some earlier pass did. The
+  // index STATE carries over -- that is still true -- but the actions are the
+  // previous pass's and were being replayed as though they had just happened.
+  assert.equal(b.scope, 'skipped');
+  assert.equal(b.inserted, 0);
+  assert.equal(b.deleted, 0);
   // A skip must still answer with the counts the caller would have got, or the
   // saving is paid for in a caller that cannot tell what happened.
   assert.equal(b.episodes, a.episodes);

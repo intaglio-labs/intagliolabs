@@ -2194,10 +2194,25 @@ async function handleAdmin(db, req, res, cors, url, channel) {
       // differently). Nothing calls it on a timer.
       const fp = episodeSourceFingerprint(db);
       if (!body.force && lastEpisodeBuild !== null && lastEpisodeBuild.fingerprint === fp) {
-        send(res, 200, { ...lastEpisodeBuild.out, skipped: 'unchanged' }, cors);
+        // THE COUNTS CARRY OVER; WHAT THE LAST PASS DID DOES NOT. Replaying the
+        // whole cached result reported `scope: "full"` and an inserted/deleted
+        // tally from a pass that ran at some other time, on a call that did no
+        // work at all -- so an operator reading the response was told about the
+        // wrong pass. The state of the index is still true; the actions are not.
+        const { inserted, deleted, rekeyed, scope, ...state } = lastEpisodeBuild.out;
+        send(
+          res,
+          200,
+          { ...state, inserted: 0, deleted: 0, rekeyed: 0, scope: 'skipped', skipped: 'unchanged' },
+          cors
+        );
         return;
       }
-      const out = withPeopleDbs(db, (state) => rebuildEpisodes(db, { spine: state ? loadSpine(state) : null }));
+      const out = withPeopleDbs(db, (state) =>
+        // `force` means re-cut everything, not merely re-check: it exists for a
+        // change in the BUILDER, which no fingerprint over the corpus can see.
+        rebuildEpisodes(db, { spine: state ? loadSpine(state) : null, full: body.force === true })
+      );
       lastEpisodeBuild = { fingerprint: fp, out };
       // COUNTS ONLY: thread_key holds a chat guid, a chat guid holds a handle,
       // and counterparty_key holds a person's name. None of them may be logged
