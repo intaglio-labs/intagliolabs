@@ -13,6 +13,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { PLATFORMS, bridgeStatus } from './bridge.mjs';
 import { GMAIL_SCOPE, accountsWithScopeIncludingStale } from '../../connectors/lib/googleAccounts.mjs';
+import { listGoogleClients } from '../../connectors/lib/googleClients.mjs';
 
 const SECRETS = (home) => join(home, '.hazlie', 'secrets');
 
@@ -74,6 +75,15 @@ export function mailSecretName(address) {
 // store is the single source of truth — connect/ and connectors/ disagreeing
 // about which mailboxes exist is exactly what the old config coupling was
 // there to prevent, and this keeps that property on a better credential.
+// The sign-in clients available, for a UI that has to ask which to use.
+export function googleClientChoices({ home = homedir() } = {}) {
+  try {
+    return listGoogleClients({ home });
+  } catch {
+    return []; // an unreadable secrets dir costs the choice, not the page
+  }
+}
+
 export function googleMailAccounts({ home = homedir() } = {}) {
   try {
     // INCLUDING THE DEAD ONES. accountsWithScope hides a stale grant from the
@@ -446,6 +456,13 @@ function cloudAccountRows(home) {
         ? 'sign in to read your mail and calendar'
         : 'add another Google account',
       action: 'gcal',
+      // WHICH CLIENTS THIS MAC CAN SIGN IN WITH. Carried on the row rather
+      // than fetched separately, because the choice belongs to this button: an
+      // Internal client reaches only its own Workspace but never expires, an
+      // External one reaches any Google account and spends one of a finite,
+      // unresettable 100. With a single client registered there is nothing to
+      // ask, and the button stays a button.
+      clients: googleClientChoices({ home }),
       caveat: null,
     },
     {

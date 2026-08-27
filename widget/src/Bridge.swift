@@ -675,7 +675,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // of two fixed flows to run, and the grant is written by that helper
       // straight into ~/.hazlie/secrets.
       let gf = String(payload["flow"] as? String ?? "google")
-      bridgeCall("POST", "api/google-auth", json: ["flow": gf], timeout: 15) { [weak self] d in
+      // Which OAuth client signs this account in. The connect service checks
+      // the name against its registry, so an unknown one is a 400 rather than
+      // an argument reaching the helper's command line.
+      let gc = String(payload["client"] as? String ?? "default")
+      bridgeCall("POST", "api/google-auth", json: ["flow": gf, "client": gc], timeout: 15) { [weak self] d in
         guard let self else { return }
         // The service started the helper and handed back the URL to show. The
         // consent screen opens HERE rather than in the default browser, which

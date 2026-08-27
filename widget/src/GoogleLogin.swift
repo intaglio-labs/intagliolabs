@@ -31,6 +31,7 @@ final class GoogleLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
   private var web: WKWebView?
   private var finished = false
   private var reason: String?
+  private var urlLine: NSTextField?
   private let done: (Bool, String?) -> Void
 
   // Google's sign-in walks through several of its own hosts, and a consent
@@ -65,13 +66,39 @@ final class GoogleLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     w.customUserAgent = Self.safariUserAgent()
     web = w
 
+    // THE ADDRESS IS SHOWN, and this window had no way to see it.
+    //
+    // BridgeLogin already made this call and wrote down why: a login window is
+    // the most impersonation-shaped surface this app has, so it names the real
+    // domain and keeps that line current as the page navigates. This window is
+    // the same shape and showed only a static title — strictly less than the
+    // bridge one offers, for a page asking for a Google password.
+    //
+    // The FULL url rather than just the host, for a second reason: Google's
+    // verification requires a demo video showing "the browser address bar of
+    // the OAuth consent screen correctly includes your app's OAuth client ID".
+    // A window with no address bar cannot produce that recording, and the
+    // alternative — sending the owner to a real browser for the take — would
+    // film a flow the product does not use.
+    let head = NSTextField(labelWithString: url.absoluteString)
+    head.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+    head.textColor = NSColor.secondaryLabelColor
+    head.lineBreakMode = .byTruncatingTail
+    head.frame = NSRect(x: 10, y: w.frame.height + 3, width: w.frame.width - 20, height: 16)
+    urlLine = head
+
+    let content = NSView(frame: NSRect(
+      x: 0, y: 0, width: w.frame.width, height: w.frame.height + 22))
+    content.addSubview(w)
+    content.addSubview(head)
+
     let win = NSWindow(
-      contentRect: w.frame,
+      contentRect: content.frame,
       styleMask: [.titled, .closable, .miniaturizable, .resizable],
       backing: .buffered, defer: false
     )
     win.title = "Sign in to Google"
-    win.contentView = w
+    win.contentView = content
     win.delegate = self
     win.center()
     win.isReleasedWhenClosed = false
@@ -152,6 +179,12 @@ final class GoogleLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     // off to an arbitrary host is either a mistake or something worse, and
     // there is nothing on the far side of it this flow needs.
     decisionHandler(ok ? .allow : .cancel)
+  }
+
+  // Kept current as the page walks Google's own hosts. A line showing only
+  // where the window STARTED is exactly the one an impersonation would leave up.
+  func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+    urlLine?.stringValue = webView.url?.absoluteString ?? ""
   }
 
   func windowWillClose(_ notification: Notification) { finish(false) }

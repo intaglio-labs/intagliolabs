@@ -30,6 +30,7 @@ import { PLATFORMS, bridgeStatus, beginCommand, beginLogin, loadPanel, relay } f
 import { bridgeApiResponse } from './lib/bridgeApi.mjs';
 import { decide, fetchPending } from './lib/memory.mjs';
 import { readStatus } from './lib/status.mjs';
+import { listGoogleClients } from '../connectors/lib/googleClients.mjs';
 import { sameOrigin } from './lib/origin.mjs';
 import { statusResponse } from './lib/statusApi.mjs';
 import { mintToken, validateToken } from './lib/tokens.mjs';
@@ -282,8 +283,23 @@ async function handleRequest(req, res) {
       return;
     }
     let which = 'google';
+    let client = 'default';
     try {
-      which = JSON.parse((await readBody(req, 4 * 1024)) || '{}').flow ?? 'google';
+      const body = JSON.parse((await readBody(req, 4 * 1024)) || '{}');
+      which = body.flow ?? 'google';
+      // WHICH OAUTH CLIENT SIGNS THIS ACCOUNT IN. Validated against the
+      // registry rather than passed through: this value becomes a command-line
+      // argument, and an unregistered name would reach the helper as one.
+      // Names are [a-z0-9-] by construction there, but checking membership is
+      // the guarantee, not the character class.
+      const asked = typeof body.client === 'string' ? body.client : 'default';
+      const known = listGoogleClients().some((c) => c.name === asked);
+      if (!known && asked !== 'default') {
+        send(res, 400, JSON.stringify({ error: `no OAuth client named "${asked}"` }),
+          'application/json; charset=utf-8');
+        return;
+      }
+      client = asked;
     } catch {
       which = 'google';
     }
@@ -315,7 +331,7 @@ async function handleRequest(req, res) {
     // helper logs "waiting for approval" first, and pinning a line number
     // would break the moment anyone adds a line above it.
     try {
-      const child = spawn(process.execPath, [scriptPath, '--print-url'], {
+      const child = spawn(process.execPath, [scriptPath, '--print-url', '--client', client], {
         stdio: ['ignore', 'pipe', 'ignore'],
         env: process.env,
       });

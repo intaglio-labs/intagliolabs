@@ -1082,6 +1082,43 @@ function card(src, keep) {
       });
   };
 
+// WHICH GOOGLE CLIENT TO SIGN IN WITH, asked only when there is more than one.
+// Built from the same pieces a hint card is, so it closes the same way and
+// needs no CSS of its own.
+function showClientChoice(row, src) {
+  closeHint();
+  const tip = document.createElement('div');
+  tip.className = 'hint';
+  tip.dataset.id = src.id;
+  tip.classList.add('hold');
+  const head = document.createElement('b');
+  head.textContent = 'Which Google account?';
+  const why = document.createElement('span');
+  why.className = 'why';
+  why.textContent = 'A work account keeps its sign-in indefinitely. Any other Google '
+    + 'account uses the shared app, which has a limited number of sign-ins.';
+  tip.append(head, why);
+  for (const c of src.clients) {
+    const b = document.createElement('button');
+    b.className = 'hold-ok';
+    b.textContent = c.label === 'default' ? 'work account ↗' : `${c.label} ↗`;
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      b.disabled = true;
+      b.textContent = 'opening Google…';
+      hzPost('googleAuth', { flow: 'google', client: c.name })
+        .then((r) => {
+          if (r && r.refused) showTileNotice(row, src, r.refused);
+          refresh();
+        })
+        .catch(() => { b.disabled = false; b.textContent = `${c.label} ↗`; });
+    });
+    tip.appendChild(b);
+  }
+  hintHost.appendChild(tip);
+  row.classList.add('open');
+}
+
 // A one-line notice in the hint strip, for something that happened OUTSIDE
 // this panel and left no other trace — today only a Google sign-in Google
 // refused. Built from the same pieces a hint card is so it closes the same way.
@@ -1137,8 +1174,20 @@ function showTileNotice(row, src, text) {
       //
       // Only while unconnected. An authorized mailbox row still opens its card,
       // because there the press means "tell me about this", not "sign me in".
+      // ONE CLIENT, ONE PRESS. More than one and the press has to ASK, because
+      // the choice is not cosmetic: an Internal client reaches only its own
+      // Workspace but its grant never expires, while an External one reaches
+      // any Google account and spends one of a finite, unresettable hundred.
+      // Nothing here can infer which the owner meant — the account they are
+      // about to pick is the only thing that decides it, and it does not exist
+      // yet at press time.
+      if (GOOGLE_AUTH.has(kindOf(src.id)) && !src.connected && src.action !== 'fda'
+          && (src.clients || []).length > 1) {
+        showClientChoice(row, src);
+        return;
+      }
       if (GOOGLE_AUTH.has(kindOf(src.id)) && !src.connected && src.action !== 'fda') {
-        hzPost('googleAuth', { flow: 'google' })
+        hzPost('googleAuth', { flow: 'google', client: (src.clients || [{}])[0].name || 'default' })
           .then((r) => {
             // A REFUSAL IS NOT A CLOSED WINDOW. Google declines some sign-ins
             // without ever redirecting — an account outside the org is the
