@@ -47,11 +47,24 @@ test('a leftover role key changes nothing', (t) => {
 // the connector never opens — and on this seed the local store holds zero
 // events for every Google calendar, so the page would be wrong both ways.
 test('the calendar row follows the configured backend', (t) => {
-  const google = readStatus({ home: home(t, { calendar: { backend: 'google' } }) });
+  const googleHome = home(t, { calendar: { backend: 'google' } });
+  const google = readStatus({ home: googleHome });
   const row = google.find((r) => r.id === 'calendar');
   assert.equal(row.connected, false, 'no tokens in a temp home');
   assert.match(row.detail, /authoriz/iu);
   assert.equal(row.action, 'gcal');
+
+  grantMailbox(
+    googleHome,
+    'owner@example.com',
+    [
+      'https://www.googleapis.com/auth/gmail.readonly',
+      'https://www.googleapis.com/auth/calendar.readonly',
+    ].join(' ')
+  );
+  const authorized = readStatus({ home: googleHome }).find((r) => r.id === 'calendar');
+  assert.equal(authorized.connected, true, 'the per-account token store is the calendar truth');
+  assert.equal(authorized.action, null);
 
   const local = readStatus({ home: home(t, { calendar: { backend: 'local' } }) });
   assert.equal(local.find((r) => r.id === 'calendar').action, 'fda');
@@ -116,14 +129,18 @@ test('WhatsApp stays explicitly disconnected until Intaglio Labs enables it', (t
 // however they came to exist. withDisabled() is mapped over every row, so this
 // is really asking whether the id a grant produces still resolves to the "mail"
 // connector; it would not if the row ids ever drifted.
-function grantMailbox(dir, address) {
+function grantMailbox(
+  dir,
+  address,
+  scope = 'https://www.googleapis.com/auth/gmail.readonly'
+) {
   const secrets = join(dir, '.hazlie', 'secrets');
   mkdirSync(secrets, { recursive: true, mode: 0o700 });
   const slug = address.toLowerCase().replace(/[^a-z0-9]+/gu, '-');
   writeFileSync(join(secrets, `google-tokens-${slug}.json`), JSON.stringify({
     account_email: address,
     access_token: 'x', refresh_token: 'y',
-    scope: 'https://www.googleapis.com/auth/gmail.readonly',
+    scope,
     obtained_at: 0, expires_in: 3600,
   }), { mode: 0o600 });
 }

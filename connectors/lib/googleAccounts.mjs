@@ -10,15 +10,14 @@
 // so more mailboxes means more grants, and more grants need somewhere to live
 // that is not a single fixed filename.
 //
-// The account's address is IN the file rather than only in its name. The name
-// is a slug and slugs are lossy: `a.b@x.co` and `a-b@x.co` slug identically,
-// and reading the address back out of a filename would eventually hand the
-// wrong label to a row. The filename is for finding; `account_email` is for
-// naming.
+// The account's address is IN the file rather than only in its name. The
+// filename combines a readable, lossy slug with a hash that prevents slug
+// collisions, but `account_email` remains the source of truth for naming.
 //
 // NOT A SECRET, but these files hold refresh tokens, so every read goes
 // through the same owner-only gauntlet as every other credential here.
 
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -37,7 +36,15 @@ export function googleAccountSlug(email) {
 }
 
 export function googleTokensPath(email, home = homedir()) {
-  return join(googleSecretsDir(home), `${PREFIX}${googleAccountSlug(email)}${SUFFIX}`);
+  const canonical = String(email).trim().toLowerCase();
+  // The readable slug is lossy (`a.b@x.co` and `a-b@x.co` collide), so it may
+  // never be the identity by itself. A hash of the complete canonical address
+  // separates those accounts while keeping paths stable across case changes.
+  // Bound the human-readable portion so an unusually long valid address cannot
+  // exceed the filesystem's component limit.
+  const slug = googleAccountSlug(canonical).slice(0, 80) || 'account';
+  const fingerprint = createHash('sha256').update(canonical).digest('hex').slice(0, 16);
+  return join(googleSecretsDir(home), `${PREFIX}${slug}-${fingerprint}${SUFFIX}`);
 }
 
 /**

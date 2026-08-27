@@ -32,7 +32,7 @@ protocol BridgeDelegate: AnyObject {
   func motionAnywayChanged(_ on: Bool)
   func soundsChanged(_ on: Bool)
   func scaleChanged(_ scale: Double, committed: Bool, from webView: WKWebView?)
-  func fitPopup(_ webView: WKWebView, contentHeight: Double, extraWidth: Double)
+  func fitPopup(_ webView: WKWebView, contentHeight: Double)
   func widgetSpot() -> [String: Double]
   func widgetBoundsChanged()
   func spotlightWidget(_ on: Bool)
@@ -84,12 +84,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     // flow — a skipped step must stay reachable.
                     "setupState", "modelDownload", "modelCancel",
                     "openFullDiskAccess", "startSources",
-                      // Google signs in from the tile: mail and calendar are one
-                      // account and one grant. Without this grant the button
-                      // renders and silently does nothing, which is exactly the
-                      // class widget/test/bridge-capabilities.test.mjs catches.
-                      "googleAuth",
-                   "permissionState", "requestPermission"],
+                    // In-panel API-key walkthroughs and Google OAuth.
+                    "connectSecret", "openApp", "googleAuth",
+                    "permissionState", "requestPermission"],
     "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
                    "widgetSpot",
                    // The setup scenes: choosing and fetching the answer model,
@@ -106,7 +103,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                "connectorsIntroSeen", "openExternal", "setConnectorEnabled", "connectSecret", "openApp",
-               "openFullDiskAccess"],
+               "openFullDiskAccess", "googleAuth"],
     // peopleFind: search across every year, server-ranked. peopleMap: the
     // ALL-YEARS source behind the constellation — every person, uncapped, with
     // their per-year topics. monthsView: where the popup was left, so a restart
@@ -587,13 +584,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // grows: the connector grid gained a third row and the last one was
       // simply cut off by the window edge.
       //
-      // extraWidth (optional) widens the popup past its base — the
-      // connections page opens its hint strip as a SIDE section, and the
-      // window grows leftward because placedFrame pins the right edge.
       // Same Int/Double dance as setScale: whole JS numbers arrive as Int.
+      // Width is deliberately not page-controlled: connector hints are
+      // overlays, and content must never grow a third panel beside Settings.
       let h = (payload["height"] as? Double) ?? Double(payload["height"] as? Int ?? 0)
-      let ew = (payload["extraWidth"] as? Double) ?? Double(payload["extraWidth"] as? Int ?? -1)
-      delegate?.fitPopup(webView, contentHeight: h, extraWidth: ew)
+      delegate?.fitPopup(webView, contentHeight: h)
       reply(webView, id, ["state": "ok"])
     case "setScale":
       // Accept Int as well as Double: a JS number that happens to be whole
@@ -669,8 +664,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
     case "googleAuth":
       // START THE GOOGLE SIGN-IN FROM THE TILE, with no terminal in the way.
-      // The connect service spawns ops/gcal-auth.mjs, which opens Google in the
-      // default browser and listens on its own loopback port for the callback.
+      // The connect service spawns ops/gcal-auth.mjs, which listens on its own
+      // loopback port for the callback. Native opens the returned authorization
+      // URL in the default browser, as Google's OAuth policy requires.
       // Nothing sensitive crosses this bridge: the request carries only which
       // of two fixed flows to run, and the grant is written by that helper
       // straight into ~/.hazlie/secrets.
@@ -681,27 +677,17 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       let gc = String(payload["client"] as? String ?? "default")
       bridgeCall("POST", "api/google-auth", json: ["flow": gf, "client": gc], timeout: 15) { [weak self] d in
         guard let self else { return }
-        // The service started the helper and handed back the URL to show. The
-        // consent screen opens HERE rather than in the default browser, which
-        // is what every other login in this app already does — see
-        // GoogleLogin.swift for why that window is a viewport and not a
-        // participant in the grant.
-        if let url = (d as? [String: Any])?["url"] as? String, !url.isEmpty {
+        // The service started the helper and handed back the URL. GoogleLogin
+        // validates the fixed Google host and sends it to the system browser;
+        // the helper receives the redirect and writes the token.
+        if let url = d["url"] as? String, !url.isEmpty {
           DispatchQueue.main.async {
             GoogleLogin.present(url: url) { ok, why in
-              // `ok` says the window saw Google redirect to the loopback
-              // callback, which is the helper taking the code — not that the
-              // tokens are written. The shelf re-reads status either way,
-              // because the file on disk is the only thing that actually
-              // settles it.
-              //
-              // `why` is set when Google REFUSED rather than the owner closing
-              // the window: an account outside the org, a declined consent, an
-              // admin policy. That distinction is worth carrying — "you picked
-              // the wrong account" and "you changed your mind" look identical
-              // from here otherwise, and only one of them is fixable by trying
-              // again the same way.
-              var out: [String: Any] = ["ok": ok, "opened": true]
+              // `ok` means macOS accepted the browser launch, not that consent
+              // completed. Returning to the app fires the shelf's focus refresh;
+              // the token file remains the source of truth. `why` is reserved
+              // for a local validation or browser-launch failure.
+              var out: [String: Any] = ["ok": ok, "opened": ok]
               if let why { out["refused"] = why }
               self.reply(webView, id, out)
             }
@@ -1477,6 +1463,40 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
 
   // MARK: status
 
+  /// Correct Full Disk Access rows in the process that actually owns the
+  /// grant. The connect server is a launchd agent, while the connector daemon
+  /// is this app's child and inherits this app's TCC identity. Trusting the
+  /// server's protected-file probe therefore paints false red tiles even while
+  /// ingestion can read the stores normally.
+  private func reconcileFullDiskStatus(_ obj: [String: Any]) -> [String: Any] {
+    guard let sources = obj["sources"] as? [[String: Any]] else { return obj }
+    let readable = Permissions.fullDiskAccessibleSources()
+    guard !readable.isEmpty else { return obj }
+    let details = [
+      "imessage": "reading your message history",
+      "calendar": "reading the local calendar store",
+      "contacts": "names behind the numbers",
+      "photos": "reading time, place and who is in them",
+      "notes": "reading what you wrote",
+    ]
+    var out = obj
+    out["sources"] = sources.map { source in
+      guard let id = source["id"] as? String,
+            source["action"] as? String == "fda",
+            readable.contains(id)
+      else { return source }
+      var fixed = source
+      fixed["connected"] = true
+      fixed["broken"] = false
+      fixed["detail"] = details[id] ?? "available to Intaglio Labs"
+      fixed["action"] = NSNull()
+      fixed["fix"] = NSNull()
+      fixed["caveat"] = NSNull()
+      return fixed
+    }
+    return out
+  }
+
   private func fetchStatus(_ done: @escaping ([String: Any]) -> Void) {
     guard let tok = bearerToken() else { done(["state": "auth"]); return }
     let req = request("GET", connectBase, "api/status", bearer: tok, timeout: 5)
@@ -1490,7 +1510,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
               let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
               obj["sources"] is [[String: Any]]
         else { done(["state": "error", "error": "unparseable status"]); return }
-        var out = obj
+        var out = self.reconcileFullDiskStatus(obj)
         out["state"] = "ok"
         done(out)
       case 401: done(["state": "auth"])

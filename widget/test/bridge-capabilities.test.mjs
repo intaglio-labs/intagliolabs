@@ -25,7 +25,10 @@ import { fileURLToPath } from 'node:url';
 const WIDGET = join(dirname(fileURLToPath(import.meta.url)), '..');
 const swift = readFileSync(join(WIDGET, 'src', 'Bridge.swift'), 'utf8');
 const bridgeLoginSwift = readFileSync(join(WIDGET, 'src', 'BridgeLogin.swift'), 'utf8');
+const googleLoginSwift = readFileSync(join(WIDGET, 'src', 'GoogleLogin.swift'), 'utf8');
 const connections = readFileSync(join(WIDGET, 'ui', 'connections.js'), 'utf8');
+const connectorTile = readFileSync(join(WIDGET, 'ui', 'connector-tile.js'), 'utf8');
+const people = readFileSync(join(WIDGET, 'ui', 'people.js'), 'utf8');
 
 // --- 1. what the dispatch handles -------------------------------------------
 const dispatchCases = new Set(
@@ -267,6 +270,18 @@ test('the credential reassurance stays middle-aligned in the native login header
   assert.match(block, /sub\.alignment = \.center/u);
 });
 
+test('Google OAuth opens in the system browser, never an embedded webview', () => {
+  assert.match(googleLoginSwift, /NSWorkspace\.shared\.open\(target\)/u);
+  assert.doesNotMatch(googleLoginSwift, /^import WebKit$/mu);
+  assert.doesNotMatch(googleLoginSwift, /WKWebView\s*\(/u);
+  assert.doesNotMatch(googleLoginSwift, /\.customUserAgent\s*=/u);
+});
+
+test('People starts the same Google authorization action as Settings', () => {
+  assert.match(people, /HZ_GOOGLE_AUTH\.has\(HZ_KIND\(src\.id\)\)/u);
+  assert.match(people, /hzPost\('googleAuth', \{ flow: 'google' \}\)/u);
+});
+
 test('Settings offers the explicit WhatsApp opt-in returned by connector status', () => {
   const block = /if \(src\.disabled && src\.action === 'enable'\) \{([\s\S]*?)\n {4}\} else if/u
     .exec(connections)?.[1];
@@ -277,4 +292,33 @@ test('Settings offers the explicit WhatsApp opt-in returned by connector status'
     /hzPost\('setConnectorEnabled', \{ connector: src\.id, enabled: true \}\)/u
   );
   assert.match(block, /\.then\(refresh\)/u, 'successful opt-in repaints connector status');
+});
+
+test('Settings keeps every unconnected connector ahead of connected caveats', () => {
+  assert.match(connections, /const needsYou = \(s\) => !s\.connected;/u);
+  assert.doesNotMatch(connections, /const needsYou =[^;]*caveat/u);
+});
+
+test('Settings connector hints are anchored overlays, never a third panel', () => {
+  assert.match(connections, /hzPlacePop\(hintHost, anchor\)/u);
+  assert.doesNotMatch(connections, /extraWidth:\s*open\s*\?\s*248/u);
+  assert.doesNotMatch(connections, /hintHost\.style\.height/u);
+  assert.doesNotMatch(swift, /payload\["extraWidth"\]/u);
+});
+
+test('connector cards use current privacy copy and connected bridge identity', () => {
+  assert.match(connections, /const STAY = "data stored locally";/u);
+  assert.match(connectorTile, /const HZ_STAY = "data stored locally";/u);
+  assert.match(connections, /const isBridge = \(src\) => src\.action === 'bridge' \|\|/u);
+  assert.match(connectorTile, /const HZ_IS_BRIDGE = \(src\) => src\.action === 'bridge' \|\|/u);
+  assert.match(connectorTile, /if \(HZ_IS_BRIDGE\(src\)\)/u);
+  assert.doesNotMatch(connectorTile, /acct\.textContent = `linked as/u);
+});
+
+test('FDA status is reconciled in the app process that owns the grant', () => {
+  const block = /private func reconcileFullDiskStatus\([\s\S]*?\n {2}\}/u.exec(swift)?.[0] ?? '';
+  assert.match(block, /Permissions\.fullDiskAccessibleSources\(\)/u);
+  assert.match(block, /source\["action"\] as\? String == "fda"/u);
+  assert.match(block, /fixed\["connected"\] = true/u);
+  assert.match(block, /fixed\["broken"\] = false/u);
 });
