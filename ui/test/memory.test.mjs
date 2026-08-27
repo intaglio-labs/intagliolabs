@@ -751,3 +751,45 @@ test('the pending queue is ordered by confidence, then newest', () => {
   assert.equal(claims.length, 5, 'nothing is dropped for lacking a confidence');
   db.close();
 });
+
+// A MODEL THAT IS NOT RUNNING IS NOT AN APP BUG.
+//
+// The companion to the abstain test above. There, a dead llama does not matter
+// because retrieval never calls it. Here retrieval succeeds, so the model IS
+// called, and the question is what the owner is told when nothing answers.
+//
+// It used to be `500 {"error":"fetch failed"}`: the catch rethrew the raw
+// TypeError and the generic handler shaped it. Bridge's `default:` arm turned
+// every unrecognised status into "something went wrong on this app's side" --
+// the app-bug string -- for a model that was merely restarting. build.sh
+// kickstarts llama-server on every deploy, so this is a state owners hit.
+test('a question with an answer to give reports the model as down, not as a bug', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hermes-llamadown-test-'));
+  const dbPath = join(dir, 'context.db');
+  seedAcceptedClaim(dbPath);
+  const server = await start({
+    port: 0,
+    dbPath,
+    llamaApiKey: 'd'.repeat(64),
+    // Port 1 is reserved and nothing listens there: a refused connection, which
+    // is exactly the shape of a model mid-restart.
+    llamaBaseUrl: 'http://127.0.0.1:1',
+    bearerToken: TOKEN,
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/vault/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ utterance: 'how do you get to work?' }),
+    });
+    // 503, because Bridge maps 502 and 503 to the one state whose copy says the
+    // model is restarting. A 500 here is the regression.
+    assert.equal(res.status, 503, 'a missing model must not read as an app bug');
+    const body = await res.json();
+    assert.match(body.error, /llama-server is unreachable/);
+    assert.ok(!/fetch failed/.test(body.error), 'and must not leak the transport message');
+  } finally {
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

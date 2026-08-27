@@ -68,6 +68,7 @@ import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
 import { contentMatches } from './people/content.mjs';
 import { rebuildEpisodes, EPISODE_SOURCES } from './memory/episodeStore.mjs';
+import { isUnreachable, unreachableError } from './llamaReady.mjs';
 import { loadSpine } from './people/graph.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
@@ -2774,7 +2775,18 @@ async function handleVaultAsk(db, req, res, cors, policy) {
         max_tokens: 300,
         stream: false,
       }),
-      signal: controller.signal,
+      // A CEILING, as well as the owner's Cancel. This had only the disconnect
+      // signal, so a model that never answered held this request -- and the
+      // single-slot server behind it -- open for as long as the socket lived.
+      // 110s sits just inside the widget's own 120s (Bridge.swift's
+      // timeoutIntervalForRequest), so hermes is the one that answers: a clean
+      // status the widget can render rather than a transport error it cannot.
+      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(110_000)]),
+      // A compromised or misconfigured loopback service must not redirect a
+      // household prompt (or its Authorization header) onto the network. Every
+      // other llama call in the tree says this; this one -- which carries the
+      // retrieved context AND the key -- did not.
+      redirect: 'error',
     });
     if (!llamaRes.ok) {
       // Unread, the error body pins this keep-alive connection to the
@@ -2810,6 +2822,10 @@ async function handleVaultAsk(db, req, res, cors, policy) {
     // the fact of it; writing to a destroyed socket would throw over the top of
     // the real reason.
     if (controller.signal.aborted) return;
+    // "The model is not running" is not an application error, and it is the one
+    // failure here the owner can be told something true about. Unshaped, it
+    // reached them as "something went wrong on this app's side".
+    if (isUnreachable(error)) throw unreachableError();
     throw error;
   } finally {
     res.off('close', onClose);
@@ -3098,10 +3114,32 @@ async function handlePeople(db, req, res, cors, url, policy) {
     // (graph + row gather); only the llama fetch is awaited, and it touches
     // no handle. If summarizeYear ever grows an await before its reads, this
     // call site must change with it.
-    const out = await withPeopleDbs(db, (state, resDb) => {
-      const { aliases } = resolutionState(resDb);
-      return summarizeYear(db, state, { personKey: body.key, year, owner, aliases, llama: policy.llama });
-    });
+    // A CLOSED ROW STOPS THE WORK. The reader can collapse a person, or close
+    // the panel, while the model is still writing their summary -- and the
+    // single-slot server means whatever generates next is queued behind it.
+    // Same wiring as /vault/ask: `res`, not `req`, because readJson has already
+    // consumed the request stream and its 'close' has fired.
+    const summaryAbort = new AbortController();
+    const onSummaryClose = () => {
+      if (!res.writableEnded) summaryAbort.abort();
+    };
+    res.once('close', onSummaryClose);
+    let out;
+    try {
+      out = await withPeopleDbs(db, (state, resDb) => {
+        const { aliases } = resolutionState(resDb);
+        return summarizeYear(db, state, {
+          personKey: body.key, year, owner, aliases, llama: policy.llama,
+          signal: summaryAbort.signal,
+        });
+      });
+    } catch (error) {
+      if (summaryAbort.signal.aborted) return;
+      if (isUnreachable(error)) throw unreachableError();
+      throw error;
+    } finally {
+      res.off('close', onSummaryClose);
+    }
     send(res, 200, out, cors);
     return;
   }

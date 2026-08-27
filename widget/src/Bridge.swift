@@ -1382,6 +1382,18 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           done(["state": "ok", "text": text, "sources": obj["sources"] as? [String] ?? []])
         case 404: done(["state": "notready"]) // /vault/ask not landed yet
         case 401, 403: done(["state": "auth"])
+        // THE MODEL IS NOT RUNNING, which is not an app bug and not permanent.
+        //
+        // Only a transport-level failure reached "down" before, and a refused
+        // connection BEHIND hermes is not one -- hermes answered, it just could
+        // not reach llama-server. So the honest cases fell to `default:` and the
+        // owner was told "something went wrong on this app's side" for a model
+        // that was merely restarting. build.sh kickstarts llama-server on every
+        // deploy, so this is a state they actually hit.
+        //
+        // 503 is what /vault/ask now sends for it; 502 is what the /lane/local
+        // proxy has always sent and nothing ever mapped.
+        case 502, 503: done(["state": "down"])
         default: done(["state": "error", "error": "http \(http.statusCode)"])
         }
       }
