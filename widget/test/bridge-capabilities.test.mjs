@@ -277,6 +277,14 @@ test('Google OAuth opens in the system browser, never an embedded webview', () =
   assert.doesNotMatch(googleLoginSwift, /\.customUserAgent\s*=/u);
 });
 
+test('Settings mounts its controls without the retired memory-review row', () => {
+  assert.match(connections, /rows\.push\(settingRow\(/u);
+  assert.match(connections, /rows\.push\(modelRow\(\)\)/u);
+  assert.match(connections, /settings\.replaceChildren\(\.\.\.rows\)/u);
+  assert.doesNotMatch(connections, /actionRow|what i have learned|openMemoryReview/u);
+  assert.doesNotMatch(swift, /openMemoryReview/u);
+});
+
 test('People starts the same Google authorization action as Settings', () => {
   assert.match(people, /HZ_GOOGLE_AUTH\.has\(HZ_KIND\(src\.id\)\)/u);
   assert.match(people, /hzPost\('googleAuth', \{ flow: 'google' \}\)/u);

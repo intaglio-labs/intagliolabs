@@ -853,16 +853,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     return true
   }
 
-  /// The review queue: the same tokened connect link, one path deeper.
-  /// Built by APPENDING rather than reconstructing the URL, so the token and
-  /// the port keep coming from whoever owns them — a second place that knows
-  /// how to spell a connect link is a second place to get it wrong.
-  func openMemoryReview() -> Bool {
-    guard let link = connectLink() else { return false }
-    NSWorkspace.shared.open(link.appendingPathComponent("memory"))
-    return true
-  }
-
   // What each popup's page last said it needs, in CSS px — unscaled, because
   // the scale can change afterwards and the measurement is about content, not
   // about how big it is being drawn.

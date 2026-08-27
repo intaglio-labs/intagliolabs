@@ -143,7 +143,7 @@ const HZ_HINTS = {
   // the connect page that would have accepted one is deleted. A hint that
   // describes a flow the product no longer has is worse than no hint — it
   // sends the owner off to do work that cannot succeed.
-  mail: { text: 'Sign in to Google and approve read-only access to your mail. Run it again with another account to add a second mailbox.' },
+  mail: { text: '' },
   // granola left the sentence behind (owner, 2026-08-25): its panel is the
   // in-app walkthrough — open granola.ai, create a key, paste it right here.
   granola: { app: 'com.granola.app', url: 'https://granola.ai', link: 'Granola',
@@ -262,7 +262,7 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
       });
       tip.append(open, step2, paste, send, said);
     } else if (hint) {
-      tip.append(hint.text + ' ');
+      if (hint.text) tip.append(hint.text + ' ');
       if (hint.url) {
         const a = document.createElement('a');
         a.href = '#';

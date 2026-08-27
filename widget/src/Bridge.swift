@@ -23,10 +23,6 @@ protocol BridgeDelegate: AnyObject {
   func openPeople()
   func openMonths()
   func openConnectRoot() -> Bool
-  /// The review queue at /c/<token>/memory — the same tokened link, one
-  /// path deeper. Separate from openConnectRoot because it is a different
-  /// destination, not a different way of reaching the same one.
-  func openMemoryReview() -> Bool
   func closeWindow(of webView: WKWebView)
   func dragWindow(of webView: WKWebView)
   func motionAnywayChanged(_ on: Bool)
@@ -77,7 +73,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                "openMonths", "voiceArm", "widgetBounds"],
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
-                    "close", "connectorsIntroSeen", "openConnectLink", "openMemoryReview", "openExternal",
+                    "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
                     "status", "setConnectorEnabled", "setMotion", "setScale", "setSounds",
                     "openOnboarding", "markHandheld",
                     // Same setup controls, reachable from the gear after the
@@ -1105,15 +1101,6 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         DispatchQueue.main.async {
           self?.reply(webView, id, error == nil ? ["state": "ok"] : ["state": "notInstalled"])
         }
-      }
-    case "openMemoryReview":
-      // What the app has learned about its owner, and the place to correct it.
-      // The page and its server never went anywhere; the route in from the app
-      // did, when the memory card was retired.
-      if delegate?.openMemoryReview() == true {
-        reply(webView, id, ["state": "ok"])
-      } else {
-        reply(webView, id, ["state": "error", "error": "no connect link yet"])
       }
     case "openConnectLink":
       // The cloud-connector setup door: the connect page's ROOT, in the

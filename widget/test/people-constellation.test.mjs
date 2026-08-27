@@ -342,3 +342,8 @@ test('the list marks a row with the card icon of every category it is top five i
   assert.match(page, /awardsByKey = awardIndex\(data\);/u);
   assert.match(page, /awardsByKey = new Map\(\);/u, 'a search carries no marks');
 });
+
+test('a hovered person name paints above every neighboring face', () => {
+  assert.match(css, /\.pm-face\[data-tip\]:hover \{ z-index: 8; \}/u,
+    'the whole transformed face must rise; its tooltip cannot escape that stacking context alone');
+});

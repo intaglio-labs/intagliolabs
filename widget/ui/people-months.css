@@ -577,6 +577,10 @@ body.plist .pm-face {
   font-weight: 600;
   cursor: default;
 }
+/* Each transformed face is its own stacking context. Raising only the
+   ::after tooltip cannot beat a neighboring face, so lift the whole hovered
+   person and its name pill above every surrounding circle. */
+body.plist .pm-face[data-tip]:hover { z-index: 8; }
 /* The people this bubble could not fit. Hollow on purpose: it is a count, not
    a person, and must never be mistaken for one. It sits IN the crowd now
    rather than after it, so it also carries the panel's own background — a

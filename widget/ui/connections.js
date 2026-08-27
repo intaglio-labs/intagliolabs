@@ -186,12 +186,6 @@ function rangeRow({ name, note, value, min, max, step, message, format }) {
   return el;
 }
 
-// A setting that DOES something rather than holding a value — same row, a pill
-// instead of a switch — went with its only caller, the onboarding row in
-// renderSettings(). Kept in history rather than in the file: the
-// `.setting-action` styling it used is still in palette.css, so the next
-// action row is a function away.
-
 // The answer model is a Settings choice, not an onboarding gate. Fresh installs
 // default to the roughly 5 GB tier; this row keeps the smaller option available
 // for a Mac that needs less memory.
@@ -342,25 +336,8 @@ async function renderSettings() {
     hzPost('setScale', { scale: 1 }).catch(() => {});
   }
   rows.push(modelRow());
-  // THE REVIEW QUEUE'S WAY BACK IN.
-  //
-  // ~~A memory-progress card sat here.~~ Retired on purpose in 36e8d9f, and
-  // this does not bring it back: no counts, no progress bar, no explainer.
-  // What went with it by accident was the only route from inside the app to
-  // the review queue — the queue, its page and its server are all intact, and
-  // have been reachable since only by knowing the URL.
-  //
-  // That matters more than a missing link usually would. This loop is how the
-  // thing learns what is true about its owner; leaving it discoverable only to
-  // someone who reads the source makes it decorative. One row, the same shape
-  // as onboarding's, opening the page the connect server already serves and
-  // already links from its own footer.
-  rows.push(actionRow({
-    name: 'what i have learned',
-    note: 'review and correct it',
-    action: 'open',
-    message: 'openMemoryReview',
-  }));
+  // The review/memory row was retired with the earlier memory-progress card.
+  // Settings ends at the model choice, then connectors.
   // The onboarding row was yeeted (owner, 2026-08-25): ~~a `run` pill that
   // replayed the welcome flow~~. Settings is where you change what the app
   // does, not where you re-watch its introduction, and the one control here
@@ -428,7 +405,9 @@ const HINTS = {
   // the connect page that would have accepted one is deleted. A hint that
   // describes a flow the product no longer has is worse than no hint — it
   // sends the owner off to do work that cannot succeed.
-  mail: { text: 'Sign in to Google and approve read-only access to your mail. Run it again with another account to add a second mailbox.' },
+  // The tile/button already starts and names this flow; repeating the setup
+  // sentence in the anchored card adds no information.
+  mail: { text: '' },
   // granola left this table (owner, 2026-08-25): its panel is the in-app
   // walkthrough now — open granola.ai, create a key, paste it right here.
   granola: { app: 'com.granola.app', url: 'https://granola.ai', link: 'Granola',
@@ -574,6 +553,22 @@ const CONNECTOR_ORDER = [
 // don't render. To restore one, delete it from this set. Nothing else keys
 // off it, so a hidden id still works everywhere else it appears.
 const HIDDEN_CONNECTORS = new Set(['oura', 'photos', 'files', 'notion', 'notes']);
+// Status returns one real row per authorized mailbox plus a synthetic `mail`
+// row for starting another grant. Once a real account exists, its card owns
+// "+ add account"; leaving the synthetic grey tile visible makes a successful
+// sign-in look unfinished. Carry its client choices onto the real rows before
+// hiding it so adding another account keeps the base client-selection logic.
+function visibleSources(sources) {
+  const addGoogle = sources.find((s) => s.id === 'mail');
+  const hasGoogleAccount = sources.some(
+    (s) => s.connected && typeof s.id === 'string' && s.id.startsWith('mail:')
+  );
+  return sources
+    .filter((s) => !HIDDEN_CONNECTORS.has(kindOf(s.id)) && !(hasGoogleAccount && s.id === 'mail'))
+    .map((s) => s.id.startsWith('mail:')
+      ? { ...s, clients: addGoogle && Array.isArray(addGoogle.clients) ? addGoogle.clients : [] }
+      : s);
+}
 // NOT YET SHIPPING. A tile that is on the shelf and does not work is worse
 // than one that is not there — but so is a tile that vanishes, because the
 // owner then wonders whether Telegram is coming at all. So: greyed, present,
@@ -893,7 +888,17 @@ function card(src, keep) {
       // account" -- on a one-per-Mac store, wired to open the Full Disk Access
       // pane. The condition the comment above always described is a property of
       // the source, not of its current error state.
-      if (hint && hint.url && !hint.local) {
+      if (GOOGLE_AUTH.has(kindOf(src.id))) {
+        const add = document.createElement('button');
+        add.className = 'hold-ok add-acct';
+        add.textContent = '+ add account';
+        add.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if ((src.clients || []).length > 1) showClientChoice(row, src);
+          else startGoogleAuth(add, (src.clients || [{}])[0].name || 'default');
+        });
+        tip.appendChild(add);
+      } else if (hint && hint.url && !hint.local) {
         const add = document.createElement('button');
         add.className = 'hold-ok add-acct';
         add.textContent = '+ add account';
@@ -907,20 +912,22 @@ function card(src, keep) {
       walkthrough(hint);
     } else if (hint) {
       // Not connected: the one-sentence how-to to set it up.
-      const setup = document.createElement('span');
-      setup.className = 'setup';
-      setup.append(hint.text + ' ');
-      if (hint.url) {
-        const a = document.createElement('a');
-        a.href = '#';
-        a.textContent = hint.link + ' ↗';
-        a.addEventListener('click', (e) => {
-          e.preventDefault();
-          hzPost('openExternal', { url: hint.url });
-        });
-        setup.appendChild(a);
+      if (hint.text || hint.url) {
+        const setup = document.createElement('span');
+        setup.className = 'setup';
+        if (hint.text) setup.append(hint.text + ' ');
+        if (hint.url) {
+          const a = document.createElement('a');
+          a.href = '#';
+          a.textContent = hint.link + ' ↗';
+          a.addEventListener('click', (e) => {
+            e.preventDefault();
+            hzPost('openExternal', { url: hint.url });
+          });
+          setup.appendChild(a);
+        }
+        tip.appendChild(setup);
       }
-      tip.appendChild(setup);
       // The cloud connectors are finished on the loopback connect page (paste
       // the token / app password there). Give it a door: the page opens from
       // the tokened link the connect server wrote, read natively — no repo, no
@@ -934,25 +941,12 @@ function card(src, keep) {
       // that genuinely paste something, but Google is not one of them any more.
       if (GOOGLE_AUTH.has(kindOf(src.id))) {
         const go = document.createElement('button');
-        go.className = 'hold-ok';
+        go.className = 'hold-ok google-auth';
         go.textContent = src.connected ? 'add another account ↗' : 'sign in with Google ↗';
         go.addEventListener('click', (e) => {
           e.stopPropagation();
-          go.disabled = true;
-          go.textContent = 'opening Google…';
-          hzPost('googleAuth', { flow: 'google' })
-            .then((r) => {
-              // A resolved call only means macOS accepted the system-browser
-              // launch. Consent may still be in progress; returning to this
-              // app triggers the focus refresh below, and the token file is
-              // the only source of truth for whether sign-in completed.
-              go.textContent = (r && r.opened) ? 'finish in your browser…' : 'sign in with Google ↗';
-              go.disabled = false;
-            })
-            .catch(() => {
-              go.disabled = false;
-              go.textContent = 'could not start — try the connect page';
-            });
+          if ((src.clients || []).length > 1) showClientChoice(row, src);
+          else startGoogleAuth(go, (src.clients || [{}])[0].name || 'default');
         });
         tip.appendChild(go);
       } else if (CONNECT_PAGE.has(kindOf(src.id))) {
@@ -966,6 +960,29 @@ function card(src, keep) {
         tip.appendChild(open);
       }
     }
+  };
+
+  // Keep the anchored card visible while the supported system-browser OAuth
+  // flow is in progress. The native reply means the browser opened; the token
+  // file and the focus refresh remain the source of truth for completion.
+  const startGoogleAuth = (button, client) => {
+    button.disabled = true;
+    button.textContent = 'opening Google…';
+    hzPost('googleAuth', { flow: 'google', client })
+      .then((r) => {
+        if (r && r.refused) {
+          showTileNotice(row, src, r.refused);
+          return;
+        }
+        button.disabled = false;
+        button.textContent = r && r.opened
+          ? 'finish in your browser…'
+          : 'could not start — try again';
+      })
+      .catch(() => {
+        button.disabled = false;
+        button.textContent = 'could not start — try again';
+      });
   };
 
   // The social bridges (Messenger/Instagram) log in INSIDE this popup —
@@ -1688,8 +1705,12 @@ function showClientChoice(row, src) {
       b.textContent = 'opening Google…';
       hzPost('googleAuth', { flow: 'google', client: c.name })
         .then((r) => {
-          if (r && r.refused) showTileNotice(row, src, r.refused);
-          refresh();
+          if (r && r.refused) {
+            showTileNotice(row, src, r.refused);
+            return;
+          }
+          b.disabled = false;
+          b.textContent = r && r.opened ? 'finish in your browser…' : `${c.label} ↗`;
         })
         .catch(() => { b.disabled = false; b.textContent = `${c.label} ↗`; });
     });
@@ -1779,11 +1800,9 @@ function showTileNotice(row, src, text) {
         openBridgeLogin();
         return;
       }
-      // GOOGLE TILE: the press IS the sign-in (owner, 2026-08-26 — "i thought
-      // its supposed to directly open the sign in page"). Same call the bridge
-      // tiles above make, for the same reason: the card had one control on it,
-      // so showing the card first is a press the owner has to spend to reach
-      // the press they meant.
+      // GOOGLE TILE: one press mounts the anchored status card and starts the
+      // supported browser flow. Mounting first means the app still explains
+      // what is in progress when focus returns from the browser.
       //
       // NOT the WhatsApp case struck through below. That was reverted because
       // connecting SILENTLY read as a false alarm — a dot turning green with
@@ -1805,23 +1824,13 @@ function showTileNotice(row, src, text) {
         return;
       }
       if (GOOGLE_AUTH.has(kindOf(src.id)) && !src.connected && src.action !== 'fda') {
-        hzPost('googleAuth', { flow: 'google', client: (src.clients || [{}])[0].name || 'default' })
-          .then((r) => {
-            // A REFUSAL IS NOT A CLOSED WINDOW. Google declines some sign-ins
-            // without ever redirecting — an account outside the org is the
-            // one the owner hit repeatedly — so the window shuts with nothing
-            // having happened and no reason given. Say which it was: trying
-            // the same account again cannot fix the first, and only the owner
-            // knows which account they meant.
-            // Shown in the hint strip this shelf already owns, rather than a
-            // toast it does not have: the strip is where every other thing
-            // this tile has to say already appears, and it persists until
-            // dismissed — which a refusal should, because the fix is to pick a
-            // different account and that takes a moment's thought.
-            if (r && r.refused) showTileNotice(row, src, r.refused);
-            refresh();
-          })
-          .catch(() => {});
+        row.classList.add('open');
+        renderTip();
+        hintHost.appendChild(tip);
+        startGoogleAuth(
+          tip.querySelector('.google-auth'),
+          (src.clients || [{}])[0].name || 'default'
+        );
         return;
       }
       // FDA tile (owner, 2026-08-25): the card had exactly one thing on it —
@@ -1894,7 +1903,7 @@ async function refresh() {
     // typed login input, and re-marked open. A strip whose source left the
     // payload closes with the tiles that could own it.
     const keep = hintHost.querySelector('.hint');
-    const shown = data.sources.filter((s) => !HIDDEN_CONNECTORS.has(kindOf(s.id)));
+    const shown = visibleSources(data.sources);
     const kept = keep && shown.some((s) => s.id === keep.dataset.id) ? keep : null;
     if (!kept) hintHost.replaceChildren(); // strips of old tiles, or of a source now gone
     grid.replaceChildren(...orderSources(shown)

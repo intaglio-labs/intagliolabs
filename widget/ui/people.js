@@ -117,7 +117,12 @@ function render(sources) {
   // Hide the non-people connectors. The three spatial anchors stay fixed;
   // remaining disconnected/errored sources lead the rest, stable within each
   // group. Connecting something must never rotate Messages away from the top.
-  const visible = sources.filter((s) => !HIDDEN_CONNECTORS.has(kindOf(s.id)));
+  const hasGoogleAccount = sources.some(
+    (s) => s.connected && typeof s.id === 'string' && s.id.startsWith('mail:')
+  );
+  const visible = sources.filter((s) =>
+    !HIDDEN_CONNECTORS.has(kindOf(s.id)) && !(hasGoogleAccount && s.id === 'mail')
+  );
   const nudgeImessage = onboardingAttention || !visible.some((s) => s.connected);
   const ordered = visible
     .map((s, i) => ({ s, i }))
