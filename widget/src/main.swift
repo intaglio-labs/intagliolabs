@@ -81,6 +81,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     bridge.delegate = self
     installEditMenu()
 
+    // BEFORE ANYTHING READS A SETTING. The bundle identifier moved from
+    // com.hazlie.widget to io.intaglio.widget, and UserDefaults is keyed on it,
+    // so a long-standing owner's onboarding state, remembered view, scale and
+    // window position all live in a domain this build cannot see. Carried over
+    // once, here, so the first thing the rename does is not greet them with
+    // setup they finished months ago. It cannot carry TCC -- see the file.
+    let carriedSettings = DefaultsMigration.runIfNeeded()
+    if carriedSettings > 0 {
+      NSLog("Intaglio Labs: carried \(carriedSettings) settings across the rename")
+    }
+
     // Self-contained install: on a fresh Mac the local backend isn't set up,
     // so stand it up from the bundle. On a machine that already has it (the
     // owner's repo-based setup, or a prior run) this only regenerates a
