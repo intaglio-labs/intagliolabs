@@ -19,6 +19,14 @@
 // scroller would clip.
 let hzTileTip = null;
 function hzShowTileTip(row, label) {
+  // NOT OVER ITS OWN OPEN CARD. The card names the source in its heading, so a
+  // floating label repeating it is redundant, and it is positioned over the
+  // shelf, which puts it on top of the card. `focus` shows this label as well as
+  // hover, and closing a login WINDOW returns focus to the tile that opened it —
+  // which is how a bare label ends up sitting on an already-open card without
+  // the pointer having moved. Same fix as connections.js.
+  const openCard = document.querySelector('.hint[data-id]');
+  if (openCard && openCard.dataset.id === row.dataset.id) return;
   if (!hzTileTip) {
     hzTileTip = document.createElement('div');
     hzTileTip.className = 'tile-tip';
@@ -56,6 +64,9 @@ function hzConnectorTile(src, { onOpen } = {}) {
   // double under the custom .tile-tip. aria-label names it for a screen reader
   // and draws nothing; hzShowTileTip owns the visible hover label.
   row.setAttribute('aria-label', src.label);
+  // Stamped so the hover label can tell whether THIS tile's card is already open
+  // — connections.js stamps the same pair for the same reason.
+  row.dataset.id = src.id;
 
   const mark = document.createElement('span');
   mark.className = 'mark';
@@ -184,6 +195,7 @@ const hzStaleRefreshed = new Set();
 function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
   const tip = document.createElement('div');
   tip.className = 'hint';
+  tip.dataset.id = src.id;
   const hint = HZ_HINT_FOR(src.id);
 
   // Non-bridge (and connected) connectors: why it matters, its status, the how.

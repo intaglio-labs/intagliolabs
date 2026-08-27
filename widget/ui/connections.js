@@ -16,6 +16,10 @@ new MutationObserver(() => {
   // stable state class instead: it animates only closed -> open, not content ->
   // different content while the pop-over remains open.
   hintHost.classList.toggle('open', open);
+  // A card opening under the cursor leaves a label already on screen with
+  // nothing to hide it: mouseleave never fires because the pointer has not
+  // moved. Same reason as the focus case above.
+  if (open) hideTileTip();
   if (open) {
     // A POP-OVER, not a side strip (owner, 2026-08-25): anchored to the tile
     // that was pressed — toggle() marks it .open just before appending — and
@@ -627,6 +631,20 @@ const NOTICES = {
 // scrolls with overflow hidden — a tooltip inside the scroller would clip.
 let tileTip = null;
 function showTileTip(row, label) {
+  // NOT OVER ITS OWN OPEN CARD.
+  //
+  // The card already names the source in its heading, so a floating label
+  // repeating it is redundant -- and it is positioned over the shelf, which puts
+  // it on top of the card. The way in is not hovering: `focus` shows this label
+  // too (for keyboard use, which is worth keeping), and closing the login WINDOW
+  // returns focus to the tile that opened it. So the owner clicked Messenger,
+  // opened the login, closed it without signing in, and got a bare "Messenger"
+  // label sitting on the Messenger card that was already open.
+  //
+  // Only this row's card is suppressed. Hovering a DIFFERENT tile while a card is
+  // open still names it, which is the case the label exists for.
+  const openCard = hintHost && hintHost.querySelector('.hint');
+  if (openCard && openCard.dataset.id === row.dataset.id) return;
   if (!tileTip) {
     tileTip = document.createElement('div');
     tileTip.className = 'tile-tip';
