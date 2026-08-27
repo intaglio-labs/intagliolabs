@@ -135,7 +135,54 @@ CREATE TABLE IF NOT EXISTS context_thread(
   thread_key TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS context_thread_key ON context_thread(thread_key);
+CREATE TABLE IF NOT EXISTS context_thread_mark(
+  one        INTEGER PRIMARY KEY CHECK (one = 1),
+  changed_at INTEGER NOT NULL,
+  context_id INTEGER NOT NULL
+);
 `;
+
+// HOW FAR THE INDEX HAS READ, as a PAIR.
+//
+// The first cut of this used `id > MAX(context_id)` -- which cannot see an
+// UPDATE. insertRows is SELECT-then-write: a row that changes keeps its id, so a
+// message whose timestamp, thread metadata or content_hash is rewritten leaves
+// every count identical and the watermark unmoved. The episode cut from the old
+// version then stands for good. That is not hypothetical on this project: the
+// history backfill was 405,952 rows of UPDATE, and map.mjs's own stamp comment
+// says so.
+//
+// store_changed_at is the column for it -- "when HERMES last changed this row"
+// -- and `context_changed(store_changed_at, id)` already indexes it. But it is
+// NOT unique and not monotonic: a connector pass stamps every row it delivers
+// with one value, and the distiller was measured losing 1,410 eligible rows
+// (49% of what its watermark had covered) across 18,775 rows sharing 149
+// distinct values. So the cursor is the same pair distill_run.through_id
+// settled on, compared lexicographically.
+function readMark(db) {
+  const row = db.prepare('SELECT changed_at, context_id FROM context_thread_mark WHERE one = 1').get();
+  return row ? { changedAt: Number(row.changed_at), id: Number(row.context_id) } : null;
+}
+
+function writeMark(db, mark) {
+  db.prepare(
+    'INSERT INTO context_thread_mark(one, changed_at, context_id) VALUES (1, ?, ?) ' +
+      'ON CONFLICT(one) DO UPDATE SET changed_at = excluded.changed_at, context_id = excluded.context_id'
+  ).run(mark.changedAt, mark.id);
+}
+
+/// The highest (store_changed_at, id) among the rows the index covers. NULL
+/// store_changed_at reads as 0 -- the schema backfills it, and treating an
+/// unstamped row as oldest means it is re-read rather than skipped.
+function highestMark(db, holes) {
+  const row = db
+    .prepare(
+      'SELECT COALESCE(store_changed_at, 0) AS changed_at, id FROM context ' +
+        `WHERE source IN (${holes}) ORDER BY COALESCE(store_changed_at, 0) DESC, id DESC LIMIT 1`
+    )
+    .get(...EPISODE_SOURCES);
+  return row ? { changedAt: Number(row.changed_at), id: Number(row.id) } : { changedAt: 0, id: 0 };
+}
 
 // What the index currently holds, for the passes that did not build all of it.
 function indexTotals(db, now) {
@@ -158,25 +205,43 @@ function ensureThreadIndex(db) {
 
 // The rows the index has not seen yet, keyed and recorded. Returns the thread
 // keys they touch -- the set of conversations that need re-cutting.
-function indexNewRows(db, holes) {
-  const watermark = Number(
-    db.prepare('SELECT COALESCE(MAX(context_id), 0) AS m FROM context_thread').get().m
-  );
+function indexNewRows(db, holes, mark0) {
+  // STRICTLY GREATER, on the PAIR. The tie-group hazard that made
+  // distill_run.through_id a pair was a CAPPED pass: a LIMIT stopped it partway
+  // through a group of rows sharing one store_changed_at, and the next pass
+  // resumed past the rest. This scan has no cap -- it reads every row beyond the
+  // mark in one go -- so a whole tie group always arrives together and strict
+  // comparison loses nothing. Inclusive comparison instead re-read the boundary
+  // row on every pass, which made `touched` never empty and defeated the
+  // nothing-new path this exists to reach.
   const fresh = db
     .prepare(
-      'SELECT id, source, meta, entity_id FROM context ' +
-        `WHERE source IN (${holes}) AND id > ? ORDER BY id`
+      'SELECT id, source, meta, entity_id, COALESCE(store_changed_at, 0) AS changed_at FROM context ' +
+        `WHERE source IN (${holes}) ` +
+        '  AND (COALESCE(store_changed_at, 0) > ? ' +
+        '       OR (COALESCE(store_changed_at, 0) = ? AND id > ?)) ' +
+        'ORDER BY COALESCE(store_changed_at, 0), id'
     )
-    .all(...EPISODE_SOURCES, watermark);
+    .all(...EPISODE_SOURCES, mark0.changedAt, mark0.changedAt, mark0.id);
   const touched = new Set();
   const ins = db.prepare('INSERT OR REPLACE INTO context_thread(context_id, thread_key) VALUES (?, ?)');
+  const prev = db.prepare('SELECT thread_key FROM context_thread WHERE context_id = ?');
+  let mark = { changedAt: mark0.changedAt, id: mark0.id };
   for (const row of fresh) {
     const key = threadKeyFor(row);
+    mark = { changedAt: Number(row.changed_at), id: Number(row.id) };
     if (!key) continue;
+    // BOTH SIDES OF A MOVE. An updated row can land in a different conversation
+    // than it was in -- its chat metadata is part of what an update rewrites --
+    // and the thread it LEFT needs re-cutting just as much as the one it joined.
+    // The old key is whatever the index held before this overwrites it, so it
+    // has to be read first.
+    const before = prev.get(row.id)?.thread_key;
+    if (before && before !== key) touched.add(before);
     ins.run(row.id, key);
     touched.add(key);
   }
-  return { watermark, touched, seen: fresh.length };
+  return { touched, seen: fresh.length, mark };
 }
 
 // Is the index still a faithful picture of the corpus? Rows only ever arrive in
@@ -217,9 +282,13 @@ export function rebuildEpisodes(
   // out from under it -- it falls through to the full pass rather than guessing.
   ensureThreadIndex(db);
   const whole = threadIndexIsWhole(db, holes);
-  let indexWhole = whole.whole && whole.indexed > 0;
-  if (!full && whole.indexed > 0) {
-    const { touched } = indexNewRows(db, holes);
+  const mark = readMark(db);
+  // No mark means an index built before this cursor existed: it cannot say what
+  // it has read, so it is rebuilt rather than trusted.
+  let indexWhole = whole.whole && whole.indexed > 0 && mark !== null;
+  if (!full && whole.indexed > 0 && mark !== null) {
+    const { touched, mark: advanced } = indexNewRows(db, holes, mark);
+    writeMark(db, advanced);
     const after = threadIndexIsWhole(db, holes);
     if (after.whole) {
       if (touched.size === 0) {
@@ -306,6 +375,10 @@ export function rebuildEpisodes(
         if (key) insThreadFast.run(row.id, key);
       }
       db.exec('CREATE INDEX IF NOT EXISTS context_thread_key ON context_thread(thread_key)');
+      // The mark belongs to the same transaction as the rows it describes: an
+      // index written without one, or with one that outran it, is worse than no
+      // index at all.
+      writeMark(db, highestMark(db, holes));
       db.exec('COMMIT');
     } catch (error) {
       db.exec('ROLLBACK');
