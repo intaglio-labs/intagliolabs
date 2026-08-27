@@ -300,6 +300,47 @@ export function candidatePairs(people, { decided = new Set(), limit = 60 } = {})
     }
   }
 
+  // Signal 3: an address that SPELLS another person's name. The case signals
+  // 1 and 2 both miss (owner's own list, 2026-08-25): "Mika Tanaka" and the
+  // separate row "mika@mikatanaka.com". The email-keyed person has no real
+  // display name, so nameParts yields nothing and it is in no surname bucket;
+  // its local part is a bare first name, which the full-name shape rule
+  // rightly refuses to join on. But the DOMAIN is the person's first+last
+  // concatenated — a personal domain is a signature, not a coincidence. Also
+  // matches the local-part form (mikatanaka@gmail.com).
+  //
+  // Guarded the way every signal here is: first AND last name required, six
+  // letters concatenated or more (short concatenations collide), and it only
+  // ever proposes a question — the "no auto-merge on a candidate" rule at the
+  // top of this file is untouched.
+  const byFullConcat = new Map(); // 'mikatanaka' -> [keys with that name]
+  for (const [key, { parts }] of meta) {
+    if (!parts.first || !parts.last) continue;
+    const concat = `${parts.first}${parts.last}`;
+    if (concat.length < 6) continue;
+    if (!byFullConcat.has(concat)) byFullConcat.set(concat, []);
+    byFullConcat.get(concat).push(key);
+  }
+  for (const [key, { person }] of meta) {
+    for (const id of person.identifiers ?? []) {
+      const s = String(id ?? '').toLowerCase();
+      const at = s.indexOf('@');
+      if (at <= 0 || s.indexOf('@', at + 1) !== -1) continue;
+      const local = s.slice(0, at).replace(/[._-]/g, '');
+      // The registrable label only: "mail.mikatanaka.com" and
+      // "mikatanaka.co.uk" both spell the name in their second-from-TLD
+      // label. Crude on purpose — a wrong read costs one bad QUESTION.
+      const hostParts = s.slice(at + 1).split('.');
+      const domainRoot = (hostParts.length >= 2 ? hostParts[hostParts.length - 2] : hostParts[0] || '')
+        .replace(/[._-]/g, '');
+      for (const hit of [byFullConcat.get(local), byFullConcat.get(domainRoot)]) {
+        for (const other of hit ?? []) {
+          consider(key, other, 3, 'the address spells this name');
+        }
+      }
+    }
+  }
+
   const all = [...found.values()].sort(
     (x, y) => y.score - x.score || pairId(x.a, x.b).localeCompare(pairId(y.a, y.b))
   );

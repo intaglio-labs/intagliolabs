@@ -68,6 +68,38 @@ export function threadKeyFor(row) {
   return key ? `chat:${row.source}:${key}` : `solo:${row.id}`;
 }
 
+// A STAND-IN CONVERSATION KEY for a row that has no episode.
+//
+// Two reasons a row lacks one, and neither is rare. makeEpisode drops any run
+// the owner never spoke in -- correct for distillation, where nothing quotable
+// means nothing citable, and it is what bounds the context widening -- but that
+// is 21,634 rows on the live store now that history has backfilled old threads
+// and lurked-in group chats. Mail and LinkedIn have no thread to cut at all.
+//
+// Anything COUNTING conversations still has to place those rows, and the obvious
+// key (the row itself) is the wrong one: it turns every unindexed message into
+// its own conversation, which is precisely the message-counting the episode
+// index exists to replace. This approximates with the thread plus the calendar
+// day. The real rule is a 60-minute gap inside a thread and a day is coarser, so
+// this UNDERCOUNTS, which is the safe direction -- the only thing lost is two
+// separate chats with the same person on the same day.
+//
+// NOT a substitute for an episode: it never gates what a model may read, and
+// nothing is distilled from it. It is for arithmetic only.
+export function approximateConversationKey(row, meta, ts) {
+  const m = meta ?? {};
+  const thread =
+    m.chat_guid ??
+    m.chat_handle ??
+    m.handle ??
+    (Array.isArray(m.from) ? m.from[0] : null) ??
+    row?.entity_id ??
+    row?.source ??
+    'unknown';
+  const d = new Date(ts);
+  return `t:${row?.source ?? '?'}:${thread}|${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+}
+
 // The owner wrote it, so it may be quoted. Everything else is context.
 //
 // Deliberately the same predicate select.mjs uses to decide what a model may

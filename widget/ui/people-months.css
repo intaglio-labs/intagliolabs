@@ -13,13 +13,48 @@ body.plist .pm-tabs {
   padding: 8px 14px 0;
   border-bottom: 1px solid rgba(234, 234, 234, 0.12);
   overflow-x: auto;
+  /* overflow-y MUST be explicit — same trap palette.css documents on
+     .conn-main, from the other side: overflow-x: auto alone promotes the
+     unset overflow-y from visible to auto, and anything laid out past the
+     strip's box (the globe tab's hover tooltip was, 25px of it) makes the
+     row vertically scrollable. The strip scrolls SIDEWAYS only. */
+  overflow-y: hidden;
   scrollbar-width: none;
   flex: 0 0 auto;
 }
 body.plist .pm-tabs::-webkit-scrollbar { display: none; }
+/* THE CLIPPED EDGE HAS TO READ AS SCROLLED, NOT BROKEN. Fifteen years need
+   ~951px against 490px of strip, so a tab is always half-cut at one end — and a
+   year sliced mid-glyph ("919") looks like a rendering fault rather than a
+   scroll position. Two changes make it legible:
+
+   snapping, so the strip comes to rest on a tab boundary instead of through the
+   middle of one. `proximity` rather than `mandatory` — mandatory fights a
+   deliberate drag halfway along the strip.
+
+   and a mask that fades both ends, so whatever is cut is visibly fading out.
+   Symmetric, because the strip scrolls both ways; the fade is 18px, about a
+   third of a tab, which is enough to read as intent and not enough to hide a
+   year. */
+body.plist .pm-tabs {
+  scroll-snap-type: x proximity;
+  -webkit-mask-image: linear-gradient(
+    to right, transparent 0, #000 18px, #000 calc(100% - 18px), transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right, transparent 0, #000 18px, #000 calc(100% - 18px), transparent 100%
+  );
+}
+body.plist .pm-tab { scroll-snap-align: start; }
+/* The globe is stuck to the right edge, so it must never be the thing that
+   fades — it is the one control that has to stay legible at all times. */
+body.plist .pm-tabs .pm-tab-globe { scroll-snap-align: end; }
 body.plist .pm-tab {
   flex: 0 0 auto;
-  padding: 5px 12px 6px;
+  /* 9px rather than 12: a year is four fixed-width glyphs, so the padding is
+     most of a tab's width. This fits ~10 of 15 years instead of ~8, which is
+     the difference between scrolling for a recent year and not. */
+  padding: 5px 9px 6px;
   border: 1px solid rgba(234, 234, 234, 0.10);
   border-bottom: none;
   border-radius: 8px 8px 0 0;
@@ -32,12 +67,21 @@ body.plist .pm-tab {
 }
 body.plist .pm-tab:hover { color: var(--fg); filter: brightness(1.15); }
 body.plist .pm-tab.active {
-  margin-bottom: -1px;
+  /* The "punches through the strip line" overlap is now a BOX-SHADOW: a 1px
+     drop of the panel's background painted over the border segment directly
+     beneath the tab. It was margin-bottom: -1px, then translateY(1px), and
+     both left the strip 1px scrollable — a negative margin adds a real pixel
+     of layout height, and a transformed box extends the scrollable overflow
+     area too (measured, both). Shadows never enter overflow. */
+  box-shadow: 0 1px 0 rgba(16, 16, 15, 0.92);
   border-color: rgba(197, 165, 109, 0.35);
-  border-bottom: 1px solid rgba(16, 16, 15, 0.92);
   background: rgba(234, 234, 234, 0.07);
   color: var(--hazelnut-light);
 }
+/* (.pm-tab.current was here 2026-08-25, same day: it marked the year the
+   constellation was drawing while the globe held `active`. The sky went
+   all-years hours later, no single year is the answer there any more, and the
+   globe tab itself carries `active` for the whole all-years surface.) */
 
 /* The instant answer to a tab click while the server rebuilds the year. */
 body.plist .pm-loading {
@@ -92,7 +136,8 @@ body.plist .pm-chip-row { margin-top: 4px; }
    unreliable in a borderless non-activating panel. Below the icon, so the
    list's own top edge cannot clip it. */
 body.plist .pm-src-ic { position: relative; }
-body.plist .pm-src-ic::after {
+body.plist .pm-src-ic::after,
+body.plist .pm-face[data-tip]::after {
   content: attr(data-tip);
   position: absolute;
   left: 50%; top: calc(100% + 5px);
@@ -109,7 +154,280 @@ body.plist .pm-src-ic::after {
   transition: opacity 0.12s;
   z-index: 5;
 }
-body.plist .pm-src-ic:hover::after { opacity: 1; }
+body.plist .pm-src-ic:hover::after,
+body.plist .pm-face[data-tip]:hover::after { opacity: 1; }
+/* (The globe tab had this tooltip too, until 2026-08-25 the same day: its
+   bubble laid out 25px past the strip's box, and with overflow-y promoted to
+   auto by overflow-x: auto that made the whole tab row vertically scrollable.
+   The faces keep theirs — the sky stage is tall enough to absorb it, and
+   initials without a name are a riddle.) */
+
+/* The globe tab: an icon where the others are a year, so it reads as a
+   different KIND of thing on the same strip. */
+body.plist .pm-tab-globe {
+  display: flex;
+  align-items: center;
+  padding: 5px 10px 6px;
+}
+body.plist .pm-tab-globe svg { display: block; width: 14px; height: 14px; }
+/* The sky has no flow to put a loading line in, so centre it like the empty
+   state rather than let it stick to the top-left corner. */
+body.plist .pm-sky .pm-loading {
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 0;
+}
+
+/* ---- the year's highlight cards (2026-08-25) ----
+   One card per claim the year actually earns. The server decides which exist
+   (people/highlights.mjs); this file only knows how to draw one. They sit
+   between the tabs and the list, scrolling sideways rather than wrapping,
+   because a year that earns five should not push the list off the panel. */
+body.plist .pm-cards {
+  display: flex;
+  gap: 8px;
+  padding: 12px 14px 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex: 0 0 auto;
+}
+body.plist .pm-cards::-webkit-scrollbar { display: none; }
+body.plist .pm-card {
+  flex: 0 0 auto;
+  width: 168px;
+  box-sizing: border-box;
+  padding: 12px;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  background: rgba(234, 234, 234, 0.04);
+  border: 1px solid rgba(234, 234, 234, 0.10);
+}
+/* Person of the year is always first and always the loudest — it is the only
+   card that is a plain maximum, so it is the one that is nearly always there
+   and the one the eye should find first. */
+body.plist .pm-card.lead {
+  background: linear-gradient(160deg, rgba(242, 232, 212, 0.14) 0%,
+              rgba(197, 165, 109, 0.10) 55%, rgba(51, 255, 102, 0.08) 100%);
+  border-color: rgba(197, 165, 109, 0.30);
+}
+body.plist .pm-card-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 9px;
+  letter-spacing: 0.13em;
+  color: var(--muted);
+  white-space: nowrap;
+  text-transform: uppercase;
+}
+body.plist .pm-card-eyebrow svg { flex: 0 0 auto; width: 13px; height: 13px; display: block; }
+body.plist .pm-card-who { display: flex; align-items: center; gap: 7px; min-width: 0; }
+body.plist .pm-card-face {
+  flex: 0 0 auto;
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 60%, #a8854c 100%);
+  box-shadow: inset -2px -2px 5px rgba(0, 0, 0, 0.18),
+              inset 2px 2px 4px rgba(255, 255, 255, 0.35);
+  color: #141412;
+  font-size: 9px;
+  font-weight: 600;
+}
+body.plist .pm-card.lead .pm-card-face {
+  box-shadow: inset -2px -2px 5px rgba(0, 0, 0, 0.18),
+              inset 2px 2px 4px rgba(255, 255, 255, 0.35),
+              0 0 14px rgba(51, 255, 102, 0.35);
+}
+body.plist .pm-card-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+body.plist .pm-card-line {
+  font-size: 10.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+/* ---- the constellation (the globe tab, 2026-08-25) ----
+   The same year's people, grouped by TOPIC instead of listed by engagement:
+   one dashed bubble per topic, the people in it as initial discs, sized by
+   that year's engagement. The list answers "who"; this answers "about what".
+
+   EVERY POSITION AND SIZE HERE IS SET FROM JAVASCRIPT through element.style,
+   never a style attribute — this page ships style-src 'self' with no
+   'unsafe-inline', so a generated style="" is parsed, dropped, and silently
+   does nothing. widget/test/csp-inline-style.test.mjs is the tripwire. What
+   lives in this file is only what is the SAME for every star. */
+body.plist .pm-sky {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 380px;
+  overflow: hidden;
+}
+/* The three dashed orbits. Decoration, not data: they do not encode distance
+   or count, they give the field a centre to be arranged around. */
+body.plist .pm-orbit {
+  position: absolute;
+  left: 50%; top: 51%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 1px dashed rgba(197, 165, 109, 0.22);
+  pointer-events: none;
+}
+/* Background specks. Deterministic per year (seeded PRNG in the page), so a
+   re-render or a search keystroke does not reshuffle the sky under the eye. */
+body.plist .pm-speck {
+  position: absolute;
+  border-radius: 50%;
+  background: var(--hazelnut-light);
+  pointer-events: none;
+}
+/* The owner, at the centre — the one thing every topic is a relationship to.
+   Same blob and breathing as the widget's own orb so it reads as the same
+   creature, with the brand gradient running cream -> hazelnut -> green. */
+body.plist .pm-core {
+  position: absolute;
+  left: 50%; top: 51%;
+  transform: translate(-50%, -50%);
+  width: 54px; height: 54px;
+  border-radius: 49% 51% 52% 48% / 51% 49% 51% 49%;
+  background: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 45%, #33ff66 100%);
+  box-shadow: 0 0 34px rgba(51, 255, 102, 0.25),
+              inset -4px -4px 10px rgba(0, 0, 0, 0.18),
+              inset 4px 4px 9px rgba(255, 255, 255, 0.30);
+  animation: orb-breathe 7s ease-in-out infinite;
+  pointer-events: none;
+}
+/* One topic. Width/height/left/top come from the page. Clicking it opens that
+   topic as a list, so it has to say it is a control — the dashed ring alone
+   reads as decoration. */
+body.plist .pm-cluster {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 1.5px dashed rgba(197, 165, 109, 0.28);
+  background: radial-gradient(circle at 50% 40%, rgba(197, 165, 109, 0.07) 0%, transparent 70%);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 7px;
+  cursor: pointer;
+  transition: border-color 0.14s, background 0.14s;
+}
+body.plist .pm-cluster:hover {
+  border-color: rgba(197, 165, 109, 0.6);
+  background: radial-gradient(circle at 50% 40%, rgba(197, 165, 109, 0.14) 0%, transparent 70%);
+}
+body.plist .pm-cluster:hover .pm-cluster-label { color: var(--hazelnut-light); }
+
+/* The active-topic chip above the list. */
+body.plist .pm-filter {
+  display: flex;
+  align-items: center;
+  padding: 8px 14px 0;
+  flex: 0 0 auto;
+}
+body.plist .pm-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(197, 165, 109, 0.45);
+  background: rgba(197, 165, 109, 0.12);
+  color: var(--hazelnut-light);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+}
+body.plist .pm-filter-chip:hover { filter: brightness(1.2); }
+body.plist .pm-filter-x {
+  font-size: 13px;
+  line-height: 1;
+  letter-spacing: normal;
+  color: var(--muted);
+}
+body.plist .pm-filter-chip:hover .pm-filter-x { color: var(--fg); }
+
+@media (prefers-reduced-motion: reduce) {
+  body.plist .pm-cluster { transition: none; }
+}
+/* 78%, not 84%: the discs wrap to a second row, and a circle is narrower there
+   than across its middle. At 84% the trailing "+N" chip sat on the dashed
+   border and looked like it had fallen out of the bubble. */
+body.plist .pm-faces {
+  display: flex; flex-wrap: wrap;
+  align-items: center; justify-content: center;
+  gap: 4px;
+  max-width: 78%;
+}
+/* A person: their initials on a hazelnut disc, lit from the upper left so a
+   crowd of them reads as beads rather than flat dots. Diameter is set from
+   the page — it carries that year's engagement. */
+body.plist .pm-face {
+  position: relative;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 60%, #a8854c 100%);
+  box-shadow: inset -2px -2px 5px rgba(0, 0, 0, 0.18),
+              inset 2px 2px 4px rgba(255, 255, 255, 0.35);
+  color: #141412;
+  font-weight: 600;
+  cursor: default;
+}
+/* The people this bubble could not fit. Hollow on purpose: it is a count, not
+   a person, and must never be mistaken for one. */
+body.plist .pm-face-more {
+  background: none;
+  box-shadow: none;
+  border: 1px dashed rgba(234, 234, 234, 0.25);
+  color: var(--muted);
+}
+body.plist .pm-cluster-label {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  text-align: center;
+  white-space: nowrap;
+}
+/* The biggest topic of the year gets the hazelnut, so the eye has somewhere
+   to land first. */
+body.plist .pm-cluster.lead .pm-cluster-label { color: var(--hazelnut-light); }
+body.plist .pm-cluster.lead { border-color: rgba(197, 165, 109, 0.45); }
+/* Said plainly rather than drawn: a constellation of nothing is just an empty
+   box, and the reason it is empty is the useful part. */
+body.plist .pm-sky-empty {
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 80%;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+/* The count caveat, when the year is bigger than the server's row cap: the
+   bubbles describe the people that were loaded, not everyone. */
+body.plist .pm-sky-note {
+  position: absolute;
+  left: 0; right: 0; bottom: 6px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 10px;
+  opacity: 0.75;
+}
+@media (prefers-reduced-motion: reduce) {
+  body.plist .pm-core { animation: none; }
+}
 
 /* The model-written year summary in the expanded row — visually set apart
    from the counted lines below it, and labeled, because unlike them it is
@@ -117,3 +435,201 @@ body.plist .pm-src-ic:hover::after { opacity: 1; }
 body.plist .pm-sum { color: var(--secondary); }
 body.plist .pm-sum .pm-sum-tag { color: var(--muted); font-size: 10px; }
 body.plist .pm-sum-wait { animation: pm-pulse 1.2s ease-in-out infinite; }
+
+/* The year a SEARCH result was found in. Only drawn when it differs from the
+   open tab, because a cross-year hit without its year is a message count from
+   a year you are not looking at. Reads as a tab, not as another chip: the
+   chips below the name are topics, and confusing the two would be worse than
+   having no badge. */
+body.plist .pm-yr-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.03em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--hazelnut-light);
+  background: color-mix(in srgb, var(--hazelnut-light) 14%, transparent);
+  white-space: nowrap;
+}
+
+/* WHY a search result is in the list — "12 msgs · 4 conversations" for a person
+   who matched on what you talked about, or a short phrase for a handle or topic
+   match. Quiet: it explains the row, it is not the row. Only ever drawn while
+   searching. */
+body.plist .pm-why {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+/* THE LINE THAT PUT THIS PERSON IN THE LIST — one bounded excerpt of the
+   message that matched, shown only for a content match while searching. Set in
+   italic against a quiet rule so it reads as somebody's words rather than as
+   another chip; the chips below it are counted, this is quoted, and the two
+   must not look alike. */
+body.plist .pm-quote {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 4px;
+  padding-left: 7px;
+  border-left: 2px solid rgba(197, 165, 109, 0.35);
+  min-width: 0;
+}
+body.plist .pm-quote-who {
+  flex: 0 0 auto;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  opacity: 0.75;
+}
+body.plist .pm-quote-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  font-style: italic;
+  line-height: 1.35;
+  color: var(--fg);
+  opacity: 0.9;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* "only in group chats" — a person who has never sent the owner a direct
+   message. Deliberately not styled like a topic chip: the chips below a name
+   describe a conversation, and this says there wasn't one. Muted rather than
+   alarming; it is a fact about the relationship, not a warning. */
+body.plist .pm-room-badge {
+  flex: 0 0 auto;
+  position: relative;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--muted);
+  border: 1px solid color-mix(in srgb, var(--muted) 45%, transparent);
+  white-space: nowrap;
+}
+
+/* Room volume, next to the direct count and quieter than it. The distinction is
+   the point: the first number is a conversation, the second is a room. */
+body.plist .pm-room-msgs {
+  opacity: 0.6;
+  font-style: italic;
+}
+
+/* Belt and braces on `hidden`. `.pm-cards` and `.pm-filter` set `display: flex`
+   in an author-origin rule, which beats the user-agent `[hidden]` rule — so
+   setting el.hidden = true left the highlight cards on screen during a search
+   and left the topic chip clickable over results it was not filtering. Same
+   one-liner palette.css already uses for .ob-prog. */
+body.plist .pm-cards[hidden],
+body.plist .pm-filter[hidden] { display: none; }
+
+/* THE RECENCY SEGMENTS, globe only. Its own row rather than sharing .pm-filter,
+   because renderFilter replaceChildren()s that node and hides it whenever the
+   view is not a list — which is exactly when this control matters. Reads as a
+   tab strip (a view you are standing in) rather than as a chip (a thing you can
+   dismiss), because "everyone" is a state and not the absence of one. */
+body.plist .pm-recency {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Room above as well as below. Flush against the tab strip's border the row
+     read as an overflow of the tabs rather than its own control. */
+  padding: 7px 12px 8px;
+  flex: 0 0 auto;
+}
+body.plist .pm-recency[hidden] { display: none; }
+
+/* THE GROOVE. What makes three buttons read as one control: a single recessed
+   track they all sit in, so the selected one is raised OUT of a surface rather
+   than being the only one with a box. */
+body.plist .pm-rec-track {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: rgba(234, 234, 234, 0.035);
+  border: 1px solid rgba(234, 234, 234, 0.07);
+}
+body.plist .pm-rec {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  padding: 3px 9px;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  transition: color 120ms ease, background-color 120ms ease;
+}
+/* The count is evidence, not part of the name. Tabular so the three numbers
+   do not jitter the track's width as the year changes under them. */
+body.plist .pm-rec-n {
+  font-size: 9px;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+body.plist .pm-rec:hover { color: var(--secondary); }
+body.plist .pm-rec.active {
+  color: var(--hazelnut-light);
+  background: rgba(234, 234, 234, 0.09);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+body.plist .pm-rec.active .pm-rec-n { opacity: 0.75; }
+body.plist .pm-rec:focus-visible {
+  outline: 1px solid var(--hazelnut-light);
+  outline-offset: 1px;
+}
+
+/* The globe sits in the strip like any other tab, immediately after the newest
+   year. It was stuck to the right edge for a while — reachable, but floating
+   apart from the years and reading as a separate right-aligned control rather
+   than the last thing in the row. The strip opens scrolled to its right-hand
+   end, which puts the newest year and the globe together in view without
+   pinning either. */
+
+/* HOW OLD THE ANSWER IS, and the way to ask for a newer one. Pushed to the far
+   end of the row so it never competes with the recency segments — it is a
+   footnote, not a control you reach for. It only becomes prominent when the
+   answer is actually behind. */
+body.plist .pm-fresh {
+  appearance: none;
+  margin-left: auto;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 5px;
+  padding: 2px 6px;
+  font: inherit;
+  font-size: 9px;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  opacity: 0.7;
+  cursor: pointer;
+  white-space: nowrap;
+}
+body.plist .pm-fresh:hover:not(:disabled) { opacity: 1; color: var(--fg); }
+body.plist .pm-fresh.stale {
+  opacity: 1;
+  color: var(--hazelnut-light);
+  border-color: color-mix(in srgb, var(--hazelnut-light) 28%, transparent);
+}
+body.plist .pm-fresh:disabled { cursor: default; opacity: 0.55; }
+body.plist .pm-fresh:focus-visible { outline: 1px solid var(--hazelnut-light); outline-offset: 1px; }

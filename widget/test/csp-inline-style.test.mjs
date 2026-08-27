@@ -8,6 +8,17 @@
 // rgba(0,0,0,0). Verified in a real engine: the styled dot and an unstyled one
 // had identical computed backgrounds while the attribute sat in the DOM.
 //
+// THAT INSTANCE IS GONE. people-sky.js and its warmth dot were yeeted
+// 2026-08-24 when the timeline (people-months) absorbed the list's job; rows
+// carry a message count and source glyphs now, and nothing renders .pl-dot.
+// A second test used to pin that dot specifically and was left reading the
+// deleted file, so it failed with ENOENT on a clean checkout — red for
+// everyone, for a feature that no longer exists. Deleted rather than
+// repointed: no current page paints a dot, so any file it was aimed at would
+// have passed by accident and pinned nothing. The class check below is the
+// part that was always the point, and it still scans every page. Its .pl-dot
+// rule and six other orphaned selectors went from people-sky.css with it.
+//
 // The failure is invisible by construction. CSP writes one line to a console,
 // inside a native app, with no devtools — so nothing surfaces, nothing throws,
 // and the feature is just quietly absent. That is the class this test closes,
@@ -81,20 +92,5 @@ test('no page generates a style attribute its CSP would block', () => {
     `a style attribute is generated on a page whose CSP blocks inline styles, so ` +
       `it will be silently dropped. Assign through element.style after insertion ` +
       `instead — CSP gates the parsed attribute, not the CSSOM:\n  ${offences.join('\n  ')}`
-  );
-});
-
-test('the warmth dot gets its colour from somewhere', () => {
-  // The specific regression, pinned. The dot has no background in CSS, so if
-  // the script stops assigning one the feature is gone again — and the only
-  // symptom is a colourless dot.
-  const css = readFileSync(join(UI, 'people-sky.css'), 'utf8');
-  const js = readFileSync(join(UI, 'people-sky.js'), 'utf8');
-  const cssPaintsIt = /\.pl-dot\b[^}]*background/u.test(css);
-  const jsPaintsIt = /\.style\.background\s*=/u.test(js);
-  assert.ok(
-    cssPaintsIt || jsPaintsIt,
-    'nothing gives .pl-dot a background — neither people-sky.css nor a CSSOM ' +
-      'assignment in people-sky.js. Every warmth dot will render transparent.'
   );
 });

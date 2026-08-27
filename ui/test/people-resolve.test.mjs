@@ -190,3 +190,58 @@ test('identical first+last but unmerged is a weaker (score 2) candidate', () => 
   assert.equal(pairs[0].score, 2);
   assert.match(pairs[0].reason, /same first and last/);
 });
+
+// ---------------- signal 3: the address spells the name ----------------
+// The case signals 1 and 2 both miss, straight off the owner's list: a person
+// keyed by a bare email whose DOMAIN is another person's first+last. The
+// email-keyed row has no real name (no surname bucket) and a bare-first-name
+// local part (rightly refused by the full-name shape rule), so before this
+// signal the pair was invisible.
+
+test('a personal domain spelling the name proposes that pair', () => {
+  const { pairs } = candidatePairs([
+    person('name:mika tanaka', 'Mika Tanaka'),
+    person('id:mika@mikatanaka.com', 'mika@mikatanaka.com',
+      { names: ['mika@mikatanaka.com'], identifiers: ['mika@mikatanaka.com'] }),
+  ]);
+  assert.equal(pairs.length, 1);
+  assert.equal(pairs[0].reason, 'the address spells this name');
+  assert.equal(pairs[0].score, 3);
+});
+
+test('a first+last local-part on a freemail domain proposes it too', () => {
+  const { pairs } = candidatePairs([
+    person('name:mika tanaka', 'Mika Tanaka'),
+    person('id:mikatanaka@gmail.com', 'mikatanaka@gmail.com',
+      { names: ['mikatanaka@gmail.com'], identifiers: ['mikatanaka@gmail.com'] }),
+  ]);
+  assert.equal(pairs.length, 1);
+  assert.equal(pairs[0].reason, 'the address spells this name');
+});
+
+test('short concatenations and unrelated domains propose nothing', () => {
+  // "Bo Li" concatenates to four letters — collision territory, refused.
+  const { pairs: short } = candidatePairs([
+    person('name:bo li', 'Bo Li'),
+    person('id:boli@gmail.com', 'boli@gmail.com',
+      { names: ['boli@gmail.com'], identifiers: ['boli@gmail.com'] }),
+  ]);
+  assert.equal(short.length, 0);
+  // A company domain that spells nobody's name stays a stranger.
+  const { pairs: none } = candidatePairs([
+    person('name:mika tanaka', 'Mika Tanaka'),
+    person('id:orders@acmestore.com', 'orders@acmestore.com',
+      { names: ['orders@acmestore.com'], identifiers: ['orders@acmestore.com'] }),
+  ]);
+  assert.equal(none.length, 0);
+});
+
+test('signal 3 respects prior decisions like every other signal', () => {
+  const a = 'name:mika tanaka', b = 'id:mika@mikatanaka.com';
+  const { pairs } = candidatePairs([
+    person(a, 'Mika Tanaka'),
+    person(b, 'mika@mikatanaka.com',
+      { names: ['mika@mikatanaka.com'], identifiers: ['mika@mikatanaka.com'] }),
+  ], { decided: new Set([pairId(a, b)]) });
+  assert.equal(pairs.length, 0);
+});

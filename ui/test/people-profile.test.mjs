@@ -64,8 +64,8 @@ test('the graph emits a month-bucketed timeline and the owner-side clock', () =>
   const spine = spineDb([['+18085550100', 'Sam Lee', 'phone'], ['sam@work.com', 'Sam Lee', 'email']]);
   const sam = buildGraph(ctx, spine, { now: NOW }).find((p) => p.name === 'Sam Lee');
   assert.deepEqual(sam.timeline, [
-    { ym: '2026-03', sent: 0, received: 2, met: 0 },
-    { ym: '2026-04', sent: 1, received: 0, met: 0 },
+    { ym: '2026-03', sent: 0, received: 2, met: 0, room: 0 },
+    { ym: '2026-04', sent: 1, received: 0, met: 0, room: 0 },
   ]);
   assert.equal(sam.lastFromOwner, apr, 'owner-side clock from the owner reply');
   assert.equal(sam.lastFromThem, mar + DAY);
@@ -75,10 +75,10 @@ test('peakEra finds the densest run and trims empty edge months', () => {
   // 2019: 3 quiet months, then a hot spring, then years of silence, then one
   // stray message — the peak must be the spring, not diluted by the stray.
   const timeline = [
-    { ym: '2019-03', sent: 20, received: 25, met: 0 },
-    { ym: '2019-04', sent: 30, received: 35, met: 0 },
-    { ym: '2019-05', sent: 10, received: 15, met: 0 },
-    { ym: '2023-06', sent: 1, received: 0, met: 0 },
+    { ym: '2019-03', sent: 20, received: 25, met: 0, room: 0 },
+    { ym: '2019-04', sent: 30, received: 35, met: 0, room: 0 },
+    { ym: '2019-05', sent: 10, received: 15, met: 0, room: 0 },
+    { ym: '2023-06', sent: 1, received: 0, met: 0, room: 0 },
   ];
   const peak = peakEra(timeline);
   assert.equal(peak.fromYm, '2019-03');
@@ -88,15 +88,15 @@ test('peakEra finds the densest run and trims empty edge months', () => {
 });
 
 test('peakEra is null for a calendar-only tie (no messages, nothing honest to say)', () => {
-  assert.equal(peakEra([{ ym: '2020-01', sent: 0, received: 0, met: 3 }]), null);
+  assert.equal(peakEra([{ ym: '2020-01', sent: 0, received: 0, met: 3, room: 0 }]), null);
   assert.equal(peakEra([]), null);
 });
 
 test('activityInWindow counts messages, meetings and active months, inclusive ends', () => {
   const timeline = [
-    { ym: '2020-01', sent: 2, received: 3, met: 1 },
-    { ym: '2020-06', sent: 0, received: 0, met: 2 },
-    { ym: '2023-01', sent: 5, received: 0, met: 0 },
+    { ym: '2020-01', sent: 2, received: 3, met: 1, room: 0 },
+    { ym: '2020-06', sent: 0, received: 0, met: 2, room: 0 },
+    { ym: '2023-01', sent: 5, received: 0, met: 0, room: 0 },
   ];
   const act = activityInWindow(timeline, '2020-01', '2022-12');
   assert.deepEqual(act, { messages: 5, met: 3, months: 2 });
@@ -105,21 +105,21 @@ test('activityInWindow counts messages, meetings and active months, inclusive en
 
 test('cadence: dormant, fading, active — measured against the peak run', () => {
   // Peak of 40 messages in mid-2020; silence since -> dormant.
-  const dormant = person({ timeline: [{ ym: '2020-06', sent: 20, received: 20, met: 0 }] });
+  const dormant = person({ timeline: [{ ym: '2020-06', sent: 20, received: 20, met: 0, room: 0 }] });
   assert.equal(cadence(dormant, { now: NOW }).state, 'dormant');
   // A trickle now (2 messages against a 40-message peak) -> fading.
   const fading = person({
     timeline: [
-      { ym: '2020-06', sent: 20, received: 20, met: 0 },
-      { ym: '2026-12', sent: 1, received: 1, met: 0 },
+      { ym: '2020-06', sent: 20, received: 20, met: 0, room: 0 },
+      { ym: '2026-12', sent: 1, received: 1, met: 0, room: 0 },
     ],
   });
   assert.equal(cadence(fading, { now: NOW }).state, 'fading');
   // Recent months carry the peak itself -> active.
   const active = person({
     timeline: [
-      { ym: '2026-11', sent: 10, received: 10, met: 0 },
-      { ym: '2026-12', sent: 10, received: 10, met: 0 },
+      { ym: '2026-11', sent: 10, received: 10, met: 0, room: 0 },
+      { ym: '2026-12', sent: 10, received: 10, met: 0, room: 0 },
     ],
   });
   assert.equal(cadence(active, { now: NOW }).state, 'active');
@@ -140,8 +140,8 @@ test('openLoop: they wrote last and were never answered', () => {
 test('eraLine reconstructs the memory: peak, went-quiet month, open loop', () => {
   const p = person({
     timeline: [
-      { ym: '2018-10', sent: 40, received: 45, met: 0 },
-      { ym: '2019-02', sent: 30, received: 35, met: 0 },
+      { ym: '2018-10', sent: 40, received: 45, met: 0, room: 0 },
+      { ym: '2019-02', sent: 30, received: 35, met: 0, room: 0 },
     ],
     lastFromThem: new Date(2019, 1, 20).getTime(),
     lastFromOwner: new Date(2019, 0, 5).getTime(),
@@ -156,7 +156,7 @@ test('eraLine reconstructs the memory: peak, went-quiet month, open loop', () =>
 
 test('the activeWindow gate: outside the window scores zero, inside is named in reasons', () => {
   const p = {
-    ...person({ timeline: [{ ym: '2021-05', sent: 30, received: 30, met: 1 }] }),
+    ...person({ timeline: [{ ym: '2021-05', sent: 30, received: 30, met: 1, room: 0 }] }),
     name: 'Ana',
     identifiers: ['ana@work.com'],
     channels: ['mail'],

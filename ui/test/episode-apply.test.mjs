@@ -7,9 +7,11 @@
 // cited", and the row a claim finally points at is the server's decision.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 
 import { openDb, insertRows, applyMemoryBatch } from '../server/hermes.mjs';
 import { rebuildEpisodes } from '../server/memory/episodeStore.mjs';
+import { loadSpine } from '../server/people/graph.mjs';
 
 const T0 = Date.UTC(2026, 2, 4, 12, 0, 0);
 
@@ -207,4 +209,358 @@ test('a row-mode run still requires at least one claim', () => {
   const rowRun = { ...run(undefined), episode_hash: undefined, episode_context: undefined };
   assert.throws(() => applyMemoryBatch(db, { run: rowRun, claims: [] }), /array of 1 to/);
   db.close();
+});
+
+// ---- the index is updated, not rewritten ----
+//
+// The rebuild used to DELETE both tables and reinsert every episode, which held
+// the corpus write lock for the whole job -- 94 seconds against the live server
+// while the distiller held it, with hermes answering nothing throughout. These
+// pin the property that replaced it: the same index, written differentially.
+test('a second rebuild over an unchanged corpus writes nothing', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    { ts: Date.UTC(2025, 0, 1, 9, 0), source: 'imessage', entity_id: 'r1', text: 'morning',
+      meta: { chat_guid: 'any;-;+15550100', handle: '+15550100', is_from_me: true } },
+    { ts: Date.UTC(2025, 0, 1, 9, 5), source: 'imessage', entity_id: 'r2', text: 'hello back',
+      meta: { chat_guid: 'any;-;+15550100', handle: '+15550100', is_from_me: false } },
+  ]);
+  const first = rebuildEpisodes(db);
+  assert.ok(first.inserted > 0);
+  const ids = db.prepare('SELECT id FROM episode ORDER BY id').all().map((r) => r.id);
+
+  const second = rebuildEpisodes(db);
+  assert.equal(second.inserted, 0, 'nothing new');
+  assert.equal(second.deleted, 0, 'nothing gone');
+  assert.equal(second.episodes, first.episodes);
+  // IDS SURVIVE, which is the correctness half: distill_run joins on
+  // member_hash and topics counts one hit per episode id, and a rebuild that
+  // renumbered everything invalidated both for no reason.
+  assert.deepEqual(db.prepare('SELECT id FROM episode ORDER BY id').all().map((r) => r.id), ids);
+  db.close();
+});
+
+test('a new conversation is added without touching the others', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    { ts: Date.UTC(2025, 0, 1, 9, 0), source: 'imessage', entity_id: 'a1', text: 'first thread',
+      meta: { chat_guid: 'any;-;+15550100', handle: '+15550100', is_from_me: true } },
+  ]);
+  rebuildEpisodes(db);
+  const before = db.prepare('SELECT id, member_hash FROM episode ORDER BY id').all();
+
+  insertRows(db, [
+    { ts: Date.UTC(2025, 5, 2, 9, 0), source: 'imessage', entity_id: 'b1', text: 'a different thread',
+      meta: { chat_guid: 'any;-;+15550199', handle: '+15550199', is_from_me: true } },
+  ]);
+  const out = rebuildEpisodes(db);
+  assert.equal(out.inserted, 1, 'exactly the new one');
+  assert.equal(out.deleted, 0);
+  const after = db.prepare('SELECT id, member_hash FROM episode ORDER BY id').all();
+  for (const row of before) {
+    assert.ok(after.some((r) => r.id === row.id && r.member_hash === row.member_hash),
+      'an untouched conversation keeps its id');
+  }
+  db.close();
+});
+
+// A message landing inside an existing episode re-cuts it: the old one is gone
+// and a new one takes its place. That MUST be a delete plus an insert, or the
+// index would carry two episodes claiming the same rows.
+test('a message joining an existing conversation replaces that episode', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    { ts: Date.UTC(2025, 0, 1, 9, 0), source: 'imessage', entity_id: 'c1', text: 'one',
+      meta: { chat_guid: 'any;-;+15550100', handle: '+15550100', is_from_me: true } },
+  ]);
+  rebuildEpisodes(db);
+  const firstHash = db.prepare('SELECT member_hash FROM episode').get().member_hash;
+
+  insertRows(db, [
+    { ts: Date.UTC(2025, 0, 1, 9, 10), source: 'imessage', entity_id: 'c2', text: 'two, same hour',
+      meta: { chat_guid: 'any;-;+15550100', handle: '+15550100', is_from_me: true } },
+  ]);
+  const out = rebuildEpisodes(db);
+  assert.equal(out.deleted, 1, 'the old cut is gone');
+  assert.equal(out.inserted, 1, 'the new cut is in');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM episode').get().n, 1, 'not two claiming the same rows');
+  assert.notEqual(db.prepare('SELECT member_hash FROM episode').get().member_hash, firstHash);
+  // And no orphaned members left behind by the delete.
+  assert.equal(
+    db.prepare('SELECT COUNT(*) n FROM episode_member m LEFT JOIN episode e ON e.id=m.episode_id WHERE e.id IS NULL').get().n,
+    0, 'cascade cleaned up'
+  );
+  db.close();
+});
+
+// ---- only the conversations that moved ----
+//
+// A full pass reads every episodic row (418,698 here, ~3s, ~384MB) just to
+// discover which threads changed, because a thread key is computed from `meta`
+// and is not a column anything can filter on. context_thread is that missing
+// index. These pin the property that makes it safe to use: the narrow pass must
+// land on exactly the index a full pass would.
+const msg = (id, guid, ts, fromMe = true) => ({
+  ts, source: 'imessage', entity_id: id, text: 'a message',
+  meta: { chat_guid: `any;-;${guid}`, handle: guid, guid: id, is_from_me: fromMe },
+});
+
+// The whole index as CONTENT, ids aside — what a caller downstream depends on.
+function indexShape(db) {
+  return db
+    .prepare('SELECT member_hash, thread_key, started_at, ended_at, row_count, owner_row_count, counterparty_key FROM episode ORDER BY member_hash')
+    .all()
+    .map((e) => {
+      const mem = db.prepare('SELECT context_id, line_no, quotable FROM episode_member m JOIN episode e ON e.id=m.episode_id WHERE e.member_hash=? ORDER BY line_no')
+        .all(e.member_hash).map((m) => `${m.context_id}:${m.line_no}:${m.quotable}`).join(',');
+      return `${e.member_hash}|${e.thread_key}|${e.started_at}|${e.ended_at}|${e.row_count}|${e.owner_row_count}|${e.counterparty_key ?? ''}|${mem}`;
+    })
+    .join('\n');
+}
+
+const NOW = Date.UTC(2026, 0, 1);
+
+test('the narrow pass lands on exactly the index a full pass would', () => {
+  const seed = [
+    msg('s1', '+15550100', Date.UTC(2025, 0, 1, 9, 0)),
+    msg('s2', '+15550100', Date.UTC(2025, 0, 1, 9, 5), false),
+    msg('s3', '+15550200', Date.UTC(2025, 0, 2, 9, 0)),
+    msg('s4', '+15550300', Date.UTC(2025, 0, 3, 9, 0)),
+  ];
+  const inc = openDb(':memory:');
+  const full = openDb(':memory:');
+  insertRows(inc, seed); insertRows(full, seed);
+  rebuildEpisodes(inc, { now: NOW });
+  rebuildEpisodes(full, { now: NOW });
+  assert.equal(indexShape(inc), indexShape(full), 'same starting point');
+
+  // One message joining an existing conversation, one opening a new thread, and
+  // one thread left completely alone.
+  const arrivals = [
+    msg('n1', '+15550100', Date.UTC(2025, 0, 1, 9, 20)),   // re-cuts s1/s2
+    msg('n2', '+15550400', Date.UTC(2025, 0, 4, 9, 0)),    // a new thread
+  ];
+  insertRows(inc, arrivals); insertRows(full, arrivals);
+
+  const narrow = rebuildEpisodes(inc, { now: NOW });
+  assert.ok(String(narrow.scope).startsWith('threads:'), `expected a narrow pass, got ${narrow.scope}`);
+
+  full.exec('DELETE FROM context_thread');  // force the full path
+  const wide = rebuildEpisodes(full, { now: NOW });
+  assert.equal(wide.scope, 'full');
+
+  assert.equal(indexShape(inc), indexShape(full), 'narrow and full agree exactly');
+  inc.close(); full.close();
+});
+
+test('a pass with nothing new touches nothing', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [msg('q1', '+15550100', Date.UTC(2025, 0, 1, 9, 0))]);
+  rebuildEpisodes(db, { now: NOW });
+  const before = indexShape(db);
+  const out = rebuildEpisodes(db, { now: NOW });
+  assert.equal(out.scope, 'nothing-new');
+  assert.equal(out.inserted, 0);
+  assert.equal(out.deleted, 0);
+  assert.equal(indexShape(db), before);
+  db.close();
+});
+
+// A watermark cannot see a deletion, and hermes is the corpus's sole DELETER.
+// The index must notice it has more rows than the corpus and start over rather
+// than leave episodes standing for rows that are gone.
+test('rows deleted out from under the index force a full pass', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    msg('d1', '+15550100', Date.UTC(2025, 0, 1, 9, 0)),
+    msg('d2', '+15550200', Date.UTC(2025, 0, 2, 9, 0)),
+  ]);
+  rebuildEpisodes(db, { now: NOW });
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM context_thread').get().n, 2);
+
+  db.exec("DELETE FROM context WHERE entity_id = 'd2'");
+  const out = rebuildEpisodes(db, { now: NOW });
+  assert.equal(out.scope, 'full', 'a deletion is not something a watermark can see');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM context_thread').get().n, 1, 'index re-derived');
+  // And no episode survives for the removed row.
+  const orphans = db.prepare(
+    'SELECT COUNT(*) n FROM episode_member m LEFT JOIN context c ON c.id = m.context_id WHERE c.id IS NULL'
+  ).get().n;
+  assert.equal(orphans, 0);
+  db.close();
+});
+
+test('an untouched conversation is not rebuilt and keeps its id', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    msg('k1', '+15550100', Date.UTC(2025, 0, 1, 9, 0)),
+    msg('k2', '+15550200', Date.UTC(2025, 0, 2, 9, 0)),
+  ]);
+  rebuildEpisodes(db, { now: NOW });
+  const quiet = db.prepare("SELECT id, member_hash FROM episode WHERE thread_key LIKE '%+15550200'").get();
+
+  insertRows(db, [msg('k3', '+15550100', Date.UTC(2025, 0, 1, 9, 30))]);
+  const out = rebuildEpisodes(db, { now: NOW });
+  assert.ok(String(out.scope).startsWith('threads:'));
+  const after = db.prepare("SELECT id, member_hash FROM episode WHERE thread_key LIKE '%+15550200'").get();
+  assert.deepEqual(after, quiet, 'the other conversation was never touched');
+  db.close();
+});
+
+// ---- an UPDATE is a change, even though the id does not move ----
+//
+// The first cut of the narrow pass used `id > MAX(context_id)`, which cannot see
+// one. insertRows is SELECT-then-write: a row that changes keeps its id, so a
+// message whose timestamp or thread metadata is rewritten left every count
+// identical and the watermark unmoved, and the episode cut from the old version
+// stood for good. Not hypothetical here -- the history backfill was 405,952 rows
+// of UPDATE.
+test('a message whose timestamp is rewritten re-cuts its conversation', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    msg('u1', '+15550100', Date.UTC(2025, 0, 1, 9, 0)),
+    msg('u2', '+15550100', Date.UTC(2025, 0, 1, 9, 10)),
+  ]);
+  rebuildEpisodes(db, { now: NOW });
+  const before = db.prepare('SELECT COUNT(*) n FROM episode').get().n;
+  assert.equal(before, 1, 'one conversation, ten minutes apart');
+
+  // The same entity_id, a timestamp two hours later: past the gap, so this must
+  // now cut into TWO episodes.
+  insertRows(db, [msg('u2', '+15550100', Date.UTC(2025, 0, 1, 11, 30))]);
+  const out = rebuildEpisodes(db, { now: NOW });
+  assert.notEqual(out.scope, 'nothing-new', 'an in-place update is not "nothing new"');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM episode').get().n, 2,
+    'the rewritten row is past the gap, so the thread cuts in two');
+  db.close();
+});
+
+// The other half of an update: the row can land in a DIFFERENT conversation than
+// it was in, and the thread it left needs re-cutting just as much.
+test('a message that moves to another thread re-cuts the one it left', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    msg('m1', '+15550100', Date.UTC(2025, 0, 1, 9, 0)),
+    msg('m2', '+15550100', Date.UTC(2025, 0, 1, 9, 5)),
+    msg('m3', '+15550200', Date.UTC(2025, 0, 2, 9, 0)),
+  ]);
+  rebuildEpisodes(db, { now: NOW });
+  const oldThread = db.prepare(
+    "SELECT row_count FROM episode WHERE thread_key LIKE '%+15550100'"
+  ).get();
+  assert.equal(oldThread.row_count, 2, 'two messages in the first conversation');
+
+  // m2 moves to the other chat, same entity_id and id.
+  insertRows(db, [msg('m2', '+15550200', Date.UTC(2025, 0, 2, 9, 5))]);
+  const out = rebuildEpisodes(db, { now: NOW });
+  assert.notEqual(out.scope, 'nothing-new');
+  const left = db.prepare("SELECT row_count FROM episode WHERE thread_key LIKE '%+15550100'").get();
+  assert.equal(left.row_count, 1, 'the conversation it left was re-cut, not left holding it');
+  const joined = db.prepare("SELECT row_count FROM episode WHERE thread_key LIKE '%+15550200'").get();
+  assert.equal(joined.row_count, 2, 'and the one it joined has it');
+  // No row may be claimed by two conversations at once.
+  const doubled = db.prepare(
+    'SELECT COUNT(*) n FROM (SELECT context_id FROM episode_member GROUP BY context_id HAVING COUNT(*) > 1)'
+  ).get().n;
+  assert.equal(doubled, 0, 'a row belongs to exactly one episode');
+  db.close();
+});
+
+// An index built before the cursor existed cannot say what it has read.
+test('an index with no mark is rebuilt rather than trusted', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [msg('n1', '+15550100', Date.UTC(2025, 0, 1, 9, 0))]);
+  rebuildEpisodes(db, { now: NOW });
+  db.exec('DELETE FROM context_thread_mark');
+  const out = rebuildEpisodes(db, { now: NOW });
+  assert.equal(out.scope, 'full', 'no mark means no narrow pass');
+  assert.ok(db.prepare('SELECT COUNT(*) n FROM context_thread_mark').get().n > 0, 'and it writes one');
+  db.close();
+});
+
+// ---- the cursor may not outrun the work it describes ----
+//
+// The index rows and the mark used to be written on autocommit, before
+// rebuildThreads opened its own transaction. A crash in between left an advanced
+// watermark, matching counts and no touched threads: `nothing-new` for ever, over
+// episodes that permanently omit the arrivals.
+test('a failed re-cut leaves the cursor where it was', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [msg('a1', '+15550100', Date.UTC(2025, 0, 1, 9, 0))]);
+  rebuildEpisodes(db, { now: NOW });
+  const markBefore = db.prepare('SELECT changed_at, context_id FROM context_thread_mark').get();
+  const indexedBefore = db.prepare('SELECT COUNT(*) n FROM context_thread').get().n;
+
+  insertRows(db, [msg('a2', '+15550200', Date.UTC(2025, 0, 2, 9, 0))]);
+  // Make the episode write fail partway: a trigger that refuses the insert.
+  db.exec(
+    'CREATE TRIGGER refuse_episode BEFORE INSERT ON episode BEGIN ' +
+    "SELECT RAISE(ABORT, 'refused'); END"
+  );
+  assert.throws(() => rebuildEpisodes(db, { now: NOW }), /refused/);
+  db.exec('DROP TRIGGER refuse_episode');
+
+  // Nothing may have moved: not the mark, not the index.
+  assert.deepEqual(db.prepare('SELECT changed_at, context_id FROM context_thread_mark').get(), markBefore,
+    'the cursor must not survive a rollback');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM context_thread').get().n, indexedBefore,
+    'nor may the index rows');
+
+  // And the next pass still sees the arrival as work to do.
+  const out = rebuildEpisodes(db, { now: NOW });
+  assert.notEqual(out.scope, 'nothing-new', 'the arrival is still pending, not lost');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM episode').get().n, 2);
+  db.close();
+});
+
+// ---- the gap rule is part of the answer ----
+test('asking for a different gap re-cuts even an unchanged corpus', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    msg('g1', '+15550100', Date.UTC(2025, 0, 1, 9, 0)),
+    msg('g2', '+15550100', Date.UTC(2025, 0, 1, 9, 40)), // 40 min apart
+  ]);
+  rebuildEpisodes(db, { now: NOW }); // default 60min gap: one episode
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM episode').get().n, 1);
+
+  // Nothing arrived, but the RULE changed: 30 minutes cuts these in two. This
+  // is what build-episodes.mjs --gap-minutes exists to do, and it returned
+  // 'nothing-new' before.
+  const out = rebuildEpisodes(db, { now: NOW, gapMs: 30 * 60_000 });
+  assert.equal(out.scope, 'full', 'a new rule cannot be applied by a narrow pass');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM episode').get().n, 2, 'cut by the rule asked for');
+  assert.equal(db.prepare('SELECT DISTINCT gap_ms n FROM episode').get().n, 30 * 60_000);
+  db.close();
+});
+
+// ---- a name learned later reaches conversations nobody touched ----
+test('an episode keyed by a raw handle is re-keyed when Contacts learns the name', () => {
+  const db = openDb(':memory:');
+  insertRows(db, [
+    // The one that will be named, and never touched again.
+    msg('q1', '+15550100', Date.UTC(2025, 0, 1, 9, 0)),
+    msg('q2', '+15550100', Date.UTC(2025, 0, 1, 9, 5), false),
+    msg('o1', '+15550200', Date.UTC(2025, 0, 2, 9, 0)),
+  ]);
+  const empty = new DatabaseSync(':memory:');
+  empty.exec('CREATE TABLE contact_ids (identifier TEXT PRIMARY KEY, display_name TEXT, kind TEXT, updated_ts INTEGER)');
+  rebuildEpisodes(db, { now: NOW, spine: loadSpine(empty) });
+  const before = db.prepare(
+    "SELECT counterparty_key k FROM episode WHERE thread_key LIKE '%+15550100'"
+  ).get();
+  assert.equal(before.k, 'id:+15550100', 'unknown handle, keyed raw');
+
+  // Contacts learns the name. Nothing arrives in THAT conversation -- a message
+  // lands in the other one, which is what triggers the narrow pass.
+  empty.prepare('INSERT INTO contact_ids VALUES (?,?,?,?)').run('+15550100', 'Mika Tanaka', 'phone', 1);
+  insertRows(db, [msg('o2', '+15550200', Date.UTC(2025, 0, 2, 9, 5))]);
+  const out = rebuildEpisodes(db, { now: NOW, spine: loadSpine(empty) });
+  assert.ok(String(out.scope).startsWith('threads:'), 'a narrow pass, over the OTHER thread');
+  assert.equal(
+    db.prepare("SELECT counterparty_key k FROM episode WHERE thread_key LIKE '%+15550100'").get().k,
+    'name:mika tanaka',
+    'the untouched conversation was re-keyed anyway'
+  );
+  assert.ok(out.rekeyed > 0, 'and the pass says it happened');
+  db.close(); empty.close();
 });

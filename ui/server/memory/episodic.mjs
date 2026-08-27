@@ -39,6 +39,7 @@
 //                       shared definition as everywhere else).
 
 import { pinnedThreadGuids } from '../../../connectors/lib/pinnedThread.mjs';
+import { threadKind, GROUP } from './threadKind.mjs';
 
 const DAY = 86_400_000;
 
@@ -359,15 +360,40 @@ export function computeEpisodicStats(rows, route = {}) {
   // iMessage: per-contact SENT counts. Names and numbers only — this is how
   // "who did I text most" gets answered without a single received word
   // entering the context.
+  //
+  // A ROOM IS NOT A CONTACT. The last field of a chat_guid is the counterparty
+  // for a one-to-one thread and an opaque room id for a group -- and this line
+  // used to take it unconditionally, so "messages you sent, by contact" could
+  // hand the model `chat488392016936725110` as though it were a person, and did:
+  // on a 90-day window the fourth-ranked "contact" was a room with 217 messages.
+  // 22.3% of iMessage rows are group threads, so this was not an edge case.
+  //
+  // Rooms are counted, just not as people. The two facts are both true and only
+  // one of them is about a contact.
   const contacts = {};
+  let roomMessages = 0;
+  const rooms = new Set();
   for (const r of by('imessage')) {
-    const h = meta(r).chat_guid;
+    const m = meta(r);
+    if (threadKind(r, m) === GROUP) {
+      roomMessages += 1;
+      if (typeof m.chat_guid === 'string') rooms.add(m.chat_guid);
+      continue;
+    }
+    // DIRECT and UNKNOWN both land here: a row with no chat_guid yields no name
+    // below and drops out on its own, which is the same thing it did before.
+    const h = m.chat_guid;
     const name = typeof h === 'string' ? h.split(';').pop() : null;
     if (name) contacts[name] = (contacts[name] ?? 0) + 1;
   }
   const top = Object.entries(contacts).sort((a, b) => b[1] - a[1]).slice(0, 5);
   if (top.length > 0) {
     lines.push(`(computed, imessage) messages you sent, by contact: ${top.map(([n, c]) => `${n} (${c})`).join(', ')}`);
+  }
+  if (roomMessages > 0) {
+    // No room id and no name: a room has no name in 77% of cases anyway, and an
+    // id is not a fact worth handing a model. The count is.
+    lines.push(`(computed, imessage) you also sent ${roomMessages} message${roomMessages === 1 ? '' : 's'} across ${rooms.size} group chat${rooms.size === 1 ? '' : 's'}`);
   }
 
   // Photos: volume by day, nothing else — a filename is not a claim, but

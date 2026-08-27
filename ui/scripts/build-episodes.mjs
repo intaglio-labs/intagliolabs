@@ -63,7 +63,11 @@ try {
   }
 
   const started = Date.now();
-  const out = rebuildEpisodes(db, { gapMs: gapMinutes * 60_000, spine });
+  // FULL, ALWAYS. Running this by hand means "re-cut everything now" -- it is the
+  // operator's override, not a scheduled tick. rebuildEpisodes also notices a
+  // changed gap on its own, so this is belt and braces for the case where the
+  // rule is the SAME and the operator still wants the whole index rebuilt.
+  const out = rebuildEpisodes(db, { gapMs: gapMinutes * 60_000, spine, full: true });
   process.stdout.write(
     `${JSON.stringify({ ...out, gap_minutes: gapMinutes, ms: Date.now() - started }, null, 2)}\n`
   );

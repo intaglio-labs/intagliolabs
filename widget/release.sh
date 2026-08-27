@@ -10,9 +10,15 @@
 #   1. Apple Developer Program membership on the shipping entity.
 #   2. A "Developer ID Application" certificate in the login keychain
 #      (Xcode > Settings > Accounts > Manage Certificates, or the portal).
-#   3. Notary credentials stored once:
+#   3. Notary credentials stored once, from an App Store Connect API key
+#      (Users and Access > Integrations). NOT an Apple ID and app-specific
+#      password: that is a credential for the whole Apple account wearing a
+#      narrower name, while the key is scoped to the API, revocable on its own,
+#      owned by the team rather than a person, and not behind anyone's 2FA.
 #        xcrun notarytool store-credentials hazlie-notary \
-#          --apple-id <appleid> --team-id <TEAMID> --password <app-specific>
+#          --key AuthKey_<KEYID>.p8 --key-id <KEYID> --issuer <ISSUER-UUID>
+#      Omit --issuer for an Individual key; notarytool requires it for a Team
+#      key and refuses it for an Individual one.
 set -eu
 cd "$(dirname "$0")"
 
@@ -66,21 +72,63 @@ WHY=""
   - the working tree has uncommitted changes:
 $(printf '%s\n' "$DIRT" | sed 's/^/      /' | head -10)"; }
 
-[ "$BRANCH" = main ] || { RELEASABLE=0; WHY="$WHY
+# A TAG IS ALSO PROVENANCE, and on a release runner it is the only kind
+# available: a tag build checks out a detached HEAD, so the branch test below can
+# never pass there and the ref this script would compare against may not have
+# been fetched at all.
+#
+# This is not a bypass, it is the same question answered by a different fact. The
+# guard asks "can somebody else fetch the exact code this DMG was built from".
+# `HEAD == origin/main` answers it for a laptop. An annotated tag that GitHub
+# resolves to this commit, on a commit that is an ancestor of origin/main,
+# answers it at least as well -- and it answers a second question the laptop path
+# cannot, which is WHICH release this is.
+#
+# Dirtiness is checked above and is NOT excused here: a runner with a modified
+# tree means something wrote to the checkout, and that is worth stopping for
+# wherever it happens.
+# HZ_RELEASE_TAG names the tag being built. It is set explicitly by the caller
+# rather than read out of GitHub's own GITHUB_REF_*, because those describe the
+# ref the WORKFLOW ran on: on a manual re-run they say "branch main" even while
+# the job is checked out at a tag, and a guard that believes them would be
+# guarding the wrong thing. An explicit variable is also what makes this testable
+# outside CI at all.
+TAGGED=0
+if [ -n "${HZ_RELEASE_TAG:-}" ]; then
+  TAG_COMMIT="$(git rev-parse --verify --quiet "refs/tags/${HZ_RELEASE_TAG}^{commit}" || echo '')"
+  if [ -z "$TAG_COMMIT" ]; then
+    RELEASABLE=0; WHY="$WHY
+  - HZ_RELEASE_TAG='${HZ_RELEASE_TAG}' is not a tag in this checkout
+    (a shallow clone has no tags -- fetch-depth: 0)"
+  elif [ "$TAG_COMMIT" != "$(git rev-parse HEAD)" ]; then
+    RELEASABLE=0; WHY="$WHY
+  - HEAD is not the commit tag '${HZ_RELEASE_TAG}' points at"
+  elif ! git merge-base --is-ancestor HEAD refs/remotes/origin/main 2>/dev/null; then
+    RELEASABLE=0; WHY="$WHY
+  - tag '${HZ_RELEASE_TAG}' is not on origin/main, so this code was never
+    merged (fetch main before releasing)"
+  else
+    TAGGED=1
+  fi
+fi
+
+if [ "$TAGGED" = 0 ]; then
+  [ "$BRANCH" = main ] || { RELEASABLE=0; WHY="$WHY
   - HEAD is on '$BRANCH', not main"; }
 
-# Compared against the LOCAL origin/main ref, and deliberately not preceded by a
-# fetch: a build script that reaches the network to decide what it is allowed to
-# ship can be answered differently on two runs a minute apart. Staleness is
-# named in the failure text instead, so the person reading it knows to fetch.
-if git rev-parse --verify --quiet origin/main >/dev/null; then
-  [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || {
-    RELEASABLE=0; WHY="$WHY
+  # Compared against the LOCAL origin/main ref, and deliberately not preceded by a
+  # fetch: a build script that reaches the network to decide what it is allowed to
+  # ship can be answered differently on two runs a minute apart. Staleness is
+  # named in the failure text instead, so the person reading it knows to fetch.
+  if git rev-parse --verify --quiet origin/main >/dev/null; then
+    [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || {
+      RELEASABLE=0; WHY="$WHY
   - HEAD is not origin/main, so this code is not pushed anywhere
     (run 'git fetch' first if origin/main looks stale)"; }
-else
-  RELEASABLE=0; WHY="$WHY
+  else
+    RELEASABLE=0; WHY="$WHY
   - there is no origin/main to compare against"
+  fi
 fi
 
 if [ "$RELEASABLE" = 0 ] && [ "$ALLOW_DIRTY" = 0 ]; then

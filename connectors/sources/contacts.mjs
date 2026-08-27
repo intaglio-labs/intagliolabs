@@ -149,14 +149,34 @@ export function createContactsSource({ home } = {}) {
       // a missing helper falls through to it too.
       if (ctx.config?.contacts?.backend !== 'local' && helperAvailable()) {
         try {
-          const entries = entriesFromContacts(await readContacts());
+          const raw = await readContacts();
+          // LIMITED ACCESS IS NOT FULL ACCESS, and the OS reports both as
+          // granted. The helper appends a marker saying which; without it a
+          // half-visible address book is indistinguishable from a complete one,
+          // and the only symptom is a phone number where a name should be for
+          // somebody the owner knows they have saved.
+          let access = 'full';
+          const cards = [];
+          for (const c of Array.isArray(raw) ? raw : []) {
+            if (c && typeof c.__access === 'string') access = c.__access;
+            else cards.push(c);
+          }
+          const entries = entriesFromContacts(cards);
           if (entries.length > 0) ctx.state.upsertContacts(entries);
           ctx.log.info('contacts_scan', {
             connector: 'contacts',
             backend: 'contacts-framework',
             identifiers: entries.length,
+            access,
           });
-          return { inserted: entries.length, updated: 0, unchanged: 0, skipped: 0 };
+          if (access === 'limited') {
+            ctx.log.warn('contacts_access_limited', {
+              connector: 'contacts',
+              identifiers: entries.length,
+              fix: 'System Settings → Privacy & Security → Contacts → Intaglio Labs → allow full access',
+            });
+          }
+          return { inserted: entries.length, updated: 0, unchanged: 0, skipped: 0, access };
         } catch (error) {
           // A DENIAL is not a reason to read the same data the wide way. Falling
           // back to the sqlite store on `denied` would mean the owner refusing

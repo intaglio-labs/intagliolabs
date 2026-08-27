@@ -37,7 +37,7 @@ enum ModelSetup {
   static let tiers: [ModelTier] = [
     ModelTier(
       id: "4b",
-      label: "Smaller",
+      label: "Smallest",
       detail: "Faster, lighter on memory. Good on 8 GB Macs.",
       file: "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
       repo: "unsloth/Qwen3-4B-Instruct-2507-GGUF",
@@ -46,7 +46,7 @@ enum ModelSetup {
     ),
     ModelTier(
       id: "8b",
-      label: "Better",
+      label: "Best",
       detail: "Noticeably better answers. Wants 16 GB or more.",
       file: "Qwen3-8B-Q4_K_M.gguf",
       repo: "Qwen/Qwen3-8B-GGUF",

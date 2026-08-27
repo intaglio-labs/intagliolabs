@@ -1,0 +1,306 @@
+# Publish a release -> a notarized DMG appears on it.
+#
+# The DMG this produces is the same one widget/release.sh has always produced;
+# what is being removed is the remembering. Until now a release meant somebody
+# ran release.sh on their own Mac and dragged the result into the GitHub UI, and
+# the download page pointed at whatever they dragged.
+#
+# WHY A REAL MAC AND NOT A CONTAINER: the app is Swift compiled against the macOS
+# SDK, signed with Developer ID, and notarized by Apple. Every one of those needs
+# macOS, and notarization needs the network.
+#
+# WHAT THE OWNER HAS TO SET UP ONCE — the workflow fails with the exact
+# instructions if any is missing, rather than shipping something degraded:
+#
+#   secrets.MAC_DEVELOPER_ID_P12       base64 of a "Developer ID Application"
+#                                      .p12 export (cert + private key)
+#   secrets.MAC_DEVELOPER_ID_P12_PASS  its export password
+#   secrets.ASC_KEY_P8                 base64 of an App Store Connect API key
+#                                      (AuthKey_<KEYID>.p8)
+#   secrets.ASC_KEY_ID                 that key's Key ID
+#   secrets.ASC_ISSUER_ID              the Issuer UUID -- Team keys only, leave
+#                                      UNSET for an Individual key
+#
+# AN API KEY RATHER THAN AN APPLE ID AND APP-SPECIFIC PASSWORD. notarytool takes
+# either, and Apple's own interactive prompt says "We recommend using App Store
+# Connect API keys for authentication". The reasons that matter here: the key is
+# scoped to the API instead of carrying a whole Apple account, it is revocable on
+# its own without changing anything a human signs in with, it belongs to the team
+# rather than to a person, and it does not sit behind that person's 2FA. An
+# app-specific password is a credential for the Apple ID itself, wearing a
+# narrower name.
+#
+# Set them from stdin, never with --body (which puts the value in argv, visible
+# to `ps` and saved to shell history), and note gh has no --body-file:
+#     base64 -i AuthKey_XXXXXXXXXX.p8 | gh secret set ASC_KEY_P8 --repo <repo>
+# For the short ones, run `gh secret set ASC_KEY_ID --repo <repo>` in a real
+# terminal: with a TTY it prompts with the input masked.
+#
+# NO MARKETPLACE ACTIONS HOLD THE SIGNING KEY. Same reasoning as site.yml: one
+# fewer third party in the path that holds a credential, and the commands in the
+# log are the ones a person would type.
+name: release
+
+on:
+  release:
+    # `published` and not `created`: a draft release fires `created`, and a draft
+    # is exactly where somebody is still deciding whether this is a release at
+    # all. Publishing is the decision.
+    types: [published]
+  # So a failed notarization can be retried without cutting a new tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'existing release tag to build and attach to'
+        required: true
+
+permissions:
+  contents: write   # to upload the asset onto the release
+
+# One signing job at a time. Two concurrent runs would fight over the notary
+# queue and could attach two different DMGs to the same release.
+concurrency:
+  group: release-dmg
+  cancel-in-progress: false
+
+jobs:
+  dmg:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+          # release.sh refuses to build anything it cannot trace to a commit that
+          # is on main and pushed. It needs the full history and the main ref to
+          # establish that, and a shallow checkout has neither.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The tag alone does not prove the code is on main -- a tag can be pushed
+      # to any commit. release.sh checks it, and this fetch is what gives it
+      # something to check against.
+      - name: fetch main, so provenance can be established
+        run: |
+          git remote add upstream "https://github.com/${GITHUB_REPOSITORY}.git" 2>/dev/null || true
+          git fetch --no-tags upstream main:refs/remotes/origin/main
+
+      # ASC_ISSUER_ID is deliberately NOT required: notarytool wants it for a Team
+      # API key and refuses it for an Individual one, so "unset" is a valid
+      # answer and the store-credentials step below branches on it.
+      - name: refuse to build without the secrets, before doing any work
+        env:
+          MAC_DEVELOPER_ID_P12: ${{ secrets.MAC_DEVELOPER_ID_P12 }}
+          MAC_DEVELOPER_ID_P12_PASS: ${{ secrets.MAC_DEVELOPER_ID_P12_PASS }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        run: |
+          missing=""
+          for v in MAC_DEVELOPER_ID_P12 MAC_DEVELOPER_ID_P12_PASS ASC_KEY_P8 ASC_KEY_ID; do
+            eval "val=\$$v"
+            [ -n "$val" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "missing secrets:$missing"
+            echo "See the header of .github/workflows/release.yml for how to create them."
+            echo "Failing now rather than after a 40-minute build."
+            exit 1
+          fi
+
+      # build.sh bundles the node it finds on PATH, so the version here is the
+      # version users run -- and setup-voice.sh below runs under it too. Pinned
+      # rather than "whatever the image ships", and FIRST, because everything
+      # after this point wants it.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # VOICE MODELS, built here rather than downloaded.
+      #
+      # This step used to fetch a 496 MB tarball the owner uploaded by hand,
+      # because this file asserted CI could not produce one -- "setup-voice.sh
+      # needs npm and esbuild, and sharp breaks the install on a current node".
+      # That was wrong, and wrong in a way worth recording: sharp does break a
+      # plain `npm install` (reproduced on node 22.21.1 and on 26.6.0), but
+      # setup-voice.sh has passed --ignore-scripts since d447212 precisely to fix
+      # it, and the comment this file cited as evidence is that fix's own
+      # post-mortem -- it carries the fix inline two lines below the description
+      # of the bug. The claim was written two days after the thing it called
+      # impossible had been made routine.
+      #
+      # Measured on a cold npm cache, an isolated HOME, and only node 22.21.1 on
+      # PATH -- the node actions/setup-node@v4 resolves here: exits 0 in well
+      # under a minute and produces a tree byte-identical to the one that was
+      # being uploaded. ~1.9 GB of runner disk and a couple of minutes, against
+      # a 90-minute budget.
+      #
+      # It writes to $HOME/.hazlie/models/voice, which widget/build.sh already
+      # reads, so nothing downstream changes.
+      - name: build the voice assets
+        run: bash widget/voice/setup-voice.sh
+
+      # AND CHECK WHAT IT PRODUCED, because setup-voice.sh does not.
+      #
+      # Its bake-voice step ends in `|| echo "bake-voice skipped"`, which is a
+      # reasonable convenience for a developer and a trap for a release: the
+      # script exits 0 with the baked lines missing, and build.sh's existence
+      # check on the directory is satisfied by the three subdirectories that
+      # remain. The DMG would ship with its deterministic voice lines silently
+      # absent -- exactly the quietly-degraded download this workflow exists to
+      # refuse to publish.
+      #
+      # Asserted here rather than by editing setup-voice.sh, because a developer
+      # running it from a partial checkout has a real reason to skip that step.
+      # A release does not.
+      - name: check the voice assets are complete
+        run: |
+          DEST="$HOME/.hazlie/models/voice"
+          for d in models vendor voice workers; do
+            [ -d "$DEST/$d" ] || { echo "voice assets incomplete: $d/ is missing"; exit 1; }
+          done
+          # The baked lines are the part that fails open above.
+          [ -f "$DEST/voice/manifest.json" ] || {
+            echo "voice assets incomplete: no baked lines (bake-voice silently skipped)"
+            exit 1
+          }
+          WAVS=$(ls "$DEST"/voice/*.wav 2>/dev/null | wc -l | tr -d ' ')
+          [ "$WAVS" -gt 0 ] || { echo "voice assets incomplete: manifest but no .wav files"; exit 1; }
+          echo "voice assets: $WAVS baked lines, $(du -sh "$DEST" | cut -f1) total"
+
+      - name: install llama.cpp
+        run: |
+          brew install llama.cpp
+          llama-server --version 2>&1 | head -2 || true
+
+      # A DEDICATED KEYCHAIN, not the login one. It is created for this job,
+      # unlocked only here, and deleted on the way out whatever happened --
+      # the runner is ephemeral, but a signing key left in a default keychain is
+      # readable by every later step, and steps get added.
+      - name: import the Developer ID certificate
+        env:
+          P12: ${{ secrets.MAC_DEVELOPER_ID_P12 }}
+          P12_PASS: ${{ secrets.MAC_DEVELOPER_ID_P12_PASS }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          # A throwaway password for a throwaway keychain; it never protects
+          # anything beyond this job.
+          KP="$(openssl rand -hex 32)"
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          security create-keychain -p "$KP" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KP" "$KEYCHAIN"
+
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$P12_PASS" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          # Without this, codesign blocks on a GUI prompt that no one will answer
+          # and the job hangs until the timeout.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$KEYCHAIN" >/dev/null
+          # The search list, so `security find-identity` in build.sh sees it.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+
+          ID="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+                | awk '/Developer ID Application/ {print $2; exit}')"
+          if [ -z "$ID" ]; then
+            echo "the .p12 imported but contains no 'Developer ID Application' identity."
+            echo "Export the certificate AND its private key from Keychain Access."
+            exit 1
+          fi
+          # The hash only. The certificate's subject line names the team.
+          echo "signing identity: $ID"
+          echo "HAZLIE_SIGN_IDENTITY=$ID" >> "$GITHUB_ENV"
+
+      # THE API KEY GOES INTO A PROFILE, not onto release.sh's command line.
+      #
+      # notarytool accepts --key/--key-id/--issuer directly on `submit`, so this
+      # step could be skipped and release.sh taught to pass them. Storing a
+      # profile is better here for two reasons. release.sh does not change at
+      # all -- it already submits with `--keychain-profile hazlie-notary`, so the
+      # script a person runs by hand and the one CI runs stay the same script.
+      # And the .p8 exists on disk for the length of ONE short step instead of
+      # for the whole notarize, in a keychain this job already had to create for
+      # the signing certificate.
+      #
+      # A trap worth knowing if this is ever half-migrated: when both are given,
+      # --keychain-profile silently wins over --key, with no warning. A script
+      # that looks like it uses the new credential can quietly be using a stale
+      # profile.
+      - name: store notary credentials
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          KEYFILE="$RUNNER_TEMP/asc.p8"
+          # Removed on the way out whatever happens, and created unreadable to
+          # anyone else in the first place.
+          trap 'rm -f "$KEYFILE"' EXIT
+          ( umask 077; printf '%s' "$ASC_KEY_P8" | base64 --decode > "$KEYFILE" )
+          [ -s "$KEYFILE" ] || { echo "ASC_KEY_P8 did not decode to anything"; exit 1; }
+
+          # --issuer is required for a TEAM key and REFUSED for an Individual
+          # one, so it is passed only when set rather than always.
+          if [ -n "${ASC_ISSUER_ID:-}" ]; then
+            xcrun notarytool store-credentials hazlie-notary \
+              --key "$KEYFILE" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" \
+              --keychain "$KEYCHAIN"
+          else
+            xcrun notarytool store-credentials hazlie-notary \
+              --key "$KEYFILE" --key-id "$ASC_KEY_ID" \
+              --keychain "$KEYCHAIN"
+          fi
+
+          # store-credentials validates against Apple by default, so a wrong key
+          # or an insufficient role fails HERE, in seconds, rather than after the
+          # build in the notarize step.
+          echo "notary profile stored and validated"
+
+      # The build itself is unchanged: the same script a person runs by hand,
+      # including its provenance guard, which on a tag build checks that the tag
+      # is this commit and that the commit is on main.
+      - name: build, sign, notarize, staple, DMG
+        env:
+          # Names the tag for release.sh's provenance guard. Passed explicitly
+          # rather than left to GITHUB_REF_*, which on a manual re-run describes
+          # the branch the workflow ran on and not the tag being built.
+          HZ_RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: ./widget/release.sh
+
+      - name: attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DMG="$(ls widget/build/dist/*.dmg)"
+          echo "built: $DMG"
+          case "$DMG" in
+            *NOT-A-RELEASE*)
+              echo "release.sh produced a non-release DMG; refusing to attach it."
+              exit 1;;
+          esac
+
+          # Gatekeeper's own answer, on the artifact as it will be downloaded.
+          # A DMG that fails this is one users see a scary dialog for, and it is
+          # far better to fail the job than to publish it.
+          spctl --assess --type open --context context:primary-signature -vv "$DMG"
+          xcrun stapler validate "$DMG"
+
+          # The site links to /releases/latest/download/IntaglioLabs.dmg, which
+          # matches on the asset's NAME. The versioned filename release.sh
+          # produces would break that permalink, so it is uploaded under the
+          # stable name. --clobber so a re-run replaces rather than fails.
+          cp "$DMG" "$RUNNER_TEMP/IntaglioLabs.dmg"
+          gh release upload "$TAG" "$RUNNER_TEMP/IntaglioLabs.dmg" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+          shasum -a 256 "$RUNNER_TEMP/IntaglioLabs.dmg" | sed 's|.*/||'
+
+      - name: remove the signing keychain
+        if: always()
+        run: |
+          security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+          security list-keychains -d user -s login.keychain-db 2>/dev/null || true

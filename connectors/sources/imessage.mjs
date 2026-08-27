@@ -28,6 +28,36 @@ const DEFAULT_BACKFILL_DAYS = 90;
 const MAX_MESSAGES_PER_SCAN = 5000;
 const CURSOR_KEY = 'imessage:max-date';
 
+// THE HISTORY CURSOR, and why it is a second one.
+//
+// The forward cursor only ever moves toward now: it answers "what arrived since
+// I last looked". It cannot reach backwards, so on this machine it left 470,364
+// of chat.db's 479,967 messages unreachable -- every year before 2026, because
+// the first run started 90 days back (DEFAULT_BACKFILL_DAYS) and walked forward
+// from there. The year tabs were empty because the data was never fetched.
+//
+// This cursor walks the other way: newest-first, a slice per pass, until it
+// reaches the beginning of the store. Newest-first because that is the order the
+// value arrives in -- last year matters more than 2017, and the screen improves
+// visibly while it runs rather than after it finishes.
+//
+// Two cursors and not one shared value, because they are answering different
+// questions and would otherwise fight: a forward pass that advanced the history
+// cursor would strand everything between them, permanently and invisibly.
+const HISTORY_CURSOR_KEY = 'imessage:history-min-date';
+
+// A slice, not the corpus. This runs on the owner's daily machine beside
+// everything else, so a pass is small enough to be unnoticeable and frequent
+// enough to finish: ~470k messages at this size is a few hundred passes, which
+// on the daemon's cadence is hours in the background rather than a stall at
+// launch.
+const HISTORY_MESSAGES_PER_PASS = 2000;
+
+// Set once the walk reaches the beginning of the store, so the daemon can stop
+// scheduling passes that read nothing. Cleared by hand if history is ever
+// re-opened (a restored backup, a merged device).
+const HISTORY_DONE_KEY = 'imessage:history-done';
+
 export function chatDbPath(home) {
   return join(home, 'Library', 'Messages', 'chat.db');
 }
@@ -47,9 +77,29 @@ export function scanFloor({ storedCursor, backfill, nowMs, backfillDays }) {
   };
 }
 
+// The CEILING a history pass reads down from. Exported for the test.
+//
+// First pass has no history cursor, so it starts where the forward scan
+// originally started -- the oldest row that scan could have seen. Everything
+// below that is what was never fetched.
+export function historyCeiling({ storedCursor, nowMs, backfillDays }) {
+  if (typeof storedCursor === 'string' && /^\d+$/u.test(storedCursor)) {
+    return { appleNanos: BigInt(storedCursor), reason: 'history-cursor' };
+  }
+  const floorMs = nowMs - backfillDays * 86_400_000;
+  const APPLE_EPOCH_MS = 978307200000;
+  return {
+    appleNanos: BigInt(Math.round((floorMs - APPLE_EPOCH_MS) * 1e6)),
+    reason: 'history-start',
+  };
+}
+
 export function createImessageSource({ home } = {}) {
   return {
     name: 'imessage',
+    // This source can walk backwards. The daemon reads it to decide whether to
+    // schedule a history slice after each forward pass.
+    walksHistory: true,
 
     // Like calendar's: readability is deliberately NOT pre-checked, because
     // FDA attributes per spawner and a needs()-time stat can pass where the
@@ -70,15 +120,30 @@ export function createImessageSource({ home } = {}) {
       let rows = [];
       let skipped = 0;
       let maxDate = null;
+      let minDate = null;
+      let scanned = 0;
+      // Which direction this pass runs. The DAEMON decides -- a source cannot
+      // choose, or a forward and a history pass could overlap and each would
+      // move a cursor the other was reading.
+      const isHistory = ctx.history === true;
       let db;
       try {
         db = new DatabaseSync(snapshotPath, { readOnly: true });
-        const floor = scanFloor({
-          storedCursor: ctx.state.getCursor(CURSOR_KEY),
-          backfill: Boolean(ctx.backfill),
-          nowMs: ctx.now(),
-          backfillDays: ctx.config?.imessage?.backfillDays ?? DEFAULT_BACKFILL_DAYS,
-        });
+        const backfillDays = ctx.config?.imessage?.backfillDays ?? DEFAULT_BACKFILL_DAYS;
+        // A history pass reads DOWN from its own cursor; an ordinary pass reads
+        // UP from the forward one.
+        const floor = isHistory
+          ? historyCeiling({
+              storedCursor: ctx.state.getCursor(HISTORY_CURSOR_KEY),
+              nowMs: ctx.now(),
+              backfillDays,
+            })
+          : scanFloor({
+              storedCursor: ctx.state.getCursor(CURSOR_KEY),
+              backfill: Boolean(ctx.backfill),
+              nowMs: ctx.now(),
+              backfillDays,
+            });
 
         // handle.id and the chat guid are joined here rather than looked up
         // per row: 633k messages make a per-row query a per-row round trip.
@@ -92,17 +157,20 @@ export function createImessageSource({ home } = {}) {
            LEFT JOIN handle h ON h.ROWID = m.handle_id
            LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
            LEFT JOIN chat c ON c.ROWID = cmj.chat_id
-           WHERE m.date > ?
-           ORDER BY m.date ASC
+           WHERE m.date ${isHistory ? '<' : '>'} ?
+           ORDER BY m.date ${isHistory ? 'DESC' : 'ASC'}
            LIMIT ?`
         );
         // message.date exceeds 2^53; without this the statement throws rather
         // than silently truncating, which is the behaviour we want.
         stmt.setReadBigInts(true);
-        const dbRows = stmt.all(floor.appleNanos, BigInt(MAX_MESSAGES_PER_SCAN));
+        const perPass = isHistory ? HISTORY_MESSAGES_PER_PASS : MAX_MESSAGES_PER_SCAN;
+        const dbRows = stmt.all(floor.appleNanos, BigInt(perPass));
+        scanned = dbRows.length;
 
         for (const r of dbRows) {
           if (maxDate === null || r.date > maxDate) maxDate = r.date;
+          if (minDate === null || r.date < minDate) minDate = r.date;
         }
         // Resolved per run rather than at module load, a habit kept from when
         // the courier could re-pin the thread while the daemon was up. The
@@ -140,8 +208,18 @@ export function createImessageSource({ home } = {}) {
 
       // The cursor advances ONLY after the batch is safely in hermes. Written
       // first, an ingest failure would be skipped permanently and invisibly.
-      if (maxDate !== null) ctx.state.setCursor(CURSOR_KEY, String(maxDate));
-      return { ...totals, skipped };
+      // A history pass moves its OWN cursor DOWN and leaves the forward one
+      // alone. Advancing the forward cursor here would strand every message
+      // between the two, permanently and with nothing to notice it by.
+      if (isHistory) {
+        if (minDate !== null) ctx.state.setCursor(HISTORY_CURSOR_KEY, String(minDate));
+        // Nothing below the cursor: the store has been walked to its beginning.
+        // Recorded so the daemon stops scheduling passes that read nothing.
+        if (scanned === 0) ctx.state.setCursor(HISTORY_DONE_KEY, '1');
+      } else if (maxDate !== null) {
+        ctx.state.setCursor(CURSOR_KEY, String(maxDate));
+      }
+      return { ...totals, skipped, history: isHistory };
     },
   };
 }

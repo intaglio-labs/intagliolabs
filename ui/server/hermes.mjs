@@ -54,9 +54,28 @@ import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch } from './people/search.mjs';
 import { loadOwner } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
-import { buildMap, buildYear } from './people/map.mjs';
+import {
+  buildMap,
+  buildYear,
+  buildSearchYears,
+  yearCore,
+  peopleCoreFreshness,
+  useTallyStore,
+} from './people/map.mjs';
+import { openTallyStore } from './people/tallyStore.mjs';
 import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
+import { rankAcrossYears } from './people/find.mjs';
+import { contentMatches } from './people/content.mjs';
+import { rebuildEpisodes, EPISODE_SOURCES } from './memory/episodeStore.mjs';
+import {
+  isUnreachable,
+  unreachableError,
+  isTimeout,
+  timeoutError,
+  LLAMA_UNREACHABLE_STATUS,
+} from './llamaReady.mjs';
+import { loadSpine } from './people/graph.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
 import { validToFor } from './memory/validity.mjs';
@@ -1364,6 +1383,26 @@ const RETAIN_FIELDS = Object.freeze(['source', 'keep_days']);
 const PURGE_FIELDS = Object.freeze(['source']);
 const DELETE_ENTITIES_FIELDS = Object.freeze(['source', 'entity_ids']);
 const MAINTAIN_FIELDS = Object.freeze([]);
+const EPISODE_REBUILD_FIELDS = Object.freeze(['force']);
+
+// The episodic corpus in one string: what rebuildEpisodes actually reads. Count
+// and high-water id together catch both arrivals and deletions, and the source
+// list is the same EPISODE_SOURCES the rebuild selects on, so the two cannot
+// drift apart. Deliberately not a hash of the rows -- reading them is the work
+// this exists to avoid.
+function episodeSourceFingerprint(db) {
+  const holes = EPISODE_SOURCES.map(() => '?').join(',');
+  const r = db
+    .prepare(
+      `SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m FROM context WHERE source IN (${holes})`
+    )
+    .get(...EPISODE_SOURCES);
+  return `${r.n}|${r.m}`;
+}
+
+// The last rebuild this process performed, and the fingerprint it was for. In
+// memory only: a restart rebuilds once.
+let lastEpisodeBuild = null;
 const ENTITIES_PARAMS = Object.freeze(['source', 'from_ts', 'to_ts']);
 const APPLY_FIELDS = Object.freeze(['run', 'claims']);
 const APPLY_RUN_FIELDS = Object.freeze([
@@ -1400,6 +1439,15 @@ const DECISION_ACTIONS = Object.freeze(['accept', 'reject', 'retract']);
 // The review page is the v1 product surface and it has to show the receipt, so
 // this cap is about one sitting's reading, not about safety.
 const PENDING_CAP = 200;
+
+// HOW LONG THE OWNER'S QUESTION MAY TAKE.
+//
+// Just inside the widget's own 120s (Bridge.swift's timeoutIntervalForRequest),
+// so hermes is the one that answers: a status the widget can render rather than
+// a transport error it cannot. Overridable only through start(), so the suite can
+// exercise this path in a quarter of a second instead of two minutes -- the real
+// code path, a hundredth of the patience.
+export const ASK_TIMEOUT_MS = 110_000;
 // Row mode names the row; EPISODE mode names the LINE and hermes resolves the
 // row itself. Both are listed so the closed-field check accepts either shape,
 // and the staging code below refuses the combination -- see the note there.
@@ -2108,6 +2156,76 @@ async function handleAdmin(db, req, res, cors, url, channel) {
       return;
     }
 
+    // REBUILDING THE EPISODE INDEX, on the database's only writer.
+    //
+    // This used to be `node ui/scripts/build-episodes.mjs` spawned by the widget
+    // every distiller cycle, which was wrong twice over. It opened context.db
+    // read-write from a SECOND process while hermes was serving and ingesting
+    // against it — and the corpus runs journal_mode=DELETE, where a writer takes
+    // a lock that excludes every reader for the length of the rebuild — so it
+    // broke the sole-writer rule that connectors/AGENTS.md and ui/AGENTS.md both
+    // state, and could stall hermes for the full 5s busy_timeout. The widget also
+    // waited on it synchronously on the main run loop, so the UI froze for the
+    // duration: ~110ms when that comment was written at 12,782 rows, 1,414ms at
+    // 113,371, and growing with every history slice.
+    //
+    // Here it is just a function call on the handle that already owns the write
+    // lock, so there is no contention to lose to and nothing to wait on.
+    // ui/scripts/build-episodes.mjs stays as a CLI for a stopped hermes; it is
+    // simply off the running app's path.
+    if (url.pathname === '/admin/episodes/rebuild') {
+      const body = await readJson(req);
+      assertClosedFields(body, EPISODE_REBUILD_FIELDS);
+      // NOTHING NEW MEANS NOTHING TO REBUILD.
+      //
+      // The distiller POSTs this before every pass, and a pass runs every 45
+      // seconds while it is catching up -- so on a 36,975-episode corpus this
+      // was deleting and reinserting all of them, twice a minute, to arrive at
+      // byte-identical rows. hermes is single-threaded, so that is not just
+      // wasted CPU: every route is frozen for the duration of each one.
+      //
+      // The index is a pure function of the episodic rows, so (count, high-water
+      // id) over exactly those sources decides it. Held in memory rather than on
+      // disk on purpose -- a restart rebuilds once, which is cheap and is the
+      // conservative direction to be wrong in.
+      //
+      // `force` is the way to demand one anyway, since the fingerprint cannot
+      // see a change in the BUILDER (a different gap rule cuts the same rows
+      // differently). Nothing calls it on a timer.
+      const fp = episodeSourceFingerprint(db);
+      if (!body.force && lastEpisodeBuild !== null && lastEpisodeBuild.fingerprint === fp) {
+        // THE COUNTS CARRY OVER; WHAT THE LAST PASS DID DOES NOT. Replaying the
+        // whole cached result reported `scope: "full"` and an inserted/deleted
+        // tally from a pass that ran at some other time, on a call that did no
+        // work at all -- so an operator reading the response was told about the
+        // wrong pass. The state of the index is still true; the actions are not.
+        const { inserted, deleted, rekeyed, scope, ...state } = lastEpisodeBuild.out;
+        send(
+          res,
+          200,
+          { ...state, inserted: 0, deleted: 0, rekeyed: 0, scope: 'skipped', skipped: 'unchanged' },
+          cors
+        );
+        return;
+      }
+      const out = withPeopleDbs(db, (state) =>
+        // `force` means re-cut everything, not merely re-check: it exists for a
+        // change in the BUILDER, which no fingerprint over the corpus can see.
+        rebuildEpisodes(db, { spine: state ? loadSpine(state) : null, full: body.force === true })
+      );
+      lastEpisodeBuild = { fingerprint: fp, out };
+      // COUNTS ONLY: thread_key holds a chat guid, a chat guid holds a handle,
+      // and counterparty_key holds a person's name. None of them may be logged
+      // or returned.
+      send(res, 200, {
+        episodes: out.episodes,
+        settled: out.settled,
+        rows: out.rows,
+        withCounterparty: out.withCounterparty,
+      }, cors);
+      return;
+    }
+
     if (url.pathname === '/admin/maintain') {
       const body = await readJson(req);
       assertClosedFields(body, MAINTAIN_FIELDS);
@@ -2402,7 +2520,13 @@ async function proxyLlama(req, res, cors, { baseUrl, apiKey }) {
   } catch (error) {
     res.off('close', clientClosed);
     if (abort.signal.aborted) return;
-    throw Object.assign(new Error('local llama-server is unreachable'), { status: 502 });
+    // 503, matching /vault/ask, so that 502 means one thing only: the model was
+    // REACHED and answered with an error. This route used 502 for both, which
+    // made the two indistinguishable to any caller trying to tell "wait for it"
+    // from "something is actually wrong".
+    throw Object.assign(new Error('local llama-server is unreachable'), {
+      status: LLAMA_UNREACHABLE_STATUS,
+    });
   }
 
   if (!upstream.ok) {
@@ -2482,7 +2606,7 @@ function tryPersonSearch(db, question) {
   let state = null;
   try {
     const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
-    state = existsSync(statePath) ? new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true }) : null;
+    state = existsSync(statePath) ? openStateReadOnly(statePath) : null;
     return answerPersonSearch(db, state, question, { owner: loadOwner() });
   } catch {
     return null;
@@ -2499,12 +2623,61 @@ function tryPersonSearch(db, question) {
 // context db (the main store) is the caller's already-open handle. Errors
 // propagate: unlike the ask-path helpers, these are explicit routes the widget
 // invoked, so a failure should surface as a 500, not a silent null.
+// Build the people core once, at boot, on the same handles a request would use.
+// Exported shape matches yearCore's so the caller can log a count without
+// reaching into it.
+// ON REQUEST. The owner asked for "recomputed... every day or on request", and
+// this is the second half: a blocking rebuild the page can ask for by hand when
+// it does not want to wait for the background one.
+//
+// Blocking on purpose. Everything else in this file goes out of its way NOT to
+// block -- but somebody who pressed refresh is asking to wait, and returning
+// instantly with the same stale numbers would read as the button doing nothing.
+function rebuildPeopleCore(db) {
+  try {
+    withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      return yearCore(db, state, { now: Date.now(), owner: loadOwner(), aliases, blocking: true });
+    });
+  } catch {
+    // A failed rebuild leaves the previous core in place: stale, not wrong.
+  }
+}
+
+function warmPeopleCore(db) {
+  return withPeopleDbs(db, (state, resDb) => {
+    const { aliases } = resolutionState(resDb);
+    return yearCore(db, state, { now: Date.now(), owner: loadOwner(), aliases, blocking: true });
+  });
+}
+
+// WAIT FOR THE WRITER; DO NOT GIVE UP AND CALL IT AN ANSWER.
+//
+// state.db is the connectors' database and it runs journal_mode=DELETE, on
+// purpose -- contact names must not survive legibly in a -wal sidecar. So a
+// writer excludes readers, and the contacts connector upserts ~2,000 rows into
+// it about once a minute. With SQLite's default busy timeout of ZERO, a read
+// landing inside that window fails instantly.
+//
+// That failure used to be swallowed into an empty contacts spine, and an empty
+// spine is not a smaller answer -- it is a different one. Every person known
+// only through the address book loses their name and reverts to a raw handle,
+// and worse, two handles belonging to one person stop merging, so they split
+// into two people with the messages divided between them. Then yearCore
+// memoised it. Observed exactly that way: 11,716 messages became 8,148 plus a
+// second "person" holding the other 3,568.
+function openStateReadOnly(statePath) {
+  const db = new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true });
+  db.exec('PRAGMA busy_timeout = 5000');
+  return db;
+}
+
 function withPeopleDbs(db, fn) {
   let state = null;
   let resDb = null;
   try {
     const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
-    state = existsSync(statePath) ? new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true }) : null;
+    state = existsSync(statePath) ? openStateReadOnly(statePath) : null;
     resDb = openResolutionsDb();
     return fn(state, resDb);
   } finally {
@@ -2523,7 +2696,7 @@ function trySyncStatus(db, question) {
   let state = null;
   try {
     const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
-    state = existsSync(statePath) ? new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true }) : null;
+    state = existsSync(statePath) ? openStateReadOnly(statePath) : null;
     return answerSyncStatus(db, state, {});
   } catch {
     return null;
@@ -2638,7 +2811,21 @@ async function handleVaultAsk(db, req, res, cors, policy) {
         max_tokens: 300,
         stream: false,
       }),
-      signal: controller.signal,
+      // A CEILING, as well as the owner's Cancel. This had only the disconnect
+      // signal, so a model that never answered held this request -- and the
+      // single-slot server behind it -- open for as long as the socket lived.
+      // 110s sits just inside the widget's own 120s (Bridge.swift's
+      // timeoutIntervalForRequest), so hermes is the one that answers: a clean
+      // status the widget can render rather than a transport error it cannot.
+      signal: AbortSignal.any([
+        controller.signal,
+        AbortSignal.timeout(policy.askTimeoutMs ?? ASK_TIMEOUT_MS),
+      ]),
+      // A compromised or misconfigured loopback service must not redirect a
+      // household prompt (or its Authorization header) onto the network. Every
+      // other llama call in the tree says this; this one -- which carries the
+      // retrieved context AND the key -- did not.
+      redirect: 'error',
     });
     if (!llamaRes.ok) {
       // Unread, the error body pins this keep-alive connection to the
@@ -2674,6 +2861,15 @@ async function handleVaultAsk(db, req, res, cors, policy) {
     // the fact of it; writing to a destroyed socket would throw over the top of
     // the real reason.
     if (controller.signal.aborted) return;
+    // "The model is not running" is not an application error, and it is the one
+    // failure here the owner can be told something true about. Unshaped, it
+    // reached them as "something went wrong on this app's side".
+    if (isUnreachable(error)) throw unreachableError();
+    // NOR IS "it did not answer in time". The ceiling above aborts the COMBINED
+    // signal, so the disconnect controller reads as not-aborted and the guard
+    // above misses it -- which sent a 110s wait to the owner as an app bug,
+    // arriving before the widget's own 120s would have said anything at all.
+    if (isTimeout(error)) throw timeoutError();
     throw error;
   } finally {
     res.off('close', onClose);
@@ -2786,7 +2982,7 @@ function handle(db, req, res, cors, url, policy) {
   // map and WRITE the owner's merge decisions, neither of which is a browser
   // capability. The Origin channel is authenticated but not entitled here, so
   // 403 (not 401), matching handleAdmin's reasoning.
-  if (url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary') {
+  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary') {
     if (channel !== 'bearer') {
       send(res, 403, { error: 'people routes are bearer-only: call with the token from ~/.hazlie/secrets/hermes-token.txt and no Origin header.' }, cors);
       return;
@@ -2850,14 +3046,77 @@ async function handlePeople(db, req, res, cors, url, policy) {
     const sinceTs = days > 0 ? Date.now() - days * 86_400_000 : null;
     const out = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
-      return buildMap(db, state, { owner, sinceTs, aliases });
+      if (url.searchParams.get('rebuild') === '1') rebuildPeopleCore(db);
+      const map = buildMap(db, state, { owner, sinceTs, aliases });
+      return { ...map, freshness: peopleCoreFreshness(db, state, aliases) };
     });
-    send(res, 200, out, cors);
+    // PROJECTED, NOT JUST STRIPPED.
+    //
+    // This route was CLI-only until the constellation started calling it from
+    // the panel. Its star carries 22 fields including every handle a person has
+    // -- 2,665 of them, 506 address-shaped and 1,859 phone-shaped -- and the page
+    // reads eight. So `?for=page` returns those eight.
+    //
+    // Two reasons, and the second is the one that bites. Identifiers have no
+    // business crossing into a webview: both sibling routes already strip them,
+    // /people/find explicitly and with a comment. And SIZE -- the full payload is
+    // 1.32 MB, and Bridge.reply hands it to evaluateJavaScript as one inlined
+    // string with completionHandler nil, so if the web view refuses it the
+    // failure is discarded and the page simply never receives its data. A
+    // surface that fails by going quiet is worth 5x less bytes on its own.
+    //
+    // Unprojected stays the default so the CLI and any existing caller are
+    // unchanged; the page asks for what it needs.
+    const forPage = url.searchParams.get('for') === 'page';
+    const people = (out.people ?? []).map(({ identifiers, ...star }) => {
+      if (!forPage) return star;
+      return {
+        key: star.key,
+        name: star.name,
+        channels: star.channels,
+        messages: star.messages,
+        roomMessages: star.roomMessages,
+        roomOnly: star.roomOnly,
+        presenceDays: star.presenceDays,
+        lastSeen: star.lastSeen,
+        years: star.years,
+      };
+    });
+    send(res, 200, { ...out, people }, cors);
     return;
   }
 
   // The timeline view: one year of people by that year's engagement, with
   // the year's topics. Same auth posture as map.
+  // FINDING A PERSON, across every year rather than whichever tab is open.
+  //
+  // The timeline filtered client-side over the 250 people already loaded for one
+  // year, so anybody outside that page or that year was unreachable -- which is
+  // most people once history lands. Ranking lives in people/find.mjs and is
+  // arithmetic: no model is in this path, because a search that invents a person
+  // is worse than one that finds nobody.
+  if (req.method === 'GET' && url.pathname === '/people/find') {
+    const q = url.searchParams.get('q') ?? '';
+    if (typeof q !== 'string' || q.length > 100) {
+      throw badRequest('"q" must be a string of at most 100 characters');
+    }
+    const out = withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      const { byYear, years, idToKey } = buildSearchYears(db, state, { owner, aliases });
+      // The corpus half: who actually talked about this, counted per person-year
+      // (people/content.mjs). Counts only — no message text crosses this line.
+      const { stats, capped } = contentMatches(db, idToKey, q);
+      const people = rankAcrossYears(byYear, q, { limit: 60, content: stats }).map(
+        // The handles matched the query; they are not part of the answer, and
+        // the page has no use for them.
+        ({ identifiers, engagement, ...row }) => row
+      );
+      return { query: q, years, people, capped };
+    });
+    send(res, 200, out, cors);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/people/year') {
     const raw = url.searchParams.get('year');
     const thisYear = new Date().getFullYear();
@@ -2867,7 +3126,12 @@ async function handlePeople(db, req, res, cors, url, policy) {
     }
     const out = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
-      return buildYear(db, state, { year, owner, aliases });
+      if (url.searchParams.get('rebuild') === '1') rebuildPeopleCore(db);
+      const year_ = buildYear(db, state, { year, owner, aliases });
+      // HOW OLD IS THIS ANSWER. The core serves stale and rebuilds behind the
+      // response, which is what makes the page instant -- but an answer that is
+      // one ingest behind must say so rather than pass as live.
+      return { ...year_, freshness: peopleCoreFreshness(db, state, aliases) };
     });
     send(res, 200, out, cors);
     return;
@@ -2894,10 +3158,32 @@ async function handlePeople(db, req, res, cors, url, policy) {
     // (graph + row gather); only the llama fetch is awaited, and it touches
     // no handle. If summarizeYear ever grows an await before its reads, this
     // call site must change with it.
-    const out = await withPeopleDbs(db, (state, resDb) => {
-      const { aliases } = resolutionState(resDb);
-      return summarizeYear(db, state, { personKey: body.key, year, owner, aliases, llama: policy.llama });
-    });
+    // A CLOSED ROW STOPS THE WORK. The reader can collapse a person, or close
+    // the panel, while the model is still writing their summary -- and the
+    // single-slot server means whatever generates next is queued behind it.
+    // Same wiring as /vault/ask: `res`, not `req`, because readJson has already
+    // consumed the request stream and its 'close' has fired.
+    const summaryAbort = new AbortController();
+    const onSummaryClose = () => {
+      if (!res.writableEnded) summaryAbort.abort();
+    };
+    res.once('close', onSummaryClose);
+    let out;
+    try {
+      out = await withPeopleDbs(db, (state, resDb) => {
+        const { aliases } = resolutionState(resDb);
+        return summarizeYear(db, state, {
+          personKey: body.key, year, owner, aliases, llama: policy.llama,
+          signal: summaryAbort.signal,
+        });
+      });
+    } catch (error) {
+      if (summaryAbort.signal.aborted) return;
+      if (isUnreachable(error)) throw unreachableError();
+      throw error;
+    } finally {
+      res.off('close', onSummaryClose);
+    }
     send(res, 200, out, cors);
     return;
   }
@@ -2943,6 +3229,9 @@ export async function start({
   llamaBaseUrl = process.env.HERMES_LLAMA_URL ?? DEFAULT_LLAMA_BASE_URL,
   llamaApiKey,
   llamaApiKeyFile = process.env.HERMES_LLAMA_API_KEY_FILE ?? DEFAULT_LLAMA_API_KEY_PATH,
+  // Test seam only: the ask's ceiling. Production never passes it, so the
+  // constant is the one number that matters and there is no env var to drift.
+  askTimeoutMs = ASK_TIMEOUT_MS,
   bearerToken: fixedBearerToken,
   bearerTokenFile = process.env.HERMES_TOKEN_FILE ?? DEFAULT_HERMES_TOKEN_PATH,
 } = {}) {
@@ -2974,6 +3263,9 @@ export async function start({
     baseUrl: canonicalLoopbackBase(llamaBaseUrl),
     apiKey,
   };
+  const askCeilingMs = Number.isFinite(askTimeoutMs) && askTimeoutMs > 0
+    ? askTimeoutMs
+    : ASK_TIMEOUT_MS;
   const db = openDb(dbPath ?? process.env.HERMES_DB ?? DEFAULT_DB_PATH);
 
   const server = createServer(async (req, res) => {
@@ -3036,6 +3328,42 @@ if (isMain) {
       console.log(
         `hermes listening on http://127.0.0.1:${port} (context rows: ${n})`
       );
+      // WARM THE PEOPLE CORE BEFORE ANYBODY ASKS.
+      //
+      // The first build is the one wait that cannot be served around: ~7.6s of
+      // synchronous work with nothing cached to hand back instead. Every hermes
+      // restart throws the memo away, and the app restarts hermes on every
+      // deploy — so without this, the first person to open the panel after a
+      // deploy pays it, every time, and while they wait hermes answers nothing
+      // at all (node:sqlite is synchronous; a 20ms timer got zero ticks during
+      // an 8s build).
+      //
+      // Deferred past listen so the port is open first: a request arriving
+      // during the warm is queued behind it, which is the same wait it would
+      // have paid anyway, and /health answers before it starts.
+      //
+      // Counts only in the log, and failure is not fatal: an unwarmed core is
+      // slow, not broken, and the next request builds it.
+      setTimeout(() => {
+        const t0 = Date.now();
+        try {
+          // A DERIVED CACHE, beside the corpus it is derived from -- the path
+          // asked of the handle rather than recomputed, so it always names the
+          // database actually open and an in-memory one (which reports no file)
+          // gets no cache at all. Deleting it costs one rescan and nothing
+          // else, which is the only property it needs to have. Opened here
+          // rather than at import so a test that imports the module never
+          // writes to the owner's disk.
+          const file = db.prepare('PRAGMA database_list').get()?.file ?? '';
+          if (file) useTallyStore(openTallyStore(`${file}.tallies`));
+          const core = warmPeopleCore(db);
+          console.log(
+            `people core warm in ${Date.now() - t0}ms (${core?.graph?.length ?? 0} people)`
+          );
+        } catch (e) {
+          console.error(`people core warm failed: ${e?.message ?? e}`);
+        }
+      }, 250).unref?.();
     },
     (e) => {
       console.error(`hermes failed to start: ${e.message ?? e}`);

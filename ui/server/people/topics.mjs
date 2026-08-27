@@ -23,6 +23,10 @@
 // about THAT year, so a friendship that moved from "classes" to "startups"
 // reads as the story it is.
 
+import { approximateConversationKey } from '../memory/episodes.mjs';
+import { threadKind, counterpartyFromThread, GROUP } from '../memory/threadKind.mjs';
+import { digest, readTallies, writeTallies, scanFingerprint } from './tallyStore.mjs';
+
 // Curated topic signals. Word-boundary, case-insensitive, one hit counted per
 // ROW containing the signal (a message that says "coffee" five times is one
 // coffee conversation, not five).
@@ -96,13 +100,64 @@ const STOPWORDS = new Set(
     'looking making getting taking coming trying saying telling asking thinking feeling talking texting waiting ' +
     // Laughter runs in every alphabet the corpus texts in — 'kkk' is how half
     // the world laughs and reads appallingly as a chip.
-    'kkk kkkk kkkkk jaja jajaja jajaj wkwk wkwkwk jeje interesting'
+    'kkk kkkk kkkkk jaja jajaja jajaj wkwk wkwkwk jeje interesting ' +
+    // VOCABULARY ABOUT THE MEDIUM, not about the subject. A chip that says
+    // "message" or "link" describes the fact that you were texting, which is
+    // already the only reason the row exists. Filler in the same pass.
+    'message messages msg msgs link links reply replied forward forwarded chat chats texts ' +
+    'tho through again per stay ready'
   ).split(/\s+/u)
 );
 
+// A MESSAGE FROM A ROBOT IS NOBODY'S TOPIC.
+//
+// Measured on the live corpus before this existed, four of the fifteen most
+// repeated non-taxonomy chips were unsubscribe boilerplate -- "reply stop" on
+// 22 person-years, then "msg data", "reply help", "txt stop", "terms apply".
+// They are distinctive by every measure the ranker has (rare across the corpus,
+// repeated within a thread) and they describe no relationship at all.
+//
+// This drops the ROW rather than blacklisting the words, and the distinction is
+// the whole design. "order", "ride", "share" and "join" were all chipping off
+// this same boilerplate; stoplisting them would also have silenced the friend
+// who ordered dinner or shared a ride. Dropping the row silences the robot and
+// leaves every one of those words available to a person who actually said it.
+//
+// Deliberately narrow: each pattern is compliance language that a person does
+// not write to another person. `isNonPerson` already drops automated SENDERS
+// from the graph; this catches the automated MESSAGE reaching a person who
+// stays -- a real business the owner talks to, or a forwarded notification.
+const AUTOMATED_ROW = [
+  /\b(reply|txt|text)\s+(stop|help)\b/iu,
+  /\bstop\s*(=|to)\s*(end|quit|cancel|unsubscribe|opt)/iu,
+  /\b(msg|message|text)\s*(&|and)?\s*data rates?\b/iu,
+  /\bstd (msg|message|text) rates?\b/iu,
+  /\bterms\s+(and conditions\s+)?apply\b/iu,
+  /\bunsubscribe\b/iu,
+  /\bopt[-\s]?out\b/iu,
+  /\b(do not|don'?t) reply\b/iu,
+  /\bno[-\s]?reply@/iu,
+  /\b(verification|security|confirmation|access) code\b/iu,
+  /\bone[-\s]?time (code|passcode|password|pin)\b/iu,
+  // A ONE-TIME CODE, by the thing that actually distinguishes one: a code word
+  // sitting next to a run of digits. Matching "your ... code" on its own would
+  // swallow "your code review is done"; requiring the digits means a real
+  // conversation about code is only ever caught if somebody also said a number
+  // in the same breath, which is a door code and no more a topic than the rest.
+  /\b(code|otp|passcode|pin)\b[^\n]{0,24}\b\d{4,8}\b/iu,
+  /\b\d{4,8}\b[^\n]{0,24}\b(code|otp|passcode|pin)\b/iu,
+  /\bhelp for help\b/iu,
+];
+
+export function isAutomatedRow(text) {
+  const t = String(text ?? '');
+  if (t.length === 0) return false;
+  return AUTOMATED_ROW.some((re) => re.test(t));
+}
+
 // One person-year of tallies.
 function emptyDoc() {
-  return { taxonomy: {}, terms: new Map(), pairs: new Map() };
+  return { taxonomy: {}, terms: new Map(), pairs: new Map(), countedIn: new Set() };
 }
 
 // Strip the shapes that must never become a chip before tokenizing: URLs and
@@ -149,8 +204,20 @@ function rowPersonId(row, meta) {
   const id =
     row.source === 'mail'
       ? (Array.isArray(meta.from) ? meta.from[0]?.toLowerCase() : null)
-      : (meta.chat_handle ?? meta.handle ?? null);
-  return !id || meta.is_group ? null : id;
+      : (meta.chat_handle ?? meta.handle ?? counterpartyFromThread(row, meta));
+  // ROOMS ARE DROPPED, and this is a decision rather than a substitution.
+  //
+  // A chip sits under a person's name and claims to say what the two of you talk
+  // about. Something said in a room you both happen to be in is not that. The
+  // gate was already here for WhatsApp; it just never fired for iMessage, so
+  // 61,163 group messages have been characterising people who never said them to
+  // the owner. 216 person-years exist ONLY because of that leak and will lose
+  // their chips entirely -- which is the honest outcome: their whole
+  // "conversation" was other people's group threads.
+  //
+  // UNKNOWN is credited, exactly as before, so the 656 guid-less rows move nothing.
+  if (threadKind(row, meta) === GROUP) return null;
+  return id || null;
 }
 
 // Scan the prose sources once and tally, per (person, year): taxonomy topic
@@ -164,14 +231,95 @@ function rowPersonId(row, meta) {
 // denominator that makes "tahoe" beat "tuesday". `bucketBy` picks the time
 // grain: 'year' ('key|2021', the year view) or 'month' ('key|2021-03', for a
 // months-of-one-year view where a year would blur the story).
-export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucketBy = 'year' } = {}) {
+// THE SCAN, CACHED ON THE CORPUS ALONE.
+//
+// Keyed on what the scan actually reads -- the rows -- and nothing else. It used
+// to be rebuilt whenever the contacts spine moved, because both the person key
+// and the name-token filter were applied inside it; both now happen at the fold,
+// so a contacts sync costs 28ms of regrouping instead of a 3,494ms rescan of
+// 425,000 unchanged rows. Measured: the fold is 0.8% of the scan.
+//
+// Keyed per database handle like its siblings, and on bucketBy because a month
+// scan and a year scan are different tallies.
+const scanMemo = new WeakMap();
+
+export function topicScan(contextDb, { bucketBy = 'year', stamp, store = null } = {}) {
+  const hit = scanMemo.get(contextDb);
+  if (hit && hit.stamp === stamp && hit.bucketBy === bucketBy) return hit.byIdentifier;
+
+  // The disk cache, when the caller supplied one. Absent by default: tests and
+  // scripts get the pure function, and only the server passes a store.
+  const print = store ? scanFingerprint(contextDb, { bucketBy, signature: signalSignature() }) : null;
+  let byIdentifier = print ? readTallies(store, print) : null;
+  const loaded = byIdentifier !== null;
+  if (!loaded) byIdentifier = runTopicScan(contextDb, { bucketBy });
+
+  if (stamp !== undefined) scanMemo.set(contextDb, { stamp, bucketBy, byIdentifier });
+  if (print && !loaded) writeTallies(store, print, byIdentifier);
+  return byIdentifier;
+}
+
+// THE SIGNAL PATTERNS THEMSELVES, hashed.
+//
+// Editing a TOPIC_SIGNALS regex changes what a stored tally MEANS while leaving
+// every count and timestamp the fingerprint watches untouched -- the exact way a
+// derived store goes quietly stale (the summaries.db lesson). Hashing the
+// patterns makes that edit invalidate the cache with no one having to remember
+// to bump anything.
+let signatureMemo = null;
+export function signalSignature() {
+  if (signatureMemo === null) {
+    signatureMemo = digest(
+      Object.entries(TOPIC_SIGNALS)
+        .map(([name, re]) => `${name}=${String(re)}`)
+        .join('\n')
+    );
+  }
+  return signatureMemo;
+}
+
+export function topicTallies(
+  contextDb,
+  idToKey,
+  { nameTokens = new Set(), bucketBy = 'year', scanStamp, store = null } = {}
+) {
+  const byIdentifier = topicScan(contextDb, { bucketBy, stamp: scanStamp, store });
+  const docs = foldToPeople(byIdentifier, idToKey, nameTokens);
+  const docFreq = new Map();
+  for (const doc of docs.values()) {
+    for (const t of doc.terms.keys()) docFreq.set(t, (docFreq.get(t) ?? 0) + 1);
+    for (const pr of doc.pairs.keys()) docFreq.set(pr, (docFreq.get(pr) ?? 0) + 1);
+  }
+  return { docs, docFreq, totalDocs: docs.size, byIdentifier };
+}
+
+function runTopicScan(contextDb, { bucketBy = 'year' } = {}) {
+  // Cheap and honest: ask the schema rather than catching a query failure,
+  // which would also swallow a real error in the join.
+  const hasEpisodes =
+    contextDb
+      .prepare("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name='episode_member'")
+      .get().n === 1;
   const rows = contextDb
     .prepare(
-      "SELECT source, ts, text, meta FROM context " +
-        "WHERE source IN ('imessage','whatsapp','mail','linkedin') AND text IS NOT NULL"
+      hasEpisodes
+        ? // The episode id rides along so a topic is counted once per
+          // CONVERSATION. LEFT JOIN, because mail and linkedin have no thread to
+          // cut and a row the index has not reached yet must still be counted.
+          'SELECT c.source, c.ts, c.text, c.meta, m.episode_id ' +
+            'FROM context c LEFT JOIN episode_member m ON m.context_id = c.id ' +
+            "WHERE c.source IN ('imessage','whatsapp','mail','linkedin') AND c.text IS NOT NULL"
+        : // NO INDEX, NO DEPENDENCY. The episode table is derived and rebuilt on
+          // a timer, so it can legitimately be absent -- a fresh install before
+          // the first build, or any caller holding a plain context database.
+          // Chips are worth having either way, so this falls back to counting
+          // per message: the old weighting, which is worse but not wrong.
+          "SELECT source, ts, text, meta, NULL AS episode_id FROM context " +
+            "WHERE source IN ('imessage','whatsapp','mail','linkedin') AND text IS NOT NULL"
     )
     .all();
-  const docs = new Map();
+  const byIdentifier = new Map();
+  const convoKeys = new Map();
   const topicNames = Object.keys(TOPIC_SIGNALS);
   for (const row of rows) {
     let meta = {};
@@ -180,10 +328,29 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
     } catch {
       meta = {};
     }
+    // Compliance boilerplate is not a conversation. Dropped before the person
+    // is even resolved, so it costs nothing on the rows it does not match.
+    if (isAutomatedRow(row.text)) continue;
     const id = rowPersonId(row, meta);
     if (id === null) continue;
-    const key = idToKey.get(id);
-    if (key === undefined) continue;
+    // TALLIED BY IDENTIFIER, FOLDED TO PEOPLE AT THE END.
+    //
+    // This used to resolve the person key here and tally straight into their
+    // doc, which made the whole scan a function of idToKey -- and idToKey moves
+    // whenever the contacts spine does, which on this store was 188,508 rows in
+    // a day. Every one of those invalidated an 8-second scan of 425,000 rows
+    // that had not changed.
+    //
+    // An identifier is the stable thing: a handle belongs to whoever it belongs
+    // to regardless of what Contacts learns later. So the expensive pass keys on
+    // it, and the cheap fold below regroups into people using the CURRENT
+    // resolution. A spine change now costs the fold, not the scan -- and the
+    // per-identifier tallies are what a persisted, incremental store can hold,
+    // because rows only ever arrive.
+    //
+    // Rows whose identifier resolves to nobody are still tallied: they cost
+    // little, and dropping them here would mean a person who becomes resolvable
+    // later needs the full rescan this exists to avoid.
     const ts = Number(row.ts);
     if (!Number.isFinite(ts)) continue;
     const d = new Date(ts);
@@ -191,38 +358,110 @@ export function topicTallies(contextDb, idToKey, { nameTokens = new Set(), bucke
       bucketBy === 'month'
         ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
         : String(d.getFullYear());
-    const docKey = `${key}|${bucket}`;
-    let doc = docs.get(docKey);
+    const docKey = `${id}|${bucket}`;
+    let doc = byIdentifier.get(docKey);
     if (doc === undefined) {
       doc = emptyDoc();
-      docs.set(docKey, doc);
+      byIdentifier.set(docKey, doc);
+    }
+    // ONE HIT PER CONVERSATION, not per message.
+    //
+    // Counting messages let a single thread decide the chips: the largest
+    // episode on this corpus is 243 messages, so an hour spent on one subject
+    // counted 243 times against a whole year of everything else. Measured
+    // across the corpus the two weightings rank differently -- "hiring" leaves
+    // the top eight and "fundraising" enters, because hiring was concentrated
+    // in few conversations while fundraising was spread across many. Spread is
+    // what a topic chip is trying to say.
+    //
+    // A row with no episode keys on an APPROXIMATION of its conversation, not on
+    // itself. 19% of the episodic corpus has no episode -- makeEpisode drops any
+    // run the owner never spoke in, and mail has no thread at all -- and keying
+    // those on the row turned each one back into its own conversation, quietly
+    // restoring the message-counting this whole block exists to replace.
+    // The conversation this row belongs to. An episode id is an integer and
+    // says nothing; the APPROXIMATE key is built from a chat guid or a handle,
+    // and this set gets written to a cache file, so that form is reduced to a
+    // digest. It is only ever tested for membership, so a digest is as good as
+    // the string -- and memoised per conversation, so a 243-message thread
+    // hashes once rather than 243 times.
+    let convo;
+    if (row.episode_id === null || row.episode_id === undefined) {
+      const raw = approximateConversationKey(row, meta, Number(row.ts));
+      convo = convoKeys.get(raw);
+      if (convo === undefined) {
+        convo = digest(raw);
+        convoKeys.set(raw, convo);
+      }
+    } else {
+      convo = `ep:${row.episode_id}`;
     }
     for (const name of topicNames) {
-      if (TOPIC_SIGNALS[name].test(row.text)) doc.taxonomy[name] = (doc.taxonomy[name] ?? 0) + 1;
+      if (!TOPIC_SIGNALS[name].test(row.text)) continue;
+      const seen = `${convo}|${name}`;
+      if (doc.countedIn.has(seen)) continue;
+      doc.countedIn.add(seen);
+      doc.taxonomy[name] = (doc.taxonomy[name] ?? 0) + 1;
     }
     for (const clause of clauseTokens(row.text)) {
       for (let i = 0; i < clause.length; i++) {
         const t = clause[i];
-        if (t === null || nameTokens.has(t)) continue;
+        if (t === null) continue;
+        // NAMES ARE DROPPED AT THE FOLD, NOT HERE. Excluding them inline made
+        // this scan depend on the set of people's names, which is a function of
+        // the contacts spine -- so learning one new name invalidated a scan of
+        // 425,000 unchanged rows. The scan is now a pure function of the corpus,
+        // and the spine is applied where it is cheap.
         doc.terms.set(t, (doc.terms.get(t) ?? 0) + 1);
         // The pair: this word and the next, only when the next is also a
-        // meaningful word (a stopword or name in between breaks adjacency).
+        // meaningful word (a stopword in between breaks adjacency; a NAME in
+        // between is broken at the fold, which drops any pair containing one).
         const u = clause[i + 1];
-        if (u !== null && u !== undefined && !nameTokens.has(u)) {
+        if (u !== null && u !== undefined) {
           const pair = `${t} ${u}`;
           doc.pairs.set(pair, (doc.pairs.get(pair) ?? 0) + 1);
         }
       }
     }
   }
-  // Document frequency over person-buckets — singles and pairs share one map
-  // (the space in a pair key keeps the namespaces apart).
-  const docFreq = new Map();
-  for (const doc of docs.values()) {
-    for (const t of doc.terms.keys()) docFreq.set(t, (docFreq.get(t) ?? 0) + 1);
-    for (const pr of doc.pairs.keys()) docFreq.set(pr, (docFreq.get(pr) ?? 0) + 1);
+  return byIdentifier;
+}
+
+// Regroup per-identifier tallies under the person each identifier currently
+// resolves to. Cheap: one pass over the identifier buckets.
+export function foldToPeople(byIdentifier, idToKey, nameTokens = new Set()) {
+  const docs = new Map();
+  for (const [idBucket, src] of byIdentifier) {
+    const cut = idBucket.lastIndexOf('|');
+    const id = idBucket.slice(0, cut);
+    const bucket = idBucket.slice(cut + 1);
+    const key = idToKey.get(id);
+    if (key === undefined) continue; // resolves to nobody today
+    const docKey = `${key}|${bucket}`;
+    let doc = docs.get(docKey);
+    if (doc === undefined) {
+      doc = emptyDoc();
+      docs.set(docKey, doc);
+    }
+    for (const [name, n] of Object.entries(src.taxonomy)) {
+      doc.taxonomy[name] = (doc.taxonomy[name] ?? 0) + n;
+    }
+    // A person's own name is never their topic -- applied here rather than in
+    // the scan, so the scan does not depend on the spine. A pair is dropped when
+    // EITHER half is a name, which is what the inline check used to achieve by
+    // never forming it.
+    for (const [t, n] of src.terms) {
+      if (nameTokens.has(t)) continue;
+      doc.terms.set(t, (doc.terms.get(t) ?? 0) + n);
+    }
+    for (const [pr, n] of src.pairs) {
+      const sp = pr.indexOf(' ');
+      if (nameTokens.has(pr.slice(0, sp)) || nameTokens.has(pr.slice(sp + 1))) continue;
+      doc.pairs.set(pr, (doc.pairs.get(pr) ?? 0) + n);
+    }
+    for (const c of src.countedIn) doc.countedIn.add(c);
   }
-  return { docs, docFreq, totalDocs: docs.size };
+  return docs;
 }
 
 // The token set of every name in play, so "sarah" is never Sarah's topic.
@@ -239,6 +478,26 @@ export function nameTokenSet(names) {
 const PAIR_STOP = new Set([
   'fair enough', 'makes sense', 'take care', 'thank you', 'thanks man',
   'sounds like', 'kind regards', 'talk soon', 'miss you', 'appreciate it',
+  // FORMAL-MAIL BOILERPLATE, as PHRASES rather than words (owner, 2026-08-25).
+  // These chipped on real rows: "order number", "future reference", "received
+  // either", "mind providing", "profile accept", "email address".
+  //
+  // isAutomatedRow above is the primary defence and catches the bulk of it, but
+  // it is aimed at SMS compliance text and one-time codes — an order
+  // confirmation or a LinkedIn notification is ordinary formal English and
+  // passes it. A first attempt stopped the transactional VOCABULARY instead
+  // (order, address, invoice, reference…) and was wrong for exactly the reason
+  // isAutomatedRow's own comment gives: it would have silenced the friend who
+  // ordered dinner. The phrase is the boilerplate; the words are not.
+  //
+  // Precision over recall on purpose. This cannot catch a phrase nobody has
+  // seen yet, and that is the correct trade against deleting real vocabulary
+  // from every conversation in the corpus.
+  'order number', 'future reference', 'email address', 'mailing address',
+  'contact information', 'customer service', 'privacy policy', 'terms conditions',
+  'confirmation number', 'tracking number', 'reference number', 'account number',
+  'received either', 'mind providing', 'profile accept', 'view profile',
+  'click here', 'please note', 'best regards', 'original trade',
 ]);
 
 // The candidate list under both chip backfill and the specifics line.
@@ -290,10 +549,22 @@ export function topTopics(doc, docFreq, totalDocs, { limit = 3, minTaxonomy = 2,
   const taken = new Set();
   const tax = Object.entries(doc.taxonomy)
     .filter(([, n]) => n >= minTaxonomy)
-    .sort((a, b) => b[1] - a[1]);
+    // Count first, then the LABEL — a stable sort leaves ties in insertion
+    // order, which is the order the corpus scan happened to encounter them.
+    // That made two chips on the same count swap places whenever the tallies
+    // were grouped differently, so a contacts sync could reorder somebody's
+    // chips for no reason a reader could see.
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  // `tax` marks the chip as coming from the FIXED vocabulary above rather than
+  // from this pair's distinctive words. Both render identically as chips, but
+  // only the fixed set is comparable ACROSS people — "food & drinks" means the
+  // same thing on every row, "tokyo station" means it on exactly one. The
+  // constellation groups by topic, so it needs that distinction; without the
+  // flag the page would have to keep its own copy of the vocabulary and the
+  // two would drift.
   for (const [label, n] of tax) {
     if (out.length >= limit) break;
-    out.push({ label, n });
+    out.push({ label, n, tax: true });
     taken.add(label);
   }
   if (out.length < limit) {
@@ -302,7 +573,8 @@ export function topTopics(doc, docFreq, totalDocs, { limit = 3, minTaxonomy = 2,
     // the shown topics' own signals match. Learned from the first live run.
     const shownSignals = [...taken].map((label) => TOPIC_SIGNALS[label]).filter(Boolean);
     const skip = (label) => taken.has(label) || shownSignals.some((re) => re.test(label));
-    out.push(...pickTerms(doc, docFreq, totalDocs, { limit: limit - out.length, minCount, skip }));
+    out.push(...pickTerms(doc, docFreq, totalDocs, { limit: limit - out.length, minCount, skip })
+      .map((t) => ({ ...t, tax: false })));
   }
   return out;
 }

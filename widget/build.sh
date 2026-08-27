@@ -133,10 +133,19 @@ fi
 #
 #   llama runtime (~30 MB)  bundled. It is small, and building it otherwise
 #                           means Homebrew and a toolchain on the owner's Mac.
-#   voice models (~496 MB)  bundled. They CANNOT be produced on a user's
-#                           machine: setup-voice.sh needs npm and esbuild to
-#                           bundle the Kokoro worker, and sharp breaks the
-#                           install on a current node even on a dev box.
+#   voice models (~496 MB)  bundled, because producing them needs node, npm and
+#                           ~1.9 GB of downloads -- a toolchain and a wait no
+#                           end user should be handed. NOT because the build is
+#                           fragile: setup-voice.sh passes --ignore-scripts and
+#                           runs clean on a cold cache in about half a minute.
+#                           (This used to say "sharp breaks the install on a
+#                           current node even on a dev box". That was true of
+#                           the script as it stood BEFORE d447212, which fixed
+#                           it with --ignore-scripts -- and was committed
+#                           eleven minutes before this comment was written.
+#                           Measured 2026-08-25: the committed script exits 0
+#                           on node 22.21.1 with a cold cache and produces a
+#                           byte-identical tree.)
 #   the .gguf (2.5-4.7 GB)  DOWNLOADED, chosen in onboarding. One file, one
 #                           declared host (huggingface.co, already in
 #                           ops/EGRESS.json as model-asset), no toolchain — and
@@ -368,7 +377,54 @@ for svc in com.hazlie.hermes com.hazlie.connect com.hazlie.llama-server; do
   fi
 done
 
-if [ "${1:-}" = "--run" ]; then
+# RESTART THE APP TOO, for exactly the same reason as the agents above.
+#
+# The comment above is careful about three background services and then left the
+# app itself behind a flag, which is the half of the install that is actually on
+# screen. A running Hazlie holds the bundle it launched with -- its webviews keep
+# serving the HTML and JS from that copy -- so overwriting /Applications changes
+# nothing it displays. On 2026-08-25 that meant an hour of testing a panel whose
+# JS was 73 minutes old, and the symptom was the worst kind: the feature looked
+# broken rather than stale, because the OLD code was doing exactly what the old
+# code did.
+#
+# Only if it was ALREADY running. Launching an app the owner had closed is a
+# surprise an install has no business springing; --run stays the way to say
+# "start it regardless".
+if pgrep -x Hazlie >/dev/null 2>&1; then
   pkill -x Hazlie 2>/dev/null || true
+  # Wait for it to actually go. `open` on a still-dying instance reactivates the
+  # corpse instead of launching the new bundle, which would reproduce the very
+  # bug this block exists to fix.
+  for _ in $(seq 1 50); do
+    pgrep -x Hazlie >/dev/null 2>&1 || break
+    sleep 0.1
+  done
+  if pgrep -x Hazlie >/dev/null 2>&1; then
+    echo "WARNING: Hazlie would not quit; it is still showing the old bundle" >&2
+  else
+    # REAP THE CONNECTOR DAEMON, which is the app's CHILD and not a launchd
+    # agent, so killing the app orphans it (reparented to launchd) rather than
+    # stopping it. The new app then spawns a second one, and two daemons ingest
+    # into the same state.db at once -- observed on 2026-08-25, where the visible
+    # symptom was a plain "database is locked" from an unrelated query.
+    #
+    # Safe only in this window: the app is confirmed dead, so any daemon still
+    # alive is by definition an orphan, and the replacement has not started yet.
+    pkill -f 'connectors/daemon\.mjs' 2>/dev/null \
+      && echo "reaped: orphaned connector daemon" || true
+    # AND THE DISTILLER, for exactly the same reason and with worse consequences.
+    # It is also a child of the app, so killing the app reparents it to launchd
+    # rather than stopping it -- Distiller.stop() only runs on a clean quit.
+    # Observed right after distillation was switched off: a pass from the
+    # PREVIOUS bundle was still running two minutes later, holding the corpus
+    # write lock and the model, under an app that had been told not to distil.
+    # An orphan also outlives the switch that disabled it, which makes the switch
+    # look broken.
+    pkill -f 'ui/scripts/distill-(episodes|once)\.mjs' 2>/dev/null \
+      && echo "reaped: orphaned distiller pass" || true
+    open "$DEST" && echo "restarted: Intaglio Labs.app"
+  fi
+elif [ "${1:-}" = "--run" ]; then
   open "$DEST"
 fi

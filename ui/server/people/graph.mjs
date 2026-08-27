@@ -22,6 +22,10 @@
 //
 // Reads two databases (context + the spine's state.db) and writes nothing.
 
+// Whether a row happened in a room or in a conversation. Derived from the
+// thread, never stored -- see memory/threadKind.mjs for why it is not a field.
+import { threadKind, isRoom, counterpartyFromThread, GROUP } from '../memory/threadKind.mjs';
+
 const DAY = 86_400_000;
 
 function normName(s) {
@@ -34,20 +38,129 @@ function normName(s) {
 }
 
 // identifier (phone/email) -> canonical display name, from the spine.
+// Is this string a NAME, or an identifier wearing one? `speaker` falls back to
+// the handle when the store knows no name, so a WhatsApp LID
+// ("11107305521405@lid") and a bare phone number both arrive looking like
+// labels. Neither is one.
+// What to show when nobody, anywhere, knows this person's name.
+//
+// A raw WhatsApp LID is seventeen digits and an @lid suffix. It is not a
+// name, it is not recognisable, and it is not even a number the owner could
+// look up -- WhatsApp mints it precisely so it cannot be traced back to one.
+// Rendering it verbatim asks somebody to recognise an opaque token.
+//
+// A phone number is different: it is unrecognisable too, but it is REAL, and
+// an owner can often place it. So numbers stay, formatted; only the LID gets
+// replaced by an honest description of what it is.
+export function readableId(identifier) {
+  if (typeof identifier !== 'string' || identifier.length === 0) return null;
+  if (identifier.endsWith('@lid')) return 'WhatsApp contact';
+  return identifier;
+}
+
+export function namelike(value) {
+  if (typeof value !== 'string') return false;
+  const v = value.trim();
+  if (v.length === 0 || v.length > 80) return false;
+  if (v.includes('@')) return false; // an address or a LID, never a name
+  if (/^\+?[0-9()\s.-]+$/u.test(v)) return false; // a phone number
+  return /\p{L}/u.test(v); // has an actual letter in it
+}
+
+// THE SAME IDENTIFIER, WRITTEN TWO WAYS.
+//
+// Contacts and the message stores agree on E.164 for almost everything -- both
+// sides of this corpus are overwhelmingly `+1XXXXXXXXXX` -- so the exact match
+// below carries the load. This is for the tail that does not: a number typed
+// into the address book with punctuation, an address stored with different
+// case. Digits only, last ten, because a leading `+1` on one side and not the
+// other is the common disagreement and ten digits is where a NANP number
+// becomes unambiguous.
+export function normIdentifier(identifier) {
+  const v = String(identifier ?? '').trim();
+  if (v.length === 0) return '';
+  if (v.includes('@')) return v.toLowerCase();
+  const digits = v.replace(/\D/gu, '');
+  if (digits.length < 7) return ''; // a short code is not a person; never fold one
+  return digits.length > 10 ? digits.slice(-10) : digits;
+}
+
+function emptySpine() {
+  return {
+    idToName: new Map(),
+    nameToIds: new Map(),
+    looseIdToName: new Map(),
+    nameFor() {
+      return undefined;
+    },
+  };
+}
+
 export function loadSpine(stateDb) {
+  if (!stateDb) return emptySpine();
   const map = new Map();
   const nameToIds = new Map();
+  // Normalised identifier -> name, used ONLY when the exact lookup misses.
+  const loose = new Map();
+  const ambiguous = new Set();
+  // AN EMPTY SPINE IS AN ANSWER, NOT AN ERROR CODE.
+  //
+  // This used to wrap the whole read in a catch that returned an empty spine for
+  // ANY failure, on the reasoning that a fresh install has no contacts yet. That
+  // is true and it is worth keeping -- but it made a transient failure
+  // indistinguishable from a genuinely empty address book, and the two have
+  // opposite consequences. With no spine, every person known only through
+  // Contacts reverts to a raw handle AND their handles stop merging, so one
+  // person becomes several with their messages split between them. Cached, that
+  // is the whole app quietly wrong until something else moves the stamp.
+  //
+  // So: a missing table is still the valid empty case. Anything else -- a lock
+  // held by the connector mid-upsert, an unreadable file -- is raised, because a
+  // caller that cannot get names must be able to tell that it could not, rather
+  // than serve a nameless graph as though it were the truth.
+  let rows;
   try {
-    for (const r of stateDb.prepare('SELECT identifier, display_name FROM contact_ids').all()) {
+    rows = stateDb.prepare('SELECT identifier, display_name FROM contact_ids').all();
+  } catch (error) {
+    if (/no such table/iu.test(String(error?.message ?? ''))) return emptySpine();
+    throw error;
+  }
+  {
+    for (const r of rows) {
       map.set(r.identifier, r.display_name);
       const key = normName(r.display_name);
       if (!nameToIds.has(key)) nameToIds.set(key, { name: r.display_name, ids: [] });
       nameToIds.get(key).ids.push(r.identifier);
+
+      const nid = normIdentifier(r.identifier);
+      if (nid === '') continue;
+      const seen = loose.get(nid);
+      // TWO PEOPLE, ONE NORMALISED NUMBER. Ten digits is not globally unique --
+      // two international numbers can share their last ten. Rather than pick
+      // one and put the wrong name on somebody, the loose index forgets the key
+      // entirely and that identifier falls back to the exact match or to no
+      // name at all. Being unnamed is recoverable; being named as someone else
+      // is not.
+      if (seen !== undefined && normName(seen) !== normName(r.display_name)) {
+        ambiguous.add(nid);
+      } else if (seen === undefined) {
+        loose.set(nid, r.display_name);
+      }
     }
-  } catch {
-    // No spine yet is a valid state — people just key by raw identifier.
   }
-  return { idToName: map, nameToIds };
+  for (const nid of ambiguous) loose.delete(nid);
+  return {
+    idToName: map,
+    nameToIds,
+    looseIdToName: loose,
+    /// The name Contacts has for this identifier, exact match first.
+    nameFor(identifier) {
+      const exact = map.get(identifier);
+      if (exact !== undefined) return exact;
+      const nid = normIdentifier(identifier);
+      return nid === '' ? undefined : loose.get(nid);
+    },
+  };
 }
 
 // The identifier a row is "about" — the counterparty, never the owner. Returns
@@ -63,14 +176,55 @@ function personSignalsForRow(row, meta, owner) {
       // only ever talked to in a group thread is now visible. The owner's own
       // group messages have no single counterparty and are still skipped; a
       // one-to-one message is credited to the chat handle as before.
-      if (meta.is_group) {
+      // THE SPEAKER IS A NAME WHEN WHATSAPP KNOWS ONE, and for most of these
+      // people it is the only name there is. A group sender arrives as a privacy
+      // LID -- an opaque id WhatsApp uses instead of a phone number -- which the
+      // spine can never resolve, so the timeline rendered seventeen digits. The
+      // connector already joins ZWAGROUPMEMBER for a contact name and puts it in
+      // `speaker`; this is where it was being thrown away.
+      //
+      // Guarded, because `speaker` falls back to the handle itself when the
+      // store knows no name: a LID or a bare number is an identifier, and
+      // passing one through here would make it somebody's display name, which
+      // is the bug this whole pass exists to fix.
+      const speakerName = namelike(row.speaker) ? row.speaker : undefined;
+      // A ROOM IS NOT A CONVERSATION, and until now nothing here could tell the
+      // difference: `meta.is_group` is written only by WhatsApp, so this branch
+      // was dead for all 360,320 iMessage rows and 22.3% of them are group
+      // threads. threadKind derives it from the chat_guid marker instead.
+      //
+      // The flag rides ALONG with the signal rather than changing which signals
+      // are emitted -- deliberately. Every consumer keeps receiving exactly the
+      // rows it received before, and each opts in separately to caring. That is
+      // what lets the clocks below be corrected without a single message count
+      // moving.
+      const room = isRoom(row, meta);
+      if (threadKind(row, meta) === GROUP) {
         if (fromMe) return [];
         const sender = meta.sender_handle ?? meta.handle ?? null;
-        return sender ? [{ id: sender, channel: row.source, ts, fromMe: false }] : [];
+        return sender
+          ? [{ id: sender, channel: row.source, ts, fromMe: false, name: speakerName, room }]
+          : [];
       }
-      const id = meta.chat_handle ?? meta.handle ?? null;
+      // ...falling back to the THREAD when Apple did not record a handle, which
+      // it does not on most outbound rows. See counterpartyFromThread: this is
+      // 109,380 of the owner's own one-to-one messages that were being dropped,
+      // and it is deliberately unreachable for group threads.
+      const id = meta.chat_handle ?? meta.handle ?? counterpartyFromThread(row, meta);
       if (!id) return [];
-      return [{ id, channel: row.source, ts, fromMe }];
+      // ONE-TO-ONE, where the id is the chat rather than the sender -- so the
+      // speaker of an OUTBOUND row is the owner, and passing it here would file
+      // the owner's own name under the person they were writing to. Measured on
+      // the live corpus: every outbound one-to-one WhatsApp row carries a
+      // namelike speaker, and all of them are the same one name.
+      //
+      // The name for a one-to-one chat is the CHAT's name, which WhatsApp sets
+      // from the contact -- 41 of 61 chats have one, and 20 of those have no
+      // other name anywhere. A group's chat_name is the room, so this is only
+      // reachable below the is_group branch above.
+      const oneToOneName = (!fromMe && speakerName)
+        || (namelike(meta.chat_name) ? meta.chat_name : undefined);
+      return [{ id, channel: row.source, ts, fromMe, name: oneToOneName || undefined, room }];
     }
     case 'mail': {
       // EVERY non-owner address on the email is counted, not just the first
@@ -99,9 +253,21 @@ function personSignalsForRow(row, meta, owner) {
     }
     case 'calendar': {
       const out = [];
-      for (const a of meta.attendees ?? []) {
-        if (a?.email) out.push({ id: a.email.toLowerCase(), channel: 'calendar', ts, fromMe: false, name: a.name });
-      }
+      const seen = new Set();
+      const add = (email, name) => {
+        const id = String(email ?? '').toLowerCase();
+        if (!id || seen.has(id)) return;
+        seen.add(id);
+        out.push({ id, channel: 'calendar', ts, fromMe: false, name: namelike(name) ? name : undefined });
+      };
+      for (const a of meta.attendees ?? []) add(a?.email, a?.name);
+      // THE ORGANIZER IS A PERSON TOO, and EventKit does not always repeat them
+      // in the attendee list -- two of them are in no attendee list at all on
+      // the live corpus, which meant the person who called the meeting was the
+      // one person it did not record. Deduped against the attendees, because
+      // usually they ARE in both.
+      const org = meta.organizer;
+      add(typeof org === 'string' ? org : org?.email, typeof org === 'string' ? undefined : org?.name);
       return out;
     }
     case 'linkedin': {
@@ -192,7 +358,20 @@ function addContentSignals(contextDb, people, keyResolver, signals) {
       row.source === 'mail'
         ? (Array.isArray(meta.from) ? meta.from[0]?.toLowerCase() : null)
         : (meta.chat_handle ?? meta.handle ?? null);
-    if (!id || meta.is_group) continue;
+    // ROOMS COUNT HERE, deliberately, and the opposite of the chips rule.
+    //
+    // This scan asks "does this PERSON talk about investor topics" -- a fact
+    // about them, not about their relationship with the owner. Somebody
+    // discussing a term sheet in a group said it; where they stood when they
+    // said it does not make it less true of them. A chip is different, because a
+    // chip claims to describe a conversation the two of you had.
+    //
+    // The `meta.is_group` test that used to sit here never fired for iMessage
+    // (the key is WhatsApp-only), so groups have in fact been counted all along.
+    // Rather than make a dead gate live and quietly drop 24.8% of the credited
+    // rows off this scan -- which would push people off the investor list -- the
+    // behaviour is kept and the intent is now written down.
+    if (!id) continue;
     const key = keyResolver(id);
     const person = people.get(key);
     if (!person) continue;
@@ -238,7 +417,8 @@ export function buildGraph(
   const rawKeyForId = (id, name) => {
     // Spine name wins; then an exact-name LinkedIn/calendar match to a spine
     // person; then the raw id.
-    if (spine.idToName.has(id)) return `name:${normName(spine.idToName.get(id))}`;
+    const known = spine.nameFor(id);
+    if (known !== undefined) return `name:${normName(known)}`;
     if (name) {
       const nk = normName(name);
       if (spine.nameToIds.has(nk)) return `name:${nk}`;
@@ -260,7 +440,11 @@ export function buildGraph(
 
   const rows = contextDb
     .prepare(
-      "SELECT ts, source, entity_id, meta FROM context " +
+      // `speaker` is in this list because it was missing from it, and its
+      // absence made the name-recovery below dead code: signalsFor read
+      // row.speaker, row.speaker was always undefined, and every WhatsApp
+      // name it was written to rescue was discarded silently.
+      "SELECT ts, source, speaker, entity_id, meta FROM context " +
         "WHERE source IN ('imessage','whatsapp','mail','calendar','linkedin')" +
         (sinceTs != null ? " AND ts >= ?" : "")
     )
@@ -287,6 +471,8 @@ export function buildGraph(
           sent: 0,
           received: 0,
           metInPerson: 0,
+          roomMessages: 0,
+          directMessages: 0,
           linkedin: null,
           content: {},
           timeline: new Map(),
@@ -297,7 +483,8 @@ export function buildGraph(
       p.identifiers.add(sig.id);
       p.channels.add(sig.channel);
       if (sig.name) p.names.add(sig.name);
-      if (spine.idToName.has(sig.id)) p.names.add(spine.idToName.get(sig.id));
+      const spineName = spine.nameFor(sig.id);
+      if (spineName !== undefined) p.names.add(spineName);
       // A calendar event is co-attendance, not contact — and it can be in the
       // FUTURE, which produced negative dormancy on the first live run. So
       // firstSeen spans everything, but lastSeen and the DORMANCY clock only
@@ -310,19 +497,41 @@ export function buildGraph(
       if (Number.isFinite(sig.ts)) {
         if (sig.ts < p.firstSeen) p.firstSeen = sig.ts;
         if (sig.ts <= now && (p.lastSeen === null || sig.ts > p.lastSeen)) p.lastSeen = sig.ts;
-        if (isMessage && !sig.fromMe && sig.ts <= now && (p.lastFromThem === null || sig.ts > p.lastFromThem)) {
+        // NOT IN A ROOM. "They reached out" has to mean they addressed the
+        // owner; somebody posting in a group both happen to be in is not that,
+        // and 205 of 1,869 people had this clock set by room chatter -- 143 of
+        // them have never sent a direct message at all, so their entire "they
+        // reached out" history was other people's group threads. Dormancy feeds
+        // the mentor band, constellation warmth and open-loop detection, so this
+        // was three wrong answers from one wrong clock.
+        if (isMessage && !sig.fromMe && !sig.room && sig.ts <= now
+            && (p.lastFromThem === null || sig.ts > p.lastFromThem)) {
           p.lastFromThem = sig.ts;
         }
         // The owner's side of the same clock, for open-loop detection ("they
         // wrote last and I never answered"). Message channels only, like
         // lastFromThem -- a calendar invite neither opens nor closes a loop.
-        if (isMessage && sig.fromMe && sig.ts <= now && (p.lastFromOwner === null || sig.ts > p.lastFromOwner)) {
+        // Same rule on the owner's side: answering in a group is not answering
+        // this person, so it must not close an open loop with them.
+        if (isMessage && sig.fromMe && !sig.room && sig.ts <= now
+            && (p.lastFromOwner === null || sig.ts > p.lastFromOwner)) {
           p.lastFromOwner = sig.ts;
         }
       }
+      // SENT AND RECEIVED MEAN DIRECT, because that is what every consumer of
+      // them already assumes. reciprocity is documented as "do they write back --
+      // 1.0 is a balanced two-way thread", and counting a room made that read
+      // 1.0 for two people who have never addressed each other and merely posted
+      // the same number of times into the same group. Somebody answering in a
+      // group chat did not answer YOU.
+      //
+      // Room volume is not discarded, it is counted as itself. The two numbers
+      // answer different questions and neither one is the other's approximation.
       if (sig.channel === 'calendar') p.metInPerson += 1;
+      else if (sig.room) p.roomMessages += 1;
       else if (sig.fromMe) p.sent += 1;
       else p.received += 1;
+      if (sig.channel !== 'calendar' && !sig.linkedin && !sig.room) p.directMessages += 1;
       // The activity TIMELINE: the same counts, bucketed by calendar month, so
       // downstream code (people/profile.mjs) can see WHEN a relationship lived
       // -- peak era, cadence, "active in 2020-2022" -- not just its lifetime
@@ -333,10 +542,13 @@ export function buildGraph(
         const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
         let bucket = p.timeline.get(ym);
         if (bucket === undefined) {
-          bucket = { sent: 0, received: 0, met: 0 };
+          bucket = { sent: 0, received: 0, met: 0, room: 0 };
           p.timeline.set(ym, bucket);
         }
+        // Same split as the totals: the year view sums these, so a room counted
+        // here would put the old number back on the one screen that shows it.
         if (sig.channel === 'calendar') bucket.met += 1;
+        else if (sig.room) bucket.room += 1;
         else if (sig.fromMe) bucket.sent += 1;
         else bucket.received += 1;
       }
@@ -353,8 +565,27 @@ export function buildGraph(
   return [...people.values()]
     .map((p) => {
       const messages = p.sent + p.received;
+      // THE SPINE FIRST, because it is the only source that knows a name for
+      // somebody who has never been named IN the data.
+      //
+      // p.names holds names carried by the events themselves -- a calendar
+      // attendee, a LinkedIn profile. A message carries a HANDLE and never a
+      // name, so for anyone known only through the address book that set is
+      // empty and this fell through to the raw identifier. That is why the
+      // timeline showed "ay@austinyoshino.com" for a person whose own key was
+      // already `name:austin yoshino`: the key had resolved him through the
+      // spine, and the label never asked.
+      //
+      // nameToIds keeps the ORIGINAL casing against the normalised key, so this
+      // renders "Austin Yoshino" rather than the flattened form the key carries.
+      const fromSpine = p.key.startsWith('name:')
+        ? spine.nameToIds.get(p.key.slice('name:'.length))?.name
+        : null;
       const display =
-        [...p.names].sort((a, b) => b.length - a.length)[0] ?? [...p.identifiers][0] ?? p.key;
+        fromSpine ??
+        [...p.names].sort((a, b) => b.length - a.length)[0] ??
+        readableId([...p.identifiers][0]) ??
+        p.key;
       return {
         // The canonical resolution key. Stable across rebuilds (derived from the
         // data, not the run), so the review queue's decisions key on it.
@@ -374,6 +605,14 @@ export function buildGraph(
             ? Math.round((100 * Math.min(p.sent, p.received)) / Math.max(p.sent, p.received)) / 100
             : 0,
         metInPerson: p.metInPerson,
+        // THE SECOND AXIS. messages/sent/received above are unchanged -- these
+        // say how much of it was addressed to the owner and how much was said in
+        // a room they also happened to be in. `roomOnly` is the case worth a
+        // badge: 143 people have never sent a direct message and today render
+        // identically to friends on every screen in the app.
+        roomMessages: p.roomMessages,
+        directMessages: p.directMessages,
+        roomOnly: p.directMessages === 0 && p.roomMessages > 0,
         firstSeen: p.firstSeen,
         lastSeen: p.lastSeen,
         // The dormancy clock the whole build was for: days since THEY last

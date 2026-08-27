@@ -751,3 +751,80 @@ test('the pending queue is ordered by confidence, then newest', () => {
   assert.equal(claims.length, 5, 'nothing is dropped for lacking a confidence');
   db.close();
 });
+
+// A MODEL THAT IS NOT RUNNING IS NOT AN APP BUG.
+//
+// The companion to the abstain test above. There, a dead llama does not matter
+// because retrieval never calls it. Here retrieval succeeds, so the model IS
+// called, and the question is what the owner is told when nothing answers.
+//
+// It used to be `500 {"error":"fetch failed"}`: the catch rethrew the raw
+// TypeError and the generic handler shaped it. Bridge's `default:` arm turned
+// every unrecognised status into "something went wrong on this app's side" --
+// the app-bug string -- for a model that was merely restarting. build.sh
+// kickstarts llama-server on every deploy, so this is a state owners hit.
+test('a question with an answer to give reports the model as down, not as a bug', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hermes-llamadown-test-'));
+  const dbPath = join(dir, 'context.db');
+  seedAcceptedClaim(dbPath);
+  const server = await start({
+    port: 0,
+    dbPath,
+    llamaApiKey: 'd'.repeat(64),
+    // Port 1 is reserved and nothing listens there: a refused connection, which
+    // is exactly the shape of a model mid-restart.
+    llamaBaseUrl: 'http://127.0.0.1:1',
+    bearerToken: TOKEN,
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/vault/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ utterance: 'how do you get to work?' }),
+    });
+    // 503, because Bridge maps 502 and 503 to the one state whose copy says the
+    // model is restarting. A 500 here is the regression.
+    assert.equal(res.status, 503, 'a missing model must not read as an app bug');
+    const body = await res.json();
+    assert.match(body.error, /llama-server is unreachable/);
+    assert.ok(!/fetch failed/.test(body.error), 'and must not leak the transport message');
+  } finally {
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The other half of the pair above: a model that ACCEPTS and never answers.
+// hermes must answer before the widget's own 120s does, with a status the widget
+// can render — not a 500 that reads as an app bug.
+test('a model that accepts and never answers is reported as slow, not as a bug', async () => {
+  const stalled = createServer((req, res) => { req.resume(); }); // never responds
+  await new Promise((r) => stalled.listen(0, '127.0.0.1', r));
+  const dir = mkdtempSync(join(tmpdir(), 'hermes-llamaslow-test-'));
+  const dbPath = join(dir, 'context.db');
+  seedAcceptedClaim(dbPath);
+  const server = await start({
+    port: 0,
+    dbPath,
+    llamaApiKey: 'd'.repeat(64),
+    llamaBaseUrl: `http://127.0.0.1:${stalled.address().port}`,
+    bearerToken: TOKEN,
+    // The production ceiling is 110s; the suite cannot wait that long, so the
+    // route reads it from here. Same code path, a hundredth of the patience.
+    askTimeoutMs: 250,
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/vault/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ utterance: 'how do you get to work?' }),
+    });
+    assert.equal(res.status, 504, 'a silent model must not read as an app bug');
+    const body = await res.json();
+    assert.match(body.error, /did not answer in time/);
+  } finally {
+    await server.close();
+    stalled.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

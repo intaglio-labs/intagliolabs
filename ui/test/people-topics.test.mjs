@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import { openDb, insertRows } from '../server/hermes.mjs';
-import { topicTallies, topTopics, topTerms, nameTokenSet, TOPIC_SIGNALS } from '../server/people/topics.mjs';
+import { topicTallies, topTopics, topTerms, nameTokenSet, isAutomatedRow, TOPIC_SIGNALS } from '../server/people/topics.mjs';
 import { yearRows, buildMap, buildYear } from '../server/people/map.mjs';
 
 const NOW = new Date(2027, 0, 1).getTime();
@@ -90,10 +90,10 @@ test('topTopics: taxonomy first by count, distinctive terms backfill to 3', () =
 
 test('yearRows collapses the month timeline with the declared meeting weight', () => {
   const timeline = [
-    { ym: '2020-03', sent: 5, received: 5, met: 0 },
-    { ym: '2020-11', sent: 0, received: 2, met: 2 },
-    { ym: '2022-01', sent: 0, received: 0, met: 1 },
-    { ym: '2023-01', sent: 0, received: 0, met: 0 }, // empty year: dropped
+    { ym: '2020-03', sent: 5, received: 5, met: 0, room: 0 },
+    { ym: '2020-11', sent: 0, received: 2, met: 2, room: 0 },
+    { ym: '2022-01', sent: 0, received: 0, met: 1, room: 0 },
+    { ym: '2023-01', sent: 0, received: 0, met: 0, room: 0 }, // empty year: dropped
   ];
   assert.deepEqual(yearRows(timeline), [
     { year: 2020, messages: 12, met: 2, engagement: 18 },
@@ -174,8 +174,12 @@ test('buildYear: one year of people by year engagement, with year topics', () =>
   insertRows(ctx, [
     // March: Sam quiet, Ana loud. July: only Sam.
     { ...msg(mar, 'gym then a workout before the marathon'), entity_id: 'm1' },
+    // FIVE SEPARATE DAYS, not five messages in one afternoon. A taxonomy chip
+    // counts conversations, so a single burst is a single hit and would not
+    // clear minTaxonomy -- which is the rule working, not a bug to fixture
+    // around. Spreading them is what "Ana talks about fundraising" means.
     ...Array.from({ length: 5 }, (_, i) => ({
-      ts: mar + i * 3600_000, source: 'imessage', entity_id: `m2:${i}`,
+      ts: mar + i * 86_400_000, source: 'imessage', entity_id: `m2:${i}`,
       text: 'the seed round term sheet from the investors', meta: { chat_handle: '+18085550200', is_from_me: false },
     })),
     { ...msg(jul, 'surf at sunrise?'), entity_id: 'm3' },
@@ -234,4 +238,108 @@ test('a stopword between two words breaks the pair', () => {
   ]);
   const { docs } = topicTallies(ctx, new Map([[HANDLE, 'k']]), { bucketBy: 'month' });
   assert.equal(docs.get('k|2026-05').pairs.get('working app'), undefined);
+});
+
+// Machine-written mail is formal English, so isAutomatedRow -- aimed at SMS
+// compliance text and one-time codes -- lets an order confirmation straight
+// through. These are the exact PHRASES that chipped on real rows.
+//
+// Phrases, not words. Stopping the vocabulary instead (order, address,
+// reference...) was tried and reverted: it would have silenced the friend who
+// ordered dinner, which is the same reason isAutomatedRow drops rows rather
+// than blacklisting terms. A lone "order" chip is the accepted cost.
+test('automated-mail boilerplate never becomes a chip', () => {
+  const ctx = openDb(':memory:');
+  const y = new Date(2024, 3, 1).getTime();
+  // Enough repetitions to clear every floor: if the register were not stopped,
+  // these would be the most "distinctive" phrases this pair has.
+  const lines = [
+    'your order number is ready for future reference',
+    'your order number is ready for future reference',
+    'your order number is ready for future reference',
+    'we have received either your email address or your profile',
+    'we have received either your email address or your profile',
+    'we have received either your email address or your profile',
+    'would you mind providing the original confirmation',
+    'would you mind providing the original confirmation',
+    'would you mind providing the original confirmation',
+  ];
+  insertRows(ctx, lines.map((t, i) => ({ ...msg(y + i * DAY, t), entity_id: `b${i}` })));
+  const idToKey = new Map([[HANDLE, 'name:shop bot']]);
+  const { docs, docFreq, totalDocs } = topicTallies(ctx, idToKey);
+  const chips = topTopics(docs.get('name:shop bot|2024'), docFreq, totalDocs, { limit: 5 })
+    .map((c) => c.label);
+  for (const junk of ['order number', 'future reference', 'received either', 'email address',
+    'mind providing']) {
+    assert.ok(!chips.includes(junk), `"${junk}" must not be a chip, got ${JSON.stringify(chips)}`);
+  }
+});
+
+// The other half of the same change: stopping the register must not cost the
+// distinctive terms the backfill exists for.
+test('real distinctive terms still chip after the pair stoplist', () => {
+  const ctx = openDb(':memory:');
+  const y = new Date(2024, 3, 1).getTime();
+  const lines = [
+    'the tahoe cabin again in tahoe next month',
+    'tahoe cabin was unreal, tahoe cabin again?',
+    'booking the tahoe cabin, same tahoe cabin as before',
+  ];
+  insertRows(ctx, lines.map((t, i) => ({ ...msg(y + i * DAY, t), entity_id: `c${i}` })));
+  const idToKey = new Map([[HANDLE, 'name:pat kim']]);
+  const { docs, docFreq, totalDocs } = topicTallies(ctx, idToKey);
+  const chips = topTopics(docs.get('name:pat kim|2024'), docFreq, totalDocs, { limit: 5 })
+    .map((c) => c.label);
+  assert.ok(chips.some((c) => c.includes('tahoe')), `expected a tahoe chip, got ${JSON.stringify(chips)}`);
+});
+
+// ---- what a robot said is nobody's topic ----
+//
+// Measured before this filter existed: four of the fifteen most repeated
+// non-taxonomy chips on the owner's corpus were unsubscribe boilerplate.
+test('compliance boilerplate is recognised, ordinary sentences are not', () => {
+  for (const t of [
+    'Reply STOP to unsubscribe',
+    'Txt STOP to end',
+    'Msg & data rates may apply',
+    'Terms and conditions apply',
+    'Your verification code is 448192',
+    '448192 is your Acme code',
+    'Reply HELP for help',
+  ]) assert.ok(isAutomatedRow(t), `should be automated: ${t}`);
+
+  for (const t of [
+    'can you stop by after work?',
+    'i had to apply for the visa today',
+    'help me pick a restaurant',
+    'the code review is done',
+    'reply when you get a sec',
+  ]) assert.equal(isAutomatedRow(t), false, `should NOT be automated: ${t}`);
+});
+
+// The reason this drops the ROW and not the words: "code" is in the engineering
+// taxonomy, and on the live corpus 335 verification-code texts were being
+// counted as engineering conversations.
+test('a verification code is not an engineering conversation', () => {
+  const ctx = openDb(':memory:');
+  const y = new Date(2024, 3, 1).getTime();
+  insertRows(ctx, [
+    { ...msg(y, 'Your Acme verification code is 771043. Reply STOP to opt out.'), entity_id: 'b1' },
+    { ...msg(y + DAY, '883120 is your security code'), entity_id: 'b2' },
+    { ...msg(y + 2 * DAY, 'your login code: 220134'), entity_id: 'b3' },
+  ]);
+  const { docs } = topicTallies(ctx, new Map([[HANDLE, 'name:sam lee']]));
+  const doc = docs.get('name:sam lee|2024');
+  assert.equal(doc?.taxonomy?.engineering, undefined, 'a robot texting a code is not "engineering"');
+});
+
+test('a real conversation about code still counts as engineering', () => {
+  const ctx = openDb(':memory:');
+  const y = new Date(2024, 3, 1).getTime();
+  insertRows(ctx, [
+    { ...msg(y, 'pushed the code, can you review the repo?'), entity_id: 'c1' },
+    { ...msg(y + DAY, 'the deploy broke, bug in the backend'), entity_id: 'c2' },
+  ]);
+  const { docs } = topicTallies(ctx, new Map([[HANDLE, 'name:sam lee']]));
+  assert.equal(docs.get('name:sam lee|2024').taxonomy.engineering, 2, 'people who say "code" to each other are safe');
 });

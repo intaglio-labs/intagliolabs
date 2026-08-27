@@ -21,6 +21,7 @@
 // messages this module refuses to call the model at all and says why.
 
 import { existsSync, mkdirSync, chmodSync } from 'node:fs';
+import { threadKind, counterpartyFromThread, GROUP } from '../memory/threadKind.mjs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -47,7 +48,9 @@ export function gatherRows(contextDb, idToKey, personKey, year) {
   const y1 = new Date(year + 1, 0, 1).getTime();
   const rows = contextDb
     .prepare(
-      "SELECT ts, text, meta FROM context WHERE source IN ('imessage','whatsapp') " +
+      // `source` is selected because threadKind dispatches on it. It was not
+      // needed while the group test read a meta key; it is now.
+      "SELECT ts, source, text, meta FROM context WHERE source IN ('imessage','whatsapp') " +
         'AND ts >= ? AND ts < ? AND text IS NOT NULL ORDER BY ts'
     )
     .all(y0, y1);
@@ -59,8 +62,18 @@ export function gatherRows(contextDb, idToKey, personKey, year) {
     } catch {
       continue;
     }
-    if (m.is_group) continue;
-    const id = m.chat_handle ?? m.handle ?? null;
+    // NOT WHAT THEY SAID IN A ROOM. The prompt this feeds tells the model it is
+    // reading messages "between you and one other person", and `m.is_group` made
+    // that true only for WhatsApp -- so a year summary could be written from one
+    // person's group monologue, with the owner never appearing in it. 50 person-
+    // years on the live store are entirely group rows.
+    if (threadKind(r, m) === GROUP) continue;
+    // Same thread fallback as the graph, chips and search. Without it this
+    // gathered only the rows Apple happened to address, so an outbound-only
+    // contact showed a message count on the row and nothing when expanded, and
+    // a mixed conversation handed the model a sample missing most of the
+    // owner's own side -- under a prompt that says it is reading both.
+    const id = m.chat_handle ?? m.handle ?? counterpartyFromThread(r, m);
     if (id === null || idToKey.get(id) !== personKey) continue;
     const text = String(r.text);
     if (text.length < MIN_TEXT_CHARS) continue;
@@ -97,6 +110,21 @@ function systemPrompt(year) {
 const REGEN_ABS = 20; // messages of drift before a regeneration...
 const REGEN_FRAC = 0.2; // ...or a fifth of the sample's basis, whichever is larger
 
+// WHAT THIS CACHE IS A CACHE OF.
+//
+// A stored summary is model prose written from a particular SAMPLE under a
+// particular PROMPT. The row-count drift check below notices the corpus growing;
+// it cannot notice the code changing what it reads. On 2026-08-26 rooms were
+// excluded from gatherRows, which changed the sample for every person who
+// shares a group chat -- and every cached summary stayed, because the row count
+// had not drifted far enough. Five had to be deleted by hand, and nothing would
+// have stopped the next change doing the same.
+//
+// BUMP THIS whenever gatherRows, the prompt file, or MIN_ROWS changes. A
+// mismatch invalidates as surely as drift does, which turns "delete the db by
+// hand and hope you remembered" into a one-line diff that reviews itself.
+export const SUMMARY_REVISION = 2; // 2: rooms excluded from the sample (2026-08-26)
+
 export function summaryStillValid(rowsSeen, rowsNow) {
   return Math.abs(rowsNow - rowsSeen) <= Math.max(REGEN_ABS, Math.floor(rowsSeen * REGEN_FRAC));
 }
@@ -117,8 +145,20 @@ export function openSummariesDb(path = summariesDbPath()) {
     'CREATE TABLE IF NOT EXISTS summaries (' +
       'person_key TEXT NOT NULL, year INTEGER NOT NULL, text TEXT NOT NULL, ' +
       'rows_seen INTEGER NOT NULL, generated_ms INTEGER NOT NULL, ' +
+      // Defaulted so an existing store opens without a migration: every row
+      // written before this column existed reads as revision 0 and is therefore
+      // stale, which is exactly right -- those are the pre-room-split summaries.
+      'code_rev INTEGER NOT NULL DEFAULT 0, ' +
       'PRIMARY KEY (person_key, year))'
   );
+  // AN EXISTING STORE DOES NOT GET THE COLUMN FROM THE CREATE ABOVE, because
+  // IF NOT EXISTS skips the whole statement. Guarded by a lookup rather than a
+  // caught error, so a real failure still surfaces; every pre-existing row lands
+  // on the DEFAULT 0 and is therefore correctly treated as stale.
+  const hasRev = db
+    .prepare("SELECT COUNT(*) AS n FROM pragma_table_info('summaries') WHERE name = 'code_rev'")
+    .get().n === 1;
+  if (!hasRev) db.exec('ALTER TABLE summaries ADD COLUMN code_rev INTEGER NOT NULL DEFAULT 0');
   return db;
 }
 
@@ -128,7 +168,7 @@ export function openSummariesDb(path = summariesDbPath()) {
 export async function summarizeYear(
   contextDb,
   stateDb,
-  { personKey, year, now = Date.now(), owner, aliases = null, llama, fetchFn = fetch, summariesDb = null } = {}
+  { personKey, year, now = Date.now(), owner, aliases = null, llama, fetchFn = fetch, summariesDb = null, signal = null } = {}
 ) {
   const { graph } = yearCore(contextDb, stateDb, { now, owner, aliases });
   const person = graph.find((p) => p.key === personKey);
@@ -145,9 +185,9 @@ export async function summarizeYear(
   const sdb = summariesDb ?? openSummariesDb();
   try {
     const hit = sdb
-      .prepare('SELECT text, rows_seen, generated_ms FROM summaries WHERE person_key = ? AND year = ?')
+      .prepare('SELECT text, rows_seen, generated_ms, code_rev FROM summaries WHERE person_key = ? AND year = ?')
       .get(personKey, year);
-    if (hit && summaryStillValid(hit.rows_seen, rows.length)) {
+    if (hit && hit.code_rev === SUMMARY_REVISION && summaryStillValid(hit.rows_seen, rows.length)) {
       return { text: hit.text, sampled: null, of: rows.length, cached: true };
     }
 
@@ -170,6 +210,15 @@ export async function summarizeYear(
       max_tokens: 140,
       stream: false,
     }),
+    // A BUDGET. This had no signal at all: no ceiling and no way for a viewer
+    // who closed the row to stop it, so an abandoned summary generated to
+    // completion against the single-slot server while the next request waited.
+    // Shorter than the ask's ceiling on purpose -- a summary is a nicety beside
+    // a question somebody typed, and it must not be what a question queues
+    // behind.
+    signal: AbortSignal.any(
+      [signal, AbortSignal.timeout(45_000)].filter(Boolean)
+    ),
     // A compromised loopback service must not redirect the sample (or the
     // key) onto the network — same rule as every other llama call here.
     redirect: 'error',
@@ -184,11 +233,12 @@ export async function summarizeYear(
   if (text === null) return { text: null, reason: 'empty model output' };
     sdb
       .prepare(
-        'INSERT INTO summaries (person_key, year, text, rows_seen, generated_ms) VALUES (?,?,?,?,?) ' +
+        'INSERT INTO summaries (person_key, year, text, rows_seen, generated_ms, code_rev) VALUES (?,?,?,?,?,?) ' +
           'ON CONFLICT (person_key, year) DO UPDATE SET text = excluded.text, ' +
-          'rows_seen = excluded.rows_seen, generated_ms = excluded.generated_ms'
+          'rows_seen = excluded.rows_seen, generated_ms = excluded.generated_ms, ' +
+          'code_rev = excluded.code_rev'
       )
-      .run(personKey, year, text, rows.length, now);
+      .run(personKey, year, text, rows.length, now, SUMMARY_REVISION);
     return { text, sampled: sample.length, of: rows.length };
   } finally {
     if (summariesDb === null) {
