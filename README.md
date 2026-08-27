@@ -1,77 +1,91 @@
-# intaglio labs — personalized & private AI
+# Intaglio Labs
 
-A personal AI that runs entirely on your own Mac.
+### Unify your circles, find your people.
 
-It reads the sources you connect — calendar, mail, messages, notes, photos,
-files, and chat platforms — into a local store, and answers questions about
-them using a model running on your machine. Nothing about your data is sent to
-a cloud model.
+Intaglio is private, personalized AI for your Mac. Connect the apps that hold
+your conversations, relationships, and history; Intaglio processes that context
+locally so you can find the people and connections that matter to you.
 
-## The claim, stated narrowly
+[Download for Mac](https://github.com/intaglio-labs/intagliolabs/releases/latest/download/IntaglioLabs.dmg) · [intaglio.io](https://intaglio.io)
 
-**No corpus text is sent to a cloud model.** All reasoning and narration happen
-locally, against loopback model servers.
+## How it works
 
-That is deliberately narrower than "nothing leaves your Mac", which would be
-false. Data does leave, on the paths enumerated in **`ops/EGRESS.json`** — the
-single source of truth for what this software can reach, enforced by
-`connectors/test/egress.test.mjs`, which fails the build on any host in the
-source that is not declared there.
+1. **Connect your apps.** Bring together iMessage, WhatsApp, Messenger,
+   Instagram, X, Telegram, Discord, Slack, LinkedIn, Gmail, Calendar, Contacts,
+   and Granola.
+2. **Process context locally.** Storage and compute run on your Mac, keeping
+   your personal data private.
+3. **Find your people.** Explore everyone in your life—from any point in
+   time—in one place.
 
-Do not restate that list in prose anywhere. It has drifted before.
+Ask questions such as:
 
-## Shape
+- “Find the investors I met in LA about five years ago.”
+- “Does anyone from my high school work in tech?”
+- “Who would be down for Italy?”
 
-| Piece | What it does |
-|---|---|
-| `widget/` | The desktop app — a Swift/AppKit shell around local web views |
-| `ui/server/` | `hermes`, the context store and its memory pipeline. Sole writer and sole deleter of the database |
-| `connectors/` | Resident pollers that read your own sources and deliver rows to hermes over loopback |
-| `connect/` | A loopback-only onboarding page for connecting sources |
-| `bridges/` | Local Matrix bridges for chat platforms, in Docker |
-| `ops/` | Setup, launchd agents, runbooks, probes |
+## Privacy, precisely
 
-Each of `connectors/` and `ui/` carries an `AGENTS.md` with rules that are
-load-bearing rather than stylistic — read those before changing behaviour in
-either.
+**No corpus text is sent to a cloud model.** Reasoning and narration run
+locally against loopback model servers.
 
-## Principles that are enforced, not just stated
+That does not mean that nothing ever leaves your Mac: connected services,
+software distribution, and other network access have their own explicit paths.
+[`ops/EGRESS.json`](ops/EGRESS.json) is the source of truth for declared egress
+and is enforced by `connectors/test/egress.test.mjs`.
 
-- **Hermes is the only writer and the only deleter.** Connectors write through
-  `POST /ingest`; deletion is requested through bearer-only `/admin/*`.
-- **Corpus text never rides a cloud request.** Not as a setting, not as a flag.
-- **The log never carries row content.** `connectors/lib/log.mjs` refuses
-  content-shaped field names outright.
-- **Reconciliation cannot mass-delete.** A scan that observed nothing may
-  delete nothing; see `connectors/lib/reconcile.mjs`.
-- **Secrets are read at use time**, from `0600` files inside a `0700`
-  directory, with the full permission check replayed on every read.
+## Run Intaglio
 
-Several of these have tests whose only job is to prove the guard *fires* — not
-merely that it passes on a tree that is already correct.
+For the ready-to-use app, [download the latest Mac release](https://github.com/intaglio-labs/intagliolabs/releases/latest/download/IntaglioLabs.dmg).
 
-## Running it
-
-`ops/README.md` is the operator's entry point. In short: `ops/setup-llm.sh`
-then `ops/setup-connectors.sh`, which installs the launchd agents and runs
-`connectors/doctor.mjs`.
-
-Full Disk Access is granted per *resolved binary*, which is why setup pins a
-copy of node at `~/.hazlie/bin/node` — a grant does not survive the binary
-being replaced by a package manager.
-
-## Tests
+For a source install, see [`ops/README.md`](ops/README.md). The short version:
 
 ```sh
-(cd connectors && npm ci && npm test)   # the no-native-module check runs in ops/setup-connectors.sh, not here
+bash ops/setup-llm.sh --verify
+bash ops/setup-connectors.sh
+```
+
+The setup provisions the local model, context store, and connectors as
+launchd-managed services. Full Disk Access is granted per resolved binary, so
+the setup intentionally uses a stable Node copy at `~/.hazlie/bin/node`.
+
+## Architecture
+
+| Component | Role |
+| --- | --- |
+| `widget/` | macOS desktop app: a Swift/AppKit shell around local web views |
+| `ui/server/` | `hermes`, the local context store and memory pipeline; sole database writer and deleter |
+| `connectors/` | Resident source pollers that deliver rows to Hermes over loopback |
+| `connect/` | Loopback-only onboarding page for connecting sources |
+| `bridges/` | Local Matrix bridges for chat platforms, run in Docker |
+| `ops/` | Setup scripts, launchd agents, runbooks, and probes |
+
+## Guardrails
+
+- **Hermes is the only writer and deleter.** Connectors use `POST /ingest`;
+  deletion is requested through bearer-only `/admin/*` routes.
+- **Corpus text never rides a cloud request.**
+- **Logs never contain row content.** `connectors/lib/log.mjs` rejects
+  content-shaped field names.
+- **Reconciliation cannot mass-delete.** A scan that observes nothing cannot
+  delete anything; see `connectors/lib/reconcile.mjs`.
+- **Secrets are read at use time** from `0600` files inside a `0700` directory.
+
+`connectors/AGENTS.md` and `ui/AGENTS.md` contain behavior-critical guidance
+for work in those directories.
+
+## Development and tests
+
+```sh
+(cd connectors && npm ci && npm test)
 (cd connect && npm test)
 (cd ui && npm test)
 node --test 'widget/test/*.test.mjs'
 ```
 
-The widget contract suite is hermetic by default; `HZ_CONTRACT_LIVE=1` runs it
-against a live hermes instead.
+The widget contract suite is hermetic by default. Set `HZ_CONTRACT_LIVE=1` to
+run it against a live Hermes instance.
 
-## Licence
+## License
 
-MIT. See `LICENSE`.
+[MIT](LICENSE)
