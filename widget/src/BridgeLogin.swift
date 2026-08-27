@@ -547,7 +547,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     // otherwise — see systemSafariUserAgent for why that is READ and not
     // written down.
     web.customUserAgent = userAgent.isEmpty ? Self.systemSafariUserAgent : userAgent
-    showHost(url.host)
+    showAddress(url)
     web.load(URLRequest(url: url))
 
     // Poll the webview's own cookie store for the session cookie. When it
@@ -610,16 +610,47 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     // autofill reads a browser's address bar to pick an item and cannot read
     // one here, because this is an app window rather than a browser — so the
     // owner searches, and the domain is the search term.
-    let host = makeLabel("", font: mono, color: hazelnutDim, y: 8)
+    // AN ADDRESS BAR, NOT A CAPTION.
+    //
+    // The domain was already live and already correct -- didCommit updates it on
+    // every navigation, so a login that hops hosts renames the header. What it
+    // was not, was legible AS an address: dim hazelnut at the same weight as the
+    // sentence beside it, reading as decoration rather than as the one fact that
+    // separates the genuine site from a convincing copy. The owner looked for an
+    // address bar and did not find one.
+    //
+    // So it is drawn as a bar: boxed, brighter than its surroundings, carrying a
+    // lock and the scheme, on its own line. Everything it claims is read from the
+    // live URL rather than from the platform we THINK we opened.
+    let bar = NSView(frame: NSRect(x: 16, y: 4, width: width - 32, height: 22))
+    bar.wantsLayer = true
+    bar.layer?.backgroundColor = color(0x0f, 0x0f, 0x0e).cgColor
+    bar.layer?.borderColor = color(0x3a, 0x3a, 0x36).cgColor
+    bar.layer?.borderWidth = 1
+    bar.layer?.cornerRadius = 5
+    bar.autoresizingMask = [.width]
+
+    let host = NSTextField(labelWithString: "")
+    host.font = NSFont(name: "Menlo Bold", size: 12) ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+    host.textColor = color(0xea, 0xea, 0xea)
+    host.backgroundColor = .clear
+    host.isBordered = false
+    host.frame = NSRect(x: 8, y: 3, width: bar.frame.width - 16, height: 16)
+    host.autoresizingMask = [.width]
+    host.lineBreakMode = .byTruncatingMiddle
     headerHost = host
-    // State the trust fact plainly, beside it.
+    bar.addSubview(host)
+
+    // The trust fact moves up beside the title: it is a promise about this app,
+    // not a property of the page, and sitting next to the address it read as a
+    // claim about the SITE.
     let sub = makeLabel(
       "your credentials stay local",
-      font: mono, color: muted, y: 8
+      font: mono, color: muted, y: height - 30
     )
-    sub.alignment = .center
+    sub.alignment = .right
     view.addSubview(title)
-    view.addSubview(host)
+    view.addSubview(bar)
     view.addSubview(sub)
     return view
   }
@@ -780,9 +811,17 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   // adds an unrelated ATS exception. The loopback bases do not come through here.
   /// Write the host into the header. Trimmed of a leading www., which is
   /// noise in every one of these and pushes the part that identifies the site.
-  private func showHost(_ host: String?) {
-    guard let host, !host.isEmpty else { return }
-    headerHost?.stringValue = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+  /// The address line. Reads the LIVE url -- never the one we intended to open --
+  /// and says plainly when a page is not encrypted, because "looks like a login
+  /// form" is exactly what a copy also looks like.
+  private func showAddress(_ url: URL?) {
+    guard let url, let host = url.host, !host.isEmpty else { return }
+    let shown = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    let secure = url.scheme?.lowercased() == "https"
+    headerHost?.stringValue = secure ? "🔒 \(shown)" : "⚠ not secure — \(shown)"
+    headerHost?.textColor = secure
+      ? NSColor(red: 0xea / 255, green: 0xea / 255, blue: 0xea / 255, alpha: 1)
+      : NSColor(red: 0xff / 255, green: 0x53 / 255, blue: 0x47 / 255, alpha: 1)
   }
 
   // The domain follows the page. A login can hop hosts inside its own fence —
@@ -790,7 +829,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   // a header still naming slack.com there would be a claim about where you are
   // that is no longer true, which is the opposite of what it is for.
   func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-    showHost(webView.url?.host)
+    showAddress(webView.url)
   }
 
   func webView(

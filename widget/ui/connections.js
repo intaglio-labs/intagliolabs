@@ -1402,7 +1402,20 @@ function card(src, keep) {
         e.stopPropagation();
         login.disabled = true; login.textContent = 'opening…';
         hzPost('bridgeWebLogin', { p: kindOf(src.id) })
-          .then(renderBridge)
+          .then((data) => {
+            // CLOSING THE LOGIN WINDOW CLOSES THE CARD.
+            //
+            // Cancelled means the owner shut the window without signing in, and
+            // re-rendering the card there put them back exactly where they had
+            // just chosen to leave -- a "data stored locally / log in" panel over
+            // the shelf, which reads as the app insisting. The tile is still
+            // there and still opens this again.
+            //
+            // Only cancelled. A login that FAILED has something to say, and the
+            // card is the only place that can say it.
+            if (data && data.state === 'cancelled') { closeHint(); return; }
+            renderBridge(data);
+          })
           .catch(() => { login.disabled = false; login.textContent = 'log in ⧉'; });
       });
       // Only when the bot is NOT mid-question (owner, 2026-08-25): pressing

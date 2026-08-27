@@ -263,11 +263,33 @@ test('model setup restarts the launch agents provisioning actually installs', ()
   assert.doesNotMatch(swift, /com\.hazlie\.(?:llama-server|hermes)/u);
 });
 
-test('the credential reassurance stays middle-aligned in the native login header', () => {
+// ~~The credential reassurance is middle-aligned.~~ It was, while it shared a
+// line with the domain. The domain became a real address bar on its own row
+// (2026-08-27), because dim text beside a sentence did not read as an address and
+// the owner went looking for one. The reassurance moved up beside the title,
+// where centre would run into it — it is a promise about this app, not a property
+// of the page, and next to the address it read as a claim about the SITE.
+test('the credential reassurance sits beside the title, clear of the address', () => {
   const block = /let sub = makeLabel\(\s*"your credentials stay local",([\s\S]*?)view\.addSubview\(sub\)/u
     .exec(bridgeLoginSwift)?.[1];
   assert.ok(block, 'credential reassurance label not found');
-  assert.match(block, /sub\.alignment = \.center/u);
+  assert.match(block, /sub\.alignment = \.right/u, 'it shares the title line now, so it aligns away from it');
+  assert.match(block, /y: height - 30/u, 'and sits on the title row, not the address row');
+});
+
+// THE ADDRESS BAR IS A SECURITY SURFACE, so what it claims must come from the
+// live URL rather than from the platform we intended to open.
+test('the login window shows a live, scheme-aware address', () => {
+  assert.match(bridgeLoginSwift, /func showAddress\(_ url: URL\?\)/u, 'it reads a URL, not a bare host');
+  assert.match(bridgeLoginSwift, /url\.scheme\?\.lowercased\(\) == "https"/u, 'it checks the scheme');
+  assert.match(bridgeLoginSwift, /not secure/u, 'and says so when the page is not encrypted');
+  // didCommit is what makes it live: a login that hops hosts must rename the bar.
+  assert.match(
+    bridgeLoginSwift,
+    /didCommit navigation[\s\S]{0,120}showAddress\(webView\.url\)/u,
+    'the address must follow the page, or it is a claim that goes stale'
+  );
+  assert.doesNotMatch(bridgeLoginSwift, /showHost\(/u, 'the host-only version is gone');
 });
 
 test('Google OAuth opens in the system browser, never an embedded webview', () => {
