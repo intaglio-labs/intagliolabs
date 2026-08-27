@@ -105,6 +105,8 @@ const HZ_KIND = (id) => (id.startsWith('mail:') ? 'mail' : id);
 const HZ_BRIDGES = new Set([
   'twitter', 'messenger', 'instagram', 'linkedin', 'discord', 'slack', 'telegram',
 ]);
+// Markers follow the same contract as connections.js -- see the comment there:
+//   ↗ leaves the app, ⧉ opens a window of this app, no marker = right here.
 const HZ_IS_BRIDGE = (src) => src.action === 'bridge' || HZ_BRIDGES.has(HZ_KIND(src.id));
 // Same grant the Settings shelf starts directly. Keeping this set beside the
 // shared kind normalizer lets every surface make the same first-press decision.
@@ -360,13 +362,13 @@ function hzConnectorHint(src, host, { refresh = () => {} } = {}) {
       } else {
       const login = document.createElement('button');
       login.className = 'hold-ok';
-      login.textContent = 'log in';
+      login.textContent = 'log in ⧉';
       login.addEventListener('click', (e) => {
         e.stopPropagation();
-        login.disabled = true; login.textContent = 'opening login…';
+        login.disabled = true; login.textContent = 'opening…';
         hzPost('bridgeWebLogin', { p: HZ_KIND(src.id) })
           .then(renderBridge)
-          .catch(() => { login.disabled = false; login.textContent = 'log in'; });
+          .catch(() => { login.disabled = false; login.textContent = 'log in ⧉'; });
       });
       // Hidden while the bot is mid-question — see connections.js: pressing
       // it would cancel the login the question belongs to.

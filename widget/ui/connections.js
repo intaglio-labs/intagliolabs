@@ -741,7 +741,30 @@ function card(src, keep) {
   // every later press, with native remembering which kinds were walked
   // through. The owner merged them (2026-08-22): the full story is short
   // enough to always show, and the panel's corner x is the only dismiss.
-  // The in-panel walkthrough (owner, 2026-08-25): the whole connect flow
+  // WHERE A CONTROL TAKES YOU, SAID THE SAME WAY EVERY TIME.
+//
+// Connecting a source is not one flow, and it cannot be: Google refuses OAuth in
+// an embedded webview, a QR code has to be big enough for a phone camera, and an
+// API key is one text field that belongs right here. Three presentations is the
+// honest answer.
+//
+// What was wrong is that a reader could not tell WHICH they were about to get.
+// The same-looking button variously pasted a key in place, threw them into
+// Chrome, or opened a second window over the panel. The `↗` marker already
+// existed for "this leaves" and was on some of them and not others -- `full disk
+// access` opened System Settings with no marker at all, and `log in` opened an
+// app window with none either.
+//
+// So the marker is the contract, applied everywhere:
+//
+//   ↗   leaves the app: your browser, System Settings, another app
+//   ⧉   opens a window belonging to this app, over the panel
+//   —   no marker: it happens right here, in this panel
+//
+// And a busy label says which of the three is in flight rather than inventing a
+// new verb per call site: `opening…` for the two that go somewhere,
+// `connecting…` for the ones that do not.
+// The in-panel walkthrough (owner, 2026-08-25): the whole connect flow
   // lives right here — open the site, make the credential, paste it back —
   // instead of handing the owner to the connect page. Shared, because two
   // connectors reach it by different routes now: granola through the plain
@@ -758,7 +781,7 @@ function card(src, keep) {
   // than as the first line of a list. It is still a button: it does something,
   // and a span would lose the keyboard and the focus ring.
   open.className = 'step-open';
-  open.textContent = `1 · open ${hint.link}`;
+  open.textContent = `1 · open ${hint.link} ↗`;
   open.addEventListener('click', (e) => {
     e.stopPropagation();
     // The installed app first, the website only if it is not there —
@@ -850,7 +873,7 @@ function card(src, keep) {
         // connect page still uses it.
         const open = document.createElement('button');
         open.className = 'hold-ok';
-        open.textContent = 'full disk access';
+        open.textContent = 'full disk access ↗';
         open.addEventListener('click', (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -967,7 +990,7 @@ function card(src, keep) {
   // file and the focus refresh remain the source of truth for completion.
   const startGoogleAuth = (button, client) => {
     button.disabled = true;
-    button.textContent = 'opening Google…';
+    button.textContent = 'opening…';
     hzPost('googleAuth', { flow: 'google', client })
       .then((r) => {
         if (r && r.refused) {
@@ -1356,13 +1379,13 @@ function card(src, keep) {
       // devtools, no paste. See ops/WIDGET-WEBVIEW-LOGIN-SPEC.md.
       const login = document.createElement('button');
       login.className = 'hold-ok';
-      login.textContent = 'log in';
+      login.textContent = 'log in ⧉';
       login.addEventListener('click', (e) => {
         e.stopPropagation();
-        login.disabled = true; login.textContent = 'opening login…';
+        login.disabled = true; login.textContent = 'opening…';
         hzPost('bridgeWebLogin', { p: kindOf(src.id) })
           .then(renderBridge)
-          .catch(() => { login.disabled = false; login.textContent = 'log in'; });
+          .catch(() => { login.disabled = false; login.textContent = 'log in ⧉'; });
       });
       // Only when the bot is NOT mid-question (owner, 2026-08-25): pressing
       // "log in" during the PIN step cancels the login and restarts it, so
@@ -1702,7 +1725,7 @@ function showClientChoice(row, src) {
     b.addEventListener('click', (e) => {
       e.stopPropagation();
       b.disabled = true;
-      b.textContent = 'opening Google…';
+      b.textContent = 'opening…';
       hzPost('googleAuth', { flow: 'google', client: c.name })
         .then((r) => {
           if (r && r.refused) {
