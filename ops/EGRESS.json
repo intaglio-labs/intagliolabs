@@ -452,7 +452,7 @@
       "purpose": "the download counter under the try-now button reads the release assets' real download_count",
       "credential": "none",
       "decision": "Public marketing site, and note this is a FETCH, not a link -- the visitor's browser calls it on page load, so GitHub sees their IP and user agent whether or not they ever click download. That is the same exposure the page already has to Google Fonts, and site/privacy/index.html discloses it in the same sentence. It is here rather than a counter of our own on purpose: a click tally would need a server this project does not have, would be a number about visitors, and would be inflatable by anyone with curl. This reads a number GitHub already publishes and records nothing.",
-      "evidence": "site/index.html -- COUNTER.endpoint, https://api.github.com/repos/intaglio-labs/privateAndPersonalizedOS/releases"
+      "evidence": "site/index.html -- COUNTER.endpoint, https://api.github.com/repos/intaglio-labs/intagliolabs/releases"
     },
     {
       "host": "www.apache.org",
