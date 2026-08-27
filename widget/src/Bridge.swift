@@ -861,6 +861,22 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         },
       ]
       state["model"] = ModelSetup.installed?.id ?? ""
+      // THE ROW COUNT IS OPT-IN, because it is the only slow thing in here.
+      //
+      // Everything above is local and instant -- a symlink read, two file
+      // existence checks, a static tier list. The row count is an HTTP call to
+      // hermes, which is single-threaded and blocks for the length of its boot
+      // warm (12-20s measured), so this request times out at 4s and the WHOLE
+      // reply waited for it. The visible symptom was the Settings panel's "local
+      // model size" row arriving seconds late, on a machine where the answer had
+      // been on disk the entire time.
+      //
+      // Only the onboarding scenes read `rows`/`memory` -- they use it for "is any
+      // data flowing yet". Settings never touches it and should never wait for it.
+      guard payload["rows"] as? Bool == true else {
+        reply(webView, id, state)
+        return
+      }
       rows { n, memory in
         var out = state
         out["rows"] = n

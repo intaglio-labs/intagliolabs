@@ -297,7 +297,7 @@ document.getElementById('cta').addEventListener('click', () => {
   hzSfx.wake();
   // Fresh installs use the roughly 5 GB model without interrupting the welcome
   // flow. An existing choice is respected; changing it lives in Settings.
-  hzPost('setupState').then((st) => {
+  hzPost('setupState', { rows: true }).then((st) => {
     if (st && !st.model && !st.downloading) {
       hzPost('modelDownload', { tier: '8b' }).catch(() => {});
     }
@@ -647,7 +647,7 @@ document.getElementById('dataCheck').addEventListener('click', async () => {
   let rows = 0;
   for (let i = 0; i < 24 && rows === 0; i += 1) {
     await new Promise((r) => setTimeout(r, 2500));
-    const st = await hzPost('setupState').catch(() => null);
+    const st = await hzPost('setupState', { rows: true }).catch(() => null);
     rows = (st && st.rows) || 0;
     // After the first handful of tries, say that it is still going rather than
     // repeating one word at someone watching an ellipsis not change.
@@ -662,7 +662,7 @@ document.getElementById('dataCheck').addEventListener('click', async () => {
     // read them into claims, which takes a while and used to happen nowhere at
     // all. "found 18,440 things" followed by an app that answers nothing is the
     // most confusing thing this flow could say, so it says both numbers.
-    const st2 = await hzPost('setupState').catch(() => null);
+    const st2 = await hzPost('setupState', { rows: true }).catch(() => null);
     const mem = (st2 && st2.memory) || null;
     dataStatus.textContent = mem && mem.pending > 0
       ? `found ${rows.toLocaleString()} things — now reading them`
@@ -677,7 +677,7 @@ document.getElementById('dataSkip').addEventListener('click', () => showScreen('
 
 // Loaded once, when the flow reaches the setup screens.
 async function loadSetup() {
-  setupState = await hzPost('setupState').catch(() => null);
+  setupState = await hzPost('setupState', { rows: true }).catch(() => null);
   if (!setupState) return;
   const perms = await hzPost('permissionState').catch(() => null);
   lastPerms = (perms && perms.permissions) || null;

@@ -355,3 +355,37 @@ test('FDA status is reconciled in the app process that owns the grant', () => {
   assert.match(block, /fixed\["connected"\] = true/u);
   assert.match(block, /fixed\["broken"\] = false/u);
 });
+
+// The Settings panel must not wait on the network to say what is on disk.
+//
+// setupState carries two kinds of fact: local ones (the installed model tier, the
+// voice tree, the static tier list) and one remote one (hermes' row count, an
+// HTTP call). Bundling them meant the panel's "local model size" row waited for
+// hermes — which is single-threaded and blocks for its whole boot warm, so the
+// call timed out at 4s and the answer arrived seconds late despite having been on
+// disk the entire time.
+test('setupState answers from disk immediately, and fetches rows only when asked', () => {
+  const block = /case "setupState":([\s\S]*?)case "modelDownload":/u.exec(swift)?.[1];
+  assert.ok(block, 'setupState case not found');
+  assert.match(
+    block,
+    /guard payload\["rows"\] as\? Bool == true else \{[\s\S]{0,120}reply\(webView, id, state\)/u,
+    'the local state must be replied without waiting for the row count'
+  );
+  // And the slow path must still exist for the caller that needs it.
+  assert.match(block, /rows \{ n, memory in/u, 'the row count is still available on request');
+});
+
+test('only the onboarding scenes pay for the row count', () => {
+  const onboarding = readFileSync(join(WIDGET, 'ui/onboarding.js'), 'utf8');
+  const connections = readFileSync(join(WIDGET, 'ui/connections.js'), 'utf8');
+  assert.ok(
+    !/hzPost\('setupState'\)/u.test(onboarding),
+    'onboarding reads rows/memory, so every call there must ask for them'
+  );
+  assert.match(onboarding, /hzPost\('setupState', \{ rows: true \}\)/u);
+  assert.ok(
+    !/hzPost\('setupState', \{ rows: true \}\)/u.test(connections),
+    'Settings never reads rows and must not wait for them'
+  );
+});
