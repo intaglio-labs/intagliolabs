@@ -208,6 +208,9 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 .orb {
   display: block; position: relative;
   width: 100%; height: 100%;
+  /* Keep the faint processing marks behind the body without letting their
+     negative z-index fall behind the transparent widget window itself. */
+  isolation: isolate;
   /* THE ORB UNIT: this orb's size over 42, the widget's. Every px in the
      shared state animations (§ORB-STATES) is written against it, so one
      block serves this 42px orb, onboarding's 120px one and the landing
@@ -249,6 +252,7 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
    they curve away with the silhouette. */
 .orb-body {
   position: absolute; inset: 0;
+  z-index: 1;
   border-radius: inherit;
   overflow: hidden;
   background: var(--tod-grad);
@@ -296,6 +300,7 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
    Rotations, scale factors and opacities are scale-free and are verbatim. */
 .face {
   position: absolute; inset: 0;
+  z-index: 2;
   display: flex; align-items: center; justify-content: center;
   gap: 5px;
   pointer-events: none;
@@ -386,6 +391,73 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 .orb.listening .orb-layer.lb { animation-duration: 2.4s; }
 .orb.listening .orb-blob.ba { animation-duration: 1.6s; }
 .orb.listening .orb-blob.bb { animation-duration: 1.25s; animation-delay: 0.4s; }
+
+/* PROCESSING — a quiet electrical murmur behind the orb, the awake counterpart
+   to idle's drifting z's. The old filled bolt crossed the silhouette and read
+   as a sticker on its forehead. These are thin, low-contrast strokes on a
+   negative layer: bzz, bzz in the background, never a warning badge. */
+@keyframes orb-buzz {
+  0%, 100% {
+    opacity: 0;
+    transform: translate(0, 2px) scale(0.78) rotate(var(--bolt-r));
+  }
+  22% {
+    opacity: 0.24;
+    transform: translate(0, 1px) scale(0.9) rotate(calc(var(--bolt-r) - 2deg));
+  }
+  46% {
+    opacity: 0.76;
+    transform: translate(var(--buzz-x), -1px) scale(1) rotate(calc(var(--bolt-r) + 2deg));
+  }
+  72% {
+    opacity: 0.28;
+    transform: translate(0, -2px) scale(0.92) rotate(var(--bolt-r));
+  }
+}
+.orb-charge {
+  position: absolute;
+  /* WebKit can drop a negative child behind the transparent panel despite
+     the isolated parent. Level zero keeps the crown in the orb's stacking
+     context; the body and face explicitly sit above it at 1 and 2. */
+  z-index: 0;
+  top: -12px;
+  left: -9px;
+  width: 60px;
+  height: 54px;
+  display: none;
+  pointer-events: none;
+}
+.orb.processing .orb-charge { display: block; }
+.orb-bolt {
+  position: absolute;
+  overflow: visible;
+  color: rgba(244, 225, 192, 0.94);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.55;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  opacity: 0;
+  transform-origin: 50% 50%;
+  /* The widget floats on arbitrary wallpaper. The dark tight shadow separates
+     the cream stroke from bright photos; the warm outer glow keeps it soft. */
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.82))
+          drop-shadow(0 0 3px rgba(197, 165, 109, 0.42));
+  animation: orb-buzz 2.8s ease-in-out infinite;
+}
+/* All three murmurs leave one place: the crown's upper-right. Their staggered
+   cadence makes that one small patch go bzz-bzz rather than surrounding the
+   head with unrelated warning marks. Coordinates are in the 60×54 charge
+   plane; the 42px orb occupies x=9..51, y=12..54. */
+.orb-bolt.bolt-1 { --bolt-r: 8deg; --buzz-x: 1px; width: 8px; height: 14px; left: 40px; top: 0; }
+.orb-bolt.bolt-2 { --bolt-r: 27deg; --buzz-x: 2px; width: 7px; height: 12px; left: 48px; top: 5px; animation-delay: -0.93s; opacity: 0; }
+.orb-bolt.bolt-3 { --bolt-r: -24deg; --buzz-x: -2px; width: 7px; height: 12px; left: 34px; top: 7px; animation-delay: -1.86s; opacity: 0; }
+/* Jackpot and concussion keep their own visual language even if background
+   work remains active underneath them. */
+.orb.processing.jackpot .orb-charge,
+.orb.processing.pop .orb-charge,
+.orb.processing.dazed .orb-charge,
+.orb.processing.undaze .orb-charge { display: none; }
 
 /* TALKING — the eyes bounce with the voice. */
 .orb.talking .face {
@@ -559,6 +631,7 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
    the only thing that decides. */
 .burst {
   position: absolute; inset: calc(var(--ou) * -6px);
+  z-index: 3;
   border-radius: 50%;
   border: calc(var(--ou) * 3px) solid rgba(229, 214, 187, 0.9);
   opacity: 0;
@@ -771,6 +844,7 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
    the digit has to stay readable at this size. */
 .orb-badge {
   position: absolute; top: -3px; right: -2px;
+  z-index: 2;
   width: 14px; height: 14px; border-radius: 50%;
   background: linear-gradient(180deg, #e5d6bb, #c5a56d);
   color: #141412; font-size: 9px; font-weight: 700; line-height: 1;
@@ -788,6 +862,7 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
      one keyframe reading these serves both. */
   --zzz-dx: 5px; --zzz-dy: -10px; --zzz-lift: 3px;
   position: absolute;
+  z-index: 2;
   display: none; align-items: center; justify-content: center;
   opacity: 0;
 }
@@ -949,9 +1024,8 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
    both .orb and .orb.talking, which killed the morph outright — on a machine
    with Reduce Motion enabled the orb looked identical armed and idle, which is
    the one thing it must never do. The state has to survive the setting.
-   (Found the hard way: the owner's Mac has Reduce Motion on, and this rule,
-   added for accessibility, silently removed the feature it was meant to make
-   accessible.)
+   Testing with Reduce Motion enabled found that this rule silently removed the
+   feature it was meant to make accessible.
    What Reduce Motion is actually for is large-area movement that triggers
    vestibular symptoms. A 42px disc changing outline is not that; a thing that
    scales, drifts and spins is closer. So the morph STAYS and the travel goes:
@@ -974,6 +1048,7 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
   body:not(.motion-anyway) .face,
   body:not(.motion-anyway) .eye,
   body:not(.motion-anyway) .zzz,
+  body:not(.motion-anyway) .orb-bolt,
   body:not(.motion-anyway) .orb-badge { animation: none !important; }
   /* A jackpot is the one thing here that overrides all of this, and it does
      it from JS rather than from another dozen !important lines: widget.js
@@ -985,6 +1060,8 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
      0 — so a still frame has to be supplied in its place. */
   body:not(.motion-anyway) .orb.idle .zzz { opacity: 0.95; }
   body:not(.motion-anyway) .orb.idle .zzz.z2 { opacity: 0.7; }
+  /* Hold a faint background buzz: the state survives, only its travel stops. */
+  body:not(.motion-anyway) .orb.processing .orb-bolt { opacity: 0.52; }
 }
 .orb-layer { position: absolute; inset: -30%; display: block; }
 .orb-layer.la { animation: orb-spin 4.5s linear infinite; }
@@ -1206,15 +1283,16 @@ body.widget.spotlight-widget .dream { display: none; }
    so viewBox x=250 lands at 30 + 8 = 38px from the right, and viewBox y=48
    lands at 34 - 6 = 28px up from the bottom. 172 x 40 is the interior that
    leaves — 26px of padding inside a rect that runs x 56..272, centred on its
-   midline at x=164. The bubble is cut to the one line it will ever hold, so
-   changing TEASE_TEXT means changing the rect's width and this box together
-   or the copy sits off-centre in a balloon. */
+   midline at x=164. Voice copy carries one intentional newline; `pre-line`
+   honours it and the slightly smaller face keeps its longer first sentence
+   inside this fixed interior. */
 .dream-text {
   position: absolute; right: 38px; bottom: 28px;
   width: 172px; height: 40px;
   display: flex; align-items: center; justify-content: center;
   text-align: center;
-  font: inherit; font-size: 11px; line-height: 1.25; letter-spacing: 0.2px;
+  font: inherit; font-size: 10.5px; line-height: 1.25; letter-spacing: 0.2px;
+  white-space: pre-line;
   color: var(--hazelnut-light);
   pointer-events: none;
 }
@@ -2167,19 +2245,31 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
 .model-setting.busy .model-progress,
 .model-setting.busy .model-status { display: block; }
 
-/* Live, but intentionally quiet: this names real local work below the model
-   picker without becoming another progress dashboard. */
+/* Real local work below the model picker without becoming another progress
+   dashboard. Historical catch-up owns its estimate on its own named row; the
+   header never leaves a naked duration beside an unrelated connector. */
 .activity-setting { gap: 7px; }
-.activity-live {
-  color: var(--hazelnut); font-size: 10px; letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
 .activity-list { display: flex; flex-direction: column; gap: 5px; min-height: 15px; }
-.activity-item { display: flex; align-items: center; gap: 7px; color: var(--fg); font-size: 11px; }
+/* Seven 15px task lines plus six 5px gaps. The scheduler can carry more, but
+   Settings should not grow forever; the rest remains reachable by scrolling. */
+.activity-list {
+  max-height: 135px; overflow-y: scroll; scrollbar-gutter: stable; padding-right: 3px;
+}
+.activity-list::-webkit-scrollbar { width: 5px; }
+.activity-list::-webkit-scrollbar-thumb {
+  background: rgba(197, 165, 109, 0.42); border-radius: 999px;
+}
+.activity-item { display: flex; align-items: center; gap: 7px; min-height: 15px; color: var(--fg); font-size: 11px; }
+.activity-item span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-item:nth-child(n + 2) { color: var(--muted); }
+.activity-item.activity-backfill { color: var(--hazelnut-light); }
 .activity-dot {
   width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto;
   background: var(--hazelnut); box-shadow: 0 0 7px rgba(197, 165, 109, 0.65);
   animation: activity-pulse 1.2s ease-in-out infinite;
+}
+.activity-item:nth-child(n + 2) .activity-dot {
+  animation: none; box-shadow: none; opacity: 0.52;
 }
 .activity-idle { color: var(--muted); font-size: 11px; }
 @keyframes activity-pulse { 50% { opacity: 0.35; transform: scale(0.75); } }

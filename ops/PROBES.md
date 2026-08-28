@@ -50,8 +50,8 @@ that usually finds nothing.
 **Which mode a consumer uses is a per-store decision that should be
 re-measured, not inherited.** As of writing, `imessage`, `whatsapp`, `notes`,
 `calendar` and `contacts` use `snapshotStore`. `photos` uses
-`openPersistentReader`: its `Photos.sqlite` measured 3.2 GB on this machine,
-so a snapshot per scan would cost ~7 s and a 3.2 GB write every pass, while a
+`openPersistentReader`: a mature Photos database can be several gigabytes, so
+a snapshot per scan would cost seconds and rewrite the database every pass, while a
 persistent read-only connection reads at zero copy cost with WAL snapshot
 isolation **per statement, not per scan** — `photos` runs its asset, name and
 face queries as three separate statements outside any wrapping transaction,

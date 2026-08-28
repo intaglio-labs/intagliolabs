@@ -365,8 +365,8 @@ export function computeEpisodicStats(rows, route = {}) {
   // for a one-to-one thread and an opaque room id for a group -- and this line
   // used to take it unconditionally, so "messages you sent, by contact" could
   // hand the model `chat488392016936725110` as though it were a person, and did:
-  // on a 90-day window the fourth-ranked "contact" was a room with 217 messages.
-  // 22.3% of iMessage rows are group threads, so this was not an edge case.
+  // in private testing a highly-ranked "contact" was actually a room. Group
+  // threads are common in iMessage, so this was not an edge case.
   //
   // Rooms are counted, just not as people. The two facts are both true and only
   // one of them is about a contact.

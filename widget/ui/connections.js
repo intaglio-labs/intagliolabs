@@ -331,17 +331,19 @@ function activityRow() {
   const name = document.createElement('span');
   name.className = 'setting-name';
   name.textContent = 'activity';
-  const live = document.createElement('span');
-  live.className = 'activity-live';
-  live.textContent = 'live';
-  head.append(name, live);
+  head.append(name);
   const list = document.createElement('div');
   list.className = 'activity-list';
   el.append(head, list);
 
   const gb = (bytes) => `${(Number(bytes || 0) / 1e9).toFixed(1)} GB`;
   const paint = (data) => {
-    const items = data && Array.isArray(data.items) ? data.items : [];
+    const latestItems = data && Array.isArray(data.items) ? data.items : [];
+    // The queue is always visible: the first row is current and the remaining
+    // real scheduled work follows in order. Seven rows fit; more scroll here.
+    const active = latestItems.filter((item) => item && item.kind !== 'queue');
+    const queued = latestItems.filter((item) => item && item.kind === 'queue');
+    const items = [...active, ...queued];
     list.replaceChildren();
     if (!items.length) {
       const idle = document.createElement('span');
@@ -352,6 +354,7 @@ function activityRow() {
       for (const item of items) {
         const row = document.createElement('div');
         row.className = 'activity-item';
+        if (item.kind === 'backfill') row.classList.add('activity-backfill');
         const dot = document.createElement('span');
         dot.className = 'activity-dot';
         const text = document.createElement('span');
@@ -1304,7 +1307,7 @@ function card(src, keep) {
     // A REJECTED VALUE IS NOT THE END OF THE STEP. mautrix answers a malformed
     // answer by complaining and waiting for another — the step stays open — so
     // this is the one "not a question" that must keep the box on screen.
-    // Austin's number went in without its country code, the bot said "Invalid
+    // A test number went in without its country code, the bot said "Invalid
     // value: phone number must start with +", and the card threw that away and
     // offered to start over (2026-08-26). The single most useful line on the
     // screen was the one being discarded.

@@ -1,10 +1,9 @@
 // Probe: what shape is WhatsApp Desktop's local store, and what units are its
 // timestamps in?
 //
-// WHY THIS EXISTS AS A FILE. ops/PROBES.md has carried a "probe-whatsapp
-// (2026-08-21, via launchd)" section since the WhatsApp connector was written,
-// reporting real measurements — 3,563 messages across 203 chats, and the fact
-// that ZMESSAGEDATE is Apple-epoch SECONDS. That last fact is load-bearing:
+// WHY THIS EXISTS AS A FILE. ops/PROBES.md has carried a probe-whatsapp section
+// since the connector was written, reporting a private-store result and the
+// fact that ZMESSAGEDATE is Apple-epoch SECONDS. That last fact is load-bearing:
 // connectors/lib/whatsappRows.mjs converts with `n * 1000 + APPLE_EPOCH_MS`
 // and cites PROBES.md as its authority. But the script that produced those
 // numbers was never committed, so the CONCLUSION survived and the EVIDENCE did

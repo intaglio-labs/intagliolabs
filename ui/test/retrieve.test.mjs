@@ -54,11 +54,11 @@ test('a relevant old claim beats recent claims that merely share stopwords', () 
       text: `do i need to bring anything to the thing on the ${i + 1}th`,
     })),
   ]);
-  const hon = propose(db, rows[0], { text: 'Austin flies to Honolulu on the 3rd.', quote: 'flying to honolulu' });
+  const hon = propose(db, rows[0], { text: 'Example Owner flies to Honolulu on the 3rd.', quote: 'flying to honolulu' });
   decide(db, hon, 'accept');
   for (let i = 1; i < rows.length; i += 1) {
     const id = propose(db, rows[i], {
-      text: `Austin was asked to bring something to the ${i}th.`,
+      text: `Example Owner was asked to bring something to the ${i}th.`,
       quote: 'need to bring anything',
     });
     decide(db, id, 'accept');
@@ -81,8 +81,8 @@ test('newer-first ordering survives the relevance ranking', () => {
     { ts: NOW - 400 * 86_400_000, source: 'notes', entity_id: 'n:1', text: 'i went vegetarian in january' },
     { ts: NOW - 10 * 86_400_000, source: 'notes', entity_id: 'n:2', text: 'i eat fish now, started in may' },
   ]);
-  const a = propose(db, older, { text: 'Austin is vegetarian.', quote: 'i went vegetarian' });
-  const b = propose(db, newer, { text: 'Austin eats fish, since May.', quote: 'i eat fish now' });
+  const a = propose(db, older, { text: 'Example Owner is vegetarian.', quote: 'i went vegetarian' });
+  const b = propose(db, newer, { text: 'Example Owner eats fish, since May.', quote: 'i eat fish now' });
   decide(db, a, 'accept');
   decide(db, b, 'accept');
 
@@ -93,8 +93,8 @@ test('newer-first ordering survives the relevance ranking', () => {
   // topped-up claim lands after every matched one regardless of its date.)
   const out = recallClaims(db, { match: ftsQuery('vegetarian fish'), limit: 5, now: NOW });
   assert.deepEqual(out.claims.map((c) => c.text), [
-    'Austin eats fish, since May.',
-    'Austin is vegetarian.',
+    'Example Owner eats fish, since May.',
+    'Example Owner is vegetarian.',
   ]);
 });
 
@@ -105,16 +105,16 @@ test('only accepted claims are ever recalled', () => {
     { ts: NOW, source: 'imessage', entity_id: 'i:2', text: 'i dont drink, never have' },
     { ts: NOW, source: 'notes', entity_id: 'n:1', text: 'i am allergic to penicillin' },
   ]);
-  const accepted = propose(db, a, { text: 'Austin is vegetarian.', quote: 'i went vegetarian' });
-  const rejected = propose(db, b, { text: 'Austin does not drink.', quote: 'i dont drink' });
-  propose(db, c, { text: 'Austin is allergic to penicillin.', quote: 'allergic to penicillin' });
+  const accepted = propose(db, a, { text: 'Example Owner is vegetarian.', quote: 'i went vegetarian' });
+  const rejected = propose(db, b, { text: 'Example Owner does not drink.', quote: 'i dont drink' });
+  propose(db, c, { text: 'Example Owner is allergic to penicillin.', quote: 'allergic to penicillin' });
 
   decide(db, accepted, 'accept');
   decide(db, rejected, 'reject');
   // The third is left PROPOSED -- unreviewed means unusable.
 
   const out = recallClaims(db, { now: NOW });
-  assert.deepEqual(out.claims.map((c2) => c2.text), ['Austin is vegetarian.']);
+  assert.deepEqual(out.claims.map((c2) => c2.text), ['Example Owner is vegetarian.']);
   assert.equal(out.abstain, false);
 
   // And a retraction takes it back out again.
@@ -130,7 +130,7 @@ test('recall never returns a quote, whatever is asked for', () => {
   const [row] = seed(db, [
     { ts: NOW, source: 'imessage', entity_id: 'i:1', text: 'i went vegetarian in january' },
   ]);
-  decide(db, propose(db, row, { text: 'Austin is vegetarian.', quote: 'i went vegetarian' }), 'accept');
+  decide(db, propose(db, row, { text: 'Example Owner is vegetarian.', quote: 'i went vegetarian' }), 'accept');
 
   for (const opts of [{ now: NOW }, { now: NOW, match: ftsQuery('vegetarian') }]) {
     const { claims } = recallClaims(db, opts);
@@ -165,7 +165,7 @@ test('search stems, so a question in English matches a claim in English', () => 
   const [row] = seed(db, [
     { ts: NOW, source: 'notes', entity_id: 'n:1', text: 'im allergic to penicillin' },
   ]);
-  decide(db, propose(db, row, { text: 'Austin is allergic to penicillin.', quote: 'allergic to penicillin' }), 'accept');
+  decide(db, propose(db, row, { text: 'Example Owner is allergic to penicillin.', quote: 'allergic to penicillin' }), 'accept');
   for (const q of ['allergies', 'allergic', 'ALLERGIES']) {
     assert.equal(recallClaims(db, { now: NOW, match: ftsQuery(q) }).abstain, false, q);
   }
@@ -192,7 +192,7 @@ test('a search that matches nothing falls back to recent accepted claims', () =>
   const [row] = seed(db, [
     { ts: NOW, source: 'notes', entity_id: 'n:1', text: 'im allergic to penicillin' },
   ]);
-  decide(db, propose(db, row, { text: 'Austin is allergic to penicillin.', quote: 'allergic to penicillin' }), 'accept');
+  decide(db, propose(db, row, { text: 'Example Owner is allergic to penicillin.', quote: 'allergic to penicillin' }), 'accept');
 
   const hit = recallClaims(db, { now: NOW, match: ftsQuery('penicillin') });
   assert.equal(hit.matched, 1, 'a real match is reported as a match');
@@ -200,7 +200,7 @@ test('a search that matches nothing falls back to recent accepted claims', () =>
   const missed = recallClaims(db, { now: NOW, match: ftsQuery('any allergies i should know about') });
   assert.equal(missed.matched, 0, 'the search itself found nothing');
   assert.equal(missed.abstain, false, 'but the claim is surfaced anyway');
-  assert.equal(missed.claims[0].text, 'Austin is allergic to penicillin.');
+  assert.equal(missed.claims[0].text, 'Example Owner is allergic to penicillin.');
   db.close();
 });
 
@@ -210,8 +210,8 @@ test('search matches claim text and respects the accepted filter', () => {
     { ts: NOW, source: 'imessage', entity_id: 'i:1', text: 'i cant do thursday mornings, physio' },
     { ts: NOW, source: 'imessage', entity_id: 'i:2', text: 'i went vegetarian in january' },
   ]);
-  decide(db, propose(db, a, { kind: 'constraint', text: 'Austin cannot do Thursday mornings.', quote: 'cant do thursday' }), 'accept');
-  const veg = propose(db, b, { text: 'Austin is vegetarian.', quote: 'i went vegetarian' });
+  decide(db, propose(db, a, { kind: 'constraint', text: 'Example Owner cannot do Thursday mornings.', quote: 'cant do thursday' }), 'accept');
+  const veg = propose(db, b, { text: 'Example Owner is vegetarian.', quote: 'i went vegetarian' });
 
   assert.deepEqual(
     recallClaims(db, { now: NOW, match: ftsQuery('thursday') }).claims.map((c) => c.kind),
@@ -241,12 +241,12 @@ test('when two accepted claims disagree, the newer one comes first and both are 
     { ts: NOW - 400 * 86_400_000, source: 'imessage', entity_id: 'i:1', text: 'i went vegetarian this year' },
     { ts: NOW - 10 * 86_400_000, source: 'imessage', entity_id: 'i:2', text: 'i eat fish again now' },
   ]);
-  decide(db, propose(db, old, { text: 'Austin is vegetarian.', quote: 'i went vegetarian' }), 'accept');
-  decide(db, propose(db, recent, { text: 'Austin eats fish again.', quote: 'i eat fish again' }), 'accept');
+  decide(db, propose(db, old, { text: 'Example Owner is vegetarian.', quote: 'i went vegetarian' }), 'accept');
+  decide(db, propose(db, recent, { text: 'Example Owner eats fish again.', quote: 'i eat fish again' }), 'accept');
 
   const { claims } = recallClaims(db, { now: NOW });
   assert.equal(claims.length, 2, 'both survive; nothing is silently dropped');
-  assert.equal(claims[0].text, 'Austin eats fish again.', 'newest observation first');
+  assert.equal(claims[0].text, 'Example Owner eats fish again.', 'newest observation first');
 });
 
 test('a very old claim is still returned, but flagged stale', () => {
@@ -254,7 +254,7 @@ test('a very old claim is still returned, but flagged stale', () => {
   const [row] = seed(db, [
     { ts: NOW - RECENCY_HORIZON_MS - 86_400_000, source: 'notes', entity_id: 'n:1', text: 'i am allergic to penicillin' },
   ]);
-  decide(db, propose(db, row, { text: 'Austin is allergic to penicillin.', quote: 'allergic to penicillin' }), 'accept');
+  decide(db, propose(db, row, { text: 'Example Owner is allergic to penicillin.', quote: 'allergic to penicillin' }), 'accept');
   const { claims } = recallClaims(db, { now: NOW });
   assert.equal(claims.length, 1, 'an allergy does not expire; it is not hidden');
   assert.equal(claims[0].stale, true, 'but the composer is told it is old');
@@ -290,15 +290,15 @@ test('grounding lines carry kind, source and date, and no quote', (t) => {
   });
   process.env.TZ = 'Pacific/Honolulu';
   const lines = groundingLines([
-    { id: 1, kind: 'fact', text: 'Austin is vegetarian.', observed_at: 1_700_000_000_000, source: 'imessage', stale: false },
-    { id: 2, kind: 'plan', text: 'Austin is moving in March.', observed_at: null, source: 'notes', stale: true },
+    { id: 1, kind: 'fact', text: 'Example Owner is vegetarian.', observed_at: 1_700_000_000_000, source: 'imessage', stale: false },
+    { id: 2, kind: 'plan', text: 'Example Owner is moving in March.', observed_at: null, source: 'notes', stale: true },
     // 2023-11-15T08:00Z is 22:00 on the 14th in Honolulu — the UTC rendering
     // this test replaced dated it the 15th.
     { id: 3, kind: 'fact', text: 'Dinner went well.', observed_at: Date.UTC(2023, 10, 15, 8, 0), source: 'imessage', stale: false },
   ]);
   assert.deepEqual(lines, [
-    '[1] (fact, imessage, 2023-11-14) Austin is vegetarian.',
-    '[2] (plan, notes, undated, OLD) Austin is moving in March.',
+    '[1] (fact, imessage, 2023-11-14) Example Owner is vegetarian.',
+    '[2] (plan, notes, undated, OLD) Example Owner is moving in March.',
     '[3] (fact, imessage, 2023-11-14) Dinner went well.',
   ]);
 });

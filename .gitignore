@@ -10,8 +10,23 @@ dist/
 # Runtime state and secrets never belong in the repo. Everything this system
 # stores lives under ~/.hazlie (0700), outside any checkout, by design.
 .env
-.env*.local
+.env.*
+!.env.example
 *.log
+.hazlie/
+secrets/
+credentials*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.dmg
 
 # macOS
 .DS_Store

@@ -29,8 +29,11 @@
   // Daylight between the stage edge and a bubble, and between two bubbles.
   var RING_MARGIN = 8;
   var GAP = 14;
-  // The core is 54px, and a bubble that touches it reads as belonging to it.
-  var CORE_CLEAR = 27 + 12;
+  // The visible core is 70% of its original 54px diameter. Keep the geometry
+  // tied to that exact size so shrinking the art does not leave an invisible
+  // 54px collision zone between the owner and the nearest topic.
+  var CORE_DIAMETER = 54 * 0.7;
+  var CORE_CLEAR = CORE_DIAMETER / 2 + 12;
   // The largest a bubble may be, from the design.
   var D_CEIL = 162;
   // The smallest. ~~118, on a measurement taken when faces were a flat 22..32px
@@ -428,6 +431,7 @@
     D_CEIL: D_CEIL,
     D_SMALL: D_SMALL,
     GAP: GAP,
+    CORE_DIAMETER: CORE_DIAMETER,
     FACE_FLOOR: FACE_FLOOR,
   };
 

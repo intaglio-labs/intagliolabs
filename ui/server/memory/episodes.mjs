@@ -4,13 +4,10 @@
 // AN EPISODE IS A CONVERSATION, cut where conversations actually stop. The rule
 // is one number -- a gap -- and it is arithmetic, not judgement:
 //
-//   adjacent messages in a thread, measured on the live store
-//   p50 0.6 min · p75 12.4 min · p90 336 min · p95 1,543 min · p99 13,976 min
-//
-// The distribution is sharply bimodal. Half of all adjacent pairs are under 40
-// seconds apart; by p90 the gap is over five hours. Anywhere between 30 and 120
-// minutes cuts the same conversations, which is what makes this a boundary
-// rather than a preference. 60 minutes is the middle of that plateau.
+// A private development corpus showed a sharply bimodal gap distribution.
+// Anywhere between 30 and 120 minutes cut substantially the same conversations,
+// which makes this a boundary rather than a preference. 60 minutes is the
+// middle of that plateau. Private corpus measurements stay out of source.
 //
 // WHY NOT A MODEL. A boundary decides what evidence exists, and decisions about
 // evidence flow one way in this system: code decides, the model reads. A model
@@ -36,11 +33,10 @@ function parseMeta(meta) {
 //
 // iMessage carries `chat_guid`; WhatsApp carries `chat_handle`
 // (connectors/lib/whatsappRows.mjs writes it from the chat JID). This read
-// chat_guid alone at first, and the result was measurable and quiet: 0 of 3,190
-// WhatsApp rows carry chat_guid, so every one fell through to `solo:` -- 57
-// single-message episodes, one per owner-sent row, with every received message
-// discarded as an unquotable singleton. Episodes were doing nothing at all for
-// that source while reporting a perfectly healthy 57.
+// chat_guid alone at first, and the result was measurable and quiet: WhatsApp
+// rows do not carry chat_guid, so every one fell through to `solo:` and
+// received messages were discarded as unquotable singletons. Episodes were
+// doing nothing for that source while reporting success.
 //
 // Listed per source rather than by trying every key, so a new connector that
 // invents a third name shows up as singletons in the test that pins this rather
@@ -51,8 +47,8 @@ const THREAD_FIELD = Object.freeze({
 });
 
 // A row with no thread of its own becomes its own episode rather than being
-// dropped or piled in with unrelated singletons: 186 owner-sent iMessage rows
-// on the live store carry no chat, and lumping them together by absence would
+// dropped or piled in with unrelated singletons: owner-sent iMessage rows can
+// carry no chat, and lumping them together by absence would
 // invent a conversation that never happened.
 export function threadKeyFor(row) {
   if (!row || typeof row !== 'object') return null;
@@ -72,9 +68,9 @@ export function threadKeyFor(row) {
 //
 // Two reasons a row lacks one, and neither is rare. makeEpisode drops any run
 // the owner never spoke in -- correct for distillation, where nothing quotable
-// means nothing citable, and it is what bounds the context widening -- but that
-// is 21,634 rows on the live store now that history has backfilled old threads
-// and lurked-in group chats. Mail and LinkedIn have no thread to cut at all.
+// means nothing citable, and it is what bounds the context widening -- but this
+// is common once history includes old threads and lurked-in group chats. Mail
+// and LinkedIn have no thread to cut at all.
 //
 // Anything COUNTING conversations still has to place those rows, and the obvious
 // key (the row itself) is the wrong one: it turns every unindexed message into
@@ -133,8 +129,8 @@ function makeEpisode(thread_key, run, { gapMs, now }) {
   }));
   const ownerCount = members.filter((m) => m.quotable === 1).length;
   // Nothing quotable means nothing citable means nothing to distil. This drop
-  // is also what bounds the context widening: on the live store it withholds
-  // 1,969 received rows in threads the owner never spoke in, which could not
+  // is also what bounds the context widening: it withholds received rows in
+  // threads the owner never spoke in, which could not
   // have supported a claim under any prompt.
   if (ownerCount === 0) return null;
 

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   CONNECTOR_HERMES_SOURCE,
   CONNECTOR_NAMES,
+  DEFAULT_DISABLED_CONNECTORS,
   RETENTION_SOURCES,
   validateConfig,
 } from '../daemon.mjs';
@@ -21,12 +22,19 @@ test('retired LinkedIn config remains valid across an upgrade', () => {
 
 test('a full config validates', () => {
   const config = {
-    selfName: 'Austin',
+    selfName: 'Example Owner',
+    ownerEmails: ['owner@example.test'],
+    ownerPersonKeys: ['id:owner@example.test'],
+    personRoles: { 'name:casey example': 'friend' },
+    personRolesByYear: {
+      2024: { 'name:casey example': 'business' },
+      2025: { 'name:casey example': 'friend' },
+    },
     intervals: { imessage: 120, oura: 3600 },
     mail: {
       host: 'imap.gmail.com',
       port: 993,
-      user: 'austin@example.com',
+      user: 'owner@example.test',
       folders: ['INBOX', '[Gmail]/Sent Mail'],
       backfillDays: 90,
       maxBodyBytes: 16384,
@@ -55,6 +63,16 @@ test('value shapes are enforced: intervals floor, port range, maintainHour forma
   assert.throws(() => validateConfig({ oura: { backfillDays: 0 } }), /oura\.backfillDays/);
   assert.throws(() => validateConfig({ retention: { maintainHour: '25:00' } }), /HH:MM/);
   assert.throws(() => validateConfig({ retention: { health: 1.5 } }), /retention\.health/);
+  assert.throws(() => validateConfig({ ownerEmails: 'owner@example.test' }), /ownerEmails/);
+  assert.throws(() => validateConfig({ ownerPersonKeys: [''] }), /ownerPersonKeys/);
+  assert.throws(() => validateConfig({ personRoles: [] }), /personRoles/u);
+  assert.throws(() => validateConfig({ personRoles: { 'name:casey example': 'coworker' } }), /personRoles/u);
+  assert.throws(() => validateConfig({ personRolesByYear: { recent: {} } }), /keys must be years/u);
+  assert.throws(() => validateConfig({ personRolesByYear: { 2025: [] } }), /personRolesByYear\.2025/u);
+  assert.throws(
+    () => validateConfig({ personRolesByYear: { 2025: { 'name:casey example': 'coworker' } } }),
+    /personRolesByYear\.2025/u
+  );
 });
 
 test('the connector roster and its hermes-source mapping stay in lockstep', () => {
@@ -69,6 +87,11 @@ test('the connector roster and its hermes-source mapping stay in lockstep', () =
   for (const source of Object.values(CONNECTOR_HERMES_SOURCE).flatMap((value) => value ?? [])) {
     if (source !== null) assert.ok(RETENTION_SOURCES.includes(source), source);
   }
+});
+
+test('hidden Settings integrations are inert in the daemon by default', () => {
+  assert.deepEqual(DEFAULT_DISABLED_CONNECTORS, ['oura', 'photos', 'files', 'notion', 'notes']);
+  for (const name of DEFAULT_DISABLED_CONNECTORS) assert.ok(CONNECTOR_NAMES.includes(name));
 });
 
 test('a Matrix purge covers every bridged Hermes source and totals the response', async () => {

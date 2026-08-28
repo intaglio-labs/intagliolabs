@@ -86,8 +86,8 @@ const STOPWORDS = new Set(
     'first last next one two three thing things stuff bit lot little much many people person guy guys man dude ' +
     'work working works home house back down still around able keep let take took give gave put use used try ' +
     'tried look looked find found feel felt sound sounds pretty better best worse worst http https www com ' +
-    // Learned from the first live run (2026-08, owner's corpus): weekday and
-    // month names chip constantly ("monday(6)") and say nothing; so does chat
+    // Learned from private testing: weekday and month names chip constantly and
+    // say nothing; so does chat
     // filler, profanity-as-filler ("fucking" in a text is emphasis, not a
     // topic), and bare -ing verbs.
     'monday tuesday wednesday thursday friday saturday sunday jan feb mar apr jun jul aug sep sept oct nov dec ' +
@@ -111,9 +111,9 @@ const STOPWORDS = new Set(
 
 // A MESSAGE FROM A ROBOT IS NOBODY'S TOPIC.
 //
-// Measured on the live corpus before this existed, four of the fifteen most
-// repeated non-taxonomy chips were unsubscribe boilerplate -- "reply stop" on
-// 22 person-years, then "msg data", "reply help", "txt stop", "terms apply".
+// In a private development corpus, several of the most repeated non-taxonomy
+// chips were unsubscribe boilerplate -- "reply stop", "msg data",
+// "reply help", "txt stop", and "terms apply".
 // They are distinctive by every measure the ranker has (rare across the corpus,
 // repeated within a thread) and they describe no relationship at all.
 //
@@ -210,12 +210,12 @@ function rowPersonId(row, meta) {
   // A chip sits under a person's name and claims to say what the two of you talk
   // about. Something said in a room you both happen to be in is not that. The
   // gate was already here for WhatsApp; it just never fired for iMessage, so
-  // 61,163 group messages have been characterising people who never said them to
-  // the owner. 216 person-years exist ONLY because of that leak and will lose
+  // group messages were characterising people who never said them to the owner.
+  // Some person-years exist ONLY because of that leak and will lose
   // their chips entirely -- which is the honest outcome: their whole
   // "conversation" was other people's group threads.
   //
-  // UNKNOWN is credited, exactly as before, so the 656 guid-less rows move nothing.
+  // UNKNOWN is credited exactly as before, so guid-less rows move nothing.
   if (threadKind(row, meta) === GROUP) return null;
   return id || null;
 }
@@ -236,8 +236,9 @@ function rowPersonId(row, meta) {
 // Keyed on what the scan actually reads -- the rows -- and nothing else. It used
 // to be rebuilt whenever the contacts spine moved, because both the person key
 // and the name-token filter were applied inside it; both now happen at the fold,
-// so a contacts sync costs 28ms of regrouping instead of a 3,494ms rescan of
-// 425,000 unchanged rows. Measured: the fold is 0.8% of the scan.
+// so a contacts sync costs a cheap regrouping instead of a full rescan of
+// unchanged rows. Private benchmarks confirmed the fold is a small fraction of
+// the scan.
 //
 // Keyed per database handle like its siblings, and on bucketBy because a month
 // scan and a year scan are different tallies.
@@ -339,9 +340,8 @@ function runTopicScan(contextDb, { bucketBy = 'year' } = {}) {
     //
     // This used to resolve the person key here and tally straight into their
     // doc, which made the whole scan a function of idToKey -- and idToKey moves
-    // whenever the contacts spine does, which on this store was 188,508 rows in
-    // a day. Every one of those invalidated an 8-second scan of 425,000 rows
-    // that had not changed.
+    // whenever the contacts spine does. A large private-store contacts sync
+    // invalidated an expensive corpus scan even though no message had changed.
     //
     // An identifier is the stable thing: a handle belongs to whoever it belongs
     // to regardless of what Contacts learns later. So the expensive pass keys on
@@ -368,16 +368,15 @@ function runTopicScan(contextDb, { bucketBy = 'year' } = {}) {
     }
     // ONE HIT PER CONVERSATION, not per message.
     //
-    // Counting messages let a single thread decide the chips: the largest
-    // episode on this corpus is 243 messages, so an hour spent on one subject
-    // counted 243 times against a whole year of everything else. Measured
-    // across the corpus the two weightings rank differently -- "hiring" leaves
-    // the top eight and "fundraising" enters, because hiring was concentrated
+    // Counting messages let a single long thread decide the chips, so an hour
+    // spent on one subject counted repeatedly against a whole year of everything
+    // else. Private testing showed the two weightings rank differently because
+    // one topic was concentrated
     // in few conversations while fundraising was spread across many. Spread is
     // what a topic chip is trying to say.
     //
     // A row with no episode keys on an APPROXIMATION of its conversation, not on
-    // itself. 19% of the episodic corpus has no episode -- makeEpisode drops any
+    // itself. Some episodic rows have no episode -- makeEpisode drops any
     // run the owner never spoke in, and mail has no thread at all -- and keying
     // those on the row turned each one back into its own conversation, quietly
     // restoring the message-counting this whole block exists to replace.
@@ -412,7 +411,7 @@ function runTopicScan(contextDb, { bucketBy = 'year' } = {}) {
         // NAMES ARE DROPPED AT THE FOLD, NOT HERE. Excluding them inline made
         // this scan depend on the set of people's names, which is a function of
         // the contacts spine -- so learning one new name invalidated a scan of
-        // 425,000 unchanged rows. The scan is now a pure function of the corpus,
+        // every unchanged row. The scan is now a pure function of the corpus,
         // and the spine is applied where it is cheap.
         doc.terms.set(t, (doc.terms.get(t) ?? 0) + 1);
         // The pair: this word and the next, only when the next is also a
@@ -504,9 +503,9 @@ const PAIR_STOP = new Set([
 
 // The candidate list under both chip backfill and the specifics line.
 // PAIRS FIRST, then single words for whatever slots remain — not one merged
-// score. Measured on the live corpus: a month rich in real phrases ("wake
-// word", "desk companion") still rendered as word salad, because the phrase
-// appears 3× while its component words appear 20× each and count×idf let
+// score. A private development corpus showed that a month rich in real phrases
+// still rendered as word salad, because a phrase can appear less often than
+// its component words and count×idf let
 // the words win every slot. A pair is always the more specific claim, and
 // specificity is this list's whole point, so specificity is structural, not
 // a score nudge. Subsumption still applies — a picked pair covers its

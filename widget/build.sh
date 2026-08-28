@@ -23,7 +23,17 @@ mkdir -p build
 # not be compiled, so there is nothing for the list to express.
 swiftc -O -target "$(uname -m)-apple-macos13.0" -o build/Hazlie src/*.swift
 
-APP="build/Intaglio Labs.app"
+# A Documents-backed checkout can add File Provider metadata to a bundle as it
+# is assembled; codesign correctly refuses that metadata. Local builds therefore
+# stage the app on the system volume. Release builds opt into build/ explicitly
+# (where CI has no File Provider) because release.sh needs that signed bundle to
+# create the DMG.
+if [ -n "${HAZLIE_STAGE_DIR:-}" ]; then
+  STAGE_ROOT="$HAZLIE_STAGE_DIR"
+else
+  STAGE_ROOT="$(mktemp -d /private/tmp/intaglio-widget.XXXXXX)"
+fi
+APP="$STAGE_ROOT/Intaglio Labs.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/ui"
 cp Info.plist "$APP/Contents/Info.plist"
@@ -314,10 +324,15 @@ case "$IDENTITY_NAME" in
     ;;
 esac
 
-# Finder provenance/resource-fork metadata is harmless on source assets but
-# codesign rejects it inside an application bundle. Clear it only from the
-# generated bundle, never from the checkout.
-xattr -cr "$APP" 2>/dev/null || true
+# Regular `cp` preserves Finder metadata from the checkout. Recent macOS
+# attaches provenance to those copied files, and signing rejects the resulting
+# FinderInfo on the outer bundle. Re-clone the assembled app without resource
+# forks or extended attributes before we sign; this changes only build output.
+CLEAN_APP="$APP.clean"
+rm -rf "$CLEAN_APP"
+ditto --norsrc --noextattr "$APP" "$CLEAN_APP"
+rm -rf "$APP"
+mv "$CLEAN_APP" "$APP"
 
 if [ -n "$IDENTITY" ]; then
   # INSIDE-OUT: the bundled node runtime is nested Mach-O and must carry its
@@ -364,12 +379,14 @@ if [ -n "$IDENTITY" ]; then
   # Signing nested Mach-O can restore this Finder attribute on the bundle.
   # Remove it immediately before the app-level signature.
   xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
+  xattr -d 'com.apple.fileprovider.fpfs#P' "$APP" 2>/dev/null || true
   codesign --force --options runtime \
     --entitlements "$ENTS" \
     -s "$IDENTITY" "$APP"
   echo "signed with $IDENTITY (hardened runtime, $ENTS)"
 else
   xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
+  xattr -d 'com.apple.fileprovider.fpfs#P' "$APP" 2>/dev/null || true
   codesign --force -s - "$APP"
   echo "WARNING: no code-signing identity found; signed ad-hoc." >&2
   echo "         macOS will re-ask for microphone access on every arm." >&2
@@ -382,7 +399,7 @@ fi
 # made LaunchServices' pick arbitrary.
 DEST="/Applications/Intaglio Labs.app"
 rm -rf "$DEST" "/Applications/Hazlie.app" "$HOME/Applications/Hazlie.app" "$HOME/Applications/Intaglio Labs.app"
-cp -R "$APP" "$DEST"
+ditto --norsrc --noextattr "$APP" "$DEST"
 # Copying a bundle into /Applications can attach Finder provenance metadata to
 # the destination after it was signed. codesign rejects that metadata, so clear
 # it from this generated install copy before LaunchServices registers it.

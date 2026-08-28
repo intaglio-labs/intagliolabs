@@ -75,10 +75,9 @@ private let chunk: TimeInterval = 365 * 24 * 60 * 60
 // has: it matches the contacts spine's `email` identifiers directly, which is
 // how a calendar event and an iMessage thread become the same person.
 //
-// Measured on this machine before it was written: 1,905 events in a year hold
-// 10,362 attendee records, and 1,348 of those events have at least one attendee
-// with an email. The stored corpus carried NONE of it -- the row meta had five
-// keys and not one of them was a person.
+// A private development calendar confirmed that attendee records frequently
+// include email addresses. The stored corpus had carried none of it -- the row
+// meta had keys for the event but not one for a person.
 //
 // isCurrentUser is kept rather than filtered here: the Node side decides whether
 // "me" belongs in a row, and a helper that silently drops the owner would make
@@ -175,16 +174,19 @@ private func dumpEvents(fromSeconds: Double, toSeconds: Double) -> Never {
 
 /// A contact photo, small enough to send 250 of.
 ///
-/// CNContactThumbnailImageData is NOT a thumbnail in any useful sense on a real
-/// address book: measured on the owner's, 267 photos averaged 247 KB and the
-/// largest was 1.8 MB (2026-08-25). The People page draws them in a 20-26px
-/// circle, so shipping those bytes would be ~60 MB of payload to render a few
-/// hundred dots. ImageIO does the decode-and-resize in one pass without ever
-/// materialising the full-size bitmap.
+/// CNContactThumbnailImageData is NOT necessarily small in a real address
+/// book. The People page draws photos in tiny circles, so shipping every
+/// original wastes memory and bridge bandwidth. ImageIO decodes and resizes in
+/// one pass without materialising a second full-size bitmap.
 ///
 /// Returns nil for absent or undecodable input — the caller omits the field,
 /// and the face falls back to initials.
-private func downscaleJPEG(_ data: Data?, max: CGFloat = 96) -> Data? {
+// The People list draws these at 20px, but its constellation can zoom to 2.2x
+// and its largest faces start much bigger than the list. A 96px source visibly
+// softens there even when WebKit rasterizes the UI itself at the right scale.
+// 256px keeps the maximum zoom sharp without retaining multi-megabyte contact
+// originals; the connector still stores only this bounded local derivative.
+private func downscaleJPEG(_ data: Data?, max: CGFloat = 256) -> Data? {
   guard let data, !data.isEmpty else { return nil }
   guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
   let opts: [CFString: Any] = [
@@ -195,7 +197,7 @@ private func downscaleJPEG(_ data: Data?, max: CGFloat = 96) -> Data? {
   guard let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
   let out = NSMutableData()
   guard let dest = CGImageDestinationCreateWithData(out, "public.jpeg" as CFString, 1, nil) else { return nil }
-  CGImageDestinationAddImage(dest, img, [kCGImageDestinationLossyCompressionQuality: 0.72] as CFDictionary)
+  CGImageDestinationAddImage(dest, img, [kCGImageDestinationLossyCompressionQuality: 0.82] as CFDictionary)
   guard CGImageDestinationFinalize(dest) else { return nil }
   return out as Data
 }

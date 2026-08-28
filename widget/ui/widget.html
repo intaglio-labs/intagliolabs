@@ -88,6 +88,15 @@
           </span>
           <span class="zzz z1"><i>z</i></span>
           <span class="zzz z2"><i>z</i></span>
+          <!-- Processing gets the awake equivalent of the sleeping z's: a
+               quiet three-beat buzz BEHIND the orb. Thin inline strokes stay
+               crisp without turning into a sticker on the forehead (and this
+               page's CSP intentionally permits no image requests). -->
+          <span class="orb-charge" aria-hidden="true">
+            <svg class="orb-bolt bolt-1" viewBox="0 0 10 16"><path d="M7.4 1.5 3.5 7.1l2.8-.4-3.8 7.8"/></svg>
+            <svg class="orb-bolt bolt-2" viewBox="0 0 10 16"><path d="M6.8 1.8 3.9 6.5l2.5-.5-3.2 7.5"/></svg>
+            <svg class="orb-bolt bolt-3" viewBox="0 0 10 16"><path d="M7.2 2 3.7 7.2l2.6-.3-3.5 6.8"/></svg>
+          </span>
           <span class="orb-badge">1</span>
           <!-- The pop's shockwave and the concussion's orbiting stars. Both
                live outside .orb-body so they can draw past the silhouette,
@@ -99,14 +108,15 @@
     </div>
     <!-- Second row: the people button and the settings gear, right-aligned. -->
     <div class="gear-row">
-      <!-- Timeline: your people, one year at a time. Person-in-a-pin glyph
-           (the Terminal Palette person x globe mark, back from the retired
-           People button — owner, 2026-08-25); opens monthsPanel. -->
-      <button class="gear" id="months" title="Timeline">
+      <!-- Your people, one year at a time. This is deliberately a plain
+           people glyph: the old pin outline suggested a location view, which
+           this button has never opened. -->
+      <button class="gear" id="months" title="People">
         <svg viewBox="0 0 44 44" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M22 38c8-8.5 12-14.6 12-20a12 12 0 1 0-24 0c0 5.4 4 11.5 12 20z"/>
-          <circle cx="22" cy="15" r="3.8" fill="currentColor" stroke="none"/>
-          <path d="M15.5 25c1.2-3.5 3.6-5.2 6.5-5.2s5.3 1.7 6.5 5.2" fill="currentColor" stroke="none"/>
+          <circle cx="17" cy="16" r="4.2"/>
+          <circle cx="29" cy="18" r="3.3"/>
+          <path d="M8.5 33c.9-5.5 4.1-8.2 8.5-8.2s7.6 2.7 8.5 8.2"/>
+          <path d="M25.1 26.5c5.2-.5 8.4 1.6 10 6.5"/>
         </svg>
       </button>
       <button class="gear" id="gear" title="Settings">

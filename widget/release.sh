@@ -161,6 +161,7 @@ fi
 # its own scan cannot pick Apple Development first, and the provenance the
 # guard above established so the stamp inside the bundle agrees with it.
 HAZLIE_SIGN_IDENTITY="$IDENTITY" \
+HAZLIE_STAGE_DIR="$PWD/build" \
   HZ_SOURCE_COMMIT="$COMMIT" \
   HZ_SOURCE_CLEAN="$([ -z "$DIRT" ] && echo 1 || echo 0)" \
   ./build.sh
@@ -194,11 +195,13 @@ cp -R "$APP" "$STAGE/Intaglio Labs.app"
 xattr -cr "$STAGE/Intaglio Labs.app" 2>/dev/null || true
 # Render at the actual backing scale and stamp it to the 600pt Finder window.
 WIN_PT=600
-swift icon/make-dmg-bg.swift icon/dmg-bg.png
-BG_W=$(sips -g pixelWidth icon/dmg-bg.png | awk '/pixelWidth/{print $2}')
+BG="$DIST/dmg-bg.png"
+swift icon/make-dmg-bg.swift "$BG"
+BG_W=$(sips -g pixelWidth "$BG" | awk '/pixelWidth/{print $2}')
 BG_DPI=$(( BG_W * 72 / WIN_PT ))
-sips -s dpiWidth "$BG_DPI" -s dpiHeight "$BG_DPI" icon/dmg-bg.png >/dev/null
-cp icon/dmg-bg.png "$STAGE/.background/bg.png"
+sips -s dpiWidth "$BG_DPI" -s dpiHeight "$BG_DPI" "$BG" >/dev/null
+cp "$BG" "$STAGE/.background/bg.png"
+rm -f "$BG"
 ln -s /Applications "$STAGE/Applications"
 # A build the guard would have refused carries that fact in its FILENAME. The
 # version string alone is hand-maintained in Info.plist and identical across

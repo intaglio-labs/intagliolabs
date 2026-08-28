@@ -295,7 +295,7 @@ test('a message joining an existing conversation replaces that episode', () => {
 
 // ---- only the conversations that moved ----
 //
-// A full pass reads every episodic row (418,698 here, ~3s, ~384MB) just to
+// A full pass reads every episodic row just to
 // discover which threads changed, because a thread key is computed from `meta`
 // and is not a column anything can filter on. context_thread is that missing
 // index. These pin the property that makes it safe to use: the narrow pass must
@@ -413,8 +413,8 @@ test('an untouched conversation is not rebuilt and keeps its id', () => {
 // one. insertRows is SELECT-then-write: a row that changes keeps its id, so a
 // message whose timestamp or thread metadata is rewritten left every count
 // identical and the watermark unmoved, and the episode cut from the old version
-// stood for good. Not hypothetical here -- the history backfill was 405,952 rows
-// of UPDATE.
+// stood for good. Not hypothetical here -- a history backfill can be largely
+// UPDATEs.
 test('a message whose timestamp is rewritten re-cuts its conversation', () => {
   const db = openDb(':memory:');
   insertRows(db, [

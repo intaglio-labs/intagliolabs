@@ -1,10 +1,9 @@
 // Walking the owner's cloud-sync folders without downloading them.
 //
-// THE MEASUREMENT THAT DECIDED THIS MODULE (this Mac, 2026-08-20). Across
-// iCloud Drive, Box and Dropbox: 97,718 files, of which **96,262 are
-// dataless** — present as names and sizes, with no bytes on disk. Reading
-// one materializes it. Reading all of them would pull **45.6 GB** through
-// the owner's iCloud account, silently, on a 15-minute timer.
+// THE MEASUREMENT THAT DECIDED THIS MODULE. Across cloud-drive mirrors, many
+// files can be dataless — present as names and sizes, with no bytes on disk.
+// Reading one materializes it. Reading all of them could pull a large archive
+// through the owner's cloud account, silently, on a timer.
 //
 // So the rule is: this connector NEVER opens a dataless file. It records
 // that the file exists — name, folder, size, dates, type — which is real
@@ -15,9 +14,9 @@
 //
 // DETECTING DATALESS FROM NODE. macOS marks these with the SF_DATALESS
 // st_flag, which node's Stats does not expose. The proxy is `blocks === 0`
-// with `size > 0`: verified on this machine against stat(1)'s flag string —
-// dataless files report 0 allocated blocks, a materialized neighbour of
-// 34,820 bytes reports 72. An APFS-compressed small file whose data lives
+// with `size > 0`: verified against stat(1)'s flag string — dataless files
+// report 0 allocated blocks while materialized files allocate blocks. An
+// APFS-compressed small file whose data lives
 // entirely in an xattr can also report 0 blocks, so this can misjudge a
 // local file as dataless. That direction is the safe one: it under-reads
 // rather than triggering a download, which is the failure this exists to
@@ -31,9 +30,9 @@
 import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-// Dependency and build trees. Without these, 60k of the 96k files found here
-// are a synced node_modules — `lodash/fp/toString.js` is not context about
-// anyone's life, and it would bury the 3,843 real documents.
+// Dependency and build trees. A synced node_modules can dominate the walk —
+// `lodash/fp/toString.js` is not context about anyone's life and would bury
+// the real documents.
 export const SKIP_DIRS = Object.freeze([
   'node_modules', '.git', '.svn', '.hg', 'build', 'Build', 'DerivedData', 'Pods',
   'Carthage', '.dart_tool', 'dist', '.next', '.nuxt', '.venv', 'venv', 'env',

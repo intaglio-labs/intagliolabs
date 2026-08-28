@@ -11,6 +11,11 @@ body.plist {
   /* Transparent so the rounded card below defines the popup's shape and its
      outer corners round (the native window is a plain rectangle behind it). */
   background: transparent;
+  /* The page itself never pans sideways. The year tabs and highlight cards
+     each own a small, intentional horizontal scroller; letting their overflow
+     promote the document to a second horizontal surface makes a trackpad drag
+     slide the whole people page into empty space. */
+  overflow-x: hidden;
 }
 .plist-win {
   height: 100%;
@@ -29,11 +34,17 @@ body.plist {
   padding: 14px 14px 8px;
   flex: 0 0 auto;
 }
-body.plist .pl-search {
+body.plist .pl-search-wrap {
   flex: 1 1 auto;
   min-width: 0;
+  position: relative;
+}
+body.plist .pl-search {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
   height: 34px;
-  padding: 0 14px;
+  padding: 0 38px 0 14px;
   border-radius: 999px;
   border: 1px solid rgba(234, 234, 234, 0.14);
   background: rgba(10, 10, 10, 0.55);
@@ -43,6 +54,28 @@ body.plist .pl-search {
 }
 body.plist .pl-search:focus { outline: none; border-color: rgba(197, 165, 109, 0.5); }
 body.plist .pl-search::placeholder { color: var(--muted); }
+body.plist .pl-search-clear {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  width: 22px;
+  height: 22px;
+  padding: 0 0 1px;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 999px;
+  background: rgba(234, 234, 234, 0.09);
+  color: var(--muted);
+  font: 15px/1 var(--mono);
+  cursor: pointer;
+}
+body.plist .pl-search-clear[hidden] { display: none; }
+body.plist .pl-search-clear:hover,
+body.plist .pl-search-clear:focus-visible {
+  background: rgba(234, 234, 234, 0.15);
+  color: var(--fg);
+  outline: none;
+}
 body.plist .close {
   /* Override the global .close (position:absolute, top-right) so it sits in the
      top bar's flex row and doesn't overlap the search box. */
@@ -59,6 +92,10 @@ body.plist .close:hover { filter: brightness(1.15); }
 .pl-list {
   flex: 1 1 auto;
   min-height: 0;
+  /* `overflow-y: auto` otherwise computes a visible x axis to `auto` too.
+     A long row or hover hint then gives the PEOPLE LIST a horizontal scroll
+     range even though its chips wrap and the page is designed to be vertical. */
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 2px 8px;
 }
@@ -81,6 +118,16 @@ body.plist .pl-nameline {
   gap: 8px;
   min-width: 0;
 }
+/* One compact identity mark: photo, name, then awards. Four pixels separates
+   those three semantic pieces without returning to the loose column-like
+   spacing the parent row uses for counts and channel icons. */
+body.plist .pl-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
 body.plist .pl-name {
   flex: 0 1 auto;
   min-width: 0;
@@ -98,6 +145,9 @@ body.plist .pl-src {
   gap: 4px;
 }
 body.plist .pl-chip {
+  appearance: none;
+  font-family: inherit;
+  line-height: inherit;
   font-size: 9.5px;
   padding: 1px 7px;
   border-radius: 999px;
@@ -105,6 +155,12 @@ body.plist .pl-chip {
   color: var(--hazelnut-light);
   background: rgba(20, 20, 18, 0.5);
   white-space: nowrap;
+  cursor: pointer;
+}
+body.plist .pl-chip:hover,
+body.plist .pl-chip:focus-visible {
+  filter: brightness(1.25);
+  outline: none;
 }
 body.plist .pl-detail {
   margin-top: 7px;
@@ -126,6 +182,92 @@ body.plist .pl-chip.pl-topic {
   border-color: rgba(234, 234, 234, 0.18);
   color: var(--secondary);
 }
+/* The one relationship role is deliberately the first chip: it answers who
+   this person is in the owner's life, while the following chips answer what
+   they talked about that year. The muted palette keeps a guess from reading
+   as a fact; right-click/long-press is the correction path. */
+body.plist .pl-chip.pl-role {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding-right: 4px;
+  border-right: 0;
+  border-radius: 999px 0 0 999px;
+  text-transform: lowercase;
+}
+body.plist .pl-role-control {
+  display: inline-flex;
+  align-items: stretch;
+  white-space: nowrap;
+}
+body.plist .pl-role-menu {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  padding: 0 5px 0 2px;
+  border: 1px solid rgba(197, 165, 109, 0.3);
+  border-left: 0;
+  border-radius: 0 999px 999px 0;
+  background: rgba(20, 20, 18, 0.5);
+  color: var(--hazelnut-light);
+  cursor: pointer;
+}
+body.plist .pl-role-menu svg {
+  width: 9px;
+  height: 9px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+body.plist .pl-role-menu:hover,
+body.plist .pl-role-menu:focus-visible { filter: brightness(1.25); outline: none; }
+body.plist .pl-role-menu:disabled { cursor: wait; opacity: 0.55; }
+body.plist .pl-role-mark {
+  opacity: 0.78;
+  font-size: 0.9em;
+  letter-spacing: 0;
+}
+/* Saving happens inside the role pill rather than replacing the list with a
+   loader. Three tiny beats preserve the bubble's dimensions and make the
+   selected role readable while its durable correction is being applied. */
+body.plist .pl-role-wait {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 1px;
+}
+body.plist .pl-role-wait > span {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.28;
+  animation: pl-role-saving 0.9s ease-in-out infinite;
+}
+body.plist .pl-role-wait > span:nth-child(2) { animation-delay: 0.12s; }
+body.plist .pl-role-wait > span:nth-child(3) { animation-delay: 0.24s; }
+@keyframes pl-role-saving {
+  0%, 60%, 100% { opacity: 0.28; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-1px); }
+}
+body.plist .pl-chip.pl-role.pending { cursor: wait; }
+@media (prefers-reduced-motion: reduce) {
+  body.plist .pl-role-wait > span { animation: none; opacity: 0.55; }
+  body.plist .pl-role-wait > span:nth-child(2) { opacity: 0.75; }
+  body.plist .pl-role-wait > span:nth-child(3) { opacity: 1; }
+}
+body.plist .pl-chip.role-friend { border-color: rgba(139, 179, 214, 0.48); color: #a9c6e1; }
+body.plist .pl-chip.role-business { border-color: rgba(205, 172, 106, 0.52); color: var(--hazelnut-light); }
+body.plist .pl-chip.role-romantic { border-color: rgba(220, 135, 164, 0.5); color: #e6a0bb; }
+body.plist .pl-chip.role-family { border-color: rgba(126, 194, 106, 0.5); color: #9bd68a; }
+body.plist .pl-role-menu.role-friend { border-color: rgba(139, 179, 214, 0.48); color: #a9c6e1; }
+body.plist .pl-role-menu.role-business { border-color: rgba(205, 172, 106, 0.52); color: var(--hazelnut-light); }
+body.plist .pl-role-menu.role-romantic { border-color: rgba(220, 135, 164, 0.5); color: #e6a0bb; }
+body.plist .pl-role-menu.role-family { border-color: rgba(126, 194, 106, 0.5); color: #9bd68a; }
 body.plist .pl-more {
   padding: 4px 10px 8px;
   font-size: 11px;

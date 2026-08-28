@@ -34,7 +34,7 @@ Everything else scales off this. Three tiers, in order of effort:
 
 | Tier | Audience | What it demands |
 |---|---|---|
-| A | Austin + Rishab's own machines | Developer ID cert; nothing else changes |
+| A | Maintainers' own machines | Developer ID cert; nothing else changes |
 | B | Friendly testers ("our family") | Everything in this plan |
 | C | Public download from intaglio.io | Tier B + legal gate + support/update story |
 

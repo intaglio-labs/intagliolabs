@@ -334,8 +334,8 @@ test('the sync-status branch returns the ask shape', SKIP, async () => {
   // that proves it is not.
   const ingest = await post('/ingest', {
     body: [
-      { source: 'imessage', entity_id: 'w:1', ts: Date.now() - 3_600_000, text: 'morning', speaker: 'Austin' },
-      { source: 'imessage', entity_id: 'w:2', ts: Date.now() - 1_800_000, text: 'on my way', speaker: 'Austin' },
+      { source: 'imessage', entity_id: 'w:1', ts: Date.now() - 3_600_000, text: 'morning', speaker: 'Example Owner' },
+      { source: 'imessage', entity_id: 'w:2', ts: Date.now() - 1_800_000, text: 'on my way', speaker: 'Example Owner' },
     ],
     headers: { authorization: `Bearer ${token()}` },
   });

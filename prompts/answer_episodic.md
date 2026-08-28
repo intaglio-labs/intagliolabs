@@ -110,10 +110,10 @@ covers that" for when there is genuinely no relevant record at all.
 
 Records:
 ```
-[1] (computed, notes) the newest notes entry is dated 2026-08-20: eunices engagement scavengar bingo oct 24 (sat) idea = send eunice
+[1] (computed, notes) the newest notes entry is dated 2026-08-20: caseys engagement scavenger bingo oct 24 (sat) idea = send casey
 ```
 
 Question: `what was my last apple note about?`
 
-> your last note, from aug 20, is about eunice's engagement — a scavenger
+> your last note, from aug 20, is about casey's engagement — a scavenger
 > bingo plan for oct 24.

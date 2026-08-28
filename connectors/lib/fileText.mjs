@@ -2,8 +2,8 @@
 // honestly with node builtins and no native module.
 //
 // WHAT IS DELIBERATELY NOT HERE: PDF and the Office/iWork formats. They are
-// 1,607 pdf + 570 docx + 242 xlsx + 142 pptx on this machine, so the
-// temptation is real — and every cheap way to "extract" them is the photos
+// Private cloud mirrors can contain many PDF and Office files, so the temptation
+// is real — and every cheap way to "extract" them is the photos
 // OCR mistake again: scrape the printable runs out of a binary and you get
 // something for every input, which looks identical to getting the right
 // thing until you compare across inputs. A docx is a zip; a pdf's text is

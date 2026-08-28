@@ -18,7 +18,7 @@ test('intent fires on need language, not on episodic stat questions', () => {
   assert.equal(detectPersonSearch('who could mentor me')?.kind, 'mentor');
   // These belong to the episodic shelf / claim path, NOT person-search.
   assert.equal(detectPersonSearch('who did i text the most this month'), null);
-  assert.equal(detectPersonSearch('what did rishab and i decide'), null);
+  assert.equal(detectPersonSearch('what did casey and i decide'), null);
   assert.equal(detectPersonSearch('when do i fly to honolulu'), null);
 });
 

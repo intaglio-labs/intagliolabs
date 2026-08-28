@@ -27,7 +27,7 @@ import {
 // A fixed Friday, 2027-03-19 12:00 local — weekday math needs a known day.
 const NOW = new Date(2027, 2, 19, 12, 0, 0).getTime();
 const DAY = 86_400_000;
-const PINNED = 'any;-;austiny808@gmail.com';
+const PINNED = 'any;-;owner@example.test';
 const opts = { excludeChatGuids: [PINNED] };
 
 function db() {
@@ -38,7 +38,7 @@ function db() {
 
 test('a question with no episodic topic routes nowhere', () => {
   assert.equal(routeQuestion('what am I allergic to?', { now: NOW }), null);
-  assert.equal(routeQuestion('who is rishab?', { now: NOW }), null);
+  assert.equal(routeQuestion('who is casey?', { now: NOW }), null);
 });
 
 test('topics pick sources; schedule questions look forward', () => {
@@ -143,7 +143,7 @@ test('the envelope is capped and every line is labeled', () => {
 test('Q1: the flight is found in a FUTURE calendar row', () => {
   const d = db();
   insertRows(d, [
-    { ts: NOW + 40 * DAY, source: 'calendar', entity_id: 'c:fly', text: '"HNL flight — HA12" 8:00AM (austin@intaglio.io)', meta: { start_ms: NOW + 40 * DAY, end_ms: NOW + 40 * DAY + 6 * 3_600_000 } },
+    { ts: NOW + 40 * DAY, source: 'calendar', entity_id: 'c:fly', text: '"HNL flight — HA12" 8:00AM (owner@example.test)', meta: { start_ms: NOW + 40 * DAY, end_ms: NOW + 40 * DAY + 6 * 3_600_000 } },
     { ts: NOW - 2 * DAY, source: 'calendar', entity_id: 'c:x', text: '"standup" 9:00AM', meta: { start_ms: NOW - 2 * DAY, end_ms: NOW - 2 * DAY + 1_800_000 } },
   ]);
   const ctx = episodicContext(d, 'When do I fly to Honolulu?', { now: NOW, ...opts });

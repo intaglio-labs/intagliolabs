@@ -189,7 +189,7 @@ test('only our own bridges\' invites are auto-joined', () => {
   assert.deepEqual(invitesToJoin({}), []);
 });
 
-test('a first run pages older room history before advancing its sync cursor', async (t) => {
+test('a first run queues older room history and the next slice resumes it', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'matrix-source-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const credentialsDir = join(dir, '.hazlie', 'matrix');
@@ -232,7 +232,7 @@ test('a first run pages older room history before advancing its sync cursor', as
   const cursors = new Map();
   const ingested = [];
   const source = createMatrixSource({ home: dir, fetchImpl });
-  const result = await source.run({
+  const ctx = {
     state: {
       getCursor: (key) => cursors.get(key) ?? null,
       setCursor: (key, value) => cursors.set(key, value),
@@ -243,15 +243,25 @@ test('a first run pages older room history before advancing its sync cursor', as
     },
     config: { selfName: 'owner' },
     backfill: false,
-  });
+  };
+  const result = await source.run(ctx);
 
-  assert.equal(result.inserted, 2);
+  assert.equal(result.inserted, 1);
+  assert.deepEqual(ingested.map((row) => row.entity_id), ['instagram:$new']);
+  assert.equal(cursors.get('matrix:history-rooms'), JSON.stringify(['!dm:hazlie.local']));
+  assert.deepEqual(ingested.map((row) => row.entity_id).sort(), [
+    'instagram:$new',
+  ]);
+  assert.equal(cursors.get('matrix:since'), 's-first');
+  assert.match(cursors.get('matrix:room:!dm:hazlie.local'), /instagram_7/u);
+
+  const history = await source.run({ ...ctx, history: true });
+  assert.equal(history.inserted, 1);
   assert.deepEqual(ingested.map((row) => row.entity_id).sort(), [
     'instagram:$new',
     'instagram:$old',
   ]);
-  assert.equal(cursors.get('matrix:since'), 's-first');
-  assert.match(cursors.get('matrix:room:!dm:hazlie.local'), /instagram_7/u);
+  assert.equal(cursors.get('matrix:history-done'), '1');
   assert.equal(fetched.filter((url) => url.pathname.endsWith('/messages')).length, 1);
 });
 

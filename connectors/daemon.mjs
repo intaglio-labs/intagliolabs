@@ -25,7 +25,8 @@
 // run completes makes overlap structurally impossible; a slow run simply
 // delays its own next pass. First runs are staggered ~10 s apart so five
 // sources do not stampede hermes and the Apple stores in one instant.
-import { existsSync, readdirSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -44,8 +45,19 @@ import { assertOwnerOnlyFile, defaultHermesTokenPath } from './lib/secrets.mjs';
 import { openStateDb, runCounts } from './lib/state.mjs';
 import { createLogger } from './lib/log.mjs';
 import { retentionPass, maintainPass, msUntilIdleWindow, isInsideIdleWindow } from './retain.mjs';
+import { PLATFORMS, bridgeStatus } from '../connect/lib/bridge.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+// Matrix is the transport, not the thing a person connected. Its one /sync
+// batches every social bridge, so Activity expands it into the platforms whose
+// bridge database confirms a real signed-in account. This is deliberately
+// local read-only status; an unlinked bridge is neither queued nor named.
+function connectedSocialPlatforms() {
+  return Object.entries(PLATFORMS)
+    .filter(([id]) => bridgeStatus(id).connected)
+    .map(([id, platform]) => ({ id, label: platform.label }));
+}
 
 // The closed set of connectors this daemon will ever schedule. A sources/
 // module whose name is not here is a typo or an unreviewed data source, and
@@ -66,6 +78,15 @@ export const CONNECTOR_NAMES = Object.freeze([
   // for seven platforms: the row's `source` comes from which bridge's ghost
   // sent it (lib/matrixRows.mjs), so messenger and slack land as themselves.
   'matrix',
+]);
+
+// Settings deliberately keeps these integrations out of the current product
+// surface. A hidden connector must also be inert: scheduling it anyway leaks
+// implementation-in-progress into Activity and can touch data the person
+// cannot enable or control from the app. Keep this in lockstep with
+// widget/ui/connections.js's HIDDEN_CONNECTORS until each integration ships.
+export const DEFAULT_DISABLED_CONNECTORS = Object.freeze([
+  'oura', 'photos', 'files', 'notion', 'notes',
 ]);
 
 // Connector name → the hermes `source` its rows land under. Oura is the
@@ -134,8 +155,72 @@ export function defaultCacheDir(home = homedir()) {
   return join(home, '.hazlie', 'cache');
 }
 
+export function defaultDaemonLockPath(home = homedir()) {
+  return join(home, '.hazlie', 'connectors', 'daemon.lock');
+}
+
+export function defaultActivityPath(home = homedir()) {
+  return join(home, '.hazlie', 'connectors', 'activity.json');
+}
+
 export function disableMarkerPath(name, home = homedir()) {
   return join(home, '.hazlie', 'connectors', `${name}.disabled`);
+}
+
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid < 2) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
+// One daemon owns the shared cursor database. A forced app stop used to leave
+// its child running, and every relaunch added another scheduler. The lock
+// refuses the second writer; the owner-PID watch at the CLI entry cleans this
+// file after a forced app stop, so the next launch starts cleanly.
+export function acquireDaemonLock({
+  home = homedir(),
+  pid = process.pid,
+  isAlive = processIsAlive,
+} = {}) {
+  const path = defaultDaemonLockPath(home);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const token = randomUUID();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = openSync(path, 'wx', 0o600);
+      writeFileSync(fd, JSON.stringify({ pid, token, startedTs: Date.now() }) + '\n');
+      return () => {
+        try {
+          const current = JSON.parse(readFileSync(path, 'utf8'));
+          if (current?.token === token) unlinkSync(path);
+        } catch {}
+        try { closeSync(fd); } catch {}
+      };
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      let owner = 0;
+      try { owner = Number(JSON.parse(readFileSync(path, 'utf8'))?.pid); } catch {}
+      if (isAlive(owner)) return null;
+      // A hard kill cannot run our cleanup handler. Only an unreadable/dead
+      // owner is cleared; a live daemon always keeps its lock.
+      try { unlinkSync(path); } catch {}
+    }
+  }
+  return null;
+}
+
+function writeActivity(activity, path = defaultActivityPath()) {
+  const tmp = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(activity) + '\n', { mode: 0o600 });
+    renameSync(tmp, path);
+  } catch {
+    try { unlinkSync(tmp); } catch {}
+  }
 }
 
 // --- config -------------------------------------------------------------------
@@ -161,6 +246,17 @@ const TOP_KEYS = Object.freeze([
   // graph (ui/server/people/owner.mjs) so an alias is not mistaken for a
   // separate person; the connectors themselves do not use it.
   'ownerEmails',
+  // Explicit graph identities marked by the owner as themselves. This is the
+  // local fallback for sources whose identifiers are not email addresses.
+  'ownerPersonKeys',
+  // Explicit relationship-role corrections. The people graph supplies a local
+  // message-derived guess; these owner choices replace it per stable key.
+  'personRoles',
+  // The same corrections scoped to one calendar year. Keeping this in the
+  // daemon's closed schema is essential: the UI writes it into this shared
+  // config, and rejecting it on the next launch would prevent every connector
+  // from starting after the first year-specific edit.
+  'personRolesByYear',
   'hermesUrl',
   'intervals',
   'mail',
@@ -246,10 +342,43 @@ function assertPositiveInt(value, where, { min = 1, max = Number.MAX_SAFE_INTEGE
   }
 }
 
+const RELATIONSHIP_ROLES = Object.freeze(['friend', 'business', 'romantic', 'family']);
+
+function assertPersonRoles(value, where) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw configError(`${where} must be an object`);
+  }
+  for (const [key, role] of Object.entries(value)) {
+    if (key.length === 0 || key.length > 300 || !RELATIONSHIP_ROLES.includes(role)) {
+      throw configError(`${where} values must be friend, business, romantic, or family`);
+    }
+  }
+}
+
 export function validateConfig(raw) {
   assertClosedKeys(raw, TOP_KEYS, 'the top level');
   if (raw.selfName !== undefined && (typeof raw.selfName !== 'string' || raw.selfName.length === 0)) {
     throw configError('"selfName" must be a non-empty string');
+  }
+  for (const [field, values] of [['ownerEmails', raw.ownerEmails], ['ownerPersonKeys', raw.ownerPersonKeys]]) {
+    if (values !== undefined && (!Array.isArray(values) || values.some((value) => typeof value !== 'string' || value.length === 0 || value.length > 300))) {
+      throw configError(`"${field}" must be an array of non-empty strings`);
+    }
+  }
+  if (raw.personRoles !== undefined) {
+    assertPersonRoles(raw.personRoles, '"personRoles"');
+  }
+  if (raw.personRolesByYear !== undefined) {
+    if (raw.personRolesByYear === null || typeof raw.personRolesByYear !== 'object' || Array.isArray(raw.personRolesByYear)) {
+      throw configError('"personRolesByYear" must be an object');
+    }
+    for (const [year, roles] of Object.entries(raw.personRolesByYear)) {
+      const numericYear = Number(year);
+      if (!/^\d{4}$/u.test(year) || numericYear < 1900 || numericYear > 3000) {
+        throw configError('"personRolesByYear" keys must be years from 1900 through 3000');
+      }
+      assertPersonRoles(roles, `"personRolesByYear.${year}"`);
+    }
   }
   // The per-machine hermes address, for Macs where the canonical port (51789)
   // is taken by something else.
@@ -384,8 +513,8 @@ export function validateConfig(raw) {
         // to enable it without the number being said out loud somewhere.
         throw configError(
           'files.materializeDataless is not implemented. Enabling it would download every ' +
-            'online-only file in the configured roots (45.6 GB when measured on 2026-08-20). ' +
-            'Implement it deliberately, with a size budget, before setting this.'
+            'online-only file in the configured roots. Implement it deliberately, with a size ' +
+            'budget and explicit user confirmation, before setting this.'
         );
       }
     }
@@ -516,7 +645,83 @@ export function createDaemon({
   now = Date.now,
 }) {
   const timers = new Set();
+  const nextRuns = new Map();
   let stopped = false;
+
+  // The settings queue is derived from the scheduler itself, not guessed from
+  // a polling interval in the UI. Keep every queued source in chronological
+  // order so the compact activity line can expand into the next real tasks.
+  const scheduledQueue = () => [...nextRuns.entries()]
+    .flatMap(([connector, nextTs]) => {
+      if (connector !== 'matrix') return [{ connector, nextTs }];
+      return connectedSocialPlatforms().map((platform) => ({
+        connector,
+        platform: platform.id,
+        label: platform.label,
+        nextTs,
+      }));
+    })
+    .sort((a, b) => a.nextTs - b.nextTs);
+  const intervalMsFor = (connector) =>
+    (config.intervals?.[connector] ?? DEFAULT_INTERVAL_S) * 1000;
+  // The old header reported the final task's START time. That answered "when
+  // does this polling round begin?", not "when will all the work finish?" —
+  // and completely hid resumable history. Calendar has an exact remaining
+  // number of date slices. Matrix pagination is intentionally opaque, so the
+  // combined number remains an intentionally rough estimate.
+  const historyEstimate = () => {
+    const nowMs = now();
+    const completionTimes = [];
+    const backfill = [];
+
+    if (!state.getCursor('calendar:history-done')) {
+      backfill.push('calendar');
+      const ceiling = positiveNumber(
+        state.getCursor(CALENDAR_HISTORY_CURSOR_KEY),
+        nowMs - 90 * 86_400_000
+      );
+      const remainingSlices = Math.max(
+        1,
+        Math.ceil((ceiling - CALENDAR_HISTORY_FLOOR_TS) / (365 * 86_400_000))
+      );
+      const slicesPerPass = positiveNumber(state.getCursor(HISTORY_RATE_KEY('calendar')), 20);
+      const passes = Math.ceil(remainingSlices / slicesPerPass);
+      const first = nextRuns.get('calendar') ?? nowMs + intervalMsFor('calendar');
+      completionTimes.push(first + Math.max(0, passes - 1) * intervalMsFor('calendar'));
+    }
+
+    if (!state.getCursor('matrix:history-done')) {
+      const rooms = matrixHistoryRooms(state.getCursor('matrix:history-rooms'));
+      if (rooms > 0) {
+        backfill.push('matrix');
+        const pagesPerPass = positiveNumber(state.getCursor(HISTORY_RATE_KEY('matrix')), 3);
+        const minimumPasses = Math.ceil(rooms / pagesPerPass);
+        const first = nextRuns.get('matrix') ?? nowMs + intervalMsFor('matrix');
+        completionTimes.push(first + Math.max(0, minimumPasses - 1) * intervalMsFor('matrix'));
+      }
+    }
+
+    if (completionTimes.length === 0) return null;
+    const completion = Math.max(...completionTimes);
+    const tenthsOfAnHour = Math.max(1, Math.round((completion - nowMs) / 360_000));
+    // The estimate says that multi-pass work exists; `backfill` says which
+    // source owns it. Keep it in next-run order so the orb can name the source
+    // whose history slice will resume first while the daemon rests between
+    // bounded passes.
+    backfill.sort((a, b) => (nextRuns.get(a) ?? Infinity) - (nextRuns.get(b) ?? Infinity));
+    return {
+      estimate: `~ ${(tenthsOfAnHour / 10).toFixed(1)} hrs left`,
+      backfill,
+    };
+  };
+  const publishActivity = (activity) => {
+    const history = historyEstimate();
+    writeActivity({ ...activity, queue: scheduledQueue(), ...(history ?? {}) });
+  };
+  const publishWaiting = () => {
+    const next = scheduledQueue()[0];
+    if (next) publishActivity({ phase: 'waiting', ...next });
+  };
 
   const admin = {
     retain: (args) => adminRetain(args, ingestOpts),
@@ -530,10 +735,10 @@ export function createDaemon({
   //
   // `backfill: false` was hardcoded here, and a source's forward cursor only
   // ever moves toward now -- so nothing in this daemon could ever reach a
-  // message older than the day it was first run. Measured on this machine:
-  // chat.db holds 479,967 messages across 2017-2026 and 9,603 had been
-  // ingested, all of them 2026. The years were not thin; they were never
-  // fetched.
+  // message older than the day it was first run. A private development corpus
+  // confirmed the symptom: only the initial forward window had been ingested.
+  // The older years were not thin; they were never fetched. Do not put private
+  // corpus sizes or date ranges in this public repository.
   //
   // A HISTORY PASS is the same source running backwards over its own second
   // cursor, one slice per turn. Scheduled rather than run at install, because
@@ -548,6 +753,25 @@ export function createDaemon({
 // on the owner's machine, large enough that a decade of messages arrives in
 // hours rather than days.
 const HISTORY_BUDGET_MS = 20_000;
+const HISTORY_RATE_KEY = (connector) => `${connector}:history-slices-per-pass`;
+const CALENDAR_HISTORY_CURSOR_KEY = 'calendar:history-ceiling-ts';
+const CALENDAR_HISTORY_FLOOR_TS = Date.UTC(1900, 0, 1);
+
+function positiveNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function matrixHistoryRooms(value) {
+  try {
+    const rooms = JSON.parse(value ?? '[]');
+    return Array.isArray(rooms)
+      ? rooms.filter((room) => typeof room === 'string' && room.length > 0).length
+      : 0;
+  } catch {
+    return 0;
+  }
+}
 
 const makeCtx = ({ history = false } = {}) => ({
     state,
@@ -562,6 +786,7 @@ const makeCtx = ({ history = false } = {}) => ({
   });
 
   async function runSource(source) {
+    nextRuns.delete(source.name);
     // The disable marker is checked per run, not at startup, so
     // `run.mjs <name> --disable` takes effect at the next tick without
     // bouncing the daemon.
@@ -580,6 +805,13 @@ const makeCtx = ({ history = false } = {}) => ({
       return;
     }
     const startedTs = now();
+    const socialPlatforms = source.name === 'matrix' ? connectedSocialPlatforms() : [];
+    publishActivity({
+      phase: 'syncing',
+      connector: source.name,
+      ...(socialPlatforms.length ? { platforms: socialPlatforms.map((platform) => platform.label) } : {}),
+      startedTs,
+    });
     try {
       // The forward pass first, always: what arrived since last time is more
       // urgent than what happened in 2019, and history must never delay it.
@@ -610,7 +842,8 @@ const makeCtx = ({ history = false } = {}) => ({
         let gained = 0;
         try {
           while (now() < deadline) {
-            const back = runCounts((await source.run(makeCtx({ history: true }))) ?? {});
+            const rawBack = (await source.run(makeCtx({ history: true }))) ?? {};
+            const back = runCounts(rawBack);
             slices += 1;
             // `ingested`, not `inserted`: runCounts NORMALISES a source's
             // {inserted|ingested} into one name, and reading the pre-normalised
@@ -621,9 +854,20 @@ const makeCtx = ({ history = false } = {}) => ({
             // Nothing read means the walk reached the beginning of the store.
             // The source records that itself; stop asking.
             if (state.getCursor(`${source.name}:history-done`)) break;
-            if (back.ingested === 0 && back.updated === 0 && back.unchanged === 0) break;
+            // A sparse calendar can have an empty historical year while still
+            // advancing its private cursor. Let that source continue through
+            // the gap; sources that did not explicitly report progress keep
+            // the old all-zero stop behaviour.
+            if (
+              back.ingested === 0 && back.updated === 0 && back.unchanged === 0
+              && rawBack.historyProgressed !== true
+            ) break;
           }
           if (slices > 0) {
+            // A short rolling measurement is enough for the activity panel to
+            // turn a known number of remaining history slices into elapsed
+            // wall-clock time. It is private cursor state, never corpus.
+            state.setCursor(HISTORY_RATE_KEY(source.name), String(slices));
             log.info('history_pass', { connector: source.name, slices, gained });
           }
         } catch (error) {
@@ -657,6 +901,8 @@ const makeCtx = ({ history = false } = {}) => ({
         error: error?.message ?? String(error),
       });
       log.error('source_failed', { connector: source.name, error: error?.message ?? String(error) });
+    } finally {
+      publishActivity({ phase: 'idle', connector: source.name, finishedTs: now() });
     }
   }
 
@@ -694,6 +940,8 @@ const makeCtx = ({ history = false } = {}) => ({
 
   function scheduleSource(source, delayMs) {
     const intervalMs = (config.intervals?.[source.name] ?? DEFAULT_INTERVAL_S) * 1000;
+    nextRuns.set(source.name, now() + delayMs);
+    publishWaiting();
     schedule(
       () => runSource(source),
       delayMs,
@@ -707,8 +955,16 @@ const makeCtx = ({ history = false } = {}) => ({
   // window is that nothing else is talking to hermes while VACUUM holds it.
   function scheduleMaintenance() {
     const delay = msUntilIdleWindow(config.retention?.maintainHour, now());
+    // Maintenance is real app work too. Keeping it in the same ordered queue
+    // gives the seven connector passes one honest item beyond the visible
+    // seven-row window, so the expanded activity view can actually scroll.
+    nextRuns.set('maintenance', now() + delay);
+    publishWaiting();
     schedule(
       async () => {
+        nextRuns.delete('maintenance');
+        const startedTs = now();
+        publishActivity({ phase: 'syncing', connector: 'maintenance', startedTs });
         // CHECKED WHEN IT FIRES, not only when it was armed.
         //
         // The delay was computed at arming time and never re-examined, so
@@ -720,18 +976,20 @@ const makeCtx = ({ history = false } = {}) => ({
         // window is that nothing else is talking to hermes.
         //
         // Skipping is free: reschedule() below aims at the next real window.
-        if (!isInsideIdleWindow(config.retention?.maintainHour, now())) {
-          log.info('maintenance_skipped', {
-            reason: 'fired outside the idle window (slept, or the clock moved)',
-            maintainHour: config.retention?.maintainHour ?? '03:30',
-          });
-          return;
-        }
         try {
+          if (!isInsideIdleWindow(config.retention?.maintainHour, now())) {
+            log.info('maintenance_skipped', {
+              reason: 'fired outside the idle window (slept, or the clock moved)',
+              maintainHour: config.retention?.maintainHour ?? '03:30',
+            });
+            return;
+          }
           await retentionPass({ config, state, log, ingestOpts, now });
           await maintainPass({ log, ingestOpts });
         } catch (error) {
           log.error('maintenance_failed', { error: error?.message ?? String(error) });
+        } finally {
+          publishActivity({ phase: 'idle', connector: 'maintenance', finishedTs: now() });
         }
       },
       delay,
@@ -741,13 +999,20 @@ const makeCtx = ({ history = false } = {}) => ({
 
   return {
     start() {
-      sources.forEach((source, i) => scheduleSource(source, 1_000 + i * FIRST_RUN_STAGGER_MS));
+      const scheduledSources = sources.filter((source) => !DEFAULT_DISABLED_CONNECTORS.includes(source.name));
+      sources.forEach((source) => {
+        if (DEFAULT_DISABLED_CONNECTORS.includes(source.name)) {
+          log.info('source_hidden', { connector: source.name });
+        }
+      });
+      scheduledSources.forEach((source, i) => scheduleSource(source, 1_000 + i * FIRST_RUN_STAGGER_MS));
       scheduleMaintenance();
       log.info('daemon_started', {
-        sources: sources.map((s) => s.name),
+        sources: scheduledSources.map((s) => s.name),
+        hidden: DEFAULT_DISABLED_CONNECTORS,
         maintainHour: config.retention?.maintainHour ?? '03:30',
       });
-      if (sources.length === 0) {
+      if (scheduledSources.length === 0) {
         log.warn('no_sources', { detail: 'connectors/sources/ is empty; every source is disabled or missing' });
       }
     },
@@ -765,7 +1030,14 @@ const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv
 
 if (isMain) {
   const log = createLogger();
+  let releaseLock = null;
+  let ownerWatch = null;
   try {
+    releaseLock = acquireDaemonLock();
+    if (!releaseLock) {
+      log.info('daemon_already_running');
+      process.exit(0);
+    }
     const config = loadConfig();
 
     // Startup preflight lives in lib/checks.mjs (owned by doctor's author;
@@ -844,17 +1116,26 @@ if (isMain) {
 
     const shutdown = (signal) => {
       log.info('daemon_stopping', { signal });
+      if (ownerWatch) clearInterval(ownerWatch);
       daemon.stop();
       state.close();
+      releaseLock?.(); releaseLock = null;
       log.close();
       process.exit(0);
     };
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
+    const ownerPid = Number(process.env.INTAGLIO_CONNECTOR_OWNER_PID);
+    if (Number.isInteger(ownerPid) && ownerPid > 1) {
+      ownerWatch = setInterval(() => {
+        if (!processIsAlive(ownerPid)) shutdown('owner-exited');
+      }, 5_000);
+    }
   } catch (error) {
     // Refuse loudly: a daemon that half-starts is worse than one that names
     // its blocker and exits for launchd to report.
     log.error('daemon_failed_to_start', { error: error?.message ?? String(error) });
+    releaseLock?.();
     console.error(`connectors daemon failed to start: ${error?.message ?? error}`);
     process.exit(1);
   }

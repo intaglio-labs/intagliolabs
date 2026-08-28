@@ -104,14 +104,14 @@ test('contacts upsert and resolve, with the kind set closed', (t) => {
   const state = openStateDb(join(sandbox(t), 'state.db'));
   t.after(() => state.close());
   state.upsertContacts([
-    { identifier: '+14155550142', displayName: 'Rishab', kind: 'phone' },
-    { identifier: 'rishab@example.com', displayName: 'Rishab', kind: 'email' },
+    { identifier: '+14155550142', displayName: 'Casey', kind: 'phone' },
+    { identifier: 'casey@example.com', displayName: 'Casey', kind: 'email' },
   ]);
-  assert.deepEqual(state.resolveIdentifier('+14155550142'), { displayName: 'Rishab', kind: 'phone' });
+  assert.deepEqual(state.resolveIdentifier('+14155550142'), { displayName: 'Casey', kind: 'phone' });
   assert.equal(state.resolveIdentifier('+10000000000'), null);
   // Re-upsert with a new name replaces in place.
-  state.upsertContacts({ identifier: '+14155550142', displayName: 'Rishab K', kind: 'phone' });
-  assert.equal(state.resolveIdentifier('+14155550142').displayName, 'Rishab K');
+  state.upsertContacts({ identifier: '+14155550142', displayName: 'Casey K', kind: 'phone' });
+  assert.equal(state.resolveIdentifier('+14155550142').displayName, 'Casey K');
   assert.equal(Number(state.db.prepare('SELECT count(*) AS n FROM contact_ids').get().n), 2);
   assert.throws(
     () => state.upsertContacts({ identifier: 'x', displayName: 'y', kind: 'carrier-pigeon' }),

@@ -29,9 +29,35 @@ import { classifySender, eventToRow } from '../lib/matrixRows.mjs';
 
 const CURSOR_KEY = 'matrix:since';
 const TIMELINE_LIMIT = 500;
-const INITIAL_HISTORY_LIMIT = 10_000;
+const HISTORY_QUEUE_KEY = 'matrix:history-rooms';
+const HISTORY_DONE_KEY = 'matrix:history-done';
+const HISTORY_BOOTSTRAP_KEY = 'matrix:history-bootstrap-v1';
 
 const roomCursorKey = (roomId) => `matrix:room:${roomId}`;
+const historyCursorKey = (roomId) => `matrix:history:${roomId}`;
+
+function decodeHistoryQueue(value) {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? [...new Set(parsed.filter((roomId) => typeof roomId === 'string' && roomId.length > 0))]
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveHistoryQueue(state, queue) {
+  state.setCursor(HISTORY_QUEUE_KEY, JSON.stringify(queue));
+}
+
+function clearHistoryDone(state) {
+  // Older test contexts and installations may not expose the precise cursor
+  // deletion helper yet. They have no completed marker to clear; production
+  // state does, so new portal rooms restart the walker correctly.
+  state.deleteCursor?.(HISTORY_DONE_KEY);
+}
 
 function decodeRoomMembers(value) {
   if (!value) return new Map();
@@ -175,6 +201,7 @@ export function syncToRows(body, { selfName = 'me', roomState = new Map() } = {}
 export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
   return {
     name: 'matrix',
+    walksHistory: true,
 
     needs() {
       // Nothing to declare: the credentials file IS the provisioning, and its
@@ -191,7 +218,85 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
         return { inserted: 0, updated: 0, unchanged: 0, skipped: 0 };
       }
 
-      const since = ctx.backfill ? null : ctx.state.getCursor(CURSOR_KEY);
+      // History deliberately avoids /sync: a history slice is one bounded
+      // `/messages` page from one room's private continuation token. That
+      // keeps it resumable, lets the daemon time-slice it, and leaves the
+      // forward sync free to prioritise newly arrived messages.
+      if (ctx.history) {
+        const queue = decodeHistoryQueue(ctx.state.getCursor(HISTORY_QUEUE_KEY));
+        if (queue.length === 0) {
+          ctx.state.setCursor(HISTORY_DONE_KEY, '1');
+          return { inserted: 0, updated: 0, unchanged: 0, skipped: 0 };
+        }
+
+        const roomId = queue[0];
+        const from = ctx.state.getCursor(historyCursorKey(roomId));
+        if (!from) {
+          saveHistoryQueue(ctx.state, queue.slice(1));
+          return { inserted: 0, updated: 0, unchanged: 0, skipped: 0 };
+        }
+
+        const pageUrl = new URL(
+          `${creds.base}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages`
+        );
+        pageUrl.searchParams.set('dir', 'b');
+        pageUrl.searchParams.set('from', from);
+        pageUrl.searchParams.set('limit', String(TIMELINE_LIMIT));
+        let page;
+        try {
+          const res = await fetchImpl(pageUrl, {
+            headers: { Authorization: `Bearer ${creds.token}` },
+            signal: AbortSignal.timeout(60_000),
+          });
+          if (!res.ok) throw new Error(`homeserver answered ${res.status}`);
+          page = await res.json();
+        } catch (error) {
+          throw new Error(
+            `matrix: history page failed (${error?.message ?? 'error'})`,
+            { cause: error }
+          );
+        }
+
+        const members = decodeRoomMembers(ctx.state.getCursor(roomCursorKey(roomId)));
+        const resolved = readRoomMembers([], members);
+        const events = Array.isArray(page?.chunk) ? page.chunk : [];
+        const rows = [];
+        if (resolved.partner) {
+          for (const ev of events) {
+            const row = eventToRow(
+              { ...ev, __partner: resolved.partner, __isGroup: resolved.isGroup },
+              { roomId, names: resolved.names, selfName: ctx.config?.selfName ?? 'me' }
+            );
+            if (row) rows.push(row);
+          }
+        }
+        const totals = rows.length
+          ? await ingestAll(ctx, rows)
+          : { inserted: 0, updated: 0, unchanged: 0 };
+
+        // Commit the page only after its rows reach Hermes. Rotate the room to
+        // the back of the queue so one enormous chat cannot keep every other
+        // bridge waiting behind it.
+        const end = typeof page?.end === 'string' && page.end && page.end !== from
+          ? page.end
+          : null;
+        if (end && events.length > 0) {
+          ctx.state.setCursor(historyCursorKey(roomId), end);
+          saveHistoryQueue(ctx.state, [...queue.slice(1), roomId]);
+        } else {
+          const remaining = queue.slice(1);
+          saveHistoryQueue(ctx.state, remaining);
+          if (remaining.length === 0) ctx.state.setCursor(HISTORY_DONE_KEY, '1');
+        }
+        return { ...totals, skipped: 0 };
+      }
+
+      // Existing installs may have the old 10k initial import and a forward
+      // sync token but no per-room history continuation. One full-state sync
+      // gives us each portal's prev_batch so those installs pick up exactly
+      // where the old cap left off rather than remaining capped forever.
+      const needsHistoryBootstrap = !ctx.state.getCursor(HISTORY_BOOTSTRAP_KEY);
+      const since = (ctx.backfill || needsHistoryBootstrap) ? null : ctx.state.getCursor(CURSOR_KEY);
       const url = new URL(`${creds.base}/_matrix/client/v3/sync`);
       url.searchParams.set('timeout', '0');
       // Room timelines only. The filter keeps presence, typing and receipts
@@ -276,65 +381,7 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
       const totals = mapped.rows.length
         ? await ingestAll(ctx, mapped.rows)
         : { inserted: 0, updated: 0, unchanged: 0 };
-      let rowCount = mapped.rows.length;
-
-      // A since-less /sync includes at most TIMELINE_LIMIT events per room.
-      // Walk backwards from prev_batch on that first run so older bridge
-      // history is not silently capped at 500 messages. Bound each room to
-      // keep a first launch finite; a --purge/--backfill safely repeats it.
-      if (!since) {
-        for (const [roomId, room] of Object.entries(joinedRooms)) {
-          const members = mapped.roomState.get(roomId) ?? new Map();
-          const resolved = readRoomMembers([], members);
-          let from = room?.timeline?.prev_batch;
-          let observed = room?.timeline?.events?.length ?? 0;
-          if (!resolved.partner || typeof from !== 'string' || !from) continue;
-
-          while (observed < INITIAL_HISTORY_LIMIT) {
-            const pageUrl = new URL(
-              `${creds.base}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages`
-            );
-            pageUrl.searchParams.set('dir', 'b');
-            pageUrl.searchParams.set('from', from);
-            pageUrl.searchParams.set(
-              'limit',
-              String(Math.min(TIMELINE_LIMIT, INITIAL_HISTORY_LIMIT - observed))
-            );
-            let page;
-            try {
-              const res = await fetchImpl(pageUrl, {
-                headers: { Authorization: `Bearer ${creds.token}` },
-                signal: AbortSignal.timeout(60_000),
-              });
-              if (!res.ok) throw new Error(`homeserver answered ${res.status}`);
-              page = await res.json();
-            } catch (error) {
-              throw new Error(
-                `matrix: initial history failed for one portal room (${error?.message ?? 'error'})`,
-                { cause: error }
-              );
-            }
-
-            const events = Array.isArray(page?.chunk)
-              ? page.chunk.slice(0, INITIAL_HISTORY_LIMIT - observed)
-              : [];
-            if (events.length === 0) break;
-            const rows = [];
-            for (const ev of events) {
-              const row = eventToRow(
-                { ...ev, __partner: resolved.partner, __isGroup: resolved.isGroup },
-                { roomId, names: resolved.names, selfName: ctx.config?.selfName ?? 'me' }
-              );
-              if (row) rows.push(row);
-            }
-            if (rows.length) mergeTotals(totals, await ingestAll(ctx, rows));
-            rowCount += rows.length;
-            observed += events.length;
-            if (typeof page.end !== 'string' || !page.end || page.end === from) break;
-            from = page.end;
-          }
-        }
-      }
+      const rowCount = mapped.rows.length;
 
       ctx.log?.info?.(`matrix: ${rowCount} rows from ${mapped.rooms} room(s)`);
 
@@ -344,6 +391,25 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
       for (const [roomId, members] of mapped.roomState) {
         ctx.state.setCursor(roomCursorKey(roomId), encodeRoomMembers(members));
       }
+      // A since-less response gives every joined portal a token just before
+      // its visible tail. Queue those continuations; the daemon consumes them
+      // in short round-robin pages after this urgent forward pass finishes.
+      let queue = decodeHistoryQueue(ctx.state.getCursor(HISTORY_QUEUE_KEY));
+      let addedHistoryRoom = false;
+      for (const [roomId, room] of Object.entries(joinedRooms)) {
+        const resolved = readRoomMembers([], mapped.roomState.get(roomId) ?? new Map());
+        const prevBatch = room?.timeline?.prev_batch;
+        if (!resolved.partner || typeof prevBatch !== 'string' || !prevBatch) continue;
+        if (ctx.state.getCursor(historyCursorKey(roomId))) continue;
+        ctx.state.setCursor(historyCursorKey(roomId), prevBatch);
+        if (!queue.includes(roomId)) queue.push(roomId);
+        addedHistoryRoom = true;
+      }
+      if (addedHistoryRoom) {
+        saveHistoryQueue(ctx.state, queue);
+        clearHistoryDone(ctx.state);
+      }
+      if (needsHistoryBootstrap) ctx.state.setCursor(HISTORY_BOOTSTRAP_KEY, '1');
       if (mapped.next) ctx.state.setCursor(CURSOR_KEY, mapped.next);
       return { ...totals, skipped: 0 };
     },
@@ -359,13 +425,6 @@ async function ingestAll(ctx, rows, batchSize = 500) {
     totals.unchanged += t.unchanged ?? 0;
   }
   return totals;
-}
-
-function mergeTotals(into, add) {
-  into.inserted += add.inserted ?? 0;
-  into.updated += add.updated ?? 0;
-  into.unchanged += add.unchanged ?? 0;
-  return into;
 }
 
 export default createMatrixSource();

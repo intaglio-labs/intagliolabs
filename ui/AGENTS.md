@@ -132,11 +132,11 @@ written down anywhere else. For what is reachable *today*, read the ledger.
    tokens live in `~/.hazlie/secrets/` under the same rotation discipline as Oura.
 
    **Why this path exists, recorded so it is not relitigated:** the owner's calendar
-   lives in Notion Calendar, which speaks to Google's API directly and never syncs
-   into macOS Calendar.app. Measured on this seed 2026-08-19 — all three Google
-   calendars registered in Calendar.app hold **zero** events, while the local
-   calendars that do hold events stop at 2026-04-16. Reading the local store
-   therefore cannot ever see the real calendar. The alternative considered and
+   can live in Notion Calendar, which speaks to Google's API directly and may not
+   sync into macOS Calendar.app. A private development account confirmed that the
+   local Calendar store can be empty or stale while Google has current events.
+   Reading the local store therefore cannot reliably see that calendar. The
+   alternative considered and
    rejected was enabling Calendar.app sync: a second redundant sync path the owner
    does not use, which fails silently and would become a manual per-machine setup
    step on every deployed Mac Mini. Google also closed the cheaper door — basic-auth

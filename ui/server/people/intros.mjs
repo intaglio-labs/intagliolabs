@@ -4,8 +4,8 @@
 // A "room" is a moment the owner was also in: one email's participant set
 // (from + to + cc), or one calendar event's attendees. Two non-owner people in
 // the same room have crossed paths THROUGH the owner, which is exactly the
-// evidence a warm intro needs — "you and Barry were both on a thread with Dana
-// in March, ask Barry."
+// evidence a warm intro needs — "you and Casey were both on a thread with Dana
+// in March, ask Casey."
 //
 // THE HONEST BOUND, in the code because it must not be forgotten: this only
 // sees crossings that touched the owner. A friend who knows the target from a

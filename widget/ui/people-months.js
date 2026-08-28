@@ -7,8 +7,7 @@
 // 2026-08-25): filtering the open year's loaded list could not reach a person
 // in another year, nor one past the 250 that list holds, which is most of them
 // once history lands. Expanding a row shows one
-// thing: a model-written summary fetched on demand — labeled as the
-// model's, because unlike the chips it is not counted, it is written. The
+// thing: a generated summary fetched on demand. The
 // taxonomy and specifics lines were yeeted in turn (owner, 2026-08-25); the
 // row's own chips are the whole counted topic surface, five of them.
 // (The file keeps its historical name; renaming the page id would ripple
@@ -27,6 +26,7 @@
 (function () {
   const listEl = document.getElementById('list');
   const searchEl = document.getElementById('search');
+  const searchClearEl = document.getElementById('search-clear');
   const closeEl = document.getElementById('close');
   const tabsEl = document.getElementById('tabs');
   // The strip and the globe are separate boxes now, so clicks are caught on
@@ -35,9 +35,18 @@
   const globeEl = document.getElementById('globe');
   const syncEl = document.getElementById('sync');
   const skyEl = document.getElementById('sky');
+  const skyPanEl = document.getElementById('sky-pan');
+  const skyStageEl = document.getElementById('sky-stage');
+  const skyZoomRange = document.getElementById('sky-zoom-range');
+  const skyZoomOut = document.getElementById('sky-zoom-out');
+  const skyZoomIn = document.getElementById('sky-zoom-in');
   const cardsEl = document.getElementById('cards');
   const filterEl = document.getElementById('filter');
   if (!listEl) return;
+
+  function syncSearchClear() {
+    if (searchClearEl) searchClearEl.hidden = searchEl.value.length === 0;
+  }
 
   // 'list' = the year by person, 'sky' = the same year by topic. A VIEW, not a
   // year: the year tabs stay live in both, so the globe is the last tab rather
@@ -60,18 +69,55 @@
   // The topic a bubble was clicked into, or null. Only the list honours it —
   // filtering the constellation to one topic would just draw that one circle.
   let topic = null;
+  // One mutually-exclusive relationship role selected from a person pill.
+  // Like topics, roles describe the whole relationship, so their result page
+  // always uses the uncapped all-years map rather than one year's top 250.
+  let roleFilter = null;
+  // A connector glyph is a year-local navigation control. Unlike topics and
+  // roles it never crosses into all-time: it answers "who was on this source
+  // in the year whose tab I am looking at?"
+  let channelFilter = null;
+  let filterOrigin = null;
+  // One award category selected from the year cards, or null. Awards are facts
+  // about the open year, so this filter never crosses into the all-years sky.
+  let awardFilter = null;
+  let skyZoom = 1;
+  let skyPanX = 0;
+  let skyPanY = 0;
+  const SKY_ZOOM_MIN = 0.65;
+  const SKY_ZOOM_MAX = 2.2;
+  // The constellation has labels and bubbles that intentionally kiss the
+  // scene edge. At 1x the scene and viewport are the same size, so a strict
+  // edge clamp gives pointer dragging a range of exactly zero and makes the
+  // canvas feel broken. Keep a small bounded grab margin on every side: enough
+  // to pull an edge label fully into view, never enough to lose the field.
+  const SKY_PAN_BLEED_RATIO = 0.16;
+  const SKY_PAN_BLEED_MAX = 140;
 
   // Hover hint per connector — shown by our own CSS tooltip (data-tip),
   // because native title tooltips are unreliable in a borderless
   // non-activating panel.
-  const CHAN_LABEL = { imessage: 'iMessage', whatsapp: 'WhatsApp', mail: 'mail', calendar: 'calendar', linkedin: 'LinkedIn' };
+  const CHAN_LABEL = {
+    imessage: 'iMessage', whatsapp: 'WhatsApp', messenger: 'Messenger', instagram: 'Instagram',
+    twitter: 'X', telegram: 'Telegram', discord: 'Discord', slack: 'Slack', mail: 'mail',
+    calendar: 'calendar', linkedin: 'LinkedIn',
+  };
+  const ROLE_MARK = { friend: ':)', business: '$', romantic: '<3', family: 'xo' };
 
   let year = new Date().getFullYear();
   let years = []; // every year with activity, from the server
-  let expanded = null; // '<personKey>|<year>' of the row showing its detail
+  // More than one relationship can be worth reading at once. Keep every open
+  // row rather than treating a new click as a command to collapse the last
+  // one; each row owns its own summary request and progress state.
+  const expanded = new Set(); // '<personKey>|<year>' rows showing detail
   const cache = new Map(); // year -> payload
   const staleYears = new Set(); // cached years owed a silent freshness check
   const refreshing = new Map(); // year -> in-flight refresh promise
+  // Normal year pages are capped for a quick first paint. Role and connector
+  // pages promise EVERY match in that year, so they upgrade only the requested
+  // year to the uncapped payload and remember that upgrade.
+  const fullFilterYears = new Set();
+  const fullFilterPending = new Map();
   // Search state. `findRows` is null when not searching, so an empty ARRAY can
   // honestly mean "nobody matches" rather than "no search has run".
   let findTerm = '';
@@ -79,6 +125,17 @@
   let findState = 'idle'; // 'pending' | 'done' | 'degraded'
   let findCapped = false; // the corpus scan hit its row ceiling; counts are a floor
   const summaries = new Map(); // '<personKey>|<year>' -> {state, text?, reason?}
+  // Role edits have two client-side phases. `pendingRoles` paints the selected
+  // role immediately with an inline saving indicator; `confirmedRoles` keeps
+  // the successful correction authoritative while stale year/map requests
+  // quietly catch up. Neither phase needs to blank the list or discard a
+  // summary the user already opened.
+  const pendingRoles = new Map(); // person+year (or all-time) -> role being saved
+  const confirmedRoles = new Map(); // person+year (or all-time) -> saved role
+  let selfMenu = null;
+  let selfPress = null;
+  let suppressPersonClickUntil = 0;
+  let awardTip = null;
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -103,15 +160,10 @@
     const bits = [];
     const sk = `${p.key}|${y}`;
     const sum = summaries.get(sk);
-    // The summary is always ABOUT ONE YEAR — that is what /people/summary
-    // takes. Outside a year tab it covers the last year this person was
-    // active, and says so, because an unlabelled paragraph under an all-years
-    // row would read as a summary of the whole relationship.
-    const tag = scope === 'all' ? `· ${y}, written by the local model` : '· written by the local model';
     if (sum && sum.state === 'pending') {
       bits.push(`<div class="pl-d pm-sum pm-sum-wait">summarizing ${y}…</div>`);
     } else if (sum && sum.state === 'done') {
-      bits.push(`<div class="pl-d pm-sum">${esc(sum.text)} <span class="pm-sum-tag">${tag}</span></div>`);
+      bits.push(`<div class="pl-d pm-sum">${esc(sum.text)}</div>`);
     } else if (sum && sum.state === 'none') {
       bits.push(`<div class="pl-d pl-dim">no summary — ${esc(sum.reason)}</div>`);
     }
@@ -164,7 +216,7 @@
         // The order categories arrive in is the cards' order, and the row wears
         // them in that order too, so two people with the same pair of marks
         // never wear them in a different sequence.
-        by.get(key).push(a);
+        by.get(key).push({ ...a, detail: a.detailByKey && a.detailByKey[key] });
       }
     }
     return by;
@@ -173,37 +225,107 @@
 
   // The card's own glyph, at row size, in front of the name. Same icon as the
   // card above it on purpose: the mark is only legible because the card taught
-  // it, and a second icon set for the same five ideas would have to be learned
+  // it, and a second icon set for the same four ideas would have to be learned
   // twice.
   function awardsHtml(p) {
     const mine = awardsByKey.get(p.key);
     if (!mine || !mine.length) return '';
-    return mine.map((a) =>
-      `<span class="pl-award" data-kind="${esc(a.kind)}" data-tip="${esc(a.label)}">` +
+    // Keep the marks as one cluster. A bare sequence made every mark a child
+    // of .pl-nameline, so that line's normal 8px text gap appeared BETWEEN
+    // trophy/arrow/fire icons rather than only between the icon cluster and
+    // the person's name.
+    return '<span class="pl-awards">' + mine.map((a) =>
+      `<button class="pl-award" type="button" data-kind="${esc(a.kind)}" ` +
+      `data-award-kind="${esc(a.kind)}" data-tip="${esc(a.detail || a.label)}" ` +
+      `aria-label="show everyone with the ${esc(a.label || a.kind)} award in ${year}">` +
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
       `stroke-linecap="round" stroke-linejoin="round">${CARD_ICON[a.kind] || FALLBACK_ICON}</svg>` +
-      '</span>').join('');
+      '</button>').join('') + '</span>';
+  }
+
+  function closeAwardTip() {
+    awardTip?.remove();
+    awardTip = null;
+  }
+
+  function showAwardTip(mark) {
+    closeAwardTip();
+    const text = mark?.dataset?.tip;
+    if (!text) return;
+    const tip = document.createElement('div');
+    tip.className = 'pl-floating-tip';
+    tip.setAttribute('role', 'tooltip');
+    tip.textContent = text;
+    document.body.append(tip);
+
+    const anchor = mark.getBoundingClientRect();
+    const box = tip.getBoundingClientRect();
+    const gutter = 8;
+    // Clamp after measuring the real wrapped box. A pseudo-element is trapped
+    // in the scrolling row and cannot know either viewport edge; this fixed
+    // layer can guarantee the whole explanation remains on screen.
+    const left = Math.max(gutter, Math.min(anchor.left, window.innerWidth - box.width - gutter));
+    let top = anchor.bottom + 5;
+    if (top + box.height > window.innerHeight - gutter) top = anchor.top - box.height - 5;
+    tip.style.left = `${left}px`;
+    tip.style.top = `${Math.max(gutter, top)}px`;
+    awardTip = tip;
+  }
+
+  function roleStateKey(personKey, roleYear = null) {
+    return `${personKey}|${roleYear === null ? 'all' : roleYear}`;
+  }
+
+  function roleYearForRow(y) {
+    // The normal globe row is the lifetime relationship. A year tab and a
+    // cross-year search result both represent a specific person-year.
+    return scope === 'year' || findTerm ? Number(y) : null;
+  }
+
+  function settledRole(p, roleYear = null) {
+    const role = confirmedRoles.get(roleStateKey(p.key, roleYear)) || p.role;
+    return ['friend', 'business', 'romantic', 'family'].includes(role) ? role : 'friend';
   }
 
   function rowHtml(p, y) {
-    // Five chips is the row's budget. The all-years union can carry more than
-    // that, so the slice lives here rather than in the data — clustering needs
-    // every topic a person belongs to, the row only needs the loudest five.
-    const chips = (p.topics || []).slice(0, 5)
-      .map((t) => `<span class="pl-chip pl-topic">${esc(t.label)}</span>`)
+    // The role is its own chip, followed by the three loudest topic chips. The
+    // all-years union can carry more than that, so the slice lives here rather
+    // than in the data — clustering still needs every topic a person belongs to.
+    const roleYear = roleYearForRow(y);
+    const stateKey = roleStateKey(p.key, roleYear);
+    const pendingRole = pendingRoles.get(stateKey);
+    const role = pendingRole || settledRole(p, roleYear);
+    const roleMark = `<span class="pl-role-mark" aria-hidden="true">${esc(ROLE_MARK[role])}</span>`;
+    const saving = pendingRole
+      ? '<span class="pl-role-wait" role="status" aria-label="saving role"><span></span><span></span><span></span></span>'
+      : '';
+    const roleContents = `${roleMark}${esc(role)}${saving}`;
+    const chips = `<span class="pl-role-control role-${esc(role)}${pendingRole ? ' pending' : ''}">` +
+      `<button class="pl-chip pl-role role-${esc(role)}${pendingRole ? ' pending' : ''}" type="button" data-role-filter="${esc(role)}" data-tip="${pendingRole ? 'saving role…' : 'click to see everyone'}"${pendingRole ? ' aria-busy="true"' : ''}>` +
+        `${roleContents}</button>` +
+      `<button class="pl-role-menu role-${esc(role)}" type="button" data-role-menu aria-label="change ${esc(role)} role"${pendingRole ? ' disabled' : ''}>` +
+        '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"></path></svg>' +
+      '</button>' +
+      '</span>' +
+      (p.topics || []).slice(0, 3)
+      .map((t) => `<button class="pl-chip pl-topic" type="button" data-topic-filter="${esc(t.label)}" data-tip="click to see everyone">${esc(t.label)}</button>`)
       .join('');
     const rowKey = `${p.key}|${y}`;
-    const open = expanded === rowKey;
+    const open = expanded.has(rowKey);
     const srcIcons = (p.channels || [])
-      .map((c) => `<span class="pm-src-ic" data-tip="${esc(CHAN_LABEL[c] || c)}">${hzGlyph(c)}</span>`)
+      .map((c) => `<button class="pm-src-ic" type="button" data-channel-filter="${esc(c)}"` +
+        ` data-tip="show everyone from ${esc(CHAN_LABEL[c] || c)} in ${y}"` +
+        ` aria-label="show everyone from ${esc(CHAN_LABEL[c] || c)} in ${y}">${hzGlyph(c)}</button>`)
       .join('');
     return (
-      `<div class="pl-row${open ? ' open' : ''}" role="button" data-rk="${esc(rowKey)}">` +
+      `<div class="pl-row${open ? ' open' : ''}" role="button" data-rk="${esc(rowKey)}" data-person-key="${esc(p.key)}" data-person-name="${esc(p.name)}"${roleYear === null ? '' : ` data-person-year="${roleYear}"`}>` +
         `<div class="pl-main">` +
           `<div class="pl-nameline">` +
-            `<span class="pl-face" data-avatar-key="${esc(p.key)}">${esc(initials(p.name))}</span>` +
-            awardsHtml(p) +
-            `<span class="pl-name">${esc(p.name)}</span>` +
+            `<span class="pl-identity">` +
+              `<span class="pl-face" data-avatar-key="${esc(p.key)}">${esc(initials(p.name))}</span>` +
+              `<span class="pl-name">${esc(p.name)}</span>` +
+              awardsHtml(p) +
+            `</span>` +
             // ONE NUMBER: what passed between the two of you.
             //
             // ~~Two, the second being "N in rooms" — what they said in a group
@@ -219,7 +341,10 @@
             (p.messages > 0
               ? `<span class="pm-msgs">${p.messages} msg${p.messages === 1 ? '' : 's'}</span>`
               : '') +
-            (y === year ? '' : `<span class="pm-yr-badge">${y}</span>`) +
+            // The globe is truly all-time; its internal latest year chooses a
+            // summary only and must not appear as though the list is filtered
+            // to that year. Search results remain cross-year and keep the cue.
+            (scope === 'all' || y === year ? '' : `<span class="pm-yr-badge">${y}</span>`) +
             // ONLY EVER IN A ROOM. Until now these rendered exactly like people
             // the owner actually talks to, which is what made every nudge about
             // them untrustworthy.
@@ -249,30 +374,78 @@
     if (topic && view === 'list') {
       rows = rows.filter((p) => (p.topics || []).some((t) => t && t.label === topic));
     }
+    if (roleFilter && view === 'list') {
+      // Keep a pending edit in its current filtered list until the save lands,
+      // so the user can actually see its inline progress indicator. Once
+      // confirmed, `settledRole` moves it to its new role filter.
+      rows = rows.filter((p) => settledRole(p, roleYearForRow(p.year ?? year)) === roleFilter);
+    }
+    if (channelFilter && view === 'list' && scope === 'year') {
+      rows = rows.filter((p) => (p.channels || []).includes(channelFilter));
+    }
+    if (awardFilter && view === 'list' && scope === 'year') {
+      const award = (data.awards || []).find((a) => a && a.kind === awardFilter);
+      const keys = new Set(award?.keys || []);
+      rows = rows.filter((p) => keys.has(p.key));
+    }
     return rows;
   }
 
   // The chip that says which topic the list is standing in, and the way out of
   // it. Without it a filtered list is indistinguishable from a short year.
-  function renderFilter(count) {
-    // Same rule as visible(): a topic is a thing the list is standing in, so
-    // the chip has no business hanging over the constellation.
-    const show = topic && view === 'list';
+  function renderFilter(data, count) {
+    // Topic, role and award filters belong to the list, never to the constellation.
+    const show = (topic || roleFilter || channelFilter || awardFilter) && view === 'list';
     filterEl.hidden = !show;
     if (!show) { filterEl.replaceChildren(); return; }
     const chip = document.createElement('button');
     chip.className = 'pm-filter-chip';
     chip.type = 'button';
+    if (awardFilter) chip.dataset.kind = awardFilter;
+    if (roleFilter) chip.dataset.role = roleFilter;
+    if (channelFilter) chip.dataset.channel = channelFilter;
     const label = document.createElement('span');
-    label.textContent = `${topic.toUpperCase()} · ${count}`;
+    const award = awardFilter && (data.awards || []).find((a) => a && a.kind === awardFilter);
+    // The filter state is the stable internal kind; the chip is reader-facing,
+    // so it must keep the card's current label when that wording evolves.
+    // The card names one achievement; this chip names the resulting set of
+    // people. Favorites keeps its plural group label in every year that can
+    // open that filter.
+    const pluralAwardLabel = {
+      'person-of-the-year': 'favorites',
+    }[awardFilter];
+    const filterLabel = topic || (roleFilter && `${ROLE_MARK[roleFilter]} ${roleFilter}`)
+      || (channelFilter && (CHAN_LABEL[channelFilter] || channelFilter))
+      || pluralAwardLabel || award?.label || awardFilter;
+    label.textContent = `${filterLabel.toUpperCase()} · ${count}`;
     const x = document.createElement('span');
     x.className = 'pm-filter-x';
     x.textContent = '×';
     chip.append(label, x);
-    // Back to the constellation, not to a bare list: without the topic this
-    // list is every person in every year, which is thousands of rows nobody
-    // asked for. You came from the sky; the way out is back to it.
-    chip.addEventListener('click', () => { topic = null; view = 'sky'; render(); });
+    chip.addEventListener('click', () => {
+      if (topic || roleFilter) {
+        topic = null;
+        roleFilter = null;
+        if (filterOrigin) {
+          view = filterOrigin.view;
+          scope = filterOrigin.scope;
+          year = filterOrigin.year;
+          awardFilter = filterOrigin.awardFilter || null;
+          channelFilter = filterOrigin.channelFilter || null;
+        } else {
+          // A restored filter has no in-memory origin. The all-years globe is
+          // its stable parent, matching the historical topic-filter behavior.
+          view = 'sky';
+          scope = 'all';
+        }
+        filterOrigin = null;
+      } else if (channelFilter) {
+        channelFilter = null;
+      } else {
+        awardFilter = null;
+      }
+      render();
+    });
     filterEl.replaceChildren(chip);
   }
 
@@ -292,27 +465,33 @@
       '<path d="M4 17 10 11l4 4 6-8"></path><path d="M16 7h4v4"></path>',
     drifting:
       '<path d="M4 7l6 6 4-4 6 8"></path><path d="M16 17h4v-4"></path>',
-    streak:
-      '<path d="M12 3s5 4.2 5 9a5 5 0 0 1-10 0c0-4.8 5-9 5-9Z"></path>' +
-      '<path d="M12 20a2.6 2.6 0 0 1-2.6-2.6c0-1.6 2.6-3.9 2.6-3.9s2.6 2.3 2.6 3.9A2.6 2.6 0 0 1 12 20Z"></path>',
   };
   const FALLBACK_ICON = '<circle cx="12" cy="12" r="7"></circle>';
 
   function cardHtml(h, i) {
     const icon = CARD_ICON[h.kind] || FALLBACK_ICON;
+    const people = Array.isArray(h.people) && h.people.length
+      ? h.people.slice(0, 3)
+      : [{ key: h.key, name: h.name, line: h.line }];
+    const more = Math.max(0, (Number(h.count) || people.length) - people.length);
     return (
       `<div class="pm-card${i === 0 ? ' lead' : ''}" data-kind="${esc(h.kind)}">` +
-        '<div class="pm-card-eyebrow">' +
+        `<button class="pm-card-eyebrow${awardFilter === h.kind ? ' active' : ''}" type="button" data-award-kind="${esc(h.kind)}" aria-pressed="${awardFilter === h.kind ? 'true' : 'false'}">` +
           '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
           `stroke-linecap="round" stroke-linejoin="round">${icon}</svg>` +
           `<span>${esc(h.label)}</span>` +
+        '</button>' +
+        '<div class="pm-card-podium">' +
+          people.map((person, rank) =>
+            `<div class="pm-card-person rank-${rank + 1}" tabindex="0" data-tip="${esc(person.line || '')}"` +
+              ` data-person-key="${esc(person.key)}" data-person-name="${esc(person.name)}" data-person-year="${year}">` +
+              `<span class="pm-card-face" data-avatar-key="${esc(person.key)}">${esc(initials(person.name))}</span>` +
+              `<span class="pm-card-name">${esc(person.name)}</span>` +
+            '</div>').join('') +
         '</div>' +
-        '<div class="pm-card-who">' +
-          `<span class="pm-card-face"${h.key ? ` data-avatar-key="${esc(h.key)}"` : ''}>` +
-            `${esc(initials(h.name))}</span>` +
-          `<span class="pm-card-name">${esc(h.name)}</span>` +
-        '</div>' +
-        `<div class="pm-card-line">${esc(h.line)}</div>` +
+        (more > 0
+          ? `<button class="pm-card-more" type="button" data-award-kind="${esc(h.kind)}">${more} more</button>`
+          : '') +
       '</div>'
     );
   }
@@ -327,7 +506,7 @@
     // about ONE year — that is what the server computed them over — and
     // sitting them above an all-years or topic list misattributes them.
     const show = hs.length > 0 && !findTerm && view === 'list'
-      && !topic && scope === 'year';
+      && !topic && !roleFilter && !channelFilter && scope === 'year';
     cardsEl.hidden = !show;
     cardsEl.innerHTML = show ? hs.map(cardHtml).join('') : '';
   }
@@ -336,6 +515,12 @@
     const where = scope === 'all' ? 'any year' : String(year);
     const empty = topic
       ? `no one in ${esc(topic)} in ${where}`
+      : roleFilter
+        ? `no one marked ${esc(roleFilter)} in ${where}`
+      : channelFilter
+        ? `no one from ${esc(CHAN_LABEL[channelFilter] || channelFilter)} in ${where}`
+      : awardFilter
+        ? `no one has the ${esc(awardFilter)} award in ${where}`
       : `no one matches in ${where}`;
     // The row's own year: in all-years each person carries the last year they
     // were active, so their summary is fetched for a year they appear in.
@@ -343,7 +528,7 @@
       || `<div class="pl-empty">${empty}</div>`;
     // The overflow line counts one year's rows, so it has no meaning under a
     // topic-filtered list, a search, or the uncapped all-years set.
-    if (scope === 'year' && !findTerm && !topic && data.total > data.people.length) {
+    if (scope === 'year' && !findTerm && !topic && !roleFilter && !channelFilter && !awardFilter && data.total > data.people.length) {
       listEl.insertAdjacentHTML('beforeend',
         `<div class="pl-more">+ ${data.total - data.people.length} more in ${year} — search reaches all of them</div>`);
     }
@@ -360,18 +545,120 @@
     return view === 'sky' ? skyEl : listEl;
   }
 
-  // Opening a bubble IS opening its list — the sky answers "about what", and
-  // the obvious next question is "who". Stays in scope 'all', so the list is
-  // everyone who has ever talked to you about it and the count matches the
-  // number printed on the bubble.
-  function openTopic(label) {
-    topic = label;
+  // Status belongs INSIDE the drawable plane, not in place of the surface.
+  // Replacing `skyEl.innerHTML` also deletes the pan plane, stage and zoom
+  // controls. The request can then finish successfully while renderSky paints
+  // into the detached `skyStageEl`, leaving the loading state on screen
+  // forever. Lists have no shell, so their status still owns the list itself.
+  function setSurfaceHtml(html) {
+    surface();
+    const target = view === 'sky' ? skyStageEl : listEl;
+    target.innerHTML = html;
+  }
+
+  function mapLoadingHtml() {
+    return '<div class="pm-typing" role="status" aria-label="Reading every year">' +
+      '<span aria-hidden="true"></span><span aria-hidden="true"></span>' +
+      '<span aria-hidden="true"></span></div>';
+  }
+
+  function loadFullFilterYear(y) {
+    if (fullFilterYears.has(y)) return Promise.resolve(cache.get(y));
+    const inFlight = fullFilterPending.get(y);
+    if (inFlight) return inFlight;
+    const request = hzPost('peopleYear', { year: y, all: true })
+      .then((res) => {
+        if (!res || !Array.isArray(res.people)) throw new Error('bad full year payload');
+        cache.set(y, res);
+        fullFilterYears.add(y);
+        staleYears.delete(y);
+        if (year === y && (roleFilter || channelFilter) && scope === 'year' && !findTerm) render();
+        return res;
+      })
+      .finally(() => fullFilterPending.delete(y));
+    fullFilterPending.set(y, request);
+    return request;
+  }
+
+  // Topic bubbles describe an all-time constellation, so their lists remain
+  // all-time. Relationship labels are clicked on year rows and answer a
+  // different question: everyone carrying that label IN THE OPEN YEAR.
+  function openPillFilter({ topicLabel = null, role = null } = {}) {
+    if (!topic && !roleFilter) filterOrigin = { view, scope, year, awardFilter, channelFilter };
+    // A filter click is an explicit navigation away from search. Leaving the
+    // query active would make render() keep drawing search results over the
+    // filter page the person just requested.
+    findId++;
+    findTerm = '';
+    findRows = null;
+    findState = 'idle';
+    searchEl.value = '';
+    topic = topicLabel;
+    roleFilter = role;
+    channelFilter = null;
+    awardFilter = null;
     view = 'list';
-    scope = 'all';
+    scope = role ? 'year' : 'all';
     render();
+    if (role) {
+      loadFullFilterYear(year).catch(() => {
+        searchEl.placeholder = `couldn’t load every ${role} in ${year}`;
+      });
+    }
+  }
+
+  function openTopic(label) {
+    openPillFilter({ topicLabel: label });
+  }
+
+  function openChannelFilter(channel) {
+    if (!channel) return;
+    // Connector navigation is explicitly about the open year. Clear any
+    // cross-year/search state before painting the quick cached subset, then
+    // upgrade that year to the uncapped payload so "everyone" is literal.
+    findId++;
+    findTerm = '';
+    findRows = null;
+    findState = 'idle';
+    searchEl.value = '';
+    topic = null;
+    roleFilter = null;
+    awardFilter = null;
+    filterOrigin = null;
+    channelFilter = channel;
+    view = 'list';
+    scope = 'year';
+    render();
+    loadFullFilterYear(year).catch(() => {
+      searchEl.placeholder = `couldn’t load every ${CHAN_LABEL[channel] || channel} contact in ${year}`;
+    });
+  }
+
+  function openAwardFilter(kind) {
+    if (!kind) return;
+    // A row trophy means the same thing as the matching card heading: show
+    // every recipient in the open year. Keep this route independent from row
+    // expansion so the same click never starts an individual summary.
+    findId++;
+    findTerm = '';
+    findRows = null;
+    findState = 'idle';
+    searchEl.value = '';
+    topic = null;
+    roleFilter = null;
+    channelFilter = null;
+    filterOrigin = null;
+    awardFilter = kind;
+    view = 'list';
+    scope = 'year';
+    expanded.clear();
+    render();
+    listEl.scrollTop = 0;
   }
 
   function render() {
+    syncSearchClear();
+    closeAwardTip();
     // A SEARCH TAKES OVER, whatever was up. It is server-side and spans every
     // year, so it belongs to neither the open tab nor the constellation — and
     // a sky filtered to one query would be a single circle.
@@ -394,7 +681,7 @@
         renderTabs();
         cardsEl.hidden = true;
         filterEl.hidden = true;
-        surface().innerHTML = '<div class="pm-loading">reading every year…</div>';
+        setSurfaceHtml(mapLoadingHtml());
         // A THROW INSIDE render() IS NOT A FETCH FAILURE, and this used to report
         // it as one: any error from visible/renderSky arrived here
         // and printed "couldn't read your years", which sends the reader to their
@@ -406,13 +693,15 @@
             try {
               render();
             } catch (err) {
-              surface().innerHTML =
-                `<div class="pl-empty">couldn’t draw the globe — ${esc(String(err && err.message || err))}</div>`;
+              setSurfaceHtml(
+                `<div class="pl-empty">couldn’t draw the globe — ${esc(String(err && err.message || err))}</div>`
+              );
             }
           })
           .catch((err) => {
-            surface().innerHTML =
-              `<div class="pl-empty">couldn’t read your years — ${esc(String(err && err.message || err))}</div>`;
+            setSurfaceHtml(
+              `<div class="pl-empty">couldn’t read your years — ${esc(String(err && err.message || err))}</div>`
+            );
           });
         return;
       }
@@ -430,13 +719,13 @@
     // put the last year's marks on this year's names.
     awardsByKey = awardIndex(data);
     renderCards(data);
-    renderFilter(rows.length);
+    renderFilter(data, rows.length);
     if (view === 'sky') renderSky(data, rows);
     else renderList(data, rows);
     // One placeholder, because search now means the same thing everywhere:
     // every person, every year, ranked by the server. Naming the open year
     // here would say the box only reaches it.
-    searchEl.placeholder = 'search everyone, every year…';
+    searchEl.placeholder = 'search';
     renderTabs();
     // After the paint, never during it — see paintAvatars.
     paintAvatars();
@@ -464,7 +753,7 @@
       : '';
     listEl.innerHTML = head + (findRows.map((p) => rowHtml(p, p.year)).join('')
       || `<div class="pl-empty">no one matches “${esc(findTerm)}”</div>`);
-    searchEl.placeholder = 'search everyone, every year…';
+    searchEl.placeholder = 'search';
     renderTabs();
     // After the paint, never during it — see paintAvatars.
     paintAvatars();
@@ -529,6 +818,12 @@
 
   function renderTabs() {
     const ys = years.length ? years : [year];
+    // History is worked newest-to-oldest, while the strip is intentionally
+    // chronological (oldest-to-newest). The tab directly left of the open
+    // year is therefore the next slice of history. Keep a real piece of it in
+    // view so an active 2021 makes the coming 2020 legible at a glance.
+    const activeIndex = scope === 'year' ? ys.indexOf(year) : -1;
+    const nextYear = activeIndex > 0 ? ys[activeIndex - 1] : null;
     tabsEl.replaceChildren();
     for (const y of ys) {
       const b = document.createElement('button');
@@ -575,9 +870,22 @@
     // year. Harmless in the list, where scrollIntoView on the active tab
     // rescues it; visible in the globe, where no year tab is active and the
     // strip simply sat on 2019.
+    const next = nextYear === null ? null : tabsEl.querySelector(`.pm-tab[data-y="${nextYear}"]`);
+    const revealActiveWithNext = () => {
+      // Put the active tab after a small visible tail of the older, next
+      // history tab. A normal scroll position can leave that neighbour wholly
+      // off-screen, which makes a long-running historical pass look like it
+      // ends at the selected year.
+      const previewWidth = Math.min(30, next.offsetWidth);
+      const desired = Math.max(0, active.offsetLeft - previewWidth - 3);
+      tabsEl.scrollLeft = Math.min(desired, tabsEl.scrollWidth - tabsEl.clientWidth);
+    };
     if (!tabsHomed && ys.length > 1) {
       tabsHomed = true;
-      tabsEl.scrollLeft = tabsEl.scrollWidth;
+      if (active && next) revealActiveWithNext();
+      else tabsEl.scrollLeft = tabsEl.scrollWidth;
+    } else if (active && next) {
+      revealActiveWithNext();
     } else if (active) {
       active.scrollIntoView({ inline: 'nearest', block: 'nearest' });
     }
@@ -759,12 +1067,14 @@
     el.dataset.topic = c.label;
     el.style.width = `${d}px`;
     el.style.height = `${d}px`;
-    // Percentages so the field still tracks the panel if it is resized under us.
-    // The centre is the stage's, a hair above the core's own 51% — the offset is
-    // the core's alone, and borrowing it here would push the lowest bubble
-    // through the bottom edge on a tall panel.
-    el.style.left = `${(50 + (spot.x * 100) / stage.w).toFixed(1)}%`;
-    el.style.top = `${(50 + (spot.y * 100) / stage.h).toFixed(1)}%`;
+    // Pixels in one FIXED scene coordinate system. These used to be
+    // percentages, which made WebKit resolve the centre against a different
+    // containing block after CSS zoom while d/spot.x/spot.y stayed in the
+    // original pixel space. At 2x the bubbles no longer shared one geometry
+    // and piled into each other. renderSky pins the stage's base dimensions,
+    // so every number here scales together and the no-overlap layout survives.
+    el.style.left = `${(stage.w / 2 + spot.x).toFixed(1)}px`;
+    el.style.top = `${(stage.h / 2 + spot.y).toFixed(1)}px`;
 
     // SEATS COME FROM THE BUBBLE, not from a constant, and the packer decides
     // how many there are — see people-sky-layout.js. Sizes are computed for the
@@ -871,10 +1181,17 @@
   }
 
   function renderSky(data, people) {
-    skyEl.replaceChildren();
+    skyStageEl.replaceChildren();
     const marked = topicsAreMarked(people);
     const all = clustersFrom(people, marked);
+    // Measure the unzoomed VIEWPORT, never the zoomed stage. CSS zoom changes
+    // the latter's layout metrics in WebKit; feeding those back into the
+    // constellation would re-layout the data at a new size midway through a
+    // camera gesture. Explicit dimensions make this a stable scene that the
+    // camera may enlarge without changing its geometry.
     const stage = { w: skyEl.clientWidth || 400, h: skyEl.clientHeight || 420 };
+    skyStageEl.style.width = `${stage.w}px`;
+    skyStageEl.style.height = `${stage.h}px`;
     // The layout takes counts, not people: it is geometry, and handing it the
     // corpus would let a change here reach into it. `people` rides along for
     // the faces this file draws.
@@ -906,7 +1223,7 @@
             ? `nothing shared enough to group — a topic needs at least ${MIN_CLUSTER} people`
             : `nothing shared enough to group in ${year} — a topic needs at least ${MIN_CLUSTER} people`)
         : `no one to place in ${year}`;
-      skyEl.appendChild(m);
+      skyStageEl.appendChild(m);
       return;
     }
 
@@ -926,7 +1243,7 @@
     // marks is the one piece of decoration here that states a fact — this topic
     // is a relationship of yours — and it gives the eye the radial order the
     // rings only pretended to.
-    skyEl.appendChild(spokesEl(clusters, stage));
+    skyStageEl.appendChild(spokesEl(clusters, stage));
 
     const core = document.createElement('div');
     // `tod-orb` is the opt-in that puts this blob on the same clock as the
@@ -935,12 +1252,17 @@
     // not exist for either — without the nudge the core wears the
     // stylesheet's fallback band until the next tick.
     core.className = 'pm-core tod-orb';
-    skyEl.appendChild(core);
+    core.style.left = `${stage.w / 2}px`;
+    core.style.top = `${stage.h * 0.51}px`;
+    skyStageEl.appendChild(core);
     if (typeof globalThis.__hzTodApply === 'function') globalThis.__hzTodApply();
 
     clusters.forEach((spot, i) => {
-      skyEl.appendChild(clusterEl(spot, i, stage));
+      skyStageEl.appendChild(clusterEl(spot, i, stage));
     });
+    // A refresh may repaint while already zoomed. Re-clamp the camera against
+    // the newly pinned scene rather than carrying an edge past its boundary.
+    applySkyViewport();
 
     // BOTH caps, said out loud. The server caps the year's rows, and the ring
     // holds four bubbles — either one silently makes this picture look like the
@@ -999,6 +1321,9 @@
       people.push({
         key: p.key,
         name: p.name,
+        // The globe carries the separate lifetime role. Year-local corrections
+        // must not rewrite it or the same cross-year leak returns client-side.
+        role: confirmedRoles.get(roleStateKey(p.key)) || p.role,
         channels: p.channels || [],
         messages,
         roomMessages,
@@ -1041,7 +1366,7 @@
 
   // Entering the globe, exactly as `load` enters a year: paint what is in hand,
   // and check it behind the picture rather than in front of it. A cold globe
-  // still shows "reading every year…" once, because there is nothing to paint.
+  // still shows the typing dots once, because there is nothing to paint.
   function visitMap() {
     if (!mapData) return ensureMap();
     if (mapStale) refreshMap().catch(() => {});
@@ -1062,7 +1387,9 @@
     // Debounced: render() runs on every keystroke of a search, and each save is
     // a UserDefaults write.
     saveTimer = setTimeout(() => {
-      hzPost('monthsView', { state: `${year}|${view}|${topic || ''}|${scope}` }).catch(() => {});
+      hzPost('monthsView', {
+        state: `${year}|${view}|${topic || ''}|${scope}|${roleFilter || ''}|${channelFilter || ''}`,
+      }).catch(() => {});
     }, 250);
   }
 
@@ -1083,7 +1410,7 @@
     // not the same as absent.
     firstVisit = saved === '';
     if (!saved) return null;
-    const [y, v, t, s] = saved.split('|');
+    const [y, v, t, s, r, c] = saved.split('|');
     const n = Number(y);
     // Trust nothing that came back: the value outlives the code that wrote it,
     // and a year the corpus no longer has would strand the page on an empty
@@ -1097,6 +1424,13 @@
     // saveView cannot produce that pair, but a hand-edited or older value can,
     // and it is one line to refuse rather than reason about downstream.
     topic = view === 'list' && t ? t : null;
+    roleFilter = view === 'list' && ['friend', 'business', 'romantic', 'family'].includes(r) ? r : null;
+    channelFilter = view === 'list' && Object.hasOwn(CHAN_LABEL, c) ? c : null;
+    // Older/corrupt state cannot restore two different pill pages at once.
+    if (topic) { roleFilter = null; channelFilter = null; }
+    if (roleFilter) channelFilter = null;
+    if (topic) scope = 'all';
+    if (roleFilter || channelFilter) scope = 'year';
     return Number.isInteger(n) && n >= 1990 && n <= new Date().getFullYear() + 1 ? n : null;
   }
 
@@ -1135,7 +1469,7 @@
     // runs. A failed freshness check leaves the old answer in place and the
     // year stale, so its next visit can try again without turning into an
     // empty error screen.
-    const request = hzPost('peopleYear', { year: y })
+    const request = hzPost('peopleYear', { year: y, all: fullFilterYears.has(y) })
       .then((res) => {
         if (!res || !Array.isArray(res.people)) throw new Error('bad year payload');
         cache.set(y, res);
@@ -1168,7 +1502,8 @@
     renderTabs();
     if (cache.has(year)) {
       render();
-      if (staleYears.has(year)) refreshYear(year).catch(() => {});
+      if (roleFilter || channelFilter) loadFullFilterYear(year).catch(() => {});
+      else if (staleYears.has(year)) refreshYear(year).catch(() => {});
       return;
     }
     const my = ++reqId;
@@ -1180,7 +1515,7 @@
     // than sitting over a loading list making last year's claims.
     cardsEl.hidden = true;
     cardsEl.innerHTML = '';
-    surface().innerHTML = `<div class="pm-loading">loading ${year}…</div>`;
+    setSurfaceHtml(`<div class="pm-loading">loading ${year}…</div>`);
     const res = await hzPost('peopleYear', { year });
     if (my !== reqId) return; // superseded by a newer tab click
     if (!res || !Array.isArray(res.people)) throw new Error('bad year payload');
@@ -1189,6 +1524,7 @@
     if (Array.isArray(res.years) && res.years.length) years = res.years;
     if (routeIfEmpty(res)) return;
     render();
+    if (roleFilter || channelFilter) loadFullFilterYear(year).catch(() => {});
     prefetchRest();
   }
 
@@ -1225,7 +1561,7 @@
   function loadOrFail(y) {
     load(y).catch(() => {
       searchEl.placeholder = 'couldn’t load';
-      surface().innerHTML = `<div class="pl-empty">couldn’t load ${y} — click its tab to retry</div>`;
+      setSurfaceHtml(`<div class="pl-empty">couldn’t load ${y} — click its tab to retry</div>`);
     });
   }
 
@@ -1268,6 +1604,10 @@
       // Arriving with a topic still selected would show a field where every
       // bubble but the chosen one was missing.
       topic = null;
+      roleFilter = null;
+      channelFilter = null;
+      filterOrigin = null;
+      awardFilter = null;
       render();
       visitMap().catch(() => {});
       return;
@@ -1280,16 +1620,248 @@
     view = 'list';
     scope = 'year';
     topic = null;
+    roleFilter = null;
+    channelFilter = null;
+    filterOrigin = null;
+    awardFilter = null;
     const y = Number(b.dataset.y);
     if (y === year && cache.has(y)) { render(); return; }
     loadOrFail(y);
   });
+
+  function closeSelfMenu() {
+    selfMenu?.remove();
+    selfMenu = null;
+  }
+
+  function personTarget(node) {
+    const el = node?.closest?.('[data-person-key]');
+    if (!el) return null;
+    const key = el.dataset.personKey;
+    const roleYear = /^\d{4}$/u.test(el.dataset.personYear || '') ? Number(el.dataset.personYear) : null;
+    return key ? { el, key, name: el.dataset.personName || 'this person', year: roleYear } : null;
+  }
+
+  async function markPersonAsSelf(person) {
+    closeSelfMenu();
+    try {
+      const out = await hzPost('peopleSelf', { key: person.key });
+      if (!out || out.state !== 'ok') throw new Error('not marked');
+      // The server rebuilt the durable core before replying. Forget every
+      // client projection too: a stale year payload or constellation must not
+      // keep showing a relationship the owner just identified as themselves.
+      cache.clear();
+      staleYears.clear();
+      mapData = null;
+      mapStale = false;
+      summaries.clear();
+      expanded.clear();
+      findTerm = '';
+      findRows = null;
+      findState = 'idle';
+      searchEl.value = '';
+      await load(year);
+    } catch {
+      searchEl.placeholder = 'couldn’t mark that identity — try again';
+    }
+  }
+
+  async function markPersonRole(person, role) {
+    closeSelfMenu();
+    // The click has already supplied the final role. Reflect it before doing
+    // any bridge or graph work, and make repeat clicks a no-op until this save
+    // resolves so two writes cannot race each other into a surprising result.
+    const stateKey = roleStateKey(person.key, person.year);
+    if (pendingRoles.has(stateKey)) return;
+    pendingRoles.set(stateKey, role);
+    render();
+    try {
+      const payload = { key: person.key, role };
+      if (person.year !== null) payload.year = person.year;
+      const out = await hzPost('peopleRole', payload);
+      if (!out || out.state !== 'ok') throw new Error('not marked');
+      confirmedRoles.set(stateKey, role);
+      pendingRoles.delete(stateKey);
+      render();
+
+      // The response arrives only after the durable config and server core are
+      // updated. Keep the optimistic picture and revalidate the active surface
+      // behind it; this used to clear every cache and block on a cold reload.
+      for (const y of cache.keys()) staleYears.add(y);
+      mapStale = true;
+      if (scope === 'all' && !findTerm) refreshMap().catch(() => {});
+      else if (scope === 'year' && cache.has(year)) refreshYear(year).catch(() => {});
+    } catch {
+      pendingRoles.delete(stateKey);
+      render();
+      searchEl.placeholder = 'couldn’t update that role — try again';
+    }
+  }
+
+  function openSelfMenu(person, clientX, clientY, { rolesOnly = false } = {}) {
+    closeSelfMenu();
+    const menu = document.createElement('div');
+    menu.className = 'pm-self-menu';
+    menu.setAttribute('role', 'menu');
+    if (!rolesOnly) {
+      const action = document.createElement('button');
+      action.type = 'button';
+      action.setAttribute('role', 'menuitem');
+      action.textContent = 'this is me';
+      action.addEventListener('click', () => { markPersonAsSelf(person); });
+      menu.append(action);
+    }
+    const roles = ['friend', 'business', 'romantic', 'family'];
+    for (const role of roles) {
+      const choice = document.createElement('button');
+      choice.type = 'button';
+      choice.setAttribute('role', 'menuitem');
+      choice.textContent = `role: ${role}`;
+      choice.addEventListener('click', () => { markPersonRole(person, role); });
+      menu.append(choice);
+    }
+    document.body.append(menu);
+    // A real DOM style assignment is permitted by the page CSP; never emit a
+    // style attribute in the generated HTML (see this file's header).
+    const width = menu.getBoundingClientRect().width;
+    menu.style.left = `${Math.max(8, Math.min(clientX, window.innerWidth - width - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(clientY, window.innerHeight - menu.getBoundingClientRect().height - 8))}px`;
+    selfMenu = menu;
+  }
+
+  // Right-click gets an explicit one-action menu. The long-press path opens
+  // the identical menu rather than immediately mutating identity, so touch and
+  // mouse both require the same intentional final tap/click.
+  document.addEventListener('contextmenu', (e) => {
+    const person = personTarget(e.target);
+    if (!person) return;
+    e.preventDefault();
+    openSelfMenu(person, e.clientX, e.clientY);
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (selfMenu && !selfMenu.contains(e.target)) closeSelfMenu();
+    const person = e.button === 0 ? personTarget(e.target) : null;
+    if (!person) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const timer = setTimeout(() => {
+      selfPress = null;
+      suppressPersonClickUntil = Date.now() + 700;
+      openSelfMenu(person, startX, startY);
+    }, 550);
+    selfPress = { timer, startX, startY };
+  });
+  const cancelSelfPress = () => {
+    if (selfPress) clearTimeout(selfPress.timer);
+    selfPress = null;
+  };
+  document.addEventListener('pointerup', cancelSelfPress);
+  document.addEventListener('pointercancel', cancelSelfPress);
+  document.addEventListener('pointermove', (e) => {
+    if (!selfPress) return;
+    if (Math.hypot(e.clientX - selfPress.startX, e.clientY - selfPress.startY) > 10) cancelSelfPress();
+  });
+  document.addEventListener('click', (e) => {
+    if (Date.now() >= suppressPersonClickUntil || !personTarget(e.target)) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }, true);
+
+  cardsEl.addEventListener('click', (e) => {
+    const control = e.target.closest('.pm-card-eyebrow[data-award-kind], .pm-card-more[data-award-kind]');
+    if (!control) return;
+    const kind = control.dataset.awardKind;
+    if (!kind) return;
+    // Cards are category filters, not routes into an individual podium row.
+    // Clicking the active heading again is the quick way back to the full year;
+    // the explicit "more" line always opens the category list.
+    awardFilter = control.classList.contains('pm-card-more')
+      ? kind
+      : awardFilter === kind ? null : kind;
+    expanded.clear();
+    render();
+    if (control.classList.contains('pm-card-more')) listEl.scrollTop = 0;
+  });
+
+  cardsEl.addEventListener('pointerover', (e) => {
+    const person = e.target.closest('.pm-card-person[data-tip]');
+    if (!person || person.contains(e.relatedTarget)) return;
+    showAwardTip(person);
+  });
+  cardsEl.addEventListener('pointerout', (e) => {
+    const person = e.target.closest('.pm-card-person[data-tip]');
+    if (!person || person.contains(e.relatedTarget)) return;
+    closeAwardTip();
+  });
+  cardsEl.addEventListener('focusin', (e) => {
+    const person = e.target.closest('.pm-card-person[data-tip]');
+    if (person) showAwardTip(person);
+  });
+  cardsEl.addEventListener('focusout', (e) => {
+    const person = e.target.closest('.pm-card-person[data-tip]');
+    if (person && !person.contains(e.relatedTarget)) closeAwardTip();
+  });
+
+  listEl.addEventListener('pointerover', (e) => {
+    const mark = e.target.closest('.pl-award[data-tip]');
+    if (!mark || mark.contains(e.relatedTarget)) return;
+    showAwardTip(mark);
+  });
+  listEl.addEventListener('pointerout', (e) => {
+    const mark = e.target.closest('.pl-award[data-tip]');
+    if (!mark || mark.contains(e.relatedTarget)) return;
+    closeAwardTip();
+  });
+
   listEl.addEventListener('click', (e) => {
+    // Pills are navigation, not row expansion. Handle them before looking for
+    // the containing row so one click cannot both open a filtered page and
+    // start generating that person's summary underneath it.
+    const trophy = e.target.closest('.pl-award[data-award-kind]');
+    if (trophy) {
+      e.preventDefault();
+      e.stopPropagation();
+      openAwardFilter(trophy.dataset.awardKind);
+      return;
+    }
+    const connector = e.target.closest('.pm-src-ic[data-channel-filter]');
+    if (connector) {
+      e.preventDefault();
+      e.stopPropagation();
+      openChannelFilter(connector.dataset.channelFilter);
+      return;
+    }
+    const roleMenu = e.target.closest('.pl-role-menu[data-role-menu]');
+    if (roleMenu) {
+      e.preventDefault();
+      e.stopPropagation();
+      const person = personTarget(roleMenu);
+      if (!person) return;
+      const box = roleMenu.getBoundingClientRect();
+      openSelfMenu(person, box.right, box.bottom + 4, { rolesOnly: true });
+      return;
+    }
+    const topicPill = e.target.closest('.pl-chip[data-topic-filter]');
+    if (topicPill) {
+      e.preventDefault();
+      e.stopPropagation();
+      openPillFilter({ topicLabel: topicPill.dataset.topicFilter });
+      return;
+    }
+    const rolePill = e.target.closest('.pl-chip[data-role-filter]');
+    if (rolePill) {
+      e.preventDefault();
+      e.stopPropagation();
+      openPillFilter({ role: rolePill.dataset.roleFilter });
+      return;
+    }
     const row = e.target.closest('.pl-row');
     if (!row) return;
     const rk = row.getAttribute('data-rk');
-    expanded = expanded === rk ? null : rk;
-    if (expanded !== null) {
+    if (expanded.has(rk)) {
+      expanded.delete(rk);
+    } else {
+      expanded.add(rk);
       const cut = rk.lastIndexOf('|');
       const key = rk.slice(0, cut);
       // The row's own year -- a 2021 result summarised against the open tab
@@ -1299,7 +1871,134 @@
     }
     render();
   });
+
+  // The globe is a dense all-time surface. Zoom is a real WebKit layout zoom,
+  // not a transform-scaled bitmap, so text, SVG and faces are rasterized at the
+  // requested resolution. Pan is a separate unscaled plane in screen pixels.
+  function clampSkyPan() {
+    const w = skyEl.clientWidth || 1;
+    const h = skyEl.clientHeight || 1;
+    const scaledW = w * skyZoom;
+    const scaledH = h * skyZoom;
+    const clampAxis = (value, viewport, scaled) => {
+      const bleed = Math.min(SKY_PAN_BLEED_MAX, viewport * SKY_PAN_BLEED_RATIO);
+      const min = Math.min(0, viewport - scaled) - bleed;
+      const max = Math.max(0, viewport - scaled) + bleed;
+      return Math.max(min, Math.min(max, value));
+    };
+    skyPanX = clampAxis(skyPanX, w, scaledW);
+    skyPanY = clampAxis(skyPanY, h, scaledH);
+  }
+
+  function applySkyViewport() {
+    clampSkyPan();
+    skyStageEl.style.setProperty('--pm-sky-zoom', String(skyZoom));
+    skyPanEl.style.left = `${skyPanX.toFixed(1)}px`;
+    skyPanEl.style.top = `${skyPanY.toFixed(1)}px`;
+    skyZoomRange.value = String(Math.round(skyZoom * 100));
+    skyEl.classList.toggle('zoomed', skyZoom > 1.001);
+  }
+
+  function skyPoint(clientX, clientY) {
+    const rect = skyEl.getBoundingClientRect();
+    return Number.isFinite(clientX) && Number.isFinite(clientY)
+      ? { x: clientX - rect.left, y: clientY - rect.top }
+      : { x: rect.width / 2, y: rect.height / 2 };
+  }
+
+  function setSkyZoom(value, anchor = null) {
+    const next = Math.max(SKY_ZOOM_MIN, Math.min(SKY_ZOOM_MAX, value));
+    const point = anchor || { x: (skyEl.clientWidth || 1) / 2, y: (skyEl.clientHeight || 1) / 2 };
+    const contentX = (point.x - skyPanX) / skyZoom;
+    const contentY = (point.y - skyPanY) / skyZoom;
+    skyZoom = next;
+    // Keep the point under the cursor/fingers stationary while the rest of the
+    // field grows around it. Button and slider zooms use the owner orb's centre.
+    skyPanX = point.x - contentX * skyZoom;
+    skyPanY = point.y - contentY * skyZoom;
+    applySkyViewport();
+  }
+
+  function setSkyPan(x, y) {
+    skyPanX = x;
+    skyPanY = y;
+    applySkyViewport();
+  }
+  skyZoomRange.addEventListener('input', () => setSkyZoom(Number(skyZoomRange.value) / 100));
+  skyZoomOut.addEventListener('click', () => setSkyZoom(skyZoom - 0.1));
+  skyZoomIn.addEventListener('click', () => setSkyZoom(skyZoom + 0.1));
+  skyEl.addEventListener('wheel', (e) => {
+    if (e.ctrlKey) {
+      e.preventDefault();
+      setSkyZoom(skyZoom * Math.exp(-e.deltaY * 0.008), skyPoint(e.clientX, e.clientY));
+      return;
+    }
+    // A normal two-finger gesture pans only when there is enlarged content to
+    // move. At 1x and below it remains an ordinary page scroll gesture.
+    if (skyZoom <= 1.001) return;
+    e.preventDefault();
+    setSkyPan(skyPanX - e.deltaX, skyPanY - e.deltaY);
+  }, { passive: false });
+  let gestureBaseZoom = 1;
+  let gestureAnchor = null;
+  skyEl.addEventListener('gesturestart', (e) => {
+    e.preventDefault();
+    gestureBaseZoom = skyZoom;
+    gestureAnchor = skyPoint(e.clientX, e.clientY);
+  });
+  skyEl.addEventListener('gesturechange', (e) => {
+    e.preventDefault();
+    setSkyZoom(gestureBaseZoom * (Number(e.scale) || 1), gestureAnchor);
+  });
+
+  // Mouse/stylus/touch drag uses pointer capture, so the field keeps moving
+  // even when the cursor outruns the panel. A drag that began on a topic must
+  // not turn into a click that opens that topic when the pointer comes up.
+  let skyDrag = null;
+  let suppressSkyClickUntil = 0;
+  skyEl.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target.closest('.pm-sky-zoom')) return;
+    // Prevent WebKit/native panel handling from claiming the initial press
+    // before pointer capture turns it into a canvas drag.
+    e.preventDefault();
+    skyDrag = { id: e.pointerId, x: e.clientX, y: e.clientY, panX: skyPanX, panY: skyPanY, moved: false };
+    skyEl.setPointerCapture(e.pointerId);
+  });
+  skyEl.addEventListener('pointermove', (e) => {
+    if (!skyDrag || skyDrag.id !== e.pointerId) return;
+    const dx = e.clientX - skyDrag.x;
+    const dy = e.clientY - skyDrag.y;
+    if (Math.hypot(dx, dy) > 3) {
+      skyDrag.moved = true;
+      skyEl.classList.add('panning');
+    }
+    if (skyDrag.moved) {
+      e.preventDefault();
+      setSkyPan(skyDrag.panX + dx, skyDrag.panY + dy);
+    }
+  });
+  const finishSkyDrag = (e) => {
+    if (!skyDrag || skyDrag.id !== e.pointerId) return;
+    if (skyDrag.moved) suppressSkyClickUntil = Date.now() + 350;
+    skyDrag = null;
+    skyEl.classList.remove('panning');
+    if (skyEl.hasPointerCapture(e.pointerId)) skyEl.releasePointerCapture(e.pointerId);
+  };
+  skyEl.addEventListener('pointerup', finishSkyDrag);
+  skyEl.addEventListener('pointercancel', finishSkyDrag);
+  skyEl.addEventListener('lostpointercapture', (e) => {
+    if (skyDrag && skyDrag.id === e.pointerId) {
+      if (skyDrag.moved) suppressSkyClickUntil = Date.now() + 350;
+      skyDrag = null;
+      skyEl.classList.remove('panning');
+    }
+  });
   skyEl.addEventListener('click', (e) => {
+    if (Date.now() < suppressSkyClickUntil) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
     const c = e.target.closest('.pm-cluster');
     if (!c || !c.dataset.topic) return;
     hzSfx.squish();
@@ -1309,6 +2008,7 @@
   let t = null;
   searchEl.addEventListener('input', () => {
     clearTimeout(t);
+    syncSearchClear();
     const term = searchEl.value.trim();
     if (term === findTerm) return;
     findTerm = term;
@@ -1321,6 +2021,20 @@
     }
     // Longer than the old 90ms because each keystroke is now a round trip.
     t = setTimeout(() => runFind(term), 160);
+  });
+  searchClearEl?.addEventListener('click', () => {
+    clearTimeout(t);
+    searchEl.value = '';
+    // One path owns search-state teardown, whether the query was erased with
+    // a keyboard or with this control. Dispatching input also invalidates an
+    // in-flight server result so it cannot repaint after the clear.
+    searchEl.dispatchEvent(new Event('input', { bubbles: true }));
+    searchEl.focus();
+  });
+  searchEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || searchEl.value.length === 0) return;
+    e.preventDefault();
+    searchClearEl?.click();
   });
   if (closeEl) closeEl.addEventListener('click', () => { hzSfx.close(); hzPost('close').catch(() => {}); });
 

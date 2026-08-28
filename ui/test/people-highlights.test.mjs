@@ -10,13 +10,18 @@ import { buildHighlights, buildYearAwards } from '../server/people/highlights.mj
 const tl = (...yms) => yms.map((ym) => ({ ym, sent: 0, received: 10, met: 0 }));
 
 // An entry as buildYear ranks them.
-function entry(key, messages, timeline, engagement = messages) {
-  return { p: { key, name: key, timeline }, messages, met: 0, engagement };
+function entry(key, messages, timeline, engagement = messages, activeDays = []) {
+  return { p: { key, name: key, timeline, activeDays }, messages, met: 0, engagement };
 }
 
 const monthsOf = (year, from, to) => {
   const out = [];
   for (let m = from; m <= to; m += 1) out.push(`${year}-${String(m).padStart(2, '0')}`);
+  return out;
+};
+const daysOf = (year, month, from, to) => {
+  const out = [];
+  for (let d = from; d <= to; d += 1) out.push(`${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`);
   return out;
 };
 
@@ -38,8 +43,8 @@ test('the favorite is ranked by engagement and names the measured activity', () 
     entry('d', 100, tl('2026-01')),
   ], { year: 2026, now: NOW });
   const card = find(runaway, 'person-of-the-year');
-  assert.equal(card.label, 'favorite');
-  assert.match(card.line, /1,000 messages — most engagement this year/);
+  assert.equal(card.label, 'favorites');
+  assert.equal(card.line, '1,000 messages');
 
   const engagementWins = buildHighlights([
     entry('chatty', 500, tl('2026-01'), 500),
@@ -54,9 +59,12 @@ test('a person with no messages earns no card at all', () => {
 });
 
 test('back from your past needs both a real gap and a real return', () => {
-  const gapAndVolume = entry('returner', 500, tl('2022-03', '2022-04', '2026-05', '2026-06'));
+  const gapAndVolume = entry(
+    'returner', 500, tl('2022-03', '2022-04', '2026-05', '2026-06'), 500,
+    daysOf(2026, 6, 1, 8)
+  );
   const h = buildHighlights([gapAndVolume], { year: 2026, now: NOW });
-  assert.match(find(h, 'back-from-your-past').line, /quiet since 2022 — then 500 messages/);
+  assert.match(find(h, 'back-from-your-past').line, /quiet since 2022 — then 8-day streak/);
 
   // Gap, but they sent almost nothing on return.
   const quietReturn = entry('q', 5, tl('2022-03', '2026-05'));
@@ -74,7 +82,8 @@ test('back from your past needs both a real gap and a real return', () => {
 test('rising star requires being new this year and actually sticking around', () => {
   const stuck = entry('r', 300, tl(...monthsOf(2026, 3, 12)));
   const card = find(buildHighlights([stuck], { year: 2026, now: NOW }), 'rising-star');
-  assert.match(card.line, /met in march — every month since/);
+  assert.equal(card.label, 'new here');
+  assert.equal(card.line, 'met in march, 300 messages since');
 
   // New, but showed up twice and vanished: not rising.
   const fizzled = entry('f', 300, tl('2026-03', '2026-04'));
@@ -88,13 +97,16 @@ test('rising star requires being new this year and actually sticking around', ()
 test('rising star counts the gaps honestly when they exist', () => {
   const patchy = entry('p', 300, tl('2026-03', '2026-05', '2026-08', '2026-11'));
   const card = find(buildHighlights([patchy], { year: 2026, now: NOW }), 'rising-star');
-  assert.match(card.line, /met in march — 4 of the 10 months since/);
+  assert.equal(card.line, 'met in march, 300 messages since');
 });
 
 test('drifting needs a rhythm to have broken, and a long enough silence', () => {
   const drifted = entry('d', 400, tl(...monthsOf(2026, 1, 6)));
-  assert.match(find(buildHighlights([drifted], { year: 2026, now: NOW }), 'drifting').line,
-    /every month to june — quiet for 6 months since/);
+  const card = find(buildHighlights([drifted], { year: 2026, now: NOW }), 'drifting');
+  assert.equal(card.line, 'quiet for 6 months');
+  const { awards } = buildYearAwards([drifted], { year: 2026, now: NOW });
+  assert.equal(awards.find((a) => a.kind === 'drifting').detailByKey.d,
+    'drifting… quiet for 6 months');
 
   // Active recently: not drifting.
   const current = entry('c', 400, tl(...monthsOf(2026, 1, 12)));
@@ -116,67 +128,60 @@ test('a live year is not read as though December already happened', () => {
   assert.ok(find(inDecember, 'drifting'));
 });
 
-test('streak needs twelve consecutive months and must still be running in this year', () => {
-  const long = entry('s', 900, tl(...monthsOf(2025, 1, 12), ...monthsOf(2026, 1, 6)));
-  assert.match(find(buildHighlights([long], { year: 2026, now: NOW }), 'streak').line,
-    /18 months unbroken since january 2025/);
-
-  // A break resets the run: 6 + 6 is not 12.
-  const broken = entry('b', 900, tl(...monthsOf(2025, 1, 6), ...monthsOf(2025, 8, 12), ...monthsOf(2026, 1, 1)));
-  assert.equal(find(buildHighlights([broken], { year: 2026, now: NOW }), 'streak'), undefined);
-
-  // A long streak that ENDED before this year is a fact about another year.
-  const stale = entry('t', 900, tl(...monthsOf(2023, 1, 12)));
-  assert.equal(find(buildHighlights([stale], { year: 2026, now: NOW }), 'streak'), undefined);
-});
-
 test('a thin year yields only the cards it can earn, in mock order', () => {
   // One ordinary person: a maximum exists, nothing else is true.
   const h = buildHighlights([entry('a', 40, tl('2026-02', '2026-03'))], { year: 2026, now: NOW });
   assert.deepEqual(kinds(h), ['person-of-the-year']);
 });
 
-test('a rich year can earn every card, and keeps them in mock order', () => {
+test('a rich year keeps the four cards in the requested order', () => {
   const h = buildHighlights([
     entry('top', 5000, tl(...monthsOf(2026, 1, 12))),
     entry('returner', 400, tl('2021-02', '2026-07')),
     entry('newcomer', 300, tl(...monthsOf(2026, 2, 12))),
     entry('fading', 350, tl(...monthsOf(2026, 1, 5)), 900),
-    entry('steady', 200, tl(...monthsOf(2024, 6, 12), ...monthsOf(2025, 1, 12), ...monthsOf(2026, 1, 3))),
+    entry('steady', 200, tl(...monthsOf(2024, 6, 12), ...monthsOf(2025, 1, 12), ...monthsOf(2026, 1, 3)), 200, daysOf(2026, 3, 1, 5)),
   ], { year: 2026, now: NOW });
   assert.deepEqual(kinds(h),
-    ['person-of-the-year', 'back-from-your-past', 'rising-star', 'drifting', 'streak']);
-  // Each card names someone, and never the same slot twice by accident.
+    ['person-of-the-year', 'rising-star', 'back-from-your-past', 'drifting']);
+  // Each card retains its winner fields for compatibility and carries a podium.
   for (const c of h) assert.ok(c.name && c.key && c.line, `card ${c.kind} is incomplete`);
 });
 
 // ---- who the LIST marks (2026-08-26) ----
-// The cards name one person each; the rows mark a category's top five. Same
-// scan, same predicates — the point of these is that the second answer cannot
-// drift away from the first.
+// The cards show three people each; the rows mark a category's top ten. Same
+// scan, same predicates — the point is that the two answers cannot drift apart.
 
-test('each category marks at most its top five, in rank order', () => {
+test('each category marks at most its top ten, in rank order', () => {
   const entries = [];
-  for (let i = 0; i < 9; i += 1) {
-    // Nine people, descending engagement, each with a long live streak so the
-    // streak category is crowded too.
-    entries.push(entry(`p${i}`, 900 - i * 50, tl(...monthsOf(2025, 1, 12), ...monthsOf(2026, 1, 12))));
+  for (let i = 0; i < 12; i += 1) {
+    // Twelve people, descending engagement; Favorites must still cap at ten.
+    entries.push(entry(`p${i}`, 1200 - i * 50, tl(...monthsOf(2025, 1, 12), ...monthsOf(2026, 1, 12)), 1200 - i * 50, daysOf(2026, 1, 1, 12 - i)));
   }
   const { cards, awards } = buildYearAwards(entries, { year: 2026, now: NOW });
   const fav = awards.find((a) => a.kind === 'person-of-the-year');
-  assert.equal(fav.keys.length, 5, 'five, not nine');
-  assert.deepEqual(fav.keys, ['p0', 'p1', 'p2', 'p3', 'p4'], 'in the order the card ranked them');
+  assert.equal(fav.keys.length, 10, 'ten, not twelve');
+  assert.deepEqual(fav.keys, ['p0', 'p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9'],
+    'in the order the card ranked them');
   // The card's winner is always the first key of its own category.
   for (const card of cards) {
     const a = awards.find((x) => x.kind === card.kind);
     assert.equal(a.keys[0], card.key, `${card.kind}: the card names its own top mark`);
   }
+  const favorite = find(cards, 'person-of-the-year');
+  assert.deepEqual(favorite.people.map((p) => p.key), ['p0', 'p1', 'p2'],
+    'the card podium preserves the category ranking');
+  assert.equal(favorite.count, 10, 'the more count describes the same capped award list');
+  assert.equal(favorite.people[0].line, favorite.line,
+    'hovering the winner reveals the subheader the one-person card used to show');
+  assert.ok(favorite.people.every((p) => p.name && p.line),
+    'every podium person carries their own hover detail');
 });
 
 test('a category nobody earns marks nobody', () => {
-  // One person, active all year, never absent and never returning: the favorite
-  // and the streak are earnable, a reconnection is not.
-  const entries = [entry('solo', 400, tl(...monthsOf(2025, 1, 12), ...monthsOf(2026, 1, 12)))];
+  // One person, active all year, never absent and never returning: Favorites
+  // is earnable, a reconnection is not.
+  const entries = [entry('solo', 400, tl(...monthsOf(2025, 1, 12), ...monthsOf(2026, 1, 12)), 400, daysOf(2026, 1, 1, 4))];
   const { cards, awards } = buildYearAwards(entries, { year: 2026, now: NOW });
   assert.equal(kinds(cards).includes('back-from-your-past'), false);
   assert.equal(awards.some((a) => a.kind === 'back-from-your-past'), false,
@@ -192,7 +197,19 @@ test('a mark carries the same label its card shows', () => {
   }
 });
 
-test('fewer than five qualifiers marks fewer, and never pads', () => {
+test('favorite and new-here marks carry their own year-specific measurement', () => {
+  const entries = [entry('a', 1_234, tl(...monthsOf(2026, 1, 12)), 1_234, daysOf(2026, 1, 10, 14))];
+  const { cards, awards } = buildYearAwards(entries, { year: 2026, now: NOW });
+  assert.equal(find(cards, 'person-of-the-year').line, '1,234 messages, 5 day streak');
+  assert.equal(awards.find((a) => a.kind === 'person-of-the-year').detailByKey.a,
+    '1,234 messages, 5 day streak');
+  assert.equal(awards.find((a) => a.kind === 'rising-star').detailByKey.a,
+    'new here · met in january, 1,234 messages since');
+  assert.equal(awards.some((a) => a.kind === 'streak'), false,
+    'streak remains supporting Favorites data, never a standalone award');
+});
+
+test('fewer than ten qualifiers marks fewer, and never pads', () => {
   const entries = [
     entry('back', 200, tl('2019-05', ...monthsOf(2026, 3, 8))),
     entry('steady', 500, tl(...monthsOf(2025, 1, 12), ...monthsOf(2026, 1, 12))),

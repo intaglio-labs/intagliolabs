@@ -65,18 +65,18 @@ test('a 1:1 received message maps, sender from the JID', () => {
 });
 
 test('an owner-sent message is attributed to the owner', () => {
-  const row = messageToRow({ ...base, ZISFROMME: 1 }, { selfName: 'Austin' });
-  assert.equal(row.speaker, 'Austin');
+  const row = messageToRow({ ...base, ZISFROMME: 1 }, { selfName: 'Example Owner' });
+  assert.equal(row.speaker, 'Example Owner');
   assert.equal(row.meta.is_from_me, true);
 });
 
 test('a group message resolves the specific member as speaker', () => {
   const row = messageToRow(
     { ...base, chat_jid: '12036@g.us', ZGROUPMEMBER: 9 },
-    { groupMember: { jid: '18085550999@s.whatsapp.net', name: 'Rishab' } }
+    { groupMember: { jid: '18085550999@s.whatsapp.net', name: 'Casey' } }
   );
   assert.equal(row.meta.is_group, true);
-  assert.equal(row.speaker, 'Rishab');
+  assert.equal(row.speaker, 'Casey');
   assert.equal(row.meta.sender_handle, '+18085550999');
 });
 
@@ -86,18 +86,18 @@ test('a message with no stanza id falls back to the primary key', () => {
 });
 
 test('messagesToRows counts skips and resolves members through memberFor', () => {
-  const members = { 9: { jid: '18085550999@s.whatsapp.net', name: 'Rishab' } };
+  const members = { 9: { jid: '18085550999@s.whatsapp.net', name: 'Casey' } };
   const out = messagesToRows(
     [
       base,
       { ...base, Z_PK: 2, ZSTANZAID: 'S2', ZTEXT: null }, // a media row, no text
       { ...base, Z_PK: 3, ZSTANZAID: 'S3', chat_jid: '12036@g.us', ZGROUPMEMBER: 9 },
     ],
-    { selfName: 'Austin', memberFor: (pk) => members[pk] ?? null }
+    { selfName: 'Example Owner', memberFor: (pk) => members[pk] ?? null }
   );
   assert.equal(out.rows.length, 2);
   assert.equal(out.skipped, 1, 'the media row is skipped');
-  assert.equal(out.rows[1].speaker, 'Rishab');
+  assert.equal(out.rows[1].speaker, 'Casey');
 });
 
 // --- the epoch unit, which was only ever asserted in a document -------------

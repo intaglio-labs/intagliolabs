@@ -1,9 +1,9 @@
 // The topic scan, kept on disk between runs.
 //
-// WHY. The scan reads every message in the corpus -- 425,000 rows, ~3.9s -- and
+// WHY. The scan reads every message in the corpus and can take seconds, but
 // it is a pure function of them (the person key and the name filter both moved
 // to the fold, see topics.mjs). A pure function of data that did not change has
-// a cached answer, and the answer is 6.5MB, which loads in 58ms. That is the
+// a cached answer, which loads much faster. That is the
 // difference between a cold start that says "loading" on every screen and one
 // that has the chips before the window paints.
 //

@@ -52,7 +52,7 @@ import { recallClaims, groundingLines, pendingForQuery } from './memory/retrieve
 import { episodicContext } from './memory/episodic.mjs';
 import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch } from './people/search.mjs';
-import { loadOwner } from './people/owner.mjs';
+import { loadOwner, markOwnerPerson, markPersonRole } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
 import {
   buildAvatars,
@@ -76,7 +76,7 @@ import {
   timeoutError,
   LLAMA_UNREACHABLE_STATUS,
 } from './llamaReady.mjs';
-import { loadSpine } from './people/graph.mjs';
+import { buildGraph, loadSpine } from './people/graph.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
 import { validToFor } from './memory/validity.mjs';
@@ -355,10 +355,9 @@ END;
    instruction sheet with a 39-character message stapled to it, 99.4% of every
    call spent re-reading the rules. Worse than the waste, the message arrived
    ALONE -- "ok" with no question above it, which is how a friend asking about
-   Chick-fil-A once became "the owner plans to order Chick-fil-A". Measured on
-   the live store: adjacent messages in a thread sit 0.6 min apart at the median
-   and 336 min apart at p90, so a 60-minute gap cuts conversations where they
-   actually end, and 3,485 owner rows collapse into 756 episodes. */
+   Chick-fil-A once became "the owner plans to order Chick-fil-A". A private
+   development corpus showed a sharply bimodal gap distribution, so a 60-minute
+   gap cuts conversations where they actually end. */
 CREATE TABLE IF NOT EXISTS episode(
   id               INTEGER PRIMARY KEY,
   source           TEXT NOT NULL,
@@ -662,17 +661,17 @@ WHERE r.scope = 'day'
 //   5  the entity uniqueness key becomes (source, entity_id) -- ids are only
 //      unique within a source; the incident is recorded on the v5 branch.
 //   9  claim.valid_to: a plan or commitment can finally say which day it was
-//      about. 95 of 156 claims on the live store were intentions and 92 of
-//      those were over 30 days old, ageing exactly like a standing fact.
+//      about. A private corpus showed that many old intentions were otherwise
+//      ageing exactly like standing facts.
 //   8  episode + episode_member, and distill_run.episode_context recording
 //      which arm produced a run. The episode is a derived grouping of context
 //      rows; the arm column is what makes turning received-message context on
 //      revertible by one index scan instead of an argument.
 //   7  distill_run.through_id: the distiller's cursor becomes (store_changed_at,
 //      id). It was store_changed_at alone, described as strictly monotonic and
-//      measurably not -- 18,775 rows over 149 distinct values -- so a capped
-//      pass advanced past the rest of its tie group and 1,410 eligible rows,
-//      49% of what the watermark had covered, were never read.
+//      measurably not -- connector batches share timestamps -- so a capped
+//      pass advanced past the rest of its tie group and eligible rows were
+//      never read.
 //   6  context_source_ts(source, ts, entity_id): per-source time-range reads
 //      (reconciliation slices, retain sweeps, the episodic shelf, the digest
 //      aggregate, the watchdog's max(ts)) all scanned without it.
@@ -750,8 +749,8 @@ function migrate(db) {
       db.exec('ALTER TABLE context ADD COLUMN store_changed_at INTEGER');
     }
     // BACKFILL WITH THE MIGRATION INSTANT, NOT `ts`. This is the whole reason
-    // the column exists: `ts` is event time and 46 rows in the live corpus
-    // (45 calendar, 1 notion) carry FUTURE timestamps, up to ~2026-10-13. A
+    // the column exists: `ts` is event time and future-dated calendar rows are
+    // valid. A
     // cursor seeded from those would sit weeks ahead of the present and skip
     // every real write until the calendar caught up with it.
     db.prepare('UPDATE context SET store_changed_at = ? WHERE store_changed_at IS NULL').run(
@@ -815,12 +814,10 @@ function migrate(db) {
     // delete another source's rows". The guard was on the harmless side and
     // absent from the destructive one. This aligns them.
     //
-    // Safe to build: measured on the live corpus 2026-08-22, ZERO entity_ids
-    // are shared across sources (284,212 imessage / 18,364 mail / 18,000
-    // photos / 12,023 linkedin / 3,828 files / 3,384 whatsapp keyed rows), so
-    // the narrower index has nothing to reject. Verified before writing this
-    // rather than assumed — a UNIQUE index that cannot be built fails the open
-    // of the database it was meant to upgrade.
+    // Safe to build: a private development corpus was checked for shared
+    // entity_ids across sources and had none, so the narrower index had
+    // nothing to reject. Verify this rather than assuming it — a UNIQUE index
+    // that cannot be built fails the open of the database it should upgrade.
     db.exec('DROP INDEX IF EXISTS context_entity');
     db.exec(
       'CREATE UNIQUE INDEX IF NOT EXISTS context_entity ON context(source, entity_id) ' +
@@ -1368,8 +1365,8 @@ export const KNOWN_SOURCES = Object.freeze([
   'seed',
 ]);
 
-// `files` and `notion` were missing until 2026-08-20 while both already had
-// rows in the live corpus -- so admin retain/purge/delete-entities for them
+// `files` and `notion` were once missing while both already had corpus rows --
+// so admin retain/purge/delete-entities for them
 // 400'd, and the only way to remove either source's data was a path that did
 // not exist. A closed set that omits a real source is not a safety property,
 // it is an outage.
@@ -2174,10 +2171,9 @@ async function handleAdmin(db, req, res, cors, url, channel) {
     // against it — and the corpus runs journal_mode=DELETE, where a writer takes
     // a lock that excludes every reader for the length of the rebuild — so it
     // broke the sole-writer rule that connectors/AGENTS.md and ui/AGENTS.md both
-    // state, and could stall hermes for the full 5s busy_timeout. The widget also
-    // waited on it synchronously on the main run loop, so the UI froze for the
-    // duration: ~110ms when that comment was written at 12,782 rows, 1,414ms at
-    // 113,371, and growing with every history slice.
+    // state, and could stall hermes for the busy timeout. The widget also waited
+    // on it synchronously on the main run loop, so the UI froze for a duration
+    // that grows with every history slice.
     //
     // Here it is just a function call on the handle that already owns the write
     // lock, so there is no contention to lose to and nothing to wait on.
@@ -2188,9 +2184,8 @@ async function handleAdmin(db, req, res, cors, url, channel) {
       assertClosedFields(body, EPISODE_REBUILD_FIELDS);
       // NOTHING NEW MEANS NOTHING TO REBUILD.
       //
-      // The distiller POSTs this before every pass, and a pass runs every 45
-      // seconds while it is catching up -- so on a 36,975-episode corpus this
-      // was deleting and reinserting all of them, twice a minute, to arrive at
+      // The distiller POSTs this frequently while catching up, so on a mature
+      // corpus this was deleting and reinserting every episode repeatedly to arrive at
       // byte-identical rows. hermes is single-threaded, so that is not just
       // wasted CPU: every route is frozen for the duration of each one.
       //
@@ -2338,7 +2333,7 @@ function hasJsonMediaType(req) {
 //            point: there is no way to hand browser JavaScript a 0600 file, and
 //            inlining one through EXPO_PUBLIC_* would ship it in the bundle.
 //   bearer   NO Origin header, plus a valid token from the 0600 file. This is
-//            the CLI channel: seed-context, curl, Rishab's ingestion pipeline.
+//            the CLI channel: seed-context, curl, or the ingestion pipeline.
 //
 // What this replaced: `!origin || allowedOrigins.has(origin)`, which trusted
 // every Origin-less caller -- and every non-browser local process sends none.
@@ -2665,8 +2660,8 @@ function warmPeopleCore(db) {
 //
 // state.db is the connectors' database and it runs journal_mode=DELETE, on
 // purpose -- contact names must not survive legibly in a -wal sidecar. So a
-// writer excludes readers, and the contacts connector upserts ~2,000 rows into
-// it about once a minute. With SQLite's default busy timeout of ZERO, a read
+// writer excludes readers, and the contacts connector upserts batches into it.
+// With SQLite's default busy timeout of ZERO, a read
 // landing inside that window fails instantly.
 //
 // That failure used to be swallowed into an empty contacts spine, and an empty
@@ -2674,8 +2669,8 @@ function warmPeopleCore(db) {
 // only through the address book loses their name and reverts to a raw handle,
 // and worse, two handles belonging to one person stop merging, so they split
 // into two people with the messages divided between them. Then yearCore
-// memoised it. Observed exactly that way: 11,716 messages became 8,148 plus a
-// second "person" holding the other 3,568.
+// memoised it. Private testing observed one person's messages split across two
+// records exactly this way.
 function openStateReadOnly(statePath) {
   const db = new DatabaseSync(`file:${statePath}?mode=ro`, { readOnly: true });
   db.exec('PRAGMA busy_timeout = 5000');
@@ -2992,7 +2987,7 @@ function handle(db, req, res, cors, url, policy) {
   // map and WRITE the owner's merge decisions, neither of which is a browser
   // capability. The Origin channel is authenticated but not entitled here, so
   // 403 (not 401), matching handleAdmin's reasoning.
-  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary' || url.pathname === '/people/avatars') {
+  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/self' || url.pathname === '/people/role' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary' || url.pathname === '/people/avatars') {
     if (channel !== 'bearer') {
       send(res, 403, { error: 'people routes are bearer-only: call with the token from ~/.hazlie/secrets/hermes-token.txt and no Origin header.' }, cors);
       return;
@@ -3008,6 +3003,8 @@ function handle(db, req, res, cors, url, policy) {
 // silently build the all-time map.
 const PEOPLE_INIT_FIELDS = Object.freeze(['days']);
 const PEOPLE_DECIDE_FIELDS = Object.freeze(['verdict', 'a', 'b']);
+const PEOPLE_SELF_FIELDS = Object.freeze(['key']);
+const PEOPLE_ROLE_FIELDS = Object.freeze(['key', 'role', 'year']);
 const PEOPLE_SUMMARY_FIELDS = Object.freeze(['key', 'year']);
 
 // Phase 1 routes. init and review both build the people map and return the
@@ -3049,6 +3046,53 @@ async function handlePeople(db, req, res, cors, url, policy) {
     return;
   }
 
+  // An owner can correct the graph when one of their own aliases has appeared
+  // as a relationship. Find the key in the local graph before writing it, so a
+  // page cannot stuff arbitrary values into the connector config. The correction
+  // records the stable key and any address-shaped identifiers, then rebuilds the
+  // cached core before the UI's next read.
+  if (req.method === 'POST' && url.pathname === '/people/self') {
+    if (!hasJsonMediaType(req)) { send(res, 415, { error: 'content-type must be application/json' }, cors); return; }
+    const body = await readJson(req);
+    assertClosedFields(body, PEOPLE_SELF_FIELDS);
+    if (typeof body?.key !== 'string' || body.key.length === 0 || body.key.length > 300) {
+      throw badRequest('"key" must be a person key');
+    }
+    const marked = withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      const person = buildGraph(db, state, { owner, aliases }).find((candidate) => candidate.key === body.key);
+      if (!person) throw badRequest('"key" is not a current person');
+      return markOwnerPerson({ key: person.key, identifiers: person.identifiers });
+    });
+    rebuildPeopleCore(db);
+    send(res, 200, { state: 'ok', ...marked }, cors);
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/people/role') {
+    if (!hasJsonMediaType(req)) { send(res, 415, { error: 'content-type must be application/json' }, cors); return; }
+    const body = await readJson(req);
+    assertClosedFields(body, PEOPLE_ROLE_FIELDS);
+    if (typeof body?.key !== 'string' || body.key.length === 0 || body.key.length > 300) {
+      throw badRequest('"key" must be a person key');
+    }
+    if (!['friend', 'business', 'romantic', 'family'].includes(body?.role)) {
+      throw badRequest('"role" must be friend, business, romantic, or family');
+    }
+    if (body?.year !== undefined && (!Number.isInteger(body.year) || body.year < 1900 || body.year > 3000)) {
+      throw badRequest('"year" must be an integer from 1900 through 3000');
+    }
+    const marked = withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      const person = buildGraph(db, state, { owner, aliases }).find((candidate) => candidate.key === body.key);
+      if (!person) throw badRequest('"key" is not a current person');
+      return markPersonRole({ key: person.key, role: body.role, year: body.year ?? null });
+    });
+    rebuildPeopleCore(db);
+    send(res, 200, { state: 'ok', ...marked }, cors);
+    return;
+  }
+
   // The constellation: every person as a star, clustered and lit. Folds in the
   // owner's confirmed merges (aliases) so a merged person is one star.
   if (req.method === 'GET' && url.pathname === '/people/map') {
@@ -3058,7 +3102,7 @@ async function handlePeople(db, req, res, cors, url, policy) {
       const { aliases } = resolutionState(resDb);
       if (url.searchParams.get('rebuild') === '1') rebuildPeopleCore(db);
       const map = buildMap(db, state, { owner, sinceTs, aliases });
-      return { ...map, freshness: peopleCoreFreshness(db, state, aliases) };
+      return { ...map, freshness: peopleCoreFreshness(db, state, aliases, owner) };
     });
     // PROJECTED, NOT JUST STRIPPED.
     //
@@ -3087,6 +3131,7 @@ async function handlePeople(db, req, res, cors, url, policy) {
         messages: star.messages,
         roomMessages: star.roomMessages,
         roomOnly: star.roomOnly,
+        role: star.role,
         presenceDays: star.presenceDays,
         lastSeen: star.lastSeen,
         years: star.years,
@@ -3137,11 +3182,15 @@ async function handlePeople(db, req, res, cors, url, policy) {
     const out = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
       if (url.searchParams.get('rebuild') === '1') rebuildPeopleCore(db);
-      const year_ = buildYear(db, state, { year, owner, aliases });
+      // The ordinary page is capped for fast paint. A relationship-label
+      // navigation explicitly asks for every matching person in this year, so
+      // its bridge request upgrades the year payload to the full ranked set.
+      const all = url.searchParams.get('all') === '1';
+      const year_ = buildYear(db, state, { year, owner, aliases, cap: all ? Infinity : 250 });
       // HOW OLD IS THIS ANSWER. The core serves stale and rebuilds behind the
       // response, which is what makes the page instant -- but an answer that is
       // one ingest behind must say so rather than pass as live.
-      return { ...year_, freshness: peopleCoreFreshness(db, state, aliases) };
+      return { ...year_, freshness: peopleCoreFreshness(db, state, aliases, owner) };
     });
     send(res, 200, out, cors);
     return;

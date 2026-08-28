@@ -1,6 +1,7 @@
-// THE YEAR'S HIGHLIGHT CARDS: the five claims the timeline can make about a
-// year without a model — a favorite, a reconnection, someone new, someone
-// drifting, and a streak.
+// THE YEAR'S HIGHLIGHT CARDS: the four claims the timeline can make about a
+// year without a model — a favorite, someone new, a reconnection, and someone
+// drifting. Streak remains a supporting measurement inside Favorites and
+// Reconnected; it is no longer its own competing category.
 //
 // Same rule as the rest of ui/server/people: CODE decides, no model. Every
 // line these produce is arithmetic over the month-bucketed timeline
@@ -10,8 +11,8 @@
 //
 // 1. A card that cannot be earned is not shown. Each builder returns null
 //    rather than a softened claim, and the page renders only what comes back
-//    (owner, 2026-08-25). The design mock shows five cards; a real year often
-//    supports two. Five cards where the data supports two is how a measurement
+//    (owner, 2026-08-25). The design mock shows four cards; a real year often
+//    supports two. Four cards where the data supports two is how a measurement
 //    surface turns into decoration.
 //
 // 2. The line says what was actually measured. "More than your next three
@@ -36,19 +37,14 @@ const RISING_MIN_ACTIVE = 3;
 const DRIFT_MIN_ACTIVE_MONTHS = 3;
 const DRIFT_MIN_SILENT_MONTHS = 2;
 
-// A streak is only remarkable once it has survived a year of life happening.
-const STREAK_MIN_MONTHS = 12;
+// Two consecutive direct-contact days are the smallest honest "streak". A
+// one-day exchange is activity, not a run.
+const STREAK_MIN_DAYS = 2;
 
 const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june',
   'july', 'august', 'september', 'october', 'november', 'december'];
 
 const monthName = (m) => MONTHS[m - 1] ?? String(m);
-
-// 'YYYY-MM' -> a single comparable integer, so "consecutive" is just "+1" and
-// December-to-January needs no special case.
-function monthIndex(ym) {
-  return Number(ym.slice(0, 4)) * 12 + (Number(ym.slice(5, 7)) - 1);
-}
 
 // ACTIVE IN WHICH SENSE? The two questions this file asks are different and the
 // answer is not the same, so the caller says which it means.
@@ -101,60 +97,69 @@ function priorYears(timeline, year) {
   return [...set].sort((a, b) => a - b);
 }
 
-// The longest run of consecutive active months anywhere in the timeline.
-function longestStreak(timeline) {
-  const idx = [...new Set((timeline ?? []).filter(isActive).map((b) => monthIndex(b.ym)))]
+// The longest direct-contact run within ONE year. `activeDays` comes directly
+// from graph.mjs's timestamped rows; month buckets are intentionally too coarse
+// for a claim measured in days.
+function longestDayStreak(activeDays, year) {
+  const prefix = `${year}-`;
+  const idx = [...new Set((activeDays ?? [])
+    .filter((day) => typeof day === 'string' && day.startsWith(prefix))
+    .map((day) => Math.floor(Date.parse(`${day}T00:00:00Z`) / 86_400_000)))]
+    .filter(Number.isFinite)
     .sort((a, b) => a - b);
-  let best = { len: 0, start: null, end: null };
+  let best = { len: 0, start: null, end: null, days: idx.length };
   let runStart = null;
   for (let i = 0; i < idx.length; i += 1) {
     if (i === 0 || idx[i] !== idx[i - 1] + 1) runStart = idx[i];
     const len = idx[i] - runStart + 1;
-    if (len > best.len) best = { len, start: runStart, end: idx[i] };
+    if (len > best.len) best = { len, start: runStart, end: idx[i], days: idx.length };
   }
   return best;
 }
 
-const fromIndex = (i) => ({ year: Math.floor(i / 12), month: (i % 12) + 1 });
-
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const messageCount = (n) => {
+  const count = Number(n) || 0;
+  return `${count.toLocaleString('en-US')} message${count === 1 ? '' : 's'}`;
+};
 
-// ---- the five cards ----------------------------------------------------
+// ---- the four cards ----------------------------------------------------
 
 // The most engaged person of the year. The only card that is a plain maximum,
 // so it is the only one that is nearly always available.
 //
-// EACH OF THESE NOW RANKS RATHER THAN PICKS. The card still names one person —
-// nothing about it changed — but the list itself marks everybody in a
-// category's top five, so the ranking a builder was already computing in order
-// to find its winner is returned instead of thrown away. One scan, two
-// answers; the alternative was a second pass with the same predicates in it,
-// which is two places to keep one definition of "drifting".
+// EACH OF THESE NOW RANKS RATHER THAN PICKS. The card shows the ranking's top
+// three and the list marks everybody in the category's top ten, so the ranking
+// a builder was already computing is returned instead of thrown away. One
+// scan, two answers; the alternative was a second pass with the same predicates
+// in it, which is two places to keep one definition of "drifting".
 function favorites(entries) {
   return [...entries]
     .filter((e) => (e.engagement ?? 0) > 0)
     .sort((a, b) => (b.engagement ?? 0) - (a.engagement ?? 0));
 }
 
-function favoriteCard(ranked) {
+function favoriteLine(entry, year) {
+  const messages = entry.messages ?? 0;
+  const streak = longestDayStreak(entry.p?.activeDays, year).len;
+  const activity = messageCount(messages);
+  return streak >= STREAK_MIN_DAYS ? `${activity}, ${streak} day streak` : activity;
+}
+
+function favoriteCard(ranked, year) {
   const top = ranked[0];
   if (!top) return null;
-  const messages = top.messages ?? 0;
-  const meetings = top.met ?? 0;
-  const activity = meetings > 0
-    ? `${messages.toLocaleString('en-US')} messages · ${plural(meetings, 'meeting')}`
-    : `${messages.toLocaleString('en-US')} messages`;
   return {
     kind: 'person-of-the-year',
-    // ~~"most engaged".~~ Renamed to "favorite" (owner, 2026-08-26). The card
+    // ~~"most engaged".~~ Renamed to "favorites" (owner, 2026-08-27). The card
     // still measures exactly what it measured — the year's maximum engagement,
     // see `line` — but "most engaged" described the arithmetic to the reader
     // instead of telling them what it means. The KIND is unchanged: it is the
     // key the page draws an icon from and the name the tests know it by.
-    label: 'favorite',
+    label: 'favorites',
     key: top.p.key,
     name: top.p.name,
-    line: `${activity} — most engagement this year`,
+    line: favoriteLine(top, year),
   };
 }
 
@@ -172,9 +177,27 @@ function reconnections(entries, year) {
     if (!prior.length) continue; // never here before: new, not returned
     const lastPrior = prior[prior.length - 1];
     if (year - lastPrior < RETURN_GAP_YEARS) continue;
-    out.push({ e, lastPrior });
+    // The message count gets a returner through the eligibility gate, but the
+    // card's line should show whether that return became a real renewed rhythm
+    // rather than repeating raw volume. `activeDays` is direct correspondence
+    // only, so a "day streak" is an honest claim about the two people.
+    out.push({
+      e,
+      lastPrior,
+      streak: longestDayStreak(e.p.activeDays, year),
+      activeMonths: activeMonths(e.p.timeline, year, { withRoom: true }).length,
+    });
   }
   return out.sort((a, b) => b.e.messages - a.e.messages);
+}
+
+function reconnectedLine(candidate) {
+  const pickup = candidate.streak.len >= STREAK_MIN_DAYS
+    ? `${candidate.streak.len}-day streak`
+    : candidate.streak.days > 0
+      ? plural(candidate.streak.days, 'active day')
+      : plural(candidate.activeMonths, 'active month');
+  return `quiet since ${candidate.lastPrior} — then ${pickup}`;
 }
 
 function reconnectedCard(ranked) {
@@ -183,12 +206,12 @@ function reconnectedCard(ranked) {
   return {
     kind: 'back-from-your-past',
     // ~~"reconnected after a gap".~~ Shortened (owner, 2026-08-26): the gap is
-    // already spelled out underneath, in "quiet since YEAR — then N messages",
-    // so the label was repeating the line below it.
+    // already spelled out underneath. The second half is the renewed cadence,
+    // not a raw message total: it makes the return visible at a human scale.
     label: 'reconnected',
     key: best.e.p.key,
     name: best.e.p.name,
-    line: `quiet since ${best.lastPrior} — then ${best.e.messages.toLocaleString('en-US')} messages`,
+    line: reconnectedLine(best),
   };
 }
 
@@ -210,20 +233,19 @@ function risingStars(entries, year, now) {
   return out.sort((a, b) => b.score - a.score || b.e.messages - a.e.messages);
 }
 
+function newLine(candidate) {
+  return `met in ${monthName(candidate.first)}, ${messageCount(candidate.e.messages)} since`;
+}
+
 function newCard(ranked) {
   const best = ranked[0];
   if (!best) return null;
-  const every = best.active === best.since;
   return {
     kind: 'rising-star',
-    // ~~"new this year".~~ "new" (owner, 2026-08-26): the card only ever
-    // describes this year, and the line underneath names the month.
-    label: 'new',
+    label: 'new here',
     key: best.e.p.key,
     name: best.e.p.name,
-    line: every
-      ? `met in ${monthName(best.first)} — every month since`
-      : `met in ${monthName(best.first)} — ${best.active} of the ${plural(best.since, 'month')} since`,
+    line: newLine(best),
   };
 }
 
@@ -242,21 +264,19 @@ function drifters(entries, year, now) {
     const lastActive = months[months.length - 1];
     const silent = lastMonth - lastActive;
     if (silent < DRIFT_MIN_SILENT_MONTHS) continue;
-    // "EVERY MONTH TO X" HAS TO BE TRUE. Nothing checked that the active months
-    // were contiguous, so a person seen in January and June read as "every month
-    // to june". The card either says the true thing or says a different one.
-    const contiguous = months.length === lastActive - months[0] + 1;
-    out.push({ e, lastActive, silent, contiguous, months });
+    out.push({ e, silent, months });
   }
   return out.sort((a, b) => b.e.engagement - a.e.engagement);
+}
+
+function driftingStat(candidate, { includeLabel = false } = {}) {
+  const quiet = `quiet for ${plural(candidate.silent, 'month')}`;
+  return includeLabel ? `drifting… ${quiet}` : quiet;
 }
 
 function driftingCard(ranked) {
   const best = ranked[0];
   if (!best) return null;
-  const lead = best.contiguous
-    ? `every month to ${monthName(best.lastActive)}`
-    : `${plural(best.months.length, 'month')} up to ${monthName(best.lastActive)}`;
   return {
     kind: 'drifting',
     // ~~"no recent contact".~~ "drifting" (owner, 2026-08-26), which is the
@@ -265,45 +285,28 @@ function driftingCard(ranked) {
     label: 'drifting',
     key: best.e.p.key,
     name: best.e.p.name,
-    line: `${lead} — quiet for ${plural(best.silent, 'month')} since`,
+    line: driftingStat(best),
   };
 }
 
-// The longest unbroken run, as long as it is still running in this year.
-function streaks(entries, year) {
-  const out = [];
-  for (const e of entries) {
-    const s = longestStreak(e.p.timeline);
-    if (s.len < STREAK_MIN_MONTHS) continue;
-    // It has to touch THIS year, or it is a fact about some other year that
-    // happens to involve someone in this list.
-    if (Math.floor(s.end / 12) < year) continue;
-    out.push({ e, s });
-  }
-  return out.sort((a, b) => b.s.len - a.s.len);
+// The podium needs the same person-specific sentence the old one-winner card
+// printed underneath its name. Keep those sentences on the server beside the
+// ranking math: deriving them from the capped display rows would omit a quiet
+// drifter or returner who legitimately ranks outside the ordinary page.
+function cardPerson(kind, candidate, year) {
+  const entry = candidate.e ?? candidate;
+  let line = '';
+  if (kind === 'person-of-the-year') line = favoriteLine(entry, year);
+  else if (kind === 'back-from-your-past') line = reconnectedLine(candidate);
+  else if (kind === 'rising-star') line = newLine(candidate);
+  else if (kind === 'drifting') line = driftingStat(candidate);
+  return { key: entry.p.key, name: entry.p.name, line };
 }
 
-function streakCard(ranked) {
-  const best = ranked[0];
-  if (!best) return null;
-  const from = fromIndex(best.s.start);
-  return {
-    kind: 'streak',
-    // ~~"longest monthly streak".~~ "streak" (owner, 2026-08-26). The line
-    // below carries the length and the month it started, so the label was
-    // spending three words on what the sentence already said.
-    label: 'streak',
-    key: best.e.p.key,
-    name: best.e.p.name,
-    line: `${plural(best.s.len, 'month')} unbroken since ${monthName(from.month)} ${from.year}`,
-  };
-}
-
-// How many people carry a category's mark in the list. Five, because the cards
-// name one and a list where a third of the rows wear a trophy has stopped
-// distinguishing anybody. Fewer qualify than that on a thin year, and the mark
-// is simply rarer; the list never pads.
-const TOP_N = 5;
+// How many people carry a category's mark in the list. Every one of the four
+// labels gets its own top ten; fewer qualify on a thin year and the list never
+// pads or invents recipients.
+const TOP_N = 10;
 
 /// Both answers from one scan: the cards, and who the list should mark.
 ///
@@ -314,7 +317,7 @@ const TOP_N = 5;
 /// Returns { cards, awards }. `cards` is what it always was: every card the
 /// year can actually earn, in the mock's order, nulls dropped. `awards` is one
 /// entry per category that HAS anybody, carrying its label and the keys of its
-/// top five in rank order — the page joins it to the rows by key.
+/// top ten in rank order — the page joins it to the rows by key.
 ///
 /// The label lives here and travels with the keys on purpose. It is the same
 /// string the card shows, and a copy of it in the page is a second place to
@@ -323,12 +326,19 @@ export function buildYearAwards(entries, { year, now = Date.now() } = {}) {
   if (!Array.isArray(entries) || !entries.length) return { cards: [], awards: [] };
   const ranked = [
     { kind: 'person-of-the-year', list: favorites(entries), card: favoriteCard },
-    { kind: 'back-from-your-past', list: reconnections(entries, year), card: reconnectedCard },
     { kind: 'rising-star', list: risingStars(entries, year, now), card: newCard },
+    { kind: 'back-from-your-past', list: reconnections(entries, year), card: reconnectedCard },
     { kind: 'drifting', list: drifters(entries, year, now), card: driftingCard },
-    { kind: 'streak', list: streaks(entries, year), card: streakCard },
   ];
-  const cards = ranked.map((r) => r.card(r.list)).filter(Boolean);
+  const cards = ranked.map((r) => {
+    const card = r.card(r.list, year, now);
+    if (!card) return null;
+    return {
+      ...card,
+      people: r.list.slice(0, 3).map((candidate) => cardPerson(r.kind, candidate, year)),
+      count: Math.min(TOP_N, r.list.length),
+    };
+  }).filter(Boolean);
   // Keyed off the CARD, not the list: a category whose winner could not be
   // written has no label to mark anybody with, and marking rows for a claim the
   // page never made is how a badge becomes unexplainable.
@@ -339,6 +349,24 @@ export function buildYearAwards(entries, { year, now = Date.now() } = {}) {
       kind: r.kind,
       label: byKind.get(r.kind),
       keys: r.list.slice(0, TOP_N).map((c) => (c.e ? c.e.p.key : c.p.key)),
+      // Row marks are not generic category labels. The number is computed on
+      // the same per-year entry that earned the mark, so "favorite" tells the
+      // reader exactly how many direct messages passed between them that year,
+      // plus its supporting calendar-day run when one exists.
+      detailByKey: Object.fromEntries(r.list.slice(0, TOP_N).map((c) => {
+        const entry = c.e ?? c;
+        const key = entry.p.key;
+        if (r.kind === 'person-of-the-year') {
+          return [key, favoriteLine(entry, year)];
+        }
+        if (r.kind === 'rising-star') {
+          return [key, `new here · met in ${monthName(c.first)}, ${messageCount(entry.messages)} since`];
+        }
+        if (r.kind === 'drifting') {
+          return [key, driftingStat(c, { includeLabel: true })];
+        }
+        return [key, byKind.get(r.kind)];
+      })),
     }));
   return { cards, awards };
 }

@@ -660,7 +660,7 @@ document.getElementById('dataCheck').addEventListener('click', async () => {
     //
     // Rows arrive in seconds; they are answerable only once the local model has
     // read them into claims, which takes a while and used to happen nowhere at
-    // all. "found 18,440 things" followed by an app that answers nothing is the
+    // all. "found many things" followed by an app that answers nothing is the
     // most confusing thing this flow could say, so it says both numbers.
     const st2 = await hzPost('setupState', { rows: true }).catch(() => null);
     const mem = (st2 && st2.memory) || null;

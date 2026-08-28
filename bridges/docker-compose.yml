@@ -28,7 +28,8 @@ name: hazlie-bridges
 
 services:
   synapse:
-    image: ghcr.io/element-hq/synapse:v1.140.0
+    # v1.140.0, pinned to the manifest published and locally exercised for 0.2.
+    image: ghcr.io/element-hq/synapse@sha256:2af5409da4e155123ef1f8ab30914fb14ba36b8b909197073498db733298fcd7
     container_name: hazlie-synapse
     restart: unless-stopped
     # 127.0.0.1 ONLY — the homeserver is reachable from this Mac (Element to log
@@ -54,7 +55,8 @@ services:
       - bus
 
   mautrix-meta:
-    image: dock.mau.dev/mautrix/meta:v26.08
+    # v26.08, immutable multi-architecture manifest.
+    image: dock.mau.dev/mautrix/meta@sha256:662f3d52249304c44c91cbc3d3552eced3e5baf93916be7c6b17a47677036de8
     container_name: hazlie-meta
     restart: unless-stopped
     depends_on:
@@ -65,7 +67,8 @@ services:
       - bus
 
   mautrix-instagram:
-    image: dock.mau.dev/mautrix/meta:ig-v26.08
+    # ig-v26.08, immutable multi-architecture manifest.
+    image: dock.mau.dev/mautrix/meta@sha256:4b2704de94809351884da2640b1b1421920980a60269aa871fa870a8d50e7eb0
     container_name: hazlie-instagram
     restart: unless-stopped
     depends_on:
@@ -77,7 +80,7 @@ services:
 
   # X / Twitter DMs. Its own repo (mautrix/twitter), same megabridge family
   # and the same posture as the Meta pair: no host port, cookie login driven
-  # from the connect page, owner-gated (Austin said go, 2026-08-22 — this was
+  # from the connect page, owner-gated (owner decision, 2026-08-22 — this was
   # the "accept the account risk" item in SOCIAL-BRIDGES-PLAN.md).
   mautrix-twitter:
     # Pinned BY DIGEST to a 2026-08-25 dev build, not to :latest — the header
@@ -121,7 +124,8 @@ services:
   # ~/.hazlie/matrix/telegram/config.yaml before its login works — the
   # container runs without it, the login just can't start until it's set.
   mautrix-telegram:
-    image: dock.mau.dev/mautrix/telegram:latest
+    # Locally exercised 0.2 image, pinned before the mutable latest tag moved.
+    image: dock.mau.dev/mautrix/telegram@sha256:c073961f95aafca58392affcb57ea74364a2d17f018a36d29a208828db8a11e8
     container_name: hazlie-telegram
     restart: unless-stopped
     depends_on:
@@ -132,7 +136,8 @@ services:
       - bus
 
   mautrix-discord:
-    image: dock.mau.dev/mautrix/discord:latest
+    # Locally exercised 0.2 image, immutable multi-architecture manifest.
+    image: dock.mau.dev/mautrix/discord@sha256:065405ca2f961b2687ca577c4eb65592c139d641342a9611d98b5394f30cf84a
     container_name: hazlie-discord
     restart: unless-stopped
     depends_on:
@@ -149,7 +154,8 @@ services:
   # under the SAME `linkedin` source the export used, so every people-graph
   # join that already reads LinkedIn keeps working unchanged.
   mautrix-linkedin:
-    image: dock.mau.dev/mautrix/linkedin:latest
+    # Locally exercised 0.2 image, immutable multi-architecture manifest.
+    image: dock.mau.dev/mautrix/linkedin@sha256:0bf683337f3a2e27f01b057f0ff83b8ec488676da400c944773dbbd936c15778
     container_name: hazlie-linkedin
     restart: unless-stopped
     depends_on:
@@ -160,7 +166,8 @@ services:
       - bus
 
   mautrix-slack:
-    image: dock.mau.dev/mautrix/slack:latest
+    # Locally cached 0.2 image, pinned before the mutable latest tag moved.
+    image: dock.mau.dev/mautrix/slack@sha256:77610eaaaa368829bcc3b78b8c79bb981832803a903991a48c6b9d2d70ff243d
     container_name: hazlie-slack
     restart: unless-stopped
     depends_on:

@@ -10,7 +10,7 @@ import { detectIntro } from '../server/people/search.mjs';
 
 const NOW = new Date(2027, 0, 1).getTime();
 const DAY = 86_400_000;
-const owner = { addresses: new Set(['ay@austinyoshino.com']), names: [] };
+const owner = { addresses: new Set(['owner@example.test']), names: [] };
 
 test('detectIntro pulls the target out of the phrasing', () => {
   assert.equal(detectIntro('how do i reach danny at lux'), 'danny at lux');
@@ -22,33 +22,33 @@ test('detectIntro pulls the target out of the phrasing', () => {
 test('a bridge is a warm contact who shared a room with the target', () => {
   const ctx = openDb(':memory:');
   insertRows(ctx, [
-    // An email thread with the owner, a close friend (barry), and the target VC (dana).
-    { ts: NOW - 300 * DAY, source: 'mail', entity_id: 'm:1', text: 'intro thread', meta: { from: ['ay@austinyoshino.com'], to: ['barry@friend.com', 'dana@lux.vc'], cc: [] } },
-    // Owner has a warm two-way history with barry so the intro is askable.
+    // An email thread with the owner, a close friend, and the target investor.
+    { ts: NOW - 300 * DAY, source: 'mail', entity_id: 'm:1', text: 'intro thread', meta: { from: ['owner@example.test'], to: ['friend@example.test', 'investor@fund.test'], cc: [] } },
+    // Owner has a warm two-way history with the friend so the intro is askable.
     ...Array.from({ length: 20 }, (_, i) => ({ ts: NOW - i * DAY, source: 'imessage', entity_id: `i:${i}`, text: 'hey', meta: { chat_handle: '+18085550100', is_from_me: i % 2 } })),
-    { ts: NOW - 5 * DAY, source: 'mail', entity_id: 'm:2', text: 'x', meta: { from: ['barry@friend.com'], to: ['ay@austinyoshino.com'] } },
+    { ts: NOW - 5 * DAY, source: 'mail', entity_id: 'm:2', text: 'x', meta: { from: ['friend@example.test'], to: ['owner@example.test'] } },
   ]);
   const spine = new DatabaseSync(':memory:');
   spine.exec("CREATE TABLE contact_ids (identifier TEXT PRIMARY KEY, display_name TEXT, kind TEXT, updated_ts INTEGER)");
-  spine.prepare('INSERT INTO contact_ids VALUES (?,?,?,?)').run('+18085550100', 'Barry', 'phone', NOW);
-  spine.prepare('INSERT INTO contact_ids VALUES (?,?,?,?)').run('barry@friend.com', 'Barry', 'email', NOW);
+  spine.prepare('INSERT INTO contact_ids VALUES (?,?,?,?)').run('+18085550100', 'Example Friend', 'phone', NOW);
+  spine.prepare('INSERT INTO contact_ids VALUES (?,?,?,?)').run('friend@example.test', 'Example Friend', 'email', NOW);
   const graph = buildGraph(ctx, spine, { owner, now: NOW });
-  const res = warmIntro(ctx, graph, 'dana@lux.vc', { owner });
+  const res = warmIntro(ctx, graph, 'investor@fund.test', { owner });
   assert.equal(res.found, true);
-  assert.ok(res.bridges.some((b) => b.name === 'Barry'), 'Barry bridges to Dana');
+  assert.ok(res.bridges.some((b) => b.name === 'Example Friend'), 'the friend bridges to the investor');
 });
 
 test('no shared room means an honest empty path, not a guess', () => {
   const ctx = openDb(':memory:');
   insertRows(ctx, [
-    { ts: NOW - DAY, source: 'mail', entity_id: 'm:1', text: 'x', meta: { from: ['dana@lux.vc'], to: ['ay@austinyoshino.com'] } },
+    { ts: NOW - DAY, source: 'mail', entity_id: 'm:1', text: 'x', meta: { from: ['investor@fund.test'], to: ['owner@example.test'] } },
   ]);
   const spine = new DatabaseSync(':memory:');
   spine.exec("CREATE TABLE contact_ids (identifier TEXT PRIMARY KEY, display_name TEXT, kind TEXT, updated_ts INTEGER)");
   const graph = buildGraph(ctx, spine, { owner, now: NOW });
-  const res = warmIntro(ctx, graph, 'dana@lux.vc', { owner });
+  const res = warmIntro(ctx, graph, 'investor@fund.test', { owner });
   assert.equal(res.found, true);
-  assert.equal(res.bridges.length, 0, 'nobody else was ever in a room with Dana');
+  assert.equal(res.bridges.length, 0, 'nobody else was ever in a room with the investor');
 });
 
 test('a target you already know well returns "no intro needed", not bridges', () => {

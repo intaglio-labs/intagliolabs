@@ -80,13 +80,13 @@ test('rankForNeed drops non-people and sorts by score', () => {
   const graph = [
     person({ name: 'Real Founder', linkedin: { position: 'CEO', company: 'Co' } }),
     person({ name: 'no-reply@stripe.com', linkedin: null }),
-    person({ name: 'Guest of Austin Yoshino', metInPerson: 40 }),
+    person({ name: 'Guest of Example Owner', metInPerson: 40 }),
     person({ name: 'Junior Pal', linkedin: null, dormancyDays: 5, messages: 30, reciprocity: 0.5, metInPerson: 0, channels: ['imessage'], channelCount: 1 }),
   ];
   const ranked = rankForNeed(graph, MENTOR_NEED, { limit: 10 });
   const names = ranked.map((p) => p.name);
   assert.ok(!names.includes('no-reply@stripe.com'));
-  assert.ok(!names.includes('Guest of Austin Yoshino'));
+  assert.ok(!names.includes('Guest of Example Owner'));
   assert.equal(ranked[0].name, 'Real Founder');
 });
 

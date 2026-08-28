@@ -70,7 +70,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   ]
   static let pageCapabilities: [String: Set<String>] = [
     "widget": ["drag", "openChat", "openChatWith", "openConnections",
-               "openMonths", "voiceArm", "widgetBounds"],
+               "openMonths", "voiceArm", "widgetBounds", "workStatus"],
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
@@ -104,7 +104,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // ALL-YEARS source behind the constellation — every person, uncapped, with
     // their per-year topics. monthsView: where the popup was left, so a restart
     // resumes on it rather than snapping back to this year.
-    "people-months": ["close", "peopleYear", "peopleFind", "peopleSummary",
+    "people-months": ["close", "peopleYear", "peopleFind", "peopleSummary", "peopleSelf", "peopleRole",
                       "openPeople", "monthsView", "peopleMap", "peopleAvatars"],
     "ear": ["orbState", "voiceError", "voiceTranscript"],
   ]
@@ -129,6 +129,31 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // than passed through, because this string is interpolated into JavaScript
   // on the other side — an unrecognised value must never reach it.
   static let orbFaces: Set<String> = ["idle", "notify", "listening", "talking"]
+
+  /// Interactive local-model work started from a panel. The connector, index
+  /// and model-download states already have their own truthful owners; this
+  /// small tracker covers asks and person summaries so the desktop orb does
+  /// not fall asleep while the user is waiting for a result they requested.
+  private final class WorkTracker {
+    private let lock = NSLock()
+    private var jobs: [UUID: String] = [:]
+
+    func begin(_ label: String) -> UUID {
+      let id = UUID()
+      lock.lock(); jobs[id] = label; lock.unlock()
+      return id
+    }
+
+    func finish(_ id: UUID) {
+      lock.lock(); jobs.removeValue(forKey: id); lock.unlock()
+    }
+
+    var label: String? {
+      lock.lock(); defer { lock.unlock() }
+      return jobs.values.sorted().first
+    }
+  }
+  private static let activeWork = WorkTracker()
 
   // The per-app Reduce Motion override. macOS Reduce Motion is a SYSTEM
   // accessibility setting and the widget honours it by default; this is the
@@ -889,10 +914,32 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // being installed or enabled. The page polls this small local snapshot.
       var items: [[String: Any]] = []
       if let model = ModelSetup.activity { items.append(model) }
+      items.append(contentsOf: Connectors.shared.activityItems)
       if let label = Distiller.shared.activity {
         items.append(["kind": "index", "label": label])
       }
+      // Backfill carries its estimate inside its own named item. A detached
+      // header estimate made the first queued connector look responsible for
+      // work that actually belongs to Calendar/social-message history.
       reply(webView, id, ["state": "ok", "items": items])
+
+    case "workStatus":
+      // A sleeping orb means no work is ACTUALLY underway. Scheduled queue
+      // entries intentionally do not participate here: they belong in
+      // Settings, not on the ambient desktop control.
+      if let label = Bridge.activeWork.label {
+        reply(webView, id, ["state": "working", "label": label])
+      } else if let model = ModelSetup.activity,
+                let phase = model["phase"] as? String,
+                let tier = model["tier"] as? String {
+        reply(webView, id, ["state": "working", "label": "\(phase) the \(tier) local model"])
+      } else if let label = Connectors.shared.activeWorkLabel {
+        reply(webView, id, ["state": "working", "label": label])
+      } else if let label = Distiller.shared.activity {
+        reply(webView, id, ["state": "working", "label": label])
+      } else {
+        reply(webView, id, ["state": "idle"])
+      }
 
     case "modelDownload":
       let tier = String((payload["tier"] as? String ?? "").prefix(8))
@@ -1155,14 +1202,35 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       peopleCall("POST", "people/decide", json: ["a": a, "b": b, "verdict": verdict]) { [weak self] data in
         self?.reply(webView, id, data)
       }
+    case "peopleSelf":
+      // Explicitly identify a graph card as the owner. The server verifies the
+      // key exists in the local graph before it writes the local-only config.
+      let key = String(payload["key"] as? String ?? "")
+      peopleCall("POST", "people/self", json: ["key": String(key.prefix(300))]) { [weak self] data in
+        self?.reply(webView, id, data)
+      }
+    case "peopleRole":
+      let key = String(payload["key"] as? String ?? "")
+      let role = String(payload["role"] as? String ?? "")
+      let year = (payload["year"] as? Int) ?? Int(payload["year"] as? Double ?? 0)
+      var rolePayload: [String: Any] = ["key": String(key.prefix(300)), "role": role]
+      if year > 0 { rolePayload["year"] = year }
+      peopleCall("POST", "people/role", json: rolePayload) { [weak self] data in
+        self?.reply(webView, id, data)
+      }
     case "peopleYear":
       // The timeline view: one year of people with the year's topics. Absent
       // year = server default (the current year).
       let year = (payload["year"] as? Int) ?? Int(payload["year"] as? Double ?? 0)
       // A refresh the reader asked for: the server rebuilds before answering.
       let wantsRebuild = payload["rebuild"] as? Bool == true
+      // Role-label navigation promises everybody with that label in this
+      // particular year, not only the normal quick-paint top 250.
+      let wantsAll = payload["all"] as? Bool == true
       let yBase = year > 0 ? "people/year?year=\(year)" : "people/year?"
-      let yPath = wantsRebuild ? yBase + "&rebuild=1" : yBase
+      let yPath = yBase
+        + (wantsRebuild ? "&rebuild=1" : "")
+        + (wantsAll ? "&all=1" : "")
       peopleCall("GET", yPath, json: nil) { [weak self] data in
         self?.reply(webView, id, data)
       }
@@ -1205,7 +1273,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // served by hermes from the LOCAL model only.
       let sKey = String(payload["key"] as? String ?? "")
       let sYear = (payload["year"] as? Int) ?? Int(payload["year"] as? Double ?? 0)
+      let work = Bridge.activeWork.begin("writing a relationship summary")
       peopleCall("POST", "people/summary", json: ["key": sKey, "year": sYear]) { [weak self] data in
+        Bridge.activeWork.finish(work)
         self?.reply(webView, id, data)
       }
     default:
@@ -1228,14 +1298,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// retrying them would turn a clear message into a slow one.
   private static let transientStates: Set<String> = ["down", "identity"]
   /// Sized against the thing that actually blocks: hermes is single-threaded, and
-  /// a cold /people/year is 5.7 seconds of SYNCHRONOUS work on this corpus. While
+  /// a cold /people/year can take seconds of SYNCHRONOUS work. While
   /// that runs the process cannot answer anything at all — so a second request's
   /// identity probe times out and reports "identity", meaning "not the hermes I
   /// trust", when the truth is "busy". Every panel open fires several calls, so
   /// this was not a rare race; it was the common case.
   ///
   /// The budget therefore has to outlast a cold build plus queueing, not just a
-  /// process launch (which is only 270ms). ~37s, and it costs nothing at all when
+  /// process launch. The longer retry budget costs nothing when
   /// hermes is warm because the first attempt succeeds.
   private static let retryDelays: [Double] = [0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
 
@@ -1362,7 +1432,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   ///
   /// The count alone was misleading in the way that mattered: rows arrive fast,
   /// and the app still cannot answer until those rows are DISTILLED into claims.
-  /// Reporting only "found 18,440 things" while every question abstained is what
+  /// Reporting only "found many things" while every question abstained is what
   /// produced "it has full access and knows nothing". /stats carries both numbers
   /// now; this passes the second one through untouched.
   private func rows(_ done: @escaping (Int, [String: Any]?) -> Void) {
@@ -1724,11 +1794,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   }
 
   private func ask(_ utterance: String, _ done: @escaping ([String: Any]) -> Void) {
-    guard !utterance.isEmpty else { done(["state": "error", "error": "empty"]); return }
-    guard let tok = bearerToken() else { done(["state": "auth"]); return }
+    let work = Bridge.activeWork.begin("thinking about your question")
+    let settle: ([String: Any]) -> Void = { result in
+      Bridge.activeWork.finish(work)
+      done(result)
+    }
+    guard !utterance.isEmpty else { settle(["state": "error", "error": "empty"]); return }
+    guard let tok = bearerToken() else { settle(["state": "auth"]); return }
     checkHermesIdentity { [weak self] identityOK in
-      guard let self else { return }
-      guard identityOK else { done(["state": "identity"]); return }
+      guard let self else { Bridge.activeWork.finish(work); return }
+      guard identityOK else { settle(["state": "identity"]); return }
       // Body is exactly {"utterance": ...}. The client never sends context
       // snippets — evidence selection is the vault's job, on the other side
       // of the corpus boundary.
@@ -1737,20 +1812,20 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         bearer: tok, json: ["utterance": utterance])
       let task = self.session.dataTask(with: req) { data, resp, err in
         if let e = err as NSError?, e.code == NSURLErrorCancelled {
-          done(["state": "cancelled"]); return
+          settle(["state": "cancelled"]); return
         }
         guard err == nil, let http = resp as? HTTPURLResponse else {
-          done(["state": "down"]); return
+          settle(["state": "down"]); return
         }
         switch http.statusCode {
         case 200:
           guard let d = data,
                 let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                 let text = obj["text"] as? String
-          else { done(["state": "error", "error": "unparseable answer"]); return }
-          done(["state": "ok", "text": text, "sources": obj["sources"] as? [String] ?? []])
-        case 404: done(["state": "notready"]) // /vault/ask not landed yet
-        case 401, 403: done(["state": "auth"])
+          else { settle(["state": "error", "error": "unparseable answer"]); return }
+          settle(["state": "ok", "text": text, "sources": obj["sources"] as? [String] ?? []])
+        case 404: settle(["state": "notready"]) // /vault/ask not landed yet
+        case 401, 403: settle(["state": "auth"])
         // THE MODEL IS NOT RUNNING, which is not an app bug and not permanent.
         //
         // Only a transport-level failure reached "down" before, and a refused
@@ -1765,13 +1840,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // reach -- a bad key, a model-side 500 -- and telling the owner to wait
         // for something to come back on its own hides a fault that needs them.
         // 502 falls to `default:` deliberately.
-        case 503: done(["state": "down"])
+        case 503: settle(["state": "down"])
         // REACHED, AND THEN SILENT. The ask carries a 110s ceiling, and until it
         // had a status of its own a model that accepted the connection and never
         // answered arrived as an app bug -- for the one failure where asking
         // again is the whole remedy.
-        case 504: done(["state": "slow"])
-        default: done(["state": "error", "error": "http \(http.statusCode)"])
+        case 504: settle(["state": "slow"])
+        default: settle(["state": "error", "error": "http \(http.statusCode)"])
         }
       }
       self.askTask = task

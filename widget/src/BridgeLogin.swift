@@ -224,11 +224,11 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   /// was 168px standing over the settings it was launched from.
   ///
   /// IT OPENS BEFORE IT HAS A CODE, and that is the point. Asking the bridge
-  /// for one means sending `login` and waiting on a bot in a container —
-  /// measured at 3.8s on this machine — and a tile that sits there for four
-  /// seconds after a press reads as a tile that did not register the press
+  /// for one means sending `login` and waiting on a bot in a container, which
+  /// can take several seconds. A tile that sits there after a press reads as a
+  /// tile that did not register the press
   /// (owner, 2026-08-26: "when i first tap discord icon nothing happens").
-  /// Instagram's window is up in 30ms because its policy is static; this one
+  /// Instagram's window is immediate because its policy is static; this one
   /// opens on the same press and fills in.
   ///
   /// `fetch` hands back a data: URI the connect server built from the bridge's

@@ -1,7 +1,7 @@
 // WhatsApp Desktop's ChatStorage.sqlite → hermes rows. Pure — no clock, no
 // I/O — so every branch is assertable against a synthetic store.
 //
-// Schema facts, measured on this Mac (ops/PROBES.md, probe-whatsapp):
+// Schema facts, derived by ops/probes/probe-whatsapp.mjs:
 //
 //   ZWAMESSAGE      one row per message. ZTEXT (nullable — media has none),
 //                   ZISFROMME, ZMESSAGEDATE (Apple-epoch SECONDS, like
@@ -59,8 +59,8 @@ export function isRealMessage(row) {
   // NON-EMPTY ZTEXT IS THE WHOLE TEST. ZGROUPEVENTTYPE was assumed to flag
   // group events ("<person> added <person>") and it does NOT on this WhatsApp
   // version — value 2 is the ordinary value on real messages, so keying off
-  // it dropped 3,561 of 3,563 rows on the first live run (measured, not
-  // guessed). Media rows carry no ZTEXT and a caption-less photo is not a
+  // it dropped nearly every row on a private test store. Media rows carry no
+  // ZTEXT and a caption-less photo is not a
   // claim, the same call the iMessage connector makes; a rare system line
   // that does carry text is harmless (excluded from claims anyway) and not
   // worth a fragile type table to chase.

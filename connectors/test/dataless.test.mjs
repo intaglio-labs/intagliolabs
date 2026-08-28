@@ -1,9 +1,8 @@
-// isDataless — the predicate the 45.6 GB rule rests on, which had no test.
+// isDataless — the no-surprise-download predicate, which had no test.
 //
-// connectors/AGENTS.md § "files — the dataless rule": 96,262 of the 97,718
-// files in the owner's cloud-mirror folders are dataless, and opening them
-// would pull 45.6 GB down through iCloud on a timer. Everything that prevents
-// that traces back to this one two-clause expression, and nothing exercised it.
+// connectors/AGENTS.md § "files — the dataless rule": many files in cloud
+// mirrors can be dataless, and opening them could trigger a large background
+// download. Everything preventing that traces to this two-clause expression.
 //
 // The stat objects here are fabricated on purpose. A genuinely dataless file
 // cannot be created in a test — it is an iCloud placeholder — so the honest

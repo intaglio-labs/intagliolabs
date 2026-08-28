@@ -4,7 +4,7 @@
 // (they run inference server-side and are not approved), and never Granola's
 // local cache (AES-encrypted with an entitlement-gated key; do not attempt).
 //
-// MEASURED response envelope — live probe on this machine, 2026-08-19,
+// MEASURED response envelope — authenticated development probe,
 // GET /v1/notes?page_size=1 → HTTP 200 (field names recorded from the real
 // response, not guessed from docs):
 //

@@ -18,7 +18,13 @@ import { start } from '../../ui/server/hermes.mjs';
 import { adminDeleteEntities, adminEntities, ingest } from '../lib/ingestClient.mjs';
 import { APPLE_EPOCH_MS } from '../lib/appleTime.mjs';
 import { createLogger } from '../lib/log.mjs';
-import calendarSource, { createCalendarSource, scanWindow, identitiesFromRows, rememberIdentities } from '../sources/calendar.mjs';
+import calendarSource, {
+  createCalendarSource,
+  historyWindow,
+  scanWindow,
+  identitiesFromRows,
+  rememberIdentities,
+} from '../sources/calendar.mjs';
 
 const TEST_LLAMA_KEY = 'a'.repeat(64);
 const TEST_BEARER_TOKEN = 'c'.repeat(64);
@@ -184,6 +190,17 @@ test('the default export satisfies the daemon source contract', () => {
 test('scanWindow: steady −7d..+30d, backfill −90d..+60d', () => {
   assert.deepEqual(scanWindow(NOW, false), { fromTs: NOW - 7 * DAY, toTs: NOW + 30 * DAY });
   assert.deepEqual(scanWindow(NOW, true), { fromTs: NOW - 90 * DAY, toTs: NOW + 60 * DAY });
+});
+
+test('historyWindow resumes from its saved ceiling in one-year slices', () => {
+  const first = historyWindow(NOW, null);
+  assert.equal(first.toTs, NOW - 90 * DAY);
+  assert.equal(first.fromTs, first.toTs - 365 * DAY);
+  assert.equal(first.doneAfter, false);
+
+  const resumed = historyWindow(NOW, String(first.fromTs));
+  assert.equal(resumed.toTs, first.fromTs);
+  assert.equal(resumed.fromTs, first.fromTs - 365 * DAY);
 });
 
 test('first steady scan ingests the window (5 rows) with the pinned row shape', async () => {

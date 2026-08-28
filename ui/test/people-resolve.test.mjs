@@ -129,11 +129,11 @@ test('a short email local-part is too generic to join two people on', () => {
 });
 
 test('a bare first-name local-part does NOT join two people (Andy != Andy)', () => {
-  // The live corpus flooded with these: andy@radical.vc and andy@nachonacho.com
-  // are different people. Only a full-name-shaped local-part joins.
+  // A private corpus contained many bare first-name addresses across domains;
+  // they are different people. Only a full-name-shaped local-part joins.
   const people = [
-    person('id:andy@radical.vc', 'andy@radical.vc', { identifiers: ['andy@radical.vc'], channels: ['mail'] }),
-    person('id:andy@nachonacho.com', 'andy@nachonacho.com', { identifiers: ['andy@nachonacho.com'], channels: ['mail'] }),
+    person('id:andy@alpha.example', 'andy@alpha.example', { identifiers: ['andy@alpha.example'], channels: ['mail'] }),
+    person('id:andy@beta.example', 'andy@beta.example', { identifiers: ['andy@beta.example'], channels: ['mail'] }),
   ];
   assert.equal(candidatePairs(people).pairs.length, 0);
 });

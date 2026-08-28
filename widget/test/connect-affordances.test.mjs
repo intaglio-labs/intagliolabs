@@ -101,7 +101,16 @@ test('a control that acts in place carries no marker', () => {
 
 // One busy word per category, rather than a new verb per call site.
 test('busy labels are drawn from a small fixed set', () => {
-  const allowed = new Set(['opening…', 'connecting…', 'sending…', 'starting…']);
+  // "checking the local connection…" is status copy for an unavailable
+  // bridge, not a fifth connect verb. Keep it explicit so this scan continues
+  // to reject one-off labels while allowing the shared down-state wording.
+  const allowed = new Set([
+    'opening…',
+    'connecting…',
+    'sending…',
+    'starting…',
+    'checking the local connection…',
+  ]);
   for (const [file, text] of Object.entries(src)) {
     for (const m of text.matchAll(/\.textContent = '([^']*…)'/gu)) {
       assert.ok(

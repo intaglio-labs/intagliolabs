@@ -17,10 +17,9 @@
 // rule travels with the code that obeys it.
 //
 // What IS read: the cluster a face belongs to, and the owner's own name for
-// that cluster where they typed one. 93 of 27,000 clusters are named, and
-// 73,895 of 83,181 detections are cluster-linked, so co-occurrence is dense
-// even where names are absent — an unnamed cluster still links the same
-// person across photos.
+// that cluster where they typed one. A private library confirmed that most
+// detections can be cluster-linked even when relatively few clusters are
+// named — an unnamed cluster still links the same person across photos.
 
 function pk(raw) {
   const v = Number(raw);

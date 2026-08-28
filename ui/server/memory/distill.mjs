@@ -112,8 +112,8 @@ export function cacheKey({ promptSha: sha, model, contentHash }) {
 // THE DATE, and why it is here rather than in the system prompt.
 //
 // The model was given the message and nothing else, so it could not resolve the
-// time IN the message. Measured on the live store: 21% of plan claims (20 of 94)
-// carried "tomorrow", "next Tuesday", "the 2nd" -- text that means nothing
+// time IN the message. A private development corpus showed many plan claims
+// carrying "tomorrow", "next Tuesday", or "the 2nd" -- text that means nothing
 // without knowing when it was written, stored as though it meant something. The
 // row's own timestamp was sitting one field away the whole time; observed_at is
 // assigned from it by code immediately afterwards.
@@ -250,7 +250,7 @@ export function validateRowClaims(row, claims) {
     // Every claim in this table is about the same person — `subject` is the
     // literal string 'owner' on all of them — so the sentence has to say so too.
     // It did not: the prompt's worked examples used a placeholder NAME, the model
-    // read that as the owner's name, and 75 of 119 claims on a real machine
+    // read that as the owner's name, and claims throughout a private test run
     // opened with it. The evidence underneath them was the owner's own first
     // person, so nothing downstream could catch it: a perfectly grounded claim
     // about the wrong human being.

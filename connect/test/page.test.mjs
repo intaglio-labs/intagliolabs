@@ -5,8 +5,8 @@ import { escapeHtml, helpTopicFor, renderConnectPage, renderHelpPage } from '../
 const items = [
   { id: 'calendar', label: 'Calendar', connected: true, detail: 'reading', action: null },
   {
-    id: 'mail:ay@austinyoshino.com',
-    label: 'ay@austinyoshino.com',
+    id: 'mail:owner@example.test',
+    label: 'owner@example.test',
     connected: false,
     detail: 'needs a password',
     action: 'gmail',
@@ -26,7 +26,7 @@ test('every interpolation is escaped', () => {
 
 test('connected rows read as connected and offer no button', () => {
   const html = renderConnectPage(items);
-  const calendar = html.slice(html.indexOf('Calendar'), html.indexOf('ay@'));
+  const calendar = html.slice(html.indexOf('Calendar'), html.indexOf('owner@example.test'));
   assert.ok(calendar.includes('connected'));
   assert.ok(!calendar.includes('class="cta"'), 'a done row must not ask again');
 });

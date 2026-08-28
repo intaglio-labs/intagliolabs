@@ -22,7 +22,9 @@ function seed() {
     [NOW - 2 * DAY, 'imessage', 'i:1', null, JSON.stringify({ chat_handle: '+15551111', is_from_me: false })],
     [NOW - 3 * DAY, 'calendar', 'c:1', null, JSON.stringify({ attendees: [{ email: '+15551111', name: 'Mike Chen' }] })],
     [NOW - 400 * DAY, 'mail', 'm:1', null, JSON.stringify({ from: ['michael.chen@acme.co'], to: ['me@x.com'] })],
-    [NOW - 401 * DAY, 'calendar', 'c:2', null, JSON.stringify({ attendees: [{ email: 'michael.chen@acme.co', name: 'Michael Chen' }] })],
+    // Calendar context is capped at the deepest non-calendar connector. Keep
+    // this event just inside the mail floor so it names the old relationship.
+    [NOW - 399 * DAY, 'calendar', 'c:2', null, JSON.stringify({ attendees: [{ email: 'michael.chen@acme.co', name: 'Michael Chen' }] })],
   ];
   for (const r of rows) ctx.prepare('INSERT INTO context (ts, source, entity_id, text, meta) VALUES (?,?,?,?,?)').run(...r);
   const res = openResolutionsDb(':memory:');

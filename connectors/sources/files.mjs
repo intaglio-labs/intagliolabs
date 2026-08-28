@@ -7,10 +7,9 @@
 // the owner made and kept — contracts, decks, notes, scans. The names and
 // the folder trails alone answer questions the rest of the corpus cannot.
 //
-// WHAT IT WILL NOT DO, measured on this Mac 2026-08-20: of 97,718 files
-// across the three roots, 96,262 are dataless — names and sizes with no
-// bytes on disk. Opening them would pull 45.6 GB through the owner's iCloud
-// on a 15-minute timer. So dataless files are ingested as metadata and never
+// WHAT IT WILL NOT DO. Many cloud-drive entries can be dataless — names and
+// sizes with no bytes on disk. Opening them could silently download a large
+// archive on a timer. So dataless files are ingested as metadata and never
 // opened. lib/fileWalk.mjs holds the detection and the reasoning.
 //
 // NO NETWORK. This connector makes no outbound connection of any kind; it
@@ -31,8 +30,8 @@ import { extractText, TEXT_EXTS } from '../lib/fileText.mjs';
 import { fileToRow } from '../lib/fileRows.mjs';
 
 const CURSOR_KEY = 'files:max-mtime';
-// One run's worth. The walk itself is ~1.7 s for 97k paths (stat only), so
-// the bound is on rows delivered, not paths visited.
+// One run's worth. The walk is metadata-only, so the bound is on rows
+// delivered, not paths visited.
 const MAX_ROWS_PER_SCAN = 2000;
 
 // The stores this connector knows how to find. Each is checked for existence
@@ -140,7 +139,7 @@ export function createFilesSource({ home, roots } = {}) {
       // but the cursor is an mtime — so a run that took the first N files it
       // happened to see and then declined to advance the cursor (because it
       // was capped) would re-walk the same N forever and never reach the
-      // second root. Measured: the first dry run delivered 2,000 iCloud rows
+      // second root. A private dry run filled the cap with iCloud rows
       // and never got as far as Box or Dropbox, and would not have on any
       // subsequent run either. Sorting by mtime and advancing to the end of
       // the delivered slice is what makes a capped run make progress.

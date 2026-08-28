@@ -54,11 +54,10 @@ export function counterpartyFor(episode, spine) {
   // A ROOM HAS NO COUNTERPARTY, however few people happened to speak in it.
   //
   // The handle test below is a proxy for "is this a group" -- more than one
-  // voice means a room -- and it is a proxy that fails in the common case: 1,680
-  // of 5,285 group episodes on the live store have exactly ONE non-owner
-  // speaking inside their 60-minute window, so they were stamped with that
-  // person's key as though the owner had been talking to them privately. 85
-  // `plan` claims were distilled under that premise.
+  // voice means a room -- and it is a proxy that fails in the common case:
+  // group episodes can have exactly one non-owner speaking inside their
+  // 60-minute window, so they were stamped with that person's key as though
+  // the owner had been talking to them privately.
   //
   // Group-ness belongs to the THREAD, not to the window. thread_key already
   // carries the chat guid, so the question is answerable without adding a
@@ -101,20 +100,19 @@ function safeMeta(meta) {
 // Bring the episode index up to date with context.
 //
 // WRITES ONLY THE DIFFERENCE. This used to DELETE both tables and reinsert
-// every episode -- 36,978 episodes and 360,367 members -- to arrive, almost
-// always, at exactly the rows that were already there. Two costs, and the
+// every episode and member to arrive, almost always, at exactly the rows that
+// were already there. Two costs, and the
 // second is the one that hurt:
 //
 //   the write itself, and
 //   the LOCK. The corpus runs journal_mode=DELETE, so a writer excludes every
 //   reader for the whole transaction, and hermes is single-threaded on top of
-//   that. Measured against the live server while the distiller held the corpus:
-//   94 SECONDS, during which the app answered nothing. The rebuild in isolation
-//   is six.
+//   that. Private testing found a long lock during which the app answered
+//   nothing, even though the rebuild itself was much shorter in isolation.
 //
 // An episode's identity is its members, and `member_hash` already says so --
-// episodeStore has always used it to recognise work across a rebuild, and it is
-// unique across all 36,978 on this corpus. So the build runs in memory, off the
+// episodeStore has always used it to recognise work across a rebuild, and it was
+// unique across every tested episode. So the build runs in memory, off the
 // lock, and only genuinely new episodes are inserted and genuinely gone ones
 // deleted. A quiet corpus writes nothing at all.
 //
@@ -124,8 +122,8 @@ function safeMeta(meta) {
 // both used to be invalidated wholesale by a rebuild that changed nothing.
 // WHICH CONVERSATION EACH ROW BELONGS TO, written down.
 //
-// The rebuild's remaining cost was that it had to read every episodic row --
-// 418,698 of them, ~3s and ~384MB -- just to discover which threads had moved,
+// The rebuild's remaining cost was that it had to read every episodic row just
+// to discover which threads had moved,
 // because a thread key is computed from `meta` and is not a column anything can
 // filter on. This is that missing index: derived, rebuildable, and the only
 // thing that makes "just the threads that changed" expressible as a query.
@@ -152,16 +150,14 @@ CREATE TABLE IF NOT EXISTS context_thread_mark(
 // UPDATE. insertRows is SELECT-then-write: a row that changes keeps its id, so a
 // message whose timestamp, thread metadata or content_hash is rewritten leaves
 // every count identical and the watermark unmoved. The episode cut from the old
-// version then stands for good. That is not hypothetical on this project: the
-// history backfill was 405,952 rows of UPDATE, and map.mjs's own stamp comment
-// says so.
+// version then stands for good. That is not hypothetical: a history backfill
+// can consist largely of UPDATEs, as map.mjs's own stamp comment explains.
 //
 // store_changed_at is the column for it -- "when HERMES last changed this row"
 // -- and `context_changed(store_changed_at, id)` already indexes it. But it is
 // NOT unique and not monotonic: a connector pass stamps every row it delivers
-// with one value, and the distiller was measured losing 1,410 eligible rows
-// (49% of what its watermark had covered) across 18,775 rows sharing 149
-// distinct values. So the cursor is the same pair distill_run.through_id
+// with one value, and the distiller was measured losing eligible rows in large
+// tie groups. So the cursor is the same pair distill_run.through_id
 // settled on, compared lexicographically.
 function readMark(db) {
   const row = db.prepare('SELECT changed_at, context_id FROM context_thread_mark WHERE one = 1').get();
@@ -284,7 +280,7 @@ function storedGapMatches(db, gapMs) {
 // stale key can outlive every future pass over other conversations.
 //
 // Cheap because it needs no members: the key already carries the handle, so this
-// is a lookup per DISTINCT unresolved key -- a handful, not 36,984 episodes.
+// is a lookup per DISTINCT unresolved key -- a handful, not every episode.
 function rekeyResolvedCounterparties(db, spine) {
   if (!spine) return 0;
   const lookup = spine.nameFor
@@ -390,9 +386,8 @@ export function rebuildEpisodes(
       // NO `text`. Cutting a conversation is arithmetic over timestamps and
       // thread keys -- nothing here reads a message body, and episodeLines
       // fetches text per episode for the distiller when it is actually needed.
-      // Carrying it here materialised 418,698 message bodies to look at their
-      // clocks: 507MB against 384MB, measured, for a field with zero readers in
-      // this path.
+      // Carrying it here materialised every message body just to look at clocks,
+      // consuming substantially more memory for a field with zero readers here.
       'SELECT id, ts, source, speaker, meta, entity_id, content_hash ' +
         `FROM context WHERE source IN (${holes}) ORDER BY id`
     )
@@ -410,8 +405,7 @@ export function rebuildEpisodes(
 
   // What each episode is WITH, computed once. The old code called
   // counterpartyFor twice per episode -- once to store it and once again to
-  // count it in the return -- which is 360,367 members walked and their meta
-  // JSON parsed, twice.
+  // count it in the return -- walking every member and parsing its meta twice.
   const keyFor = new Map();
   for (const ep of episodes) keyFor.set(ep.member_hash, counterpartyFor(ep, spine));
 
@@ -436,15 +430,15 @@ export function rebuildEpisodes(
   let rekeyed = 0;
 
   // THE INDEX IS REBUILT ONLY WHEN IT IS ACTUALLY BROKEN, and never inside the
-  // episode transaction. Writing all 418,715 rows on every full pass added a
-  // second bulk write to the one place that must be short -- measured at 158s
-  // against the live server, worse than the whole thing was before it existed.
+  // episode transaction. Writing the entire index on every full pass added a
+  // second bulk write to the one place that must be short and made the live
+  // server lock substantially worse.
   if (!indexWhole) {
     db.exec('BEGIN');
     try {
       // The secondary index comes OFF for the bulk load and goes back on after.
-      // Maintaining a b-tree per row across 418,715 inserts is most of the cost
-      // of building this: 26s with it, a fraction of that without. The table is
+      // Maintaining a b-tree per row across the bulk insert is most of the cost
+      // of building this; dropping it first is much faster. The table is
       // empty of readers inside this transaction, so there is nothing to serve
       // from it meanwhile.
       db.exec('DROP INDEX IF EXISTS context_thread_key');

@@ -14,6 +14,7 @@ import {
   sampleRows,
   MIN_ROWS,
   openSummariesDb,
+  SUMMARY_REVISION,
 } from '../server/people/summary.mjs';
 
 const NOW = new Date(2027, 0, 1).getTime();
@@ -75,6 +76,12 @@ test('a real sample produces a summary, and the request stays on the given base'
   assert.ok(out.sampled >= MIN_ROWS && out.of === 30);
   assert.match(body.messages[1].content, /you: /u, 'owner side labeled');
   assert.match(body.messages[1].content, /Sam: /u, 'their side labeled by first name');
+  assert.match(body.messages[0].content, /Start directly with the subject/u);
+  assert.match(body.messages[0].content, /do not name either person/u);
+});
+
+test('summary revision invalidates cached participant-led wording', () => {
+  assert.equal(SUMMARY_REVISION, 4);
 });
 
 test('sampleRows spreads evenly and caps', () => {

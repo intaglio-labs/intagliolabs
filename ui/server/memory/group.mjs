@@ -43,9 +43,9 @@ export function similarity(a, b) {
   return shared / (A.size + B.size - shared);
 }
 
-// MEASURED, NOT PICKED. Run over the 80 claims on a real machine, every threshold
-// from 0.5 to 0.9 produced the identical grouping: 74 groups, 6 claims merged
-// away, largest group 7. The distribution is bimodal — repeats score near 1.0 and
+// MEASURED, NOT PICKED. In a private syntheticized test run, every threshold
+// from 0.5 to 0.9 produced the same grouping. The distribution is bimodal —
+// repeats score near 1.0 and
 // everything else falls below 0.4 — so the number barely matters and the high end
 // is free.
 //

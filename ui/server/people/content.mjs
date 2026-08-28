@@ -4,11 +4,9 @@ import { threadKind, isRoom, counterpartyFromThread, GROUP } from '../memory/thr
 // WHO DID I TALK TO ABOUT THIS? — the corpus half of person search.
 //
 // WHY THIS EXISTS. Search used to match a person's name, their handle, and the
-// five topic chips on their row. Five chips is a very small window onto 119,376
-// messages, and measured against the live corpus the window was the whole
-// problem: "pickleball" appears in 165 messages and returned NOBODY, "flight" in
-// 347 and returned nobody, "birthday" in 190, "interview" in 76, "wedding" in
-// 35. A person you had four conversations about something with was invisible
+// topic chips on their row. A few chips are a very small window onto a mature
+// corpus, and private testing showed common relationship topics returning
+// nobody. A person you had several conversations about something with was invisible
 // unless that something also happened to win a chip slot.
 //
 // WHAT CHANGED SINCE find.mjs SAID NOT TO DO THIS. Its header argued against
@@ -120,7 +118,8 @@ export function rowPersonId(row, meta) {
     return fromMe ? null : (meta.sender_handle ?? meta.handle ?? null);
   }
   // Same thread fallback as the graph: an outbound row Apple left unaddressed
-  // is still a row in a conversation with somebody, and it is 109,380 of them.
+  // is still a row in a conversation with somebody; private testing confirmed
+  // this is common.
   return meta.chat_handle ?? meta.handle ?? counterpartyFromThread(row, meta);
 }
 

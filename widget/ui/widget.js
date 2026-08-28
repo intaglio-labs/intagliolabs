@@ -66,7 +66,9 @@ orbEl.addEventListener('animationend', (e) => {
 // needed room the window did not have: see main.swift's cloudSlot, which
 // reserves it above the bar.
 const VOICE_TEASE = true;
-const TEASE_TEXT = 'voice things coming soon. help us build it :)';
+// The explicit break keeps the smiley with its sentence instead of letting
+// WebKit strand it on a third line inside the fixed-width thought bubble.
+const TEASE_TEXT = 'voice coming soon.\nhelp us build it :)';
 // Chat wears the same sign for now (owner, 2026-08-25): the pill no longer
 // expands, and pressing it answers with a line instead of an input. Flip
 // this off to give the bar back.
@@ -315,18 +317,52 @@ orbBtn.addEventListener('pointerdown', () => {
 for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) {
   orbBtn.addEventListener(ev, endHold);
 }
-// Four faces (palette.css §the face), exactly one at a time. Native only ever
-// tells us `talking`, so idle and talking are the two that are live today;
-// listening and notify are reachable through __hzOrbState for whoever wires
-// the arm-vs-speak split and real notifications later.
+// Four faces (palette.css §the face), exactly one at a time. `listening` is
+// the elegant thinking pose: active work owns it unless the voice stack is
+// actively speaking, which is a stronger state.
 const ORB_STATES = ['idle', 'notify', 'listening', 'talking'];
 function setOrbState(state) {
   for (const s of ORB_STATES) orbEl.classList.toggle(s, s === state);
 }
-window.__hzOrb = (talking) => setOrbState(talking === true ? 'talking' : 'idle');
-window.__hzOrbState = (state) => {
-  if (ORB_STATES.includes(state)) setOrbState(state);
+let voiceOrbState = 'idle';
+let workLabel = '';
+function paintOrbState() {
+  const processing = voiceOrbState === 'idle' && !!workLabel;
+  setOrbState(voiceOrbState !== 'idle' ? voiceOrbState : (processing ? 'listening' : 'idle'));
+  // `listening` is also a real voice state. Keep the electric crown on
+  // background work only, so opening the mic does not claim a processor is
+  // running and voice temporarily outranks a simultaneous backfill.
+  orbEl.classList.toggle('processing', processing);
+  orbBtn.title = workLabel ? `processing: ${workLabel}` : 'intaglio labs';
+}
+window.__hzOrb = (talking) => {
+  voiceOrbState = talking === true ? 'talking' : 'idle';
+  paintOrbState();
 };
+window.__hzOrbState = (state) => {
+  if (ORB_STATES.includes(state)) {
+    voiceOrbState = state;
+    paintOrbState();
+  }
+};
+
+// Background connectors, local model setup, indexing, chat and on-demand
+// relationship summaries all report one current label through native. The
+// widget is deliberately interested only in WORK NOW, never the future queue:
+// the sleeping pose should return the instant the current operation settles.
+async function refreshWorkState() {
+  try {
+    const status = await hzPost('workStatus');
+    workLabel = status?.state === 'working' && typeof status.label === 'string'
+      ? status.label.slice(0, 120)
+      : '';
+  } catch {
+    workLabel = '';
+  }
+  paintOrbState();
+}
+refreshWorkState();
+setInterval(refreshWorkState, 1500);
 
 // Time of day lives in bridge.js so the onboarding orb reads the same bands.
 // A wake from sleep is when the clock is most likely to have moved a long way

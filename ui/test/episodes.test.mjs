@@ -142,9 +142,8 @@ test('every episode records the rule that made it', () => {
 });
 
 // EACH SOURCE NAMES ITS THREAD DIFFERENTLY. Reading only iMessage's name turned
-// all 3,190 live WhatsApp rows into singletons -- 57 one-message episodes, one
-// per owner-sent row, every received message discarded as unquotable. Episodes
-// did nothing at all for that source while reporting a healthy 57.
+// all live WhatsApp rows into singletons, every received message discarded as
+// unquotable. Episodes did nothing for that source while reporting success.
 test('whatsapp threads group by chat_handle, not chat_guid', () => {
   const wa = (id, minutes, me) => ({
     id,

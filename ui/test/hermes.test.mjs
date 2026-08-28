@@ -462,7 +462,7 @@ test('hermes refuses to start without a readable bearer token', async () => {
 test('ingest accepts a single object', async () => {
   const res = await post('/ingest', {
     source: 'seed',
-    speaker: 'austin',
+    speaker: 'example owner',
     text: 'the corgi ate the waffle',
     meta: { mood: 'unrepentant' },
   });
@@ -475,8 +475,8 @@ test('ingest accepts a single object', async () => {
 test('ingest accepts an array', async () => {
   const t0 = Date.now();
   const res = await post('/ingest', [
-    { ts: t0 + 1000, source: 'seed', speaker: 'rishab', text: 'oldest of the batch' },
-    { ts: t0 + 3000, source: 'seed', speaker: 'rishab', text: 'newest of the batch' },
+    { ts: t0 + 1000, source: 'seed', speaker: 'casey', text: 'oldest of the batch' },
+    { ts: t0 + 3000, source: 'seed', speaker: 'casey', text: 'newest of the batch' },
     { ts: t0 + 2000, source: 'seed', text: 'middle of the batch' },
   ]);
   assert.equal(res.status, 200);
@@ -1077,6 +1077,8 @@ test('every people route refuses the browser channel with a 403', async () => {
     ['GET', '/people/map', undefined],
     ['POST', '/people/avatars', { keys: [] }],
     ['POST', '/people/decide', { verdict: 'skip', a: 'x', b: 'y' }],
+    ['POST', '/people/self', { key: 'id:me@example.com' }],
+    ['POST', '/people/role', { key: 'id:me@example.com', role: 'friend' }],
   ];
   for (const [method, path, body] of attempts) {
     // An allowlisted Origin — a caller authorize() ACCEPTS as the browser
@@ -1129,6 +1131,18 @@ test('people routes reject unknown fields, and the bearer channel answers', asyn
   const decideTypo = await post('/people/decide', { verdict: 'skip', a: 'x', b: 'y', note: 'hm' });
   assert.equal(decideTypo.status, 400);
   assert.match((await decideTypo.json()).error, /unknown field "note"/);
+
+  const selfTypo = await post('/people/self', { key: 'id:me@example.com', note: 'hm' });
+  assert.equal(selfTypo.status, 400);
+  assert.match((await selfTypo.json()).error, /unknown field "note"/);
+
+  const roleTypo = await post('/people/role', { key: 'id:me@example.com', role: 'friend', note: 'hm' });
+  assert.equal(roleTypo.status, 400);
+  assert.match((await roleTypo.json()).error, /unknown field "note"/);
+
+  const roleYearTypo = await post('/people/role', { key: 'id:me@example.com', role: 'friend', year: 23 });
+  assert.equal(roleYearTypo.status, 400);
+  assert.match((await roleYearTypo.json()).error, /"year" must be an integer/u);
 
   // And the gate guards capability, not the feature: the bearer channel gets
   // a real review answer.
@@ -1324,8 +1338,8 @@ test('maintain runs the physical cleanup and reports it', async () => {
 
 // ---- the episode index is not rebuilt for nothing ----
 //
-// The distiller POSTs this before every pass, and a pass runs every 45 seconds
-// while it is catching up. Rebuilding 36,975 episodes twice a minute to arrive
+// The distiller POSTs this before every pass while it is catching up. Rebuilding
+// every episode repeatedly to arrive
 // at identical rows is not just wasted CPU: hermes is single-threaded, so every
 // route is frozen for the duration of each one. These pin both halves -- that it
 // skips when nothing changed, and that it does NOT skip when something did.

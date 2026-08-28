@@ -1,8 +1,8 @@
 // When a claim stops being about the future. PURE: no database, no model.
 //
-// THE MEASURED PROBLEM. 95 of 156 claims on the live store are plans or
-// commitments, and 92 of those describe intentions more than 30 days old. The
-// store had no way to say a plan had passed: observed_at records when it was
+// THE MEASURED PROBLEM. A private development corpus contained many plans and
+// commitments whose intentions were already old. The store had no way to say
+// a plan had passed: observed_at records when it was
 // SAID, and a reader has to infer everything else. So "the owner flies to
 // Denver on the 2nd" and "the owner is vegetarian" aged identically, which is
 // wrong in both directions -- the flight is over, the diet is not.

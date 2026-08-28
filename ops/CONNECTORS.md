@@ -280,10 +280,8 @@ chat.db, the Calendar store, and AddressBook sit behind TCC. The design is:
   process*. When launchd spawns the stable binary directly (as both plists
   do), the binary is responsible and the grant applies. When a shell spawns
   the very same binary, the terminal app is responsible and the read is
-  denied. Verified on this machine, 2026-08-19: identical read-only opens of
-  chat.db, the Group Containers Calendar store, and two AddressBook stores
-  all PASS under `launchctl submit … ~/.hazlie/bin/node connectors/doctor.mjs`
-  and are all EPERM'd when the same command runs from a terminal.
+  denied. This was verified with identical read-only opens under launchd and
+  from a terminal.
 - **Consequences:**
   - `doctor` run from a shell shows `fda-*` FAILs that production will not
     have. The production truth is one line:
@@ -363,17 +361,11 @@ a shell.
 
 ## files — the dataless rule
 
-Measured on the owner's Mac, 2026-08-20, across iCloud Drive, Box and Dropbox:
+Private development measurements found that most entries across the configured
+cloud-drive mirrors can be dataless, with a large aggregate download size.
 
-| | count |
-|---|---|
-| files walked | 97,718 |
-| **dataless** (online-only, no bytes on disk) | **96,262** |
-| materialized locally | 1,456 |
-| total size if every dataless file were opened | **45.6 GB** |
-
-Reading a dataless file materializes it. A connector that opened them would
-pull 45.6 GB through the owner's iCloud account on a 15-minute timer, and
+Reading a dataless file materializes it. A connector that opened them could
+pull a large archive through the owner's cloud account on a timer, and
 would look like a sync bug rather than a design mistake. So:
 
 - **Dataless files are ingested as metadata and never opened.** `meta.online_only`
@@ -381,8 +373,8 @@ would look like a sync bug rather than a design mistake. So:
   never mistake a filename for a summary of contents.
 - **Detection is `blocks === 0 && size > 0`.** macOS marks these with the
   `SF_DATALESS` st_flag, which node's `Stats` does not expose. The proxy was
-  verified against `stat(1)`'s flag string on this machine: dataless files
-  report 0 allocated blocks, a materialized 34,820-byte neighbour reports 72.
+  verified against `stat(1)`'s flag string: dataless files report 0 allocated
+  blocks while materialized files allocate blocks.
   An APFS-compressed file whose data lives in an xattr can also report 0
   blocks, so this can misjudge a local file as dataless — that direction
   under-reads instead of triggering a download, which is the failure the
@@ -397,25 +389,22 @@ Other rules the walk enforces, each with a measurement behind it:
   are symlinks back into the home directory; following them walks all of
   `~`, ingests it twice, and escapes the configured root.
 - **Dependency trees are skipped** (`node_modules`, `.git`, `build`, `Pods`,
-  `.dart_tool`, …). Without this, ~60k of the 96k files found are a synced
-  `node_modules` and the 3,843 real documents are buried.
+  `.dart_tool`, …). Without this, a synced `node_modules` can dominate the walk
+  and bury the real documents.
 - **Credential folders and filenames are skipped** (`Secret Keys`, `.ssh`,
   `*.pem`, `.env`, `id_rsa`, …). The owner's iCloud has a folder called
   "Secret Keys"; neither its contents nor its filenames belong in a corpus.
-- **Only documents and text files earn a row.** 17,331 files survive the
-  exclusions; 3,843 of those are documents.
+- **Only documents and text files earn a row.**
 
 **Cursor.** `files:max-mtime`, advanced to the mtime of the last row actually
 *delivered*, not of the last file seen. The walk yields in directory order,
 so candidates are sorted by mtime before the per-run cap is applied — without
-that, the first dry run delivered 2,000 iCloud rows, declined to advance the
-cursor because it was capped, and would have re-delivered the same 2,000
-forever without ever reaching Box or Dropbox. Verified converging: run 1
-delivered 2,000 (1,831 remaining), run 2 delivered 1,828, run 3 delivered 0.
+that, a private dry run filled the cap with iCloud rows, declined to advance the
+cursor because it was capped, and would have re-delivered the same rows forever
+without ever reaching Box or Dropbox. Repeated runs were verified to converge.
 
-**First run is slow, steady state is not.** The first walk makes iCloud's
-file provider answer ~17k cold metadata queries: 54 s measured. Warm, the
-same walk is 242 ms.
+**First run is slow, steady state is not.** The first walk makes the cloud file
+provider answer cold metadata queries; a warm repeat is much faster.
 
 ## notion — setup and consent
 

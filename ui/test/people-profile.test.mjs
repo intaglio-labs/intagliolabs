@@ -64,8 +64,8 @@ test('the graph emits a month-bucketed timeline and the owner-side clock', () =>
   const spine = spineDb([['+18085550100', 'Sam Lee', 'phone'], ['sam@work.com', 'Sam Lee', 'email']]);
   const sam = buildGraph(ctx, spine, { now: NOW }).find((p) => p.name === 'Sam Lee');
   assert.deepEqual(sam.timeline, [
-    { ym: '2026-03', sent: 0, received: 2, met: 0, room: 0 },
-    { ym: '2026-04', sent: 1, received: 0, met: 0, room: 0 },
+    { ym: '2026-03', sent: 0, received: 2, met: 0, room: 0, channels: ['imessage'] },
+    { ym: '2026-04', sent: 1, received: 0, met: 0, room: 0, channels: ['imessage'] },
   ]);
   assert.equal(sam.lastFromOwner, apr, 'owner-side clock from the owner reply');
   assert.equal(sam.lastFromThem, mar + DAY);

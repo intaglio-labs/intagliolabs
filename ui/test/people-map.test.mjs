@@ -137,8 +137,8 @@ test('a recent DIRECT message still makes somebody warm', () => {
 //
 // recencyDays answers "how warm is this relationship" and refuses the room.
 // presenceDays answers "when did I last come across this person at all" and
-// accepts it. The 467 room-only people on the live corpus are the entire
-// difference, which is what lets a recency filter offer "in touch" without
+// accepts it. Room-only people are the entire difference, which is what lets a
+// recency filter offer "in touch" without
 // deleting the cohort the room work just made visible.
 test('a room counts for presence and not for warmth', () => {
   const ctx = new DatabaseSync(':memory:');
@@ -203,10 +203,9 @@ test('presence is the only field a recency filter can honestly use', () => {
 
 // ---- the relationship floor ----
 //
-// It used to be "has an imessage or whatsapp channel", which on a corpus that is
-// 415,447 iMessage rows and zero mail rows passed 100% of everyone who survived
-// isNonPerson — it removed nobody. 864 people had exactly one message ever and
-// were drawn on the globe as contacts.
+// It used to be "has an imessage or whatsapp channel", which on a private corpus
+// dominated by iMessage passed everyone who survived isNonPerson — it removed
+// nobody. People with exactly one message were drawn on the globe as contacts.
 test('one message from a stranger is not a relationship', () => {
   const ctx = new DatabaseSync(':memory:');
   ctx.exec('CREATE TABLE context (ts INTEGER, source TEXT, speaker TEXT, entity_id TEXT, text TEXT, meta TEXT)');

@@ -1,5 +1,5 @@
 // Dev fixtures for Hermes' context store, so the store has something in it
-// before Rishab's real ingestion pipeline exists. Every row is marked
+// before the real ingestion pipeline exists. Every row is marked
 // source: 'seed' and the content is plainly synthetic — nothing here can be
 // mistaken for ingested household audio.
 //
@@ -74,7 +74,7 @@ const ROWS = [
 async function overHttp() {
   // The bearer channel: no Origin header, plus the token from the 0600 file
   // (server/hermes.mjs authorize()). This is Node, so unlike the page it can
-  // read that file -- and this is the write path Rishab's pipeline copies, so
+  // read that file -- and this is the write path the ingestion pipeline copies, so
   // it has to demonstrate the real one.
   const res = await fetch(`${BASE}/ingest`, {
     method: 'POST',

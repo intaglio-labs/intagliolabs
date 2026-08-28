@@ -22,8 +22,10 @@
 // rendered as Unix epoch seconds. occurrence_start_date is the actual,
 // possibly moved, start: it belongs in meta, never in the id.
 //
-// This source is CURSOR-FREE: every pass rescans the whole window and the
-// entity upsert absorbs the overlap (redelivery lands as `unchanged`).
+// The foreground source is CURSOR-FREE: every pass rescans the whole window
+// and the entity upsert absorbs the overlap (redelivery lands as `unchanged`).
+// A separate history cursor walks older year-sized windows in the background;
+// it never delays the upcoming-calendar view.
 // Upserts cannot express absence, so after each FULLY successful scan the
 // pass reconciles: fetch the entity ids hermes holds for the scanned window
 // (ids + timestamps only — corpus text never crosses back), diff against what
@@ -55,6 +57,13 @@ const DAY_MS = 86_400_000;
 // horizon); backfill widens both for a first run or a purge recovery.
 const STEADY_WINDOW = Object.freeze({ backMs: 7 * DAY_MS, aheadMs: 30 * DAY_MS });
 const BACKFILL_WINDOW = Object.freeze({ backMs: 90 * DAY_MS, aheadMs: 60 * DAY_MS });
+const HISTORY_CURSOR_KEY = 'calendar:history-ceiling-ts';
+const HISTORY_DONE_KEY = 'calendar:history-done';
+const HISTORY_SLICE_MS = 365 * DAY_MS;
+// Calendar data before 1900 is outside the practical range of EventKit and
+// Google Calendar. This is deliberately far older than a user's account, so
+// every history occurrence those providers can return is visited eventually.
+const HISTORY_FLOOR_TS = Date.UTC(1900, 0, 1);
 
 // The SQL prefilter selects on the RAW occurrence start, but the row's `ts`
 // (and therefore the reconciliation window) is the all-day-adjusted start —
@@ -98,10 +107,9 @@ export function storeCandidatePaths(home = homedir()) {
 //
 // Attendee emails are the one join key that reaches across platforms: they
 // match the contacts spine's `email` identifiers, which is how a calendar
-// event and a message thread resolve to the same person. Measured before
-// this was written: 1,417 of 1,905 events on this machine carry attendees,
-// 10,362 records in all, and 1,348 events have at least one email. The stored
-// rows carried none of it.
+// event and a message thread resolve to the same person. A private development
+// calendar confirmed that many events carry attendees with email addresses.
+// The stored rows had carried none of it.
 //
 // The OWNER is dropped from the list (isMe) -- "who else was there" is the
 // question, and the owner is in every one of their own events. The count of
@@ -144,11 +152,10 @@ export function attendeesOf(occ) {
 // EVERY ATTENDEE IS ALSO AN IDENTITY, and the calendar is the only place many
 // of them are named.
 //
-// Measured on this machine: 1,417 of 1,905 events carry attendees, giving 706
-// distinct emails and ALL 706 carry a name -- while only 19 of those emails are
-// in the address book. They are work contacts nobody ever saved. Without this
+// A private development calendar confirmed that invitees can carry a name even
+// when the address book does not. They are work contacts nobody ever saved. Without this
 // the timeline shows them as raw email addresses, which is what
-// "ay@austinyoshino.com" was.
+// "owner@example.test" was.
 //
 // Written at source 'calendar', which ranks BELOW 'contacts': a name the owner
 // chose always beats a name an invite supplied, whichever connector ran last.
@@ -225,6 +232,18 @@ export function identityWindow(nowMs) {
 export function scanWindow(nowMs, backfill = false) {
   const { backMs, aheadMs } = backfill ? BACKFILL_WINDOW : STEADY_WINDOW;
   return { fromTs: nowMs - backMs, toTs: nowMs + aheadMs };
+}
+
+// `ceiling` is exclusive from the next (older) slice and inclusive in the
+// current one. The overlap at that single instant is intentional: entity ids
+// are stable, and overlap is safer than losing an event exactly on a boundary.
+export function historyWindow(nowMs, storedCeiling) {
+  const parsed = typeof storedCeiling === 'string' ? Number(storedCeiling) : NaN;
+  const ceiling = Number.isFinite(parsed) && parsed > HISTORY_FLOOR_TS && parsed <= nowMs
+    ? parsed
+    : nowMs - BACKFILL_WINDOW.backMs;
+  const fromTs = Math.max(HISTORY_FLOOR_TS, ceiling - HISTORY_SLICE_MS);
+  return { fromTs, toTs: ceiling, doneAfter: fromTs === HISTORY_FLOOR_TS };
 }
 
 function statusError(status, message) {
@@ -546,14 +565,14 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
     // `!== false` IS CORRECT, and stays. The 2026-08-22 audit flagged this as
     // inverted, reasoning that Google documents `selected` as defaulting to
     // false, so an omitted field ought to mean unticked. Measured against the
-    // owner's real account before changing it:
+    // a private development account before changing it:
     //
     //   7 calendars returned by calendarList
     //   1 with `selected: true`
     //   0 with `selected: false`
     //   6 with the field ABSENT
     //
-    // and all 7 have rows in the live store (255 of them). So the API omits
+    // and every returned calendar had events. So the API omits
     // the field for calendars that are plainly in use, and `=== true` would
     // have cut ingestion from seven calendars to one — then handed
     // reconciliation six calendars' worth of suddenly-unobserved entities to
@@ -675,6 +694,7 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
 
   return {
     name: 'calendar',
+    walksHistory: true,
 
     // Store readability is deliberately NOT pre-checked for the local
     // backend: FDA attributes per spawner, so a needs()-time stat can pass in
@@ -705,7 +725,19 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
     },
 
     async run(ctx) {
-      const window = scanWindow(ctx.now(), Boolean(ctx.backfill));
+      const isHistory = ctx.history === true;
+      const window = isHistory
+        ? historyWindow(ctx.now(), ctx.state.getCursor(HISTORY_CURSOR_KEY))
+        : scanWindow(ctx.now(), Boolean(ctx.backfill));
+      const finish = (result) => {
+        if (!isHistory) return result;
+        // The cursor moves only after the selected backend read, ingest, and
+        // window-limited reconciliation all succeeded. Re-running a slice is
+        // harmless; skipping one would permanently lose calendar history.
+        if (window.doneAfter) ctx.state.setCursor(HISTORY_DONE_KEY, '1');
+        else ctx.state.setCursor(HISTORY_CURSOR_KEY, String(window.fromTs));
+        return { ...result, historyProgressed: true };
+      };
 
       // Two backends, one at a time, never both. Both write `source:
       // 'calendar'` rows, and the reconciliation below deletes every held
@@ -713,7 +745,7 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
       // would have each delete the other's rows on alternate passes.
       // `calendar.backend` is the switch; there is deliberately no merge.
       if (ctx.config?.calendar?.backend === 'google') {
-        return runGoogleBackend(ctx, window);
+        return finish(await runGoogleBackend(ctx, window));
       }
       // EventKit is PREFERRED over the sqlite path when the helper is present,
       // because it is the same data for a far smaller grant -- so this is a
@@ -722,7 +754,7 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
       // to it anyway when the helper is missing, which is what keeps a backend
       // that has shipped for a while from disappearing under an upgrade.
       if (ctx.config?.calendar?.backend !== 'local' && helperAvailable()) {
-        return runEventKitBackend(ctx, window);
+        return finish(await runEventKitBackend(ctx, window));
       }
 
       const cacheDir = join(ctx.cacheDir, 'calendar');
@@ -794,12 +826,12 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
       });
 
       // The daemon records this run (recordRun) from the counts we return.
-      return {
+      return finish({
         ingested: totals.inserted,
         updated: totals.updated,
         unchanged: totals.unchanged,
         deleted,
-      };
+      });
     },
   };
 }

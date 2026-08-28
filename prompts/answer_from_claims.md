@@ -97,6 +97,6 @@ Question: `whats my favourite film?`
      actually contains. The distiller writes claims that way on purpose: it is not
      told the owner's name and must not invent one. These examples once used a
      name, and in the DISTILLER's prompt that single detail taught the model to
-     call the owner by it — 75 of 119 claims on a real machine. Here the name only
+     call the owner by it throughout a private test run. Here the name only
      ever appeared on the input side, so the damage was smaller, but an example
      that disagrees with the data is still an example that will be believed. -->

@@ -31,7 +31,7 @@ function askBody() {
 
 function askStates() {
   const found = new Set();
-  for (const m of askBody().matchAll(/done\(\["state":\s*"([a-z]+)"/gu)) found.add(m[1]);
+  for (const m of askBody().matchAll(/(?:done|settle)\(\["state":\s*"([a-z]+)"/gu)) found.add(m[1]);
   return found;
 }
 
@@ -53,19 +53,19 @@ test('every state Bridge can report has a line of copy for it', () => {
 test('a model that is not running is reported as down, not as an app bug', () => {
   assert.match(
     askBody(),
-    /case\s+503:\s*done\(\["state":\s*"down"\]\)/u,
+    /case\s+503:\s*settle\(\["state":\s*"down"\]\)/u,
     'Bridge must map 503 to the "down" state'
   );
   // AND 502 MUST NOT BE THERE. hermes sends 502 for a non-OK answer from a model
   // it DID reach -- a bad key, a model-side 500 -- and "it should come back on
   // its own" would hide a fault that needs the owner.
   assert.ok(
-    !/case\s+[0-9,\s]*502[0-9,\s]*:\s*done\(\["state":\s*"down"\]\)/u.test(askBody()),
+    !/case\s+[0-9,\s]*502[0-9,\s]*:\s*settle\(\["state":\s*"down"\]\)/u.test(askBody()),
     '502 means the model answered with an error and must not read as downtime'
   );
   assert.match(
     askBody(),
-    /case\s+504:\s*done\(\["state":\s*"slow"\]\)/u,
+    /case\s+504:\s*settle\(\["state":\s*"slow"\]\)/u,
     'a model that never answered needs its own state, not the app-bug string'
   );
   assert.match(

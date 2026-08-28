@@ -34,13 +34,13 @@ const RUN = { model: 'm', prompt_path: 'p', prompt_sha: 's', params: {} };
 // claims, each accepted one at a time. Nothing here concerns films, cars,
 // mortgages, shoes or birthdays -- that is the point.
 const CORPUS = [
-  ['n:1', 'im allergic to penicillin', 'fact', 'Austin is allergic to penicillin.', 'allergic to penicillin'],
-  ['n:2', "can't do thursday mornings, physio", 'constraint', 'Austin cannot do Thursday mornings; he has weekly physio.', "can't do thursday mornings"],
-  ['n:3', 'i take the 7am train on weekdays', 'fact', 'Austin takes the 7am train on weekdays.', 'take the 7am train'],
-  ['n:4', "we're moving to denver in march, signed the lease", 'plan', 'Austin is moving to Denver in March.', 'moving to denver in march'],
-  ['n:5', 'i went vegetarian in january', 'fact', 'Austin went vegetarian in January.', 'went vegetarian'],
-  ['n:6', 'id rather do mornings than evenings', 'preference', 'Austin prefers mornings to evenings.', 'rather do mornings'],
-  ['n:7', 'i cant drive', 'constraint', 'Austin cannot drive.', 'cant drive'],
+  ['n:1', 'im allergic to penicillin', 'fact', 'Example Owner is allergic to penicillin.', 'allergic to penicillin'],
+  ['n:2', "can't do thursday mornings, physio", 'constraint', 'Example Owner cannot do Thursday mornings; they have weekly physio.', "can't do thursday mornings"],
+  ['n:3', 'i take the 7am train on weekdays', 'fact', 'Example Owner takes the 7am train on weekdays.', 'take the 7am train'],
+  ['n:4', "we're moving to denver in march, signed the lease", 'plan', 'Example Owner is moving to Denver in March.', 'moving to denver in march'],
+  ['n:5', 'i went vegetarian in january', 'fact', 'Example Owner went vegetarian in January.', 'went vegetarian'],
+  ['n:6', 'id rather do mornings than evenings', 'preference', 'Example Owner prefers mornings to evenings.', 'rather do mornings'],
+  ['n:7', 'i cant drive', 'constraint', 'Example Owner cannot drive.', 'cant drive'],
 ];
 
 // Questions whose answers are genuinely absent from CORPUS. Ordinary things an
@@ -212,7 +212,7 @@ test('a stale corpus is marked stale, not silently emptied', () => {
 // yes. A candidate is supposed to mean same surname in a nickname form, or the
 // same email name across two domains. Two unrelated people share neither.
 test('a stranger is never proposed as the same person as someone known', () => {
-  const known = { key: 'name:austin reed', name: 'Austin Reed', names: ['Austin Reed'], identifiers: ['austin@reed.example'], channels: ['imessage'], messages: 40 };
+  const known = { key: 'name:rowan reed', name: 'Rowan Reed', names: ['Rowan Reed'], identifiers: ['rowan@reed.example'], channels: ['imessage'], messages: 40 };
   const strangers = [
     { key: 'name:priya venkatesan', name: 'Priya Venkatesan', names: ['Priya Venkatesan'], identifiers: ['priya@elsewhere.example'], channels: ['imessage'], messages: 12 },
     { key: 'name:tomasz nowak', name: 'Tomasz Nowak', names: ['Tomasz Nowak'], identifiers: ['tnowak@other.example'], channels: ['whatsapp'], messages: 9 },

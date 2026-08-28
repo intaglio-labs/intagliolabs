@@ -251,8 +251,8 @@ about the same person, and the subject is recorded separately — the sentence o
 has to be readable on its own.
 
 This paragraph exists because the examples above once used a placeholder name,
-and the model copied it as if it were the owner's: on a real machine 75 of 119
-claims opened with that name, describing someone who was not the owner, from rows
+and the model copied it as if it were the owner's throughout a private test run,
+describing someone who was not the owner, from rows
 whose evidence was the owner's own first person. Rows containing no name at all
 produced it too — the name came from HERE, not from the data. A placeholder in an
 example is an instruction.

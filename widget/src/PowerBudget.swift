@@ -3,9 +3,8 @@ import IOKit.ps
 
 // WHETHER THE MACHINE CAN AFFORD BACKGROUND WORK RIGHT NOW.
 //
-// The distiller is a local model pass over every conversation in the corpus. On
-// this install that is 14,595 conversations still to go -- 365 passes, roughly
-// fifteen hours of near-continuous inference. Run flat out it is indistinguishable
+// The distiller is a local model pass over every conversation in the corpus. A
+// mature corpus can require hours of repeated passes. Run flat out it is indistinguishable
 // from a stress test: the owner's laptop gets hot, kernel_task starts stealing
 // cycles to cool it, and everything else on the machine slows down to pay for
 // catching up on a backlog that nobody is waiting on.

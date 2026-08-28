@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import { openDb, insertRows } from '../server/hermes.mjs';
-import { buildGraph, loadSpine } from '../server/people/graph.mjs';
+import { buildGraph, loadSpine, relationshipHistoryFloor } from '../server/people/graph.mjs';
 
 const NOW = new Date(2027, 0, 1).getTime();
 const DAY = 86_400_000;
@@ -24,7 +24,7 @@ test('the spine merges a phone and an email into one person', () => {
   const ctx = openDb(':memory:');
   insertRows(ctx, [
     { ts: NOW - 10 * DAY, source: 'imessage', entity_id: 'i:1', text: 'yo', meta: { chat_handle: '+18085550100', is_from_me: false } },
-    { ts: NOW - 5 * DAY, source: 'mail', entity_id: 'm:1', text: 'hi', meta: { from: ['sam@work.com'], to: ['ay@austinyoshino.com'] } },
+    { ts: NOW - 5 * DAY, source: 'mail', entity_id: 'm:1', text: 'hi', meta: { from: ['sam@work.com'], to: ['owner@example.test'] } },
   ]);
   const spine = spineDb([['+18085550100', 'Sam Lee', 'phone'], ['sam@work.com', 'Sam Lee', 'email']]);
   const graph = buildGraph(ctx, spine, { now: NOW });
@@ -96,12 +96,52 @@ test('calendar co-attendance merges by attendee email and counts meetings', () =
   insertRows(ctx, [
     { ts: NOW - 20 * DAY, source: 'calendar', entity_id: 'c:1', text: 'm1', meta: { attendees: [{ email: 'mika@example.com', name: 'Mika Tanaka' }] } },
     { ts: NOW - 10 * DAY, source: 'calendar', entity_id: 'c:2', text: 'm2', meta: { attendees: [{ email: 'mika@example.com', name: 'Mika Tanaka' }] } },
-    { ts: NOW - 15 * DAY, source: 'imessage', entity_id: 'i:1', text: 'hey', meta: { chat_handle: '+15555550123', is_from_me: false } },
+    // The message connector reaches deeper than both calendar rows, so this
+    // fixture tests calendar merging rather than the separate horizon cap.
+    { ts: NOW - 30 * DAY, source: 'imessage', entity_id: 'i:1', text: 'hey', meta: { chat_handle: '+15555550123', is_from_me: false } },
   ]);
   const spine = spineDb([['+15555550123', 'Mika Tanaka', 'phone'], ['mika@example.com', 'Mika Tanaka', 'email']]);
   const r = buildGraph(ctx, spine, { now: NOW }).find((p) => p.name === 'Mika Tanaka');
   assert.equal(r.metInPerson, 2);
   assert.ok(r.channels.includes('calendar') && r.channels.includes('imessage'));
+});
+
+test('calendar context is capped at the deepest non-calendar connector history', () => {
+  const ctx = openDb(':memory:');
+  const calTooOld = new Date(2015, 4, 1).getTime();
+  const instagramFloor = new Date(2020, 4, 1).getTime();
+  const imessageFloor = new Date(2018, 4, 1).getTime();
+  const calInRange = new Date(2019, 4, 1).getTime();
+  insertRows(ctx, [
+    { ts: calTooOld, source: 'calendar', entity_id: 'c:old', text: 'birthday', meta: { attendees: [{ email: 'sam@work.com', name: 'Sam Lee' }] } },
+    { ts: instagramFloor, source: 'instagram', entity_id: 'ig:1', text: 'hello', meta: { chat_handle: 'sam_ig', is_from_me: false } },
+    { ts: imessageFloor, source: 'imessage', entity_id: 'i:floor', text: 'hey', meta: { chat_handle: '+18085550100', is_from_me: false } },
+    { ts: calInRange, source: 'calendar', entity_id: 'c:keep', text: 'birthday', meta: { attendees: [{ email: 'sam@work.com', name: 'Sam Lee' }] } },
+  ]);
+  const spine = spineDb([
+    ['+18085550100', 'Sam Lee', 'phone'], ['sam@work.com', 'Sam Lee', 'email'],
+    ['sam_ig', 'Sam Lee', 'social'],
+  ]);
+
+  assert.equal(relationshipHistoryFloor(ctx, NOW), imessageFloor,
+    'the oldest non-calendar connector—not calendar—sets the floor');
+  const sam = buildGraph(ctx, spine, { now: NOW }).find((p) => p.name === 'Sam Lee');
+  assert.ok(sam);
+  assert.equal(sam.metInPerson, 1, 'calendar context inside the connector horizon is retained');
+  assert.equal(sam.firstSeen, imessageFloor, 'older synthetic calendar history cannot extend the relationship');
+  assert.deepEqual(sam.timeline.map((b) => b.ym), ['2018-05', '2019-05', '2020-05']);
+});
+
+test('calendar remains available when no other connector can define a floor', () => {
+  const ctx = openDb(':memory:');
+  const oldCalendar = new Date(2015, 4, 1).getTime();
+  insertRows(ctx, [
+    { ts: oldCalendar, source: 'calendar', entity_id: 'c:only', text: 'birthday', meta: { attendees: [{ email: 'sam@work.com', name: 'Sam Lee' }] } },
+  ]);
+  const sam = buildGraph(ctx, spineDb([['sam@work.com', 'Sam Lee', 'email']]), { now: NOW })
+    .find((p) => p.name === 'Sam Lee');
+  assert.equal(relationshipHistoryFloor(ctx, NOW), null);
+  assert.equal(sam?.metInPerson, 1, 'absence of a comparison connector does not erase calendar context');
 });
 
 test('a LinkedIn connection carries title/company and the dormancy of the tie', () => {
@@ -122,24 +162,34 @@ test('the graph now keeps a single-message person (the >=2 bar is gone)', () => 
   // by the graph — that separation is the point of removing the >=2 bar.
   const ctx = openDb(':memory:');
   insertRows(ctx, [
-    { ts: NOW - DAY, source: 'mail', entity_id: 'm:1', text: 'receipt', meta: { from: ['no-reply@amazon.com'], to: ['ay@austinyoshino.com'] } },
+    { ts: NOW - DAY, source: 'mail', entity_id: 'm:1', text: 'receipt', meta: { from: ['no-reply@shop.test'], to: ['owner@example.test'] } },
   ]);
-  const owner = { addresses: new Set(['ay@austinyoshino.com']), names: [] };
+  const owner = { addresses: new Set(['owner@example.test']), names: [] };
   const graph = buildGraph(ctx, spineDb([]), { now: NOW, owner });
-  assert.ok(graph.find((p) => p.identifiers.includes('no-reply@amazon.com')), 'kept in the graph now');
+  assert.ok(graph.find((p) => p.identifiers.includes('no-reply@shop.test')), 'kept in the graph now');
 });
 
 test('owner-sent mail attributes the recipient, not the owner', () => {
   const ctx = openDb(':memory:');
   insertRows(ctx, [
-    { ts: NOW - DAY, source: 'mail', entity_id: 'm:1', text: 'a', meta: { from: ['ay@austinyoshino.com'], to: ['client@co.com'] } },
-    { ts: NOW - 2 * DAY, source: 'mail', entity_id: 'm:2', text: 'b', meta: { from: ['client@co.com'], to: ['ay@austinyoshino.com'] } },
+    { ts: NOW - DAY, source: 'mail', entity_id: 'm:1', text: 'a', meta: { from: ['owner@example.test'], to: ['client@company.test'] } },
+    { ts: NOW - 2 * DAY, source: 'mail', entity_id: 'm:2', text: 'b', meta: { from: ['client@company.test'], to: ['owner@example.test'] } },
   ]);
-  const owner = { addresses: new Set(['ay@austinyoshino.com']), names: [] };
-  const p = buildGraph(ctx, spineDb([]), { now: NOW, owner }).find((x) => x.identifiers.includes('client@co.com'));
+  const owner = { addresses: new Set(['owner@example.test']), names: [] };
+  const p = buildGraph(ctx, spineDb([]), { now: NOW, owner }).find((x) => x.identifiers.includes('client@company.test'));
   assert.ok(p);
   assert.equal(p.sent, 1, 'the owner-sent one');
   assert.equal(p.received, 1);
+});
+
+test('an explicitly marked owner key is absent from the relationship graph', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - DAY, source: 'imessage', entity_id: 'i:1', text: 'a', meta: { chat_handle: '+18085550199', is_from_me: false } },
+  ]);
+  const key = 'id:+18085550199';
+  const owner = { addresses: new Set(), names: [], keys: new Set([key]) };
+  assert.equal(buildGraph(ctx, spineDb([]), { now: NOW, owner }).some((person) => person.key === key), false);
 });
 
 // ── labels for people nobody named ───────────────────────────────────────────
@@ -153,7 +203,7 @@ test('an identifier is never mistaken for a name', () => {
   assert.equal(namelike('11107305521405@lid'), false, 'a LID');
   assert.equal(namelike('+14047180236'), false, 'a phone number');
   assert.equal(namelike('(808) 555-0100'), false, 'a formatted one');
-  assert.equal(namelike('ay@austinyoshino.com'), false, 'an address');
+  assert.equal(namelike('owner@example.test'), false, 'an address');
   assert.equal(namelike(''), false);
   assert.equal(namelike(null), false);
 });
@@ -174,7 +224,7 @@ test('an unnameable LID renders as what it is, not as digits', () => {
 // place it. It stays.
 test('a phone number survives, because it is something a person can place', () => {
   assert.equal(readableId('+14047180236'), '+14047180236');
-  assert.equal(readableId('ay@austinyoshino.com'), 'ay@austinyoshino.com');
+  assert.equal(readableId('owner@example.test'), 'owner@example.test');
   assert.equal(readableId(''), null);
 });
 
@@ -254,7 +304,7 @@ test('a calendar organizer absent from the attendee list is still a person', () 
 
 // ---- a room is not a conversation ----
 //
-// 22.3% of iMessage rows are group threads, and until 2026-08-26 nothing here
+// Group threads are common in iMessage, and until 2026-08-26 nothing here
 // could tell: the branch that asked "is this a group" read meta.is_group, which
 // only WhatsApp writes. These pin both halves of the fix -- the clocks stop
 // ticking on room chatter, and the counts do NOT move while that happens.
@@ -410,10 +460,9 @@ test('every Matrix social source follows the iMessage direct/group rules', () =>
 
 // ---- a spine that cannot be read is not an empty address book ----
 //
-// Observed live: every name in the panel became a raw phone number and one
-// person's 11,716 messages became 8,148 plus a second "person" holding the
-// other 3,568. state.db runs journal_mode=DELETE, the contacts connector
-// upserts ~2,000 rows into it about once a minute, and hermes read it with
+// Observed in private testing: every name in the panel became a raw phone number
+// and one person's messages split across two records. state.db runs
+// journal_mode=DELETE, the contacts connector upserts batches into it, and hermes read it with
 // SQLite's default busy timeout of zero -- so a read landing in that window
 // failed, and loadSpine turned the failure into an empty spine.
 //

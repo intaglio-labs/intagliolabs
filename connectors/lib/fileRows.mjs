@@ -2,16 +2,16 @@
 //
 // The text of a row is the file's own name and the folder path that leads to
 // it, plus extracted content when there is any. That is not a placeholder:
-// "Anja - Referral Agreement.docx" inside "AY-CAP LLC" is a fact about the
-// owner's year, and it is available for all 96,262 online-only files that
-// this connector will never open. See lib/fileWalk.mjs for why it must not
+// "Example Referral Agreement.docx" inside "Example Co" is a fact about the
+// owner's year, and it is available for online-only files that this connector
+// will never open. See lib/fileWalk.mjs for why it must not
 // open them.
 
 import { extensionOf } from './fileWalk.mjs';
 
 // Folder names carry most of the signal in a path, and the machinery around
 // them carries none. `/Users/x/Library/Mobile Documents/com~apple~CloudDocs/
-// AY-CAP LLC/2026/contract.pdf` is, to a reader, "AY-CAP LLC / 2026".
+// Example Co/2026/contract.pdf` is, to a reader, "Example Co / 2026".
 export function relativeParts(path, root) {
   const rest = path.startsWith(root) ? path.slice(root.length) : path;
   return rest.split('/').filter(Boolean).slice(0, -1);

@@ -111,7 +111,7 @@ protection. Presence, where it is controllable at all, is
   — never broadcasts that you're online/typing.
 - ~~**`backfill.enabled: false`** — no bulk history pull (which would mark many
   chats read).~~ **THIS WAS FALSE, and it cost four bridges their history.**
-  Backfill is ON everywhere now (owner decision, Austin, 2026-08-22: "all
+  Backfill is ON everywhere now (owner decision, 2026-08-22: "all
   connections should pull bulk messages"), and the claim it rested on does not
   survive contact with the logs.
 

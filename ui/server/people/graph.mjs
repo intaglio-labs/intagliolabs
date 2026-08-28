@@ -25,8 +25,30 @@
 // Whether a row happened in a room or in a conversation. Derived from the
 // thread, never stored -- see memory/threadKind.mjs for why it is not a field.
 import { threadKind, isRoom, counterpartyFromThread, GROUP } from '../memory/threadKind.mjs';
+import { inferRelationshipRoleIndex } from './roles.mjs';
 
 const DAY = 86_400_000;
+
+// Calendar providers commonly expose a deeper synthetic history than any
+// conversation connector (recurring birthdays are the classic case). Keep
+// that context, but do not let it invent extra relationship years. The oldest
+// real row from ANY other relationship connector is the shared backfill floor:
+// if iMessage reaches nine years, Instagram seven and Calendar eleven, every
+// relationship signal is read from the iMessage floor onward.
+const NON_CALENDAR_RELATIONSHIP_SOURCES = Object.freeze([
+  'imessage', 'whatsapp', 'messenger', 'instagram', 'twitter', 'telegram',
+  'discord', 'slack', 'mail', 'linkedin',
+]);
+
+export function relationshipHistoryFloor(contextDb, now = Date.now()) {
+  const placeholders = NON_CALENDAR_RELATIONSHIP_SOURCES.map(() => '?').join(',');
+  const row = contextDb.prepare(
+    `SELECT MIN(ts) AS oldest FROM context WHERE source IN (${placeholders}) AND ts <= ?`
+  ).get(...NON_CALENDAR_RELATIONSHIP_SOURCES, now);
+  if (row?.oldest === null || row?.oldest === undefined) return null;
+  const oldest = Number(row?.oldest);
+  return Number.isFinite(oldest) ? oldest : null;
+}
 
 function normName(s) {
   return String(s ?? '')
@@ -238,8 +260,8 @@ function personSignalsForRow(row, meta, owner) {
       };
       for (const a of meta.attendees ?? []) add(a?.email, a?.name);
       // THE ORGANIZER IS A PERSON TOO, and EventKit does not always repeat them
-      // in the attendee list -- two of them are in no attendee list at all on
-      // the live corpus, which meant the person who called the meeting was the
+      // in the attendee list. A private development corpus confirmed this could
+      // omit the person who called the meeting, making that person the
       // one person it did not record. Deduped against the attendees, because
       // usually they ARE in both.
       const org = meta.organizer;
@@ -283,7 +305,7 @@ function isOwnerName(n, owner) {
 // HIGH-SPECIFICITY ONLY. The first cut included "deck", "round", "angel",
 // "raise", "portfolio" — and family members lit up, because those words live
 // in ordinary conversation ("raise the bar", "slide deck", "next round" of
-// drinks). Measured on the live corpus: Mother scored 35 "investor" threads.
+// drinks). A private development corpus produced obvious family false positives.
 // So the vocabulary is now terms that essentially ONLY occur when actually
 // discussing a fundraise — multiword and jargon that casual talk does not use.
 // This trades recall (a real investor thread that never said "term sheet" is
@@ -390,10 +412,15 @@ function addContentSignals(contextDb, people, keyResolver, signals) {
 export function buildGraph(
   contextDb,
   stateDb,
-  { now = Date.now(), owner = { addresses: new Set(), names: [] }, contentSignals = null,
+  { now = Date.now(), owner = { addresses: new Set(), names: [], keys: new Set() }, contentSignals = null,
     sinceTs = null, aliases = null } = {}
 ) {
   const spine = loadSpine(stateDb);
+  const connectorFloor = relationshipHistoryFloor(contextDb, now);
+  const lowerBound = [sinceTs, connectorFloor]
+    .filter((value) => Number.isFinite(value))
+    .reduce((latest, value) => Math.max(latest, value), -Infinity);
+  const hasLowerBound = Number.isFinite(lowerBound);
 
   // canonical key -> person accumulator
   const people = new Map();
@@ -430,9 +457,9 @@ export function buildGraph(
       "SELECT ts, source, speaker, entity_id, meta FROM context " +
         "WHERE source IN ('imessage','whatsapp','messenger','instagram','twitter'," +
         "'telegram','discord','slack','mail','calendar','linkedin')" +
-        (sinceTs != null ? " AND ts >= ?" : "")
+        (hasLowerBound ? " AND ts >= ?" : "")
     )
-    .all(...(sinceTs != null ? [sinceTs] : []));
+    .all(...(hasLowerBound ? [lowerBound] : []));
 
   for (const row of rows) {
     let meta = {};
@@ -460,6 +487,11 @@ export function buildGraph(
           linkedin: null,
           content: {},
           timeline: new Map(),
+          // Direct-message days, distinct from the monthly aggregate above.
+          // Highlight streaks need actual calendar-day continuity; deriving it
+          // from twelve non-empty months would call one message a month a
+          // "streak" and cannot answer the year's longest day run.
+          activeDays: new Set(),
           lastFromOwner: null,
         });
       }
@@ -482,9 +514,9 @@ export function buildGraph(
         if (sig.ts < p.firstSeen) p.firstSeen = sig.ts;
         if (sig.ts <= now && (p.lastSeen === null || sig.ts > p.lastSeen)) p.lastSeen = sig.ts;
         // NOT IN A ROOM. "They reached out" has to mean they addressed the
-        // owner; somebody posting in a group both happen to be in is not that,
-        // and 205 of 1,869 people had this clock set by room chatter -- 143 of
-        // them have never sent a direct message at all, so their entire "they
+        // owner; somebody posting in a group both happen to be in is not that.
+        // Private testing found people whose clock was set entirely by room
+        // chatter even though they had never sent a direct message, so their "they
         // reached out" history was other people's group threads. Dormancy feeds
         // the mentor band, constellation warmth and open-loop detection, so this
         // was three wrong answers from one wrong clock.
@@ -526,15 +558,25 @@ export function buildGraph(
         const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
         let bucket = p.timeline.get(ym);
         if (bucket === undefined) {
-          bucket = { sent: 0, received: 0, met: 0, room: 0 };
+          bucket = { sent: 0, received: 0, met: 0, room: 0, channels: new Set() };
           p.timeline.set(ym, bucket);
         }
+        // Connector provenance belongs to the same month as its activity.
+        // A lifetime channel set cannot answer "who was on Instagram in
+        // 2023" when that person only appeared there years later.
+        bucket.channels.add(sig.channel);
         // Same split as the totals: the year view sums these, so a room counted
         // here would put the old number back on the one screen that shows it.
         if (sig.channel === 'calendar') bucket.met += 1;
         else if (sig.room) bucket.room += 1;
         else if (sig.fromMe) bucket.sent += 1;
         else bucket.received += 1;
+        // A streak is reciprocal direct correspondence. Calendar attendance
+        // and group chatter are valuable, but neither says the two people
+        // exchanged a message on this day.
+        if (isMessage && !sig.room) {
+          p.activeDays.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+        }
       }
       if (sig.linkedin) p.linkedin = sig.linkedin;
     }
@@ -546,7 +588,11 @@ export function buildGraph(
   }
 
   // Finalize: pick a display name, compute dormancy and a depth score.
-  return [...people.values()]
+  const graph = [...people.values()]
+    // An explicitly marked self identity can be a non-email source ID. Email
+    // aliases are removed while rows are read; this stable-key fallback makes
+    // sure a person never survives as their own relationship card.
+    .filter((p) => !owner?.keys?.has(p.key))
     .map((p) => {
       const messages = p.sent + p.received;
       // THE SPINE FIRST, because it is the only source that knows a name for
@@ -556,12 +602,12 @@ export function buildGraph(
       // attendee, a LinkedIn profile. A message carries a HANDLE and never a
       // name, so for anyone known only through the address book that set is
       // empty and this fell through to the raw identifier. That is why the
-      // timeline showed "ay@austinyoshino.com" for a person whose own key was
-      // already `name:austin yoshino`: the key had resolved him through the
+      // timeline showed "owner@example.test" for a person whose own key was
+      // already `name:example owner`: the key had resolved them through the
       // spine, and the label never asked.
       //
       // nameToIds keeps the ORIGINAL casing against the normalised key, so this
-      // renders "Austin Yoshino" rather than the flattened form the key carries.
+      // renders "Example Owner" rather than the flattened form the key carries.
       const fromSpine = p.key.startsWith('name:')
         ? spine.nameToIds.get(p.key.slice('name:'.length))?.name
         : null;
@@ -613,7 +659,8 @@ export function buildGraph(
         // received, met }]. The extraction layer's raw material.
         timeline: [...p.timeline.entries()]
           .sort(([a], [b]) => (a < b ? -1 : 1))
-          .map(([ym, b]) => ({ ym, ...b })),
+          .map(([ym, b]) => ({ ym, ...b, channels: [...b.channels].sort() })),
+        activeDays: [...p.activeDays].sort(),
         linkedin: p.linkedin,
         content: p.content,
       };
@@ -622,6 +669,32 @@ export function buildGraph(
     // no-reply, one calendar invite from a room. A person worth knowing about
     // shows up more than once OR across more than one channel.
     ;
+  const inferredRoles = inferRelationshipRoleIndex(
+    contextDb,
+    new Map(graph.flatMap((person) => (person.identifiers ?? []).map((id) => [id, person.key]))),
+    new Map(graph.map((person) => [person.key, person.name]))
+  );
+  return graph.map((person) => {
+    const yearRoles = inferredRoles.rolesByYear.get(person.key) ?? new Map();
+    const activeYears = new Set((person.timeline ?? []).map((bucket) => Number(String(bucket.ym).slice(0, 4))));
+    const rolesByYear = {};
+    for (const year of activeYears) {
+      if (!Number.isInteger(year)) continue;
+      // Manual corrections are scoped to the tab on which they were made.
+      // With no message evidence in a calendar-only year, fall back only to
+      // saved-name identity evidence (for example "Mother"), never to a role
+      // inferred from some other year's conversation.
+      rolesByYear[year] = owner?.rolesByYear?.get(String(year))?.get(person.key)
+        ?? yearRoles.get(year)
+        ?? inferredRoles.nameRoles.get(person.key)
+        ?? 'friend';
+    }
+    return {
+      ...person,
+      role: owner?.roles?.get(person.key) ?? inferredRoles.roles.get(person.key) ?? 'friend',
+      rolesByYear,
+    };
+  });
   // THE "≥2" EXISTENCE BAR IS GONE (owner, 2026-08-21). Every resolved person
   // is kept, even one with a single message on a single channel — a lone real
   // email from a VC used to be filtered as noise before ranking ever saw it,

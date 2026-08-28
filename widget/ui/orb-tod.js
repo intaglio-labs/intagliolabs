@@ -90,7 +90,7 @@
 
     // Set on every orb present. `.tod-orb` is the opt-in for something that
     // wants the band WITHOUT the .orb chrome — the constellation's core
-    // (people-months.css .pm-core) is a 54px blob with no face, no blobs and
+    // (people-months.css .pm-core) is a 37.8px blob with no face, no blobs and
     // no button around it, so it takes the mood and none of the machinery.
     // ~~"widget orb today; harmless if more appear"~~ — one appeared.
     for (const orb of document.querySelectorAll('.orb, .tod-orb')) {

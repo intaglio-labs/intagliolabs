@@ -7,7 +7,7 @@ import AppKit
 // the local model what the owner's own rows say and proposes claims, and answers
 // come from accepted claims only — `retrieve.mjs` reads `v_claim_accepted` and
 // nothing else. Miss the middle step and every question abstains on a full
-// database. That is exactly what shipped: 11,237 context rows, 0 claims, and an
+// database. That is exactly what shipped: context rows with no claims, and an
 // owner asking why the app that "has full access" knows nothing.
 //
 // distill-once.mjs was written as a one-shot CLI and was never wired to anything —
@@ -46,13 +46,12 @@ final class Distiller {
   /// real wake-up; this is the backstop for one that never arrives.
   private let pausedInterval: TimeInterval = 300
 
-  // OFF UNTIL THE OUTPUT HAS A DOOR. (Rishab, 2026-08-27, explicitly: "stop the
+  // OFF UNTIL THE OUTPUT HAS A DOOR. (Owner decision, 2026-08-27: "stop the
   // distiller from running until we have a way to surface this to the user.")
   //
-  // The pass works. It has produced 3,810 claims on this install -- 3,243 plan,
-  // 252 fact, 155 constraint, 147 preference, 13 commitment -- and NONE of them
-  // can answer a question, because /vault/ask reads v_claim_accepted and nothing
-  // has been accepted. Acceptance needs a human, by design.
+  // The pass works and has produced claims on a private development install,
+  // but NONE can answer a question because /vault/ask reads v_claim_accepted
+  // and nothing has been accepted. Acceptance needs a human, by design.
   //
   // There are two places a human could do that and neither is in the app:
   //
@@ -148,9 +147,9 @@ final class Distiller {
     // Episodes rather than rows, because the row was the wrong unit and this is
     // where that decision takes effect. A row reached the model alone -- "ok"
     // with no question above it -- and 99.4% of every call was the instruction
-    // sheet. Measured on this corpus: 3,759 owner rows collapse into 1,030
-    // conversations, so the same evidence costs a third of the calls and each
-    // one carries the exchange it came from.
+    // sheet. A private development corpus confirmed that many owner rows
+    // collapse into far fewer conversations, so the same evidence costs fewer
+    // calls and each call carries the exchange it came from.
     let script = backend.appendingPathComponent("ui/scripts/distill-episodes.mjs")
     let db = home.appendingPathComponent(".hazlie/context/context.db")
     guard fm.fileExists(atPath: node.path), fm.fileExists(atPath: script.path),
@@ -167,11 +166,9 @@ final class Distiller {
     // ingesting against it, breaking the sole-writer rule that
     // connectors/AGENTS.md and ui/AGENTS.md both state -- and the corpus runs
     // journal_mode=DELETE, where a writer's lock excludes every reader for the
-    // whole rebuild, so the two could stall each other for the full 5s
-    // busy_timeout. And runOnce() is a main-run-loop timer callback, so waiting
-    // on it froze the UI for the duration: the comment here used to say 110ms at
-    // 12,782 rows; it measured 1,414ms at 113,371, and it grows with every
-    // history slice that lands.
+    // whole rebuild, so the two could stall each other for the busy timeout.
+    // And runOnce() is a main-run-loop timer callback, so waiting on it froze
+    // the UI for a duration that grows with every history slice that lands.
     //
     // Now it is one POST to the writer that already holds the lock, and the
     // distiller starts in the completion handler instead of after a blocked

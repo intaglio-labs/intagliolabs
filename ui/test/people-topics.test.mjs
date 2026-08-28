@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { openDb, insertRows } from '../server/hermes.mjs';
 import { topicTallies, topTopics, topTerms, nameTokenSet, isAutomatedRow, TOPIC_SIGNALS } from '../server/people/topics.mjs';
-import { yearRows, buildMap, buildYear } from '../server/people/map.mjs';
+import { yearRows, buildMap, buildYear, peopleCoreFreshness } from '../server/people/map.mjs';
 
 const NOW = new Date(2027, 0, 1).getTime();
 const DAY = 86_400_000;
@@ -234,6 +234,98 @@ test('buildYear: one year of people by year engagement, with year topics', () =>
   assert.equal(ana.specifics, undefined, 'specifics line yeeted with it');
 });
 
+test('an uncapped year can supply every person to a relationship-label page', () => {
+  const ctx = openDb(':memory:');
+  const ts = new Date(2026, 4, 1).getTime();
+  const handles = Array.from({ length: 12 }, (_, i) => `+18085551${String(i).padStart(3, '0')}`);
+  insertRows(ctx, handles.map((handle, i) => ({
+    ts: ts + i * DAY,
+    source: 'imessage',
+    entity_id: `role-page:${i}`,
+    text: `hello from person ${i}`,
+    meta: { chat_handle: handle, is_from_me: false },
+  })));
+  const spine = spineDb(handles.map((handle, i) => [handle, `Person ${i}`, 'phone']));
+  const options = { year: 2026, now: NOW, owner: { addresses: new Set(), names: [] } };
+  const quick = buildYear(ctx, spine, { ...options, cap: 1 });
+  const full = buildYear(ctx, spine, { ...options, cap: Infinity });
+  assert.ok(quick.people.length < 12, 'the quick year remains bounded');
+  assert.equal(full.people.length, 12, 'the role-label year contains everybody');
+});
+
+test('year rows expose only connectors that carried activity in that year', () => {
+  const ctx = openDb(':memory:');
+  const y2025 = new Date(2025, 4, 1).getTime();
+  const y2026 = new Date(2026, 4, 1).getTime();
+  insertRows(ctx, [
+    { ...msg(y2025, 'hello on messages'), entity_id: 'channel-year:imessage' },
+    {
+      ts: y2026, source: 'instagram', entity_id: 'channel-year:instagram', text: 'hello on instagram',
+      meta: { chat_handle: 'sam_ig', is_group: false, is_from_me: false },
+    },
+  ]);
+  const spine = spineDb([[HANDLE, 'Sam Lee', 'phone'], ['sam_ig', 'Sam Lee', 'social']]);
+  const options = { now: NOW, owner: { addresses: new Set(), names: [] } };
+  assert.deepEqual(buildYear(ctx, spine, { ...options, year: 2025 }).people[0].channels, ['imessage']);
+  assert.deepEqual(buildYear(ctx, spine, { ...options, year: 2026 }).people[0].channels, ['instagram']);
+});
+
+test('year rows classify the relationship from that year rather than lifetime history', () => {
+  const ctx = openDb(':memory:');
+  const romanticYear = new Date(2020, 4, 1).getTime();
+  const businessYear = new Date(2023, 4, 1).getTime();
+  const friendYear = new Date(2024, 4, 1).getTime();
+  insertRows(ctx, [
+    ...['love you babe', 'goodnight baby', 'miss you, my love', 'date night tomorrow'].map((text, i) => ({
+      ...msg(romanticYear + i * DAY, text), entity_id: `role-year:romantic:${i}`,
+    })),
+    ...['investor meeting and deck', 'client roadmap launch', 'contract and invoice'].map((text, i) => ({
+      ...msg(businessYear + i * DAY, text), entity_id: `role-year:business:${i}`,
+    })),
+    { ...msg(friendYear, 'want to grab coffee?'), entity_id: 'role-year:friend' },
+  ]);
+  const spine = spineDb([[HANDLE, 'Casey Example', 'phone']]);
+  const owner = { addresses: new Set(), names: [], roles: new Map(), rolesByYear: new Map() };
+
+  assert.equal(buildYear(ctx, spine, { year: 2020, now: NOW, owner }).people[0].role, 'romantic');
+  assert.equal(buildYear(ctx, spine, { year: 2023, now: NOW, owner }).people[0].role, 'business');
+  assert.equal(buildYear(ctx, spine, { year: 2024, now: NOW, owner }).people[0].role, 'friend');
+});
+
+test('people-core freshness includes the same role stamp as the core', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [{ ...msg(new Date(2024, 4, 1).getTime(), 'hello'), entity_id: 'role-stamp:1' }]);
+  const spine = spineDb([[HANDLE, 'Casey Example', 'phone']]);
+  const owner = {
+    addresses: new Set(), names: [], roles: new Map(),
+    rolesByYear: new Map([['2024', new Map([['name:casey example', 'friend']])]]),
+  };
+  buildYear(ctx, spine, { year: 2024, now: NOW, owner });
+  assert.equal(peopleCoreFreshness(ctx, spine, null, owner).state, 'fresh');
+
+  const changed = {
+    ...owner,
+    rolesByYear: new Map([['2024', new Map([['name:casey example', 'business']])]]),
+  };
+  assert.equal(peopleCoreFreshness(ctx, spine, null, changed).state, 'stale');
+});
+
+test('year tabs do not extend earlier than the deepest non-calendar connector', () => {
+  const ctx = openDb(':memory:');
+  const oldCalendar = new Date(2015, 3, 1).getTime();
+  const messageFloor = new Date(2018, 3, 1).getTime();
+  const keptCalendar = new Date(2019, 3, 1).getTime();
+  insertRows(ctx, [
+    { ts: oldCalendar, source: 'calendar', entity_id: 'c:old', text: 'birthday', meta: { attendees: [{ email: 'sam@work.com', name: 'Sam Lee' }] } },
+    { ...msg(messageFloor, 'oldest message'), entity_id: 'i:floor' },
+    { ts: keptCalendar, source: 'calendar', entity_id: 'c:keep', text: 'birthday', meta: { attendees: [{ email: 'sam@work.com', name: 'Sam Lee' }] } },
+  ]);
+  const spine = spineDb([[HANDLE, 'Sam Lee', 'phone'], ['sam@work.com', 'Sam Lee', 'email']]);
+  const out = buildYear(ctx, spine, { year: 2019, now: NOW, owner: { addresses: new Set(), names: [] } });
+  assert.deepEqual(out.years, [2018, 2019]);
+  assert.equal(out.people[0]?.engagement, 3, 'the in-range calendar event still contributes relationship context');
+});
+
 test('topTerms returns the specifics alone — no taxonomy labels, floors intact', () => {
   const doc = {
     taxonomy: { fundraising: 9 },
@@ -355,8 +447,8 @@ test('compliance boilerplate is recognised, ordinary sentences are not', () => {
 });
 
 // The reason this drops the ROW and not the words: "code" is in the engineering
-// taxonomy, and on the live corpus 335 verification-code texts were being
-// counted as engineering conversations.
+// taxonomy, and a private development corpus showed verification-code texts
+// being counted as engineering conversations.
 test('a verification code is not an engineering conversation', () => {
   const ctx = openDb(':memory:');
   const y = new Date(2024, 3, 1).getTime();

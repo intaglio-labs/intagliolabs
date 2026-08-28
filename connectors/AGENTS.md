@@ -11,9 +11,8 @@ to reconstruct it before "simplifying" it away.
 
 - loopback HTTP to hermes — the only place corpus rows go. The address is
   `HAZLIE_HERMES_URL`, then config `hermesUrl`, then `127.0.0.1:51789` — the
-  canonical port since 2026-08-20, chosen because an unrelated dev server
-  holds 8787 on the owner's Mac and answers 200 there
-  (an unrelated dev server commonly holds 8787 and answers 200 there).
+  canonical port since 2026-08-20, chosen because unrelated local software may
+  hold 8787 and answer 200 there.
   run.mjs and the daemon's
   preflight both verify the port answers with hermes' exact `/health` body
   before any row is sent — liveness is not identity.
@@ -29,8 +28,8 @@ to reconstruct it before "simplifying" it away.
 The `files` connector (added 2026-08-20) opens **no socket at all** — it reads
 the local mirrors iCloud Drive, Box and Dropbox already maintain on disk, so
 it widens nothing here. What it does need is a hard rule about *not* reading:
-96,262 of the 97,718 files in those folders are dataless, and opening them
-would pull 45.6 GB down through the owner's iCloud on a timer. See
+many files in those folders can be dataless, and opening them could pull a
+large archive down through the owner's cloud account on a timer. See
 `ops/CONNECTORS.md` § "files — the dataless rule".
 
 Owner decision, 2026-08-19: the Apple Health connector is **replaced by an

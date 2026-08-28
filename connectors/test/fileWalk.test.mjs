@@ -17,8 +17,8 @@ function tree(t) {
   return dir;
 }
 
-// The measurement this whole module exists for: on the owner's Mac 96,262 of
-// 97,718 files are dataless. Reading one downloads it.
+// Private development measurements confirmed that many cloud entries are
+// dataless. Reading one downloads it.
 test('dataless is blocks 0 with a real size, and nothing else', () => {
   assert.equal(isDataless({ blocks: 0, size: 24864 }), true);
   assert.equal(isDataless({ blocks: 72, size: 34820 }), false, 'a materialized file has blocks');

@@ -12,6 +12,7 @@ const WIDGET = join(dirname(fileURLToPath(import.meta.url)), '..');
 const page = readFileSync(join(WIDGET, 'ui', 'people-months.js'), 'utf8');
 const html = readFileSync(join(WIDGET, 'ui', 'people-months.html'), 'utf8');
 const css = readFileSync(join(WIDGET, 'ui', 'people-months.css'), 'utf8');
+const sharedCss = readFileSync(join(WIDGET, 'ui', 'people-sky.css'), 'utf8');
 // The geometry is a plain script for the page and a module here — same file,
 // so these assertions are about the arrangement that actually ships, not a
 // second copy of the math written to agree with the first.
@@ -282,13 +283,30 @@ test('the constellation core wears the same mood as the home orb', () => {
   assert.match(page, /globalThis\.__hzTodApply\(\)/u);
 });
 
+test('the constellation core is thirty percent smaller in both art and geometry', () => {
+  assert.match(css, /\.pm-core \{[\s\S]*?width: 37\.8px; height: 37\.8px;/u);
+  assert.equal(sky.CORE_DIAMETER, 37.8,
+    'the collision geometry must shrink with the visible core');
+});
+
+test('the people page and list never become horizontal scrollers', () => {
+  assert.match(sharedCss, /body\.plist \{[\s\S]*?overflow-x: hidden;/u,
+    'the document must not pan into empty space');
+  assert.match(sharedCss, /\.pl-list \{[\s\S]*?overflow-x: hidden;[\s\S]*?overflow-y: auto;/u,
+    'the people list is vertical-only even when a row briefly overflows');
+  // These are deliberately local sideways surfaces; locking the page must not
+  // remove the year or highlight-card navigation that actually needs it.
+  assert.match(css, /\.pm-tabs \{[\s\S]*?overflow-x: auto;/u);
+  assert.match(css, /\.pm-cards \{[\s\S]*?overflow-x: auto;/u);
+});
+
 test('each highlight card takes its colour from an orb time-of-day band', () => {
   const palette = readFileSync(join(WIDGET, 'ui', 'palette.css'), 'utf8');
   // The kind rides to the DOM so the stylesheet can key on it; a switch in the
   // page would put the colour in two files.
   assert.match(page, /data-kind="\$\{esc\(h\.kind\)\}"/u);
   assert.match(page, /data-kind="\$\{esc\(a\.kind\)\}"/u);
-  for (const kind of ['person-of-the-year', 'back-from-your-past', 'rising-star', 'drifting', 'streak']) {
+  for (const kind of ['person-of-the-year', 'rising-star', 'back-from-your-past', 'drifting']) {
     assert.match(css, new RegExp(`\\.pm-card\\[data-kind="${kind}"\\] \\.pm-card-eyebrow`, 'u'),
       `${kind} has no card colour`);
     assert.match(css, new RegExp(`\\.pl-award\\[data-kind="${kind}"\\]`, 'u'),
@@ -301,6 +319,31 @@ test('each highlight card takes its colour from an orb time-of-day band', () => 
     if (hex === '#191918') continue; // the card background, quoted in the note
     assert.ok(palette.includes(hex), `${hex} is not a colour the orb uses`);
   }
+});
+
+test('Favorites keeps its plural label in the people-count filter', () => {
+  assert.match(page, /'person-of-the-year': 'favorites'/u);
+  assert.doesNotMatch(page, /streak: 'streaks'/u);
+  assert.match(page, /<span>\$\{esc\(h\.label\)\}<\/span>/u);
+});
+
+test('award-card underlines span the icon and label as one control', () => {
+  assert.match(css, /\.pm-card-eyebrow::after \{/u);
+  assert.match(css, /\.pm-card-eyebrow \{[\s\S]*?width: fit-content;[\s\S]*?max-width: 100%;/u);
+  assert.doesNotMatch(css, /\.pm-card-eyebrow span::after/u);
+});
+
+test('highlight cards render a ranked top-three podium and a link to the remaining list', () => {
+  assert.match(page, /h\.people\.slice\(0, 3\)/u);
+  assert.match(page, /pm-card-person rank-\$\{rank \+ 1\}/u);
+  assert.match(page, /data-tip="\$\{esc\(person\.line \|\| ''\)\}"/u,
+    'each person exposes the old subheader detail on hover');
+  assert.match(page, /class="pm-card-more"[\s\S]*?\$\{more\} more/u);
+  assert.match(page, /control\.classList\.contains\('pm-card-more'\)[\s\S]*?\? kind/u,
+    'the remaining-count control opens rather than toggles the category list');
+  assert.match(css, /\.pm-card-person\.rank-1 \.pm-card-face \{ width: 30px; height: 30px;/u);
+  assert.match(css, /\.pm-card-person\.rank-2 \.pm-card-face \{ width: 24px; height: 24px;/u);
+  assert.match(css, /\.pm-card-person\.rank-3 \.pm-card-face \{ width: 19px; height: 19px;/u);
 });
 
 test('the globe is a floating icon, not a tab', () => {
@@ -329,18 +372,123 @@ test('the strip fades only the end that is hiding tabs', () => {
 // The row marks are the cards' own glyphs, joined to the rows by key from the
 // year payload — never a second icon set, and never a label the page keeps its
 // own copy of.
-test('the list marks a row with the card icon of every category it is top five in', () => {
+test('the list marks a row with the card icon of every category it is top ten in', () => {
   assert.match(page, /function awardIndex\(data\)/u);
   assert.match(page, /data\.awards/u);
   assert.match(page, /CARD_ICON\[a\.kind\] \|\| FALLBACK_ICON/u,
     'the mark reuses the card glyph rather than introducing another');
-  assert.match(page, /data-tip="\$\{esc\(a\.label\)\}"/u,
-    'the label comes from the payload, not from a copy in the page');
-  // In front of the name, after the face.
-  assert.match(page, /pl-face[\s\S]{0,200}awardsHtml\(p\) \+\n\s*`<span class="pl-name">/u);
+  assert.match(page, /data-tip="\$\{esc\(a\.detail \|\| a\.label\)\}"/u,
+    'the detail and fallback label come from the payload, not from a copy in the page');
+  // The row is one compact identity group: picture, name, then awards.
+  assert.match(page, /pl-identity[\s\S]{0,200}pl-face[\s\S]{0,200}pl-name[\s\S]{0,200}awardsHtml\(p\)/u);
+  assert.match(sharedCss, /\.pl-identity \{[\s\S]*?gap: 4px;/u);
+  assert.match(css, /\.pl-face \{[\s\S]*?margin-right: 0;/u);
+  assert.match(css, /\.pl-awards \{[\s\S]*?gap: 0;/u,
+    'the awards remain a single tight cluster');
   // And the index is rebuilt per paint, so a year change cannot leave marks behind.
   assert.match(page, /awardsByKey = awardIndex\(data\);/u);
   assert.match(page, /awardsByKey = new Map\(\);/u, 'a search carries no marks');
+});
+
+test('long award explanations use a viewport-clamped tooltip and never clip in the row', () => {
+  assert.match(page, /function showAwardTip\(mark\)[\s\S]*?document\.body\.append\(tip\)/u,
+    'the tooltip escapes the scrolling list');
+  assert.match(page, /Math\.min\(anchor\.left, window\.innerWidth - box\.width - gutter\)/u,
+    'the tooltip clamps against the right viewport edge');
+  assert.match(page, /if \(top \+ box\.height > window\.innerHeight - gutter\) top = anchor\.top - box\.height - 5;/u,
+    'the tooltip flips above when the lower edge would clip it');
+  assert.match(css, /\.pl-award::after \{\s*display: none;/u);
+  assert.match(css, /\.pl-floating-tip \{[\s\S]*?max-width: calc\(100vw - 16px\);[\s\S]*?overflow-wrap: anywhere;/u,
+    'even text wider than the panel wraps inside both viewport gutters');
+});
+
+test('person rows show one role followed by at most three topic chips', () => {
+  assert.match(page, /\(p\.topics \|\| \[\]\)\.slice\(0, 3\)/u);
+  assert.match(page, /pl-chip pl-role/u);
+  assert.match(page, /function adaptMap\(payload\)[\s\S]*?role: confirmedRoles\.get\(roleStateKey\(p\.key\)\) \|\| p\.role,/u,
+    'all-time rows preserve manual relationship-role corrections');
+  assert.match(page, /ROLE_MARK = \{ friend: ':\)', business: '\$', romantic: '<3', family: 'xo' \}/u);
+  assert.match(page, /pl-role-mark/u, 'the role shorthand sits inside the role pill');
+  assert.match(page, /const roleContents = `\$\{roleMark\}\$\{esc\(role\)\}\$\{saving\}`/u,
+    'every role shorthand appears before its label');
+});
+
+test('the search field reveals an inline clear button only while it has text', () => {
+  assert.match(html, /class="pl-search-wrap"[\s\S]*?id="search"[\s\S]*?id="search-clear"[\s\S]*?aria-label="clear search"[\s\S]*?hidden/u);
+  assert.match(page, /function syncSearchClear\(\) \{[\s\S]*?searchClearEl\.hidden = searchEl\.value\.length === 0/u);
+  assert.match(page, /searchClearEl\?\.addEventListener\('click',[\s\S]*?searchEl\.value = '';[\s\S]*?dispatchEvent\(new Event\('input'/u,
+    'clearing uses the same state teardown as keyboard deletion');
+  assert.match(sharedCss, /\.pl-search-clear \{[\s\S]*?position: absolute;[\s\S]*?right: 7px;/u);
+  assert.match(sharedCss, /\.pl-search-clear\[hidden\] \{ display: none; \}/u);
+  assert.equal((page.match(/searchEl\.placeholder = 'search';/gu) || []).length, 2,
+    'both ordinary and result views use the terse hint');
+});
+
+test('each role label ends with a chevron that opens role choices directly', () => {
+  assert.match(page, /class="pl-role-menu role-\$\{esc\(role\)\}"[\s\S]*?data-role-menu[\s\S]*?aria-label="change \$\{esc\(role\)\} role"/u);
+  assert.match(page, /<path d="m3 4\.5 3 3 3-3"><\/path>/u);
+  assert.match(page, /const roleMenu = e\.target\.closest\('\.pl-role-menu\[data-role-menu\]'\)[\s\S]*?openSelfMenu\(person, box\.right, box\.bottom \+ 4, \{ rolesOnly: true \}\)/u,
+    'the chevron opens role choices rather than navigating the label list');
+  assert.match(sharedCss, /\.pl-role-menu \{[\s\S]*?border-radius: 0 999px 999px 0;/u,
+    'the chevron is visually joined to the right end of the role pill');
+});
+
+test('role corrections paint an inline saving state before the bridge request finishes', () => {
+  assert.match(page, /const pendingRoles = new Map\(\)/u);
+  assert.match(page, /const stateKey = roleStateKey\(person\.key, person\.year\);[\s\S]*?pendingRoles\.set\(stateKey, role\);\s*render\(\);\s*try \{/u,
+    'the selected pill and loader paint before waiting on the server');
+  assert.match(page, /if \(person\.year !== null\) payload\.year = person\.year;\s*const out = await hzPost\('peopleRole', payload\)/u,
+    'a correction made on a year row is persisted for that person-year');
+  assert.match(page, /pl-role-wait[\s\S]*?aria-label="saving role"/u);
+  assert.match(page, /confirmedRoles\.set\(stateKey, role\);[\s\S]*?pendingRoles\.delete\(stateKey\);[\s\S]*?render\(\)/u,
+    'success swaps the pending role into settled local state immediately');
+  assert.doesNotMatch(page, /async function markPersonRole[\s\S]*?cache\.clear\(\)[\s\S]*?await load\(year\)/u,
+    'a role edit must not blank every cached surface and block on a cold reload');
+  assert.match(sharedCss, /\.pl-role-wait > span \{[\s\S]*?animation: pl-role-saving/u);
+});
+
+test('expanded summaries omit the local-model attribution', () => {
+  assert.doesNotMatch(page, /written by the local model/u);
+  assert.doesNotMatch(page, /pm-sum-tag/u);
+});
+
+test('topic pills stay all-time while role labels open everyone in the selected year', () => {
+  assert.match(page, /data-role-filter="\$\{esc\(role\)\}"/u);
+  assert.match(page, /data-topic-filter="\$\{esc\(t\.label\)\}"/u);
+  assert.match(page, /scope = role \? 'year' : 'all';/u,
+    'role navigation stays in the open year; topic navigation keeps its all-time scope');
+  assert.match(page, /hzPost\('peopleYear', \{ year: y, all: true \}\)/u,
+    'the role page upgrades that year beyond the normal row cap');
+  assert.match(page, /if \(roleFilter && view === 'list'\)[\s\S]*?settledRole\(p, roleYearForRow\(p\.year \?\? year\)\) === roleFilter/u,
+    'role pills filter by the single inferred or manually corrected role');
+  assert.match(page, /if \(topicPill\)[\s\S]*?openPillFilter\(\{ topicLabel:/u);
+  assert.match(page, /if \(rolePill\)[\s\S]*?openPillFilter\(\{ role:/u);
+  const handler = page.slice(page.indexOf("listEl.addEventListener('click'"), page.indexOf('// The globe is a dense all-time surface'));
+  assert.ok(handler.indexOf('topicPill') < handler.indexOf("closest('.pl-row')"),
+    'pill navigation is handled before a row can expand');
+});
+
+test('connector glyphs open an uncapped connector list for the selected year', () => {
+  assert.match(page, /class="pm-src-ic" type="button" data-channel-filter="\$\{esc\(c\)\}"/u);
+  assert.match(page, /if \(channelFilter && view === 'list' && scope === 'year'\)[\s\S]*?p\.channels \|\| \[\]\)\.includes\(channelFilter\)/u);
+  assert.match(page, /function openChannelFilter\(channel\)[\s\S]*?channelFilter = channel;[\s\S]*?scope = 'year';/u);
+  assert.match(page, /loadFullFilterYear\(year\)/u,
+    'the connector page upgrades past the normal quick-page cap');
+  assert.match(page, /const connector = e\.target\.closest\('\.pm-src-ic\[data-channel-filter\]'\)[\s\S]*?openChannelFilter\(connector\.dataset\.channelFilter\)/u);
+  const handler = page.slice(page.indexOf("listEl.addEventListener('click'"), page.indexOf('// The globe is a dense all-time surface'));
+  assert.ok(handler.indexOf('data-channel-filter') < handler.indexOf("closest('.pl-row')"),
+    'a connector click filters rather than expanding its source row');
+  assert.match(css, /\.pm-src-ic \{[\s\S]*?border: 0;[\s\S]*?cursor: pointer;/u);
+});
+
+test('row trophy buttons open everyone with that trophy in the selected year', () => {
+  assert.match(page, /<button class="pl-award" type="button"[\s\S]*?data-award-kind="\$\{esc\(a\.kind\)\}"/u);
+  assert.match(page, /function openAwardFilter\(kind\)[\s\S]*?awardFilter = kind;[\s\S]*?scope = 'year';/u);
+  assert.match(page, /const trophy = e\.target\.closest\('\.pl-award\[data-award-kind\]'\)[\s\S]*?openAwardFilter\(trophy\.dataset\.awardKind\)/u);
+  const handler = page.slice(page.indexOf("listEl.addEventListener('click'"), page.indexOf('// The globe is a dense all-time surface'));
+  assert.ok(handler.indexOf('data-award-kind') < handler.indexOf("closest('.pl-row')"),
+    'a trophy click filters rather than expanding its person row');
+  assert.match(css, /\.pl-award \{[\s\S]*?border: 0;[\s\S]*?cursor: pointer;/u);
 });
 
 test('a hovered person name paints above every neighboring face', () => {

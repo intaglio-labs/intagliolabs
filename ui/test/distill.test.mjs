@@ -228,9 +228,9 @@ test('a speakered row reaches the model as "Speaker: text" — the wiring has a 
   const req = buildRequest({
     system: 'sys',
     model: '/models/model.gguf',
-    row: { ...ROW, speaker: 'Barry' },
+    row: { ...ROW, speaker: 'Casey' },
   });
-  assert.equal(req.messages[1].content, `Barry: ${ROW.text}`);
+  assert.equal(req.messages[1].content, `Casey: ${ROW.text}`);
 });
 
 test('a blank or non-string speaker adds no prefix and no stray colon', () => {
@@ -280,23 +280,23 @@ test('the cache key changes when the prompt, the model or the row changes', () =
 // missing), but quotes are still validated against the BARE text — a quote
 // that swallows the label is dropped, never stored.
 test('rowContent prefixes the author and quote checks stay on bare text', () => {
-  const row = { id: 1, speaker: 'Barry', text: 'want chick-fil-a?', content_hash: 'h' };
-  assert.equal(rowContent(row), 'Barry: want chick-fil-a?');
+  const row = { id: 1, speaker: 'Casey', text: 'want chick-fil-a?', content_hash: 'h' };
+  assert.equal(rowContent(row), 'Casey: want chick-fil-a?');
   assert.equal(rowContent({ ...row, speaker: null }), 'want chick-fil-a?');
   assert.equal(rowContent({ ...row, speaker: '  ' }), 'want chick-fil-a?');
 
   // A quote including the label fails the exact-span check against row.text.
   const bad = validateRowClaims(row, [
-    { kind: 'plan', text: 'Barry asked about chick-fil-a.', quote: 'Barry: want chick-fil-a?' },
+    { kind: 'plan', text: 'Casey asked about chick-fil-a.', quote: 'Casey: want chick-fil-a?' },
   ]);
   assert.equal(bad.kept.length, 0);
   assert.match(bad.dropped[0].reason, /exact span/u);
 
   // AND THE SUBJECT IS CHECKED, which is the other half of the same fabrication.
-  // "Barry asked about chick-fil-a" is a claim about Barry; this table is about
+  // "Casey asked about chick-fil-a" is a claim about Casey; this table is about
   // the owner and nobody else, so it is dropped no matter how good its quote is.
   const somebodyElse = validateRowClaims(row, [
-    { kind: 'plan', text: 'Barry asked about chick-fil-a.', quote: 'want chick-fil-a?' },
+    { kind: 'plan', text: 'Casey asked about chick-fil-a.', quote: 'want chick-fil-a?' },
   ]);
   assert.equal(somebodyElse.kept.length, 0);
   assert.match(somebodyElse.dropped[0].reason, /owner/u);
@@ -308,8 +308,8 @@ test('rowContent prefixes the author and quote checks stay on bare text', () => 
 });
 
 // THE NAME THE MODEL WAS TAUGHT. The prompt's worked examples once used a
-// placeholder name, the model read it as the owner's, and on a real machine 75 of
-// 119 claims opened with it — every one grounded in a quote that was the owner's
+// placeholder name, the model read it as the owner's, and claims throughout a
+// private test run opened with it — every one grounded in a quote that was the owner's
 // own first person, so nothing downstream could catch it. The prompt says "the
 // owner" now; this is the part that does not depend on the model reading it.
 test('a claim that names somebody instead of the owner is dropped', () => {

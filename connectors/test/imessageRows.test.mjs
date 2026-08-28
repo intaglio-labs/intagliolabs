@@ -21,8 +21,8 @@ function blob(text, { attachment = false } = {}) {
   return Buffer.concat([head, Buffer.from([0x2b]), len, body]);
 }
 
-// 97% of messages on the dev seed store text ONLY here. A reader trusting
-// message.text captures 2% of the corpus and looks like it works.
+// Most messages on modern macOS can store text ONLY here. A reader trusting
+// message.text captures a small fraction of the corpus and looks like it works.
 test('the decoder reads short and long strings out of a typedstream blob', () => {
   assert.equal(decodeAttributedBody(blob('hello')), 'hello');
   const long = 'x'.repeat(900);
@@ -88,25 +88,24 @@ test('a received message maps to a hermes row', () => {
 });
 
 test('an outbound message is attributed to the owner, not a handle', () => {
-  const row = messageToRow(raw({ is_from_me: 1 }), { selfName: 'Austin' });
-  assert.equal(row.speaker, 'Austin');
+  const row = messageToRow(raw({ is_from_me: 1 }), { selfName: 'Example Owner' });
+  assert.equal(row.speaker, 'Example Owner');
   assert.equal(row.meta.is_from_me, true);
 });
 
 // THE INGESTION HALF OF THE 2026-08-19 LOOP. The courier sent this text into
 // the pinned thread, chat.db handed it back on the next scan, and it entered
 // the corpus as an ordinary owner-authored message — which is exactly what it
-// looks like at this layer. The fixture is the real specimen (live store id
-// 12389) so the test can fail the way the system actually failed.
+// looks like at this layer. The payload is deliberately synthetic: exclusion
+// is keyed by chat GUID, so publishing a real owner's health digest would add
+// privacy risk without strengthening this regression.
 const DIGEST_SPECIMEN = [
-  '📈 energy up',
-  '— averaged 8.4h a night across 6 nights',
-  '— slept 8h+ on 4 of 6 nights',
-  '— 8,229 steps a day on average',
-  '— HRV averaged 23ms',
+  'synthetic daily digest',
+  '— private metric one',
+  '— private metric two',
 ].join('\n');
 
-const PINNED = 'any;-;austiny808@gmail.com';
+const PINNED = 'any;-;owner@example.test';
 
 test('the pinned Intaglio Labs thread never becomes a corpus row', () => {
   const digest = raw({ guid: 'D1', text: DIGEST_SPECIMEN, is_from_me: 1, chat_guid: PINNED });
@@ -191,9 +190,10 @@ test('a corrupt cursor falls back to the window instead of resuming from garbage
 // ── walking history backwards ────────────────────────────────────────────────
 //
 // The forward cursor only ever moves toward now, so nothing in the daemon could
-// reach a message older than the day it first ran. Measured on a real machine:
-// chat.db held 479,967 messages across 2017-2026 and 9,603 were ingested, all
-// of them 2026. The years were not thin; they were never fetched.
+// reach a message older than the day it first ran. A private development corpus
+// confirmed that only the initial forward window was ingested. The older years
+// were not thin; they were never fetched. Private corpus sizes stay out of
+// public fixtures.
 
 const NOW = Date.UTC(2026, 7, 25);
 const APPLE_EPOCH_MS = 978307200000;

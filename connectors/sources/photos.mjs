@@ -61,7 +61,7 @@ import { assetToRow } from '../lib/photoRows.mjs';
 import { groupPeopleByAsset, peopleMeta, peopleText, personNames } from '../lib/peopleRows.mjs';
 
 const DEFAULT_BACKFILL_DAYS = 365;
-// One pass is bounded: the library here holds 88,775 assets, and decoding OCR
+// One pass is bounded because photo libraries can be large and decoding OCR
 // spawns a plutil per photo. The cursor advances, so the remainder arrives on
 // later passes rather than being lost.
 const MAX_ASSETS_PER_SCAN = 2000;
@@ -117,8 +117,8 @@ export function createPhotosSource({ home } = {}) {
         // OCR IS NOT READ, and the reason is measured rather than assumed.
         // This used to point at connectors/lib/ocrPlist.mjs, a decoder the
         // connector never called; the code is deleted and its finding moved
-        // here, next to the decision it justifies. Measured 2026-08-20 on a
-        // real 88,775-asset library:
+        // here, next to the decision it justifies. Measured on a private photo
+        // library:
         //
         //   - the blob in ZCHARACTERRECOGNITIONATTRIBUTES.ZCHARACTER-
         //     RECOGNITIONDATA IS a binary plist (magic `bplist00`), readable
@@ -130,10 +130,8 @@ export function createPhotosSource({ home } = {}) {
         //     format error, which is the kind of wrong mistaken for an empty
         //     library;
         //   - but the recognized text is NOT in the plist's <string>
-        //     elements. Those are 26 NSKeyedArchiver class names, identical
-        //     in every photo. Collecting them returned the SAME 214
-        //     characters for all 8 sampled blobs, whose sizes ranged 3.6 KB
-        //     to 26.7 KB;
+        //     elements. Those are NSKeyedArchiver class names, identical in
+        //     every photo. Sampled blobs returned the same boilerplate;
         //   - the text sits in a ~25 KB <data> element that is not itself a
         //     plist (magic 103bdee9…) — protobuf, or a Vision encoding.
         //
@@ -144,7 +142,7 @@ export function createPhotosSource({ home } = {}) {
         // worked. It returned text, for every photo, with no errors. Only
         // comparing hashes across photos revealed every "decode" was the same
         // string — which shipped would have put one boilerplate string in all
-        // 88,775 rows and made every future search match everything.
+        // rows and made every future search match everything.
         const stmt = db.prepare(
           `SELECT a.Z_PK, a.ZUUID, a.ZDATECREATED, a.ZKIND, a.ZKINDSUBTYPE, a.ZLATITUDE, a.ZLONGITUDE,
                   a.ZFAVORITE, a.ZWIDTH, a.ZHEIGHT, a.ZDURATION, a.ZTRASHEDSTATE, a.ZFILENAME,
@@ -158,9 +156,9 @@ export function createPhotosSource({ home } = {}) {
         const assets = stmt.all(floor.seconds, MAX_ASSETS_PER_SCAN);
 
         // Faces are fetched for THIS BATCH's assets only, not the whole
-        // library: 83,181 detections joined per-row would be a round trip per
-        // photo, and loading them all would be most of the table for 2,000
-        // photos' worth of answers.
+        // library: joining every detection per-row would be a round trip per
+        // photo, and loading them all would be most of the table for one
+        // batch's answers.
         let peopleByAsset = new Map();
         if (assets.length > 0) {
           const pks = assets.map((a) => Number(a.Z_PK)).filter(Number.isFinite);

@@ -1,17 +1,17 @@
 // Extract the plain string from a Messages `attributedBody` blob.
 //
-// WHY THIS FILE EXISTS AT ALL: on this seed, 614,443 of 633,368 messages carry
-// their text ONLY in `attributedBody`, and just 11,834 populate `message.text`.
-// A reader that trusts `text` captures 2% of the corpus and looks like it
-// works. Measured 2026-08-19; the ratio is a consequence of a macOS change,
-// not of this mailbox.
+// WHY THIS FILE EXISTS AT ALL: on modern macOS, most Messages rows can carry
+// their text ONLY in `attributedBody`, while comparatively few populate
+// `message.text`. A reader that trusts `text` captures a small fraction of the
+// corpus and looks like it works. This is an OS schema behavior, not a property
+// of one mailbox.
 //
 // The blob is an NSKeyedArchiver *typedstream* — the old NeXT binary format,
 // not the plist-based archive, so there is no builtin to parse it. Rather than
 // take a dependency to read one string, this decodes the one shape that
 // matters: the NSString payload that follows the class name.
 //
-// Layout, empirically (and stable across every message on this seed):
+// Layout, empirically stable across the tested fixtures:
 //
 //   ... "NSString" <flags> 0x2B <length> <utf8 bytes> ...
 //

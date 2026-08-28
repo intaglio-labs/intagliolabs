@@ -16,7 +16,7 @@ different certificates, and conflating them wastes a day.
 
 ~~A development-signed app can be handed to other Macs by embedding a
 `MAC_APP_DEVELOPMENT` provisioning profile, which requires registering an App ID
-and each machine's UDID.~~ **Removed 2026-08-27 (Rishab, explicitly: "remove it
+and each machine's UDID.~~ **Removed 2026-08-27 (owner decision: "remove it
 if its useless").** The reasoning is kept because the setup instructions were
 here for a while and somebody will wonder where they went.
 

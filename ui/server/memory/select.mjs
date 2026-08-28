@@ -49,8 +49,8 @@
 // Included sources still carry a per-source PREDICATE, because "the owner's
 // notes" is not the same set as "rows whose source is notes":
 //
-//   notes     body_undecoded IS NOT 1 -- 19 rows in the live corpus failed
-//             typedstream decoding, and their text is a mangled fragment. A
+//   notes     body_undecoded IS NOT 1 -- rows that fail typedstream decoding
+//             contain a mangled fragment. A
 //             claim drawn from one would quote bytes the owner never wrote.
 //   imessage  is_from_me = 1 -- the whole point. A sent message can still
 //             QUOTE somebody else, so this reduces the attack surface rather
@@ -172,16 +172,14 @@ export function selectionSql(excludedGuidCount = 0) {
   // KEYSET PAGINATION over (store_changed_at, id), which is the pair this
   // already sorts by. It used to be `store_changed_at > ?` alone, on the stated
   // grounds that hermes assigns store_changed_at "strictly monotonically". IT
-  // DOES NOT, and the live store is not close: 18,775 rows across 149 distinct
-  // values, because a connector pass stamps every row it delivers with one
-  // timestamp. Ties of ~100-200 rows are ordinary.
+  // DOES NOT: a connector pass stamps every row it delivers with one
+  // timestamp, so large tie groups are ordinary.
   //
   // What that cost: a capped pass took `limit` rows out of a tie group, the
   // caller advanced the cursor to that group's shared value, and the next pass
   // asked for a value strictly greater -- stepping over every remaining row in
-  // the group, permanently. Measured on the live store before this fix: 37 runs
-  // sent 1,480 rows while the watermark walked over 2,890 eligible ones. 1,410
-  // rows, 49% of the corpus it had covered, were never read and never would be.
+  // the group, permanently. A private development corpus confirmed that this
+  // skipped a material share of eligible rows.
   //
   // The pair is unique (id is the primary key), so `>` on it is exact: no rows
   // skipped, none repeated, and no rewind-and-refetch dance like the one

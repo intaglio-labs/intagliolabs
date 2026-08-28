@@ -26,8 +26,12 @@
         <polyline points="34 38 34 31 27 31"/>
       </svg>
     </button>
-    <input class="pl-search" id="search" type="text" placeholder="loading your year…"
-           autocomplete="off" autocorrect="off" spellcheck="false">
+    <div class="pl-search-wrap">
+      <input class="pl-search" id="search" type="text" placeholder="loading your year…"
+             autocomplete="off" autocorrect="off" spellcheck="false">
+      <button class="pl-search-clear" id="search-clear" type="button"
+              aria-label="clear search" title="Clear search" hidden>×</button>
+    </div>
     <button class="close" id="close" title="Close">×</button>
   </div>
   <!-- Year tabs, browser-style: every year with activity, oldest to newest,
@@ -74,7 +78,20 @@
        already recorded it) and this sentence was left describing the old
        arrangement. Filled by people-months.js from /people/map, which it
        caches for the panel's life, so re-opening it costs no fetch. -->
-  <div class="pm-sky" id="sky" hidden></div>
+  <div class="pm-sky" id="sky" hidden>
+    <!-- Pan and zoom are separate layout planes: the outer plane moves in
+         screen pixels, while CSS zoom relays out the inner field at its target
+         resolution. The controls remain fixed above both. -->
+    <div class="pm-sky-pan" id="sky-pan">
+      <div class="pm-sky-stage" id="sky-stage"></div>
+    </div>
+    <div class="pm-sky-zoom" id="sky-zoom" aria-label="Constellation zoom">
+      <button type="button" id="sky-zoom-out" title="Zoom out" aria-label="Zoom out">−</button>
+      <input type="range" id="sky-zoom-range" min="65" max="220" value="100" step="5"
+             aria-label="Constellation zoom level">
+      <button type="button" id="sky-zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+    </div>
+  </div>
   </div>
   <script src="bridge.js"></script>
   <!-- The constellation's core wears the SAME mood as the home orb, and this

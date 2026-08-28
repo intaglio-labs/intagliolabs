@@ -105,9 +105,8 @@ test('a participant with neither name nor address contributes nothing', () => {
 
 // ── attendees as identities ──────────────────────────────────────────────────
 //
-// 706 distinct attendee emails on this machine, all 706 carrying a name, and
-// only 19 of them in the address book. Without this the timeline renders them
-// as raw email addresses.
+// A private development calendar contained named attendee emails that were not
+// in the address book. Without this the timeline renders them as raw addresses.
 import { attendeeIdentities } from '../sources/calendar.mjs';
 
 const ev = (attendees, organizer) => ({ attendees, organizer });

@@ -146,22 +146,29 @@ body.plist .pm-icon:hover { filter: brightness(1.2); }
 body.plist .pm-icon svg { display: block; width: 100%; height: 100%; }
 
 
-/* Connector glyphs after the name: which sources know this person. Same
-   glyph set as the connector tiles (hzGlyph); muted so the name stays the
-   loudest thing on the line. The title attribute carries the hover hint. */
+/* Connector glyphs after the name: which sources carried this person in the
+   selected year. They are buttons into that connector's full year list, using
+   the same glyph set as the connector tiles (hzGlyph); muted so the name stays
+   the loudest thing on the line. */
 body.plist .pm-src-ic {
   flex: 0 0 auto;
   display: inline-flex;
   width: 14px; height: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--muted);
+  font: inherit;
+  cursor: pointer;
 }
 body.plist .pm-src-ic svg { width: 100%; height: 100%; display: block; }
-body.plist .pm-src-ic:hover { color: var(--hazelnut-light); }
+body.plist .pm-src-ic:hover,
+body.plist .pm-src-ic:focus-visible { color: var(--hazelnut-light); outline: none; }
 
-/* THE CATEGORY MARKS, in front of the name: this person is in the top five of
+/* THE CATEGORY MARKS, immediately after the name: this person is in the top ten of
    a card's category this year. Same glyph the card uses, at row size — the mark
    is only readable because the card above taught it, so a second icon set for
-   the same five ideas would have to be learned twice. Hazelnut rather than
+   the same four ideas would have to be learned twice. Hazelnut rather than
    muted, because unlike the connector glyphs after the name these are the
    uncommon thing on a line and they are what the eye is meant to catch; the
    label arrives with the data and shows on hover. */
@@ -170,15 +177,27 @@ body.plist .pl-award {
   position: relative;
   display: inline-flex;
   width: 14px; height: 14px;
-  margin-right: 1px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+  margin-right: 0;
   color: var(--hazelnut-light);
   /* ~~0.75.~~ Lifted once the glyphs stopped all being hazelnut: the tint is
      the mark's identity now (see the tod-band block below), and a quarter of
      it dropped on the way to the eye. */
   opacity: 0.9;
 }
+body.plist .pl-awards {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+}
 body.plist .pl-award svg { width: 100%; height: 100%; display: block; }
 body.plist .pl-award:hover { opacity: 1; }
+body.plist .pl-award:focus-visible { opacity: 1; outline: 1px solid currentColor; outline-offset: 2px; }
 
 /* Line 1's message count, directly after the name; line 2 is the chips. */
 body.plist .pm-msgs {
@@ -216,6 +235,29 @@ body.plist .pm-face[data-tip]::after {
 body.plist .pm-src-ic:hover::after,
 body.plist .pl-award:hover::after,
 body.plist .pm-face[data-tip]:hover::after { opacity: 1; }
+/* Award explanations can be longer than the remaining row width. Their real
+   tooltip is a fixed body child positioned and clamped by JS; suppress the
+   old pseudo-element, which was trapped by the scrolling list's clipping. */
+body.plist .pl-award::after {
+  display: none;
+}
+body.plist .pl-floating-tip {
+  position: fixed;
+  z-index: 80;
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(20, 20, 18, 0.98);
+  border: 1px solid rgba(197, 165, 109, 0.42);
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.36);
+  color: var(--hazelnut-light);
+  font-size: 10px;
+  line-height: 1.35;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
 /* (The globe tab had this tooltip too, until 2026-08-25 the same day: its
    bubble laid out 25px past the strip's box, and with overflow-y promoted to
    auto by overflow-x: auto that made the whole tab row vertically scrollable.
@@ -266,6 +308,37 @@ body.plist .pm-sky .pm-loading {
   padding: 0;
 }
 
+/* The globe's cold-load state is the familiar typing cadence, without a
+   message bubble or explanatory copy. The accessible name lives on the
+   parent in markup; these are only the three visible beats. */
+body.plist .pm-typing {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  display: flex;
+  gap: 7px;
+  transform: translate(-50%, -50%);
+}
+body.plist .pm-typing span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--hazelnut-light);
+  opacity: 0.25;
+  animation: pm-typing-dot 1.05s ease-in-out infinite;
+}
+body.plist .pm-typing span:nth-child(2) { animation-delay: 0.14s; }
+body.plist .pm-typing span:nth-child(3) { animation-delay: 0.28s; }
+@keyframes pm-typing-dot {
+  0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-4px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.plist .pm-typing span { animation: none; opacity: 0.55; }
+  body.plist .pm-typing span:nth-child(2) { opacity: 0.8; }
+  body.plist .pm-typing span:nth-child(3) { opacity: 1; }
+}
+
 /* ---- the year's highlight cards (2026-08-25) ----
    One card per claim the year actually earns. The server decides which exist
    (people/highlights.mjs); this file only knows how to draw one. They sit
@@ -286,12 +359,10 @@ body.plist .pm-card {
      made narrower: it is nowrap by design (a two-line eyebrow above a one-line
      name unbalances the row) and its labels come from the server, not from
      this file. ~~168px.~~ That left a 142px content box, and the longest
-     labels overran it — "longest monthly streak" needs 164px, and the widest
-     of them, then "reconnected after a gap", needed 171px (measured) — so the
+     labels overran it — the then-longest labels needed 164–171px (measured) — so the
      text crossed the card's right border and painted over the next card.
      202 gave that widest label 5px of slack; since the 2026-08-26 renames
-     ("favorite", "reconnected") the widest is "longest monthly streak" and the
-     slack is 12px. Left at 202 rather than retuned: a card narrow enough to
+     ("favorites", "reconnected") there is ample slack. Left at 202 rather than retuned: a card narrow enough to
      fit today's labels exactly is a card the next label overruns. Fixed rather than sized to
      content: a content-sized card takes its width from the longest line in it,
      and the line under the name is free text, so the cards came out different
@@ -305,6 +376,7 @@ body.plist .pm-card {
   display: flex;
   flex-direction: column;
   gap: 7px;
+  min-height: 145px;
   background: rgba(234, 234, 234, 0.04);
   border: 1px solid rgba(234, 234, 234, 0.10);
 }
@@ -318,9 +390,18 @@ body.plist .pm-card {
    it — the constellation's lead bubble still uses it — it just no longer
    changes how this card is painted. */
 body.plist .pm-card-eyebrow {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 0 0 4px;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   /* Belt and braces on the width above: if a label ever outgrows even a card
      sized to it, it truncates inside its own card rather than over the next
      one. Overflow here is a bug either way — this only decides which kind. */
@@ -333,15 +414,37 @@ body.plist .pm-card-eyebrow {
   text-transform: uppercase;
 }
 body.plist .pm-card-eyebrow svg { flex: 0 0 auto; width: 13px; height: 13px; display: block; }
+/* The heading is a filter for everyone who earned this year's award. The
+   underline makes that action legible without adding another control to cards. */
+body.plist .pm-card-eyebrow span {
+  display: inline-block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-decoration: none;
+}
+body.plist .pm-card-eyebrow::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: 1px;
+  left: 0;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.75;
+}
+body.plist .pm-card-eyebrow:hover::after,
+body.plist .pm-card-eyebrow:focus-visible::after,
+body.plist .pm-card-eyebrow.active::after { height: 2px; opacity: 1; }
+body.plist .pm-card-eyebrow:focus-visible { outline: 1px solid currentColor; outline-offset: 3px; border-radius: 3px; }
 
-/* ---- A COLOUR PER CARD, FROM THE ORB'S OWN FIVE MOODS (owner, 2026-08-26) ----
-   Five highlight kinds and five time-of-day bands, and the pairings are the
+/* ---- A COLOUR PER CARD, FROM THE ORB'S OWN MOODS (owner, 2026-08-26) ----
+   Four highlight kinds use four time-of-day bands, and the pairings are the
    moods' own descriptions in palette.css §time of day, not a rotation:
 
      favorite     <- power hour     "the brand gradient at full saturation"
      reconnected  <- early morning  "pre-dawn quiet", something coming back
      new          <- late morning   "energetic · fresh spring green"
-     streak       <- happy hour     "hazelnut ripens into golden-hour amber"
      drifting     <- night          "the one band that goes DARKER"
 
    One declaration each: the eyebrow's `color` is inherited by its label AND by
@@ -363,16 +466,43 @@ body.plist .pm-card-eyebrow svg { flex: 0 0 auto; width: 13px; height: 13px; dis
    the right end of the row for the card that says a friendship is fading. */
 body.plist .pm-card[data-kind="person-of-the-year"] .pm-card-eyebrow,
 body.plist .pl-award[data-kind="person-of-the-year"] { color: #c5a56d; }
+body.plist .pm-filter-chip[data-kind="person-of-the-year"] { --pm-filter-tint: #c5a56d; }
 body.plist .pm-card[data-kind="back-from-your-past"] .pm-card-eyebrow,
 body.plist .pl-award[data-kind="back-from-your-past"] { color: #cbb8d6; }
+body.plist .pm-filter-chip[data-kind="back-from-your-past"] { --pm-filter-tint: #cbb8d6; }
 body.plist .pm-card[data-kind="rising-star"] .pm-card-eyebrow,
 body.plist .pl-award[data-kind="rising-star"] { color: #7fc46a; }
-body.plist .pm-card[data-kind="streak"] .pm-card-eyebrow,
-body.plist .pl-award[data-kind="streak"] { color: #e0a35c; }
+body.plist .pm-filter-chip[data-kind="rising-star"] { --pm-filter-tint: #7fc46a; }
 body.plist .pm-card[data-kind="drifting"] .pm-card-eyebrow,
 body.plist .pl-award[data-kind="drifting"] { color: color-mix(in srgb, #6e3a5c 55%, var(--fg)); }
-body.plist .pm-card-eyebrow span { overflow: hidden; text-overflow: ellipsis; }
-body.plist .pm-card-who { display: flex; align-items: center; gap: 7px; min-width: 0; }
+body.plist .pm-filter-chip[data-kind="drifting"] { --pm-filter-tint: color-mix(in srgb, #6e3a5c 55%, var(--fg)); }
+body.plist .pm-filter-chip[data-role="friend"] { --pm-filter-tint: #a9c6e1; }
+body.plist .pm-filter-chip[data-role="business"] { --pm-filter-tint: var(--hazelnut-light); }
+body.plist .pm-filter-chip[data-role="romantic"] { --pm-filter-tint: #e6a0bb; }
+body.plist .pm-filter-chip[data-role="family"] { --pm-filter-tint: #9bd68a; }
+/* A compact podium replaces the old one-winner name plus exposed detail line.
+   Rank is carried by scale rather than medals or numerals: the winner leads,
+   then each following person steps down without becoming illegible. */
+body.plist .pm-card-podium {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+body.plist .pm-card-person {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  border-radius: 7px;
+  cursor: help;
+  transition: background 0.12s, opacity 0.12s;
+}
+body.plist .pm-card-person:hover,
+body.plist .pm-card-person:focus-visible {
+  background: rgba(234, 234, 234, 0.055);
+  outline: none;
+}
 body.plist .pm-card-face {
   flex: 0 0 auto;
   width: 26px; height: 26px;
@@ -385,7 +515,6 @@ body.plist .pm-card-face {
   font-size: 9px;
   font-weight: 600;
 }
-
 body.plist .pm-card-name {
   font-size: 12.5px;
   font-weight: 600;
@@ -394,11 +523,67 @@ body.plist .pm-card-name {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-body.plist .pm-card-line {
-  font-size: 10.5px;
+body.plist .pm-card-person.rank-1 .pm-card-face { width: 30px; height: 30px; font-size: 10px; }
+body.plist .pm-card-person.rank-1 .pm-card-name { font-size: 12.5px; }
+body.plist .pm-card-person.rank-2 { opacity: 0.86; }
+body.plist .pm-card-person.rank-2 .pm-card-face { width: 24px; height: 24px; font-size: 8px; }
+body.plist .pm-card-person.rank-2 .pm-card-name { font-size: 11px; }
+body.plist .pm-card-person.rank-3 { opacity: 0.68; }
+body.plist .pm-card-person.rank-3 .pm-card-face { width: 19px; height: 19px; font-size: 7px; }
+body.plist .pm-card-person.rank-3 .pm-card-name { font-size: 10px; }
+body.plist .pm-card-person.rank-2:hover,
+body.plist .pm-card-person.rank-2:focus-visible,
+body.plist .pm-card-person.rank-3:hover,
+body.plist .pm-card-person.rank-3:focus-visible { opacity: 1; }
+body.plist .pm-card-more {
+  align-self: flex-start;
+  margin-top: auto;
+  padding: 1px 0;
+  border: 0;
+  background: transparent;
   color: var(--muted);
-  line-height: 1.5;
+  font: inherit;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
 }
+body.plist .pm-card-more:hover,
+body.plist .pm-card-more:focus-visible {
+  color: var(--fg);
+  text-decoration: underline;
+  outline: none;
+}
+
+/* A deliberate identity correction, available by right-click or long press on
+   a person. It is fixed because the source row/card can repaint underneath it
+   after a background refresh; the action remains anchored to the gesture, not
+   to an element whose layout may move. */
+body.plist .pm-self-menu {
+  position: fixed;
+  z-index: 50;
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, var(--gold) 55%, rgba(255, 255, 255, 0.16));
+  border-radius: 9px;
+  background: #181816;
+  box-shadow: 0 9px 24px rgba(0, 0, 0, 0.38);
+}
+body.plist .pm-self-menu button {
+  display: block;
+  width: 100%;
+  appearance: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 8px 11px;
+  background: transparent;
+  color: var(--gold);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+body.plist .pm-self-menu button:hover,
+body.plist .pm-self-menu button:focus-visible { background: rgba(205, 172, 106, 0.13); outline: none; }
 
 /* ---- the constellation (the globe tab, 2026-08-25) ----
    The same year's people, grouped by TOPIC instead of listed by engagement:
@@ -416,7 +601,68 @@ body.plist .pm-sky {
   flex: 1 1 auto;
   min-height: 380px;
   overflow: hidden;
+  user-select: none;
+  touch-action: none;
 }
+/* Panning and zooming live on separate planes. `zoom` makes WebKit lay out and
+   rasterize text, SVG strokes and faces at the requested resolution; a
+   transform-scale snapshots the 1x field and magnifies that bitmap, which is
+   why the old zoom made every label blurry. The pan plane moves only by left
+   and top, so it cannot turn the freshly rendered field back into a texture. */
+body.plist .pm-sky-pan {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+}
+body.plist .pm-sky-stage {
+  position: absolute;
+  left: 0;
+  top: 0;
+  /* JS pins width/height to the UNZOOMED viewport before laying anything
+     out. Leaving right/bottom or percentages in this rule lets WebKit solve
+     a different containing block after `zoom` is applied, while the camera
+     still pans as though the scene were viewport × zoom. That disagreement
+     is what collapsed neighboring clusters into one pile. */
+  width: 100%;
+  height: 100%;
+  zoom: var(--pm-sky-zoom, 1);
+}
+/* The canvas is draggable even at 1x: edge labels may extend past the stage,
+   and a strict "only while zoomed" affordance made the default view inert. */
+body.plist .pm-sky .pm-sky-pan { cursor: grab; }
+body.plist .pm-sky.panning .pm-sky-pan { cursor: grabbing; }
+body.plist .pm-sky-zoom {
+  position: absolute;
+  z-index: 8;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 5px;
+  border: 1px solid rgba(234, 234, 234, 0.15);
+  border-radius: 9px;
+  background: rgba(20, 20, 18, 0.82);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.25);
+}
+body.plist .pm-sky-zoom button {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--hazelnut-light);
+  font: inherit;
+  font-size: 16px;
+  line-height: 18px;
+  cursor: pointer;
+}
+body.plist .pm-sky-zoom button:hover,
+body.plist .pm-sky-zoom button:focus-visible { background: rgba(197, 165, 109, 0.16); outline: none; }
+body.plist .pm-sky-zoom input { width: 62px; accent-color: var(--hazelnut-light); cursor: ew-resize; }
 /* The spokes: one line from the core to each bubble, its weight and opacity
    the same normalised activity that set the bubble's distance. ~~Three dashed
    orbits at fixed pixel radii.~~ They were decoration on a data display, and
@@ -449,7 +695,8 @@ body.plist .pm-core {
   position: absolute;
   left: 50%; top: 51%;
   transform: translate(-50%, -50%);
-  width: 54px; height: 54px;
+  /* 70% of the original 54px constellation core. */
+  width: 37.8px; height: 37.8px;
   border-radius: 49% 51% 52% 48% / 51% 49% 51% 49%;
   background: var(--tod-grad, linear-gradient(160deg, #f2e8d4 0%, #c5a56d 45%, #33ff66 100%));
   box-shadow: 0 0 34px var(--tod-glow, rgba(51, 255, 102, 0.30)),
@@ -494,9 +741,9 @@ body.plist .pm-filter-chip {
   gap: 8px;
   padding: 4px 8px 4px 10px;
   border-radius: 999px;
-  border: 1px solid rgba(197, 165, 109, 0.45);
-  background: rgba(197, 165, 109, 0.12);
-  color: var(--hazelnut-light);
+  border: 1px solid color-mix(in srgb, var(--pm-filter-tint, var(--hazelnut)) 45%, transparent);
+  background: color-mix(in srgb, var(--pm-filter-tint, var(--hazelnut)) 12%, transparent);
+  color: var(--pm-filter-tint, var(--hazelnut-light));
   font-family: inherit;
   font-size: 10px;
   letter-spacing: 0.1em;
@@ -525,7 +772,7 @@ body.plist .pl-face {
   width: 20px; height: 20px;
   border-radius: 50%;
   display: inline-flex; align-items: center; justify-content: center;
-  margin-right: 7px;
+  margin-right: 0;
   background: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 60%, #a8854c 100%);
   box-shadow: inset -2px -2px 5px rgba(0, 0, 0, 0.18),
               inset 2px 2px 4px rgba(255, 255, 255, 0.35);
@@ -654,11 +901,8 @@ body.plist .pm-sky-note {
   body.plist .pm-core { animation: none; }
 }
 
-/* The model-written year summary in the expanded row — visually set apart
-   from the counted lines below it, and labeled, because unlike them it is
-   written, not counted. */
+/* The generated year summary in the expanded row. */
 body.plist .pm-sum { color: var(--secondary); }
-body.plist .pm-sum .pm-sum-tag { color: var(--muted); font-size: 10px; }
 body.plist .pm-sum-wait { animation: pm-pulse 1.2s ease-in-out infinite; }
 
 /* The year a SEARCH result was found in. Only drawn when it differs from the

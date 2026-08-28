@@ -49,7 +49,7 @@ function seed(db, text = 'i am vegetarian and i do not eat fish either') {
 function claimFor(row, { quote = 'i am vegetarian', kind = 'preference' } = {}) {
   return {
     kind,
-    text: 'Austin is vegetarian.',
+    text: 'Example Owner is vegetarian.',
     source: { context_id: Number(row.id), quote, content_hash: row.content_hash },
   };
 }
@@ -227,7 +227,7 @@ test('claim, claim_source and claim_decision are append-only in fact', () => {
         .run(claimId, run_id),
     /REPLACE in disguise/u
   );
-  assert.equal(db.prepare('SELECT text FROM claim WHERE id = ?').get(claimId).text, 'Austin is vegetarian.');
+  assert.equal(db.prepare('SELECT text FROM claim WHERE id = ?').get(claimId).text, 'Example Owner is vegetarian.');
 
   db.prepare(
     "INSERT INTO claim_decision(claim_id, action, actor, created_at) VALUES (?, 'accept', 'owner', 1)"
@@ -365,8 +365,8 @@ test('purge and delete-entities take the derived memory with them, in one operat
       const res = await post('/admin/memory/apply', {
         run: RUN,
         claims: [
-          { kind: 'preference', text: 'Austin is vegetarian.', source: { context_id: 1, quote: 'i am vegetarian' } },
-          { kind: 'plan', text: 'Austin plans to call his mother.', source: { context_id: 2, quote: 'call mum' } },
+          { kind: 'preference', text: 'Example Owner is vegetarian.', source: { context_id: 1, quote: 'i am vegetarian' } },
+          { kind: 'plan', text: 'Example Owner plans to call their mother.', source: { context_id: 2, quote: 'call mum' } },
         ],
       });
       assert.equal(res.status, 200);
@@ -442,7 +442,7 @@ test('the compose path sends a REAL bearer key to llama, not the getter', async 
     claims: [
       {
         kind: 'fact',
-        text: 'Austin takes the 7am train on weekdays.',
+        text: 'Example Owner takes the 7am train on weekdays.',
         source: { context_id: Number(row.id), quote: 'take the 7am train' },
       },
     ],
@@ -502,7 +502,7 @@ function seedAcceptedClaim(dbPath) {
     claims: [
       {
         kind: 'fact',
-        text: 'Austin takes the 7am train on weekdays.',
+        text: 'Example Owner takes the 7am train on weekdays.',
         source: { context_id: Number(row.id), quote: 'take the 7am train' },
       },
     ],

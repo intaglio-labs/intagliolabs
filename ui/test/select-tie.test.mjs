@@ -2,10 +2,8 @@
 //
 // store_changed_at was documented as "strictly monotonic" and used alone as the
 // cursor. It is not: a connector pass stamps every row it delivers with one
-// value, so ties of 100-200 rows are ordinary. Measured on the live store before
-// the fix: 18,775 rows across 149 distinct values, 37 capped runs sent 1,480
-// rows while the watermark walked over 2,890 eligible ones, and 1,410 rows --
-// 49% of the covered corpus -- were never read and never would be.
+// value, so large ties are ordinary. A private development corpus confirmed
+// that the scalar cursor skipped a material share of eligible rows.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 

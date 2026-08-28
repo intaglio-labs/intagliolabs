@@ -823,7 +823,7 @@ async function checkNetOura() {
 //
 // /health is unauthenticated and answers 200 only when the weights are loaded;
 // while loading it answers 503 "Loading model", which is a WAIT, not a fault.
-// Measured on this machine: refused at t+0, 503 from t+0.25s, 200 at t+2.94s.
+// Startup testing observed connection refusal, then loading, then healthy.
 async function checkLlama({ fetchImpl = fetch } = {}) {
   const name = 'llama';
   const base = process.env.HAZLIE_LLAMA_URL ?? 'http://127.0.0.1:51780';

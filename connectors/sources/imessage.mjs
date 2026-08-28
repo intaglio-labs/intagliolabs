@@ -31,14 +31,14 @@ const CURSOR_KEY = 'imessage:max-date';
 // THE HISTORY CURSOR, and why it is a second one.
 //
 // The forward cursor only ever moves toward now: it answers "what arrived since
-// I last looked". It cannot reach backwards, so on this machine it left 470,364
-// of chat.db's 479,967 messages unreachable -- every year before 2026, because
-// the first run started 90 days back (DEFAULT_BACKFILL_DAYS) and walked forward
-// from there. The year tabs were empty because the data was never fetched.
+// I last looked". It cannot reach backwards, so a private development corpus
+// left most of its historical messages unreachable because the first run
+// started 90 days back (DEFAULT_BACKFILL_DAYS) and walked forward from there.
+// The year tabs were empty because the data was never fetched.
 //
 // This cursor walks the other way: newest-first, a slice per pass, until it
 // reaches the beginning of the store. Newest-first because that is the order the
-// value arrives in -- last year matters more than 2017, and the screen improves
+// value arrives in -- recent history matters first, and the screen improves
 // visibly while it runs rather than after it finishes.
 //
 // Two cursors and not one shared value, because they are answering different
@@ -48,9 +48,8 @@ const HISTORY_CURSOR_KEY = 'imessage:history-min-date';
 
 // A slice, not the corpus. This runs on the owner's daily machine beside
 // everything else, so a pass is small enough to be unnoticeable and frequent
-// enough to finish: ~470k messages at this size is a few hundred passes, which
-// on the daemon's cadence is hours in the background rather than a stall at
-// launch.
+// enough to finish over repeated passes on the daemon's cadence rather than
+// stalling launch.
 const HISTORY_MESSAGES_PER_PASS = 2000;
 
 // Set once the walk reaches the beginning of the store, so the daemon can stop

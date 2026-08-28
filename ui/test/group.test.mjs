@@ -15,8 +15,7 @@ test('the words every claim shares do not make claims similar', () => {
 });
 
 // The real duplicate: one fact, four messages about it, four rows distilled at
-// temperature 0 into the same sentence. On a real corpus this was six claims and
-// one group of seven.
+// temperature 0 into the same sentence. A private test run confirmed this shape.
 test('a claim repeated across rows lands in one group', () => {
   const groups = groupClaims([
     claim(1, 'The owner is flying to Honolulu on the 14th.'),
@@ -82,8 +81,8 @@ test('junk in the list does not take the queue down with it', () => {
 import { sharesContent } from '../server/memory/retrieve.mjs';
 
 // A confirmation card interrupts to assert "this would have answered you". bm25
-// ORs every term including stopwords, so on a real corpus "what do i eat" ranked
-// a claim about product development first — the two share the word "what". Good
+// ORs every term including stopwords, so a private test corpus ranked a claim
+// about product development first — the two share the word "what". Good
 // enough to rank by, nowhere near good enough to interrupt on.
 test('a suggestion must share a content word with the question', () => {
   assert.equal(sharesContent('what do i eat', 'The owner eats fish again.'), true);

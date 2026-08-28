@@ -141,11 +141,11 @@ New releases: `widget/release.sh`, then attach the DMG to a GitHub release as
 
 ## Which project serves the site — moved 2026-08-27
 
-The site is served by the **`intagliolabs`** Firebase project, in the
-`intaglio.io` organization, under **austin@intaglio.io**. The hosting site id is
+The site is served by the **`intagliolabs`** Firebase project in the
+`intaglio.io` organization under an organization-owned deploy identity. The hosting site id is
 also `intagliolabs` (`https://intagliolabs.web.app`).
 
-~~`hazlie-prod`, under ay@austinyoshino.com.~~ Moved so that everything lives in
+~~The original personal Firebase project.~~ Moved so that everything lives in
 one organization under the company account instead of a personal one. Note the
 two ids that had to move together: `.firebaserc` names the **project**,
 `firebase.json` names the hosting **site**. They happen to share a name in both

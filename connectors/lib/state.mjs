@@ -153,6 +153,7 @@ export function openStateDb(path = defaultStateDbPath()) {
     'INSERT INTO cursor(name, value, updated_ts) VALUES (?, ?, ?) ' +
       'ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_ts = excluded.updated_ts'
   );
+  const deleteCursorStmt = db.prepare('DELETE FROM cursor WHERE name = ?');
   const deleteCursorsStmt = db.prepare("DELETE FROM cursor WHERE name = ? OR name LIKE ? ESCAPE '\\'");
   const recordRunStmt = db.prepare(
     'INSERT INTO run_log(connector, started_ts, finished_ts, ok, ingested, updated, unchanged, deleted, error) ' +
@@ -202,6 +203,17 @@ export function openStateDb(path = defaultStateDbPath()) {
         throw new Error('cursor value must be a non-empty string; serialize before storing');
       }
       setCursorStmt.run(name, value, now);
+    },
+
+    // A source can complete an old history walk, then discover a new stream
+    // that needs walking too. Removing only this exact mark (rather than the
+    // whole connector namespace) lets it resume history without losing its
+    // forward cursor or any per-room progress.
+    deleteCursor(name) {
+      if (typeof name !== 'string' || name.length === 0) {
+        throw new Error('cursor name must be a non-empty string');
+      }
+      return Number(deleteCursorStmt.run(name).changes);
     },
 
     // Wipes every cursor a connector owns: the exact name plus the

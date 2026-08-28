@@ -128,12 +128,10 @@ function warmthOf(recencyDays) {
 // A RELATIONSHIP NEEDS SOME SUBSTANCE, not just a channel.
 //
 // The old rule admitted anyone carrying an imessage or whatsapp channel, full
-// stop — and on a corpus that is 415,447 iMessage rows and zero mail rows, that
-// clause passed 100% of everyone who survived isNonPerson. It removed nobody.
-// 1,778 of 2,604 people (68%) qualified on it and nothing else; 1,543 of the
-// 2,519 drawn (61%) have two or fewer direct messages EVER, and 864 have exactly
-// one. That is the owner's "showing too many people im definitely not connected
-// to this many".
+// stop — and on a private corpus dominated by iMessage, that clause passed
+// everyone who survived isNonPerson. It removed nobody, and most displayed
+// people had only a handful of direct messages. That produced the owner's
+// "showing too many people im definitely not connected to this many".
 //
 // Each clause below is a different way of being real, and any one is enough:
 //
@@ -193,12 +191,12 @@ const yearMemo = new WeakMap();
 //
 //   * THE CONTACTS SPINE. buildGraph resolves every identifier to a person key
 //     through it, so a contacts sync changes who the graph's people ARE — and
-//     188,508 spine rows landed in one day without moving the stamp by one bit.
+//     a large private-store sync once landed without moving the stamp at all.
 //   * episode_member. topicTallies LEFT JOINs it to count a topic once per
 //     conversation, so rebuilding the episode index changes the chips.
 //
-// And COUNT(*) with MAX(rowid) cannot see an UPDATE at all: the 405,952-row
-// history backfill was updates, which move neither. Adding the store's own
+// And COUNT(*) with MAX(rowid) cannot see an UPDATE at all: a history backfill
+// can consist entirely of updates, which move neither. Adding the store's own
 // change counter fixes that -- SQLite's data_version bumps on any committed
 // write by another connection.
 //
@@ -251,10 +249,17 @@ export function corpusStamp(contextDb, stateDb, extra = '') {
 // how old it is rather than implying it is live.
 let coreRebuildScheduled = false;
 
-export function peopleCoreFreshness(contextDb, stateDb, aliases = null) {
+export function peopleCoreFreshness(contextDb, stateDb, aliases = null, owner = null) {
   const hit = yearMemo.get(contextDb);
   if (!hit) return { state: 'cold', builtAt: null, stale: true };
-  const stamp = corpusStamp(contextDb, stateDb, String(aliases ? aliases.size : 0));
+  // This must be byte-for-byte the same dependency stamp yearCore uses.
+  // Omitting the role suffix made every core report stale forever (even when
+  // no overrides existed, because yearCore's stamp still ended in `|`).
+  const stamp = corpusStamp(
+    contextDb,
+    stateDb,
+    `${aliases ? aliases.size : 0}|${ownerRoleStamp(owner)}`
+  );
   return {
     state: hit.stamp === stamp ? 'fresh' : 'stale',
     builtAt: hit.builtAt ?? null,
@@ -267,8 +272,8 @@ export function peopleCoreFreshness(contextDb, stateDb, aliases = null) {
 // corpusStamp above is what the PEOPLE core depends on, spine included. The
 // topic scan depends on strictly less than that: it is a pure function of the
 // rows and the episode index, now that both the person key and the name filter
-// happen at the fold. Giving it its own stamp is what lets a contacts sync --
-// 188,508 rows in a day -- reuse a scan it cannot possibly have changed.
+// happen at the fold. Giving it its own stamp lets a large contacts sync reuse
+// a scan it cannot possibly have changed.
 export function corpusOnlyStamp(contextDb) {
   const c = contextDb
     .prepare('SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM context')
@@ -297,8 +302,22 @@ export function useTallyStore(store) {
   tallyStore = store ?? null;
 }
 
+function ownerRoleStamp(owner, { years = true } = {}) {
+  const lifetime = [...(owner?.roles ?? new Map()).entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, role]) => `${key}:${role}`);
+  if (!years) return lifetime.join('|');
+  const perYear = [...(owner?.rolesByYear ?? new Map()).entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .flatMap(([year, roles]) => [...roles.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, role]) => `${year}:${key}:${role}`));
+  return [...lifetime, ...perYear].join('|');
+}
+
 export function yearCore(contextDb, stateDb, { now, owner, aliases, blocking = false }) {
-  const stamp = corpusStamp(contextDb, stateDb, String(aliases ? aliases.size : 0));
+  const roleStamp = ownerRoleStamp(owner);
+  const stamp = corpusStamp(contextDb, stateDb, `${aliases ? aliases.size : 0}|${roleStamp}`);
   const hit = yearMemo.get(contextDb);
   if (hit && hit.stamp === stamp) return hit.core;
 
@@ -393,6 +412,7 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
     let messages = 0;
     let met = 0;
     let roomMessages = 0;
+    const channels = new Set();
     for (const b of p.timeline ?? []) {
       yearsSet.add(Number(b.ym.slice(0, 4)));
       if (!b.ym.startsWith(prefix)) continue;
@@ -401,6 +421,7 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
       messages += (b.sent ?? 0) + (b.received ?? 0);
       met += b.met ?? 0;
       roomMessages += b.room ?? 0;
+      for (const channel of b.channels ?? []) channels.add(channel);
     }
     const engagement = messages + MEETING_WEIGHT * met;
     // A YEAR SPENT ONLY IN ROOMS STILL HAPPENED. Ordering is by direct
@@ -410,7 +431,7 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
     // that vanishes cannot give it. Room volume deliberately does NOT enter
     // engagement: it would buy rank with other people's conversations.
     if (engagement === 0 && roomMessages === 0) continue;
-    entries.push({ p, messages, met, engagement, roomMessages });
+    entries.push({ p, messages, met, engagement, roomMessages, channels: [...channels].sort() });
   }
   entries.sort((a, b) => b.engagement - a.engagement);
 
@@ -419,16 +440,32 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
   // past row 250, and capping first would have quietly made the highlights a
   // fact about the first page rather than about the year.
   const { cards, awards } = buildYearAwards(entries, { year, now });
+  // A category can reward a quiet returner or drifter who sits below the
+  // ordinary engagement cap. Keep every top-ten recipient in the payload so
+  // its row can actually wear the label and the category filter can show all
+  // ten; dedupe against the normal first page and preserve rank order.
+  const displayEntries = entries.slice(0, cap);
+  const displayedKeys = new Set(displayEntries.map((entry) => entry.p.key));
+  const entryByKey = new Map(entries.map((entry) => [entry.p.key, entry]));
+  for (const award of awards) {
+    for (const key of award.keys ?? []) {
+      if (displayedKeys.has(key)) continue;
+      const entry = entryByKey.get(key);
+      if (!entry) continue;
+      displayEntries.push(entry);
+      displayedKeys.add(key);
+    }
+  }
 
   return {
     year,
     years: [...yearsSet].sort((a, b) => a - b),
     total: entries.length,
     highlights: cards,
-    // Each category's top five. The page joins these compact key lists onto
+    // Each category's top ten. The page joins these compact key lists onto
     // the visible rows and reuses the category card's own icon and label.
     awards,
-    people: entries.slice(0, cap).map((e) => {
+    people: displayEntries.map((e) => {
       const doc = topics.docs.get(`${e.p.key}|${year}`);
       // The row carries only what the page still shows: the company, status
       // and in-person filters were yeeted (owner, 2026-08-25) and their
@@ -436,16 +473,23 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
       return {
         key: e.p.key,
         name: e.p.name,
-        channels: e.p.channels ?? [],
+        // Year-local, not the relationship's lifetime union. These glyphs are
+        // interactive filters, so their claim has to match the selected tab.
+        channels: e.channels,
         messages: e.messages,
         roomMessages: e.roomMessages,
         engagement: e.engagement,
         // ONLY EVER IN ROOMS. Relationship-level, not per-year: the question
         // "do I actually know this person, or do we just share a group chat"
-        // is not a question about 2024. 458 people on the live store have
-        // never sent the owner a direct message and until now rendered
+        // is not a question about a particular year. Some people in a private
+        // development corpus had never sent the owner a direct message and
+        // until now rendered
         // identically to friends.
         roomOnly: e.p.roomOnly === true,
+        // A year tab gets that year's inferred/corrected role. Never fall back
+        // to the lifetime role here: that is how an early romantic period used
+        // to paint every later year romantic too.
+        role: e.p.rolesByYear?.[year] ?? 'friend',
         // Five chips, not three (owner, 2026-08-25) — and no separate
         // taxonomy or specifics fields: the chips ARE the topic surface, and
         // the expanded row's only extra is the model-written summary.
@@ -470,7 +514,11 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
 const searchMemo = new WeakMap();
 
 export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, aliases = null } = {}) {
-  const stamp = corpusStamp(contextDb, stateDb, String(aliases ? aliases.size : 0));
+  const stamp = corpusStamp(
+    contextDb,
+    stateDb,
+    `${aliases ? aliases.size : 0}|${ownerRoleStamp(owner)}`
+  );
   const hit = searchMemo.get(contextDb);
   if (hit && hit.stamp === stamp) return hit.value;
 
@@ -481,10 +529,11 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
     for (const b of p.timeline ?? []) {
       const y = Number(String(b.ym).slice(0, 4));
       if (!Number.isInteger(y)) continue;
-      const cur = per.get(y) ?? { messages: 0, met: 0, roomMessages: 0 };
+      const cur = per.get(y) ?? { messages: 0, met: 0, roomMessages: 0, channels: new Set() };
       cur.messages += (b.sent ?? 0) + (b.received ?? 0);
       cur.met += b.met ?? 0;
       cur.roomMessages += b.room ?? 0;
+      for (const channel of b.channels ?? []) cur.channels.add(channel);
       per.set(y, cur);
     }
     for (const [y, v] of per) {
@@ -496,12 +545,13 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
       byYear.get(y).push({
         key: p.key,
         name: p.name,
-        channels: p.channels ?? [],
+        channels: [...v.channels].sort(),
         identifiers: p.identifiers ?? [],
         messages: v.messages,
         roomMessages: v.roomMessages,
         engagement,
         roomOnly: p.roomOnly === true,
+        role: p.rolesByYear?.[y] ?? 'friend',
         // Each person-year doc is touched once across the whole loop, so this
         // is one pass over the docs rather than one per year.
         topics: topTopics(topics.docs.get(`${p.key}|${y}`), topics.docFreq, topics.totalDocs, { limit: 5 }),
@@ -518,7 +568,7 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
 }
 
 // Memoized like its two siblings, on the same corpus stamp. The globe is a full
-// synchronous scan -- measured 4.5 to 7 seconds on this corpus -- and it ran on
+// synchronous scan that can take several seconds, and it ran on
 // every open, including at app start when the last-used scope was restored.
 // yearCore and buildSearchYears have both paid for this lesson already.
 //
@@ -529,25 +579,27 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
 const mapMemo = new WeakMap();
 
 export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs = null, aliases = null } = {}) {
-  const stamp = corpusStamp(contextDb, stateDb, `${aliases ? aliases.size : 0}|${sinceTs ?? 'all'}`);
+  // A role correction changes the star payload without touching the corpus.
+  // Keep that local config state in this memo key so the constellation never
+  // trails behind the People list after a right-click correction.
+  const roleStamp = ownerRoleStamp(owner, { years: false });
+  const stamp = corpusStamp(contextDb, stateDb, `${aliases ? aliases.size : 0}|${sinceTs ?? 'all'}|${roleStamp}`);
   const memoHit = mapMemo.get(contextDb);
   if (memoHit && memoHit.stamp === stamp) return memoHit.value;
   // Drop automated senders/role addresses (shared filter), then keep only the
   // people the owner actually has a relationship with — see hasRelationship.
   // SHARE THE CORE when there is no window. buildMap was calling buildGraph
-  // directly and rebuilding an identical 2,604-person population into its own
-  // memo -- 6,496ms of pure duplication after yearCore had already paid for it,
-  // which was half the cost of a first visit to the panel.
+  // directly and rebuilding an identical population into its own memo, pure
+  // duplication after yearCore had already paid for it.
   //
   // Only when sinceTs is null, because a window changes WHICH ROWS the graph is
   // built from and yearCore has no notion of one. That is the globe's own case,
   // so the sharing covers the path that actually hurts.
   // SHARE THE WHOLE CORE when there is no window -- the graph AND the topic
   // tallies. buildMap was calling buildGraph and topicTallies itself, rebuilding
-  // an identical 2,604-person population and rescanning the whole corpus for
-  // chips that yearCore had already computed: 6,496ms of pure duplication, half
-  // the cost of a first visit to the panel. topicTallies alone is 57-68% of a
-  // cold build, so sharing it is the larger half.
+  // an identical population and rescanning the whole corpus for chips that
+  // yearCore had already computed. topicTallies is most of a cold build, so
+  // sharing it is the larger half.
   //
   // Only when sinceTs is null, because a window changes WHICH ROWS the graph is
   // built from and yearCore has no notion of one. That is the globe's own case,
@@ -646,6 +698,7 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
       // Carried onto the star so the constellation can mark it, and so this is
       // measurable from the payload rather than only from the graph behind it.
       roomOnly: p.roomOnly === true,
+      role: p.role,
       // The room count travels with the flag, because a consumer deciding
       // whether to draw somebody needs to tell "no contact" from "not there at
       // all" -- and `messages` alone can no longer make that distinction.

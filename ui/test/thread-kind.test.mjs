@@ -2,7 +2,7 @@
 //
 // These exist because the thing they pin was wrong in a way nothing could
 // catch: the branch that asked "is this a group" read a field only one
-// connector writes, so it was dead across 99% of the corpus and no test
+// connector writes, so it was dead across nearly the whole corpus and no test
 // noticed, because no fixture ever carried a real iMessage chat_guid.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -93,8 +93,8 @@ test('junk does not throw', () => {
 
 // ---- who an outbound message was sent to ----
 //
-// Apple leaves message.handle_id NULL on most outbound rows, so 109,380 of the
-// owner's own one-to-one messages carry no handle and were dropped entirely.
+// Apple leaves message.handle_id NULL on many outbound rows, so the owner's own
+// one-to-one messages could carry no handle and were dropped entirely.
 // The recipient is the guid's third field the whole time.
 test('a one-to-one thread names its counterparty', () => {
   assert.equal(counterpartyFromThread(...im('any;-;+15550100')), '+15550100');
@@ -104,8 +104,8 @@ test('a one-to-one thread names its counterparty', () => {
 
 // THE TRAP, and the reason this lives behind the group test. A group guid's
 // third field is an opaque room id; deriving from it would mint rooms as people
-// with message counts, indistinguishable from real contacts. 21,644 live group
-// rows have no handle and would each have taken the bait.
+// with message counts, indistinguishable from real contacts. Group rows can
+// have no handle and would each have taken the bait.
 test('a room NEVER yields a counterparty', () => {
   assert.equal(counterpartyFromThread(...im('any;+;chat488392016936725110')), null);
   assert.equal(counterpartyFromThread(...im('iMessage;+;chat9')), null);
