@@ -354,13 +354,13 @@
     {
       "host": "dock.mau.dev",
       "kind": "registry",
-      "component": "bridges/docker-compose.yml",
+      "component": "bridges/docker-compose.yml + ops/setup-bridges.sh + ops/prefetch-bridges.sh",
       "direction": "pull",
-      "purpose": "all six mautrix bridge images",
+      "purpose": "all seven mautrix bridge images",
       "credential": "none",
       "decision": "implied by the bridge decisions above; never enumerated as egress before this file",
-      "evidence": "bridges/docker-compose.yml, the six image: dock.mau.dev/... lines",
-      "note": "telegram, discord and slack are pinned to :latest, a MUTABLE tag, on containers that receive the owner's live session cookies. meta/instagram/twitter are pinned to a version tag. None are pinned by digest."
+      "evidence": "bridges/docker-compose.yml, the seven image: dock.mau.dev/... lines",
+      "note": "The runtime Compose file pins every bridge by digest. Telegram setup and prefetch use that same digest; keep the remaining setup/prefetch rows aligned before enabling their flows."
     },
     {
       "host": "ghcr.io",

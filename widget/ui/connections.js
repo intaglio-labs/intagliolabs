@@ -712,26 +712,12 @@ function visibleSources(sources) {
       ? { ...s, clients: addGoogle && Array.isArray(addGoogle.clients) ? addGoogle.clients : [] }
       : s);
 }
-// NOT YET SHIPPING. A tile that is on the shelf and does not work is worse
-// than one that is not there — but so is a tile that vanishes, because the
-// owner then wonders whether Telegram is coming at all. So: greyed, present,
-// and says so when pressed.
-//
-// Telegram is here because its login is the only one that sends you to a
-// developer portal first. Every install has to register its own app at
-// my.telegram.org and paste api_id:api_hash before the bridge will start —
-// the flow works, and it is not a flow to hand anyone (owner, 2026-08-26).
-// The route out is written down at PLATFORMS.telegram in
-// connect/lib/bridge.mjs: one registered app shipped with the product, which
-// cannot be committed to this public repo and needs build-time injection.
-// Delete from this set when that lands; nothing else keys off it, and the
-// connector, its bridge and its walkthrough are all still wired underneath.
 // Google sign-in is intentionally parked while its authorization path is not
 // ready to ship. Keep its normal tile so people can discover it, but mute it
 // before the card says "coming soon" — a bright Google mark read as available.
 // Only the synthetic `mail` tile is greyed; a previously connected `mail:<…>`
 // account remains a normal, usable source.
-const SOON_CONNECTORS = new Set(['mail', 'telegram']);
+const SOON_CONNECTORS = new Set(['mail']);
 // WHAT NEEDS YOU COMES FIRST. The shelf scrolls, so anything past the fourth
 // tile is work to reach — and the tiles that need reaching are exactly the
 // ones not yet connected or broken. Those lead; everything healthy follows in
@@ -1504,16 +1490,35 @@ function card(src, keep) {
     // A one-line input that relays whatever the bot last asked for (a token,
     // a phone number, then the code) and re-renders with the bot's reply.
     const relayInput = (placeholder, multiline, secretPin = false) => {
+      const asked = pendingQuestion() || '';
+      const secretAnswer = secretPin || /\bpassword\b/iu.test(asked);
+      const phoneAnswer = kindOf(src.id) === 'telegram' && /\bphone\b/iu.test(asked);
       const box = document.createElement(multiline ? 'textarea' : 'input');
       box.className = multiline ? 'bpaste' : 'binput';
       box.placeholder = placeholder;
       box.setAttribute('spellcheck', 'false');
-      if (secretPin && !multiline) {
+      if (phoneAnswer && !multiline) {
+        box.type = 'tel';
+        box.inputMode = 'tel';
+        box.autocomplete = 'tel';
+        // Telegram requires an E.164 number. This audience is US-first, so
+        // typing an ordinary local number supplies the country code on the
+        // first keystroke. Starting with `+` remains untouched for every
+        // other country, and clearing the field really leaves it empty.
+        box.addEventListener('input', () => {
+          if (box.value && !box.value.startsWith('+')) {
+            box.value = `+1 ${box.value.trimStart()}`;
+          }
+        });
+      }
+      if (secretAnswer && !multiline) {
         box.type = 'password';
+        box.autocomplete = secretPin ? 'off' : 'current-password';
+      }
+      if (secretPin && !multiline) {
         box.inputMode = 'numeric';
         box.maxLength = 4;
         box.pattern = '[0-9]{4}';
-        box.autocomplete = 'off';
         box.setAttribute('aria-label', '4-digit X Chat passcode');
         box.addEventListener('input', () => {
           box.value = box.value.replace(/\D/gu, '').slice(0, 4);
@@ -1533,7 +1538,6 @@ function card(src, keep) {
       // never asked to talk to — where the person is part-way through a login
       // and wants the next step. Every one of these questions has a step after
       // it, so the button says so.
-      const asked = pendingQuestion() || '';
       send.textContent = /\bcreate\b/iu.test(asked) ? 'create' : 'continue';
       const validation = document.createElement('span');
       validation.className = 'setup field-error';
@@ -2141,6 +2145,41 @@ function showTileNotice(row, src, text) {
   // (grid id kept for the container; it renders rows now)
 }
 
+// A FIRST CLICK INTO SETTINGS ALSO FOCUSES ITS NON-ACTIVATING PANEL. The focus
+// event used to call refresh() immediately; that async response could replace
+// the connector row between pointerdown and click, detaching the exact node
+// that was meant to open. The visible result was deterministic enough to feel
+// like a double-click requirement: first press focused + rebuilt, second press
+// finally reached a stable tile.
+//
+// Hold a focus refresh until the pointer gesture has produced its click. The
+// timer still refreshes a panel focused by keyboard or programmatically, and a
+// refresh that was already in flight refuses to repaint while a press is down.
+let settingsPointerDown = false;
+let focusRefreshPending = false;
+let focusRefreshTimer = 0;
+const flushFocusRefresh = () => {
+  if (!focusRefreshPending || settingsPointerDown) return;
+  focusRefreshPending = false;
+  focusRefreshTimer = 0;
+  refresh();
+};
+const scheduleFocusRefresh = () => {
+  focusRefreshPending = true;
+  clearTimeout(focusRefreshTimer);
+  focusRefreshTimer = setTimeout(flushFocusRefresh, 120);
+};
+document.addEventListener('pointerdown', () => {
+  settingsPointerDown = true;
+  if (focusRefreshPending) clearTimeout(focusRefreshTimer);
+}, true);
+const finishSettingsPointer = () => {
+  settingsPointerDown = false;
+  if (focusRefreshPending) requestAnimationFrame(flushFocusRefresh);
+};
+document.addEventListener('pointerup', finishSettingsPointer, true);
+document.addEventListener('pointercancel', finishSettingsPointer, true);
+
 async function refresh() {
   try {
     const data = await hzPost('status');
@@ -2162,6 +2201,13 @@ async function refresh() {
     const keep = hintHost.querySelector('.hint');
     const shown = visibleSources(data.sources);
     const kept = keep && shown.some((s) => s.id === keep.dataset.id) ? keep : null;
+    // A non-focus refresh may already have been in flight when this gesture
+    // began. Re-fetch after click instead of replacing its target underneath
+    // the pointer.
+    if (settingsPointerDown) {
+      focusRefreshPending = true;
+      return;
+    }
     if (!kept) hintHost.replaceChildren(); // strips of old tiles, or of a source now gone
     grid.replaceChildren(...orderSources(shown)
       .map((s) => card(s, kept && kept.dataset.id === s.id ? kept : null)));
@@ -2174,7 +2220,7 @@ async function refresh() {
 refresh();
 // The panel is hidden and re-shown, not reloaded — without this, a reopened
 // popup would show the status from its first open forever.
-window.addEventListener('focus', refresh);
+window.addEventListener('focus', scheduleFocusRefresh);
 
 // The close must SURVIVE the chrome around it: the sound is best-effort (a
 // Web Audio throw must never eat the close). The dead-clicks bug itself was

@@ -335,12 +335,40 @@ test('People and Settings park only unfinished connectors', () => {
     'Settings uses the same unfinished-connector gate');
   assert.match(connections, /const renderSoon = \(\) => \{[\s\S]{0,300}coming soon/u,
     'and Settings says it too');
-  assert.match(tile, /HZ_SOON_CONNECTORS = new Set\(\['mail', 'telegram'\]\)/u,
-    'the shared card parks only Mail and Telegram');
-  assert.match(connections, /SOON_CONNECTORS = new Set\(\['mail', 'telegram'\]\)/u,
-    'Settings parks only Mail and Telegram');
+  assert.match(tile, /HZ_SOON_CONNECTORS = new Set\(\['mail'\]\)/u,
+    'the shared card parks only Mail');
+  assert.match(connections, /SOON_CONNECTORS = new Set\(\['mail'\]\)/u,
+    'Settings parks only Mail');
   assert.doesNotMatch(tile, /HZ_SOON_CONNECTORS[^\n]*twitter/u, 'X ships in the shared tile');
   assert.doesNotMatch(connections, /SOON_CONNECTORS[^\n]*twitter/u, 'X ships in Settings');
+  assert.doesNotMatch(tile, /HZ_SOON_CONNECTORS[^\n]*telegram/u, 'Telegram ships in the shared tile');
+  assert.doesNotMatch(connections, /SOON_CONNECTORS[^\n]*telegram/u, 'Telegram ships in Settings');
+});
+
+test('Telegram starts a phone-and-code login on the first press on both surfaces', () => {
+  assert.match(connections, /telegram:\s*\{\s*place: 'phone number'/u,
+    'Settings declares Telegram as a phone conversation');
+  assert.match(connections, /!started[\s\S]*autoBegun\.add\(src\.id\)[\s\S]*bridgeBegin/u,
+    'Settings automatically begins a fresh Telegram conversation');
+  assert.match(tile, /const telegramPhone = HZ_KIND\(src\.id\) === 'telegram'/u,
+    'the shared card preserves Telegram phone-flow state after the first reply');
+  assert.match(tile, /!transcript\.length && !hzAutoBegun\.has\(src\.id\)[\s\S]*startTelegram\(\)/u,
+    'the shared card starts Telegram without a second begin-login press');
+  assert.match(tile, /if \(data && data\.connected\)[\s\S]{0,220}hzAutoBegun\.delete\(src\.id\)/u,
+    'a completed attempt releases the first-press guard for a later reconnect');
+  assert.match(tile, /Keep the guard set while painting the failure[\s\S]{0,400}renderBridge\(\{ state: 'down' \}\)/u,
+    'an unavailable bridge settles on a retry card instead of auto-starting forever');
+  assert.match(tile, /hzPost\('bridgeCookies', \{ p: 'telegram', cookies: value \}\)/u,
+    'the shared card relays phone, code, and password answers locally');
+  assert.match(connections, /secretAnswer = secretPin \|\| \/\\bpassword\\b\/[iu]+\.test\(asked\)/u);
+  assert.match(connections, /if \(secretAnswer && !multiline\)[\s\S]{0,120}box\.type = 'password'/u,
+    'Settings masks Telegram two-step-verification passwords');
+  assert.match(tile, /answer\.type = password \? 'password'/u,
+    'the shared card masks Telegram two-step-verification passwords');
+  assert.match(connections, /phoneAnswer[\s\S]{0,500}!box\.value\.startsWith\('\+'\)[\s\S]{0,160}box\.value = `\+1 /u,
+    'Settings adds the US calling code when an ordinary phone number begins');
+  assert.match(tile, /if \(phone\) answer\.addEventListener\('input'[\s\S]{0,300}!answer\.value\.startsWith\('\+'\)[\s\S]{0,160}answer\.value = `\+1 /u,
+    'the shared card adds the US calling code while preserving explicit international codes');
 });
 
 test('X Chat passcode is a four-digit encrypted-DM step on both surfaces', () => {
@@ -382,6 +410,19 @@ test('a login launched from the non-activating Settings panel rises on its first
     'the settled pass must not depend on the non-activating source panel');
   assert.equal((bridgeLoginSwift.match(/presentLoginWindow\(win\)/gu) || []).length, 2,
     'both web and QR login windows use the first-click presenter');
+});
+
+test('Settings focus refresh cannot detach a connector during its first click', () => {
+  assert.match(connections, /window\.addEventListener\('focus', scheduleFocusRefresh\)/u,
+    'focus schedules rather than immediately rebuilding the connector shelf');
+  assert.match(connections, /document\.addEventListener\('pointerdown'[\s\S]{0,220}clearTimeout\(focusRefreshTimer\)/u,
+    'the first pointer press pauses the scheduled focus refresh');
+  assert.match(connections, /document\.addEventListener\('pointerup', finishSettingsPointer[\s\S]{0,180}pointercancel/u,
+    'pointer completion releases the deferred refresh');
+  assert.match(connections, /if \(settingsPointerDown\)[\s\S]{0,120}focusRefreshPending = true;[\s\S]{0,80}return;/u,
+    'an already-running refresh cannot replace the pressed connector row');
+  assert.match(connections, /requestAnimationFrame\(flushFocusRefresh\)/u,
+    'the deferred repaint runs after the browser has emitted click');
 });
 
 test('only the current bridge prompt can block a fresh login window', () => {
