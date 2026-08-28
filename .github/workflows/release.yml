@@ -97,9 +97,10 @@ jobs:
           MAC_DEVELOPER_ID_P12_PASS: ${{ secrets.MAC_DEVELOPER_ID_P12_PASS }}
           ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          TELEGRAM_APP_CREDENTIAL: ${{ secrets.TELEGRAM_APP_CREDENTIAL }}
         run: |
           missing=""
-          for v in MAC_DEVELOPER_ID_P12 MAC_DEVELOPER_ID_P12_PASS ASC_KEY_P8 ASC_KEY_ID; do
+          for v in MAC_DEVELOPER_ID_P12 MAC_DEVELOPER_ID_P12_PASS ASC_KEY_P8 ASC_KEY_ID TELEGRAM_APP_CREDENTIAL; do
             eval "val=\$$v"
             [ -n "$val" ] || missing="$missing $v"
           done
@@ -277,6 +278,10 @@ jobs:
           # rather than left to GITHUB_REF_*, which on a manual re-run describes
           # the branch the workflow ran on and not the tag being built.
           HZ_RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+          # Telegram rejects app credentials published in source. Inject the
+          # private pair only into the signed bundle; build.sh shape-checks it
+          # and setup-bridges.sh installs it into the local bridge config.
+          HZ_TELEGRAM_APP: ${{ secrets.TELEGRAM_APP_CREDENTIAL }}
         run: ./widget/release.sh
 
       - name: attach it to the release
