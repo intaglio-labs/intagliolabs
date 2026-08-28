@@ -105,6 +105,9 @@ export function eventToRow(event, { calendarTitle, fallbackZone } = {}) {
       end_ms: end.ms,
       calendar: title,
       all_day: start.allDay,
+      ...(typeof event?.location === 'string' && event.location.trim()
+        ? { location: event.location.trim() }
+        : {}),
       // Who was actually in the room. Attendee emails were thrown away until
       // 2026-08-21, which made "who did I meet" answerable only by inference;
       // the email is the cleanest join key this corpus has (it matches mail

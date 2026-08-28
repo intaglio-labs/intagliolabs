@@ -1,7 +1,15 @@
 # Deep people search
 
-Plan only. This document describes how to extend Intaglio's existing people
-graph into an evidence-backed search surface for compound questions such as:
+Implementation status (2026-08-28): the first vertical release is built in
+`ui/server/people/deepSearch.mjs` and covered by
+`ui/test/people-deep-search.test.mjs`. It answers the three questions below by
+intersecting evidence directly from Hermes at query time. Calendar location
+ingestion and owner-configured high schools are included. The materialized
+`person_evidence` index described later remains a scale optimization for a
+mature corpus, not a requirement for correctness.
+
+This document describes how to extend Intaglio's existing people graph into an
+evidence-backed search surface for compound questions such as:
 
 - “Find the investors I met in LA about five years ago.”
 - “Does anyone from my high school work in tech?”

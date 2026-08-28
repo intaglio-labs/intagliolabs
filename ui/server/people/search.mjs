@@ -22,6 +22,7 @@ import { rankForNeed, MENTOR_NEED, INVESTOR_NEED, evidenceLine } from './rank.mj
 import { groupByFirm, warmthLabel } from './firms.mjs';
 import { warmIntro } from './intros.mjs';
 import { eraLine } from './profile.mjs';
+import { answerDeepPeopleSearch } from './deepSearch.mjs';
 
 // "how do i reach X", "warm intro to X", "who can introduce me to X" -> the
 // target string X, or null. Separate from the who-fits-a-need searches: this
@@ -142,6 +143,9 @@ export function answerPersonSearch(
   question,
   { owner, now = Date.now(), limit = 50 } = {}
 ) {
+  const deep = answerDeepPeopleSearch(contextDb, stateDb, question, { owner, now, limit: Math.min(limit, 10) });
+  if (deep !== null) return deep;
+
   // Warm-intro is checked first: it already names a target and wants the path
   // to them, which is a different question from "who fits a need".
   const introTarget = detectIntro(question);

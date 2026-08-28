@@ -271,7 +271,17 @@ function personSignalsForRow(row, meta, owner) {
     case 'linkedin': {
       if (meta.kind === 'connection') {
         return [{ id: `linkedin:${row.entity_id.split(':').pop()}`, channel: 'linkedin', ts, fromMe: false,
-                  name: meta.name, linkedin: { position: meta.position, company: meta.company, connected_on: meta.connected_on, email: meta.email } }];
+                  name: meta.name, linkedin: {
+                    position: meta.position,
+                    company: meta.company,
+                    connected_on: meta.connected_on,
+                    email: meta.email,
+                    industry: meta.industry,
+                    education: meta.education,
+                    schools: meta.schools,
+                    school: meta.school,
+                    high_school: meta.high_school,
+                  } }];
       }
       if (meta.kind === 'message') {
         const id = meta.from && !isOwnerName(meta.from, owner) ? `liname:${normName(meta.from)}` : null;

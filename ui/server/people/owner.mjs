@@ -74,7 +74,12 @@ export function loadOwner({ home = homedir(), configPath = null } = {}) {
     );
     if (yearRoles.size) rolesByYear.set(year, yearRoles);
   }
-  return { addresses, names, keys, roles, rolesByYear };
+  const schools = [...new Set([
+    ...asStrings(raw?.schools),
+    ...asStrings(raw?.highSchools),
+    ...(typeof raw?.highSchool === 'string' ? [raw.highSchool] : []),
+  ].map((school) => school.trim()).filter(Boolean))];
+  return { addresses, names, keys, roles, rolesByYear, schools, highSchools: schools };
 }
 
 function readMutableConfig(configPath) {

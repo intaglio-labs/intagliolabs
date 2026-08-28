@@ -150,6 +150,9 @@ private func dumpEvents(fromSeconds: Double, toSeconds: Double) -> Never {
         "occurrenceStart": startDate.timeIntervalSinceReferenceDate,
         "allDay": event.isAllDay,
       ]
+      if let location = event.location?.trimmingCharacters(in: .whitespacesAndNewlines), !location.isEmpty {
+        row["location"] = location
+      }
       row["occurrenceEnd"] = appleSeconds(event.endDate) ?? NSNull()
       // The occurrence SLOT, which is what the entity id is suffixed with. For a
       // non-recurring event this is the start; EventKit reports it either way.
