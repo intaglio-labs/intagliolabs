@@ -62,8 +62,10 @@ The seams to preserve are:
 - `ui/server/memory/validity.mjs` already computes advisory expiry for plans and
   commitments.
 - `/admin/purge` and `/admin/delete-entities` already remove claims derived from
-  deleted context, rebuild the FTS index, and physically clean deleted pages.
-  Relationship claims must join this cascade rather than invent another one.
+  deleted context. Purge rebuilds the FTS indexes and VACUUMs inline;
+  delete-entities defers that physical cleanup to the existing maintenance
+  window. Relationship claims must join the same sweep and maintenance path
+  rather than invent another one.
 
 The schema decision is to extend the existing claim machinery for relationship
 assertions. Broaden the owner-only `claim.subject` constraint to admit a
@@ -72,6 +74,11 @@ Keep `claim_source`, `distill_run`, and the append-only `claim_decision` as the
 only trust lifecycle for both owner and relationship claims. The inbox is one
 projection over that lifecycle. It must not persist a separate mutable
 `trust_state`; the latest decision derives the state, as it does today.
+
+SQLite cannot alter the existing `claim.subject` CHECK constraint in place.
+Broadening it is an explicit copy migration under the existing `user_version`
+discipline: create the replacement table and constraints, copy and verify every
+row, rebuild its indexes and triggers, then swap tables in one transaction.
 
 Identity resolution remains the specialized graph constraint it already is,
 not a model claim. It appears in the same inbox through an adapter over
@@ -198,13 +205,19 @@ prompt hash, parameters, and run timestamps. Deterministic builders must record
 an equivalent ruleset/code version so a result remains reproducible after an
 upgrade.
 
-Initial `kind` values:
+Initial schema `kind` values:
 
 - `owner_relationship_label`
 - `explicit_commitment`
 - `open_loop`
 - `shared_context`
 - `contradiction`
+
+`contradiction` is reserved but disabled in v1. No model, background job, or
+rule produces contradiction items in the initial experiment. Enabling it
+requires a separately specified, receipt-preserving detector and evaluation;
+until then, the owner may retract a claim after seeing conflicting evidence,
+but the system cannot manufacture a contradiction item.
 
 Identity merge review appears in the same inbox through the existing resolver
 adapter, but it is not a relationship claim kind and never enters the claim
@@ -304,6 +317,8 @@ The candidate builder is deterministic. Before anything is shown it must
 recheck:
 
 - the source evidence still exists;
+- every referenced memory still derives `trust_state = accepted` and
+  `standing_state = active` from the latest decisions at display time;
 - the item is live rather than expired;
 - each required source is fresh according to the existing watchdog verdict;
 - the observed source window spans the entire dormancy period named by the
@@ -405,6 +420,12 @@ Use a sealed evaluation list and a four-arm ablation:
 3. calendar only; and
 4. the full messages-plus-calendar join.
 
+The owner writes the sealed reconnect list before seeing any system output.
+After each arm runs, the owner grades its candidates useful or not useful while
+still blind to the other arms. The primary utility measure is the number of
+useful candidates the system found that were absent from the owner's sealed
+list: value created by the system, not overlap with what the owner already knew.
+
 Phase 0 establishes numerical baselines. Before shadow mode begins, commit a
 versioned promotion-gates artifact that fixes the evaluation set, thresholds,
 measurement windows, and decision rules. The full join must beat the
@@ -423,7 +444,11 @@ measurement window; tuning creates a new version and a new window.
 Expose the experiment behind an explicit opt-in. Show only when the app is open.
 Every card includes dismiss, mute, and evidence controls. Do not use operating
 system notifications. Promotion requires the pre-registered gates to pass and
-zero occurrences of the hard stop conditions below.
+zero occurrences of the hard stop conditions below. Use a small,
+pre-registered set of equivalent card presentations so repeated cards do not
+become one identical visual stimulus; evidence, controls, and meaning remain
+fixed. Track open-rate decay by presentation and exposure count alongside
+dismissals.
 
 ### Phase 3: notification consideration
 
