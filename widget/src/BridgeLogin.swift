@@ -269,6 +269,26 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     return image
   }
 
+  /// Raise a login window from the widget's non-activating Settings panel.
+  ///
+  /// `NSApp.activate` does not finish synchronously. When a login is launched
+  /// from an `NSPanel` carrying `.nonactivatingPanel`, making the new window key
+  /// in the same run-loop turn can be ignored while AppKit is still activating
+  /// the process. The request has already started (the tile spinner proves it),
+  /// but the window remains behind Settings until a second press gives AppKit a
+  /// later turn. Order it once immediately and once after activation settles;
+  /// the second pass is idempotent and scoped to the still-current login.
+  private func presentLoginWindow(_ win: NSWindow) {
+    NSApp.activate(ignoringOtherApps: true)
+    win.makeKeyAndOrderFront(nil)
+    DispatchQueue.main.async { [weak self, weak win] in
+      guard let self, !self.finished, self.window === win, let win else { return }
+      NSApp.activate(ignoringOtherApps: true)
+      win.makeKeyAndOrderFront(nil)
+      win.orderFrontRegardless()
+    }
+  }
+
   private func showQR(instruction: String) {
     // Sized to the content, top down: 34 under the header, the code, then the
     // one line that says what to do with it. A QR window with room left over
@@ -355,8 +375,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     win.contentView = content
     win.center()
     self.window = win
-    NSApp.activate(ignoringOtherApps: true)
-    win.makeKeyAndOrderFront(nil)
+    presentLoginWindow(win)
   }
 
   @objc private func retryQRCode() { requestQRCode() }
@@ -611,9 +630,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     win.contentView = content
     win.center()
     self.window = win
-
-    NSApp.activate(ignoringOtherApps: true)
-    win.makeKeyAndOrderFront(nil)
+    presentLoginWindow(win)
 
     // A real Safari user-agent. WKWebView's default UA carries no Safari
     // marketing token, and the big login SPAs — x.com most visibly — serve a

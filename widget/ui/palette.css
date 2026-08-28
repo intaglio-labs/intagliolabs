@@ -1498,12 +1498,18 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
      small card, not 280px of mostly empty room (owner, 2026-08-25). The
      placer (hzPlacePop) sets only max-width; long flows wrap at the cap. */
   width: max-content;
-  overflow-y: auto;
+  box-sizing: border-box;
+  overflow-x: hidden; overflow-y: auto;
   display: flex; flex-direction: column; align-items: stretch;
   background: rgba(20, 20, 18, 0.97);
   border: 1px solid rgba(234, 234, 234, 0.14);
   border-radius: 14px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+}
+.hint-host > .hint {
+  box-sizing: border-box;
+  max-width: 100%; min-width: 0;
+  overflow-wrap: anywhere;
 }
 /* A quick rise into place — the pop-over equivalent of the old book fold. */
 @keyframes hint-pop-open {
@@ -2246,9 +2252,13 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
 .model-setting.busy .model-status { display: block; }
 
 /* Real local work below the model picker without becoming another progress
-   dashboard. Historical catch-up owns its estimate on its own named row; the
-   header never leaves a naked duration beside an unrelated connector. */
+   dashboard. The total queue horizon stays pinned in the header; individual
+   rows name work and never own or clip that total. */
 .activity-setting { gap: 7px; }
+.activity-estimate {
+  color: var(--hazelnut-light); font-size: 10px; letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums; white-space: nowrap; text-transform: uppercase;
+}
 .activity-list { display: flex; flex-direction: column; gap: 5px; min-height: 15px; }
 /* Seven 15px task lines plus six 5px gaps. The scheduler can carry more, but
    Settings should not grow forever; the rest remains reachable by scrolling. */

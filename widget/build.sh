@@ -79,6 +79,19 @@ cp voice/lib/* "$APP/Contents/Resources/ui/lib/"
 # plists' code paths at this backend dir.
 BE="$APP/Contents/Resources/backend"
 rm -rf "$BE"; mkdir -p "$BE"
+# This checkout commonly lives in a File Provider-backed Documents folder.
+# A byte-for-byte `cp -R` of connectors/node_modules then opens thousands of
+# tiny files and can turn a local rebuild into a forty-minute operation. APFS
+# clone-copy keeps identical bytes copy-on-write and finishes in seconds. Keep
+# the ordinary copy as a fallback for non-APFS build volumes.
+clone_tree() {
+  src="$1"; dst="$2"
+  rm -rf "$dst"
+  if ! cp -c -R "$src" "$dst" 2>/dev/null; then
+    rm -rf "$dst"
+    cp -R "$src" "$dst"
+  fi
+}
 # Builtins-only services + the connectors' pure-JS deps. NOT ui/node_modules:
 # it carries native ABIs (onnxruntime/sharp) left over from the deleted Expo
 # tree, ui/package.json declares zero deps, and hermes is node builtins only.
@@ -90,11 +103,27 @@ rm -rf "$BE"; mkdir -p "$BE"
 # distill-once.mjs reads prompts/ relative to the repo root. Provision sets
 # @REPO@ to this backend dir, so every one of those paths must resolve here.
 mkdir -p "$BE/ui"
-cp -R ../connect "$BE/connect"
-cp -R ../ui/server "$BE/ui/server"
-cp -R ../ui/scripts "$BE/ui/scripts"
-cp -R ../prompts "$BE/prompts"
-cp -R ../connectors "$BE/connectors"
+clone_tree ../connect "$BE/connect"
+clone_tree ../ui/server "$BE/ui/server"
+clone_tree ../ui/scripts "$BE/ui/scripts"
+clone_tree ../prompts "$BE/prompts"
+# node_modules is the one pathological tree in a File Provider checkout. Reuse
+# the installed copy only when its lockfile is byte-identical; source and tests
+# still come from this checkout. A dependency change misses the cache and falls
+# back to the authoritative repo tree.
+mkdir -p "$BE/connectors"
+rsync -a --exclude node_modules ../connectors/ "$BE/connectors/"
+INSTALLED_CONNECTORS="/Applications/Intaglio Labs.app/Contents/Resources/backend/connectors"
+# Release builds set HAZLIE_STAGE_DIR. They must never inherit executable code
+# from an installed app, even with the same lockfile: the release checkout is
+# the only auditable source for the artifact that gets Developer ID signed.
+if [ -z "${HAZLIE_STAGE_DIR:-}" ] \
+   && [ -d "$INSTALLED_CONNECTORS/node_modules" ] \
+   && cmp -s ../connectors/package-lock.json "$INSTALLED_CONNECTORS/package-lock.json"; then
+  clone_tree "$INSTALLED_CONNECTORS/node_modules" "$BE/connectors/node_modules"
+else
+  clone_tree ../connectors/node_modules "$BE/connectors/node_modules"
+fi
 # THE AUTH SCRIPTS, because a downloaded install has no repo to run them from.
 # The connect page's Google and Oura rows told the owner to run
 # `node ops/gcal-auth.mjs`, and ops/ was never copied into the bundle — so that
@@ -109,7 +138,7 @@ cp ../ops/gcal-auth.mjs ../ops/oura-auth.mjs ../ops/setup-bridges.sh \
 # set it explicitly so an archive or checkout that lost executable bits cannot
 # silently turn first-launch bridge warming off.
 chmod 755 "$BE/ops/setup-bridges.sh" "$BE/ops/prefetch-bridges.sh"
-cp -R ../bridges "$BE/bridges"
+clone_tree ../bridges "$BE/bridges"
 # The bridge installer needs yq to safely patch third-party YAML templates.
 # Ship the static editor in the app instead of requiring every downloaded-app
 # user to have Homebrew. This is a build requirement only, not a runtime one.

@@ -32,6 +32,30 @@ function safeTranscript(transcript) {
   }));
 }
 
+// The transcript is a rolling history. Only the newest meaningful bot line
+// can own a live input step; an older X passcode prompt must not block a fresh
+// login after a later logout/success response. A validation error is the one
+// exception: it keeps the preceding question active for retry.
+const questionLine = (body) => String(body ?? '').split('\n')
+  .map((line) => line.trim()).filter(Boolean)
+  .find((line) => line.endsWith('?') || /^(please|enter|register|create|choose)\b/iu.test(line));
+
+export function pendingBridgeQuestion(transcript) {
+  const bodies = [...(transcript ?? [])].reverse()
+    .filter((m) => m.from === 'bot')
+    .map((m) => String(m.body ?? '').trim())
+    .filter((body) => body && !body.startsWith('Login URL:') && !body.includes('`{'));
+  if (!bodies.length) return null;
+  const current = questionLine(bodies[0]);
+  if (current) return current;
+  if (!/^(invalid\b|must start with|not a valid|please try again)/iu.test(bodies[0])) return null;
+  for (const body of bodies.slice(1)) {
+    const prior = questionLine(body);
+    if (prior) return prior;
+  }
+  return null;
+}
+
 export async function bridgeApiResponse({
   method,
   subpath = '',
@@ -58,6 +82,11 @@ export async function bridgeApiResponse({
         connected: st.connected,
         name: st.name ?? null,
         transcript: safeTranscript(transcript),
+        // Native uses this BEFORE presenting a browser window. That folds
+        // "resume a live passcode" and "open a fresh login" into one tile
+        // request instead of making the UI perform a preliminary status call
+        // whose row can be replaced by the panel's focus refresh.
+        pendingQuestion: pendingBridgeQuestion(transcript),
         // For the widget's in-app (Beeper-style) login: where to point the
         // embedded webview, and which domain's cookies to harvest once the user
         // has logged in there. loginUrl prefers the bot's own "Login URL:" line.

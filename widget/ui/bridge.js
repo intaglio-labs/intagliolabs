@@ -20,6 +20,43 @@ function hzPost(type, payload = {}) {
   });
 }
 
+// BRIDGE-PENDING-STATE-BEGIN
+// A bridge transcript is a rolling HISTORY, not a description of what is
+// currently pending. In particular, disconnecting X leaves its earlier Chat
+// passcode prompt in the last sixteen messages. Looking for *any* question in
+// that window made the next tile press reopen the status card instead of the
+// login window. Only the newest meaningful bot response can own a live step;
+// the sole exception is a validation error, which keeps the immediately
+// preceding question active so a mistyped PIN/passcode can be retried.
+const hzBridgeQuestionLine = (body) => String(body || '').split('\n')
+  .map((line) => line.trim()).filter(Boolean)
+  .find((line) => line.endsWith('?') || /^(please|enter|register|create|choose)\b/iu.test(line));
+function hzPendingBridgeQuestion(data) {
+  // Current builds receive the decision from the local connect service, which
+  // is also what native checks before opening a login window. Keep the parser
+  // below as a compatibility fallback for an older service during an app
+  // update and for locally constructed UI states.
+  if (data && Object.prototype.hasOwnProperty.call(data, 'pendingQuestion')) {
+    return typeof data.pendingQuestion === 'string' && data.pendingQuestion.trim()
+      ? data.pendingQuestion.trim()
+      : null;
+  }
+  const bodies = [...((data && data.transcript) || [])].reverse()
+    .filter((m) => m.from === 'bot')
+    .map((m) => String(m.body || '').trim())
+    .filter((body) => body && !body.startsWith('Login URL:') && !body.includes('`{'));
+  if (!bodies.length) return null;
+  const current = hzBridgeQuestionLine(bodies[0]);
+  if (current) return current;
+  if (!/^(invalid\b|must start with|not a valid|please try again)/iu.test(bodies[0])) return null;
+  for (const body of bodies.slice(1)) {
+    const question = hzBridgeQuestionLine(body);
+    if (question) return question;
+  }
+  return null;
+}
+// BRIDGE-PENDING-STATE-END
+
 // On the ear page only: a module-graph or runtime error must surface as a
 // fixed chat note, not vanish — there is no devtools console in this app.
 if (document.body && document.body.classList.contains('ear')) {
@@ -408,14 +445,26 @@ function hzPlacePop(host, anchor) {
   if (!host || !anchor) return;
   const r = anchor.getBoundingClientRect();
   const vw = window.innerWidth, vh = window.innerHeight;
-  // Cap, don't dictate: the host is width: max-content, so a short connect
-  // card stays a small card; only the ceiling comes from here. The real width
-  // is then measured back for the clamp — content just changed, so this
-  // layout read is fresh, not a stale rect.
-  host.style.maxWidth = `${Math.min(280, vw - 16)}px`;
-  const w = host.getBoundingClientRect().width || Math.min(280, vw - 16);
-  const left = Math.round(Math.min(Math.max(8, r.left + r.width / 2 - w / 2), vw - w - 8));
-  host.style.left = `${left}px`;
+  // GROW AWAY FROM THE NEAREST EDGE. Centering depended on measuring the
+  // current card width and writing `left`; when async status replaced a short
+  // card with a wider account/passcode card, the fixed left survived one
+  // layout and the new right edge was cut off by the WebView. Edge anchoring
+  // needs no width prediction: a right-side tile keeps the card's right edge
+  // fixed and new content grows left, while a left-side tile does the mirror.
+  // The max-width includes the opposite 8px gutter, so even a long server
+  // response cannot push the other edge out of the viewport.
+  const onRight = r.left + r.width / 2 >= vw / 2;
+  if (onRight) {
+    const right = Math.max(8, Math.round(vw - r.right));
+    host.style.right = `${right}px`;
+    host.style.left = 'auto';
+    host.style.maxWidth = `${Math.max(120, Math.min(280, vw - right - 8))}px`;
+  } else {
+    const left = Math.max(8, Math.round(r.left));
+    host.style.left = `${left}px`;
+    host.style.right = 'auto';
+    host.style.maxWidth = `${Math.max(120, Math.min(280, vw - left - 8))}px`;
+  }
   const above = r.top, below = vh - r.bottom;
   if (above >= 160 || above >= below) {
     // Bottom-anchored to the tile's top edge: async content (a login reply

@@ -67,14 +67,18 @@ test('native work status includes active work and unfinished backfill, but exclu
 });
 
 test('the total processing estimate uses the plain approximate-hours label', () => {
+  assert.match(daemon, /const completionTimes = scheduledQueue\(\)\.map\(\(task\) => task\.nextTs\)/u,
+    'the total reaches the final task in the live scheduler queue');
   assert.match(daemon, /estimate: `~ \$\{\(tenthsOfAnHour \/ 10\)\.toFixed\(1\)\} hrs left`/u);
   assert.match(connectors, /estimate\.hasPrefix\("≥ "\) \|\| estimate\.hasPrefix\("≈ "\)/u,
     'a persisted snapshot is normalized before the daemon republishes it');
-  assert.ok(connectors.includes('"label": "backfilling \\(subjects) history · \\(estimate)"'),
-    'the estimate must name the historical work it belongs to');
-  assert.doesNotMatch(bridge, /activity\["estimate"\]/u,
-    'a detached header estimate makes the first connector look responsible for it');
-  assert.doesNotMatch(connections, /activity-estimate/u);
+  assert.ok(connectors.includes('var activityEstimate: String?'));
+  assert.match(bridge, /activity\["estimate"\] = estimate/u);
+  assert.match(connections, /activity-estimate/u);
+  assert.match(connections, /estimate\.hidden = !total/u,
+    'the total is pinned in the header and hidden only when no queue exists');
+  assert.ok(connectors.includes('"label": "backfilling \\(subjects) history"'),
+    'the backfill row names work without duplicating the total');
 });
 
 test('only live work says current; scheduled connectors show only future order', () => {
