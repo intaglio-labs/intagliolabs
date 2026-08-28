@@ -407,6 +407,29 @@ An L5 card must answer:
 
 ## Rollout
 
+### Where experiment data lives
+
+This repository is public, and experiment results are owner data by
+definition: a sealed list of real people, per-person candidate snapshots,
+grades, outcome events. None of it ever has a path inside the repo. Everything
+Phase 0 onward produces lives in `~/.hazlie/experiments/l5/` (`0600` files in
+the `0700` home, the existing secrets convention), and
+`connectors/test/experimentResults.test.mjs` fails the suite if a
+result-shaped file or a `results/`, `experiments/`, or `exp_*/` directory
+appears anywhere in the working tree. That is the enforcement; a `.gitignore`
+would only be advice. The directory name follows the code, which still writes
+`~/.hazlie/` -- the io.intaglio.* rename covered identifiers, not the data
+directory.
+
+The one committed artifact is `ops/l5-promotion-gates.json`: thresholds,
+measurement windows, decision rules, arm definitions, and a sha256 of the
+sealed evaluation-set file -- never the set itself. The hash is what freezing
+means here: pre-registration needs the set to be unmodifiable after the fact,
+not published. Any later edit to the local file breaks the committed hash. The
+hash proves the list did not change after commit; it cannot prove the owner
+wrote it before seeing system output -- that remains an owner-honesty property
+either way.
+
 ### Phase 0: offline evaluation
 
 Run the deterministic candidate builder over a bounded local history. Record
@@ -420,15 +443,17 @@ Use a sealed evaluation list and a four-arm ablation:
 3. calendar only; and
 4. the full messages-plus-calendar join.
 
-The owner writes the sealed reconnect list before seeing any system output.
+The owner writes the sealed reconnect list before seeing any system output,
+to `~/.hazlie/experiments/l5/`, never into the repo.
 After each arm runs, the owner grades its candidates useful or not useful while
 still blind to the other arms. The primary utility measure is the number of
 useful candidates the system found that were absent from the owner's sealed
 list: value created by the system, not overlap with what the owner already knew.
 
-Phase 0 establishes numerical baselines. Before shadow mode begins, commit a
-versioned promotion-gates artifact that fixes the evaluation set, thresholds,
-measurement windows, and decision rules. The full join must beat the
+Phase 0 establishes numerical baselines. Before shadow mode begins, commit
+the versioned promotion-gates artifact described above, fixing the evaluation
+set by content hash alongside the thresholds, measurement windows, and
+decision rules. The full join must beat the
 messages-only arm on the preselected utility measure or the calendar join is
 removed rather than defended after the result.
 
@@ -462,7 +487,8 @@ fatigue is measured rather than inferred from an early novelty period.
 
 The experiment pre-registers decision rules without fabricating target numbers:
 
-- which sealed examples and ablation arms are evaluated;
+- which sealed examples (referenced by content hash) and ablation arms are
+  evaluated;
 - the primary utility, dismissal, repeat, and coverage-failure measures;
 - the direction and minimum improvement required from each phase;
 - the maximum global frequency and cooldown policy;
