@@ -121,7 +121,7 @@ cat <<'ROWS'
 meta      dock.mau.dev/mautrix/meta:v26.08      hazlie-meta      29319  mautrix-meta
 instagram dock.mau.dev/mautrix/meta:ig-v26.08   hazlie-instagram 29330  mautrix-instagram
 twitter   dock.mau.dev/mautrix/twitter@sha256:a780515de3c7fa8f410e2d6355d4c69a0c439742c40bafeec8a3d8e61a94cbc4 hazlie-twitter 29327 mautrix-twitter
-telegram  dock.mau.dev/mautrix/telegram:latest  hazlie-telegram  29317  mautrix-telegram
+telegram  dock.mau.dev/mautrix/telegram@sha256:c073961f95aafca58392affcb57ea74364a2d17f018a36d29a208828db8a11e8 hazlie-telegram 29317 mautrix-telegram
 slack     dock.mau.dev/mautrix/slack:latest     hazlie-slack     29335  mautrix-slack
 linkedin  dock.mau.dev/mautrix/linkedin:latest  hazlie-linkedin  29336  mautrix-linkedin
 ROWS
@@ -134,8 +134,8 @@ bridge_rows | while read -r name image cn port dbfile; do
     [ -f "$M/$name/config.yaml" ] || { echo "$name: config generation failed" >&2; exit 1; }
     echo "$name: config written"
   fi
-  # All six above are the modern (bridgev2) layout — telegram's :latest
-  # moved to it too, which is why it is in this list and not special-cased
+  # All six above are the modern (bridgev2) layout — Telegram's pinned image
+  # uses it too, which is why it is in this list and not special-cased
   # the way its python-era config would have needed. This must run even when
   # a first attempt wrote its example config then failed before registration:
   # mautrix only generates registration.yaml after the homeserver is set.
@@ -247,9 +247,6 @@ PY
 fi
 
 # --- telegram's missing half --------------------------------------------------
-# The generated config ships mautrix's EXAMPLE credentials (api_id 12345), and
-# the bridge refuses to start on them — so the example id is the reliable
-# "not yet configured" signal, not an empty key.
 # The generated config ships mautrix's EXAMPLE credentials (api_id 12345) and
 # the bridge refuses to start on them, so the example id is the reliable
 # "not yet configured" signal rather than an empty key.
@@ -288,10 +285,12 @@ if [ "$("$YQ" '.network.api_id // 0' "$M/telegram/config.yaml" 2>/dev/null)" = "
     TG_HASH="${TG_APP#*:}"
     # Targeted line replacement, not a yq round trip: mautrix's generated
     # config carries ~700 lines of comments that a re-serialise would flatten.
-    /usr/bin/sed -i '' \
-      -e "s/^\([[:space:]]*api_id:\).*/\1 $TG_ID/" \
-      -e "s/^\([[:space:]]*api_hash:\).*/\1 \"$TG_HASH\"/" \
-      "$M/telegram/config.yaml"
+    # Feed the replacement program over stdin so the API hash never appears in
+    # sed's argv (and therefore never flashes in another process's `ps` view).
+    {
+      printf 's/^\\([[:space:]]*api_id:\\).*/\\1 %s/\n' "$TG_ID"
+      printf 's/^\\([[:space:]]*api_hash:\\).*/\\1 "%s"/\n' "$TG_HASH"
+    } | /usr/bin/sed -i '' -f - "$M/telegram/config.yaml"
     ( cd bridges && docker compose up -d mautrix-telegram >/dev/null 2>&1 ) || true
     echo "telegram: configured from a shipped app credential"
   else

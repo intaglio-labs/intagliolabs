@@ -28,7 +28,7 @@ ghcr.io/element-hq/synapse:v1.140.0
 dock.mau.dev/mautrix/meta:v26.08
 dock.mau.dev/mautrix/meta:ig-v26.08
 dock.mau.dev/mautrix/twitter@sha256:a780515de3c7fa8f410e2d6355d4c69a0c439742c40bafeec8a3d8e61a94cbc4
-dock.mau.dev/mautrix/telegram:latest
+dock.mau.dev/mautrix/telegram@sha256:c073961f95aafca58392affcb57ea74364a2d17f018a36d29a208828db8a11e8
 dock.mau.dev/mautrix/discord:latest
 dock.mau.dev/mautrix/slack:latest
 dock.mau.dev/mautrix/linkedin:latest'

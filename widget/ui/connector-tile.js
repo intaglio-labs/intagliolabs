@@ -196,7 +196,7 @@ const HZ_IS_BRIDGE = (src) => src.action === 'bridge' || HZ_BRIDGES.has(HZ_KIND(
 const HZ_GOOGLE_AUTH = new Set(['mail', 'calendar']);
 // Match the Settings shelf: these remain visible and explain themselves, but
 // do not start their respective login paths until the integration is ready.
-const HZ_SOON_CONNECTORS = new Set(['mail', 'telegram']);
+const HZ_SOON_CONNECTORS = new Set(['mail']);
 
 const HZ_FDA_HINT = {
   // ~~text: the sentence walking through the grant.~~ Yeeted (owner,
@@ -266,6 +266,10 @@ const HZ_NOTICES = {
 // See connections.js staleRefreshed — bounded, and module scope so it survives
 // the rebuild a refresh causes.
 const hzStaleRefreshed = new Set();
+// A conversational bridge begins once when its card first appears. Keep this
+// outside renderBridge: every bot reply repaints the card, and beginning on
+// every repaint would cancel the login that just advanced.
+const hzAutoBegun = new Set();
 
 // `onClose` is how the CARD tells its HOST to close, and it matters because the
 // two surfaces close differently: Settings drops one hint host, the People ring
@@ -463,8 +467,17 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
     // same flow on every surface — and the native fence then cancelled the
     // navigation, leaving a blank branded window with no error. Reading the
     // server's answer means the decision lives in one place instead of three.
-    const manual = data && data.state === 'manual';
+    // Native marks the first no-webview handoff as `manual`, but subsequent
+    // bridgeBegin/bridgeCookies replies are ordinary `ok` responses. Telegram
+    // remains a phone-and-code conversation for the whole exchange, so its
+    // platform identity—not a transient response state—owns that decision.
+    const telegramPhone = HZ_KIND(src.id) === 'telegram';
+    const manual = telegramPhone || (data && data.state === 'manual');
     if (data && data.connected) {
+      // A later disconnect must be able to auto-start a fresh login in the
+      // same app session. The guard belongs to one attempt, not this tile for
+      // the lifetime of the page.
+      hzAutoBegun.delete(src.id);
       const acct = document.createElement('span');
       acct.className = 'acct';
       // The green dot already says connected. Use this line to name the actual
@@ -503,7 +516,9 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
       if (manual) {
         const note = document.createElement('span');
         note.className = 'why';
-        note.textContent = HZ_NOTICES.manual;
+        note.textContent = telegramPhone
+          ? 'sign in with your phone number, then the code Telegram sends'
+          : HZ_NOTICES.manual;
         tip.appendChild(note);
       } else {
       const login = document.createElement('button');
@@ -591,7 +606,86 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
       // other platforms carried here ("having trouble? paste cookies
       // manually") was yeeted (owner, 2026-08-25), same call as in
       // connections.js: the webview login is the flow, not one of two.
-      if (manual) {
+      if (telegramPhone) {
+        const transcript = (data && Array.isArray(data.transcript)) ? data.transcript : [];
+        const startTelegram = (button = null) => {
+          hzAutoBegun.add(src.id);
+          if (button) { button.disabled = true; button.textContent = 'starting…'; }
+          hzPost('bridgeBegin', { p: HZ_KIND(src.id) })
+            .then(renderBridge)
+            .catch(() => {
+              if (button) {
+                hzAutoBegun.delete(src.id);
+                button.disabled = false;
+                button.textContent = 'start login';
+              } else {
+                // Keep the guard set while painting the failure. Clearing it
+                // first would make renderBridge auto-start again immediately
+                // and spin forever while the local bridge is down. The stable
+                // failure card exposes one explicit retry button instead.
+                renderBridge({ state: 'down' });
+              }
+            });
+        };
+        if (askText) {
+          const phone = /\bphone\b/iu.test(askText);
+          const code = /\bcode\b/iu.test(askText) && !/\bpassword\b/iu.test(askText);
+          const password = /\bpassword\b/iu.test(askText);
+          const answer = document.createElement('input');
+          answer.className = 'binput';
+          answer.type = password ? 'password' : phone ? 'tel' : 'text';
+          answer.autocomplete = code ? 'one-time-code' : password ? 'current-password' : phone ? 'tel' : 'off';
+          if (phone || code) answer.inputMode = phone ? 'tel' : 'numeric';
+          answer.placeholder = phone ? '+1 xxx xxx xxxx' : code ? 'code from Telegram' : 'your password';
+          answer.setAttribute('spellcheck', 'false');
+          if (phone) answer.addEventListener('input', () => {
+            // Supply the US country code on the first ordinary digit. A person
+            // who starts with `+` is entering another international calling
+            // code, so leave it exactly as typed.
+            if (answer.value && !answer.value.startsWith('+')) {
+              answer.value = `+1 ${answer.value.trimStart()}`;
+            }
+          });
+          const send = document.createElement('button');
+          send.className = 'hold-ok';
+          send.textContent = 'continue';
+          const validation = document.createElement('span');
+          validation.className = 'setup field-error';
+          const submit = () => {
+            const value = answer.value.trim();
+            if (!value) { validation.textContent = 'enter your answer'; answer.focus(); return; }
+            validation.textContent = '';
+            send.disabled = true; send.textContent = 'sending…';
+            const before = hzBridgeSignature(data);
+            hzPost('bridgeCookies', { p: 'telegram', cookies: value })
+              .then((next) => {
+                answer.value = '';
+                hzSettleBridgeAnswer('telegram', before, next, renderBridge);
+              })
+              .catch(() => {
+                send.disabled = false; send.textContent = 'continue';
+                validation.textContent = 'could not reach the local connection';
+              });
+          };
+          send.addEventListener('click', (e) => { e.stopPropagation(); submit(); });
+          answer.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); submit(); }
+          });
+          tip.append(answer, send, validation);
+        } else if (!transcript.length && !hzAutoBegun.has(src.id)) {
+          const starting = document.createElement('span');
+          starting.className = 'setup';
+          starting.textContent = 'starting…';
+          tip.appendChild(starting);
+          startTelegram();
+        } else {
+          const begin = document.createElement('button');
+          begin.className = 'hold-ok';
+          begin.textContent = 'start login';
+          begin.addEventListener('click', (e) => { e.stopPropagation(); startTelegram(begin); });
+          tip.appendChild(begin);
+        }
+      } else if (manual) {
         const adv = document.createElement('details');
         adv.open = true; // not "advanced" when it is the only way in
         const sum = document.createElement('summary');

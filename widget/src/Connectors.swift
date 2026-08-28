@@ -65,12 +65,27 @@ final class Connectors {
       .sorted { $0.nextTs < $1.nextTs }
   }
 
+  /// Matrix is one local transport for several user-facing connectors. The
+  /// daemon expands it into one queued task per connected platform; preserve
+  /// those names anywhere Settings describes Matrix work instead of leaking
+  /// the implementation-shaped "social messages" label back into the UI.
+  private func matrixPlatformLabels(_ raw: [String: Any]) -> [String] {
+    var seen = Set<String>()
+    return scheduledActivityTasks(raw).compactMap { task in
+      guard task.connector == "matrix",
+            let label = task.label?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !label.isEmpty,
+            seen.insert(label).inserted else { return nil }
+      return label
+    }
+  }
+
   /// The daemon's current pass plus its actual scheduled queue. This is read
   /// from a private local snapshot, never inferred from a connector merely
   /// being installed or enabled.
   var activityItems: [[String: Any]] {
     guard let raw = activitySnapshot else { return [] }
-    let names = ["imessage": "iMessage", "matrix": "social messages", "maintenance": "maintenance"]
+    let names = ["imessage": "iMessage", "matrix": "connected platforms", "maintenance": "maintenance"]
     let labelFor = { (connector: String) in names[connector] ?? String(connector.prefix(32)) }
     let now = Date().timeIntervalSince1970 * 1000
     var items: [[String: Any]] = []
@@ -88,13 +103,15 @@ final class Connectors {
     // Historical catch-up remains a named job in the list. Its duration is not
     // repeated here: the pinned header is the horizon for the ENTIRE queue.
     if let backfill = raw["backfill"] as? [String], !backfill.isEmpty {
-      let backfillNames = ["calendar": "calendar", "matrix": "social messages"]
-      let subjects = backfill.map { backfillNames[$0] ?? labelFor($0) }
-        .joined(separator: " + ")
-      items.append([
-        "kind": "backfill",
-        "label": "backfilling \(subjects) history",
-      ])
+      for connector in backfill {
+        let subjects = connector == "matrix" ? matrixPlatformLabels(raw) : [labelFor(connector)]
+        for subject in subjects.isEmpty ? [labelFor(connector)] : subjects {
+          items.append([
+            "kind": "backfill",
+            "label": "backfilling \(subject) history",
+          ])
+        }
+      }
     }
 
     let queue = scheduledActivityTasks(raw)
@@ -131,7 +148,7 @@ final class Connectors {
   /// pose until that job reaches the beginning of the source.
   var activeWorkLabel: String? {
     guard let raw = activitySnapshot else { return nil }
-    let names = ["imessage": "iMessage", "matrix": "social messages"]
+    let names = ["imessage": "iMessage", "matrix": "connected platforms"]
     let labelFor = { (connector: String) in names[connector] ?? String(connector.prefix(32)) }
     if raw["phase"] as? String == "syncing",
        let connector = raw["connector"] as? String,
@@ -147,6 +164,9 @@ final class Connectors {
        let estimate = raw["estimate"] as? String,
        !estimate.isEmpty,
        let connector = (raw["backfill"] as? [String])?.first {
+      if connector == "matrix", let platform = matrixPlatformLabels(raw).first {
+        return "backfilling \(platform)"
+      }
       return "backfilling \(labelFor(connector))"
     }
     return nil

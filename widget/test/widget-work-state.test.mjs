@@ -61,6 +61,7 @@ test('native work status includes active work and unfinished backfill, but exclu
   assert.match(connectors, /raw\["phase"\] as\? String == "syncing"/u);
   assert.match(connectors, /raw\["phase"\] as\? String == "waiting"/u);
   assert.match(connectors, /raw\["backfill"\] as\? \[String\]/u);
+  assert.ok(connectors.includes('return "backfilling \\(platform)"'));
   assert.ok(connectors.includes('return "backfilling \\(labelFor(connector))"'));
   assert.match(daemon, /return \{[\s\S]*?estimate:[\s\S]*?backfill,/u,
     'the daemon snapshot must distinguish unfinished history from a routine queue');
@@ -77,8 +78,12 @@ test('the total processing estimate uses the plain approximate-hours label', () 
   assert.match(connections, /activity-estimate/u);
   assert.match(connections, /estimate\.hidden = !total/u,
     'the total is pinned in the header and hidden only when no queue exists');
-  assert.ok(connectors.includes('"label": "backfilling \\(subjects) history"'),
-    'the backfill row names work without duplicating the total');
+  assert.ok(connectors.includes('"label": "backfilling \\(subject) history"'),
+    'the backfill rows name work without duplicating the total');
+  assert.match(connectors, /connector == "matrix" \? matrixPlatformLabels\(raw\)/u,
+    'Matrix history is split into the connected platform labels');
+  assert.doesNotMatch(connectors, /matrix": "social messages"/u,
+    'the transport name never replaces a user-facing platform name');
 });
 
 test('only live work says current; scheduled connectors show only future order', () => {

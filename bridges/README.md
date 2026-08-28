@@ -12,16 +12,19 @@ inbound-fetch-of-your-own-data posture as the IMAP and Oura pollers.
 
 | container | image | what | host port |
 |---|---|---|---|
-| `hazlie-synapse` | `ghcr.io/element-hq/synapse:v1.140.0` | the homeserver / bus | `127.0.0.1:8008` only |
-| `hazlie-meta` | `dock.mau.dev/mautrix/meta:v26.08` | Facebook **Messenger** | none (internal) |
-| `hazlie-instagram` | `dock.mau.dev/mautrix/meta:ig-v26.08` | **Instagram** DMs | none (internal) |
-| `hazlie-twitter` | `dock.mau.dev/mautrix/twitter:v26.08` | **X/Twitter** DMs | none (internal) |
-| `hazlie-telegram` | `dock.mau.dev/mautrix/telegram:latest` | **Telegram** | none (internal) |
-| `hazlie-discord` | `dock.mau.dev/mautrix/discord:latest` | **Discord** DMs | none (internal) |
-| `hazlie-slack` | `dock.mau.dev/mautrix/slack:latest` | **Slack** DMs | none (internal) |
+| `hazlie-synapse` | `ghcr.io/element-hq/synapse@sha256:2af5…` | the homeserver / bus | `127.0.0.1:8008` only |
+| `hazlie-meta` | `dock.mau.dev/mautrix/meta@sha256:662f…` | Facebook **Messenger** | none (internal) |
+| `hazlie-instagram` | `dock.mau.dev/mautrix/meta@sha256:4b27…` | **Instagram** DMs | none (internal) |
+| `hazlie-twitter` | `dock.mau.dev/mautrix/twitter@sha256:a780…` | **X/Twitter** DMs | none (internal) |
+| `hazlie-telegram` | `dock.mau.dev/mautrix/telegram@sha256:c073…` | **Telegram** | none (internal) |
+| `hazlie-discord` | `dock.mau.dev/mautrix/discord@sha256:0654…` | **Discord** DMs | none (internal) |
+| `hazlie-linkedin` | `dock.mau.dev/mautrix/linkedin@sha256:0bf6…` | **LinkedIn** DMs | none (internal) |
+| `hazlie-slack` | `dock.mau.dev/mautrix/slack@sha256:7761…` | **Slack** DMs | none (internal) |
 
-(`telegram`, `discord` and `slack` ride a mutable `:latest` tag — see "Root
-cause worth fixing" below.)
+(The runtime Compose file pins every bridge image by digest. Telegram's setup
+and prefetch paths now use that same digest too, so a first install cannot
+generate its config with different code from the container it later runs. The
+remaining setup/prefetch entries still need the same alignment.)
 
 **Why two Meta bridges:** mautrix split them in July 2026 when Meta dropped the
 shared Instagram/Messenger API; the v26.08 `meta` binary is Messenger-only, the
@@ -45,9 +48,8 @@ backfill on, double puppeting off), brings the stack up, and creates the owner
 user + `~/.hazlie/matrix/owner-credentials.json`. Written 2026-08-25, the day
 a wipe proved the original stack's recipe lived in nobody's head: the widget's
 login windows harvested cookies with no bridge behind them to take the
-hand-off. Telegram alone stays stopped until you put your own api_id/api_hash
-from my.telegram.org/apps into its config — the script says exactly this when
-it happens.
+hand-off. Telegram reads its app credential from the signed app bundle; a
+source build without one falls back to the per-user api_id/api_hash walkthrough.
 
 ## Operating it
 
@@ -95,7 +97,7 @@ yq -i '.backfill.enabled = true | .double_puppet.secrets = {}' config.yaml
 ```
 
 `homeserver.presence = false` used to be in that line. **Drop it — the key does
-not exist.** Verified 2026-08-22 across all six configs: no bridge version here
+not exist.** Verified 2026-08-22 across all seven configs: no bridge version here
 has `homeserver.presence`, and each drops it during the config rewrite it does
 at startup. It was a no-op that got copied from bridge to bridge and read like a
 protection. Presence, where it is controllable at all, is
@@ -197,10 +199,11 @@ a **postgres placeholder**, and `bridge.permissions` is an **example.com
 placeholder** that fails startup with `bridge.permissions not configured`. Then
 `docker compose restart mautrix-<bridge>` and look for `Bridge started`.
 
-**Root cause worth fixing:** `telegram`, `discord` and `slack` are pinned to
-`:latest` in `docker-compose.yml`, while `meta`, `instagram` and `twitter` use
-version tags. A mutable tag means the image can move under a config that was
-fine yesterday. Pin them.
+**Image consistency:** `docker-compose.yml` pins every live bridge by digest.
+Telegram's setup and prefetch entries use its runtime digest as well. The
+remaining setup/prefetch entries still use mutable tags and must also be
+aligned; until then, a mutable tag can move underneath a config that was fine
+yesterday.
 
 ### The honest risk (Meta)
 
