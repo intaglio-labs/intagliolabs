@@ -85,19 +85,15 @@ final class Connectors {
       items.append(["kind": "current", "label": "current: syncing \(label)"])
     }
 
-    // HISTORICAL CATCH-UP IS ITS OWN JOB. The estimate belongs to this row,
-    // never to whichever routine connector happens to be first in the polling
-    // queue. Putting "16 hrs left" in the card header while the first row said
-    // Granola made it read as sixteen hours of Granola/model work; the daemon's
-    // estimate actually describes only unfinished Calendar/Matrix history.
-    if let backfill = raw["backfill"] as? [String], !backfill.isEmpty,
-       let estimate = normalizedActivityEstimate(raw) {
+    // Historical catch-up remains a named job in the list. Its duration is not
+    // repeated here: the pinned header is the horizon for the ENTIRE queue.
+    if let backfill = raw["backfill"] as? [String], !backfill.isEmpty {
       let backfillNames = ["calendar": "calendar", "matrix": "social messages"]
       let subjects = backfill.map { backfillNames[$0] ?? labelFor($0) }
         .joined(separator: " + ")
       items.append([
         "kind": "backfill",
-        "label": "backfilling \(subjects) history · \(estimate)",
+        "label": "backfilling \(subjects) history",
       ])
     }
 
@@ -118,6 +114,14 @@ final class Connectors {
       items.append(["kind": "queue", "label": "next: \(label)"])
     }
     return items
+  }
+
+  /// Approximate wall-clock horizon for every task currently represented by
+  /// the daemon queue. Kept separate from activityItems so the UI can pin it in
+  /// the card header instead of letting a long task label clip it away.
+  var activityEstimate: String? {
+    guard let raw = activitySnapshot else { return nil }
+    return normalizedActivityEstimate(raw)
   }
 
   /// The one connector operation happening now, if any. Unlike activityItems,

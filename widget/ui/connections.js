@@ -32,9 +32,10 @@ const afterLoginAttempt = (data, show) => {
 // second, non-browser step.
 const bridgeSignature = (data) => ((data && data.transcript) || [])
   .map((m) => `${m.from || ''}|${m.body || ''}|${m.image ? 'image' : ''}`).join('\u0000');
-const bridgeNeedsReply = (data) => ((data && data.transcript) || []).some((m) =>
-  m.from === 'bot' && /^(please|enter|create|choose|register)\b/iu.test(String(m.body || '').trim())
-);
+// The transcript includes completed historical prompts. The shared helper
+// deliberately follows only the CURRENT bot state (plus validation retries),
+// so an old X Chat passcode question cannot consume the first fresh login tap.
+const bridgeNeedsReply = (data) => !!hzPendingBridgeQuestion(data);
 const settleWebLogin = (platform, first, show) => {
   if (!first || first.state === 'cancelled' || first.connected || first.state !== 'ok' || bridgeNeedsReply(first)) {
     afterLoginAttempt(first, show);
@@ -331,13 +332,19 @@ function activityRow() {
   const name = document.createElement('span');
   name.className = 'setting-name';
   name.textContent = 'activity';
-  head.append(name);
+  const estimate = document.createElement('span');
+  estimate.className = 'activity-estimate';
+  estimate.hidden = true;
+  head.append(name, estimate);
   const list = document.createElement('div');
   list.className = 'activity-list';
   el.append(head, list);
 
   const gb = (bytes) => `${(Number(bytes || 0) / 1e9).toFixed(1)} GB`;
   const paint = (data) => {
+    const total = data && typeof data.estimate === 'string' ? data.estimate.trim() : '';
+    estimate.textContent = total;
+    estimate.hidden = !total;
     const latestItems = data && Array.isArray(data.items) ? data.items : [];
     // The queue is always visible: the first row is current and the remaining
     // real scheduled work follows in order. Seven rows fit; more scroll here.
@@ -724,7 +731,7 @@ function visibleSources(sources) {
 // before the card says "coming soon" — a bright Google mark read as available.
 // Only the synthetic `mail` tile is greyed; a previously connected `mail:<…>`
 // account remains a normal, usable source.
-const SOON_CONNECTORS = new Set(['mail', 'twitter', 'telegram']);
+const SOON_CONNECTORS = new Set(['mail', 'telegram']);
 // WHAT NEEDS YOU COMES FIRST. The shelf scrolls, so anything past the fourth
 // tile is work to reach — and the tiles that need reaching are exactly the
 // ones not yet connected or broken. Those lead; everything healthy follows in
@@ -1349,6 +1356,17 @@ function card(src, keep) {
       }
       return null;
     };
+    // A rejected answer leaves the bridge on the same step. In that state the
+    // newest bot line is the error and the question is one line behind it.
+    // Treat both shapes as one pending prompt so closing/reopening the card —
+    // or retrying a wrong X Chat passcode — never turns into a fresh login.
+    const pendingQuestion = () => askedFor()
+      || (RETRYABLE.test(botSaid() || '') ? lastQuestion() : null);
+    const xPasscodeStep = () => kindOf(src.id) === 'twitter'
+      && /\b(pin|passcode)\b/iu.test(pendingQuestion() || '');
+    const xPasscodeCopy = () => (/\bcreate\b/iu.test(pendingQuestion() || '')
+      ? 'create a 4-digit X Chat passcode'
+      : 'enter your 4-digit X Chat passcode');
     // A live QR in the transcript: the login is waiting to be scanned.
     const qrIn = (d) => ((d && d.transcript) || []).some(
       (m) => m.from === 'bot' && typeof m.image === 'string' && m.image.startsWith('data:image/')
@@ -1360,12 +1378,18 @@ function card(src, keep) {
       return !!last && /error logging in|websocket|timed? out|cancelled/iu.test(last.body);
     };
     const appendTranscript = () => {
-      const ask = askedFor();
+      const ask = pendingQuestion();
       if (ask) {
         const line = document.createElement('span');
         line.className = 'setup';
-        line.textContent = ask; // server-masked; text only, never HTML
+        line.textContent = xPasscodeStep() ? xPasscodeCopy() : ask;
         tip.appendChild(line);
+        if (xPasscodeStep()) {
+          const why = document.createElement('span');
+          why.className = 'why x-passcode-help';
+          why.textContent = 'This unlocks your encrypted DMs. It is not your X password or 2FA code.';
+          tip.appendChild(why);
+        }
       }
       // THE QR IS THE STEP, for Discord. Its login is remote-auth: the bot
       // posts a QR, you scan it with the phone app, and it redacts the image
@@ -1457,7 +1481,8 @@ function card(src, keep) {
     // has no obvious shape falls back to the vague line, which is the right
     // answer there.
     const answerHint = () => {
-      const asked = askedFor() || lastQuestion() || '';
+      const asked = pendingQuestion() || '';
+      if (xPasscodeStep()) return '4-digit passcode';
       if (/\bphone\b/iu.test(asked)) return '+1 xxx xxx xxxx';
       // An ADDRESS looks like an address. "type your answer" under "enter your
       // email" is the box describing itself instead of the answer (owner,
@@ -1478,11 +1503,22 @@ function card(src, keep) {
     };
     // A one-line input that relays whatever the bot last asked for (a token,
     // a phone number, then the code) and re-renders with the bot's reply.
-    const relayInput = (placeholder, multiline) => {
+    const relayInput = (placeholder, multiline, secretPin = false) => {
       const box = document.createElement(multiline ? 'textarea' : 'input');
       box.className = multiline ? 'bpaste' : 'binput';
       box.placeholder = placeholder;
       box.setAttribute('spellcheck', 'false');
+      if (secretPin && !multiline) {
+        box.type = 'password';
+        box.inputMode = 'numeric';
+        box.maxLength = 4;
+        box.pattern = '[0-9]{4}';
+        box.autocomplete = 'off';
+        box.setAttribute('aria-label', '4-digit X Chat passcode');
+        box.addEventListener('input', () => {
+          box.value = box.value.replace(/\D/gu, '').slice(0, 4);
+        });
+      }
       const send = document.createElement('button');
       send.className = 'hold-ok';
       // THE VERB FOLLOWS THE QUESTION. "create" is right for X's PIN, which is
@@ -1497,12 +1533,19 @@ function card(src, keep) {
       // never asked to talk to — where the person is part-way through a login
       // and wants the next step. Every one of these questions has a step after
       // it, so the button says so.
-      const asked = askedFor() || '';
+      const asked = pendingQuestion() || '';
       send.textContent = /\bcreate\b/iu.test(asked) ? 'create' : 'continue';
+      const validation = document.createElement('span');
+      validation.className = 'setup field-error';
       const fire = () => {
         const val = box.value.trim();
         if (!val) return;
-        box.value = ''; // gone from the page before anything else happens
+        if (secretPin && !/^\d{4}$/u.test(val)) {
+          validation.textContent = 'enter all 4 digits';
+          box.focus();
+          return;
+        }
+        validation.textContent = '';
         const busy = send.textContent === 'create' ? 'creating…' : 'sending…';
         const idle = send.textContent;
         send.disabled = true; send.textContent = busy;
@@ -1510,7 +1553,10 @@ function card(src, keep) {
         // can be told apart from the question it is answering.
         const had = signature(data);
         hzPost('bridgeCookies', { p: kindOf(src.id), cookies: val })
-          .then((d) => settle(d, had))
+          .then((d) => {
+            box.value = ''; // remove the secret before repainting the step
+            settle(d, had);
+          })
           .catch(() => { send.disabled = false; send.textContent = idle; });
       };
       send.addEventListener('click', (e) => { e.stopPropagation(); fire(); });
@@ -1518,6 +1564,7 @@ function card(src, keep) {
         if (e.key === 'Enter') { e.preventDefault(); fire(); }
       });
       tip.append(box, send);
+      if (secretPin) tip.appendChild(validation);
     };
     const beginButton = (label) => {
       const begin = document.createElement('button');
@@ -1586,7 +1633,7 @@ function card(src, keep) {
       // "log in" during the PIN step cancels the login and restarts it, so
       // offering it beside the question is offering to undo the progress the
       // question represents. The answer box below is the only way forward.
-      if (!askedFor()) tip.appendChild(login);
+      if (!pendingQuestion()) tip.appendChild(login);
       // ~~A 'cancelled' state appended "login window closed — tap to try
       // again."~~ Yeeted (owner, 2026-08-25): the card already shows the same
       // log in button either way, and the sentence squeezed in beside the
@@ -1600,10 +1647,10 @@ function card(src, keep) {
       // further than ever. The relay input is the same one the token/phone
       // flows use; it appears only when the bot is mid-conversation and not
       // yet connected, so the ordinary one-shot cookie login is unchanged.
-      if (askedFor() && !(data && data.connected)) {
+      if (pendingQuestion() && !(data && data.connected)) {
         // The bot's question is already on screen directly above; the box only
         // has to say it is the place to answer it.
-        relayInput(answerHint(), false);
+        relayInput(answerHint(), false, xPasscodeStep());
       }
       // The manual cookie-paste fallback ("having trouble? paste cookies
       // manually") was yeeted (owner, 2026-08-25): the webview login is the
@@ -1899,23 +1946,6 @@ function card(src, keep) {
         showBridgePanel({ state: 'down' });
       });
   };
-  // Do not open another X browser window when its bridge is already waiting
-  // for a passcode. Resume the pending local conversation instead; starting a
-  // second cookie flow would cancel the exact state the person just created.
-  const resumeOrStartBridgeLogin = () => {
-    row.classList.add('logging-in');
-    hzPost('bridgeStatus', { p: kindOf(src.id) })
-      .then((data) => {
-        row.classList.remove('logging-in');
-        if (bridgeNeedsReply(data)) showBridgePanel(data);
-        else openBridgeLogin();
-      })
-      .catch(() => {
-        row.classList.remove('logging-in');
-        openBridgeLogin();
-      });
-  };
-
 // WHICH GOOGLE CLIENT TO SIGN IN WITH, asked only when there is more than one.
 // Built from the same pieces a hint card is, so it closes the same way and
 // needs no CSS of its own.
@@ -2031,10 +2061,11 @@ function showTileNotice(row, src, text) {
       // reachable for the first time.
       const flow = BRIDGE_FLOW[kindOf(src.id)] || 'cookie';
       if (isBridge(src) && !src.connected && (flow === 'cookie' || kindOf(src.id) === 'discord')) {
-        // X may be waiting for a passcode, so it gets the resume check. A
-        // Discord QR is intentionally requested on this first tap.
-        if (kindOf(src.id) === 'discord') openBridgeLogin();
-        else resumeOrStartBridgeLogin();
+        // bridgeWebLogin is the single entry point. Native checks the same GET
+        // response for a genuinely current passcode question before it opens
+        // anything, so X resumes safely without a preliminary status request
+        // that can lose this first press during the focus-refresh rebuild.
+        openBridgeLogin();
         return;
       }
       // GOOGLE TILE: one press mounts the anchored status card and starts the

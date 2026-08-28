@@ -664,14 +664,15 @@ export function createDaemon({
     .sort((a, b) => a.nextTs - b.nextTs);
   const intervalMsFor = (connector) =>
     (config.intervals?.[connector] ?? DEFAULT_INTERVAL_S) * 1000;
-  // The old header reported the final task's START time. That answered "when
-  // does this polling round begin?", not "when will all the work finish?" —
-  // and completely hid resumable history. Calendar has an exact remaining
-  // number of date slices. Matrix pagination is intentionally opaque, so the
-  // combined number remains an intentionally rough estimate.
-  const historyEstimate = () => {
+  // TOTAL QUEUE HORIZON, not the duration of the first/current row. The owner
+  // asked for one pinned answer to "when is all the work in this queue done?".
+  // Routine passes contribute their actual scheduler deadlines (including the
+  // idle-window maintenance pass); resumable Calendar/Matrix history can extend
+  // that horizon across additional bounded passes. Matrix pagination is opaque,
+  // so this remains deliberately approximate rather than claiming precision.
+  const totalWorkEstimate = () => {
     const nowMs = now();
-    const completionTimes = [];
+    const completionTimes = scheduledQueue().map((task) => task.nextTs);
     const backfill = [];
 
     if (!state.getCursor('calendar:history-done')) {
@@ -715,8 +716,8 @@ export function createDaemon({
     };
   };
   const publishActivity = (activity) => {
-    const history = historyEstimate();
-    writeActivity({ ...activity, queue: scheduledQueue(), ...(history ?? {}) });
+    const total = totalWorkEstimate();
+    writeActivity({ ...activity, queue: scheduledQueue(), ...(total ?? {}) });
   };
   const publishWaiting = () => {
     const next = scheduledQueue()[0];

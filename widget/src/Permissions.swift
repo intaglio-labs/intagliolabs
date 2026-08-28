@@ -198,31 +198,34 @@ enum Permissions {
       return (try? handle.read(upToCount: 1)) != nil
     }
 
-    var candidates: [String: [URL]] = [
+    let candidates: [String: [URL]] = [
       "imessage": [home.appendingPathComponent("Library/Messages/chat.db")],
-      "calendar": [home.appendingPathComponent(
-        "Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb")],
       "photos": [home.appendingPathComponent(
         "Pictures/Photos Library.photoslibrary/database/Photos.sqlite")],
       "notes": [home.appendingPathComponent(
         "Library/Group Containers/group.com.apple.notes/NoteStore.sqlite")],
     ]
 
-    let addressBook = home.appendingPathComponent("Library/Application Support/AddressBook")
-    var contactStores = [addressBook.appendingPathComponent("AddressBook-v22.abcddb")]
-    let sources = addressBook.appendingPathComponent("Sources")
-    if let entries = try? fm.contentsOfDirectory(
-      at: sources, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
-    ) {
-      contactStores.append(contentsOf: entries.map {
-        $0.appendingPathComponent("AddressBook-v22.abcddb")
-      })
-    }
-    candidates["contacts"] = contactStores
-
     return Set(candidates.compactMap { id, paths in
       paths.contains(where: readable) ? id : nil
     })
+  }
+
+  /// Every local Apple source the connector daemon can reach through THIS app.
+  ///
+  /// Calendar and Contacts stopped opening Apple's private databases directly:
+  /// they now read through EventKit and Contacts.framework. Keeping them in the
+  /// Full Disk Access probe made a granted framework permission look broken,
+  /// because macOS quite correctly continued denying the obsolete database
+  /// path. The connector succeeded while its tile stayed red.
+  ///
+  /// Protected-file sources still need an actual read probe; framework-backed
+  /// sources use the same native authorization state their readers depend on.
+  static func accessibleLocalSources() -> Set<String> {
+    var sources = fullDiskAccessibleSources()
+    if contacts() == .granted { sources.insert("contacts") }
+    if calendar() == .granted { sources.insert("calendar") }
+    return sources
   }
 
   /// Nudge macOS into listing this app under Full Disk Access, then open the
