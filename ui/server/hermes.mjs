@@ -438,7 +438,17 @@ CREATE TABLE IF NOT EXISTS distill_run(
 CREATE TABLE IF NOT EXISTS claim(
   id          INTEGER PRIMARY KEY,
   run_id      INTEGER NOT NULL REFERENCES distill_run(id) ON DELETE CASCADE,
-  subject     TEXT NOT NULL CHECK (subject = 'owner'),
+  /* WHO THE CLAIM IS ABOUT. Closed to the literal 'owner' through v9; v10
+     (L5 step 2) admits 'person' -- a claim about someone in the owner's life,
+     keyed by the people-graph canonical key in subject_person_key.
+     Deliberately the SAME table: a person claim rides the identical
+     source-receipt, decision, validity and deletion machinery, because a
+     second trust lifecycle is the failure the L5 plan forbids by name. */
+  subject     TEXT NOT NULL CHECK (subject IN ('owner','person')),
+  /* Present exactly when subject = 'person'. Hermes stores the key opaquely:
+     the people graph owns key shape and resolution, and a hermes-side
+     spine check would give this database a second copy of identity. */
+  subject_person_key TEXT CHECK ((subject_person_key IS NOT NULL) = (subject = 'person')),
   kind        TEXT NOT NULL CHECK (kind IN
                 ('fact','preference','constraint','plan','commitment')),
   text        TEXT NOT NULL,
@@ -675,7 +685,11 @@ WHERE r.scope = 'day'
 //   6  context_source_ts(source, ts, entity_id): per-source time-range reads
 //      (reconciliation slices, retain sweeps, the episodic shelf, the digest
 //      aggregate, the watchdog's max(ts)) all scanned without it.
-const SCHEMA_VERSION = 9;
+//  10  claim.subject widens to ('owner','person') plus subject_person_key --
+//      L5 step 2. A CHECK cannot be ALTERed, so the claim table is rebuilt in
+//      place with ids preserved; see the v10 branch for why foreign_keys is
+//      OFF across the drop.
+const SCHEMA_VERSION = 10;
 
 // The PRAGMAs that decide whether "deleted" means deleted, and whether the
 // memory tables' declared references mean anything. Applied to every
@@ -881,6 +895,115 @@ function migrate(db) {
       'CREATE INDEX IF NOT EXISTS claim_valid_to ON claim(valid_to) WHERE valid_to IS NOT NULL'
     );
     version = 9;
+  }
+  if (version < 10) {
+    // claim.subject widens from the single literal 'owner' (L5 step 2). A
+    // CHECK constraint cannot be ALTERed in SQLite, so the table is rebuilt
+    // and rows copied with their ids -- claim_source and claim_decision
+    // reference claim(id), and preserved ids keep every receipt and every
+    // owner decision pointing where it pointed.
+    //
+    // foreign_keys goes OFF first, and it is not ceremony: with enforcement
+    // ON, DROP TABLE performs an implicit DELETE whose foreign-key ACTIONS
+    // still run -- ON DELETE CASCADE on claim_source and claim_decision would
+    // empty both child tables. OFF, the drop is purely structural. The toggle
+    // is a no-op inside a transaction, which is why it brackets one rather
+    // than joining it.
+    const claimDef = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'claim'")
+      .get();
+    if (claimDef !== undefined && /subject\s*=\s*'owner'/u.test(String(claimDef.sql))) {
+      db.exec('PRAGMA foreign_keys = OFF');
+      db.exec('BEGIN');
+      try {
+        db.exec(
+          "CREATE TABLE claim_v10(" +
+            'id INTEGER PRIMARY KEY, ' +
+            'run_id INTEGER NOT NULL REFERENCES distill_run(id) ON DELETE CASCADE, ' +
+            "subject TEXT NOT NULL CHECK (subject IN ('owner','person')), " +
+            'subject_person_key TEXT CHECK ((subject_person_key IS NOT NULL) = (subject = \'person\')), ' +
+            "kind TEXT NOT NULL CHECK (kind IN ('fact','preference','constraint','plan','commitment')), " +
+            'text TEXT NOT NULL, observed_at INTEGER, valid_to INTEGER, p_claim REAL, ' +
+            'created_at INTEGER NOT NULL)'
+        );
+        db.exec(
+          'INSERT INTO claim_v10(id, run_id, subject, kind, text, observed_at, valid_to, p_claim, created_at) ' +
+            'SELECT id, run_id, subject, kind, text, observed_at, valid_to, p_claim, created_at FROM claim'
+        );
+        // claim_fts goes FIRST, and not optionally: it is a content= index over
+        // the table being dropped, and ALTER ... RENAME re-parses every schema
+        // object that names the table -- with the fts index dangling, the
+        // rename itself fails with a bare 'SQL logic error' (observed while
+        // writing this migration). The v4 branch already established that the
+        // index is disposable: no claim data lives in it, and 'rebuild'
+        // repopulates it from the claim table it indexes.
+        db.exec('DROP TABLE claim_fts');
+        // v_claim_accepted references claim too, and it is the reason the fts
+        // drop alone was not enough: ALTER ... RENAME re-parses EVERY schema
+        // object, and a view naming a table that is mid-swap fails the whole
+        // rename. Recreated verbatim below, same as the triggers.
+        db.exec('DROP VIEW IF EXISTS v_claim_accepted');
+        // Drops claim_run, claim_valid_to and the fts triggers with it.
+        db.exec('DROP TABLE claim');
+        db.exec('ALTER TABLE claim_v10 RENAME TO claim');
+        db.exec(
+          "CREATE VIRTUAL TABLE claim_fts USING fts5(text, content='claim', content_rowid='id', tokenize='porter unicode61')"
+        );
+        db.exec("INSERT INTO claim_fts(claim_fts) VALUES('rebuild')");
+        // Re-assert secure-delete: it is a property of the (new) shadow
+        // tables, not of the connection, and v3 set it for a reason.
+        db.exec("INSERT INTO claim_fts(claim_fts, rank) VALUES('secure-delete', 1)");
+        // Every trigger on the old table died with it, and SCHEMA will not
+        // run again until the next open -- so ALL of them are recreated here,
+        // verbatim, INCLUDING the append-only guards: a process that kept
+        // running after this migration would otherwise accept its first
+        // UPDATE on claim in the product's history.
+        db.exec(
+          'CREATE TRIGGER IF NOT EXISTS claim_ai AFTER INSERT ON claim BEGIN ' +
+            'INSERT INTO claim_fts(rowid, text) VALUES (new.id, new.text); END'
+        );
+        db.exec(
+          'CREATE TRIGGER IF NOT EXISTS claim_ad AFTER DELETE ON claim BEGIN ' +
+            "INSERT INTO claim_fts(claim_fts, rowid, text) VALUES ('delete', old.id, old.text); END"
+        );
+        db.exec(
+          'CREATE TRIGGER IF NOT EXISTS claim_no_update BEFORE UPDATE ON claim BEGIN ' +
+            "SELECT RAISE(ABORT, 'claim is append-only: a correction appends a claim_decision or produces a new claim'); END"
+        );
+        db.exec(
+          'CREATE TRIGGER IF NOT EXISTS claim_no_replace BEFORE INSERT ON claim ' +
+            'WHEN new.id IS NOT NULL AND EXISTS (SELECT 1 FROM claim WHERE id = new.id) BEGIN ' +
+            "SELECT RAISE(ABORT, 'claim is append-only: an explicit id colliding with an existing row is a REPLACE in disguise'); END"
+        );
+        db.exec('CREATE INDEX IF NOT EXISTS claim_run ON claim(run_id)');
+        db.exec(
+          'CREATE INDEX IF NOT EXISTS claim_valid_to ON claim(valid_to) WHERE valid_to IS NOT NULL'
+        );
+        db.exec(
+          'CREATE VIEW IF NOT EXISTS v_claim_accepted AS ' +
+            'SELECT c.* FROM claim c WHERE (' +
+            'SELECT d.action FROM claim_decision d WHERE d.claim_id = c.id ' +
+            "ORDER BY d.created_at DESC, d.id DESC LIMIT 1) = 'accept'"
+        );
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        db.exec('PRAGMA foreign_keys = ON');
+        throw error;
+      }
+      db.exec('PRAGMA foreign_keys = ON');
+      // The receipts and decisions must still point at claims. An empty result
+      // is the postcondition; anything else takes the open down NOW, while the
+      // operator is looking at a migration, not weeks later as a claim whose
+      // receipt silently vanished.
+      for (const child of ['claim_source', 'claim_decision']) {
+        const broken = db.prepare(`PRAGMA foreign_key_check(${child})`).all();
+        if (broken.length > 0) {
+          throw new Error(`claim rebuild broke ${broken.length} reference(s) from ${child}`);
+        }
+      }
+    }
+    version = 10;
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
@@ -1429,16 +1552,27 @@ const APPLY_RUN_FIELDS = Object.freeze([
   'episode_hash',
   'episode_context',
 ]);
-// Note what is NOT here: `subject` and `observed_at`. The model emits kind,
-// text and quote; subject is closed to 'owner' by the schema, and observed_at
-// is read off the cited context row by this server. A model-supplied
-// observed_at would let a claim date itself, which is how "he said that in
-// March" stops being checkable against anything.
+// Note what is NOT here: `observed_at`. It is read off the cited context row
+// by this server; a model-supplied observed_at would let a claim date itself,
+// which is how "he said that in March" stops being checkable against anything.
+//
+// `subject` WAS in that excluded list, closed to 'owner' by the schema, until
+// v10 (L5 step 2) -- struck rather than erased, because the original reasoning
+// still binds: a subject names who a claim characterizes, and the distiller
+// prompt still does not emit one (an absent subject defaults to 'owner', so
+// nothing changes for that producer). What v10 adds is 'person' with a
+// required subject_person_key, for the Relationship Memory service's
+// deterministic producers. The protections that made the closure safe to
+// relax are the ones that always bound: an exact quote from a context row the
+// owner can read, the same decision flow, and the same deletion cascade. The
+// L5 stop condition "the system characterizes a third party beyond the
+// owner's direct evidence" is enforced by those receipts, not by pretending
+// person claims do not exist.
 // when_phrase is the model's COPY of the time words in the message. It is not
 // stored: validity.mjs resolves it to valid_to here and the phrase itself has
 // no use afterwards, so keeping it would be a second, unversioned record of
 // what the message said.
-const APPLY_CLAIM_FIELDS = Object.freeze(['kind', 'text', 'when_phrase', 'p_claim', 'source']);
+const APPLY_CLAIM_FIELDS = Object.freeze(['kind', 'text', 'when_phrase', 'p_claim', 'source', 'subject', 'subject_person_key']);
 const DECIDE_FIELDS = Object.freeze(['claim_id', 'action', 'reason']);
 const PENDING_PARAMS = Object.freeze(['limit']);
 const RECALL_PARAMS = Object.freeze(['q', 'limit']);
@@ -1537,7 +1671,14 @@ export const REVIEW_FLOOR = 0.5;
 export function pendingClaims(db, { limit = PENDING_CAP } = {}) {
   const rows = db
     .prepare(
-      'SELECT c.id, c.kind, c.text, c.observed_at, c.p_claim, c.created_at, ' +
+      'SELECT c.id, c.subject, c.subject_person_key, c.kind, c.text, c.observed_at, c.p_claim, c.created_at, ' +
+        // The bitemporal names L5 step 2 asks the API to carry: recorded_at is
+        // TRANSACTION time (when hermes wrote the claim -- observed_at is when
+        // the world said it), and producer_version names which producer at
+        // which version asserted it, so a re-run after a prompt or code change
+        // is distinguishable from the run it replaces.
+        'c.created_at AS recorded_at, ' +
+        "r.model || '@' || r.prompt_sha AS producer_version, " +
         's.context_id, s.source, s.quote, s.content_hash AS snapshot_hash, ' +
         'r.model, r.prompt_path, r.prompt_sha, ' +
         'x.ts AS source_ts, x.content_hash AS current_hash ' +
@@ -1724,6 +1865,19 @@ export function applyMemoryBatch(db, body) {
     if (typeof claim.text !== 'string' || claim.text.trim().length === 0) {
       throw at('"text" must be a non-empty string');
     }
+    // Absent means 'owner' -- the pre-v10 producers never sent the field and
+    // must keep meaning what they always meant.
+    const subject = claim.subject ?? 'owner';
+    if (subject !== 'owner' && subject !== 'person') {
+      throw at('"subject" must be \'owner\' or \'person\'');
+    }
+    if (subject === 'person') {
+      if (typeof claim.subject_person_key !== 'string' || claim.subject_person_key.trim().length === 0) {
+        throw at('a person claim requires "subject_person_key" (the people-graph canonical key)');
+      }
+    } else if (claim.subject_person_key !== undefined && claim.subject_person_key !== null) {
+      throw at('"subject_person_key" is only accepted when subject is \'person\'');
+    }
     if (
       claim.p_claim !== undefined &&
       claim.p_claim !== null &&
@@ -1789,7 +1943,7 @@ export function applyMemoryBatch(db, body) {
     ) {
       throw at('"source.content_hash" must be a string');
     }
-    return { i, claim, src };
+    return { i, claim, subject, personKey: subject === 'person' ? claim.subject_person_key.trim() : null, src };
   });
 
   const now = Date.now();
@@ -1803,8 +1957,8 @@ export function applyMemoryBatch(db, body) {
       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?, ?)"
   );
   const insClaim = db.prepare(
-    'INSERT INTO claim(run_id, subject, kind, text, observed_at, valid_to, p_claim, created_at) ' +
-      "VALUES (?, 'owner', ?, ?, ?, ?, ?, ?)"
+    'INSERT INTO claim(run_id, subject, subject_person_key, kind, text, observed_at, valid_to, p_claim, created_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
   );
   const insSource = db.prepare(
     'INSERT INTO claim_source(claim_id, context_id, source, entity_id, content_hash, quote) ' +
@@ -1836,7 +1990,7 @@ export function applyMemoryBatch(db, body) {
         now
       ).lastInsertRowid
     );
-    for (const { i, claim, src } of staged) {
+    for (const { i, claim, subject, personKey, src } of staged) {
       const row = getRow.get(src.context_id);
       if (row === undefined) {
         rejected.push({ index: i, reason: 'no such context row' });
@@ -1857,6 +2011,8 @@ export function applyMemoryBatch(db, body) {
       const claimId = Number(
         insClaim.run(
           runId,
+          subject,
+          personKey,
           claim.kind,
           claim.text,
           // World time from the row, not the model. NULL stays NULL rather
