@@ -29,6 +29,8 @@ const bridgeLoginSwift = readFileSync(join(WIDGET, 'src', 'BridgeLogin.swift'), 
 const googleLoginSwift = readFileSync(join(WIDGET, 'src', 'GoogleLogin.swift'), 'utf8');
 const connections = readFileSync(join(WIDGET, 'ui', 'connections.js'), 'utf8');
 const connectorTile = readFileSync(join(WIDGET, 'ui', 'connector-tile.js'), 'utf8');
+const bridgeUi = readFileSync(join(WIDGET, 'ui', 'bridge.js'), 'utf8');
+const palette = readFileSync(join(WIDGET, 'ui', 'palette.css'), 'utf8');
 const people = readFileSync(join(WIDGET, 'ui', 'people.js'), 'utf8');
 // The shared tile/card both surfaces render from.
 const tile = readFileSync(join(WIDGET, 'ui', 'connector-tile.js'), 'utf8');
@@ -319,7 +321,7 @@ test('Settings mounts its controls without the retired memory-review row', () =>
 // picker, a second small menu inside a panel where every other tile loads its
 // login straight away, and an inconsistent flow for an unfinished connector is
 // not worth keeping wired.
-test('People and Settings park unfinished connectors the same way', () => {
+test('People and Settings park only unfinished connectors', () => {
   // Neither surface may start the flow from a tile any more.
   assert.ok(!/hzPost\('googleAuth'/u.test(people), 'the People ring must not start sign-in');
   assert.ok(
@@ -333,10 +335,93 @@ test('People and Settings park unfinished connectors the same way', () => {
     'Settings uses the same unfinished-connector gate');
   assert.match(connections, /const renderSoon = \(\) => \{[\s\S]{0,300}coming soon/u,
     'and Settings says it too');
-  assert.match(tile, /HZ_SOON_CONNECTORS = new Set\(\['mail', 'twitter', 'telegram'\]\)/u,
-    'the shared card also parks X and Telegram');
-  assert.match(connections, /SOON_CONNECTORS = new Set\(\['mail', 'twitter', 'telegram'\]\)/u,
-    'Settings also parks X and Telegram');
+  assert.match(tile, /HZ_SOON_CONNECTORS = new Set\(\['mail', 'telegram'\]\)/u,
+    'the shared card parks only Mail and Telegram');
+  assert.match(connections, /SOON_CONNECTORS = new Set\(\['mail', 'telegram'\]\)/u,
+    'Settings parks only Mail and Telegram');
+  assert.doesNotMatch(tile, /HZ_SOON_CONNECTORS[^\n]*twitter/u, 'X ships in the shared tile');
+  assert.doesNotMatch(connections, /SOON_CONNECTORS[^\n]*twitter/u, 'X ships in Settings');
+});
+
+test('X Chat passcode is a four-digit encrypted-DM step on both surfaces', () => {
+  for (const [name, source] of [['Settings', connections], ['People', tile]]) {
+    assert.match(source, /enter your 4-digit X Chat passcode/u, `${name} names the passcode`);
+    assert.match(source, /not your X password or 2FA code/u, `${name} explains the credential`);
+    assert.match(source, /type = 'password'/u, `${name} masks the passcode`);
+    assert.match(source, /inputMode = 'numeric'/u, `${name} requests a numeric keyboard`);
+    assert.match(source, /maxLength = 4/u, `${name} enforces the length`);
+    assert.match(source, /\^\\d\{4\}\$/u, `${name} rejects an incomplete passcode`);
+    assert.match(source, /bridgeCookies[^\n]*cookies: (val|value)/u, `${name} relays locally`);
+  }
+});
+
+test('X resumes pending bridge state and reconciles asynchronous completion', () => {
+  const nativeLogin = /case "bridgeWebLogin":([\s\S]*?)\n {4}\/\/ ---- setup:/u.exec(swift)?.[1];
+  assert.ok(nativeLogin, 'native bridgeWebLogin handler is missing');
+  assert.match(nativeLogin, /begin\["pendingQuestion"\][\s\S]*self\.reply\(webView, id, begin\)[\s\S]*BridgeLogin\.present/u,
+    'native resumes the current question before presenting a second login window');
+  assert.doesNotMatch(connections, /resumeOrStartBridgeLogin/u,
+    'Settings must not make a preliminary status request before the login action');
+  assert.doesNotMatch(tile, /hzPost\('bridgeStatus'[\s\S]{0,300}beginWebLogin/u,
+    'the shared tile must not make a preliminary status request before the login action');
+  assert.match(tile, /function hzSettleCookieLogin/u);
+  assert.match(tile, /function hzSettleBridgeAnswer/u);
+  assert.match(tile, /data\.connected && !src\.connected[\s\S]*refresh\(\)/u);
+});
+
+test('a login launched from the non-activating Settings panel rises on its first click', () => {
+  const presenter = /private func presentLoginWindow\(_ win: NSWindow\) \{([\s\S]*?)\n  \}/u
+    .exec(bridgeLoginSwift)?.[1];
+  assert.ok(presenter, 'the native login-window presenter is missing');
+  assert.match(presenter, /NSApp\.activate\(ignoringOtherApps: true\)/u);
+  assert.match(presenter, /DispatchQueue\.main\.async/u,
+    'AppKit activation must get a run-loop turn before the final foreground pass');
+  assert.match(presenter, /self\.window === win/u,
+    'a superseded login window must never be raised later');
+  assert.match(presenter, /win\.orderFrontRegardless\(\)/u,
+    'the settled pass must not depend on the non-activating source panel');
+  assert.equal((bridgeLoginSwift.match(/presentLoginWindow\(win\)/gu) || []).length, 2,
+    'both web and QR login windows use the first-click presenter');
+});
+
+test('only the current bridge prompt can block a fresh login window', () => {
+  const block = bridgeUi.split('// BRIDGE-PENDING-STATE-BEGIN')[1]
+    ?.split('// BRIDGE-PENDING-STATE-END')[0];
+  assert.ok(block, 'shared pending-bridge-state helper is missing');
+  const pendingQuestion = Function(`${block}\nreturn hzPendingBridgeQuestion;`)();
+  const bot = (body) => ({ from: 'bot', body });
+  const user = (body) => ({ from: 'user', body });
+
+  assert.equal(
+    pendingQuestion({ transcript: [bot('Please enter your passcode'), user('••••'), bot('Logged out')] }),
+    null,
+    'a completed historical passcode prompt must not consume the next tile press'
+  );
+  assert.equal(
+    pendingQuestion({ transcript: [bot('Please enter your passcode')] }),
+    'Please enter your passcode',
+    'the current passcode prompt must still resume instead of opening a second login'
+  );
+  assert.equal(
+    pendingQuestion({ transcript: [bot('Please enter your passcode'), user('••••'), bot('Invalid passcode')] }),
+    'Please enter your passcode',
+    'a validation error keeps the preceding prompt active'
+  );
+  assert.equal(
+    pendingQuestion({ transcript: [bot('Please enter your passcode'), bot('Unknown command')] }),
+    null,
+    'an ended conversation must not revive an older prompt'
+  );
+  assert.equal(
+    pendingQuestion({
+      pendingQuestion: null,
+      transcript: [bot('Please enter your passcode')],
+    }),
+    null,
+    'an explicit current-service decision overrides the compatibility parser'
+  );
+  assert.match(connections, /const bridgeNeedsReply = \(data\) => !!hzPendingBridgeQuestion\(data\)/u);
+  assert.match(tile, /const hzBridgeNeedsReply = \(data\) => !!hzPendingBridgeQuestion\(data\)/u);
 });
 
 // The machinery stays defined so restoring it is one block, not a rewrite.
@@ -367,6 +452,19 @@ test('Settings connector hints are anchored overlays, never a third panel', () =
   assert.doesNotMatch(connections, /extraWidth:\s*open\s*\?\s*248/u);
   assert.doesNotMatch(connections, /hintHost\.style\.height/u);
   assert.doesNotMatch(swift, /payload\["extraWidth"\]/u);
+});
+
+test('connector popovers grow inward from viewport edges and never clip', () => {
+  const place = /function hzPlacePop\(host, anchor\) \{([\s\S]*?)\n\}/u.exec(bridgeUi)?.[1];
+  assert.ok(place, 'shared popover placer not found');
+  assert.match(place, /host\.style\.right = `\$\{right\}px`/u);
+  assert.match(place, /host\.style\.left = 'auto'/u);
+  assert.match(place, /host\.style\.left = `\$\{left\}px`/u);
+  assert.match(place, /host\.style\.right = 'auto'/u);
+  assert.match(place, /vw - right - 8/u);
+  assert.match(place, /vw - left - 8/u);
+  assert.match(palette, /\.hint-host\s*\{[\s\S]*?box-sizing: border-box;[\s\S]*?overflow-x: hidden;/u);
+  assert.match(palette, /\.hint-host > \.hint\s*\{[\s\S]*?max-width: 100%/u);
 });
 
 test('connector cards use current privacy copy and connected bridge identity', () => {

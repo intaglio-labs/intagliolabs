@@ -27,6 +27,61 @@ function hzAfterLoginAttempt(data, show, close) {
   show(data);
 }
 
+const hzBridgeSignature = (data) => ((data && data.transcript) || [])
+  .map((m) => `${m.from || ''}|${m.body || ''}|${m.image ? 'image' : ''}`).join('\u0000');
+const hzBridgeNeedsReply = (data) => !!hzPendingBridgeQuestion(data);
+
+// Cookie handoff can finish before a bridge posts its second step. Keep the
+// tile busy and poll local state instead of briefly offering a second browser
+// login that would cancel the pending X Chat passcode conversation.
+function hzSettleCookieLogin(platform, first, done) {
+  if (!first || first.state === 'cancelled' || first.connected
+      || first.state !== 'ok' || hzBridgeNeedsReply(first)) {
+    done(first);
+    return;
+  }
+  const before = hzBridgeSignature(first);
+  let tries = 0;
+  const poll = () => {
+    hzPost('bridgeStatus', { p: platform })
+      .then((next) => {
+        if (!next || next.state !== 'ok' || next.connected || hzBridgeNeedsReply(next)
+            || hzBridgeSignature(next) !== before || ++tries >= 12) {
+          done(next || first);
+          return;
+        }
+        setTimeout(poll, 1500);
+      })
+      .catch(() => {
+        if (++tries >= 12) done(first);
+        else setTimeout(poll, 1500);
+      });
+  };
+  setTimeout(poll, 1200);
+}
+
+function hzSettleBridgeAnswer(platform, before, first, done) {
+  const changed = (data) => !!data
+    && (data.connected || hzBridgeSignature(data) !== before);
+  if (changed(first)) { done(first); return; }
+  let tries = 0;
+  const poll = () => {
+    hzPost('bridgeStatus', { p: platform })
+      .then((next) => {
+        if (changed(next) || ++tries >= 15) {
+          done(next || first);
+          return;
+        }
+        setTimeout(poll, 2000);
+      })
+      .catch(() => {
+        if (++tries >= 15) done(first);
+        else setTimeout(poll, 2000);
+      });
+  };
+  setTimeout(poll, 2000);
+}
+
 function hzShowTileTip(row, label) {
   // NOT OVER ITS OWN OPEN CARD. The card names the source in its heading, so a
   // floating label repeating it is redundant, and it is positioned over the
@@ -141,7 +196,7 @@ const HZ_IS_BRIDGE = (src) => src.action === 'bridge' || HZ_BRIDGES.has(HZ_KIND(
 const HZ_GOOGLE_AUTH = new Set(['mail', 'calendar']);
 // Match the Settings shelf: these remain visible and explain themselves, but
 // do not start their respective login paths until the integration is ready.
-const HZ_SOON_CONNECTORS = new Set(['mail', 'twitter', 'telegram']);
+const HZ_SOON_CONNECTORS = new Set(['mail', 'telegram']);
 
 const HZ_FDA_HINT = {
   // ~~text: the sentence walking through the grant.~~ Yeeted (owner,
@@ -427,24 +482,23 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
       // The bot's pending QUESTION, computed first because the log in button
       // below is hidden while one is outstanding (owner, 2026-08-25).
       // connections.js askedFor()/tidy() carries the full reasoning.
+      const rawQuestion = hzPendingBridgeQuestion(data);
+      const xPasscode = HZ_KIND(src.id) === 'twitter'
+        && /\b(pin|passcode)\b/iu.test(rawQuestion || '');
       const askText = (() => {
-        const t = (data && Array.isArray(data.transcript)) ? data.transcript : [];
-        for (let i = t.length - 1; i >= 0; i--) {
-          if (t[i].from !== 'bot') continue;
-          const body = String(t[i].body || '').trim();
-          if (!body || body.startsWith('Login URL:') || body.includes('`{')) continue;
-          const line = body.split('\n').map((l) => l.trim()).filter(Boolean)
-            .find((l) => l.endsWith('?') || /^(please|enter|register|create|choose)\b/iu.test(l));
-          if (!line) return null; // chatter, not a step: no question pending
-          const m = /^please enter your\s+(.+)$/iu.exec(line);
-          if (!m) return line;
-          const field = m[1].replace(/\.$/u, '').trim();
-          const verb = /^(create|enter|choose|register)\b/iu.exec(field);
-          return verb
-            ? `please ${verb[0].toLowerCase()} ${field.slice(verb[0].length).trim()} for ${src.label}`
-            : `please enter your ${field} for ${src.label}`;
+        if (!rawQuestion) return null;
+        if (xPasscode) {
+          return /\bcreate\b/iu.test(rawQuestion)
+            ? 'create a 4-digit X Chat passcode'
+            : 'enter your 4-digit X Chat passcode';
         }
-        return null;
+        const m = /^please enter your\s+(.+)$/iu.exec(rawQuestion);
+        if (!m) return rawQuestion;
+        const field = m[1].replace(/\.$/u, '').trim();
+        const verb = /^(create|enter|choose|register)\b/iu.exec(field);
+        return verb
+          ? `please ${verb[0].toLowerCase()} ${field.slice(verb[0].length).trim()} for ${src.label}`
+          : `please enter your ${field} for ${src.label}`;
       })();
       if (manual) {
         const note = document.createElement('span');
@@ -482,6 +536,55 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
         line.className = 'setup';
         line.textContent = askText;
         tip.appendChild(line);
+      }
+      if (xPasscode) {
+        const why = document.createElement('span');
+        why.className = 'why x-passcode-help';
+        why.textContent = 'This unlocks your encrypted DMs. It is not your X password or 2FA code.';
+        const passcode = document.createElement('input');
+        passcode.className = 'binput';
+        passcode.type = 'password';
+        passcode.inputMode = 'numeric';
+        passcode.maxLength = 4;
+        passcode.pattern = '[0-9]{4}';
+        passcode.autocomplete = 'off';
+        passcode.placeholder = '4-digit passcode';
+        passcode.setAttribute('aria-label', '4-digit X Chat passcode');
+        passcode.addEventListener('input', () => {
+          passcode.value = passcode.value.replace(/\D/gu, '').slice(0, 4);
+        });
+        const validation = document.createElement('span');
+        validation.className = 'setup field-error';
+        const send = document.createElement('button');
+        send.className = 'hold-ok';
+        send.textContent = /\bcreate\b/iu.test(rawQuestion) ? 'create' : 'continue';
+        const submit = () => {
+          const value = passcode.value.trim();
+          if (!/^\d{4}$/u.test(value)) {
+            validation.textContent = 'enter all 4 digits';
+            passcode.focus();
+            return;
+          }
+          validation.textContent = '';
+          send.disabled = true;
+          send.textContent = 'sending…';
+          const before = hzBridgeSignature(data);
+          hzPost('bridgeCookies', { p: HZ_KIND(src.id), cookies: value })
+            .then((next) => {
+              passcode.value = '';
+              hzSettleBridgeAnswer(HZ_KIND(src.id), before, next, renderBridge);
+            })
+            .catch(() => {
+              send.disabled = false;
+              send.textContent = 'continue';
+              validation.textContent = 'could not reach the local connection';
+            });
+        };
+        send.addEventListener('click', (e) => { e.stopPropagation(); submit(); });
+        passcode.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); submit(); }
+        });
+        tip.append(why, passcode, send, validation);
       }
       // Token (discord/slack) and phone (telegram) connectors keep the guided
       // conversation — it is their only way in. The cookie-paste fallback the
@@ -560,12 +663,23 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
       host.appendChild(tip);
       renderBridge(data);
     };
-    hzPost('bridgeWebLogin', { p: HZ_KIND(src.id) })
-      .then((data) => hzAfterLoginAttempt(data, speak, () => {
-        if (onBusy) onBusy(false);
-        if (onClose) onClose();
-      }))
-      .catch(() => speak({ state: 'down' }));
+    const closeCancelled = () => {
+      if (onBusy) onBusy(false);
+      if (onClose) onClose();
+    };
+    const beginWebLogin = () => {
+      hzPost('bridgeWebLogin', { p: HZ_KIND(src.id) })
+        .then((first) => hzSettleCookieLogin(HZ_KIND(src.id), first, (data) => {
+          hzAfterLoginAttempt(data, speak, closeCancelled);
+        }))
+        .catch(() => speak({ state: 'down' }));
+    };
+    // One request owns both decisions. Native reads the server-authored
+    // pendingQuestion from bridgeWebLogin's policy response: a live X
+    // passcode returns to this card, otherwise the login window opens. The old
+    // preliminary bridgeStatus request was the first half of the double-click
+    // bug when a focus refresh replaced the pressed tile between requests.
+    beginWebLogin();
     return tip;
   }
 

@@ -785,6 +785,17 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // there. Server-authored like the rest; the window uses it at most once.
         let storageUrl = String((begin["storageUrl"] as? String ?? "").prefix(300))
         let label = begin["label"] as? String ?? p
+        // ONE TILE PRESS, ONE NATIVE ACTION. The UI used to GET bridgeStatus
+        // first to decide whether X had a live Chat-passcode question, then
+        // send bridgeWebLogin as a second request. Focusing Settings rebuilds
+        // its tile shelf, so that two-request handoff could strand the first
+        // press on a detached row and leave only its spinner behind. This GET
+        // already carries both policy and the server-authored current question:
+        // resume it here, otherwise present the window below.
+        if let pending = begin["pendingQuestion"] as? String, !pending.isEmpty {
+          self.reply(webView, id, begin)
+          return
+        }
         // A QR LOGIN IS ALSO A WINDOW, just not a webview one. Discord has no
         // login page to drive — its bridge posts a remote-auth QR and waits
         // for the phone app — so it takes this branch before the webview
@@ -918,10 +929,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       if let label = Distiller.shared.activity {
         items.append(["kind": "index", "label": label])
       }
-      // Backfill carries its estimate inside its own named item. A detached
-      // header estimate made the first queued connector look responsible for
-      // work that actually belongs to Calendar/social-message history.
-      reply(webView, id, ["state": "ok", "items": items])
+      var activity: [String: Any] = ["state": "ok", "items": items]
+      if let estimate = Connectors.shared.activityEstimate {
+        activity["estimate"] = estimate
+      }
+      reply(webView, id, activity)
 
     case "workStatus":
       // A sleeping orb means no work is ACTUALLY underway. Scheduled queue

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const WIDGET = join(dirname(fileURLToPath(import.meta.url)), '..');
 const release = readFileSync(join(WIDGET, 'release.sh'), 'utf8');
+const build = readFileSync(join(WIDGET, 'build.sh'), 'utf8');
 
 test('packaging renders the Finder background outside the tracked source tree', () => {
   assert.match(release, /BG="\$DIST\/dmg-bg\.png"/u);
@@ -14,5 +15,15 @@ test('packaging renders the Finder background outside the tracked source tree', 
     release,
     /make-dmg-bg\.swift\s+icon\/dmg-bg\.png/u,
     'a release must not dirty its checkout after the provenance guard runs',
+  );
+});
+
+test('release builds never reuse executable dependencies from the installed app', () => {
+  assert.match(release, /HAZLIE_STAGE_DIR="\$PWD\/build"/u,
+    'release.sh must identify release staging to build.sh');
+  assert.match(
+    build,
+    /if \[ -z "\$\{HAZLIE_STAGE_DIR:-\}" \][\s\S]*?INSTALLED_CONNECTORS\/node_modules/u,
+    'the installed dependency cache must be restricted to direct local builds'
   );
 });

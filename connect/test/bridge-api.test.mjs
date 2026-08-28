@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { bridgeApiResponse } from '../lib/bridgeApi.mjs';
+import { bridgeApiResponse, pendingBridgeQuestion } from '../lib/bridgeApi.mjs';
 
 const TOKEN = 'ab'.repeat(32);
 
@@ -42,4 +42,23 @@ test('fresh manual bridges report their policy instead of a Matrix error', async
   assert.equal(res.body.connected, false);
   assert.equal(res.body.allowedHosts, null);
   assert.equal(res.body.sessionCookie, null);
+});
+
+test('only a currently pending bridge question blocks a fresh login', () => {
+  const bot = (body) => ({ from: 'bot', body });
+  const you = (body) => ({ from: 'you', body });
+  assert.equal(
+    pendingBridgeQuestion([bot('Please enter your passcode'), you('1234'), bot('Logged out')]),
+    null,
+    'a historical X passcode is completed by the later logout response'
+  );
+  assert.equal(
+    pendingBridgeQuestion([bot('Please enter your passcode')]),
+    'Please enter your passcode'
+  );
+  assert.equal(
+    pendingBridgeQuestion([bot('Please enter your passcode'), you('1234'), bot('Invalid passcode')]),
+    'Please enter your passcode',
+    'validation keeps the preceding question active'
+  );
 });
