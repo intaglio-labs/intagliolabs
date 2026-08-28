@@ -27,7 +27,7 @@ export function loadOwner({ home = homedir(), configPath = null } = {}) {
     if (typeof a?.user === 'string' && a.user.includes('@')) addresses.add(a.user.toLowerCase());
   }
   // Additional owner addresses beyond the mail-connector accounts — the
-  // owner's other aliases (old company addresses, forwards) that Hazlie has no
+  // owner's other aliases (old company addresses, forwards) that Intaglio Labs has no
   // connector for but that ARE the owner. Without these, an alias looks like a
   // separate person and even shows up as a "warm-intro bridge" to the owner
   // themselves. Config-only (local), never guessed from the corpus.

@@ -7,7 +7,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { threadKind, isRoom, counterpartyFromThread, GROUP, DIRECT, UNKNOWN } from '../server/memory/threadKind.mjs';
+import {
+  BRIDGED_SOCIAL_SOURCES,
+  threadKind,
+  isRoom,
+  counterpartyFromThread,
+  GROUP,
+  DIRECT,
+  UNKNOWN,
+} from '../server/memory/threadKind.mjs';
 
 const im = (guid) => [{ source: 'imessage' }, { chat_guid: guid }];
 const wa = (meta) => [{ source: 'whatsapp' }, meta];
@@ -57,8 +65,21 @@ test('whatsapp uses its own written flag, and falls back to the jid suffix', () 
   assert.equal(threadKind(...wa({})), UNKNOWN);
 });
 
+test('every Matrix social bridge uses the same direct/group contract', () => {
+  for (const source of BRIDGED_SOCIAL_SOURCES) {
+    assert.equal(threadKind({ source }, { is_group: true }), GROUP, source);
+    assert.equal(threadKind({ source }, { is_group: false }), DIRECT, source);
+    assert.equal(threadKind({ source }, { is_group: 1 }), GROUP, `${source} sqlite true`);
+    assert.equal(threadKind({ source }, { is_group: 0 }), DIRECT, `${source} sqlite false`);
+    assert.equal(threadKind({ source }, {}), UNKNOWN, `${source} missing flag`);
+  }
+  // The old LinkedIn export is a flat connection/message dataset, not Matrix.
+  assert.equal(threadKind({ source: 'linkedin' }, { kind: 'connection' }), DIRECT);
+  assert.equal(threadKind({ source: 'linkedin' }, { kind: 'message' }), DIRECT);
+});
+
 test('a source with no threads is never a room', () => {
-  for (const source of ['mail', 'calendar', 'notes', 'linkedin', 'files', 'photos']) {
+  for (const source of ['mail', 'calendar', 'notes', 'files', 'photos']) {
     assert.equal(threadKind({ source }, {}), DIRECT, source);
     assert.equal(isRoom({ source }, {}), false, source);
   }

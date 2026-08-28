@@ -138,7 +138,7 @@ const STYLE = `
   }
   .caveat { font-size: 11px; color: ${C.muted}; line-height: 1.7; margin-top: 6px; }
 
-  /* Hazlie's voice, not a section label — lowercase like the welcome. */
+  /* Intaglio Labs' voice, not a section label — lowercase like the welcome. */
   .foot { font-size: 11px; color: ${C.muted}; letter-spacing: 0.02em; margin: 4px 0 0; }
   .banner {
     padding: 12px 16px; border-radius: 12px; font-size: 12px;
@@ -182,31 +182,25 @@ function row(item, index, formBase) {
 
   const caveat = item.caveat ? `<div class="caveat">${escapeHtml(item.caveat)}</div>` : '';
 
-  // Gmail is the one row that takes a secret, so it renders a form that POSTs
-  // same-origin. The value goes straight to a 0600 file on this machine and is
-  // never echoed back into the page. The account rides in a hidden field, not
-  // the URL: an app password must never land in browser history or a referer.
-  if (item.action === 'gmail') {
-    const account = item.id.startsWith('mail:') ? item.id.slice('mail:'.length) : '';
-    return `<li class="has-form">${idx}<span class="name"><b>${escapeHtml(
-      item.label
-    )}</b><span class="note">${escapeHtml(item.detail)}</span>
-      <form method="post" action="${escapeHtml(formBase)}/gmail">
-        <input type="hidden" name="account" value="${escapeHtml(account)}">
-        <input name="appPassword" type="password" autocomplete="off" spellcheck="false"
-               placeholder="16-character app password" aria-label="App password for ${escapeHtml(
-                 item.label
-               )}" required>
-        <button class="cta" type="submit">Connect</button>
-        <div class="hint">myaccount.google.com &rarr; Security &rarr; App passwords. Stored 0600 on this Mac only.</div>
-      </form>${caveat}</span></li>`;
-  }
+  // ~~Two form branches here: an address field that POSTed to /mailbox, and an
+  // app-password field that POSTed to /gmail.~~ Both deleted with the app
+  // password (2026-08-26). Mail is a Google grant now, so its row is an
+  // ordinary Connect button like Calendar's — same account, same consent
+  // screen, nothing to type on this page. The forms' routes are gone from
+  // server.mjs in the same commit.
+
+  // Outline, not the gradient. This row is `optional` — it is a standing
+  // invitation rather than outstanding work — so it is excluded from
+  // firstActionable above, and a filled button here would put two accents on a
+  // page whose stated rule is one. (The app-password form below keeps its
+  // filled button: by the time it renders, an address has been added and
+  // finishing it IS the outstanding work.)
 
   // Primary gradient for the first actionable row, hazelnut outline after it:
   // the design permits one filled button per view.
   const primary = item.primary === true;
   const label = item.action === 'fda' ? 'How' : 'Connect';
-  // The social bridges open Hazlie's OWN login panel (/bridge?p=…), not a help
+  // The social bridges open Intaglio Labs' OWN login panel (/bridge?p=…), not a help
   // page — the whole point is that linking happens in this surface. Everything
   // else links to its help topic at /help/<id>.
   const href =
@@ -220,11 +214,14 @@ function row(item, index, formBase) {
 }
 
 export function renderConnectPage(items, { banner = null, token = null } = {}) {
-  const remaining = items.filter((i) => !i.connected && !i.soon).length;
+  // `optional` rows are standing invitations rather than outstanding work —
+  // "add another mailbox" is never finished, and counting it would mean this
+  // number never reaches zero and the page never says "all set".
+  const remaining = items.filter((i) => !i.connected && !i.soon && !i.optional).length;
   const formBase = token === null ? '' : `/c/${token}`;
   // One filled button per view, per the palette's "one accent" rule: the
   // first row that needs an action gets it, the rest are outlines.
-  const firstActionable = items.findIndex((i) => !i.connected && !i.soon);
+  const firstActionable = items.findIndex((i) => !i.connected && !i.soon && !i.optional);
   const decorated = items.map((item, i) => ({ ...item, primary: i === firstActionable }));
 
   return `<!doctype html>
@@ -319,17 +316,9 @@ const HELP = {
       'One thing to know: the desktop app only syncs while it is open, so leave it running (or open it now and then) to keep WhatsApp fresh. Everything stays on this Mac.',
     ],
   },
-  linkedin: {
-    title: 'Import your LinkedIn connections',
-    body: [
-      'No login and no API — LinkedIn hands you the file. Go to linkedin.com → Settings → Data privacy → <em>Get a copy of your data</em>, pick Connections (and Messages if you want DM history), and download the archive when it arrives.',
-      'Then put the CSVs where intaglio labs looks:',
-    ],
-    code: 'mkdir -p ~/.hazlie/imports/linkedin && cp ~/Downloads/Connections.csv ~/Downloads/messages.csv ~/.hazlie/imports/linkedin/ 2>/dev/null; true',
-    after: [
-      'The <em>Connected On</em> dates are the point — they say how old each relationship is. Everything stays on this Mac.',
-    ],
-  },
+  // ~~linkedin: request the export, unzip Connections.csv into
+  // ~/.hazlie/imports/linkedin.~~ Gone with the export (owner, 2026-08-25):
+  // LinkedIn logs in through the bridge now, like every other social source.
   files: {
     title: 'Your cloud folders',
     body: [
@@ -338,7 +327,7 @@ const HELP = {
     ],
     code: null,
     after: [
-      'Files in folders named for keys or secrets, and files that look like credentials, are skipped entirely.',
+      'Files in folders named for keys or secrets, and files that look like credentials, are <em>skipped entirely</em>.',
     ],
   },
   granola: {

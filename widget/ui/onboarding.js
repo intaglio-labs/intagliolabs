@@ -112,7 +112,7 @@ function aimAtOrb(fly) {
 }
 
 // Armed once the line is typed: the demo stops and waits for the send to be
-// pressed. The typing is Hazlie's half of the rehearsal; the send is yours.
+// pressed. The typing is Intaglio Labs' half of the rehearsal; the send is yours.
 let demoArmed = false;
 
 function runDemo() {
@@ -297,7 +297,7 @@ document.getElementById('cta').addEventListener('click', () => {
   hzSfx.wake();
   // Fresh installs use the roughly 5 GB model without interrupting the welcome
   // flow. An existing choice is respected; changing it lives in Settings.
-  hzPost('setupState').then((st) => {
+  hzPost('setupState', { rows: true }).then((st) => {
     if (st && !st.model && !st.downloading) {
       hzPost('modelDownload', { tier: '8b' }).catch(() => {});
     }
@@ -305,7 +305,7 @@ document.getElementById('cta').addEventListener('click', () => {
   showScreen(2);
 });
 
-function finish({ then } = {}) {
+function finish() {
   // Put the widget back under the windows before anything else. Native does
   // this too when the panel closes, because a desktop widget left floating
   // above everything would be the worst bug this app could ship — but asking
@@ -315,16 +315,18 @@ function finish({ then } = {}) {
   // torn down mid-message and the flow reappears on the next launch.
   hzPost('onboardingDone')
     .catch(() => {})
-    .then(() => {
-      if (then) hzPost(then).catch(() => {});
-      return hzPost('close');
-    });
+    // Close the full-screen scrim first, then open the real People popup it was
+    // leading toward. The onboarding webview survives orderOut, so this second
+    // message remains deliverable after close resolves.
+    .then(() => hzPost('close'))
+    .then(() => hzPost('openPeople'))
+    .catch(() => {});
 }
 
 // Escape leaves but does NOT mark it done — dismissing is not finishing, and a
 // flow you backed out of should still be there next time.
 document.addEventListener('keydown', (e) => {
-  if ((e.key === 'Enter' || e.key === 'Return') && currentScreen === '2' && demoArmed) {
+  if ((e.key === 'Enter' || e.key === 'Return') && String(currentScreen) === '2' && demoArmed) {
     e.preventDefault();
     demoSendNow();
     return;
@@ -645,7 +647,7 @@ document.getElementById('dataCheck').addEventListener('click', async () => {
   let rows = 0;
   for (let i = 0; i < 24 && rows === 0; i += 1) {
     await new Promise((r) => setTimeout(r, 2500));
-    const st = await hzPost('setupState').catch(() => null);
+    const st = await hzPost('setupState', { rows: true }).catch(() => null);
     rows = (st && st.rows) || 0;
     // After the first handful of tries, say that it is still going rather than
     // repeating one word at someone watching an ellipsis not change.
@@ -660,7 +662,7 @@ document.getElementById('dataCheck').addEventListener('click', async () => {
     // read them into claims, which takes a while and used to happen nowhere at
     // all. "found 18,440 things" followed by an app that answers nothing is the
     // most confusing thing this flow could say, so it says both numbers.
-    const st2 = await hzPost('setupState').catch(() => null);
+    const st2 = await hzPost('setupState', { rows: true }).catch(() => null);
     const mem = (st2 && st2.memory) || null;
     dataStatus.textContent = mem && mem.pending > 0
       ? `found ${rows.toLocaleString()} things — now reading them`
@@ -675,7 +677,7 @@ document.getElementById('dataSkip').addEventListener('click', () => showScreen('
 
 // Loaded once, when the flow reaches the setup screens.
 async function loadSetup() {
-  setupState = await hzPost('setupState').catch(() => null);
+  setupState = await hzPost('setupState', { rows: true }).catch(() => null);
   if (!setupState) return;
   const perms = await hzPost('permissionState').catch(() => null);
   lastPerms = (perms && perms.permissions) || null;

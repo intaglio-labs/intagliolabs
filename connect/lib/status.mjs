@@ -8,12 +8,76 @@
 // rows say so, instead of rendering a red X the owner cannot act on.
 
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { PLATFORMS, bridgeStatus } from './bridge.mjs';
+import {
+  CALENDAR_SCOPE,
+  GMAIL_SCOPE,
+  accountsWithScope,
+  accountsWithScopeIncludingStale,
+} from '../../connectors/lib/googleAccounts.mjs';
+import { listGoogleClients } from '../../connectors/lib/googleClients.mjs';
 
 const SECRETS = (home) => join(home, '.hazlie', 'secrets');
+
+// A source the owner turned off with `run.mjs <name> --disable`. The daemon
+// checks this marker every tick (connectors/daemon.mjs), so a disabled source
+// never runs — and a row that still reported "connected" because its store
+// happens to be readable would be describing a poll that will not happen.
+// Readable is not the same as running.
+function connectorForStatusRow(id) {
+  if (id.startsWith('mail:')) return 'mail';
+  // Seven status rows, one Matrix poller and therefore one disable marker.
+  if (Object.hasOwn(PLATFORMS, id)) return 'matrix';
+  return id;
+}
+
+const disabledMarker = (home, id) => {
+  const connector = connectorForStatusRow(id);
+  return existsSync(join(home, '.hazlie', 'connectors', `${connector}.disabled`));
+};
+
+function withDisabled(row, home) {
+  if (!disabledMarker(home, row.id)) return row;
+  // WhatsApp is the one passive store a fresh app deliberately gates in the
+  // product UI. Preserve the existing CLI-only semantics for every other
+  // source: their markers may have been created by run.mjs --disable, and the
+  // native enable action is intentionally not authorized to mutate them.
+  if (row.id !== 'whatsapp') {
+    const connector = connectorForStatusRow(row.id);
+    return {
+      ...row,
+      connected: false,
+      broken: false,
+      // THE FLAG, NOT ONLY THE WORDS. `detail: 'turned off'` fixed the connect
+      // page, which renders the sentence -- but the widget's shelf renders from
+      // the row's SHAPE, so a disabled source still drew as merely un-set-up and
+      // still offered to sign the owner into it. A surface cannot tell "off"
+      // from "not yet connected" out of prose. connector-tile.js already reads
+      // this flag for the WhatsApp case below; this is the same signal for the
+      // CLI-disabled ones, without the enable button, because those markers are
+      // run.mjs' and the native action is deliberately not authorized to remove
+      // them.
+      disabled: true,
+      detail: 'turned off',
+      action: null,
+      fix: `re-enable with: rm ~/.hazlie/connectors/${connector}.disabled`,
+      caveat: null,
+    };
+  }
+  return {
+    ...row,
+    connected: false,
+    broken: false, // off on purpose is not a fault; it must never paint red
+    disabled: true,
+    detail: 'not connected yet',
+    action: 'enable',
+    fix: null,
+    caveat: null,
+  };
+}
 
 // One app password per mailbox, filed under a slug of the address. Gmail
 // issues app passwords per-account, so there is no single credential that
@@ -22,10 +86,35 @@ export function mailSecretName(address) {
   return `gmail-app-password-${String(address).toLowerCase().replace(/[^a-z0-9]+/gu, '-')}.txt`;
 }
 
-// The configured mailboxes, read from the connectors config so the connect
-// page and the (still unbuilt) mail connector cannot disagree about which
-// accounts exist. An absent or unreadable config means no mail rows, not a
-// crash — the page has three other sources to render.
+// Mailboxes this Mac holds a Gmail grant for. The connectors' own account
+// store is the single source of truth — connect/ and connectors/ disagreeing
+// about which mailboxes exist is exactly what the old config coupling was
+// there to prevent, and this keeps that property on a better credential.
+// The sign-in clients available, for a UI that has to ask which to use.
+export function googleClientChoices({ home = homedir() } = {}) {
+  try {
+    return listGoogleClients({ home });
+  } catch {
+    return []; // an unreadable secrets dir costs the choice, not the page
+  }
+}
+
+export function googleMailAccounts({ home = homedir() } = {}) {
+  try {
+    // INCLUDING THE DEAD ONES. accountsWithScope hides a stale grant from the
+    // CONNECTORS, which is right — re-presenting a refused token every tick
+    // earns nothing but rate limiting. It would be exactly wrong here: a
+    // mailbox that has stopped working is the row this page most needs to
+    // draw, and hiding it is how a broken source becomes an invisible one.
+    return accountsWithScopeIncludingStale(GMAIL_SCOPE, { home });
+  } catch {
+    return []; // an unreadable secrets dir costs the mail rows, not the page
+  }
+}
+
+// Per-account SETTINGS (backfill window, body cap) still live in the
+// connectors config — see accountSettings in connectors/sources/mail.mjs. This
+// no longer decides which mailboxes EXIST; the grants do.
 export function mailAccounts({ home = homedir() } = {}) {
   const path = join(home, '.hazlie', 'connectors', 'config.json');
   try {
@@ -37,6 +126,13 @@ export function mailAccounts({ home = homedir() } = {}) {
     return [];
   }
 }
+
+// ~~isMailAddress / addMailAccount / ADDRESS.~~ Deleted with the app password
+// (2026-08-26). They existed so this page could register a mailbox in the
+// connectors config and then accept a secret filed under it; an OAuth grant
+// registers itself, so there is nothing left to validate or write.
+// mailSecretName stays: connectors/lib/checks.mjs still names the old secret
+// file when telling an owner about an obsolete credential left on disk.
 
 function ownerOnlyFileExists(path) {
   try {
@@ -111,7 +207,7 @@ const FDA_FIX =
 // launchd. Saying that is better than a cross the owner cannot act on.
 //
 // That caveat is also why `broken` is only trustworthy from the launchd-run
-// connect service (ops/com.hazlie.connect.plist runs it under
+// connect service (ops/io.intaglio.connect.plist runs it under
 // ~/.hazlie/bin/node). Verified 2026-08-22: the same code says FAIL from a dev
 // shell and PASS under launchd, on a machine whose grant was fine the whole
 // time. A shell-run status must never be what paints the shelf red.
@@ -216,7 +312,7 @@ function whatsappRow(home) {
 
 // The social bridges (Messenger, Instagram). "Connected" is read from each
 // bridge's own DB — a live login row — so the page tells the truth without
-// touching Meta. Not yet linked → a row that opens Hazlie's own login panel
+// touching Meta. Not yet linked → a row that opens Intaglio Labs' own login panel
 // (action 'bridge'), never a third-party client.
 function bridgeRows({ home = homedir() } = {}) {
   return Object.values(PLATFORMS).map((p) => {
@@ -234,26 +330,19 @@ function bridgeRows({ home = homedir() } = {}) {
   });
 }
 
-function linkedinRow(home) {
-  // File-based on purpose — the export, never an API or a scrape. Connected
-  // means Connections.csv is in place; messages.csv is optional and not
-  // checked, because its absence is a choice rather than a fault.
-  const ok = existsSync(join(home, '.hazlie', 'imports', 'linkedin', 'Connections.csv'));
-  return {
-    id: 'linkedin',
-    label: 'LinkedIn',
-    connected: ok,
-    detail: ok ? 'export imported' : 'needs your LinkedIn data export',
-    action: ok ? null : 'linkedin',
-    caveat: null,
-  };
-}
+// ~~linkedinRow: connected meant Connections.csv was sitting in
+// ~/.hazlie/imports/linkedin, from an export the owner had to request,
+// wait hours for, download and unzip.~~ Yeeted (owner, 2026-08-25, asked
+// twice): LinkedIn is a social platform like the other six and now rides the
+// same bus — mautrix-linkedin in bridges/docker-compose.yml, listed by
+// bridgeRows() below from the PLATFORMS table. Its rows keep the SAME
+// `linkedin` source name the export wrote, so nothing downstream changed.
 
 function fullStatus(home) {
   return [
     localStoreRow({
       id: 'imessage',
-      label: 'Messages',
+      label: 'iMessage', // owner (2026-08-25): the store's own name, not the app's
       path: join(home, 'Library', 'Messages', 'chat.db'),
       reads: 'reading your message history',
     }),
@@ -273,7 +362,6 @@ function fullStatus(home) {
     filesRow(home),
     ...cloudAccountRows(home),
     notionRow(home),
-    linkedinRow(home),
     whatsappRow(home),
     ...bridgeRows({ home }),
   ];
@@ -283,7 +371,11 @@ export function readStatus({ home = homedir() } = {}) {
   // Every source, always. This used to branch on a `role` naming which machine
   // this was in a two-machine split; that split and the roles are gone with it,
   // so there is one page and it shows everything this install can connect.
-  return fullStatus(home);
+  //
+  // The disable pass runs HERE rather than inside each row builder: it applies
+  // to every source by the same rule, and one place to apply it is one place
+  // for it to be forgotten from when a source is added.
+  return fullStatus(home).map((row) => withDisabled(row, home));
 }
 
 // Which calendar backend is configured. The row has to follow it: checking
@@ -302,20 +394,38 @@ function calendarBackend(home) {
 
 function calendarRow(home) {
   if (calendarBackend(home) === 'google') {
-    const tokens = join(SECRETS(home), 'gcal-tokens.json');
-    const ok = ownerOnlyFileExists(tokens);
+    // The singleton gcal-tokens.json was retired when Google grants became
+    // per-account. Use the same account store as the connector itself, and
+    // require the Calendar scope rather than treating any Google token as one.
+    // A REVOKED GRANT IS NOT "CONNECTED", AND IT IS NOT "NEVER SET UP" EITHER.
+    //
+    // accountsWithScope filters stale accounts out, so a calendar whose grant
+    // had been revoked or expired fell into the same row as one that was never
+    // authorized: "needs authorizing", no broken flag, and the tile read as an
+    // ordinary un-set-up source. The mail rows already make this distinction
+    // (accountsWithScopeIncludingStale, above); the calendar was left behind
+    // when grants went per-account.
+    const live = accountsWithScope(CALENDAR_SCOPE, { home });
+    const anyGrant = accountsWithScopeIncludingStale(CALENDAR_SCOPE, { home });
+    const ok = live.length > 0;
+    const revoked = !ok && anyGrant.length > 0;
     return {
       id: 'calendar',
       label: 'Calendar',
       connected: ok,
-      detail: ok ? 'authorized · Google Calendar API' : 'needs authorizing',
+      broken: revoked,
+      detail: ok
+        ? 'authorized · Google Calendar API'
+        : revoked
+          ? 'access was revoked or expired — sign in again'
+          : 'needs authorizing',
       action: ok ? null : 'gcal',
       caveat: null,
     };
   }
   return localStoreRow({
     id: 'calendar',
-    label: 'Calendar',
+    label: 'Apple Calendar', // owner (2026-08-25): names WHICH calendar this reads
     path: join(home, 'Library', 'Group Containers', 'group.com.apple.calendar', 'Calendar.sqlitedb'),
     reads: 'reading the local calendar store',
   });
@@ -324,20 +434,70 @@ function calendarRow(home) {
 function cloudAccountRows(home) {
   return [
     calendarRow(home),
-    // One row per configured mailbox rather than a single "Gmail" row: each
-    // needs its own app password, so collapsing them would hide which of the
-    // two is actually connected.
-    ...mailAccounts({ home }).map((account) => {
-      const stored = ownerOnlyFileExists(join(SECRETS(home), mailSecretName(account.user)));
-      return {
-        id: `mail:${account.user}`,
-        label: account.user,
-        connected: stored,
-        detail: stored ? 'app password stored' : 'needs a Google app password (IMAP)',
-        action: stored ? null : 'gmail',
+    // ONE ROW PER AUTHORIZED GOOGLE ACCOUNT.
+    //
+    // ~~One row per mailbox in mail.accounts[], each wanting a 16-character
+    // app password, plus an "add a mailbox" form that wrote that config.~~ All
+    // of it went when the connector moved to OAuth (2026-08-26). An app
+    // password is minted by hand and carries the whole account; a grant is
+    // scoped and read-only. The consequence for this page is that there is no
+    // address to type and no secret to paste: an AUTHORIZED account is a
+    // configured one, so the rows are read from the grants on disk.
+    //
+    // That form was the right fix for the problem as it stood the same
+    // morning — mail rows were generated from a config nothing could write, so
+    // no install had any — and it is the wrong shape now. Deleted rather than
+    // left beside the new path: two ways in, one of which silently no longer
+    // reaches the connector, is worse than the bug it fixed.
+    // BROKEN IS NOT THE SAME AS NEVER SET UP, and this row is the one place
+    // that distinction has teeth: a grant dies silently — revoked, password
+    // changed, or simply expired on an OAuth client still in Testing — and the
+    // owner's experience is mail that stopped arriving with nothing to see.
+    // `broken: true` is what pins the tile to the front of the shelf.
+    ...googleMailAccounts({ home }).map((account) => (account.stale
+      ? {
+        id: `mail:${account.email}`,
+        label: account.email,
+        connected: false,
+        broken: true,
+        detail: 'sign in again — Google refused the saved grant',
+        action: 'gcal',
+        fix: 'Google will not renew this authorization. Sign in again from the Connections shelf; '
+          + 'the usual causes are a revoked app, a password change, or an OAuth client left in Testing.',
         caveat: null,
-      };
-    }),
+      }
+      : {
+        id: `mail:${account.email}`,
+        label: account.email,
+        connected: true,
+        detail: 'authorized · Gmail API, read-only',
+        action: null,
+        caveat: null,
+      })),
+    // The way to add one (or the first one). Optional, so a page with no
+    // mailbox still reaches "all set" — reading mail is a choice, not an
+    // outstanding task, and the counter is what tells the owner they are done.
+    {
+      id: 'mail',
+      // "Google account", not "Another mailbox": one grant brings mail AND
+      // calendar, so naming it after the mailbox undersells what the button
+      // does and reads as a second, separate thing to connect.
+      label: 'Google account',
+      connected: false,
+      optional: true,
+      detail: googleMailAccounts({ home }).length === 0
+        ? 'sign in to read your mail and calendar'
+        : 'add another Google account',
+      action: 'gcal',
+      // WHICH CLIENTS THIS MAC CAN SIGN IN WITH. Carried on the row rather
+      // than fetched separately, because the choice belongs to this button: an
+      // Internal client reaches only its own Workspace but never expires, an
+      // External one reaches any Google account and spends one of a finite,
+      // unresettable 100. With a single client registered there is nothing to
+      // ask, and the button stays a button.
+      clients: googleClientChoices({ home }),
+      caveat: null,
+    },
     {
       id: 'granola',
       label: 'Granola',

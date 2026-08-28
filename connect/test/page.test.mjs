@@ -31,30 +31,28 @@ test('connected rows read as connected and offer no button', () => {
   assert.ok(!calendar.includes('class="cta"'), 'a done row must not ask again');
 });
 
-test('the gmail row posts same-origin and never echoes the secret back', () => {
+// ~~Three tests pinning the gmail app-password form: that it posts
+// same-origin with type="password" and autocomplete off, that its action is
+// the absolute /c/<token>/gmail rather than a relative "gmail" that drops the
+// token, and that the address rides in a hidden field so a secret never lands
+// in history or a referer.~~ The form is gone (2026-08-26) — mail is an OAuth
+// grant, so this page has no secret to collect.
+//
+// The ABSOLUTE-ACTION regression they caught is the one worth not losing, and
+// it was never really about gmail: any form this page grows has the same trap,
+// because the page is served at /c/<token> with no trailing slash, so a
+// relative action resolves against /c/ and drops the token. Re-pinned below
+// against every form the page renders, so the next one inherits the lesson
+// instead of rediscovering it.
+test('every form on the page posts to an absolute, token-carrying action', () => {
   const html = renderConnectPage(items, { token: 'TOK' });
-  assert.ok(html.includes('type="password"'));
-  assert.ok(html.includes('autocomplete="off"'));
-});
-
-// REGRESSION. The page is served at /c/<token> with no trailing slash, so a
-// relative action="gmail" resolves against the directory /c/ and posts to
-// /c/gmail — token dropped, 404. Hitting the route directly with curl passes
-// while the real form is broken, which is exactly how this shipped once.
-test('the form action carries the token and is an absolute path', () => {
-  const html = renderConnectPage(items, { token: 'TOK' });
-  assert.ok(
-    html.includes('action="/c/TOK/gmail"'),
-    'the action must be /c/<token>/gmail, not a relative "gmail"'
-  );
-  assert.ok(!/action="gmail"/u.test(html), 'a bare relative action loses the token');
-});
-
-test('the account rides in a hidden field, never in the URL', () => {
-  const html = renderConnectPage(items, { token: 'TOK' });
-  assert.ok(html.includes(String.raw`value="ay@austinyoshino.com"`));
-  // An app password in a path would persist in history and referer headers.
-  assert.ok(!/action="[^"]*appPassword/u.test(html));
+  const actions = [...html.matchAll(/<form[^>]*\saction="([^"]*)"/gu)].map((m) => m[1]);
+  for (const action of actions) {
+    assert.ok(
+      action.startsWith('/c/TOK/'),
+      `a form action must be absolute and carry the token, got "${action}"`
+    );
+  }
 });
 
 test('the footer counts what is actually left', () => {
@@ -133,12 +131,16 @@ test('the FDA page names the APP, not the binary underneath it', () => {
 });
 
 // Help prose is authored with inline markup in `body` and `after` alike —
-// linkedin.after carries <em>Connected On</em>. This page used to escape
-// `after`, so the user read a literal "<em>Connected On</em>" on the LinkedIn
-// help page while the same markup rendered fine one paragraph up.
+// This page used to escape `after`, so the reader saw a literal "<em>…</em>"
+// there while the same markup rendered fine one paragraph up.
+//
+// The fixture was linkedin.after ("<em>Connected On</em>") until that topic
+// went away with the CSV export (2026-08-25). Repointed at files rather than
+// dropped: the escaping bug is still possible, and a guard deleted because
+// its example moved is how a fixed bug comes back.
 test('after paragraphs render their markup instead of showing it', () => {
-  const html = renderHelpPage('linkedin', { token: 'TOK' });
-  assert.ok(html.includes('<em>Connected On</em>'), 'after markup must render as markup');
+  const html = renderHelpPage('files', { token: 'TOK' });
+  assert.ok(html.includes('<em>skipped entirely</em>'), 'after markup must render as markup');
   assert.ok(!html.includes('&lt;em&gt;'), 'no escaped tag may reach the reader as text');
 });
 

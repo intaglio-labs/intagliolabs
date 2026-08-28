@@ -181,6 +181,50 @@ enum Permissions {
     return (try? handle.read(upToCount: 1)) != nil ? .granted : .denied
   }
 
+  /// The protected stores this APP can actually read right now.
+  ///
+  /// Connector status is otherwise assembled by the connect server, which is
+  /// a launchd agent and therefore has its own TCC identity. The connector
+  /// daemon is a child of this app, so the launchd process is the wrong place
+  /// to decide whether the app's Full Disk Access grant applies. Probe the same
+  /// files here and let Bridge reconcile only the FDA rows it proves readable.
+  static func fullDiskAccessibleSources() -> Set<String> {
+    let fm = FileManager.default
+    let home = fm.homeDirectoryForCurrentUser
+
+    func readable(_ url: URL) -> Bool {
+      guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+      defer { try? handle.close() }
+      return (try? handle.read(upToCount: 1)) != nil
+    }
+
+    var candidates: [String: [URL]] = [
+      "imessage": [home.appendingPathComponent("Library/Messages/chat.db")],
+      "calendar": [home.appendingPathComponent(
+        "Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb")],
+      "photos": [home.appendingPathComponent(
+        "Pictures/Photos Library.photoslibrary/database/Photos.sqlite")],
+      "notes": [home.appendingPathComponent(
+        "Library/Group Containers/group.com.apple.notes/NoteStore.sqlite")],
+    ]
+
+    let addressBook = home.appendingPathComponent("Library/Application Support/AddressBook")
+    var contactStores = [addressBook.appendingPathComponent("AddressBook-v22.abcddb")]
+    let sources = addressBook.appendingPathComponent("Sources")
+    if let entries = try? fm.contentsOfDirectory(
+      at: sources, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+    ) {
+      contactStores.append(contentsOf: entries.map {
+        $0.appendingPathComponent("AddressBook-v22.abcddb")
+      })
+    }
+    candidates["contacts"] = contactStores
+
+    return Set(candidates.compactMap { id, paths in
+      paths.contains(where: readable) ? id : nil
+    })
+  }
+
   /// Nudge macOS into listing this app under Full Disk Access, then open the
   /// pane so the row is on screen with its switch off.
   static func primeFullDisk() {

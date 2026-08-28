@@ -38,7 +38,13 @@ const PAGES = ['widget/ui/connections.js', 'widget/ui/widget.js', 'widget/ui/cha
 
 function allowlist() {
   const swift = readFileSync(join(REPO, 'widget/src/Bridge.swift'), 'utf8');
-  const at = swift.indexOf('allowedExternal');
+  // The DECLARATION, not the first mention of the name. Anchoring on the bare
+  // word meant any comment above it that discussed allowedExternal captured
+  // the scan, and the block then read as whatever literal came next — a
+  // sibling allowlist added in 2026-08 (allowedApps) turned every real URL
+  // into a failure that way, which reads as "your URL is not allowed" rather
+  // than "this test lost the list".
+  const at = swift.indexOf('let allowedExternal');
   assert.notEqual(at, -1, 'Bridge.swift no longer declares allowedExternal — has openExternal changed shape?');
   // The declaration through the end of its array literal.
   const close = swift.indexOf(']', at);

@@ -31,7 +31,7 @@ export function isRealMessage(row) {
 // A self-thread records every message TWICE — once is_from_me=1 as this Mac
 // sending, once is_from_me=0 as the account receiving, ~140 ms apart with
 // identical text (measured 2026-08-19). Ingesting both would double every
-// message Hazlie ever sent, and any future inbound watcher that treats
+// message Intaglio Labs ever sent, and any future inbound watcher that treats
 // is_from_me=0 as "the owner said something" would answer its own digest
 // forever. The received copy of an outbound message is an artefact of how
 // Apple records self-sends, not a second event.
@@ -61,12 +61,12 @@ export function dropSelfEchoes(rows, { windowMs = 5000 } = {}) {
 export function messageToRow(row, { selfName = 'me', excludeChatGuids = [] } = {}) {
   if (!isRealMessage(row)) return null;
 
-  // The pinned Hazlie thread never becomes a corpus row. SKIPPED, not
+  // The pinned Intaglio Labs thread never becomes a corpus row. SKIPPED, not
   // relabelled: the energy digest that closed this loop on 2026-08-19 was
   // relabel-proof, because the courier sent it and chat.db handed it back as
   // an ordinary owner-authored message. The only durable fact is which thread
   // it lives in, and the cheapest correct thing to do with a conversation
-  // between the owner and Hazlie is to not record it at all. Nothing
+  // between the owner and Intaglio Labs is to not record it at all. Nothing
   // downstream has to be clever if the row never exists.
   const chatGuid = typeof row?.chat_guid === 'string' ? row.chat_guid : null;
   if (chatGuid !== null && excludeChatGuids.includes(chatGuid)) return null;

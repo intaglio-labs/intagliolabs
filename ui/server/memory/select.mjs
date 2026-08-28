@@ -55,7 +55,7 @@
 //   imessage  is_from_me = 1 -- the whole point. A sent message can still
 //             QUOTE somebody else, so this reduces the attack surface rather
 //             than proving authorship, and the prompt is written knowing that.
-//             AND the pinned Hazlie thread is removed by chat_guid; see below.
+//             AND the pinned Intaglio Labs thread is removed by chat_guid; see below.
 //
 // THE PINNED-THREAD EXCLUSION EXISTS BECAUSE THE LOOP CLOSED ONCE, FOR REAL.
 // `hazlie_digest` is in EXCLUDED_SOURCES below and always was, but the energy
@@ -65,12 +65,12 @@
 // authored by every test this selector applies. Run 3 distilled it, two
 // separate sends produced duplicate claims, the duplication read as
 // corroboration, and six claims about the owner's own sleep and step counts
-// were accepted on the strength of Hazlie quoting itself. A source-name
+// were accepted on the strength of Intaglio Labs quoting itself. A source-name
 // exclusion cannot catch that, because the delivery channel relabels the row
 // on the way back in. Only the thread identity survives the round trip, so
 // that is what this filters on.
 //
-// Scope, deliberately narrow: ONLY the pinned Hazlie thread. The owner's other
+// Scope, deliberately narrow: ONLY the pinned Intaglio Labs thread. The owner's other
 // self-threads stay readable, because a note the owner texts themselves is
 // real life data and dropping every self-addressed message to close this hole
 // would cost more than the hole did.
@@ -118,12 +118,25 @@ export const EXCLUDED_SOURCES = Object.freeze({
   // never as their message text.
   linkedin: 'export metadata + third-party messages; joins read it, claims never do',
   whatsapp: 'third-party message text; joins read it as handles/counts, claims never do',
+  // The bridged social platforms (connectors/sources/matrix.mjs), excluded on
+  // exactly WhatsApp's reasoning and inheriting it deliberately: these are
+  // other people's DMs, arriving continuously, and the graph wants them as
+  // names, handles and counts while the model must never read the words.
+  // Deciding this at the same commit that admits the sources is the point of
+  // the test that failed when it was not — a new source with no decision is a
+  // corpus the model reads by default.
+  messenger: 'third-party message text; joins read it as handles/counts, claims never do',
+  instagram: 'third-party message text; joins read it as handles/counts, claims never do',
+  twitter: 'third-party message text; joins read it as handles/counts, claims never do',
+  telegram: 'third-party message text; joins read it as handles/counts, claims never do',
+  discord: 'third-party message text; joins read it as handles/counts, claims never do',
+  slack: 'third-party message text; joins read it as handles/counts, claims never do',
   // RESERVED, NOT RETIRED — decided 2026-08-20 when the energy digest was
   // killed as a product surface. No row has ever carried this source (0 in the
   // live store, and the digest that closed the loop arrived as `imessage`
   // instead), so the honest options were "delete an unused name" or "keep a
   // decision already made". Kept: the name is the obvious one for any future
-  // row holding Hazlie's own output, and keeping the entry means whoever
+  // row holding Intaglio Labs' own output, and keeping the entry means whoever
   // writes that row inherits this exclusion instead of re-deciding it without
   // having read what happened on 2026-08-19. One unused string in three lists
   // is a cheaper failure mode than a name coming back free.

@@ -168,6 +168,42 @@ test('a group message credits its sender, and the owner speaks for nobody', () =
   );
 });
 
+test('content search includes every Matrix social direct message', () => {
+  const ctx = openDb(':memory:');
+  const sources = ['messenger', 'instagram', 'twitter', 'telegram', 'discord', 'slack', 'linkedin'];
+  const keys = new Map();
+  insertRows(ctx, sources.map((source, i) => {
+    const handle = `${source}_person`;
+    keys.set(handle, `name:${source} person`);
+    return {
+      ts: NOW + i * DAY,
+      source,
+      entity_id: `${source}:search`,
+      text: 'pickleball this weekend',
+      meta: { chat_handle: handle, is_group: false, is_from_me: i % 2 === 0 },
+    };
+  }));
+  const { stats } = contentMatches(ctx, keys, 'pickleball');
+  for (const source of sources) {
+    assert.equal(stats.get(`name:${source} person|2025`)?.messages, 1, source);
+  }
+});
+
+test('Matrix social rooms credit the sender and never the owner room post', () => {
+  const ctx = openDb(':memory:');
+  const sender = 'discord_group_sender';
+  insertRows(ctx, [
+    { ts: NOW, source: 'discord', entity_id: 'discord:group-in', text: 'pickleball in the room',
+      meta: { chat_handle: 'discord_room', sender_handle: sender, is_group: true, is_from_me: false } },
+    { ts: NOW + 1, source: 'discord', entity_id: 'discord:group-out', text: 'pickleball in the room',
+      meta: { chat_handle: 'discord_room', is_group: true, is_from_me: true } },
+  ]);
+  const { stats } = contentMatches(ctx, new Map([[sender, 'name:group person']]), 'pickleball');
+  const stat = stats.get('name:group person|2025');
+  assert.equal(stat.messages, 1, 'only the actual sender is attributed');
+  assert.equal(stat.excerpt.room, true);
+});
+
 // ---- a room is findable, but it does not pretend to be a conversation ----
 //
 // The opposite call from chips, on purpose: search exists to FIND somebody, and

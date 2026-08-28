@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Read-side connectors feeding the Hazlie context store through hermes /ingest. Loopback-only daemon: no listener of any kind.",
+  "description": "Read-side connectors feeding the Intaglio Labs context store through hermes /ingest. Loopback-only daemon: no listener of any kind.",
   "scripts": {
     "test": "node --test 'test/*.test.mjs'",
     "daemon": "node daemon.mjs",

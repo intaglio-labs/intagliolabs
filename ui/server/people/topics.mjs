@@ -197,10 +197,10 @@ function clauseTokens(text) {
 
 // The counterparty of one prose row -- the SAME derivation as graph.mjs's
 // content scan (mail rows attribute to the sender, so the owner's outbound
-// mail carries no tally; iMessage/WhatsApp threads attribute both directions
-// to the counterparty, because "what WE talked about" includes both sides).
+// mail carries no tally; direct message threads attribute both directions to
+// the counterparty, because "what WE talked about" includes both sides).
 function rowPersonId(row, meta) {
-  if (row.source === 'linkedin' && meta.kind !== 'message') return null;
+  if (row.source === 'linkedin' && meta.kind && meta.kind !== 'message') return null;
   const id =
     row.source === 'mail'
       ? (Array.isArray(meta.from) ? meta.from[0]?.toLowerCase() : null)
@@ -308,14 +308,16 @@ function runTopicScan(contextDb, { bucketBy = 'year' } = {}) {
           // cut and a row the index has not reached yet must still be counted.
           'SELECT c.source, c.ts, c.text, c.meta, m.episode_id ' +
             'FROM context c LEFT JOIN episode_member m ON m.context_id = c.id ' +
-            "WHERE c.source IN ('imessage','whatsapp','mail','linkedin') AND c.text IS NOT NULL"
+            "WHERE c.source IN ('imessage','whatsapp','messenger','instagram','twitter'," +
+            "'telegram','discord','slack','mail','linkedin') AND c.text IS NOT NULL"
         : // NO INDEX, NO DEPENDENCY. The episode table is derived and rebuilt on
           // a timer, so it can legitimately be absent -- a fresh install before
           // the first build, or any caller holding a plain context database.
           // Chips are worth having either way, so this falls back to counting
           // per message: the old weighting, which is worse but not wrong.
           "SELECT source, ts, text, meta, NULL AS episode_id FROM context " +
-            "WHERE source IN ('imessage','whatsapp','mail','linkedin') AND text IS NOT NULL"
+            "WHERE source IN ('imessage','whatsapp','messenger','instagram','twitter'," +
+            "'telegram','discord','slack','mail','linkedin') AND text IS NOT NULL"
     )
     .all();
   const byIdentifier = new Map();

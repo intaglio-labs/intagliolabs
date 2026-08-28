@@ -1,10 +1,10 @@
-// Notice when a source goes quiet, and say so once — as Hazlie, in the same
+// Notice when a source goes quiet, and say so once — as Intaglio Labs, in the same
 // thread as everything else.
 //
 // THE UX DECISIONS, because they are the hard part rather than the code:
 //
-// 1. THE MINI SENDS IT, NOT THE FAILING MACHINE. Only the Mini has Hazlie's
-//    Apple account, so only it can speak as Hazlie. That is also the more
+// 1. THE MINI SENDS IT, NOT THE FAILING MACHINE. Only the Mini has Intaglio Labs'
+//    Apple account, so only it can speak as Intaglio Labs. That is also the more
 //    robust design: the personal Mac's link failing is exactly the case where
 //    that Mac cannot report anything — asleep, off, off-network — so a
 //    self-report would go missing precisely when it mattered.

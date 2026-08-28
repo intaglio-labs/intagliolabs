@@ -61,8 +61,11 @@ export const CONNECTOR_NAMES = Object.freeze([
   'contacts',
   'notion',
   'files',
-  'linkedin',
   'whatsapp',
+  // The social bridges' DMs, read out of the local Matrix bus. One connector
+  // for seven platforms: the row's `source` comes from which bridge's ghost
+  // sent it (lib/matrixRows.mjs), so messenger and slack land as themselves.
+  'matrix',
 ]);
 
 // Connector name → the hermes `source` its rows land under. Oura is the
@@ -81,8 +84,20 @@ export const CONNECTOR_HERMES_SOURCE = Object.freeze({
   contacts: null,
   notion: 'notion',
   files: 'files',
-  linkedin: 'linkedin',
   whatsapp: 'whatsapp',
+  // Unlike contacts, Matrix DOES write corpus — one source for every bridge.
+  // Keep the full set here because run.mjs --purge uses this mapping too: a
+  // null sentinel means "no corpus" and previously made a Matrix purge report
+  // success while leaving every bridged message behind.
+  matrix: Object.freeze([
+    'messenger',
+    'instagram',
+    'twitter',
+    'telegram',
+    'discord',
+    'slack',
+    'linkedin',
+  ]),
 });
 
 // What retention config may name: hermes sources that connectors own rows
@@ -98,8 +113,16 @@ export const RETENTION_SOURCES = Object.freeze([
   'notes',
   'notion',
   'files',
+  // Still written — by the matrix connector now, not an import.
   'linkedin',
   'whatsapp',
+  // Written by the matrix connector, one source per bridged platform.
+  'messenger',
+  'instagram',
+  'twitter',
+  'telegram',
+  'discord',
+  'slack',
   'hazlie_digest',
 ]);
 
@@ -148,6 +171,11 @@ const TOP_KEYS = Object.freeze([
   'photos',
   'notion',
   'files',
+  'matrix',
+  // Accepted and ignored for upgrade compatibility. LinkedIn used to be a
+  // standalone export connector with an empty config section; removing the
+  // key from this closed schema made every existing config carrying
+  // `"linkedin": {}` fail before ANY connector could start.
   'linkedin',
   'retention',
 ]);
@@ -179,10 +207,8 @@ const GRANOLA_KEYS = Object.freeze(['includeTranscripts']);
 const OURA_KEYS = Object.freeze(['backfillDays']);
 const PHOTOS_KEYS = Object.freeze(['backfillDays']);
 const NOTION_KEYS = Object.freeze([]);
-// Empty on purpose: the linkedin connector reads no config yet, so any key
-// inside a `"linkedin"` section is a misspelling or an expectation the
-// daemon cannot meet — it must fail loudly, not validate cleanly and do
-// nothing (the failure the header describes).
+// Retired but still validated for upgrade compatibility. The export connector
+// took no config, so only the empty object old installs already carry is valid.
 const LINKEDIN_KEYS = Object.freeze([]);
 // `roots` overrides the discovered cloud folders; `materializeDataless` is the
 // opt-in that lets the walk OPEN online-only files. It defaults false and the
@@ -239,7 +265,9 @@ export function validateConfig(raw) {
     }
   }
   if (raw.intervals !== undefined) {
-    assertClosedKeys(raw.intervals, CONNECTOR_NAMES, '"intervals"');
+    // `intervals.linkedin` belonged to the retired export poller. Accept it as
+    // a no-op so an upgrade keeps booting; Matrix has its own interval now.
+    assertClosedKeys(raw.intervals, [...CONNECTOR_NAMES, 'linkedin'], '"intervals"');
     for (const [name, seconds] of Object.entries(raw.intervals)) {
       assertPositiveInt(seconds, `intervals.${name} (seconds)`, { min: MIN_INTERVAL_S, max: 86_400 });
     }

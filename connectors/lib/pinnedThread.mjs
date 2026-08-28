@@ -1,4 +1,4 @@
-// Which Messages thread is Hazlie's own conversation with the owner.
+// Which Messages thread is Intaglio Labs' own conversation with the owner.
 //
 // One definition, imported by both sides of the loop that closed on
 // 2026-08-19: the iMessage connector (which must not ingest that thread) and
@@ -8,7 +8,7 @@
 // system quietly starts treating its own words as the owner's again.
 //
 // Survivor note (2026-08-21): the courier's iMessage send/listen lanes are
-// retired — Hazlie no longer texts its user — but this reader stays, because
+// retired — Intaglio Labs no longer texts its user — but this reader stays, because
 // its job was always on the INGEST side: a machine that once had a pinned
 // hazlie thread must keep excluding it from the corpus, or the assistant's
 // own old messages ingest as the owner's words.
@@ -31,7 +31,7 @@ export function courierConfigPath(home = homedir()) {
 
 // Returns the pinned thread guid as a one-element array, or [] if none is
 // pinned. An array rather than a string because both call sites want a list to
-// test membership against, and because a second Hazlie thread is a plausible
+// test membership against, and because a second Intaglio Labs thread is a plausible
 // future (a household account, a second device) that should not need a
 // signature change to accommodate.
 export function pinnedThreadGuids({ home = homedir(), configPath = null } = {}) {
@@ -53,7 +53,7 @@ export function pinnedThreadGuids({ home = homedir(), configPath = null } = {}) 
     // reads the same in both cases.
     //
     // That guard exists because of the 2026-08-19 self-ingestion incident:
-    // Hazlie's own messages being read back in as household corpus. Failing
+    // Intaglio Labs' own messages being read back in as household corpus. Failing
     // closed here costs one errored poll; failing open reopens that loop.
     throw Object.assign(
       new Error(`courier config at ${path} is unreadable, so the pinned thread cannot be excluded`),

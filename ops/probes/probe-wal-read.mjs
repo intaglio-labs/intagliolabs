@@ -25,9 +25,9 @@
 // ~/.hazlie/bin/node and only attributes when launchd is the spawner, so a
 // direct terminal run reports BLOCKED for this part. Full run:
 //
-//   launchctl submit -l com.hazlie.probe-wal-read -o <out> -e <err> \
+//   launchctl submit -l io.intaglio.probe-wal-read -o <out> -e <err> \
 //     -- ~/.hazlie/bin/node /path/to/ops/probes/probe-wal-read.mjs
-//   (poll <out> for the RESULT line, then: launchctl remove com.hazlie.probe-wal-read)
+//   (poll <out> for the RESULT line, then: launchctl remove io.intaglio.probe-wal-read)
 //
 // Prints counts, timings, and sizes only — never row text. No TTY assumed.
 // Exit: 0 all parts PASS · 2 a part is BLOCKED by launch context · 1 FAIL.

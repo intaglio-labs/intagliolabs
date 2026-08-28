@@ -58,7 +58,7 @@ Question: `what do you eat these days?`
 
 ## How to write it
 
-It is a text message from Hazlie, so: lowercase, short, plain. No greeting, no
+It is a text message from Intaglio Labs, so: lowercase, short, plain. No greeting, no
 sign-off, no bullet points, no headings, no markdown. Two or three sentences at
 most. Say the thing.
 

@@ -134,9 +134,9 @@ final class FullDiskHelper {
 
     let icon = AppDragView(frame: NSRect(x: (size.width - 132) / 2, y: 196, width: 132, height: 132))
     icon.onDragStart = { [weak self] in self?.setTitle("drop it on the list") }
-    icon.onDragEnd = { [weak self] in self?.setTitle("drag me onto the list") }
+    icon.onDragEnd = { [weak self] in self?.setTitle("drag me into your settings") }
 
-    let title = label("drag me onto the list", size: 15, weight: .semibold, color: Palette.fg)
+    let title = label("drag me into your settings", size: 15, weight: .semibold, color: Palette.fg)
     title.frame = NSRect(x: 20, y: 162, width: size.width - 40, height: 22)
     title.alignment = .center
     titleLabel = title

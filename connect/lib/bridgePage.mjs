@@ -1,4 +1,4 @@
-// The bridge-login panel, rendered as a string — Hazlie's own surface for
+// The bridge-login panel, rendered as a string — Intaglio Labs' own surface for
 // linking Messenger/Instagram, in place of a third-party Matrix client. Same
 // "Terminal Palette v0.2" as the connect page, self-contained (no external
 // requests), no script: every action is a same-origin form POST that reloads

@@ -36,6 +36,14 @@ export const GROUP = 'group';
 export const DIRECT = 'direct';
 export const UNKNOWN = 'unknown';
 
+// Matrix writes the same is_group contract for every bridged social source.
+// Exported so the contract test covers the complete bridge roster from the
+// same list the classifier uses.
+export const BRIDGED_SOCIAL_SOURCES = Object.freeze([
+  'messenger', 'instagram', 'twitter', 'telegram', 'discord', 'slack', 'linkedin',
+]);
+const BRIDGED_SOCIAL = new Set(BRIDGED_SOCIAL_SOURCES);
+
 // WhatsApp's own marker, for the rows where the connector did not write the
 // boolean: a group jid ends in the broadcast suffix, a personal one does not.
 // Checked against the 3,190 rows that DO carry is_group -- the two agree on all
@@ -63,7 +71,16 @@ export function threadKind(row, meta) {
     return UNKNOWN;
   }
 
-  // Mail, calendar, notes, linkedin, files, photos: none of them is a room in
+  if (BRIDGED_SOCIAL.has(source)) {
+    // LinkedIn export rows predate the Matrix bridge and are connection/message
+    // records, not rooms. Matrix rows carry no `kind` and do carry is_group.
+    if (source === 'linkedin' && typeof m.kind === 'string') return DIRECT;
+    if (typeof m.is_group === 'boolean') return m.is_group ? GROUP : DIRECT;
+    if (m.is_group === 1 || m.is_group === 0) return m.is_group === 1 ? GROUP : DIRECT;
+    return UNKNOWN;
+  }
+
+  // Mail, calendar, notes, files, photos: none of them is a room in
   // this sense. A calendar event has attendees, which is co-attendance and is
   // modelled separately; it is not a thread with a marker.
   return DIRECT;

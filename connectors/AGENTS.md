@@ -1,6 +1,6 @@
 # connectors/ — binding rules
 
-This package is the read side of Hazlie's ingestion: resident pollers that
+This package is the read side of Intaglio Labs' ingestion: resident pollers that
 read the owner's own stores and services and deliver rows to hermes. The
 rules below are load-bearing; the why is written with each one so nobody has
 to reconstruct it before "simplifying" it away.

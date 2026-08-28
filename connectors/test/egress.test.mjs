@@ -132,8 +132,15 @@ const SKIP_FILE = new Set(['package-lock.json']);
 const stripDoctype = (text) => text.replace(/<!DOCTYPE[^>]*>/gu, '');
 
 // Loopback is not egress. `synapse` is the compose-internal DNS name the
-// bridge connector uses inside the docker network.
-const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1', '0.0.0.0', 'synapse']);
+// bridge connector uses inside the docker network, and the `hazlie-*`
+// container names are the same class: appservice endpoints on the compose
+// `hazlie-bus` network (ops/setup-bridges.sh writes them into bridge
+// configs), resolvable only inside that network. Only one appears in tracked
+// source as a literal — the others are shell-interpolated — but all six are
+// listed so the next literal does not trip the wire for being spelled out.
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1', '0.0.0.0', 'synapse',
+  'hazlie-meta', 'hazlie-instagram', 'hazlie-twitter',
+  'hazlie-telegram', 'hazlie-discord', 'hazlie-slack']);
 
 // `depth` is 0 when `dir` IS a root, so its immediate children are the ones
 // SKIP_AT_ROOT applies to.

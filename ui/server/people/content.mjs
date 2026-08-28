@@ -104,7 +104,10 @@ export function rowPersonId(row, meta) {
   if (row.source === 'mail') {
     return Array.isArray(meta.from) ? (meta.from[0]?.toLowerCase() ?? null) : null;
   }
-  if (row.source === 'linkedin') return null;
+  // Export-backed LinkedIn rows have their own schema. Matrix-backed LinkedIn
+  // rows carry no kind and use the same chat_handle/is_group contract as every
+  // other social bridge.
+  if (row.source === 'linkedin' && typeof meta.kind === 'string') return null;
   const fromMe = meta.is_from_me === true || meta.is_from_me === 1;
   // ROOMS ARE KEPT HERE, and that is the opposite call from chips -- on purpose.
   //
@@ -147,7 +150,8 @@ export function contentMatches(db, idToKey, query, { maxRows = 6000 } = {}) {
           'FROM context_fts ' +
           'JOIN context c ON c.id = context_fts.rowid ' +
           'LEFT JOIN episode_member m ON m.context_id = c.id ' +
-          "WHERE context_fts MATCH ? AND c.source IN ('imessage','whatsapp','mail') " +
+          "WHERE context_fts MATCH ? AND c.source IN ('imessage','whatsapp','messenger'," +
+          "'instagram','twitter','telegram','discord','slack','linkedin','mail') " +
           'ORDER BY c.ts DESC LIMIT ?'
       )
       .all(match, maxRows);

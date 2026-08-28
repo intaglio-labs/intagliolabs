@@ -3,16 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'self'; script-src 'self'">
+      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src data:">
 <link rel="stylesheet" href="palette.css">
 </head>
 <body class="connections">
   <div class="win">
     <div class="glow"></div>
-    <!-- The hint / hand-hold / bridge-login strip. It opens as a SIDE
-         section, left of the main column: the native popup pins its right
-         edge to the widget, so extra width grows leftward and the shelf,
-         settings and footer never move when a strip opens. -->
+    <!-- The hint / hand-hold / bridge-login card floats over this page and is
+         anchored to the connector tile that opened it. It never widens the
+         native window or creates another panel beside Settings. -->
     <div class="hint-host" id="hintHost"></div>
     <div class="conn-main">
       <!-- "settings" identity and the close on ONE row, X in the top-right

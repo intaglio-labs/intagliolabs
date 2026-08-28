@@ -1,4 +1,4 @@
-# Scope — the Hazlie assistant track
+# Scope — the Intaglio Labs assistant track
 
 (Amended for the public tree: this file used to open with an Expo-versions
 header and a scope exemption citing the root CLAUDE.md that governed the
@@ -6,7 +6,7 @@ diarization experiments. Neither the Expo app, the experiments, nor a root
 CLAUDE.md/AGENTS.md is in this repository — they stayed on the private side —
 so the rules that still bind are inlined below rather than cited.)
 
-ui/ is a sanctioned separate track (the Hazlie assistant): its
+ui/ is a sanctioned separate track (the Intaglio Labs assistant): its
 local context server (server/hermes.mjs) and retrieval into the LLM prompt exist by
 explicit owner direction — they satisfy the requirement that the interaction
 layer query a locally served database of ingested context. Two hard
@@ -93,7 +93,7 @@ others, so the enumeration had to stop being prose.
 What does NOT move is the claim itself, which is still stated here and stated
 once:
 
-**Hazlie sends no corpus data to a cloud model. All reasoning and narration happen
+**Intaglio Labs sends no corpus data to a cloud model. All reasoning and narration happen
 locally**, on loopback llama-server instances. That claim is much narrower than
 "nothing leaves the Mac" — which is false, and must not be written anywhere.
 Data leaves on every `api`, `bridge` and `login-webview` path in the ledger.
@@ -156,5 +156,5 @@ the iMessage lane — no context-DB handle, commands accepted only from the pinn
 Messages self-thread with an explicit `hz` / `hazlie:` prefix. Its send/listen
 lanes were retired 2026-08-21 and its code is not in this repository; the ledger's
 scope note says the same of its send path. What survives here is the ingest-side
-pinned-thread reader, `connectors/lib/pinnedThread.mjs`, which keeps Hazlie's own
+pinned-thread reader, `connectors/lib/pinnedThread.mjs`, which keeps Intaglio Labs' own
 old thread excluded from the corpus.)

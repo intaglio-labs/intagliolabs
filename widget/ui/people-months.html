@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'self'; script-src 'self'">
+      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src data:">
 <link rel="stylesheet" href="palette.css">
 <link rel="stylesheet" href="people-sky.css">
 <link rel="stylesheet" href="people-months.css">
@@ -31,8 +31,32 @@
     <button class="close" id="close" title="Close">×</button>
   </div>
   <!-- Year tabs, browser-style: every year with activity, oldest to newest,
-       the open year lifted and connected to the list below. -->
-  <div class="pm-tabs" id="tabs"></div>
+       the open year lifted and connected to the list below.
+       The globe is a SIBLING of the scrolling strip, not the last tab inside
+       it. ~~It used to live in the strip, stuck to the right edge with
+       position: sticky and an opaque background, on the reasoning that the
+       years should scroll underneath it.~~ They did, and it looked broken: at
+       most scroll positions a year sat half-covered (2023 measured 22px under
+       the globe, showing "20"), and a year sliced mid-glyph reads as a
+       rendering fault rather than as a strip that continues. Outside the
+       scroller it overlaps nothing, and the strip's own fading edge is what
+       says there is more to the left. -->
+  <div class="pm-tabrow" id="tabrow">
+    <div class="pm-tabs" id="tabs"></div>
+    <!-- Not built by people-months.js like the year tabs: it is one fixed
+         control, so it lives here and the script only lights it. It is NOT a
+         .pm-tab: it stopped wearing tab chrome (owner, 2026-08-26) and is a
+         floating icon pinned to the right edge, so the class that carries the
+         chrome would be a lie the stylesheet then has to undo. -->
+    <button class="pm-globe" id="globe" data-view="sky"
+            aria-label="every year by topic">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path>
+        <path d="M12 3a14 14 0 0 0 0 18a14 14 0 0 0 0-18"></path>
+      </svg>
+    </button>
+  </div>
   <!-- The year's highlight cards, from the server's own arithmetic over the
        month timeline (ui/server/people/highlights.mjs). A card only exists
        when its sentence is true, so this row is often shorter than five and
@@ -41,20 +65,26 @@
   <div class="pm-cards" id="cards" hidden></div>
   <!-- Which topic the list is standing inside, after a bubble was clicked, and
        the way back out. Hidden when the list is the whole year. -->
-  <!-- Recency, on the globe only. Its own row rather than sharing #filter,
-       because renderFilter replaceChildren()s that node and hides it whenever
-       the view is not a list — which is exactly when this control matters. -->
-  <div class="pm-recency" id="recency" hidden></div>
   <div class="pm-filter" id="filter" hidden></div>
   <div class="pl-list" id="list"></div>
-  <!-- The constellation: the same year seen by topic instead of by person.
+  <!-- The constellation: every year seen by topic instead of by person.
        A sibling of the list rather than a second window — the year tabs above
-       belong to both, and the globe is just the last tab. Hidden until it is
-       the chosen view; people-months.js fills it from the year already in
-       hand, so opening it costs no fetch. -->
+       belong to both. ~~"and the globe is just the last tab"~~: it stopped
+       being a tab on 2026-08-26 (see the tabrow comment above, which had
+       already recorded it) and this sentence was left describing the old
+       arrangement. Filled by people-months.js from /people/map, which it
+       caches for the panel's life, so re-opening it costs no fetch. -->
   <div class="pm-sky" id="sky" hidden></div>
   </div>
   <script src="bridge.js"></script>
+  <!-- The constellation's core wears the SAME mood as the home orb, and this
+       is the file that decides what that mood is — blended continuously
+       between the five bands rather than snapped at their edges, so the two
+       orbs cannot land a shade apart. widget.html loads it for the same
+       reason. -->
+  <script src="orb-tod.js"></script>
+  <!-- The constellation's geometry, before the page that draws with it. -->
+  <script src="people-sky-layout.js"></script>
   <script src="people-months.js"></script>
 </body>
 </html>

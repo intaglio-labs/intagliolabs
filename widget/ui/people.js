@@ -1,18 +1,23 @@
 // The People popup. Screen 1 of the People/network feature: a short line, then
 // the CONNECTIONS BAR — the same connector tiles as the settings screen (same
-// .list/.row/.mark/.dot classes, same hzGlyph), but sorted DISCONNECTED/errored
-// first, so the popup reads as "connect these to search your people deeper."
+// .list/.row/.mark/.dot classes, same hzGlyph). Messages, Contacts and Calendar
+// own the top-clockwise positions; remaining disconnected/errored sources lead
+// the rest, so the popup reads as "connect these to search your people deeper."
 // Clicking a tile hands off to the settings connections popup, where the connect
 // flow already lives. bridge.js provides hzPost, hzGlyph, hzAutoFit.
 'use strict';
 
 document.getElementById('close').addEventListener('click', () => {
+  // The close tone, same as every other popup — this id is excluded from the
+  // global squish (bridge.js HZ_OWN_TONE) precisely so it can play this.
+  hzSfx.close();
   hzPost('close').catch(() => {});
 });
 
 const pconn = document.getElementById('pconn');
 const phint = document.getElementById('phint');
 let openId = null; // which connector's flow is showing, for toggle
+let onboardingAttention = false; // this open is the handoff from onboarding
 
 // Search parameters. Timeframe in days back; 0 = max (all time). Default 1 year.
 const TIME_LABEL = { 7: '1 week', 30: '1 month', 180: '6 months', 365: '1 year', 1095: '3 years', 1825: '5 years', 0: 'all time' };
@@ -28,8 +33,8 @@ function closeHint() {
   openId = null;
   for (const r of pconn.querySelectorAll('.row')) r.classList.remove('open');
   phint.replaceChildren();
-  hzPost('fitContent', { height: 0, extraWidth: 0 }).catch(() => {});
-  fitPeople();
+  // No fitContent here any more: the pop-over floats, so opening and closing
+  // it never changed the window's size to restore.
 }
 
 // A corner × on the side panel, like settings.
@@ -42,16 +47,12 @@ function addHintClose() {
   phint.appendChild(x);
 }
 
-// Open the side panel WITHOUT letting it grow the popup taller than the main
-// column. A tall panel (the specs) that stretched the row would drag the whole
-// popup up past the top of the screen and clip its header — so we cap the panel
-// to the main column's height and let it scroll inside. The popup's total
-// height then never changes when a panel opens, so it can't be pushed off-screen.
-function growPanel() {
-  const main = document.getElementById('pmain');
-  if (main) phint.style.maxHeight = Math.round(main.getBoundingClientRect().height) + 'px';
-  hzPost('fitContent', { height: 0, extraWidth: 248 }).catch(() => {});
-  fitPeople();
+// ~~growPanel: cap the side panel to the main column and widen the window by
+// 248 to reveal it.~~ The flow is a POP-OVER now (owner, 2026-08-25): anchored
+// to whatever was pressed, clamped to the viewport by the shared placer, and
+// the window never resizes for it.
+function growPanel(anchor) {
+  hzPlacePop(phint, anchor);
 }
 
 function openConnector(src, row) {
@@ -59,21 +60,52 @@ function openConnector(src, row) {
   phint.replaceChildren();
   for (const r of pconn.querySelectorAll('.row')) r.classList.remove('open');
   if (wasOpen) { closeHint(); return; }
+  // Same shortcut as the settings shelf (owner, 2026-08-25): an FDA tile's
+  // card held only the one button, so pressing the tile presses it — and the
+  // primed verb lands "intaglio labs" in the pane's list before opening it.
+  if (src.action === 'fda') {
+    openId = null;
+    hzPost('openFullDiskAccess').catch(() => {});
+    return;
+  }
+  // Match the Settings shelf: for an unconnected Google row, the tile press
+  // opens sign-in directly instead of presenting instructions with no action.
+  // Calendar's local/FDA row remains local because base backend selection is
+  // authoritative; only a row already advertising the Google action gets here.
+  // ~~Pressing a Google tile started sign-in directly.~~ Parked with the Settings
+  // shelf (owner, 2026-08-27): the flow reached a "Which Google account?" picker,
+  // a second menu inside a panel where every other tile loads its login straight
+  // away. The card below now says "coming soon" for these, which is the same
+  // answer both surfaces give.
+
+  // The disabled-connector shortcut was reverted with its settings-shelf
+  // twin (owner, 2026-08-25): the card and its connect button are back.
   openId = src.id;
   row.classList.add('open');
-  hzConnectorHint(src, phint, { refresh: reload });
+  // The ring closes with everything the ring owns -- the open row, the open id,
+  // the hint host -- so a cancelled login here ends exactly where it does in
+  // Settings, rather than leaving an open card with nothing in it.
+  hzConnectorHint(src, phint, {
+    refresh: reload,
+    onClose: closeHint,
+    // The TILE carries the wait, not a card: a bridge press opens its login
+    // window and says nothing until there is something to say.
+    onBusy: (on) => row.classList.toggle('logging-in', on),
+  });
   addHintClose();
-  growPanel();
+  growPanel(row);
   row.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
 }
 
 // The tile is the SHARED component (connector-tile.js): same markup, status
 // dot, and hover label as the settings shelf. Only the click handler is ours.
 // Wrapped in .rowwrap to match the shelf's markup.
-function tile(src) {
+function tile(src, nudgeImessage) {
   const wrap = document.createElement('div');
   wrap.className = 'rowwrap';
-  wrap.appendChild(hzConnectorTile(src, { onOpen: openConnector }));
+  const row = hzConnectorTile(src, { onOpen: openConnector });
+  if (nudgeImessage && kindOf(src.id) === 'imessage') row.classList.add('p-imessage-nudge');
+  wrap.appendChild(row);
   return wrap;
 }
 
@@ -81,15 +113,48 @@ function tile(src) {
 const HIDDEN_CONNECTORS = new Set(['oura', 'photos', 'files', 'notion', 'notes']);
 const kindOf = (id) => (id.startsWith('mail:') ? 'mail' : id);
 
+// The first three positions are spatial, not merely a scan order: index zero
+// is twelve o'clock, then the ring proceeds clockwise. Messages is the door;
+// Contacts and Calendar sit immediately to its right. Everything after those
+// anchors keeps the old needs-attention-first ordering.
+const PEOPLE_ANCHORS = ['imessage', 'contacts', 'calendar'];
+const anchorRank = (src) => {
+  const i = PEOPLE_ANCHORS.indexOf(kindOf(src.id));
+  return i === -1 ? PEOPLE_ANCHORS.length : i;
+};
+
 function render(sources) {
-  // Hide the non-people connectors, then disconnected/errored first (surface
-  // what still needs connecting), stable within each group.
-  const ordered = sources
-    .filter((s) => !HIDDEN_CONNECTORS.has(kindOf(s.id)))
+  // Hide the non-people connectors. The three spatial anchors stay fixed;
+  // remaining disconnected/errored sources lead the rest, stable within each
+  // group. Connecting something must never rotate Messages away from the top.
+  const hasGoogleAccount = sources.some(
+    (s) => s.connected && typeof s.id === 'string' && s.id.startsWith('mail:')
+  );
+  const visible = sources.filter((s) =>
+    !HIDDEN_CONNECTORS.has(kindOf(s.id)) && !(hasGoogleAccount && s.id === 'mail')
+  );
+  const nudgeImessage = onboardingAttention || !visible.some((s) => s.connected);
+  const ordered = visible
     .map((s, i) => ({ s, i }))
-    .sort((a, b) => (a.s.connected === b.s.connected ? a.i - b.i : a.s.connected ? 1 : -1))
+    .sort((a, b) =>
+      anchorRank(a.s) - anchorRank(b.s)
+      || (a.s.connected === b.s.connected ? a.i - b.i : a.s.connected ? 1 : -1))
     .map((x) => x.s);
-  pconn.replaceChildren(...ordered.map(tile));
+  pconn.replaceChildren(...ordered.map((src) => tile(src, nudgeImessage)));
+  // The ring positions each tile by transform (people.css), reading these two
+  // custom properties: --n is the same on every tile, --i is its index, so an
+  // evenly-spaced angle falls out of pure CSS with no per-count stylesheet.
+  // --n also lands on the ring container itself, one level up, so the ring's
+  // own size (and therefore the popup's total height) can grow only as far
+  // as the actual connector count needs — a handful of sources gets a small
+  // ring instead of always paying for the worst case.
+  const rows = pconn.querySelectorAll('.row');
+  const pring = document.getElementById('pring');
+  if (pring) pring.style.setProperty('--n', rows.length);
+  rows.forEach((row, i) => {
+    row.style.setProperty('--i', i);
+    row.style.setProperty('--n', rows.length);
+  });
   if (typeof fitPeople === 'function') fitPeople();
 }
 
@@ -99,6 +164,29 @@ function reload() {
   hzPost('status')
     .then((d) => { if (d && d.state === 'ok' && Array.isArray(d.sources)) render(d.sources); })
     .catch(() => {});
+}
+
+// A fresh People page pulls the handoff flag itself; a reused page receives
+// the same fact from native through __hzPeopleIntro. In both cases, record the
+// intro only after this page is actually alive to show it. The local boolean
+// deliberately stays true for this visit, so an existing install replaying
+// onboarding still sees Messages jump even if several connectors are linked.
+function enterFromOnboarding(on) {
+  onboardingAttention = on === true;
+  reload();
+  if (onboardingAttention) hzPost('connectorsIntroSeen').catch(() => {});
+}
+window.__hzPeopleIntro = enterFromOnboarding;
+
+function firstLoad() {
+  Promise.all([
+    hzPost('status').catch(() => null),
+    hzPost('prefs').catch(() => null),
+  ]).then(([d, p]) => {
+    onboardingAttention = !!(p && p.onboarded === true && p.connectorsIntroDone === false);
+    if (d && d.state === 'ok' && Array.isArray(d.sources)) render(d.sources);
+    if (onboardingAttention) hzPost('connectorsIntroSeen').catch(() => {});
+  });
 }
 
 // ---------------- deep search controls ----------------
@@ -113,6 +201,11 @@ function openSearchDetails() {
   const head = document.createElement('b');
   head.textContent = 'what deep search does';
   tip.appendChild(head);
+  // Under the header, same as every connector card (owner, 2026-08-25).
+  const stay = document.createElement('span');
+  stay.className = 'stay';
+  stay.textContent = 'data stored locally';
+  tip.appendChild(stay);
   const ul = document.createElement('ul');
   ul.className = 'p-what';
   for (const line of [
@@ -126,13 +219,9 @@ function openSearchDetails() {
     ul.appendChild(li);
   }
   tip.appendChild(ul);
-  const stay = document.createElement('span');
-  stay.className = 'stay';
-  stay.textContent = 'everything stored locally — no cloud model ever sees it';
-  tip.appendChild(stay);
   phint.appendChild(tip);
   addHintClose();
-  growPanel();
+  growPanel(document.getElementById('pspecs'));
 }
 document.getElementById('pspecs').addEventListener('click', (e) => {
   e.preventDefault();
@@ -295,7 +384,7 @@ function renderDone() {
 document.getElementById('pinit').addEventListener('click', () => {
   const b = document.getElementById('pinit');
   b.disabled = true;
-  b.textContent = 'initializing…';
+  b.textContent = 'searching…';
   rDays = searchDays;
   rDecided = 0;
   rSkipped.clear();
@@ -310,30 +399,79 @@ document.getElementById('pinit').addEventListener('click', () => {
     })
     .catch(() => {
       b.textContent = 'couldn’t start — try again';
-      setTimeout(() => { b.textContent = 'initialize search'; }, 1800);
+      setTimeout(() => { b.textContent = 'search'; }, 1800);
     })
     .finally(() => {
       // Re-enable for next time; it is hidden while review mode is up anyway.
       b.disabled = false;
-      if (!preview.hidden) b.textContent = 'initialize search';
+      if (!preview.hidden) b.textContent = 'search';
     });
 });
 
 // Push the exact card height to native, so a bottom row like "read specs" can
-// never sit below the panel's bottom edge. Belt-and-suspenders alongside
-// hzAutoFit's observer.
+// never sit below the panel's bottom edge.
+//
+// THIS IS THE ONLY FITTER ON THIS PAGE, and the page must not also run
+// hzAutoFit. That one reports `window.innerHeight + (scrollHeight -
+// clientHeight)` — the height the window ALREADY has, plus whatever overflows
+// it. Two consequences, both of which this page hit:
+//   - it can only ever grow the window, never shrink it back;
+//   - under `overflow: hidden` there is no measurable overflow, so it reports
+//     the current height forever and the window never grows either.
+// Running both meant hzAutoFit's "keep it exactly as it is" answer landed
+// after this one's correct measurement and pinned the panel to whatever the
+// native base size happened to be — content cut off when the base was small,
+// and a band of empty card below "read specs" when the base was raised to
+// compensate. Measuring the card itself grows AND shrinks, which is the whole
+// job.
 function fitPeople() {
   // Measure AFTER layout settles (rAF), by the rendered rect, so the popup
   // sizes exactly to the card — no dead space below "read specs", and it
   // shrinks back when a side panel closes.
   requestAnimationFrame(() => {
     const win = document.querySelector('.win');
-    if (win) hzPost('fitContent', { height: Math.ceil(win.getBoundingClientRect().height) + 4 }).catch(() => {});
+    if (!win) return;
+    // Measure what the content WANTS, not what the last squeeze left it: with
+    // the cap still applied, the measurement would ratify the shrunken ring
+    // and the window could never grow back when the widget is moved and the
+    // ceiling rises. Cleared and re-applied inside one rAF, so no intermediate
+    // layout is ever painted.
+    const pring = document.getElementById('pring');
+    if (pring) pring.style.removeProperty('--ring-cap');
+    hzPost('fitContent', { height: Math.ceil(win.getBoundingClientRect().height) + 4 }).catch(() => {});
+    capRing();
   });
 }
 
-reload();
-if (window.hzAutoFit) hzAutoFit(document.body);
+// The other half of the bargain fitContent strikes: the page asks for the
+// height its content wants, and native answers with the room it actually has
+// (popupCeiling clamps every popup to the space above the widget). When the
+// answer is short, shrink the RING to fit it rather than scrolling — a ring
+// with its bottom arc cut off reads as broken, and the overlay scrollbar that
+// would say otherwise is invisible until touched. Solving the box arithmetic
+// backwards (box = 2r + 44, so r = room/2 − 22) makes the shrunken ring land
+// exactly inside the granted height in one step, no creep and no oscillation:
+// re-running with an unchanged grant computes the same cap. CSS floors the
+// result at 64px — below that the tiles would overlap, so scrolling returns
+// as the honest last resort.
+function capRing() {
+  const pring = document.getElementById('pring');
+  const win = document.querySelector('.win');
+  if (!pring || !win) return;
+  const ringH = pring.getBoundingClientRect().height;
+  if (ringH < 1) return; // review mode: no ring on screen, nothing to size
+  const chrome = win.getBoundingClientRect().height - ringH;
+  pring.style.setProperty('--ring-cap', `${Math.floor((window.innerHeight - chrome) / 2) - 22}px`);
+}
+// Native's resize lands after the fitContent round trip, as a window resize
+// here — that is the moment the granted height is knowable.
+window.addEventListener('resize', capRing);
+
+firstLoad();
+// No hzAutoFit here — see fitPeople's header for why the two cannot both run.
 requestAnimationFrame(fitPeople);
+// rAF does not fire in a window that is ordered out, and this page loads while
+// hidden; the timer is what makes the first measurement happen at all. (This
+// backstop is the one genuinely useful thing hzAutoFit was providing.)
 setTimeout(fitPeople, 250);
 window.addEventListener('focus', () => { reload(); fitPeople(); });

@@ -1,10 +1,10 @@
 // The self-ingestion guard, which had no test and failed open.
 //
-// pinnedThreadGuids names the Messages thread Hazlie talks to the owner
+// pinnedThreadGuids names the Messages thread Intaglio Labs talks to the owner
 // through. Every caller uses the result to EXCLUDE that thread — from
 // ingestion (sources/imessage.mjs), from claim selection (memory/select.mjs)
 // and from the episodic shelf (memory/episodic.mjs). It exists because of the
-// 2026-08-19 self-ingestion incident, where Hazlie's own messages were read
+// 2026-08-19 self-ingestion incident, where Intaglio Labs' own messages were read
 // back in as household corpus.
 //
 // It used to `catch { return [] }` on every error, which made "nothing is

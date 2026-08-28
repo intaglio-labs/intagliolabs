@@ -359,6 +359,55 @@ test('an unaddressed message in a ROOM does not invent a person', () => {
   assert.equal(g.length, 0, 'a room id must never become a person with a message count');
 });
 
+test('every Matrix social source follows the iMessage direct/group rules', () => {
+  const ctx = openDb(':memory:');
+  const sources = ['messenger', 'instagram', 'twitter', 'telegram', 'discord', 'slack', 'linkedin'];
+  const rows = [];
+  for (const [i, source] of sources.entries()) {
+    const direct = `${source}_direct`;
+    const sender = `${source}_group_sender`;
+    const room = `${source}_room_partner`;
+    rows.push(
+      { ts: NOW - (10 + i) * DAY, source, entity_id: `${source}:direct-in`, text: 'direct inbound',
+        speaker: `Direct ${source}`,
+        meta: { chat_handle: direct, is_group: false, is_from_me: false } },
+      { ts: NOW - (9 + i) * DAY, source, entity_id: `${source}:direct-out`, text: 'direct outbound',
+        speaker: 'The Owner',
+        meta: { chat_handle: direct, is_group: false, is_from_me: true } },
+      { ts: NOW - (8 + i) * DAY, source, entity_id: `${source}:group-in`, text: 'said in a room',
+        speaker: `Group ${source}`,
+        meta: { chat_handle: room, sender_handle: sender, is_group: true, is_from_me: false } },
+      { ts: NOW - (7 + i) * DAY, source, entity_id: `${source}:group-out`, text: 'owner said to room',
+        speaker: 'The Owner',
+        meta: { chat_handle: room, is_group: true, is_from_me: true } },
+    );
+  }
+  insertRows(ctx, rows);
+
+  const graph = buildGraph(ctx, spineDb([]), { now: NOW });
+  assert.equal(graph.length, sources.length * 2, 'no room or owner identities are invented');
+  for (const source of sources) {
+    const direct = graph.find((p) => p.identifiers.includes(`${source}_direct`));
+    assert.ok(direct, `${source} direct counterparty exists`);
+    assert.equal(direct.sent, 1, `${source} outbound direct`);
+    assert.equal(direct.received, 1, `${source} inbound direct`);
+    assert.equal(direct.directMessages, 2, `${source} direct total`);
+    assert.equal(direct.roomMessages, 0, `${source} direct is not a room`);
+
+    const groupSender = graph.find((p) => p.identifiers.includes(`${source}_group_sender`));
+    assert.ok(groupSender, `${source} group sender exists`);
+    assert.equal(groupSender.messages, 0, `${source} room chatter is not a DM`);
+    assert.equal(groupSender.roomMessages, 1, `${source} room activity is retained`);
+    assert.equal(groupSender.roomOnly, true, `${source} sender is room-only`);
+    assert.equal(groupSender.dormancyDays, null, `${source} room chatter does not start the clock`);
+    assert.equal(
+      graph.some((p) => p.identifiers.includes(`${source}_room_partner`)),
+      false,
+      `${source} owner group post is assigned to nobody`,
+    );
+  }
+});
+
 // ---- a spine that cannot be read is not an empty address book ----
 //
 // Observed live: every name in the panel became a raw phone number and one

@@ -46,10 +46,26 @@ step() { printf '\n==> %s\n' "$*"; }
 step "runtime directory tree (~/.hazlie)"
 mkdir -p "$BIN_DIR" "$LIB_DIR" "$HAZLIE/cache" "$HAZLIE/connectors" "$SECRET_DIR" "$LOG_DIR"
 # ~/.hazlie can predate this script or have been created under a permissive
-# umask. Everything under it is Hazlie-private state, so reassert the whole
+# umask. Everything under it is Intaglio Labs-private state, so reassert the whole
 # tree on every run rather than trusting whichever run created each piece.
 chmod 700 "$HAZLIE" "$BIN_DIR" "$LIB_DIR" "$HAZLIE/cache" "$HAZLIE/connectors" "$SECRET_DIR" "$LOG_DIR"
 echo "    0700 asserted on ~/.hazlie and children"
+
+# Every connector's loadConfig() (connectors/daemon.mjs) refuses to run at all
+# without this file, and every top-level key in it is optional — so a bare "{}"
+# is a fully valid config. Without this step a fresh install could complete
+# every other part of setup and still have zero working connectors, with each
+# one failing identically ("connectors config file is missing") for a reason
+# none of them state (ops/CONNECTORS.md, "Configuration (config.json)").
+CONFIG_FILE="$HAZLIE/connectors/config.json"
+if [[ -f "$CONFIG_FILE" ]]; then
+  chmod 600 "$CONFIG_FILE"
+  echo "    config.json present (mode 0600 reasserted)"
+else
+  printf '{}\n' > "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE"
+  echo "    config.json created (empty; see ops/CONNECTORS.md, \"Configuration (config.json)\" to customize)"
+fi
 
 # ── (b) stable node binary ────────────────────────────────────────────────────
 # TCC grants Full Disk Access to one exact file. /opt/homebrew/bin/node is a
@@ -174,42 +190,11 @@ else
   echo "    disabled until the key from the Granola app is saved there (0600)."
 fi
 
-# Gmail app password: the one secret a human has to type. read -s so it never
-# lands in shell history or process listings; written via mktemp + mv so a
-# crash mid-write cannot leave a world-readable partial file.
-GMAIL_FILE="$SECRET_DIR/gmail-app-password.txt"
-if [[ -L "$GMAIL_FILE" ]] || [[ -e "$GMAIL_FILE" && ! -f "$GMAIL_FILE" ]]; then
-  echo "ERROR: $GMAIL_FILE must be a regular, non-symlink file." >&2
-  exit 1
-fi
-if [[ -f "$GMAIL_FILE" ]]; then
-  chmod 600 "$GMAIL_FILE"
-  echo "    gmail-app-password.txt present (mode 0600 reasserted)"
-elif [[ -t 0 ]]; then
-  echo "    gmail-app-password.txt is missing. Create one at"
-  echo "    https://myaccount.google.com/apppasswords and paste it here"
-  echo "    (input hidden; press Enter alone to skip — mail stays disabled):"
-  read -rs -p "    app password: " GMAIL_APP_PASSWORD
-  echo
-  GMAIL_APP_PASSWORD="${GMAIL_APP_PASSWORD// /}"  # Google displays it in spaced groups
-  if [[ -n "$GMAIL_APP_PASSWORD" ]]; then
-    gmail_tmp=$(mktemp "$SECRET_DIR/.gmail-app-password.XXXXXX")
-    trap 'rm -f "${gmail_tmp:-}"' EXIT
-    printf '%s\n' "$GMAIL_APP_PASSWORD" > "$gmail_tmp"
-    chmod 600 "$gmail_tmp"
-    mv "$gmail_tmp" "$GMAIL_FILE"
-    gmail_tmp=
-    trap - EXIT
-    unset GMAIL_APP_PASSWORD
-    echo "    saved owner-only gmail-app-password.txt"
-  else
-    unset GMAIL_APP_PASSWORD
-    echo "    skipped — mail connector disabled until it exists"
-  fi
-else
-  echo "    gmail-app-password.txt is missing and stdin is not a terminal —"
-  echo "    skipping the prompt (mail connector disabled); re-run interactively."
-fi
+# Gmail uses Google OAuth now; no password belongs in this installer or in a
+# file it creates. The app owns the ordinary path, while the helper remains a
+# direct option for a repository-based setup.
+echo "    Gmail: sign in to Google from the Connections shelf in the app,"
+echo "    or run: node $REPO_ROOT/ops/gcal-auth.mjs"
 
 # Oura tokens are OAuth2 artifacts, not a value a human can type: a separate
 # helper mints ~/.hazlie/secrets/oura-tokens.json after the browser consent
@@ -247,6 +232,33 @@ fi
 
 # ── (e) launchd agents ────────────────────────────────────────────────────────
 step "launchd agents"
+
+# THE PRE-RENAME AGENTS, RETIRED FIRST. The reverse-DNS namespace moved from
+# com.hazlie.* to io.intaglio.* on 2026-08-25, to derive from the domain the
+# project actually owns (intaglio.io). launchd keys a service on its LABEL, so
+# the old agents are not "replaced" by the new ones — they are simply a second
+# set, still loaded, still KeepAlive, still executing the same scripts against
+# the same database. Two hermes instances racing for port 51789 is the visible
+# failure; two connector daemons racing for the same cursors is the quiet one.
+# Retired here rather than in a migration note, because a note only helps the
+# person who reads it.
+# ONLY THE AGENTS THIS SCRIPT OWNS. llama-server is setup-llm.sh's, and
+# retiring it here left a machine with no llama-server at all: this script
+# booted the old one out and nothing in it installs the replacement, so
+# `/vault/ask` answered "fetch failed" until setup-llm.sh was re-run. An
+# uninstall step for an agent you do not install is a hole, not a migration.
+for old in hermes connect connectors whatsapp-keepalive; do
+  old_label="com.hazlie.$old"
+  old_plist="$HOME/Library/LaunchAgents/$old_label.plist"
+  if launchctl print "gui/$UID/$old_label" >/dev/null 2>&1; then
+    launchctl bootout "gui/$UID/$old_label" 2>/dev/null || true
+    echo "    retired pre-rename agent $old_label"
+  fi
+  if [[ -f "$old_plist" ]]; then
+    rm -f "$old_plist"
+    echo "    removed $old_plist"
+  fi
+done
 
 bootstrap_agent() {
   local plist_dst="$1" label="$2"
@@ -310,8 +322,8 @@ install_agent() {
   fi
 }
 
-install_agent com.hazlie.hermes
-install_agent com.hazlie.connect
+install_agent io.intaglio.hermes
+install_agent io.intaglio.connect
 
 # WhatsApp Desktop only syncs while it is running, so the connector's freshness
 # is bounded by how often the owner opens the app (ops/PROBES.md measured the
@@ -325,20 +337,35 @@ install_agent com.hazlie.connect
 # awake for a connector that is not built would be a daily app launch for
 # nothing.
 if [[ -f "$REPO_ROOT/connectors/sources/whatsapp.mjs" ]]; then
-  install_agent com.hazlie.whatsapp-keepalive
+  install_agent io.intaglio.whatsapp-keepalive
 else
-  echo "    com.hazlie.whatsapp-keepalive: no whatsapp connector — skipping"
+  echo "    io.intaglio.whatsapp-keepalive: no whatsapp connector — skipping"
 fi
 
-if [[ -f "$REPO_ROOT/connectors/daemon.mjs" ]]; then
-  install_agent com.hazlie.connectors
-else
-  echo "    com.hazlie.connectors: connectors/daemon.mjs not present yet (a"
+# THE APP OWNS THE DAEMON WHEN THE APP IS INSTALLED, and installing this agent
+# anyway is not merely redundant — the two actively fight. `Provision
+# .retireConnectorsAgent()` boots out and DELETES this plist on every app
+# launch, by design: the daemon runs as a child of the app so TCC attributes
+# Full Disk Access to one row called Intaglio Labs instead of to a unix binary
+# nobody installed (widget/src/Connectors.swift). So a machine with the app got
+# an agent installed here, killed seconds later by the app, and a
+# "Bootstrap failed: 5: Input/output error" that looks like a launchd defect
+# and is really two components disagreeing about who owns the process.
+#
+# Observed 2026-08-25: the plist vanishing from ~/Library/LaunchAgents after
+# each attempt was read as macOS pruning a failing agent. It was the app.
+if [[ ! -f "$REPO_ROOT/connectors/daemon.mjs" ]]; then
+  echo "    io.intaglio.connectors: connectors/daemon.mjs not present yet (a"
   echo "    concurrent commit adds it) — skipping this agent; a KeepAlive job"
   echo "    pointing at a missing script would crash-loop. Re-run after it lands."
+elif [[ -d "/Applications/Intaglio Labs.app" ]]; then
+  echo "    io.intaglio.connectors: the app is installed and runs the daemon as"
+  echo "    its own child — skipping the agent, which the app would delete anyway."
+else
+  install_agent io.intaglio.connectors
 fi
 
-# The iMessage lanes are GONE (owner, 2026-08-21): Hazlie no longer texts its
+# The iMessage lanes are GONE (owner, 2026-08-21): Intaglio Labs no longer texts its
 # user and no longer takes `hz` commands from a pinned thread — everything
 # goes through the widget. If an old install still has the agents loaded:
 #   launchctl bootout gui/$UID/com.hazlie.listen
@@ -369,7 +396,7 @@ for i in $(seq 1 15); do
 done
 if [[ "$healthy" != 1 ]]; then
   echo "ERROR: no Hermes health answer after 15s." >&2
-  echo "Check: launchctl print gui/$UID/com.hazlie.hermes" >&2
+  echo "Check: launchctl print gui/$UID/io.intaglio.hermes" >&2
   echo "       tail -50 $LOG_DIR/hermes.err.log" >&2
   echo "       lsof -nP -iTCP:${HERMES_PORT:-51789} -sTCP:LISTEN   # another process may hold the port" >&2
   exit 1
@@ -384,9 +411,9 @@ if [[ "$DOCTOR_STATUS" != 0 ]]; then
   echo "doctor reported FAILs (exit $DOCTOR_STATUS). fda-* rows failing HERE are"
   echo "expected: this shell — not launchd — is the responsible process, so the"
   echo "Full Disk Access grant does not apply to this run. Production truth:"
-  echo "    launchctl submit -l com.hazlie.doctor -o /tmp/doctor.out -e /tmp/doctor.err \\"
+  echo "    launchctl submit -l io.intaglio.doctor -o /tmp/doctor.out -e /tmp/doctor.err \\"
   echo "      -- $STABLE_NODE $REPO_ROOT/connectors/doctor.mjs --json"
-  echo "    (poll /tmp/doctor.out, then: launchctl remove com.hazlie.doctor)"
+  echo "    (poll /tmp/doctor.out, then: launchctl remove io.intaglio.doctor)"
   echo "Any non-fda FAIL above is real; act on its fix line."
 else
   echo "doctor is green."

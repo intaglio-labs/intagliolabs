@@ -51,7 +51,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.hazlie.llama-server</string>
+  <string>io.intaglio.llama-server</string>
 
   <!-- Attribute this background item to the APP, not to the program it runs.
        Without this key macOS names the item after the executable, so a person
@@ -63,7 +63,7 @@
        makes them one entry instead of four. -->
   <key>AssociatedBundleIdentifiers</key>
   <array>
-    <string>com.hazlie.widget</string>
+    <string>io.intaglio.widget</string>
   </array>
 
   <key>ProgramArguments</key>
@@ -84,7 +84,7 @@
     <string>--flash-attn</string>
     <string>on</string>
     <!-- Auto parallelism created four 8K slots on an 8 GB M2 and exhausted
-         unified GPU memory before the first token. Hazlie serves one household
+         unified GPU memory before the first token. Intaglio Labs serves one household
          turn at a time, so one slot is both sufficient and deterministic. -->
     <string>--parallel</string>
     <string>1</string>

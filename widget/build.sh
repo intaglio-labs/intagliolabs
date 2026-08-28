@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the Hazlie desktop widget: one swiftc invocation, a bundle assembled
+# Build the Intaglio Labs desktop widget: one swiftc invocation, a bundle assembled
 # by hand, an ad-hoc signature. No Xcode project, no SwiftPM, no third-party
 # code — the same shape as the ops/setup-*.sh scripts.
 #
@@ -85,6 +85,51 @@ cp -R ../ui/server "$BE/ui/server"
 cp -R ../ui/scripts "$BE/ui/scripts"
 cp -R ../prompts "$BE/prompts"
 cp -R ../connectors "$BE/connectors"
+# THE AUTH SCRIPTS, because a downloaded install has no repo to run them from.
+# The connect page's Google and Oura rows told the owner to run
+# `node ops/gcal-auth.mjs`, and ops/ was never copied into the bundle — so that
+# instruction worked for whoever had cloned the repo and for nobody else. The
+# connect server spawns these directly now (POST /api/google-auth), and it
+# resolves them at ../ops relative to itself, which is this path in the bundle
+# and the repo root in a checkout. Same relative path, both layouts.
+mkdir -p "$BE/ops"
+cp ../ops/gcal-auth.mjs ../ops/oura-auth.mjs "$BE/ops/"
+
+# THE TELEGRAM APP CREDENTIAL, if this build machine has one.
+#
+# Telegram issues api_id/api_hash per ACCOUNT, and its bridge refuses to start
+# without a real pair — so until now every install had to register its own app
+# at my.telegram.org and paste the pair in before Telegram would do anything.
+# Shipping one pair with the product is what turns that into an ordinary
+# phone-and-code login (it is what Beeper does).
+#
+# IT CANNOT LIVE IN THE REPO, and this is the whole reason it arrives here
+# rather than as a file in ops/: this repository is PUBLIC, and Telegram
+# refuses logins made with any api_id it finds in public code
+# (API_ID_PUBLISHED_FLOOD). Committing the pair would not degrade Telegram
+# slowly, it would break every install at once. So the build reads it from the
+# machine's own secret store (or CI's, from a repository secret) and writes it
+# into the bundle, the same shape the site's Firebase credentials already use.
+#
+# A build WITHOUT the secret is not an error — it produces an app whose
+# Telegram falls back to the per-user walkthrough, which is exactly today's
+# behaviour. That fallback is the point: a shipped api_id is extractable from
+# any binary with `strings`, so "published" is a matter of when, and when
+# Telegram flags this one the per-user path is what everybody lands on.
+TG_APP="${HZ_TELEGRAM_APP:-}"
+if [ -z "$TG_APP" ] && [ -f "$HOME/.hazlie/secrets/telegram-app.txt" ]; then
+  TG_APP="$(tr -d '[:space:]' < "$HOME/.hazlie/secrets/telegram-app.txt")"
+fi
+# Shape-checked here as well as at the reader, because a malformed pair
+# produces a bridge that crash-loops at the user with no line naming why.
+if printf '%s' "$TG_APP" | grep -Eq '^[0-9]{1,12}:[0-9a-fA-F]{32}$'; then
+  printf '%s\n' "$TG_APP" > "$BE/telegram-app"
+  chmod 600 "$BE/telegram-app"
+  echo "telegram: app credential baked in (ops/setup-bridges.sh will use it)"
+else
+  [ -n "$TG_APP" ] && echo "telegram: ignoring a malformed credential — expected <api_id>:<api_hash>" >&2
+  echo "telegram: no app credential on this machine; installs will use the per-user walkthrough"
+fi
 
 # The Calendar/Contacts helper. Node cannot call EventKit or the Contacts
 # framework, so without this both sources can only reach their data by reading
@@ -180,8 +225,8 @@ fi
 # Plist templates (@HOME@/@REPO@ placeholders) — provision renders them:
 # @REPO@ -> this backend dir, @HOME@ -> the user's home.
 mkdir -p "$BE/agents"
-cp ../ops/com.hazlie.connect.plist ../ops/com.hazlie.hermes.plist \
-   ../ops/com.hazlie.connectors.plist ../ops/com.hazlie.llama-server.plist "$BE/agents/"
+cp ../ops/io.intaglio.connect.plist ../ops/io.intaglio.hermes.plist \
+   ../ops/io.intaglio.connectors.plist ../ops/io.intaglio.llama-server.plist "$BE/agents/"
 
 # SIGNING, AND WHY IT IS NOT AD-HOC ANY MORE.
 #
@@ -215,39 +260,31 @@ IDENTITY="${HAZLIE_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/
 
 # THE PROVISIONING PROFILE, embedded before signing.
 #
-# A development-signed Mac app carries one or it is not validly signed for any
-# machine, and `spctl -a` says rejected. The profile names this team, this bundle
-# id and the Macs allowed to run it, and lives at
-# Contents/embedded.provisionprofile by convention.
-#
-# This comment used to go on to blame the missing profile for the silent
-# Contacts/Calendar/Photos prompt failure. That was the wrong diagnosis, and it is
-# corrected here rather than deleted because it sent the search in the wrong
-# direction for days. The app that would not prompt HAD a valid profile and both
-# identifier entitlements. What it lacked was the per-service hardened-runtime
-# entitlements — see Hazlie.entitlements, which now carries all four and quotes
-# tccd's own refusal. A profile is what lets you hand the app to someone else; it
-# is not what earns a TCC prompt.
-#
-# Absent is not fatal: an ad-hoc or unprofiled build still runs for whoever
-# built it. It just cannot be handed to anyone.
 # TWO SIGNING MODES, AND THEY ARE NOT COMPATIBLE.
 #
-#   Apple Development  -> embed a provisioning profile, and carry the two
-#                         identifier entitlements it asserts. Runs only on the
-#                         Macs the profile lists. Without the profile the app is
-#                         not validly signed for ANY machine.
-#   Developer ID       -> NO profile, and NOT those entitlements. A Developer ID
-#                         app is signed for everyone, so a per-machine profile is
-#                         meaningless and application-identifier is invalid
-#                         without one; codesign rejects the combination.
+#   Apple Development  -> signs for the machine that built it. `spctl -a` rejects
+#                         it, which is expected and sufficient.
+#   Developer ID       -> signed for everyone, notarized and stapled by
+#                         release.sh. This is the artifact anyone else gets.
 #
 # release.sh sets HAZLIE_SIGN_IDENTITY to the Developer ID hash and calls this
-# script, so the mode has to be decided HERE from the identity actually in use
-# rather than assumed. Getting this wrong produces a bundle that signs fine and
-# is refused at launch, which is a slow way to find out.
+# script, so the mode is decided HERE from the identity actually in use rather
+# than assumed. Getting this wrong produces a bundle that signs fine and is
+# refused at launch, which is a slow way to find out.
+#
+# ~~The development arm used to embed signing/mac-dev.provisionprofile and lift
+# `application-identifier` + `team-identifier` out of it, which is what let a
+# development build run on other listed Macs.~~ Removed 2026-08-27 with the
+# instructions in ops/SIGNING.md: it required registering an App ID and every
+# machine's UDID, and bought nothing -- release.sh already produces something
+# that runs anywhere, and the entitlements carry no get-task-allow so it was
+# never a debugging aid either. See ops/SIGNING.md, "There is no shareable
+# development build, on purpose".
+#
+# The Developer ID arm still clears a stale embedded profile: an older build in
+# the same tree could have left one, and a Developer ID signature with a
+# per-machine profile is refused.
 ENTS="Hazlie.entitlements"
-PROFILE="signing/mac-dev.provisionprofile"
 IDENTITY_NAME="$(security find-identity -v -p codesigning 2>/dev/null | grep -F "$IDENTITY" | head -1)"
 case "$IDENTITY_NAME" in
   *"Developer ID"*)
@@ -255,27 +292,8 @@ case "$IDENTITY_NAME" in
     echo "signing for distribution: no provisioning profile, base entitlements"
     ;;
   *)
-    if [ -f "$PROFILE" ]; then
-      cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
-      # The identifier entitlements are only valid alongside the profile that
-      # asserts them, so they are added here rather than living in the file.
-      ENTS="build/dev.entitlements"
-      python3 - "$PROFILE" "$ENTS" <<'PYEOF'
-import plistlib, subprocess, sys
-raw = subprocess.run(["security", "cms", "-D", "-i", sys.argv[1]],
-                     capture_output=True).stdout
-ents = plistlib.loads(raw).get("Entitlements", {})
-base = plistlib.load(open("Hazlie.entitlements", "rb"))
-for k in ("com.apple.application-identifier", "com.apple.developer.team-identifier"):
-    if k in ents:
-        base[k] = ents[k]
-plistlib.dump(base, open(sys.argv[2], "wb"))
-PYEOF
-      echo "embedded $PROFILE (development build)"
-    else
-      echo "NOTE: no $PROFILE — this build runs only for whoever built" >&2
-      echo "      it, and cannot be handed to anyone. See ops/SIGNING.md." >&2
-    fi
+    rm -f "$APP/Contents/embedded.provisionprofile"
+    echo "signing for this machine (development identity, no profile)"
     ;;
 esac
 
@@ -323,11 +341,15 @@ if [ -n "$IDENTITY" ]; then
   if [ -f "$BE/helpers/apple-data" ]; then
     codesign --force --options runtime -s "$IDENTITY" "$BE/helpers/apple-data"
   fi
+  # Signing nested Mach-O can restore this Finder attribute on the bundle.
+  # Remove it immediately before the app-level signature.
+  xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
   codesign --force --options runtime \
     --entitlements "$ENTS" \
     -s "$IDENTITY" "$APP"
   echo "signed with $IDENTITY (hardened runtime, $ENTS)"
 else
+  xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
   codesign --force -s - "$APP"
   echo "WARNING: no code-signing identity found; signed ad-hoc." >&2
   echo "         macOS will re-ask for microphone access on every arm." >&2
@@ -369,7 +391,7 @@ LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServic
 # that comes back is guaranteed to be reading the bundle just installed.
 # Failures are tolerated: a machine that has never provisioned the agents has
 # nothing to restart, which is a normal state and not a build error.
-for svc in com.hazlie.hermes com.hazlie.connect com.hazlie.llama-server; do
+for svc in io.intaglio.hermes io.intaglio.connect io.intaglio.llama-server; do
   if launchctl print "gui/$(id -u)/$svc" >/dev/null 2>&1; then
     launchctl kickstart -k "gui/$(id -u)/$svc" >/dev/null 2>&1 \
       && echo "restarted: $svc" \
@@ -381,7 +403,7 @@ done
 #
 # The comment above is careful about three background services and then left the
 # app itself behind a flag, which is the half of the install that is actually on
-# screen. A running Hazlie holds the bundle it launched with -- its webviews keep
+# screen. A running Intaglio Labs holds the bundle it launched with -- its webviews keep
 # serving the HTML and JS from that copy -- so overwriting /Applications changes
 # nothing it displays. On 2026-08-25 that meant an hour of testing a panel whose
 # JS was 73 minutes old, and the symptom was the worst kind: the feature looked
@@ -401,7 +423,7 @@ if pgrep -x Hazlie >/dev/null 2>&1; then
     sleep 0.1
   done
   if pgrep -x Hazlie >/dev/null 2>&1; then
-    echo "WARNING: Hazlie would not quit; it is still showing the old bundle" >&2
+    echo "WARNING: Intaglio Labs would not quit; it is still showing the old bundle" >&2
   else
     # REAP THE CONNECTOR DAEMON, which is the app's CHILD and not a launchd
     # agent, so killing the app orphans it (reparented to launchd) rather than

@@ -6,12 +6,32 @@
    active year lifted (its bottom border punches through the strip line via
    -1px margin) and tinted hazelnut. Oldest year left, newest right; the strip
    scrolls sideways when a life outgrows the window. */
+/* The row is the strip PLUS the globe: the years scroll inside .pm-tabs, the
+   globe sits beside them in its own cell. The padding and the baseline line
+   belong here so both read as one strip; only the years move. */
+body.plist .pm-tabrow {
+  display: flex;
+  align-items: flex-end;
+  padding: 8px 14px 0;
+  border-bottom: 1px solid rgba(234, 234, 234, 0.12);
+  flex: 0 0 auto;
+}
 body.plist .pm-tabs {
   display: flex;
   align-items: flex-end;
   gap: 3px;
-  padding: 8px 14px 0;
-  border-bottom: 1px solid rgba(234, 234, 234, 0.12);
+  /* min-width: 0 or the strip refuses to shrink below its content and pushes
+     the globe off the panel — the exact thing this layout exists to prevent. */
+  min-width: 0;
+  /* SHRINK-TO-FIT, PUSHED RIGHT. ~~flex: 1 1 auto~~ made the strip eat the whole
+     row, so a year or two of history left a hand's width of nothing between the
+     last tab and the globe. Now the strip is only as wide as its tabs (up to
+     the room available) and margin-left: auto carries it over to sit against
+     the globe, whether it holds one year or fifteen.
+     margin-left: auto and not justify-content: flex-end — end-justified
+     content in a scroll container is the classic way to make the START of the
+     list unreachable in WebKit, and WebKit is this app's engine. */
+  margin-left: auto;
   overflow-x: auto;
   /* overflow-y MUST be explicit — same trap palette.css documents on
      .conn-main, from the other side: overflow-x: auto alone promotes the
@@ -20,7 +40,7 @@ body.plist .pm-tabs {
      row vertically scrollable. The strip scrolls SIDEWAYS only. */
   overflow-y: hidden;
   scrollbar-width: none;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
 }
 body.plist .pm-tabs::-webkit-scrollbar { display: none; }
 /* THE CLIPPED EDGE HAS TO READ AS SCROLLED, NOT BROKEN. Fifteen years need
@@ -36,8 +56,23 @@ body.plist .pm-tabs::-webkit-scrollbar { display: none; }
    Symmetric, because the strip scrolls both ways; the fade is 18px, about a
    third of a tab, which is enough to read as intent and not enough to hide a
    year. */
-body.plist .pm-tabs {
-  scroll-snap-type: x proximity;
+body.plist .pm-tabs { scroll-snap-type: x proximity; }
+/* ~~The fade was permanent, on both ends.~~ It cost the end tabs their edges
+   whether or not anything was hidden behind them, and paying for that at the
+   right-hand end meant holding the newest year 18px clear of the globe — the
+   gap the owner asked about. The page now says which side is actually cut
+   (markTabFades, on scroll and after every strip render), so a strip resting at
+   its newest end fades only on the left and the newest year can sit right
+   against the globe with its border intact. */
+body.plist .pm-tabs.fade-l {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 18px);
+  mask-image: linear-gradient(to right, transparent 0, #000 18px);
+}
+body.plist .pm-tabs.fade-r {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent 100%);
+}
+body.plist .pm-tabs.fade-l.fade-r {
   -webkit-mask-image: linear-gradient(
     to right, transparent 0, #000 18px, #000 calc(100% - 18px), transparent 100%
   );
@@ -46,9 +81,10 @@ body.plist .pm-tabs {
   );
 }
 body.plist .pm-tab { scroll-snap-align: start; }
-/* The globe is stuck to the right edge, so it must never be the thing that
-   fades — it is the one control that has to stay legible at all times. */
-body.plist .pm-tabs .pm-tab-globe { scroll-snap-align: end; }
+/* (The globe used to need `scroll-snap-align: end` here, and the mask above
+   faded it anyway — it sat inside the strip's own right-hand fade. Out of the
+   scroller it is neither snapped nor masked, which is what "the one control
+   that has to stay legible at all times" actually required.) */
 body.plist .pm-tab {
   flex: 0 0 auto;
   /* 9px rather than 12: a year is four fixed-width glyphs, so the padding is
@@ -122,6 +158,28 @@ body.plist .pm-src-ic {
 body.plist .pm-src-ic svg { width: 100%; height: 100%; display: block; }
 body.plist .pm-src-ic:hover { color: var(--hazelnut-light); }
 
+/* THE CATEGORY MARKS, in front of the name: this person is in the top five of
+   a card's category this year. Same glyph the card uses, at row size — the mark
+   is only readable because the card above taught it, so a second icon set for
+   the same five ideas would have to be learned twice. Hazelnut rather than
+   muted, because unlike the connector glyphs after the name these are the
+   uncommon thing on a line and they are what the eye is meant to catch; the
+   label arrives with the data and shows on hover. */
+body.plist .pl-award {
+  flex: 0 0 auto;
+  position: relative;
+  display: inline-flex;
+  width: 14px; height: 14px;
+  margin-right: 1px;
+  color: var(--hazelnut-light);
+  /* ~~0.75.~~ Lifted once the glyphs stopped all being hazelnut: the tint is
+     the mark's identity now (see the tod-band block below), and a quarter of
+     it dropped on the way to the eye. */
+  opacity: 0.9;
+}
+body.plist .pl-award svg { width: 100%; height: 100%; display: block; }
+body.plist .pl-award:hover { opacity: 1; }
+
 /* Line 1's message count, directly after the name; line 2 is the chips. */
 body.plist .pm-msgs {
   flex: 0 0 auto;
@@ -137,6 +195,7 @@ body.plist .pm-chip-row { margin-top: 4px; }
    list's own top edge cannot clip it. */
 body.plist .pm-src-ic { position: relative; }
 body.plist .pm-src-ic::after,
+body.plist .pl-award::after,
 body.plist .pm-face[data-tip]::after {
   content: attr(data-tip);
   position: absolute;
@@ -155,6 +214,7 @@ body.plist .pm-face[data-tip]::after {
   z-index: 5;
 }
 body.plist .pm-src-ic:hover::after,
+body.plist .pl-award:hover::after,
 body.plist .pm-face[data-tip]:hover::after { opacity: 1; }
 /* (The globe tab had this tooltip too, until 2026-08-25 the same day: its
    bubble laid out 25px past the strip's box, and with overflow-y promoted to
@@ -162,14 +222,41 @@ body.plist .pm-face[data-tip]:hover::after { opacity: 1; }
    The faces keep theirs — the sky stage is tall enough to absorb it, and
    initials without a name are a riddle.) */
 
-/* The globe tab: an icon where the others are a year, so it reads as a
-   different KIND of thing on the same strip. */
-body.plist .pm-tab-globe {
+/* THE GLOBE IS AN ICON, NOT A TAB (owner, 2026-08-26). ~~It wore the same
+   rounded top, border and fill as a year.~~ Dressing it as a tab said it was
+   another year, and it is not: it is the way out of years altogether. Bare
+   glyph, pinned to the right edge, tinted when it is the surface you are on.
+   The strip of years floats up against it. */
+body.plist .pm-globe {
   display: flex;
   align-items: center;
-  padding: 5px 10px 6px;
+  flex: 0 0 auto;
+  /* SITS ON THE YEARS' BASELINE — the bottom of the circle level with the
+     bottom of "2026", not with the bottom of the tab that holds it (owner,
+     2026-08-26). ~~The tab's box edge was the first reading of this~~ and it
+     looked wrong: the eye lines an icon up against the digits beside it, not
+     against the chrome around them.
+     7px, and it is two measured numbers rather than a nudge. The baseline is
+     9.0px above the tab's box bottom — 6px of the tab's own bottom padding plus
+     ~3px of descent under 12px IBM Plex Mono — and the circle's ink stops
+     1.87px short of the svg's box bottom, because an r=9 circle in a 24 viewBox
+     drawn at 15px leaves that much air beneath it. 9.0 - 1.87 = 7.13, rounded
+     to 7; the remainder is a tenth of a pixel and false precision to write
+     down. Change the tab's padding, the font size, or that viewBox and this
+     number is wrong — measure it again rather than nudging it. */
+  margin: 0 0 7px 8px;
+  padding: 0 2px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.14s;
 }
-body.plist .pm-tab-globe svg { display: block; width: 14px; height: 14px; }
+body.plist .pm-globe svg { display: block; width: 15px; height: 15px; }
+body.plist .pm-globe:hover { color: var(--fg); }
+/* Lit rather than boxed: same signal the active year carries, without the
+   chrome the year needs to sit on the strip's line. */
+body.plist .pm-globe.active { color: var(--hazelnut-light); }
 /* The sky has no flow to put a loading line in, so centre it like the empty
    state rather than let it stick to the top-left corner. */
 body.plist .pm-sky .pm-loading {
@@ -195,7 +282,23 @@ body.plist .pm-cards {
 body.plist .pm-cards::-webkit-scrollbar { display: none; }
 body.plist .pm-card {
   flex: 0 0 auto;
-  width: 168px;
+  /* WIDE ENOUGH FOR THE EYEBROW, which is the one line here that cannot be
+     made narrower: it is nowrap by design (a two-line eyebrow above a one-line
+     name unbalances the row) and its labels come from the server, not from
+     this file. ~~168px.~~ That left a 142px content box, and the longest
+     labels overran it — "longest monthly streak" needs 164px, and the widest
+     of them, then "reconnected after a gap", needed 171px (measured) — so the
+     text crossed the card's right border and painted over the next card.
+     202 gave that widest label 5px of slack; since the 2026-08-26 renames
+     ("favorite", "reconnected") the widest is "longest monthly streak" and the
+     slack is 12px. Left at 202 rather than retuned: a card narrow enough to
+     fit today's labels exactly is a card the next label overruns. Fixed rather than sized to
+     content: a content-sized card takes its width from the longest line in it,
+     and the line under the name is free text, so the cards came out different
+     widths from each other (209 against 198, measured). A label longer than
+     any of today's ellipsizes inside its own card — the eyebrow rule below is
+     what makes sure of it. */
+  width: 202px;
   box-sizing: border-box;
   padding: 12px;
   border-radius: 12px;
@@ -208,15 +311,21 @@ body.plist .pm-card {
 /* Person of the year is always first and always the loudest — it is the only
    card that is a plain maximum, so it is the one that is nearly always there
    and the one the eye should find first. */
-body.plist .pm-card.lead {
-  background: linear-gradient(160deg, rgba(242, 232, 212, 0.14) 0%,
-              rgba(197, 165, 109, 0.10) 55%, rgba(51, 255, 102, 0.08) 100%);
-  border-color: rgba(197, 165, 109, 0.30);
-}
+/* ~~The first card wore a gold-to-green wash and a lit border, and its face
+   a green glow.~~ Both yeeted (owner, 2026-08-25): person of the year is the
+   card that says so, and dressing it as well made the row of cards read as
+   one highlighted thing next to three dim ones. The .lead class still marks
+   it — the constellation's lead bubble still uses it — it just no longer
+   changes how this card is painted. */
 body.plist .pm-card-eyebrow {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* Belt and braces on the width above: if a label ever outgrows even a card
+     sized to it, it truncates inside its own card rather than over the next
+     one. Overflow here is a bug either way — this only decides which kind. */
+  min-width: 0;
+  overflow: hidden;
   font-size: 9px;
   letter-spacing: 0.13em;
   color: var(--muted);
@@ -224,6 +333,45 @@ body.plist .pm-card-eyebrow {
   text-transform: uppercase;
 }
 body.plist .pm-card-eyebrow svg { flex: 0 0 auto; width: 13px; height: 13px; display: block; }
+
+/* ---- A COLOUR PER CARD, FROM THE ORB'S OWN FIVE MOODS (owner, 2026-08-26) ----
+   Five highlight kinds and five time-of-day bands, and the pairings are the
+   moods' own descriptions in palette.css §time of day, not a rotation:
+
+     favorite     <- power hour     "the brand gradient at full saturation"
+     reconnected  <- early morning  "pre-dawn quiet", something coming back
+     new          <- late morning   "energetic · fresh spring green"
+     streak       <- happy hour     "hazelnut ripens into golden-hour amber"
+     drifting     <- night          "the one band that goes DARKER"
+
+   One declaration each: the eyebrow's `color` is inherited by its label AND by
+   the glyph, which is stroked with currentColor, so the icon and the title
+   cannot come out different colours.
+
+   WHICH STOP OF THE BAND. Each gradient has three or four, and these take the
+   one that is legible as INK on the card rather than the one that is furthest
+   along the ramp — a gradient stop is chosen to sit next to its neighbours on
+   a lit sphere, which is not the same job. Against the card's own background
+   (#191918, the 4% white over the panel) the greys these replace measure 2.63
+   to 1, and the four bands' chosen stops run 7.52 to 9.52 — arithmetic on the
+   WCAG relative-luminance formula, not a guess.
+
+   Night is the exception and it could not be otherwise: its brightest stop is
+   #6e3a5c at 2.03 to 1, darker than the grey it would replace, because the
+   band is defined as going darker than what it sits on. Mixed toward the
+   foreground until it clears 5 to 1 — still the dimmest of the five, which is
+   the right end of the row for the card that says a friendship is fading. */
+body.plist .pm-card[data-kind="person-of-the-year"] .pm-card-eyebrow,
+body.plist .pl-award[data-kind="person-of-the-year"] { color: #c5a56d; }
+body.plist .pm-card[data-kind="back-from-your-past"] .pm-card-eyebrow,
+body.plist .pl-award[data-kind="back-from-your-past"] { color: #cbb8d6; }
+body.plist .pm-card[data-kind="rising-star"] .pm-card-eyebrow,
+body.plist .pl-award[data-kind="rising-star"] { color: #7fc46a; }
+body.plist .pm-card[data-kind="streak"] .pm-card-eyebrow,
+body.plist .pl-award[data-kind="streak"] { color: #e0a35c; }
+body.plist .pm-card[data-kind="drifting"] .pm-card-eyebrow,
+body.plist .pl-award[data-kind="drifting"] { color: color-mix(in srgb, #6e3a5c 55%, var(--fg)); }
+body.plist .pm-card-eyebrow span { overflow: hidden; text-overflow: ellipsis; }
 body.plist .pm-card-who { display: flex; align-items: center; gap: 7px; min-width: 0; }
 body.plist .pm-card-face {
   flex: 0 0 auto;
@@ -237,11 +385,7 @@ body.plist .pm-card-face {
   font-size: 9px;
   font-weight: 600;
 }
-body.plist .pm-card.lead .pm-card-face {
-  box-shadow: inset -2px -2px 5px rgba(0, 0, 0, 0.18),
-              inset 2px 2px 4px rgba(255, 255, 255, 0.35),
-              0 0 14px rgba(51, 255, 102, 0.35);
-}
+
 body.plist .pm-card-name {
   font-size: 12.5px;
   font-weight: 600;
@@ -258,8 +402,9 @@ body.plist .pm-card-line {
 
 /* ---- the constellation (the globe tab, 2026-08-25) ----
    The same year's people, grouped by TOPIC instead of listed by engagement:
-   one dashed bubble per topic, the people in it as initial discs, sized by
-   that year's engagement. The list answers "who"; this answers "about what".
+   one dashed bubble per topic, the people in it as initial discs. A bubble's
+   distance encodes conversation activity; its size encodes people in it. The
+   list answers "who"; this answers "about what".
 
    EVERY POSITION AND SIZE HERE IS SET FROM JAVASCRIPT through element.style,
    never a style attribute — this page ships style-src 'self' with no
@@ -272,35 +417,42 @@ body.plist .pm-sky {
   min-height: 380px;
   overflow: hidden;
 }
-/* The three dashed orbits. Decoration, not data: they do not encode distance
-   or count, they give the field a centre to be arranged around. */
-body.plist .pm-orbit {
+/* The spokes: one line from the core to each bubble, its weight and opacity
+   the same normalised activity that set the bubble's distance. ~~Three dashed
+   orbits at fixed pixel radii.~~ They were decoration on a data display, and
+   they read as a scale they were not — see the note in people-months.js.
+   Stretched to the stage (preserveAspectRatio: none) so a resize moves the
+   line ends with the bubbles they point at. */
+body.plist .pm-spokes {
   position: absolute;
-  left: 50%; top: 51%;
-  transform: translate(-50%, -50%);
-  border-radius: 50%;
-  border: 1px dashed rgba(197, 165, 109, 0.22);
-  pointer-events: none;
-}
-/* Background specks. Deterministic per year (seeded PRNG in the page), so a
-   re-render or a search keystroke does not reshuffle the sky under the eye. */
-body.plist .pm-speck {
-  position: absolute;
-  border-radius: 50%;
-  background: var(--hazelnut-light);
+  inset: 0;
+  width: 100%; height: 100%;
   pointer-events: none;
 }
 /* The owner, at the centre — the one thing every topic is a relationship to.
    Same blob and breathing as the widget's own orb so it reads as the same
-   creature, with the brand gradient running cream -> hazelnut -> green. */
+   creature.
+
+   AND NOW THE SAME MOOD (owner, 2026-08-26). ~~The gradient and the glow were
+   written out longhand here: cream -> hazelnut -> green, with a green halo.~~
+   That is one of the orb's five time-of-day bands — power hour — frozen into a
+   second stylesheet. The home orb has drifted through the other four since the
+   day it was written, so for most of any given day the two orbs were different
+   colours while claiming to be the same creature, and at night they were a
+   deep-magenta one and a bright green one.
+   The vars come from orb-tod.js, which the page now loads and which blends
+   between bands continuously; `tod-orb` on the element is what opts it in.
+   The literals stay as var() FALLBACKS rather than being deleted: they are what
+   paints if that script is ever absent, and a core with no background at all is
+   an invisible centre to a picture that is arranged around it. */
 body.plist .pm-core {
   position: absolute;
   left: 50%; top: 51%;
   transform: translate(-50%, -50%);
   width: 54px; height: 54px;
   border-radius: 49% 51% 52% 48% / 51% 49% 51% 49%;
-  background: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 45%, #33ff66 100%);
-  box-shadow: 0 0 34px rgba(51, 255, 102, 0.25),
+  background: var(--tod-grad, linear-gradient(160deg, #f2e8d4 0%, #c5a56d 45%, #33ff66 100%));
+  box-shadow: 0 0 34px var(--tod-glow, rgba(51, 255, 102, 0.30)),
               inset -4px -4px 10px rgba(0, 0, 0, 0.18),
               inset 4px 4px 9px rgba(255, 255, 255, 0.30);
   animation: orb-breathe 7s ease-in-out infinite;
@@ -308,16 +460,18 @@ body.plist .pm-core {
 }
 /* One topic. Width/height/left/top come from the page. Clicking it opens that
    topic as a list, so it has to say it is a control — the dashed ring alone
-   reads as decoration. */
+   reads as decoration.
+   ~~A centred flex column: the faces, then the label under them.~~ The faces
+   are PACKED now, each one at a spot people-sky-layout.js solved for, so they
+   are positioned against this box rather than flowed inside it. The label went
+   with them, out to the bubble's bottom edge. */
 body.plist .pm-cluster {
   position: absolute;
+  box-sizing: border-box;
   transform: translate(-50%, -50%);
   border-radius: 50%;
   border: 1.5px dashed rgba(197, 165, 109, 0.28);
   background: radial-gradient(circle at 50% 40%, rgba(197, 165, 109, 0.07) 0%, transparent 70%);
-  display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
-  gap: 7px;
   cursor: pointer;
   transition: border-color 0.14s, background 0.14s;
 }
@@ -360,21 +514,60 @@ body.plist .pm-filter-chip:hover .pm-filter-x { color: var(--fg); }
 @media (prefers-reduced-motion: reduce) {
   body.plist .pm-cluster { transition: none; }
 }
-/* 78%, not 84%: the discs wrap to a second row, and a circle is narrower there
-   than across its middle. At 84% the trailing "+N" chip sat on the dashed
-   border and looked like it had fallen out of the bubble. */
-body.plist .pm-faces {
-  display: flex; flex-wrap: wrap;
-  align-items: center; justify-content: center;
-  gap: 4px;
-  max-width: 78%;
-}
 /* A person: their initials on a hazelnut disc, lit from the upper left so a
    crowd of them reads as beads rather than flat dots. Diameter is set from
    the page — it carries that year's engagement. */
-body.plist .pm-face {
-  position: relative;
+/* The list row's own face (owner, 2026-08-25: photos on the names too, not
+   just the awarded ones). Same treatment as the constellation's and the
+   cards', at the size a dense list can carry. */
+body.plist .pl-face {
   flex: 0 0 auto;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  margin-right: 7px;
+  background: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 60%, #a8854c 100%);
+  box-shadow: inset -2px -2px 5px rgba(0, 0, 0, 0.18),
+              inset 2px 2px 4px rgba(255, 255, 255, 0.35);
+  color: #141412;
+  font-size: 8px; font-weight: 600; letter-spacing: 0;
+}
+
+/* A REAL PHOTO REPLACES THE INITIALS, and the text must go with it: the
+   letters are the fallback, not a caption. Covered and centred so a
+   non-square thumbnail fills the circle instead of squashing into it, and the
+   gradient is dropped so a photo with transparency does not sit on gold. */
+/* SCOPED, and that is the whole point. A bare `.has-photo` (0,1,0) loses to
+   `body.plist .pl-face` (0,2,1), so the photo rendered at its natural 96px
+   inside a 20px circle — a blurry zoomed crop — with the initials still dark
+   on top of it. Written with !important first, then "cleaned up" to remove
+   them, which is what broke it (2026-08-25). Matching the base rules'
+   specificity is the fix; !important would only have hidden the question. */
+body.plist .pl-face.has-photo,
+body.plist .pm-face.has-photo,
+body.plist .pm-card-face.has-photo {
+  /* The photo itself is an inline background-image set by paintAvatars, which
+     replaces the gradient the base rule painted. These are the framing rules
+     the inline style cannot carry. */
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  /* The initials stay in the DOM as the fallback and as the accessible name;
+     they must not show THROUGH the face they were standing in for. */
+  color: transparent;
+}
+
+/* Absolutely placed, never flowed: left/top/width/height are the packer's
+   answer for this face in this bubble.
+   NO `overflow: hidden` here, and it is worth saying why not, because the
+   design's artboard has it: the artboard puts a real <img> inside the circle
+   and has to clip it. This draws the photo as a BACKGROUND, which border-radius
+   already clips on its own — and the face's hover tooltip is an ::after that
+   lives 5px BELOW the circle, so hiding overflow would silently swallow it and
+   leave a crowd of initials with no way to learn a name. */
+body.plist .pm-face {
+  position: absolute;
+  transform: translate(-50%, -50%);
   border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
   background: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 60%, #a8854c 100%);
@@ -384,23 +577,55 @@ body.plist .pm-face {
   font-weight: 600;
   cursor: default;
 }
+/* Each transformed face is its own stacking context. Raising only the
+   ::after tooltip cannot beat a neighboring face, so lift the whole hovered
+   person and its name pill above every surrounding circle. */
+body.plist .pm-face[data-tip]:hover { z-index: 8; }
 /* The people this bubble could not fit. Hollow on purpose: it is a count, not
-   a person, and must never be mistaken for one. */
+   a person, and must never be mistaken for one. It sits IN the crowd now
+   rather than after it, so it also carries the panel's own background — a
+   dashed ring alone reads as one more face at this size. */
 body.plist .pm-face-more {
-  background: none;
+  background: rgba(13, 13, 12, 0.85);
   box-shadow: none;
   border: 1px dashed rgba(234, 234, 234, 0.25);
   color: var(--muted);
+  /* NOT CLIPPED, unlike every other face. The base rule hides overflow so a
+     contact photo cannot paint the corners outside its circle; a chip has no
+     photo, and what it has instead is a NUMBER. A four-digit count in a 13px
+     seat sits a pixel or so wider than the dashed ring — which is what the
+     design's own artboard draws, and it reads fine — but clipped to the ring
+     it would read as a different, smaller number. A wrong count is worse than
+     an untidy one. */
+  overflow: visible;
 }
+/* A PILL ON THE BUBBLE'S HEM, not a line under the faces. It has to stay
+   legible over whatever face the packer put at the bottom of the crowd, which
+   is what the opaque background and the border are for; the layout module
+   reserves the 8px it hangs below the circle (LABEL_DROP) so the lowest bubble
+   on the stage does not lose it to the panel edge.
+
+   LABELS STAY IN FRONT (new code, 2026-08-26). A transformed face establishes
+   its own stacking context, so DOM order alone did not reliably keep the pill
+   above a large bottom-row face. Give the label an explicit layer: names must
+   remain readable even where the deliberately packed circles overlap them. */
 body.plist .pm-cluster-label {
-  font-size: 10px;
+  position: absolute;
+  z-index: 2;
+  left: 50%; bottom: -8px;
+  transform: translateX(-50%);
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(20, 20, 18, 0.92);
+  border: 1px solid rgba(197, 165, 109, 0.3);
+  font-size: 9px;
   letter-spacing: 0.1em;
   color: var(--muted);
   text-align: center;
   white-space: nowrap;
 }
-/* The biggest topic of the year gets the hazelnut, so the eye has somewhere
-   to land first. */
+/* The most-talked-about topic gets the hazelnut, so the eye has somewhere to
+   land first. */
 body.plist .pm-cluster.lead .pm-cluster-label { color: var(--hazelnut-light); }
 body.plist .pm-cluster.lead { border-color: rgba(197, 165, 109, 0.45); }
 /* Said plainly rather than drawn: a constellation of nothing is just an empty
@@ -520,12 +745,11 @@ body.plist .pm-room-badge {
   white-space: nowrap;
 }
 
-/* Room volume, next to the direct count and quieter than it. The distinction is
-   the point: the first number is a conversation, the second is a room. */
-body.plist .pm-room-msgs {
-  opacity: 0.6;
-  font-style: italic;
-}
+/* ~~.pm-room-msgs: room volume, next to the direct count and quieter than it.~~
+   Yeeted with the number it painted (owner, 2026-08-26) rather than left as an
+   unused rule — a selector nothing renders is a trap for the next reader, who
+   has to prove it is dead before touching anything near it. The distinction it
+   drew still holds everywhere the counts are USED; see rowHtml. */
 
 /* Belt and braces on `hidden`. `.pm-cards` and `.pm-filter` set `display: flex`
    in an author-origin rule, which beats the user-agent `[hidden]` rule — so
@@ -535,101 +759,16 @@ body.plist .pm-room-msgs {
 body.plist .pm-cards[hidden],
 body.plist .pm-filter[hidden] { display: none; }
 
-/* THE RECENCY SEGMENTS, globe only. Its own row rather than sharing .pm-filter,
-   because renderFilter replaceChildren()s that node and hides it whenever the
-   view is not a list — which is exactly when this control matters. Reads as a
-   tab strip (a view you are standing in) rather than as a chip (a thing you can
-   dismiss), because "everyone" is a state and not the absence of one. */
-body.plist .pm-recency {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  /* Room above as well as below. Flush against the tab strip's border the row
-     read as an overflow of the tabs rather than its own control. */
-  padding: 7px 12px 8px;
-  flex: 0 0 auto;
-}
-body.plist .pm-recency[hidden] { display: none; }
-
-/* THE GROOVE. What makes three buttons read as one control: a single recessed
-   track they all sit in, so the selected one is raised OUT of a surface rather
-   than being the only one with a box. */
-body.plist .pm-rec-track {
-  display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: 8px;
-  background: rgba(234, 234, 234, 0.035);
-  border: 1px solid rgba(234, 234, 234, 0.07);
-}
-body.plist .pm-rec {
-  appearance: none;
-  border: 0;
-  background: transparent;
-  border-radius: 6px;
-  padding: 3px 9px;
-  font: inherit;
-  font-size: 10px;
-  line-height: 1.4;
-  letter-spacing: 0.02em;
-  color: var(--muted);
-  cursor: pointer;
-  white-space: nowrap;
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-  transition: color 120ms ease, background-color 120ms ease;
-}
-/* The count is evidence, not part of the name. Tabular so the three numbers
-   do not jitter the track's width as the year changes under them. */
-body.plist .pm-rec-n {
-  font-size: 9px;
-  opacity: 0.55;
-  font-variant-numeric: tabular-nums;
-}
-body.plist .pm-rec:hover { color: var(--secondary); }
-body.plist .pm-rec.active {
-  color: var(--hazelnut-light);
-  background: rgba(234, 234, 234, 0.09);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
-}
-body.plist .pm-rec.active .pm-rec-n { opacity: 0.75; }
-body.plist .pm-rec:focus-visible {
-  outline: 1px solid var(--hazelnut-light);
-  outline-offset: 1px;
-}
-
-/* The globe sits in the strip like any other tab, immediately after the newest
-   year. It was stuck to the right edge for a while — reachable, but floating
-   apart from the years and reading as a separate right-aligned control rather
-   than the last thing in the row. The strip opens scrolled to its right-hand
-   end, which puts the newest year and the globe together in view without
-   pinning either. */
-
-/* HOW OLD THE ANSWER IS, and the way to ask for a newer one. Pushed to the far
-   end of the row so it never competes with the recency segments — it is a
-   footnote, not a control you reach for. It only becomes prominent when the
-   answer is actually behind. */
-body.plist .pm-fresh {
-  appearance: none;
-  margin-left: auto;
-  border: 1px solid transparent;
-  background: transparent;
-  border-radius: 5px;
-  padding: 2px 6px;
-  font: inherit;
-  font-size: 9px;
-  letter-spacing: 0.03em;
-  color: var(--muted);
-  opacity: 0.7;
-  cursor: pointer;
-  white-space: nowrap;
-}
-body.plist .pm-fresh:hover:not(:disabled) { opacity: 1; color: var(--fg); }
-body.plist .pm-fresh.stale {
-  opacity: 1;
-  color: var(--hazelnut-light);
-  border-color: color-mix(in srgb, var(--hazelnut-light) 28%, transparent);
-}
-body.plist .pm-fresh:disabled { cursor: default; opacity: 0.55; }
-body.plist .pm-fresh:focus-visible { outline: 1px solid var(--hazelnut-light); outline-offset: 1px; }
+/* THE GLOBE TOGGLE STAYS REACHABLE — ten years plus the globe do not fit a
+   520px panel, so as the last tab of a scrolling strip it lived past the right
+   edge and had to be hunted for. (It is no longer a tab at all; the history
+   below is why it is not inside the scroller, which still holds.)
+   ~~Fixed by sticking it to the right edge with position: sticky and an opaque
+   background, the years scrolling underneath it; opaque because a year sliding
+   under a see-through button reads as a rendering fault. A second rule then had
+   to restate .active, because that opaque background beat the shared one.~~
+   Both yeeted (owner, 2026-08-26): a year sliding under an OPAQUE button reads
+   as a rendering fault too — the covered year keeps its own left corner and its
+   first glyphs and looks half-eaten, not scrolled ("20" of 2023, 22px covered,
+   measured). It is a sibling of the strip now, so it is always reachable, never
+   overlaps anything, and .pm-tab.active paints it like every other tab. */

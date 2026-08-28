@@ -8,7 +8,13 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import { openDb, insertRows } from '../server/hermes.mjs';
-import { summarizeYear, sampleRows, MIN_ROWS, openSummariesDb } from '../server/people/summary.mjs';
+import {
+  gatherRows,
+  summarizeYear,
+  sampleRows,
+  MIN_ROWS,
+  openSummariesDb,
+} from '../server/people/summary.mjs';
 
 const NOW = new Date(2027, 0, 1).getTime();
 
@@ -77,6 +83,46 @@ test('sampleRows spreads evenly and caps', () => {
   assert.equal(s.length, 120);
   assert.equal(s[0].i, 0);
   assert.ok(s[119].i > 500, 'reaches the tail of the year');
+});
+
+test('year summaries include social DMs and exclude social rooms', () => {
+  const ctx = openDb(':memory:');
+  const y = new Date(2026, 2, 1).getTime();
+  const sources = ['messenger', 'instagram', 'twitter', 'telegram', 'discord', 'slack', 'linkedin'];
+  const idToKey = new Map();
+  const rows = sources.map((source, i) => {
+    const handle = `${source}_person`;
+    idToKey.set(handle, `name:${source} person`);
+    return {
+      ts: y + i * 86_400_000,
+      source,
+      entity_id: `${source}:summary-direct`,
+      text: `a substantive direct message about our ${source} project plans`,
+      meta: { chat_handle: handle, is_group: false, is_from_me: i % 2 === 0 },
+    };
+  });
+  rows.push({
+    ts: y + 20 * 86_400_000,
+    source: 'discord',
+    entity_id: 'discord:summary-room',
+    text: 'a substantive room message that must not enter a two-person summary',
+    meta: {
+      chat_handle: 'discord_room', sender_handle: 'discord_group_sender',
+      is_group: true, is_from_me: false,
+    },
+  });
+  idToKey.set('discord_group_sender', 'name:discord group sender');
+  insertRows(ctx, rows);
+
+  for (const source of sources) {
+    const gathered = gatherRows(ctx, idToKey, `name:${source} person`, 2026);
+    assert.equal(gathered.length, 1, `${source} direct message included`);
+  }
+  assert.deepEqual(
+    gatherRows(ctx, idToKey, 'name:discord group sender', 2026),
+    [],
+    'room text cannot be summarized as a two-person conversation',
+  );
 });
 
 test('a persisted summary is reused, and regenerates only after real drift', async () => {

@@ -34,22 +34,66 @@ enum Provision {
   // System Settings under a name nobody installed. Spawned by the app, the app
   // is responsible, so the grant is one row called Intaglio Labs and the same
   // inheritance covers the Contacts, Calendar and Photos prompts.
-  private static let agentsInOrder = ["com.hazlie.hermes", "com.hazlie.llama-server", "com.hazlie.connect"]
+  private static let agentsInOrder = ["io.intaglio.hermes", "io.intaglio.llama-server", "io.intaglio.connect"]
 
   /// Remove a connectors agent left behind by an older install. Without this it
   /// keeps running under launchd — responsible for itself, needing its own FDA,
   /// and racing the app's child for the same cursors and caches.
   static func retireConnectorsAgent() {
-    let label = "com.hazlie.connectors"
-    let plist = launchAgents.appendingPathComponent("\(label).plist")
-    guard fm.fileExists(atPath: plist.path) else { return }
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-    p.arguments = ["bootout", "gui/\(getuid())/\(label)"]
-    try? p.run()
-    p.waitUntilExit()
-    try? fm.removeItem(at: plist)
-    NSLog("Intaglio Labs: retired the connectors launchd agent; it runs as a child now")
+    // BOTH namespaces, because "an older install" now includes one from before
+    // the com.hazlie.* -> io.intaglio.* rename (2026-08-25). Dropping the old
+    // label here would leave a pre-rename agent running under launchd forever:
+    // responsible for itself, needing its own FDA, and racing the app's child
+    // for the same cursors and caches — exactly what this function exists to
+    // prevent, silently reintroduced by the rename.
+    for label in ["io.intaglio.connectors", "com.hazlie.connectors"] {
+      let plist = launchAgents.appendingPathComponent("\(label).plist")
+      guard fm.fileExists(atPath: plist.path) else { continue }
+      let p = Process()
+      p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+      p.arguments = ["bootout", "gui/\(getuid())/\(label)"]
+      try? p.run()
+      p.waitUntilExit()
+      try? fm.removeItem(at: plist)
+      NSLog("Intaglio Labs: retired the \(label) launchd agent; it runs as a child now")
+    }
+  }
+
+  /// Retire the backend jobs installed before the bundle identifier moved
+  /// from com.hazlie.* to io.intaglio.*. The new plists are installed first;
+  /// only then are these working fallbacks removed, so a failed upgrade never
+  /// trades a running backend for none at all.
+  private static func retireLegacyBackendAgents() -> Bool {
+    var retired = false
+    let migrations = [
+      ("com.hazlie.hermes", "io.intaglio.hermes"),
+      ("com.hazlie.llama-server", "io.intaglio.llama-server"),
+      ("com.hazlie.connect", "io.intaglio.connect"),
+    ]
+    for (legacy, replacement) in migrations {
+      let plist = launchAgents.appendingPathComponent("\(legacy).plist")
+      let replacementPlist = launchAgents.appendingPathComponent("\(replacement).plist")
+      guard fm.fileExists(atPath: plist.path),
+            fm.fileExists(atPath: replacementPlist.path) else { continue }
+      let p = Process()
+      p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+      p.arguments = ["bootout", "gui/\(getuid())/\(legacy)"]
+      try? p.run()
+      p.waitUntilExit()
+      try? fm.removeItem(at: plist)
+      retired = true
+      NSLog("Intaglio Labs: retired legacy backend agent \(legacy)")
+    }
+    return retired
+  }
+
+  /// Jobs may have attempted to start while their legacy counterparts still
+  /// owned the ports. Restart every installed new job after migration.
+  private static func restartInstalledBackendAgents() {
+    for label in agentsInOrder {
+      let plist = launchAgents.appendingPathComponent("\(label).plist")
+      if fm.fileExists(atPath: plist.path) { kickstart(label) }
+    }
   }
   // The llama plist hard-codes Homebrew's binary path; provision points it at
   // the stable copy instead.
@@ -58,9 +102,45 @@ enum Provision {
   // Call once at launch. Runs off the main thread — copying node and booting
   // launchd agents should not block the UI coming up.
 
+  /// Ensure the connector daemon has its minimum config before anything tries
+  /// to start it. A downloaded app used to create this file only if onboarding
+  /// reached one particular button, so skipping/resuming that scene left every
+  /// connector permanently parked after an otherwise successful provision.
+  ///
+  /// A newly-created connector identity also starts WhatsApp OFF. WhatsApp's
+  /// Desktop database belongs to WhatsApp, not to Intaglio Labs, and survives a
+  /// Intaglio Labs wipe. Treating its mere presence as prior consent made a truly fresh
+  /// install paint WhatsApp green before the owner had selected it. The marker
+  /// is removed only by the explicit Connect button in the connections UI.
+  @discardableResult
+  static func ensureConnectorDefaults() -> Bool {
+    let dir = hazlie.appendingPathComponent("connectors")
+    let config = dir.appendingPathComponent("config.json")
+    if fm.fileExists(atPath: config.path) { return true }
+    do {
+      try mkdir(hazlie, 0o700)
+      try mkdir(dir, 0o700)
+      let whatsapp = dir.appendingPathComponent("whatsapp.disabled")
+      if !fm.fileExists(atPath: whatsapp.path) {
+        try Data().write(to: whatsapp, options: .atomic)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: whatsapp.path)
+      }
+
+      // Config is the completion marker and is deliberately written last. If
+      // anything above fails, the next launch retries instead of seeing a config
+      // and skipping the consent marker that should accompany its creation.
+      try "{}\n".write(to: config, atomically: true, encoding: .utf8)
+      try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: config.path)
+      return true
+    } catch {
+      NSLog("Intaglio Labs: connector defaults failed: \(error)")
+      return false
+    }
+  }
+
   static func ensureBackend() {
     DispatchQueue.global(qos: .utility).async {
-      let connectPlist = launchAgents.appendingPathComponent("com.hazlie.connect.plist")
+      let connectPlist = launchAgents.appendingPathComponent("io.intaglio.connect.plist")
       guard !fm.fileExists(atPath: connectPlist.path) else {
         // Already provisioned (owner's setup or a previous run) — but still
         // heal a missing secret: installs provisioned by a build that only
@@ -69,13 +149,17 @@ enum Provision {
         // Existing files are never touched, so this is a no-op when healthy.
         do { try ensureSecrets() }
         catch { NSLog("Intaglio Labs: secret provisioning failed: \(error)") }
+        if retireLegacyBackendAgents() { restartInstalledBackendAgents() }
         return
       }
       guard fm.fileExists(atPath: backend.appendingPathComponent("connect/server.mjs").path) else {
         NSLog("Intaglio Labs: no bundled backend — a dev build without it, skipping provision")
         return
       }
-      do { try provision() }
+      do {
+        try provision()
+        if retireLegacyBackendAgents() { restartInstalledBackendAgents() }
+      }
       catch { NSLog("Intaglio Labs: provisioning failed: \(error)") }
     }
   }
@@ -164,12 +248,12 @@ enum Provision {
     // download lands, which is when it becomes true.
     let modelLink = hazlie.appendingPathComponent("models/model.gguf")
     for label in agentsInOrder {
-      if label == "com.hazlie.llama-server" && !fm.fileExists(atPath: modelLink.path) {
+      if label == "io.intaglio.llama-server" && !fm.fileExists(atPath: modelLink.path) {
         NSLog("Intaglio Labs: no model yet — skipping the llama agent until one is chosen")
         continue
       }
       installAgent(label)
-      if label == "com.hazlie.hermes" { waitForHermes() }
+      if label == "io.intaglio.hermes" { waitForHermes() }
     }
     NSLog("Intaglio Labs: provisioned backend from the app bundle")
   }

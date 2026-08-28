@@ -37,7 +37,7 @@
     "SCOPE. This ledger describes THIS repository. One entry was removed when the",
     "code was extracted for open source: the outbound iMessage lane, which was the",
     "courier's send path and is not here. A ledger that over-declares is as",
-    "misleading as one that under-declares \u2014 it invites a reader to believe a",
+    "misleading as one that under-declares — it invites a reader to believe a",
     "capability exists.",
     "",
     "2026-08-24. The marketing site MOVED INTO this repository, at site/. It reaches",
@@ -82,7 +82,7 @@
       "direction": "inbound-fetch",
       "purpose": "fetch the owner's own Notion pages",
       "credential": "notion internal integration token",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
       "evidence": "connectors/lib/notionClient.mjs:18 NOTION_BASE_URL"
     },
     {
@@ -96,19 +96,9 @@
       "evidence": "connectors/lib/ouraClient.mjs"
     },
     {
-      "host": "imap.gmail.com",
-      "kind": "api",
-      "component": "connectors/sources/mail.mjs",
-      "direction": "inbound-fetch",
-      "purpose": "fetch the owner's own mailbox down to this Mac",
-      "credential": "gmail app password",
-      "decision": "ui/AGENTS.md egress policy, 2026-08-19",
-      "evidence": "connectors/sources/mail.mjs:32 DEFAULT_HOST"
-    },
-    {
       "host": "oauth2.googleapis.com",
       "kind": "api",
-      "component": "connectors/lib/gcalClient.mjs",
+      "component": "connectors/lib/gcalClient.mjs, connectors/lib/gmailClient.mjs",
       "direction": "outbound-send",
       "purpose": "google oauth2 token exchange and refresh",
       "credential": "google refresh token",
@@ -130,8 +120,8 @@
       "kind": "api",
       "component": "connectors/lib/gcalClient.mjs",
       "direction": "inbound-fetch",
-      "purpose": "read the owner's own calendar; the owner's calendar lives in Notion Calendar, which speaks to Google directly and never syncs into Calendar.app",
-      "credential": "google access token, scope calendar.readonly (cannot create, move or delete an event)",
+      "purpose": "read the owner's own calendar and mailbox. Calendar: the owner's calendar lives in Notion Calendar, which speaks to Google directly and never syncs into Calendar.app. Mail: replaced IMAP on 2026-08-26 — Google will not accept gmail.readonly over IMAP, which demands the full-mailbox scope (read, write, delete and send), so reaching mail over REST is what keeps the grant read-only",
+      "credential": "google access token, scopes calendar.readonly and gmail.readonly — read-only in both: cannot create, move or delete an event, and cannot send, delete or even mark a message read",
       "decision": "ui/AGENTS.md egress policy, amended 2026-08-19",
       "evidence": "connectors/lib/gcalClient.mjs"
     },
@@ -142,7 +132,7 @@
       "direction": "bidirectional",
       "purpose": "Discord DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
       "evidence": "connect/lib/bridge.mjs PLATFORMS.discord; bridges/docker-compose.yml image dock.mau.dev/mautrix/discord"
     },
     {
@@ -152,8 +142,68 @@
       "direction": "bidirectional",
       "purpose": "Slack DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
       "evidence": "connect/lib/bridge.mjs PLATFORMS.slack; bridges/docker-compose.yml image dock.mau.dev/mautrix/slack"
+    },
+    {
+      "host": "app.slack.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift + connect/lib/bridge.mjs PLATFORMS.slack",
+      "direction": "bidirectional",
+      "purpose": "Slack's web client, which the login window walks to after a successful sign-in because it is where the session's client token lives.",
+      "credential": "the owner's own Slack session, already established by the sign-in they just completed in that window.",
+      "decision": "Already covered by the slack.com entry in substance — the fence matches by suffix and app.slack.com is inside it — and listed separately because the tripwire reads literals, and because the reason this particular subdomain is named in source deserves to be findable. Slack's sign-in ends on an interstitial offering to launch the desktop app; that page holds no token, so the window walks to the web client once, after the required cookies prove the sign-in worked. Not a workaround for a failed login: it is the last step the owner would otherwise have to know to take, and one of them sat on that page with nothing to press (2026-08-26).",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.slack.webLogin.storageUrl"
+    },
+    {
+      "host": "accounts.google.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift + connect/lib/bridge.mjs PLATFORMS.slack",
+      "direction": "bidirectional",
+      "purpose": "Google's OAuth sign-in, when the owner chooses \"Sign In With Google\" on Slack's own login page inside the bridge login window.",
+      "credential": "the owner's Google password and second factor, typed on Google's own page in that window; this app never reads them",
+      "decision": "Slack's login page offers email, Google and Apple, and the window's fence allowed only slack.com -- so the Google button reached slack.com/signin/oauth/google/start and the next hop was cancelled with no error, which reads as a dead button (owner, 2026-08-26). Allowed because it IS Slack's sign-in, not a detour from it. Measured with a fenceless probe that clicked the button and logged every main-frame host; the enumeration stops at Google's \"Email or phone\" screen, because going further means typing an address and a password, which is the owner's to do. A later 2FA hop through a host not listed here will die the same silent way, and the fix is to measure that hop and name it, never to widen this to google.com.",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.slack.webLogin.allowedHosts; widget/src/BridgeLogin.swift navigation fence"
+    },
+    {
+      "host": "accounts.youtube.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift + connect/lib/bridge.mjs PLATFORMS.slack",
+      "direction": "bidirectional",
+      "purpose": "Google's cross-domain session sync, a hop inside the same Google sign-in.",
+      "credential": "none of its own -- it carries Google's session cookies, set by the step before it",
+      "decision": "Part of Google's sign-in rather than a separate destination: the probe above logged it between accounts.google.com and the return to Slack. Listed separately because the fence matches hosts, and a reader who finds youtube.com in a login window's allowlist deserves to find the reason next to it.",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.slack.webLogin.allowedHosts"
+    },
+    {
+      "host": "appleid.apple.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift + connect/lib/bridge.mjs PLATFORMS.slack",
+      "direction": "bidirectional",
+      "purpose": "Apple's sign-in, when the owner chooses \"Apple\" on Slack's login page inside the bridge login window.",
+      "credential": "the owner's Apple ID credentials, typed on Apple's own page in that window; this app never reads them",
+      "decision": "Same cancelled-navigation bug as Google and fixed in the same commit. One hop, measured the same way: slack.com -> appleid.apple.com. Included because leaving one of Slack's three sign-in buttons dead while fixing the other two is the kind of half-fix that reads as a different bug later.",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.slack.webLogin.allowedHosts"
+    },
+    {
+      "host": "www.google.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift + connect/lib/bridge.mjs PLATFORMS.slack",
+      "direction": "bidirectional",
+      "purpose": "reCAPTCHA's two iframes — the checkbox and the image challenge — inside Slack's own login page in the bridge login window.",
+      "credential": "none. The frames carry the challenge and its answer; the app reads only the response token reCAPTCHA writes into the page after a human passes, which is the receipt the Slack bridge asks for.",
+      "decision": "SUBFRAMES ONLY, never the top-level window: BridgeLogin's fence has two lists and this host is on the frame one. That distinction is the decision. Allowing it in the main list would let the window navigate itself to Google in the one webview where the owner types a password. Measured 2026-08-26 on Google's own reCAPTCHA demo page inside a fenced WKWebView: /recaptcha/api2/anchor and /recaptcha/api2/bframe, both subframes; www.gstatic.com never appears because the script is a subresource and the fence does not gate those.",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.slack.webLogin.allowedFrameHosts; widget/src/BridgeLogin.swift fence"
+    },
+    {
+      "host": "www.recaptcha.net",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift + connect/lib/bridge.mjs PLATFORMS.slack",
+      "direction": "bidirectional",
+      "purpose": "The same reCAPTCHA widget, from Google's alternate domain.",
+      "credential": "none, as above.",
+      "decision": "NOT OBSERVED, and listed anyway — the one row in this file that is precaution rather than measurement, said plainly so nobody mistakes it for evidence. Google serves the identical widget from this domain for networks where google.com is unreachable, and which one a page gets is decided by the script URL the site loads. Slack loads that script lazily from a bundle, so it was not cheap to determine. If it is never used this row is unused; if it is, its absence would have been an empty challenge box that reproduces on nobody's machine but the owner's.",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.slack.webLogin.allowedFrameHosts"
     },
     {
       "host": "web.telegram.org",
@@ -162,7 +212,7 @@
       "direction": "bidirectional",
       "purpose": "Telegram DMs through a local Matrix bridge",
       "credential": "harvested session tokens",
-      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' \u2014 a question with no meaning in a public one.",
+      "decision": "User-enabled source. Off until the user connects it on the connect page, and it reaches only that user's own account. Was UNRECORDED while this lived in a private repo, where `decision` meant 'the owner wrote down that they approved this' — a question with no meaning in a public one.",
       "evidence": "connect/lib/bridge.mjs PLATFORMS.telegram; bridges/docker-compose.yml image dock.mau.dev/mautrix/telegram"
     },
     {
@@ -186,6 +236,26 @@
       "decision": "SOCIAL-BRIDGES-PLAN.md, owner-requested 2026-08-21",
       "evidence": "connect/lib/bridge.mjs PLATFORMS.instagram; bridges/docker-compose.yml",
       "note": "The bare domain is declared separately under login-webview: the embedded login navigates the apex and its subdomains, not just this www host."
+    },
+    {
+      "host": "linkedin.com",
+      "kind": "bridge",
+      "component": "bridges/ mautrix-linkedin + connect/lib/bridge.mjs",
+      "direction": "inbound-fetch",
+      "purpose": "LinkedIn DMs through a local Matrix bridge — replaced the hand-unzipped CSV export (owner, 2026-08-25)",
+      "credential": "the owner's own LinkedIn session, captured by the login webview",
+      "decision": "Owner asked for LinkedIn to sync like every other social source, 2026-08-25. Same posture as the Meta and X bridges: read-only, no host port, double puppeting off.",
+      "evidence": "bridges/docker-compose.yml mautrix-linkedin; connect/lib/bridge.mjs PLATFORMS.linkedin"
+    },
+    {
+      "host": "www.linkedin.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift (fence from connect/lib/bridge.mjs)",
+      "direction": "inbound-fetch",
+      "purpose": "LinkedIn cookie + request-header login, in the fenced in-app window",
+      "credential": "the owner's own LinkedIn session",
+      "decision": "Same decision as the Meta and X login webviews: the owner logs in to their own account, in a window fenced to that platform's hosts.",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.linkedin.webLogin.allowedHosts"
     },
     {
       "host": "x.com",
@@ -355,6 +425,16 @@
       "note": "Added by the ledger tripwire on the commit that introduced it, which is the point of the tripwire. FOUND AT THE SAME TIME, and since fixed: this host was missing from Bridge.swift's allowedExternal, an exact-match allowlist (Bridge.swift's case \"openExternal\" handler), so both links failed with 'url not in allowlist'. Both URLs are now in allowedExternal."
     },
     {
+      "host": "my.telegram.org",
+      "kind": "user-browser-link",
+      "component": "widget/src/Bridge.swift openExternal allowlist",
+      "direction": "none",
+      "purpose": "send the owner to Telegram to register their OWN api_id/api_hash -- mautrix-telegram refuses to start on the example pair it ships, and Telegram bans app ids shared across unrelated accounts, so each install registers its own (owner, 2026-08-25)",
+      "credential": "none -- this process opens no socket here",
+      "decision": "n/a",
+      "evidence": "widget/src/Bridge.swift allowedExternal https://my.telegram.org/apps"
+    },
+    {
       "host": "granola.ai",
       "kind": "user-browser-link",
       "component": "widget/src/Bridge.swift openExternal allowlist",
@@ -391,7 +471,7 @@
       "direction": "inbound-fetch",
       "purpose": "the IBM Plex Mono and Caveat stylesheet the landing page links",
       "credential": "none",
-      "decision": "Public marketing site. The visitor's browser loads this, not any Hazlie process; it carries no credential and sees only that someone opened the page.",
+      "decision": "Public marketing site. The visitor's browser loads this, not any Intaglio Labs process; it carries no credential and sees only that someone opened the page.",
       "evidence": "site/index.html:13 <link href=\"https://fonts.googleapis.com/css2?family=IBM+Plex+Mono\u2026&family=Caveat\u2026\" rel=\"stylesheet\">"
     },
     {
@@ -401,7 +481,7 @@
       "direction": "inbound-fetch",
       "purpose": "the font files that stylesheet then pulls",
       "credential": "none",
-      "decision": "Public marketing site. The visitor's browser loads this, not any Hazlie process; it carries no credential and sees only that someone opened the page.",
+      "decision": "Public marketing site. The visitor's browser loads this, not any Intaglio Labs process; it carries no credential and sees only that someone opened the page.",
       "evidence": "site/index.html:10 <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>"
     },
     {
@@ -482,7 +562,7 @@
       "purpose": "mautrix project homepage",
       "credential": null,
       "decision": "allowed",
-      "evidence": "site/privacy/index.html -- \u00a76 links the mautrix project when naming the bridges that reach the chat platforms, so the reader can see whose software runs on their Mac"
+      "evidence": "site/privacy/index.html -- §6 links the mautrix project when naming the bridges that reach the chat platforms, so the reader can see whose software runs on their Mac"
     }
   ],
   "_loopback": [

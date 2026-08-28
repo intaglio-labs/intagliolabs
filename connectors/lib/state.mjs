@@ -54,6 +54,19 @@ CREATE TABLE IF NOT EXISTS contact_ids(
   source       TEXT NOT NULL DEFAULT 'contacts',
   updated_ts   INTEGER NOT NULL
 );
+/* Contact photos, so the People page can show a face instead of initials.
+   Keyed by the SAME identifier as contact_ids, because that is what the
+   people graph resolves a person to — the join is already there.
+   The bytes are the Contacts framework's THUMBNAIL, not the original photo:
+   a list draws them at 26px, and the full image is often megabytes.
+   Separate table rather than a column on contact_ids: one contact has many
+   identifiers and they would each carry a copy of the same blob, and every
+   query that wants a NAME would drag the image along with it. */
+CREATE TABLE IF NOT EXISTS contact_avatars(
+  identifier TEXT PRIMARY KEY,
+  jpeg       BLOB NOT NULL,
+  updated_ts INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS imessage_undecoded(
   guid          TEXT PRIMARY KEY,
   rowid         INTEGER NOT NULL,
@@ -162,6 +175,10 @@ export function openStateDb(path = defaultStateDbPath()) {
       'kind = excluded.kind, source = excluded.source, updated_ts = excluded.updated_ts ' +
       "WHERE excluded.source = 'contacts' OR contact_ids.source != 'contacts'"
   );
+  const upsertAvatarStmt = db.prepare(
+    'INSERT INTO contact_avatars(identifier, jpeg, updated_ts) VALUES(?, ?, ?) ' +
+      'ON CONFLICT(identifier) DO UPDATE SET jpeg = excluded.jpeg, updated_ts = excluded.updated_ts'
+  );
   const resolveStmt = db.prepare(
     'SELECT display_name, kind FROM contact_ids WHERE identifier = ?'
   );
@@ -235,6 +252,39 @@ export function openStateDb(path = defaultStateDbPath()) {
     // so the iMessage and mail sources can label rows with a human name.
     // Names come from the AddressBook store (a human typed them), which is
     // the sanctioned side of the no-voiceprints line.
+    /**
+     * Contact photos, keyed by the same identifier as upsertContacts.
+     *
+     * Separate call rather than a field on a contact entry: most contacts have
+     * no picture, the two arrive from different fields of the same fetch, and
+     * a name write must never be blocked by an image write.
+     */
+    replaceAvatars(avatars, now = Date.now()) {
+      const list = Array.isArray(avatars) ? avatars : [avatars];
+      for (const [i, a] of list.entries()) {
+        if (a === null || typeof a !== 'object') throw new Error(`avatars[${i}]: not an object`);
+        if (typeof a.identifier !== 'string' || a.identifier.length === 0) {
+          throw new Error(`avatars[${i}]: missing "identifier" string`);
+        }
+        if (!(a.jpeg instanceof Uint8Array) || a.jpeg.length === 0) {
+          throw new Error(`avatars[${i}]: "jpeg" must be a non-empty Uint8Array`);
+        }
+      }
+      db.exec('BEGIN');
+      try {
+        // A Contacts-framework fetch is a complete snapshot. Replace rather
+        // than only upsert so deleting a contact or removing their photo also
+        // removes the old bytes from local state.
+        db.exec('DELETE FROM contact_avatars');
+        for (const a of list) upsertAvatarStmt.run(a.identifier, a.jpeg, now);
+        db.exec('COMMIT');
+      } catch (e) {
+        db.exec('ROLLBACK');
+        throw e;
+      }
+      return list.length;
+    },
+
     upsertContacts(contacts, now = Date.now()) {
       const list = Array.isArray(contacts) ? contacts : [contacts];
       for (const [i, c] of list.entries()) {

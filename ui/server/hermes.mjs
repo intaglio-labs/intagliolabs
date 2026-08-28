@@ -55,6 +55,7 @@ import { answerPersonSearch } from './people/search.mjs';
 import { loadOwner } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
 import {
+  buildAvatars,
   buildMap,
   buildYear,
   buildSearchYears,
@@ -1354,6 +1355,15 @@ export const KNOWN_SOURCES = Object.freeze([
   'notion',
   'linkedin',
   'whatsapp',
+  // Continuous DMs written by connectors/sources/matrix.mjs. These are named
+  // individually because "matrix" is transport, not provenance; keeping them
+  // in this same closed set makes every accepted row deletable again.
+  'messenger',
+  'instagram',
+  'twitter',
+  'telegram',
+  'discord',
+  'slack',
   'hazlie_digest',
   'seed',
 ]);
@@ -2982,7 +2992,7 @@ function handle(db, req, res, cors, url, policy) {
   // map and WRITE the owner's merge decisions, neither of which is a browser
   // capability. The Origin channel is authenticated but not entitled here, so
   // 403 (not 401), matching handleAdmin's reasoning.
-  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary') {
+  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary' || url.pathname === '/people/avatars') {
     if (channel !== 'bearer') {
       send(res, 403, { error: 'people routes are bearer-only: call with the token from ~/.hazlie/secrets/hermes-token.txt and no Origin header.' }, cors);
       return;
@@ -3132,6 +3142,25 @@ async function handlePeople(db, req, res, cors, url, policy) {
       // response, which is what makes the page instant -- but an answer that is
       // one ingest behind must say so rather than pass as live.
       return { ...year_, freshness: peopleCoreFreshness(db, state, aliases) };
+    });
+    send(res, 200, out, cors);
+    return;
+  }
+
+  // Contact photos are delivered through the native bridge: widget pages have
+  // no bearer token and therefore cannot fetch Hermes URLs themselves.
+  if (req.method === 'POST' && url.pathname === '/people/avatars') {
+    if (!hasJsonMediaType(req)) { send(res, 415, { error: 'content-type must be application/json' }, cors); return; }
+    const body = await readJson(req);
+    assertClosedFields(body, ['keys']);
+    const keys = Array.isArray(body.keys) ? body.keys.filter((k) => typeof k === 'string').slice(0, 400) : [];
+    const out = withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      const avatars = {};
+      for (const [key, jpeg] of buildAvatars(db, state, { keys, owner, aliases })) {
+        avatars[key] = Buffer.from(jpeg).toString('base64');
+      }
+      return { avatars };
     });
     send(res, 200, out, cors);
     return;

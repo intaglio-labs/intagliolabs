@@ -16,7 +16,7 @@
 //   2. IT ABSTAINS. A question with no accepted support returns nothing and
 //      says so. An answer composed from zero claims is a guess wearing the
 //      costume of a memory, and it is worse than silence — the whole point of
-//      the accept step is that Hazlie only says what the owner confirmed.
+//      the accept step is that Intaglio Labs only says what the owner confirmed.
 //
 // `match` is an FTS5 expression that the CALLER has already sanitised with
 // hermes' ftsQuery(). It is not sanitised here, and this module does not import

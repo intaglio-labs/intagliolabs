@@ -39,7 +39,13 @@ body {
   -webkit-user-select: none;
   user-select: none;
   cursor: default;
+  /* hidden AND clip, in that order: hidden is the fallback, clip is the
+     guarantee. An overflow: hidden box still scrolls programmatically — a
+     focus() or scrollIntoView on anything past an edge shifts the whole page
+     and CLIPS THE OTHER SIDE, with no scrollbar to say so; that is how the
+     settings column lost its left edge. clip forbids scrolling outright. */
   overflow: hidden;
+  overflow: clip;
 }
 ::selection { background: var(--hazelnut); color: var(--bg); }
 button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
@@ -224,8 +230,13 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
   --tod-grad: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 45%, var(--status-ok) 100%);
   --tod-mid: #c5a56d;
   --tod-far: var(--status-ok);
-  --tod-glow: rgba(51, 255, 102, 0.10);
-  --tod-glow-armed: rgba(51, 255, 102, 0.30);
+  /* 0.30 at rest, not 0.10. The canvas draws power hour with accentGlow30
+     — the STRONGEST halo of the five, because it is the band captioned "the
+     brand gradient at full saturation". The widget had it at 0.10, the
+     weakest of the five, which inverted the one thing the band is named for.
+     Armed follows the +0.20 step every other band uses. */
+  --tod-glow: rgba(51, 255, 102, 0.30);
+  --tod-glow-armed: rgba(51, 255, 102, 0.50);
   /* The catchlight. Cream in four of the five bands, exactly as the canvas
      draws it — but it is a variable because it sits top-left, which is where
      a 160deg gradient puts its FIRST stop. When that stop is not warm, a
@@ -247,10 +258,15 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
     inset 3px 3px 7px rgba(255, 255, 255, 0.30);
   transition: box-shadow .4s ease;
 }
+/* The blush was a HARDCODED hazelnut, rgba(197, 165, 109, 0.55), on every
+   band. On the two warm bands nobody noticed; on lavender, spring green and
+   deep magenta it read as two tan thumbprints stuck to the face — visible as
+   dots in the 120px onboarding orb, which is where it was caught. It takes
+   the band's own mid tone now, at an alpha that tints rather than paints. */
 .blush {
   position: absolute; top: 58%;
   width: 7px; height: 4px; border-radius: 50%;
-  background: rgba(197, 165, 109, 0.55);
+  background: color-mix(in srgb, var(--tod-mid) 28%, transparent);
   filter: blur(1px);
 }
 .blush.bl { left: 12%; }
@@ -910,8 +926,9 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 .orb.tod-power {
   --tod-grad: linear-gradient(160deg, #f2e8d4 0%, #c5a56d 45%, var(--status-ok) 100%);
   --tod-mid: #c5a56d; --tod-far: var(--status-ok);
-  --tod-glow: rgba(51, 255, 102, 0.10);
-  --tod-glow-armed: rgba(51, 255, 102, 0.30);
+  /* See the fallback block for why this is 0.30 and not 0.10. */
+  --tod-glow: rgba(51, 255, 102, 0.30);
+  --tod-glow-armed: rgba(51, 255, 102, 0.50);
 }
 .orb.tod-happy {
   --tod-grad: linear-gradient(160deg, #f5d9a8 0%, #e0a35c 45%, #c56d4a 100%);
@@ -974,24 +991,58 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 .orb-layer.lb { animation: orb-spin-rev 3.5s linear infinite; }
 .orb-layer.lc { animation: orb-spin 6s linear infinite; }
 .orb-blob { position: absolute; display: block; }
+/* THE BLOBS ARE WEATHER, NOT PAINT.
+ *
+ * The canvas draws each mood orb as its gradient plus ONE white catchlight —
+ * nothing else. The widget adds three drifting blobs on top, and it should:
+ * they are the only reason a 42px disc looks alive rather than printed. But
+ * they were mixed at paint strength, and three washes over a gradient is a
+ * gradient you can no longer see. Held next to the canvas, every band had
+ * lost its mood: early's lavender came out bone white, late's purple half
+ * vanished before it could turn green, night's plum lifted to a grey pink,
+ * and power hour — the band whose caption is "full saturation" — was the
+ * palest of the lot.
+ *
+ * The gradient carries the colour now and the blobs only modulate it. Two
+ * rules came out of matching them back to the canvas:
+ *
+ *   1. NOTHING PAINTS OFF-PALETTE. `ba` washed the top-left in cream at full
+ *      opacity, which is exactly where a 160deg gradient puts its FIRST and
+ *      most saturated stop; `bc` carried a hardcoded hazelnut mid-stop that
+ *      put a tan cast under all five bands. Every stop is derived from a
+ *      --tod-* var, so a blob can only ever deepen the mood it is in.
+ *   2. ALPHA IS THE DIAL, NOT COLOUR. Motion survives at low alpha — it is
+ *      movement the eye catches, not opacity. Saturation does not survive
+ *      being covered. So the blobs were taken down until the canvas's colour
+ *      came back, and the drift is still perfectly legible at 42px.
+ *
+ * The catchlight the canvas DOES draw is .orb-hl, and it is untouched. */
 .orb-blob.ba {
-  width: 75%; height: 75%; top: 0; left: 8%;
-  background: radial-gradient(circle, var(--tod-light) 0%, color-mix(in srgb, var(--tod-light) 40%, transparent) 40%, transparent 70%);
-  filter: blur(3.5px);
+  /* The sheen. Smaller and far fainter than it was: at 75% and full cream it
+     was not a highlight, it was a second light source painted over the
+     gradient's warmest stop. */
+  width: 55%; height: 55%; top: 0; left: 15%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--tod-light) 12%, transparent) 0%, color-mix(in srgb, var(--tod-light) 4%, transparent) 40%, transparent 55%);
+  filter: blur(3.5px); mix-blend-mode: screen;
   animation: orb-drift 2.25s ease-in-out infinite;
 }
-/* Both blobs read from the time-of-day vars: leaving them on the fixed green
-   and hazelnut made the orb's body drift while its innards stayed at midday,
-   which showed up as a green cast under the lavender and magenta bands. */
+/* All three blobs read from the time-of-day vars: leaving them on the fixed
+   green and hazelnut made the orb's body drift while its innards stayed at
+   midday, which showed up as a green cast under the lavender and magenta
+   bands. */
 .orb-blob.bb {
+  /* The band's far stop, pooled where the gradient already lands it. Its
+     mid-stop used to be --tod-glow — a SHADOW alpha (0.10–0.28 depending on
+     band) borrowed as a colour, so how far this blob reached varied by band
+     for no reason anyone chose. It is a stated fraction of --tod-far now. */
   width: 80%; height: 80%; bottom: 0; right: 5%;
-  background: radial-gradient(circle, var(--tod-far) 0%, var(--tod-glow) 45%, transparent 72%);
+  background: radial-gradient(circle, color-mix(in srgb, var(--tod-far) 42%, transparent) 0%, color-mix(in srgb, var(--tod-far) 14%, transparent) 45%, transparent 70%);
   filter: blur(4px); mix-blend-mode: screen;
   animation: orb-drift 1.75s ease-in-out infinite 0.6s;
 }
 .orb-blob.bc {
   width: 70%; height: 70%; top: 12%; right: 0;
-  background: radial-gradient(circle, var(--tod-mid) 0%, rgba(197, 165, 109, 0.4) 45%, transparent 72%);
+  background: radial-gradient(circle, color-mix(in srgb, var(--tod-mid) 30%, transparent) 0%, color-mix(in srgb, var(--tod-mid) 10%, transparent) 45%, transparent 70%);
   filter: blur(3.5px); mix-blend-mode: soft-light;
   animation: orb-drift 2.75s ease-in-out infinite 1.2s;
 }
@@ -1235,7 +1286,8 @@ body.widget.spotlight-widget .dream { display: none; }
   background: var(--bg);
   border: 1px solid rgba(234, 234, 234, 0.08);
   border-radius: 20px;
-  overflow: hidden;
+  overflow: hidden; /* fallback; clip forbids the programmatic scroll too */
+  overflow: clip;
   position: relative;
 }
 .close {
@@ -1256,19 +1308,14 @@ body.widget.spotlight-widget .dream { display: none; }
    window, but flex-end closes the gap for free. */
 body.connections .win {
   padding: 14px 20px 14px;
-  /* A unifying CARD, matching the People popup: the hint side panel and the
-     shelf read as one connected surface over the glass, instead of each
-     floating on it separately. */
+  /* A unifying card behind Settings; connector hints float above it. */
   background: rgba(20, 20, 18, 0.72);
   border: 1px solid rgba(234, 234, 234, 0.10);
   border-radius: 16px;
   box-shadow: inset 0 1px 0 rgba(234, 234, 234, 0.08);
-  /* A row, not a column: the hint strip is a SIDE section on the left and
-     the shelf keeps the right, pinned to the widget by native placement.
-     flex-end on both axes hugs everything to the bottom-right corner —
-     content-shaped windows grow up and left, never push down. */
-  flex-direction: row; align-items: flex-end; justify-content: flex-end;
-  gap: 12px;
+  /* The hint is fixed-position overlay content, so the window itself remains
+     one Settings column at its normal width. */
+  flex-direction: column;
 }
 /* The column the window used to be: everything except the hint strip.
    flex 1 1 REQUIRED: with shrink 0 this column sizes to the shelf's
@@ -1284,11 +1331,19 @@ body.connections .win {
 body.connections .conn-main {
   display: flex; flex-direction: column;
   flex: 1 1 auto; min-width: 0;
-  /* overflow-x MUST be explicit: setting only overflow-y: auto promotes the
-     unset overflow-x from visible to auto (the CSS "one axis clipped forces
-     the other to auto" rule), which let the whole settings column scroll
-     sideways. Only the .list shelf inside it is meant to scroll horizontally. */
-  max-height: 100%; overflow-y: auto; overflow-x: hidden;
+  /* ~~max-height: 100% + overflow-y: auto, the scroll-inside constraint for
+     big scales.~~ Settings does not scroll vertically any more (owner,
+     2026-08-25): the page must always FIT, and the window grows to hold it —
+     fitConnections measures the column and native sizes the window to the
+     answer, with the whole screen available now that the panel stands over
+     the orb. overflow-x stays clipped: only the .list shelf inside is meant
+     to scroll sideways.
+     clip, NOT hidden — and this is the second time this exact pair rule has
+     bitten this block, once per direction: overflow-x: hidden silently
+     promotes the unset overflow-y from visible to AUTO, which re-created the
+     vertical scroll everything above says is gone. clip is the one value
+     that leaves the other axis truly visible. */
+  overflow-x: clip;
 }
 /* Bottom-anchoring WITHOUT justify-content: flex-end — on a scrollable
    flex column, flex-end makes overflow past the start edge unreachable
@@ -1351,34 +1406,37 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
 }
 /* The hint no longer lives IN the row — a full-width strip cannot be a cell
    of a horizontal shelf. It renders below, in its own host. */
-/* 236px wide; the +12px .win gap makes the 248 the page posts as
-   extraWidth (connections.js) — change one, change both. Scrolls on its own
-   if a hand-hold outgrows the window rather than growing it. Its height is
-   set by connections.js to match .conn-main exactly, so with both columns
-   bottom-anchored the panel's TOP lines up with the CONNECTIONS eyebrow. */
+/* ~~The hint host was a LEFT SIDE STRIP: flex: 0 1 236px in the .win row,
+   the window widening by 248 to reveal it, a book-fold rotateY on open.~~
+   Re-shaped into a POP-OVER (owner, 2026-08-25): the flow floats over the
+   page, anchored to the tile that was pressed — bridge.js hzPlacePop sets
+   left/top/bottom/max-height from the tile's rect — and the window never
+   changes size for it. position: fixed keeps it out of the body's
+   overflow: clip; the card scrolls inside itself when the flow is taller
+   than the room the tile leaves it. */
 .hint-host {
-  flex: 0 0 236px; max-height: 100%; overflow-y: auto;
-  position: relative;
+  position: fixed; z-index: 40;
+  /* Sized to the card's own content: a two-line connect card should be a
+     small card, not 280px of mostly empty room (owner, 2026-08-25). The
+     placer (hzPlacePop) sets only max-width; long flows wrap at the cap. */
+  width: max-content;
+  overflow-y: auto;
   display: flex; flex-direction: column; align-items: stretch;
-  /* Bottom-aligned so the pop-up sits in-line to the LEFT of the connectors
-     shelf (which lives at the bottom of the settings column now), not floating
-     up by the settings header. */
-  justify-content: flex-end;
-  /* Hinged on the right edge — the side it meets the main column on — so it
-     unfolds outward like a page. */
-  transform-origin: right center;
+  background: rgba(20, 20, 18, 0.97);
+  border: 1px solid rgba(234, 234, 234, 0.14);
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
 }
-/* Delightful open: a book page folding out from underneath the main panel
-   (owner). Hinged on the right edge, it swings from nearly edge-on (tucked
-   behind the column) to flat, with a soft settle. Runs every time the host
-   goes from empty (display:none) to filled, i.e. each time a tile opens. */
-@keyframes hint-book-open {
-  0%   { transform: perspective(900px) rotateY(-80deg); opacity: 0; }
-  55%  { opacity: 1; }
-  100% { transform: perspective(900px) rotateY(0deg); opacity: 1; }
+/* A quick rise into place — the pop-over equivalent of the old book fold. */
+@keyframes hint-pop-open {
+  from { transform: translateY(6px) scale(0.97); opacity: 0; }
+  to   { transform: translateY(0) scale(1); opacity: 1; }
 }
-.hint-host:not(:empty) {
-  animation: hint-book-open 0.34s cubic-bezier(0.22, 0.72, 0.24, 1) both;
+.hint-host.open {
+  animation: hint-pop-open 0.18s cubic-bezier(0.22, 0.72, 0.24, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  body:not(.motion-anyway) .hint-host.open { animation: none; }
 }
 .hint-host:empty { display: none; }
 /* The panel's own close. Same gesture as pressing the tile again, one
@@ -1420,6 +1478,15 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
   color: var(--hazelnut-light);
 }
 .row .mark svg { width: 20px; height: 20px; }
+/* NOT YET SHIPPING (SOON_CONNECTORS in connections.js). Greyed rather than
+   hidden: a tile that disappears reads as a connector that is not coming,
+   and this one is. The glyph loses its hazelnut and most of its contrast so
+   it sits back from the tiles that can actually be pressed into service —
+   but the tile keeps its shape and stays pressable, because pressing it is
+   how you find out why. Not opacity on .row: that would fade the dot and
+   the tile's own inset highlight into mush; this dims the mark alone. */
+.row.soon .mark { color: var(--muted); opacity: 0.55; }
+.row.soon { border-color: rgba(234, 234, 234, 0.06); }
 /* Long names (a mail address) get the middle eaten rather than the end, so
    the domain still identifies which account it is. */
 /* No label on the tile any more — at 40px a name is two illegible letters
@@ -1432,7 +1499,26 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--muted);
 }
-.row .dot.on { background: var(--status-ok); }
+/* CONNECTED IS A CHECK MARK, not a dot (owner, 2026-08-26). A filled green
+   circle says "a state"; a tick says "done", which is what a connected source
+   is. Drawn as a glyph rather than another element so nothing about the tile's
+   markup changes — and so the spinner rule below, which owns .dot while a
+   bridge is connecting, still wins by being later.
+
+   The dot grows to fit the glyph and drops its own fill: at 6px a tick is a
+   smudge. Everything else on this shelf stays a dot, because only `on` earned
+   a mark. */
+.row .dot.on {
+  width: 12px; height: 12px; top: 2px; right: 2px;
+  background: none;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--status-ok);
+  font-size: 11px; font-weight: 700; line-height: 1;
+  /* A dark rim so the tick reads against a pale contact photo or a bright
+     glyph underneath it, the same job the dot's fill used to do for free. */
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), 0 0 4px rgba(0, 0, 0, 0.8);
+}
+.row .dot.on::after { content: '✓'; }
 .row .dot.off { background: transparent; border: 1px solid var(--disabled); }
 /* `bad` = set up and not working, as distinct from `off` = never linked. It is
    the only thing on this shelf that asks for attention, so it is the only thing
@@ -1469,6 +1555,9 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
   border-top-color: var(--hazelnut-light);
   animation: tile-spin 0.7s linear infinite;
 }
+/* And the tick goes with it: a reconnect can carry `on` and `logging-in` at
+   once, and a check mark spinning inside its own spinner is not a state. */
+.row.logging-in .dot::after { content: none; }
 @keyframes tile-spin { to { transform: rotate(360deg); } }
 /* The whole tile is the hint affordance now — a 14px ring inside a 62px
    square was a needlessly small target — so the ⓘ is gone. */
@@ -1520,15 +1609,38 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
 /* The connectors intro (its banner and promo pulse) was yeeted 2026-08-22 —
    see connections.js; the hint hand-holds below are the only guidance now. */
 /* The hand-hold: a connector's first press opens the tall version of its
-   hint — why it is worth connecting, the privacy line, then the how. */
+   hint — the privacy line, then the how. The `.why` subheader (what data the
+   source reads) was yeeted with its tables (owner, 2026-08-25); its rule left
+   with it. */
 .hint.hold { padding: 10px 12px; }
-.hint.hold .why { display: block; color: var(--fg); margin-bottom: 6px; }
 /* The connected-account line: who's linked, in cream, above the + add button. */
 .hint.hold .acct { display: block; color: var(--fg); font-size: 11px; margin: 2px 0 4px; }
+/* Walkthrough steps and how-to sentences each hold a line of their own —
+   "2 · create an API key" wrapped around the step-1 pill otherwise. */
+.hint.hold .setup { display: block; margin-top: 6px; }
+/* Step 1 of a walkthrough: a button that reads as one of the numbered lines
+   around it, because that is what it is. It wore .hold-ok — the pill this
+   card uses for its ONE action — and a capsule with an arrow at the top of
+   three plain steps claimed a prominence step 1 does not have (owner,
+   2026-08-26). Matched to .setup, tinted so it still reads as pressable. */
+.hint.hold .step-open {
+  display: block; margin-top: 6px; padding: 0;
+  border: none; background: none;
+  color: var(--hazelnut-light);
+  font: inherit; text-align: left;
+  cursor: pointer;
+}
+.hint.hold .step-open:hover { color: var(--fg); }
+/* Every connected line leads with a green check (owner, 2026-08-25). One
+   rule, not a per-site prefix: the check rides the .acct class, so it cannot
+   be forgotten by the next connected state someone renders. */
+.hint.hold .acct::before { content: '✓ '; color: var(--status-ok); font-weight: 700; }
 .hint.hold .add-acct { font-size: 11px; }
+/* Sits under the card's NAME now (owner, 2026-08-25), so the margin flips:
+   tight to the header above it, a breath before the flow below it. */
 .hint.hold .stay {
   display: block; color: var(--hazelnut); font-size: 10px;
-  margin-top: 7px;
+  margin: 2px 0 7px;
 }
 /* The broken block. It sits FIRST in the panel — above the why and the how —
    because it is the only thing here the owner has to act on, and a connector
@@ -1549,21 +1661,22 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
   display: block; color: var(--status-bad); font-weight: 600;
   margin-bottom: 2px;
 }
-/* The one failure with somewhere to send them gets a button. Sized off
-   .setting-action so the two read as the same control. */
-.hint.hold .broken-fix {
-  display: block; margin-top: 7px;
-  padding: 4px 10px;
-  border: 1px solid var(--status-bad); border-radius: 999px;
-  background: transparent; color: var(--status-bad);
-  font: inherit; font-size: 10px; letter-spacing: 0.04em;
-  cursor: pointer;
-}
-.hint.hold .broken-fix:hover { background: rgba(255, 83, 71, 0.14); }
+/* ~~The one failure with somewhere to send them got a red-outlined
+   .broken-fix button.~~ Gone with its only caller (owner, 2026-08-25): the
+   Full Disk Access panel now renders in plain text with the shared .hold-ok
+   button — needing a grant is setup, not failure — so nothing red survives
+   on that panel and this rule had nothing left to style. */
 /* The bridge login's pieces inside a hold strip: the bot conversation and
    the paste box. The transcript is capped and scrolls — a login exchange is
    a few lines, an old one can be long, and the popup must not grow to fit
    history. */
+/* A login QR, inline in the hint card. Sized so a phone camera can read it
+   off the screen without the card outgrowing the popup. */
+.hint.hold .bqr {
+  display: block; margin: 8px 0 4px;
+  width: 168px; height: 168px;
+  border-radius: 6px; background: #fff; padding: 6px;
+}
 .hint.hold .blog {
   max-height: 110px; overflow-y: auto;
   display: flex; flex-direction: column; gap: 4px;
@@ -1598,7 +1711,10 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
 .hint.hold .hold-ok + .binput { margin-top: 8px; }
 .hint.hold .hold-ok {
   display: inline-block; margin-top: 8px;
-  height: 22px; padding: 0 12px;
+  /* min-height, not height: a label that wraps ("full disk access" in a
+     narrow card) must grow the pill, not hang below its border. */
+  min-height: 22px; padding: 3px 12px;
+  line-height: 1.5;
   border: 1px solid rgba(197, 165, 109, 0.4); border-radius: 999px;
   background: rgba(20, 20, 18, 0.9); color: var(--hazelnut-light);
   font-size: 10px; letter-spacing: 0.1em;
@@ -1686,9 +1802,12 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
    scale (17px) rather than the page-default 26px h1, so the two tabs read the
    same. Cream with the same shadow the eyebrow carries — this window is
    transparent, so headings need their own contrast off the wallpaper. */
+/* Same voice as the SETTINGS eyebrow above it (owner, 2026-08-25): two
+   section labels on one panel in two different typographies read as two
+   different products. ~~17px/600 in --fg~~ — now the eyebrow treatment. */
 body.connections .conn-title {
-  font-size: 17px; font-weight: 600; letter-spacing: -0.01em;
-  margin: 0 0 8px; color: var(--fg);
+  font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+  font-weight: 700; margin: 0 0 8px 2px; color: var(--hazelnut-light);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), 0 2px 12px rgba(0, 0, 0, 0.8);
 }
 /* "settings" eyebrow on the left, the close ring on the right, one row at the
@@ -1771,7 +1890,7 @@ body.chat .close { position: static; }
 /* The thinking state: three dots that travel, iMessage-style.
 
    Replaces a blinking green underscore. The cursor read as a terminal prompt
-   waiting for INPUT — the opposite of what it meant, which is that Hazlie is
+   waiting for INPUT — the opposite of what it meant, which is that Intaglio Labs is
    busy and the person should wait. Dots are the gesture everyone already
    knows, and they carry the one bit that matters (something is coming) without
    implying a text field. */
@@ -2024,21 +2143,6 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
 .ob-cta:hover { filter: brightness(1.06); }
 .ob-cta:active { transform: scale(1.06, 0.94); }
 
-/* A settings row whose control acts instead of holding a value. Same vessel as
-   the close ring and the label pills, so it reads as one family. */
-.setting-action {
-  flex: 0 0 auto;
-  height: 22px; padding: 0 12px;
-  border: 1px solid rgba(197, 165, 109, 0.4);
-  border-radius: 999px;
-  background: rgba(20, 20, 18, 0.9);
-  color: var(--hazelnut-light);
-  font-size: 10px; letter-spacing: 0.1em;
-  transition: transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.15s ease;
-}
-.setting-action:hover { border-color: rgba(197, 165, 109, 0.75); }
-.setting-action:active { transform: scale(1.10, 0.91); }
-
 .model-pick { display: flex; gap: 6px; }
 .model-pick-button {
   flex: 1; min-width: 0; padding: 5px 7px;
@@ -2259,7 +2363,7 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
 .orb.gulp { animation: orb-gulp 0.9s ease-in-out; }
 
 /* ---------------- the pipe: scene 2's exit ----------------
-   The orb is Hazlie, and Hazlie is about to live in the bottom-right corner
+   The orb is Intaglio Labs, and Intaglio Labs is about to live in the bottom-right corner
    — so it TRAVELS there: sucked into an invisible pipe, vanishing exactly
    where the real widget surfaces a beat later (scene 3's spotlight). The
    reveal becomes causal — the thing you talked to went THERE — instead of a

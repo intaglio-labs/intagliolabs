@@ -24,6 +24,13 @@ import { fileURLToPath } from 'node:url';
 
 const WIDGET = join(dirname(fileURLToPath(import.meta.url)), '..');
 const swift = readFileSync(join(WIDGET, 'src', 'Bridge.swift'), 'utf8');
+const bridgeLoginSwift = readFileSync(join(WIDGET, 'src', 'BridgeLogin.swift'), 'utf8');
+const googleLoginSwift = readFileSync(join(WIDGET, 'src', 'GoogleLogin.swift'), 'utf8');
+const connections = readFileSync(join(WIDGET, 'ui', 'connections.js'), 'utf8');
+const connectorTile = readFileSync(join(WIDGET, 'ui', 'connector-tile.js'), 'utf8');
+const people = readFileSync(join(WIDGET, 'ui', 'people.js'), 'utf8');
+// The shared tile/card both surfaces render from.
+const tile = readFileSync(join(WIDGET, 'ui', 'connector-tile.js'), 'utf8');
 
 // --- 1. what the dispatch handles -------------------------------------------
 const dispatchCases = new Set(
@@ -179,12 +186,7 @@ test('every page yields at least one readable call of its own', () => {
 
 test('no page calls the bridge in a way this scanner cannot read', () => {
   // A dynamic first argument means a capability nobody can check statically.
-  // onboarding.js has one — `hzPost(then)` inside finish({ then }) — and it is
-  // dead: finish() is only ever called with no argument, so `then` is always
-  // undefined and the call never fires. It is listed rather than ignored,
-  // because the next one might not be dead.
   const KNOWN_DYNAMIC = new Set([
-    'onboarding.js: then', // dead: finish() is only called with no argument
     'connections.js: message', // resolved via the `message: 'setX'` literals above
   ]);
   const surprises = [];
@@ -239,4 +241,174 @@ test('every page in the map is a real page', () => {
   const real = new Set(pageScripts.keys());
   const phantom = [...declared.keys()].filter((p) => !real.has(p));
   assert.deepEqual(phantom, [], `the map names pages with no ui/<page>.html: ${phantom.join(', ')}`);
+});
+
+test('native web login carries every server-authored policy feature to the login window', () => {
+  const block = /case "bridgeWebLogin":([\s\S]*?)\n {4}\/\/ ---- setup:/u.exec(swift)?.[1];
+  assert.ok(block, 'bridgeWebLogin handler not found');
+
+  for (const field of [
+    'requiredCookies', 'cookieFormat', 'fields', 'approval', 'userAgent',
+    'allowedFrameHosts', 'storageUrl',
+  ]) {
+    assert.match(block, new RegExp(`begin\\["${field}"\\]`, 'u'), `${field} is read from server policy`);
+    assert.match(block, new RegExp(`${field}: ${field}`, 'u'), `${field} is passed to BridgeLogin`);
+    assert.match(bridgeLoginSwift, new RegExp(`\\b${field}:`, 'u'), `BridgeLogin accepts ${field}`);
+  }
+  assert.match(block, /begin\["qrLogin"\]/u, 'QR policy is handled by the native QR window');
+});
+
+test('model setup restarts the launch agents provisioning actually installs', () => {
+  assert.match(swift, /Provision\.installAgent\("io\.intaglio\.llama-server"\)/u);
+  assert.match(swift, /Provision\.kickstart\("io\.intaglio\.llama-server"\)/u);
+  assert.match(swift, /Provision\.kickstart\("io\.intaglio\.hermes"\)/u);
+  assert.doesNotMatch(swift, /com\.hazlie\.(?:llama-server|hermes)/u);
+});
+
+// ~~The credential reassurance is middle-aligned.~~ It was, while the domain sat
+// beside it at the same weight. The domain now carries the weight and the full
+// foreground -- it is the one fact in this header worth reading -- and the
+// reassurance moved to the opposite end, quieter, so the two do not compete and
+// cannot collide as a domain grows.
+test('the domain leads the header and the reassurance stays out of its way', () => {
+  const block = /let host = makeLabel\(([\s\S]*?)view\.addSubview\(sub\)/u.exec(bridgeLoginSwift)?.[1];
+  assert.ok(block, 'header block not found');
+  assert.match(block, /font: monoBold, color: fg/u, 'the domain is the emphasised element');
+  assert.match(block, /sub\.alignment = \.right/u, 'the reassurance sits opposite it');
+  assert.match(block, /color: muted/u, 'and stays quieter than the domain');
+});
+
+// THE DOMAIN IS A SECURITY SURFACE, so what it claims must come from the live URL
+// rather than from the platform we intended to open.
+test('the login window shows a live, scheme-aware domain', () => {
+  assert.match(bridgeLoginSwift, /func showHost\(_ url: URL\?\)/u, 'it reads a URL, so it can judge the scheme');
+  assert.match(bridgeLoginSwift, /url\.scheme\?\.lowercased\(\) == "https"/u, 'it checks the scheme');
+  assert.match(bridgeLoginSwift, /dropFirst\(4\)/u, 'www. is noise and is dropped');
+  // didCommit is what makes it live: a login that hops hosts must rename it.
+  assert.match(
+    bridgeLoginSwift,
+    /didCommit navigation[\s\S]{0,120}showHost\(webView\.url\)/u,
+    'the domain must follow the page, or it is a claim that goes stale'
+  );
+  // ~~A lock glyph, then the whole url.~~ Both tried, both reverted: a lock is a
+  // summary somebody has to be trusted for, and a full url in mono is a wall of
+  // text that reads as less trustworthy in a window this size.
+  assert.doesNotMatch(bridgeLoginSwift, /absoluteString/u, 'the full-url version is gone');
+  assert.doesNotMatch(bridgeLoginSwift, /"🔒/u, 'the lock glyph is gone');
+});
+
+test('Google OAuth opens in the system browser, never an embedded webview', () => {
+  assert.match(googleLoginSwift, /NSWorkspace\.shared\.open\(target\)/u);
+  assert.doesNotMatch(googleLoginSwift, /^import WebKit$/mu);
+  assert.doesNotMatch(googleLoginSwift, /WKWebView\s*\(/u);
+  assert.doesNotMatch(googleLoginSwift, /\.customUserAgent\s*=/u);
+});
+
+test('Settings mounts its controls without the retired memory-review row', () => {
+  assert.match(connections, /rows\.push\(settingRow\(/u);
+  assert.match(connections, /rows\.push\(modelRow\(\)\)/u);
+  assert.match(connections, /settings\.replaceChildren\(\.\.\.rows\)/u);
+  assert.doesNotMatch(connections, /actionRow|what i have learned|openMemoryReview/u);
+  assert.doesNotMatch(swift, /openMemoryReview/u);
+});
+
+// ~~People starts the same Google authorization action as Settings.~~ It did, and
+// the shared behaviour is still the point -- it is just that both now say
+// "coming soon" (owner, 2026-08-27). Sign-in reached a "Which Google account?"
+// picker, a second small menu inside a panel where every other tile loads its
+// login straight away, and an inconsistent flow for an unfinished connector is
+// not worth keeping wired.
+test('People and Settings park Google the same way', () => {
+  // Neither surface may start the flow from a tile any more.
+  assert.ok(!/hzPost\('googleAuth'/u.test(people), 'the People ring must not start sign-in');
+  assert.ok(
+    !/startGoogleAuth\(\s*tip\.querySelector/u.test(connections),
+    'the Settings tile press must not start sign-in'
+  );
+  // And both must actually SAY so, from the shared card and from Settings' own.
+  assert.match(tile, /HZ_GOOGLE_AUTH\.has\(HZ_KIND\(src\.id\)\)[\s\S]{0,400}coming soon/u,
+    'the shared card says it, which is what the People ring renders');
+  assert.match(connections, /GOOGLE_AUTH\.has\(kindOf\(src\.id\)\)[\s\S]{0,300}coming soon/u,
+    'and Settings says it too');
+});
+
+// The machinery stays defined so restoring it is one block, not a rewrite.
+test('the Google OAuth path is parked, not deleted', () => {
+  assert.match(connections, /function showClientChoice/u);
+  assert.match(connections, /function startGoogleAuth|const startGoogleAuth/u);
+});
+
+test('Settings offers the explicit WhatsApp opt-in returned by connector status', () => {
+  const block = /if \(src\.disabled && src\.action === 'enable'\) \{([\s\S]*?)\n {4}\} else if/u
+    .exec(connections)?.[1];
+  assert.ok(block, 'disabled connector branch not found in Settings');
+  assert.match(block, /enable\.textContent = 'connect'/u);
+  assert.match(
+    block,
+    /hzPost\('setConnectorEnabled', \{ connector: src\.id, enabled: true \}\)/u
+  );
+  assert.match(block, /\.then\(refresh\)/u, 'successful opt-in repaints connector status');
+});
+
+test('Settings keeps every unconnected connector ahead of connected caveats', () => {
+  assert.match(connections, /const needsYou = \(s\) => !s\.connected;/u);
+  assert.doesNotMatch(connections, /const needsYou =[^;]*caveat/u);
+});
+
+test('Settings connector hints are anchored overlays, never a third panel', () => {
+  assert.match(connections, /hzPlacePop\(hintHost, anchor\)/u);
+  assert.doesNotMatch(connections, /extraWidth:\s*open\s*\?\s*248/u);
+  assert.doesNotMatch(connections, /hintHost\.style\.height/u);
+  assert.doesNotMatch(swift, /payload\["extraWidth"\]/u);
+});
+
+test('connector cards use current privacy copy and connected bridge identity', () => {
+  assert.match(connections, /const STAY = "data stored locally";/u);
+  assert.match(connectorTile, /const HZ_STAY = "data stored locally";/u);
+  assert.match(connections, /const isBridge = \(src\) => src\.action === 'bridge' \|\|/u);
+  assert.match(connectorTile, /const HZ_IS_BRIDGE = \(src\) => src\.action === 'bridge' \|\|/u);
+  assert.match(connectorTile, /if \(HZ_IS_BRIDGE\(src\)\)/u);
+  assert.doesNotMatch(connectorTile, /acct\.textContent = `linked as/u);
+});
+
+test('FDA status is reconciled in the app process that owns the grant', () => {
+  const block = /private func reconcileFullDiskStatus\([\s\S]*?\n {2}\}/u.exec(swift)?.[0] ?? '';
+  assert.match(block, /Permissions\.fullDiskAccessibleSources\(\)/u);
+  assert.match(block, /source\["action"\] as\? String == "fda"/u);
+  assert.match(block, /fixed\["connected"\] = true/u);
+  assert.match(block, /fixed\["broken"\] = false/u);
+});
+
+// The Settings panel must not wait on the network to say what is on disk.
+//
+// setupState carries two kinds of fact: local ones (the installed model tier, the
+// voice tree, the static tier list) and one remote one (hermes' row count, an
+// HTTP call). Bundling them meant the panel's "local model size" row waited for
+// hermes — which is single-threaded and blocks for its whole boot warm, so the
+// call timed out at 4s and the answer arrived seconds late despite having been on
+// disk the entire time.
+test('setupState answers from disk immediately, and fetches rows only when asked', () => {
+  const block = /case "setupState":([\s\S]*?)case "modelDownload":/u.exec(swift)?.[1];
+  assert.ok(block, 'setupState case not found');
+  assert.match(
+    block,
+    /guard payload\["rows"\] as\? Bool == true else \{[\s\S]{0,120}reply\(webView, id, state\)/u,
+    'the local state must be replied without waiting for the row count'
+  );
+  // And the slow path must still exist for the caller that needs it.
+  assert.match(block, /rows \{ n, memory in/u, 'the row count is still available on request');
+});
+
+test('only the onboarding scenes pay for the row count', () => {
+  const onboarding = readFileSync(join(WIDGET, 'ui/onboarding.js'), 'utf8');
+  const connections = readFileSync(join(WIDGET, 'ui/connections.js'), 'utf8');
+  assert.ok(
+    !/hzPost\('setupState'\)/u.test(onboarding),
+    'onboarding reads rows/memory, so every call there must ask for them'
+  );
+  assert.match(onboarding, /hzPost\('setupState', \{ rows: true \}\)/u);
+  assert.ok(
+    !/hzPost\('setupState', \{ rows: true \}\)/u.test(connections),
+    'Settings never reads rows and must not wait for them'
+  );
 });

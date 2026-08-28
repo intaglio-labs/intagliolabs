@@ -35,6 +35,7 @@
 import Foundation
 import EventKit
 import Contacts
+import ImageIO
 
 // Apple absolute time: seconds since 2001-01-01 UTC, which is exactly what
 // Date.timeIntervalSinceReferenceDate returns and exactly what the sqlite
@@ -172,6 +173,33 @@ private func dumpEvents(fromSeconds: Double, toSeconds: Double) -> Never {
 
 // MARK: - contacts
 
+/// A contact photo, small enough to send 250 of.
+///
+/// CNContactThumbnailImageData is NOT a thumbnail in any useful sense on a real
+/// address book: measured on the owner's, 267 photos averaged 247 KB and the
+/// largest was 1.8 MB (2026-08-25). The People page draws them in a 20-26px
+/// circle, so shipping those bytes would be ~60 MB of payload to render a few
+/// hundred dots. ImageIO does the decode-and-resize in one pass without ever
+/// materialising the full-size bitmap.
+///
+/// Returns nil for absent or undecodable input — the caller omits the field,
+/// and the face falls back to initials.
+private func downscaleJPEG(_ data: Data?, max: CGFloat = 96) -> Data? {
+  guard let data, !data.isEmpty else { return nil }
+  guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+  let opts: [CFString: Any] = [
+    kCGImageSourceCreateThumbnailFromImageAlways: true,
+    kCGImageSourceCreateThumbnailWithTransform: true,   // honour EXIF rotation
+    kCGImageSourceThumbnailMaxPixelSize: max,
+  ]
+  guard let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+  let out = NSMutableData()
+  guard let dest = CGImageDestinationCreateWithData(out, "public.jpeg" as CFString, 1, nil) else { return nil }
+  CGImageDestinationAddImage(dest, img, [kCGImageDestinationLossyCompressionQuality: 0.72] as CFDictionary)
+  guard CGImageDestinationFinalize(dest) else { return nil }
+  return out as Data
+}
+
 private func dumpContacts() -> Never {
   let store = CNContactStore()
   let sem = DispatchSemaphore(value: 0)
@@ -213,6 +241,12 @@ private func dumpContacts() -> Never {
     CNContactPhoneNumbersKey as CNKeyDescriptor,
     CNContactEmailAddressesKey as CNKeyDescriptor,
     CNContactOrganizationNameKey as CNKeyDescriptor,
+    // THUMBNAIL, not the full image. CNContactImageDataKey is the original the
+    // owner dropped in — often a multi-megabyte photo — and the People page
+    // draws it at 26px. The thumbnail is what Contacts.app itself shows in a
+    // list, already square and small, so this is the size the product needs
+    // rather than a size we would have to resize down ourselves.
+    CNContactThumbnailImageDataKey as CNKeyDescriptor,
   ]
   let request = CNContactFetchRequest(keysToFetch: keys)
   var out: [[String: Any]] = []
@@ -228,7 +262,14 @@ private func dumpContacts() -> Never {
       guard !phones.isEmpty || !emails.isEmpty else { return }
       // RAW, not normalised. contacts.mjs owns the phone normalisation for both
       // backends -- see the header.
-      out.append(["displayName": display, "phones": phones, "emails": emails])
+      // base64, because this crosses a pipe as JSON. Absent when the contact
+      // has no picture — most do not, and an empty string per contact is a
+      // field the reader would have to special-case anyway.
+      var row: [String: Any] = ["displayName": display, "phones": phones, "emails": emails]
+      if let small = downscaleJPEG(contact.thumbnailImageData) {
+        row["thumbnail"] = small.base64EncodedString()
+      }
+      out.append(row)
     }
   } catch {
     fail("enumerating contacts failed: \(error.localizedDescription)")

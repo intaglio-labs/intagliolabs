@@ -36,6 +36,19 @@ Docker contains that, and every mautrix path targets it.
 - All runtime state (configs, session cookies, message DBs) lives under
   `~/.hazlie/matrix/` (0700), **outside the repo**. Only this dir is committed.
 
+## Setting it up from nothing
+
+`bash ops/setup-bridges.sh` — idempotent, resumable, and the ONLY recipe for a
+fresh machine. It generates synapse's config (client-only, no federation, all
+six appservices registered), each bridge's config and registration (hardened:
+backfill on, double puppeting off), brings the stack up, and creates the owner
+user + `~/.hazlie/matrix/owner-credentials.json`. Written 2026-08-25, the day
+a wipe proved the original stack's recipe lived in nobody's head: the widget's
+login windows harvested cookies with no bridge behind them to take the
+hand-off. Telegram alone stays stopped until you put your own api_id/api_hash
+from my.telegram.org/apps into its config — the script says exactly this when
+it happens.
+
 ## Operating it
 
 ```sh
@@ -49,7 +62,7 @@ docker compose down && rm -rf ~/.hazlie/matrix/*   # FULL teardown, wipes everyt
 
 ## Logging in a platform  (THE human step — nothing flows until this is done)
 
-Login happens in **Hazlie's own connect page** (`connect/`), not a third-party
+Login happens in **Intaglio Labs' own connect page** (`connect/`), not a third-party
 Matrix client. The Messenger and Instagram rows there open a native login panel
 (`connect/lib/bridge.mjs` + `bridgePage.mjs`) that drives the bridge bot over the
 local Matrix API. Auth is **cookie-based** (mautrix removed QR from the bot flow).
@@ -127,7 +140,7 @@ protection. Presence, where it is controllable at all, is
   `connectors/doctor.mjs` now FAILS when a bridge has backfill off, so this
   cannot quietly revert.
 - **Read-only in practice** — sending DMs *through* the bridge is the automation
-  Meta actually hunts; Hazlie only reads, so stay out of typing in portal rooms.
+  Meta actually hunts; Intaglio Labs only reads, so stay out of typing in portal rooms.
 - **Cookies from your everyday browser session** — extract them from the browser
   you already use the platform on, so Meta sees your existing session continuing
   on your normal device/IP, not a new-device login.

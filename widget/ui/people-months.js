@@ -1,7 +1,8 @@
 // The timeline popup: ONE YEAR of your people, sorted by that year's
 // engagement, with the year's topic chips — month grouping was yeeted
 // (owner, 2026-08-25). Browser-style year tabs page between years; one fetch
-// per year (cached, dropped on every panel re-open via __hzRefresh). Search
+// per year (cached for the panel's lifetime and refreshed in the background
+// when the panel re-opens). Search
 // is SERVER-SIDE and crosses every year (the filter row was yeeted — owner,
 // 2026-08-25): filtering the open year's loaded list could not reach a person
 // in another year, nor one past the 250 that list holds, which is most of them
@@ -27,8 +28,11 @@
   const listEl = document.getElementById('list');
   const searchEl = document.getElementById('search');
   const closeEl = document.getElementById('close');
-  const recencyEl = document.getElementById('recency');
   const tabsEl = document.getElementById('tabs');
+  // The strip and the globe are separate boxes now, so clicks are caught on
+  // the row that holds both.
+  const tabRowEl = document.getElementById('tabrow');
+  const globeEl = document.getElementById('globe');
   const syncEl = document.getElementById('sync');
   const skyEl = document.getElementById('sky');
   const cardsEl = document.getElementById('cards');
@@ -44,16 +48,15 @@
   // person's topics are a thing about the relationship, not about a calendar
   // year, and slicing them by year made the same friend appear and vanish
   // between tabs.
-  // 'all' | 'in' | 'quiet'. Defaults to 'all': the globe's identity is
-  // everyone-you-know, so the chip's job is to ASK the recency question, not to
-  // answer it on the owner's behalf. Defaulting to 'in' would open on 759 of
-  // 2,604 stars and read as a much emptier corpus than it is.
-  let recency = 'all';
   // The strip is homed to its right-hand end once, not on every render.
   let tabsHomed = false;
-  let lastFreshness = null;
-  let rebuilding = false;
   let scope = 'year';
+  // Whether this is the first time this page has ever been opened, decided by
+  // native having no remembered view for it. Only ever true before the first
+  // fetch lands, and only trusted when the read SUCCEEDED — a bridge that threw
+  // tells us nothing, and guessing "first visit" there would route someone away
+  // from a page they have used for months.
+  let firstVisit = false;
   // The topic a bubble was clicked into, or null. Only the list honours it —
   // filtering the constellation to one topic would just draw that one circle.
   let topic = null;
@@ -67,6 +70,8 @@
   let years = []; // every year with activity, from the server
   let expanded = null; // '<personKey>|<year>' of the row showing its detail
   const cache = new Map(); // year -> payload
+  const staleYears = new Set(); // cached years owed a silent freshness check
+  const refreshing = new Map(); // year -> in-flight refresh promise
   // Search state. `findRows` is null when not searching, so an empty ARRAY can
   // honestly mean "nobody matches" rather than "no search has run".
   let findTerm = '';
@@ -146,6 +151,40 @@
     );
   }
 
+  // WHO WEARS WHICH MARK. Rebuilt per paint from the open year's payload, so it
+  // is always the year on screen that decides — a trophy that survived a tab
+  // change would be a claim about the wrong year. Empty on the all-years
+  // surface, which has no awards to give: they are a fact about ONE year, and
+  // the map payload does not compute them.
+  function awardIndex(data) {
+    const by = new Map();
+    for (const a of (data && data.awards) || []) {
+      for (const key of a.keys || []) {
+        if (!by.has(key)) by.set(key, []);
+        // The order categories arrive in is the cards' order, and the row wears
+        // them in that order too, so two people with the same pair of marks
+        // never wear them in a different sequence.
+        by.get(key).push(a);
+      }
+    }
+    return by;
+  }
+  let awardsByKey = new Map();
+
+  // The card's own glyph, at row size, in front of the name. Same icon as the
+  // card above it on purpose: the mark is only legible because the card taught
+  // it, and a second icon set for the same five ideas would have to be learned
+  // twice.
+  function awardsHtml(p) {
+    const mine = awardsByKey.get(p.key);
+    if (!mine || !mine.length) return '';
+    return mine.map((a) =>
+      `<span class="pl-award" data-kind="${esc(a.kind)}" data-tip="${esc(a.label)}">` +
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+      `stroke-linecap="round" stroke-linejoin="round">${CARD_ICON[a.kind] || FALLBACK_ICON}</svg>` +
+      '</span>').join('');
+  }
+
   function rowHtml(p, y) {
     // Five chips is the row's budget. The all-years union can carry more than
     // that, so the slice lives here rather than in the data — clustering needs
@@ -159,19 +198,26 @@
       .map((c) => `<span class="pm-src-ic" data-tip="${esc(CHAN_LABEL[c] || c)}">${hzGlyph(c)}</span>`)
       .join('');
     return (
-      `<div class="pl-row${open ? ' open' : ''}" data-rk="${esc(rowKey)}">` +
+      `<div class="pl-row${open ? ' open' : ''}" role="button" data-rk="${esc(rowKey)}">` +
         `<div class="pl-main">` +
           `<div class="pl-nameline">` +
+            `<span class="pl-face" data-avatar-key="${esc(p.key)}">${esc(initials(p.name))}</span>` +
+            awardsHtml(p) +
             `<span class="pl-name">${esc(p.name)}</span>` +
-            // TWO NUMBERS, because they answer different questions. "msgs" is
-            // what passed between the two of you; "in rooms" is what they said
-            // in a group you were also in. Folding the second into the first is
-            // what made someone you have never messaged look like a friend.
+            // ONE NUMBER: what passed between the two of you.
+            //
+            // ~~Two, the second being "N in rooms" — what they said in a group
+            // you were also in.~~ The row no longer prints it (owner,
+            // 2026-08-26). The reason the split EXISTS is unchanged and still
+            // load-bearing: folding room volume into the direct count is what
+            // made someone you have never messaged look like a friend, so
+            // `roomMessages` stays separate everywhere it is counted, ranked
+            // and filtered — it is simply not a number the row says out loud.
+            // What survives on screen is the qualitative half: a person with no
+            // direct messages at all still wears the "only in group chats"
+            // badge below, which is the part that changes how you read the row.
             (p.messages > 0
               ? `<span class="pm-msgs">${p.messages} msg${p.messages === 1 ? '' : 's'}</span>`
-              : '') +
-            (p.roomMessages > 0
-              ? `<span class="pm-msgs pm-room-msgs">${p.roomMessages} in rooms</span>`
               : '') +
             (y === year ? '' : `<span class="pm-yr-badge">${y}</span>`) +
             // ONLY EVER IN A ROOM. Until now these rendered exactly like people
@@ -203,125 +249,7 @@
     if (topic && view === 'list') {
       rows = rows.filter((p) => (p.topics || []).some((t) => t && t.label === topic));
     }
-    // RECENCY APPLIES TO BOTH VIEWS, unlike topic. visible() is the single input
-    // to the list and to the sky, so filtering here is what makes the two agree
-    // by construction rather than by two call sites remembering to match.
-    //
-    // On presenceDays, never recencyDays: recencyDays is null for all 467
-    // room-only people by design, so a filter on it would silently delete the
-    // exact cohort the room work made visible. See the two-clocks comment in
-    // ui/server/people/map.mjs.
-    if (recency === 'in') {
-      rows = rows.filter((p) => presenceOf(p) != null && presenceOf(p) < RECENT_DAYS);
-    } else if (recency === 'quiet') {
-      rows = rows.filter((p) => { const d = presenceOf(p); return d == null || d >= RECENT_DAYS; });
-    }
     return rows;
-  }
-
-  // A YEAR, because that is the boundary the eye already uses ("did I see them
-  // this year") and because it splits this corpus into two usable halves rather
-  // than one big one and a sliver.
-  const RECENT_DAYS = 365;
-
-  // Server-computed, with a client fallback for a payload that predates the
-  // field — the same shape as the topicsAreMarked detect below, and the reason
-  // for it is the same: an app bundle and a backend ship by different routes, so
-  // one can be newer than the other. Treating `undefined` as a value would put
-  // every star in "gone quiet" on an older server.
-  function presenceOf(p) {
-    if (typeof p.presenceDays === 'number') return p.presenceDays;
-    if (typeof p.recencyDays === 'number') return p.recencyDays;
-    if (typeof p.lastSeen === 'number') return Math.max(0, Math.floor((Date.now() - p.lastSeen) / 86400000));
-    return null;
-  }
-
-  // THE RECENCY SEGMENTS. Three states, each printing its own count, so the
-  // control can never be silently on -- a filtered globe that looks like a small
-  // corpus is the failure this is guarding against.
-  //
-  // Globe only: yearCore's rows carry no recency field at all (the year view is
-  // built from month buckets, not from the graph person), so the chip would have
-  // nothing to filter on inside a year tab. Gated rather than hidden-and-hoped.
-  // How old the answer is, and the way to ask for a newer one.
-  //
-  // The core serves STALE and rebuilds behind the response -- that is what makes
-  // the page instant -- so an answer can be one ingest behind. Saying so is the
-  // difference between a cache and a lie. Clicking rebuilds on request, which is
-  // the one place the app deliberately makes the reader wait, because they asked.
-  function freshnessChip(fresh) {
-    if (!fresh) return null;
-    const b = document.createElement('button');
-    const age = fresh.builtAt ? Date.now() - fresh.builtAt : null;
-    const ago = age == null ? '' :
-      age < 60_000 ? 'just now' :
-      age < 3_600_000 ? `${Math.floor(age / 60_000)}m ago` :
-      age < 86_400_000 ? `${Math.floor(age / 3_600_000)}h ago` :
-      `${Math.floor(age / 86_400_000)}d ago`;
-    b.className = 'pm-fresh' + (fresh.stale ? ' stale' : '');
-    b.dataset.rebuild = '1';
-    b.textContent = rebuilding ? 'recomputing…' : (fresh.stale ? `${ago} · refresh` : ago);
-    b.title = rebuilding
-      ? 'recomputing from every message'
-      : fresh.stale
-        ? 'new messages have arrived since this was built — click to recompute'
-        : 'up to date with every message — click to recompute anyway';
-    b.disabled = rebuilding;
-    return b;
-  }
-
-  function renderRecency(data) {
-    // The row shows freshness in BOTH views; the segments are the globe's own,
-    // because a year tab's rows carry no recency field to filter on.
-    const segments = scope === 'all' && !findTerm && Array.isArray(data?.people);
-    const fresh = data?.freshness ?? lastFreshness;
-    if (data?.freshness) lastFreshness = data.freshness;
-    const show = (segments || fresh) && !findTerm;
-    recencyEl.hidden = !show;
-    if (!show) { recencyEl.replaceChildren(); return; }
-    if (!segments) {
-      const chip = freshnessChip(fresh);
-      recencyEl.replaceChildren(...(chip ? [chip] : []));
-      return;
-    }
-    const all = data.people;
-    const n = (f) => all.filter(f).length;
-    const states = [
-      { id: 'all', label: 'everyone', count: all.length },
-      { id: 'in', label: 'in touch', count: n((p) => presenceOf(p) != null && presenceOf(p) < RECENT_DAYS) },
-      { id: 'quiet', label: 'gone quiet', count: n((p) => { const d = presenceOf(p); return d == null || d >= RECENT_DAYS; }) },
-    ];
-    // The three live in a TRACK. Rendered as three bare buttons they read as
-    // one pill and two loose words -- a label someone forgot to style, not a
-    // control -- because only the selected one had any box at all. A shared
-    // groove is what says "these are the three states of one thing, and you are
-    // standing in this one".
-    const track = document.createElement('div');
-    track.className = 'pm-rec-track';
-    track.append(...states.map((st) => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = `pm-rec${st.id === recency ? ' active' : ''}`;
-      b.dataset.rec = st.id;
-      b.setAttribute('aria-pressed', String(st.id === recency));
-      const label = document.createElement('span');
-      label.textContent = st.label;
-      // The count is evidence for the label, not part of its name: same row,
-      // quieter, and its own element so "everyone" and "1793" stop running
-      // together into one string.
-      const num = document.createElement('span');
-      num.className = 'pm-rec-n';
-      num.textContent = String(st.count);
-      b.append(label, num);
-      // "in touch" means seen anywhere, group chats included -- say so, because
-      // the number is bigger than a reader expecting direct contact would guess.
-      b.title = st.id === 'in' ? 'seen in the last year, group chats included'
-        : st.id === 'quiet' ? 'nothing for a year or more, anywhere'
-        : 'no recency filter';
-      return b;
-    }));
-    const chip = freshnessChip(fresh);
-    recencyEl.replaceChildren(...(chip ? [track, chip] : [track]));
   }
 
   // The chip that says which topic the list is standing in, and the way out of
@@ -350,7 +278,10 @@
 
   // One glyph per card kind. Keyed by the server's `kind`, with a fallback, so
   // a server that grows a sixth card renders as a nameless-but-present card
-  // rather than throwing.
+  // rather than throwing. The same `kind` also picks the card's colour — see
+  // the tod-band block in people-months.css — which is why it rides onto both
+  // the card and the row glyph as a data attribute rather than being switched
+  // on here.
   const CARD_ICON = {
     'person-of-the-year':
       '<path d="M8 4h8v5a4 4 0 0 1-8 0V4Z"></path><path d="M8 5H5v2a3 3 0 0 0 3 3"></path>' +
@@ -358,10 +289,9 @@
     'back-from-your-past':
       '<circle cx="12" cy="12" r="8"></circle><path d="M12 7v5l3 2"></path>',
     'rising-star':
-      '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z"></path>',
+      '<path d="M4 17 10 11l4 4 6-8"></path><path d="M16 7h4v4"></path>',
     drifting:
-      '<path d="M4 8h10"></path><path d="M4 13h7"></path><path d="M4 18h4"></path>' +
-      '<path d="M17 13v6"></path><path d="M14.5 16.5 17 19l2.5-2.5"></path>',
+      '<path d="M4 7l6 6 4-4 6 8"></path><path d="M16 17h4v-4"></path>',
     streak:
       '<path d="M12 3s5 4.2 5 9a5 5 0 0 1-10 0c0-4.8 5-9 5-9Z"></path>' +
       '<path d="M12 20a2.6 2.6 0 0 1-2.6-2.6c0-1.6 2.6-3.9 2.6-3.9s2.6 2.3 2.6 3.9A2.6 2.6 0 0 1 12 20Z"></path>',
@@ -371,14 +301,15 @@
   function cardHtml(h, i) {
     const icon = CARD_ICON[h.kind] || FALLBACK_ICON;
     return (
-      `<div class="pm-card${i === 0 ? ' lead' : ''}">` +
+      `<div class="pm-card${i === 0 ? ' lead' : ''}" data-kind="${esc(h.kind)}">` +
         '<div class="pm-card-eyebrow">' +
           '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
           `stroke-linecap="round" stroke-linejoin="round">${icon}</svg>` +
           `<span>${esc(h.label)}</span>` +
         '</div>' +
         '<div class="pm-card-who">' +
-          `<span class="pm-card-face">${esc(initials(h.name))}</span>` +
+          `<span class="pm-card-face"${h.key ? ` data-avatar-key="${esc(h.key)}"` : ''}>` +
+            `${esc(initials(h.name))}</span>` +
           `<span class="pm-card-name">${esc(h.name)}</span>` +
         '</div>' +
         `<div class="pm-card-line">${esc(h.line)}</div>` +
@@ -454,7 +385,6 @@
       // that does not change. A control that cannot act should not exist.
       filterEl.hidden = true;
       filterEl.replaceChildren();
-      renderRecency(null);
       renderFind();
       saveView();
       return;
@@ -466,7 +396,7 @@
         filterEl.hidden = true;
         surface().innerHTML = '<div class="pm-loading">reading every year…</div>';
         // A THROW INSIDE render() IS NOT A FETCH FAILURE, and this used to report
-        // it as one: any error from visible/renderSky/renderRecency arrived here
+        // it as one: any error from visible/renderSky arrived here
         // and printed "couldn't read your years", which sends the reader to their
         // network and their corpus for a bug in a renderer. The two causes now
         // read differently, and the message carries the reason -- a globe that
@@ -496,11 +426,11 @@
   function paint(data) {
     const rows = visible(data);
     surface();
+    // Before anything draws a row: rowHtml reads this, and a stale index would
+    // put the last year's marks on this year's names.
+    awardsByKey = awardIndex(data);
     renderCards(data);
     renderFilter(rows.length);
-    // Counts come from the UNFILTERED data so each segment says how many it
-    // would show, not how many are showing now.
-    renderRecency(data);
     if (view === 'sky') renderSky(data, rows);
     else renderList(data, rows);
     // One placeholder, because search now means the same thing everywhere:
@@ -508,18 +438,14 @@
     // here would say the box only reaches it.
     searchEl.placeholder = 'search everyone, every year…';
     renderTabs();
+    // After the paint, never during it — see paintAvatars.
+    paintAvatars();
     saveView();
   }
 
   // Browser-style year tabs: oldest left, newest right, the open one active,
   // and the globe last — a view rather than a year, but it lives on the same
   // strip because it shows the same year.
-  const GLOBE_SVG =
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
-    'stroke-linecap="round" stroke-linejoin="round">' +
-    '<circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path>' +
-    '<path d="M12 3a14 14 0 0 0 0 18a14 14 0 0 0 0-18"></path></svg>';
-
   // Search results: ranked by the server across every year, each row carrying
   // the year it was found in.
   function renderFind() {
@@ -528,6 +454,11 @@
       renderTabs();
       return;
     }
+    // NO MARKS ON A SEARCH. Results span every year, and the marks belong to
+    // one: a row found in 2021 would wear whichever year happened to be open
+    // behind the search box. The categories are still readable one tab at a
+    // time, which is where they mean something.
+    awardsByKey = new Map();
     const head = findState === 'degraded'
       ? `<div class="pl-more">couldn’t reach search — showing matches from the years already loaded</div>`
       : '';
@@ -535,6 +466,8 @@
       || `<div class="pl-empty">no one matches “${esc(findTerm)}”</div>`);
     searchEl.placeholder = 'search everyone, every year…';
     renderTabs();
+    // After the paint, never during it — see paintAvatars.
+    paintAvatars();
   }
 
   // Ask the server. reqId guards the race the same way the year loader does:
@@ -552,8 +485,8 @@
         findRows = res.people;
         findState = 'done';
         findCapped = res.capped === true;
+        if (Array.isArray(res.years) && res.years.length) years = res.years;
         render();
-        noteYears(res.years);
       })
       .catch(() => {
         if (my !== findId) return;
@@ -581,6 +514,19 @@
   // Browser-style year tabs: oldest left, newest right, the open one active,
   // and the globe last — all-years rather than a year, but on the same strip
   // because it is the same surface.
+  // WHICH END IS ACTUALLY HIDING SOMETHING. The strip's fade used to be painted
+  // on both ends at all times, which meant the tab at either end lost its edge
+  // to a gradient whether or not there was anything behind it — and the newest
+  // year, the one a fresh open selects, is always at an end. Marked from the
+  // scroll position instead: a strip with nothing to its left does not fade
+  // left. 1px of slack because scrollLeft is fractional on a scaled display.
+  function markTabFades() {
+    const max = tabsEl.scrollWidth - tabsEl.clientWidth;
+    tabsEl.classList.toggle('fade-l', tabsEl.scrollLeft > 1);
+    tabsEl.classList.toggle('fade-r', tabsEl.scrollLeft < max - 1);
+  }
+  tabsEl.addEventListener('scroll', markTabFades, { passive: true });
+
   function renderTabs() {
     const ys = years.length ? years : [year];
     tabsEl.replaceChildren();
@@ -595,17 +541,13 @@
       b.textContent = String(y);
       tabsEl.appendChild(b);
     }
-    const g = document.createElement('button');
-    // Stays lit for the topic LIST as well as the constellation: both are
+    // The globe is in the HTML, outside the scroller, so a render only lights
+    // it. Lit for the topic LIST as well as the constellation: both are
     // all-years and both were reached through here, so this is where you are.
     // No data-tip — its hover bubble is laid out 25px below the strip, which
     // (with overflow-y promoted to auto by the horizontal scroll) made the
     // whole tab row vertically scrollable.
-    g.className = 'pm-tab pm-tab-globe' + (scope === 'all' ? ' active' : '');
-    g.dataset.view = 'sky';
-    g.setAttribute('aria-label', 'every year by topic');
-    g.innerHTML = GLOBE_SVG;
-    tabsEl.appendChild(g);
+    globeEl.classList.toggle('active', scope === 'all');
     // WHERE THE STRIP SITS.
     //
     // Years run oldest-to-newest, so the interesting end is the RIGHT one, and
@@ -626,59 +568,37 @@
     // is a no-op when the active tab is already visible, which parked a fresh
     // open on 2012 with the newest years off-screen.
     const active = tabsEl.querySelector('.pm-tab.active');
-    // NOT HOMED UNTIL THERE IS SOMETHING TO HOME TO. The first renderTabs runs
-    // before any payload has arrived, when the strip holds the current year and
-    // the globe and there is nothing to scroll -- marking it homed there spent
-    // the one-shot on an empty strip, so when the real years arrived the newest
-    // one was off the right edge and stayed there.
-    if (!tabsHomed && years.length > 0) {
+    // ONCE THE STRIP IS A STRIP. `ys.length > 1` because the first paint of a
+    // cold page draws the open year alone, before any payload has said which
+    // years exist — homing to the right end of a single tab spends the one
+    // homing on nothing, and the real strip then arrives parked on the oldest
+    // year. Harmless in the list, where scrollIntoView on the active tab
+    // rescues it; visible in the globe, where no year tab is active and the
+    // strip simply sat on 2019.
+    if (!tabsHomed && ys.length > 1) {
       tabsHomed = true;
       tabsEl.scrollLeft = tabsEl.scrollWidth;
     } else if (active) {
       active.scrollIntoView({ inline: 'nearest', block: 'nearest' });
     }
+    // After the scroll above, not before: the fades describe where the strip
+    // ended up. The scroll listener covers every move after this one.
+    markTabFades();
   }
 
   // ---- the constellation ----
-  // HOW MANY BUBBLES FIT IS SOLVED, NOT CHOSEN. This was a flat 4, which was
-  // only ever right for the ~400px panel it was measured on — a scaled-up
-  // window has room for more and was still being given four.
-  //
-  // n bubbles of diameter d on a ring of radius r are 2r*sin(pi/n) apart
-  // (chord, not arc — arc overstates the gap and lets them touch), and that
-  // must be at least d. The ring must also fit: r <= R - d/2 - margin, where R
-  // is the stage's half-minor-axis. Substituting one into the other and
-  // solving for d gives the most a given n can afford:
-  //
-  //     d(n) = 2*sin(pi/n) * (R - margin) / (1 + sin(pi/n))
-  //
-  // So: try the most bubbles we would ever want, shrink them to fit, and stop
-  // at the first n whose bubbles are still big enough to hold faces. On a
-  // 400px panel that lands back on 4, which is what the design shows.
-  const CLUSTER_HARD_CAP = 8; // past this the labels collide and it reads as confetti
+  // ~~HOW MANY BUBBLES FIT IS SOLVED, NOT CHOSEN: n equal circles on one ring,
+  // d(n) = 2*sin(pi/n)*(R - margin)/(1 + sin(pi/n)).~~ The solve was right and
+  // its premise was wrong — the bubbles are neither equal nor on one ring, so
+  // it guaranteed spacing for a picture the page never drew. That is where the
+  // overlap came from. See people-sky-layout.js, which places each bubble on
+  // its own radius and proves the result has no intersections.
   const MIN_CLUSTER = 2;
-  const MAX_FACES = 5;
-  const RING_MARGIN = 8;
-  // The floor is not cosmetic — six discs wrap to a second row, where a circle
-  // is much narrower than its diameter, and below this the "+N" chip pushes out
-  // through the dashed border. Measured, not guessed.
-  const D_FLOOR = 118;
-  const D_CEIL = 162;
-
-  // { n, d }: how many bubbles this stage holds, and how big they may be.
-  function fitLayout(stageW, stageH, wanted) {
-    const R = Math.min(stageW, stageH) / 2;
-    const most = Math.max(1, Math.min(wanted, CLUSTER_HARD_CAP));
-    for (let n = most; n > 1; n -= 1) {
-      const s = Math.sin(Math.PI / n);
-      // 0.97 rather than the exact bound: the ring is an ELLIPSE, and the
-      // circle-based solve is only near-exact on a square stage. Measured gaps
-      // came out at 1-3px on tall panels without it.
-      const d = Math.min(D_CEIL, (2 * s * (R - RING_MARGIN) * 0.97) / (1 + s));
-      if (d >= D_FLOOR) return { n, d: Math.round(d) };
-    }
-    return { n: 1, d: Math.round(Math.min(D_CEIL, Math.max(D_FLOOR, R - RING_MARGIN))) };
-  }
+  // The stage geometry — how big each bubble is, how far out it sits, and where
+  // around the core it goes — lives in people-sky-layout.js, which has no DOM in
+  // it and is imported by widget/test/people-constellation.test.mjs so the
+  // arrangement can be checked with numbers. This file draws what it returns.
+  const SKY = globalThis.HzSkyLayout;
 
   // Two words -> both initials, one word -> one letter. Never two letters off a
   // single name: "Je" reads as a truncation, "J" reads as a monogram.
@@ -687,19 +607,6 @@
     if (!parts.length) return '?';
     const s = parts.length > 1 ? parts[0][0] + parts[parts.length - 1][0] : parts[0][0];
     return s.toUpperCase();
-  }
-
-  // Seeded PRNG (mulberry32). Math.random would reshuffle the background on
-  // every keystroke of a search, which reads as the sky twitching at you.
-  // Seeded by the year, so a year always comes back the same sky.
-  function mulberry32(seed) {
-    let a = seed >>> 0;
-    return () => {
-      a = (a + 0x6d2b79f5) >>> 0;
-      let t = Math.imul(a ^ (a >>> 15), 1 | a);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
   }
 
   // Does this payload carry the server's taxonomy mark at all? The app bundle
@@ -719,7 +626,24 @@
   // stranger's word. Without the mark, fall back to "a label at least
   // MIN_CLUSTER people share" — the same line drawn approximately, since a
   // term distinctive to one pair cannot clear that bar either.
-  // A person joins every topic they carry: people are not one thing.
+  // A person joins every topic they carry: people are not one thing. Activity
+  // is the sum of the topic's message counts across those people; this is the
+  // value that determines proximity to the owner, not merely how many people
+  // happen to share the label.
+  //
+  // EACH MEMBER KEEPS THE COUNT THAT PUT THEM IN THIS BUBBLE, and the members
+  // are ordered by it. ~~Both came from the person's GLOBAL engagement: the
+  // roster arrives sorted by total messages, and the faces were sized from
+  // p.engagement.~~ That was defensible while a bubble showed five faces and
+  // meant "the biggest names who are in here". It stopped being defensible the
+  // moment the bubble started carrying its whole cast: inside a circle labelled
+  // FAMILY, a face sized by how much somebody talks to you about WORK is a
+  // false statement about family, and the seats went to whoever was loudest
+  // elsewhere rather than to whoever actually carries the topic. Measured on a
+  // synthetic corpus of eight topics: the global ordering seated five faces in
+  // one bubble and fourteen in another of nearly the same size, because a cast
+  // of uniformly-loud people is a cast of uniformly-large faces, and large
+  // faces do not fit. The per-topic count decays the way topics actually do.
   function clustersFrom(people, marked) {
     const by = new Map();
     for (const p of people) {
@@ -727,96 +651,223 @@
         if (!t || !t.label) continue;
         if (marked && !t.tax) continue;
         let c = by.get(t.label);
-        if (!c) by.set(t.label, (c = { label: t.label, members: [] }));
-        c.members.push(p);
+        if (!c) by.set(t.label, (c = { label: t.label, members: [], activity: 0 }));
+        const n = Math.max(0, Number(t.n) || 0);
+        c.members.push({ person: p, n });
+        c.activity += n;
       }
+    }
+    for (const c of by.values()) {
+      // Ties broken by the global order the roster arrived in, which is stable,
+      // so a bubble does not reshuffle itself between two renders of the same
+      // data. `n` alone is not stable: a topic where everyone sent four
+      // messages is entirely ties.
+      c.members.forEach((m, i) => { m.at = i; });
+      c.members.sort((a, b) => b.n - a.n || a.at - b.at);
     }
     // Not sliced here — renderSky needs the full count to say how many topics
     // the cap left out.
     return [...by.values()]
       .filter((c) => c.members.length >= MIN_CLUSTER)
-      .sort((a, b) => b.members.length - a.members.length || a.label.localeCompare(b.label));
+      .sort((a, b) => b.activity - a.activity || b.members.length - a.members.length || a.label.localeCompare(b.label));
   }
 
-  // Face sizes SCALE WITH THE BUBBLE, and that is load-bearing rather than
-  // tidy. Held at the design's flat 22..32 they stopped fitting once bubbles
-  // shrank to make room for more topics: three 32px discs need ~104px, more
-  // than a 127px circle offers at its second row, so they wrapped to three rows
-  // and pushed out through the border. Measured — the first cut had a dozen
-  // faces outside their circles at 400px. 0.20 * d reproduces 22..32 at the
-  // largest bubble, which is where the design's numbers came from.
-  function faceScale(d) {
-    const max = Math.max(16, Math.min(32, Math.round(d * 0.2)));
-    return { max, min: Math.round(max * 0.69) };
+  // How far down the cluster's roster the faces are sized before the packer is
+  // asked. Well past what any bubble on this panel seats — the largest one
+  // measured seats twenty-one — and it keeps a four-hundred-person topic from
+  // sizing four hundred faces to draw twenty.
+  const FACE_CANDIDATES = 48;
+
+  // Contact photos, key -> data URI, or null once we know there is none.
+  // Cached for the life of the popup: a face does not change while it is open,
+  // and re-asking on every tab switch would be a round trip per year.
+  const avatarCache = new Map();
+
+  /**
+   * Fill in the faces for whatever is on screen.
+   *
+   * Fetched AFTER the list paints, never before: the names and counts are the
+   * page, and a photo arriving a beat later is invisible, while a list that
+   * waits for photos is a list that stutters.
+   */
+  async function paintAvatars() {
+    // cardsEl sits OUTSIDE the scrolling surface (it must stay put while the
+    // list moves), so both roots are swept or the award faces never fill in.
+    const holders = [
+      ...surface().querySelectorAll('[data-avatar-key]'),
+      ...cardsEl.querySelectorAll('[data-avatar-key]'),
+    ];
+    const need = [...new Set(holders.map((el) => el.dataset.avatarKey))]
+      .filter((k) => k && !avatarCache.has(k));
+    if (need.length) {
+      try {
+        const d = await hzPost('peopleAvatars', { keys: need });
+        const got = (d && d.avatars) || {};
+        for (const k of need) {
+          avatarCache.set(k, got[k] ? `data:image/jpeg;base64,${got[k]}` : null);
+        }
+      } catch {
+        // No faces is a fine page; mark them known so we do not ask again.
+        for (const k of need) avatarCache.set(k, null);
+      }
+    }
+    for (const el of holders) {
+      const uri = avatarCache.get(el.dataset.avatarKey);
+      if (!uri) continue;
+      el.style.backgroundImage = `url("${uri}")`;
+      el.classList.add('has-photo');
+    }
   }
 
-  function faceEl(p, maxEngagement, fs) {
+  // A FACE'S DIAMETER IS ITS PERSON'S SHARE OF THIS TOPIC — their messages
+  // under this label, against the busiest person under it. The band it moves in
+  // comes from the bubble (people-sky-layout.js owns the ratios), so the
+  // encoding survives a topic being drawn small.
+  function faceSize(n, maxN, fs) {
+    return Math.round(fs.min + (fs.max - fs.min) * (Math.max(0, n) / maxN));
+  }
+
+  // `at` is the spot the packer solved for: centre offsets from the middle of
+  // the bubble, in bubble pixels.
+  function faceEl(p, at) {
     const f = document.createElement('div');
     f.className = 'pm-face';
-    const size = Math.round(fs.min + (fs.max - fs.min) * ((p.engagement || 0) / maxEngagement));
-    f.style.width = `${size}px`;
-    f.style.height = `${size}px`;
-    f.style.fontSize = size >= 28 ? '10px' : `${Math.max(7, Math.round(size * 0.34))}px`;
+    f.style.width = `${at.d}px`;
+    f.style.height = `${at.d}px`;
+    f.style.left = `calc(50% + ${at.x.toFixed(1)}px)`;
+    f.style.top = `calc(50% + ${at.y.toFixed(1)}px)`;
+    f.style.fontSize = at.d >= 28 ? '10px' : `${Math.max(6, Math.round(at.d * 0.34))}px`;
     f.textContent = initials(p.name);
+    if (p.key) f.dataset.avatarKey = p.key;
     // data-tip, not title: native tooltips do not fire reliably in a
     // borderless non-activating panel (same reason as the connector glyphs).
     f.setAttribute('data-tip', `${p.name} · ${p.messages} msg${p.messages === 1 ? '' : 's'}`);
     return f;
   }
 
-  // The ring the bubbles sit on, from the same solve — the widest ellipse that
-  // still keeps a bubble of diameter d wholly on the stage. The panel is
-  // native-sized and the owner can scale it, so a hardcoded radius is a clipped
-  // bubble waiting to happen, which is exactly what a fixed 32% did.
-  function ringFor(stageW, stageH, d) {
-    const half = d / 2 + RING_MARGIN;
-    return {
-      rx: Math.max(0, stageW / 2 - half),
-      ry: Math.max(0, stageH / 2 - half),
-    };
+  // Written once: the layout sizes the stage against this string's width, and
+  // a second copy of the format is a second chance for the two to disagree.
+  function labelFor(topic, members) {
+    return `${String(topic).toUpperCase()} (${members})`;
   }
 
-  function clusterEl(c, i, count, maxMembers, ring, stage, dMax) {
+  function clusterEl(spot, i, stage) {
+    const c = spot.cluster;
+    const d = spot.d;
     const el = document.createElement('div');
     el.className = 'pm-cluster' + (i === 0 ? ' lead' : '');
     el.dataset.topic = c.label;
-    // Evenly around the centre, starting upper-left so a four-topic year lands
-    // on the diagonals the design draws.
-    const ang = -Math.PI * 0.75 + (i * Math.PI * 2) / count;
-    // Smaller bubbles scale down from the fitted maximum rather than from a
-    // constant, so the whole field shrinks together on a tight panel instead of
-    // the big one clipping while the small ones sit in space.
-    const dMin = Math.min(dMax, D_FLOOR);
-    const d = Math.round(dMin + (dMax - dMin) * (c.members.length / maxMembers));
     el.style.width = `${d}px`;
     el.style.height = `${d}px`;
-    // Percentages so the ring still tracks the panel if it is resized under us.
-    el.style.left = `${(50 + (Math.cos(ang) * ring.rx * 100) / stage.w).toFixed(1)}%`;
-    el.style.top = `${(51 + (Math.sin(ang) * ring.ry * 100) / stage.h).toFixed(1)}%`;
+    // Percentages so the field still tracks the panel if it is resized under us.
+    // The centre is the stage's, a hair above the core's own 51% — the offset is
+    // the core's alone, and borrowing it here would push the lowest bubble
+    // through the bottom edge on a tall panel.
+    el.style.left = `${(50 + (spot.x * 100) / stage.w).toFixed(1)}%`;
+    el.style.top = `${(50 + (spot.y * 100) / stage.h).toFixed(1)}%`;
 
-    const faces = document.createElement('div');
-    faces.className = 'pm-faces';
-    const fs = faceScale(d);
-    const shown = c.members.slice(0, MAX_FACES);
-    const maxE = Math.max(1, ...shown.map((p) => p.engagement || 0));
-    for (const p of shown) faces.appendChild(faceEl(p, maxE, fs));
-    const rest = c.members.length - shown.length;
-    if (rest > 0) {
+    // SEATS COME FROM THE BUBBLE, not from a constant, and the packer decides
+    // how many there are — see people-sky-layout.js. Sizes are computed for the
+    // whole candidate list before anything is placed, because a face's size is
+    // its engagement against the busiest person in the TOPIC; recomputing it
+    // against whoever happened to be seated would make the same person a
+    // different size in a bubble that dropped its tail.
+    const fs = SKY.faceScaleFor(d);
+    const cast = c.cast.slice(0, FACE_CANDIDATES);
+    const maxN = Math.max(1, ...cast.map((m) => m.n));
+    let packed = SKY.packFaces(d, cast.map((m) => faceSize(m.n, maxN, fs)));
+    let chip = null;
+    // THE "+N" CHIP TAKES A SEAT, it does not sit on top of the crowd — a seat
+    // is the only placement that cannot land on a face. It takes one of the
+    // LAST seats, which are the smallest and outermost, so the faces it costs
+    // are the least active in the topic and the crowd stays a clean prefix of
+    // the roster: everyone drawn is busier here than everyone counted.
+    //
+    // Which of the last seats depends on the number. Seats run down to a 13px
+    // floor, and "+1408" does not fit a 13px circle at a legible size — the
+    // first cut drew exactly that, four digits smeared across a disc the width
+    // of three. So walk out from the last seat until the text fits at 6px, the
+    // smallest the design sets this chip, and give up at four seats: past that
+    // the chip is eating people to describe them.
+    if (c.cast.length > packed.seated && packed.seated > 1) {
+      const digits = `+${c.cast.length - packed.seated + 1}`.length;
+      let k = packed.spots.length - 1;
+      // 0.6em per character is the monospace advance; 3px keeps the text off
+      // the dashed ring it sits inside.
+      const fits = (spot) => spot.d >= digits * 6 * 0.6 + 3;
+      while (k > 1 && k > packed.spots.length - 5 && !fits(packed.spots[k])) k -= 1;
+      chip = packed.spots[k];
+      packed = { spots: packed.spots.slice(0, k), seated: k };
+    }
+    packed.spots.forEach((at, n) => { el.appendChild(faceEl(cast[n].person, at)); });
+    const rest = c.cast.length - packed.seated;
+    if (chip && rest > 0) {
       const more = document.createElement('div');
       more.className = 'pm-face pm-face-more';
-      more.style.width = `${fs.min}px`;
-      more.style.height = `${fs.min}px`;
-      more.style.fontSize = `${Math.max(7, Math.round(fs.min * 0.36))}px`;
+      more.style.width = `${chip.d}px`;
+      more.style.height = `${chip.d}px`;
+      more.style.left = `calc(50% + ${chip.x.toFixed(1)}px)`;
+      more.style.top = `calc(50% + ${chip.y.toFixed(1)}px)`;
+      // Shrunk to the text when the seat is tight, never below 6px — the seat
+      // walk above is what keeps that floor from being reached with a number
+      // too long to sit in it.
+      more.style.fontSize =
+        `${Math.max(6, Math.min(Math.round(chip.d * 0.36), Math.floor((chip.d - 3) / (`+${rest}`.length * 0.6))))}px`;
       more.textContent = `+${rest}`;
-      faces.appendChild(more);
+      el.appendChild(more);
     }
 
     const label = document.createElement('div');
     label.className = 'pm-cluster-label';
-    label.textContent = `${c.label.toUpperCase()} · ${c.members.length}`;
-
-    el.append(faces, label);
+    label.textContent = labelFor(c.label, c.members);
+    el.appendChild(label);
     return el;
+  }
+
+  // The spokes. SVG rather than eight rotated divs: a rotated div's hairline
+  // ends are square and visibly clipped at low opacity, and the transform
+  // origin has to be re-derived from every bubble's own offset.
+  //
+  // PARSED, NOT createElementNS, and that is not a style preference. That call
+  // takes the SVG namespace as an argument, and the namespace is spelled as a
+  // URL — so connectors/test/egress.test.mjs, which scans tracked source for
+  // host-shaped literals, reads it as a host this software may contact. It is
+  // not one: an XML namespace is an identifier and nothing ever fetches it.
+  // But that scan is a tripwire rather than a document (CLAUDE.md rule 3), and
+  // declaring the standards body in ops/EGRESS.json to quiet it would put a
+  // non-host in the ledger and cost the ledger the one property that makes it
+  // worth keeping. The HTML parser applies the namespace on its own, so going
+  // through innerHTML needs no such literal anywhere — and it is what every
+  // other SVG on this page is already built with. (The prose is worded around
+  // the string too, deliberately: the scan matches comments, exactly like the
+  // inline-style tripwire does, and for the same reason.)
+  //
+  // The geometry rides as ATTRIBUTES, which the page's CSP does not gate; only
+  // a style attribute is thrown away (see the note at .pm-sky in
+  // people-months.css), and there is none here.
+  function spokesEl(clusters, stage) {
+    const lines = clusters.map((spot) => {
+      // Weight and opacity both ride `heat`, the normalised activity the
+      // layout used for the bubble's distance. The two ends of each range are
+      // the design's.
+      const heat = Math.max(0, Math.min(1, Number(spot.heat) || 0));
+      return '<line ' +
+        // From the CORE's centre, which sits at 51% like the element does — a
+        // spoke that starts at 50% leaves a visible stub above the orb.
+        `x1="${stage.w / 2}" y1="${stage.h * 0.51}" ` +
+        `x2="${(stage.w / 2 + spot.x).toFixed(1)}" y2="${(stage.h / 2 + spot.y).toFixed(1)}" ` +
+        `stroke="rgba(197,165,109,${(0.12 + 0.38 * heat).toFixed(2)})" ` +
+        `stroke-width="${(1 + 5 * heat).toFixed(1)}"></line>`;
+    }).join('');
+    const holder = document.createElement('div');
+    // Every value in here is arithmetic on numbers this file computed; nothing
+    // reaches it from the corpus, so there is no name or label to escape.
+    holder.innerHTML =
+      `<svg class="pm-spokes" viewBox="0 0 ${stage.w} ${stage.h}" ` +
+      'preserveAspectRatio="none"></svg>';
+    const svg = holder.firstElementChild;
+    svg.innerHTML = lines;
+    return svg;
   }
 
   function renderSky(data, people) {
@@ -824,53 +875,71 @@
     const marked = topicsAreMarked(people);
     const all = clustersFrom(people, marked);
     const stage = { w: skyEl.clientWidth || 400, h: skyEl.clientHeight || 420 };
-    const fit = fitLayout(stage.w, stage.h, all.length);
-    const clusters = all.slice(0, fit.n);
+    // The layout takes counts, not people: it is geometry, and handing it the
+    // corpus would let a change here reach into it. `people` rides along for
+    // the faces this file draws.
+    const placed = SKY.place(stage.w, stage.h, all.map((c) => ({
+      label: c.label,
+      members: c.members.length,
+      activity: c.activity,
+      // {person, n} pairs, busiest in this topic first — clusterEl needs both
+      // halves, and handing it bare people would put the sizes back on the
+      // global engagement this stopped using. Named apart from `members` above,
+      // which the layout reads as a COUNT: one object cannot carry the same key
+      // twice, and the silent winner was the array.
+      cast: c.members,
+      // What the label will measure, so the layout can keep it on the stage.
+      // Arithmetic rather than a measuring pass: the face is monospaced, and
+      // .pm-cluster-label is 9px with 0.1em of letter-spacing — 5.4px of
+      // advance plus 0.9px of tracking, 6.3px a character. It is a PILL now
+      // rather than bare text, so its 9px of side padding and 1px of border
+      // count twice each on top. Checked against the rendered width of the
+      // longest label this corpus produces; they agree to a pixel.
+      labelWidth: Math.ceil(labelFor(c.label, c.members.length).length * 6.3) + 20,
+    })));
+    const clusters = placed.spots;
     if (!clusters.length) {
       const m = document.createElement('div');
       m.className = 'pm-sky-empty';
       m.textContent = people.length
-        // NAME THE CAUSE. The old sentence blamed the year, which is wrong on an
-        // all-years globe and wrong again when a filter is what emptied it —
-        // leaving the owner to conclude the corpus is thin.
-        ? (recency !== 'all'
-            ? `nothing to group among the ${recency === 'in' ? 'in touch' : 'gone quiet'} — try everyone`
-            : scope === 'all'
-              ? `nothing shared enough to group — a topic needs at least ${MIN_CLUSTER} people`
-              : `nothing shared enough to group in ${year} — a topic needs at least ${MIN_CLUSTER} people`)
+        ? (scope === 'all'
+            ? `nothing shared enough to group — a topic needs at least ${MIN_CLUSTER} people`
+            : `nothing shared enough to group in ${year} — a topic needs at least ${MIN_CLUSTER} people`)
         : `no one to place in ${year}`;
       skyEl.appendChild(m);
       return;
     }
 
-    const rnd = mulberry32(year * 2654435761);
-    for (const d of [180, 300, 420]) {
-      const o = document.createElement('div');
-      o.className = 'pm-orbit';
-      o.style.width = `${d}px`;
-      o.style.height = `${d}px`;
-      skyEl.appendChild(o);
-    }
-    for (let i = 0; i < 48; i += 1) {
-      const s = document.createElement('span');
-      s.className = 'pm-speck';
-      const size = 2.5 + rnd() * 2.5;
-      s.style.width = `${size.toFixed(1)}px`;
-      s.style.height = `${size.toFixed(1)}px`;
-      s.style.left = `${(2 + rnd() * 96).toFixed(1)}%`;
-      s.style.top = `${(4 + rnd() * 92).toFixed(1)}%`;
-      s.style.opacity = (0.22 + rnd() * 0.3).toFixed(2);
-      skyEl.appendChild(s);
-    }
+    // ~~48 seeded background specks, a starfield behind the topics.~~ Yeeted
+    // (owner, 2026-08-26). They were the only marks on this surface that meant
+    // nothing — every other dot here is a person — and at speck size the eye
+    // cannot tell decoration from a person too far out to read.
+    //
+    // ~~Three dashed orbits at 180/300/420px.~~ Yeeted with them, one design
+    // later: they were decoration on a data display, and worse, they read as a
+    // distance SCALE they were not — a bubble sitting between two rings looked
+    // like it had been measured against them, when the rings were three fixed
+    // pixel values and the bubble's distance was a log of its message count.
+    //
+    // What replaces them is a spoke per topic, core to bubble, carrying the
+    // distance encoding a second time as weight and opacity. A line between two
+    // marks is the one piece of decoration here that states a fact — this topic
+    // is a relationship of yours — and it gives the eye the radial order the
+    // rings only pretended to.
+    skyEl.appendChild(spokesEl(clusters, stage));
 
     const core = document.createElement('div');
-    core.className = 'pm-core';
+    // `tod-orb` is the opt-in that puts this blob on the same clock as the
+    // home orb (orb-tod.js). Then ask for the mood straight away: that file
+    // ran at page load and re-runs on a minute's timer, and this element did
+    // not exist for either — without the nudge the core wears the
+    // stylesheet's fallback band until the next tick.
+    core.className = 'pm-core tod-orb';
     skyEl.appendChild(core);
+    if (typeof globalThis.__hzTodApply === 'function') globalThis.__hzTodApply();
 
-    const ring = ringFor(stage.w, stage.h, fit.d);
-    const maxMembers = clusters[0].members.length;
-    clusters.forEach((c, i) => {
-      skyEl.appendChild(clusterEl(c, i, clusters.length, maxMembers, ring, stage, fit.d));
+    clusters.forEach((spot, i) => {
+      skyEl.appendChild(clusterEl(spot, i, stage));
     });
 
     // BOTH caps, said out loud. The server caps the year's rows, and the ring
@@ -880,7 +949,8 @@
     // stopped being true of this surface: the row cap belonged to /people/year
     // and the constellation no longer reads from there, and the year belonged
     // to a per-year sky that no longer exists. What remains is the topic cap,
-    // and the bubbles that fit are the largest ones — see fitLayout.
+    // and the bubbles that fit are the largest ones — see people-sky-layout.js,
+    // which gives ground on size and on distance before it drops a topic at all.
   }
 
   // ---- every year at once ----
@@ -894,20 +964,20 @@
   // serves both surfaces.
   let mapData = null;
   let mapPending = null;
+  // The globe's half of the year tabs' contract. `staleYears` marks every
+  // cached year for a silent freshness check on its next visit; the map had no
+  // such mark, so once it had been read the globe showed that first answer for
+  // the life of the webview — and the webview survives every close of the
+  // panel. A day of new conversation could not reach it.
+  let mapStale = false;
 
   function adaptMap(payload) {
     const people = [];
-    // The years with anyone in them, gathered while walking the stars. The map
-    // payload has no year list of its own, and this is the only surface a
-    // globe-first session ever loads -- without it the tab strip has nothing to
-    // draw but the current year.
-    const seenYears = new Set();
     for (const p of payload.people || []) {
       const byLabel = new Map();
       let latestYear = null;
       for (const y of p.years || []) {
         if (latestYear === null || y.year > latestYear) latestYear = y.year;
-        if (Number.isInteger(y.year)) seenYears.add(y.year);
         for (const t of y.topics || []) {
           if (!t || !t.label) continue;
           const cur = byLabel.get(t.label);
@@ -933,7 +1003,6 @@
         messages,
         roomMessages,
         roomOnly: p.roomOnly === true,
-        // Whitelisted through, or the recency filter has nothing to read.
         presenceDays: typeof p.presenceDays === 'number' ? p.presenceDays : null,
         lastSeen: typeof p.lastSeen === 'number' ? p.lastSeen : null,
         // Ordering is still by direct contact: room volume must not buy a
@@ -948,27 +1017,35 @@
       });
     }
     people.sort((a, b) => b.engagement - a.engagement);
-    return { people, total: people.length, allYears: true, years: [...seenYears].sort((a, b) => a - b) };
+    return { people, total: people.length, allYears: true };
   }
 
-  function ensureMap({ rebuild = false } = {}) {
-    if (mapData && !rebuild) return Promise.resolve(mapData);
+  function refreshMap() {
     if (!mapPending) {
-      mapPending = hzPost('peopleMap', rebuild ? { rebuild: true } : {})
+      const repaint = mapData !== null;
+      mapPending = hzPost('peopleMap')
         .then((r) => {
-          if (r && r.freshness) lastFreshness = r.freshness;
           mapData = adaptMap(r || {});
-          mapData.freshness = r?.freshness ?? null;
-          // The map knows every year with activity -- adaptMap gathers it from
-          // the stars, since the payload carries no list of its own. Taking it
-          // here is what fills the tab strip for a session that never opened a
-          // year, and starts warming them now the constellation itself is drawn.
-          noteYears(mapData.years);
+          mapStale = false;
+          if (repaint && scope === 'all' && !findTerm) render();
           return mapData;
         })
         .finally(() => { mapPending = null; });
     }
     return mapPending;
+  }
+
+  function ensureMap() {
+    return mapData ? Promise.resolve(mapData) : refreshMap();
+  }
+
+  // Entering the globe, exactly as `load` enters a year: paint what is in hand,
+  // and check it behind the picture rather than in front of it. A cold globe
+  // still shows "reading every year…" once, because there is nothing to paint.
+  function visitMap() {
+    if (!mapData) return ensureMap();
+    if (mapStale) refreshMap().catch(() => {});
+    return Promise.resolve(mapData);
   }
 
   // ---- remembering where you were ----
@@ -978,14 +1055,14 @@
   // landed on this year with nothing selected.
   //
   // One compact string rather than a JSON blob: native stores it opaquely and
-  // bounds its length, and three fields do not need a schema on the far side.
+  // bounds its length, and four fields do not need a schema on the far side.
   let saveTimer = null;
   function saveView() {
     clearTimeout(saveTimer);
     // Debounced: render() runs on every keystroke of a search, and each save is
     // a UserDefaults write.
     saveTimer = setTimeout(() => {
-      hzPost('monthsView', { state: `${year}|${view}|${topic || ''}|${scope}|${recency}` }).catch(() => {});
+      hzPost('monthsView', { state: `${year}|${view}|${topic || ''}|${scope}` }).catch(() => {});
     }, 250);
   }
 
@@ -1000,8 +1077,13 @@
     } catch {
       return null; // no memory is not an error; start on this year
     }
+    // Native replies with the empty string exactly when nothing was ever
+    // stored, which is the one signal on this page that means "never been
+    // here". A malformed reply leaves saved null and this false: unreadable is
+    // not the same as absent.
+    firstVisit = saved === '';
     if (!saved) return null;
-    const [y, v, t, s, r] = saved.split('|');
+    const [y, v, t, s] = saved.split('|');
     const n = Number(y);
     // Trust nothing that came back: the value outlives the code that wrote it,
     // and a year the corpus no longer has would strand the page on an empty
@@ -1015,21 +1097,80 @@
     // saveView cannot produce that pair, but a hand-edited or older value can,
     // and it is one line to refuse rather than reason about downstream.
     topic = view === 'list' && t ? t : null;
-    // A fifth field is absent from every value written before this existed, and
-    // anything unrecognised means no filter -- the safe state, since it is the
-    // one that hides nobody.
-    recency = r === 'in' || r === 'quiet' ? r : 'all';
     return Number.isInteger(n) && n >= 1990 && n <= new Date().getFullYear() + 1 ? n : null;
+  }
+
+  // A first visit that finds NOTHING has nothing to show and no way to fix it
+  // from here: the year tabs, the search and the constellation are all views of
+  // a corpus, so with no corpus this page can only say "no one matches in 2026"
+  // — which reads as a broken year rather than as "you have not connected
+  // anything yet". Send them to unify-your-circles, which is where a corpus
+  // starts, and which the sync button already opens.
+  //
+  // Both halves of the condition carry weight. `years` is corpus-wide (buildYear
+  // walks every person's whole timeline, not the open year), so this fires on an
+  // empty install and never on someone who simply has a thin 2026. And
+  // firstVisit keeps a returning owner who opened this page on purpose from
+  // being bounced out of it.
+  function routeIfEmpty(res) {
+    if (!firstVisit) return false;
+    firstVisit = false; // decided once, whatever the answer was
+    if (!Array.isArray(res.years) || res.years.length > 0) return false;
+    hzPost('openPeople').catch(() => {});
+    // Leaving this popup open behind unify would mean closing an empty year to
+    // get back to the thing that fills it.
+    hzPost('close').catch(() => {});
+    return true;
   }
 
   // An uncached year is a server rebuild on first touch, so the click must
   // answer INSTANTLY with a loading state. reqId guards the race: only the
   // newest click's response may paint.
   let reqId = 0;
-  async function load(y, { rebuild = false } = {}) {
+  function refreshYear(y) {
+    const inFlight = refreshing.get(y);
+    if (inFlight) return inFlight;
+
+    // STALE-WHILE-REVALIDATE: the cached list stays painted while this request
+    // runs. A failed freshness check leaves the old answer in place and the
+    // year stale, so its next visit can try again without turning into an
+    // empty error screen.
+    const request = hzPost('peopleYear', { year: y })
+      .then((res) => {
+        if (!res || !Array.isArray(res.people)) throw new Error('bad year payload');
+        cache.set(y, res);
+        staleYears.delete(y);
+        if (Array.isArray(res.years) && res.years.length) {
+          years = res.years;
+          // THE STRIP BELONGS TO BOTH SURFACES. `years` is corpus-wide and
+          // arrives with a year payload, so until one lands the strip can only
+          // draw the open year — one lonely tab. The constellation is painted
+          // from the map and does not repaint when a year lands, which left
+          // that placeholder strip on screen for the whole visit: the owner
+          // opened the app into the globe and saw a single 2026, with every
+          // other year appearing only once something else forced a paint.
+          // Redrawing the tabs is cheap and says nothing about the field.
+          renderTabs();
+        }
+        // Only into the list. A background year check landing while the globe
+        // is up used to repaint the constellation, which is built from the map
+        // and had nothing to learn from it — the whole field blinked.
+        if (year === y && !findTerm && scope === 'year') render();
+        return res;
+      })
+      .finally(() => refreshing.delete(y));
+    refreshing.set(y, request);
+    return request;
+  }
+
+  async function load(y) {
     year = y;
     renderTabs();
-    if (cache.has(year) && !rebuild) return render();
+    if (cache.has(year)) {
+      render();
+      if (staleYears.has(year)) refreshYear(year).catch(() => {});
+      return;
+    }
     const my = ++reqId;
     searchEl.placeholder = `loading ${year}…`;
     // Into whichever surface is actually up. Writing it unconditionally to the
@@ -1040,40 +1181,15 @@
     cardsEl.hidden = true;
     cardsEl.innerHTML = '';
     surface().innerHTML = `<div class="pm-loading">loading ${year}…</div>`;
-    const res = await hzPost('peopleYear', rebuild ? { year, rebuild: true } : { year });
+    const res = await hzPost('peopleYear', { year });
     if (my !== reqId) return; // superseded by a newer tab click
     if (!res || !Array.isArray(res.people)) throw new Error('bad year payload');
-    if (res.freshness) lastFreshness = res.freshness;
     cache.set(year, res);
-    // Before the render, so the first paint of a fresh open already has every
-    // year in the strip rather than acquiring them a frame later.
-    noteYears(res.years);
+    staleYears.delete(year);
+    if (Array.isArray(res.years) && res.years.length) years = res.years;
+    if (routeIfEmpty(res)) return;
     render();
-  }
-
-  // EVERY PATH THAT LEARNS THE YEAR LIST WARMS THE REST.
-  //
-  // The warming used to be reachable only from load(), and boot calls load()
-  // only when it is opening a YEAR -- restoring to the constellation renders
-  // and returns. So a session that opened on the globe (or searched first) left
-  // every year tab cold, and clicking the newest year was the only thing that
-  // started the warming: which is why past years appeared to need a click on
-  // the latest one before they would show.
-  //
-  // Called after the thing on screen has its data, never before, so warming a
-  // year the reader is not looking at can never queue ahead of the surface they
-  // are (hermes is single-threaded; a queued scan is a frozen panel).
-  function noteYears(list) {
-    if (Array.isArray(list) && list.length && list.join(',') !== years.join(',')) {
-      years = list;
-      // REDRAW THE STRIP, HERE. The year list arrives with a payload, which is
-      // always after the surface has been rendered at least once -- so the tabs
-      // were drawn while `years` was still empty and nothing drew them again.
-      // The strip showed the current year alone, which is exactly one tab, and
-      // every other year was unreachable until something else forced a render.
-      renderTabs();
-    }
-    if (years.length) prefetchRest();
+    prefetchRest();
   }
 
   // Warm the remaining years in the background, newest first — the server
@@ -1087,8 +1203,18 @@
       for (const y of [...years].reverse()) {
         if (cache.has(y)) continue;
         const res = await hzPost('peopleYear', { year: y });
-        if (res && Array.isArray(res.people)) cache.set(y, res);
+        if (res && Array.isArray(res.people)) {
+          cache.set(y, res);
+          staleYears.delete(y);
+        }
       }
+      // AND THE GLOBE, last. Every year tab is warmed so its click is instant;
+      // the globe was the one tab on the strip that always paid for its own
+      // first open, and it is the most expensive read of the lot. It goes last
+      // because the years are what is on screen, and /people/map rides the same
+      // memoised graph the year scans just built on the server, so by now it is
+      // the cheap end of this loop rather than the dear one.
+      if (!mapData) await ensureMap();
     } catch {
       // Background warming only; a failure costs nothing but the warmth.
     } finally {
@@ -1103,29 +1229,38 @@
     });
   }
 
-  // Native calls this on every panel re-open: the webview SURVIVES hidden
-  // (panels keep state), so without it the first open's data was the data
-  // forever. Refetch is cheap (the server memoizes the heavy scan).
+  // Native calls this on every panel re-open. The webview SURVIVES hidden, so
+  // keep its already-painted years and summaries, mark the year payloads stale,
+  // and refresh only the visible year behind the existing rows. Other years
+  // refresh silently when first revisited. This avoids both the blank loading
+  // screen and a fan-out request for every historical year on every open.
   window.__hzRefresh = () => {
-    cache.clear();
-    summaries.clear();
-    mapData = null;
-    prefetching = false;
-    // A re-open drops the search as well as the cache: a stale query over
-    // refetched years would be answering a question nobody is asking now.
+    for (const y of cache.keys()) staleYears.add(y);
+    mapStale = true;
+    // A re-open drops the search: a stale query over refreshed data would be
+    // answering a question nobody is asking now.
     findId++;
     findTerm = '';
     findRows = null;
     findState = 'idle';
     searchEl.value = '';
     // Re-open where the panel was left: in all-years the year fetch is not
-    // what is on screen, and loading it would flip the view back to a year.
-    if (scope === 'all') render();
-    else loadOrFail(year);
+    // what is on screen. Both paths paint their last good payload first, then
+    // revalidate just that visible surface behind it.
+    if (scope === 'all') {
+      render();
+      refreshMap().catch(() => {});
+    } else if (cache.has(year)) {
+      render();
+      refreshYear(year).catch(() => {});
+    } else {
+      loadOrFail(year);
+    }
   };
 
-  tabsEl.addEventListener('click', (e) => {
-    const b = e.target.closest('.pm-tab');
+  tabRowEl.addEventListener('click', (e) => {
+    // Two shapes, one strip: the year tabs and the globe icon beside them.
+    const b = e.target.closest('.pm-tab, .pm-globe');
     if (!b) return;
     if (b.dataset.view === 'sky') {
       view = 'sky';
@@ -1134,6 +1269,7 @@
       // bubble but the chosen one was missing.
       topic = null;
       render();
+      visitMap().catch(() => {});
       return;
     }
     if (!b.dataset.y) return;
@@ -1169,26 +1305,6 @@
     hzSfx.squish();
     openTopic(c.dataset.topic);
   });
-  recencyEl.addEventListener('click', (e) => {
-    const f = e.target.closest('.pm-fresh');
-    if (f) {
-      if (rebuilding) return;
-      rebuilding = true;
-      render();
-      // Drops both caches and re-asks with rebuild=1, which blocks on the
-      // server. The reader pressed refresh; they are asking to wait.
-      cache.clear();
-      mapData = null;
-      (scope === 'all' ? ensureMap({ rebuild: true }) : load(year, { rebuild: true }))
-        .catch(() => {})
-        .finally(() => { rebuilding = false; render(); });
-      return;
-    }
-    const b = e.target.closest('.pm-rec');
-    if (!b || !b.dataset.rec || b.dataset.rec === recency) return;
-    recency = b.dataset.rec;
-    render();
-  });
   syncEl.addEventListener('click', () => { hzPost('openPeople').catch(() => {}); });
   let t = null;
   searchEl.addEventListener('input', () => {
@@ -1216,7 +1332,14 @@
     .catch(() => {})
     .finally(() => {
       // All-years does not want the year fetch painted over it.
-      if (scope === 'all') render();
-      else loadOrFail(year);
+      if (scope === 'all') {
+        render();
+        // Reopened INTO the globe, the page used to warm nothing: no year was
+        // ever fetched, so `years` stayed empty, the tab strip carried a single
+        // year, and the first click on any tab was a cold server rebuild. Read
+        // the remembered year quietly behind the constellation — it is what
+        // fills the strip — and let the usual warming follow it.
+        refreshYear(year).then(() => prefetchRest()).catch(() => {});
+      } else loadOrFail(year);
     });
 })();

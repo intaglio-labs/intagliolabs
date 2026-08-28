@@ -163,69 +163,45 @@ export function loadSpine(stateDb) {
   };
 }
 
+// The shared direct/room rule for iMessage, WhatsApp, and every Matrix-backed
+// social source. Incoming room rows belong to their actual sender; the owner's
+// room rows belong to nobody in particular. Direct rows belong to the thread's
+// counterparty in both directions.
+function chatSignalsForRow(row, meta, ts) {
+  const fromMe = meta.is_from_me === true || meta.is_from_me === 1;
+  const speakerName = namelike(row.speaker) ? row.speaker : undefined;
+  const room = isRoom(row, meta);
+  if (threadKind(row, meta) === GROUP) {
+    if (fromMe) return [];
+    const sender = meta.sender_handle ?? meta.handle ?? null;
+    return sender
+      ? [{ id: sender, channel: row.source, ts, fromMe: false, name: speakerName, room }]
+      : [];
+  }
+  // Apple omits the handle on most outbound one-to-one rows; the thread guid
+  // recovers it only for iMessage. Matrix and WhatsApp write chat_handle.
+  const id = meta.chat_handle ?? meta.handle ?? counterpartyFromThread(row, meta);
+  if (!id) return [];
+  // Never give a counterparty the owner's speaker name on an outbound row.
+  const oneToOneName = (!fromMe && speakerName)
+    || (namelike(meta.chat_name) ? meta.chat_name : undefined);
+  return [{ id, channel: row.source, ts, fromMe, name: oneToOneName || undefined, room }];
+}
+
 // The identifier a row is "about" — the counterparty, never the owner. Returns
 // { id, channel, ts, fromMe, name? } or null for rows with no person.
 function personSignalsForRow(row, meta, owner) {
   const ts = Number(row.ts);
   switch (row.source) {
     case 'imessage':
-    case 'whatsapp': {
-      const fromMe = meta.is_from_me === true || meta.is_from_me === 1;
-      // GROUPS ARE NO LONGER DROPPED (owner, 2026-08-21). A group message is
-      // credited to the person who SENT it, not the room — so an investor you
-      // only ever talked to in a group thread is now visible. The owner's own
-      // group messages have no single counterparty and are still skipped; a
-      // one-to-one message is credited to the chat handle as before.
-      // THE SPEAKER IS A NAME WHEN WHATSAPP KNOWS ONE, and for most of these
-      // people it is the only name there is. A group sender arrives as a privacy
-      // LID -- an opaque id WhatsApp uses instead of a phone number -- which the
-      // spine can never resolve, so the timeline rendered seventeen digits. The
-      // connector already joins ZWAGROUPMEMBER for a contact name and puts it in
-      // `speaker`; this is where it was being thrown away.
-      //
-      // Guarded, because `speaker` falls back to the handle itself when the
-      // store knows no name: a LID or a bare number is an identifier, and
-      // passing one through here would make it somebody's display name, which
-      // is the bug this whole pass exists to fix.
-      const speakerName = namelike(row.speaker) ? row.speaker : undefined;
-      // A ROOM IS NOT A CONVERSATION, and until now nothing here could tell the
-      // difference: `meta.is_group` is written only by WhatsApp, so this branch
-      // was dead for all 360,320 iMessage rows and 22.3% of them are group
-      // threads. threadKind derives it from the chat_guid marker instead.
-      //
-      // The flag rides ALONG with the signal rather than changing which signals
-      // are emitted -- deliberately. Every consumer keeps receiving exactly the
-      // rows it received before, and each opts in separately to caring. That is
-      // what lets the clocks below be corrected without a single message count
-      // moving.
-      const room = isRoom(row, meta);
-      if (threadKind(row, meta) === GROUP) {
-        if (fromMe) return [];
-        const sender = meta.sender_handle ?? meta.handle ?? null;
-        return sender
-          ? [{ id: sender, channel: row.source, ts, fromMe: false, name: speakerName, room }]
-          : [];
-      }
-      // ...falling back to the THREAD when Apple did not record a handle, which
-      // it does not on most outbound rows. See counterpartyFromThread: this is
-      // 109,380 of the owner's own one-to-one messages that were being dropped,
-      // and it is deliberately unreachable for group threads.
-      const id = meta.chat_handle ?? meta.handle ?? counterpartyFromThread(row, meta);
-      if (!id) return [];
-      // ONE-TO-ONE, where the id is the chat rather than the sender -- so the
-      // speaker of an OUTBOUND row is the owner, and passing it here would file
-      // the owner's own name under the person they were writing to. Measured on
-      // the live corpus: every outbound one-to-one WhatsApp row carries a
-      // namelike speaker, and all of them are the same one name.
-      //
-      // The name for a one-to-one chat is the CHAT's name, which WhatsApp sets
-      // from the contact -- 41 of 61 chats have one, and 20 of those have no
-      // other name anywhere. A group's chat_name is the room, so this is only
-      // reachable below the is_group branch above.
-      const oneToOneName = (!fromMe && speakerName)
-        || (namelike(meta.chat_name) ? meta.chat_name : undefined);
-      return [{ id, channel: row.source, ts, fromMe, name: oneToOneName || undefined, room }];
-    }
+    case 'whatsapp':
+    case 'messenger':
+    case 'instagram':
+    case 'twitter':
+    case 'telegram':
+    case 'discord':
+    case 'slack':
+      return chatSignalsForRow(row, meta, ts);
     case 'mail': {
       // EVERY non-owner address on the email is counted, not just the first
       // (owner, 2026-08-21). A VC cc'd on an intro thread is exactly the
@@ -279,7 +255,8 @@ function personSignalsForRow(row, meta, owner) {
         const id = meta.from && !isOwnerName(meta.from, owner) ? `liname:${normName(meta.from)}` : null;
         return id ? [{ id, channel: 'linkedin', ts, fromMe: false, name: meta.from }] : [];
       }
-      return [];
+      // No `kind` means this is a Matrix bridge row.
+      return chatSignalsForRow(row, meta, ts);
     }
     default:
       return [];
@@ -333,15 +310,16 @@ export const CONTENT_SIGNALS = Object.freeze({
 });
 
 // Attach per-person content-signal counts, from the message text of the
-// sources whose text is real prose (imessage, whatsapp, mail, linkedin
-// messages). Calendar titles and LinkedIn connection rows are not prose.
+// sources whose text is real prose (message sources plus mail). Calendar
+// titles and LinkedIn connection rows are not prose.
 function addContentSignals(contextDb, people, keyResolver, signals) {
   const names = Object.keys(signals);
   if (names.length === 0) return;
   const rows = contextDb
     .prepare(
       "SELECT source, text, meta FROM context " +
-        "WHERE source IN ('imessage','whatsapp','mail','linkedin') AND text IS NOT NULL"
+        "WHERE source IN ('imessage','whatsapp','messenger','instagram','twitter'," +
+        "'telegram','discord','slack','mail','linkedin') AND text IS NOT NULL"
     )
     .all();
   for (const row of rows) {
@@ -351,13 +329,18 @@ function addContentSignals(contextDb, people, keyResolver, signals) {
     } catch {
       meta = {};
     }
-    if (row.source === 'linkedin' && meta.kind !== 'message') continue;
+    if (row.source === 'linkedin' && meta.kind && meta.kind !== 'message') continue;
     // Which person is this row's counterparty? Reuse the same id derivation,
     // but we only need the key, not a full signal.
-    const id =
-      row.source === 'mail'
-        ? (Array.isArray(meta.from) ? meta.from[0]?.toLowerCase() : null)
-        : (meta.chat_handle ?? meta.handle ?? null);
+    const fromMe = meta.is_from_me === true || meta.is_from_me === 1;
+    let id;
+    if (row.source === 'mail') {
+      id = Array.isArray(meta.from) ? meta.from[0]?.toLowerCase() : null;
+    } else if (threadKind(row, meta) === GROUP) {
+      id = fromMe ? null : (meta.sender_handle ?? meta.handle ?? null);
+    } else {
+      id = meta.chat_handle ?? meta.handle ?? counterpartyFromThread(row, meta);
+    }
     // ROOMS COUNT HERE, deliberately, and the opposite of the chips rule.
     //
     // This scan asks "does this PERSON talk about investor topics" -- a fact
@@ -445,7 +428,8 @@ export function buildGraph(
       // row.speaker, row.speaker was always undefined, and every WhatsApp
       // name it was written to rescue was discarded silently.
       "SELECT ts, source, speaker, entity_id, meta FROM context " +
-        "WHERE source IN ('imessage','whatsapp','mail','calendar','linkedin')" +
+        "WHERE source IN ('imessage','whatsapp','messenger','instagram','twitter'," +
+        "'telegram','discord','slack','mail','calendar','linkedin')" +
         (sinceTs != null ? " AND ts >= ?" : "")
     )
     .all(...(sinceTs != null ? [sinceTs] : []));

@@ -28,7 +28,7 @@ protocol BridgeDelegate: AnyObject {
   func motionAnywayChanged(_ on: Bool)
   func soundsChanged(_ on: Bool)
   func scaleChanged(_ scale: Double, committed: Bool, from webView: WKWebView?)
-  func fitPopup(_ webView: WKWebView, contentHeight: Double, extraWidth: Double)
+  func fitPopup(_ webView: WKWebView, contentHeight: Double)
   func widgetSpot() -> [String: Double]
   func widgetBoundsChanged()
   func spotlightWidget(_ on: Bool)
@@ -74,19 +74,21 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
-                    "status", "setMotion", "setScale", "setSounds", "openOnboarding",
-                    "markHandheld",
+                    "status", "setConnectorEnabled", "setMotion", "setScale", "setSounds",
+                    "openOnboarding", "markHandheld",
                     // Same setup controls, reachable from the gear after the
                     // flow — a skipped step must stay reachable.
                     "setupState", "modelDownload", "modelCancel",
                     "openFullDiskAccess", "startSources",
-                   "permissionState", "requestPermission"],
+                    // In-panel API-key walkthroughs and Google OAuth.
+                    "connectSecret", "openApp", "googleAuth",
+                    "permissionState", "requestPermission"],
     "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
                    "widgetSpot",
                    // The setup scenes: choosing and fetching the answer model,
                    // and turning on the first data source.
                    "setupState", "modelDownload", "modelCancel",
-                   "openFullDiskAccess", "startSources",
+                    "openFullDiskAccess", "startSources", "openPeople",
                     "permissionState", "requestPermission",
                     // Which scene is up, remembered so a restart resumes on it.
                     "onboardingStep"],
@@ -96,13 +98,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // map from the wrong file cost one broken popup in review.
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
-               "openExternal"],
+               "connectorsIntroSeen", "openExternal", "setConnectorEnabled", "connectSecret", "openApp",
+               "openFullDiskAccess", "googleAuth"],
     // peopleFind: search across every year, server-ranked. peopleMap: the
     // ALL-YEARS source behind the constellation — every person, uncapped, with
     // their per-year topics. monthsView: where the popup was left, so a restart
     // resumes on it rather than snapping back to this year.
     "people-months": ["close", "peopleYear", "peopleFind", "peopleSummary",
-                      "openPeople", "monthsView", "peopleMap"],
+                      "openPeople", "monthsView", "peopleMap", "peopleAvatars"],
     "ear": ["orbState", "voiceError", "voiceTranscript"],
   ]
 
@@ -315,6 +318,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // delivered one ask at a time).
   private var pendingVoiceUtterance: String?
 
+  // Only desktop applications named by the connector UI may be launched.
+  private let allowedApps: Set<String> = ["com.granola.app"]
+
   // The only external destinations this app will hand to the OS. Opening
   // one launches the default browser (or System Settings) — the app itself
   // still opens no socket beyond loopback; the user's click on a fixed help
@@ -325,6 +331,30 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "https://granola.ai",
     "https://cloud.ouraring.com/oauth/applications",
     "https://www.notion.so/my-integrations",
+    // Telegram's app registration — each install gets its own api_id/api_hash.
+    //
+    // RESTORED IN THE MERGE (2026-08-26). This entry and the walkthrough that
+    // sends the owner to it were both present at 72b5960 and both absent by
+    // 91e8285, and 72b5960 is an ancestor of it — so they were lost, not never
+    // written. The loss is in `0f17d26` "Merge updated connector onboarding
+    // branch": its two parents were 2e58f17 (no walkthrough) and 72b5960 (two),
+    // and it resolved widget/ui/connections.js and this file toward the side
+    // that had neither.
+    //
+    // ~~"lost when the People-tab PR (9176ef8) reverted these files".~~ WRONG,
+    // and corrected here rather than left standing: 9176ef8 is innocent, its
+    // connections.js diff is +17/-10 and touches neither. A reviewer traced it
+    // properly and I had blamed the wrong commit. Worth the correction because
+    // the true cause is a different KIND of bug — not a PR overwriting a file,
+    // but a merge silently choosing the older side — and `git log -S` will not
+    // find it, because it skips merge commits by default. That is exactly where
+    // a loss like this hides.
+    //
+    // None of it was ever on main; it is branch work. connectors/test/
+    // openExternal.test.mjs is what caught the survivor half — the walkthrough
+    // came through the merge, its allowlist entry did not, and the symptom
+    // would have been a link that does nothing.
+    "https://my.telegram.org/apps",
     // The bridge token how-to links, for the Discord/Slack guided login flows.
     "https://docs.mau.fi/bridges/go/discord/authentication.html",
     "https://docs.mau.fi/bridges/go/slack/authentication.html",
@@ -433,7 +463,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": "ok"])
     case "orbState":
       // The ear now names the face it wants — idle, listening or talking —
-      // because a single boolean could not tell "Hazlie is speaking" from
+      // because a single boolean could not tell "Intaglio Labs is speaking" from
       // "the mic is open and the owner is". The boolean is still read as the
       // fallback, so an older ear page keeps working unchanged.
       if let face = payload["state"] as? String, Bridge.orbFaces.contains(face) {
@@ -550,13 +580,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // grows: the connector grid gained a third row and the last one was
       // simply cut off by the window edge.
       //
-      // extraWidth (optional) widens the popup past its base — the
-      // connections page opens its hint strip as a SIDE section, and the
-      // window grows leftward because placedFrame pins the right edge.
       // Same Int/Double dance as setScale: whole JS numbers arrive as Int.
+      // Width is deliberately not page-controlled: connector hints are
+      // overlays, and content must never grow a third panel beside Settings.
       let h = (payload["height"] as? Double) ?? Double(payload["height"] as? Int ?? 0)
-      let ew = (payload["extraWidth"] as? Double) ?? Double(payload["extraWidth"] as? Int ?? -1)
-      delegate?.fitPopup(webView, contentHeight: h, extraWidth: ew)
+      delegate?.fitPopup(webView, contentHeight: h)
       reply(webView, id, ["state": "ok"])
     case "setScale":
       // Accept Int as well as Double: a JS number that happens to be whole
@@ -598,6 +626,28 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": "ok"])
     case "status":
       fetchStatus { [weak self] data in self?.reply(webView, id, data) }
+    case "setConnectorEnabled":
+      // This webview-controlled write is deliberately limited to the passive
+      // WhatsApp connector marker; no arbitrary path reaches the filesystem.
+      let connector = payload["connector"] as? String ?? ""
+      guard connector == "whatsapp" else {
+        reply(webView, id, ["state": "error", "error": "unknown connector"])
+        return
+      }
+      let marker = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".hazlie/connectors/\(connector).disabled")
+      do {
+        if payload["enabled"] as? Bool == true {
+          if FileManager.default.fileExists(atPath: marker.path) { try FileManager.default.removeItem(at: marker) }
+        } else {
+          try Data().write(to: marker, options: .atomic)
+          try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: marker.path)
+        }
+        Connectors.shared.start()
+        reply(webView, id, ["state": "ok"])
+      } catch {
+        reply(webView, id, ["state": "error", "error": "could not update connector"])
+      }
     case "bridgeStatus":
       let p = String((payload["p"] as? String ?? "").prefix(24))
       bridgeCall("GET", "api/bridge", query: ["p": p]) { [weak self] d in
@@ -606,6 +656,46 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "bridgeBegin":
       let p = String((payload["p"] as? String ?? "").prefix(24))
       bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { [weak self] d in
+        self?.reply(webView, id, d)
+      }
+    case "googleAuth":
+      // START THE GOOGLE SIGN-IN FROM THE TILE, with no terminal in the way.
+      // The connect service spawns ops/gcal-auth.mjs, which listens on its own
+      // loopback port for the callback. Native opens the returned authorization
+      // URL in the default browser, as Google's OAuth policy requires.
+      // Nothing sensitive crosses this bridge: the request carries only which
+      // of two fixed flows to run, and the grant is written by that helper
+      // straight into ~/.hazlie/secrets.
+      let gf = String(payload["flow"] as? String ?? "google")
+      // Which OAuth client signs this account in. The connect service checks
+      // the name against its registry, so an unknown one is a 400 rather than
+      // an argument reaching the helper's command line.
+      let gc = String(payload["client"] as? String ?? "default")
+      bridgeCall("POST", "api/google-auth", json: ["flow": gf, "client": gc], timeout: 15) { [weak self] d in
+        guard let self else { return }
+        // The service started the helper and handed back the URL. GoogleLogin
+        // validates the fixed Google host and sends it to the system browser;
+        // the helper receives the redirect and writes the token.
+        if let url = d["url"] as? String, !url.isEmpty {
+          DispatchQueue.main.async {
+            GoogleLogin.present(url: url) { ok, why in
+              // `ok` means macOS accepted the browser launch, not that consent
+              // completed. Returning to the app fires the shelf's focus refresh;
+              // the token file remains the source of truth. `why` is reserved
+              // for a local validation or browser-launch failure.
+              var out: [String: Any] = ["ok": ok, "opened": ok]
+              if let why { out["refused"] = why }
+              self.reply(webView, id, out)
+            }
+          }
+        } else {
+          self.reply(webView, id, d)
+        }
+      }
+    case "connectSecret":
+      let p = String(payload["p"] as? String ?? "")
+      let value = String(payload["value"] as? String ?? "")
+      bridgeCall("POST", "api/secret", json: ["p": p, "value": value], timeout: 10) { [weak self] d in
         self?.reply(webView, id, d)
       }
     case "bridgeCookies":
@@ -623,7 +713,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // endpoint. The webview and its cookies never touch this bridge's own
       // views; only the harvested set is POSTed to the loopback server.
       let p = String((payload["p"] as? String ?? "").prefix(24))
-      bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { [weak self] begin in
+      // Fetch policy without beginning the Matrix-bot conversation. Beginning
+      // used to happen first, which meant a fresh install with no bridge state
+      // failed before the real Facebook/Instagram/X login window could even
+      // appear. The login window needs only the static, server-authored policy;
+      // start the bot immediately after cookies are available.
+      bridgeCall("GET", "api/bridge", query: ["p": p]) { [weak self] begin in
         guard let self else { return }
         guard begin["state"] as? String == "ok",
               let loginUrl = begin["loginUrl"] as? String,
@@ -640,24 +735,101 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // never fire. That blank window was the bug.
         let allowedHosts = (begin["allowedHosts"] as? [String])?.filter { !$0.isEmpty } ?? []
         let sessionCookie = begin["sessionCookie"] as? String ?? ""
-        guard !allowedHosts.isEmpty, !sessionCookie.isEmpty else {
+        let requiredCookies = (begin["requiredCookies"] as? [String])?.filter { !$0.isEmpty } ?? []
+        let cookieFormat = begin["cookieFormat"] as? String ?? "json"
+        // The bridge's field contract, flattened to strings — the login window
+        // fills it in without interpreting any of it.
+        let fields: [[String: String]] = (begin["fields"] as? [[String: Any]] ?? []).map { f in
+          var out: [String: String] = [:]
+          for (k, v) in f { if let sv = v as? String { out[k] = sv } }
+          return out
+        }
+        // A window needs a fence and SOMETHING to wait for. ~~That was read as
+        // "a session cookie", which is only one of the two shapes~~ — Slack's
+        // window harvests no session at all: it exists so the person can
+        // answer the CAPTCHA Slack demands before it will email a code, and it
+        // waits on the `fields` contract instead. Requiring a cookie here
+        // meant Slack replied "manual" and no window ever opened, which is
+        // exactly what the card kept showing (owner, 2026-08-26).
+        let approval = begin["approval"] as? Bool ?? false
+        let userAgent = String((begin["userAgent"] as? String ?? "").prefix(300))
+        // Subframe-only hosts: a challenge widget's iframes. Same server-authored
+        // shape as allowedHosts, enforced separately — see BridgeLogin's fence.
+        let allowedFrameHosts = (begin["allowedFrameHosts"] as? [String])?.filter { !$0.isEmpty } ?? []
+        // Where a storage field's value lives, when signing in does not land
+        // there. Server-authored like the rest; the window uses it at most once.
+        let storageUrl = String((begin["storageUrl"] as? String ?? "").prefix(300))
+        let label = begin["label"] as? String ?? p
+        // A QR LOGIN IS ALSO A WINDOW, just not a webview one. Discord has no
+        // login page to drive — its bridge posts a remote-auth QR and waits
+        // for the phone app — so it takes this branch before the webview
+        // guard below, which would send it to the card's manual path.
+        if begin["qrLogin"] as? Bool == true {
+          self.presentQrLogin(webView, id: id, p: p, label: label)
+          return
+        }
+        guard !allowedHosts.isEmpty, !sessionCookie.isEmpty || !fields.isEmpty || approval else {
+          // No window for this platform — Telegram signs in by phone number
+          // and a code, which is a conversation, not a page. The card runs it.
+          //
+          // ~~This branch ran `begin` itself, so one press opened on the bot's
+          // first question~~ (d88e56c). Withdrawn the same day: `begin` sends
+          // cancel-then-login, so a press on a tile whose login was ALREADY in
+          // flight destroyed it — and each press put six command messages into
+          // a sixteen-message transcript window, which scrolled the owner's own
+          // answer out of sight and left the card unable to see that anything
+          // had happened (owner, 2026-08-26: "i'm stuck here").
+          //
+          // The card begins the login instead, and it can do so safely because
+          // it is the side that already parses whether the bot is mid-question.
+          // One press still reaches the question; deciding here could not tell
+          // "nothing started" from "something is waiting for an answer".
           self.reply(webView, id, ["state": "manual", "transcript": begin["transcript"] ?? []])
           return
         }
-        let label = begin["label"] as? String ?? p
         DispatchQueue.main.async {
           BridgeLogin.present(
             label: label, loginUrl: loginUrl, cookieDomain: cookieDomain,
-            sessionCookie: sessionCookie, allowedHosts: allowedHosts
+            sessionCookie: sessionCookie, allowedHosts: allowedHosts,
+            requiredCookies: requiredCookies, cookieFormat: cookieFormat,
+            fields: fields, approval: approval, userAgent: userAgent,
+            allowedFrameHosts: allowedFrameHosts, storageUrl: storageUrl
           ) { cookiesJSON in
             guard let cookiesJSON else {
               self.reply(webView, id, ["state": "cancelled"])
               return
             }
-            self.bridgeCall(
-              "POST", "api/bridge/cookies", json: ["p": p, "cookies": cookiesJSON], timeout: 15
-            ) { done in
-              self.reply(webView, id, done)
+            // BEGIN FIRST, EXCEPT WHEN THE LOGIN IS ALREADY UNDERWAY. A cookie
+            // harvest is self-contained: the window collects the session and
+            // the conversation starts afterwards, which is why begin lives
+            // here rather than before the window (a fresh install with no
+            // bridge state used to fail before the window could appear).
+            //
+            // A CHALLENGE window is the opposite. It opens partway through a
+            // conversation the bot is already holding — Slack asked for the
+            // challenge because it had been given an email address — and
+            // begin's first act is `cancel`. Calling it here would throw away
+            // the very request whose answer this window just captured, and the
+            // bot would then be asked for an email address with a captcha
+            // token. Derived from the field contract, like the rest.
+            let midConversation = fields.contains { $0["from"] == "captcha" }
+            let sendValue = {
+              self.bridgeCall(
+                "POST", "api/bridge/cookies", json: ["p": p, "cookies": cookiesJSON], timeout: 15
+              ) { done in
+                self.reply(webView, id, done)
+              }
+            }
+            if midConversation {
+              sendValue()
+            } else {
+              self.bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { started in
+                guard started["state"] as? String == "ok" else {
+                  self.reply(webView, id, started)
+                  return
+                }
+                sendValue()
+              }
             }
           }
         }
@@ -689,6 +861,22 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         },
       ]
       state["model"] = ModelSetup.installed?.id ?? ""
+      // THE ROW COUNT IS OPT-IN, because it is the only slow thing in here.
+      //
+      // Everything above is local and instant -- a symlink read, two file
+      // existence checks, a static tier list. The row count is an HTTP call to
+      // hermes, which is single-threaded and blocks for the length of its boot
+      // warm (12-20s measured), so this request times out at 4s and the WHOLE
+      // reply waited for it. The visible symptom was the Settings panel's "local
+      // model size" row arriving seconds late, on a machine where the answer had
+      // been on disk the entire time.
+      //
+      // Only the onboarding scenes read `rows`/`memory` -- they use it for "is any
+      // data flowing yet". Settings never touches it and should never wait for it.
+      guard payload["rows"] as? Bool == true else {
+        reply(webView, id, state)
+        return
+      }
       rows { n, memory in
         var out = state
         out["rows"] = n
@@ -730,18 +918,18 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
               ])
               return
             }
-            Provision.installAgent("com.hazlie.llama-server")
-            Provision.kickstart("com.hazlie.llama-server")
+            Provision.installAgent("io.intaglio.llama-server")
+            Provision.kickstart("io.intaglio.llama-server")
             // hermes holds the llama base URL open; restart it so the first ask
             // after setup does not meet a proxy pointed at nothing.
-            Provision.kickstart("com.hazlie.hermes")
+            Provision.kickstart("io.intaglio.hermes")
             // REACH AN ENDING. Loading several GB of weights takes a while, so
             // wait -- but bounded, and then say which way it went. A screen that
             // says "checking" forever is the one state that is never true.
             if Provision.waitForLlama() {
               self.delegate?.setupProgress(["phase": "ready", "tier": tier])
               ModelSetup.notify(
-                title: "Hazlie can answer now",
+                title: "Intaglio Labs can answer now",
                 body: "The model finished downloading and is ready.")
             } else {
               let why = "The model is saved but didn’t start. Reopen the app to try again."
@@ -915,6 +1103,21 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       } else {
         reply(webView, id, ["state": "error", "error": "url not in allowlist"])
       }
+    case "openApp":
+      let bundleId = String((payload["bundleId"] as? String ?? "").prefix(96))
+      guard allowedApps.contains(bundleId),
+            let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId)
+      else {
+        reply(webView, id, ["state": "notInstalled"])
+        return
+      }
+      let config = NSWorkspace.OpenConfiguration()
+      config.activates = true
+      NSWorkspace.shared.openApplication(at: appURL, configuration: config) { [weak self] _, error in
+        DispatchQueue.main.async {
+          self?.reply(webView, id, error == nil ? ["state": "ok"] : ["state": "notInstalled"])
+        }
+      }
     case "openConnectLink":
       // The cloud-connector setup door: the connect page's ROOT, in the
       // browser — a full setup flow (tokens, app passwords) that wants a real
@@ -982,6 +1185,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
       reply(webView, id, ["state": Bridge.monthsView ?? ""])
 
+    case "peopleAvatars":
+      let keys = (payload["keys"] as? [String])?.prefix(400).map { String($0.prefix(200)) } ?? []
+      peopleCall("POST", "people/avatars", json: ["keys": Array(keys)]) { [weak self] data in
+        self?.reply(webView, id, data)
+      }
     case "peopleSummary":
       // Model-written year summary for one person; generated on demand,
       // served by hermes from the LOCAL model only.
@@ -1258,6 +1466,40 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
 
   // MARK: status
 
+  /// Correct Full Disk Access rows in the process that actually owns the
+  /// grant. The connect server is a launchd agent, while the connector daemon
+  /// is this app's child and inherits this app's TCC identity. Trusting the
+  /// server's protected-file probe therefore paints false red tiles even while
+  /// ingestion can read the stores normally.
+  private func reconcileFullDiskStatus(_ obj: [String: Any]) -> [String: Any] {
+    guard let sources = obj["sources"] as? [[String: Any]] else { return obj }
+    let readable = Permissions.fullDiskAccessibleSources()
+    guard !readable.isEmpty else { return obj }
+    let details = [
+      "imessage": "reading your message history",
+      "calendar": "reading the local calendar store",
+      "contacts": "names behind the numbers",
+      "photos": "reading time, place and who is in them",
+      "notes": "reading what you wrote",
+    ]
+    var out = obj
+    out["sources"] = sources.map { source in
+      guard let id = source["id"] as? String,
+            source["action"] as? String == "fda",
+            readable.contains(id)
+      else { return source }
+      var fixed = source
+      fixed["connected"] = true
+      fixed["broken"] = false
+      fixed["detail"] = details[id] ?? "available to Intaglio Labs"
+      fixed["action"] = NSNull()
+      fixed["fix"] = NSNull()
+      fixed["caveat"] = NSNull()
+      return fixed
+    }
+    return out
+  }
+
   private func fetchStatus(_ done: @escaping ([String: Any]) -> Void) {
     guard let tok = bearerToken() else { done(["state": "auth"]); return }
     let req = request("GET", connectBase, "api/status", bearer: tok, timeout: 5)
@@ -1271,7 +1513,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
               let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
               obj["sources"] is [[String: Any]]
         else { done(["state": "error", "error": "unparseable status"]); return }
-        var out = obj
+        var out = self.reconcileFullDiskStatus(obj)
         out["state"] = "ok"
         done(out)
       case 401: done(["state": "auth"])
@@ -1289,6 +1531,98 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // paste rides this once and is masked server-side out of every transcript;
   // nothing here stores or logs it. begin/cookies wait on a live bot, so they
   // get 15s where status gets 5.
+  /// Discord's login, end to end: open the window on the press, ask the bot
+  /// for a QR, show it, and poll the bridge until the phone approves it.
+  ///
+  /// THE WINDOW OPENS FIRST. `login` is a round trip to a bot in a container
+  /// (3.8s measured here), and doing that before showing anything is what made
+  /// the tile look dead on the first press — the owner pressed twice and read
+  /// the second press as the one that worked. Instagram's window is up
+  /// immediately because its policy is static; this one now opens on the same
+  /// press and fills in when the code lands.
+  ///
+  /// The QR is the bridge's own Matrix media, inlined as a data: URI by the
+  /// connect server (lib/bridge.mjs inlineMedia, images only and capped) —
+  /// this process fetches nothing to show it.
+  ///
+  /// WHAT COMES BACK to the page is deliberately not the transcript. A
+  /// finished attempt's QR is redacted by the bridge, so replaying the
+  /// conversation into the card is how the card ended up showing the words
+  /// around a code that was no longer there; the card gets a fresh status
+  /// instead, or `cancelled`, which is the state its begin button already
+  /// knows how to answer.
+  private func presentQrLogin(_ webView: WKWebView, id: Int, p: String, label: String) {
+    // A bot reply with no image — "You're already logged in", or a bridge that
+    // is down — is the card's to show, not this window's. Captured here so the
+    // close path can hand it back.
+    var fallback: [String: Any]?
+    // ENDING TAKES TWO POLLS IN A ROW. The bot posts "Error logging in:
+    // websocket: close sent" for a socket that lapsed, and on this machine
+    // that line was followed by "Successfully logged in" from the scan the
+    // owner had just done — so a window that closed on the first sighting
+    // would have closed a login that was about to succeed.
+    var endingStreak = 0
+    // Main thread: this is reached from a URLSession completion, and it puts a
+    // window on screen.
+    DispatchQueue.main.async {
+      BridgeLogin.presentQR(
+        label: label,
+        // Owner's wording (2026-08-26). Not "the Discord app": a phone camera
+        // recognises the code and offers the app itself, and naming a second
+        // piece of software to go and open first is a step that is not there.
+        instruction: "scan this with your phone camera",
+        fetch: { [weak self] deliver in
+          guard let self else { deliver(nil); return }
+          self.bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { begun in
+            guard begun["state"] as? String == "ok" else {
+              fallback = begun
+              deliver(nil)
+              return
+            }
+            // The LAST bot image: a retried login posts a second code, and the
+            // stale one is still above it in the transcript.
+            let transcript = begun["transcript"] as? [[String: Any]] ?? []
+            let qr = transcript.reversed().first { m in
+              (m["from"] as? String) == "bot"
+                && (m["image"] as? String)?.hasPrefix("data:image/") == true
+            }?["image"] as? String
+            if qr == nil {
+              fallback = ["state": "manual", "transcript": begun["transcript"] ?? []]
+            }
+            deliver(qr)
+          }
+        },
+        check: { [weak self] report in
+          guard let self else { return }
+          self.bridgeCall("GET", "api/bridge", query: ["p": p]) { st in
+            if st["connected"] as? Bool == true { report(.connected); return }
+            // The bridge says it is over in words, and they are the bot's own.
+            // Matching the shape rather than the sentence, because that string
+            // is the container's to change.
+            let lines = (st["transcript"] as? [[String: Any]] ?? [])
+              .compactMap { ($0["from"] as? String) == "bot" ? $0["body"] as? String : nil }
+            let last = lines.last?.lowercased() ?? ""
+            let over = last.contains("error logging in") || last.contains("websocket")
+              || last.contains("timed out") || last.contains("cancelled")
+            endingStreak = over ? endingStreak + 1 : 0
+            report(endingStreak >= 2 ? .ended : .waiting)
+          }
+        }
+      ) { [weak self] result in
+        guard let self else { return }
+        guard result != nil else {
+          self.reply(webView, id, fallback ?? ["state": "cancelled"])
+          return
+        }
+        // Linked. Re-read rather than reporting the poll's own copy, so the card
+        // paints from the same source every other path uses.
+        self.bridgeCall("GET", "api/bridge", query: ["p": p]) { done in
+          self.reply(webView, id, done)
+        }
+      }
+    }
+  }
+
   private func bridgeCall(
     _ method: String, _ path: String, query: [String: String] = [:],
     json: [String: Any]? = nil, timeout: TimeInterval = 5,

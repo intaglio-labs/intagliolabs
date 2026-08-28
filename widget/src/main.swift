@@ -1,4 +1,4 @@
-// Hazlie desktop widget — entry point and window wiring.
+// Intaglio Labs desktop widget — entry point and window wiring.
 //
 // One process, no Dock icon (.accessory), three windows: the desktop-pinned
 // widget panel plus two popups. All HTTP lives in Bridge.swift; this file
@@ -44,7 +44,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // its real content height (hzAutoFit on .conn-main), so the card fits snugly
   // instead of standing 500px tall with the shelf pinned to the bottom.
   private static let connectionsBase = NSSize(width: 312, height: 150)
-  private static let peopleBase = NSSize(width: 312, height: 300)
+  // Wider than the other popups because this one is not a list: the connector
+  // ring needs its diameter in BOTH axes at once, and the title sits inside it.
+  //
+  // The height is a FLOOR, deliberately below what the page actually needs —
+  // people.js measures the card and reports it (fitPeople), and `want` below
+  // takes max(base, reported). Raising this to "make it fit" was the wrong
+  // lever and cost a band of dead card under "read specs": the content was
+  // never the thing that failed to fit, a second fitter was overwriting the
+  // measurement. See fitPeople's header in widget/ui/people.js.
+  private static let peopleBase = NSSize(width: 360, height: 240)
   // Height is deliberately absurd: the timeline is a tall side panel, and
   // fit()/sidePlacedFrame clamp it to the screen — so this reads "as tall as
   // the screen allows", not 2000pt.
@@ -72,11 +81,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     bridge.delegate = self
     installEditMenu()
 
+    // BEFORE ANYTHING READS A SETTING. The bundle identifier moved from
+    // com.hazlie.widget to io.intaglio.widget, and UserDefaults is keyed on it,
+    // so a long-standing owner's onboarding state, remembered view, scale and
+    // window position all live in a domain this build cannot see. Carried over
+    // once, here, so the first thing the rename does is not greet them with
+    // setup they finished months ago. It cannot carry TCC -- see the file.
+    let carriedSettings = DefaultsMigration.runIfNeeded()
+    if carriedSettings > 0 {
+      NSLog("Intaglio Labs: carried \(carriedSettings) settings across the rename")
+    }
+
     // Self-contained install: on a fresh Mac the local backend isn't set up,
     // so stand it up from the bundle. On a machine that already has it (the
     // owner's repo-based setup, or a prior run) this only regenerates a
     // missing secret file, and it runs off the main thread so it never
     // delays the UI.
+    // Synchronous and tiny: the connector child is started later in this same
+    // launch, so its config must exist before that race begins. The expensive
+    // backend copy remains asynchronous inside ensureBackend().
+    Provision.ensureConnectorDefaults()
     Provision.ensureBackend()
 
     // The second half of the self-move (Bridge "moveToApplications"): the
@@ -397,53 +421,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     panel.setFrame(frame, display: false)
   }
 
-  // The timeline sits BESIDE the widget, not above it: it is a tall reading
-  // surface, and the column of screen next to the widget is the only place a
-  // near-full-height panel can live without covering the widget it belongs
-  // to. Prefers the widget's left, falls back to the right when the widget
-  // hugs the left edge, clamps to the screen either way, and fills the
-  // screen's height top to bottom.
-  // Flush, not gapped: the timeline should read as attached to the widget
-  // (owner: "right next to each other"), so it uses a 2pt seam instead of the
-  // 12pt popupGap the stacked popups use.
-  private static let sideSeam: CGFloat = 2
-
-  private func sidePlacedFrame(_ size: NSSize) -> NSRect {
+  // ~~The timeline sat BESIDE the widget, flush against its edge, and
+  // settings hung beside it too (sideSeam, sidePlacedFrame,
+  // Bridge.widgetVisibleLeftCSS did the geometry).~~ Both moved ON TOP of the
+  // orb (owner, 2026-08-25): bottom edge pinned to the widget's bottom, right
+  // edge to the widget's right, so the panel may stand as tall as the screen
+  // instead of as tall as the room above the orb. Covering the widget is the
+  // point, not a hazard — the popup IS the interface while it is up, the
+  // popups draw at .normal level over the desktop-level widget, and
+  // click-outside, ESC and the × all still dismiss. The timeline stays wider
+  // than settings by their bases (520 vs 312).
+  private func overlayFrame(_ size: NSSize) -> NSRect {
     let wf = visibleWidgetFrame
     guard let v = (widgetWindow.screen ?? NSScreen.main)?.visibleFrame else {
-      return NSRect(origin: NSPoint(x: wf.minX - size.width - Self.sideSeam, y: wf.minY), size: size)
+      return NSRect(origin: NSPoint(x: wf.maxX - size.width, y: wf.minY), size: size)
     }
     var s = size
     s.height = min(s.height, v.height - Self.screenMargin * 2)
     s.width = min(s.width, v.width - Self.screenMargin * 2)
-    // The widget window is wider than the widget: the orb cluster is
-    // right-aligned inside a mostly-transparent window, so the window's minX
-    // can be ~160pt of empty glass left of anything visible. The page reports
-    // where the visible content starts (Bridge.widgetVisibleLeftCSS, CSS px,
-    // scaled to points here); fall back to the window edge until it has.
-    let visibleMinX = wf.minX + CGFloat((Bridge.widgetVisibleLeftCSS ?? 0) * Bridge.scale)
-    var x = visibleMinX - Self.sideSeam - s.width
-    if x < v.minX + 12 {
-      x = wf.maxX + Self.sideSeam
-      if x + s.width > v.maxX - 12 { x = v.maxX - s.width - 12 }
-    }
-    // Top-aligned to the widget so a short panel (settings) hangs beside it;
-    // a full-height panel (the timeline) clamps to the screen and fills it —
-    // the same expression serves both.
-    var y = min(wf.maxY, v.maxY - Self.screenMargin) - s.height
-    y = max(v.minY + Self.screenMargin, y)
+    var x = wf.maxX - s.width
+    x = max(v.minX + 12, min(x, v.maxX - s.width - 12))
+    var y = wf.minY
+    y = max(v.minY + Self.screenMargin, min(y, v.maxY - Self.screenMargin - s.height))
     return NSRect(origin: NSPoint(x: x, y: y), size: s)
   }
 
-  // The side-placed set: panels that sit BESIDE the widget rather than above
-  // it. Membership decides placement AND exempts them from popupCeiling —
-  // that ceiling measures room above the widget, where these do not live.
-  private func isSidePlaced(_ panel: PopupPanel) -> Bool {
+  // The overlay-placed set: panels that stand over the widget rather than in
+  // the strip above it. Membership decides placement AND exempts them from
+  // popupCeiling — that ceiling measures room above the widget, which stops
+  // mattering the moment a panel may cover the widget.
+  private func isOverlayPlaced(_ panel: PopupPanel) -> Bool {
     panel === monthsPanel || panel === connectionsPanel
   }
 
   private func chosenFrame(_ panel: PopupPanel, _ size: NSSize) -> NSRect {
-    isSidePlaced(panel) ? sidePlacedFrame(size) : placedFrame(size)
+    isOverlayPlaced(panel) ? overlayFrame(size) : placedFrame(size)
   }
 
   // The widget page re-measured its visible cluster (bar opened or closed,
@@ -451,7 +463,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // follow it.
   func widgetBoundsChanged() {
     for panel in edgePanels {
-      guard let panel, panel.isVisible, isSidePlaced(panel) else { continue }
+      guard let panel, panel.isVisible, isOverlayPlaced(panel) else { continue }
       place(panel)
     }
   }
@@ -501,6 +513,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       if event.window === self.widgetWindow { return }
       // Onboarding covers the screen and owns its own dismissal.
       if self.onboardingPanel?.isVisible == true { return }
+      // A BRIDGE LOGIN IS RUNNING — leave the panel alone (owner,
+      // 2026-08-25). The login is this app's own window, and it is where the
+      // whole connect flow happens, so every click inside it — typing a
+      // password, entering X's PIN — read as an "outside click" and ordered
+      // settings out from under the flow that opened it. The panel behind it
+      // is where the result is shown and where the bot's next question gets
+      // answered, so it has to survive the login that fills it.
+      if BridgeLogin.isActive { return }
       // A SCREENSHOT IS NOT AN OUTSIDE CLICK.
       //
       // ⇧⌘4 drags a selection, and that mouse-down reaches this global monitor
@@ -610,13 +630,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
         // escaped from scene 1, or the panel closed by any native path. At
         // its own level: below every window, exactly as it lives.
         self?.widgetWindow.orderFrontRegardless()
-        // The handoff: a FINISHED flow (and only a finished one — escape
-        // leaves onboarded false) sets the gear bouncing until settings is
-        // opened once. The next scene is behind that gear, and the nudge is
-        // this app's one gesture for "this wants you".
-        if Bridge.onboarded && !Bridge.connectorsIntroDone {
-          self?.widgetWeb?.evaluateJavaScript("window.__hzGearNudge && window.__hzGearNudge(true)")
-        }
+        // A finished flow opens People from onboarding.js after this scrim is
+        // gone. Escape still only restores the widget; it does not finish or
+        // open the next scene.
       }
       onboardingPanel = p
     }
@@ -789,11 +805,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       p.orderOut(nil)
       return
     }
+    let firstOpen = peoplePanel == nil
     if peoplePanel == nil {
       peoplePanel = makePanel(page: "people", size: capped(Self.scaled(Self.peopleBase, Bridge.scale)))
       peoplePanel!.hasShadow = false
     }
     present(peoplePanel!)
+    // A reused page already ran its initial prefs pull, so push the one-shot
+    // onboarding fact explicitly. A newly created page pulls it after load to
+    // avoid racing its script, exactly like the connections popup.
+    if !firstOpen {
+      let intro = Bridge.onboarded && !Bridge.connectorsIntroDone
+      (peoplePanel?.contentView as? WKWebView)?
+        .evaluateJavaScript("window.__hzPeopleIntro && window.__hzPeopleIntro(\(intro))")
+    }
   }
 
   // The timeline popup: the people list dressed by month, one year at a
@@ -843,19 +868,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // the scale can change afterwards and the measurement is about content, not
   // about how big it is being drawn.
   private var contentHeights: [PopupPanel: CGFloat] = [:]
-  // Extra width past the base, same CSS-px convention. Only the connections
-  // page sets this today (its hint strip opens as a side section).
-  private var extraWidths: [PopupPanel: CGFloat] = [:]
-
   private func capped(_ size: NSSize) -> NSSize {
     NSSize(width: size.width, height: min(size.height, popupCeiling()))
   }
 
-  func fitPopup(_ webView: WKWebView, contentHeight: Double, extraWidth: Double) {
-    // Either dimension may arrive alone: height 0 means "keep what you had"
-    // (the hint panel opening posts only extraWidth), extraWidth < 0 likewise
-    // (every hzAutoFit height report posts no width at all).
-    guard contentHeight > 0 || extraWidth >= 0 else { return }
+  func fitPopup(_ webView: WKWebView, contentHeight: Double) {
+    guard contentHeight > 0 else { return }
     // Remember it, but do not act on it mid-drag: the height a page reports
     // while the scale is moving is a measurement of a layout that is about to
     // change again, and acting on it is what turned one drag into a stream of
@@ -864,8 +882,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       for (panel, _) in [(connectionsPanel, 0), (chatPanel, 0), (peoplePanel, 0), (monthsPanel, 0)] {
         guard let p = panel, p.contentView === webView
           || p.contentView?.subviews.first === webView else { continue }
-        if contentHeight > 0 { contentHeights[p] = CGFloat(contentHeight) }
-        if extraWidth >= 0 { extraWidths[p] = CGFloat(extraWidth) }
+        contentHeights[p] = CGFloat(contentHeight)
         return
       }
       return
@@ -877,13 +894,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     for (panel, base) in panels {
       guard let p = panel, p.contentView === webView
         || p.contentView?.subviews.first === webView else { continue }
-      if contentHeight > 0 { contentHeights[p] = CGFloat(contentHeight) }
-      if extraWidth >= 0 { extraWidths[p] = CGFloat(extraWidth) }
+      contentHeights[p] = CGFloat(contentHeight)
       let want = NSSize(
-        width: base.width + (extraWidths[p] ?? 0),
+        width: base.width,
         height: max(base.height, contentHeights[p] ?? 0))
       let fitted = Self.fit(Self.scaled(want, Bridge.scale), on: p)
-      let size = isSidePlaced(p) ? fitted : capped(fitted)
+      let size = isOverlayPlaced(p) ? fitted : capped(fitted)
       guard abs(size.height - p.frame.height) > 1
         || abs(size.width - p.frame.width) > 1 else { return } // no thrash
       resize(p, to: size)
@@ -1337,7 +1353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // that, scaled, rather than snapping back to the guess.
       let want = NSSize(width: base.width, height: max(base.height, contentHeights[p] ?? 0))
       let sized = Self.fit(Self.scaled(want, scale), on: p)
-      resize(p, to: isSidePlaced(p) ? sized : capped(sized))
+      resize(p, to: isOverlayPlaced(p) ? sized : capped(sized))
       (p.contentView as? WKWebView ?? p.contentView?.subviews.first as? WKWebView)?.pageZoom = scale
     }
     // Onboarding is full-screen by definition, so its FRAME must not scale —

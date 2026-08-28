@@ -12,7 +12,7 @@
 import { buildGraph, namelike } from './graph.mjs';
 import { depthScore, isNonPerson } from './rank.mjs';
 import { topicTallies, topTopics, nameTokenSet } from './topics.mjs';
-import { buildHighlights } from './highlights.mjs';
+import { buildYearAwards } from './highlights.mjs';
 
 const DAY = 86_400_000;
 
@@ -359,6 +359,30 @@ function buildYearCore(contextDb, stateDb, { now, owner, aliases, stamp }) {
   return core;
 }
 
+// Person key → contact image bytes for explicitly requested people. This
+// reuses the memoised graph and treats a missing legacy avatar table as no
+// photo, rather than as a failed People page.
+export function buildAvatars(contextDb, stateDb, { keys, now = Date.now(), owner, aliases = null } = {}) {
+  const wanted = new Set(Array.isArray(keys) ? keys : []);
+  if (wanted.size === 0 || !stateDb) return new Map();
+  let avatarFor;
+  try {
+    avatarFor = stateDb.prepare('SELECT jpeg FROM contact_avatars WHERE identifier = ?');
+  } catch {
+    return new Map();
+  }
+  const { graph } = yearCore(contextDb, stateDb, { now, owner, aliases });
+  const out = new Map();
+  for (const person of graph) {
+    if (!wanted.has(person.key)) continue;
+    for (const identifier of person.identifiers ?? []) {
+      const row = avatarFor.get(identifier);
+      if (row?.jpeg) { out.set(person.key, row.jpeg); break; }
+    }
+  }
+  return out;
+}
+
 export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, aliases = null, cap = 250 } = {}) {
   const { graph, topics } = yearCore(contextDb, stateDb, { now, owner, aliases });
 
@@ -390,15 +414,20 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
   }
   entries.sort((a, b) => b.engagement - a.engagement);
 
+  // Computed over the FULL ranked set, deliberately before the display cap
+  // below: a streak or a return is worth surfacing even when the person sits
+  // past row 250, and capping first would have quietly made the highlights a
+  // fact about the first page rather than about the year.
+  const { cards, awards } = buildYearAwards(entries, { year, now });
+
   return {
     year,
     years: [...yearsSet].sort((a, b) => a - b),
     total: entries.length,
-    // Computed over the FULL ranked set, deliberately before the display cap
-    // below: a streak or a return is worth surfacing even when the person sits
-    // past row 250, and capping first would have quietly made the highlights a
-    // fact about the first page rather than about the year.
-    highlights: buildHighlights(entries, { year, now }),
+    highlights: cards,
+    // Each category's top five. The page joins these compact key lists onto
+    // the visible rows and reuses the category card's own icon and label.
+    awards,
     people: entries.slice(0, cap).map((e) => {
       const doc = topics.docs.get(`${e.p.key}|${year}`);
       // The row carries only what the page still shows: the company, status

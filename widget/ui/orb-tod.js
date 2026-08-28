@@ -15,12 +15,30 @@
 (function () {
   // Each mood anchored at its band's CENTRE hour (night wraps past midnight to
   // hour 1). Colours lifted verbatim from palette.css's .orb.tod-* rules.
+  //
+  // FOUR STOPS, EACH WITH ITS OWN POSITION — and that is not tidying.
+  // This file used to carry three colours per mood and hardcode the stops at
+  // 0/45/100 for all five. Two bands do not fit that shape:
+  //
+  //   late morning is 0/30/62/100 in the canvas, and the purple is HELD flat
+  //     across the first 30% on purpose — that run is the whole reason it
+  //     reads as purple BECOMING green instead of one muddy slide. Squeezed
+  //     into 0/45/100 the hold disappears and so does the mood. Since this
+  //     script writes --tod-grad inline it BEATS the .orb.tod-late rule, so
+  //     the four-stop version in palette.css was never what shipped: the
+  //     comment there describing the hold was, in practice, describing
+  //     nothing.
+  //   early morning turns at 40%, not 45%.
+  //
+  // So a stop is [colour, position] and both halves interpolate. Moods that
+  // genuinely have three colours repeat their first stop at 0, which makes
+  // every mood four stops and lets adjacent ones blend pairwise.
   const PHASES = [
-    { h: 1.0,  c: ['#6e3a5c', '#48243e', '#1e0f1a'], mid: '#48243e', far: '#6e3a5c', glow: [110, 58, 92],   ga: 0.28, gaArm: 0.50, light: '#f2e8d4' }, // night   21–05
-    { h: 7.0,  c: ['#e8e2f0', '#cbb8d6', '#9a8fb8'], mid: '#cbb8d6', far: '#9a8fb8', glow: [154, 143, 184], ga: 0.18, gaArm: 0.38, light: '#f2e8d4' }, // early   05–09
-    { h: 10.5, c: ['#b294c9', '#a8bfa0', '#7fc46a'], mid: '#a8bfa0', far: '#7fc46a', glow: [127, 196, 106], ga: 0.22, gaArm: 0.42, light: '#efe7f6' }, // late    09–12
-    { h: 14.5, c: ['#f2e8d4', '#c5a56d', '#33ff66'], mid: '#c5a56d', far: '#33ff66', glow: [51, 255, 102],  ga: 0.10, gaArm: 0.30, light: '#f2e8d4' }, // power   12–17
-    { h: 19.0, c: ['#f5d9a8', '#e0a35c', '#c56d4a'], mid: '#e0a35c', far: '#c56d4a', glow: [224, 163, 92],  ga: 0.25, gaArm: 0.45, light: '#f2e8d4' }, // happy   17–21
+    { h: 1.0,  s: [['#6e3a5c', 0], ['#6e3a5c', 0], ['#48243e', 45], ['#1e0f1a', 100]], mid: '#48243e', far: '#6e3a5c', glow: [110, 58, 92],   ga: 0.28, gaArm: 0.50, light: '#f2e8d4' }, // night   21–05
+    { h: 7.0,  s: [['#e8e2f0', 0], ['#e8e2f0', 0], ['#cbb8d6', 40], ['#9a8fb8', 100]], mid: '#cbb8d6', far: '#9a8fb8', glow: [154, 143, 184], ga: 0.18, gaArm: 0.38, light: '#f2e8d4' }, // early   05–09
+    { h: 10.5, s: [['#b294c9', 0], ['#b294c9', 30], ['#a8bfa0', 62], ['#7fc46a', 100]], mid: '#a8bfa0', far: '#7fc46a', glow: [127, 196, 106], ga: 0.22, gaArm: 0.42, light: '#efe7f6' }, // late    09–12
+    { h: 14.5, s: [['#f2e8d4', 0], ['#f2e8d4', 0], ['#c5a56d', 45], ['#33ff66', 100]], mid: '#c5a56d', far: '#33ff66', glow: [51, 255, 102],  ga: 0.30, gaArm: 0.50, light: '#f2e8d4' }, // power   12–17
+    { h: 19.0, s: [['#f5d9a8', 0], ['#f5d9a8', 0], ['#e0a35c', 45], ['#c56d4a', 100]], mid: '#e0a35c', far: '#c56d4a', glow: [224, 163, 92],  ga: 0.25, gaArm: 0.45, light: '#f2e8d4' }, // happy   17–21
   ];
 
   const hx = (h) => {
@@ -54,9 +72,11 @@
     const hour = now.getHours() + now.getMinutes() / 60;
     const { A, B, t } = segment(hour);
 
-    const c0 = lerpHex(A.c[0], B.c[0], t);
-    const c1 = lerpHex(A.c[1], B.c[1], t);
-    const c2 = lerpHex(A.c[2], B.c[2], t);
+    // Colour and position both blend, stop by stop.
+    const stops = A.s.map((sa, i) => {
+      const sb = B.s[i];
+      return `${lerpHex(sa[0], sb[0], t)} ${(+lerp(sa[1], sb[1], t).toFixed(2))}%`;
+    });
     const mid = lerpHex(A.mid, B.mid, t);
     const far = lerpHex(A.far, B.far, t);
     const light = lerpHex(A.light, B.light, t);
@@ -64,12 +84,16 @@
     const ga = lerp(A.ga, B.ga, t);
     const gaArm = lerp(A.gaArm, B.gaArm, t);
 
-    const grad = `linear-gradient(160deg, ${c0} 0%, ${c1} 45%, ${c2} 100%)`;
+    const grad = `linear-gradient(160deg, ${stops.join(', ')})`;
     const glow = `rgba(${g[0]}, ${g[1]}, ${g[2]}, ${ga.toFixed(3)})`;
     const glowArm = `rgba(${g[0]}, ${g[1]}, ${g[2]}, ${gaArm.toFixed(3)})`;
 
-    // Set on every .orb present (widget orb today; harmless if more appear).
-    for (const orb of document.querySelectorAll('.orb')) {
+    // Set on every orb present. `.tod-orb` is the opt-in for something that
+    // wants the band WITHOUT the .orb chrome — the constellation's core
+    // (people-months.css .pm-core) is a 54px blob with no face, no blobs and
+    // no button around it, so it takes the mood and none of the machinery.
+    // ~~"widget orb today; harmless if more appear"~~ — one appeared.
+    for (const orb of document.querySelectorAll('.orb, .tod-orb')) {
       const s = orb.style;
       s.setProperty('--tod-grad', grad);
       s.setProperty('--tod-mid', mid);
@@ -85,4 +109,10 @@
   // laptop that slept across a band edge catches up the moment it wakes.
   setInterval(apply, 60000);
   window.addEventListener('focus', apply);
+  // Exposed so a page that BUILDS its orb after load can ask for the current
+  // mood the moment it exists, instead of showing the stylesheet's fallback
+  // band for up to a minute. The constellation's core is drawn on every render
+  // of the globe, which is long after this file ran. (bridge.js's
+  // hzApplyTimeOfDay returns its apply function for the same reason.)
+  window.__hzTodApply = apply;
 })();

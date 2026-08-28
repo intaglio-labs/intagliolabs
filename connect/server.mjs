@@ -17,18 +17,22 @@
 
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { renderConnectPage, renderHelpPage } from './lib/page.mjs';
 import { renderMemoryPage } from './lib/memoryPage.mjs';
 import { renderBridgePage } from './lib/bridgePage.mjs';
+import { secretResponse } from './lib/secretApi.mjs';
 import { PLATFORMS, bridgeStatus, beginCommand, beginLogin, loadPanel, relay } from './lib/bridge.mjs';
 import { bridgeApiResponse } from './lib/bridgeApi.mjs';
 import { decide, fetchPending } from './lib/memory.mjs';
-import { mailAccounts, mailSecretName, readStatus } from './lib/status.mjs';
+import { readStatus } from './lib/status.mjs';
+import { listGoogleClients } from '../connectors/lib/googleClients.mjs';
 import { sameOrigin } from './lib/origin.mjs';
-import { statusResponse } from './lib/statusApi.mjs';
+import { bearerAuthorized, statusResponse } from './lib/statusApi.mjs';
 import { mintToken, validateToken } from './lib/tokens.mjs';
 
 const DEFAULT_PORT = 51788;
@@ -161,6 +165,27 @@ async function sendMemoryPage(res, token, opts = {}) {
   send(res, 200, html, 'text/html; charset=utf-8', { csp: memoryCsp(nonce) });
 }
 
+// Put the owner's own Telegram api_id/api_hash into that bridge's generated
+// config, then start the container that has been refusing to run without them.
+// Line replacement, not a YAML round trip: the generated config is ~700 lines
+// of comments that a rewrite would flatten, and these two keys appear once.
+// The container start is best-effort — docker may not be running, and the
+// credentials are still saved either way, so the next setup-bridges run picks
+// them up.
+function writeBridgeConfig(bridge, { apiId, apiHash }) {
+  const path = join(homedir(), '.hazlie', 'matrix', bridge, 'config.yaml');
+  const text = readFileSync(path, 'utf8');
+  const next = text
+    .replace(/^(\s*api_id:).*$/mu, `$1 ${apiId}`)
+    .replace(/^(\s*api_hash:).*$/mu, `$1 "${apiHash}"`);
+  writeFileSync(path, next, { mode: 0o600 });
+  try {
+    execFileSync('docker', ['start', `hazlie-${bridge}`], { stdio: 'ignore', timeout: 15000 });
+  } catch {
+    // Not running, not installed, or already up — the credentials landed.
+  }
+}
+
 function writeSecret(name, value) {
   const path = join(homedir(), '.hazlie', 'secrets', name);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -232,6 +257,160 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // /api/google-auth — START THE GOOGLE SIGN-IN, from a button rather than a
+  // terminal.
+  //
+  // The connect page's Google rows used to say "run `node ops/gcal-auth.mjs`",
+  // which asked the owner to open a terminal in a repo — and ops/ was never
+  // copied into the app bundle, so on a downloaded install that instruction
+  // named a file that did not exist. This spawns it instead: the script starts
+  // its own loopback listener and opens Google in the default browser, exactly
+  // as it does from a shell.
+  //
+  // DETACHED AND UNWAITED, deliberately. The flow lives as long as the owner
+  // takes to approve (15 minutes at the outside), and an HTTP request must not
+  // hold that open — the answer here is "the browser is opening", not "you are
+  // signed in". Whether the grant landed is a question the status rows answer
+  // afterwards, because they read the tokens on disk.
+  //
+  // NOTHING FROM THE REQUEST REACHES THE COMMAND LINE. The script path is a
+  // constant resolved against this file, and the only variable is which of two
+  // fixed names — a request cannot name a third. That is the whole reason this
+  // is an allowlist of literals rather than a parameter.
+  if (url.pathname === '/api/google-auth') {
+    // Native-only, exactly like /api/status, /api/secret and /api/bridge. A
+    // browser can issue a blind POST to loopback even without CORS permission;
+    // without these checks any page could occupy the helper's fixed callback
+    // port and keep the owner's real sign-in from starting.
+    if (req.headers.origin !== undefined) {
+      send(res, 403, JSON.stringify({ error: 'browser channel refused' }),
+        'application/json; charset=utf-8');
+      return;
+    }
+    if (!bearerAuthorized(req.headers.authorization)) {
+      send(res, 401, JSON.stringify({ error: 'unauthorized' }),
+        'application/json; charset=utf-8');
+      return;
+    }
+    if (req.method !== 'POST') {
+      send(res, 405, JSON.stringify({ error: 'POST only' }), 'application/json; charset=utf-8');
+      return;
+    }
+    let which = 'google';
+    let client = 'default';
+    try {
+      const body = JSON.parse((await readBody(req, 4 * 1024)) || '{}');
+      which = body.flow ?? 'google';
+      // WHICH OAUTH CLIENT SIGNS THIS ACCOUNT IN. Validated against the
+      // registry rather than passed through: this value becomes a command-line
+      // argument, and an unregistered name would reach the helper as one.
+      // Names are [a-z0-9-] by construction there, but checking membership is
+      // the guarantee, not the character class.
+      const asked = typeof body.client === 'string' ? body.client : 'default';
+      const known = listGoogleClients().some((c) => c.name === asked);
+      if (!known && asked !== 'default') {
+        send(res, 400, JSON.stringify({ error: `no OAuth client named "${asked}"` }),
+          'application/json; charset=utf-8');
+        return;
+      }
+      client = asked;
+    } catch {
+      which = 'google';
+    }
+    const SCRIPTS = { google: 'gcal-auth.mjs', oura: 'oura-auth.mjs' };
+    const script = SCRIPTS[which];
+    if (!script) {
+      send(res, 400, JSON.stringify({ error: 'unknown flow' }), 'application/json; charset=utf-8');
+      return;
+    }
+    const scriptPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'ops', script);
+    if (!existsSync(scriptPath)) {
+      send(res, 501, JSON.stringify({
+        error: 'the authorization helper is not installed beside this server',
+      }), 'application/json; charset=utf-8');
+      return;
+    }
+    // THE URL COMES BACK so native code can validate the fixed Google host and
+    // hand it to the system browser. The helper still holds the loopback
+    // listener and exchanges the code; the browser follows Google's redirect
+    // into that listener normally.
+    //
+    // Stdout is READ, not ignored, so the child cannot be fully detached until
+    // the URL has arrived. It is unref'd immediately after: the flow outlives
+    // this request by however long consent takes, and the response says "here
+    // is where to send them", never "they are signed in".
+    //
+    // Scanned for the AUTHORIZE_URL prefix rather than read as line 1 — the
+    // helper logs "waiting for approval" first, and pinning a line number
+    // would break the moment anyone adds a line above it.
+    try {
+      const child = spawn(process.execPath, [scriptPath, '--print-url', '--client', client], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env: process.env,
+      });
+      const url = await new Promise((resolve) => {
+        let buf = '';
+        // If the helper cannot start — a missing client credential is the
+        // ordinary case — it exits without ever printing. Resolve null rather
+        // than hang the request, and let the caller say so.
+        const done = (v) => { clearTimeout(t); resolve(v); };
+        const t = setTimeout(() => done(null), 10_000);
+        child.stdout.on('data', (d) => {
+          buf += d;
+          const m = /^AUTHORIZE_URL (\S+)$/mu.exec(buf);
+          if (m) done(m[1]);
+        });
+        child.once('exit', () => done(null));
+        child.once('error', () => done(null));
+      });
+      child.unref();
+      if (!url) {
+        send(res, 502, JSON.stringify({
+          error: 'the authorization helper did not start; check that the Google client credential is installed',
+        }), 'application/json; charset=utf-8');
+        return;
+      }
+      send(res, 200, JSON.stringify({ ok: true, started: which, url }), 'application/json; charset=utf-8');
+    } catch (error) {
+      send(res, 500, JSON.stringify({ error: 'could not start the authorization helper' }),
+        'application/json; charset=utf-8');
+    }
+    return;
+  }
+
+  // /api/secret — the widget's NATIVE channel for pasting a connector's API
+  // key (the in-panel walkthrough; lib/secretApi.mjs carries the allowlist and
+  // the rules). Above the /c/<token> gate like its siblings: that gate 404s
+  // everything it doesn't match.
+  if (url.pathname === '/api/secret') {
+    let body = {};
+    if (req.method === 'POST') {
+      let raw = '';
+      try {
+        raw = await readBody(req, 16 * 1024);
+      } catch {
+        send(res, 413, JSON.stringify({ error: 'too large' }), 'application/json; charset=utf-8');
+        return;
+      }
+      try {
+        body = JSON.parse(raw || '{}');
+      } catch {
+        send(res, 400, JSON.stringify({ error: 'bad json' }), 'application/json; charset=utf-8');
+        return;
+      }
+    }
+    const { status, body: out } = secretResponse({
+      method: req.method,
+      origin: req.headers.origin,
+      authorization: req.headers.authorization,
+      body,
+      write: writeSecret,
+      writeConfig: writeBridgeConfig,
+    });
+    send(res, status, JSON.stringify(out), 'application/json; charset=utf-8');
+    return;
+  }
+
   // /api/bridge[/begin|/cookies] — the widget's NATIVE channel for social-bridge
   // login (same bearer + Origin-less rules as /api/status). Above the /c/<token>
   // gate for the same reason: that gate 404s everything it doesn't match. Lets
@@ -283,9 +462,8 @@ async function handleRequest(req, res) {
     return;
   }
   // /c/<token>            → the page
-  // /c/<token>/gmail      → POST the app password
   // /c/<token>/memory     → GET the review queue, POST one decision
-  const match = /^\/c\/([A-Za-z0-9_-]{1,64})(?:\/(gmail|memory|bridge|help\/[a-z]+))?\/?$/u.exec(
+  const match = /^\/c\/([A-Za-z0-9_-]{1,64})(?:\/(memory|bridge|help\/[a-z]+))?\/?$/u.exec(
     url.pathname
   );
   if (!match) {
@@ -379,51 +557,13 @@ async function handleRequest(req, res) {
     return;
   }
 
-  if (req.method === 'POST' && action === 'gmail') {
-    if (!sameOrigin(req.headers)) {
-      send(res, 403, 'Cross-origin form post refused.', 'text/plain; charset=utf-8');
-      return;
-    }
-    let value = '';
-    let account = '';
-    try {
-      const form = new URLSearchParams(await readBody(req));
-      value = form.get('appPassword') ?? '';
-      account = form.get('account') ?? '';
-    } catch {
-      send(res, 413, 'Too large.', 'text/plain; charset=utf-8');
-      return;
-    }
-    // The address must be one this machine is configured for. Accepting an
-    // arbitrary string would let a form post choose the filename a secret is
-    // written under, which is a path-traversal primitive dressed as a feature.
-    const known = mailAccounts().some((a) => a.user === account);
-    if (!known) {
-      send(
-        res,
-        200,
-        renderConnectPage(readStatus(), { token,
-          banner: 'Unknown mailbox. Nothing was saved.',
-        })
-      );
-      return;
-    }
-    // Google app passwords are 16 letters, usually shown in four groups.
-    const normalized = value.replace(/\s+/gu, '');
-    if (!/^[a-z]{16}$/iu.test(normalized)) {
-      send(
-        res,
-        200,
-        renderConnectPage(readStatus(), { token,
-          banner: 'That does not look like a 16-letter Google app password. Nothing was saved.',
-        })
-      );
-      return;
-    }
-    writeSecret(mailSecretName(account), normalized);
-    send(res, 200, renderConnectPage(readStatus(), { token, banner: `${account} connected.` }));
-    return;
-  }
+  // ~~POST /c/<token>/mailbox and POST /c/<token>/gmail.~~ Both gone with the
+  // app password (2026-08-26). Mail is an OAuth grant now, so there is no
+  // address to register and no secret to post — and a route that still accepted
+  // a 16-character password would write it to a file no connector reads, which
+  // is worse than dead code: it looks like it worked. The route regex below no
+  // longer matches either path, so a stale bookmark gets a 404 rather than a
+  // form that silently achieves nothing.
 
   // Social bridge login, relayed to the local bot. The message may be a cookie
   // blob (several KB), so the body limit is raised from the credential-form

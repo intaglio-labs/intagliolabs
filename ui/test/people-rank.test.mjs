@@ -42,12 +42,16 @@ test('seniority reads the title, most senior first', () => {
 
 test('reachable requires a message channel, not just linkedin', () => {
   assert.equal(reachable({ channels: ['linkedin'] }), false);
+  assert.equal(reachable({ channels: ['linkedin'], directMessages: 2 }), true, 'a LinkedIn DM is reachable');
   assert.equal(reachable({ channels: ['linkedin', 'imessage'] }), true);
   assert.equal(reachable({ channels: ['mail'] }), true);
+  for (const channel of ['messenger', 'instagram', 'twitter', 'telegram', 'discord', 'slack']) {
+    assert.equal(reachable({ channels: [channel] }), true, `${channel} is a message channel`);
+  }
 });
 
 test('the mentor need excludes the unreachable and the too-thin', () => {
-  assert.equal(scoreForNeed(person({ channels: ['linkedin'], channelCount: 1 })).score, 0, 'linkedin-only cannot be texted');
+  assert.equal(scoreForNeed(person({ channels: ['linkedin'], channelCount: 1 })).score, 0, 'a connection export alone cannot be messaged');
   assert.equal(
     scoreForNeed(person({ messages: 1, reciprocity: 0, metInPerson: 0, channels: ['imessage'], channelCount: 1, relationshipDays: 0 })).score,
     0,

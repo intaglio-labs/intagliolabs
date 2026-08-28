@@ -1,6 +1,6 @@
 // "am i up to date?" as a live query surface. The iMessage push side that
 // once delivered these alerts (courier/watch.mjs) was retired 2026-08-21 —
-// Hazlie no longer texts its user — so this PULL surface is now the ONLY way
+// Intaglio Labs no longer texts its user — so this PULL surface is now the ONLY way
 // freshness reaches the owner: asked through the widget, on demand, and
 // rendered as a status.
 //

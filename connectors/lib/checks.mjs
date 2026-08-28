@@ -124,7 +124,7 @@ function checkSqliteBackup() {
 
 // --- ~/.hazlie tree permissions -----------------------------------------------
 
-// Everything under ~/.hazlie is Hazlie-private state (secrets, the context DB,
+// Everything under ~/.hazlie is Intaglio Labs-private state (secrets, the context DB,
 // connector cursors, store snapshots in cache/). One group-readable directory
 // quietly widens all of it, so the tree is checked as a whole rather than
 // trusting whichever setup run created each piece.
@@ -261,20 +261,126 @@ function checkOuraSecret(home) {
   return result(name, PASS, 'present, owner-only, carries access and refresh tokens');
 }
 
+// CHECK THE THING THE CONNECTOR ACTUALLY GATES ON.
+//
+// Twice now this has checked a credential nobody reads. First a bare
+// `gmail-app-password.txt` while everything else read a per-account
+// `gmail-app-password-<address>.txt`; that was fixed on 2026-08-25 by moving to
+// the per-account name. Then mail moved to Google OAuth on 2026-08-26 --
+// sources/mail.mjs's needs() reads accountsWithScope(GMAIL_SCOPE) and nothing
+// else, and connect/ deleted the routes that wrote a password -- and this was
+// left checking the pair that no longer decides anything.
+//
+// So it lied in BOTH directions on every install this branch produces: a working
+// OAuth mailbox got "no mail.accounts[] in config.json -- mail connector
+// disabled", with a fix line pointing at a password form that no longer exists;
+// and an upgraded install with a leftover file got a PASS for a connector that
+// runs on something else entirely. The first version of this comment was written
+// to kill exactly that failure. Gating on the grant is what actually ends it.
+//
+// mail.accounts[] still exists, but only as per-account overrides
+// (sources/mail.mjs) -- backfillDays and maxBodyBytes. It selects nothing, so it
+// answers nothing here.
+//
+// Kept as WARN rather than FAIL: mail is opt-in, and a machine that never
+// authorized it is not broken.
+const GMAIL_SCOPE_URL = 'https://www.googleapis.com/auth/gmail.readonly';
+
+// Read straight from disk rather than importing googleAccounts: this module is
+// built-ins only by design (see its header), so the filename convention is
+// re-stated here rather than reaching across for it.
+function googleGrantFiles(home) {
+  const dir = join(home, '.hazlie', 'secrets');
+  try {
+    return readdirSync(dir)
+      .filter((n) => n.startsWith('google-tokens-') && n.endsWith('.json'))
+      .map((n) => join(dir, n));
+  } catch {
+    return [];
+  }
+}
+
+function grantHasScope(path, scope) {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    const scopes = parsed?.scope ?? parsed?.scopes ?? '';
+    const list = Array.isArray(scopes) ? scopes : String(scopes).split(/\s+/u);
+    return { ok: list.includes(scope), stale: parsed?.stale === true || parsed?.problem != null };
+  } catch {
+    return { ok: false, stale: false, unreadable: true };
+  }
+}
+
 function checkGmailSecret(home) {
   const name = 'secret-gmail';
-  const p = join(home, '.hazlie', 'secrets', 'gmail-app-password.txt');
-  const problem = secretFileProblem(p);
-  if (problem === 'missing') {
+  const authorized = [];
+  const stale = [];
+  const unreadable = [];
+
+  for (const p of googleGrantFiles(home)) {
+    // FAIL is daemon-fatal, so it stays reserved for a credential file that is
+    // genuinely unsafe to hold -- not for one that is merely expired.
+    const problem = secretFileProblem(p);
+    if (problem && problem !== 'missing') {
+      return result(name, FAIL, `${p}: ${problem}`, `chmod 600 ${p} (and make it a plain owner-owned file)`);
+    }
+    const scoped = grantHasScope(p, GMAIL_SCOPE_URL);
+    if (scoped.unreadable) unreadable.push(p);
+    else if (!scoped.ok) continue;
+    else if (scoped.stale) stale.push(p);
+    else authorized.push(p);
+  }
+
+  // A LEFTOVER PASSWORD IS A NOTE, NOT A VERDICT. It is no longer a credential
+  // this product uses, so its presence says nothing about whether mail works --
+  // but a secret sitting on disk that nothing reads is worth naming once.
+  const strayCount = ['gmail-app-password.txt']
+    .concat(
+      (() => {
+        try {
+          return readdirSync(join(home, '.hazlie', 'secrets'))
+            .filter((n) => n.startsWith('gmail-app-password-'));
+        } catch {
+          return [];
+        }
+      })()
+    )
+    .filter((n) => secretFileProblem(join(home, '.hazlie', 'secrets', n)) !== 'missing').length;
+  const stray = strayCount > 0
+    ? ` (${strayCount} leftover app-password file(s) are present, which nothing reads any more)`
+    : '';
+
+  if (unreadable.length > 0) {
     return result(
       name,
       WARN,
-      `${p} is missing — mail connector disabled`,
-      're-run ops/setup-connectors.sh interactively to be prompted for the Gmail app password'
+      `${unreadable.length} Google grant file(s) could not be parsed${stray}`,
+      'run: node ops/gcal-auth.mjs   (re-authorize; a half-written token file is not recoverable)'
     );
   }
-  if (problem) return result(name, FAIL, `${p}: ${problem}`, `chmod 600 ${p} (and make it a plain owner-owned file)`);
-  return result(name, PASS, 'present, owner-only');
+  if (authorized.length > 0) {
+    return result(
+      name,
+      PASS,
+      `${authorized.length} Google account(s) authorized for Gmail${
+        stale.length > 0 ? `, ${stale.length} needing re-authorization` : ''
+      }${stray}`
+    );
+  }
+  if (stale.length > 0) {
+    return result(
+      name,
+      WARN,
+      `${stale.length} Google account(s) had Gmail access and it has since been revoked or expired${stray}`,
+      'open the connect page and sign in with Google again'
+    );
+  }
+  return result(
+    name,
+    WARN,
+    `no Google account is authorized for Gmail — mail connector disabled${stray}`,
+    'open the connect page and use "sign in with Google" to authorize mail'
+  );
 }
 
 // --- hermes -------------------------------------------------------------------
@@ -382,7 +488,7 @@ export async function verifyHermesIdentity(base, { fetchImpl = fetch } = {}) {
     return {
       ok: false,
       detail: `${base}/health unreachable (${error?.cause?.code ?? error?.name ?? error})`,
-      fix: 'launchctl kickstart -k gui/$UID/com.hazlie.hermes (or bash ops/setup-connectors.sh)',
+      fix: 'launchctl kickstart -k gui/$UID/io.intaglio.hermes (or bash ops/setup-connectors.sh)',
     };
   }
   const text = await res.text().catch(() => '');
@@ -493,8 +599,8 @@ const FDA_SHELL_CAVEAT =
   'if the grant exists (System Settings > Privacy & Security > Full Disk Access > "intaglio labs"), ' +
   'this FAIL is expected from a dev shell — TCC attributes the grant to the responsible process, ' +
   'so only a run spawned by something that holds it proves anything: ' +
-  'launchctl submit -l com.hazlie.doctor -o /tmp/doctor.out -e /tmp/doctor.err -- ' +
-  '~/.hazlie/bin/node <repo>/connectors/doctor.mjs --json  (then launchctl remove com.hazlie.doctor). ' +
+  'launchctl submit -l io.intaglio.doctor -o /tmp/doctor.out -e /tmp/doctor.err -- ' +
+  '~/.hazlie/bin/node <repo>/connectors/doctor.mjs --json  (then launchctl remove io.intaglio.doctor). ' +
   'If it fails there too, switch on "intaglio labs" under Full Disk Access — the app opens that pane ' +
   'for you and puts itself on screen as a draggable icon; ops/CONNECTORS.md has the runbook.';
 
@@ -706,11 +812,69 @@ async function checkNetOura() {
   return result(name, FAIL, `api.ouraring.com:443 ${r.detail}`, 'check network/DNS; the oura poller will stall until this recovers');
 }
 
-async function checkNetImap() {
-  const name = 'net-imap';
-  const r = await tcpProbe('imap.gmail.com', 993);
+// IS THE ANSWER MODEL THERE?
+//
+// There was no check for llama-server at all, on a doctor that checks hermes,
+// connect, every secret and four network hosts. hermes now distinguishes three
+// states for it -- unreachable (503), reached-and-errored (502), and
+// reached-and-silent (504) -- and none of them reached this surface, so an
+// owner whose model was down had a green doctor and a chat that could not
+// answer.
+//
+// /health is unauthenticated and answers 200 only when the weights are loaded;
+// while loading it answers 503 "Loading model", which is a WAIT, not a fault.
+// Measured on this machine: refused at t+0, 503 from t+0.25s, 200 at t+2.94s.
+async function checkLlama({ fetchImpl = fetch } = {}) {
+  const name = 'llama';
+  const base = process.env.HAZLIE_LLAMA_URL ?? 'http://127.0.0.1:51780';
+  let res;
+  try {
+    res = await fetchImpl(`${base}/health`, { signal: AbortSignal.timeout(4000) });
+  } catch {
+    // WARN, not FAIL: the model is not required for ingestion, and a machine
+    // that has not finished setting one up is not broken. The chat says so for
+    // itself now.
+    return result(
+      name,
+      WARN,
+      'llama-server is not answering — questions will report the model as down',
+      'launchctl kickstart -k gui/$UID/io.intaglio.llama-server   (or run ops/setup-llm.sh)'
+    );
+  }
+  if (res.status === 503) {
+    return result(name, PASS, 'llama-server is loading its weights (answers in a few seconds)');
+  }
+  if (!res.ok) {
+    return result(
+      name,
+      WARN,
+      `llama-server answered ${res.status}`,
+      'check ~/.hazlie/logs/llama-server.err.log'
+    );
+  }
+  return result(name, PASS, 'llama-server is loaded and answering');
+}
+
+// PROBE THE HOST THE CONNECTOR ACTUALLY REACHES.
+//
+// This probed imap.gmail.com:993 -- correct while mail was IMAP, and a
+// permanent FAIL the moment it was not. Mail moved to the Gmail API over
+// www.googleapis.com on 2026-08-26, and imap.gmail.com went out of
+// ops/EGRESS.json in the same change, so this was probing a host the project
+// had just declared it does not talk to, and failing the doctor over it.
+//
+// Renamed with it: a check called `net-imap` that probes an HTTPS API is the
+// same lie one layer down.
+async function checkNetGmail() {
+  const name = 'net-gmail';
+  const r = await tcpProbe('www.googleapis.com', 443);
   if (r.ok) return result(name, PASS, r.detail);
-  return result(name, FAIL, `imap.gmail.com:993 ${r.detail}`, 'check network/DNS; the mail connector will stall until this recovers');
+  return result(
+    name,
+    FAIL,
+    `www.googleapis.com:443 ${r.detail}`,
+    'check network/DNS; the mail and calendar connectors will stall until this recovers'
+  );
 }
 
 // --- runner ---------------------------------------------------------------------
@@ -797,7 +961,7 @@ function backfillState(text) {
 // reader will otherwise re-derive and re-apply: backfill was disabled to keep
 // the bridge invisible on the remote account, since a bulk history pull marks
 // many conversations READ on the real Meta/X/Slack account. That cost was
-// accepted knowingly in exchange for Hazlie having message history to reason
+// accepted knowingly in exchange for Intaglio Labs having message history to reason
 // over -- a bridge that starts empty is a memory that starts empty.
 //
 // So this probe now FAILS on backfill being off, which is the exact inverse of
@@ -806,7 +970,7 @@ function backfillState(text) {
 //
 // The other two are unchanged and still WARN: they are about the bridge's
 // footprint on the remote account (never acting as you, never broadcasting that
-// you are online), not about what Hazlie gets to read, and nothing in the
+// you are online), not about what Intaglio Labs gets to read, and nothing in the
 // backfill decision touches them.
 // NOT CHECKED: homeserver.presence. bridges/README.md tells you to set it, and
 // this probe used to warn when it was missing — but the key DOES NOT EXIST in
@@ -934,8 +1098,8 @@ function connectBase(env) {
 // and is invisible from inside the repo because the repo's own copy is correct.
 const CONNECT_STALE_AGENT_FIX =
   'if this is ECONNREFUSED, suspect a launch agent that predates a port move: the installed plist is a ' +
-  'rendered COPY of ops/com.hazlie.connect.plist, so it keeps launching the old port forever. Confirm with ' +
-  "`grep -A1 -- --port ~/Library/LaunchAgents/com.hazlie.connect.plist` and `lsof -nP -iTCP -sTCP:LISTEN | grep node`. " +
+  'rendered COPY of ops/io.intaglio.connect.plist, so it keeps launching the old port forever. Confirm with ' +
+  "`grep -A1 -- --port ~/Library/LaunchAgents/io.intaglio.connect.plist` and `lsof -nP -iTCP -sTCP:LISTEN | grep node`. " +
   'Re-render it with `bash ops/setup-connectors.sh` RUN FROM THE TREE THE AGENT LAUNCHES - setup substitutes ' +
   '@REPO@ with wherever it is run, so running it from a dev checkout silently repoints production at a tree ' +
   'someone may later git-checkout out from under it.';
@@ -1007,13 +1171,17 @@ export async function runChecks({ network = false, home = homedir(), env = proce
     () => checkHermesHealth(env, config),
     () => checkHermesStats(env, home, config),
     () => checkConnectHealth(env),
+    // Local, like hermes and connect: it is a loopback service this machine runs,
+    // not a host on the network, so it belongs in the default set rather than
+    // behind --network.
+    () => checkLlama(),
     () => checkFdaImessage(home),
     () => checkFdaCalendar(home),
     () => checkFdaContacts(home),
     () => checkBridgeHardening(home),
   ];
   if (network) {
-    checks.push(() => checkNetGranola(home), () => checkNetOura(), () => checkNetImap());
+    checks.push(() => checkNetGranola(home), () => checkNetOura(), () => checkNetGmail());
   }
   const results = [];
   for (const run of checks) {

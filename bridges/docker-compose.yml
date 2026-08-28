@@ -46,6 +46,7 @@ services:
       - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/telegram/registration.yaml:/registrations/telegram.yaml:ro
       - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/discord/registration.yaml:/registrations/discord.yaml:ro
       - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/slack/registration.yaml:/registrations/slack.yaml:ro
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/linkedin/registration.yaml:/registrations/linkedin.yaml:ro
     environment:
       - SYNAPSE_CONFIG_DIR=/data
       - SYNAPSE_CONFIG_PATH=/data/homeserver.yaml
@@ -79,7 +80,14 @@ services:
   # from the connect page, owner-gated (Austin said go, 2026-08-22 — this was
   # the "accept the account risk" item in SOCIAL-BRIDGES-PLAN.md).
   mautrix-twitter:
-    image: dock.mau.dev/mautrix/twitter:v26.08
+    # Pinned BY DIGEST to a 2026-08-25 dev build, not to :latest — the header
+    # rule against mutable tags stands, and a digest is the only immutable name
+    # a dev build has. Moved off the v26.08 release because that build could
+    # not complete an X login: registering the XChat public key returned HTTP
+    # 403 behind a Cloudflare challenge, every time, with correct cookies
+    # (owner, 2026-08-25). The previous pin is one line down if this regresses.
+    # ~~image: dock.mau.dev/mautrix/twitter:v26.08~~
+    image: dock.mau.dev/mautrix/twitter@sha256:a780515de3c7fa8f410e2d6355d4c69a0c439742c40bafeec8a3d8e61a94cbc4
     container_name: hazlie-twitter
     restart: unless-stopped
     depends_on:
@@ -134,6 +142,23 @@ services:
     networks:
       - bus
 
+  # LinkedIn. Added 2026-08-25 (owner, twice): LinkedIn was the one social
+  # source that arrived as a one-time CSV export the owner had to request,
+  # download and unzip by hand — a dead end next to six platforms that just
+  # log in. It rides the same bus with the same posture, and its rows land
+  # under the SAME `linkedin` source the export used, so every people-graph
+  # join that already reads LinkedIn keeps working unchanged.
+  mautrix-linkedin:
+    image: dock.mau.dev/mautrix/linkedin:latest
+    container_name: hazlie-linkedin
+    restart: unless-stopped
+    depends_on:
+      - synapse
+    volumes:
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/linkedin:/data
+    networks:
+      - bus
+
   mautrix-slack:
     image: dock.mau.dev/mautrix/slack:latest
     container_name: hazlie-slack
@@ -145,7 +170,7 @@ services:
     networks:
       - bus
 
-# Login is driven NATIVELY from Hazlie's own connect page (connect/lib/bridge.mjs
+# Login is driven NATIVELY from Intaglio Labs' own connect page (connect/lib/bridge.mjs
 # + bridgePage.mjs), which talks to the bridge bots over the local Matrix API —
 # so there is no third-party Matrix client in the stack. An earlier build ran an
 # Element web container here as a scaffold; it was removed once the connect-page

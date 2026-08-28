@@ -108,6 +108,38 @@ export function readStore(db) {
 // path uses. That is the whole reason the split is drawn there: an identifier
 // normalised two different ways is two different people to the resolver, and a
 // backend switch would silently orphan every identifier already in the spine.
+/**
+ * The same contacts, as avatar rows — one per identifier that has a photo.
+ *
+ * Keyed per IDENTIFIER rather than per contact, deliberately: the people graph
+ * resolves a person to identifiers, so this is the join that already exists.
+ * A contact with three numbers and a photo stores three small rows; a contact
+ * with no photo stores none, which is most of them.
+ */
+export function avatarsFromContacts(contacts) {
+  const out = [];
+  for (const c of Array.isArray(contacts) ? contacts : []) {
+    const b64 = typeof c?.thumbnail === 'string' ? c.thumbnail : '';
+    if (!b64) continue;
+    let jpeg;
+    try {
+      jpeg = Buffer.from(b64, 'base64');
+    } catch {
+      continue; // a thumbnail that will not decode is not worth a failed run
+    }
+    if (jpeg.length === 0) continue;
+    for (const raw of Array.isArray(c.phones) ? c.phones : []) {
+      const identifier = normalizePhone(raw);
+      if (identifier) out.push({ identifier, jpeg });
+    }
+    for (const raw of Array.isArray(c.emails) ? c.emails : []) {
+      const identifier = normalizeEmail(raw);
+      if (identifier) out.push({ identifier, jpeg });
+    }
+  }
+  return out;
+}
+
 export function entriesFromContacts(contacts) {
   const entries = [];
   for (const c of Array.isArray(contacts) ? contacts : []) {
@@ -123,6 +155,10 @@ export function entriesFromContacts(contacts) {
     }
   }
   return entries;
+}
+
+function statusError(status, message) {
+  return Object.assign(new Error(message), { status });
 }
 
 export function createContactsSource({ home } = {}) {
@@ -163,10 +199,24 @@ export function createContactsSource({ home } = {}) {
           }
           const entries = entriesFromContacts(cards);
           if (entries.length > 0) ctx.state.upsertContacts(entries);
+          // Photos are a nice-to-have on top of the spine: a failure here must
+          // never cost the run its names, which are the thing the graph cannot
+          // work without.
+          let avatars = 0;
+          try {
+            const rows = avatarsFromContacts(cards);
+            avatars = ctx.state.replaceAvatars(rows);
+          } catch (e) {
+            ctx.log.warn('contacts_avatars_failed', {
+              connector: 'contacts',
+              code: String(e?.code ?? ''),
+            });
+          }
           ctx.log.info('contacts_scan', {
             connector: 'contacts',
             backend: 'contacts-framework',
             identifiers: entries.length,
+            avatars,
             access,
           });
           if (access === 'limited') {
@@ -219,6 +269,7 @@ export function createContactsSource({ home } = {}) {
 
       const byIdentifier = new Map();
       let storesRead = 0;
+      const attempts = [];
       const cacheDir = join(ctx.cacheDir, 'contacts');
       for (const src of stores) {
         let snapshotPath = null;
@@ -226,12 +277,24 @@ export function createContactsSource({ home } = {}) {
         try {
           snapshotPath = await snapshotStore(src, cacheDir);
           db = new DatabaseSync(snapshotPath, { readOnly: true });
-          const { entries } = readStore(db);
-          storesRead += 1;
+          // A STORE THAT DID NOT YIELD A USABLE READ IS NOT A STORE THAT WAS
+          // READ. Counting it made a PARTIAL failure look total-success: the
+          // 403 below only fires when EVERY store failed, and the cursor at the
+          // end advanced past the one that broke -- after which the mtime
+          // short-circuit skipped the whole connector on every later run. One
+          // silent failure masked itself permanently.
+          const { entries, reason } = readStore(db);
+          if (reason) {
+            attempts.push(`${src} (${reason})`);
+            ctx.log.info('contacts_store_skipped', { connector: 'contacts', code: reason });
+          } else {
+            storesRead += 1;
+          }
           // Later stores win on collision — Sources/* are the synced accounts
           // and are fresher than the legacy top-level store.
           for (const e of entries) byIdentifier.set(`${e.kind}:${e.identifier}`, e);
         } catch (error) {
+          attempts.push(`${src} (${error?.message ?? error})`);
           ctx.log.info('contacts_store_skipped', { connector: 'contacts', code: error?.code ?? '' });
         } finally {
           try {
@@ -239,6 +302,22 @@ export function createContactsSource({ home } = {}) {
           } catch {}
           if (snapshotPath) rmSync(snapshotPath, { force: true });
         }
+      }
+
+      // Every candidate passed the stat filter above (it exists) but not one
+      // could actually be opened. Unlike a single bad store among several —
+      // a genuine schema surprise, degraded per readStore()'s contract — this
+      // is the FDA signature: every store denied is calendar.mjs's identical
+      // all-candidates-failed case, and must fail loudly the same way rather
+      // than read as a quiet "0 contacts".
+      if (stores.length > 0 && storesRead === 0) {
+        throw statusError(
+          403,
+          `contacts store is not readable at any candidate path: ${attempts.join('; ')}. ` +
+            'If the store exists, this is Full Disk Access attribution: the read only works when ' +
+            'launchd spawns the granted binary ~/.hazlie/bin/node directly — see the FDA runbook ' +
+            'in ops/CONNECTORS.md.'
+        );
       }
 
       const entries = [...byIdentifier.values()];
@@ -249,7 +328,18 @@ export function createContactsSource({ home } = {}) {
         storesRead,
         identifiers: entries.length,
       });
-      if (stores.length > 0) ctx.state.setCursor(CURSOR_KEY, String(newestMtime));
+      // ONLY WHEN EVERY STORE WAS READ. newestMtime is the max over stores that
+      // merely STATTED, including any whose read failed, so advancing on a
+      // partial pass writes a watermark covering data nobody looked at.
+      //
+      // Deliberate trade: a permanently unreadable store (a stale Sources/<uuid>
+      // with a corrupt database) now means the cursor never advances and the
+      // full read repeats each pass. That is the cheap direction to be wrong in
+      // -- contacts is a small, whole-file read, and repeating it costs seconds
+      // where skipping it costs an address book.
+      if (stores.length > 0 && storesRead === stores.length) {
+        ctx.state.setCursor(CURSOR_KEY, String(newestMtime));
+      }
       // The daemon's run_log wants ingest-shaped counts; identifiers landed in
       // state.db, not hermes, and `ingested` reports them so the run is
       // visible in the log rather than reading as a permanent no-op.

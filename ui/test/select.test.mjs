@@ -22,7 +22,7 @@ import {
 const NOW = 1_800_000_000_000;
 const DAY = 86_400_000;
 
-// The real text of the digest Hazlie sent into the pinned thread on
+// The real text of the digest Intaglio Labs sent into the pinned thread on
 // 2026-08-19, byte for byte out of the live store (context id 12389). A
 // paraphrase would be a worse fixture: this is the specimen that actually
 // produced six accepted claims about the owner's sleep and step counts, and a
@@ -103,7 +103,7 @@ test('hazlie_digest and seed produce zero distiller input', () => {
 
 // THE REGRESSION. This is not a hypothetical: it happened, on 2026-08-19, and
 // the six claims it produced were accepted by the owner before anyone noticed
-// that Hazlie was the author of its own evidence.
+// that Intaglio Labs was the author of its own evidence.
 test('a digest in the pinned thread produces zero distiller input', () => {
   const d = db();
   add(d, [
@@ -131,7 +131,7 @@ test('a digest in the pinned thread produces zero distiller input', () => {
   assert.equal(selectRows(d, { now: NOW, excludeChatGuids: [] }).length, 1);
 });
 
-test('excluding the Hazlie thread does not exclude the owner other threads', () => {
+test('excluding the Intaglio Labs thread does not exclude the owner other threads', () => {
   const d = db();
   add(d, [
     {
