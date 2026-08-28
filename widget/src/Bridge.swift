@@ -78,7 +78,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     "openOnboarding", "markHandheld",
                     // Same setup controls, reachable from the gear after the
                     // flow — a skipped step must stay reachable.
-                    "setupState", "modelDownload", "modelCancel",
+                    "setupState", "modelDownload", "modelCancel", "activity",
                     "openFullDiskAccess", "startSources",
                     // In-panel API-key walkthroughs and Google OAuth.
                     "connectSecret", "openApp", "googleAuth",
@@ -655,7 +655,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
     case "bridgeBegin":
       let p = String((payload["p"] as? String ?? "").prefix(24))
-      bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { [weak self] d in
+      beginBridgeLogin(p) { [weak self] d in
         self?.reply(webView, id, d)
       }
     case "googleAuth":
@@ -823,7 +823,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
             if midConversation {
               sendValue()
             } else {
-              self.bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { started in
+              self.beginBridgeLogin(p) { started in
                 guard started["state"] as? String == "ok" else {
                   self.reply(webView, id, started)
                   return
@@ -883,6 +883,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         if let memory { out["memory"] = memory }
         self.reply(webView, id, out)
       }
+
+    case "activity":
+      // Actual work owned by the app, never a guess based on a connector merely
+      // being installed or enabled. The page polls this small local snapshot.
+      var items: [[String: Any]] = []
+      if let model = ModelSetup.activity { items.append(model) }
+      if let label = Distiller.shared.activity {
+        items.append(["kind": "index", "label": label])
+      }
+      reply(webView, id, ["state": "ok", "items": items])
 
     case "modelDownload":
       let tier = String((payload["tier"] as? String ?? "").prefix(8))
@@ -1570,10 +1580,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // Owner's wording (2026-08-26). Not "the Discord app": a phone camera
         // recognises the code and offers the app itself, and naming a second
         // piece of software to go and open first is a step that is not there.
-        instruction: "scan this with your phone camera",
+        instruction: "Scan with Discord on your phone, then approve",
         fetch: { [weak self] deliver in
           guard let self else { deliver(nil); return }
-          self.bridgeCall("POST", "api/bridge/begin", json: ["p": p], timeout: 22) { begun in
+          self.beginBridgeLogin(p) { begun in
             guard begun["state"] as? String == "ok" else {
               fallback = begun
               deliver(nil)
@@ -1662,11 +1672,36 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // transcript (the JS renders that). 400 is "you pasted nothing", 502
         // is a Matrix/network fault — both carry {error}. Pass it through.
         var out = body ?? [:]
-        out["state"] = "error"
+        // Keep a server-authored, actionable state (notably `nobridge`) so
+        // beginBridgeLogin can initialize a first-time local bridge instead
+        // of reducing every 503 to the generic error state.
+        if out["state"] == nil { out["state"] = "error" }
         if out["error"] == nil { out["error"] = "http \(http.statusCode)" }
         done(out)
       }
     }.resume()
+  }
+
+  /// Begin a social login. On a brand-new install the connect service answers
+  /// `nobridge` until Matrix has its private local state; initialize it once,
+  /// then retry the exact same request. The app has already prefetched images
+  /// in the background, so this normally covers only config generation and
+  /// startup—not a surprise multi-image download at click time.
+  private func beginBridgeLogin(_ platform: String, _ done: @escaping ([String: Any]) -> Void) {
+    bridgeCall("POST", "api/bridge/begin", json: ["p": platform], timeout: 22) { [weak self] first in
+      guard let self else { return }
+      guard first["state"] as? String == "nobridge" else {
+        done(first)
+        return
+      }
+      Provision.ensureBridgeRuntime { ready in
+        guard ready else {
+          done(["state": "nobridge", "error": "social connections could not start; open Docker Desktop and try again"])
+          return
+        }
+        self.bridgeCall("POST", "api/bridge/begin", json: ["p": platform], timeout: 30, done)
+      }
+    }
   }
 
   // MARK: chat

@@ -31,6 +31,7 @@ final class Distiller {
   private var process: Process?
   private var timer: Timer?
   private var stopping = false
+  private var rebuildingIndex = false
 
   /// Rows per pass. Small enough that a pass finishes in a visible amount of time
   /// on a local model, big enough that a long backlog still drains.
@@ -87,6 +88,14 @@ final class Distiller {
   }
 
   var isRunning: Bool { process?.isRunning == true }
+
+  /// Truth for Settings' live activity row. Episode indexing runs inside
+  /// hermes, rather than as this class's child process, so it has its own state.
+  var activity: String? {
+    if isRunning { return "building local memory" }
+    if rebuildingIndex { return "updating the conversation index" }
+    return nil
+  }
 
   /// Begin supervising. Safe to call repeatedly.
   func start() {
@@ -199,7 +208,13 @@ final class Distiller {
   /// happened. Never throws the pass away: a rebuild that did not run leaves the
   /// previous index in place, which is stale rather than wrong.
   private func rebuildIndex(done: @escaping () -> Void) {
-    let finish = { DispatchQueue.main.async(execute: done) }
+    rebuildingIndex = true
+    let finish = { [weak self] in
+      DispatchQueue.main.async {
+        self?.rebuildingIndex = false
+        done()
+      }
+    }
     guard let tok = hermesToken(),
           let url = URL(string: "http://127.0.0.1:51789/admin/episodes/rebuild") else {
       finish()

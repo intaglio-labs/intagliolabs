@@ -318,7 +318,7 @@ test('Settings mounts its controls without the retired memory-review row', () =>
 // picker, a second small menu inside a panel where every other tile loads its
 // login straight away, and an inconsistent flow for an unfinished connector is
 // not worth keeping wired.
-test('People and Settings park Google the same way', () => {
+test('People and Settings park unfinished connectors the same way', () => {
   // Neither surface may start the flow from a tile any more.
   assert.ok(!/hzPost\('googleAuth'/u.test(people), 'the People ring must not start sign-in');
   assert.ok(
@@ -326,10 +326,16 @@ test('People and Settings park Google the same way', () => {
     'the Settings tile press must not start sign-in'
   );
   // And both must actually SAY so, from the shared card and from Settings' own.
-  assert.match(tile, /HZ_GOOGLE_AUTH\.has\(HZ_KIND\(src\.id\)\)[\s\S]{0,400}coming soon/u,
+  assert.match(tile, /HZ_SOON_CONNECTORS\.has\(HZ_KIND\(src\.id\)\)[\s\S]{0,400}coming soon/u,
     'the shared card says it, which is what the People ring renders');
-  assert.match(connections, /GOOGLE_AUTH\.has\(kindOf\(src\.id\)\)[\s\S]{0,300}coming soon/u,
+  assert.match(connections, /SOON_CONNECTORS\.has\(kindOf\(src\.id\)\)/u,
+    'Settings uses the same unfinished-connector gate');
+  assert.match(connections, /const renderSoon = \(\) => \{[\s\S]{0,300}coming soon/u,
     'and Settings says it too');
+  assert.match(tile, /HZ_SOON_CONNECTORS = new Set\(\['mail', 'twitter', 'telegram'\]\)/u,
+    'the shared card also parks X and Telegram');
+  assert.match(connections, /SOON_CONNECTORS = new Set\(\['mail', 'twitter', 'telegram'\]\)/u,
+    'Settings also parks X and Telegram');
 });
 
 // The machinery stays defined so restoring it is one block, not a rewrite.

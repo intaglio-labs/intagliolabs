@@ -164,6 +164,102 @@ enum Provision {
     }
   }
 
+  /// Warm the container-image cache after launch, without creating any social
+  /// state. The expensive download happens before a person chooses LinkedIn
+  /// (or another social source), while the actual Matrix/bridge setup remains
+  /// deferred until that explicit Connect action. Docker may be starting with
+  /// the app, so the script waits briefly off the main thread and then safely
+  /// gives up; a later launch retries.
+  static func prefetchBridgeImages() {
+    let script = backend.appendingPathComponent("ops/prefetch-bridges.sh")
+    guard fm.fileExists(atPath: script.path) else {
+      NSLog("Intaglio Labs: bundled bridge prefetch script is missing")
+      return
+    }
+    guard fm.isExecutableFile(atPath: script.path) else {
+      NSLog("Intaglio Labs: bundled bridge prefetch script is not executable")
+      return
+    }
+    DispatchQueue.global(qos: .utility).async {
+      let logDir = hazlie.appendingPathComponent("logs")
+      try? mkdir(logDir, 0o700)
+      let log = logDir.appendingPathComponent("bridge-prefetch.log")
+      guard fm.createFile(atPath: log.path, contents: nil),
+            let out = try? FileHandle(forWritingTo: log) else { return }
+      defer { try? out.close() }
+      let p = Process()
+      p.executableURL = URL(fileURLWithPath: "/bin/sh")
+      p.arguments = [script.path]
+      var env = ProcessInfo.processInfo.environment
+      env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+      p.environment = env
+      p.standardOutput = out
+      p.standardError = out
+      do {
+        try p.run()
+        p.waitUntilExit()
+      } catch {
+        NSLog("Intaglio Labs: bridge prefetch could not start: \(error)")
+      }
+    }
+  }
+
+  private static let bridgeSetupLock = NSLock()
+  private static var bridgeSetupRunning = false
+  private static var bridgeSetupWaiters: [(Bool) -> Void] = []
+
+  /// Materialize the local-only Matrix runtime after someone explicitly starts
+  /// a social login. Image downloads were already warmed on launch; this is
+  /// the small, user-requested half that writes private state under ~/.hazlie
+  /// and starts the requested bridge stack. Concurrent card presses join the
+  /// same run rather than racing two installers against one data directory.
+  static func ensureBridgeRuntime(_ completion: @escaping (Bool) -> Void) {
+    bridgeSetupLock.lock()
+    bridgeSetupWaiters.append(completion)
+    if bridgeSetupRunning {
+      bridgeSetupLock.unlock()
+      return
+    }
+    bridgeSetupRunning = true
+    bridgeSetupLock.unlock()
+
+    DispatchQueue.global(qos: .userInitiated).async {
+      let script = backend.appendingPathComponent("ops/setup-bridges.sh")
+      var success = false
+      if fm.isExecutableFile(atPath: script.path) {
+        let logDir = hazlie.appendingPathComponent("logs")
+        try? mkdir(logDir, 0o700)
+        let log = logDir.appendingPathComponent("bridge-setup.log")
+        if !fm.fileExists(atPath: log.path) { fm.createFile(atPath: log.path, contents: nil) }
+        if let out = try? FileHandle(forWritingTo: log) {
+          defer { try? out.close() }
+          _ = try? out.seekToEnd()
+          let p = Process()
+          p.executableURL = URL(fileURLWithPath: "/bin/sh")
+          p.arguments = [script.path]
+          var env = ProcessInfo.processInfo.environment
+          env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+          p.environment = env
+          p.standardOutput = out
+          p.standardError = out
+          do {
+            try p.run()
+            p.waitUntilExit()
+            success = p.terminationStatus == 0
+          } catch {
+            NSLog("Intaglio Labs: bridge setup could not start: \(error)")
+          }
+        }
+      }
+      bridgeSetupLock.lock()
+      let waiters = bridgeSetupWaiters
+      bridgeSetupWaiters.removeAll()
+      bridgeSetupRunning = false
+      bridgeSetupLock.unlock()
+      DispatchQueue.main.async { waiters.forEach { $0(success) } }
+    }
+  }
+
   private static func provision() throws {
     // 0700 private root and its subdirs.
     try mkdir(hazlie, 0o700)

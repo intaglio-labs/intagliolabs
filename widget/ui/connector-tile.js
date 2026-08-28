@@ -91,6 +91,14 @@ function hzConnectorTile(src, { onOpen } = {}) {
   // broken connector indistinguishable from one that was never connected.
   dot.className = 'dot' + (src.connected ? ' on' : src.broken ? ' bad' : ' off');
 
+  // Keep parked integrations discoverable without making their bright icon and
+  // active-looking dot promise a login flow that is not ready yet.
+  const soon = !src.connected && HZ_SOON_CONNECTORS.has(HZ_KIND(src.id));
+  if (soon) {
+    row.classList.add('soon');
+    dot.className = 'dot off';
+  }
+
   row.append(mark, name, dot);
 
   row.addEventListener('mouseenter', () => hzShowTileTip(row, src.label));
@@ -131,6 +139,9 @@ const HZ_IS_BRIDGE = (src) => src.action === 'bridge' || HZ_BRIDGES.has(HZ_KIND(
 // Same grant the Settings shelf starts directly. Keeping this set beside the
 // shared kind normalizer lets every surface make the same first-press decision.
 const HZ_GOOGLE_AUTH = new Set(['mail', 'calendar']);
+// Match the Settings shelf: these remain visible and explain themselves, but
+// do not start their respective login paths until the integration is ready.
+const HZ_SOON_CONNECTORS = new Set(['mail', 'twitter', 'telegram']);
 
 const HZ_FDA_HINT = {
   // ~~text: the sentence walking through the grant.~~ Yeeted (owner,
@@ -188,10 +199,10 @@ const HZ_STAY = "data stored locally";
 const HZ_NOTICES = {
   // See connections.js NOTICES.nobridge — the engine, not the connection.
   nobridge: 'the social bridge engine is not running — open Docker, then: bash ops/setup-bridges.sh',
-  down: 'connect service unreachable — status unknown',
+  down: 'checking the local connection…',
   auth: 'token mismatch — status unknown',
   noroute: 'connect service predates /api/status — status unknown',
-  error: 'status unavailable',
+  error: 'checking connector status…',
   // The server said this platform has no cookie flow, so there is no embedded
   // login to open — its bridge wants a pasted token or a phone code instead.
   manual: 'this one links with a token, not a browser login — use the steps below.',
@@ -215,13 +226,13 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
   // GOOGLE IS PARKED, and the shared card is where both surfaces read it from --
   // Settings says the same (owner, 2026-08-27). The OAuth path underneath is
   // untouched; this is one condition to delete when it ships.
-  if (HZ_GOOGLE_AUTH.has(HZ_KIND(src.id)) && !src.connected) {
+  if (!src.connected && HZ_SOON_CONNECTORS.has(HZ_KIND(src.id))) {
     tip.classList.add('hold');
     const head = document.createElement('b');
     head.textContent = src.label;
     const soon = document.createElement('span');
     soon.className = 'setup';
-    soon.textContent = 'coming soon';
+    soon.textContent = 'coming soon. help us build it :)';
     tip.append(head, soon);
     host.appendChild(tip);
     return tip;
@@ -346,6 +357,46 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
     stay.className = 'stay';
     stay.textContent = HZ_STAY;
     tip.appendChild(stay);
+
+    // Keep a transient loopback-status miss from becoming a sticky false
+    // diagnosis. The settings surface has the same bounded re-poll below; the
+    // people shelf must behave identically because either surface can open a
+    // Discord connection.
+    const transientStatus = data && !data.transcript
+      && (data.state === 'down' || data.state === 'error');
+    if (transientStatus) {
+      const say = document.createElement('span');
+      say.className = 'setup';
+      say.textContent = 'checking the local connection…';
+      const retry = document.createElement('button');
+      retry.className = 'hold-ok';
+      retry.textContent = 'retry now';
+      const pollStatus = () => {
+        hzPost('bridgeStatus', { p: HZ_KIND(src.id) })
+          .then(renderBridge)
+          .catch(() => { say.textContent = 'still starting — retry when ready'; });
+      };
+      retry.addEventListener('click', (e) => { e.stopPropagation(); pollStatus(); });
+      tip.append(say, retry);
+      let tries = 0;
+      const tick = () => {
+        if (!tip.isConnected || ++tries > 10) {
+          if (tries > 10) say.textContent = 'still starting — retry when ready';
+          return;
+        }
+        hzPost('bridgeStatus', { p: HZ_KIND(src.id) })
+          .then((next) => {
+            if (next && !next.transcript && (next.state === 'down' || next.state === 'error')) {
+              setTimeout(tick, 2000);
+            } else {
+              renderBridge(next);
+            }
+          })
+          .catch(() => setTimeout(tick, 2000));
+      };
+      setTimeout(tick, 2000);
+      return;
+    }
 
     // WHETHER THERE IS AN EMBEDDED LOGIN AT ALL IS THE SERVER'S CALL.
     //

@@ -108,6 +108,25 @@ enum ModelSetup {
   private static var cancelled = false
   private static let lock = NSLock()
 
+  // Settings reads this local snapshot rather than inferring work from a model
+  // file that happens to be changing. URLSession reports on its own queue while
+  // the settings page asks from the main queue, hence the same lock as cancel.
+  private static var activeTier: ModelTier?
+  private static var activeBytes: Int64 = 0
+  private static var activeTotal: Int64 = 0
+
+  static var activity: [String: Any]? {
+    lock.lock(); defer { lock.unlock() }
+    guard busy, let tier = activeTier else { return nil }
+    return [
+      "kind": "model",
+      "phase": task == nil ? "verifying" : "downloading",
+      "tier": tier.label,
+      "got": activeBytes,
+      "total": activeTotal > 0 ? activeTotal : tier.bytes,
+    ]
+  }
+
   static var isDownloading: Bool { task != nil || busy }
   private static var busy = false
 
@@ -145,6 +164,11 @@ enum ModelSetup {
     guard let tier = tiers.first(where: { $0.id == tierId }) else { done("unknown model"); return }
     lock.lock(); cancelled = false; lock.unlock()
     busy = true
+    lock.lock()
+    activeTier = tier
+    activeBytes = 0
+    activeTotal = tier.bytes
+    lock.unlock()
     do {
       try fm.createDirectory(at: modelDir, withIntermediateDirectories: true,
                              attributes: [.posixPermissions: 0o700])
@@ -158,6 +182,11 @@ enum ModelSetup {
         task = nil
         driver = nil
         busy = false
+        lock.lock()
+        activeTier = nil
+        activeBytes = 0
+        activeTotal = 0
+        lock.unlock()
         done(isCancelled ? "cancelled" : reason)
       }
     }
@@ -175,7 +204,10 @@ enum ModelSetup {
     if let size = (try? fm.attributesOfItem(atPath: existing.path)[.size]) as? Int64,
        size == tier.bytes {
       DispatchQueue.global(qos: .utility).async {
-        DispatchQueue.main.async { progress(tier.bytes, tier.bytes) }
+        DispatchQueue.main.async {
+          updateActivity(tier.bytes, tier.bytes)
+          progress(tier.bytes, tier.bytes)
+        }
         let sum = digest(of: existing)
         guard !isCancelled else { finish("cancelled"); return }
         if sum == tier.sha256 {
@@ -208,6 +240,12 @@ enum ModelSetup {
     let t = session.downloadTask(with: tier.url)
     task = t
     t.resume()
+  }
+
+  private static func updateActivity(_ got: Int64, _ total: Int64) {
+    lock.lock(); defer { lock.unlock() }
+    activeBytes = max(0, got)
+    activeTotal = max(0, total)
   }
 
   /// Put a verified file in place: name it after the tier, point model.gguf at
@@ -266,6 +304,7 @@ enum ModelSetup {
       // The server's Content-Length is advisory; the tier's own byte count is
       // the one we verify against, so report against that when it is known.
       let total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : tier.bytes
+      ModelSetup.updateActivity(totalBytesWritten, total)
       DispatchQueue.main.async { self.progress(totalBytesWritten, total) }
     }
 

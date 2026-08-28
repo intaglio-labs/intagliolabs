@@ -30,7 +30,8 @@
 # credential nobody else can create. The script stops that container and says
 # so rather than leaving a restart loop burning quietly.
 set -eu
-cd "$(dirname "$0")/.."
+OPS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$OPS_DIR/.."
 
 M="$HOME/.hazlie/matrix"
 SYNAPSE_IMAGE="ghcr.io/element-hq/synapse:v1.140.0"
@@ -39,14 +40,21 @@ if ! docker info >/dev/null 2>&1; then
   echo "docker is not running — open Docker Desktop first, then re-run." >&2
   exit 1
 fi
-if ! command -v yq >/dev/null 2>&1; then
-  echo "yq is required to generate and harden the bridge configs." >&2
-  echo "Install it first (Homebrew: brew install yq), then re-run." >&2
+# Downloaded builds carry yq next to this script. A checkout keeps supporting a
+# developer's PATH copy, but end users must never need Homebrew just to press
+# Connect. HZ_YQ is intentionally first for release/CI validation.
+YQ="${HZ_YQ:-$OPS_DIR/../tools/yq}"
+if [ ! -x "$YQ" ]; then YQ="$(command -v yq 2>/dev/null || true)"; fi
+if [ -z "$YQ" ] || [ ! -x "$YQ" ]; then
+  echo "bridge config editor is missing from this install; reinstall Intaglio Labs." >&2
   exit 1
 fi
 
 mkdir -p "$M" && chmod 700 "$M"
-printf 'HAZLIE_MATRIX=%s\n' "$M" > bridges/.env
+# The compose file interpolates this environment variable. Keeping it in this
+# process rather than bridges/.env means the downloaded app never needs to
+# mutate its own signed bundle just to set up a user's private bridge state.
+export HAZLIE_MATRIX="$M"
 
 # --- synapse ------------------------------------------------------------------
 if [ ! -f "$M/synapse/homeserver.yaml" ]; then
@@ -64,7 +72,7 @@ NEEDS_SYNAPSE_RESTART=0
 if [ -f "$M/synapse/homeserver.yaml" ] && grep -q app_service_config_files "$M/synapse/homeserver.yaml"; then
   for b in meta instagram twitter telegram discord slack linkedin; do
     if ! grep -q "/registrations/$b.yaml" "$M/synapse/homeserver.yaml"; then
-      yq -i ".app_service_config_files += [\"/registrations/$b.yaml\"]" "$M/synapse/homeserver.yaml"
+      "$YQ" -i ".app_service_config_files += [\"/registrations/$b.yaml\"]" "$M/synapse/homeserver.yaml"
       echo "synapse: registered $b"
       NEEDS_SYNAPSE_RESTART=1
     fi
@@ -124,25 +132,38 @@ bridge_rows | while read -r name image cn port dbfile; do
   if [ ! -f "$M/$name/config.yaml" ]; then
     docker run --rm -v "$M/$name:/data" "$image" >/dev/null 2>&1 || true
     [ -f "$M/$name/config.yaml" ] || { echo "$name: config generation failed" >&2; exit 1; }
-    # All five above are the modern (bridgev2) layout — telegram's :latest
-    # moved to it too, which is why it is in this list and not special-cased
-    # the way its python-era config would have needed.
-    yq -i "
-      .homeserver.address = \"http://synapse:8008\" |
-      .homeserver.domain = \"hazlie.local\" |
-      .appservice.address = \"http://$cn:$port\" |
-      .appservice.hostname = \"0.0.0.0\" |
-      .appservice.port = $port |
-      .database.type = \"sqlite3-fk-wal\" |
-      .database.uri = \"file:/data/$dbfile.db?_txlock=immediate\" |
-      .bridge.permissions = {\"hazlie.local\": \"user\", \"@you:hazlie.local\": \"admin\"} |
-      .backfill.enabled = true |
-      .backfill.max_initial_messages = 10000 |
-      .double_puppet.secrets = {}
-    " "$M/$name/config.yaml"
     echo "$name: config written"
   fi
+  # All six above are the modern (bridgev2) layout — telegram's :latest
+  # moved to it too, which is why it is in this list and not special-cased
+  # the way its python-era config would have needed. This must run even when
+  # a first attempt wrote its example config then failed before registration:
+  # mautrix only generates registration.yaml after the homeserver is set.
+  "$YQ" -i "
+    .homeserver.address = \"http://synapse:8008\" |
+    .homeserver.domain = \"hazlie.local\" |
+    .appservice.address = \"http://$cn:$port\" |
+    .appservice.hostname = \"0.0.0.0\" |
+    .appservice.port = $port |
+    .database.type = \"sqlite3-fk-wal\" |
+    .database.uri = \"file:/data/$dbfile.db?_txlock=immediate\" |
+    .bridge.permissions = {\"hazlie.local\": \"user\", \"@you:hazlie.local\": \"admin\"} |
+    .backfill.enabled = true |
+    .backfill.max_initial_messages = 10000 |
+    .double_puppet.secrets = {}
+  " "$M/$name/config.yaml"
   if [ ! -f "$M/$name/registration.yaml" ]; then
+    # Docker Compose creates a directory when its bind-mount source does not
+    # exist. That directory blocks mautrix from writing the registration file
+    # on the next setup attempt, so remove only an *empty* one; never discard
+    # user data or a non-empty path.
+    if [ -d "$M/$name/registration.yaml" ]; then
+      rmdir "$M/$name/registration.yaml" 2>/dev/null || {
+        echo "$name: registration.yaml is a non-empty directory; move it aside before retrying" >&2
+        exit 1
+      }
+      echo "$name: removed empty stale registration path"
+    fi
     docker run --rm -v "$M/$name:/data" "$image" >/dev/null 2>&1 || true
     [ -f "$M/$name/registration.yaml" ] || { echo "$name: registration generation failed" >&2; exit 1; }
     echo "$name: registration written"
@@ -156,21 +177,31 @@ if [ ! -f "$M/discord/config.yaml" ]; then
   mkdir -p "$M/discord"
   docker run --rm -v "$M/discord:/data" dock.mau.dev/mautrix/discord:latest >/dev/null 2>&1 || true
   [ -f "$M/discord/config.yaml" ] || { echo "discord: config generation failed" >&2; exit 1; }
-  yq -i '
-    .homeserver.address = "http://synapse:8008" |
-    .homeserver.domain = "hazlie.local" |
-    .appservice.address = "http://hazlie-discord:29334" |
-    .appservice.hostname = "0.0.0.0" |
-    .appservice.port = 29334 |
-    .appservice.database.type = "sqlite3-fk-wal" |
-    .appservice.database.uri = "file:/data/mautrix-discord.db?_txlock=immediate" |
-    .bridge.permissions = {"hazlie.local": "user", "@you:hazlie.local": "admin"} |
-    .bridge.backfill.forward_limits.initial.dm = 10000 |
-    .bridge.double_puppet_server_map = {}
-  ' "$M/discord/config.yaml"
   echo "discord: config written"
 fi
+# Same partial-install recovery as the modern bridges above. Discord uses the
+# pre-bridgev2 config shape, but its registration generator has the same
+# prerequisite: a configured homeserver domain.
+"$YQ" -i '
+  .homeserver.address = "http://synapse:8008" |
+  .homeserver.domain = "hazlie.local" |
+  .appservice.address = "http://hazlie-discord:29334" |
+  .appservice.hostname = "0.0.0.0" |
+  .appservice.port = 29334 |
+  .appservice.database.type = "sqlite3-fk-wal" |
+  .appservice.database.uri = "file:/data/mautrix-discord.db?_txlock=immediate" |
+  .bridge.permissions = {"hazlie.local": "user", "@you:hazlie.local": "admin"} |
+  .bridge.backfill.forward_limits.initial.dm = 10000 |
+  .bridge.double_puppet_server_map = {}
+' "$M/discord/config.yaml"
 if [ ! -f "$M/discord/registration.yaml" ]; then
+  if [ -d "$M/discord/registration.yaml" ]; then
+    rmdir "$M/discord/registration.yaml" 2>/dev/null || {
+      echo "discord: registration.yaml is a non-empty directory; move it aside before retrying" >&2
+      exit 1
+    }
+    echo "discord: removed empty stale registration path"
+  fi
   docker run --rm -v "$M/discord:/data" dock.mau.dev/mautrix/discord:latest >/dev/null 2>&1 || true
   [ -f "$M/discord/registration.yaml" ] || { echo "discord: registration generation failed" >&2; exit 1; }
   echo "discord: registration written"
@@ -247,7 +278,7 @@ telegram_app_credential() {
   printf ''
 }
 
-if [ "$(yq '.network.api_id // 0' "$M/telegram/config.yaml" 2>/dev/null)" = "12345" ]; then
+if [ "$("$YQ" '.network.api_id // 0' "$M/telegram/config.yaml" 2>/dev/null)" = "12345" ]; then
   TG_APP="$(telegram_app_credential)"
   # Shape-checked before it is written. A malformed pair produces a container
   # that crash-loops with nothing on the machine naming the cause — which is

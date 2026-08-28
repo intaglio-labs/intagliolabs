@@ -122,12 +122,22 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   /// ordinary web login — the two modes share this window's chrome and its
   /// single-exit teardown, and nothing else.
   private var qrCheck: ((@escaping (QRProgress) -> Void) -> Void)?
+  private var qrFetch: ((@escaping (String?) -> Void) -> Void)?
   private var qrView: NSImageView?
   private var qrSpinner: NSProgressIndicator?
   private var qrHow: NSTextField?
+  private var qrRetry: NSButton?
+  private var qrExpiry: Date?
+  private var qrNextCheck = Date.distantFuture
 
   private var window: NSWindow?
   private var web: WKWebView?
+  // Messenger's current consent/bootstrap page does not complete in an
+  // ephemeral WebKit store. It gets the default store for this one window,
+  // then finish() explicitly removes every record again; no Facebook session
+  // survives the handoff to the local bridge.
+  private var websiteDataStore: WKWebsiteDataStore?
+  private var clearsWebsiteData = false
   private var poll: Timer?
   private var finished = false
   // The green underscore blinks like a terminal cursor.
@@ -237,15 +247,10 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
       approval: false, userAgent: "", allowedFrameHosts: [], storageUrl: "", done: done
     )
     ctl.qrCheck = check
+    ctl.qrFetch = fetch
     current = ctl
     ctl.showQR(instruction: instruction)
-    fetch { [weak ctl] uri in
-      DispatchQueue.main.async {
-        guard let ctl, !ctl.finished else { return }
-        guard let uri, let image = decodeDataImage(uri) else { ctl.finish(nil); return }
-        ctl.fillQR(image)
-      }
-    }
+    ctl.requestQRCode()
   }
 
   /// data:image/<type>;base64,<...> → NSImage. Deliberately narrow: only a
@@ -268,7 +273,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     // Sized to the content, top down: 34 under the header, the code, then the
     // one line that says what to do with it. A QR window with room left over
     // reads as a window still loading.
-    let W: CGFloat = 420, headH: CGFloat = 62, bodyH: CGFloat = 358
+    let W: CGFloat = 420, headH: CGFloat = 62, bodyH: CGFloat = 400
     func color(_ r: Int, _ g: Int, _ b: Int) -> NSColor {
       NSColor(red: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255, alpha: 1)
     }
@@ -314,20 +319,29 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     how.isBordered = false
     how.isEditable = false
     how.alignment = .center
-    // 40pt tall so a longer platform name can wrap; text draws from the TOP of
-    // that frame, which is what this offset is measured to.
-    how.frame = NSRect(x: 24, y: cardY - 56, width: W - 48, height: 40)
-    // ~~"waiting for the scan — this closes itself" under it.~~ Yeeted (owner,
-    // 2026-08-26). The window is one instruction and one code; a second line
-    // narrating that the window is still a window earns nothing.
+    // Two short lines fit without clipping and leave room for an explicit retry
+    // below. QR codes routinely expire while the phone is being unlocked, so
+    // closing the window at that moment used to make a normal retry look like
+    // a broken connector.
+    how.frame = NSRect(x: 24, y: cardY - 62, width: W - 48, height: 44)
     how.isHidden = true // nothing to instruct until there is a code to scan
     qrHow = how
+
+    let retry = NSButton(frame: NSRect(x: W / 2 - 58, y: cardY - 96, width: 116, height: 28))
+    retry.title = "retry code"
+    retry.bezelStyle = .rounded
+    retry.controlSize = .small
+    retry.target = self
+    retry.action = #selector(retryQRCode)
+    retry.isHidden = true
+    qrRetry = retry
 
     let header = makeHeader(width: W, height: headH)
     header.frame = NSRect(x: 0, y: bodyH, width: W, height: headH)
     header.autoresizingMask = [.width, .minYMargin]
     content.addSubview(card)
     content.addSubview(how)
+    content.addSubview(retry)
     content.addSubview(header)
 
     let win = NSWindow(
@@ -345,41 +359,103 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     win.makeKeyAndOrderFront(nil)
   }
 
-  /// The code arrived: swap it for the spinner and say what to do with it.
-  /// The poll starts HERE rather than at open, because there is nothing to
-  /// approve until there is a code on screen.
+  @objc private func retryQRCode() { requestQRCode() }
+
+  /// Ask for a fresh remote-auth code. The bridge generates these one at a
+  /// time, so retry deliberately starts a new attempt rather than trying to
+  /// revive the old Matrix event.
+  private func requestQRCode() {
+    guard !finished, let fetch = qrFetch else { return }
+    poll?.invalidate(); poll = nil
+    qrExpiry = nil
+    qrNextCheck = Date.distantFuture
+    qrView?.image = nil
+    qrHow?.isHidden = false
+    qrHow?.stringValue = "getting a fresh code…"
+    qrRetry?.isHidden = true
+    fetch { [weak self] uri in
+      DispatchQueue.main.async {
+        guard let self, !self.finished else { return }
+        guard let uri, let image = Self.decodeDataImage(uri) else {
+          self.qrSpinner?.stopAnimation(nil)
+          self.qrSpinner?.removeFromSuperview()
+          self.qrSpinner = nil
+          self.qrHow?.stringValue = "couldn't get a code — try again"
+          self.qrRetry?.isHidden = false
+          return
+        }
+        self.fillQR(image)
+      }
+    }
+  }
+
+  /// The code arrived: swap it for the spinner, name exactly what needs to be
+  /// done on the phone, and make its short lifetime visible. The remote-auth
+  /// bridge expires a code after about a minute; a retry remains in this same
+  /// window instead of returning the person to an ambiguous card status.
   private func fillQR(_ image: NSImage) {
     qrSpinner?.stopAnimation(nil)
     qrSpinner?.removeFromSuperview()
     qrSpinner = nil
     qrView?.image = image
     qrHow?.isHidden = false
+    qrRetry?.isHidden = true
+    qrExpiry = Date().addingTimeInterval(60)
+    qrNextCheck = Date()
+    updateQRCountdown()
 
-    // 2.5s: the remote-auth code lives about two minutes, so this is dozens of
-    // asks over its whole life, not a busy loop.
-    let timer = Timer(timeInterval: 2.5, repeats: true) { [weak self] _ in
-      guard let self, let check = self.qrCheck, !self.finished else { return }
-      check { [weak self] progress in
-        guard let self, !self.finished else { return }
-        switch progress {
-        case .waiting: break
-        case .connected: self.finish("connected")
-        case .ended:
-          // The card behind this window offers the way back (its begin
-          // button), so ending here is a close, not a dead window with a
-          // message in it.
-          self.finish(nil)
-        }
-      }
+    // Update the countdown every second; query the local bridge only every
+    // 2.5 seconds. UI cadence and API cadence are intentionally independent.
+    let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+      self?.pollQRCode()
     }
     RunLoop.main.add(timer, forMode: .common)
     self.poll = timer
   }
 
+  private func updateQRCountdown() {
+    guard let expiry = qrExpiry else { return }
+    let seconds = max(0, Int(ceil(expiry.timeIntervalSinceNow)))
+    qrHow?.stringValue = "Scan with Discord on your phone, then approve — expires in \(seconds) seconds"
+  }
+
+  private func expireQRCode() {
+    poll?.invalidate(); poll = nil
+    qrExpiry = nil
+    qrHow?.stringValue = "That code expired — get a new one"
+    qrRetry?.isHidden = false
+  }
+
+  private func pollQRCode() {
+    guard !finished, let expiry = qrExpiry else { return }
+    guard expiry.timeIntervalSinceNow > 0 else { expireQRCode(); return }
+    updateQRCountdown()
+    guard Date() >= qrNextCheck, let check = qrCheck else { return }
+    qrNextCheck = Date().addingTimeInterval(2.5)
+    check { [weak self] progress in
+      DispatchQueue.main.async {
+        guard let self, !self.finished else { return }
+        switch progress {
+        case .waiting: break
+        case .connected: self.finish("connected")
+        case .ended: self.expireQRCode()
+        }
+      }
+    }
+  }
+
   private func show(url: URL) {
     let W: CGFloat = 480, webH: CGFloat = 680, headH: CGFloat = 62
     let config = WKWebViewConfiguration()
-    config.websiteDataStore = .nonPersistent() // isolated + discarded on teardown
+    // Facebook currently needs a persistent WebKit store to render its
+    // first-visit consent/login bootstrap. Scope that exception to Messenger
+    // only and clear the store on every exit; every other platform remains
+    // truly ephemeral as before.
+    let persistentMessengerStore = label == "Messenger"
+    let dataStore = persistentMessengerStore ? WKWebsiteDataStore.default() : .nonPersistent()
+    config.websiteDataStore = dataStore
+    websiteDataStore = dataStore
+    clearsWebsiteData = persistentMessengerStore
 
     // HEADER CAPTURE, only when the bridge asked for headers. LinkedIn's login
     // step wants X-LI-Track and X-LI-Page-Instance, which its own JavaScript
@@ -562,6 +638,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   /// The domain line under the title. Updated as the page navigates, so it
   /// names where you ACTUALLY are rather than where the window started.
   private var headerHost: NSTextField?
+  private var headerNotice: NSTextField?
 
   // The terminal-palette, mono header. Values mirror the connect page's
   // "Terminal Palette v0.2" so Intaglio Labs' login window is visually of a piece with
@@ -641,6 +718,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
       font: mono, color: muted, y: 10
     )
     sub.alignment = .right
+    headerNotice = sub
     view.addSubview(title)
     view.addSubview(host)
     view.addSubview(sub)
@@ -824,6 +902,29 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   // that is no longer true, which is the opposite of what it is for.
   func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
     showHost(webView.url)
+    headerNotice?.stringValue = "your credentials stay local"
+    headerNotice?.textColor = NSColor(red: 0x8a / 255, green: 0x8a / 255, blue: 0x8a / 255, alpha: 1)
+  }
+
+  private func showNavigationFailure(_ error: Error, url: URL?) {
+    let host = url?.host?.hasPrefix("www.") == true
+      ? String(url!.host!.dropFirst(4))
+      : (url?.host ?? "this page")
+    // `localizedDescription` is often a long, system-localized sentence. The
+    // compact error code makes a report diagnosable while still telling the
+    // person what to do, instead of preserving the old blank white failure.
+    let code = (error as NSError).code
+    headerNotice?.stringValue = "couldn't load \(host) (\(code)) — close and retry"
+    headerNotice?.textColor = NSColor(red: 0xff / 255, green: 0x90 / 255, blue: 0x68 / 255, alpha: 1)
+    NSLog("Intaglio Labs: social login navigation failed for \(host), code \(code): \(error.localizedDescription)")
+  }
+
+  func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+    showNavigationFailure(error, url: webView.url)
+  }
+
+  func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+    showNavigationFailure(error, url: webView.url)
   }
 
   func webView(
@@ -865,6 +966,11 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
       list.contains { host == $0 || host.hasSuffix("." + $0) }
     }
     let ok = matches(allowedSuffixes) || (!inMain && matches(allowedFrameSuffixes))
+    if !ok && inMain {
+      headerNotice?.stringValue = "blocked redirect to \(host) — close and retry"
+      headerNotice?.textColor = NSColor(red: 0xff / 255, green: 0x90 / 255, blue: 0x68 / 255, alpha: 1)
+      NSLog("Intaglio Labs: social login blocked main-frame redirect to \(host)")
+    }
     decisionHandler(ok ? .allow : .cancel)
   }
 
@@ -919,21 +1025,29 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     if !finished { finish(nil) }
   }
 
-  // Single exit for every path: report once, stop polling, drop the webview and
-  // its (non-persistent) data store, close the window, release self.
+  // Single exit for every path: report once, stop polling, clear Messenger's
+  // temporary persistent store, close the window, release self.
   private func finish(_ result: String?) {
     if finished { return }
     finished = true
     poll?.invalidate(); poll = nil
     blink?.invalidate(); blink = nil
     headerTitle = nil
+    headerNotice = nil
     qrCheck = nil
+    qrFetch = nil
     qrView = nil
     qrSpinner?.stopAnimation(nil)
     qrSpinner = nil
     qrHow = nil
+    qrRetry = nil
+    qrExpiry = nil
     let cb = done
     let win = window
+    let dataStore = websiteDataStore
+    let clearData = clearsWebsiteData
+    websiteDataStore = nil
+    clearsWebsiteData = false
     web?.navigationDelegate = nil
     web = nil
     window?.delegate = nil
@@ -942,6 +1056,10 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     DispatchQueue.main.async {
       win?.close()
       cb(result)
+    }
+    if clearData, let dataStore {
+      dataStore.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+                           modifiedSince: Date(timeIntervalSince1970: 0)) {}
     }
   }
 }

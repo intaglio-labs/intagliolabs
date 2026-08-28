@@ -93,7 +93,24 @@ cp -R ../connectors "$BE/connectors"
 # resolves them at ../ops relative to itself, which is this path in the bundle
 # and the repo root in a checkout. Same relative path, both layouts.
 mkdir -p "$BE/ops"
-cp ../ops/gcal-auth.mjs ../ops/oura-auth.mjs "$BE/ops/"
+cp ../ops/gcal-auth.mjs ../ops/oura-auth.mjs ../ops/setup-bridges.sh \
+   ../ops/prefetch-bridges.sh "$BE/ops/"
+# A downloaded app executes these directly. Preserve the source mode, but also
+# set it explicitly so an archive or checkout that lost executable bits cannot
+# silently turn first-launch bridge warming off.
+chmod 755 "$BE/ops/setup-bridges.sh" "$BE/ops/prefetch-bridges.sh"
+cp -R ../bridges "$BE/bridges"
+# The bridge installer needs yq to safely patch third-party YAML templates.
+# Ship the static editor in the app instead of requiring every downloaded-app
+# user to have Homebrew. This is a build requirement only, not a runtime one.
+YQ_SRC="$(command -v yq 2>/dev/null || true)"
+if [ -z "$YQ_SRC" ]; then
+  echo "ERROR: yq is required to build a self-contained social bridge installer." >&2
+  exit 1
+fi
+mkdir -p "$BE/tools"
+cp -L "$YQ_SRC" "$BE/tools/yq"
+chmod 755 "$BE/tools/yq"
 
 # THE TELEGRAM APP CREDENTIAL, if this build machine has one.
 #
@@ -340,6 +357,9 @@ if [ -n "$IDENTITY" ]; then
   # book fine; signed with the entitlements it never got far enough to try.
   if [ -f "$BE/helpers/apple-data" ]; then
     codesign --force --options runtime -s "$IDENTITY" "$BE/helpers/apple-data"
+  fi
+  if [ -f "$BE/tools/yq" ]; then
+    codesign --force --options runtime -s "$IDENTITY" "$BE/tools/yq"
   fi
   # Signing nested Mach-O can restore this Finder attribute on the bundle.
   # Remove it immediately before the app-level signature.

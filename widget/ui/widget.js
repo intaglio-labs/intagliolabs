@@ -66,12 +66,12 @@ orbEl.addEventListener('animationend', (e) => {
 // needed room the window did not have: see main.swift's cloudSlot, which
 // reserves it above the bar.
 const VOICE_TEASE = true;
-const TEASE_TEXT = 'voice things coming soon';
+const TEASE_TEXT = 'voice things coming soon. help us build it :)';
 // Chat wears the same sign for now (owner, 2026-08-25): the pill no longer
 // expands, and pressing it answers with a line instead of an input. Flip
 // this off to give the bar back.
 const CHAT_TEASE = true;
-const CHAT_TEASE_TEXT = 'chat coming soon';
+const CHAT_TEASE_TEXT = 'chat coming soon. help us build it :)';
 const TEASE_MS = 2400;
 const dreamEl = document.getElementById('wdream');
 const dreamText = document.getElementById('wdreamtext');

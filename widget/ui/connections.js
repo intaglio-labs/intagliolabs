@@ -24,6 +24,45 @@ const afterLoginAttempt = (data, show) => {
   show(data);
 };
 
+// A cookie window is only the first half of X's login. The bridge can answer
+// the cookie handoff before it posts its encrypted-DM passcode question, so the
+// old UI painted a fresh "log in" card from that in-between response. Keep the
+// card in a finishing state and re-read the local bridge until the next bot
+// step lands. The same safeguard benefits any future cookie bridge with a
+// second, non-browser step.
+const bridgeSignature = (data) => ((data && data.transcript) || [])
+  .map((m) => `${m.from || ''}|${m.body || ''}|${m.image ? 'image' : ''}`).join('\u0000');
+const bridgeNeedsReply = (data) => ((data && data.transcript) || []).some((m) =>
+  m.from === 'bot' && /^(please|enter|create|choose|register)\b/iu.test(String(m.body || '').trim())
+);
+const settleWebLogin = (platform, first, show) => {
+  if (!first || first.state === 'cancelled' || first.connected || first.state !== 'ok' || bridgeNeedsReply(first)) {
+    afterLoginAttempt(first, show);
+    return;
+  }
+  // Do not make a successfully closed login window look like it forgot the
+  // click while the bot finishes its second step.
+  show({ state: 'pending' });
+  const before = bridgeSignature(first);
+  let tries = 0;
+  const poll = () => {
+    hzPost('bridgeStatus', { p: platform })
+      .then((next) => {
+        if (!next || next.state !== 'ok' || next.connected || bridgeNeedsReply(next)
+            || bridgeSignature(next) !== before || ++tries >= 12) {
+          afterLoginAttempt(next || first, show);
+          return;
+        }
+        setTimeout(poll, 1500);
+      })
+      .catch(() => {
+        if (++tries >= 12) afterLoginAttempt(first, show);
+        else setTimeout(poll, 1500);
+      });
+  };
+  setTimeout(poll, 1200);
+};
+
 const closeHint = () => {
   hintHost.replaceChildren();
   for (const r of document.querySelectorAll('#grid .row')) r.classList.remove('open');
@@ -281,6 +320,60 @@ function modelRow() {
   return el;
 }
 
+// A small live view of work this app is ACTUALLY doing. It intentionally does
+// not call a connector "active" just because its daemon is running: only model
+// bytes in flight and app-owned indexing/distillation phases appear here.
+function activityRow() {
+  const el = document.createElement('div');
+  el.className = 'setting setting-col activity-setting';
+  const head = document.createElement('div');
+  head.className = 'setting-head';
+  const name = document.createElement('span');
+  name.className = 'setting-name';
+  name.textContent = 'activity';
+  const live = document.createElement('span');
+  live.className = 'activity-live';
+  live.textContent = 'live';
+  head.append(name, live);
+  const list = document.createElement('div');
+  list.className = 'activity-list';
+  el.append(head, list);
+
+  const gb = (bytes) => `${(Number(bytes || 0) / 1e9).toFixed(1)} GB`;
+  const paint = (data) => {
+    const items = data && Array.isArray(data.items) ? data.items : [];
+    list.replaceChildren();
+    if (!items.length) {
+      const idle = document.createElement('span');
+      idle.className = 'activity-idle';
+      idle.textContent = 'nothing processing right now';
+      list.appendChild(idle);
+    } else {
+      for (const item of items) {
+        const row = document.createElement('div');
+        row.className = 'activity-item';
+        const dot = document.createElement('span');
+        dot.className = 'activity-dot';
+        const text = document.createElement('span');
+        if (item.kind === 'model') {
+          const verb = item.phase === 'verifying' ? 'verifying' : 'downloading';
+          text.textContent = `${verb} ${item.tier || 'local model'} · ${gb(item.got)} of ${gb(item.total)}`;
+        } else {
+          text.textContent = item.label || 'processing locally';
+        }
+        row.append(dot, text);
+        list.appendChild(row);
+      }
+    }
+    fitConnections();
+  };
+  const refreshActivity = () => hzPost('activity').then(paint).catch(() => {});
+  refreshActivity();
+  const timer = setInterval(refreshActivity, 2000);
+  window.addEventListener('pagehide', () => clearInterval(timer), { once: true });
+  return el;
+}
+
 // Fit the popup to its content EXACTLY. hzAutoFit only ever grows (its measure
 // is innerHeight + overflow, and overflow is 0 once the window is big enough),
 // so a tall window stayed stuck above short content — the dead space up top the
@@ -289,6 +382,18 @@ function modelRow() {
 // so the window follows whichever is taller.
 let fitLast = 0;
 let fitQueued = false;
+// A connector card is `position: fixed`, so resizing the native Settings
+// window does not move it with its tile. The live activity row can change the
+// Settings height at any moment; re-place an open card after the WebView has
+// its new viewport rather than leaving it at the old, now-clipped coordinates.
+function repositionOpenHint() {
+  if (!hintHost.classList.contains('open')) return;
+  const card = hintHost.querySelector('.hint');
+  const id = card?.dataset.id;
+  const anchor = document.querySelector('#grid .row.open')
+    || (id ? grid.querySelector(`.row[data-id="${CSS.escape(id)}"]`) : null);
+  if (anchor) hzPlacePop(hintHost, anchor);
+}
 function fitConnections() {
   if (fitQueued) return; // coalesce a burst of DOM mutations into one measure
   fitQueued = true;
@@ -323,7 +428,13 @@ new MutationObserver(fitConnections).observe(document.querySelector('.win'), {
   // and would re-measure every few seconds for nothing.
   attributes: true, attributeFilter: ['hidden', 'class'],
 });
-window.addEventListener('resize', fitConnections);
+window.addEventListener('resize', () => {
+  fitConnections();
+  // `resize` fires after AppKit has accepted fitContent and changed this
+  // WebView's bounds, which is the first point the fixed-position placer has
+  // the correct viewport to clamp against.
+  requestAnimationFrame(repositionOpenHint);
+});
 fitConnections();
 
 async function renderSettings() {
@@ -359,8 +470,7 @@ async function renderSettings() {
     hzPost('setScale', { scale: 1 }).catch(() => {});
   }
   rows.push(modelRow());
-  // The review/memory row was retired with the earlier memory-progress card.
-  // Settings ends at the model choice, then connectors.
+  rows.push(activityRow());
   // The onboarding row was yeeted (owner, 2026-08-25): ~~a `run` pill that
   // replayed the welcome flow~~. Settings is where you change what the app
   // does, not where you re-watch its introduction, and the one control here
@@ -606,7 +716,12 @@ function visibleSources(sources) {
 // cannot be committed to this public repo and needs build-time injection.
 // Delete from this set when that lands; nothing else keys off it, and the
 // connector, its bridge and its walkthrough are all still wired underneath.
-const SOON_CONNECTORS = new Set();
+// Google sign-in is intentionally parked while its authorization path is not
+// ready to ship. Keep its normal tile so people can discover it, but mute it
+// before the card says "coming soon" — a bright Google mark read as available.
+// Only the synthetic `mail` tile is greyed; a previously connected `mail:<…>`
+// account remains a normal, usable source.
+const SOON_CONNECTORS = new Set(['mail', 'twitter', 'telegram']);
 // WHAT NEEDS YOU COMES FIRST. The shelf scrolls, so anything past the fourth
 // tile is work to reach — and the tiles that need reaching are exactly the
 // ones not yet connected or broken. Those lead; everything healthy follows in
@@ -638,10 +753,11 @@ const NOTICES = {
   // starts it). Named separately from `down` because the remedy is different
   // and specific: this is not "unknown", it is "start it".
   nobridge: 'the social bridge engine is not running — open Docker, then: bash ops/setup-bridges.sh',
-  down: 'connect service unreachable — status unknown',
+  down: 'checking the local connection…',
   auth: 'token mismatch — status unknown',
   noroute: 'connect service predates /api/status — status unknown',
-  error: 'status unavailable',
+  error: 'checking connector status…',
+  pending: 'finishing the sign-in…',
 };
 
 // WKWebView never draws the native title-attribute tooltip, so the tile's
@@ -745,7 +861,7 @@ function card(src, keep) {
 
   // Greyed, and the dot goes with it: an off dot on a tile that cannot be
   // turned on is an invitation, and this tile is declining one.
-  const soon = SOON_CONNECTORS.has(kindOf(src.id));
+  const soon = !src.connected && SOON_CONNECTORS.has(kindOf(src.id));
   if (soon) {
     row.classList.add('soon');
     dot.className = 'dot off';
@@ -958,7 +1074,7 @@ function card(src, keep) {
       if (GOOGLE_AUTH.has(kindOf(src.id))) {
         const soon = document.createElement('span');
         soon.className = 'setup';
-        soon.textContent = 'coming soon';
+        soon.textContent = 'coming soon. help us build it :)';
         tip.appendChild(soon);
       } else if (hint && hint.url && !hint.local) {
         const add = document.createElement('button');
@@ -1004,7 +1120,7 @@ function card(src, keep) {
       if (GOOGLE_AUTH.has(kindOf(src.id))) {
         const soon = document.createElement('span');
         soon.className = 'setup';
-        soon.textContent = 'coming soon';
+        soon.textContent = 'coming soon. help us build it :)';
         tip.appendChild(soon);
       } else if (CONNECT_PAGE.has(kindOf(src.id))) {
         const open = document.createElement('button');
@@ -1093,6 +1209,48 @@ function card(src, keep) {
     stay.className = 'stay';
     stay.textContent = STAY;
     tip.appendChild(stay);
+
+    // The connect service can be alive while its first status request loses a
+    // short race with launch or Docker waking up. A one-shot `down` result was
+    // rendered as "service unreachable" and stayed there even after Discord
+    // had already generated a valid QR. Re-poll the local service while this
+    // card remains open; stop after a bounded window and leave an explicit
+    // retry rather than asserting that the service is dead.
+    const transientStatus = data && !data.transcript
+      && (data.state === 'down' || data.state === 'error');
+    if (transientStatus) {
+      const say = document.createElement('span');
+      say.className = 'setup';
+      say.textContent = 'checking the local connection…';
+      const retry = document.createElement('button');
+      retry.className = 'hold-ok';
+      retry.textContent = 'retry now';
+      const pollStatus = () => {
+        hzPost('bridgeStatus', { p: kindOf(src.id) })
+          .then((next) => renderBridge(next))
+          .catch(() => { say.textContent = 'still starting — retry when ready'; });
+      };
+      retry.addEventListener('click', (e) => { e.stopPropagation(); pollStatus(); });
+      tip.append(say, retry);
+      let tries = 0;
+      const tick = () => {
+        if (!tip.isConnected || ++tries > 10) {
+          if (tries > 10) say.textContent = 'still starting — retry when ready';
+          return;
+        }
+        hzPost('bridgeStatus', { p: kindOf(src.id) })
+          .then((next) => {
+            if (next && !next.transcript && (next.state === 'down' || next.state === 'error')) {
+              setTimeout(tick, 2000);
+            } else {
+              renderBridge(next);
+            }
+          })
+          .catch(() => setTimeout(tick, 2000));
+      };
+      setTimeout(tick, 2000);
+      return;
+    }
 
     // ~~The whole bot transcript rendered as a grey log.~~ Yeeted (owner,
     // 2026-08-25: "don't show that shit on any of the connectors"). It was a
@@ -1731,11 +1889,27 @@ function card(src, keep) {
         // result/retry. Cancelled → nothing at all: see afterLoginAttempt. This
         // is the path a TILE PRESS takes, and it was the one still putting the
         // card up after the window was shut.
-        afterLoginAttempt(data, showBridgePanel);
+        settleWebLogin(kindOf(src.id), data, showBridgePanel);
       })
       .catch(() => {
         row.classList.remove('logging-in');
         showBridgePanel({ state: 'down' });
+      });
+  };
+  // Do not open another X browser window when its bridge is already waiting
+  // for a passcode. Resume the pending local conversation instead; starting a
+  // second cookie flow would cancel the exact state the person just created.
+  const resumeOrStartBridgeLogin = () => {
+    row.classList.add('logging-in');
+    hzPost('bridgeStatus', { p: kindOf(src.id) })
+      .then((data) => {
+        row.classList.remove('logging-in');
+        if (bridgeNeedsReply(data)) showBridgePanel(data);
+        else openBridgeLogin();
+      })
+      .catch(() => {
+        row.classList.remove('logging-in');
+        openBridgeLogin();
       });
   };
 
@@ -1813,7 +1987,7 @@ function showTileNotice(row, src, text) {
     head.textContent = src.label;
     const say = document.createElement('span');
     say.className = 'setup';
-    say.textContent = 'coming soon';
+    say.textContent = 'coming soon. help us build it :)';
     tip.append(head, say);
   };
 
@@ -1842,22 +2016,22 @@ function showTileNotice(row, src, text) {
       // (openBridgeLogin owns that). Everything else opens the panel now:
       // attach BEFORE rendering, because the async bridge/status openers paint
       // into this node when their promise lands.
-      // THE WINDOW IS THE ENTRY POINT ONLY WHERE IT IS THE WHOLE LOGIN. For a
-      // cookie harvest it is: the owner signs in on the platform's page and the
-      // session IS the answer. For a conversation flow it is a STEP INSIDE the
-      // login, and opening it first skips the conversation entirely — Slack's
-      // bot has to be given an email address before it will ask for anything
-      // else, and a window opened ahead of that is the owner signing into
-      // Slack's website while no part of this app is waiting on it (owner,
-      // 2026-08-26, three screenshots deep into exactly that).
+      // THE WINDOW IS THE ENTRY POINT only where it is the whole login. That
+      // is true for a cookie harvest and Discord's remote-auth QR: Discord's
+      // first actionable thing is the code, so making a person press "begin
+      // login" just to reveal it charges an empty press. Slack remains a
+      // conversation flow because it needs an email before its browser step.
       //
       // ~~Every unconnected bridge tile opened the window.~~ That was harmless
       // only because the conversation platforms had no webLogin policy and the
       // window degraded to this card; restoring Slack's made the wrong path
       // reachable for the first time.
-      if (isBridge(src) && !src.connected
-          && (BRIDGE_FLOW[kindOf(src.id)] || 'cookie') === 'cookie') {
-        openBridgeLogin();
+      const flow = BRIDGE_FLOW[kindOf(src.id)] || 'cookie';
+      if (isBridge(src) && !src.connected && (flow === 'cookie' || kindOf(src.id) === 'discord')) {
+        // X may be waiting for a passcode, so it gets the resume check. A
+        // Discord QR is intentionally requested on this first tap.
+        if (kindOf(src.id) === 'discord') openBridgeLogin();
+        else resumeOrStartBridgeLogin();
         return;
       }
       // GOOGLE TILE: one press mounts the anchored status card and starts the

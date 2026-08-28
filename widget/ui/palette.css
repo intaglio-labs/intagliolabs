@@ -2167,6 +2167,23 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
 .model-setting.busy .model-progress,
 .model-setting.busy .model-status { display: block; }
 
+/* Live, but intentionally quiet: this names real local work below the model
+   picker without becoming another progress dashboard. */
+.activity-setting { gap: 7px; }
+.activity-live {
+  color: var(--hazelnut); font-size: 10px; letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.activity-list { display: flex; flex-direction: column; gap: 5px; min-height: 15px; }
+.activity-item { display: flex; align-items: center; gap: 7px; color: var(--fg); font-size: 11px; }
+.activity-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto;
+  background: var(--hazelnut); box-shadow: 0 0 7px rgba(197, 165, 109, 0.65);
+  animation: activity-pulse 1.2s ease-in-out infinite;
+}
+.activity-idle { color: var(--muted); font-size: 11px; }
+@keyframes activity-pulse { 50% { opacity: 0.35; transform: scale(0.75); } }
+
 /* ---------------- onboarding screen 2: the chat demo ----------------
    It plays itself: the message types, sends, and the bubble is swallowed by
    the orb. Keyframes are the canvas's, with one change — see suck-up. */
