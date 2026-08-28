@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 
 const WIDGET = join(dirname(fileURLToPath(import.meta.url)), '..');
 const swift = readFileSync(join(WIDGET, 'src', 'Bridge.swift'), 'utf8');
+const permissionsSwift = readFileSync(join(WIDGET, 'src', 'Permissions.swift'), 'utf8');
 const bridgeLoginSwift = readFileSync(join(WIDGET, 'src', 'BridgeLogin.swift'), 'utf8');
 const googleLoginSwift = readFileSync(join(WIDGET, 'src', 'GoogleLogin.swift'), 'utf8');
 const connections = readFileSync(join(WIDGET, 'ui', 'connections.js'), 'utf8');
@@ -377,12 +378,22 @@ test('connector cards use current privacy copy and connected bridge identity', (
   assert.doesNotMatch(connectorTile, /acct\.textContent = `linked as/u);
 });
 
-test('FDA status is reconciled in the app process that owns the grant', () => {
-  const block = /private func reconcileFullDiskStatus\([\s\S]*?\n {2}\}/u.exec(swift)?.[0] ?? '';
-  assert.match(block, /Permissions\.fullDiskAccessibleSources\(\)/u);
+test('local Apple-source status is reconciled in the app process that owns each grant', () => {
+  const block = /private func reconcileLocalSourceStatus\([\s\S]*?\n {2}\}/u.exec(swift)?.[0] ?? '';
+  assert.match(block, /Permissions\.accessibleLocalSources\(\)/u);
   assert.match(block, /source\["action"\] as\? String == "fda"/u);
   assert.match(block, /fixed\["connected"\] = true/u);
   assert.match(block, /fixed\["broken"\] = false/u);
+});
+
+test('Calendar and Contacts status follows their frameworks, not obsolete database probes', () => {
+  const fda = /static func fullDiskAccessibleSources\([\s\S]*?\n {2}\}\n\n {2}\/\/\/ Every local/u
+    .exec(permissionsSwift)?.[0] ?? '';
+  const local = /static func accessibleLocalSources\([\s\S]*?\n {2}\}/u
+    .exec(permissionsSwift)?.[0] ?? '';
+  assert.doesNotMatch(fda, /"calendar"|"contacts"/u);
+  assert.match(local, /if contacts\(\) == \.granted \{ sources\.insert\("contacts"\) \}/u);
+  assert.match(local, /if calendar\(\) == \.granted \{ sources\.insert\("calendar"\) \}/u);
 });
 
 // The Settings panel must not wait on the network to say what is on disk.

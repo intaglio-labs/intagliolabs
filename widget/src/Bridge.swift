@@ -1546,14 +1546,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
 
   // MARK: status
 
-  /// Correct Full Disk Access rows in the process that actually owns the
-  /// grant. The connect server is a launchd agent, while the connector daemon
-  /// is this app's child and inherits this app's TCC identity. Trusting the
-  /// server's protected-file probe therefore paints false red tiles even while
-  /// ingestion can read the stores normally.
-  private func reconcileFullDiskStatus(_ obj: [String: Any]) -> [String: Any] {
+  /// Correct local Apple-source rows in the process that actually owns their
+  /// permissions. The connect server is a launchd agent, while the connector
+  /// daemon is this app's child and inherits this app's TCC identity. Trusting
+  /// the server's protected-file probes therefore paints false red tiles even
+  /// while ingestion can read the stores normally. Calendar and Contacts are
+  /// framework-backed, so their native authorization belongs here too.
+  private func reconcileLocalSourceStatus(_ obj: [String: Any]) -> [String: Any] {
     guard let sources = obj["sources"] as? [[String: Any]] else { return obj }
-    let readable = Permissions.fullDiskAccessibleSources()
+    let readable = Permissions.accessibleLocalSources()
     guard !readable.isEmpty else { return obj }
     let details = [
       "imessage": "reading your message history",
@@ -1593,7 +1594,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
               let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
               obj["sources"] is [[String: Any]]
         else { done(["state": "error", "error": "unparseable status"]); return }
-        var out = self.reconcileFullDiskStatus(obj)
+        var out = self.reconcileLocalSourceStatus(obj)
         out["state"] = "ok"
         done(out)
       case 401: done(["state": "auth"])
