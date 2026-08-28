@@ -118,6 +118,14 @@ jobs:
         with:
           node-version: '22'
 
+      # build.sh bundles the connector runtime and its dependencies. A clean
+      # checkout never contains node_modules, and release builds deliberately
+      # refuse to borrow executable code from an app already installed on the
+      # runner. Recreate the exact dependency tree from the committed lockfile
+      # before packaging so the signed bundle is both complete and auditable.
+      - name: install connector dependencies
+        run: npm ci --prefix connectors --ignore-scripts
+
       # VOICE MODELS, built here rather than downloaded.
       #
       # This step used to fetch a 496 MB tarball the owner uploaded by hand,
