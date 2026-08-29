@@ -51,7 +51,13 @@ import { DatabaseSync } from 'node:sqlite';
 import { recallClaims, groundingLines, pendingForQuery } from './memory/retrieve.mjs';
 import { episodicContext } from './memory/episodic.mjs';
 import { selectRows } from './memory/select.mjs';
-import { answerPersonSearch } from './people/search.mjs';
+import { answerPersonSearch, detectIntro, detectPersonSearch } from './people/search.mjs';
+import {
+  planGeneralPeopleQuestion,
+  prepareGeneralPeopleEvidence,
+  evaluateGeneralPeopleEvidence,
+  formatGeneralPeopleResult,
+} from './people/generalSearch.mjs';
 import { loadOwner, markOwnerPerson, markPersonRole } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
 import {
@@ -2666,6 +2672,40 @@ function tryPersonSearch(db, question) {
   }
 }
 
+// Unfamiliar people questions use the local model only as a constrained plan
+// compiler and evidence judge. The state/resolution handles are held only for
+// the synchronous projection + retrieval phase; no connector database stays
+// open while the single-slot model is generating.
+async function tryGeneralPeopleSearch(db, question, llama, { signal = null } = {}) {
+  const owner = loadOwner();
+  const plan = await planGeneralPeopleQuestion(question, { llama, signal, owner });
+  if (plan === null || plan.kind === 'not_people_search') return null;
+  let prepared;
+  try {
+    prepared = withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      return prepareGeneralPeopleEvidence(db, state, plan, {
+        owner, aliases,
+      });
+    });
+  } catch {
+    return {
+      text: `I couldn't refresh the local people evidence index just now. Your source data is unchanged; try again in a moment.`,
+      sources: [], count: 0,
+    };
+  }
+  const matches = await evaluateGeneralPeopleEvidence(question, prepared, {
+    llama, signal, limit: 10,
+  });
+  return formatGeneralPeopleResult(matches, prepared);
+}
+
+function preferDeterministicRelationshipSearch(question) {
+  if (detectIntro(question) !== null) return true;
+  const intent = detectPersonSearch(question);
+  return intent?.kind === 'reconnect';
+}
+
 // The People-popup "initialize search" backend. Opens the spine read-only (like
 // tryPersonSearch) and the owner's decisions store read-write, runs `fn`, and
 // always closes both — even on throw — so a build never leaks a handle. The
@@ -2796,27 +2836,72 @@ async function handleVaultAsk(db, req, res, cors, policy) {
 
   const question = utterance.trim();
 
-  // Person-search (memory/people/search.mjs): "who are investors I talked to",
-  // "who should I reconnect with". Answered from the people GRAPH by code, not
-  // the claim/episodic path — the ranker is deterministic and the evidence
-  // lines are already human-readable, so no model is called and nobody can be
-  // hallucinated onto the list. Tried FIRST because its intent is narrow (a
-  // need word plus a people word); a miss returns null and falls straight
-  // through to the normal answer path below.
-  // Sync-status ("am i up to date?", "is anything behind?"): the freshest,
-  // narrowest intent, so it is tried before person-search. Timestamps only,
-  // computed by code — the same policy the watchdog alerts on, answered on
-  // demand. A non-match returns null and falls straight through.
+  // Sync-status ("am i up to date?", "is anything behind?") is the freshest,
+  // narrowest intent and stays first. Timestamps only, computed by code — the
+  // same policy the watchdog alerts on, answered on demand. A non-match falls
+  // through to graph relationship operations and then general evidence-based
+  // people search.
   const syncStatus = trySyncStatus(db, question);
   if (syncStatus !== null) {
     send(res, 200, { text: syncStatus.text, sources: syncStatus.sources, usedRows: syncStatus.count }, cors);
     return;
   }
 
-  const person = tryPersonSearch(db, question);
-  if (person !== null) {
-    send(res, 200, { text: person.text, sources: person.sources, usedRows: person.count }, cors);
+  // Warm paths and relationship-health searches are graph operations, not
+  // evidence questions, so they keep their purpose-built graph traversal and
+  // ranking. Every evidence-based selection question goes through the general
+  // planner below; there are no topic-specific shortcuts ahead of it.
+  const relationshipSearch = preferDeterministicRelationshipSearch(question);
+  if (relationshipSearch) {
+    const person = tryPersonSearch(db, question);
+    if (person !== null) {
+      send(res, 200, { text: person.text, sources: person.sources, usedRows: person.count }, cors);
+      return;
+    }
+  }
+
+  // Evidence-based people questions all reach the same general local planner.
+  // The first model call sees the question plus explicit owner-profile facts,
+  // code retrieves a bounded candidate set, and the second local call can
+  // return only supplied person + evidence ids.
+  const peopleController = new AbortController();
+  const peopleClosed = () => {
+    if (!res.writableEnded) peopleController.abort();
+  };
+  res.once('close', peopleClosed);
+  let generalPerson;
+  try {
+    generalPerson = await tryGeneralPeopleSearch(db, question, policy.llama, {
+      signal: AbortSignal.any([
+        peopleController.signal,
+        AbortSignal.timeout(policy.askTimeoutMs ?? ASK_TIMEOUT_MS),
+      ]),
+    });
+  } catch (error) {
+    if (peopleController.signal.aborted) return;
+    throw error;
+  } finally {
+    res.off('close', peopleClosed);
+  }
+  if (generalPerson !== null) {
+    send(res, 200, {
+      text: generalPerson.text,
+      sources: generalPerson.sources,
+      usedRows: generalPerson.count,
+    }, cors);
     return;
+  }
+
+  // Non-question-shaped legacy need queries (for example, "investors I spoke
+  // with") do not activate the general planner's conservative question gate.
+  // They retain the existing graph answer as a fallback, after the general
+  // path has had first refusal for any normal people question.
+  if (!relationshipSearch) {
+    const person = tryPersonSearch(db, question);
+    if (person !== null) {
+      send(res, 200, { text: person.text, sources: person.sources, usedRows: person.count }, cors);
+      return;
+    }
   }
 
   const recalled = recallClaims(db, { match: ftsQuery(question), limit: 12 });

@@ -50,7 +50,7 @@ function coreShape(graph) {
 test('Hermes creates dedicated people projection tables and revisions participant writes', () => {
   const db = openDb(':memory:');
   const tableNames = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
-  for (const name of ['people', 'person_identifiers', 'identity_evidence', 'person_activity']) {
+  for (const name of ['people', 'person_identifiers', 'identity_evidence', 'person_event_links', 'person_activity']) {
     assert.ok(tableNames.has(name), `${name} exists`);
   }
   assert.equal(Number(projectionState(db).source_revision), 0);
@@ -87,6 +87,15 @@ test('a refresh materializes people, all card identifiers, evidence, and source 
     db.prepare('SELECT source, notes FROM person_activity ORDER BY source').all().map((row) => ({ ...row })),
     [{ source: 'granola', notes: 1 }, { source: 'imessage', notes: 0 }]
   );
+  assert.deepEqual(
+    db.prepare(
+      'SELECT source, role, authored, owner_authored, room, confidence FROM person_event_links ORDER BY source'
+    ).all().map((row) => ({ ...row })),
+    [
+      { source: 'granola', role: 'participant', authored: 0, owner_authored: 0, room: 0, confidence: 1 },
+      { source: 'imessage', role: 'counterparty', authored: 1, owner_authored: 0, room: 0, confidence: 1 },
+    ]
+  );
 
   const second = refreshPeopleProjection(db, spine, { now: NOW, owner: owner() });
   assert.equal(second.rebuilt, false, 'an unchanged search reads the prepared graph');
@@ -98,25 +107,83 @@ test('a refresh materializes people, all card identifiers, evidence, and source 
     'observing the same Contacts snapshot again does not invalidate identity');
 });
 
-test('corpus writes dirty the projection and only the affected refresh pays for a rebuild', () => {
+test('event links distinguish the person speaking from the owner speaking to them', () => {
   const db = openDb(':memory:');
   const spine = stateDb([{ id: '+15550100', name: 'Sam Lee', kind: 'phone', ref: 'card-sam' }]);
-  insertRows(db, {
-    ts: NOW - DAY, source: 'imessage', entity_id: 'i:1', text: 'one',
-    meta: { chat_handle: '+15550100', is_from_me: false },
-  });
+  insertRows(db, [
+    {
+      ts: NOW - 2 * DAY, source: 'imessage', entity_id: 'i:incoming', text: 'My next trip is soon.',
+      meta: { chat_handle: '+15550100', is_from_me: false },
+    },
+    {
+      ts: NOW - DAY, source: 'imessage', entity_id: 'i:outgoing', text: 'Have you planned another trip?',
+      meta: { chat_handle: '+15550100', is_from_me: true },
+    },
+  ]);
+  refreshPeopleProjection(db, spine, { now: NOW, owner: owner() });
+  assert.deepEqual(
+    db.prepare(
+      'SELECT c.entity_id, pel.authored, pel.owner_authored FROM person_event_links pel ' +
+        'JOIN context c ON c.id = pel.context_id ORDER BY c.entity_id'
+    ).all().map((row) => ({ ...row })),
+    [
+      { entity_id: 'i:incoming', authored: 1, owner_authored: 0 },
+      { entity_id: 'i:outgoing', authored: 0, owner_authored: 1 },
+    ]
+  );
+});
+
+test('corpus writes incrementally rebuild only affected existing people', () => {
+  const db = openDb(':memory:');
+  const spine = stateDb([
+    { id: '+15550100', name: 'Sam Lee', kind: 'phone', ref: 'card-sam' },
+    { id: '+15550101', name: 'Alex Still', kind: 'phone', ref: 'card-alex' },
+  ]);
+  insertRows(db, [
+    {
+      ts: NOW - DAY, source: 'imessage', entity_id: 'i:1', text: 'one',
+      meta: { chat_handle: '+15550100', is_from_me: false },
+    },
+    {
+      ts: NOW - DAY, source: 'imessage', entity_id: 'i:alex', text: 'unchanged',
+      meta: { chat_handle: '+15550101', is_from_me: false },
+    },
+  ]);
   refreshPeopleProjection(db, spine, { now: NOW, owner: owner() });
   const before = projectionState(db);
+  const alexBuiltAt = db.prepare("SELECT built_at FROM people WHERE display_name = 'Alex Still'").get().built_at;
 
   insertRows(db, {
     ts: NOW, source: 'imessage', entity_id: 'i:2', text: 'two',
     meta: { chat_handle: '+15550100', is_from_me: true },
   });
   assert.ok(Number(projectionState(db).source_revision) > Number(before.projected_revision));
-  const refreshed = refreshPeopleProjection(db, spine, { now: NOW, owner: owner() });
+  const refreshed = refreshPeopleProjection(db, spine, { now: NOW + 1000, owner: owner() });
   assert.equal(refreshed.rebuilt, true);
-  assert.equal(refreshed.graph[0].messages, 2);
+  assert.equal(refreshed.incremental, true);
+  assert.equal(refreshed.graph.find((person) => person.name === 'Sam Lee').messages, 2);
+  assert.equal(
+    db.prepare("SELECT built_at FROM people WHERE display_name = 'Alex Still'").get().built_at,
+    alexBuiltAt,
+    'an unrelated person row was not rewritten'
+  );
   assert.equal(Number(projectionState(db).source_revision), Number(projectionState(db).projected_revision));
+  assert.equal(Number(db.prepare('SELECT count(*) AS n FROM people_projection_dirty').get().n), 0);
+});
+
+test('incremental deletion removes a person whose last source row disappeared', () => {
+  const db = openDb(':memory:');
+  const spine = stateDb([{ id: '+15550109', name: 'Delete Me', kind: 'phone', ref: 'card-delete' }]);
+  insertRows(db, {
+    ts: NOW - DAY, source: 'imessage', entity_id: 'i:delete', text: 'temporary',
+    meta: { chat_handle: '+15550109', is_from_me: false },
+  });
+  refreshPeopleProjection(db, spine, { now: NOW, owner: owner() });
+  db.prepare("DELETE FROM context WHERE entity_id = 'i:delete'").run();
+  const refreshed = refreshPeopleProjection(db, spine, { now: NOW, owner: owner() });
+  assert.equal(refreshed.incremental, true);
+  assert.equal(refreshed.graph.length, 0);
+  assert.equal(Number(db.prepare('SELECT count(*) AS n FROM person_event_links').get().n), 0);
 });
 
 test('same-sized owner merge changes invalidate and rewrite canonical membership', () => {

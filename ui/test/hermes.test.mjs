@@ -1234,6 +1234,7 @@ test('purge deletes a source and physically cleans the index, immediately', asyn
     now: Date.now(), owner: { addresses: new Set(), names: [], keys: new Set() },
   });
   assert.ok(Number(admin.db.prepare('SELECT count(*) AS n FROM people').get().n) > 0);
+  assert.ok(Number(admin.db.prepare('SELECT count(*) AS n FROM person_event_links').get().n) > 0);
   assert.equal(ftsHits(admin.db, token), 2);
   const res = await adminPost('/admin/purge', { source: 'granola' });
   assert.equal(res.status, 200);
@@ -1268,6 +1269,7 @@ test('an idempotent purge clears stale derived people even with no raw rows left
     now: Date.now(), owner: { addresses: new Set(), names: [], keys: new Set() },
   });
   assert.ok(Number(admin.db.prepare('SELECT count(*) AS n FROM people').get().n) > 0);
+  assert.ok(Number(admin.db.prepare('SELECT count(*) AS n FROM person_event_links').get().n) > 0);
 
   admin.db.prepare("DELETE FROM context WHERE source = 'instagram'").run();
   assert.ok(Number(admin.db.prepare('SELECT count(*) AS n FROM people').get().n) > 0,
@@ -1277,6 +1279,7 @@ test('an idempotent purge clears stale derived people even with no raw rows left
   assert.equal(res.status, 200);
   assert.equal((await res.json()).deleted, 0);
   assert.equal(Number(admin.db.prepare('SELECT count(*) AS n FROM people').get().n), 0);
+  assert.equal(Number(admin.db.prepare('SELECT count(*) AS n FROM person_event_links').get().n), 0);
 });
 
 test('the dedicated People clear route removes Contacts-derived projection rows', async () => {
@@ -1291,11 +1294,13 @@ test('the dedicated People clear route removes Contacts-derived projection rows'
     now: Date.now(), owner: { addresses: new Set(), names: [], keys: new Set() },
   });
   assert.ok(Number(admin.db.prepare('SELECT count(*) AS n FROM people').get().n) > 0);
+  assert.ok(Number(admin.db.prepare('SELECT count(*) AS n FROM person_event_links').get().n) > 0);
 
   const res = await adminPost('/admin/people/clear', {});
   assert.equal(res.status, 200);
   assert.ok((await res.json()).cleared > 0);
   assert.equal(Number(admin.db.prepare('SELECT count(*) AS n FROM people').get().n), 0);
+  assert.equal(Number(admin.db.prepare('SELECT count(*) AS n FROM person_event_links').get().n), 0);
 });
 
 test('delete-entities requires source and entity_id to match as a pair', async () => {

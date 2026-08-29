@@ -314,7 +314,10 @@ function chatSignalsForRow(row, meta, ts) {
     if (fromMe) return [];
     const sender = meta.sender_handle ?? meta.handle ?? null;
     return sender
-      ? [{ id: sender, channel: row.source, ts, fromMe: false, name: speakerName, room }]
+      ? [{
+          id: sender, channel: row.source, ts, fromMe: false, name: speakerName, room,
+          role: 'speaker', authored: true, ownerAuthored: false,
+        }]
       : [];
   }
   // Apple omits the handle on most outbound one-to-one rows; the thread guid
@@ -324,12 +327,15 @@ function chatSignalsForRow(row, meta, ts) {
   // Never give a counterparty the owner's speaker name on an outbound row.
   const oneToOneName = (!fromMe && speakerName)
     || (namelike(meta.chat_name) ? meta.chat_name : undefined);
-  return [{ id, channel: row.source, ts, fromMe, name: oneToOneName || undefined, room }];
+  return [{
+    id, channel: row.source, ts, fromMe, name: oneToOneName || undefined, room,
+    role: 'counterparty', authored: !fromMe, ownerAuthored: fromMe,
+  }];
 }
 
 // The identifier a row is "about" — the counterparty, never the owner. Returns
 // { id, channel, ts, fromMe, name? } or null for rows with no person.
-function personSignalsForRow(row, meta, owner) {
+export function personSignalsForRow(row, meta, owner) {
   const ts = Number(row.ts);
   switch (row.source) {
     case 'imessage':
@@ -350,18 +356,22 @@ function personSignalsForRow(row, meta, owner) {
       const from = Array.isArray(meta.from) ? meta.from[0] : null;
       const ownerSent = Boolean(from && isOwnerAddress(from, owner));
       const everyone = [
-        ...(Array.isArray(meta.from) ? meta.from : []),
-        ...(Array.isArray(meta.to) ? meta.to : []),
-        ...(Array.isArray(meta.cc) ? meta.cc : []),
+        ...(Array.isArray(meta.from) ? meta.from.map((id) => ({ id, role: 'sender' })) : []),
+        ...(Array.isArray(meta.to) ? meta.to.map((id) => ({ id, role: 'recipient' })) : []),
+        ...(Array.isArray(meta.cc) ? meta.cc.map((id) => ({ id, role: 'cc' })) : []),
       ];
       const seen = new Set();
       const out = [];
-      for (const addr of everyone) {
-        if (typeof addr !== 'string') continue;
-        const id = addr.toLowerCase();
+      for (const participant of everyone) {
+        if (typeof participant.id !== 'string') continue;
+        const id = participant.id.toLowerCase();
         if (isOwnerAddress(id, owner) || seen.has(id)) continue;
         seen.add(id);
-        out.push({ id, channel: 'mail', ts, fromMe: ownerSent });
+        out.push({
+          id, channel: 'mail', ts, fromMe: ownerSent, role: participant.role,
+          authored: participant.role === 'sender' && !ownerSent,
+          ownerAuthored: ownerSent,
+        });
         if (out.length >= 12) break;
       }
       return out;
@@ -369,25 +379,32 @@ function personSignalsForRow(row, meta, owner) {
     case 'calendar': {
       const out = [];
       const seen = new Set();
-      const add = (email, name) => {
+      const add = (email, name, role = 'attendee') => {
         const id = String(email ?? '').toLowerCase();
         if (!id || seen.has(id)) return;
         seen.add(id);
-        out.push({ id, channel: 'calendar', ts, fromMe: false, name: namelike(name) ? name : undefined });
+        out.push({
+          id, channel: 'calendar', ts, fromMe: false, name: namelike(name) ? name : undefined,
+          role, authored: false, ownerAuthored: false,
+        });
       };
-      for (const a of meta.attendees ?? []) add(a?.email, a?.name);
+      for (const a of meta.attendees ?? []) {
+        const response = String(a?.response ?? a?.status ?? '').toLowerCase();
+        add(a?.email, a?.name, response === 'declined' ? 'declined' : 'attendee');
+      }
       // THE ORGANIZER IS A PERSON TOO, and EventKit does not always repeat them
       // in the attendee list. A private development corpus confirmed this could
       // omit the person who called the meeting, making that person the
       // one person it did not record. Deduped against the attendees, because
       // usually they ARE in both.
       const org = meta.organizer;
-      add(typeof org === 'string' ? org : org?.email, typeof org === 'string' ? undefined : org?.name);
+      add(typeof org === 'string' ? org : org?.email, typeof org === 'string' ? undefined : org?.name, 'organizer');
       return out;
     }
     case 'linkedin': {
       if (meta.kind === 'connection') {
         return [{ id: `linkedin:${row.entity_id.split(':').pop()}`, channel: 'linkedin', ts, fromMe: false,
+                  role: 'profile', authored: false, ownerAuthored: false,
                   name: meta.name, linkedin: {
                     position: meta.position,
                     company: meta.company,
@@ -398,7 +415,10 @@ function personSignalsForRow(row, meta, owner) {
       }
       if (meta.kind === 'message') {
         const id = meta.from && !isOwnerName(meta.from, owner) ? `liname:${normName(meta.from)}` : null;
-        return id ? [{ id, channel: 'linkedin', ts, fromMe: false, name: meta.from }] : [];
+        return id ? [{
+          id, channel: 'linkedin', ts, fromMe: false, name: meta.from,
+          role: 'sender', authored: true, ownerAuthored: false,
+        }] : [];
       }
       // No `kind` means this is a Matrix bridge row.
       return chatSignalsForRow(row, meta, ts);
@@ -429,7 +449,10 @@ function personSignalsForRow(row, meta, owner) {
               : null;
         if (!id || seen.has(id)) continue;
         seen.add(id);
-        out.push({ id, channel: 'granola', ts, fromMe: false, name, meetingNote: true });
+        out.push({
+          id, channel: 'granola', ts, fromMe: false, name, meetingNote: true,
+          role: 'participant', authored: false, ownerAuthored: false,
+        });
       }
       return out;
     }
@@ -576,7 +599,7 @@ export function buildGraph(
   contextDb,
   stateDb,
   { now = Date.now(), owner = { addresses: new Set(), names: [], keys: new Set() }, contentSignals = null,
-    sinceTs = null, aliases = null } = {}
+    sinceTs = null, aliases = null, contextIds = null } = {}
 ) {
   const spine = loadSpine(stateDb);
   const connectorFloor = relationshipHistoryFloor(contextDb, now);
@@ -611,17 +634,28 @@ export function buildGraph(
   // A one-arg resolver for the content scan, which knows only the identifier.
   const keyForId2 = (id) => keyForId(id, null);
 
-  const rows = contextDb
-    .prepare(
+  const rowSql = (idCount = 0) =>
       // `speaker` is in this list because it was missing from it, and its
       // absence made the name-recovery below dead code: signalsFor read
       // row.speaker, row.speaker was always undefined, and every WhatsApp
       // name it was written to rescue was discarded silently.
       `SELECT ts, source, speaker, entity_id, meta FROM context ` +
         `WHERE source IN (${RELATIONSHIP_SOURCES.map(() => '?').join(',')})` +
-        (hasLowerBound ? " AND ts >= ?" : "")
-    )
-    .all(...RELATIONSHIP_SOURCES, ...(hasLowerBound ? [lowerBound] : []));
+        (hasLowerBound ? " AND ts >= ?" : "") +
+        (idCount > 0 ? ` AND id IN (${Array.from({ length: idCount }, () => '?').join(',')})` : '');
+  let rows;
+  if (Array.isArray(contextIds)) {
+    const ids = [...new Set(contextIds.map(Number).filter(Number.isFinite))];
+    rows = [];
+    for (let index = 0; index < ids.length; index += 500) {
+      const chunk = ids.slice(index, index + 500);
+      rows.push(...contextDb.prepare(rowSql(chunk.length)).all(
+        ...RELATIONSHIP_SOURCES, ...(hasLowerBound ? [lowerBound] : []), ...chunk
+      ));
+    }
+  } else {
+    rows = contextDb.prepare(rowSql()).all(...RELATIONSHIP_SOURCES, ...(hasLowerBound ? [lowerBound] : []));
+  }
 
   for (const row of rows) {
     let meta = {};
