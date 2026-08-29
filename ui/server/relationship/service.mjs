@@ -37,6 +37,7 @@ import {
 } from '../people/resolve.mjs';
 import { isNonPerson } from '../people/rank.mjs';
 import { renderClaimReceipt } from './receipt.mjs';
+import { createControls } from './controls.mjs';
 import { validToFor, isExpired } from '../memory/validity.mjs';
 import { collectLastSeen, evaluate, STALE_AFTER_MS } from '../status/watchdog.mjs';
 
@@ -59,6 +60,15 @@ export function createRelationshipMemory({ contextDb, stateDb, resolutionsDb = n
 
   const rankStrategies = new Map([['fixed-interval', fixedIntervalBaseline]]);
   const sourceAdapters = new Map();
+
+  // Suppression and mute fold alias keys through the SAME resolutions store
+  // people() uses, so an identity merge widens what a suppression covers and
+  // can never silently clear it -- the plan's exact requirement for the
+  // permanent control.
+  const canonicalOf = (key) => {
+    if (!resolutionsDb) return key;
+    return resolutionState(resolutionsDb).aliases.get(key) ?? key;
+  };
 
   const service = {
     // ---- the canonical people view --------------------------------------
@@ -113,6 +123,9 @@ export function createRelationshipMemory({ contextDb, stateDb, resolutionsDb = n
         },
       };
     },
+
+    // ---- the owner's controls (step 4): one gate, both call sites --------
+    controls: createControls(contextDb, { canonicalOf }),
 
     // ---- receipts: the deterministic renderer (step 3) -------------------
     receiptFor(claimId, opts = {}) {

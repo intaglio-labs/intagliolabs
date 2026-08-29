@@ -655,6 +655,87 @@ WHERE r.scope = 'day'
     ORDER BY r2.created_at DESC, r2.id DESC
     LIMIT 1
   );
+
+/* RELATIONSHIP MEMORY CONTROLS (L5 step 4) -- the owner's "leave me alone"
+   state, built BEFORE anything can generate a suggestion, per the plan's
+   ordering: there must never be a moment where the system can nag and the
+   owner cannot stop it. Operations live in ui/server/relationship/controls.mjs;
+   these tables are here because this database has the one writer, the one
+   deletion story, and the one place owner decisions already live
+   (claim_decision, energy_rating). No version bump: IF NOT EXISTS on a new
+   table needs none, same as energy_rating.
+
+   The 'kind' columns are deliberately UNCHECKED text. The suggestion-kind list is
+   owned by the relationship service and will grow; a CHECK here would demand
+   a v10-style table rebuild per new kind, a cost that migration just taught
+   us. The service validates kinds at its door.
+
+   rm_suppression is the permanent "never this person" control. Row present =
+   suppressed; reversal is a DELETE, offered only from Relationship Memory
+   settings. It is keyed by the person key AS SUPPRESSED, and the service
+   checks it through the alias map -- so an identity merge widens what the
+   suppression covers and can never silently clear it (the plan's exact
+   requirement). No expiry column on purpose: permanent means permanent. */
+CREATE TABLE IF NOT EXISTS rm_suppression(
+  person_key TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS rm_suppression_no_update
+BEFORE UPDATE ON rm_suppression BEGIN
+  SELECT RAISE(ABORT, 'suppression is present or absent: reverse it by DELETE from settings, never by edit');
+END;
+
+/* Temporary mute, three explicit scopes: person (kind NULL), kind
+   (person_key NULL), person-plus-kind (both). The CHECK refuses the fourth
+   shape -- a mute of nothing is a bug, not a global pause; the global pause
+   is the frequency cap's job. Mutes expire by the clock (until_at <= now);
+   expired rows are history, not garbage. */
+CREATE TABLE IF NOT EXISTS rm_mute(
+  id         INTEGER PRIMARY KEY,
+  person_key TEXT,
+  kind       TEXT,
+  until_at   INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  CHECK (person_key IS NOT NULL OR kind IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS rm_mute_until ON rm_mute(until_at);
+CREATE TRIGGER IF NOT EXISTS rm_mute_no_update
+BEFORE UPDATE ON rm_mute BEGIN
+  SELECT RAISE(ABORT, 'a mute is not edited: let it expire, or record a new one with the scope stated');
+END;
+
+/* Card outcome events, append-only: shown / opened / accepted / dismissed /
+   muted / suppressed, by person key, kind, LOCAL time band and rule version.
+   The plan's logging contract -- product events without source text (rule 4
+   binds here too: no text column exists to misuse). 'shown' rows are what the
+   global frequency cap counts; a dismissal's structured reason rides the same
+   event rather than a parallel table, so one query answers "what happened to
+   this card". The experiment does not retune itself from these rows; they are
+   labeled input for a reviewed, versioned threshold change (the plan's exact
+   words). */
+CREATE TABLE IF NOT EXISTS rm_card_event(
+  id           INTEGER PRIMARY KEY,
+  person_key   TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  event        TEXT NOT NULL CHECK (event IN
+                 ('shown','opened','accepted','dismissed','muted','suppressed')),
+  /* Only a dismissal carries a reason, and only one of the five the card
+     offers. One-tap and optional: NULL is "dismissed, no reason given". */
+  reason       TEXT CHECK (reason IS NULL OR (event = 'dismissed' AND reason IN
+                 ('wrong-person','wrong-time','never-this-person','not-this-kind','not-useful'))),
+  rule_version TEXT NOT NULL,
+  time_band    TEXT NOT NULL CHECK (time_band IN ('morning','afternoon','evening','night')),
+  created_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS rm_card_event_shown ON rm_card_event(event, created_at);
+CREATE TRIGGER IF NOT EXISTS rm_card_event_no_update
+BEFORE UPDATE ON rm_card_event BEGIN
+  SELECT RAISE(ABORT, 'card events are append-only: the record of what the owner was shown is not editable');
+END;
+CREATE TRIGGER IF NOT EXISTS rm_card_event_no_delete
+BEFORE DELETE ON rm_card_event BEGIN
+  SELECT RAISE(ABORT, 'card events are append-only: deleting the frequency record is how a cap stops capping');
+END;
 `;
 
 // Bumped only when a migration must run at open. Version history:
