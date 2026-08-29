@@ -12,9 +12,10 @@ import { depthScore, investorIdentity, isNonPerson, reachable } from './rank.mjs
 import { rowPersonId } from './content.mjs';
 
 const DAY = 86_400_000;
+const TRAVEL_INTEREST_MAX_AGE = 3 * 365.25 * DAY;
 
 const PLACE_ALIASES = Object.freeze({
-  'los angeles': Object.freeze({ label: 'Los Angeles', evidence: /\b(?:los angeles|la,?\s+ca(?:lifornia)?)\b/iu }),
+  'los angeles': Object.freeze({ label: 'Los Angeles', evidence: /\b(?:los angeles|la(?:,?\s+ca(?:lifornia)?)?)\b/iu }),
   italy: Object.freeze({ label: 'Italy', evidence: /\bital(?:y|ia|ian)\b/iu }),
 });
 const NUMBER_WORDS = Object.freeze({
@@ -82,14 +83,26 @@ function personIndex(graph) {
   const exact = new Map();
   const loose = new Map();
   const byName = new Map();
+  const ambiguousLoose = new Set();
+  const ambiguousNames = new Set();
   for (const person of graph) {
-    byName.set(norm(person.name), person.key);
+    const name = norm(person.name);
+    if (name) {
+      const prior = byName.get(name);
+      if (prior !== undefined && prior !== person.key) ambiguousNames.add(name);
+      else if (prior === undefined) byName.set(name, person.key);
+    }
     for (const id of person.identifiers ?? []) {
       exact.set(String(id).toLowerCase(), person.key);
       const normalized = normIdentifier(id);
-      if (normalized) loose.set(normalized, person.key);
+      if (!normalized) continue;
+      const prior = loose.get(normalized);
+      if (prior !== undefined && prior !== person.key) ambiguousLoose.add(normalized);
+      else if (prior === undefined) loose.set(normalized, person.key);
     }
   }
+  for (const id of ambiguousLoose) loose.delete(id);
+  for (const name of ambiguousNames) byName.delete(name);
   return {
     keyFor(id) {
       if (typeof id !== 'string' || id.length === 0) return null;
@@ -108,7 +121,11 @@ function rowPersonKeys(row, meta, index, owner) {
     if (key) out.add(key);
   };
   if (row.source === 'calendar') {
-    for (const attendee of meta.attendees ?? []) add(attendee?.email, attendee?.name);
+    for (const attendee of meta.attendees ?? []) {
+      const response = String(attendee?.response ?? attendee?.status ?? '').toLowerCase();
+      if (response === 'declined') continue;
+      add(attendee?.email, attendee?.name);
+    }
     const organizer = meta.organizer;
     add(typeof organizer === 'string' ? organizer : organizer?.email,
       typeof organizer === 'string' ? null : organizer?.name);
@@ -146,15 +163,33 @@ function incomingPersonKey(row, meta, index, owner) {
   return index.keyFor(rowPersonId(row, meta)) ?? index.keyForName(row.speaker);
 }
 
-function corpusRows(contextDb) {
-  return contextDb.prepare(
-    "SELECT id, ts, source, speaker, text, meta, entity_id FROM context " +
-      "WHERE source IN ('imessage','whatsapp','messenger','instagram','twitter'," +
-      "'telegram','discord','slack','mail','calendar','linkedin')"
-  ).all();
+function corpusRows(contextDb, query, owner) {
+  const fields = 'id, ts, source, speaker, text, meta, entity_id';
+  if (query.kind === 'investor_place_time') {
+    return contextDb.prepare(
+      `SELECT ${fields} FROM context WHERE source = 'calendar'` +
+        (query.window ? ' AND ts >= ? AND ts <= ?' : '')
+    ).all(...(query.window ? [query.window.from, query.window.to] : []));
+  }
+  if (query.kind === 'travel_interest') {
+    return contextDb.prepare(
+      `SELECT c.${fields.split(', ').join(', c.')} FROM context_fts ` +
+        'JOIN context c ON c.id = context_fts.rowid ' +
+        'WHERE context_fts MATCH ? AND c.source IN ' +
+        "('imessage','whatsapp','messenger','instagram','twitter','telegram','discord','slack','mail','linkedin')"
+    ).all('"italy" OR "italia"');
+  }
+  const schools = ownerSchools(owner);
+  if (query.kind === 'school_tech' && schools.length > 0) {
+    const schoolClauses = schools.map(() => 'instr(lower(text), lower(?)) > 0').join(' OR ');
+    return contextDb.prepare(
+      `SELECT ${fields} FROM context WHERE source = 'linkedin' OR (${schoolClauses})`
+    ).all(...schools);
+  }
+  return [];
 }
 
-function locationText(meta, row) {
+function locationText(meta) {
   const structured = meta.structured_location ?? meta.structuredLocation ?? {};
   return [
     meta.location,
@@ -162,8 +197,6 @@ function locationText(meta, row) {
     structured.formattedAddress,
     structured.title,
     structured.address,
-    // Older calendar rows may only carry a location in their canonical text.
-    row.text,
   ].filter((value) => typeof value === 'string').join(' ');
 }
 
@@ -190,7 +223,7 @@ function investorPlaceTime(rows, graph, index, query, { limit }) {
     if (!Number.isFinite(ts)) continue;
     if (query.window && (ts < query.window.from || ts > query.window.to)) continue;
     const meta = parseMeta(row.meta);
-    if (!isPhysicalMeeting(meta, row) || !place.evidence.test(locationText(meta, row))) continue;
+    if (!isPhysicalMeeting(meta, row) || !place.evidence.test(locationText(meta))) continue;
     for (const key of rowPersonKeys(row, meta, index, {})) {
       const prior = meetings.get(key);
       if (!prior || Math.abs(ts - (query.window?.from + query.window?.to) / 2) < prior.distance) {
@@ -220,7 +253,7 @@ function investorPlaceTime(rows, graph, index, query, { limit }) {
   });
   return {
     text: `investors you met in ${place.label}${timeNote}:\n${lines.join('\n')}`,
-    sources: ['calendar', ...new Set(matches.flatMap(({ person }) => person.channels))].sort(),
+    sources: [...new Set(['calendar', ...matches.flatMap(({ person }) => person.channels)])].sort(),
     count: matches.length,
   };
 }
@@ -244,16 +277,20 @@ function sameSchoolEvidence(rows, index, schools, owner) {
   const schoolNorms = schools.map((school) => ({ label: school, key: norm(school) })).filter((school) => school.key);
   for (const row of rows) {
     const meta = parseMeta(row.meta);
-    const keys = rowPersonKeys(row, meta, index, owner);
-    if (keys.size === 0) continue;
     for (const school of schoolNorms) {
-      const structured = educationValues(meta).some((value) => norm(value) === school.key);
-      // Prose is accepted only when an affiliation phrase and the exact school
-      // occur together. A bare mention of a school is not attendance evidence.
+      const structured = row.source === 'linkedin' && meta.kind === 'connection'
+        && educationValues(meta).some((value) => norm(value) === school.key);
+      const structuredKeys = structured ? rowPersonKeys(row, meta, index, owner) : new Set();
+      // Prose is accepted only when the person themselves uses a first-person
+      // affiliation phrase alongside the exact school. A bare mention, a CC,
+      // or somebody else's statement is not attendance evidence.
       const text = norm(row.text);
       const prose = text.includes(school.key)
-        && /\b(?:went to|attended|graduated from|class of|alum(?:ni|nus|na)? of|we were at|from)\b/iu.test(row.text ?? '');
+        && /\b(?:i|we)\s+(?:both\s+)?(?:went to|attended|graduated from|were at)\b|\b(?:i(?:'m| am)|we(?:'re| are))\s+(?:an?\s+)?alum(?:ni|nus|na)?\s+of\b/iu.test(row.text ?? '');
       if (!structured && !prose) continue;
+      const proseKey = prose ? incomingPersonKey(row, meta, index, owner) : null;
+      const keys = new Set(structuredKeys);
+      if (proseKey) keys.add(proseKey);
       for (const key of keys) {
         const prior = found.get(key);
         const confidence = structured ? 1 : 0.8;
@@ -268,14 +305,27 @@ function techEmployment(person) {
   const linkedin = person.linkedin ?? {};
   const role = `${linkedin.position ?? ''} ${linkedin.industry ?? ''}`;
   const company = String(linkedin.company ?? '');
-  const roleMatch = /\b(?:software|engineer(?:ing)?|developer|product manager|data scientist|machine learning|artificial intelligence|\bai\b|cybersecurity|devops|cloud|information technology|\bit\b|cto|chief technology|technical)\b/iu.test(role);
-  const companyMatch = /\b(?:software|technolog(?:y|ies)|systems|digital|cloud|\bai\b|labs)\b/iu.test(company)
+  const roleMatch = /\b(?:software|developer|data scientist|machine learning|artificial intelligence|\bai\b|cybersecurity|devops|cloud|information technology|\bit\b|cto|chief technology|technical)\b/iu.test(role);
+  const companyMatch = /\b(?:software|technolog(?:y|ies)|cloud|\bai\b)\b/iu.test(company)
     || /\b(?:software|technology|internet|computer|semiconductor|information technology)\b/iu.test(linkedin.industry ?? '');
   return roleMatch || companyMatch;
 }
 
+function ownerSchools(owner) {
+  const byName = new Map();
+  for (const values of [owner?.highSchools, owner?.schools]) {
+    if (!Array.isArray(values)) continue;
+    for (const value of values) {
+      if (typeof value !== 'string' || !value.trim()) continue;
+      const key = norm(value);
+      if (key && !byName.has(key)) byName.set(key, value.trim());
+    }
+  }
+  return [...byName.values()];
+}
+
 function schoolTech(rows, graph, index, owner, { limit }) {
-  const schools = [...new Set([...(owner?.highSchools ?? []), ...(owner?.schools ?? [])].filter((s) => typeof s === 'string' && s.trim()))];
+  const schools = ownerSchools(owner);
   if (schools.length === 0) {
     return { text: `I don't know which high school is yours yet. Add it to your local owner profile, then ask again.`, sources: [], count: 0 };
   }
@@ -288,9 +338,14 @@ function schoolTech(rows, graph, index, owner, { limit }) {
   if (matches.length === 0) {
     return { text: `I couldn't find anyone from ${schools[0]} with a current tech role in your data.`, sources: [], count: 0 };
   }
-  const lines = matches.map(({ person, school }, i) =>
-    `${i + 1}. ${person.name} — ${person.linkedin.position}${person.linkedin.company ? ` at ${person.linkedin.company}` : ''}; ${school.school}`
-  );
+  const lines = matches.map(({ person, school }, i) => {
+    const role = person.linkedin.position
+      ? `${person.linkedin.position}${person.linkedin.company ? ` at ${person.linkedin.company}` : ''}`
+      : person.linkedin.company
+        ? `works at ${person.linkedin.company}`
+        : 'current tech role';
+    return `${i + 1}. ${person.name} — ${role}; ${school.school}`;
+  });
   return {
     text: `people from your high school who work in tech:\n${lines.join('\n')}`,
     sources: [...new Set(matches.flatMap(({ person, school }) => [school.source, ...person.channels]))].sort(),
@@ -308,14 +363,17 @@ function travelInterest(rows, graph, index, owner, query, { now, limit }) {
     const meta = parseMeta(row.meta);
     const key = incomingPersonKey(row, meta, index, owner);
     if (!key) continue;
+    const ts = Number(row.ts);
+    if (!Number.isFinite(ts) || ts > now || now - ts > TRAVEL_INTEREST_MAX_AGE) continue;
     const positive = ITALY_POSITIVE.test(row.text ?? '');
     const negative = ITALY_NEGATIVE.test(row.text ?? '');
     if (!positive && !negative) continue;
-    const item = evidence.get(key) ?? { positive: null, negative: null, source: row.source };
-    const ts = Number(row.ts);
-    if (positive && (!item.positive || ts > item.positive)) item.positive = ts;
+    const item = evidence.get(key) ?? { positive: null, negative: null, positiveSource: null };
+    if (positive && (!item.positive || ts > item.positive)) {
+      item.positive = ts;
+      item.positiveSource = row.source;
+    }
     if (negative && (!item.negative || ts > item.negative)) item.negative = ts;
-    item.source = row.source;
     evidence.set(key, item);
   }
   const matches = graph
@@ -339,7 +397,7 @@ function travelInterest(rows, graph, index, owner, query, { now, limit }) {
   );
   return {
     text: `people who may be down for Italy — based on what they said, not a commitment:\n${lines.join('\n')}`,
-    sources: [...new Set(matches.map(({ item }) => item.source))].sort(),
+    sources: [...new Set(matches.map(({ item }) => item.positiveSource))].sort(),
     count: matches.length,
   };
 }
@@ -352,9 +410,16 @@ export function answerDeepPeopleSearch(
 ) {
   const query = detectDeepPeopleQuery(question, { now });
   if (query === null) return null;
-  const graph = buildGraph(contextDb, stateDb, { now, owner, contentSignals: CONTENT_SIGNALS });
+  if (query.kind === 'school_tech' && ownerSchools(owner).length === 0) {
+    return { text: `I don't know which high school is yours yet. Add it to your local owner profile, then ask again.`, sources: [], count: 0 };
+  }
+  const graph = buildGraph(contextDb, stateDb, {
+    now,
+    owner,
+    contentSignals: query.kind === 'investor_place_time' ? CONTENT_SIGNALS : null,
+  });
   const index = personIndex(graph);
-  const rows = corpusRows(contextDb);
+  const rows = corpusRows(contextDb, query, owner);
   if (query.kind === 'investor_place_time') return investorPlaceTime(rows, graph, index, query, { limit });
   if (query.kind === 'school_tech') return schoolTech(rows, graph, index, owner, { limit });
   if (query.kind === 'travel_interest') return travelInterest(rows, graph, index, owner, query, { now, limit });

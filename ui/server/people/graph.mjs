@@ -277,10 +277,6 @@ function personSignalsForRow(row, meta, owner) {
                     connected_on: meta.connected_on,
                     email: meta.email,
                     industry: meta.industry,
-                    education: meta.education,
-                    schools: meta.schools,
-                    school: meta.school,
-                    high_school: meta.high_school,
                   } }];
       }
       if (meta.kind === 'message') {

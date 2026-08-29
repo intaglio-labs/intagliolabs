@@ -25,6 +25,7 @@ test('a full config validates', () => {
     selfName: 'Example Owner',
     ownerEmails: ['owner@example.test'],
     ownerPersonKeys: ['id:owner@example.test'],
+    highSchools: ['Lincoln High School'],
     personRoles: { 'name:casey example': 'friend' },
     personRolesByYear: {
       2024: { 'name:casey example': 'business' },
@@ -65,6 +66,8 @@ test('value shapes are enforced: intervals floor, port range, maintainHour forma
   assert.throws(() => validateConfig({ retention: { health: 1.5 } }), /retention\.health/);
   assert.throws(() => validateConfig({ ownerEmails: 'owner@example.test' }), /ownerEmails/);
   assert.throws(() => validateConfig({ ownerPersonKeys: [''] }), /ownerPersonKeys/);
+  assert.throws(() => validateConfig({ highSchools: 'Lincoln High School' }), /highSchools/);
+  assert.throws(() => validateConfig({ highSchools: [''] }), /highSchools/);
   assert.throws(() => validateConfig({ personRoles: [] }), /personRoles/u);
   assert.throws(() => validateConfig({ personRoles: { 'name:casey example': 'coworker' } }), /personRoles/u);
   assert.throws(() => validateConfig({ personRolesByYear: { recent: {} } }), /keys must be years/u);
