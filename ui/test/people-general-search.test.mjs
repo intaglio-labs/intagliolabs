@@ -1,16 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { openDb, insertRows } from '../server/hermes.mjs';
 import {
   answerGeneralPeopleSearch,
+  evaluateGeneralPeopleEvidence,
+  formatGeneralPeopleResult,
+  generalPeopleAnswerCacheInput,
   GENERAL_PEOPLE_PLAN_SCHEMA,
   looksLikeGeneralPeopleQuestion,
   planGeneralPeopleQuestion,
   prepareGeneralPeopleEvidence,
   validateGeneralPeoplePlan,
 } from '../server/people/generalSearch.mjs';
+import { openPeopleSearchCache } from '../server/people/searchCache.mjs';
 
 const NOW = new Date(2027, 0, 1, 12).getTime();
 const DAY = 86_400_000;
@@ -83,6 +90,7 @@ test('general people detection is broad, while the local planner may reject worl
   const out = await planGeneralPeopleQuestion('Who is the president of France?', {
     now: NOW,
     owner: { schools: ['Lincoln High School'], highSchools: ['Lincoln High School'] },
+    ownerMemories: ['Example Owner prefers warm-weather trips.'],
     llama: { baseUrl: 'http://127.0.0.1:51780', apiKey: () => 'a'.repeat(64) },
     fetchFn,
   });
@@ -90,6 +98,8 @@ test('general people detection is broad, while the local planner may reject worl
   assert.deepEqual(request.response_format, { type: 'json_schema', json_schema: GENERAL_PEOPLE_PLAN_SCHEMA });
   assert.match(request.messages[1].content, /president of France/u);
   assert.match(request.messages[1].content, /Lincoln High School/u);
+  assert.match(request.messages[1].content, /prefers warm-weather trips/u);
+  assert.match(request.messages[1].content, /never as evidence about another person/u);
   assert.doesNotMatch(request.messages[1].content, /PERSON p1|EVIDENCE/u, 'planning sees the question, not corpus rows');
 });
 
@@ -108,6 +118,61 @@ test('invalid open-ended plans are rejected before touching retrieval', () => {
     prefer_repeated: true, require_reachable: true, ranking: 'relevance',
   });
   assert.equal(durable.minimumEvidence, 2, 'durable affinity cannot degrade to one item');
+});
+
+test('the planner repairs one invalid schema response', async () => {
+  let calls = 0;
+  const fetchFn = async () => {
+    calls += 1;
+    const content = calls === 1 ? '{}' : JSON.stringify({
+      kind: 'people_search', interpretation: 'people interested in painting',
+      facets: [{ label: 'painting', terms: ['painting'], required: true }],
+      scope: ['messages'], attribution: 'person', from: '', to: '', minimum_evidence: 1,
+      prefer_repeated: false, require_reachable: true, ranking: 'relevance',
+    });
+    return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  const out = await planGeneralPeopleQuestion('Who is interested in painting?', {
+    now: NOW, owner: owner(),
+    llama: { baseUrl: 'http://127.0.0.1:51780', apiKey: () => 'a'.repeat(64) }, fetchFn,
+  });
+  assert.equal(calls, 2);
+  assert.equal(out.kind, 'people_search');
+  assert.equal(out.facets[0].label, 'painting');
+});
+
+test('model cache persistence strips fields outside the closed plan schema', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'people-plan-cache-'));
+  const path = join(root, 'cache.db');
+  const cache = openPeopleSearchCache(path);
+  let calls = 0;
+  try {
+    const fetchFn = async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+        kind: 'people_search', interpretation: 'people interested in painting',
+        facets: [{ label: 'painting', terms: ['painting'], required: true }],
+        scope: ['messages'], attribution: 'person', from: '', to: '', minimum_evidence: 1,
+        prefer_repeated: false, require_reachable: true, ranking: 'relevance',
+        unexpected_private_echo: 'do-not-persist-this-model-echo',
+      }) } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    };
+    const options = {
+      now: NOW, owner: owner(), cache,
+      llama: { baseUrl: 'http://127.0.0.1:51780', apiKey: () => 'a'.repeat(64) }, fetchFn,
+    };
+    const first = await planGeneralPeopleQuestion('Who is interested in painting?', options);
+    const warm = await planGeneralPeopleQuestion('Who is interested in painting?', options);
+    assert.deepEqual(warm, first);
+    assert.equal(calls, 1);
+    cache.close();
+    assert.doesNotMatch(readFileSync(path).toString('utf8'), /do-not-persist-this-model-echo/u);
+  } finally {
+    try { cache?.close(); } catch {}
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('planner cleanup moves time and durability out of lexical facets', async () => {
@@ -131,6 +196,27 @@ test('planner cleanup moves time and durability out of lexical facets', async ()
   assert.deepEqual(out.facets.map((facet) => facet.label), ['role', 'location']);
   assert.equal(new Date(out.from).getFullYear(), 2022);
   assert.equal(new Date(out.to).getFullYear(), 2022);
+});
+
+test('inferred invitations search durable affinity rather than requiring the proposed destination', async () => {
+  const fetchFn = async () => new Response(JSON.stringify({
+    choices: [{ message: { content: JSON.stringify({
+      kind: 'people_search', interpretation: 'people likely to enjoy a proposed trip',
+      facets: [
+        { label: 'travel interest', terms: ['travel', 'trips'], required: true },
+        { label: 'invitation to Greece', terms: ['Greece', 'Athens'], required: true },
+      ],
+      scope: ['messages'], attribution: 'person', from: '', to: '',
+      minimum_evidence: 2, prefer_repeated: true, require_reachable: true, ranking: 'relationship',
+    }) } }],
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  const out = await planGeneralPeopleQuestion('Who should I invite to Greece?', {
+    now: NOW, owner: owner(),
+    llama: { baseUrl: 'http://127.0.0.1:51780', apiKey: () => 'a'.repeat(64) }, fetchFn,
+  });
+  assert.deepEqual(out.facets.map((facet) => facet.label), ['travel interest']);
+  assert.equal(out.preferRepeated, true);
+  assert.equal(out.minimumEvidence, 2);
 });
 
 test('required facets survive noisy partial matches and candidate caps', async () => {
@@ -203,6 +289,62 @@ test('short acronym facets do not substring-match unrelated words', () => {
     preferRepeated: false, requireReachable: false,
   }), { owner: owner(), now: NOW });
   assert.deepEqual(prepared.candidates.map((candidate) => candidate.person.name), ['Real Match']);
+  spine.close();
+  ctx.close();
+});
+
+test('deterministic ranking bounds the model candidate set', () => {
+  const ctx = openDb(':memory:');
+  const contacts = Array.from({ length: 14 }, (_, index) => [
+    `bounded${index}@example.test`, `Bounded Person ${index}`, `bounded-${index}`,
+  ]);
+  const spine = spineDb(contacts);
+  insertRows(ctx, contacts.map(([email], index) => ({
+    ts: NOW - index * DAY, source: 'mail', entity_id: `mail:bounded:${index}`,
+    text: 'I enjoy woodworking projects.',
+    meta: { from: [email], to: ['owner@example.test'], thread_id: `bounded-${index}` },
+  })));
+  const prepared = prepareGeneralPeopleEvidence(ctx, spine, plan({
+    interpretation: 'people interested in woodworking',
+    facets: [{ label: 'woodworking', terms: ['woodworking'], required: true }],
+    minimumEvidence: 1, preferRepeated: false, requireReachable: false,
+  }), { owner: owner(), now: NOW });
+  assert.equal(prepared.candidates.length, 6);
+  spine.close();
+  ctx.close();
+});
+
+test('facet-level judgments must support every required condition', async () => {
+  const ctx = openDb(':memory:');
+  const spine = spineDb([['facet@example.test', 'Facet Person', 'facet-person']]);
+  insertRows(ctx, [
+    {
+      ts: NOW - DAY, source: 'mail', entity_id: 'mail:facet-role', text: 'I am an investor.',
+      meta: { from: ['facet@example.test'], to: ['owner@example.test'], thread_id: 'facet-role' },
+    },
+    {
+      ts: NOW - DAY, source: 'granola', entity_id: 'granola:facet-place', text: 'Meeting in Los Angeles.',
+      meta: { participants: [{ email: 'facet@example.test' }] },
+    },
+  ]);
+  const out = await answerGeneralPeopleSearch(ctx, spine, 'Which investors did I meet in Los Angeles?', {
+    owner: owner(), now: NOW,
+    plan: plan({
+      interpretation: 'investors met in Los Angeles',
+      facets: [
+        { label: 'investor', terms: ['investor'], required: true },
+        { label: 'Los Angeles', terms: ['Los Angeles'], required: true },
+      ],
+      scope: ['messages', 'calendar'], attribution: 'participant', minimumEvidence: 2,
+      preferRepeated: false, requireReachable: false,
+    }),
+    judgments: [{
+      person_id: 'p1', confidence: 0.95, contradicted: false,
+      conditions: [{ condition_id: 'f1', supported: true, evidence_ids: ['e1'] }],
+    }],
+    verifications: [{ person_id: 'p1', supported: true, confidence: 0.95, evidence_ids: ['e1'] }],
+  });
+  assert.equal(out.count, 0);
   spine.close();
   ctx.close();
 });
@@ -366,6 +508,24 @@ test('general retrieval searches structured profile fields', async () => {
   assert.deepEqual(out.sources, ['linkedin']);
 });
 
+test('domain stems match longer profile words without short substring false positives', () => {
+  const ctx = openDb(':memory:');
+  const spine = spineDb([['tech@example.test', 'Example Technologist', 'tech-person']]);
+  insertRows(ctx, {
+    ts: NOW - DAY, source: 'linkedin', entity_id: 'linkedin:tech-prefix', text: 'Example Technologist',
+    meta: { kind: 'connection', name: 'Example Technologist', email: 'tech@example.test' },
+  });
+  const prepared = prepareGeneralPeopleEvidence(ctx, spine, plan({
+    interpretation: 'people in tech',
+    facets: [{ label: 'industry', terms: ['tech'], required: true }],
+    scope: ['profiles'], attribution: 'participant', minimumEvidence: 1,
+    preferRepeated: false, requireReachable: false,
+  }), { owner: owner(), now: NOW });
+  assert.deepEqual(prepared.candidates.map((candidate) => candidate.person.name), ['Example Technologist']);
+  spine.close();
+  ctx.close();
+});
+
 test('a model cannot cite another candidate’s evidence', async () => {
   const ctx = openDb(':memory:');
   const spine = spineDb([
@@ -404,16 +564,13 @@ test('the full open-ended path plans, retrieves, and judges through loopback JSO
     },
     {
       matches: [{
-        person_id: 'p1', confidence: 0.93, signal: 'actively learns cooking and makes pasta',
-        evidence_ids: ['e1'],
-      }],
-    },
-    {
-      verdicts: [{
-        person_id: 'p1', supported: true, confidence: 0.92, evidence_ids: ['e1'],
+        person_id: 'p1', confidence: 0.93, contradicted: false,
+        support: { f1: ['e1'] },
       }],
     },
   ];
+  const cache = openPeopleSearchCache(':memory:');
+  const events = [];
   const fetchFn = async (url, options) => {
     requests.push({ url, options, body: JSON.parse(options.body) });
     return new Response(JSON.stringify({
@@ -423,16 +580,185 @@ test('the full open-ended path plans, retrieves, and judges through loopback JSO
   const out = await answerGeneralPeopleSearch(ctx, spine, 'Which friends are interested in cooking?', {
     owner: owner(), now: NOW,
     llama: { baseUrl: 'http://127.0.0.1:51780', apiKey: () => 'b'.repeat(64) },
-    fetchFn,
+    fetchFn, cache, onStage: (event) => events.push(event),
   });
   assert.equal(out.count, 1);
   assert.match(out.text, /Jamie Cook/u);
-  assert.equal(requests.length, 3);
+  assert.equal(requests.length, 2);
   assert.equal(requests.every((request) => request.url.startsWith('http://127.0.0.1:')), true);
   assert.equal(requests.every((request) => request.options.redirect === 'error'), true);
   assert.deepEqual(requests[0].body.response_format.json_schema, GENERAL_PEOPLE_PLAN_SCHEMA);
   assert.match(requests[1].body.messages[1].content, /PERSON p1: Jamie Cook/u);
+  assert.match(requests[1].body.messages[1].content, /CONDITION f1/u);
   assert.match(requests[1].body.messages[1].content, /person said/u);
+  assert.ok(requests[1].body.response_format.json_schema.schema.properties.matches
+    .items.properties.support.properties.f1);
+
+  const warm = await answerGeneralPeopleSearch(ctx, spine, 'Which friends are interested in cooking?', {
+    owner: owner(), now: NOW,
+    llama: { baseUrl: 'http://127.0.0.1:51780', apiKey: () => 'b'.repeat(64) },
+    fetchFn, cache, onStage: (event) => events.push(event),
+  });
+  assert.deepEqual(warm, out);
+  assert.equal(requests.length, 2, 'the repeated plan and judgment make no model calls');
+  assert.equal(events.filter((event) => event.event === 'cache_hit').length, 2);
+  cache.close();
+  spine.close();
+  ctx.close();
+});
+
+test('the final answer cache invalidates when corpus evidence changes', () => {
+  const ctx = openDb(':memory:');
+  const spine = spineDb([['cache@example.test', 'Cache Person', 'cache-person']]);
+  const searchPlan = plan({
+    interpretation: 'people interested in caching',
+    facets: [{ label: 'caching', terms: ['caching'], required: true }],
+    minimumEvidence: 1, preferRepeated: false,
+  });
+  insertRows(ctx, {
+    ts: NOW - DAY, source: 'mail', entity_id: 'cache:one', text: 'I like caching.',
+    meta: { from: ['cache@example.test'], to: ['owner@example.test'], thread_id: 'cache-one' },
+  });
+  const cache = openPeopleSearchCache(':memory:');
+  const first = generalPeopleAnswerCacheInput(
+    ctx, spine, 'Who likes caching?', searchPlan,
+    { owner: owner(), now: NOW, limit: 10 }
+  );
+  cache.put('answer', first, { text: 'derived answer', sources: [], count: 1, evidence: [] });
+  assert.equal(cache.get('answer', first).count, 1);
+
+  insertRows(ctx, {
+    ts: NOW, source: 'mail', entity_id: 'cache:two', text: 'Caching changed.',
+    meta: { from: ['cache@example.test'], to: ['owner@example.test'], thread_id: 'cache-two' },
+  });
+  const changed = generalPeopleAnswerCacheInput(
+    ctx, spine, 'Who likes caching?', searchPlan,
+    { owner: owner(), now: NOW, limit: 10 }
+  );
+  assert.notEqual(changed.evidenceStamp, first.evidenceStamp);
+  assert.equal(cache.get('answer', changed), null);
+  cache.close();
+  spine.close();
+  ctx.close();
+});
+
+test('the bounded candidate set uses one compact judgment call', async () => {
+  const ctx = openDb(':memory:');
+  const contacts = ['A', 'B', 'C', 'D', 'E'].map((name, index) => [
+    `batch${index}@example.test`, `Batch ${name}`, `batch-${index}`,
+  ]);
+  const spine = spineDb(contacts);
+  insertRows(ctx, contacts.map(([email], index) => ({
+    ts: NOW - index * DAY, source: 'mail', entity_id: `mail:batch:${index}`,
+    text: 'Robotics is an important interest of mine.',
+    meta: { from: [email], to: ['owner@example.test'], thread_id: `batch-${index}` },
+  })));
+  const searchPlan = plan({
+    interpretation: 'people interested in robotics',
+    facets: [{ label: 'robotics', terms: ['robotics'], required: true }],
+    attribution: 'participant', minimumEvidence: 1, preferRepeated: false, requireReachable: false,
+  });
+  const prepared = prepareGeneralPeopleEvidence(ctx, spine, searchPlan, { owner: owner(), now: NOW });
+  const events = [];
+  let calls = 0;
+  const fetchFn = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      matches: [{
+        person_id: 'p5', confidence: 0.9, contradicted: false,
+        conditions: [{ condition_id: 'f1', supported: true, evidence_ids: ['e5'] }],
+      }],
+    }) } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  const matches = await evaluateGeneralPeopleEvidence('Who is interested in robotics?', prepared, {
+    llama: { baseUrl: 'http://127.0.0.1:51780', apiKey: () => 'c'.repeat(64) },
+    fetchFn, onStage: (event) => events.push(event),
+  });
+  const out = formatGeneralPeopleResult(matches, prepared);
+  assert.equal(calls, 1);
+  assert.equal(out.count, 1);
+  assert.match(out.text, /Batch E/u);
+  assert.ok(events.some((event) => event.stage === 'judgment' && event.event === 'complete'));
+  assert.ok(events.some((event) => event.stage === 'verification' && event.event === 'skipped'));
+  spine.close();
+  ctx.close();
+});
+
+test('uncited negative context does not trigger a redundant verifier call', async () => {
+  const ctx = openDb(':memory:');
+  const spine = spineDb([['sail@example.test', 'Sailing Person', 'sailing-person']]);
+  insertRows(ctx, [
+    {
+      ts: NOW - DAY, source: 'mail', entity_id: 'mail:sail:positive', text: 'I love sailing every summer.',
+      meta: { from: ['sail@example.test'], to: ['owner@example.test'], thread_id: 'sail-positive' },
+    },
+    {
+      ts: NOW - 2 * DAY, source: 'mail', entity_id: 'mail:sail:negative', text: 'I do not sail during winter storms.',
+      meta: { from: ['sail@example.test'], to: ['owner@example.test'], thread_id: 'sail-negative' },
+    },
+  ]);
+  const searchPlan = plan({
+    interpretation: 'people interested in sailing',
+    facets: [{ label: 'sailing', terms: ['sailing', 'sail'], required: true }],
+    attribution: 'participant', minimumEvidence: 1, preferRepeated: false, requireReachable: false,
+  });
+  const prepared = prepareGeneralPeopleEvidence(ctx, spine, searchPlan, { owner: owner(), now: NOW });
+  let calls = 0;
+  const events = [];
+  const fetchFn = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      matches: [{
+        person_id: 'p1', confidence: 0.9, contradicted: false,
+        conditions: [{ condition_id: 'f1', supported: true, evidence_ids: ['e1'] }],
+      }],
+    }) } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  const matches = await evaluateGeneralPeopleEvidence('Who enjoys sailing?', prepared, {
+    llama: { baseUrl: 'http://127.0.0.1:51780', apiKey: () => 'd'.repeat(64) },
+    fetchFn, onStage: (event) => events.push(event),
+  });
+  assert.equal(matches.length, 1);
+  assert.equal(calls, 1);
+  assert.ok(events.some((event) => event.stage === 'verification' && event.event === 'skipped'));
+  spine.close();
+  ctx.close();
+});
+
+test('a failed contradiction verifier fails closed without failing the search', async () => {
+  const ctx = openDb(':memory:');
+  const spine = spineDb([['negative@example.test', 'Negative Person', 'negative-person']]);
+  insertRows(ctx, {
+    ts: NOW - DAY, source: 'mail', entity_id: 'mail:negative', text: 'I do not enjoy sailing.',
+    meta: { from: ['negative@example.test'], to: ['owner@example.test'], thread_id: 'negative' },
+  });
+  const searchPlan = plan({
+    interpretation: 'people interested in sailing',
+    facets: [{ label: 'sailing', terms: ['sailing'], required: true }],
+    attribution: 'participant', minimumEvidence: 1, preferRepeated: false, requireReachable: false,
+  });
+  const prepared = prepareGeneralPeopleEvidence(ctx, spine, searchPlan, { owner: owner(), now: NOW });
+  const events = [];
+  let calls = 0;
+  const fetchFn = async () => {
+    calls += 1;
+    if (calls === 2) return new Response('verifier failed', { status: 500 });
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      matches: [{
+        person_id: 'p1', confidence: 0.9, contradicted: false,
+        conditions: [{ condition_id: 'f1', supported: true, evidence_ids: ['e1'] }],
+      }],
+    }) } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  const matches = await evaluateGeneralPeopleEvidence('Who enjoys sailing?', prepared, {
+    llama: { baseUrl: 'http://127.0.0.1:51780', apiKey: () => 'e'.repeat(64) },
+    fetchFn, onStage: (event) => events.push(event),
+  });
+  assert.deepEqual(matches, []);
+  assert.equal(calls, 2);
+  assert.ok(events.some((event) => event.stage === 'verification' && event.event === 'error'));
+  spine.close();
+  ctx.close();
 });
 
 test('general search aggregates evidence across connectors and multiple identifiers', async () => {

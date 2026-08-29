@@ -57,6 +57,7 @@ import {
   prepareGeneralPeopleEvidence,
   evaluateGeneralPeopleEvidence,
   formatGeneralPeopleResult,
+  generalPeopleAnswerCacheInput,
 } from './people/generalSearch.mjs';
 import { loadOwner, markOwnerPerson, markPersonRole } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
@@ -70,6 +71,10 @@ import {
   useTallyStore,
 } from './people/map.mjs';
 import { openTallyStore } from './people/tallyStore.mjs';
+import {
+  clearPeopleSearchCacheStorage,
+  openPeopleSearchCache,
+} from './people/searchCache.mjs';
 import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
@@ -1936,7 +1941,7 @@ export function applyMemoryBatch(db, body) {
   return { run_id: runId, applied, rejected };
 }
 
-async function handleAdmin(db, req, res, cors, url, channel) {
+async function handleAdmin(db, req, res, cors, url, channel, policy) {
   if (channel !== 'bearer') {
     // 403, not 401: the caller IS authenticated (allowlisted Origin) — it is
     // the channel that lacks the capability. The browser channel's Origin gate
@@ -2075,6 +2080,7 @@ async function handleAdmin(db, req, res, cors, url, channel) {
       const body = await readJson(req);
       assertClosedFields(body, MAINTAIN_FIELDS);
       const cleared = Number(db.prepare('SELECT count(*) AS n FROM people').get().n);
+      clearPeopleSearchCacheStorage(policy.peopleSearchCache, policy.peopleSearchCachePath);
       db.exec('BEGIN');
       try {
         clearPeopleProjection(db);
@@ -2095,6 +2101,7 @@ async function handleAdmin(db, req, res, cors, url, channel) {
       if (!Number.isInteger(keepDays) || keepDays < 1 || keepDays > 3650) {
         throw badRequest('"keep_days" must be an integer between 1 and 3650');
       }
+      clearPeopleSearchCacheStorage(policy.peopleSearchCache, policy.peopleSearchCachePath);
       // Routine retention deletes cheaply and leaves the physical cleanup to a
       // scheduled /admin/maintain; only an explicit purge pays for it inline.
       //
@@ -2133,6 +2140,7 @@ async function handleAdmin(db, req, res, cors, url, channel) {
       const body = await readJson(req);
       assertClosedFields(body, PURGE_FIELDS);
       assertKnownSource(body.source);
+      clearPeopleSearchCacheStorage(policy.peopleSearchCache, policy.peopleSearchCachePath);
       let deleted = 0;
       let claimsDeleted = 0;
       db.exec('BEGIN');
@@ -2175,6 +2183,7 @@ async function handleAdmin(db, req, res, cors, url, channel) {
           throw badRequest(`entity_ids[${i}] must be a non-empty string`);
         }
       });
+      clearPeopleSearchCacheStorage(policy.peopleSearchCache, policy.peopleSearchCachePath);
       // Source AND entity_id must both match. Ids are namespaced by convention
       // only ("imessage:<guid>"), not by constraint — requiring the pair means
       // a connector with a crossed-up id list cannot delete another source's
@@ -2676,16 +2685,41 @@ function tryPersonSearch(db, question) {
 // compiler and evidence judge. The state/resolution handles are held only for
 // the synchronous projection + retrieval phase; no connector database stays
 // open while the single-slot model is generating.
-async function tryGeneralPeopleSearch(db, question, llama, { signal = null } = {}) {
+async function tryGeneralPeopleSearch(
+  db,
+  question,
+  llama,
+  { signal = null, cache = null, onStage = null } = {}
+) {
+  const now = Date.now();
+  const cacheGeneration = cache?.generation?.();
   const owner = loadOwner();
-  const plan = await planGeneralPeopleQuestion(question, { llama, signal, owner });
+  const recalled = recallClaims(db, { match: ftsQuery(question), limit: 6 });
+  const ownerMemories = recalled.matched > 0
+    ? recalled.claims.map((claim) => claim.text).filter(Boolean)
+    : [];
+  const plan = await planGeneralPeopleQuestion(question, {
+    llama, signal, owner, ownerMemories, cache, onStage, now,
+  });
   if (plan === null || plan.kind === 'not_people_search') return null;
   let prepared;
+  let answerCacheInput = null;
+  let cachedAnswer = null;
   try {
     prepared = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
+      if (cache) {
+        answerCacheInput = generalPeopleAnswerCacheInput(db, state, question, plan, {
+          owner, aliases, now, limit: 10, model: llama.model ?? llama.baseUrl,
+        });
+        cachedAnswer = cache.get('answer', answerCacheInput);
+        try {
+          onStage?.({ stage: 'answer', event: cachedAnswer === null ? 'cache_miss' : 'cache_hit' });
+        } catch {}
+        if (cachedAnswer !== null) return null;
+      }
       return prepareGeneralPeopleEvidence(db, state, plan, {
-        owner, aliases,
+        owner, aliases, now,
       });
     });
   } catch {
@@ -2694,10 +2728,13 @@ async function tryGeneralPeopleSearch(db, question, llama, { signal = null } = {
       sources: [], count: 0,
     };
   }
+  if (cachedAnswer !== null) return cachedAnswer;
   const matches = await evaluateGeneralPeopleEvidence(question, prepared, {
-    llama, signal, limit: 10,
+    llama, signal, limit: 10, cache, onStage,
   });
-  return formatGeneralPeopleResult(matches, prepared);
+  const result = formatGeneralPeopleResult(matches, prepared);
+  if (answerCacheInput) cache.put('answer', answerCacheInput, result, cacheGeneration);
+  return result;
 }
 
 function preferDeterministicRelationshipSearch(question) {
@@ -2872,6 +2909,7 @@ async function handleVaultAsk(db, req, res, cors, policy) {
   let generalPerson;
   try {
     generalPerson = await tryGeneralPeopleSearch(db, question, policy.llama, {
+      cache: policy.peopleSearchCache,
       signal: AbortSignal.any([
         peopleController.signal,
         AbortSignal.timeout(policy.askTimeoutMs ?? ASK_TIMEOUT_MS),
@@ -3084,7 +3122,7 @@ function handle(db, req, res, cors, url, policy) {
   // — a browser probing /admin/anything learns "not your channel", not a route
   // map.
   if (url.pathname.startsWith('/admin/')) {
-    return handleAdmin(db, req, res, cors, url, channel);
+    return handleAdmin(db, req, res, cors, url, channel, policy);
   }
 
   if (req.method === 'POST' && url.pathname === '/ingest') {
@@ -3503,6 +3541,14 @@ export async function start({
     ? askTimeoutMs
     : ASK_TIMEOUT_MS;
   const db = openDb(dbPath ?? process.env.HERMES_DB ?? DEFAULT_DB_PATH);
+  // The cache is derived and rebuildable, so keep it beside the exact corpus
+  // handle it accelerates. In-memory test databases get no implicit disk
+  // writes. The store persists only hashed inputs and constrained outputs.
+  const databaseFile = db.prepare('PRAGMA database_list').get()?.file ?? '';
+  const peopleSearchCachePath = databaseFile ? `${databaseFile}.people-search-cache` : null;
+  const peopleSearchCache = peopleSearchCachePath
+    ? openPeopleSearchCache(peopleSearchCachePath)
+    : null;
 
   const server = createServer(async (req, res) => {
     const cors = corsHeaders(req, allowedOriginSet);
@@ -3529,6 +3575,8 @@ export async function start({
         allowedOrigins: allowedOriginSet,
         bearerToken,
         llama,
+        peopleSearchCache,
+        peopleSearchCachePath,
       });
     } catch (e) {
       send(res, e.status ?? 500, { error: e.message ?? String(e) }, cors);
@@ -3545,6 +3593,7 @@ export async function start({
         close: () =>
           new Promise((done, fail) => {
             server.close((err) => {
+              peopleSearchCache?.close();
               db.close();
               err ? fail(err) : done();
             });

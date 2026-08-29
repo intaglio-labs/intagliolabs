@@ -28,6 +28,7 @@ import {
   answerGeneralPeopleSearch,
   evaluateGeneralPeopleEvidence,
   formatGeneralPeopleResult,
+  generalPeopleAnswerCacheInput,
   looksLikeGeneralPeopleQuestion,
   planGeneralPeopleQuestion,
   prepareGeneralPeopleEvidence,
@@ -37,6 +38,7 @@ import { detectPersonSearch } from '../../server/people/search.mjs';
 import { loadOwner } from '../../server/people/owner.mjs';
 import { resolutionsDbPath } from '../../server/people/init.mjs';
 import { resolutionState } from '../../server/people/resolve.mjs';
+import { openPeopleSearchCache } from '../../server/people/searchCache.mjs';
 import { recallClaims } from '../../server/memory/retrieve.mjs';
 import { assertAggregatePrivateMetrics } from './privacy.mjs';
 
@@ -413,6 +415,11 @@ async function runPrivateShadow(llama) {
     execution_errors: 0, candidates: 0, verified_matches: 0,
     memory_errors: 0, planning_errors: 0, retrieval_errors: 0, verification_errors: 0,
     elapsed_ms: 0,
+    judgment_batches: 0, verification_batches: 0, batch_errors: 0,
+    planning_ms: 0, judgment_ms: 0, verification_ms: 0,
+    model_calls: 0, prompt_tokens: 0, completion_tokens: 0,
+    cache_hits: 0, cache_misses: 0, warm_cache_hits: 0,
+    warm_model_calls: 0, warm_cache_ms: 0, cache_consistency_violations: 0,
     privacy_violations: 0, identity_confidence_violations: 0,
     person_attribution_owner_evidence_violations: 0,
     memory_queries_with_lexical_hits: 0, memory_store_available: false,
@@ -426,6 +433,32 @@ async function runPrivateShadow(llama) {
     : null;
   const aliases = resolutions ? resolutionState(resolutions).aliases : null;
   const profile = loadOwner();
+  const cache = openPeopleSearchCache(':memory:');
+  const recordStage = (event, { warm = false } = {}) => {
+    if (event.event === 'cache_hit') {
+      if (warm) metrics.warm_cache_hits += 1;
+      else metrics.cache_hits += 1;
+    } else if (event.event === 'cache_miss' && !warm) {
+      metrics.cache_misses += 1;
+    } else if (event.event === 'model_complete') {
+      if (warm) metrics.warm_model_calls += 1;
+      else {
+        metrics.model_calls += 1;
+        metrics.prompt_tokens += Number(event.promptTokens ?? 0);
+        metrics.completion_tokens += Number(event.completionTokens ?? 0);
+      }
+    } else if (!warm && event.stage === 'planning' && event.event === 'complete') {
+      metrics.planning_ms += Number(event.elapsedMs ?? 0);
+    } else if (!warm && event.stage === 'judgment' && event.event === 'complete') {
+      metrics.judgment_batches += 1;
+      metrics.judgment_ms += Number(event.elapsedMs ?? 0);
+    } else if (!warm && event.stage === 'verification' && event.event === 'complete') {
+      metrics.verification_batches += 1;
+      metrics.verification_ms += Number(event.elapsedMs ?? 0);
+    } else if (!warm && event.event === 'error') {
+      metrics.batch_errors += 1;
+    }
+  };
   metrics.memory_store_available = Number(
     contextDb.prepare('SELECT count(*) AS n FROM v_claim_accepted').get().n
   ) > 0;
@@ -433,11 +466,13 @@ async function runPrivateShadow(llama) {
     for (const question of PRIVATE_QUESTIONS) {
       let stage = 'memory';
       try {
+        const queryNow = Date.now();
         const recalled = recallClaims(contextDb, { match: ftsQuery(question), now: Date.now() });
         if (recalled.matched > 0) metrics.memory_queries_with_lexical_hits += 1;
         stage = 'planning';
         const searchPlan = await planGeneralPeopleQuestion(question, {
-          llama, now: Date.now(), owner: profile,
+          llama, now: queryNow, owner: profile, cache,
+          onStage: (event) => recordStage(event),
         });
         if (!searchPlan || searchPlan.kind !== 'people_search') {
           metrics.abstained += 1;
@@ -446,7 +481,7 @@ async function runPrivateShadow(llama) {
         metrics.planned += 1;
         stage = 'retrieval';
         const prepared = prepareGeneralPeopleEvidence(contextDb, state, searchPlan, {
-          owner: profile, aliases, now: Date.now(),
+          owner: profile, aliases, now: queryNow,
         });
         metrics.candidates += prepared.candidates.length;
         if (prepared.candidates.length === 0) {
@@ -454,7 +489,9 @@ async function runPrivateShadow(llama) {
           continue;
         }
         stage = 'verification';
-        const matches = await evaluateGeneralPeopleEvidence(question, prepared, { llama, limit: 10 });
+        const matches = await evaluateGeneralPeopleEvidence(question, prepared, {
+          llama, limit: 10, cache, onStage: (event) => recordStage(event),
+        });
         metrics.verified_matches += matches.length;
         if (matches.length === 0) metrics.abstained += 1;
         else metrics.answered += 1;
@@ -467,12 +504,29 @@ async function runPrivateShadow(llama) {
           if (match.confidence > identityFloor) metrics.identity_confidence_violations += 1;
           if (copiedFromRows(JSON.stringify(result), match.cited)) metrics.privacy_violations += 1;
         }
+
+        // The low-level eval path has just produced the same validated result
+        // the production wrapper stores. Seed that final derived entry, then
+        // replay the complete production wrapper. Only aggregate latency/hit
+        // counts and output cardinality survive.
+        cache.put('answer', generalPeopleAnswerCacheInput(
+          contextDb, state, question, searchPlan,
+          { owner: profile, aliases, now: queryNow, limit: 10, model: llama.model ?? llama.baseUrl }
+        ), result);
+        const warmStartedAt = Date.now();
+        const warmResult = await answerGeneralPeopleSearch(contextDb, state, question, {
+          llama, limit: 10, cache, owner: profile, aliases, now: queryNow,
+          onStage: (event) => recordStage(event, { warm: true }),
+        });
+        metrics.warm_cache_ms += Date.now() - warmStartedAt;
+        if (warmResult?.count !== result.count) metrics.cache_consistency_violations += 1;
       } catch {
         metrics.execution_errors += 1;
         metrics[`${stage}_errors`] += 1;
       }
     }
   } finally {
+    cache?.close();
     try { resolutions?.close(); } catch {}
     try { state?.close(); } catch {}
     contextDb.close();
@@ -509,7 +563,10 @@ async function main() {
   }
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   const invariantsOk = invariantPassed === Object.keys(checks).length;
-  if (!invariantsOk || gold.passed !== gold.total || report.private_shadow?.execution_errors > 0) {
+  if (!invariantsOk || gold.passed !== gold.total
+      || report.private_shadow?.execution_errors > 0 || report.private_shadow?.batch_errors > 0
+      || report.private_shadow?.warm_model_calls > 0
+      || report.private_shadow?.cache_consistency_violations > 0) {
     process.exitCode = 1;
   }
 }
