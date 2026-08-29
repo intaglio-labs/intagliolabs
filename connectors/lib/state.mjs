@@ -1,5 +1,5 @@
 // The connectors' own local state: cursors (high-water marks per source),
-// the contact identifier→name map, the quarantine list of iMessage rows the
+// the contact identifier→person membership/name map, the quarantine list of iMessage rows the
 // typedstream decoder could not handle, and the run log. NONE of this is
 // corpus — corpus rows live in context.db behind hermes — but cursors and
 // contact names are still household-private, so the file gets the same
@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS contact_ids(
   identifier   TEXT PRIMARY KEY,  /* E.164 phone or lowercased email */
   display_name TEXT NOT NULL,
   kind         TEXT NOT NULL,     /* 'phone' | 'email' */
+  /* Opaque stable membership of one Address Book card. Every phone and email
+     on that card shares this value, so identity resolution does not have to
+     pretend that an exact display-name match is a person id. NULL for weaker
+     sources such as an unnamed calendar attendee. */
+  person_ref   TEXT,
   /* WHERE THE NAME CAME FROM, because more than one place knows names and they
      do not rank equally. 'contacts' is the address book -- a name the owner
      chose. 'calendar' is an event attendee: a real name, but one an invite
@@ -138,6 +143,9 @@ export function openStateDb(path = defaultStateDbPath()) {
     if (!contactCols.has('source')) {
       db.exec("ALTER TABLE contact_ids ADD COLUMN source TEXT NOT NULL DEFAULT 'contacts'");
     }
+    if (!contactCols.has('person_ref')) {
+      db.exec('ALTER TABLE contact_ids ADD COLUMN person_ref TEXT');
+    }
     chmodSync(path, 0o600);
   } catch (error) {
     try {
@@ -170,10 +178,12 @@ export function openStateDb(path = defaultStateDbPath()) {
   // A 'contacts' write always lands. A 'calendar' write lands only where no
   // contacts row already holds that identifier.
   const upsertContactStmt = db.prepare(
-    'INSERT INTO contact_ids(identifier, display_name, kind, source, updated_ts) ' +
-      'VALUES (?, ?, ?, ?, ?) ' +
+    'INSERT INTO contact_ids(identifier, display_name, kind, person_ref, source, updated_ts) ' +
+      'VALUES (?, ?, ?, ?, ?, ?) ' +
       'ON CONFLICT(identifier) DO UPDATE SET display_name = excluded.display_name, ' +
-      'kind = excluded.kind, source = excluded.source, updated_ts = excluded.updated_ts ' +
+      'kind = excluded.kind, person_ref = CASE WHEN excluded.source = \'contacts\' ' +
+      'THEN COALESCE(excluded.person_ref, contact_ids.person_ref) ELSE contact_ids.person_ref END, ' +
+      'source = excluded.source, updated_ts = excluded.updated_ts ' +
       "WHERE excluded.source = 'contacts' OR contact_ids.source != 'contacts'"
   );
   const upsertAvatarStmt = db.prepare(
@@ -183,6 +193,29 @@ export function openStateDb(path = defaultStateDbPath()) {
   const resolveStmt = db.prepare(
     'SELECT display_name, kind FROM contact_ids WHERE identifier = ?'
   );
+
+  function validateContacts(contacts) {
+    const list = Array.isArray(contacts) ? contacts : [contacts];
+    for (const [i, c] of list.entries()) {
+      if (c === null || typeof c !== 'object') throw new Error(`contacts[${i}]: not an object`);
+      if (typeof c.identifier !== 'string' || c.identifier.length === 0) {
+        throw new Error(`contacts[${i}]: missing "identifier" string`);
+      }
+      if (typeof c.displayName !== 'string' || c.displayName.length === 0) {
+        throw new Error(`contacts[${i}]: missing "displayName" string`);
+      }
+      if (!CONTACT_KINDS.includes(c.kind)) {
+        throw new Error(`contacts[${i}]: "kind" must be one of ${CONTACT_KINDS.join(', ')}`);
+      }
+      if (c.personRef !== undefined && (typeof c.personRef !== 'string' || c.personRef.length === 0 || c.personRef.length > 200)) {
+        throw new Error(`contacts[${i}]: "personRef" must be a non-empty string of at most 200 characters`);
+      }
+      if (c.source !== undefined && !CONTACT_SOURCES.includes(c.source)) {
+        throw new Error(`contacts[${i}]: "source" must be one of ${CONTACT_SOURCES.join(', ')}`);
+      }
+    }
+    return list;
+  }
 
   return {
     db,
@@ -261,7 +294,8 @@ export function openStateDb(path = defaultStateDbPath()) {
     },
 
     // Contacts are RESOLUTION STATE, never corpus: identifier → display name
-    // so the iMessage and mail sources can label rows with a human name.
+    // plus stable Address Book card membership, so iMessage, mail, and meeting
+    // sources can aggregate all of one person's exact identifiers.
     // Names come from the AddressBook store (a human typed them), which is
     // the sanctioned side of the no-voiceprints line.
     /**
@@ -298,26 +332,35 @@ export function openStateDb(path = defaultStateDbPath()) {
     },
 
     upsertContacts(contacts, now = Date.now()) {
-      const list = Array.isArray(contacts) ? contacts : [contacts];
-      for (const [i, c] of list.entries()) {
-        if (c === null || typeof c !== 'object') throw new Error(`contacts[${i}]: not an object`);
-        if (typeof c.identifier !== 'string' || c.identifier.length === 0) {
-          throw new Error(`contacts[${i}]: missing "identifier" string`);
-        }
-        if (typeof c.displayName !== 'string' || c.displayName.length === 0) {
-          throw new Error(`contacts[${i}]: missing "displayName" string`);
-        }
-        if (!CONTACT_KINDS.includes(c.kind)) {
-          throw new Error(`contacts[${i}]: "kind" must be one of ${CONTACT_KINDS.join(', ')}`);
-        }
-        if (c.source !== undefined && !CONTACT_SOURCES.includes(c.source)) {
-          throw new Error(`contacts[${i}]: "source" must be one of ${CONTACT_SOURCES.join(', ')}`);
-        }
-      }
+      const list = validateContacts(contacts);
       db.exec('BEGIN');
       try {
         for (const c of list)
-          upsertContactStmt.run(c.identifier, c.displayName, c.kind, c.source ?? 'contacts', now);
+          upsertContactStmt.run(c.identifier, c.displayName, c.kind, c.personRef ?? null, c.source ?? 'contacts', now);
+        db.exec('COMMIT');
+      } catch (e) {
+        db.exec('ROLLBACK');
+        throw e;
+      }
+      return list.length;
+    },
+
+    // A full Contacts read is a snapshot, not an event stream. Replacing only
+    // the address-book-owned rows makes removed emails stop resolving to their
+    // former card. Calendar-owned fallback names are left intact. Callers must
+    // use upsertContacts for limited-access or partial reads, where absence is
+    // not evidence that the owner removed an identifier.
+    replaceContacts(contacts, now = Date.now()) {
+      const list = validateContacts(contacts);
+      if (list.some((c) => c.source !== undefined && c.source !== 'contacts')) {
+        throw new Error('replaceContacts accepts only address-book contacts');
+      }
+      db.exec('BEGIN');
+      try {
+        db.exec("DELETE FROM contact_ids WHERE source = 'contacts'");
+        for (const c of list) {
+          upsertContactStmt.run(c.identifier, c.displayName, c.kind, c.personRef ?? null, 'contacts', now);
+        }
         db.exec('COMMIT');
       } catch (e) {
         db.exec('ROLLBACK');

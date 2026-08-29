@@ -84,16 +84,35 @@ const nonEmptyString = (v) => (typeof v === 'string' && v.length > 0 ? v : null)
 // order in hermes' content hash, and an unsorted list would read as an edit
 // on every delivery (ops/INGESTION.md). The same sorted list feeds both the
 // row text and meta so the two can never disagree.
-export function extractAttendees(detail) {
+export function extractParticipants(detail) {
   const raw = detail?.attendees ?? detail?.people ?? [];
   if (!Array.isArray(raw)) return [];
-  const names = [];
+  const participants = [];
   for (const a of raw) {
-    const name =
-      typeof a === 'string' ? a : (nonEmptyString(a?.name) ?? nonEmptyString(a?.email) ?? null);
-    if (name) names.push(name);
+    const name = typeof a === 'string' && !a.includes('@') ? a : nonEmptyString(a?.name);
+    const email = typeof a === 'string' && a.includes('@')
+      ? a.trim().toLowerCase()
+      : nonEmptyString(a?.email)?.trim().toLowerCase();
+    const id = typeof a === 'object' && a !== null
+      ? (nonEmptyString(a?.id) ?? nonEmptyString(a?.user_id) ?? nonEmptyString(a?.person_id))
+      : null;
+    if (!name && !email && !id) continue;
+    participants.push({
+      ...(name ? { name } : {}),
+      ...(email ? { email } : {}),
+      ...(id ? { id } : {}),
+    });
   }
-  return names.sort();
+  return participants.sort((a, b) =>
+    String(a.email ?? a.name ?? a.id).localeCompare(String(b.email ?? b.name ?? b.id))
+  );
+}
+
+export function extractAttendees(detail) {
+  return extractParticipants(detail)
+    .map((participant) => participant.name ?? participant.email ?? participant.id)
+    .filter(Boolean)
+    .sort();
 }
 
 // The note detail's field names beyond {summary_markdown, attendees} are not
@@ -145,7 +164,8 @@ export function noteStartMs(detail, listNote) {
 export function buildNoteRow(detail, listNote) {
   const id = listNote.id;
   const title = nonEmptyString(detail?.title) ?? nonEmptyString(listNote?.title);
-  const attendees = extractAttendees(detail);
+  const participants = extractParticipants(detail);
+  const attendees = participants.map((participant) => participant.name ?? participant.email ?? participant.id).filter(Boolean).sort();
   const summary = nonEmptyString(detail?.summary_markdown) ?? nonEmptyString(detail?.summary) ?? '';
   const parts = [];
   if (title) parts.push(title);
@@ -164,6 +184,7 @@ export function buildNoteRow(detail, listNote) {
       updated_at: nonEmptyString(detail?.updated_at) ?? nonEmptyString(listNote?.updated_at),
       folder: extractFolder(detail),
       attendees,
+      participants,
       calendar_event_id: extractCalendarEventId(detail),
     },
   };

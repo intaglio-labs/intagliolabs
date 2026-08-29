@@ -23,6 +23,16 @@ test('one contact fans out to one entry per number and address', () => {
   assert.equal(entries.length, 3);
   assert.deepEqual(entries.map((e) => e.kind), ['phone', 'phone', 'email']);
   assert.equal(entries[2].identifier, normalizeEmail('a@example.com'));
+  assert.equal(new Set(entries.map((entry) => entry.personRef)).size, 1, 'one card has one stable person ref');
+});
+
+test('two cards with the same display name remain distinct identities', () => {
+  const entries = entriesFromContacts([
+    { contactId: 'card-a', displayName: 'Alex Kim', phones: ['555-0100'], emails: [] },
+    { contactId: 'card-b', displayName: 'Alex Kim', phones: ['555-0101'], emails: [] },
+  ]);
+  assert.equal(entries.length, 2);
+  assert.notEqual(entries[0].personRef, entries[1].personRef);
 });
 
 test('a contact with no name carries no identity and is dropped', () => {

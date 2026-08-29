@@ -17,7 +17,8 @@
 // question the episodic shelf already answers well, and hijacking it would
 // make the surface worse, not better.
 
-import { buildGraph, CONTENT_SIGNALS } from './graph.mjs';
+import { CONTENT_SIGNALS } from './graph.mjs';
+import { materializedPeopleGraph } from './projection.mjs';
 import { rankForNeed, MENTOR_NEED, INVESTOR_NEED, evidenceLine } from './rank.mjs';
 import { groupByFirm, warmthLabel } from './firms.mjs';
 import { warmIntro } from './intros.mjs';
@@ -65,9 +66,14 @@ export function detectEraWindow(question, { now = Date.now() } = {}) {
     const y = yr(m[1]);
     return { fromYm: `${y}-01`, toYm: `${y}-12` };
   }
-  m = q.match(/\b(\d{1,2})\s*years?\s+(?:ago|back)\b/u);
+  m = q.match(/\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s*years?\s+(?:ago|back)\b/u);
   if (m) {
-    const y = thisYear - Number(m[1]);
+    const words = new Map([
+      ['one', 1], ['two', 2], ['three', 3], ['four', 4], ['five', 5],
+      ['six', 6], ['seven', 7], ['eight', 8], ['nine', 9], ['ten', 10],
+    ]);
+    const years = words.get(m[1]) ?? Number(m[1]);
+    const y = thisYear - years;
     return { fromYm: `${y}-01`, toYm: `${y}-12` };
   }
   return null;
@@ -90,7 +96,7 @@ export function detectPersonSearch(question) {
   const q = String(question ?? '').toLowerCase();
   const investor = /\b(investor|investors|\bvc\b|\bvcs\b|angel|angels|fundrais\w*|raising|raise money|check size|back my|backed me)\b/u.test(q);
   const mentor = /\b(mentor|mentors|advisor|advisors|advice from|guidance)\b/u.test(q);
-  const reconnect = /\b(reconnect|lost touch|fallen out of touch|reach out to|reach back|who should i|who have i dropped|dropped the ball|introduce me|intro me|who do i know)\b/u.test(q);
+  const reconnect = /\b(reconnect|lost touch|fallen out of touch|reach back|who have i dropped|dropped the ball)\b/u.test(q);
   // investor/mentor are ROLES — a person by definition — so they need no
   // extra "people" word ("which vcs did i pitch" is a person-search). Only
   // the generic reconnect case needs the people guard, so "reconnect the
@@ -140,13 +146,13 @@ export function answerPersonSearch(
   contextDb,
   stateDb,
   question,
-  { owner, now = Date.now(), limit = 50 } = {}
+  { owner, aliases = null, now = Date.now(), limit = 50 } = {}
 ) {
   // Warm-intro is checked first: it already names a target and wants the path
   // to them, which is a different question from "who fits a need".
   const introTarget = detectIntro(question);
   if (introTarget !== null) {
-    const graph = buildGraph(contextDb, stateDb, { now, owner, contentSignals: CONTENT_SIGNALS });
+    const graph = materializedPeopleGraph(contextDb, stateDb, { now, owner, aliases, contentSignals: CONTENT_SIGNALS });
     const res = warmIntro(contextDb, graph, introTarget, { owner, limit });
     if (!res.found) return { text: res.reason, sources: [], count: 0 };
     if (res.alreadyWarm) {
@@ -181,9 +187,10 @@ export function answerPersonSearch(
     : intent.need;
   const eraNote = era ? ` (${eraSpanNote(era)})` : '';
 
-  const graph = buildGraph(contextDb, stateDb, {
+  const graph = materializedPeopleGraph(contextDb, stateDb, {
     now,
     owner,
+    aliases,
     contentSignals: need.contentSignal ? CONTENT_SIGNALS : null,
   });
   const ranked = rankForNeed(graph, need, { limit });

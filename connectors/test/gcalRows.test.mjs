@@ -104,6 +104,13 @@ test('an untitled event and an untitled calendar still render', () => {
   assert.equal(row.meta.calendar, '(untitled calendar)');
 });
 
+test('a physical event location survives into canonical metadata', () => {
+  const row = eventToRow(timed('2026-08-13T09:00:00Z', '2026-08-13T10:00:00Z', {
+    location: ' Los Angeles, CA ',
+  }), { calendarTitle: 'Travel' });
+  assert.equal(row.meta.location, 'Los Angeles, CA');
+});
+
 // --- meta.attendees is a SET, so its order must not carry information -------
 // No test looked at meta.attendees at all until 2026-08-22, which is how the
 // missing sort survived: hermes canonicalizes object key order for the content

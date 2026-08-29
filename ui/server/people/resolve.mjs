@@ -23,6 +23,8 @@
 // question, never an answer. Nothing in this file merges two people the owner
 // has not explicitly said are the same.
 
+import { createHash } from 'node:crypto';
+
 // Same normalizer the graph uses, so keys line up across modules.
 function normName(s) {
   return String(s ?? '')
@@ -128,6 +130,14 @@ export function resolutionState(db) {
   const decided = new Set(differentPairs);
   for (const [a, b] of same) decided.add(pairId(a, b));
   return { aliases, decided, differentPairs };
+}
+
+// Cache identity must depend on WHICH keys were merged, not merely how many.
+// Hashing also keeps private identifiers out of cache stamps and logs.
+export function resolutionFingerprint(aliases = null) {
+  const rows = [...(aliases ?? new Map()).entries()]
+    .sort(([ak, av], [bk, bv]) => ak.localeCompare(bk) || av.localeCompare(bv));
+  return createHash('sha256').update(JSON.stringify(rows)).digest('hex');
 }
 
 // ---------------------------------------------------------------------------

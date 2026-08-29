@@ -239,6 +239,16 @@ export async function adminPurge({ source }, opts) {
   return expectOk(res, '/admin/purge'); // {deleted, claims_deleted, maintained}
 }
 
+// Contacts has no corpus source of its own, but its identifiers and names can
+// be present in Hermes' rebuildable People projection. Its explicit purge uses
+// this route so deleting connector state cannot leave that derived copy behind.
+export async function adminClearPeopleProjection(opts) {
+  const ctx = requireOpts(opts);
+  const token = readHermesTokenFile(ctx.tokenFile);
+  const res = await request(ctx, 'POST', '/admin/people/clear', token, {});
+  return expectOk(res, '/admin/people/clear'); // {cleared}
+}
+
 // Hermes accepts 1–500 ids per call; this wrapper chunks a larger list so a
 // reconciler can hand over one diff without knowing the transport cap, and
 // sums the deleted counts. Deleting an already-deleted id deletes zero rows,
