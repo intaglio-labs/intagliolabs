@@ -47,10 +47,13 @@ export function calendarReconnectAdapter({ minMeetings = 3, dormancyDays = 120, 
       // display names stay eligible (the owner graded several useful in
       // Phase 0) but keep their email as the honest display.
       const byEmail = new Map();
+      const namedKeys = new Set(); // normName keys the owner actually named
       for (const r of stateDb.prepare('SELECT identifier, display_name FROM contact_ids').all()) {
         const id = String(r.identifier).toLowerCase();
+        const emailShaped = String(r.display_name).includes('@');
+        if (!emailShaped) namedKeys.add(normName(r.display_name));
         if (!id.includes('@')) continue;
-        byEmail.set(id, { key: `name:${normName(r.display_name)}`, name: r.display_name });
+        byEmail.set(id, { key: `name:${normName(r.display_name)}`, name: r.display_name, emailShaped });
       }
 
       // Forward coverage: the calendar pipe must be demonstrably delivering
@@ -67,8 +70,18 @@ export function calendarReconnectAdapter({ minMeetings = 3, dormancyDays = 120, 
         if (!Array.isArray(atts) || atts.length === 0 || atts.length > maxAttendees) continue;
         for (const a of atts) {
           if (a?.response === 'declined') continue;
-          const hit = byEmail.get(String(a?.email ?? '').toLowerCase());
+          let hit = byEmail.get(String(a?.email ?? '').toLowerCase());
           if (!hit) continue;
+          // The Phase 0 fold, kept: when the stored display name IS the email
+          // (a calendar-sourced contact nobody named) and the invite carries a
+          // display name matching a contact the owner DID name, fold to that
+          // person -- the ablation shipped one human as two cards, graded
+          // oppositely, without this. An invite-supplied name may only point
+          // AT an owner-named person, never mint one.
+          if (hit.emailShaped && typeof a?.name === 'string') {
+            const nk = normName(a.name);
+            if (namedKeys.has(nk)) hit = { key: `name:${nk}`, name: a.name, emailShaped: false };
+          }
           let p = people.get(hit.key);
           if (!p) { p = { name: hit.name, met: 0, lastMet: -Infinity, future: 0 }; people.set(hit.key, p); }
           if (row.ts <= now) { p.met += 1; if (row.ts > p.lastMet) p.lastMet = row.ts; }
