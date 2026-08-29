@@ -163,6 +163,21 @@ test('v10 rebuilds the claim table: rows, receipts, decisions and FTS all surviv
   ).run(), /CHECK/);
 });
 
+test('a mis-stamped database heals: v10 stamp, v9 table -- the production incident', () => {
+  // The exact state found on the reference install 2026-08-29: something
+  // stamped user_version 10 without rebuilding, and a stamp-trusting migrate
+  // would skip the rebuild forever. The healer keys on the DDL instead.
+  const path = join(mkdtempSync(join(tmpdir(), 'claim-v10-')), 'context.db');
+  buildV9Db(path);
+  const raw = new DatabaseSync(path);
+  raw.exec('PRAGMA user_version = 10');
+  raw.close();
+  const db = openDb(path);
+  assert.equal(Number(db.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('claim') WHERE name='subject_person_key'").get().n), 1,
+    'the rebuild ran despite the lying stamp');
+  assert.equal(db.prepare('SELECT text FROM claim WHERE id = 7').get().text, 'the owner prefers fridays');
+});
+
 test('a second open of a migrated database is a no-op, not a second rebuild', () => {
   const path = join(mkdtempSync(join(tmpdir(), 'claim-v10-')), 'context.db');
   buildV9Db(path);

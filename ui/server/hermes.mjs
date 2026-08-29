@@ -864,6 +864,18 @@ function hardenConnection(db) {
 function migrate(db) {
   const row = db.prepare('PRAGMA user_version').get();
   let version = Number(row?.user_version ?? 0);
+  // THE STAMP IS A CACHE; THE DDL IS THE TRUTH. Found 2026-08-29 on the
+  // reference install: the live database was stamped user_version 10 while
+  // still carrying the v9 claim table -- an open running mid-development
+  // branch code stamped without rebuilding, and every later open trusted the
+  // stamp and skipped the rebuild forever, which surfaces as 'no such
+  // column: c.subject_person_key' the first time pendingClaims runs. The v2
+  // migration already learned this lesson for ALTERs ("guarded by what
+  // table_info actually reports rather than by version arithmetic"); this
+  // applies it to the rebuild: the check runs on every open, costs one
+  // sqlite_master read, and heals a mis-stamped database no matter what the
+  // version says.
+  rebuildClaimTableForV10(db);
   if (version >= SCHEMA_VERSION) return;
   if (version < 1) {
     // Rewrites every page under secure_delete. Cheap on a small database and
@@ -1033,18 +1045,27 @@ function migrate(db) {
     version = 9;
   }
   if (version < 10) {
-    // claim.subject widens from the single literal 'owner' (L5 step 2). A
-    // CHECK constraint cannot be ALTERed in SQLite, so the table is rebuilt
-    // and rows copied with their ids -- claim_source and claim_decision
-    // reference claim(id), and preserved ids keep every receipt and every
-    // owner decision pointing where it pointed.
-    //
-    // foreign_keys goes OFF first, and it is not ceremony: with enforcement
-    // ON, DROP TABLE performs an implicit DELETE whose foreign-key ACTIONS
-    // still run -- ON DELETE CASCADE on claim_source and claim_decision would
-    // empty both child tables. OFF, the drop is purely structural. The toggle
-    // is a no-op inside a transaction, which is why it brackets one rather
-    // than joining it.
+    // The v10 rebuild itself ran above, stamp or no stamp; this branch only
+    // records the version. See rebuildClaimTableForV10.
+    version = 10;
+  }
+  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+}
+
+// claim.subject widens from the single literal 'owner' (L5 step 2). A CHECK
+// constraint cannot be ALTERed in SQLite, so the table is rebuilt and rows
+// copied with their ids -- claim_source and claim_decision reference
+// claim(id), and preserved ids keep every receipt and every owner decision
+// pointing where it pointed. Runs from migrate() on EVERY open, keyed on the
+// DDL rather than on user_version -- see the incident note there.
+//
+// foreign_keys goes OFF first, and it is not ceremony: with enforcement
+// ON, DROP TABLE performs an implicit DELETE whose foreign-key ACTIONS
+// still run -- ON DELETE CASCADE on claim_source and claim_decision would
+// empty both child tables. OFF, the drop is purely structural. The toggle
+// is a no-op inside a transaction, which is why it brackets one rather
+// than joining it.
+function rebuildClaimTableForV10(db) {
     const claimDef = db
       .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'claim'")
       .get();
@@ -1139,9 +1160,6 @@ function migrate(db) {
         }
       }
     }
-    version = 10;
-  }
-  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 
 export function openDb(dbPath = DEFAULT_DB_PATH) {
