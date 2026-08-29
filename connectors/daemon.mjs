@@ -97,6 +97,12 @@ export const DEFAULT_DISABLED_CONNECTORS = Object.freeze([
   'oura', 'photos', 'files', 'notion', 'notes',
 ]);
 
+export function sourceRetryDelay(result, intervalMs) {
+  return Number.isFinite(result?.nextDelayMs) && result.nextDelayMs >= 1_000
+    ? Math.min(60_000, Math.floor(result.nextDelayMs))
+    : intervalMs;
+}
+
 // Connector name → the hermes `source` its rows land under. Oura is the
 // health connector (entity ids stay health:<metric>:<date> /
 // health:workout:<start_iso> — the id scheme names the data, not the
@@ -886,10 +892,18 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
       ...(socialPlatforms.length ? { platforms: socialPlatforms.map((platform) => platform.label) } : {}),
       startedTs,
     });
+    let nextDelayMs = null;
     try {
       // The forward pass first, always: what arrived since last time is more
       // urgent than what happened in 2019, and history must never delay it.
       const forward = (await source.run(makeCtx())) ?? {};
+      // Sources may discover short-lived local work that should not wait for
+      // their ordinary polling interval. Matrix uses this after Synapse rate-
+      // limits a portal-join recovery pass. The source supplies only a bounded
+      // delay, never an identifier or cursor.
+      if (Number.isFinite(forward.retryAfterMs) && forward.retryAfterMs >= 1_000) {
+        nextDelayMs = Math.min(60_000, Math.floor(forward.retryAfterMs));
+      }
       if (forward.historyReopened === true) yearlyBackfill.reopen(source.name);
       const counts = runCounts(forward);
 
@@ -990,6 +1004,7 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
     } finally {
       publishActivity({ phase: 'idle', connector: source.name, finishedTs: now() });
     }
+    return { nextDelayMs };
   }
 
   function schedule(fn, delayMs, reschedule) {
@@ -1012,14 +1027,15 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
       //
       // connectors/AGENTS.md: "A source failure is recorded in run_log and the
       // other sources keep running." This is what makes that true.
+      let result;
       try {
-        await fn();
+        result = await fn();
       } catch (error) {
         log.error('schedule_task_failed', {
           error: safeErrorFingerprint(error),
         });
       }
-      if (!stopped) reschedule();
+      if (!stopped) reschedule(result);
     }, delayMs);
     timers.add(timer);
   }
@@ -1031,7 +1047,10 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
     schedule(
       () => runSource(source),
       delayMs,
-      () => scheduleSource(source, intervalMs)
+      (result) => scheduleSource(
+        source,
+        sourceRetryDelay(result, intervalMs)
+      )
     );
   }
 

@@ -258,7 +258,8 @@ bridge_rows | while read -r name image cn port dbfile; do
     .backfill.max_initial_messages = 2147483647 |
     .backfill.max_catchup_messages = 2147483647 |
     .backfill.threads.max_initial_messages = 2147483647 |
-    .double_puppet.secrets = {}
+    .double_puppet.secrets = {} |
+    .logging.min_level = "info"
   " "$M/$name/config.yaml"
   if [ ! -f "$M/$name/registration.yaml" ]; then
     # Docker Compose creates a directory when its bind-mount source does not
@@ -316,6 +317,9 @@ fi
 # 32-bit value there. Missed-message backfill does support -1. Create every
 # private portal at startup as well; leaving the image default of five made a
 # linked account look healthy while almost all of its DMs remained invisible.
+# The generated Discord config also defaults to debug. Its HTTP debug records
+# can include message request bodies, which do not belong in local operational
+# logs. Info retains lifecycle/failure diagnostics without message content.
 "$YQ" -i '
   .homeserver.address = "http://synapse:8008" |
   .homeserver.domain = "hazlie.local" |
@@ -332,7 +336,8 @@ fi
   .bridge.backfill.forward_limits.missed.dm = -1 |
   .bridge.backfill.forward_limits.missed.channel = -1 |
   .bridge.backfill.forward_limits.missed.thread = -1 |
-  .bridge.double_puppet_server_map = {}
+  .bridge.double_puppet_server_map = {} |
+  .logging.min_level = "info"
 ' "$M/discord/config.yaml"
 if [ ! -f "$M/discord/registration.yaml" ]; then
   if [ -d "$M/discord/registration.yaml" ]; then

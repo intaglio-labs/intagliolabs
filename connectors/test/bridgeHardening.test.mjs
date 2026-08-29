@@ -44,6 +44,8 @@ backfill:
         max_initial_messages: 2147483647
 double_puppet:
     secrets: {}
+logging:
+    min_level: info
 `;
 
 const homes = [];
@@ -109,6 +111,8 @@ homeserver:
     presence: false
 double_puppet:
     secrets: {}
+logging:
+    min_level: info
 `;
 
 test('discord’s legacy nested backfill layout is understood', () => {
@@ -163,6 +167,15 @@ test('double puppeting turned on is a WARN — it could act as the owner', () =>
   assert.equal(r.status, 'WARN');
   assert.match(r.detail, /double_puppet/u);
   assert.match(r.detail, /act as the owner/u);
+});
+
+test('debug bridge logging is a FAIL because request bodies can contain messages', () => {
+  const r = checkBridgeHardening(
+    withHome({ meta: CONFIGURED.replace('min_level: info', 'min_level: debug') })
+  );
+  assert.equal(r.status, 'FAIL');
+  assert.match(r.detail, /debug logs may contain message bodies/u);
+  assert.match(r.fix, /logging\.min_level stays at info/u);
 });
 
 test('homeserver.presence is NOT checked — the key does not exist in these bridges', () => {

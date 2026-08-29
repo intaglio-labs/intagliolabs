@@ -121,9 +121,11 @@ non-calendar timeline.
 Modern mautrix bridges request the largest supported initial import and
 Discord uses an explicit `2147483647` initial limit (its initial backfill has
 no unlimited sentinel), `-1` for missed-message fetch-all, and creates every
-known private portal at startup for DMs, channels, threads
-and missed-message recovery. Standard Synapse does not support mautrix's
-backward-insertion queue, so this uncapped initial portal import is the
+known private portal at startup for DMs. Discord servers are an explicit owner
+opt-in in the connected-account card: checking one bridges that guild with
+`--entire`, which creates its bridgeable channel and thread portals under the
+same uncapped initial and missed-message limits. Standard Synapse does not
+support mautrix's backward-insertion queue, so this uncapped initial portal import is the
 supported way to make remote history locally available; the Matrix connector
 then reveals it through the shared year barrier.
 
@@ -150,6 +152,14 @@ new policy while preserving the authenticated account. The Connections tile
 then stays in its waiting-ring state until the bridge database contains message
 rows; authentication alone is no longer enough to paint it green.
 
+DM ingestion is automatic after Discord login. Server ingestion is not: the
+Connections card lists the servers discovered by the local bridge and stores
+the choice in mautrix-discord's owner-only database. Checking a server imports
+all bridgeable channels and threads; unchecking it invokes the bridge's
+supported unbridge operation and removes those local portal rooms. Server
+names and IDs are exposed only over the native bearer channel and are never
+written to connector logs or repository state.
+
 ## Source registry
 
 One namespace per source; the full `entity_id` grammar and upsert semantics
@@ -167,7 +177,7 @@ live in [`INGESTION.md`](INGESTION.md). What each connector puts in a row:
 | `notion` | `notion:<page_id>` | title + the page's text blocks, ≤20k chars | url, parent type, block count, `truncated` |
 | `files` | `files:<absolute path>` | filename + folder trail; file contents when local, small and text | `store`, `folder`, `ext`, `bytes`, **`online_only`**, `has_content` |
 | `whatsapp` | `whatsapp:<stanza_id>` | one message's text, from WhatsApp Desktop's local store | `stanza_id`, `is_from_me`, `is_group`, `chat_handle`, `chat_name`?, `sender_handle`? |
-| `messenger`, `instagram`, `linkedin`, `twitter`, `telegram`, `discord`, `slack` | `<source>:<matrix_event_id>` | one bridged direct-message text event | Matrix event/room ids, direction, group flag and conversation/sender handles; legacy LinkedIn export rows remain readable |
+| `messenger`, `instagram`, `linkedin`, `twitter`, `telegram`, `discord`, `slack` | `<source>:<matrix_event_id>` | one bridged message text event | Matrix event/room ids, direction, group flag and conversation/sender handles; legacy LinkedIn export rows remain readable |
 | `hazlie_digest` | `hazlie_digest:<date>` | the delivered digest text | composition facts |
 | `seed` | (none) | dev fixtures | — |
 
@@ -407,6 +417,26 @@ tokens or Google grants) or edges the store readers handle. Network
 checks are opt-in so a local diagnosis opens no third-party sockets as a side
 effect. Remember the attribution caveat above when reading `fda-*` rows from
 a shell.
+
+## Coverage audit
+
+After connectors are linked, verify what actually reached the corpus rather
+than treating a green login state as proof of history coverage:
+
+```
+(cd connectors && npm run coverage)
+(cd connectors && npm run coverage -- --json)
+```
+
+The report includes per-source row and conversation counts, oldest/newest
+dates, row counts by year, durable completed-year checkpoints, and the live
+scheduler/backfill queue. The Matrix transport line is a count of portal
+invites still waiting to be joined/replayed, so a rate-limited recovery is
+visible instead of looking stuck. It is deliberately aggregate-only. Hermes performs
+the grouping while it owns `context.db`; the connector process receives no
+message text, speakers, names, addresses, entity ids, room ids, or remote
+cursors. `contacts` is a count of local resolution records because that source
+does not write corpus rows.
 
 
 ## files — the dataless rule

@@ -17,6 +17,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   DEFAULT_ALLOWED_ORIGINS,
   KNOWN_SOURCES,
+  connectorCoverage,
   defaultDbPath,
   defaultHermesTokenPath,
   insertRows,
@@ -1052,6 +1053,7 @@ test('every admin route refuses the browser channel with a 403', async () => {
     ['POST', '/admin/delete-entities', { source: 'seed', entity_ids: ['seed:x'] }],
     ['POST', '/admin/people/clear', {}],
     ['POST', '/admin/maintain', {}],
+    ['GET', '/admin/coverage', undefined],
     ['GET', '/admin/entities?source=seed', undefined],
   ];
   for (const [method, path, body] of attempts) {
@@ -1363,6 +1365,58 @@ test('the entities endpoint returns entity_id and ts only, windowed', async () =
     { entity_id: 'calendar:win-a', ts: T + 1000 },
     { entity_id: 'calendar:win-b', ts: T + 2000 },
   ]);
+});
+
+test('coverage returns aggregates only and keeps conversation keys inside Hermes', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE context(
+      ts INTEGER NOT NULL,
+      source TEXT NOT NULL,
+      entity_id TEXT,
+      speaker TEXT,
+      text TEXT NOT NULL,
+      meta TEXT NOT NULL
+    )
+  `);
+  const insert = db.prepare(
+    'INSERT INTO context(ts, source, entity_id, speaker, text, meta) VALUES (?, ?, ?, ?, ?, ?)'
+  );
+  const room = '!private-room:localhost';
+  const person = 'private-person@example.com';
+  insert.run(1704110400000, 'discord', '$private-event-1', person, 'private message one', JSON.stringify({ room_id: room }));
+  insert.run(1735689599000, 'discord', '$private-event-2', person, 'private message two', JSON.stringify({ room_id: room }));
+  insert.run(1706745600000, 'calendar', 'calendar:private', person, 'private event', '{}');
+  insert.run(1706745600000, 'private-source-name', 'private:id', person, 'legacy private row', '{}');
+  insert.run(1706745600000, 'discord', '$legacy-event', person, 'legacy message', 'not-json');
+  try {
+    const body = connectorCoverage(db);
+    const discord = body.sources.find((row) => row.source === 'discord');
+    assert.deepEqual(discord, {
+      source: 'discord',
+      rows: 3,
+      conversations: 1,
+      oldest_ts: 1704110400000,
+      newest_ts: 1735689599000,
+      years: [{ year: 2024, rows: 3 }],
+    });
+    assert.equal(body.sources.find((row) => row.source === 'calendar').conversations, null);
+    const encoded = JSON.stringify(body);
+    for (const secret of [
+      room, person, 'private message', '$private-event', 'calendar:private', 'private-source-name',
+    ]) {
+      assert.equal(encoded.includes(secret), false, `coverage leaked ${secret}`);
+    }
+  } finally {
+    db.close();
+  }
+});
+
+test('coverage endpoint is bearer-only and rejects query parameters', async () => {
+  const res = await adminGet('/admin/coverage');
+  assert.equal(res.status, 200);
+  assert.ok(Array.isArray((await res.json()).sources));
+  assert.equal((await adminGet('/admin/coverage?source=mail')).status, 400);
 });
 
 test('the entities endpoint rejects unknown params and non-numeric bounds', async () => {

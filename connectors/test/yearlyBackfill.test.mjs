@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createYearlyBackfill, localYearBounds } from '../lib/yearlyBackfill.mjs';
+import {
+  createYearlyBackfill,
+  localYearBounds,
+  yearlyBackfillCoverage,
+} from '../lib/yearlyBackfill.mjs';
 
 function memoryState() {
   const values = new Map();
@@ -29,6 +33,26 @@ test('local year bounds match the same local-year buckets the people graph uses'
     year: 2026,
     fromTs: new Date(2026, 0, 1).getTime(),
     toTs: new Date(2027, 0, 1).getTime(),
+  });
+});
+
+test('coverage reports durable year checkpoints without cursor values', () => {
+  const state = memoryState();
+  state.setCursor('yearly-backfill:year', '2025');
+  state.setCursor('yearly-backfill:connector:imessage:done:2026', '1');
+  state.setCursor('yearly-backfill:connector:calendar:exhausted', '1');
+  const coverage = yearlyBackfillCoverage({
+    state,
+    connectors: ['imessage', 'calendar'],
+    now: () => NOW,
+  });
+  assert.deepEqual(coverage, {
+    year: 2025,
+    complete: false,
+    connectors: [
+      { connector: 'imessage', completedYears: [2026], exhausted: false, pending: true },
+      { connector: 'calendar', completedYears: [], exhausted: true, pending: false },
+    ],
   });
 });
 

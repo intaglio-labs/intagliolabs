@@ -1625,6 +1625,11 @@ function card(src, keep) {
         acct.textContent = (cut > 0 && tail.includes('@')) ? whole.slice(0, cut) : whole;
         tip.appendChild(acct);
       }
+      hzAppendDiscordServers(
+        tip, data, renderBridge,
+        () => hzPost('bridgeStatus', { p: 'discord' }),
+        (serverId, enabled) => hzPost('bridgeDiscordServer', { serverId, enabled })
+      );
       // + add ANOTHER account: re-run the login. mautrix bridges hold more
       // than one login per user, so a second account lands alongside the
       // first rather than replacing it.

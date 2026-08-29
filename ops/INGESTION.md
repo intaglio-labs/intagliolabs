@@ -367,6 +367,15 @@ telling the caller to narrow the window — a silently truncated list would read
 to a reconciler as "these entities no longer exist", and it would delete the
 remainder.
 
+### `GET /admin/coverage`
+
+The local coverage audit's read path. Hermes returns only aggregate source
+counts, distinct conversation counts, oldest/newest timestamps, and row counts
+by local calendar year. Conversation keys are consumed inside SQLite's
+`COUNT(DISTINCT ...)` and discarded; entity ids, room ids, handles, speakers,
+metadata, and text never cross back into the connector process. The route is
+bearer-only and accepts no query parameters.
+
 ### `POST /admin/maintain {}`
 
 The batched physical cleanup: FTS rebuild + `VACUUM`. Verified:

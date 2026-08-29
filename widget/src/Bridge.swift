@@ -73,6 +73,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                "openMonths", "voiceArm", "widgetBounds", "workStatus"],
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
+                    "bridgeDiscordServer",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
                     "status", "setConnectorEnabled", "setMotion", "setScale", "setSounds",
                     "openOnboarding", "markHandheld",
@@ -98,6 +99,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // map from the wrong file cost one broken popup in review.
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
+               "bridgeDiscordServer",
                "connectorsIntroSeen", "openExternal", "setConnectorEnabled", "connectSecret", "openApp",
                "openFullDiskAccess", "googleAuth"],
     // peopleFind: search across every year, server-ranked. peopleMap: the
@@ -681,6 +683,19 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "bridgeBegin":
       let p = String((payload["p"] as? String ?? "").prefix(24))
       beginBridgeLogin(p) { [weak self] d in
+        self?.reply(webView, id, d)
+      }
+    case "bridgeDiscordServer":
+      // Discord DMs are automatic; this narrowly scoped write toggles one
+      // numeric guild ID from the server list returned by the local bridge.
+      // Connect validates the ID again before it reaches mautrix-discord.
+      let serverId = String((payload["serverId"] as? String ?? "").prefix(24))
+      let enabled = payload["enabled"] as? Bool ?? false
+      bridgeCall(
+        "POST", "api/bridge/discord-server",
+        json: ["p": "discord", "serverId": serverId, "enabled": enabled],
+        timeout: 60
+      ) { [weak self] d in
         self?.reply(webView, id, d)
       }
     case "googleAuth":

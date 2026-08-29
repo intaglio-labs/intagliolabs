@@ -34,6 +34,36 @@ function savedYear(state, now) {
   return Number.isInteger(parsed) && parsed >= 1900 && parsed <= current ? parsed : current;
 }
 
+// Durable progress only: safe to print in diagnostics because these cursor
+// names contain connector names, years, and booleans — never remote tokens or
+// household identifiers. Availability is intentionally absent; the live
+// activity file supplies the active queue, while this receipt says exactly
+// which year barriers have actually been crossed.
+export function yearlyBackfillCoverage({ state, connectors, now = Date.now } = {}) {
+  const roster = [...new Set((connectors ?? []).filter((name) => typeof name === 'string' && name))];
+  const currentYear = new Date(now()).getFullYear();
+  const activeYear = savedYear(state, now);
+  const complete = state.getCursor(COMPLETE_KEY) === '1';
+  return {
+    year: activeYear,
+    complete,
+    connectors: roster.map((connector) => {
+      const completedYears = [];
+      for (let year = currentYear; year >= 1900; year -= 1) {
+        if (state.getCursor(doneKey(year, connector)) === '1') completedYears.push(year);
+      }
+      return {
+        connector,
+        completedYears,
+        exhausted: state.getCursor(exhaustedKey(connector)) === '1',
+        pending: !complete
+          && state.getCursor(exhaustedKey(connector)) !== '1'
+          && state.getCursor(doneKey(activeYear, connector)) !== '1',
+      };
+    }),
+  };
+}
+
 export function createYearlyBackfill({ state, connectors, now = Date.now } = {}) {
   const roster = [...new Set((connectors ?? []).filter((name) => typeof name === 'string' && name))];
   const classified = new Set();

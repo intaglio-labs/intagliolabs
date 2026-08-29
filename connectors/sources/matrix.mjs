@@ -36,6 +36,14 @@ const HISTORY_YEAR_KEY = 'matrix:history-year';
 const HISTORY_YEAR_QUEUE_KEY = 'matrix:history-year-rooms';
 const HISTORY_DONE_KEY = 'matrix:history-done';
 const HISTORY_BOOTSTRAP_KEY = 'matrix:history-bootstrap-v1';
+const PENDING_INVITES_KEY = 'matrix:pending-portal-invites';
+const INVITE_RECOVERY_KEY = 'matrix:invite-recovery-v1';
+// Portal joins are local Synapse requests, not upstream platform fetches. A
+// migrated install can legitimately have hundreds waiting after the old sync
+// bug, so one pass must be able to repair the whole known backlog. The 429
+// branch below remains the real pressure valve: it stops immediately and
+// keeps every unattempted room durable for the next run.
+const INVITES_PER_PASS = 1_000;
 
 const roomCursorKey = (roomId) => `matrix:room:${roomId}`;
 const historyCursorKey = (roomId) => `matrix:history:${roomId}`;
@@ -54,6 +62,31 @@ function decodeHistoryQueue(value) {
 
 function saveHistoryQueue(state, queue) {
   state.setCursor(HISTORY_QUEUE_KEY, JSON.stringify(queue));
+}
+
+function retryAfterMs(response, now = Date.now()) {
+  const raw = response?.headers?.get?.('retry-after');
+  const seconds = Number(raw);
+  if (raw !== null && raw !== undefined && raw !== '' && Number.isFinite(seconds) && seconds >= 0) {
+    return Math.max(1_000, seconds * 1_000);
+  }
+  const date = Date.parse(String(raw ?? ''));
+  if (Number.isFinite(date)) return Math.max(1_000, date - now);
+  return 15_000;
+}
+
+export function pendingPortalInvites(saved, body) {
+  return [...new Set([
+    ...decodeHistoryQueue(saved),
+    ...invitesToJoin(body),
+  ])];
+}
+
+// Count-only operator receipt. Room ids remain inside the owner-only state DB;
+// the coverage command can show whether replay is draining without printing a
+// single portal identifier.
+export function pendingPortalInviteCount(saved) {
+  return decodeHistoryQueue(saved).length;
 }
 
 function clearHistoryDone(state) {
@@ -364,7 +397,16 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
       // gives us each portal's prev_batch so those installs pick up exactly
       // where the old cap left off rather than remaining capped forever.
       const needsHistoryBootstrap = !ctx.state.getCursor(HISTORY_BOOTSTRAP_KEY);
-      const since = (ctx.backfill || needsHistoryBootstrap) ? null : ctx.state.getCursor(CURSOR_KEY);
+      // v1 recovery is deliberately a since-less snapshot. Before pending
+      // invites were durable, a failed/rate-limited join was forgotten as soon
+      // as the sync token advanced. Existing installs can therefore have
+      // hundreds of portal rooms still sitting at `invite`, invisible to every
+      // later incremental /sync. One full snapshot re-discovers them; after
+      // that, the private queue below makes incremental delivery safe.
+      const needsInviteRecovery = !ctx.state.getCursor(INVITE_RECOVERY_KEY);
+      const since = (ctx.backfill || needsHistoryBootstrap || needsInviteRecovery)
+        ? null
+        : ctx.state.getCursor(CURSOR_KEY);
       const url = new URL(`${creds.base}/_matrix/client/v3/sync`);
       url.searchParams.set('timeout', '0');
       // Room timelines only. The filter keeps presence, typing and receipts
@@ -413,12 +455,27 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
       if (!res.ok) throw new Error(`matrix: homeserver answered ${res.status}`);
       const body = await res.json();
 
-      // Accept the bridges' portal invites BEFORE mapping this page. A newly
-      // joined room's history arrives on the next sync, which the daemon runs
-      // minutes later — so a first run after a login joins, and the run after
-      // it ingests. Joining is idempotent; an already-joined room is a no-op.
+      // Accept the bridges' portal invites BEFORE mapping this page. The queue
+      // is durable because Matrix offers an invite only once on an incremental
+      // sync: advancing `since` after a rate limit used to strand that room
+      // forever. Keep failures and unattempted rooms for the next bounded pass;
+      // log counts only because room ids are household-private.
+      let pendingInvites = pendingPortalInvites(
+        ctx.state.getCursor(PENDING_INVITES_KEY),
+        body
+      );
       let joined = 0;
-      for (const roomId of invitesToJoin(body)) {
+      let joinFailed = 0;
+      let attempted = 0;
+      let inviteRetryMs = null;
+      const remainingInvites = [];
+      for (let i = 0; i < pendingInvites.length; i += 1) {
+        const roomId = pendingInvites[i];
+        if (attempted >= INVITES_PER_PASS) {
+          remainingInvites.push(...pendingInvites.slice(i));
+          break;
+        }
+        attempted += 1;
         try {
           const r = await fetchImpl(
             `${creds.base}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`,
@@ -427,12 +484,36 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
               body: '{}',
               signal: AbortSignal.timeout(15_000) }
           );
-          if (r.ok) joined += 1;
+          if (r.ok) {
+            joined += 1;
+          } else if (r.status === 403 || r.status === 404) {
+            // No longer invited / room gone: terminal, and another full sync
+            // is the authority if it ever becomes actionable again.
+            joinFailed += 1;
+          } else {
+            joinFailed += 1;
+            remainingInvites.push(roomId);
+            if (r.status === 429) {
+              inviteRetryMs = retryAfterMs(r);
+              remainingInvites.push(...pendingInvites.slice(i + 1));
+              break;
+            }
+          }
         } catch {
-          // A room that will not join this tick is offered again next sync.
+          joinFailed += 1;
+          remainingInvites.push(roomId);
         }
       }
-      if (joined) ctx.log?.info?.(`matrix: joined ${joined} portal room(s)`);
+      pendingInvites = [...new Set(remainingInvites)];
+      ctx.state.setCursor(PENDING_INVITES_KEY, JSON.stringify(pendingInvites));
+      if (attempted > 0) {
+        ctx.log?.info?.('matrix_portal_invites', {
+          attempted,
+          joined,
+          failed: joinFailed,
+          pending: pendingInvites.length,
+        });
+      }
 
       // Matrix omits unchanged membership state from incremental syncs. Keep a
       // private per-room member snapshot so a message-only page can still be
@@ -485,8 +566,14 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
         clearHistoryDone(ctx.state);
       }
       if (needsHistoryBootstrap) ctx.state.setCursor(HISTORY_BOOTSTRAP_KEY, '1');
+      if (needsInviteRecovery) ctx.state.setCursor(INVITE_RECOVERY_KEY, '1');
       if (mapped.next) ctx.state.setCursor(CURSOR_KEY, mapped.next);
-      return { ...totals, skipped: 0, historyReopened: addedHistoryRoom };
+      return {
+        ...totals,
+        skipped: 0,
+        historyReopened: addedHistoryRoom,
+        ...(pendingInvites.length > 0 ? { retryAfterMs: inviteRetryMs ?? 15_000 } : {}),
+      };
     },
   };
 }

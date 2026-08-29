@@ -8,6 +8,7 @@
     "test": "node --test 'test/*.test.mjs'",
     "daemon": "node daemon.mjs",
     "doctor": "node doctor.mjs",
+    "coverage": "node coverage.mjs",
     "run": "node run.mjs"
   },
   "dependencies": {

@@ -500,6 +500,11 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
         acct.textContent = (cut > 0 && tail.includes('@')) ? whole.slice(0, cut) : whole;
         tip.appendChild(acct);
       }
+      hzAppendDiscordServers(
+        tip, data, renderBridge,
+        () => hzPost('bridgeStatus', { p: 'discord' }),
+        (serverId, enabled) => hzPost('bridgeDiscordServer', { serverId, enabled })
+      );
     } else if (data && data.state !== 'ok' && data.state !== 'cancelled' && !manual && !data.transcript) {
       tip.append(HZ_NOTICES[data.state] || data.error || HZ_NOTICES.error);
     } else {

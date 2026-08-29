@@ -529,6 +529,18 @@ test('connector cards use current privacy copy and connected bridge identity', (
   assert.doesNotMatch(connectorTile, /acct\.textContent = `linked as/u);
 });
 
+test('Discord DMs stay automatic while servers are explicit checkbox opt-ins', () => {
+  assert.match(bridgeUi, /DMs sync automatically · choose servers to add/u);
+  assert.match(bridgeUi, /check\.type = 'checkbox'/u);
+  assert.match(
+    bridgeUi,
+    /writeServer\(server\.id, enabled\)/u
+  );
+  assert.match(connections, /hzAppendDiscordServers\([\s\S]*?hzPost\('bridgeDiscordServer'/u);
+  assert.match(connectorTile, /hzAppendDiscordServers\([\s\S]*?hzPost\('bridgeDiscordServer'/u);
+  assert.match(palette, /\.discord-servers\s*\{[\s\S]*?max-height: 190px; overflow-y: auto/u);
+});
+
 test('local Apple-source status is reconciled in the app process that owns each grant', () => {
   const block = /private func reconcileLocalSourceStatus\([\s\S]*?\n {2}\}/u.exec(swift)?.[0] ?? '';
   assert.match(block, /Permissions\.accessibleLocalSources\(\)/u);

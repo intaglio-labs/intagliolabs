@@ -1033,6 +1033,15 @@ function doublePuppetState(text) {
   return { where: 'double_puppet', found: undefined, off: true };
 }
 
+function safeLoggingState(text) {
+  const raw = yamlPathValue(text, ['logging', 'min_level']);
+  const level = String(raw ?? '').replace(/^['"]|['"]$/gu, '').toLowerCase();
+  return {
+    found: raw,
+    safe: ['info', 'warn', 'warning', 'error', 'fatal'].includes(level),
+  };
+}
+
 // Exported so the suite can prove it FIRES, not just that it passes on a clean
 // machine — a guard nobody has watched fail is a guard nobody knows works.
 export function checkBridgeHardening(home) {
@@ -1076,6 +1085,13 @@ export function checkBridgeHardening(home) {
       problems.push(`${dir}: ${dp.where} is ${dp.found} — bridge could act as the owner`);
       if (worst !== FAIL) worst = WARN;
     }
+    const logging = safeLoggingState(text);
+    if (!logging.safe) {
+      problems.push(
+        `${dir}: logging.min_level is ${logging.found ?? 'unset'} — debug logs may contain message bodies`
+      );
+      worst = FAIL;
+    }
   }
 
   if (checked === 0) return result(name, PASS, 'no bridge configs present — nothing to harden');
@@ -1083,7 +1099,7 @@ export function checkBridgeHardening(home) {
     return result(
       name,
       PASS,
-      `${checked} bridge config(s) match owner intent: maximum history backfill, double puppeting off`
+      `${checked} bridge config(s) match owner intent: maximum history backfill, double puppeting off, content-safe logging`
     );
   }
   return result(
@@ -1093,7 +1109,8 @@ export function checkBridgeHardening(home) {
     'set the named keys in ~/.hazlie/matrix/<bridge>/config.yaml, then restart that bridge: ' +
       'run ops/setup-bridges.sh to restore the maximum per-bridge history limits; ' +
       'full backfill is the owner decision (all connections pull maximum available history); ' +
-      'double_puppet stays off so the bridge never acts as you on the remote account.'
+      'double_puppet stays off so the bridge never acts as you on the remote account; ' +
+      'logging.min_level stays at info so bridge logs do not record message request bodies.'
   );
 }
 
