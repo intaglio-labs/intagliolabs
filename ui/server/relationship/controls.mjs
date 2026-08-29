@@ -82,7 +82,7 @@ export function createControls(db, { canonicalOf = (k) => k } = {}) {
     },
 
     // ---- events and structured dismissal --------------------------------
-    recordEvent({ personKey, kind, event, reason = null, ruleVersion, now = Date.now() }) {
+    recordEvent({ personKey, kind, event, reason = null, ruleVersion, snapshotId = null, now = Date.now() }) {
       if (event === 'dismissed' && reason !== null && !DISMISS_REASONS.includes(reason)) {
         throw new Error(`dismissal reason must be one of: ${DISMISS_REASONS.join(', ')}`);
       }
@@ -90,10 +90,10 @@ export function createControls(db, { canonicalOf = (k) => k } = {}) {
         throw new Error('only a dismissal carries a reason');
       }
       db.prepare(
-        'INSERT INTO rm_card_event(person_key, kind, event, reason, rule_version, time_band, created_at) ' +
-          'VALUES (?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO rm_card_event(person_key, kind, event, reason, rule_version, snapshot_id, time_band, created_at) ' +
+          'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(requireKey(personKey, 'personKey'), requireKey(kind, 'kind'), event, reason,
-        requireKey(ruleVersion, 'ruleVersion'), timeBand(now), now);
+        requireKey(ruleVersion, 'ruleVersion'), snapshotId, timeBand(now), now);
     },
     // The one-tap dismissal. 'never-this-person' IS the permanent control
     // reached from a card -- the plan lists it among the reasons precisely so

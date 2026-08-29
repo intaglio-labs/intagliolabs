@@ -717,6 +717,12 @@ CREATE TABLE IF NOT EXISTS rm_card_event(
   id           INTEGER PRIMARY KEY,
   person_key   TEXT NOT NULL,
   kind         TEXT NOT NULL,
+  /* Which offered candidate this outcome belongs to, when there was one --
+     the join that makes "what happened to what we offered" one query.
+     Nullable: review-only events (an inbox decision) have no snapshot. Safe
+     to add in place: the rm_* tables have never shipped in a release, so no
+     installed database carries the narrower shape. */
+  snapshot_id  INTEGER REFERENCES rm_candidate_snapshot(id),
   event        TEXT NOT NULL CHECK (event IN
                  ('shown','opened','accepted','dismissed','muted','suppressed')),
   /* Only a dismissal carries a reason, and only one of the five the card
@@ -735,6 +741,55 @@ END;
 CREATE TRIGGER IF NOT EXISTS rm_card_event_no_delete
 BEFORE DELETE ON rm_card_event BEGIN
   SELECT RAISE(ABORT, 'card events are append-only: deleting the frequency record is how a cap stops capping');
+END;
+
+/* CANDIDATE SNAPSHOTS (L5 step 7) -- what the system OFFERED, immutably.
+   Every pass through the aggregation door records a batch, including a pass
+   that yielded nothing and a pass the cap refused: a zero is a measurement
+   (the same lesson distill_run learned about empty episodes), and shadow
+   mode's numbers -- candidate frequency, repeat rate, cap pressure -- are
+   computed from these rows, not remembered. Snapshot rows carry counted
+   facts only; there is no text column to misuse, and 'evidence' is the
+   candidate's counted-facts object as canonical JSON. Immutable in fact:
+   update AND delete triggers, same as the event log, because a snapshot
+   that can be tidied up afterwards is not a snapshot. */
+CREATE TABLE IF NOT EXISTS rm_candidate_batch(
+  id              INTEGER PRIMARY KEY,
+  created_at      INTEGER NOT NULL,
+  candidate_count INTEGER NOT NULL,
+  /* 'open' or 'cap-closed': whether the door opened at all. cap_config is
+     the cap as asked (canonical JSON) or NULL for none-configured -- which
+     always closes the door, and the batch row is the proof it was asked. */
+  gate            TEXT NOT NULL CHECK (gate IN ('open','cap-closed')),
+  cap_config      TEXT
+);
+CREATE TABLE IF NOT EXISTS rm_candidate_snapshot(
+  id               INTEGER PRIMARY KEY,
+  batch_id         INTEGER NOT NULL REFERENCES rm_candidate_batch(id),
+  person_key       TEXT NOT NULL,
+  kind             TEXT NOT NULL,
+  summary          TEXT NOT NULL,
+  evidence         TEXT NOT NULL,   /* canonical JSON, counted facts only */
+  producer_version TEXT NOT NULL,
+  rank_strategy    TEXT,
+  created_at       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS rm_candidate_snapshot_person ON rm_candidate_snapshot(person_key, created_at);
+CREATE TRIGGER IF NOT EXISTS rm_candidate_batch_no_update
+BEFORE UPDATE ON rm_candidate_batch BEGIN
+  SELECT RAISE(ABORT, 'candidate batches are append-only: a pass happened or it did not');
+END;
+CREATE TRIGGER IF NOT EXISTS rm_candidate_batch_no_delete
+BEFORE DELETE ON rm_candidate_batch BEGIN
+  SELECT RAISE(ABORT, 'candidate batches are append-only: a pass happened or it did not');
+END;
+CREATE TRIGGER IF NOT EXISTS rm_candidate_snapshot_no_update
+BEFORE UPDATE ON rm_candidate_snapshot BEGIN
+  SELECT RAISE(ABORT, 'a snapshot that can be edited afterwards is not a snapshot');
+END;
+CREATE TRIGGER IF NOT EXISTS rm_candidate_snapshot_no_delete
+BEFORE DELETE ON rm_candidate_snapshot BEGIN
+  SELECT RAISE(ABORT, 'a snapshot that can be deleted afterwards is not a snapshot');
 END;
 `;
 

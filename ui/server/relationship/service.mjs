@@ -178,10 +178,28 @@ export function createRelationshipMemory({ contextDb, stateDb, resolutionsDb = n
     // before showing it; a candidate is an offer, not a shown card, so
     // nothing here records a 'shown' event.
     candidates({ now = Date.now(), cap } = {}) {
-      if (!service.controls.underGlobalCap({ ...cap, now })) return [];
+      // Step 7: every pass through this door is recorded immutably -- the
+      // refused ones too. A zero is a measurement (cap pressure is one of
+      // shadow mode's numbers), and it must be a ROW, not an absence.
+      const open = service.controls.underGlobalCap({ ...cap, now });
       const out = [];
-      for (const adapter of sourceAdapters.values()) {
-        out.push(...adapter.candidates(service, { now }));
+      if (open) {
+        for (const adapter of sourceAdapters.values()) {
+          out.push(...adapter.candidates(service, { now }));
+        }
+      }
+      const batchId = Number(contextDb.prepare(
+        'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, ?, ?, ?)'
+      ).run(now, out.length, open ? 'open' : 'cap-closed',
+        cap ? JSON.stringify(cap) : null).lastInsertRowid);
+      const insSnap = contextDb.prepare(
+        'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) ' +
+          'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+      );
+      for (const c of out) {
+        c.snapshot_id = Number(insSnap.run(batchId, c.personKey, c.kind, c.summary,
+          JSON.stringify(c.evidence ?? {}), c.producer_version, c.rank_strategy ?? null, now).lastInsertRowid);
+        c.batch_id = batchId;
       }
       return out;
     },
