@@ -64,6 +64,50 @@ const settleWebLogin = (platform, first, show) => {
   setTimeout(poll, 1200);
 };
 
+// Put the open card back on its tile. Returns false when there is no tile to
+// put it on, which is the caller's cue to stop.
+//
+// THE ANCHOR IS RESOLVED, NOT ASSUMED. Every appender is supposed to mark its
+// row .open first, but an async painter can land after a close or a rebuild has
+// unmarked the world — and hzPlacePop's null-anchor guard then silently skips
+// placement, which shows the card wherever its stale styles left it. Fall back
+// to the live row that owns the card (both carry dataset.id for exactly this
+// kind of reunion), and if no live row owns it, close the host: an unplaceable
+// pop-over must not render.
+//
+// EXTRACTED so that scrolling can call it too. #grid is a ONE-LINE HORIZONTAL
+// SCROLLER (.list is display:flex with overflow-x:auto and overflow-y:hidden),
+// so most of the connector tiles are off screen at any moment, and pressing one
+// runs row.scrollIntoView({inline:'nearest', behavior:'smooth'}). The card was
+// placed once against the tile's rect and never again, so the smooth scroll then
+// slid the tile out from under its own card: the owner pressed Instagram, the
+// login succeeded, and the card ended up floating over the activity panel with
+// no tile beneath it ("the tab moved way to the right", 2026-08-29). The card
+// has to track its anchor for as long as the anchor can move.
+//
+// closeIfUnplaceable is a real difference between callers, not a knob. The
+// mutation observer has just been handed a card, so a card with no tile is an
+// error it must clear. The window fitter and the scroll listener run constantly
+// against whatever the DOM happens to be mid-rebuild, and a transient miss there
+// is not a reason to throw the owner's open card away.
+const placeOpenHint = ({ closeIfUnplaceable = false } = {}) => {
+  let anchor = document.querySelector('#grid .row.open');
+  if (!anchor) {
+    const cardEl = hintHost.querySelector('.hint');
+    const id = cardEl ? cardEl.dataset.id : null;
+    anchor = id
+      ? [...document.querySelectorAll('#grid .row')].find((r) => r.dataset.id === id) || null
+      : null;
+    if (anchor) anchor.classList.add('open'); // so the next tap closes, never relaunches
+  }
+  if (!anchor) {
+    if (closeIfUnplaceable) hintHost.replaceChildren();
+    return false;
+  }
+  hzPlacePop(hintHost, anchor);
+  return true;
+};
+
 const closeHint = () => {
   hintHost.replaceChildren();
   for (const r of document.querySelectorAll('#grid .row')) r.classList.remove('open');
@@ -92,17 +136,7 @@ new MutationObserver(() => {
     // left it. Fall back to the live row that owns the card (both carry
     // dataset.id for exactly this kind of reunion), and if no live row owns
     // it, close the host: an unplaceable pop-over must not render.
-    let anchor = document.querySelector('#grid .row.open');
-    if (!anchor) {
-      const cardEl = hintHost.querySelector('.hint');
-      const id = cardEl ? cardEl.dataset.id : null;
-      anchor = id
-        ? [...document.querySelectorAll('#grid .row')].find((r) => r.dataset.id === id) || null
-        : null;
-      if (anchor) anchor.classList.add('open'); // so the next tap closes, never relaunches
-    }
-    if (!anchor) { hintHost.replaceChildren(); return; }
-    hzPlacePop(hintHost, anchor);
+    if (!placeOpenHint({ closeIfUnplaceable: true })) return;
     if (!hintHost.querySelector('.hint-x')) {
       const x = document.createElement('button');
       x.className = 'hint-x';
@@ -115,6 +149,24 @@ new MutationObserver(() => {
     hintHost.replaceChildren(); // drop an orphaned x so :empty hides the host
   }
 }).observe(hintHost, { childList: true });
+// The strip scrolls, so the card must follow. Passive because this only reads
+// layout and repositions; blocking the scroll would make the very gesture that
+// exposes the bug feel worse than the bug. rAF-coalesced: a smooth scroll fires
+// this many times per second and hzPlacePop reads a rect each time.
+{
+  const grid = document.getElementById('grid');
+  if (grid) {
+    let queued = false;
+    grid.addEventListener('scroll', () => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => {
+        queued = false;
+        if (hintHost.querySelector('.hint')) placeOpenHint();
+      });
+    }, { passive: true });
+  }
+}
 const notice = document.getElementById('notice');
 const settings = document.getElementById('settings');
 
@@ -398,11 +450,10 @@ let fitQueued = false;
 // its new viewport rather than leaving it at the old, now-clipped coordinates.
 function repositionOpenHint() {
   if (!hintHost.classList.contains('open')) return;
-  const card = hintHost.querySelector('.hint');
-  const id = card?.dataset.id;
-  const anchor = document.querySelector('#grid .row.open')
-    || (id ? grid.querySelector(`.row[data-id="${CSS.escape(id)}"]`) : null);
-  if (anchor) hzPlacePop(hintHost, anchor);
+  // Same resolution as everywhere else. This used to do its own, without the
+  // .open reunion step, so a card whose row had been rebuilt could be placed by
+  // one path and skipped by the other.
+  placeOpenHint();
 }
 function fitConnections() {
   if (fitQueued) return; // coalesce a burst of DOM mutations into one measure
