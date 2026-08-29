@@ -36,6 +36,7 @@ import {
   ensureResolutionsSchema, resolutionState, candidatePairs, recordDecision,
 } from '../people/resolve.mjs';
 import { isNonPerson } from '../people/rank.mjs';
+import { renderClaimReceipt } from './receipt.mjs';
 import { validToFor, isExpired } from '../memory/validity.mjs';
 import { collectLastSeen, evaluate, STALE_AFTER_MS } from '../status/watchdog.mjs';
 
@@ -111,6 +112,11 @@ export function createRelationshipMemory({ contextDb, stateDb, resolutionsDb = n
           return seen !== null && (now - seen) < dormancyDays * DAY;
         },
       };
+    },
+
+    // ---- receipts: the deterministic renderer (step 3) -------------------
+    receiptFor(claimId, opts = {}) {
+      return renderClaimReceipt(contextDb, claimId, opts);
     },
 
     // ---- claim validity: hermes' lifecycle, re-exposed -------------------
