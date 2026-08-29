@@ -583,6 +583,36 @@
       "credential": "none -- the redirect carries a short-lived signed query string",
       "decision": "Declared by hand because connectors/test/egress.test.mjs matches host LITERALS and a redirect target is never one. Measured 2026-08-29: curl -IL on a mautrix release asset returns 302 to this host. Same decision as the github.com entry above -- it is one fetch, and listing only the host that appears in source would leave the ledger true by wording and false in substance, which its own _readme calls the failure this file exists to prevent.",
       "evidence": "ops/fetch-bridges.mjs download() follows redirects; bridges/native.json base https://github.com/mautrix"
+    },
+    {
+      "host": "gitlab.matrix.org",
+      "kind": "registry",
+      "component": "ops/build-libolm.sh",
+      "direction": "inbound-fetch",
+      "purpose": "the libolm 3.2.16 source tarball. Every native mautrix bridge carries LC_LOAD_DYLIB on @rpath/libolm.3.dylib -- a hard link -- and upstream ships that dylib only as a CI artifact, so it is built from source",
+      "credential": "none -- a public archive tarball",
+      "decision": "BUILD TIME ONLY. No shipped process reaches this; the dylib is produced once and placed beside the binaries. gitlab.matrix.org is the only real source left: libolm is archived, the GitHub mirror is an empty 7 KB stub, and Homebrew no longer carries a formula. Tag 3.2.16 is the version the bridges actually link, measured with otool rather than assumed.",
+      "evidence": "ops/build-libolm.sh SRC_URL"
+    },
+    {
+      "host": "pypi.org",
+      "kind": "registry",
+      "component": "ops/build-synapse.sh (pip, implicit)",
+      "direction": "inbound-fetch",
+      "purpose": "resolve the Synapse wheels named in bridges/synapse-requirements.txt",
+      "credential": "none",
+      "decision": "BUILD TIME ONLY, and declared by hand: pip reaches this without the name appearing anywhere in source, so the literal-matching tripwire cannot see it. Every version is pinned in the requirements file and installed with --only-binary --no-deps, so what arrives is a fixed set rather than whatever pip would resolve today -- which is the exact failure this replaces, since an image froze its dependency set and a fresh install does not.",
+      "evidence": "ops/build-synapse.sh pip install -r bridges/synapse-requirements.txt"
+    },
+    {
+      "host": "files.pythonhosted.org",
+      "kind": "registry",
+      "component": "ops/build-synapse.sh (pip, implicit)",
+      "direction": "inbound-fetch",
+      "purpose": "where PyPI actually serves wheel bytes; a pip install reaches it whether or not the name appears in any source file",
+      "credential": "none",
+      "decision": "BUILD TIME ONLY. Same decision as the pypi.org entry above -- it is one install, and listing only the index while omitting the host that serves the files would leave this ledger true by wording and false in substance.",
+      "evidence": "ops/build-synapse.sh pip install; PyPI serves wheels from this host"
     }
   ],
   "_loopback": [

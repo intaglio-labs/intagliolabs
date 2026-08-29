@@ -10,7 +10,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -131,4 +131,50 @@ test('missingLibraries reports nothing missing for a system binary', () => {
   const { checked, missing } = missingLibraries('/bin/ls');
   assert.equal(checked, true, 'otool must have run');
   assert.deepEqual(missing, [], '/bin/ls resolves everything through system paths');
+});
+
+// ---- the Synapse leg ----
+//
+// The homeserver is the eighth container and the one the previous answer
+// wrongly called impossible to remove. It installs from a macOS arm64 wheel; the
+// thing that actually breaks it is dependency RESOLUTION, which the container
+// image was silently doing for us.
+
+test('the Synapse dependency set is fully pinned, like the image it replaces', () => {
+  const reqs = readFileSync(join(REPO, 'bridges', 'synapse-requirements.txt'), 'utf8');
+  const lines = reqs.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+  assert.ok(lines.length >= 40, `expected a full freeze, got ${lines.length} lines`);
+  for (const line of lines) {
+    assert.match(line, /==/u, `unpinned requirement: ${line}`);
+  }
+});
+
+// THE ONE THAT MATTERS. matrix-synapse asks for `prometheus-client >=0.6.0`, so
+// an unconstrained install takes the newest, and Synapse then cannot subclass
+// its Collector: the homeserver dies at import with an MRO TypeError before it
+// reads a config. Reproduced on CPython 3.12 and 3.14 alike.
+test('prometheus_client stays at a version Synapse can subclass', () => {
+  const reqs = readFileSync(join(REPO, 'bridges', 'synapse-requirements.txt'), 'utf8');
+  const line = reqs.split('\n').find((l) => /^prometheus[-_]client==/iu.test(l.trim()));
+  assert.ok(line, 'prometheus_client must be pinned explicitly');
+  const [, version] = line.trim().split('==');
+  const [major, minor] = version.split('.').map(Number);
+  assert.equal(major, 0);
+  assert.ok(minor <= 21, `prometheus_client ${version} breaks Synapse's Collector subclass`);
+});
+
+test('Synapse is pinned to a version that still publishes a macOS wheel', () => {
+  const reqs = readFileSync(join(REPO, 'bridges', 'synapse-requirements.txt'), 'utf8');
+  const line = reqs.split('\n').find((l) => /^matrix-synapse==/iu.test(l.trim()));
+  assert.ok(line, 'matrix-synapse must be pinned');
+  const [, version] = line.trim().split('==');
+  const [major, minor] = version.split('.').map(Number);
+  // Upstream deprecated macOS wheels at 1.144.0; 1.143.0 is the last with them.
+  // Past that, ops/build-synapse.sh's --only-binary must become a CI sdist
+  // build, and this test is the reminder rather than a discovery at runtime.
+  assert.equal(major, 1);
+  assert.ok(
+    minor <= 143,
+    `Synapse ${version} publishes no macOS wheel; build-synapse.sh needs an sdist path first`
+  );
 });
