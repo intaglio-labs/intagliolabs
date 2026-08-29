@@ -21,6 +21,7 @@
 
 import { pendingClaims, decideClaim } from '../hermes.mjs';
 import { openLoop } from '../people/profile.mjs';
+import { VOUCHABLE_CHANNELS } from './reconnect.mjs';
 
 // The deterministic builder's version, recorded on every item it computes --
 // the item contract requires a producer version so a result stays
@@ -30,12 +31,12 @@ export const INBOX_RULES_VERSION = 'rm-inbox-v1';
 // pairId() joins its two keys with NUL, a character no person key contains.
 const PAIR_SEP = '\u0000';
 
-// Sources whose rows can CLOSE an open loop (an answer would arrive there),
-// intersected with what the watchdog can vouch for. A loop shown to the owner
-// claims "you have not answered" -- if any channel this person uses cannot be
-// vouched fresh across the waiting window, the claim is not coverable and the
-// item is dropped. Over-invalidation is the plan's chosen failure mode.
-const LOOP_CHANNELS = Object.freeze(['imessage', 'mail', 'whatsapp']);
+// An open loop claims "you have not answered" -- if any channel this person
+// uses cannot be vouched fresh across the waiting window, the claim is not
+// coverable and the item is dropped. Over-invalidation is the plan's chosen
+// failure mode. The channel list lives with the reconnect adapter: both
+// categories make silence claims, and two lists is how they drift.
+const LOOP_CHANNELS = VOUCHABLE_CHANNELS;
 
 export function buildInbox(service, { now = Date.now(), limit = 40 } = {}) {
   const items = [];

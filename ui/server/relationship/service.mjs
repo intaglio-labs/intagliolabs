@@ -170,6 +170,21 @@ export function createRelationshipMemory({ contextDb, stateDb, resolutionsDb = n
     // Empty on purpose in step 1. The contract is registered here so step 6's
     // adapters, step 4's suppression, and step 7's snapshots all meet at the
     // same interface instead of each inventing one.
+    // Every registered source drains through THIS door (the step-1 comment's
+    // promise): suppression and mute were already applied inside each
+    // adapter before ranking, and the global cap is enforced here -- if the
+    // cap is spent or unconfigured, no candidate leaves the building. The
+    // display surface still calls controls.allowCard() per card immediately
+    // before showing it; a candidate is an offer, not a shown card, so
+    // nothing here records a 'shown' event.
+    candidates({ now = Date.now(), cap } = {}) {
+      if (!service.controls.underGlobalCap({ ...cap, now })) return [];
+      const out = [];
+      for (const adapter of sourceAdapters.values()) {
+        out.push(...adapter.candidates(service, { now }));
+      }
+      return out;
+    },
     registerSource(adapter) {
       if (typeof adapter?.name !== 'string' || adapter.name.length === 0 || typeof adapter?.candidates !== 'function') {
         throw new Error('a source adapter is { name, candidates(service, opts) }');
