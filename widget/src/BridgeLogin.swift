@@ -1012,12 +1012,12 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   // have to be as loud as the success path or the log cannot tell "the page
   // loaded and rendered nothing" from "the navigation died".
   func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-    loginLog("provisional-fail \(label) \(webView.url?.absoluteString ?? "?") \(error.localizedDescription)")
+    loginLog("provisional-fail \(label) \(webView.url?.host ?? "?")\(webView.url?.path ?? "") \(error.localizedDescription)")
     showNavigationFailure(error, url: webView.url)
   }
 
   func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-    loginLog("nav-fail \(label) \(webView.url?.absoluteString ?? "?") \(error.localizedDescription)")
+    loginLog("nav-fail \(label) \(webView.url?.host ?? "?")\(webView.url?.path ?? "") \(error.localizedDescription)")
     showNavigationFailure(error, url: webView.url)
   }
 
