@@ -507,7 +507,39 @@ The first version of the unified Relationship Memory inbox supports only:
 2. explicit owner commitments involving another person; and
 3. deterministic open-loop or reconnect opportunities.
 
-Everything else remains retrieval-only or out of scope. In particular, existing
+~~Everything else remains retrieval-only or out of scope.~~ Amended
+2026-08-29 (owner decision, after grading the first shadow runs): the
+deterministic counted-facts justification failed the owner's taste test --
+accurate, auditable, and not a reason anyone would act on. Content-grounded
+matching enters scope: rank dormant candidates by overlap between the
+owner's CURRENT conversation topics (last 45 days, curated topic signals,
+code only) and each candidate's topical history, and compose the one-line
+"why" with the LOCAL model from labels and counts only. Message text still
+never reaches any model for this surface, and nothing leaves the box. The
+counted-facts receipt remains on every card as the audit trail; what changed
+is which facts lead.
+
+## Continuous evaluation
+
+Relationship Memory is a product pillar under continuous evaluation, not a
+one-shot experiment. The loop, and where each part lives:
+
+- Every shadow report carries per-card grading (would-text / right person,
+  weak reason / no) plus free-text feedback per card and per run, stamped
+  with the run id and matching-rules version. Exported evals land in
+  `~/.hazlie/experiments/l5/evals/` and are aggregated per rules version by
+  a local scorer. They are owner data and never enter this repository --
+  `connectors/test/experimentResults.test.mjs` reserves eval-shaped
+  filenames alongside the other result shapes.
+- In the shipped product, the same loop is rm_card_event (structured
+  outcomes with dismissal reasons) joined to rm_candidate_snapshot (what was
+  offered, immutably): grading by living with it rather than by form.
+- Rules versions are the join key everywhere. A matching or prompting change
+  bumps the version, and its grades accumulate under the new name, so "did
+  the change help" is a query, not a memory. The experiment still does not
+  retune itself: evals become labeled input for a reviewed, versioned
+  change, exactly as the suppression section already states for outcome
+  logs. In particular, existing
 generated people summaries remain excluded from memory eligibility and L5
 candidate generation.
 

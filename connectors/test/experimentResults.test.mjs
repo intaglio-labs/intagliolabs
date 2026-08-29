@@ -49,9 +49,11 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const RESERVED_DIR = /^(experiments|results|exp_.+)$/i;
 
 // Result-shaped basenames. The word-based patterns come straight from the L5
-// plan's own vocabulary; the extension-based ones catch a row store however it
-// is named.
-const RESERVED_FILE = /(sealed|grades|candidates|outcomes)|\.(db|sqlite3?|jsonl)$/i;
+// plan's own vocabulary ('eval' added 2026-08-29 when the continuous-eval
+// loop started producing l5-eval-*.json files -- grades with free-text owner
+// feedback, exactly the shape that must never land here); the extension-based
+// ones catch a row store however it is named.
+const RESERVED_FILE = /(sealed|grades|candidates|outcomes|eval)|\.(db|sqlite3?|jsonl)$/i;
 
 // Vendored and generated trees, same shape as egress.test.mjs. .git holds
 // object files this scan has no business reading.
