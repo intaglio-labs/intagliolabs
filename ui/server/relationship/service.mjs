@@ -38,6 +38,7 @@ import {
 import { isNonPerson } from '../people/rank.mjs';
 import { renderClaimReceipt } from './receipt.mjs';
 import { createControls } from './controls.mjs';
+import { buildInbox, reviewItem } from './inbox.mjs';
 import { validToFor, isExpired } from '../memory/validity.mjs';
 import { collectLastSeen, evaluate, STALE_AFTER_MS } from '../status/watchdog.mjs';
 
@@ -123,6 +124,18 @@ export function createRelationshipMemory({ contextDb, stateDb, resolutionsDb = n
         },
       };
     },
+
+    // ---- the inbox (step 5): three categories, one review door -----------
+    inbox(opts = {}) {
+      return buildInbox(service, opts);
+    },
+    review(itemId, opts = {}) {
+      return reviewItem(service, itemId, opts);
+    },
+    // The raw handle, for the inbox's claim queries. Read paths only --
+    // hermes stays the sole writer, and the claim writes above (decideClaim)
+    // go through hermes' own exported functions on this same handle.
+    db: () => contextDb,
 
     // ---- the owner's controls (step 4): one gate, both call sites --------
     controls: createControls(contextDb, { canonicalOf }),
