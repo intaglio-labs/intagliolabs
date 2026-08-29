@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "label": "pre-hardening audit",
+  "recorded_at": "2026-08-29",
+  "method": "Direct audit reproductions and code-path measurements. Local-model answer quality was not measured before hardening.",
+  "invariants": {
+    "passed": 2,
+    "total": 9,
+    "categories": {
+      "broad_question_activation": false,
+      "evidence_first_routing": false,
+      "compound_required_conditions": false,
+      "durable_interest_threshold": false,
+      "independent_support_verification": false,
+      "safe_browser_summary": false,
+      "identity_confidence_cap": false,
+      "memory_authorship_boundary": true,
+      "cross_connector_identity": true
+    }
+  },
+  "local_model_gold": null,
+  "private_shadow": null
+}

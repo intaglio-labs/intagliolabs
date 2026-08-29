@@ -139,7 +139,7 @@ test('v10 rebuilds the claim table: rows, receipts, decisions and FTS all surviv
   const path = join(mkdtempSync(join(tmpdir(), 'claim-v10-')), 'context.db');
   buildV9Db(path);
   const db = openDb(path);
-  assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 10);
+  assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 11);
   // The pre-migration claim, receipt and decision, ids preserved.
   const old = { ...db.prepare('SELECT id, subject, subject_person_key, text FROM claim WHERE id = 7').get() };
   assert.deepEqual(old, { id: 7, subject: 'owner', subject_person_key: null, text: 'the owner prefers fridays' });

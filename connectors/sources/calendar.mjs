@@ -430,6 +430,7 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
         calendar: calendarTitle,
         all_day: allDay,
       };
+      if (typeof occ.location === 'string' && occ.location.trim()) meta.location = occ.location.trim();
       if (typeof occ.rrule === 'string' && occ.rrule.length > 0) meta.rrule = occ.rrule;
       const people = attendeesOf(occ);
       if (people.length > 0) meta.attendees = people;

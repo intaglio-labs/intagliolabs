@@ -10,6 +10,8 @@
 // domain or LinkedIn company, nothing inferred.
 
 import { buildGraph, namelike } from './graph.mjs';
+import { materializedPeopleGraph, peopleSpineFingerprint } from './projection.mjs';
+import { resolutionFingerprint } from './resolve.mjs';
 import { depthScore, isNonPerson } from './rank.mjs';
 import { topicTallies, topTopics, nameTokenSet } from './topics.mjs';
 import { buildYearAwards } from './highlights.mjs';
@@ -20,6 +22,7 @@ const DAY = 86_400_000;
 // diff: a meeting is worth more than a message, and three felt right against
 // the seed ("met monthly" should outrank "texted weekly, never met").
 const MEETING_WEIGHT = 3;
+const MEETING_NOTE_WEIGHT = 1;
 
 // Collapse a person's month-bucketed timeline (graph.mjs) into year rows:
 // [{ year, engagement, messages, met }], oldest first. The year view's raw
@@ -30,14 +33,18 @@ export function yearRows(timeline) {
     const year = Number(b.ym.slice(0, 4));
     let row = byYear.get(year);
     if (row === undefined) {
-      row = { year, messages: 0, met: 0 };
+      row = { year, messages: 0, met: 0, meetingNotes: 0 };
       byYear.set(year, row);
     }
     row.messages += (b.sent ?? 0) + (b.received ?? 0);
     row.met += b.met ?? 0;
+    row.meetingNotes += b.notes ?? 0;
   }
   return [...byYear.values()]
-    .map((r) => ({ ...r, engagement: r.messages + MEETING_WEIGHT * r.met }))
+    .map((r) => ({
+      ...r,
+      engagement: r.messages + MEETING_WEIGHT * r.met + MEETING_NOTE_WEIGHT * r.meetingNotes,
+    }))
     .filter((r) => r.engagement > 0)
     .sort((a, b) => a.year - b.year);
 }
@@ -203,10 +210,26 @@ const yearMemo = new WeakMap();
 // This mattered little while the memos lived for seconds. It is the prerequisite
 // for caching anything longer: a stale answer is a delay, a WRONG answer served
 // from cache is a bug you cannot see.
+function contextStampRow(contextDb) {
+  try {
+    return contextDb.prepare(
+      'SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m, ' +
+        'COALESCE(MAX(store_changed_at), 0) AS changed FROM context'
+    ).get();
+  } catch (error) {
+    // Pure graph tests and pre-v3 read-only fixtures can legitimately carry the
+    // old five-column context shape. Their count/rowid stamp is weaker but still
+    // correct for their insert-only use; a real Hermes open migrates the column.
+    if (!/no such column:\s*store_changed_at/iu.test(String(error?.message ?? ''))) throw error;
+    const row = contextDb
+      .prepare('SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM context')
+      .get();
+    return { ...row, changed: 0 };
+  }
+}
+
 export function corpusStamp(contextDb, stateDb, extra = '') {
-  const c = contextDb
-    .prepare('SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM context')
-    .get();
+  const c = contextStampRow(contextDb);
   const dv = contextDb.prepare('PRAGMA data_version').get();
   let eps = 0;
   try {
@@ -214,16 +237,22 @@ export function corpusStamp(contextDb, stateDb, extra = '') {
   } catch {
     eps = 0; // a corpus with no episode index is a valid state
   }
-  let spine = 0;
+  let spine = peopleSpineFingerprint(null);
   try {
-    if (stateDb) {
-      spine = Number(stateDb.prepare('SELECT COUNT(*) AS n FROM contact_ids').get().n) || 0;
-    }
+    spine = peopleSpineFingerprint(stateDb);
   } catch {
-    spine = 0;
+    spine = peopleSpineFingerprint(null);
+  }
+  let peopleRevision = 0;
+  try {
+    peopleRevision = Number(
+      contextDb.prepare('SELECT source_revision FROM people_projection_state WHERE id = 1').get()?.source_revision
+    ) || 0;
+  } catch {
+    peopleRevision = 0;
   }
   const version = dv ? Object.values(dv)[0] : 0;
-  return `${c.n}|${c.m}|${version}|${eps}|${spine}|${extra}`;
+  return `${c.n}|${c.m}|${c.changed}|${version}|${peopleRevision}|${eps}|${spine}|${extra}`;
 }
 
 // SERVE THE LAST GOOD ANSWER, THEN CATCH UP.
@@ -258,7 +287,7 @@ export function peopleCoreFreshness(contextDb, stateDb, aliases = null, owner = 
   const stamp = corpusStamp(
     contextDb,
     stateDb,
-    `${aliases ? aliases.size : 0}|${ownerRoleStamp(owner)}`
+    `${resolutionFingerprint(aliases)}|${ownerRoleStamp(owner)}`
   );
   return {
     state: hit.stamp === stamp ? 'fresh' : 'stale',
@@ -275,9 +304,7 @@ export function peopleCoreFreshness(contextDb, stateDb, aliases = null, owner = 
 // happen at the fold. Giving it its own stamp lets a large contacts sync reuse
 // a scan it cannot possibly have changed.
 export function corpusOnlyStamp(contextDb) {
-  const c = contextDb
-    .prepare('SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM context')
-    .get();
+  const c = contextStampRow(contextDb);
   const dv = contextDb.prepare('PRAGMA data_version').get();
   let eps = 0;
   try {
@@ -285,7 +312,15 @@ export function corpusOnlyStamp(contextDb) {
   } catch {
     eps = 0;
   }
-  return `${c.n}|${c.m}|${dv ? Object.values(dv)[0] : 0}|${eps}`;
+  let peopleRevision = 0;
+  try {
+    peopleRevision = Number(
+      contextDb.prepare('SELECT source_revision FROM people_projection_state WHERE id = 1').get()?.source_revision
+    ) || 0;
+  } catch {
+    peopleRevision = 0;
+  }
+  return `${c.n}|${c.m}|${c.changed}|${dv ? Object.values(dv)[0] : 0}|${peopleRevision}|${eps}`;
 }
 
 // THE DISK CACHE, OPT-IN.
@@ -303,21 +338,29 @@ export function useTallyStore(store) {
 }
 
 function ownerRoleStamp(owner, { years = true } = {}) {
+  // Self identity changes who is excluded from the graph just as surely as a
+  // role correction changes its labels. It belongs in the same dependency
+  // stamp so marking a mistaken self card cannot be hidden behind a fresh memo.
+  const identity = [
+    ...[...(owner?.addresses ?? new Set())].sort().map((value) => `address:${value}`),
+    ...[...(owner?.names ?? [])].sort().map((value) => `name:${value}`),
+    ...[...(owner?.keys ?? new Set())].sort().map((value) => `key:${value}`),
+  ];
   const lifetime = [...(owner?.roles ?? new Map()).entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, role]) => `${key}:${role}`);
-  if (!years) return lifetime.join('|');
+  if (!years) return [...identity, ...lifetime].join('|');
   const perYear = [...(owner?.rolesByYear ?? new Map()).entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .flatMap(([year, roles]) => [...roles.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([key, role]) => `${year}:${key}:${role}`));
-  return [...lifetime, ...perYear].join('|');
+  return [...identity, ...lifetime, ...perYear].join('|');
 }
 
 export function yearCore(contextDb, stateDb, { now, owner, aliases, blocking = false }) {
   const roleStamp = ownerRoleStamp(owner);
-  const stamp = corpusStamp(contextDb, stateDb, `${aliases ? aliases.size : 0}|${roleStamp}`);
+  const stamp = corpusStamp(contextDb, stateDb, `${resolutionFingerprint(aliases)}|${roleStamp}`);
   const hit = yearMemo.get(contextDb);
   if (hit && hit.stamp === stamp) return hit.core;
 
@@ -354,7 +397,7 @@ export function yearCore(contextDb, stateDb, { now, owner, aliases, blocking = f
 }
 
 function buildYearCore(contextDb, stateDb, { now, owner, aliases, stamp }) {
-  const graph = buildGraph(contextDb, stateDb, { now, owner, aliases })
+  const graph = materializedPeopleGraph(contextDb, stateDb, { now, owner, aliases })
     .filter((p) => !isNonPerson(p) && hasRelationship(p));
   const idToKey = new Map(graph.flatMap((p) => (p.identifiers ?? []).map((id) => [id, p.key])));
   const nameTokens = nameTokenSet([...graph.map((p) => p.name), ...(owner?.names ?? [])]);
@@ -411,6 +454,7 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
   for (const p of graph) {
     let messages = 0;
     let met = 0;
+    let meetingNotes = 0;
     let roomMessages = 0;
     const channels = new Set();
     for (const b of p.timeline ?? []) {
@@ -420,10 +464,11 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
       // volume is its own number, next to it, not folded into it.
       messages += (b.sent ?? 0) + (b.received ?? 0);
       met += b.met ?? 0;
+      meetingNotes += b.notes ?? 0;
       roomMessages += b.room ?? 0;
       for (const channel of b.channels ?? []) channels.add(channel);
     }
-    const engagement = messages + MEETING_WEIGHT * met;
+    const engagement = messages + MEETING_WEIGHT * met + MEETING_NOTE_WEIGHT * meetingNotes;
     // A YEAR SPENT ONLY IN ROOMS STILL HAPPENED. Ordering is by direct
     // engagement, so somebody the owner never addressed sorts below everybody
     // they did -- but they stay ON the list, because "you were in three group
@@ -431,7 +476,7 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
     // that vanishes cannot give it. Room volume deliberately does NOT enter
     // engagement: it would buy rank with other people's conversations.
     if (engagement === 0 && roomMessages === 0) continue;
-    entries.push({ p, messages, met, engagement, roomMessages, channels: [...channels].sort() });
+    entries.push({ p, messages, met, meetingNotes, engagement, roomMessages, channels: [...channels].sort() });
   }
   entries.sort((a, b) => b.engagement - a.engagement);
 
@@ -478,6 +523,7 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
         channels: e.channels,
         messages: e.messages,
         roomMessages: e.roomMessages,
+        meetingNotes: e.meetingNotes,
         engagement: e.engagement,
         // ONLY EVER IN ROOMS. Relationship-level, not per-year: the question
         // "do I actually know this person, or do we just share a group chat"
@@ -517,7 +563,7 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
   const stamp = corpusStamp(
     contextDb,
     stateDb,
-    `${aliases ? aliases.size : 0}|${ownerRoleStamp(owner)}`
+    `${resolutionFingerprint(aliases)}|${ownerRoleStamp(owner)}`
   );
   const hit = searchMemo.get(contextDb);
   if (hit && hit.stamp === stamp) return hit.value;
@@ -529,15 +575,16 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
     for (const b of p.timeline ?? []) {
       const y = Number(String(b.ym).slice(0, 4));
       if (!Number.isInteger(y)) continue;
-      const cur = per.get(y) ?? { messages: 0, met: 0, roomMessages: 0, channels: new Set() };
+      const cur = per.get(y) ?? { messages: 0, met: 0, meetingNotes: 0, roomMessages: 0, channels: new Set() };
       cur.messages += (b.sent ?? 0) + (b.received ?? 0);
       cur.met += b.met ?? 0;
+      cur.meetingNotes += b.notes ?? 0;
       cur.roomMessages += b.room ?? 0;
       for (const channel of b.channels ?? []) cur.channels.add(channel);
       per.set(y, cur);
     }
     for (const [y, v] of per) {
-      const engagement = v.messages + MEETING_WEIGHT * v.met;
+      const engagement = v.messages + MEETING_WEIGHT * v.met + MEETING_NOTE_WEIGHT * v.meetingNotes;
       // Reachable by search even in a year that was only rooms -- search is
       // about finding somebody, and they were there.
       if (engagement === 0 && v.roomMessages === 0) continue;
@@ -548,6 +595,7 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
         channels: [...v.channels].sort(),
         identifiers: p.identifiers ?? [],
         messages: v.messages,
+        meetingNotes: v.meetingNotes,
         roomMessages: v.roomMessages,
         engagement,
         roomOnly: p.roomOnly === true,
@@ -583,7 +631,7 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
   // Keep that local config state in this memo key so the constellation never
   // trails behind the People list after a right-click correction.
   const roleStamp = ownerRoleStamp(owner, { years: false });
-  const stamp = corpusStamp(contextDb, stateDb, `${aliases ? aliases.size : 0}|${sinceTs ?? 'all'}|${roleStamp}`);
+  const stamp = corpusStamp(contextDb, stateDb, `${resolutionFingerprint(aliases)}|${sinceTs ?? 'all'}|${roleStamp}`);
   const memoHit = mapMemo.get(contextDb);
   if (memoHit && memoHit.stamp === stamp) return memoHit.value;
   // Drop automated senders/role addresses (shared filter), then keep only the
@@ -712,6 +760,7 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
       received: p.received ?? 0,
       reciprocity: p.reciprocity ?? 0,
       metInPerson: p.metInPerson ?? 0,
+      meetingNotes: p.meetingNotes ?? 0,
       firstSeen: p.firstSeen ?? null,
       lastSeen: p.lastSeen ?? null,
       dormancyDays: p.dormancyDays ?? null,

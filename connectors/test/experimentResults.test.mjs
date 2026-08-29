@@ -49,11 +49,15 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const RESERVED_DIR = /^(experiments|results|exp_.+)$/i;
 
 // Result-shaped basenames. The word-based patterns come straight from the L5
-// plan's own vocabulary ('eval' added 2026-08-29 when the continuous-eval
-// loop started producing l5-eval-*.json files -- grades with free-text owner
-// feedback, exactly the shape that must never land here); the extension-based
-// ones catch a row store however it is named.
-const RESERVED_FILE = /(sealed|grades|candidates|outcomes|eval)|\.(db|sqlite3?|jsonl)$/i;
+// plan's own vocabulary; the extension-based ones catch a row store however
+// it is named. 'eval' is scoped to DATA extensions (json/jsonl/csv) because
+// the repo legitimately carries eval HARNESS code -- ui/evals/people-search/
+// and ui/test/people-eval.test.mjs arrived with PR #30, runner and sanitized
+// baseline in-tree, real results out -- while l5-eval-*.json (grades with
+// free-text owner feedback about named people) must never land here. An
+// unscoped 'eval' pattern failed the suite on the harness itself, which is a
+// tripwire firing on the fire brigade.
+const RESERVED_FILE = /(sealed|grades|candidates|outcomes)|eval[^/]*\.(json|jsonl|csv)$|\.(db|sqlite3?|jsonl)$/i;
 
 // Vendored and generated trees, same shape as egress.test.mjs. .git holds
 // object files this scan has no business reading.

@@ -1,10 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { loadOwner, markOwnerPerson, markPersonRole, ownerConfigPath } from '../server/people/owner.mjs';
+
+test('loadOwner exposes configured high schools for shared-affiliation search', () => {
+  const home = mkdtempSync(join(tmpdir(), 'hazlie-school-'));
+  try {
+    const configPath = ownerConfigPath(home);
+    markOwnerPerson({ key: 'id:owner@example.test', configPath });
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    raw.highSchools = ['Lincoln High School', 'Lincoln High School'];
+    writeFileSync(configPath, `${JSON.stringify(raw)}\n`, { mode: 0o600 });
+    assert.deepEqual(loadOwner({ configPath }).highSchools, ['Lincoln High School']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test('markOwnerPerson persists a stable self key and only email-shaped aliases', () => {
   const home = mkdtempSync(join(tmpdir(), 'hazlie-owner-'));

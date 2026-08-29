@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import {
   ensureResolutionsSchema, recordDecision, loadResolutions,
-  aliasMap, resolutionState, candidatePairs, pairId,
+  aliasMap, resolutionState, resolutionFingerprint, candidatePairs, pairId,
 } from '../server/people/resolve.mjs';
 
 // A resolved-person stub shaped like buildGraph output.
@@ -32,6 +32,14 @@ test('a decision is stored order-independently and round-trips', () => {
   // Stored sorted, so (b,a) and (a,b) are one pair.
   assert.deepEqual(same[0].sort(), ['id:b', 'name:a'].sort());
   assert.equal(differentPairs.size, 0);
+});
+
+test('resolution cache identity changes when the aliases change but their count does not', () => {
+  const first = new Map([['id:a', 'name:one']]);
+  const second = new Map([['id:b', 'name:two']]);
+  assert.equal(first.size, second.size);
+  assert.notEqual(resolutionFingerprint(first), resolutionFingerprint(second));
+  assert.equal(resolutionFingerprint(first), resolutionFingerprint(new Map(first)));
 });
 
 test('skip records nothing — the pair stays undecided', () => {

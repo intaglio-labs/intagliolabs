@@ -187,6 +187,7 @@ test('detectEraWindow parses ranges, single years, since, and years-ago', () => 
   assert.deepEqual(detectEraWindow('mentors back in 2019', { now: NOW }), { fromYm: '2019-01', toYm: '2019-12' });
   assert.deepEqual(detectEraWindow('who do i know since 2024', { now: NOW }), { fromYm: '2024-01', toYm: '2027-01' });
   assert.deepEqual(detectEraWindow('mentors from 3 years ago', { now: NOW }), { fromYm: '2024-01', toYm: '2024-12' });
+  assert.deepEqual(detectEraWindow('investors from five years ago', { now: NOW }), { fromYm: '2022-01', toYm: '2022-12' });
   assert.equal(detectEraWindow('who are investors i talked to', { now: NOW }), null);
 });
 

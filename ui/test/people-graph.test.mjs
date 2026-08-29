@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import { openDb, insertRows } from '../server/hermes.mjs';
-import { buildGraph, loadSpine, relationshipHistoryFloor } from '../server/people/graph.mjs';
+import { KNOWN_SOURCES } from '../server/hermes.mjs';
+import { buildGraph, loadSpine, relationshipHistoryFloor, PERSON_SOURCE_POLICY } from '../server/people/graph.mjs';
 
 const NOW = new Date(2027, 0, 1).getTime();
 const DAY = 86_400_000;
@@ -20,6 +21,18 @@ function spineDb(pairs) {
   return db;
 }
 
+function identitySpineDb(rows) {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE contact_ids (identifier TEXT PRIMARY KEY, display_name TEXT, kind TEXT, person_ref TEXT, source TEXT, updated_ts INTEGER)');
+  const ins = db.prepare('INSERT INTO contact_ids VALUES (?,?,?,?,?,?)');
+  for (const row of rows) ins.run(row.id, row.name, row.kind ?? 'email', row.ref, 'contacts', NOW);
+  return db;
+}
+
+test('every Hermes source has an explicit people-identity policy', () => {
+  assert.deepEqual(Object.keys(PERSON_SOURCE_POLICY).sort(), [...KNOWN_SOURCES].sort());
+});
+
 test('the spine merges a phone and an email into one person', () => {
   const ctx = openDb(':memory:');
   insertRows(ctx, [
@@ -32,6 +45,65 @@ test('the spine merges a phone and an email into one person', () => {
   assert.ok(sam, 'one person, not two');
   assert.deepEqual(sam.channels, ['imessage', 'mail']);
   assert.equal(sam.messages, 2);
+});
+
+test('stable contact membership joins multiple emails while same-named cards stay split', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - 4 * DAY, source: 'imessage', entity_id: 'i:card-a', text: 'one', meta: { chat_handle: '+18085550100', is_from_me: false } },
+    { ts: NOW - 3 * DAY, source: 'mail', entity_id: 'm:card-a-1', text: 'two', meta: { from: ['sam@one.test'], to: ['owner@example.test'] } },
+    { ts: NOW - 2 * DAY, source: 'mail', entity_id: 'm:card-a-2', text: 'three', meta: { from: ['sam@two.test'], to: ['owner@example.test'] } },
+    { ts: NOW - DAY, source: 'mail', entity_id: 'm:card-b', text: 'other Sam', meta: { from: ['other@sam.test'], to: ['owner@example.test'] } },
+  ]);
+  const spine = identitySpineDb([
+    { id: '+18085550100', name: 'Sam Lee', kind: 'phone', ref: 'card-a' },
+    { id: 'sam@one.test', name: 'Sam Lee', ref: 'card-a' },
+    { id: 'sam@two.test', name: 'Sam Lee', ref: 'card-a' },
+    { id: 'other@sam.test', name: 'Sam Lee', ref: 'card-b' },
+  ]);
+  const sams = buildGraph(ctx, spine, { now: NOW }).filter((person) => person.name === 'Sam Lee');
+  assert.equal(sams.length, 2, 'two Address Book cards with the same label are not auto-merged');
+  const joined = sams.find((person) => person.identifiers.includes('+18085550100'));
+  assert.deepEqual(new Set(joined.identifiers), new Set(['+18085550100', 'sam@one.test', 'sam@two.test']));
+  assert.equal(joined.messages, 3);
+});
+
+test('a unique Contact card preserves the legacy stable name key', () => {
+  const spine = identitySpineDb([
+    { id: '+18085550100', name: 'Sam Lee', kind: 'phone', ref: 'card-a' },
+    { id: 'sam@example.test', name: 'Sam Lee', ref: 'card-a' },
+  ]);
+  const loaded = loadSpine(spine);
+  assert.equal(loaded.keyFor('+18085550100'), 'name:sam lee');
+  assert.equal(loaded.keyFor('sam@example.test'), 'name:sam lee');
+});
+
+test('Granola participants join the same canonical person without becoming messages', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - 2 * DAY, source: 'imessage', entity_id: 'i:devon', text: 'hi', meta: { chat_handle: '+15555550111', is_from_me: false } },
+    { ts: NOW - DAY, source: 'granola', entity_id: 'granola:meeting', text: 'meeting summary', meta: { participants: [{ name: 'Devon Park', email: 'devon@example.test' }] } },
+  ]);
+  const spine = identitySpineDb([
+    { id: '+15555550111', name: 'Devon Park', kind: 'phone', ref: 'card-devon' },
+    { id: 'devon@example.test', name: 'Devon Park', ref: 'card-devon' },
+  ]);
+  const devon = buildGraph(ctx, spine, { now: NOW }).find((person) => person.name === 'Devon Park');
+  assert.deepEqual(devon.channels, ['granola', 'imessage']);
+  assert.equal(devon.messages, 1);
+  assert.equal(devon.directMessages, 1);
+  assert.equal(devon.meetingNotes, 1);
+});
+
+test('Granola name-only attendees stay meeting-scoped without hard identity', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - 2 * DAY, source: 'granola', entity_id: 'granola:first', text: 'first', meta: { participants: [{ name: 'Alex Kim' }] } },
+    { ts: NOW - DAY, source: 'granola', entity_id: 'granola:second', text: 'second', meta: { participants: [{ name: 'Alex Kim' }] } },
+  ]);
+  const alexes = buildGraph(ctx, spineDb([]), { now: NOW }).filter((person) => person.name === 'Alex Kim');
+  assert.equal(alexes.length, 2, 'a shared name is not a stable identifier');
+  assert.ok(alexes.every((person) => person.meetingNotes === 1));
 });
 
 test('a person with no spine entry keys by raw identifier', () => {
@@ -104,6 +176,25 @@ test('calendar co-attendance merges by attendee email and counts meetings', () =
   const r = buildGraph(ctx, spine, { now: NOW }).find((p) => p.name === 'Mika Tanaka');
   assert.equal(r.metInPerson, 2);
   assert.ok(r.channels.includes('calendar') && r.channels.includes('imessage'));
+});
+
+test('calendar fallback names label exact emails but never merge same-named invitees', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [
+    { ts: NOW - 2 * DAY, source: 'calendar', entity_id: 'c:alex-a', text: 'one', meta: { attendees: [{ email: 'alex.a@example.test', name: 'Alex Kim' }] } },
+    { ts: NOW - DAY, source: 'calendar', entity_id: 'c:alex-b', text: 'two', meta: { attendees: [{ email: 'alex.b@example.test', name: 'Alex Kim' }] } },
+  ]);
+  const spine = new DatabaseSync(':memory:');
+  spine.exec('CREATE TABLE contact_ids(identifier TEXT PRIMARY KEY, display_name TEXT, kind TEXT, person_ref TEXT, source TEXT, updated_ts INTEGER)');
+  const insert = spine.prepare('INSERT INTO contact_ids VALUES(?,?,?,?,?,?)');
+  insert.run('alex.a@example.test', 'Alex Kim', 'email', null, 'calendar', NOW);
+  insert.run('alex.b@example.test', 'Alex Kim', 'email', null, 'calendar', NOW);
+
+  const alexes = buildGraph(ctx, spine, { now: NOW }).filter((person) => person.name === 'Alex Kim');
+  assert.equal(alexes.length, 2);
+  assert.deepEqual(alexes.map((person) => person.identifiers).sort(), [
+    ['alex.a@example.test'], ['alex.b@example.test'],
+  ]);
 });
 
 test('calendar context is capped at the deepest non-calendar connector history', () => {

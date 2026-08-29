@@ -249,6 +249,10 @@ const TOP_KEYS = Object.freeze([
   // Explicit graph identities marked by the owner as themselves. This is the
   // local fallback for sources whose identifiers are not email addresses.
   'ownerPersonKeys',
+  // Owner-confirmed schools used by the local people-search graph. This lives
+  // in the shared config, so the daemon must accept and validate the same key
+  // the UI reads; otherwise adding a school would stop every connector.
+  'highSchools',
   // Explicit relationship-role corrections. The people graph supplies a local
   // message-derived guess; these owner choices replace it per stable key.
   'personRoles',
@@ -360,7 +364,11 @@ export function validateConfig(raw) {
   if (raw.selfName !== undefined && (typeof raw.selfName !== 'string' || raw.selfName.length === 0)) {
     throw configError('"selfName" must be a non-empty string');
   }
-  for (const [field, values] of [['ownerEmails', raw.ownerEmails], ['ownerPersonKeys', raw.ownerPersonKeys]]) {
+  for (const [field, values] of [
+    ['ownerEmails', raw.ownerEmails],
+    ['ownerPersonKeys', raw.ownerPersonKeys],
+    ['highSchools', raw.highSchools],
+  ]) {
     if (values !== undefined && (!Array.isArray(values) || values.some((value) => typeof value !== 'string' || value.length === 0 || value.length > 300))) {
       throw configError(`"${field}" must be an array of non-empty strings`);
     }

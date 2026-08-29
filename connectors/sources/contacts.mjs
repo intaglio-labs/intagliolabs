@@ -5,9 +5,10 @@
 // which query-time joins read so the same human stops surfacing three times —
 // once as a phone number, once as an email local-part, once as a full name in
 // a meeting. It is
-// deliberately a lookup table and not a person schema: rows are
-// (identifier, displayName, kind∈{phone,email}), resolution happens at query
-// time, and the spine must never become the project.
+// deliberately a resolution spine rather than a second corpus: rows are
+// (identifier, displayName, kind∈{phone,email}, opaque personRef). personRef
+// preserves the hard fact that several identifiers came from one Address Book
+// card; all corpus aggregation still happens at query time.
 //
 // FULL DISK ACCESS: the AddressBook stores are TCC territory, so this runs
 // under launchd with the stable binary, same as iMessage. Layout confirmed by
@@ -23,6 +24,7 @@ import { readdirSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { readContacts, helperAvailable } from '../lib/apple-data.mjs';
 import { snapshotStore } from '../lib/storeReader.mjs';
 
@@ -57,6 +59,17 @@ export function normalizeEmail(raw) {
   return s.includes('@') ? s : null;
 }
 
+// Opaque on purpose: a CNContact identifier or a fallback list of private
+// identifiers should not become a readable graph key. The same card produces
+// the same ref, and different cards with the same display name stay distinct.
+function personRefFor({ contactId = null, displayName = '', identifiers = [] } = {}) {
+  const explicit = typeof contactId === 'string' && contactId.trim() ? contactId.trim() : null;
+  const seed = explicit
+    ? `cn:${explicit}`
+    : `fallback:${displayName}\u0000${[...identifiers].sort().join('\u0000')}`;
+  return createHash('sha256').update(seed).digest('hex').slice(0, 32);
+}
+
 function tableColumns(db, table) {
   try {
     return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name));
@@ -82,21 +95,30 @@ export function readStore(db) {
     if (display) names.set(Number(r.Z_PK), display);
   }
 
+  const byOwner = new Map();
+  const add = (owner, identifier, kind) => {
+    if (!identifier || !names.has(owner)) return;
+    if (!byOwner.has(owner)) byOwner.set(owner, []);
+    byOwner.get(owner).push({ identifier, kind });
+  };
   const phone = tableColumns(db, 'ZABCDPHONENUMBER');
   if (phone.has('ZOWNER') && phone.has('ZFULLNUMBER')) {
     for (const r of db.prepare('SELECT ZOWNER, ZFULLNUMBER FROM ZABCDPHONENUMBER').all()) {
-      const display = names.get(Number(r.ZOWNER));
-      const id = normalizePhone(r.ZFULLNUMBER);
-      if (display && id) entries.push({ identifier: id, displayName: display, kind: 'phone' });
+      const owner = Number(r.ZOWNER);
+      add(owner, normalizePhone(r.ZFULLNUMBER), 'phone');
     }
   }
   const email = tableColumns(db, 'ZABCDEMAILADDRESS');
   if (email.has('ZOWNER') && email.has('ZADDRESS')) {
     for (const r of db.prepare('SELECT ZOWNER, ZADDRESS FROM ZABCDEMAILADDRESS').all()) {
-      const display = names.get(Number(r.ZOWNER));
-      const id = normalizeEmail(r.ZADDRESS);
-      if (display && id) entries.push({ identifier: id, displayName: display, kind: 'email' });
+      const owner = Number(r.ZOWNER);
+      add(owner, normalizeEmail(r.ZADDRESS), 'email');
     }
+  }
+  for (const [owner, identifiers] of byOwner) {
+    const displayName = names.get(owner);
+    const personRef = personRefFor({ displayName, identifiers: identifiers.map((item) => item.identifier) });
+    for (const item of identifiers) entries.push({ ...item, displayName, personRef });
   }
   return { entries, reason: null };
 }
@@ -145,14 +167,22 @@ export function entriesFromContacts(contacts) {
   for (const c of Array.isArray(contacts) ? contacts : []) {
     const display = typeof c?.displayName === 'string' ? c.displayName.trim() : '';
     if (!display) continue;
+    const identifiers = [];
     for (const raw of Array.isArray(c.phones) ? c.phones : []) {
       const identifier = normalizePhone(raw);
-      if (identifier) entries.push({ identifier, displayName: display, kind: 'phone' });
+      if (identifier) identifiers.push({ identifier, kind: 'phone' });
     }
     for (const raw of Array.isArray(c.emails) ? c.emails : []) {
       const identifier = normalizeEmail(raw);
-      if (identifier) entries.push({ identifier, displayName: display, kind: 'email' });
+      if (identifier) identifiers.push({ identifier, kind: 'email' });
     }
+    const unique = [...new Map(identifiers.map((item) => [`${item.kind}:${item.identifier}`, item])).values()];
+    const personRef = personRefFor({
+      contactId: c?.contactId,
+      displayName: display,
+      identifiers: unique.map((item) => item.identifier),
+    });
+    for (const item of unique) entries.push({ ...item, displayName: display, personRef });
   }
   return entries;
 }
@@ -198,7 +228,11 @@ export function createContactsSource({ home } = {}) {
             else cards.push(c);
           }
           const entries = entriesFromContacts(cards);
-          if (entries.length > 0) ctx.state.upsertContacts(entries);
+          // Only full access makes absence meaningful. With limited access the
+          // OS hides cards, so replacing would turn an incomplete view into
+          // destructive identity churn.
+          if (access === 'full') ctx.state.replaceContacts(entries);
+          else if (entries.length > 0) ctx.state.upsertContacts(entries);
           // Photos are a nice-to-have on top of the spine: a failure here must
           // never cost the run its names, which are the thing the graph cannot
           // work without.
@@ -321,7 +355,11 @@ export function createContactsSource({ home } = {}) {
       }
 
       const entries = [...byIdentifier.values()];
-      if (entries.length > 0) ctx.state.upsertContacts(entries);
+      // All stores read means this is a complete snapshot. A partial pass can
+      // safely improve known rows but cannot prove a missing identifier was
+      // removed from Contacts.
+      if (stores.length > 0 && storesRead === stores.length) ctx.state.replaceContacts(entries);
+      else if (entries.length > 0) ctx.state.upsertContacts(entries);
       ctx.log.info('contacts_scan', {
         connector: 'contacts',
         stores: stores.length,
