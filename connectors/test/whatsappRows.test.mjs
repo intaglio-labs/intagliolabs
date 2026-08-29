@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -267,4 +267,71 @@ test('a batch-wide tie finishes the second and advances instead of livelocking',
   await source.run(ctx); // progress: the messages after the tie second land
   assert.equal(delivered.size, 5006, 'messages after the tie second are reachable');
   assert.equal(cursors.get('whatsapp:max-date'), String(500_104));
+});
+
+// ---- provisioning ----
+//
+// needs() returned [] unconditionally, on the reasoning that the store exists
+// once WhatsApp Desktop has run. It does not: re-linking the app wipes the
+// message store, and the connector then failed every fifteen minutes for six
+// days instead of reporting itself unprovisioned.
+
+test('an absent store is unprovisioned, and the message names the path and the fix', () => {
+  const home = mkdtempSync(join(tmpdir(), 'wa-needs-absent-'));
+  try {
+    const missing = createWhatsappSource({ home }).needs();
+    assert.equal(missing.length, 1);
+    assert.match(missing[0], /whatsapp desktop store missing/u);
+    assert.ok(missing[0].includes(chatStoragePath(home)), 'must name the absolute path');
+    assert.match(missing[0], /install WhatsApp Desktop|connect page/u, 'must say how to fix it');
+    // run.mjs joins these with '; ' inside a sentence.
+    assert.ok(!missing[0].endsWith('.'), 'no terminal period');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a store WhatsApp Desktop has written clears the gate', () => {
+  const home = mkdtempSync(join(tmpdir(), 'wa-needs-present-'));
+  let db;
+  try {
+    db = createSyntheticStore(home);
+    assert.deepEqual(createWhatsappSource({ home }).needs(), []);
+  } finally {
+    try { db?.close(); } catch {}
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// Both call sites invoke `source.needs({ config })` and never pass a home, so
+// needs() has to resolve its own. calendar pins the same property.
+test('needs() ignores the daemon argument and resolves its own home', () => {
+  const home = mkdtempSync(join(tmpdir(), 'wa-needs-arg-'));
+  let db;
+  try {
+    db = createSyntheticStore(home);
+    assert.deepEqual(createWhatsappSource({ home }).needs({ config: {} }), []);
+  } finally {
+    try { db?.close(); } catch {}
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// THE LOAD-BEARING ONE. Only ENOENT means unprovisioned; a permission failure
+// must fall through to the run, which is the honest probe and fails loudly.
+// existsSync would report a TCC denial as "not installed" and turn today's loud
+// failure into silence. A regular file where Library/ should be makes statSync
+// fail with ENOTDIR, which forces the non-ENOENT branch without mocking.
+test('a non-ENOENT stat failure does not gate: readability stays the run\'s job', () => {
+  const home = mkdtempSync(join(tmpdir(), 'wa-needs-denied-'));
+  try {
+    writeFileSync(join(home, 'Library'), 'not a directory');
+    assert.deepEqual(
+      createWhatsappSource({ home }).needs(),
+      [],
+      'only ENOENT is unprovisioned; anything else is for the run to surface'
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
