@@ -251,9 +251,42 @@ const HZ_HINT_FOR = (id) => (id.startsWith('mail:') ? HZ_HINTS.mail : HZ_HINTS[i
 // HZ_WHY — the one-line what-this-reads subheader — was yeeted with its twin
 // in connections.js (owner, 2026-08-25); the note there carries the reasoning.
 const HZ_STAY = "data stored locally";
+// THE ENGINE NEEDS DOCKER RUNNING -- offer that, do not print a shell command.
+//
+// This used to say "open Docker, then: bash ops/setup-bridges.sh", which was
+// wrong three ways at once: it named a repo path a downloaded install does not
+// have, it told the owner to run a script the app ALREADY runs itself
+// (Provision.ensureBridgeRuntime shells the bundled copy on any nobridge), and
+// it omitted the only fact that resolves the situation -- press the tile again
+// once Docker is up. Exactly one step here is genuinely the owner's, so offer
+// that one step as a button and say nothing else.
+function hzTileNobridgeNotice(tip) {
+  const line = document.createElement('span');
+  line.textContent = 'social connections need Docker Desktop running.';
+  const open = document.createElement('button');
+  open.className = 'engine-open';
+  open.textContent = 'open Docker ↗';
+  open.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // Installed app first; openApp answers notInstalled rather than failing
+    // silently, and only then do we send them to the download.
+    hzPost('openApp', { bundleId: 'com.docker.docker' })
+      .then((d) => {
+        if (!d || d.state !== 'ok') {
+          hzPost('openExternal', { url: 'https://www.docker.com/products/docker-desktop/' }).catch(() => {});
+        }
+      })
+      .catch(() => {});
+  });
+  const after = document.createElement('span');
+  after.className = 'engine-after';
+  after.textContent = 'then press this again.';
+  tip.append(line, open, after);
+}
+
 const HZ_NOTICES = {
   // See connections.js NOTICES.nobridge — the engine, not the connection.
-  nobridge: 'the social bridge engine is not running — open Docker, then: bash ops/setup-bridges.sh',
+  nobridge: 'social connections need Docker Desktop running.',
   down: 'checking the local connection…',
   auth: 'token mismatch — status unknown',
   noroute: 'connect service predates /api/status — status unknown',
@@ -490,7 +523,8 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
         tip.appendChild(acct);
       }
     } else if (data && data.state !== 'ok' && data.state !== 'cancelled' && !manual && !data.transcript) {
-      tip.append(HZ_NOTICES[data.state] || data.error || HZ_NOTICES.error);
+      if (data.state === 'nobridge') { hzTileNobridgeNotice(tip); }
+      else { tip.append(HZ_NOTICES[data.state] || data.error || HZ_NOTICES.error); }
     } else {
       // The bot's pending QUESTION, computed first because the log in button
       // below is hidden while one is outstanding (owner, 2026-08-25).

@@ -62,3 +62,40 @@ test('only a currently pending bridge question blocks a fresh login', () => {
     'validation keeps the preceding question active'
   );
 });
+
+// ---- is there actually an engine behind this? ----
+//
+// This route answers 200 whether or not a bridge stack exists -- the GET falls
+// back to policy-only so a fresh install can still render -- and native read
+// that 200 as permission to open a login window. On 2026-08-29 it did exactly
+// that on a machine with no homeserver: a real Meta password, a real harvested
+// session, dropped. The policy fallback stays; it just has to SAY so now.
+
+test('a fresh install still gets its policy, and is told the engine is down', async (t) => {
+  const home = freshHome(t);
+  const query = new URLSearchParams({ p: 'messenger' });
+  const res = await bridgeApiResponse({
+    method: 'GET', authorization: `Bearer ${TOKEN}`, query, home,
+  });
+  // Unchanged: policy renders without Matrix. This is the behaviour the
+  // fallback exists for and it must not regress.
+  assert.equal(res.status, 200);
+  assert.equal(res.body.loginUrl, 'https://www.facebook.com/login/');
+  assert.equal(res.body.connected, false);
+  // New: and it no longer looks identical to a healthy stack.
+  assert.equal(res.body.engine, 'down');
+});
+
+test('every platform reports an engine state, never undefined', async (t) => {
+  const home = freshHome(t);
+  for (const p of ['messenger', 'instagram', 'telegram']) {
+    const res = await bridgeApiResponse({
+      method: 'GET', authorization: `Bearer ${TOKEN}`, query: new URLSearchParams({ p }), home,
+    });
+    assert.ok(
+      ['up', 'down', 'unknown'].includes(res.body.engine),
+      `${p} answered engine=${String(res.body.engine)}`
+    );
+  }
+});
+

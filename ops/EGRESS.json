@@ -563,6 +563,16 @@
       "credential": null,
       "decision": "allowed",
       "evidence": "site/privacy/index.html -- §6 links the mautrix project when naming the bridges that reach the chat platforms, so the reader can see whose software runs on their Mac"
+    },
+    {
+      "host": "www.docker.com",
+      "kind": "user-browser-link",
+      "component": "widget/src/Bridge.swift openExternal allowlist, widget/ui/connections.js, widget/ui/connector-tile.js",
+      "direction": "none",
+      "purpose": "send the owner to download Docker Desktop when the social bridges cannot start because it is not installed -- reached only from the nobridge notice's button, and only after openApp reports the bundle absent",
+      "credential": "none -- this process opens no socket here",
+      "decision": "n/a",
+      "evidence": "widget/src/Bridge.swift allowedExternal https://www.docker.com/products/docker-desktop/"
     }
   ],
   "_loopback": [

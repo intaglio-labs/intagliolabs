@@ -68,8 +68,22 @@ test('native work status includes active work and unfinished backfill, but exclu
 });
 
 test('the total processing estimate uses the plain approximate-hours label', () => {
-  assert.match(daemon, /const completionTimes = scheduledQueue\(\)\.map\(\(task\) => task\.nextTs\)/u,
-    'the total reaches the final task in the live scheduler queue');
+  // WAS: /const completionTimes = scheduledQueue\(\).map\(\(task\) => task.nextTs\)/,
+  // "the total reaches the final task in the live scheduler queue".
+  //
+  // That contract shipped and the owner rejected it on sight: an idle daemon
+  // read "~ 17.3 HRS LEFT" because the idle-window maintenance pass was armed
+  // for 03:30 tomorrow and the horizon took the max over the whole queue
+  // ("whats gonna take 17h", 2026-08-29 -- backfill empty, nothing running).
+  // Routine passes are WAITS, not work: seconds of work on a fifteen-minute
+  // timer, so the gap before one says nothing about how much is left to do.
+  // Only resumable history spans multiple bounded passes and can honestly be
+  // described in hours. Not a goalpost move -- the estimate still exists and
+  // still counts real backfill, which the line below pins unchanged.
+  assert.match(daemon, /const completionTimes = \[\];/u,
+    'the horizon counts backfill work only, never the routine schedule');
+  assert.doesNotMatch(daemon, /const completionTimes = scheduledQueue\(\)/u,
+    'a routine poll must never be counted as work remaining');
   assert.match(daemon, /estimate: `~ \$\{\(tenthsOfAnHour \/ 10\)\.toFixed\(1\)\} hrs left`/u);
   assert.match(connectors, /estimate\.hasPrefix\("≥ "\) \|\| estimate\.hasPrefix\("≈ "\)/u,
     'a persisted snapshot is normalized before the daemon republishes it');

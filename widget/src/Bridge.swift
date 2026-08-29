@@ -344,7 +344,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   private var pendingVoiceUtterance: String?
 
   // Only desktop applications named by the connector UI may be launched.
-  private let allowedApps: Set<String> = ["com.granola.app"]
+  // Docker Desktop is here because the social bridges need it running and the
+  // owner should never be told to go and start it by hand. The openApp handler
+  // already replies state:"notInstalled" when a bundle is absent, so this one
+  // entry buys both branches: a working button when Docker is installed, and a
+  // distinguishable state to offer a download when it is not.
+  private let allowedApps: Set<String> = ["com.granola.app", "com.docker.docker"]
 
   // The only external destinations this app will hand to the OS. Opening
   // one launches the default browser (or System Settings) — the app itself
@@ -354,6 +359,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
     "https://myaccount.google.com/apppasswords",
     "https://granola.ai",
+    // Where to get Docker Desktop, for the nobridge notice's button when the app
+    // is not installed. openApp already distinguishes that case; this is the only
+    // destination that branch needs.
+    "https://www.docker.com/products/docker-desktop/",
     "https://cloud.ouraring.com/oauth/applications",
     "https://www.notion.so/my-integrations",
     // Telegram's app registration — each install gets its own api_id/api_hash.
@@ -750,6 +759,24 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
               let cookieDomain = begin["cookieDomain"] as? String
         else {
           self.reply(webView, id, begin) // begin failed → pass the notice back
+          return
+        }
+        // ASK BEFORE THE PASSWORD, NOT AFTER.
+        //
+        // This route answers 200 even with no bridge stack behind it -- the GET
+        // falls back to policy-only so a fresh install still renders -- so "ok"
+        // used to mean "open the window". It did, on a machine with no
+        // homeserver: the owner typed a real Meta password into a real Meta page,
+        // the cookies were harvested, and beginBridgeLogin THEN discovered there
+        // was nothing to hand them to and dropped the session. Nothing queued,
+        // nothing resumed, and the next press was another fresh password.
+        //
+        // Only 'down' refuses. 'unknown' and 'up' both proceed, so an already
+        // connected platform, or any route that never probed, behaves exactly as
+        // it did. ensureBridgeRuntime still runs on the POST path below; this
+        // only stops us collecting a credential we cannot deliver.
+        if begin["engine"] as? String == "down" {
+          self.reply(webView, id, ["state": "nobridge"])
           return
         }
         // The web-login policy comes from the server's platform table. A
