@@ -349,8 +349,46 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
       // joined room's history arrives on the next sync, which the daemon runs
       // minutes later — so a first run after a login joins, and the run after
       // it ingests. Joining is idempotent; an already-joined room is a no-op.
+      //
+      // RECONCILED AGAINST THE SERVER, NOT JUST THIS PAGE.
+      //
+      // ~~"A room that will not join this tick is offered again next sync."~~
+      // That was the comment below and it is false for an INCREMENTAL sync.
+      // rooms.invite reports CHANGES since the token: an invite appears in
+      // exactly one page, and if that page is missed — the daemon was down, the
+      // join 429'd, the login landed between passes — the token moves past it and
+      // the room is never offered again. Measured on this machine: 25 portal
+      // rooms sat invited and 19 joined, so Discord and LinkedIn had bridge
+      // databases full of messages and ZERO rows in the corpus, indefinitely.
+      //
+      // A sync with no `since` returns current invite state rather than a delta,
+      // so it sees all 25. timeline.limit=0 keeps it cheap — no message bodies,
+      // just room summaries and invite_state, which is all invitesToJoin reads.
+      // Run every pass: it is one request, it is idempotent, and the alternative
+      // is a silent permanent hole in somebody's history.
+      const pending = [...invitesToJoin(body)];
+      try {
+        const filter = encodeURIComponent(JSON.stringify({
+          room: { timeline: { limit: 0 }, state: { lazy_load_members: true } },
+        }));
+        const res2 = await fetchImpl(
+          `${creds.base}/_matrix/client/v3/sync?filter=${filter}&timeout=0`,
+          { headers: { Authorization: `Bearer ${creds.token}` },
+            signal: AbortSignal.timeout(30_000) }
+        );
+        if (res2.ok) {
+          const full = await res2.json();
+          for (const roomId of invitesToJoin(full)) {
+            if (!pending.includes(roomId)) pending.push(roomId);
+          }
+        }
+      } catch {
+        // Best effort. The incremental page's own invites are already queued
+        // above, so a failed reconcile costs nothing this pass and retries next.
+      }
+
       let joined = 0;
-      for (const roomId of invitesToJoin(body)) {
+      for (const roomId of pending) {
         try {
           const r = await fetchImpl(
             `${creds.base}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`,
@@ -361,7 +399,9 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
           );
           if (r.ok) joined += 1;
         } catch {
-          // A room that will not join this tick is offered again next sync.
+          // Offered again next pass by the reconcile above — which is the whole
+          // reason that reconcile exists, because the incremental page will not
+          // offer it a second time.
         }
       }
       if (joined) ctx.log?.info?.(`matrix: joined ${joined} portal room(s)`);

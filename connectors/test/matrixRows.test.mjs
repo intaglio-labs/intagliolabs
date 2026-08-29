@@ -6,7 +6,7 @@
 // never become corpus rows. Everything else here is join-key plumbing.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { classifySender, eventToRow } from '../lib/matrixRows.mjs';
@@ -268,3 +268,38 @@ test('a first run queues older room history and the next slice resumes it', asyn
 function jsonResponse(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
+
+// ---- invites are reconciled, not merely observed ----
+//
+// The connector auto-joins portal invites, but it read them only from the
+// INCREMENTAL /sync page, whose rooms.invite reports CHANGES since the token.
+// An invite therefore appears in exactly one page; miss it — daemon down, login
+// landing between passes — and the token moves past it and the room is never
+// offered again. The code's own comment claimed the opposite: "A room that will
+// not join this tick is offered again next sync."
+//
+// Measured on the owner's machine 2026-08-29: 25 portal rooms invited, 19
+// joined, and Discord and LinkedIn holding full bridge databases with ZERO rows
+// in the corpus. A sync with no `since` returned all 25; the incremental sync
+// returned none.
+
+test('the invite sweep does not rely on the incremental page alone', () => {
+  const src = readFileSync(new URL('../sources/matrix.mjs', import.meta.url), 'utf8');
+  const code = src.split('\n').filter((l) => !/^\s*\/\//u.test(l)).join('\n');
+  // A second sync with NO since token is the only thing that sees an invite the
+  // delta page has already moved past.
+  assert.match(code, /v3\/sync\?filter=\$\{filter\}&timeout=0/u,
+    'a reconcile sync must run alongside the incremental one');
+  assert.match(code, /timeline: \{ limit: 0 \}/u,
+    'the reconcile must be cheap — invite state only, no message bodies');
+  assert.doesNotMatch(code, /offered again next sync/u,
+    'the false claim must not survive in code');
+});
+
+test('both invite sources feed one join loop, without duplicates', () => {
+  const src = readFileSync(new URL('../sources/matrix.mjs', import.meta.url), 'utf8');
+  assert.match(src, /const pending = \[\.\.\.invitesToJoin\(body\)\]/u);
+  assert.match(src, /if \(!pending\.includes\(roomId\)\) pending\.push\(roomId\)/u,
+    'a room in both the delta and the reconcile must be joined once');
+  assert.match(src, /for \(const roomId of pending\)/u);
+});
