@@ -381,13 +381,23 @@ test('X Chat passcode is a four-digit encrypted-DM step on both surfaces', () =>
     assert.match(source, /\^\\d\{4\}\$/u, `${name} rejects an incomplete passcode`);
     assert.match(source, /bridgeCookies[^\n]*cookies: (val|value)/u, `${name} relays locally`);
   }
+  assert.match(bridgeLoginSwift, /func showPasscode\(question: String/u,
+    'the native login window owns the normal X passcode step');
+  assert.match(bridgeLoginSwift, /NSSecureTextField/u, 'the native passcode stays masked');
+  assert.match(bridgeLoginSwift, /"\^\[0-9\]\{4\}\$"/u, 'native rejects incomplete passcodes');
+  assert.match(bridgeLoginSwift, /completeHarvest[\s\S]*afterHarvest\(json, self\)/u,
+    'cookie harvest transitions into the local continuation without closing the window');
 });
 
 test('X resumes pending bridge state and reconciles asynchronous completion', () => {
   const nativeLogin = /case "bridgeWebLogin":([\s\S]*?)\n {4}\/\/ ---- setup:/u.exec(swift)?.[1];
   assert.ok(nativeLogin, 'native bridgeWebLogin handler is missing');
-  assert.match(nativeLogin, /begin\["pendingQuestion"\][\s\S]*self\.reply\(webView, id, begin\)[\s\S]*BridgeLogin\.present/u,
-    'native resumes the current question before presenting a second login window');
+  assert.match(nativeLogin, /p == "twitter"[\s\S]*xPasscodeQuestion\(begin\)[\s\S]*BridgeLogin\.presentPasscode/u,
+    'an already-pending X passcode opens natively on the first tile press');
+  assert.match(nativeLogin, /let inlineX = p == "twitter"[\s\S]*afterHarvest[\s\S]*awaitXBridgeStep/u,
+    'fresh X cookies remain in the login window until the bridge asks its follow-up');
+  assert.match(nativeLogin, /afterHarvest: afterHarvest/u,
+    'the X continuation is handed to the web-login controller');
   assert.doesNotMatch(connections, /resumeOrStartBridgeLogin/u,
     'Settings must not make a preliminary status request before the login action');
   assert.doesNotMatch(tile, /hzPost\('bridgeStatus'[\s\S]{0,300}beginWebLogin/u,
@@ -408,8 +418,10 @@ test('a login launched from the non-activating Settings panel rises on its first
     'a superseded login window must never be raised later');
   assert.match(presenter, /win\.orderFrontRegardless\(\)/u,
     'the settled pass must not depend on the non-activating source panel');
-  assert.equal((bridgeLoginSwift.match(/presentLoginWindow\(win\)/gu) || []).length, 2,
-    'both web and QR login windows use the first-click presenter');
+  assert.ok((bridgeLoginSwift.match(/presentLoginWindow\(win\)/gu) || []).length >= 3,
+    'web, QR, and local continuation surfaces use the first-click presenter');
+  assert.match(bridgeLoginSwift, /installLocalBody[\s\S]*presentLoginWindow\(win\)/u,
+    'the in-place passcode continuation remains in the foreground');
 });
 
 test('Settings focus refresh cannot detach a connector during its first click', () => {
@@ -483,8 +495,8 @@ test('Settings offers the explicit WhatsApp opt-in returned by connector status'
   assert.match(block, /\.then\(refresh\)/u, 'successful opt-in repaints connector status');
 });
 
-test('Settings keeps every unconnected connector ahead of connected caveats', () => {
-  assert.match(connections, /const needsYou = \(s\) => !s\.connected;/u);
+test('Settings keeps every unconnected or still-importing connector ahead of connected caveats', () => {
+  assert.match(connections, /const needsYou = \(s\) => !s\.connected \|\| s\.pending === true;/u);
   assert.doesNotMatch(connections, /const needsYou =[^;]*caveat/u);
 });
 

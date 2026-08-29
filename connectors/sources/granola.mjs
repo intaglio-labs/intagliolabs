@@ -207,6 +207,7 @@ export function createGranolaSource(overrides = {}) {
 
   return {
     name: 'granola',
+    walksHistory: true,
 
     async needs() {
       // existsSync only — the full permission gauntlet runs at read time in
@@ -218,6 +219,7 @@ export function createGranolaSource(overrides = {}) {
 
     async run(ctx) {
       const { state, ingest, admin, config, log, backfill } = ctx;
+      const yearly = ctx.history === true && ctx.historyWindow?.year ? ctx.historyWindow : null;
       const client = createGranolaClient({
         keyFile,
         cacheDir: join(ctx.cacheDir, 'granola'),
@@ -233,11 +235,13 @@ export function createGranolaSource(overrides = {}) {
         detail: 'Granola API returns only notes with a generated AI summary; unsummarized meetings are invisible to this connector',
       });
 
-      // Backfill paginates EVERYTHING; steady runs filter by the cursor. A
-      // steady run with no cursor yet (first ever run) is also a full scan —
-      // there is no high-water mark to pin to, and unlike chat.db the note
-      // corpus is small and bounded.
-      const updatedAfter = backfill ? null : state.getCursor(UPDATED_AFTER_CURSOR);
+      // A first steady run starts at local New Year's Day. Older notes belong
+      // to the durable year queue below; pulling the entire account here would
+      // defeat the newest-year-first UX before the coordinator gets a turn.
+      const firstSteadyFloor = new Date(new Date(ctx.now()).getFullYear(), 0, 1).toISOString();
+      const updatedAfter = (backfill || yearly)
+        ? null
+        : (state.getCursor(UPDATED_AFTER_CURSOR) ?? firstSteadyFloor);
 
       const listed = [];
       let cursor;
@@ -262,7 +266,28 @@ export function createGranolaSource(overrides = {}) {
         seenCursors.add(page.cursor);
         cursor = page.cursor;
       }
-      log.info('granola_listed', { count: listed.length, backfill: Boolean(backfill) });
+      log.info('granola_listed', {
+        count: listed.length,
+        backfill: Boolean(backfill),
+        ...(yearly ? { historyYear: yearly.year } : {}),
+      });
+
+      const currentYearFloor = new Date(new Date(ctx.now()).getFullYear(), 0, 1).getTime();
+      const selected = yearly
+        ? listed.filter((item) => {
+            const created = Date.parse(item?.created_at ?? '');
+            return Number.isFinite(created) && created >= yearly.fromTs && created < yearly.toTs;
+          })
+        : ((!backfill && ctx.historyComplete !== true)
+            ? listed.filter((item) => {
+                const created = Date.parse(item?.created_at ?? '');
+                return Number.isFinite(created) && created >= currentYearFloor;
+              })
+            : listed);
+      const oldestCreated = listed.reduce((oldest, item) => {
+        const created = Date.parse(item?.created_at ?? '');
+        return Number.isFinite(created) ? Math.min(oldest, created) : oldest;
+      }, Infinity);
 
       const rows = [];
       // Per-note transcript bookkeeping, applied only AFTER the ingest
@@ -271,7 +296,7 @@ export function createGranolaSource(overrides = {}) {
       const chunkPlans = [];
       let maxUpdatedMs = null;
 
-      for (const item of listed) {
+      for (const item of selected) {
         if (!nonEmptyString(item?.id)) throw new Error('granola /notes returned an item without an id');
         const detail = await client.getNote(item.id);
         const row = buildNoteRow(detail, item);
@@ -328,7 +353,7 @@ export function createGranolaSource(overrides = {}) {
       // Advance the cursor LAST, and only off timestamps hermes has actually
       // accepted — a run that failed above resumes from the old mark and the
       // overlap redelivers as `unchanged`. The 60 s rewind is the skew guard.
-      if (maxUpdatedMs !== null) {
+      if (!yearly && maxUpdatedMs !== null) {
         state.setCursor(UPDATED_AFTER_CURSOR, new Date(maxUpdatedMs - SKEW_GUARD_MS).toISOString());
       }
 
@@ -337,6 +362,11 @@ export function createGranolaSource(overrides = {}) {
         updated: totals.updated,
         unchanged: totals.unchanged,
         deleted,
+        ...(yearly ? {
+          historyDone: true,
+          historyHasOlder: oldestCreated < yearly.fromTs,
+          historyProgressed: selected.length > 0,
+        } : {}),
       };
     },
   };

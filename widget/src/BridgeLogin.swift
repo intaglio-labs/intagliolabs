@@ -29,7 +29,8 @@
 import AppKit
 import WebKit
 
-final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate, WKScriptMessageHandler {
+final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate,
+                         WKScriptMessageHandler, NSTextFieldDelegate {
   // Held for the life of the window so ARC doesn't reclaim it mid-login.
   private static var current: BridgeLogin?
 
@@ -117,6 +118,26 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   private let allowedFrameSuffixes: [String]
   private let done: (String?) -> Void
 
+  /// Cookie logins normally finish as soon as their cookie payload is ready.
+  /// X is the exception: its bridge asks for a local four-digit encrypted-DM
+  /// passcode after accepting those cookies. Keeping that continuation here
+  /// lets the same trusted window transition from x.com to the local passcode
+  /// step instead of closing and making the person find a second Settings card.
+  typealias HarvestContinuation = (String, BridgeLogin) -> Void
+  private let afterHarvest: HarvestContinuation?
+  private var harvestStarted = false
+
+  enum PasscodeOutcome {
+    case connected
+    case retry(String)
+  }
+  typealias PasscodeSubmit = (String, @escaping (PasscodeOutcome) -> Void) -> Void
+  private var passcodeSubmit: PasscodeSubmit?
+  private var passcodeField: NSSecureTextField?
+  private var passcodeButton: NSButton?
+  private var passcodeError: NSTextField?
+  private var passcodeIdleTitle = "continue"
+
   /// A QR WINDOW's two pieces: the image the bridge posted, and the closure
   /// that asks the bridge whether the scan has landed yet. Both nil for an
   /// ordinary web login — the two modes share this window's chrome and its
@@ -149,7 +170,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     label: String, cookieDomain: String, sessionCookie: String, allowedHosts: [String],
     requiredCookies: [String], cookieFormat: String, fields: [[String: String]],
     approval: Bool, userAgent: String, allowedFrameHosts: [String],
-    storageUrl: String, done: @escaping (String?) -> Void
+    storageUrl: String, afterHarvest: HarvestContinuation?,
+    done: @escaping (String?) -> Void
   ) {
     self.label = label
     self.cookieDomain = cookieDomain
@@ -164,6 +186,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     self.allowedFrameSuffixes = allowedFrameHosts
     self.storageUrl = storageUrl
     self.allowedSuffixes = allowedHosts
+    self.afterHarvest = afterHarvest
     self.done = done
   }
 
@@ -183,6 +206,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     cookieFormat: String = "json", fields: [[String: String]] = [],
     approval: Bool = false, userAgent: String = "", allowedFrameHosts: [String] = [],
     storageUrl: String = "",
+    afterHarvest: HarvestContinuation? = nil,
     done: @escaping (String?) -> Void
   ) {
     // A window must have something to wait for: a session cookie to appear, or
@@ -199,10 +223,32 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
       sessionCookie: sessionCookie, allowedHosts: allowedHosts,
       requiredCookies: requiredCookies, cookieFormat: cookieFormat,
       fields: fields, approval: approval, userAgent: userAgent,
-      allowedFrameHosts: allowedFrameHosts, storageUrl: storageUrl, done: done
+      allowedFrameHosts: allowedFrameHosts, storageUrl: storageUrl,
+      afterHarvest: afterHarvest, done: done
     )
     current = ctl
     ctl.show(url: url)
+  }
+
+  /// Resume an X login whose cookie step already finished in an earlier app
+  /// session. A tile press still opens the native continuation immediately;
+  /// the person never has to open a connector card just to find the passcode
+  /// field. New logins reach the same method by transitioning their web window
+  /// in place after cookie harvest.
+  static func presentPasscode(
+    label: String, question: String,
+    submit: @escaping PasscodeSubmit,
+    done: @escaping (String?) -> Void
+  ) {
+    current?.finish(nil)
+    let ctl = BridgeLogin(
+      label: label, cookieDomain: "", sessionCookie: "", allowedHosts: [],
+      requiredCookies: [], cookieFormat: "json", fields: [],
+      approval: false, userAgent: "", allowedFrameHosts: [], storageUrl: "",
+      afterHarvest: nil, done: done
+    )
+    current = ctl
+    ctl.showPasscode(question: question, submit: submit)
   }
 
   /// What the bridge has to say about a QR login in flight.
@@ -244,7 +290,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     let ctl = BridgeLogin(
       label: label, cookieDomain: "", sessionCookie: "", allowedHosts: [],
       requiredCookies: [], cookieFormat: "json", fields: [],
-      approval: false, userAgent: "", allowedFrameHosts: [], storageUrl: "", done: done
+      approval: false, userAgent: "", allowedFrameHosts: [], storageUrl: "",
+      afterHarvest: nil, done: done
     )
     ctl.qrCheck = check
     ctl.qrFetch = fetch
@@ -460,6 +507,210 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
         case .ended: self.expireQRCode()
         }
       }
+    }
+  }
+
+  /// Retire the live website while keeping this exact native window alive for
+  /// a local continuation. No web content, cookies, or script handler remains
+  /// mounted behind the passcode UI.
+  private func detachWebSurface() {
+    poll?.invalidate(); poll = nil
+    web?.stopLoading()
+    web?.navigationDelegate = nil
+    web?.uiDelegate = nil
+    web = nil
+    seenHeaders.removeAll()
+    blink?.invalidate(); blink = nil
+    headerTitle = nil
+    headerHost = nil
+    headerNotice = nil
+  }
+
+  /// Replace the website with one compact local step. Reuses the existing X
+  /// window when there is one; a resumed passcode creates the same shell from
+  /// scratch. The header deliberately switches from a live-domain claim to
+  /// x.com plus local-storage copy because there is no page underneath now.
+  private func installLocalBody(_ body: NSView, bodyHeight: CGFloat) {
+    guard !finished else { return }
+    let W: CGFloat = 480, headH: CGFloat = 62
+    detachWebSurface()
+    let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: bodyHeight + headH))
+    content.wantsLayer = true
+    content.layer?.backgroundColor = NSColor(
+      red: 0x14 / 255, green: 0x14 / 255, blue: 0x12 / 255, alpha: 1
+    ).cgColor
+    body.frame = NSRect(x: 0, y: 0, width: W, height: bodyHeight)
+    let header = makeHeader(width: W, height: headH)
+    header.frame = NSRect(x: 0, y: bodyHeight, width: W, height: headH)
+    header.autoresizingMask = [.width, .minYMargin]
+    content.addSubview(body)
+    content.addSubview(header)
+    headerHost?.stringValue = "x.com"
+    headerNotice?.stringValue = "data stored locally"
+
+    if let win = window {
+      win.setContentSize(NSSize(width: W, height: bodyHeight + headH))
+      win.contentView = content
+      presentLoginWindow(win)
+    } else {
+      let win = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: W, height: bodyHeight + headH),
+        styleMask: [.titled, .closable], backing: .buffered, defer: false
+      )
+      win.title = ""
+      win.level = .normal
+      win.isReleasedWhenClosed = false
+      win.delegate = self
+      win.contentView = content
+      win.center()
+      window = win
+      presentLoginWindow(win)
+    }
+  }
+
+  /// The cookie handoff can take a few seconds to wake the bridge and receive
+  /// its encrypted-DM question. Keep the flow visibly alive in the same window
+  /// instead of dropping back to Settings during that gap.
+  func showProgress(_ text: String = "setting up encrypted DMs…") {
+    let body = NSView()
+    let spinner = NSProgressIndicator(frame: NSRect(x: 104, y: 83, width: 24, height: 24))
+    spinner.style = .spinning
+    spinner.controlSize = .small
+    spinner.startAnimation(nil)
+    let line = NSTextField(labelWithString: text)
+    line.font = NSFont(name: "Menlo", size: 14)
+      ?? NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+    line.textColor = NSColor(red: 0xea / 255, green: 0xea / 255, blue: 0xea / 255, alpha: 1)
+    line.frame = NSRect(x: 142, y: 80, width: 280, height: 30)
+    body.addSubview(spinner)
+    body.addSubview(line)
+    installLocalBody(body, bodyHeight: 190)
+  }
+
+  func showFailure(_ text: String) {
+    let body = NSView()
+    let line = NSTextField(wrappingLabelWithString: text)
+    line.font = NSFont(name: "Menlo", size: 14)
+      ?? NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+    line.textColor = NSColor(red: 0xff / 255, green: 0x90 / 255, blue: 0x68 / 255, alpha: 1)
+    line.alignment = .center
+    line.frame = NSRect(x: 46, y: 62, width: 388, height: 66)
+    body.addSubview(line)
+    installLocalBody(body, bodyHeight: 190)
+  }
+
+  func completeInlineLogin() { finish("connected") }
+
+  /// Turn the web login window into X's local four-digit step. The value is
+  /// never logged, persisted, or echoed; `submit` relays it over the existing
+  /// loopback bridge channel and reports only connected/retry state.
+  func showPasscode(question: String, submit: @escaping PasscodeSubmit) {
+    passcodeSubmit = submit
+    let creating = question.range(of: "create", options: [.caseInsensitive]) != nil
+    let body = NSView()
+    let mono = NSFont(name: "Menlo", size: 13)
+      ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+    let monoBold = NSFont(name: "Menlo Bold", size: 15)
+      ?? NSFont.monospacedSystemFont(ofSize: 15, weight: .semibold)
+    let fg = NSColor(red: 0xea / 255, green: 0xea / 255, blue: 0xea / 255, alpha: 1)
+    let muted = NSColor(red: 0x8a / 255, green: 0x8a / 255, blue: 0x8a / 255, alpha: 1)
+
+    let title = NSTextField(labelWithString: creating
+      ? "create a 4-digit X Chat passcode"
+      : "enter your 4-digit X Chat passcode")
+    title.font = monoBold
+    title.textColor = fg
+    title.frame = NSRect(x: 30, y: 188, width: 420, height: 28)
+
+    let why = NSTextField(wrappingLabelWithString:
+      "This unlocks your encrypted DMs. It is not your X password or 2FA code.")
+    why.font = mono
+    why.textColor = muted
+    why.frame = NSRect(x: 30, y: 126, width: 420, height: 48)
+
+    let field = NSSecureTextField(frame: NSRect(x: 30, y: 76, width: 260, height: 34))
+    field.font = NSFont(name: "Menlo", size: 18)
+      ?? NSFont.monospacedSystemFont(ofSize: 18, weight: .regular)
+    field.placeholderString = "4 digits"
+    field.delegate = self
+    field.maximumNumberOfLines = 1
+    passcodeField = field
+
+    let button = NSButton(frame: NSRect(x: 308, y: 76, width: 122, height: 34))
+    button.title = creating ? "create" : "continue"
+    passcodeIdleTitle = button.title
+    button.bezelStyle = .rounded
+    button.font = monoBold
+    button.target = self
+    button.action = #selector(submitPasscode)
+    button.keyEquivalent = "\r"
+    passcodeButton = button
+
+    let error = NSTextField(labelWithString: "")
+    error.font = mono
+    error.textColor = NSColor(red: 0xff / 255, green: 0x90 / 255, blue: 0x68 / 255, alpha: 1)
+    error.frame = NSRect(x: 30, y: 40, width: 400, height: 22)
+    passcodeError = error
+
+    body.addSubview(title)
+    body.addSubview(why)
+    body.addSubview(field)
+    body.addSubview(button)
+    body.addSubview(error)
+    installLocalBody(body, bodyHeight: 245)
+    window?.makeFirstResponder(field)
+  }
+
+  func controlTextDidChange(_ obj: Notification) {
+    guard let field = obj.object as? NSSecureTextField, field === passcodeField else { return }
+    let digits = String(field.stringValue.filter(\.isNumber).prefix(4))
+    if digits != field.stringValue { field.stringValue = digits }
+    passcodeError?.stringValue = ""
+  }
+
+  @objc private func submitPasscode() {
+    guard let submit = passcodeSubmit, let field = passcodeField else { return }
+    let value = field.stringValue
+    guard value.range(of: "^[0-9]{4}$", options: .regularExpression) != nil else {
+      passcodeError?.stringValue = "enter all 4 digits"
+      window?.makeFirstResponder(field)
+      return
+    }
+    passcodeError?.stringValue = ""
+    passcodeButton?.isEnabled = false
+    passcodeButton?.title = "checking…"
+    submit(value) { [weak self] outcome in
+      DispatchQueue.main.async {
+        guard let self, !self.finished else { return }
+        switch outcome {
+        case .connected:
+          field.stringValue = ""
+          self.finish("connected")
+        case .retry(let message):
+          field.stringValue = ""
+          self.passcodeButton?.isEnabled = true
+          self.passcodeButton?.title = self.passcodeIdleTitle
+          self.passcodeError?.stringValue = message
+          self.window?.makeFirstResponder(field)
+        }
+      }
+    }
+  }
+
+  /// One-shot cookie harvest. X hands the payload to its inline continuation;
+  /// every other platform preserves the original close-and-return behavior.
+  private func completeHarvest(_ json: String) {
+    guard !harvestStarted else { return }
+    harvestStarted = true
+    if let afterHarvest {
+      poll?.invalidate(); poll = nil
+      DispatchQueue.main.async { [weak self] in
+        guard let self, !self.finished else { return }
+        self.showProgress()
+        afterHarvest(json, self)
+      }
+    } else {
+      finish(json)
     }
   }
 
@@ -870,14 +1121,14 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
         guard payload.count == self.fields.count,
               let data = try? JSONSerialization.data(withJSONObject: payload),
               let json = String(data: data, encoding: .utf8) else { return }
-        self.finish(json)
+        self.completeHarvest(json)
         return
       }
       var bag: [String: String] = [:]
       for c in mine { bag[c.name] = c.value }
       guard let data = try? JSONSerialization.data(withJSONObject: bag),
             let json = String(data: data, encoding: .utf8) else { return }
-      self.finish(json)
+      self.completeHarvest(json)
     }
   }
 
@@ -1059,6 +1310,11 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     qrHow = nil
     qrRetry = nil
     qrExpiry = nil
+    passcodeSubmit = nil
+    passcodeField = nil
+    passcodeButton = nil
+    passcodeError = nil
+    passcodeIdleTitle = "continue"
     let cb = done
     let win = window
     let dataStore = websiteDataStore
@@ -1066,6 +1322,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     websiteDataStore = nil
     clearsWebsiteData = false
     web?.navigationDelegate = nil
+    web?.uiDelegate = nil
     web = nil
     window?.delegate = nil
     window = nil

@@ -158,7 +158,10 @@ function stubIngest(recorded) {
 }
 
 let cacheCount = 0;
-function makeCtx({ state, ingestFn, admin, config = {}, log, backfill = false }) {
+function makeCtx({
+  state, ingestFn, admin, config = {}, log, backfill = false, historyWindow,
+  historyComplete = false,
+}) {
   return {
     state,
     ingest: ingestFn,
@@ -172,6 +175,8 @@ function makeCtx({ state, ingestFn, admin, config = {}, log, backfill = false })
     log,
     now: Date.now,
     backfill,
+    historyComplete,
+    ...(historyWindow ? { history: true, historyWindow } : {}),
   };
 }
 
@@ -428,7 +433,11 @@ test('pagination stitches every page; rows follow the registry; the limitation i
   assert.equal(listCalls.length, 2);
   assert.equal(listCalls[0].params.cursor, undefined);
   assert.equal(listCalls[1].params.cursor, 'off:2');
-  assert.equal(listCalls[0].params.updated_after, undefined); // no cursor yet: full scan
+  assert.equal(
+    listCalls[0].params.updated_after,
+    new Date(new Date(Date.now()).getFullYear(), 0, 1).toISOString(),
+    'a fresh steady lane starts at local New Year; the yearly history lane owns older notes'
+  );
 
   // The summary-only API limitation is on the record exactly once per run.
   assert.equal(events.filter((e) => e.event === 'granola_summary_only').length, 1);
@@ -468,6 +477,66 @@ test('steady runs advance and use the updated_after cursor (max updated_at − 6
   await source.run(makeCtx({ state, ingestFn: stubIngest(recordedBackfill), log, backfill: true }));
   assert.equal(fx.calls.filter((c) => c.path === '/v1/notes').at(-1).params.updated_after, undefined);
   assert.equal(recordedBackfill.length, 2);
+});
+
+test('yearly history ingests only the selected year and reports whether older notes exist', async () => {
+  const fx = makeGranolaFixture({ pageSize: 1 });
+  fx.notes.push(
+    makeNote('older', {
+      title: 'Older', createdAt: '2025-06-01T12:00:00.000Z',
+      updatedAt: '2025-06-01T12:30:00.000Z', summary: 'older summary',
+    }),
+    makeNote('current', {
+      title: 'Current', createdAt: '2026-03-01T12:00:00.000Z',
+      updatedAt: '2026-03-01T12:30:00.000Z', summary: 'current summary',
+    }),
+  );
+  const source = createGranolaSource({ keyFile, fetchImpl: fx.fetchImpl });
+  const state = freshState();
+  const recorded = [];
+  const { log } = recordingLogger();
+  const result = await source.run(makeCtx({
+    state,
+    ingestFn: stubIngest(recorded),
+    log,
+    historyWindow: {
+      year: 2026,
+      fromTs: new Date(2026, 0, 1).getTime(),
+      toTs: new Date(2027, 0, 1).getTime(),
+    },
+  }));
+
+  assert.deepEqual(recorded.map((row) => row.entity_id), ['granola:current']);
+  assert.equal(result.historyDone, true);
+  assert.equal(result.historyHasOlder, true);
+  assert.equal(state.getCursor(UPDATED_AFTER_CURSOR), null, 'history never moves the forward cursor');
+});
+
+test('an old note edited today cannot bypass the year barrier', async () => {
+  const fx = makeGranolaFixture({ pageSize: 30 });
+  fx.notes.push(makeNote('old-edited', {
+    title: 'Old but edited',
+    createdAt: '2025-04-01T12:00:00.000Z',
+    updatedAt: '2026-08-28T12:00:00.000Z',
+    summary: 'edited summary',
+  }));
+  const state = freshState();
+  const source = createGranolaSource({ keyFile, fetchImpl: fx.fetchImpl });
+  const { log } = recordingLogger();
+  const beforeBarrier = [];
+  await source.run(makeCtx({ state, ingestFn: stubIngest(beforeBarrier), log }));
+  assert.deepEqual(beforeBarrier, []);
+  assert.equal(state.getCursor(UPDATED_AFTER_CURSOR), null,
+    'the skipped update remains observable after the historical queue completes');
+
+  const afterBarrier = [];
+  await source.run(makeCtx({
+    state,
+    ingestFn: stubIngest(afterBarrier),
+    log,
+    historyComplete: true,
+  }));
+  assert.deepEqual(afterBarrier.map((row) => row.entity_id), ['granola:old-edited']);
 });
 
 test('hasMore without a cursor refuses loudly instead of looping', async () => {

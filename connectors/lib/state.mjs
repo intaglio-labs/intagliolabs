@@ -6,7 +6,7 @@
 // 0600-in-0700 discipline and the same "deleted means deleted" PRAGMAs as
 // hermes' own store (ui/server/hermes.mjs hardenConnection).
 //
-// run_log.error holds error MESSAGES from this package's own code. The log
+// run_log.error holds sanitized error fingerprints from this package's own code. The log
 // policy (connectors/AGENTS.md) binds here too: an error string must never
 // embed row text, message bodies, or subjects — name the failure and the
 // counts, not the content.

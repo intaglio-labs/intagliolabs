@@ -7,10 +7,11 @@
 // failing for real reasons while the role tests only ever restated the table.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readStatus } from '../lib/status.mjs';
+import { discordImportState, readStatus } from '../lib/status.mjs';
 
 function home(t, config) {
   const dir = mkdtempSync(join(tmpdir(), 'connect-status-'));
@@ -164,6 +165,58 @@ test('shared connector disable markers apply to account and platform rows', (t) 
     assert.equal(platform.connected, false);
     assert.equal(platform.detail, 'turned off');
   }
+});
+
+function seedDiscord(homeDir, { portals = 1, messages = 0, readStateVersion = 1 } = {}) {
+  const dir = join(homeDir, '.hazlie', 'matrix', 'discord');
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const db = new DatabaseSync(join(dir, 'mautrix-discord.db'));
+  db.exec(`
+    CREATE TABLE "user" (dcid TEXT, read_state_version INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE puppet (id TEXT, username TEXT, global_name TEXT, name TEXT);
+    CREATE TABLE portal (mxid TEXT);
+    CREATE TABLE message (id TEXT);
+  `);
+  db.prepare('INSERT INTO "user" (dcid, read_state_version) VALUES (?, ?)')
+    .run('discord-user', readStateVersion);
+  db.prepare('INSERT INTO puppet (id, username, global_name, name) VALUES (?, ?, ?, ?)')
+    .run('discord-user', 'owner', '', '');
+  for (let i = 0; i < portals; i += 1) db.prepare('INSERT INTO portal (mxid) VALUES (?)').run(`!${i}`);
+  for (let i = 0; i < messages; i += 1) db.prepare('INSERT INTO message (id) VALUES (?)').run(`${i}`);
+  db.close();
+}
+
+test('Discord stays pending after authentication until imported message rows exist', (t) => {
+  const dir = home(t, {});
+  seedDiscord(dir, { portals: 3, messages: 0 });
+
+  const empty = discordImportState({ home: dir });
+  assert.deepEqual(empty, {
+    verified: true,
+    portalCount: 3,
+    messageCount: 0,
+    ready: false,
+  });
+  const waiting = readStatus({ home: dir }).find((row) => row.id === 'discord');
+  assert.equal(waiting.connected, true, 'the account stays authenticated and cannot relaunch login');
+  assert.equal(waiting.pending, true, 'zero imported rows keeps the tile in its waiting state');
+  assert.equal(waiting.importedMessages, 0);
+
+  const db = new DatabaseSync(join(dir, '.hazlie', 'matrix', 'discord', 'mautrix-discord.db'));
+  db.prepare('INSERT INTO message (id) VALUES (?)').run('first-imported-message');
+  db.close();
+
+  const ready = readStatus({ home: dir }).find((row) => row.id === 'discord');
+  assert.equal(ready.connected, true);
+  assert.equal(ready.pending, false);
+  assert.equal(ready.importedMessages, 1);
+  assert.equal(ready.discoveredConversations, 3);
+});
+
+test('a fully synchronized Discord account with no conversations does not wait forever', (t) => {
+  const dir = home(t, {});
+  seedDiscord(dir, { portals: 0, messages: 0, readStateVersion: 4 });
+  assert.equal(discordImportState({ home: dir }).ready, true);
 });
 
 // ~~"adding a mailbox never replaces a corrupt connectors config".~~ Removed in

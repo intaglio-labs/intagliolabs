@@ -69,13 +69,13 @@ here must never produce a `.node` file or a `binding.gyp` in `node_modules`
 ## The log never carries row content
 
 `lib/log.mjs` writes JSON lines to `~/.hazlie/logs/connectors.log`: counts,
-ids, durations, error messages, schema facts — **never message bodies, mail
+ids, durations, sanitized error fingerprints, schema facts — **never message bodies, mail
 subjects, note content, transcript text, or contact names**. The corpus
 boundary is hermes' database; a log line quoting a message re-creates the
 corpus in a second file with none of hermes' deletion discipline. The logger
 refuses a closed list of content-shaped field names (`text`, `body`,
 `subject`, …) as a tripwire, but the policy binds everything the tripwire
-cannot see — including `run_log.error` strings in state.db and every
+cannot see — including `run_log.error` fingerprints in state.db and every
 `console.*` in this package.
 
 ## Hermes is the sole writer AND sole deleter
@@ -137,3 +137,10 @@ State, caches, and cursors are deliberately not backed up — a backup is a
 second unguarded copy of household-adjacent data, and everything here
 re-ingests from its source of truth. An owner who wants one anyway should
 encrypt it and treat it as another corpus copy.
+
+The versioned full-history bridge migration is the sole product-created
+exception: before replacing the old capped Matrix runtime, setup moves it into
+an owner-only recovery directory under `~/.hazlie/matrix/backups/`. The public
+privacy policy discloses that copy and that it may contain synchronized messages
+and live platform session material. No ordinary connector state or cache joins
+it, and no later setup run creates it again.

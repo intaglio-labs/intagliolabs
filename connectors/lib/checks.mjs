@@ -885,16 +885,12 @@ async function checkNetGmail() {
 // other results.
 // The bridges' privacy hardening, checked rather than remembered.
 //
-// WHY THIS EXISTS. site/privacy/index.html is about to tell the public that
-// linking a chat platform pulls "new messages only -- no history", that the
-// bridge never marks conversations read, and that it never reports you online
-// or typing. All three are true today and none of them is enforced: they come
-// from three settings in ~/.hazlie/matrix/*/config.yaml, a GITIGNORED file that
-// bridges/README.md says to reapply with `yq` after any regeneration. A public
-// promise resting on a step someone has to remember is the shape of claim this
-// whole ledger exists to stop. Miss it once and the bridge does a bulk history
-// pull, which also marks a pile of chats read on the real account -- the exact
-// footprint the hardening exists to avoid.
+// WHY THIS EXISTS. Maximum history and no double-puppeting are product policy,
+// but their values live in ~/.hazlie/matrix/*/config.yaml: private generated
+// files that can silently return to image defaults during regeneration. A
+// public promise resting on a setup step someone has to remember is the shape
+// of claim this ledger exists to stop. The doctor therefore checks the actual
+// generated configs rather than trusting the tracked setup script.
 //
 // FAILS CLOSED. mautrix's own defaults are the permissive ones, so a setting we
 // cannot find or cannot parse is reported as a problem, never as a pass. The
@@ -933,23 +929,60 @@ function yamlPathValue(text, path) {
   return undefined;
 }
 
-// Backfill lives in two different places depending on the bridge's generation,
-// and means two different things: a boolean in bridgev2, a per-chat-type
-// message limit in the older discord bridge where 0 means off. Returns the
-// observed value as a string plus whether it counts as "history is being
-// pulled", so the caller does not have to know which shape it got.
+// Backfill lives in two different places depending on the bridge generation.
+// Merely checking "on" used to bless the old 10,000-message cap, so this also
+// verifies that every supported history lane is configured for the maximum.
 function backfillState(text) {
   const modern = yamlPathValue(text, ['backfill', 'enabled']);
-  if (modern !== undefined) return { where: 'backfill.enabled', found: modern, on: modern === 'true' };
-  const legacy = yamlPathValue(text, ['bridge', 'backfill', 'forward_limits', 'initial', 'dm']);
-  if (legacy !== undefined) {
+  if (modern !== undefined) {
+    if (modern !== 'true') {
+      return { where: 'backfill.enabled', found: modern, on: false, full: false };
+    }
+    const initial = Number(yamlPathValue(text, ['backfill', 'max_initial_messages']));
+    const catchup = Number(yamlPathValue(text, ['backfill', 'max_catchup_messages']));
+    const threads = Number(yamlPathValue(text, ['backfill', 'threads', 'max_initial_messages']));
     return {
-      where: 'bridge.backfill.forward_limits.initial.dm',
-      found: legacy,
-      on: Number(legacy) !== 0,
+      where: 'backfill.max_*',
+      found: `enabled=${modern}, initial=${initial}, catchup=${catchup}, threads=${threads}`,
+      on: modern === 'true',
+      full: modern === 'true'
+        && initial >= 2_147_483_647
+        && catchup >= 2_147_483_647
+        && threads >= 2_147_483_647,
     };
   }
-  return { where: 'backfill.enabled', found: undefined, on: false };
+  const legacy = yamlPathValue(text, ['bridge', 'backfill', 'forward_limits', 'initial', 'dm']);
+  if (legacy !== undefined) {
+    if (Number(legacy) === 0) {
+      return {
+        where: 'bridge.backfill.forward_limits.initial.dm',
+        found: legacy,
+        on: false,
+        full: false,
+      };
+    }
+    const kinds = ['dm', 'channel', 'thread'];
+    const initial = kinds.map((kind) => Number(yamlPathValue(
+      text, ['bridge', 'backfill', 'forward_limits', 'initial', kind]
+    )));
+    const missed = kinds.map((kind) => Number(yamlPathValue(
+      text, ['bridge', 'backfill', 'forward_limits', 'missed', kind]
+    )));
+    const startup = Number(yamlPathValue(
+      text, ['bridge', 'startup_private_channel_create_limit']
+    ));
+    const initialFull = initial.every((value) => value >= 2_147_483_647);
+    const missedFull = missed.every((value) => value === -1);
+    const portalsFull = startup >= 2_147_483_647;
+    const read = (values) => values.join('/');
+    return {
+      where: 'bridge.backfill.forward_limits',
+      found: `initial=${read(initial)}, missed=${read(missed)}, private_portals=${startup}`,
+      on: Number(legacy) !== 0,
+      full: initialFull && missedFull && portalsFull,
+    };
+  }
+  return { where: 'backfill.enabled', found: undefined, on: false, full: false };
 }
 
 // [topKey, childKey, wanted, severity].
@@ -1034,6 +1067,9 @@ export function checkBridgeHardening(home) {
     if (!backfill.on) {
       problems.push(`${dir}: ${backfill.where} is ${backfill.found ?? 'unset'} — history is NOT being pulled`);
       worst = FAIL;
+    } else if (!backfill.full) {
+      problems.push(`${dir}: ${backfill.where} is ${backfill.found ?? 'unset'} — history is capped`);
+      worst = FAIL;
     }
     const dp = doublePuppetState(text);
     if (!dp.off) {
@@ -1047,7 +1083,7 @@ export function checkBridgeHardening(home) {
     return result(
       name,
       PASS,
-      `${checked} bridge config(s) match owner intent: history backfill on, double puppeting off`
+      `${checked} bridge config(s) match owner intent: maximum history backfill, double puppeting off`
     );
   }
   return result(
@@ -1055,11 +1091,9 @@ export function checkBridgeHardening(home) {
     worst,
     problems.join('; '),
     'set the named keys in ~/.hazlie/matrix/<bridge>/config.yaml, then restart that bridge: ' +
-      "yq -i '.backfill.enabled = true | .homeserver.presence = false | .double_puppet.secrets = {}' config.yaml — " +
-      'backfill ON is the owner decision of 2026-08-22 (all connections pull bulk history); ' +
-      'presence and double_puppet stay off so the bridge never acts as you on the remote account. ' +
-      'NOTE bridges/README.md § "Privacy hardening" still prints the old line with ' +
-      'backfill = false; that half of it is superseded.'
+      'run ops/setup-bridges.sh to restore the maximum per-bridge history limits; ' +
+      'full backfill is the owner decision (all connections pull maximum available history); ' +
+      'double_puppet stays off so the bridge never acts as you on the remote account.'
   );
 }
 

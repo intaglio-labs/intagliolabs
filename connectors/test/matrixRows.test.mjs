@@ -247,6 +247,8 @@ test('a first run queues older room history and the next slice resumes it', asyn
   const result = await source.run(ctx);
 
   assert.equal(result.inserted, 1);
+  assert.equal(result.historyReopened, true,
+    'a newly discovered portal must reopen Matrix year checkpoints');
   assert.deepEqual(ingested.map((row) => row.entity_id), ['instagram:$new']);
   assert.equal(cursors.get('matrix:history-rooms'), JSON.stringify(['!dm:hazlie.local']));
   assert.deepEqual(ingested.map((row) => row.entity_id).sort(), [
@@ -255,13 +257,24 @@ test('a first run queues older room history and the next slice resumes it', asyn
   assert.equal(cursors.get('matrix:since'), 's-first');
   assert.match(cursors.get('matrix:room:!dm:hazlie.local'), /instagram_7/u);
 
-  const history = await source.run({ ...ctx, history: true });
+  const history = await source.run({
+    ...ctx,
+    history: true,
+    historyWindow: {
+      year: 2020,
+      fromTs: new Date(2020, 0, 1).getTime(),
+      toTs: new Date(2021, 0, 1).getTime(),
+    },
+  });
   assert.equal(history.inserted, 1);
+  assert.equal(history.historyDone, true);
+  assert.equal(history.historyHasOlder, false);
   assert.deepEqual(ingested.map((row) => row.entity_id).sort(), [
     'instagram:$new',
     'instagram:$old',
   ]);
-  assert.equal(cursors.get('matrix:history-done'), '1');
+  assert.equal(cursors.get('matrix:history-done'), undefined,
+    'the shared year coordinator owns completion for yearly history');
   assert.equal(fetched.filter((url) => url.pathname.endsWith('/messages')).length, 1);
 });
 

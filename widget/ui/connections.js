@@ -36,14 +36,19 @@ const bridgeSignature = (data) => ((data && data.transcript) || [])
 // deliberately follows only the CURRENT bot state (plus validation retries),
 // so an old X Chat passcode question cannot consume the first fresh login tap.
 const bridgeNeedsReply = (data) => !!hzPendingBridgeQuestion(data);
-const settleWebLogin = (platform, first, show) => {
+const settleWebLogin = (platform, first, show, settled) => {
+  const finish = (data) => {
+    settled(data);
+    afterLoginAttempt(data, show);
+  };
   if (!first || first.state === 'cancelled' || first.connected || first.state !== 'ok' || bridgeNeedsReply(first)) {
-    afterLoginAttempt(first, show);
+    finish(first);
     return;
   }
   // Do not make a successfully closed login window look like it forgot the
-  // click while the bot finishes its second step.
-  show({ state: 'pending' });
+  // click while the bridge commits the new session. The tile keeps its waiting
+  // ring until this poll reaches a real result; opening a card here would move
+  // the wait away from the exact control whose state is changing.
   const before = bridgeSignature(first);
   let tries = 0;
   const poll = () => {
@@ -51,13 +56,13 @@ const settleWebLogin = (platform, first, show) => {
       .then((next) => {
         if (!next || next.state !== 'ok' || next.connected || bridgeNeedsReply(next)
             || bridgeSignature(next) !== before || ++tries >= 12) {
-          afterLoginAttempt(next || first, show);
+          finish(next || first);
           return;
         }
         setTimeout(poll, 1500);
       })
       .catch(() => {
-        if (++tries >= 12) afterLoginAttempt(first, show);
+        if (++tries >= 12) finish(first);
         else setTimeout(poll, 1500);
       });
   };
@@ -728,7 +733,7 @@ const SOON_CONNECTORS = new Set(['mail']);
 // time WhatsApp Desktop ran"), so a freshly connected WhatsApp sat pinned at
 // the front forever, which is the exact opposite of the move-out-of-the-way
 // promise above. A standing disclosure is not a call to action.
-const needsYou = (s) => !s.connected;
+const needsYou = (s) => !s.connected || s.pending === true;
 function orderSources(sources) {
   const rank = (s) => {
     const i = CONNECTOR_ORDER.indexOf(kindOf(s.id));
@@ -802,6 +807,19 @@ function hideTileTip() { if (tileTip) tileTip.classList.remove('on'); }
 // Sources already refreshed once because the shelf disagreed with their own
 // bridge. Module scope, so it survives the card rebuild that refresh() causes.
 const staleRefreshed = new Set();
+// A native login window can finish before /api/status reflects the new
+// account. It can also return focus to Settings, whose refresh rebuilds every
+// tile. Keep the transition by source id rather than on one DOM node so that a
+// replacement tile still shows the waiting ring until a connected payload is
+// actually rendered.
+const bridgeWaitingSources = new Set();
+function setBridgeWaiting(sourceId, waiting) {
+  if (waiting) bridgeWaitingSources.add(sourceId);
+  else bridgeWaitingSources.delete(sourceId);
+  for (const live of grid.querySelectorAll('.row')) {
+    if (live.dataset.id === sourceId) live.classList.toggle('logging-in', waiting);
+  }
+}
 // A card begins its login once. renderBridge repaints on every bot reply and
 // begin starts with `cancel`, so an unguarded auto-begin would cancel the
 // conversation it opened. Keyed by source id, for the life of the page.
@@ -853,7 +871,9 @@ function card(src, keep) {
   // from one you simply never turned on — so nothing on the shelf ever asks for
   // help, and the owner finds out when an answer is quietly missing its source.
   const dot = document.createElement('span');
-  dot.className = 'dot' + (src.connected ? ' on' : src.broken ? ' bad' : ' off');
+  dot.className = 'dot' + (src.connected && !src.pending ? ' on' : src.broken ? ' bad' : ' off');
+  if (src.connected && !src.pending) bridgeWaitingSources.delete(src.id);
+  else if (src.pending || bridgeWaitingSources.has(src.id)) row.classList.add('logging-in');
 
   // Greyed, and the dot goes with it: an off dot on a tile that cannot be
   // turned on is an invitation, and this tile is declining one.
@@ -1933,20 +1953,24 @@ function card(src, keep) {
     renderBridge(data);
   };
   const openBridgeLogin = () => {
-    if (row.classList.contains('logging-in')) return;
-    row.classList.add('logging-in');
+    if (bridgeWaitingSources.has(src.id)) return;
+    setBridgeWaiting(src.id, true);
     hzPost('bridgeWebLogin', { p: kindOf(src.id) })
       .then((data) => {
-        row.classList.remove('logging-in');
         // Connected → renderBridge refreshes the shelf (dot goes green) and
         // shows the account name. Not connected → the panel shows the
         // result/retry. Cancelled → nothing at all: see afterLoginAttempt. This
         // is the path a TILE PRESS takes, and it was the one still putting the
         // card up after the window was shut.
-        settleWebLogin(kindOf(src.id), data, showBridgePanel);
+        settleWebLogin(kindOf(src.id), data, showBridgePanel, (final) => {
+          // A connected result retains the ring through refresh(); card() clears
+          // it only when the shelf itself renders connected. Every other result
+          // is terminal without a green state, so restore the ordinary dot now.
+          if (!(final && final.connected)) setBridgeWaiting(src.id, false);
+        });
       })
       .catch(() => {
-        row.classList.remove('logging-in');
+        setBridgeWaiting(src.id, false);
         showBridgePanel({ state: 'down' });
       });
   };
