@@ -38,12 +38,19 @@ const PAIR_SEP = '\u0000';
 // categories make silence claims, and two lists is how they drift.
 const LOOP_CHANNELS = VOUCHABLE_CHANNELS;
 
+// `limit` is PER CATEGORY, not global. The first shadow run over the real
+// corpus proved why: a 40-item global budget was consumed entirely by the
+// identity-merge backlog before the open-loop section ran, and loops read as
+// "none" when the truth was "starved". A category's volume must never decide
+// whether another category is visible.
 export function buildInbox(service, { now = Date.now(), limit = 40 } = {}) {
   const items = [];
   const gate = (personKey) => !service.controls.isSuppressed(personKey);
+  const catStart = () => items.length;
 
   // -- identity and merge confirmation ------------------------------------
   for (const pair of service.identity.pending({ now, limit }).pairs) {
+    if (items.length >= limit) break;
     if (!gate(pair.a.key) || !gate(pair.b.key)) continue;
     items.push({
       id: `merge:${pair.pairId}`,
@@ -59,7 +66,9 @@ export function buildInbox(service, { now = Date.now(), limit = 40 } = {}) {
   // claim.kind stays hermes' vocabulary ('commitment'); the INBOX kind is the
   // item contract's ('explicit_commitment'). The receipt renderer carries the
   // evidence; the inbox only decides membership.
+  const claimStart = catStart();
   for (const c of pendingClaims(service.db(), { limit }).claims) {
+    if (items.length - claimStart >= limit) break;
     if (c.subject !== 'person' || c.kind !== 'commitment') continue;
     if (!gate(c.subject_person_key)) continue;
     items.push({
@@ -77,8 +86,9 @@ export function buildInbox(service, { now = Date.now(), limit = 40 } = {}) {
   // Suggestion-shaped, so mute applies here as well as suppression, and the
   // coverage gate must span the dormancy claim before the claim is made.
   const coverage = service.coverage({ now });
+  const loopStart = catStart();
   for (const p of service.people({ now })) {
-    if (items.length >= limit) break;
+    if (items.length - loopStart >= limit) break;
     const loop = openLoop(p, { now });
     if (loop === null) continue;
     if (!gate(p.key)) continue;
@@ -98,7 +108,7 @@ export function buildInbox(service, { now = Date.now(), limit = 40 } = {}) {
     });
   }
 
-  return items.slice(0, limit);
+  return items;
 }
 
 // The unified review door: one entry point, three existing lifecycles, none
