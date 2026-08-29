@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { chatStoragePath, createWhatsappSource } from '../sources/whatsapp.mjs';
+import { chatStoragePath, createWhatsappSource, scanFloor } from '../sources/whatsapp.mjs';
 import {
   appleSecondsToMs,
   jidToHandle,
@@ -18,6 +18,18 @@ import {
   messageToRow,
   messagesToRows,
 } from '../lib/whatsappRows.mjs';
+
+test('a fresh forward scan starts at local New Year while explicit backfill remains unbounded', () => {
+  const nowMs = new Date(2026, 7, 28, 12).getTime();
+  assert.deepEqual(scanFloor({ storedCursor: null, backfill: false, nowMs }), {
+    seconds: (new Date(2026, 0, 1).getTime() - 978307200000) / 1000 - 1,
+    reason: 'current-year',
+  });
+  assert.deepEqual(scanFloor({ storedCursor: null, backfill: true, nowMs }), {
+    seconds: -Infinity,
+    reason: 'backfill',
+  });
+});
 
 test('apple-second dates convert to epoch ms', () => {
   // 2001-01-01 is second 0.
@@ -185,7 +197,10 @@ function runContext(home) {
     cacheDir: join(home, 'cache'),
     backfill: false,
     config: { selfName: 'me' },
-    now: () => Date.now(),
+    // Fixture message seconds start at the Apple epoch. Keep the synthetic
+    // clock in that year so the fresh-install current-year floor includes
+    // them; production tests for the floor itself live above.
+    now: () => Date.UTC(2001, 0, 1),
     log: { info() {}, warn() {} },
     state: {
       getCursor: (k) => cursors.get(k),

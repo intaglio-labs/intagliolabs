@@ -40,6 +40,7 @@ import { defaultHermesTokenPath } from './lib/secrets.mjs';
 import { openStateDb, runCounts } from './lib/state.mjs';
 import { verifyHermesIdentity } from './lib/checks.mjs';
 import { createLogger } from './lib/log.mjs';
+import { safeErrorFingerprint } from './lib/safeError.mjs';
 import { wipeLocalArtifacts } from './retain.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -186,7 +187,7 @@ if (isMain) {
       console.log(JSON.stringify({ connector: name, backfill: flag === '--backfill', ...raw, ...runCounts(raw) }));
     }
   } catch (error) {
-    console.error(error?.message ?? String(error));
+    console.error(`connector command failed (${safeErrorFingerprint(error)}); run npm run doctor`);
     process.exitCode = 1;
   } finally {
     state?.close();

@@ -198,6 +198,18 @@ enum Provision {
       do {
         try p.run()
         p.waitUntilExit()
+        // Existing bridge installs need setup-bridges to apply versioned
+        // migrations too. Fresh installs have no owner credentials and remain
+        // consent-deferred; their first connector click still owns setup.
+        let existingRuntime = hazlie.appendingPathComponent("matrix/owner-credentials.json")
+        let historyMigration = hazlie.appendingPathComponent("matrix/.full-history-reset-v1")
+        let historyMigrationPending = hazlie.appendingPathComponent("matrix/.full-history-reset-v1.pending")
+        if p.terminationStatus == 0,
+           fm.fileExists(atPath: historyMigrationPending.path)
+             || (fm.fileExists(atPath: existingRuntime.path)
+                 && !fm.fileExists(atPath: historyMigration.path)) {
+          ensureBridgeRuntime { _ in }
+        }
       } catch {
         NSLog("Intaglio Labs: bridge prefetch could not start: \(error)")
       }
@@ -256,7 +268,13 @@ enum Provision {
       bridgeSetupWaiters.removeAll()
       bridgeSetupRunning = false
       bridgeSetupLock.unlock()
-      DispatchQueue.main.async { waiters.forEach { $0(success) } }
+      DispatchQueue.main.async {
+        // setup-bridges may have written a one-time corpus-reset marker. The
+        // daemon consumes it before scheduling reads, so respawn it before any
+        // newly recreated portal can be indexed.
+        if success { Connectors.shared.restart() }
+        waiters.forEach { $0(success) }
+      }
     }
   }
 

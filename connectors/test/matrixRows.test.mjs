@@ -13,6 +13,8 @@ import { classifySender, eventToRow } from '../lib/matrixRows.mjs';
 import {
   createMatrixSource,
   invitesToJoin,
+  pendingPortalInviteCount,
+  pendingPortalInvites,
   readRoomMembers,
   syncToRows,
 } from '../sources/matrix.mjs';
@@ -189,6 +191,95 @@ test('only our own bridges\' invites are auto-joined', () => {
   assert.deepEqual(invitesToJoin({}), []);
 });
 
+test('pending portal invites survive an incremental sync and de-duplicate', () => {
+  const body = { rooms: { invite: {
+    '!new:hazlie.local': { invite_state: { events: [
+      { type: 'm.room.member', sender: '@telegrambot:hazlie.local',
+        content: { membership: 'invite' } },
+    ] } },
+  } } };
+  assert.deepEqual(
+    pendingPortalInvites(JSON.stringify(['!old:hazlie.local', '!new:hazlie.local']), body),
+    ['!old:hazlie.local', '!new:hazlie.local']
+  );
+  assert.equal(pendingPortalInviteCount(JSON.stringify([
+    '!old:hazlie.local', '!new:hazlie.local',
+  ])), 2);
+  assert.equal(pendingPortalInviteCount('not-json'), 0);
+});
+
+test('a rate-limited portal join stays queued after the sync cursor advances', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'matrix-invite-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const credentialsDir = join(dir, '.hazlie', 'matrix');
+  mkdirSync(credentialsDir, { recursive: true });
+  writeFileSync(join(credentialsDir, 'owner-credentials.json'), JSON.stringify({
+    homeserver: 'http://127.0.0.1:8008',
+    access_token: 'private-test-token',
+    user_id: '@you:hazlie.local',
+  }));
+
+  const invite = (sender) => ({ invite_state: { events: [
+    { type: 'm.room.member', sender, content: { membership: 'invite' } },
+  ] } });
+  let syncs = 0;
+  let rateLimited = true;
+  const joined = [];
+  const fetchImpl = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith('/sync')) {
+      syncs += 1;
+      return jsonResponse(syncs === 1 ? {
+        next_batch: 's-invites',
+        rooms: { invite: {
+          '!one:hazlie.local': invite('@facebookbot:hazlie.local'),
+          '!two:hazlie.local': invite('@instagrambot:hazlie.local'),
+          '!three:hazlie.local': invite('@telegrambot:hazlie.local'),
+        } },
+      } : { next_batch: 's-after', rooms: {} });
+    }
+    if (url.pathname.includes('/join/')) {
+      const room = decodeURIComponent(url.pathname.split('/join/')[1]);
+      if (room === '!two:hazlie.local' && rateLimited) {
+        rateLimited = false;
+        return jsonResponse({}, 429);
+      }
+      joined.push(room);
+      return jsonResponse({ room_id: room });
+    }
+    throw new Error(`unexpected Matrix URL ${url}`);
+  };
+
+  const cursors = new Map([['matrix:history-bootstrap-v1', '1']]);
+  const source = createMatrixSource({ home: dir, fetchImpl });
+  const ctx = {
+    state: {
+      getCursor: (key) => cursors.get(key) ?? null,
+      setCursor: (key, value) => cursors.set(key, value),
+      deleteCursor: (key) => cursors.delete(key),
+    },
+    ingest: async () => ({ inserted: 0, updated: 0, unchanged: 0 }),
+    config: { selfName: 'owner' },
+    log: { info() {} },
+    backfill: false,
+  };
+
+  const limited = await source.run(ctx);
+  assert.equal(limited.retryAfterMs, 15_000);
+  assert.deepEqual(joined, ['!one:hazlie.local']);
+  assert.deepEqual(JSON.parse(cursors.get('matrix:pending-portal-invites')), [
+    '!two:hazlie.local', '!three:hazlie.local',
+  ]);
+  assert.equal(cursors.get('matrix:since'), 's-invites', 'sync cursor may safely advance');
+
+  await source.run(ctx);
+  assert.deepEqual(joined, [
+    '!one:hazlie.local', '!two:hazlie.local', '!three:hazlie.local',
+  ]);
+  assert.deepEqual(JSON.parse(cursors.get('matrix:pending-portal-invites')), []);
+  assert.equal(cursors.get('matrix:since'), 's-after');
+});
+
 test('a first run queues older room history and the next slice resumes it', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'matrix-source-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -247,6 +338,8 @@ test('a first run queues older room history and the next slice resumes it', asyn
   const result = await source.run(ctx);
 
   assert.equal(result.inserted, 1);
+  assert.equal(result.historyReopened, true,
+    'a newly discovered portal must reopen Matrix year checkpoints');
   assert.deepEqual(ingested.map((row) => row.entity_id), ['instagram:$new']);
   assert.equal(cursors.get('matrix:history-rooms'), JSON.stringify(['!dm:hazlie.local']));
   assert.deepEqual(ingested.map((row) => row.entity_id).sort(), [
@@ -255,13 +348,24 @@ test('a first run queues older room history and the next slice resumes it', asyn
   assert.equal(cursors.get('matrix:since'), 's-first');
   assert.match(cursors.get('matrix:room:!dm:hazlie.local'), /instagram_7/u);
 
-  const history = await source.run({ ...ctx, history: true });
+  const history = await source.run({
+    ...ctx,
+    history: true,
+    historyWindow: {
+      year: 2020,
+      fromTs: new Date(2020, 0, 1).getTime(),
+      toTs: new Date(2021, 0, 1).getTime(),
+    },
+  });
   assert.equal(history.inserted, 1);
+  assert.equal(history.historyDone, true);
+  assert.equal(history.historyHasOlder, false);
   assert.deepEqual(ingested.map((row) => row.entity_id).sort(), [
     'instagram:$new',
     'instagram:$old',
   ]);
-  assert.equal(cursors.get('matrix:history-done'), '1');
+  assert.equal(cursors.get('matrix:history-done'), undefined,
+    'the shared year coordinator owns completion for yearly history');
   assert.equal(fetched.filter((url) => url.pathname.endsWith('/messages')).length, 1);
 });
 

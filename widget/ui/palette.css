@@ -1720,6 +1720,44 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
    be forgotten by the next connected state someone renders. */
 .hint.hold .acct::before { content: '✓ '; color: var(--status-ok); font-weight: 700; }
 .hint.hold .add-acct { font-size: 11px; }
+.hint.hold .discord-servers {
+  display: flex; flex-direction: column; gap: 3px;
+  width: min(248px, calc(100vw - 32px));
+  max-height: 190px; overflow-y: auto; overflow-x: hidden;
+  margin: 7px 0 8px; padding: 7px 7px 7px 8px;
+  box-sizing: border-box;
+  border: 1px solid rgba(234, 234, 234, 0.10);
+  border-radius: 9px;
+  background: rgba(8, 8, 8, 0.22);
+  scrollbar-width: thin;
+}
+.hint.hold .discord-servers-title {
+  color: var(--hazelnut-light); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase;
+}
+.hint.hold .discord-servers-note,
+.hint.hold .discord-servers-empty {
+  display: block; color: var(--muted); font-size: 9px; line-height: 1.4;
+  margin-bottom: 3px;
+}
+.hint.hold .discord-server {
+  display: grid; grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center; gap: 6px;
+  min-height: 23px; padding: 2px 3px;
+  color: var(--fg); font-size: 10px; cursor: pointer;
+  border-radius: 6px;
+}
+.hint.hold .discord-server:hover { background: rgba(234, 234, 234, 0.06); }
+.hint.hold .discord-server input {
+  width: 13px; height: 13px; margin: 0;
+  accent-color: var(--hazelnut-light); cursor: pointer;
+}
+.hint.hold .discord-server-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hint.hold .discord-server-state { color: var(--hazelnut); font-size: 9px; }
+.hint.hold .discord-server.pending { cursor: wait; opacity: 0.72; }
+.hint.hold .discord-server.failed .discord-server-state { color: var(--status-bad); }
 /* Sits under the card's NAME now (owner, 2026-08-25), so the margin flips:
    tight to the header above it, a breath before the flow below it. */
 .hint.hold .stay {

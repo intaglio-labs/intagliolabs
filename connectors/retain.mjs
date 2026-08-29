@@ -9,7 +9,9 @@
 // rows are OURS, and deleting them happens directly (see run.mjs --purge,
 // which pairs an /admin/purge with wipeLocalArtifacts below). Backup policy
 // for all of it is NONE by default — a backup is a second unguarded corpus
-// copy, and everything here re-ingests from its source of truth.
+// copy, and everything here re-ingests from its source of truth. The one-time,
+// owner-only bridge-runtime migration backup is documented separately in
+// connectors/AGENTS.md and does not contain this connector state.
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -17,6 +19,7 @@ import { adminMaintain, adminRetain, DEFAULT_HERMES_BASE_URL } from './lib/inges
 import { defaultHermesTokenPath } from './lib/secrets.mjs';
 import { openStateDb } from './lib/state.mjs';
 import { createLogger } from './lib/log.mjs';
+import { safeErrorFingerprint } from './lib/safeError.mjs';
 // A STATIC import despite the cycle (daemon.mjs imports this module back):
 // ESM resolves static cycles by hoisting, and both sides touch the other's
 // bindings only inside function bodies. The obvious-looking dynamic
@@ -98,15 +101,15 @@ export async function retentionPass({ config, state, log, ingestOpts, now = Date
       });
       log?.info('retention', { source, keepDays, deleted });
     } catch (error) {
-      results[source] = { error: error?.message ?? String(error) };
+      results[source] = { error: safeErrorFingerprint(error) };
       state?.recordRun({
         connector: `retain:${source}`,
         startedTs,
         finishedTs: now(),
         ok: false,
-        error: error?.message ?? String(error),
+        error: safeErrorFingerprint(error),
       });
-      log?.error('retention_failed', { source, error: error?.message ?? String(error) });
+      log?.error('retention_failed', { source, error: safeErrorFingerprint(error) });
     }
   }
   return results;
@@ -163,7 +166,7 @@ if (isMain) {
       JSON.stringify({ retention: results, maintained: maintain?.maintained === true })
     );
   } catch (error) {
-    console.error(`retention failed: ${error?.message ?? error}`);
+    console.error(`retention failed (${safeErrorFingerprint(error)}); run npm run doctor`);
     process.exitCode = 1;
   } finally {
     state.close();

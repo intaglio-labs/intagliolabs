@@ -18,6 +18,15 @@
 // Fixed because the shelf scrolls with overflow hidden — a tooltip inside the
 // scroller would clip.
 let hzTileTip = null;
+// Login completion and connector status are two separate local writes. Keep a
+// source-level waiting state so a focus/status refresh can replace the tile
+// without replacing its spinner with an unexplained empty dot.
+const hzBridgeWaitingSources = new Set();
+function hzSetBridgeWaiting(sourceId, waiting, onBusy) {
+  if (waiting) hzBridgeWaitingSources.add(sourceId);
+  else hzBridgeWaitingSources.delete(sourceId);
+  if (onBusy) onBusy(waiting);
+}
 // Closing the login window without signing in returns you to the shelf; only a
 // login that FAILED leaves something on screen. Same rule as connections.js --
 // see afterLoginAttempt there for why it is a helper rather than a check written
@@ -144,7 +153,9 @@ function hzConnectorTile(src, { onOpen } = {}) {
   // Three states, same as the settings shelf: on (green), bad (set up but
   // failing — src.broken), off (never linked). A plain !connected would make a
   // broken connector indistinguishable from one that was never connected.
-  dot.className = 'dot' + (src.connected ? ' on' : src.broken ? ' bad' : ' off');
+  dot.className = 'dot' + (src.connected && !src.pending ? ' on' : src.broken ? ' bad' : ' off');
+  if (src.connected && !src.pending) hzBridgeWaitingSources.delete(src.id);
+  else if (src.pending || hzBridgeWaitingSources.has(src.id)) row.classList.add('logging-in');
 
   // Keep parked integrations discoverable without making their bright icon and
   // active-looking dot promise a login flow that is not ready yet.
@@ -489,6 +500,11 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
         acct.textContent = (cut > 0 && tail.includes('@')) ? whole.slice(0, cut) : whole;
         tip.appendChild(acct);
       }
+      hzAppendDiscordServers(
+        tip, data, renderBridge,
+        () => hzPost('bridgeStatus', { p: 'discord' }),
+        (serverId, enabled) => hzPost('bridgeDiscordServer', { serverId, enabled })
+      );
     } else if (data && data.state !== 'ok' && data.state !== 'cancelled' && !manual && !data.transcript) {
       tip.append(HZ_NOTICES[data.state] || data.error || HZ_NOTICES.error);
     } else {
@@ -751,14 +767,16 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
     // (onBusy), the way it already did in Settings, and a card is materialised
     // only when there is something to SAY: a failure. Cancelled says nothing,
     // because closing a window you opened needs no reply.
-    if (onBusy) onBusy(true);
+    hzSetBridgeWaiting(src.id, true, onBusy);
     const speak = (data) => {
-      if (onBusy) onBusy(false);
+      // Keep the ring across refresh when the bridge is connected. The fresh
+      // connected tile clears the source-level state in hzConnectorTile.
+      if (!(data && data.connected)) hzSetBridgeWaiting(src.id, false, onBusy);
       host.appendChild(tip);
       renderBridge(data);
     };
     const closeCancelled = () => {
-      if (onBusy) onBusy(false);
+      hzSetBridgeWaiting(src.id, false, onBusy);
       if (onClose) onClose();
     };
     const beginWebLogin = () => {

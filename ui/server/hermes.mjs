@@ -1535,6 +1535,73 @@ function maintainNow(db) {
 // longer exist", and it would then delete the remainder.
 const ENTITY_WINDOW_CAP = 5000;
 
+// A privacy-safe coverage receipt for the connector operator. This is the
+// only corpus-wide read exposed to the connector process, and every selected
+// value is an aggregate: no entity id, room id, handle, speaker, metadata, or
+// text crosses the Hermes boundary. Conversation keys are inspected only
+// inside COUNT(DISTINCT ...), then discarded by SQLite.
+//
+// Mail, calendar, and document-like sources deliberately report null for
+// conversations. Inventing a "conversation" from subject text or an entity id
+// would both misstate coverage and tempt this route to expose a private key.
+export function connectorCoverage(db) {
+  const conversationalSources = new Set([
+    'imessage', 'whatsapp', 'messenger', 'instagram', 'twitter',
+    'telegram', 'discord', 'slack', 'linkedin',
+  ]);
+  const sourceSlots = KNOWN_SOURCES.map(() => '?').join(',');
+  const totals = db
+    .prepare(
+      `SELECT source,
+              COUNT(*) AS rows,
+              MIN(ts) AS oldest_ts,
+              MAX(ts) AS newest_ts,
+              COUNT(DISTINCT CASE
+                WHEN NOT json_valid(meta) THEN NULL
+                WHEN source = 'imessage' THEN
+                  COALESCE(json_extract(meta, '$.chat_guid'), json_extract(meta, '$.handle'))
+                WHEN source = 'whatsapp' THEN json_extract(meta, '$.chat_handle')
+                WHEN source IN ('messenger', 'instagram', 'twitter', 'telegram',
+                                'discord', 'slack', 'linkedin') THEN
+                  json_extract(meta, '$.room_id')
+                ELSE NULL
+              END) AS conversations
+         FROM context
+        WHERE source IN (${sourceSlots})
+        GROUP BY source
+        ORDER BY source`
+    )
+    .all(...KNOWN_SOURCES);
+  const yearly = db
+    .prepare(
+      `SELECT source,
+              CAST(strftime('%Y', ts / 1000, 'unixepoch', 'localtime') AS INTEGER) AS year,
+              COUNT(*) AS rows
+         FROM context
+        WHERE source IN (${sourceSlots})
+        GROUP BY source, year
+        ORDER BY source, year DESC`
+    )
+    .all(...KNOWN_SOURCES);
+  const yearsBySource = new Map();
+  for (const row of yearly) {
+    if (!Number.isInteger(row.year)) continue;
+    const list = yearsBySource.get(row.source) ?? [];
+    list.push({ year: Number(row.year), rows: Number(row.rows) });
+    yearsBySource.set(row.source, list);
+  }
+  return {
+    sources: totals.map((row) => ({
+      source: row.source,
+      rows: Number(row.rows),
+      conversations: conversationalSources.has(row.source) ? Number(row.conversations) : null,
+      oldest_ts: Number(row.oldest_ts),
+      newest_ts: Number(row.newest_ts),
+      years: yearsBySource.get(row.source) ?? [],
+    })),
+  };
+}
+
 function parseTsParam(params, name, fallback) {
   const raw = params.get(name);
   if (raw === null || raw === '') return fallback;
@@ -2027,6 +2094,14 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
 
   if (req.method === 'GET' && url.pathname === '/admin/memory/counts') {
     send(res, 200, claimCounts(db), cors);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/admin/coverage') {
+    if ([...url.searchParams.keys()].length > 0) {
+      throw badRequest('this route accepts no query parameters');
+    }
+    send(res, 200, connectorCoverage(db), cors);
     return;
   }
 

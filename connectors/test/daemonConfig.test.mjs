@@ -5,6 +5,7 @@ import {
   CONNECTOR_NAMES,
   DEFAULT_DISABLED_CONNECTORS,
   RETENTION_SOURCES,
+  sourceRetryDelay,
   validateConfig,
 } from '../daemon.mjs';
 import { msUntilIdleWindow } from '../retain.mjs';
@@ -95,6 +96,13 @@ test('the connector roster and its hermes-source mapping stay in lockstep', () =
 test('hidden Settings integrations are inert in the daemon by default', () => {
   assert.deepEqual(DEFAULT_DISABLED_CONNECTORS, ['oura', 'photos', 'files', 'notion', 'notes']);
   for (const name of DEFAULT_DISABLED_CONNECTORS) assert.ok(CONNECTOR_NAMES.includes(name));
+});
+
+test('a source can request a bounded urgent retry without changing its normal interval', () => {
+  assert.equal(sourceRetryDelay({ nextDelayMs: 8_500 }, 900_000), 8_500);
+  assert.equal(sourceRetryDelay({ nextDelayMs: 900_000 }, 900_000), 60_000);
+  assert.equal(sourceRetryDelay({ nextDelayMs: 500 }, 900_000), 900_000);
+  assert.equal(sourceRetryDelay({}, 900_000), 900_000);
 });
 
 test('a Matrix purge covers every bridged Hermes source and totals the response', async () => {

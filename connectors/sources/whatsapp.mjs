@@ -32,6 +32,8 @@ import { snapshotStore } from '../lib/storeReader.mjs';
 import { messagesToRows } from '../lib/whatsappRows.mjs';
 
 const CURSOR_KEY = 'whatsapp:max-date';
+const APPLE_EPOCH_MS = 978307200000;
+const yearlyCursorKey = (year) => `whatsapp:history-year:${year}:max-date`;
 // Apple-epoch seconds; the connector stores the cursor as the raw seconds
 // string, same idea as iMessage's nanosecond cursor.
 const MAX_MESSAGES_PER_SCAN = 5000;
@@ -46,18 +48,24 @@ export function chatStoragePath(home) {
   );
 }
 
-export function scanFloor({ storedCursor, backfill }) {
+export function scanFloor({ storedCursor, backfill, nowMs = Date.now() }) {
   if (!backfill && typeof storedCursor === 'string' && /^-?\d+(\.\d+)?$/u.test(storedCursor)) {
     return { seconds: Number(storedCursor), reason: 'cursor' };
   }
-  // No date floor on a full read — the store holds at most a few years and a
-  // few thousand rows, nothing like chat.db's 633k. Backfill re-reads all.
-  return { seconds: -Infinity, reason: backfill ? 'backfill' : 'no-cursor' };
+  if (backfill) return { seconds: -Infinity, reason: 'backfill' };
+  // A fresh install must not leak old years into the graph before the shared
+  // year barrier reaches them. The history lane below owns 2026, then 2025,
+  // and so on across platforms; the forward lane starts at local New Year.
+  return {
+    seconds: (new Date(new Date(nowMs).getFullYear(), 0, 1).getTime() - APPLE_EPOCH_MS) / 1000 - 1,
+    reason: 'current-year',
+  };
 }
 
 export function createWhatsappSource({ home } = {}) {
   return {
     name: 'whatsapp',
+    walksHistory: true,
 
     // Readability is the honest probe, not a pre-check: FDA attributes per
     // spawner (the iMessage rule). needs() answers "provisioned?" — the store
@@ -79,15 +87,33 @@ export function createWhatsappSource({ home } = {}) {
       let newestSeen = null;
       let capped = false;
       let tieFinished = false;
+      let historyDone = false;
+      let historyHasOlder = true;
       try {
         // The snapshot attempt IS the readability test.
         snapshotPath = await snapshotStore(srcPath, cacheDir);
         db = new DatabaseSync(snapshotPath, { readOnly: true });
 
-        const floor = scanFloor({
-          storedCursor: ctx.state.getCursor(CURSOR_KEY),
-          backfill: Boolean(ctx.backfill),
-        });
+        const yearly = ctx.history === true && ctx.historyWindow?.year
+          ? {
+              year: ctx.historyWindow.year,
+              fromSeconds: (ctx.historyWindow.fromTs - APPLE_EPOCH_MS) / 1000,
+              toSeconds: (ctx.historyWindow.toTs - APPLE_EPOCH_MS) / 1000,
+            }
+          : null;
+        const floor = yearly
+          ? {
+              seconds: Number(
+                ctx.state.getCursor(yearlyCursorKey(yearly.year))
+                  ?? (yearly.fromSeconds - 1)
+              ),
+              reason: 'yearly-history',
+            }
+          : scanFloor({
+              storedCursor: ctx.state.getCursor(CURSOR_KEY),
+              backfill: Boolean(ctx.backfill),
+              nowMs: ctx.now(),
+            });
 
         // Message joined to its session for the JID and partner name. Group
         // sender is resolved separately (memberFor) to keep the mapper pure.
@@ -96,14 +122,19 @@ export function createWhatsappSource({ home } = {}) {
                   s.ZCONTACTJID AS chat_jid, s.ZPARTNERNAME AS chat_name
            FROM ZWAMESSAGE m
            JOIN ZWACHATSESSION s ON s.Z_PK = m.ZCHATSESSION`;
-        const stmt = db.prepare(
-          `${messageSelect}
-           WHERE m.ZMESSAGEDATE > ?
-           ORDER BY m.ZMESSAGEDATE ASC
-           LIMIT ?`
-        );
+        const stmt = db.prepare(yearly
+          ? `${messageSelect}
+             WHERE m.ZMESSAGEDATE > ? AND m.ZMESSAGEDATE >= ? AND m.ZMESSAGEDATE < ?
+             ORDER BY m.ZMESSAGEDATE ASC
+             LIMIT ?`
+          : `${messageSelect}
+             WHERE m.ZMESSAGEDATE > ?
+             ORDER BY m.ZMESSAGEDATE ASC
+             LIMIT ?`);
         const floorSec = Number.isFinite(floor.seconds) ? floor.seconds : -1e12;
-        let dbRows = stmt.all(floorSec, MAX_MESSAGES_PER_SCAN);
+        let dbRows = yearly
+          ? stmt.all(floorSec, yearly.fromSeconds, yearly.toSeconds, MAX_MESSAGES_PER_SCAN)
+          : stmt.all(floorSec, MAX_MESSAGES_PER_SCAN);
         capped = dbRows.length >= MAX_MESSAGES_PER_SCAN;
 
         // A tie wider than the whole batch: the one-second rewind below would
@@ -121,6 +152,15 @@ export function createWhatsappSource({ home } = {}) {
 
         for (const r of dbRows) {
           if (maxDate === null || r.ZMESSAGEDATE > maxDate) maxDate = r.ZMESSAGEDATE;
+        }
+        if (yearly) {
+          const continuation = maxDate ?? floorSec;
+          historyDone = db.prepare(
+            'SELECT 1 AS found FROM ZWAMESSAGE WHERE ZMESSAGEDATE > ? AND ZMESSAGEDATE < ? LIMIT 1'
+          ).get(continuation, yearly.toSeconds) === undefined;
+          historyHasOlder = db.prepare(
+            'SELECT 1 AS found FROM ZWAMESSAGE WHERE ZMESSAGEDATE < ? LIMIT 1'
+          ).get(yearly.fromSeconds) !== undefined;
         }
         // Newest message in the WHOLE store, for the freshness report — not
         // just this batch, so "how stale is the app" is answerable even on a
@@ -159,7 +199,8 @@ export function createWhatsappSource({ home } = {}) {
           storeAgeDays:
             newestSeen === null
               ? null
-              : Math.floor((ctx.now() - (newestSeen * 1000 + 978307200000)) / 86_400_000),
+              : Math.floor((ctx.now() - (newestSeen * 1000 + APPLE_EPOCH_MS)) / 86_400_000),
+          ...(yearly ? { historyYear: yearly.year } : {}),
         });
       } finally {
         try {
@@ -183,9 +224,25 @@ export function createWhatsappSource({ home } = {}) {
       // boundary second, so the cursor moves past it — rewinding there would
       // re-select the same batch forever.
       if (maxDate !== null) {
-        ctx.state.setCursor(CURSOR_KEY, String(capped && !tieFinished ? maxDate - 1 : maxDate));
+        const cursor = String(capped && !tieFinished ? maxDate - 1 : maxDate);
+        if (ctx.history === true && ctx.historyWindow?.year) {
+          ctx.state.setCursor(yearlyCursorKey(ctx.historyWindow.year), cursor);
+        } else {
+          ctx.state.setCursor(CURSOR_KEY, cursor);
+        }
       }
-      return { ...totals, skipped };
+      return {
+        ...totals,
+        skipped,
+        ...(ctx.history === true && ctx.historyWindow?.year ? {
+          historyDone,
+          historyHasOlder,
+          // A page of media/system rows can produce no corpus rows while its
+          // durable timestamp cursor still advances. Tell the daemon to keep
+          // draining instead of mistaking that safe progress for a stall.
+          historyProgressed: maxDate !== null || historyDone,
+        } : {}),
+      };
     },
   };
 }

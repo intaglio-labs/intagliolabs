@@ -32,8 +32,9 @@
 //    fields, not IMAP objects, so it did not care what fetched them. This file
 //    adapts Gmail's payload into that shape and nothing downstream moved.
 //
-// LOG POLICY (connectors/AGENTS.md): counts and account addresses only. No
-// subjects, no bodies, no recipients — those are corpus, and a log is not.
+// LOG POLICY (connectors/AGENTS.md): counts and account ordinals only. No
+// addresses, provider response text, subjects, bodies or recipients — those
+// are private data, and a log is not a second corpus.
 
 import { homedir } from 'node:os';
 import { createGmailClient } from '../lib/gmailClient.mjs';
@@ -41,12 +42,19 @@ import { GMAIL_SCOPE, accountsWithScope } from '../lib/googleAccounts.mjs';
 import { DEFAULT_MAX_BODY_BYTES, messageToRow } from '../lib/mailRows.mjs';
 
 const DEFAULT_BACKFILL_DAYS = 30;
-// One account's scan is bounded so a first run against a decade-old mailbox
-// cannot become an unbounded fetch loop. Same guard the IMAP version carried.
+// Forward scans stay bounded so a first run cannot monopolize the daemon.
+// Historical scans are bounded by ONE API page per pass instead; their durable
+// page token eventually drains the whole year without imposing a data cap.
 const MAX_MESSAGES_PER_ACCOUNT = 2000;
 const PAGE_SIZE = 100;
 
 const cursorKey = (email) => `mail:${String(email).toLowerCase()}:internalDate`;
+const historyPageKey = (email, year) =>
+  `mail:${String(email).toLowerCase()}:history-year:${year}:page`;
+const historyDoneKey = (email, year) =>
+  `mail:${String(email).toLowerCase()}:history-year:${year}:done`;
+const historyOlderKey = (email, year) =>
+  `mail:${String(email).toLowerCase()}:history-year:${year}:has-older`;
 
 // Gmail returns headers as a [{name, value}] list, case-insensitively named.
 function header(payload, want) {
@@ -118,9 +126,13 @@ export function accountSettings(config, email) {
   };
 }
 
-export function createMailSource() {
+export function createMailSource({
+  accountsForScope = accountsWithScope,
+  makeClient = createGmailClient,
+} = {}) {
   return {
     name: 'mail',
+    walksHistory: true,
 
     // Blocks only when NO account is authorized for mail. One grant is enough
     // to run — the same call the IMAP version made about one provisioned
@@ -129,48 +141,70 @@ export function createMailSource() {
     // connector off while its consent screen is open.
     needs({ home } = {}) {
       const opts = home ? { home } : {};
-      if (accountsWithScope(GMAIL_SCOPE, opts).length > 0) return [];
+      if (accountsForScope(GMAIL_SCOPE, opts).length > 0) return [];
       return ['no Google account is authorized for mail: run `node ops/gcal-auth.mjs`, or open the connect page'];
     },
 
     async run(ctx) {
       const { state, ingest, config, log, now, home } = ctx;
-      const accounts = accountsWithScope(GMAIL_SCOPE, home ? { home } : {});
+      const accounts = accountsForScope(GMAIL_SCOPE, home ? { home } : {});
 
       let inserted = 0;
       let updated = 0;
       let unchanged = 0;
       const failures = [];
+      const yearly = ctx.history === true && ctx.historyWindow?.year ? ctx.historyWindow : null;
+      let historyDone = true;
+      let historyHasOlder = false;
+      let historyProgressed = false;
 
-      for (const account of accounts) {
+      for (const [accountIndex, account] of accounts.entries()) {
+        if (yearly && state.getCursor(historyDoneKey(account.email, yearly.year)) === '1') {
+          historyHasOlder ||= state.getCursor(historyOlderKey(account.email, yearly.year)) === '1';
+          continue;
+        }
         const { backfillDays, maxBodyBytes } = accountSettings(config, account.email);
         const stored = Number(state.getCursor(cursorKey(account.email)));
-        const floor = Number.isFinite(stored) && stored > 0
-          ? stored
-          : now() - backfillDays * 86_400_000;
+        const rollingFloor = now() - backfillDays * 86_400_000;
+        const freshFloor = Math.max(
+          rollingFloor,
+          new Date(new Date(now()).getFullYear(), 0, 1).getTime()
+        );
+        const floor = yearly
+          ? yearly.fromTs
+          : (Number.isFinite(stored) && stored > 0
+              ? stored
+              : freshFloor);
         // Gmail's `after:` takes whole seconds and is inclusive to the day on
         // some paths, so the query is deliberately a little wider than the
         // cursor and the exact bound is enforced below. Fetching a handful of
         // already-seen messages costs a dedupe; missing one costs it forever.
-        const q = `after:${Math.floor(floor / 1000)}`;
-        const client = createGmailClient({ email: account.email, ...(home ? { home } : {}) });
+        const q = yearly
+          ? `after:${Math.floor(yearly.fromTs / 1000) - 1} before:${Math.ceil(yearly.toTs / 1000)}`
+          : `after:${Math.floor(floor / 1000)}`;
+        const client = makeClient({ email: account.email, ...(home ? { home } : {}) });
 
         try {
-          let pageToken;
+          let pageToken = yearly
+            ? (state.getCursor(historyPageKey(account.email, yearly.year)) ?? undefined)
+            : undefined;
           let seen = 0;
           let highest = Number.isFinite(stored) ? stored : 0;
           const rows = [];
 
           page: do {
             const list = await client.listMessages({ q, pageToken, maxResults: PAGE_SIZE });
+            if (yearly) historyProgressed = true;
             pageToken = list.nextPageToken;
             for (const stub of list.messages ?? []) {
-              if (seen >= MAX_MESSAGES_PER_ACCOUNT) break page;
+              if (!yearly && seen >= MAX_MESSAGES_PER_ACCOUNT) break page;
               seen += 1;
               const full = await client.getMessage(stub.id);
               const internal = Number(full?.internalDate);
               // The exact bound the query could only approximate.
-              if (Number.isFinite(internal) && internal <= floor && stored > 0) continue;
+              if (yearly) {
+                if (!Number.isFinite(internal) || internal < yearly.fromTs || internal >= yearly.toTs) continue;
+              } else if (Number.isFinite(internal) && internal <= floor && stored > 0) continue;
               const parsed = gmailMessageToParsed(full);
               const row = messageToRow(parsed, {
                 account: account.email,
@@ -184,6 +218,11 @@ export function createMailSource() {
                 if (Number.isFinite(internal) && internal > highest) highest = internal;
               }
             }
+            // One historical page per source invocation. The daemon's time
+            // budget can immediately invoke the source again, while the saved
+            // token makes every completed page crash-safe and removes the old
+            // 2,000-message-per-year ceiling.
+            if (yearly) break page;
           } while (pageToken && seen < MAX_MESSAGES_PER_ACCOUNT);
 
           if (rows.length > 0) {
@@ -195,29 +234,60 @@ export function createMailSource() {
             // messages that were fetched but never ingested is the failure the
             // old UIDVALIDITY comment warned about, wearing different clothes:
             // nothing errors, and that window is never fetched again.
-            if (highest > 0) state.setCursor(cursorKey(account.email), String(highest));
+            if (!yearly && highest > 0) state.setCursor(cursorKey(account.email), String(highest));
+          }
+          if (yearly) {
+            if (pageToken) {
+              state.setCursor(historyPageKey(account.email, yearly.year), pageToken);
+              historyDone = false;
+            } else {
+              state.deleteCursor(historyPageKey(account.email, yearly.year));
+              const older = await client.listMessages({
+                q: `before:${Math.floor(yearly.fromTs / 1000)}`,
+                maxResults: 1,
+              });
+              const hasOlder = (older.messages?.length ?? 0) > 0;
+              state.setCursor(historyDoneKey(account.email, yearly.year), '1');
+              state.setCursor(historyOlderKey(account.email, yearly.year), hasOlder ? '1' : '0');
+              historyHasOlder ||= hasOlder;
+            }
           }
           log.info('mail_account_scan', {
             connector: 'mail',
             account: account.email,
             fetched: seen,
             rows: rows.length,
+            ...(yearly ? { historyYear: yearly.year } : {}),
           });
         } catch (error) {
           // One mailbox failing must not cost the others theirs — separate
           // grants, separate tokens, separate fates.
-          failures.push({ account: account.email, message: error?.message ?? String(error) });
-          log.warn('mail_account_failed', { connector: 'mail', account: account.email });
+          failures.push(accountIndex);
+          log.warn('mail_account_failed', { connector: 'mail', accountIndex });
         }
       }
 
       if (accounts.length > 0 && failures.length === accounts.length) {
-        throw new Error(
-          `all ${accounts.length} mail account(s) failed: ` +
-            failures.map((f) => `${f.account}: ${f.message}`).join('; ')
-        );
+        throw new Error(`all ${accounts.length} mail account(s) failed`);
       }
-      return { inserted, updated, unchanged, failures: failures.length, accounts: accounts.length };
+      if (yearly) {
+        for (const account of accounts) {
+          historyDone &&= state.getCursor(historyDoneKey(account.email, yearly.year)) === '1';
+          historyHasOlder ||= state.getCursor(historyOlderKey(account.email, yearly.year)) === '1';
+        }
+      }
+      return {
+        inserted,
+        updated,
+        unchanged,
+        failures: failures.length,
+        accounts: accounts.length,
+        ...(yearly ? {
+          historyDone,
+          historyHasOlder,
+          historyProgressed,
+        } : {}),
+      };
     },
   };
 }
