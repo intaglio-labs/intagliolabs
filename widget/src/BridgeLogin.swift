@@ -954,15 +954,38 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   // response. Either the window is on a different document or the recollection is
   // off, and only a log can tell those apart. Counts and hosts only, never a
   // cookie, a query string or a form value.
+  // TO A FILE, NOT NSLog. The first version of this used NSLog and produced
+  // nothing readable: `log show --predicate 'process == "Hazlie"'` returned zero
+  // lines across an hour that included a real reproduction, so the one
+  // measurement this was added to take was silently unavailable. A diagnostic
+  // nobody can read is worse than none, because it is mistaken for evidence of
+  // absence. AssetScheme.swift already writes to ~/.hazlie/logs; this follows it.
+  //
+  // Always on, unlike AssetScheme's env-gated dbg: this fires once per completed
+  // navigation in a window the owner opened deliberately, and the whole point is
+  // to have the record ALREADY when a failure is reported, not to ask for a
+  // repeat with a flag set.
+  private func loginLog(_ line: String) {
+    let f = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".hazlie/logs/bridge-login.log")
+    let msg = "\(ISO8601DateFormatter().string(from: Date())) \(line)\n"
+    guard let data = msg.data(using: .utf8) else { return }
+    if let h = try? FileHandle(forWritingTo: f) {
+      h.seekToEndOfFile(); h.write(data); try? h.close()
+    } else {
+      try? msg.write(to: f, atomically: true, encoding: .utf8)
+    }
+  }
+
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     let js = "JSON.stringify({t:document.title,n:document.images.length," +
       "b:Array.from(document.images).filter(i=>!i.naturalWidth).length," +
       "w:document.documentElement.clientWidth,s:document.documentElement.scrollWidth," +
-      "f:document.querySelectorAll('iframe').length})"
+      "f:document.querySelectorAll('iframe').length,x:document.body?document.body.innerText.trim().slice(0,120):''})"
     webView.evaluateJavaScript(js) { value, _ in
       let host = webView.url?.host ?? "?"
       let path = webView.url?.path ?? "?"
-      NSLog("Intaglio Labs: login loaded \(host)\(path) \(value as? String ?? "{}")")
+      self.loginLog("loaded \(self.label) \(host)\(path) \(value as? String ?? "{}")")
     }
   }
 
@@ -985,11 +1008,16 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     NSLog("Intaglio Labs: social login navigation failed for \(host), code \(code): \(error.localizedDescription)")
   }
 
+  // A BLANK WINDOW MOST LIKELY MEANS didFinish NEVER FIRED, so the failure paths
+  // have to be as loud as the success path or the log cannot tell "the page
+  // loaded and rendered nothing" from "the navigation died".
   func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+    loginLog("provisional-fail \(label) \(webView.url?.absoluteString ?? "?") \(error.localizedDescription)")
     showNavigationFailure(error, url: webView.url)
   }
 
   func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+    loginLog("nav-fail \(label) \(webView.url?.absoluteString ?? "?") \(error.localizedDescription)")
     showNavigationFailure(error, url: webView.url)
   }
 
@@ -1052,7 +1080,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     if !ok && inMain {
       headerNotice?.stringValue = "blocked redirect to \(host) — close and retry"
       headerNotice?.textColor = NSColor(red: 0xff / 255, green: 0x90 / 255, blue: 0x68 / 255, alpha: 1)
-      NSLog("Intaglio Labs: social login blocked main-frame redirect to \(host)")
+      loginLog("blocked \(label) main-frame redirect to \(host)")
     }
     decisionHandler(ok ? .allow : .cancel)
   }
