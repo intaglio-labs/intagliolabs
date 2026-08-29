@@ -17,7 +17,8 @@
 // question the episodic shelf already answers well, and hijacking it would
 // make the surface worse, not better.
 
-import { buildGraph, CONTENT_SIGNALS } from './graph.mjs';
+import { CONTENT_SIGNALS } from './graph.mjs';
+import { materializedPeopleGraph } from './projection.mjs';
 import { rankForNeed, MENTOR_NEED, INVESTOR_NEED, evidenceLine } from './rank.mjs';
 import { groupByFirm, warmthLabel } from './firms.mjs';
 import { warmIntro } from './intros.mjs';
@@ -141,16 +142,18 @@ export function answerPersonSearch(
   contextDb,
   stateDb,
   question,
-  { owner, now = Date.now(), limit = 50 } = {}
+  { owner, aliases = null, now = Date.now(), limit = 50 } = {}
 ) {
-  const deep = answerDeepPeopleSearch(contextDb, stateDb, question, { owner, now, limit: Math.min(limit, 10) });
+  const deep = answerDeepPeopleSearch(contextDb, stateDb, question, {
+    owner, aliases, now, limit: Math.min(limit, 10),
+  });
   if (deep !== null) return deep;
 
   // Warm-intro is checked first: it already names a target and wants the path
   // to them, which is a different question from "who fits a need".
   const introTarget = detectIntro(question);
   if (introTarget !== null) {
-    const graph = buildGraph(contextDb, stateDb, { now, owner, contentSignals: CONTENT_SIGNALS });
+    const graph = materializedPeopleGraph(contextDb, stateDb, { now, owner, aliases, contentSignals: CONTENT_SIGNALS });
     const res = warmIntro(contextDb, graph, introTarget, { owner, limit });
     if (!res.found) return { text: res.reason, sources: [], count: 0 };
     if (res.alreadyWarm) {
@@ -185,9 +188,10 @@ export function answerPersonSearch(
     : intent.need;
   const eraNote = era ? ` (${eraSpanNote(era)})` : '';
 
-  const graph = buildGraph(contextDb, stateDb, {
+  const graph = materializedPeopleGraph(contextDb, stateDb, {
     now,
     owner,
+    aliases,
     contentSignals: need.contentSignal ? CONTENT_SIGNALS : null,
   });
   const ranked = rankForNeed(graph, need, { limit });

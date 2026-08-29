@@ -109,6 +109,15 @@ test('a Matrix purge covers every bridged Hermes source and totals the response'
   assert.deepEqual(result, { deleted: 8, maintained: true });
 });
 
+test('a Contacts purge clears Hermes derived People state despite having no corpus source', async () => {
+  let cleared = 0;
+  const result = await purgeHermesSources(CONNECTOR_HERMES_SOURCE.contacts, { token: 'unused' }, {
+    clearPeople: async () => { cleared += 1; return { cleared: 3 }; },
+  });
+  assert.equal(cleared, 1);
+  assert.deepEqual(result, { deleted: 0, maintained: false });
+});
+
 test('msUntilIdleWindow lands on the next local occurrence, always in the future', () => {
   const now = new Date(2026, 7, 19, 10, 0, 0).getTime(); // 10:00 local
   assert.equal(msUntilIdleWindow('11:30', now), 90 * 60_000); // later today

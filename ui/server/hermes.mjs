@@ -76,7 +76,13 @@ import {
   timeoutError,
   LLAMA_UNREACHABLE_STATUS,
 } from './llamaReady.mjs';
-import { buildGraph, loadSpine } from './people/graph.mjs';
+import { loadSpine } from './people/graph.mjs';
+import {
+  clearPeopleProjection,
+  ensurePeopleProjectionSchema,
+  isProjectedPeopleSource,
+  materializedPeopleGraph,
+} from './people/projection.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
 import { validToFor } from './memory/validity.mjs';
@@ -660,6 +666,8 @@ WHERE r.scope = 'day'
 //      verb forms. It is a partial win only -- see the note in SCHEMA.
 //   5  the entity uniqueness key becomes (source, entity_id) -- ids are only
 //      unique within a source; the incident is recorded on the v5 branch.
+//  10  Hermes-owned materialized people, identifiers, identity evidence, and
+//      activity tables. Raw context remains the rebuildable source of truth.
 //   9  claim.valid_to: a plan or commitment can finally say which day it was
 //      about. A private corpus showed that many old intentions were otherwise
 //      ageing exactly like standing facts.
@@ -675,7 +683,7 @@ WHERE r.scope = 'day'
 //   6  context_source_ts(source, ts, entity_id): per-source time-range reads
 //      (reconciliation slices, retain sweeps, the episodic shelf, the digest
 //      aggregate, the watchdog's max(ts)) all scanned without it.
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 // The PRAGMAs that decide whether "deleted" means deleted, and whether the
 // memory tables' declared references mean anything. Applied to every
@@ -882,6 +890,21 @@ function migrate(db) {
     );
     version = 9;
   }
+  if (version < 10) {
+    // The projection schema is ensured before migrate(), so fresh and upgraded
+    // databases both have the tables here. The guarded ALTER also repairs a
+    // short-lived development v9 schema that predated evidence confidence.
+    const evidenceColumns = new Set(
+      db.prepare("SELECT name FROM pragma_table_info('identity_evidence')").all().map((c) => c.name)
+    );
+    if (!evidenceColumns.has('confidence')) {
+      db.exec(
+        'ALTER TABLE identity_evidence ADD COLUMN confidence REAL NOT NULL DEFAULT 1 ' +
+          'CHECK (confidence >= 0 AND confidence <= 1)'
+      );
+    }
+    version = 10;
+  }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 
@@ -890,6 +913,7 @@ export function openDb(dbPath = DEFAULT_DB_PATH) {
     const db = new DatabaseSync(dbPath);
     hardenConnection(db);
     db.exec(SCHEMA);
+    ensurePeopleProjectionSchema(db);
     migrate(db);
     return db;
   }
@@ -920,6 +944,7 @@ export function openDb(dbPath = DEFAULT_DB_PATH) {
     chmodSync(dbPath, 0o600);
     hardenConnection(db);
     db.exec(SCHEMA);
+    ensurePeopleProjectionSchema(db);
     migrate(db);
     // Reassert after schema creation in case the platform replaced the file.
     chmodSync(dbPath, 0o600);
@@ -2040,6 +2065,22 @@ async function handleAdmin(db, req, res, cors, url, channel) {
       return;
     }
 
+    if (url.pathname === '/admin/people/clear') {
+      const body = await readJson(req);
+      assertClosedFields(body, MAINTAIN_FIELDS);
+      const cleared = Number(db.prepare('SELECT count(*) AS n FROM people').get().n);
+      db.exec('BEGIN');
+      try {
+        clearPeopleProjection(db);
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+      send(res, 200, { cleared }, cors);
+      return;
+    }
+
     if (url.pathname === '/admin/retain') {
       const body = await readJson(req);
       assertClosedFields(body, RETAIN_FIELDS);
@@ -2068,6 +2109,11 @@ async function handleAdmin(db, req, res, cors, url, channel) {
           db.prepare('DELETE FROM context WHERE source = ? AND ts < ?').run(body.source, cutoff)
             .changes
         );
+        // An explicit deletion must also clear a stale derived copy even when
+        // the raw rows were already absent. Privacy deletion is idempotent;
+        // conditioning this on `deleted` made the second purge weaker than the
+        // first whenever projection state had drifted.
+        if (isProjectedPeopleSource(body.source)) clearPeopleProjection(db);
         db.exec('COMMIT');
       } catch (e) {
         db.exec('ROLLBACK');
@@ -2093,6 +2139,7 @@ async function handleAdmin(db, req, res, cors, url, channel) {
         claimsDeleted = swept.claimsDeleted;
         dropCachedDistillates(swept.contentHashes);
         deleted = Number(db.prepare('DELETE FROM context WHERE source = ?').run(body.source).changes);
+        if (isProjectedPeopleSource(body.source)) clearPeopleProjection(db);
         db.exec('COMMIT');
       } catch (e) {
         db.exec('ROLLBACK');
@@ -2142,6 +2189,7 @@ async function handleAdmin(db, req, res, cors, url, channel) {
           deleted += Number(del.run(body.source, id).changes);
         }
         dropCachedDistillates(cacheHashes);
+        if (isProjectedPeopleSource(body.source)) clearPeopleProjection(db);
         db.exec('COMMIT');
       } catch (e) {
         db.exec('ROLLBACK');
@@ -2608,17 +2656,13 @@ const MAX_UTTERANCE = 2000;
 // handle for questions that are not person-searches. Returns null on any
 // error or a non-match, so the ask route falls through unharmed.
 function tryPersonSearch(db, question) {
-  let state = null;
   try {
-    const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
-    state = existsSync(statePath) ? openStateReadOnly(statePath) : null;
-    return answerPersonSearch(db, state, question, { owner: loadOwner() });
+    return withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      return answerPersonSearch(db, state, question, { owner: loadOwner(), aliases });
+    });
   } catch {
     return null;
-  } finally {
-    try {
-      state?.close();
-    } catch {}
   }
 }
 
@@ -2654,6 +2698,29 @@ function warmPeopleCore(db) {
     const { aliases } = resolutionState(resDb);
     return yearCore(db, state, { now: Date.now(), owner: loadOwner(), aliases, blocking: true });
   });
+}
+
+// Coalesce connector batches into one background projection refresh after the
+// ingest stream goes quiet. Rebuilding after every 200-row backfill batch would
+// be worse than rebuilding on search; waiting for a quiet edge preserves fresh
+// prepared tables without turning ingestion into repeated full graph work.
+const peopleProjectionTimers = new WeakMap();
+function schedulePeopleProjectionRefresh(db) {
+  const pending = peopleProjectionTimers.get(db);
+  if (pending) clearTimeout(pending);
+  const timer = setTimeout(() => {
+    peopleProjectionTimers.delete(db);
+    try {
+      withPeopleDbs(db, (state, resDb) => {
+        const { aliases } = resolutionState(resDb);
+        materializedPeopleGraph(db, state, { now: Date.now(), owner: loadOwner(), aliases });
+      });
+    } catch {
+      // It remains stale and the next search uses the raw fallback or retries.
+    }
+  }, 30_000);
+  timer.unref?.();
+  peopleProjectionTimers.set(db, timer);
 }
 
 // WAIT FOR THE WRITER; DO NOT GIVE UP AND CALL IT AN ANSWER.
@@ -2948,7 +3015,13 @@ function handle(db, req, res, cors, url, policy) {
       // insertRows returns exactly the response contract: how many rows were
       // new, how many replaced an entity in place, and how many were
       // redeliveries the canonical hash proved identical.
-      send(res, 200, insertRows(db, body), cors);
+      const touchesPeople = (Array.isArray(body) ? body : [body])
+        .some((row) => isProjectedPeopleSource(row?.source));
+      const counts = insertRows(db, body);
+      send(res, 200, counts, cors);
+      if (touchesPeople && (counts.inserted > 0 || counts.updated > 0)) {
+        schedulePeopleProjectionRefresh(db);
+      }
     });
   }
 
@@ -3060,7 +3133,7 @@ async function handlePeople(db, req, res, cors, url, policy) {
     }
     const marked = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
-      const person = buildGraph(db, state, { owner, aliases }).find((candidate) => candidate.key === body.key);
+      const person = materializedPeopleGraph(db, state, { owner, aliases }).find((candidate) => candidate.key === body.key);
       if (!person) throw badRequest('"key" is not a current person');
       return markOwnerPerson({ key: person.key, identifiers: person.identifiers });
     });
@@ -3084,7 +3157,7 @@ async function handlePeople(db, req, res, cors, url, policy) {
     }
     const marked = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
-      const person = buildGraph(db, state, { owner, aliases }).find((candidate) => candidate.key === body.key);
+      const person = materializedPeopleGraph(db, state, { owner, aliases }).find((candidate) => candidate.key === body.key);
       if (!person) throw badRequest('"key" is not a current person');
       return markPersonRole({ key: person.key, role: body.role, year: body.year ?? null });
     });

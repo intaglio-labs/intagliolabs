@@ -40,32 +40,32 @@ test('the three requested questions activate deep people search', () => {
 test('Find the investors I met in LA about five years ago', () => {
   const ctx = openDb(':memory:');
   const spine = spineDb([
-    ['maya@sun.vc', 'Maya Vela'],
-    ['nora@bay.vc', 'Nora Bay'],
-    ['theo@old.vc', 'Theo Old'],
+    ['maya@sun.test', 'Maya Vela'],
+    ['nora@bay.test', 'Nora Bay'],
+    ['theo@old.test', 'Theo Old'],
     ['eli@startup.test', 'Eli Founder'],
-    ['rowan@declined.vc', 'Rowan Declined'],
-    ['lara@title.vc', 'Lara Title'],
+    ['rowan@declined.test', 'Rowan Declined'],
+    ['lara@title.test', 'Lara Title'],
   ]);
   insertRows(ctx, [
-    { ts: new Date(2019, 0, 1).getTime(), source: 'linkedin', entity_id: 'linkedin:conn:maya', text: 'Maya Vela — Partner', meta: { kind: 'connection', name: 'Maya Vela', position: 'Partner', company: 'Sunset Ventures', email: 'maya@sun.vc' } },
-    { ts: new Date(2019, 0, 1).getTime(), source: 'linkedin', entity_id: 'linkedin:conn:nora', text: 'Nora Bay — Partner', meta: { kind: 'connection', name: 'Nora Bay', position: 'Partner', company: 'Bay Capital', email: 'nora@bay.vc' } },
-    { ts: new Date(2018, 0, 1).getTime(), source: 'linkedin', entity_id: 'linkedin:conn:theo', text: 'Theo Old — Angel Investor', meta: { kind: 'connection', name: 'Theo Old', position: 'Angel Investor', company: 'Old Fund', email: 'theo@old.vc' } },
+    { ts: new Date(2019, 0, 1).getTime(), source: 'linkedin', entity_id: 'linkedin:conn:maya', text: 'Maya Vela — Partner', meta: { kind: 'connection', name: 'Maya Vela', position: 'Partner', company: 'Sunset Ventures', email: 'maya@sun.test' } },
+    { ts: new Date(2019, 0, 1).getTime(), source: 'linkedin', entity_id: 'linkedin:conn:nora', text: 'Nora Bay — Partner', meta: { kind: 'connection', name: 'Nora Bay', position: 'Partner', company: 'Bay Capital', email: 'nora@bay.test' } },
+    { ts: new Date(2018, 0, 1).getTime(), source: 'linkedin', entity_id: 'linkedin:conn:theo', text: 'Theo Old — Angel Investor', meta: { kind: 'connection', name: 'Theo Old', position: 'Angel Investor', company: 'Old Fund', email: 'theo@old.test' } },
     { ts: new Date(2019, 0, 1).getTime(), source: 'linkedin', entity_id: 'linkedin:conn:eli', text: 'Eli Founder — CEO', meta: { kind: 'connection', name: 'Eli Founder', position: 'CEO', company: 'Startup', email: 'eli@startup.test' } },
-    { ts: new Date(2019, 0, 1).getTime(), source: 'linkedin', entity_id: 'linkedin:conn:rowan', text: 'Rowan Declined — Partner', meta: { kind: 'connection', name: 'Rowan Declined', position: 'Partner', company: 'Declined VC', email: 'rowan@declined.vc' } },
-    { ts: new Date(2019, 0, 1).getTime(), source: 'linkedin', entity_id: 'linkedin:conn:lara', text: 'Lara Title — Partner', meta: { kind: 'connection', name: 'Lara Title', position: 'Partner', company: 'Title VC', email: 'lara@title.vc' } },
+    { ts: new Date(2019, 0, 1).getTime(), source: 'linkedin', entity_id: 'linkedin:conn:rowan', text: 'Rowan Declined — Partner', meta: { kind: 'connection', name: 'Rowan Declined', position: 'Partner', company: 'Declined VC', email: 'rowan@declined.test' } },
+    { ts: new Date(2019, 0, 1).getTime(), source: 'linkedin', entity_id: 'linkedin:conn:lara', text: 'Lara Title — Partner', meta: { kind: 'connection', name: 'Lara Title', position: 'Partner', company: 'Title VC', email: 'lara@title.test' } },
     // The only candidate satisfying investor AND physical LA meeting AND time.
-    { ts: new Date(2022, 5, 10).getTime(), source: 'calendar', entity_id: 'calendar:maya', text: 'Seed dinner', meta: { location: 'Los Angeles, CA', attendees: [{ email: 'maya@sun.vc', name: 'Maya Vela' }] } },
+    { ts: new Date(2022, 5, 10).getTime(), source: 'calendar', entity_id: 'calendar:maya', text: 'Seed dinner', meta: { location: 'Los Angeles, CA', attendees: [{ email: 'maya@sun.test', name: 'Maya Vela' }] } },
     // Right role and time, wrong place.
-    { ts: new Date(2022, 5, 10).getTime(), source: 'calendar', entity_id: 'calendar:nora', text: 'Fund meeting', meta: { location: 'San Francisco, CA', attendees: [{ email: 'nora@bay.vc', name: 'Nora Bay' }] } },
+    { ts: new Date(2022, 5, 10).getTime(), source: 'calendar', entity_id: 'calendar:nora', text: 'Fund meeting', meta: { location: 'San Francisco, CA', attendees: [{ email: 'nora@bay.test', name: 'Nora Bay' }] } },
     // Right role and place, wrong time.
-    { ts: new Date(2020, 0, 10).getTime(), source: 'calendar', entity_id: 'calendar:theo', text: 'Coffee', meta: { location: 'LA, CA', attendees: [{ email: 'theo@old.vc', name: 'Theo Old' }] } },
+    { ts: new Date(2020, 0, 10).getTime(), source: 'calendar', entity_id: 'calendar:theo', text: 'Coffee', meta: { location: 'LA, CA', attendees: [{ email: 'theo@old.test', name: 'Theo Old' }] } },
     // Right place and time, not an investor.
     { ts: new Date(2022, 5, 10).getTime(), source: 'calendar', entity_id: 'calendar:eli', text: 'Founder meetup', meta: { location: 'Los Angeles', attendees: [{ email: 'eli@startup.test', name: 'Eli Founder' }] } },
     // A declined attendee was invited, not met.
-    { ts: new Date(2022, 5, 10).getTime(), source: 'calendar', entity_id: 'calendar:rowan', text: 'Fund dinner', meta: { location: 'Los Angeles', attendees: [{ email: 'rowan@declined.vc', name: 'Rowan Declined', response: 'declined' }] } },
+    { ts: new Date(2022, 5, 10).getTime(), source: 'calendar', entity_id: 'calendar:rowan', text: 'Fund dinner', meta: { location: 'Los Angeles', attendees: [{ email: 'rowan@declined.test', name: 'Rowan Declined', response: 'declined' }] } },
     // A title mentioning LA is not structured location evidence.
-    { ts: new Date(2022, 5, 10).getTime(), source: 'calendar', entity_id: 'calendar:lara', text: 'LA investor dinner', meta: { attendees: [{ email: 'lara@title.vc', name: 'Lara Title' }] } },
+    { ts: new Date(2022, 5, 10).getTime(), source: 'calendar', entity_id: 'calendar:lara', text: 'LA investor dinner', meta: { attendees: [{ email: 'lara@title.test', name: 'Lara Title' }] } },
   ]);
 
   const out = answerPersonSearch(ctx, spine, 'Find the investors I met in LA about five years ago.', { owner: owner(), now: NOW });
@@ -195,4 +195,19 @@ test('future and stale travel enthusiasm are not current interest', () => {
   const out = answerPersonSearch(ctx, spine, 'Who would be down for Italy?', { owner: owner(), now: NOW });
   assert.equal(out.count, 0);
   assert.doesNotMatch(out.text, /Future Fan|Old Fan/u);
+});
+
+test('deep search applies an owner-confirmed identity merge', () => {
+  const ctx = openDb(':memory:');
+  const spine = spineDb([]);
+  insertRows(ctx, [
+    { ts: NOW - 8 * 365 * DAY, source: 'linkedin', entity_id: 'linkedin:conn:maya', text: 'Maya — Partner', meta: { kind: 'connection', name: 'Maya Vela', position: 'Partner', company: 'Sunset Ventures' } },
+    { ts: new Date(2022, 4, 1).getTime(), source: 'calendar', entity_id: 'calendar:maya', text: 'Dinner', meta: { location: 'Los Angeles', attendees: [{ email: 'maya@example.test', name: 'Maya Vela' }] } },
+  ]);
+  const aliases = new Map([['id:maya@example.test', 'id:linkedin:maya']]);
+  const out = answerPersonSearch(ctx, spine, 'Find the investors I met in LA about five years ago.', {
+    owner: owner(), aliases, now: NOW,
+  });
+  assert.equal(out.count, 1);
+  assert.match(out.text, /Maya Vela/u);
 });

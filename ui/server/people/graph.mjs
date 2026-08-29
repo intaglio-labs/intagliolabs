@@ -12,9 +12,9 @@
 // (counts, dormancy, co-attendance). No model decides who is whom — identity
 // is too consequential to hand a language model, exactly like a query.
 //
-// RESOLUTION, deliberately conservative (the spine must not become the
-// project): two identifiers are the same person when the contacts spine maps
-// them to the same display name, OR when they are literally the same string.
+// RESOLUTION, deliberately conservative: two identifiers are the same person
+// when one Address Book card owns both, when a legacy spine maps both to one
+// unambiguous display name, or when they are literally the same string.
 // A LinkedIn connection merges into that person only on an EXACT normalized
 // name match or a shared email — never on fuzzy name similarity, because a
 // wrong merge invents a relationship that is not there, which is worse than a
@@ -29,16 +29,47 @@ import { inferRelationshipRoleIndex } from './roles.mjs';
 
 const DAY = 86_400_000;
 
+// Every Hermes source is classified explicitly. Participant sources may mint
+// or strengthen a person. Content-only sources can mention people but lack a
+// structured participant identity, so they never invent one. Non-person rows
+// describe the owner or generated/test material. Keeping the closed policy in
+// sync with Hermes prevents a newly added connector from being silently absent
+// from identity design.
+export const PERSON_SOURCE_POLICY = Object.freeze({
+  imessage: 'participant',
+  calendar: 'participant',
+  mail: 'participant',
+  granola: 'participant',
+  linkedin: 'participant',
+  whatsapp: 'participant',
+  messenger: 'participant',
+  instagram: 'participant',
+  twitter: 'participant',
+  telegram: 'participant',
+  discord: 'participant',
+  slack: 'participant',
+  notes: 'content-only',
+  files: 'content-only',
+  notion: 'content-only',
+  health: 'non-person',
+  photos: 'non-person',
+  hazlie_digest: 'non-person',
+  seed: 'non-person',
+});
+
+export const RELATIONSHIP_SOURCES = Object.freeze(
+  Object.entries(PERSON_SOURCE_POLICY).filter(([, policy]) => policy === 'participant').map(([source]) => source)
+);
+
 // Calendar providers commonly expose a deeper synthetic history than any
 // conversation connector (recurring birthdays are the classic case). Keep
 // that context, but do not let it invent extra relationship years. The oldest
 // real row from ANY other relationship connector is the shared backfill floor:
 // if iMessage reaches nine years, Instagram seven and Calendar eleven, every
 // relationship signal is read from the iMessage floor onward.
-const NON_CALENDAR_RELATIONSHIP_SOURCES = Object.freeze([
-  'imessage', 'whatsapp', 'messenger', 'instagram', 'twitter', 'telegram',
-  'discord', 'slack', 'mail', 'linkedin',
-]);
+const NON_CALENDAR_RELATIONSHIP_SOURCES = Object.freeze(
+  RELATIONSHIP_SOURCES.filter((source) => source !== 'calendar')
+);
 
 export function relationshipHistoryFloor(contextDb, now = Date.now()) {
   const placeholders = NON_CALENDAR_RELATIONSHIP_SOURCES.map(() => '?').join(',');
@@ -107,11 +138,21 @@ export function normIdentifier(identifier) {
   return digits.length > 10 ? digits.slice(-10) : digits;
 }
 
+function evidenceConfidence(type) {
+  if (type === 'exact_name_unambiguous') return 0.8;
+  if (type === 'legacy_contact_name') return 0.7;
+  return 1;
+}
+
 function emptySpine() {
   return {
     idToName: new Map(),
     nameToIds: new Map(),
     looseIdToName: new Map(),
+    keyFor() { return undefined; },
+    keyForName() { return undefined; },
+    nameForKey() { return undefined; },
+    evidenceFor() { return undefined; },
     nameFor() {
       return undefined;
     },
@@ -122,6 +163,11 @@ export function loadSpine(stateDb) {
   if (!stateDb) return emptySpine();
   const map = new Map();
   const nameToIds = new Map();
+  const idToKey = new Map();
+  const idToEvidence = new Map();
+  const contactIdentifiers = new Set();
+  let keyToName = new Map();
+  let nameToKeys = new Map();
   // Normalised identifier -> name, used ONLY when the exact lookup misses.
   const loose = new Map();
   const ambiguous = new Set();
@@ -142,7 +188,12 @@ export function loadSpine(stateDb) {
   // than serve a nameless graph as though it were the truth.
   let rows;
   try {
-    rows = stateDb.prepare('SELECT identifier, display_name FROM contact_ids').all();
+    const columns = new Set(
+      stateDb.prepare("SELECT name FROM pragma_table_info('contact_ids')").all().map((column) => column.name)
+    );
+    const personRef = columns.has('person_ref') ? ', person_ref' : '';
+    const source = columns.has('source') ? ', source' : '';
+    rows = stateDb.prepare(`SELECT identifier, display_name${personRef}${source} FROM contact_ids`).all();
   } catch (error) {
     if (/no such table/iu.test(String(error?.message ?? ''))) return emptySpine();
     throw error;
@@ -153,6 +204,29 @@ export function loadSpine(stateDb) {
       const key = normName(r.display_name);
       if (!nameToIds.has(key)) nameToIds.set(key, { name: r.display_name, ids: [] });
       nameToIds.get(key).ids.push(r.identifier);
+      const isCalendarFallback = r.source === 'calendar';
+      const personKey = typeof r.person_ref === 'string' && r.person_ref.length > 0
+        ? `contact:${r.person_ref}`
+        : isCalendarFallback
+          ? `id:${r.identifier}`
+          : `name:${key}`;
+      idToKey.set(r.identifier, personKey);
+      idToEvidence.set(r.identifier,
+        typeof r.person_ref === 'string' && r.person_ref.length > 0
+          ? 'contacts_card'
+          : isCalendarFallback
+            ? 'calendar_identifier'
+            : 'legacy_contact_name'
+      );
+      if (!keyToName.has(personKey)) keyToName.set(personKey, r.display_name);
+      // Calendar names label an exact address, but they are not an Address
+      // Book card. Letting them enter this index made two invitees with the
+      // same display name silently become one person.
+      if (!isCalendarFallback) {
+        contactIdentifiers.add(r.identifier);
+        if (!nameToKeys.has(key)) nameToKeys.set(key, new Set());
+        nameToKeys.get(key).add(personKey);
+      }
 
       const nid = normIdentifier(r.identifier);
       if (nid === '') continue;
@@ -171,10 +245,53 @@ export function loadSpine(stateDb) {
     }
   }
   for (const nid of ambiguous) loose.delete(nid);
+
+  // Preserve the legacy `name:<normalized>` key whenever that name belongs to
+  // exactly one Contact card. Stored owner roles and confirmed merges already
+  // use those keys. The opaque card key is needed only to distinguish two
+  // separate cards that genuinely have the same display name.
+  const finalKeyToName = new Map();
+  const finalNameToKeys = new Map();
+  for (const [identifier, provisional] of idToKey) {
+    const displayName = map.get(identifier);
+    const nameKey = normName(displayName);
+    const finalKey = provisional.startsWith('contact:') && nameToKeys.get(nameKey)?.size === 1
+      ? `name:${nameKey}`
+      : provisional;
+    idToKey.set(identifier, finalKey);
+    if (!finalKeyToName.has(finalKey)) finalKeyToName.set(finalKey, displayName);
+    if (contactIdentifiers.has(identifier)) {
+      if (!finalNameToKeys.has(nameKey)) finalNameToKeys.set(nameKey, new Set());
+      finalNameToKeys.get(nameKey).add(finalKey);
+    }
+  }
+  keyToName = finalKeyToName;
+  nameToKeys = finalNameToKeys;
   return {
     idToName: map,
     nameToIds,
     looseIdToName: loose,
+    keyFor(identifier) {
+      const exact = idToKey.get(identifier);
+      if (exact !== undefined) return exact;
+      const matchedName = (() => {
+        const nid = normIdentifier(identifier);
+        return nid === '' ? undefined : loose.get(nid);
+      })();
+      if (matchedName === undefined) return undefined;
+      const keys = nameToKeys.get(normName(matchedName));
+      return keys?.size === 1 ? [...keys][0] : undefined;
+    },
+    keyForName(name) {
+      const keys = nameToKeys.get(normName(name));
+      return keys?.size === 1 ? [...keys][0] : undefined;
+    },
+    nameForKey(key) {
+      return keyToName.get(key);
+    },
+    evidenceFor(identifier) {
+      return idToEvidence.get(identifier);
+    },
     /// The name Contacts has for this identifier, exact match first.
     nameFor(identifier) {
       const exact = map.get(identifier);
@@ -285,6 +402,36 @@ function personSignalsForRow(row, meta, owner) {
       }
       // No `kind` means this is a Matrix bridge row.
       return chatSignalsForRow(row, meta, ts);
+    }
+    case 'granola': {
+      const participants = Array.isArray(meta.participants) && meta.participants.length > 0
+        ? meta.participants
+        : (Array.isArray(meta.attendees) ? meta.attendees : []);
+      const out = [];
+      const seen = new Set();
+      for (const participant of participants) {
+        const name = typeof participant === 'string'
+          ? (participant.includes('@') ? null : participant)
+          : (typeof participant?.name === 'string' ? participant.name : null);
+        const email = typeof participant === 'string'
+          ? (participant.includes('@') ? participant : null)
+          : (typeof participant?.email === 'string' ? participant.email : null);
+        if ((email && isOwnerAddress(email, owner)) || (name && isOwnerName(name, owner))) continue;
+        const providerId = participant && typeof participant === 'object'
+          ? (participant.id ?? participant.user_id ?? participant.person_id)
+          : null;
+        const id = email
+          ? String(email).toLowerCase()
+          : providerId
+            ? `granola:${String(providerId)}`
+            : name
+              ? `granola-name:${String(row.entity_id ?? row.ts)}:${normName(name)}`
+              : null;
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        out.push({ id, channel: 'granola', ts, fromMe: false, name, meetingNote: true });
+      }
+      return out;
     }
     default:
       return [];
@@ -398,6 +545,16 @@ function addContentSignals(contextDb, people, keyResolver, signals) {
   }
 }
 
+// Decorate a prepared graph with the few content-derived scores a particular
+// search requested. Identity and relationship totals come from the materialized
+// tables; message text is still scanned locally and never stored in them.
+export function attachContentSignals(contextDb, graph, idToKey, signals) {
+  const people = new Map(graph.map((person) => [person.key, person]));
+  for (const person of graph) person.content = {};
+  addContentSignals(contextDb, people, (identifier) => idToKey.get(identifier), signals);
+  return graph;
+}
+
 // Build the graph. Returns an array of person objects, each merging every
 // channel that names them.
 //
@@ -431,13 +588,13 @@ export function buildGraph(
   // canonical key -> person accumulator
   const people = new Map();
   const rawKeyForId = (id, name) => {
-    // Spine name wins; then an exact-name LinkedIn/calendar match to a spine
-    // person; then the raw id.
-    const known = spine.nameFor(id);
-    if (known !== undefined) return `name:${normName(known)}`;
+    // Stable Contact-card membership wins; then an unambiguous exact-name
+    // match to one Contact card; then the raw id.
+    const knownKey = spine.keyFor(id);
+    if (knownKey !== undefined) return knownKey;
     if (name) {
-      const nk = normName(name);
-      if (spine.nameToIds.has(nk)) return `name:${nk}`;
+      const namedKey = spine.keyForName(name);
+      if (namedKey !== undefined) return namedKey;
     }
     return `id:${id}`;
   };
@@ -460,12 +617,11 @@ export function buildGraph(
       // absence made the name-recovery below dead code: signalsFor read
       // row.speaker, row.speaker was always undefined, and every WhatsApp
       // name it was written to rescue was discarded silently.
-      "SELECT ts, source, speaker, entity_id, meta FROM context " +
-        "WHERE source IN ('imessage','whatsapp','messenger','instagram','twitter'," +
-        "'telegram','discord','slack','mail','calendar','linkedin')" +
+      `SELECT ts, source, speaker, entity_id, meta FROM context ` +
+        `WHERE source IN (${RELATIONSHIP_SOURCES.map(() => '?').join(',')})` +
         (hasLowerBound ? " AND ts >= ?" : "")
     )
-    .all(...(hasLowerBound ? [lowerBound] : []));
+    .all(...RELATIONSHIP_SOURCES, ...(hasLowerBound ? [lowerBound] : []));
 
   for (const row of rows) {
     let meta = {};
@@ -490,8 +646,11 @@ export function buildGraph(
           metInPerson: 0,
           roomMessages: 0,
           directMessages: 0,
+          meetingNotes: 0,
           linkedin: null,
           content: {},
+          identityEvidence: new Map(),
+          activity: new Map(),
           timeline: new Map(),
           // Direct-message days, distinct from the monthly aggregate above.
           // Highlight streaks need actual calendar-day continuity; deriving it
@@ -504,6 +663,29 @@ export function buildGraph(
       const p = people.get(key);
       p.identifiers.add(sig.id);
       p.channels.add(sig.channel);
+      const evidence = [];
+      evidence.push({ identifier: sig.id, type: 'source_observed', source: sig.channel, confidence: 1 });
+      const directKey = spine.keyFor(sig.id);
+      if (directKey !== undefined) {
+        const type = spine.evidenceFor(sig.id) ?? 'exact_identifier';
+        evidence.push({
+          identifier: sig.id,
+          type,
+          source: type === 'calendar_identifier' ? 'calendar' : 'contacts',
+          confidence: evidenceConfidence(type),
+        });
+      } else if (sig.name && spine.keyForName(sig.name) !== undefined) {
+        evidence.push({
+          identifier: sig.id, type: 'exact_name_unambiguous', source: sig.channel, confidence: 0.8,
+        });
+      }
+      const rawKey = rawKeyForId(sig.id, sig.name);
+      if (rawKey !== key) {
+        evidence.push({ identifier: sig.id, type: 'owner_confirmed', source: 'owner', confidence: 1 });
+      }
+      for (const item of evidence) {
+        p.identityEvidence.set(`${item.identifier}\u0000${item.type}\u0000${item.source}`, item);
+      }
       if (sig.name) p.names.add(sig.name);
       const spineName = spine.nameFor(sig.id);
       if (spineName !== undefined) p.names.add(spineName);
@@ -515,7 +697,7 @@ export function buildGraph(
       // an unguarded seed let a future event stick as lastSeen whenever it
       // happened to be the person's first row scanned. A meeting on the
       // calendar is not them reaching out.
-      const isMessage = sig.channel !== 'calendar' && !sig.linkedin;
+      const isMessage = sig.channel !== 'calendar' && !sig.linkedin && !sig.meetingNote;
       if (Number.isFinite(sig.ts)) {
         if (sig.ts < p.firstSeen) p.firstSeen = sig.ts;
         if (sig.ts <= now && (p.lastSeen === null || sig.ts > p.lastSeen)) p.lastSeen = sig.ts;
@@ -550,10 +732,11 @@ export function buildGraph(
       // Room volume is not discarded, it is counted as itself. The two numbers
       // answer different questions and neither one is the other's approximation.
       if (sig.channel === 'calendar') p.metInPerson += 1;
+      else if (sig.meetingNote) p.meetingNotes += 1;
       else if (sig.room) p.roomMessages += 1;
       else if (sig.fromMe) p.sent += 1;
       else p.received += 1;
-      if (sig.channel !== 'calendar' && !sig.linkedin && !sig.room) p.directMessages += 1;
+      if (isMessage && !sig.room) p.directMessages += 1;
       // The activity TIMELINE: the same counts, bucketed by calendar month, so
       // downstream code (people/profile.mjs) can see WHEN a relationship lived
       // -- peak era, cadence, "active in 2020-2022" -- not just its lifetime
@@ -574,9 +757,21 @@ export function buildGraph(
         // Same split as the totals: the year view sums these, so a room counted
         // here would put the old number back on the one screen that shows it.
         if (sig.channel === 'calendar') bucket.met += 1;
+        else if (sig.meetingNote) bucket.notes = (bucket.notes ?? 0) + 1;
         else if (sig.room) bucket.room += 1;
         else if (sig.fromMe) bucket.sent += 1;
         else bucket.received += 1;
+        const activityKey = `${ym}\u0000${sig.channel}`;
+        let activity = p.activity.get(activityKey);
+        if (activity === undefined) {
+          activity = { ym, source: sig.channel, sent: 0, received: 0, met: 0, room: 0, notes: 0 };
+          p.activity.set(activityKey, activity);
+        }
+        if (sig.channel === 'calendar') activity.met += 1;
+        else if (sig.meetingNote) activity.notes += 1;
+        else if (sig.room) activity.room += 1;
+        else if (sig.fromMe) activity.sent += 1;
+        else activity.received += 1;
         // A streak is reciprocal direct correspondence. Calendar attendance
         // and group chatter are valuable, but neither says the two people
         // exchanged a message on this day.
@@ -585,6 +780,30 @@ export function buildGraph(
         }
       }
       if (sig.linkedin) p.linkedin = sig.linkedin;
+    }
+  }
+
+  // Once any identifier has established that a person belongs in the
+  // relationship graph, carry every identifier on the same Contact card into
+  // the canonical record. This is what lets a newly seen second email resolve
+  // through `person_identifiers` immediately instead of waiting for that exact
+  // address to accumulate its own activity first. Contacts-only cards still do
+  // not mint relationship stars by themselves.
+  for (const identifier of spine.idToName.keys()) {
+    const raw = spine.keyFor(identifier);
+    if (raw === undefined) continue;
+    let key = raw;
+    for (let i = 0; i < 8 && aliases?.has(key); i++) key = aliases.get(key);
+    const person = people.get(key);
+    if (!person) continue;
+    person.identifiers.add(identifier);
+    const type = spine.evidenceFor(identifier) ?? 'exact_identifier';
+    const source = type === 'calendar_identifier' ? 'calendar' : 'contacts';
+    const item = { identifier, type, source, confidence: evidenceConfidence(type) };
+    person.identityEvidence.set(`${identifier}\u0000${type}\u0000${source}`, item);
+    if (raw !== key) {
+      const confirmed = { identifier, type: 'owner_confirmed', source: 'owner', confidence: 1 };
+      person.identityEvidence.set(`${identifier}\u0000owner_confirmed\u0000owner`, confirmed);
     }
   }
 
@@ -614,9 +833,8 @@ export function buildGraph(
       //
       // nameToIds keeps the ORIGINAL casing against the normalised key, so this
       // renders "Example Owner" rather than the flattened form the key carries.
-      const fromSpine = p.key.startsWith('name:')
-        ? spine.nameToIds.get(p.key.slice('name:'.length))?.name
-        : null;
+      const fromSpine = spine.nameForKey(p.key)
+        ?? (p.key.startsWith('name:') ? spine.nameToIds.get(p.key.slice('name:'.length))?.name : null);
       const display =
         fromSpine ??
         [...p.names].sort((a, b) => b.length - a.length)[0] ??
@@ -641,6 +859,7 @@ export function buildGraph(
             ? Math.round((100 * Math.min(p.sent, p.received)) / Math.max(p.sent, p.received)) / 100
             : 0,
         metInPerson: p.metInPerson,
+        meetingNotes: p.meetingNotes,
         // THE SECOND AXIS. messages/sent/received above are unchanged -- these
         // say how much of it was addressed to the owner and how much was said in
         // a room they also happened to be in. `roomOnly` is the case worth a
@@ -667,6 +886,12 @@ export function buildGraph(
           .sort(([a], [b]) => (a < b ? -1 : 1))
           .map(([ym, b]) => ({ ym, ...b, channels: [...b.channels].sort() })),
         activeDays: [...p.activeDays].sort(),
+        activity: [...p.activity.values()].sort((a, b) =>
+          a.ym.localeCompare(b.ym) || a.source.localeCompare(b.source)
+        ),
+        identityEvidence: [...p.identityEvidence.values()].sort((a, b) =>
+          a.identifier.localeCompare(b.identifier) || a.type.localeCompare(b.type) || a.source.localeCompare(b.source)
+        ),
         linkedin: p.linkedin,
         content: p.content,
       };

@@ -7,7 +7,8 @@
 // high-precision evidence patterns, but no text is returned and no model picks
 // a person. The answer contains names, dates, and derived reasons only.
 
-import { buildGraph, CONTENT_SIGNALS, normIdentifier } from './graph.mjs';
+import { CONTENT_SIGNALS, normIdentifier } from './graph.mjs';
+import { materializedPeopleGraph } from './projection.mjs';
 import { depthScore, investorIdentity, isNonPerson, reachable } from './rank.mjs';
 import { rowPersonId } from './content.mjs';
 
@@ -406,16 +407,17 @@ export function answerDeepPeopleSearch(
   contextDb,
   stateDb,
   question,
-  { owner = { addresses: new Set(), names: [], keys: new Set(), schools: [], highSchools: [] }, now = Date.now(), limit = 10 } = {}
+  { owner = { addresses: new Set(), names: [], keys: new Set(), schools: [], highSchools: [] }, aliases = null, now = Date.now(), limit = 10 } = {}
 ) {
   const query = detectDeepPeopleQuery(question, { now });
   if (query === null) return null;
   if (query.kind === 'school_tech' && ownerSchools(owner).length === 0) {
     return { text: `I don't know which high school is yours yet. Add it to your local owner profile, then ask again.`, sources: [], count: 0 };
   }
-  const graph = buildGraph(contextDb, stateDb, {
+  const graph = materializedPeopleGraph(contextDb, stateDb, {
     now,
     owner,
+    aliases,
     contentSignals: query.kind === 'investor_place_time' ? CONTENT_SIGNALS : null,
   });
   const index = personIndex(graph);

@@ -243,6 +243,7 @@ private func dumpContacts() -> Never {
 
   let keys: [CNKeyDescriptor] = [
     CNContactFormatter.descriptorForRequiredKeys(for: .fullName),
+    CNContactIdentifierKey as CNKeyDescriptor,
     CNContactPhoneNumbersKey as CNKeyDescriptor,
     CNContactEmailAddressesKey as CNKeyDescriptor,
     CNContactOrganizationNameKey as CNKeyDescriptor,
@@ -270,7 +271,12 @@ private func dumpContacts() -> Never {
       // base64, because this crosses a pipe as JSON. Absent when the contact
       // has no picture — most do not, and an empty string per contact is a
       // field the reader would have to special-case anyway.
-      var row: [String: Any] = ["displayName": display, "phones": phones, "emails": emails]
+      var row: [String: Any] = [
+        "contactId": contact.identifier,
+        "displayName": display,
+        "phones": phones,
+        "emails": emails,
+      ]
       if let small = downscaleJPEG(contact.thumbnailImageData) {
         row["thumbnail"] = small.base64EncodedString()
       }

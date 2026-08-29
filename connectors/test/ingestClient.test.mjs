@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { start } from '../../ui/server/hermes.mjs';
 import {
   adminDeleteEntities,
+  adminClearPeopleProjection,
   adminEntities,
   adminMaintain,
   adminPurge,
@@ -347,6 +348,12 @@ test('adminPurge deletes the whole source and reports the inline maintenance', a
   assert.equal(result.maintained, true);
   assert.ok(result.deleted >= 1);
   assert.deepEqual(await adminEntities({ source: 'granola' }, opts), []);
+});
+
+test('adminClearPeopleProjection round-trips without exposing rows', async () => {
+  const result = await adminClearPeopleProjection(opts);
+  assert.equal(typeof result.cleared, 'number');
+  assert.deepEqual(Object.keys(result), ['cleared']);
 });
 
 test('adminMaintain round-trips', async () => {
