@@ -317,17 +317,68 @@ function whatsappRow(home) {
 function bridgeRows({ home = homedir() } = {}) {
   return Object.values(PLATFORMS).map((p) => {
     const st = bridgeStatus(p.id, { home });
+    const discordImport = p.id === 'discord' && st.connected
+      ? discordImportState({ home })
+      : null;
+    // Authentication and usable data are two separate milestones for Discord.
+    // Its QR approval writes the user row first; portal discovery and message
+    // backfill follow asynchronously. Reporting the first milestone as a green
+    // check left a long, silent gap in which the tile promised data that did
+    // not exist yet. Keep the authenticated state (so pressing the tile cannot
+    // start a second login), but expose `pending` until the bridge DB contains
+    // imported message rows. The widget renders that as its waiting ring.
+    const pending = discordImport?.ready === false;
     return {
       id: p.id,
       label: p.label,
       connected: st.connected,
+      pending,
       detail: st.connected
-        ? `linked${st.name ? ` as ${st.name}` : ''} · DMs syncing`
+        ? pending
+          ? 'linked · finding conversations and importing messages'
+          : `linked${st.name ? ` as ${st.name}` : ''} · DMs syncing`
         : `link your ${p.label} DMs`,
       action: st.connected ? null : 'bridge',
       caveat: st.connected ? null : 'reads your own DMs through a local bridge on this Mac — the bridge stays signed in to the platform to do it.',
+      ...(discordImport?.verified ? {
+        importedMessages: discordImport.messageCount,
+        discoveredConversations: discordImport.portalCount,
+      } : {}),
     };
   });
+}
+
+// Verify Discord DATA, not merely its login row. Exact aggregate counts are
+// intentionally returned: they are local-only, contain no message content,
+// and let the UI/API prove why the tile is ready. read_state_version advances
+// during Discord's initial account sync; a non-zero value with no portals is
+// the valid empty-account case and must not spin forever.
+export function discordImportState({ home = homedir() } = {}) {
+  let db;
+  try {
+    db = new DatabaseSync(join(home, '.hazlie', 'matrix', 'discord', 'mautrix-discord.db'), {
+      readOnly: true,
+    });
+    const portalCount = Number(db.prepare(
+      'SELECT COUNT(*) AS count FROM portal WHERE mxid IS NOT NULL'
+    ).get()?.count ?? 0);
+    const messageCount = Number(db.prepare('SELECT COUNT(*) AS count FROM message').get()?.count ?? 0);
+    const readStateVersion = Number(db.prepare(
+      'SELECT COALESCE(MAX(read_state_version), 0) AS version FROM "user"'
+    ).get()?.version ?? 0);
+    return {
+      verified: true,
+      portalCount,
+      messageCount,
+      ready: messageCount > 0 || (portalCount === 0 && readStateVersion > 0),
+    };
+  } catch {
+    // Fail closed: if an authenticated Discord database cannot be verified,
+    // the tile waits instead of claiming the import succeeded.
+    return { verified: false, portalCount: 0, messageCount: 0, ready: false };
+  } finally {
+    try { db?.close(); } catch {}
+  }
 }
 
 // ~~linkedinRow: connected meant Connections.csv was sitting in

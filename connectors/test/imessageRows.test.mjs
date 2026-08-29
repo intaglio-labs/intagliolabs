@@ -174,6 +174,18 @@ test('the scan floor resumes from the cursor and falls back to a date window', (
   assert.equal(fresh.reason, 'no-cursor');
   assert.equal(typeof fresh.appleNanos, 'bigint');
 
+  const january = scanFloor({
+    storedCursor: undefined,
+    backfill: false,
+    nowMs: new Date(2026, 0, 10).getTime(),
+    backfillDays: 90,
+  });
+  assert.equal(
+    january.appleNanos,
+    BigInt(new Date(2026, 0, 1).getTime() - 978307200000) * 1_000_000n,
+    'a fresh forward lane cannot populate the previous year ahead of the barrier'
+  );
+
   const forced = scanFloor({ storedCursor: '790000000000000000', backfill: true, nowMs: Date.parse('2026-08-19T00:00:00Z'), backfillDays: 1 });
   assert.equal(forced.reason, 'backfill', 'backfill ignores the cursor');
 });

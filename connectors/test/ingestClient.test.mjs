@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { start } from '../../ui/server/hermes.mjs';
 import {
+  adminCoverage,
   adminDeleteEntities,
   adminClearPeopleProjection,
   adminEntities,
@@ -314,6 +315,19 @@ test('adminEntities returns ids and timestamps ONLY, windowed', async () => {
   // The reconciliation read must never widen: ids + timestamps and nothing
   // else may cross back into this process.
   for (const e of entities) assert.deepEqual(Object.keys(e).sort(), ['entity_id', 'ts']);
+});
+
+test('adminCoverage returns aggregate source receipts only', async () => {
+  const body = await adminCoverage(opts);
+  assert.ok(Array.isArray(body.sources));
+  const granola = body.sources.find((row) => row.source === 'granola');
+  assert.ok(granola.rows >= 3);
+  assert.deepEqual(Object.keys(granola).sort(), [
+    'conversations', 'newest_ts', 'oldest_ts', 'rows', 'source', 'years',
+  ]);
+  const encoded = JSON.stringify(body);
+  assert.equal(encoded.includes('granola:win-a'), false);
+  assert.equal(encoded.includes('note a'), false);
 });
 
 test('adminDeleteEntities deletes the diff and chunks batches over 500', async () => {

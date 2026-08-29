@@ -133,9 +133,9 @@ function buildFixture(path) {
   return db;
 }
 
-function makeCtx({ backfill = false, ingestImpl } = {}) {
+function makeCtx({ backfill = false, ingestImpl, historyWindow } = {}) {
   return {
-    state: {}, // the source is cursor-free; the daemon owns recordRun
+    state: {},
     ingest: ingestImpl ?? ((rows) => ingest(rows, opts)),
     admin: {
       entities: (args) => adminEntities(args, opts),
@@ -146,6 +146,7 @@ function makeCtx({ backfill = false, ingestImpl } = {}) {
     log,
     now: () => NOW,
     backfill,
+    ...(historyWindow ? { history: true, historyWindow } : {}),
   };
 }
 
@@ -190,6 +191,22 @@ test('the default export satisfies the daemon source contract', () => {
 test('scanWindow: steady −7d..+30d, backfill −90d..+60d', () => {
   assert.deepEqual(scanWindow(NOW, false), { fromTs: NOW - 7 * DAY, toTs: NOW + 30 * DAY });
   assert.deepEqual(scanWindow(NOW, true), { fromTs: NOW - 90 * DAY, toTs: NOW + 60 * DAY });
+});
+
+test('yearly history scans one exact local year and reports a completed barrier slice', async () => {
+  const result = await source.run(makeCtx({
+    ingestImpl: async (rows) => ({ inserted: rows.length, updated: 0, unchanged: 0 }),
+    historyWindow: {
+      year: 2026,
+      fromTs: new Date(2026, 0, 1).getTime(),
+      toTs: new Date(2027, 0, 1).getTime(),
+    },
+  }));
+  assert.equal(result.historyDone, true);
+  assert.equal(result.historyHasOlder, true);
+  assert.equal(result.historyProgressed, true);
+  assert.equal(result.unchanged, 0);
+  assert.equal(result.ingested, 6);
 });
 
 test('historyWindow resumes from its saved ceiling in one-year slices', () => {

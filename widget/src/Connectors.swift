@@ -103,12 +103,13 @@ final class Connectors {
     // Historical catch-up remains a named job in the list. Its duration is not
     // repeated here: the pinned header is the horizon for the ENTIRE queue.
     if let backfill = raw["backfill"] as? [String], !backfill.isEmpty {
+      let year = raw["backfillYear"] as? Int
       for connector in backfill {
         let subjects = connector == "matrix" ? matrixPlatformLabels(raw) : [labelFor(connector)]
         for subject in subjects.isEmpty ? [labelFor(connector)] : subjects {
           items.append([
             "kind": "backfill",
-            "label": "backfilling \(subject) history",
+            "label": year.map { "fetching \($0) \(subject)" } ?? "backfilling \(subject) history",
           ])
         }
       }
@@ -164,10 +165,12 @@ final class Connectors {
        let estimate = raw["estimate"] as? String,
        !estimate.isEmpty,
        let connector = (raw["backfill"] as? [String])?.first {
+      let year = raw["backfillYear"] as? Int
       if connector == "matrix", let platform = matrixPlatformLabels(raw).first {
-        return "backfilling \(platform)"
+        return year.map { "fetching \($0) \(platform)" } ?? "backfilling \(platform)"
       }
-      return "backfilling \(labelFor(connector))"
+      return year.map { "fetching \($0) \(labelFor(connector))" }
+        ?? "backfilling \(labelFor(connector))"
     }
     return nil
   }

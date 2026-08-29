@@ -4,7 +4,13 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PLATFORMS, bridgeStatus } from '../lib/bridge.mjs';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  PLATFORMS, bridgeStatus, discordServers, discordServerCommand,
+} from '../lib/bridge.mjs';
 import { renderBridgePage } from '../lib/bridgePage.mjs';
 
 test('all platforms are defined with the fields the flow needs', () => {
@@ -19,6 +25,44 @@ test('all platforms are defined with the fields the flow needs', () => {
 
 test('an unknown platform reads as not connected, never throws', () => {
   assert.deepEqual(bridgeStatus('nope'), { connected: false });
+});
+
+test('Discord server choices come from the local bridge DB and only entire guilds are checked', (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'discord-servers-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const dir = join(home, '.hazlie', 'matrix', 'discord');
+  mkdirSync(dir, { recursive: true });
+  const db = new DatabaseSync(join(dir, 'mautrix-discord.db'));
+  db.exec(`CREATE TABLE guild (
+    dcid TEXT PRIMARY KEY, plain_name TEXT, name TEXT, bridging_mode INTEGER
+  )`);
+  db.prepare('INSERT INTO guild VALUES (?, ?, ?, ?)').run('100001', 'Zeta', '', 0);
+  db.prepare('INSERT INTO guild VALUES (?, ?, ?, ?)').run('100002', 'Alpha', '', 3);
+  db.prepare('INSERT INTO guild VALUES (?, ?, ?, ?)').run('100003', 'Partial', '', 2);
+  db.close();
+
+  assert.deepEqual(discordServers({ home }), [
+    { id: '100002', name: 'Alpha', enabled: true },
+    { id: '100003', name: 'Partial', enabled: false },
+    { id: '100001', name: 'Zeta', enabled: false },
+  ]);
+});
+
+test('Discord server commands use whole-server import and the supported unbridge verb', (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'discord-prefix-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const dir = join(home, '.hazlie', 'matrix', 'discord');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'config.yaml'), 'bridge:\n  command_prefix: "!mine"\n');
+  assert.equal(
+    discordServerCommand('1234567890', true, { home }),
+    '!mine guilds bridge 1234567890 --entire'
+  );
+  assert.equal(
+    discordServerCommand('1234567890', false, { home }),
+    '!mine guilds unbridge 1234567890'
+  );
+  assert.throws(() => discordServerCommand('not-an-id', true, { home }), /invalid Discord server/u);
 });
 
 test('the panel renders the login surface when not connected', () => {

@@ -104,6 +104,10 @@ before(async () => {
 
 after(async () => {
   await hermes?.close();
+  // Hermes uses a pooled HTTP client for llama. Close any idle keep-alive
+  // sockets before awaiting server.close(), otherwise this hermetic contract
+  // test can sit open until the client's multi-minute idle timeout expires.
+  llamaStub?.closeAllConnections?.();
   await new Promise((r) => (llamaStub ? llamaStub.close(r) : r()));
   if (tmp) rmSync(tmp, { recursive: true, force: true });
 });

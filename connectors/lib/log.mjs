@@ -1,7 +1,7 @@
 // JSON-lines operational log for the connectors daemon.
 //
 // THE LOG NEVER CARRIES ROW TEXT. Not message bodies, not mail subjects, not
-// note content, not contact names — counts, ids, durations, error messages,
+// note content, not contact names — counts, ids, durations, error fingerprints,
 // and schema facts only. The corpus boundary is hermes' database; a log line
 // that quotes a message re-creates the corpus in a second file with none of
 // hermes' deletion discipline. This is enforced at the seam below (a closed

@@ -277,6 +277,20 @@ export async function adminMaintain(opts) {
   return expectOk(res, '/admin/maintain'); // {maintained}
 }
 
+// Aggregate connector coverage only. Hermes performs the DISTINCT and date
+// grouping while it still owns the corpus handle; this process receives no
+// message text, people, addresses, room ids, or entity ids.
+export async function adminCoverage(opts) {
+  const ctx = requireOpts(opts);
+  const token = readHermesTokenFile(ctx.tokenFile);
+  const res = await request(ctx, 'GET', '/admin/coverage', token);
+  const body = await expectOk(res, '/admin/coverage');
+  if (!Array.isArray(body?.sources)) {
+    throw new Error('hermes /admin/coverage response is missing the sources array');
+  }
+  return body;
+}
+
 // The read half of window reconciliation. Returns [{entity_id, ts}] — ids and
 // timestamps are ALL hermes will ever send back here, by design: corpus text
 // crossing into this process would land it inside logs and state files that
