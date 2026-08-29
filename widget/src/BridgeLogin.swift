@@ -137,11 +137,11 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   // then finish() explicitly removes every record again; no Facebook session
   // survives the handoff to the local bridge.
   private var websiteDataStore: WKWebsiteDataStore?
-  private var clearsWebsiteData = false
   private var poll: Timer?
   private var finished = false
   // The green underscore blinks like a terminal cursor.
   private var headerTitle: NSTextField?
+  private let windowWidth: CGFloat
   private var blink: Timer?
   private var cursorOn = true
 
@@ -149,7 +149,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     label: String, cookieDomain: String, sessionCookie: String, allowedHosts: [String],
     requiredCookies: [String], cookieFormat: String, fields: [[String: String]],
     approval: Bool, userAgent: String, allowedFrameHosts: [String],
-    storageUrl: String, done: @escaping (String?) -> Void
+    storageUrl: String, windowWidth: Int, done: @escaping (String?) -> Void
   ) {
     self.label = label
     self.cookieDomain = cookieDomain
@@ -164,6 +164,17 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     self.allowedFrameSuffixes = allowedFrameHosts
     self.storageUrl = storageUrl
     self.allowedSuffixes = allowedHosts
+    // WIDE ENOUGH FOR THE PAGE THIS PLATFORM ACTUALLY SERVES.
+    //
+    // 480 is right for a login page that declares a viewport. Facebook's does
+    // not declare one at all, so WebKit lays it out at the desktop default and
+    // a 480pt window showed the top-left corner of a ~980px page: the Meta mark,
+    // a broken image, and a horizontal scrollbar. Nothing was blocked and no
+    // cookie was involved -- the form was simply off-screen to the right.
+    // Instagram's page carries width=device-width and fits, which is exactly why
+    // one worked and the other did not. Server-authored like the rest of this
+    // policy; 0 means "use the default".
+    self.windowWidth = windowWidth > 0 ? CGFloat(windowWidth) : 480
     self.done = done
   }
 
@@ -182,7 +193,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     sessionCookie: String, allowedHosts: [String], requiredCookies: [String] = [],
     cookieFormat: String = "json", fields: [[String: String]] = [],
     approval: Bool = false, userAgent: String = "", allowedFrameHosts: [String] = [],
-    storageUrl: String = "",
+    storageUrl: String = "", windowWidth: Int = 0,
     done: @escaping (String?) -> Void
   ) {
     // A window must have something to wait for: a session cookie to appear, or
@@ -199,7 +210,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
       sessionCookie: sessionCookie, allowedHosts: allowedHosts,
       requiredCookies: requiredCookies, cookieFormat: cookieFormat,
       fields: fields, approval: approval, userAgent: userAgent,
-      allowedFrameHosts: allowedFrameHosts, storageUrl: storageUrl, done: done
+      allowedFrameHosts: allowedFrameHosts, storageUrl: storageUrl,
+      windowWidth: windowWidth, done: done
     )
     current = ctl
     ctl.show(url: url)
@@ -244,7 +256,9 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     let ctl = BridgeLogin(
       label: label, cookieDomain: "", sessionCookie: "", allowedHosts: [],
       requiredCookies: [], cookieFormat: "json", fields: [],
-      approval: false, userAgent: "", allowedFrameHosts: [], storageUrl: "", done: done
+      approval: false, userAgent: "", allowedFrameHosts: [], storageUrl: "",
+      // The QR window sizes itself in showQR and never loads a platform page.
+      windowWidth: 0, done: done
     )
     ctl.qrCheck = check
     ctl.qrFetch = fetch
@@ -464,17 +478,25 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   }
 
   private func show(url: URL) {
-    let W: CGFloat = 480, webH: CGFloat = 680, headH: CGFloat = 62
+    let W: CGFloat = windowWidth, webH: CGFloat = 680, headH: CGFloat = 62
     let config = WKWebViewConfiguration()
-    // Facebook currently needs a persistent WebKit store to render its
-    // first-visit consent/login bootstrap. Scope that exception to Messenger
-    // only and clear the store on every exit; every other platform remains
-    // truly ephemeral as before.
-    let persistentMessengerStore = label == "Messenger"
-    let dataStore = persistentMessengerStore ? WKWebsiteDataStore.default() : .nonPersistent()
+    // EVERY PLATFORM IS EPHEMERAL AGAIN.
+    //
+    // ~~Messenger got WKWebsiteDataStore.default()~~ on the theory that Facebook
+    // needed a persistent store to render its first-visit bootstrap. That could
+    // never have worked: clearsWebsiteData was set for the same platform, and
+    // finish() wipes allWebsiteDataTypes since epoch 0 on EVERY exit including
+    // cancel -- so the store was empty on arrival every single time, and every
+    // visit was a first visit. It was strictly worse than .nonPersistent() on
+    // both counts: it changed nothing about rendering, and it emptied the app's
+    // SHARED default store, which belongs to every other webview in the process.
+    //
+    // The blank page was never about storage. Facebook's login page declares no
+    // viewport, so it laid out at desktop width inside a 480pt window; the fix
+    // is windowWidth above.
+    let dataStore = WKWebsiteDataStore.nonPersistent()
     config.websiteDataStore = dataStore
     websiteDataStore = dataStore
-    clearsWebsiteData = persistentMessengerStore
 
     // HEADER CAPTURE, only when the bridge asked for headers. LinkedIn's login
     // step wants X-LI-Track and X-LI-Page-Instance, which its own JavaScript
@@ -1061,10 +1083,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     qrExpiry = nil
     let cb = done
     let win = window
-    let dataStore = websiteDataStore
-    let clearData = clearsWebsiteData
     websiteDataStore = nil
-    clearsWebsiteData = false
     web?.navigationDelegate = nil
     web = nil
     window?.delegate = nil
@@ -1073,10 +1092,6 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     DispatchQueue.main.async {
       win?.close()
       cb(result)
-    }
-    if clearData, let dataStore {
-      dataStore.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
-                           modifiedSince: Date(timeIntervalSince1970: 0)) {}
     }
   }
 }

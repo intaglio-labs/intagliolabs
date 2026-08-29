@@ -77,7 +77,19 @@ export const PLATFORMS = Object.freeze({
     cookieDomain: 'facebook.com',
     // Meta's login bounces across its own properties (account center, 2FA),
     // so the flow needs all three; `c_user` appearing means the session is up.
-    webLogin: { allowedHosts: ['facebook.com', 'messenger.com', 'meta.com'], sessionCookie: 'c_user' },
+    // WIDTH, because Facebook's login page declares no viewport meta at all.
+    // WebKit therefore lays it out at the desktop default, and in the login
+    // window's usual 480pt it rendered as the top-left corner of a ~980px page --
+    // the Meta mark, a broken image and a horizontal scrollbar, with the form
+    // off-screen to the right (owner, 2026-08-29). Instagram's page carries
+    // width=device-width and fits at 480, which is why the same window worked
+    // there and not here. Policy, not a Swift constant, like every other
+    // per-platform difference in this table.
+    webLogin: {
+      allowedHosts: ['facebook.com', 'messenger.com', 'meta.com'],
+      sessionCookie: 'c_user',
+      windowWidth: 1000,
+    },
   },
   instagram: {
     id: 'instagram',

@@ -805,6 +805,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // exactly what the card kept showing (owner, 2026-08-26).
         let approval = begin["approval"] as? Bool ?? false
         let userAgent = String((begin["userAgent"] as? String ?? "").prefix(300))
+        // How wide the login window has to be for THIS platform's page.
+        // Server-authored like the rest; clamped because a fat-fingered or
+        // hostile value must not open a window whose close button the owner
+        // cannot reach. 0 keeps BridgeLogin's own default.
+        let windowWidth = min(max(begin["windowWidth"] as? Int ?? 0, 0), 1400)
         // Subframe-only hosts: a challenge widget's iframes. Same server-authored
         // shape as allowedHosts, enforced separately — see BridgeLogin's fence.
         let allowedFrameHosts = (begin["allowedFrameHosts"] as? [String])?.filter { !$0.isEmpty } ?? []
@@ -856,7 +861,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
             sessionCookie: sessionCookie, allowedHosts: allowedHosts,
             requiredCookies: requiredCookies, cookieFormat: cookieFormat,
             fields: fields, approval: approval, userAgent: userAgent,
-            allowedFrameHosts: allowedFrameHosts, storageUrl: storageUrl
+            allowedFrameHosts: allowedFrameHosts, storageUrl: storageUrl,
+            windowWidth: windowWidth
           ) { cookiesJSON in
             guard let cookiesJSON else {
               self.reply(webView, id, ["state": "cancelled"])

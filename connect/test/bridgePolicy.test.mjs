@@ -320,3 +320,27 @@ test('the field contract is declared per platform, for the two that need one', (
     }
   }
 });
+
+// ---- a login window wide enough for the page it loads ----
+//
+// Facebook's login page declares no viewport meta, so WebKit lays it out at the
+// desktop default. In the login window's usual 480pt that rendered as the
+// top-left corner of a ~980px page -- the Meta mark, a broken image and a
+// horizontal scrollbar, with the form off-screen to the right (owner,
+// 2026-08-29). Instagram's page carries width=device-width and fits, which is
+// why the same window worked there and not here.
+
+test('Messenger asks for a window wide enough for a page with no viewport', () => {
+  const messenger = PLATFORMS.messenger;
+  assert.ok(messenger, 'the messenger platform must exist');
+  assert.ok(
+    Number(messenger.webLogin?.windowWidth) >= 900,
+    `a viewport-less desktop page needs room; got ${String(messenger.webLogin?.windowWidth)}`
+  );
+});
+
+test('a platform whose login page is responsive asks for nothing', () => {
+  // Instagram fits the default. Declaring a width for every platform would make
+  // the exception invisible, which is how it stops being read as an exception.
+  assert.equal(PLATFORMS.instagram.webLogin?.windowWidth, undefined);
+});
