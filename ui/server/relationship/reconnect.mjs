@@ -18,10 +18,30 @@
 // the fixed-interval strategy itself -- the pre-registered Phase 0 control
 // rules -- and the promotion-gates artifact overrides them when it exists.
 
+import { STALE_AFTER_MS } from '../status/watchdog.mjs';
+
 // Channels whose rows could show the relationship is NOT dormant, intersected
-// with what the watchdog can vouch fresh. Shared with the open-loop category:
-// both make silence claims, and a silence claim needs a provably-live pipe.
-export const VOUCHABLE_CHANNELS = Object.freeze(['imessage', 'mail', 'whatsapp']);
+// with what can be vouched fresh. Shared with the open-loop category: both
+// make silence claims, and a silence claim needs a provably-live pipe.
+//
+// slack and instagram joined 2026-08-30 after measuring their ingest cadence
+// on the reference corpus over 180 days: slack's widest gap between rows was
+// 1.1 days (8,394 rows), instagram's 3.1 days (1,595 rows). The thresholds
+// below sit 3-4x above those maxima, so an ordinary quiet weekend cannot
+// void a claim while a dead bridge still does. discord, twitter and
+// messenger measured too sparse and irregular to vouch (15-46 day gaps) and
+// stay excluded -- a person reachable only there produces no silence claim.
+export const VOUCHABLE_CHANNELS = Object.freeze(['imessage', 'mail', 'whatsapp', 'slack', 'instagram']);
+
+// Vouching thresholds for SILENCE CLAIMS, distinct from the watchdog's
+// alerting thresholds on purpose: adding slack/instagram to STALE_AFTER_MS
+// itself would make the proactive watchdog nag the owner about quiet
+// weekends. Candidate vouching extends the map; alerting keeps its own.
+export const VOUCH_STALE_AFTER = Object.freeze({
+  ...STALE_AFTER_MS,
+  slack: 5 * 24 * 3600 * 1000,
+  instagram: 10 * 24 * 3600 * 1000,
+});
 
 export const RECONNECT_RULES_VERSION = 'rm-reconnect-v1';
 
@@ -29,7 +49,7 @@ export function reconnectAdapter({ intervalDays, minMessages, limit = 15 } = {})
   return {
     name: 'reconnect-messages',
     candidates(service, { now = Date.now() } = {}) {
-      const coverage = service.coverage({ now });
+      const coverage = service.coverage({ now, staleAfter: VOUCH_STALE_AFTER });
       const rankOpts = { now };
       if (intervalDays !== undefined) rankOpts.intervalDays = intervalDays;
       if (minMessages !== undefined) rankOpts.minMessages = minMessages;

@@ -136,6 +136,9 @@ export function createRelationshipMemory({ contextDb, stateDb, resolutionsDb = n
     // hermes stays the sole writer, and the claim writes above (decideClaim)
     // go through hermes' own exported functions on this same handle.
     db: () => contextDb,
+    // Same contract as db(): read paths only. The calendar adapter joins
+    // attendee emails to owner-named people through the contacts spine.
+    stateDbHandle: () => stateDb,
 
     // ---- the owner's controls (step 4): one gate, both call sites --------
     controls: createControls(contextDb, { canonicalOf }),

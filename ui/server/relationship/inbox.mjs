@@ -21,7 +21,7 @@
 
 import { pendingClaims, decideClaim } from '../hermes.mjs';
 import { openLoop } from '../people/profile.mjs';
-import { VOUCHABLE_CHANNELS } from './reconnect.mjs';
+import { VOUCHABLE_CHANNELS, VOUCH_STALE_AFTER } from './reconnect.mjs';
 
 // The deterministic builder's version, recorded on every item it computes --
 // the item contract requires a producer version so a result stays
@@ -85,7 +85,7 @@ export function buildInbox(service, { now = Date.now(), limit = 40 } = {}) {
   // -- deterministic open loops --------------------------------------------
   // Suggestion-shaped, so mute applies here as well as suppression, and the
   // coverage gate must span the dormancy claim before the claim is made.
-  const coverage = service.coverage({ now });
+  const coverage = service.coverage({ now, staleAfter: VOUCH_STALE_AFTER });
   const loopStart = catStart();
   for (const p of service.people({ now })) {
     if (items.length - loopStart >= limit) break;
