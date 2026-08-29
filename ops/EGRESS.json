@@ -506,12 +506,12 @@
     },
     {
       "host": "github.com",
-      "kind": "website",
-      "component": "site/index.html",
-      "direction": "outbound-link",
-      "purpose": "upstream project links in the third-party notices page",
-      "credential": "none",
-      "decision": "Public marketing site. A link the visitor may click; nothing is fetched unless they do. No credential, no automatic request.",
+      "kind": "registry",
+      "component": "ops/fetch-bridges.mjs + bridges/native.json; also site/index.html",
+      "direction": "inbound-fetch",
+      "purpose": "download the prebuilt mautrix bridge binaries named in bridges/native.json, replacing the container images pulled from dock.mau.dev. Separately and unchanged, the upstream project links the marketing site hands to a visitor's browser.",
+      "credential": "none -- unauthenticated public release assets",
+      "decision": "Replaces a `docker pull` with an equivalent fetch of the same upstream software, so the posture is unchanged: upstream artifacts reach the owner's machine from upstream, and this repo conveys none of them. Every asset is pinned by sha256 from the release's own sha256sums.txt, and a mismatch is deleted rather than used. Was kind=website while only the marketing site linked here; the product fetches now, so the stronger kind wins.",
       "evidence": "site/notices/index.html:321,329 (moonshine and silero-vad repository links) and site/index.html:241,405,427,589 (the download buttons, which point at this project's own releases \u2014 header and try-now, once per board) and site/index.html:399,584 (the \"open sourced OS\" link under the prompts headline, once per board)"
     },
     {
@@ -573,6 +573,16 @@
       "credential": "none -- this process opens no socket here",
       "decision": "n/a",
       "evidence": "widget/src/Bridge.swift allowedExternal https://www.docker.com/products/docker-desktop/"
+    },
+    {
+      "host": "release-assets.githubusercontent.com",
+      "kind": "registry",
+      "component": "ops/fetch-bridges.mjs (redirect target, not a source literal)",
+      "direction": "inbound-fetch",
+      "purpose": "where a github.com release-asset URL actually serves the bytes -- GET /releases/download/... answers 302 to this host, so a fetch of a bridge binary reaches it whether or not the name appears in any source file",
+      "credential": "none -- the redirect carries a short-lived signed query string",
+      "decision": "Declared by hand because connectors/test/egress.test.mjs matches host LITERALS and a redirect target is never one. Measured 2026-08-29: curl -IL on a mautrix release asset returns 302 to this host. Same decision as the github.com entry above -- it is one fetch, and listing only the host that appears in source would leave the ledger true by wording and false in substance, which its own _readme calls the failure this file exists to prevent.",
+      "evidence": "ops/fetch-bridges.mjs download() follows redirects; bridges/native.json base https://github.com/mautrix"
     }
   ],
   "_loopback": [
