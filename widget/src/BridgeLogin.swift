@@ -166,14 +166,21 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     self.allowedSuffixes = allowedHosts
     // WIDE ENOUGH FOR THE PAGE THIS PLATFORM ACTUALLY SERVES.
     //
-    // 480 is right for a login page that declares a viewport. Facebook's does
-    // not declare one at all, so WebKit lays it out at the desktop default and
-    // a 480pt window showed the top-left corner of a ~980px page: the Meta mark,
-    // a broken image, and a horizontal scrollbar. Nothing was blocked and no
-    // cookie was involved -- the form was simply off-screen to the right.
-    // Instagram's page carries width=device-width and fits, which is exactly why
-    // one worked and the other did not. Server-authored like the rest of this
-    // policy; 0 means "use the default".
+    // Facebook's login page declares no viewport meta and overflows 480pt --
+    // scrollWidth 515 against clientWidth 480, which is the horizontal scrollbar
+    // that was reported. 1000 removes it.
+    //
+    // ~~"so WebKit lays it out at the desktop default and a 480pt window showed
+    // the top-left corner of a ~980px page, with the form off-screen"~~ was the
+    // reasoning when this landed and it is WRONG. That fallback viewport is iOS
+    // WKWebView behaviour; macOS lays out at the view's width. Measured:
+    // clientWidth === 480, email field at {x:67,y:271,w:346,h:38}, fully visible,
+    // and a replica of this configuration renders the whole form at 480 and at
+    // 1000 alike. So this fixed a real 35px overflow and did NOT fix the blank
+    // window, which remains open. The retraction stays in the file because the
+    // claim already survived one review.
+    //
+    // Server-authored like the rest of this policy; 0 means "use the default".
     self.windowWidth = windowWidth > 0 ? CGFloat(windowWidth) : 480
     self.done = done
   }
@@ -939,6 +946,26 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   // Slack's SSO buttons reach accounts.google.com and appleid.apple.com — and
   // a header still naming slack.com there would be a claim about where you are
   // that is no longer true, which is the opposite of what it is for.
+  // WHAT DOCUMENT ARE WE ACTUALLY ON? Nothing recorded it, which is why two
+  // rounds of Facebook diagnosis argued about a page nobody had read.
+  //
+  // facebook.com/login/ contains ZERO <img> elements -- verified in the served
+  // HTML and in a live DOM -- so a broken-image glyph cannot come from its normal
+  // response. Either the window is on a different document or the recollection is
+  // off, and only a log can tell those apart. Counts and hosts only, never a
+  // cookie, a query string or a form value.
+  func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+    let js = "JSON.stringify({t:document.title,n:document.images.length," +
+      "b:Array.from(document.images).filter(i=>!i.naturalWidth).length," +
+      "w:document.documentElement.clientWidth,s:document.documentElement.scrollWidth," +
+      "f:document.querySelectorAll('iframe').length})"
+    webView.evaluateJavaScript(js) { value, _ in
+      let host = webView.url?.host ?? "?"
+      let path = webView.url?.path ?? "?"
+      NSLog("Intaglio Labs: login loaded \(host)\(path) \(value as? String ?? "{}")")
+    }
+  }
+
   func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
     showHost(webView.url)
     headerNotice?.stringValue = "your credentials stay local"
@@ -1000,7 +1027,24 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     // not "subframes are fine". Everything unlisted is cancelled in both, which
     // on Slack's own page means the doubleclick and contentsquare iframes their
     // marketing stack loads.
-    let inMain = navigationAction.targetFrame?.isMainFrame ?? true
+    // A FRAME BEING CREATED HAS NO targetFrame YET, and defaulting that to "main
+    // frame" makes allowedFrameHosts dead for the only case it exists to serve.
+    //
+    // ~~targetFrame?.isMainFrame ?? true~~ meant a brand-new subframe -- which is
+    // what a challenge widget always is on first load -- got checked against
+    // allowedHosts instead of allowedFrameHosts, was cancelled, and logged
+    // "blocked main-frame redirect". That is precisely the empty-CAPTCHA-box
+    // failure the two-list split was written to prevent: Slack's reCAPTCHA loads
+    // www.google.com/recaptcha/api2/anchor into a fresh iframe, and X serves an
+    // Arkose/FunCaptcha subframe on a challenged login.
+    //
+    // sourceFrame is never nil, so it answers the question targetFrame cannot: a
+    // navigation REQUESTED BY the main frame with no target frame yet is a
+    // subframe the main frame is creating. Only a navigation whose target really
+    // is the main frame gets main-frame treatment. Unknown still fails closed --
+    // it lands in the subframe list, which is itself an allowlist.
+    let inMain = navigationAction.targetFrame?.isMainFrame
+      ?? (navigationAction.sourceFrame.isMainFrame && navigationAction.targetFrame != nil)
     let matches = { (list: [String]) in
       list.contains { host == $0 || host.hasSuffix("." + $0) }
     }

@@ -92,8 +92,14 @@ test('the total processing estimate uses the plain approximate-hours label', () 
   assert.match(connections, /activity-estimate/u);
   assert.match(connections, /estimate\.hidden = !total/u,
     'the total is pinned in the header and hidden only when no queue exists');
-  assert.ok(connectors.includes('"label": "backfilling \\(subject) history"'),
-    'the backfill rows name work without duplicating the total');
+  // The row now carries a SCOPE as well as a subject. It used to end at
+  // "history" and the header beside it carried an ETA -- an ETA that could not
+  // move, because it was ceil(rooms / perPass) rendered as a forecast. The count
+  // replaced it, so the row is where "how much" now lives.
+  assert.ok(connectors.includes('"label": "backfilling \\(subject) history\\(scope)"'),
+    'the backfill rows name work and how much of it there is');
+  assert.match(connectors, /raw\["backfillRooms"\] as\? Int/u,
+    'the scope must come from a published count, not be composed here');
   assert.match(connectors, /connector == "matrix" \? matrixPlatformLabels\(raw\)/u,
     'Matrix history is split into the connected platform labels');
   assert.doesNotMatch(connectors, /matrix": "social messages"/u,

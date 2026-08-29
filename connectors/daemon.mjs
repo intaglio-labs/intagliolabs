@@ -706,6 +706,7 @@ export function createDaemon({
     const nowMs = now();
     const completionTimes = [];
     const backfill = [];
+    let backfillRooms = 0;
 
     if (!state.getCursor('calendar:history-done')) {
       backfill.push('calendar');
@@ -723,18 +724,38 @@ export function createDaemon({
       completionTimes.push(first + Math.max(0, passes - 1) * intervalMsFor('calendar'));
     }
 
+    // MATRIX CONTRIBUTES NO ETA, ONLY A COUNT.
+    //
+    // It used to compute `minimumPasses = ceil(rooms / pagesPerPass)` and render
+    // the result as an ETA. With 9 rooms and a rate of 11 that is ceil(9/11) = 1,
+    // so the answer was always exactly one interval away -- "~ 0.2 hrs left" on
+    // every single pass, while the per-room pagination cursors ran thousands of
+    // events deep. The owner watched it and asked the only sensible question:
+    // "why doesnt it ever progress from the first one / how do i knoe its working
+    // / how much is left" (2026-08-29).
+    //
+    // The variable was honestly named minimumPasses and then rendered as though
+    // it were a forecast. It is a FLOOR: Matrix pagination is opaque, a room can
+    // need one more page or four hundred, and nothing here can know which. A
+    // lower bound presented as time remaining is a fabricated metric in the sense
+    // CLAUDE.md's first hard rule means -- it is not measuring what its label
+    // claims.
+    //
+    // So: say how many conversations are being walked, which is a real count of
+    // real objects, and say nothing about when it ends, which is not knowable.
     if (!state.getCursor('matrix:history-done')) {
       const rooms = matrixHistoryRooms(state.getCursor('matrix:history-rooms'));
       if (rooms > 0) {
         backfill.push('matrix');
-        const pagesPerPass = positiveNumber(state.getCursor(HISTORY_RATE_KEY('matrix')), 3);
-        const minimumPasses = Math.ceil(rooms / pagesPerPass);
-        const first = nextRuns.get('matrix') ?? nowMs + intervalMsFor('matrix');
-        completionTimes.push(first + Math.max(0, minimumPasses - 1) * intervalMsFor('matrix'));
+        backfillRooms = rooms;
       }
     }
 
-    if (completionTimes.length === 0) return null;
+    // A count with no estimate is still worth publishing: it is the difference
+    // between "something is happening to 9 conversations" and a silent panel.
+    if (completionTimes.length === 0) {
+      return backfill.length === 0 ? null : { backfill, backfillRooms };
+    }
     const completion = Math.max(...completionTimes);
     const tenthsOfAnHour = Math.max(1, Math.round((completion - nowMs) / 360_000));
     // The estimate says that multi-pass work exists; `backfill` says which
@@ -745,6 +766,7 @@ export function createDaemon({
     return {
       estimate: `~ ${(tenthsOfAnHour / 10).toFixed(1)} hrs left`,
       backfill,
+      backfillRooms,
     };
   };
   const publishActivity = (activity) => {

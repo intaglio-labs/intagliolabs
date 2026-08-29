@@ -77,14 +77,22 @@ export const PLATFORMS = Object.freeze({
     cookieDomain: 'facebook.com',
     // Meta's login bounces across its own properties (account center, 2FA),
     // so the flow needs all three; `c_user` appearing means the session is up.
-    // WIDTH, because Facebook's login page declares no viewport meta at all.
-    // WebKit therefore lays it out at the desktop default, and in the login
-    // window's usual 480pt it rendered as the top-left corner of a ~980px page --
-    // the Meta mark, a broken image and a horizontal scrollbar, with the form
-    // off-screen to the right (owner, 2026-08-29). Instagram's page carries
-    // width=device-width and fits at 480, which is why the same window worked
-    // there and not here. Policy, not a Swift constant, like every other
-    // per-platform difference in this table.
+    // WIDTH. Facebook's login page declares no viewport meta, and at 480pt it
+    // overflows: measured scrollWidth 515 against clientWidth 480, which is the
+    // horizontal scrollbar the owner saw. 1000 removes that.
+    //
+    // ~~"WebKit lays it out at the desktop default, so the form is off-screen to
+    // the right"~~ was the reasoning given when this landed and it is WRONG. That
+    // ~980px fallback viewport is iOS WKWebView behaviour; on macOS the page lays
+    // out at the view's width. A probe measured document.documentElement.clientWidth
+    // === 480 with the email field at {x:67,y:271,w:346,h:38} -- fully on screen --
+    // and a replica of this exact configuration renders the complete form at 480
+    // AND at 1000. The width was a real defect (35px of overflow) but it was NOT
+    // the cause of the blank window, which is still open. Kept because a
+    // scrollbar-free login window is better; the causal claim is retracted so the
+    // next reader does not inherit it.
+    //
+    // Policy, not a Swift constant, like every other per-platform difference.
     webLogin: {
       allowedHosts: ['facebook.com', 'messenger.com', 'meta.com'],
       sessionCookie: 'c_user',

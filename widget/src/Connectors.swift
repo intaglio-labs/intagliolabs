@@ -105,10 +105,21 @@ final class Connectors {
     if let backfill = raw["backfill"] as? [String], !backfill.isEmpty {
       for connector in backfill {
         let subjects = connector == "matrix" ? matrixPlatformLabels(raw) : [labelFor(connector)]
+        // SAY HOW MANY, since we cannot honestly say how long. The daemon
+        // used to publish an ETA for this and it could not move: the
+        // arithmetic was ceil(rooms / perPass), which with 9 rooms and a rate
+        // of 11 is always 1, so the header read "~ 0.2 hrs left" on every
+        // pass while the per-room pagination cursors ran thousands of events
+        // deep. A count of conversations is a count of real objects, and it
+        // changes.
+        let rooms = raw["backfillRooms"] as? Int ?? 0
+        let scope = connector == "matrix" && rooms > 0
+          ? " (\(rooms) conversation\(rooms == 1 ? "" : "s"))"
+          : ""
         for subject in subjects.isEmpty ? [labelFor(connector)] : subjects {
           items.append([
             "kind": "backfill",
-            "label": "backfilling \(subject) history",
+            "label": "backfilling \(subject) history\(scope)",
           ])
         }
       }
