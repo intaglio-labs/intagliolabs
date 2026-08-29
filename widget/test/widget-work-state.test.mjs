@@ -1,6 +1,6 @@
-// The ambient widget must show real work without mistaking the connector queue
-// for work. Its title is the only hover surface on the transparent desktop orb,
-// so it carries the current task in the same state transition as the face.
+// The ambient widget must show real work continuously across the connector
+// queue's bounded pauses. Its hover surface carries the current task and total
+// horizon in the same state transition as the face.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,39 +25,56 @@ test('the voice coming-soon thought fits in exactly two deliberate lines', () =>
 test('the widget gives real work the thinking pose and a current-task hover label', () => {
   assert.match(script, /hzPost\('workStatus'\)/u);
   assert.match(script, /processing \? 'listening' : 'idle'/u);
-  assert.match(script, /orbBtn\.title = workLabel \? `processing: \$\{workLabel\}`/u);
+  assert.match(script, /orbBtn\.title = workLabel \? workDetailText\(\)\.replace\('\\n', ' — '\)/u);
+  assert.match(script, /return `current: \$\{workLabel\}\\n\$\{workEstimate \|\| 'estimating time left…'\}`/u);
   assert.match(script, /setInterval\(refreshWorkState, 1500\)/u);
 });
 
-test('processing puts a quiet electrical buzz behind the orb without borrowing the voice state', () => {
-  assert.equal((html.match(/class="orb-bolt bolt-/gu) || []).length, 3);
+test('processing shows a crisp spinning flywheel with outward sparks without borrowing the voice state', () => {
+  assert.equal((html.match(/class="think-spark spark-/gu) || []).length, 3);
+  assert.match(html, /class="orb-thinker"/u);
+  assert.match(html, /class="think-wheel"/u);
   assert.match(script, /const processing = voiceOrbState === 'idle' && !!workLabel;/u);
   assert.match(script, /classList\.toggle\('processing', processing\)/u);
-  assert.match(palette, /\.orb\.processing \.orb-charge \{ display: block; \}/u);
-  assert.match(palette, /@keyframes orb-buzz/u);
-  assert.match(palette, /\.orb-charge \{[\s\S]*?z-index: 0;/u);
-  assert.match(palette, /\.orb-body \{[\s\S]*?z-index: 1;/u,
-    'the buzz stays behind the orb without falling behind the transparent window');
-  assert.match(palette, /fill: none;/u, 'the marks are thin strokes, not filled stickers');
-  assert.match(palette, /animation: orb-buzz 2\.8s ease-in-out infinite;/u,
-    'the buzz keeps a slow, soft cadence');
-  assert.match(palette, /stroke-linejoin: round;/u, 'the sparks have cartoon-soft corners');
-  assert.match(palette, /46% \{[\s\S]*?opacity: 0\.76;/u,
-    'the peak remains visible over a bright desktop photo');
+  assert.match(palette, /\.orb\.processing \.orb-thinker \{ display: block; \}/u);
+  assert.match(palette, /@keyframes thinker-spin/u);
+  assert.match(palette, /@keyframes thinker-spark/u);
+  assert.match(palette, /\.orb-thinker \{[\s\S]*?z-index: 3;/u,
+    'the icon remains visible above the orb and the transparent window');
+  assert.match(palette, /animation: thinker-spin 1\.35s/u);
+  assert.match(palette, /animation: thinker-spark 1\.35s/u);
+  assert.match(palette, /stroke-linejoin: round;/u, 'the spinner and sparks have soft corners');
   assert.match(palette, /drop-shadow\(0 1px 1px rgba\(0, 0, 0, 0\.82\)\)/u,
-    'a tight dark edge separates the cream bolt from arbitrary wallpaper');
-  assert.match(palette, /\.bolt-1[^\n]*left: 40px; top: 0;/u);
-  assert.match(palette, /\.bolt-2[^\n]*left: 48px; top: 5px;/u);
-  assert.match(palette, /\.bolt-3[^\n]*left: 34px; top: 7px;/u,
-    'every spark stays in the head’s upper-right quadrant');
-  assert.match(palette, /prefers-reduced-motion:[\s\S]*\.orb\.processing \.orb-bolt \{ opacity: 0\.52; \}/u);
+    'a tight dark edge separates the cream icon from arbitrary wallpaper');
+  assert.match(palette, /top: -15px;[\s\S]*?right: -13px;/u,
+    'the complete thinking mark stays at the head’s upper-right');
+  assert.match(palette, /prefers-reduced-motion:[\s\S]*\.orb\.processing \.think-wheel \{ transform: rotate\(28deg\); \}/u);
 });
 
-test('native work status includes active work and unfinished backfill, but excludes the routine future queue', () => {
+test('hover holds current work details and click pins the task plus total hours', () => {
+  assert.match(script, /orbBtn\.addEventListener\('pointerenter'/u);
+  assert.match(script, /if \(workLabel && !dazed && !jackpotOn\) showWorkDetails\(\)/u);
+  assert.match(script, /if \(dreamKind === 'work' && !teaseTimer\) hideTease\(\)/u);
+  assert.match(script, /if \(workLabel\) \{[\s\S]*?showWorkDetails\(WORK_DETAILS_MS\);[\s\S]*?return;/u,
+    'a processing click reveals status instead of the unrelated voice teaser');
+  assert.match(script, /workEstimate = workLabel && typeof status\.estimate === 'string'/u);
+  assert.match(script, /showTease\(workDetailText\(\), dwellMs, 'work'\)/u);
+});
+
+test('native work status stays processing across bounded connector-queue pauses', () => {
   assert.match(bridge, /case "workStatus":/u);
   assert.match(bridge, /writing a relationship summary/u);
+  assert.match(bridge, /beginOnce\(workKey, label: "writing a relationship summary"\)/u);
+  assert.match(bridge, /data\["pending"\] as\? Bool != true \{ Bridge\.activeWork\.finish\(workKey\) \}/u,
+    'summary polling holds one continuous native work state until the background job is complete');
   assert.match(bridge, /thinking about your question/u);
+  assert.match(bridge, /status\["estimate"\] = estimate/u,
+    'the hover card receives the same total-hours horizon as Settings');
   assert.match(connectors, /var activeWorkLabel: String\?/u);
+  assert.match(connectors, /var queuedWorkLabel: String\?/u);
+  assert.match(connectors, /return "working through connector queue"/u);
+  assert.match(bridge, /Connectors\.shared\.queuedWorkLabel/u,
+    'the orb cannot sleep while Settings still has a total-hours queue');
   assert.match(connectors, /raw\["phase"\] as\? String == "syncing"/u);
   assert.match(connectors, /raw\["phase"\] as\? String == "waiting"/u);
   assert.match(connectors, /raw\["backfill"\] as\? \[String\]/u);

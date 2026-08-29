@@ -88,14 +88,21 @@
           </span>
           <span class="zzz z1"><i>z</i></span>
           <span class="zzz z2"><i>z</i></span>
-          <!-- Processing gets the awake equivalent of the sleeping z's: a
-               quiet three-beat buzz BEHIND the orb. Thin inline strokes stay
-               crisp without turning into a sticker on the forehead (and this
-               page's CSP intentionally permits no image requests). -->
-          <span class="orb-charge" aria-hidden="true">
-            <svg class="orb-bolt bolt-1" viewBox="0 0 10 16"><path d="M7.4 1.5 3.5 7.1l2.8-.4-3.8 7.8"/></svg>
-            <svg class="orb-bolt bolt-2" viewBox="0 0 10 16"><path d="M6.8 1.8 3.9 6.5l2.5-.5-3.2 7.5"/></svg>
-            <svg class="orb-bolt bolt-3" viewBox="0 0 10 16"><path d="M7.2 2 3.7 7.2l2.6-.3-3.5 6.8"/></svg>
+          <!-- Processing gets a tiny flywheel at the crown: an incomplete
+               ring turns while three restrained sparks peel away from it.
+               SVG keeps the lines crisp on Retina and the page's strict CSP
+               permits no external image requests. -->
+          <span class="orb-thinker" aria-hidden="true">
+            <svg viewBox="0 0 32 32">
+              <circle class="think-track" cx="13" cy="15" r="7.5"/>
+              <g class="think-wheel">
+                <path class="think-arc" d="M8.2 9.2a7.5 7.5 0 1 1-1.9 8.5"/>
+                <circle class="think-dot" cx="6.2" cy="14.2" r="1.35"/>
+              </g>
+              <path class="think-spark spark-a" d="M22.2 7.6 25 5.2"/>
+              <path class="think-spark spark-b" d="M24.2 12.2h3.5"/>
+              <path class="think-spark spark-c" d="m21.8 16.8 2.8 2"/>
+            </svg>
           </span>
           <span class="orb-badge">1</span>
           <!-- The pop's shockwave and the concussion's orbiting stars. Both
