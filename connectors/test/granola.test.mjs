@@ -247,6 +247,12 @@ test('buildNoteRow: registry shape, sorted attendees, meeting-start ts, speaker 
     updated_at: '2026-08-10T11:00:00.000Z',
     folder: 'Work',
     attendees: ['Ari', 'Mia', 'Zed', 'no-name@example.com'],
+    participants: [
+      { name: 'Ari' },
+      { name: 'Mia' },
+      { email: 'no-name@example.com' },
+      { name: 'Zed' },
+    ],
     calendar_event_id: 'ev-a',
   });
   // No calendar event → the note's created time carries the ts.
@@ -259,6 +265,7 @@ test('buildNoteRow: registry shape, sorted attendees, meeting-start ts, speaker 
   const bareRow = buildNoteRow(bare, bare);
   assert.equal(bareRow.ts, Date.parse('2026-08-11T08:00:00.000Z'));
   assert.deepEqual(bareRow.meta.attendees, []);
+  assert.deepEqual(bareRow.meta.participants, []);
   assert.equal(bareRow.meta.folder, null);
   assert.equal(bareRow.meta.calendar_event_id, null);
 });

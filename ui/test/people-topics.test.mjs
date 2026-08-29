@@ -133,8 +133,8 @@ test('yearRows collapses the month timeline with the declared meeting weight', (
     { ym: '2023-01', sent: 0, received: 0, met: 0, room: 0 }, // empty year: dropped
   ];
   assert.deepEqual(yearRows(timeline), [
-    { year: 2020, messages: 12, met: 2, engagement: 18 },
-    { year: 2022, messages: 0, met: 1, engagement: 3 },
+    { year: 2020, messages: 12, met: 2, meetingNotes: 0, engagement: 18 },
+    { year: 2022, messages: 0, met: 1, meetingNotes: 0, engagement: 3 },
   ]);
 });
 
@@ -308,6 +308,34 @@ test('people-core freshness includes the same role stamp as the core', () => {
     rolesByYear: new Map([['2024', new Map([['name:casey example', 'business']])]]),
   };
   assert.equal(peopleCoreFreshness(ctx, spine, null, changed).state, 'stale');
+
+  const selfChanged = { ...owner, keys: new Set(['name:casey example']) };
+  assert.equal(peopleCoreFreshness(ctx, spine, null, selfChanged).state, 'stale');
+});
+
+test('an in-place corpus edit dirties the people core on Hermes own connection', () => {
+  const ctx = openDb(':memory:');
+  const row = { ...msg(new Date(2024, 4, 1).getTime(), 'hello'), entity_id: 'same-connection-edit' };
+  insertRows(ctx, row);
+  const spine = spineDb([[HANDLE, 'Casey Example', 'phone']]);
+  const owner = { addresses: new Set(), names: [], roles: new Map(), rolesByYear: new Map() };
+  buildYear(ctx, spine, { year: 2024, now: NOW, owner });
+  assert.equal(peopleCoreFreshness(ctx, spine, null, owner).state, 'fresh');
+
+  insertRows(ctx, { ...row, text: 'edited in place' });
+  assert.equal(peopleCoreFreshness(ctx, spine, null, owner).state, 'stale');
+});
+
+test('a Contacts timestamp-only rewrite keeps the people core fresh', () => {
+  const ctx = openDb(':memory:');
+  insertRows(ctx, [{ ...msg(new Date(2024, 4, 1).getTime(), 'hello'), entity_id: 'stable-contact:1' }]);
+  const spine = spineDb([[HANDLE, 'Casey Example', 'phone']]);
+  const owner = { addresses: new Set(), names: [], roles: new Map(), rolesByYear: new Map() };
+  buildYear(ctx, spine, { year: 2024, now: NOW, owner });
+  assert.equal(peopleCoreFreshness(ctx, spine, null, owner).state, 'fresh');
+
+  spine.prepare('UPDATE contact_ids SET updated_ts = ?').run(NOW + DAY);
+  assert.equal(peopleCoreFreshness(ctx, spine, null, owner).state, 'fresh');
 });
 
 test('year tabs do not extend earlier than the deepest non-calendar connector', () => {

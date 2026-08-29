@@ -28,6 +28,7 @@ import {
 } from './daemon.mjs';
 import {
   DEFAULT_HERMES_BASE_URL,
+  adminClearPeopleProjection,
   adminDeleteEntities,
   adminEntities,
   adminMaintain,
@@ -66,11 +67,16 @@ export function parseArgs(argv) {
 export async function purgeHermesSources(
   hermesSource,
   ingestOpts,
-  { purge = adminPurge } = {}
+  { purge = adminPurge, clearPeople = adminClearPeopleProjection } = {}
 ) {
-  const sources = hermesSource === null
-    ? []
-    : (Array.isArray(hermesSource) ? hermesSource : [hermesSource]);
+  // Contacts owns no context rows, but its local identifiers are copied into
+  // Hermes' rebuildable People projection. Clear that copy before the caller
+  // wipes state.db so an explicit Contacts purge is complete immediately.
+  if (hermesSource === null) {
+    await clearPeople(ingestOpts);
+    return { deleted: 0, maintained: false };
+  }
+  const sources = Array.isArray(hermesSource) ? hermesSource : [hermesSource];
   const purged = { deleted: 0, maintained: false };
   for (const source of sources) {
     const result = await purge({ source }, ingestOpts);
@@ -123,8 +129,8 @@ if (isMain) {
     } else if (flag === '--purge') {
       // Hermes first, local second: if the /admin/purge fails, the cursors
       // survive and nothing is forgotten locally about data hermes still
-      // holds. contacts maps to no hermes source (resolution state only) —
-      // its purge is entirely local.
+      // holds. Contacts maps to no corpus source, but the helper still asks
+      // Hermes to clear the rebuildable People projection before local state.
       const hermesSource = CONNECTOR_HERMES_SOURCE[name];
       // Matrix is one connector but seven Hermes sources. Purge them all before
       // forgetting any local cursor; if one request fails, the catch below
