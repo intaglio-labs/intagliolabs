@@ -613,6 +613,16 @@
       "credential": "none",
       "decision": "BUILD TIME ONLY. Same decision as the pypi.org entry above -- it is one install, and listing only the index while omitting the host that serves the files would leave this ledger true by wording and false in substance.",
       "evidence": "ops/build-synapse.sh pip install; PyPI serves wheels from this host"
+    },
+    {
+      "host": "raw.githubusercontent.com",
+      "kind": "registry",
+      "component": "ops/fetch-bridges.mjs via bridges/native.json exampleConfig",
+      "direction": "inbound-fetch",
+      "purpose": "mautrix-discord's example-config.yaml, from its source tree at the same pinned tag as its binary. Pre-bridgev2 bridges have no --generate-example-config flag: the container image shipped that file and its entrypoint copied it in, so removing the container removes the seed config too",
+      "credential": "none -- a public file in a public repository",
+      "decision": "Same posture as the bridge binaries themselves: an upstream artifact fetched to the owner's machine, pinned by sha256 in bridges/native.json and deleted on mismatch. A config that seeds a bridge holding live session cookies is not a file to fetch on trust, which is why it is hashed like the executables rather than merely downloaded.",
+      "evidence": "bridges/native.json discord.exampleConfig.url"
     }
   ],
   "_loopback": [

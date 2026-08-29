@@ -204,6 +204,42 @@ export async function fetchBridges({
       }
     }
 
+    // A PRE-BRIDGEV2 BRIDGE CANNOT WRITE ITS OWN EXAMPLE CONFIG.
+    //
+    // The modern binaries take -e/--generate-example-config. discord does not:
+    // the CONTAINER shipped example-config.yaml and its entrypoint copied it in,
+    // which is why `docker run` bare produced a config and the bare binary
+    // answers `failed to read config: no such file`. So the example comes from
+    // the source tree at the same pinned tag, hashed exactly like the binary --
+    // a config that seeds a bridge holding live session cookies is not a file to
+    // fetch on trust.
+    if (bridge.exampleConfig && !checkOnly) {
+      const cfgDest = join(dir, `${bridge.id}-example-config.yaml`);
+      const want = String(bridge.exampleConfig.sha256 ?? '');
+      if (!/^[0-9a-f]{64}$/u.test(want)) {
+        results.push({ id: bridge.id, state: 'failed', ok: false, error: 'exampleConfig has no valid sha256' });
+        continue;
+      }
+      if (!existsSync(cfgDest) || sha256File(cfgDest) !== want) {
+        const tmp = `${cfgDest}.part`;
+        try {
+          await download(bridge.exampleConfig.url, tmp);
+          const got = sha256File(tmp);
+          if (got !== want) {
+            rmSync(tmp, { force: true });
+            throw new Error(`example config sha256 mismatch: expected ${want}, got ${got}`);
+          }
+          renameSync(tmp, cfgDest);
+          log(`${bridge.id}: example config fetched`);
+        } catch (error) {
+          rmSync(tmp, { force: true });
+          results.push({ id: bridge.id, state: 'failed', ok: false, error: String(error?.message ?? error) });
+          log(`${bridge.id}: FAILED example config — ${String(error?.message ?? error)}`);
+          continue;
+        }
+      }
+    }
+
     const signature = signatureState(dest);
     const { checked, missing } = missingLibraries(dest);
     const ok = signature !== 'unsigned' && missing.length === 0;

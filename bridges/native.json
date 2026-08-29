@@ -75,7 +75,12 @@
       "asset": "mautrix-discord-darwin-arm64",
       "sha256": "8db5ce8eb239acb79e9231e76f551bffde59b0f1aa0c3b70edae81fa1c97c79b",
       "replaces": "dock.mau.dev/mautrix/discord:latest",
-      "note": "Still pre-bridgev2, hence the different version line. Was pulled by ':latest' before this file existed."
+      "exampleConfig": {
+        "url": "https://raw.githubusercontent.com/mautrix/discord/v0.7.7/example-config.yaml",
+        "sha256": "a17c8ae8ce8dcbaa62e93cb4a02e3dc614dcb35e7148296a8376aa2495eaf824",
+        "note": "Pre-bridgev2 binaries have no -e/--generate-example-config flag: the CONTAINER shipped example-config.yaml and its entrypoint copied it in, so `docker run` bare produced a config and the bare binary produces `failed to read config: no such file`. Fetched from the source tree at the same pinned tag as the binary, and hashed like everything else here."
+      },
+      "note": "Still pre-bridgev2, hence the different version line and the exampleConfig above. Was pulled by ':latest' before this file existed."
     },
     {
       "id": "linkedin",
