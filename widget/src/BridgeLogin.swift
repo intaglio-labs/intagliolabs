@@ -163,6 +163,17 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   // The green underscore blinks like a terminal cursor.
   private var headerTitle: NSTextField?
   private let windowWidth: CGFloat
+  /// The third terminal outcome, beside a cookie jar and nil.
+  ///
+  /// Chosen so it is neither valid JSON nor a valid Cookie header: Bridge.swift
+  /// POSTs any non-nil result straight to /api/bridge/cookies, so a sentinel that
+  /// could be mistaken for a credential blob would be relayed into the bridge
+  /// bot's transcript. Both call sites guard on it before that POST.
+  static let browserHandoff = "__hz_browser_handoff__"
+
+  /// One refusal per window, ever, and one evaluation per navigation.
+  private var refusalShown = false
+  private var refusalArmed = false
   private var blink: Timer?
   private var cursorOn = true
 
@@ -554,9 +565,15 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   /// window when there is one; a resumed passcode creates the same shell from
   /// scratch. The header deliberately switches from a live-domain claim to
   /// x.com plus local-storage copy because there is no page underneath now.
-  private func installLocalBody(_ body: NSView, bodyHeight: CGFloat) {
+  private func installLocalBody(
+    _ body: NSView, bodyHeight: CGFloat, notice: String = "data stored locally"
+  ) {
     guard !finished else { return }
-    let W: CGFloat = 480, headH: CGFloat = 62
+    // THE WINDOW'S OWN WIDTH, not 480. Messenger declares windowWidth 1000, so a
+    // hardcoded 480 visibly shrank the window the moment a local body replaced
+    // the page. presentPasscode constructs with 0, which init clamps to 480, so
+    // X's three existing bodies are unchanged by this.
+    let W: CGFloat = windowWidth, headH: CGFloat = 62
     detachWebSurface()
     let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: bodyHeight + headH))
     content.wantsLayer = true
@@ -569,8 +586,12 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     header.autoresizingMask = [.width, .minYMargin]
     content.addSubview(body)
     content.addSubview(header)
-    headerHost?.stringValue = "x.com"
-    headerNotice?.stringValue = "data stored locally"
+    // THE HEADER MUST STAY TRUE. It hardcoded x.com, which was right for the one
+    // caller that existed and wrong for every other: a Facebook body would have
+    // claimed x.com in the one place this app tells the owner which site they are
+    // on. presentPasscode passes an empty cookieDomain, so X is unaffected.
+    headerHost?.stringValue = cookieDomain.isEmpty ? "x.com" : cookieDomain
+    headerNotice?.stringValue = notice
 
     if let win = window {
       win.setContentSize(NSSize(width: W, height: bodyHeight + headH))
@@ -609,6 +630,118 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     body.addSubview(spinner)
     body.addSubview(line)
     installLocalBody(body, bodyHeight: 190)
+  }
+
+  // WHEN THE SITE REFUSES TO RENDER AT ALL.
+  //
+  // Measured five times across four sessions on 2026-08-30. Facebook's two-step
+  // verification page arrives fully server-rendered and displays nothing:
+  //
+  //   refused   kids 153-165  html ~2,480,000  vis 11   text ""  hidden 152
+  //             shadow 0  ready complete  err []  wa {called:0}
+  //             every laid-out element a bare <div> with no class
+  //   working   kids 90       html ~326,000    vis 205  text present
+  //             classes div.x9f619, div.x78zum5 — Facebook's real atomic CSS
+  //
+  // Not a crash, not a hang, not a blocked resource, no WebAuthn, no shadow DOM.
+  // Meta server-renders the challenge and styles none of it into existence: it
+  // declines to show a security step inside an embedded browser, the same posture
+  // that makes Google refuse OAuth in one (see GoogleLogin.swift). X hits the same
+  // wall one screen earlier. Five theories died before this one, four of them by
+  // measurement, which is why the predicate below is written against numbers that
+  // were actually observed rather than a plausible story.
+  //
+  // The owner cannot be left staring at it. Retire the page and offer the route
+  // that does work.
+  private func evaluateRefusal(_ json: String, on webView: WKWebView) {
+    guard refusalArmed, !refusalShown, !finished else { return }
+    guard looksRefused(json) else { return }
+    refusalArmed = false
+    // A SECOND LOOK, 2.5s later. The first sample cannot tell a refusal from a
+    // React shell mid-mount; the second can, because a mounting page gains
+    // layout and a refused one does not. The measured refusal held for minutes,
+    // four separate times, so the delay is far past a mount and far short of it.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self, weak webView] in
+      guard let self, let webView, !self.refusalShown, !self.finished else { return }
+      webView.evaluateJavaScript(Self.probeJS) { value, _ in
+        guard let again = value as? String, self.looksRefused(again) else { return }
+        guard !self.finished, !self.harvestStarted else { return }
+        // Take the one-shot harvest funnel rather than racing it: a cookie poll
+        // that lands after this returns early, and a genuine harvest that got
+        // here first wins outright. One flag, two paths, no ordering to get wrong.
+        self.harvestStarted = true
+        self.refusalShown = true
+        self.loginLog("refused \(self.label) — site rendered nothing, offering browser handoff")
+        self.showBrowserHandoff()
+      }
+    }
+  }
+
+  /// The predicate, over the probe JSON the didFinish handler already collects.
+  ///
+  /// Every threshold is a measured one. `html` is the floor that excludes a
+  /// legitimately minimal page — a small page is small; a refused one is 2.4MB.
+  /// The vis-to-kids ratio is what separates "almost nothing has a box" from a
+  /// page that simply has few elements: 11*8 <= 153 fires, 205*8 <= 90 does not.
+  private func looksRefused(_ json: String) -> Bool {
+    guard let data = json.data(using: .utf8),
+          let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+          (o["ready"] as? String) == "complete",
+          (o["x"] as? String)?.isEmpty == true,
+          (o["shadow"] as? Int) == 0,
+          let html = o["html"] as? Int, html >= 400_000,
+          let kids = o["kids"] as? Int, kids >= 24,
+          let vis = o["vis"] as? Int, vis >= 0, vis <= 24,
+          vis * 8 <= kids
+    else { return false }
+    return true
+  }
+
+  /// One sentence naming the cause, and one control. No retry, no apology.
+  ///
+  /// This deliberately does NOT reuse showFailure: that renders a label and never
+  /// finishes, so its only exit is the close box, which reports "cancelled" — and
+  /// connections.js renders cancelled as nothing at all. A dead end is a worse
+  /// answer than the wall itself.
+  ///
+  /// It also is not the paste box that was removed on 2026-08-25 for making every
+  /// login button read as expected to fail. That one sat under a working control.
+  /// This replaces a window that has already failed, and names why.
+  private func showBrowserHandoff() {
+    let W = windowWidth
+    let body = NSView(frame: NSRect(x: 0, y: 0, width: W, height: 210))
+
+    let title = NSTextField(labelWithString: "Finish this step in your browser")
+    title.font = NSFont.monospacedSystemFont(ofSize: 15, weight: .bold)
+    title.textColor = NSColor(white: 0.92, alpha: 1)
+    title.frame = NSRect(x: 24, y: 150, width: W - 48, height: 22)
+    body.addSubview(title)
+
+    let blurb = NSTextField(wrappingLabelWithString:
+      "\(label) won't display this security step inside an app window. Your "
+      + "browser can. Sign in there and the connect page picks the session up.")
+    blurb.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+    blurb.textColor = NSColor(white: 0.54, alpha: 1)
+    blurb.frame = NSRect(x: 24, y: 74, width: W - 48, height: 66)
+    body.addSubview(blurb)
+
+    // ↗ is this repo's contract for "leaves the app".
+    let go = NSButton(title: "open the connect page ↗", target: self,
+                      action: #selector(pressBrowserHandoff))
+    go.bezelStyle = .rounded
+    go.keyEquivalent = "\r"
+    go.frame = NSRect(x: 24, y: 24, width: 240, height: 32)
+    body.addSubview(go)
+
+    // "nothing was sent" rather than "data stored locally": no credential was
+    // captured here, and saying so is the whole reassurance the moment needs.
+    installLocalBody(body, bodyHeight: 210, notice: "nothing was sent")
+  }
+
+  @objc private func pressBrowserHandoff() {
+    // The terminal outcome must be a deliberate press. Closing the window reports
+    // "cancelled", which the UI renders as nothing.
+    finish(Self.browserHandoff)
   }
 
   func showFailure(_ text: String) {
@@ -1259,6 +1392,38 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   // navigation in a window the owner opened deliberately, and the whole point is
   // to have the record ALREADY when a failure is reported, not to ask for a
   // repeat with a flag set.
+  /// The one page probe, hoisted so didFinish and the refusal re-check run
+  /// the SAME script. Two copies would drift, and the re-check exists to
+  /// compare like with like.
+  static let probeJS =
+  "JSON.stringify({t:document.title,n:document.images.length," +
+  "b:Array.from(document.images).filter(i=>!i.naturalWidth).length," +
+  "w:document.documentElement.clientWidth,s:document.documentElement.scrollWidth," +
+  "f:document.querySelectorAll('iframe').length," +
+  "kids:document.body?document.body.children.length:-1," +
+  "html:document.body?document.body.innerHTML.length:-1," +
+  "err:(window.__hzErr||[])," +
+  // A 2.5MB DOM with no rendered text is content that exists and is not
+  // shown. h/vis say whether ANYTHING has layout; wa says whether the page
+  // is waiting on a WebAuthn assertion that will never arrive, which is
+  // what a second-factor page in a non-browser WKWebView cannot get.
+  "h:document.body?document.body.scrollHeight:-1," +
+  "vis:document.body?Array.from(document.body.querySelectorAll('*')).filter(function(e){return e.offsetHeight>0}).length:-1," +
+  "wa:(window.__hzWA||null)," +
+  // WHAT IS ACTUALLY ON SCREEN. 11 laid-out elements and no text is a page
+  // whose chrome rendered and whose content did not. Tag names and the first
+  // class token only -- never text, never an attribute value, because this
+  // page is a second factor and everything on it is sensitive.
+  "shape:document.body?Array.from(document.body.querySelectorAll('*')).filter(function(e){return e.offsetHeight>0}).slice(0,14).map(function(e){return e.tagName.toLowerCase()+(e.className&&typeof e.className==='string'?'.'+e.className.split(' ')[0]:'')}):[]," +
+  // innerText does not pierce a shadow root, so a shadowed page reads as
+  // empty text with real height -- exactly this shape.
+  "shadow:document.body?Array.from(document.body.querySelectorAll('*')).filter(function(e){return !!e.shadowRoot}).length:-1," +
+  "ready:document.readyState," +
+  // A hidden content region is the other candidate: count what exists but
+  // has no box at all.
+  "hidden:document.body?Array.from(document.body.querySelectorAll('*')).filter(function(e){return e.offsetParent===null&&e.offsetHeight===0}).length:-1," +
+  "x:document.body?document.body.innerText.trim().slice(0,120):''})"
+
   private func loginLog(_ line: String) {
     let f = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".hazlie/logs/bridge-login.log")
@@ -1275,41 +1440,19 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     // kids/html distinguish "no DOM at all" from "DOM present, no text": a React
     // shell that mounted and rendered nothing looks nothing like a script that
     // died at parse. err is why, when there is a why.
-    let js = "JSON.stringify({t:document.title,n:document.images.length," +
-      "b:Array.from(document.images).filter(i=>!i.naturalWidth).length," +
-      "w:document.documentElement.clientWidth,s:document.documentElement.scrollWidth," +
-      "f:document.querySelectorAll('iframe').length," +
-      "kids:document.body?document.body.children.length:-1," +
-      "html:document.body?document.body.innerHTML.length:-1," +
-      "err:(window.__hzErr||[])," +
-      // A 2.5MB DOM with no rendered text is content that exists and is not
-      // shown. h/vis say whether ANYTHING has layout; wa says whether the page
-      // is waiting on a WebAuthn assertion that will never arrive, which is
-      // what a second-factor page in a non-browser WKWebView cannot get.
-      "h:document.body?document.body.scrollHeight:-1," +
-      "vis:document.body?Array.from(document.body.querySelectorAll('*')).filter(function(e){return e.offsetHeight>0}).length:-1," +
-      "wa:(window.__hzWA||null)," +
-      // WHAT IS ACTUALLY ON SCREEN. 11 laid-out elements and no text is a page
-      // whose chrome rendered and whose content did not. Tag names and the first
-      // class token only -- never text, never an attribute value, because this
-      // page is a second factor and everything on it is sensitive.
-      "shape:document.body?Array.from(document.body.querySelectorAll('*')).filter(function(e){return e.offsetHeight>0}).slice(0,14).map(function(e){return e.tagName.toLowerCase()+(e.className&&typeof e.className==='string'?'.'+e.className.split(' ')[0]:'')}):[]," +
-      // innerText does not pierce a shadow root, so a shadowed page reads as
-      // empty text with real height -- exactly this shape.
-      "shadow:document.body?Array.from(document.body.querySelectorAll('*')).filter(function(e){return !!e.shadowRoot}).length:-1," +
-      "ready:document.readyState," +
-      // A hidden content region is the other candidate: count what exists but
-      // has no box at all.
-      "hidden:document.body?Array.from(document.body.querySelectorAll('*')).filter(function(e){return e.offsetParent===null&&e.offsetHeight===0}).length:-1," +
-      "x:document.body?document.body.innerText.trim().slice(0,120):''})"
+    let js = Self.probeJS
     webView.evaluateJavaScript(js) { value, _ in
       let host = webView.url?.host ?? "?"
       let path = webView.url?.path ?? "?"
       self.loginLog("loaded \(self.label) \(host)\(path) \(value as? String ?? "{}")")
+      // After the record is written, whatever happens next.
+      if let probe = value as? String { self.evaluateRefusal(probe, on: webView) }
     }
   }
 
   func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+    refusalArmed = true // one evaluation per navigation
+
     showHost(webView.url)
     headerNotice?.stringValue = "your credentials stay local"
     headerNotice?.textColor = NSColor(red: 0x8a / 255, green: 0x8a / 255, blue: 0x8a / 255, alpha: 1)

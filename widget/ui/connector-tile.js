@@ -297,7 +297,16 @@ function hzTileNobridgeNotice(tip) {
 
 const HZ_NOTICES = {
   // See connections.js NOTICES.nobridge — the engine, not the connection.
-  nobridge: 'social connections need Docker Desktop running.',
+  // Named by what it IS, not by how it happens to run: since e9567ea the
+  // native runtime is the default and Docker is only the fallback, so a
+  // native install told to start Docker was being sent somewhere it does not
+  // need to go.
+  nobridge: 'social connections need their local engine running.',
+  // The site refused to render a security step in an embedded window and the
+  // owner pressed the handoff. Not a failure state: the connect page is open
+  // in their browser, where that step does render.
+  browserLogin: 'this step needs a real browser — the connect page just opened; finish signing in there, then press this again.',
+
   down: 'checking the local connection…',
   auth: 'token mismatch — status unknown',
   noroute: 'connect service predates /api/status — status unknown',

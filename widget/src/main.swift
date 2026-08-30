@@ -858,10 +858,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     return url
   }
 
-  // The cloud-connector setup door: the connect page's root, in the browser.
-  func openConnectRoot() -> Bool {
+  // The cloud-connector setup door: a page under the connect token, in the
+  // browser.
+  //
+  // NOT routed through openExternal, and that is deliberate rather than an
+  // oversight. openExternal gates on allowedExternal.contains(urlString) — an
+  // exact string match — and this URL carries a freshly minted token, so it can
+  // never appear in a static allowlist. connectors/test/openExternal.test.mjs
+  // says as much itself: a URL assembled at runtime from parts is invisible to
+  // that check. The safety here is that the base is read from disk and validated
+  // (http, loopback) and the path is a closed enum.
+  //
+  // connectLink() is re-read on every press, which is required and not merely
+  // tidy: minting a link revokes every earlier one and the TTL is 24h, so a URL
+  // captured once goes stale.
+  func openConnectRoot(path: ConnectPath, query: [String: String]) -> Bool {
     guard let link = connectLink() else { return false }
-    NSWorkspace.shared.open(link)
+    guard path != .root || query.isEmpty else { return false }
+    var target = link
+    if path != .root {
+      target = link.appendingPathComponent(String(path.rawValue.dropFirst()))
+    }
+    if !query.isEmpty, var parts = URLComponents(url: target, resolvingAgainstBaseURL: false) {
+      parts.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+      target = parts.url ?? target
+    }
+    NSWorkspace.shared.open(target)
     return true
   }
 

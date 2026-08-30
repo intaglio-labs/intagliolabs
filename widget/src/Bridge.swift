@@ -8,6 +8,15 @@
 import AppKit
 import WebKit
 
+/// Which page under the connect token the app may open. An ENUM, never a string
+/// from JS: connectLink() validates the base (http, loopback, re-read each time
+/// because minting a link revokes the last), and this closes the suffix, so no
+/// caller can steer the browser at an arbitrary path under a live token.
+enum ConnectPath: String {
+  case root = ""
+  case bridge = "/bridge"
+}
+
 protocol BridgeDelegate: AnyObject {
   func openChat()
   func openChat(with utterance: String)
@@ -22,7 +31,7 @@ protocol BridgeDelegate: AnyObject {
   func openConnections()
   func openPeople()
   func openMonths()
-  func openConnectRoot() -> Bool
+  func openConnectRoot(path: ConnectPath, query: [String: String]) -> Bool
   func closeWindow(of webView: WKWebView)
   func dragWindow(of webView: WKWebView)
   func motionAnywayChanged(_ on: Bool)
@@ -929,6 +938,29 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
             windowWidth: windowWidth,
             afterHarvest: afterHarvest
           ) { cookiesJSON in
+            // THE HANDOFF SENTINEL, CHECKED BEFORE ANYTHING ELSE READS IT.
+            //
+            // The non-X path below POSTs any non-nil result verbatim to
+            // /api/bridge/cookies, so an unguarded sentinel would be relayed into
+            // the bridge bot as though it were a pasted credential blob. The
+            // string is also chosen to be neither valid JSON nor a valid Cookie
+            // header, so nothing downstream could mistake it for one either.
+            //
+            // It deliberately does NOT call beginBridgeLogin: begin's first act is
+            // to cancel, and the connect page has its own Begin control. Not
+            // calling it removes the hazard for every platform instead of fencing
+            // one, which matters because Slack's challenge window is genuinely
+            // mid-conversation.
+            let handoff: () -> Void = {
+              let opened = self.delegate?.openConnectRoot(
+                path: .bridge, query: ["p": p]
+              ) == true
+              self.reply(webView, id, opened
+                ? ["state": "browserLogin"]
+                : ["state": "browserLogin",
+                   "error": "the connect page isn't running — open Settings once, then retry"])
+            }
+            if cookiesJSON == BridgeLogin.browserHandoff { handoff(); return }
             if inlineX {
               guard cookiesJSON == "connected" else {
                 self.reply(webView, id, ["state": "cancelled"])
@@ -1299,7 +1331,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // The cloud-connector setup door: the connect page's ROOT, in the
       // browser — a full setup flow (tokens, app passwords) that wants a real
       // browser.
-      if delegate?.openConnectRoot() == true {
+      if delegate?.openConnectRoot(path: .root, query: [:]) == true {
         reply(webView, id, ["state": "ok"])
       } else {
         reply(webView, id, ["state": "error", "error": "no connect link yet"])

@@ -36,7 +36,15 @@ for (const file of UI) {
   test(`${file} tells a consumer to start an app, not to run a shell`, () => {
     const line = noticeLine(src[file]);
     assert.doesNotMatch(line, /bash |\.sh\b|ops\//u, `a shell instruction survives: ${line.trim()}`);
-    assert.match(line, /Docker/u, 'it should still name what is actually needed');
+    // ~~/Docker/~~ was right when Docker was the only runtime. Since e9567ea the
+    // native path is the default and Docker is the fallback, so naming the
+    // vendor in the notice sent a native install somewhere it does not need to
+    // go. Assert that the notice names the thing that is missing — the engine —
+    // rather than one implementation of it. The Docker BUTTON is still pinned by
+    // the next test, because the fallback must stay reachable.
+    assert.match(line, /engine|Docker/u, 'it should still name what is actually needed');
+    assert.doesNotMatch(line, /Docker Desktop/u,
+      'the notice must not name a runtime the install may not be using');
   });
 
   test(`${file} offers Docker as a button rather than an instruction`, () => {
