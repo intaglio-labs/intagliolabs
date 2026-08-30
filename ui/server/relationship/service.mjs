@@ -113,7 +113,23 @@ export function createRelationshipMemory({ contextDb, stateDb, resolutionsDb = n
     // relationship. `spansDormancy` is the question candidate adapters must
     // ask before claiming silence.
     coverage({ now = Date.now(), sources, previous = {}, staleAfter = STALE_AFTER_MS } = {}) {
-      const lastSeen = collectLastSeen({ contextDb, stateDb, ...(sources ? { sources } : {}) });
+      // ASK ABOUT THE SOURCES WE ARE ABOUT TO JUDGE.
+      //
+      // `sources` is undefined at all three call sites, so this took
+      // collectLastSeen's default — the seven keys of STALE_AFTER_MS, which
+      // exclude slack and instagram. evaluate() then ran against the caller's
+      // staleAfter, which HAS those two, found no lastSeen entry for them and
+      // marked them 'absent' forever. spansDormancy is false for anything not
+      // 'fresh', and the consuming gate is .every() — so a person on imessage
+      // AND slack was dropped even though imessage vouches perfectly well.
+      // Adding slack and instagram to VOUCHABLE_CHANNELS did not widen the
+      // pool, it narrowed it below what it was before.
+      //
+      // The keys being judged are the keys to ask about; anything else is two
+      // lists that can disagree.
+      const lastSeen = collectLastSeen({
+        contextDb, stateDb, sources: sources ?? Object.keys(staleAfter),
+      });
       const { state, newlyStale, recovered } = evaluate({ lastSeen, now, previous, staleAfter });
       return {
         lastSeen, state, newlyStale, recovered,

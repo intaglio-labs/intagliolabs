@@ -336,6 +336,12 @@ const TOP_KEYS = Object.freeze([
   // `"linkedin": {}` fail before ANY connector could start.
   'linkedin',
   'retention',
+  // The Relationship Memory cap. hermes gates the whole reconnect card on
+  // relationshipMemory.capPerDay, and assertClosedKeys throws on any unknown
+  // top-level key — so before this line, writing the key that TURNS THE
+  // FEATURE ON stopped every connector from starting. The daemon does not read
+  // it; it only has to stop refusing it.
+  'relationshipMemory',
 ]);
 const MAIL_KEYS = Object.freeze([
   'host',

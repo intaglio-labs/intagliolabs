@@ -40,14 +40,26 @@ test('the Docker provisioner still ships as the fallback', () => {
   assert.ok(buildSh.includes('setup-bridges.sh'), 'the Docker script must remain');
 });
 
-test('Provision chooses by artifact, never by preference', () => {
-  assert.match(provision, /setup-bridges-native\.sh/u, 'the native provisioner must be reachable');
-  // .ready is written LAST by build-synapse.sh precisely so a half-built runtime
-  // is distinguishable from a good one. Testing the directory would defeat that.
-  assert.match(provision, /bridges\/synapse\/\.ready/u,
-    'the choice must gate on the completion marker, not on a directory');
-  assert.match(provision, /useNative[\s\S]{0,120}setup-bridges\.sh/u,
-    'Docker must remain the fallback branch');
+test('native is tried first and Docker is only the net', () => {
+  // ~~Gated on bridges/synapse/.ready~~ — that preferred native only where native
+  // was ALREADY built, which is never true on a fresh install, so every new
+  // machine fell through to Docker. A fallback that catches the common case is
+  // the default wearing another name. The native script bootstraps itself now,
+  // so the ORDER is the contract.
+  const i = provision.indexOf('setup-bridges-native.sh');
+  const j = provision.indexOf('setup-bridges.sh', i + 1);
+  assert.ok(i > 0, 'the native provisioner must be reachable');
+  assert.ok(j > i, 'Docker must come after native, as the fallback');
+  assert.match(provision, /for candidate in scripts where !success/u,
+    'a fallback that is never attempted is not a fallback');
+});
+
+test('the native script can reach a working state by itself', () => {
+  // Otherwise "Docker is the fallback" means "Docker is required on first run".
+  assert.match(nativeSh, /fetch-bridges\.mjs/u, 'it must fetch the binaries');
+  assert.match(nativeSh, /build-synapse\.sh/u, 'and build the homeserver runtime');
+  assert.match(nativeSh, /bridges\/lib\/libolm\.3\.dylib/u,
+    'and take the libolm the bundle ships, since a stock Mac has no cmake');
 });
 
 test('the native configs satisfy the hardening the Docker path is held to', () => {

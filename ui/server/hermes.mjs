@@ -2459,9 +2459,17 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // the local model is done, and GET /card serves the previous batch (or
     // nothing) in the meantime. Errors are recorded on the state, not lost.
     rel.lastError = null;
-    (policy.relationshipMatcher ?? buildMatchedCards)(rel.service, {
-      llamaCall: rel.llamaCall, now: Date.now(),
-    }).then((result) => {
+    // Held behind the same gate the summary queue uses, so a refresh cannot run
+    // while the owner is mid-question. pauseForInteractive returns a resume
+    // handle; taking one here means the summary queue also stands down for the
+    // duration rather than the two of them interleaving on one local model.
+    const summaryQueue = policy?.peopleSummaryManager?.queue;
+    (summaryQueue ? summaryQueue.pauseForInteractive() : Promise.resolve(null))
+      .then((resumeSummaries) =>
+        (policy.relationshipMatcher ?? buildMatchedCards)(rel.service, {
+          llamaCall: rel.llamaCall, now: Date.now(),
+        }).finally(() => { try { resumeSummaries?.(); } catch {} })
+      ).then((result) => {
       const now = Date.now();
       const batchId = Number(db.prepare(
         'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, ?, ?, ?)'

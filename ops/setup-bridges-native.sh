@@ -116,7 +116,38 @@ esac
 # Each of these is something a previous leg produces. Checked by ARTIFACT rather
 # than by directory, because a half-built runtime is the failure that reports
 # success (see ops/build-synapse.sh on why .ready exists).
-[ -f "$SYN/.ready" ] || { echo "no Synapse runtime: run ops/build-synapse.sh" >&2; exit 1; }
+# SELF-BOOTSTRAPPING, because the alternative is Docker.
+#
+# This used to demand a pre-built runtime and exit, which meant a fresh install
+# had no .ready, fell through to the Docker provisioner, and started a Linux VM
+# on a machine that never needed one. Docker being the FALLBACK only helps if the
+# native path can reach a working state by itself.
+#
+# Nothing here needs a toolchain on the owner's machine: the bridge binaries are
+# published Go executables, libolm ships prebuilt in the app bundle, and the
+# Synapse runtime is a relocatable CPython plus wheels (--only-binary, so a
+# missing wheel FAILS rather than silently starting a source build). What it does
+# need is network, once. If any step fails the script exits non-zero and
+# Provision falls back to Docker, which is exactly what a fallback is for.
+NODE="${HZ_NODE:-$HOME/.hazlie/bin/node}"
+[ -x "$NODE" ] || NODE=$(command -v node 2>/dev/null || true)
+
+if [ ! -x "$BIN/mautrix-meta-darwin-arm64" ] && [ -n "$NODE" ] \
+   && [ -f "$REPO/ops/fetch-bridges.mjs" ]; then
+  echo "fetching bridge binaries (first run)"
+  "$NODE" "$REPO/ops/fetch-bridges.mjs" || {
+    echo "bridge fetch failed" >&2; exit 1;
+  }
+fi
+
+if [ ! -f "$SYN/.ready" ] && [ -f "$REPO/ops/build-synapse.sh" ]; then
+  echo "building the Synapse runtime (first run)"
+  sh "$REPO/ops/build-synapse.sh" "$SYN" || {
+    echo "synapse runtime build failed" >&2; exit 1;
+  }
+fi
+
+[ -f "$SYN/.ready" ] || { echo "no Synapse runtime and could not build one" >&2; exit 1; }
 # libolm comes from the app bundle on a real install and is built from source
 # only in a checkout. It must sit BESIDE the binaries: their rpath lists
 # @executable_path first, and upstream ships the dylib nowhere.
@@ -139,7 +170,12 @@ missing=""
 for b in $(bridge_rows | awk '{print $4}'); do
   [ -x "$BIN/$b" ] || missing="$missing $b"
 done
-[ -z "$missing" ] || { echo "missing bridge binaries:$missing — run: node ops/fetch-bridges.mjs" >&2; exit 1; }
+[ -z "$missing" ] || {
+  echo "missing bridge binaries:$missing" >&2
+  echo "the first-run fetch above did not produce them; check the network and" >&2
+  echo "re-run, or run: node ops/fetch-bridges.mjs" >&2
+  exit 1
+}
 
 YQ="${HZ_YQ:-}"
 [ -n "$YQ" ] || YQ=$(command -v yq 2>/dev/null || true)

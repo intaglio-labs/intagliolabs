@@ -283,8 +283,22 @@ export async function buildMatchedCards(service, { llamaCall, now = Date.now(), 
       const matchedEntry = entries.find((e) => e.tag === quote || e.tag.includes(quote.slice(0, 60)));
       const matched = matchedEntry?.tag;
       if (!matched || !(matched.startsWith('them') || matched.startsWith('meeting'))) return null;
+      // AN EMPTY CLAIM IS NOT A GROUNDED ONE.
+      //
+      // This passed unconditionally when the model omitted `focus`: the claim was
+      // '' and `f.includes('')` is true for the first item, so the verbatim-copy
+      // rule the prompt states was never enforced. It then stored String(focus) —
+      // the literal "undefined" — onto the card and into rm_candidate_snapshot,
+      // a table with a no-delete trigger.
+      //
+      // The same hole opened from the other end: if every phrase ownerFocus
+      // returns is filtered out as SOCIAL_FOCUS, focusItems is [''] and any
+      // invented focus matched an empty list. Both ends are closed here.
       const claimed = String(focus ?? '').trim().toLowerCase();
-      if (!focusItems.some((f) => f === claimed || f.includes(claimed) || claimed.includes(f))) return null;
+      if (!claimed) return null;
+      const grounds = focusItems.filter((f) => f && f.trim());
+      if (!grounds.length) return null;
+      if (!grounds.some((f) => f === claimed || f.includes(claimed) || claimed.includes(f))) return null;
       return { role: String(role ?? ''), sentence, quote: quote.replace(/^them\s*/, ''),
         quoteContextId: matchedEntry.cid, focus: String(focus), excerpts };
     };

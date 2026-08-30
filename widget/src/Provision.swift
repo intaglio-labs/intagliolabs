@@ -254,38 +254,57 @@ enum Provision {
       // keep working. Chosen by ARTIFACT, never by preference: .ready is written
       // last by build-synapse.sh precisely so a half-built runtime is
       // distinguishable from a good one.
+      // NATIVE IS THE PATH. Docker is the safety net, and only that.
+      //
+      // ~~Gated on ~/.hazlie/bridges/synapse/.ready~~ this preferred native only
+      // where native was ALREADY built — which is never true on a fresh install,
+      // so every new machine fell through to Docker and started a Linux VM it did
+      // not need. A fallback that catches the common case is not a fallback, it is
+      // the default wearing a different name.
+      //
+      // setup-bridges-native.sh now bootstraps itself: it fetches the published
+      // bridge binaries, takes the libolm the bundle ships, and builds the Synapse
+      // runtime from wheels. None of that needs a toolchain on this machine — no
+      // Docker, no Homebrew, no Xcode — only network, once.
+      //
+      // Docker is still tried if native fails, because "the network was down on
+      // first launch" should not mean "no social connectors, ever". Which one ran
+      // is recorded in bridge-setup.log rather than inferred.
       let nativeScript = backend.appendingPathComponent("ops/setup-bridges-native.sh")
-      let nativeReady = hazlie
-        .appendingPathComponent("bridges/synapse/.ready")
-      let useNative = fm.isExecutableFile(atPath: nativeScript.path)
-        && fm.fileExists(atPath: nativeReady.path)
-      let script = useNative
-        ? nativeScript
-        : backend.appendingPathComponent("ops/setup-bridges.sh")
+      let dockerScript = backend.appendingPathComponent("ops/setup-bridges.sh")
+      let scripts = fm.isExecutableFile(atPath: nativeScript.path)
+        ? [nativeScript, dockerScript]
+        : [dockerScript]
       var success = false
-      if fm.isExecutableFile(atPath: script.path) {
-        let logDir = hazlie.appendingPathComponent("logs")
-        try? mkdir(logDir, 0o700)
-        let log = logDir.appendingPathComponent("bridge-setup.log")
-        if !fm.fileExists(atPath: log.path) { fm.createFile(atPath: log.path, contents: nil) }
-        if let out = try? FileHandle(forWritingTo: log) {
-          defer { try? out.close() }
-          _ = try? out.seekToEnd()
-          let p = Process()
-          p.executableURL = URL(fileURLWithPath: "/bin/sh")
-          p.arguments = [script.path]
-          var env = ProcessInfo.processInfo.environment
-          env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
-          p.environment = env
-          p.standardOutput = out
-          p.standardError = out
-          do {
-            try p.run()
-            p.waitUntilExit()
-            success = p.terminationStatus == 0
-          } catch {
-            NSLog("Intaglio Labs: bridge setup could not start: \(error)")
-          }
+      let logDir = hazlie.appendingPathComponent("logs")
+      try? mkdir(logDir, 0o700)
+      let log = logDir.appendingPathComponent("bridge-setup.log")
+      if !fm.fileExists(atPath: log.path) { fm.createFile(atPath: log.path, contents: nil) }
+      // In order, stopping at the first that succeeds. Every attempt is written to
+      // bridge-setup.log with the script that ran, so which path provisioned this
+      // machine is a fact in a file rather than something to be inferred from
+      // whether Docker happens to be running.
+      for candidate in scripts where !success {
+        guard fm.isExecutableFile(atPath: candidate.path) else { continue }
+        guard let out = try? FileHandle(forWritingTo: log) else { continue }
+        defer { try? out.close() }
+        _ = try? out.seekToEnd()
+        let banner = "\n=== \(Date()) running \(candidate.lastPathComponent) ===\n"
+        if let data = banner.data(using: .utf8) { out.write(data) }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = [candidate.path]
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+        p.environment = env
+        p.standardOutput = out
+        p.standardError = out
+        do {
+          try p.run()
+          p.waitUntilExit()
+          success = p.terminationStatus == 0
+        } catch {
+          NSLog("Intaglio Labs: bridge setup could not start: \(error)")
         }
       }
       bridgeSetupLock.lock()
