@@ -291,9 +291,18 @@ fi
 # Docker was for. So the build machine pays that cost once and the result ships,
 # exactly as the llama dylibs above already do.
 #
-# libolm is Apache-2.0 (site/notices reproduces the licence, as its section 4
-# requires). It is also archived upstream and does not compile unpatched against
-# a current clang — build-libolm.sh carries the one-line patch and the reasoning.
+# libolm is Apache-2.0. This comment used to assert that site/notices already
+# reproduced that licence; it did not name libolm at all, and shipping a binary
+# on the strength of a licence note that does not exist is worse than shipping
+# it with no note. site/notices now carries a "Native libraries" section naming
+# OpenMarket and New Vector, pointing at the Apache text already on the page,
+# and reproducing the three-clause BSD notice for curve25519-donna — which is
+# compiled INTO this dylib (confirmed by nm) and whose binary clause requires
+# the notice appear in our documentation. Node and yq ship here too and are
+# still unnamed; that gap is older than this file and is flagged, not fixed.
+#
+# libolm is also archived upstream and does not compile unpatched against a
+# current clang — build-libolm.sh carries the one-line patch and the reasoning.
 mkdir -p "$BE/bridges/lib"
 if [ -f "$BE/bridges/lib/libolm.3.dylib" ]; then
   : # already staged by a previous run in this tree
