@@ -179,10 +179,13 @@ jobs:
           [ "$WAVS" -gt 0 ] || { echo "voice assets incomplete: manifest but no .wav files"; exit 1; }
           echo "voice assets: $WAVS baked lines, $(du -sh "$DEST" | cut -f1) total"
 
-      - name: install llama.cpp
-        run: |
-          brew install llama.cpp
-          llama-server --version 2>&1 | head -2 || true
+      # NO `brew install llama.cpp` ANY MORE. widget/bundle-llama.py used to
+      # repackage whatever Homebrew installed here, which meant the runtime that
+      # shipped depended on the runner's Homebrew snapshot -- and Homebrew's
+      # build looks for its ggml backends in an absolute Cellar path that exists
+      # on no user's Mac, so local answering could never start off the build
+      # machine. The bundler now fetches llama.cpp's own sha256-pinned macOS
+      # release, so nothing needs installing and every build gets the same bytes.
 
       # A DEDICATED KEYCHAIN, not the login one. It is created for this job,
       # unlocked only here, and deleted on the way out whatever happened --
