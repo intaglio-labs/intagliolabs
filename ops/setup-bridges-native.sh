@@ -117,7 +117,24 @@ esac
 # than by directory, because a half-built runtime is the failure that reports
 # success (see ops/build-synapse.sh on why .ready exists).
 [ -f "$SYN/.ready" ] || { echo "no Synapse runtime: run ops/build-synapse.sh" >&2; exit 1; }
-[ -f "$BIN/libolm.3.dylib" ] || { echo "no libolm: run ops/build-libolm.sh" >&2; exit 1; }
+# libolm comes from the app bundle on a real install and is built from source
+# only in a checkout. It must sit BESIDE the binaries: their rpath lists
+# @executable_path first, and upstream ships the dylib nowhere.
+if [ ! -f "$BIN/libolm.3.dylib" ]; then
+  BUNDLED="$REPO/bridges/lib/libolm.3.dylib"
+  if [ -f "$BUNDLED" ]; then
+    mkdir -p "$BIN"
+    cp "$BUNDLED" "$BIN/libolm.3.dylib"
+    chmod 0755 "$BIN/libolm.3.dylib"
+  elif command -v cmake >/dev/null 2>&1; then
+    sh "$REPO/ops/build-libolm.sh" "$BIN" >/dev/null 2>&1 || true
+  fi
+fi
+[ -f "$BIN/libolm.3.dylib" ] || {
+  echo "no libolm: the app should ship it at bridges/lib/libolm.3.dylib; in a" >&2
+  echo "checkout run ops/build-libolm.sh (needs cmake)" >&2
+  exit 1
+}
 missing=""
 for b in $(bridge_rows | awk '{print $4}'); do
   [ -x "$BIN/$b" ] || missing="$missing $b"

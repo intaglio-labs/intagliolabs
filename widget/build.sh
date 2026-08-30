@@ -278,6 +278,40 @@ else
   echo "      brew install llama.cpp before building for distribution." >&2
 fi
 
+# libolm.3.dylib, PREBUILT AND SHIPPED, so a fresh install needs no toolchain.
+#
+# Every native mautrix bridge carries LC_LOAD_DYLIB on @rpath/libolm.3.dylib — a
+# hard link, so the process aborts in dyld before main() without it — and upstream
+# publishes that dylib only as a CI artifact, never as a release asset.
+#
+# ops/build-libolm.sh can build it, but it needs cmake, and cmake is NOT on a
+# stock Mac: Xcode's command line tools do not provide it, so the only cmake on
+# this build machine is Homebrew's. Making a consumer install depend on that
+# would trade a Docker dependency for a Homebrew one, which is not what removing
+# Docker was for. So the build machine pays that cost once and the result ships,
+# exactly as the llama dylibs above already do.
+#
+# libolm is Apache-2.0 (site/notices reproduces the licence, as its section 4
+# requires). It is also archived upstream and does not compile unpatched against
+# a current clang — build-libolm.sh carries the one-line patch and the reasoning.
+mkdir -p "$BE/bridges/lib"
+if [ -f "$BE/bridges/lib/libolm.3.dylib" ]; then
+  : # already staged by a previous run in this tree
+elif [ -f "$HOME/.hazlie/bridges/bin/libolm.3.dylib" ]; then
+  cp "$HOME/.hazlie/bridges/bin/libolm.3.dylib" "$BE/bridges/lib/libolm.3.dylib"
+  echo "bundled libolm from the local native runtime"
+elif command -v cmake >/dev/null 2>&1; then
+  if sh ../ops/build-libolm.sh "$BE/bridges/lib" >/dev/null 2>&1; then
+    echo "bundled libolm (built from source)"
+  else
+    echo "NOTE: libolm build failed — native bridges will not start." >&2
+  fi
+else
+  echo "NOTE: no cmake and no prebuilt libolm — native bridges will not start." >&2
+  echo "      brew install cmake, or run ops/build-libolm.sh once, before" >&2
+  echo "      building for distribution." >&2
+fi
+
 # VOICE MODELS (ear STT + speak TTS), so voice works offline out of the box the
 # same way ask does. ~495MB — Moonshine tiny + Silero VAD + onnxruntime-web for
 # the ear, Kokoro-82M for the voice — normally produced by voice/setup-voice.sh
