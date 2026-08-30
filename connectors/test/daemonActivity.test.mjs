@@ -39,7 +39,7 @@ const source = (name, missing = [], { walksHistory = false } = {}) => ({
 });
 
 // Drive a real daemon for one tick and hand back what it published.
-async function publishedSnapshot(sources, cursors) {
+async function publishedSnapshot(sources, cursors, { settleMs = FIRST_TICK_MS } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hazlie-activity-'));
   const activityPath = join(dir, 'activity.json');
   const daemon = createDaemon({
@@ -53,7 +53,7 @@ async function publishedSnapshot(sources, cursors) {
   });
   try {
     daemon.start();
-    await sleep(FIRST_TICK_MS);
+    await sleep(settleMs);
     return JSON.parse(readFileSync(activityPath, 'utf8'));
   } finally {
     daemon.stop();
@@ -97,4 +97,30 @@ test('real multi-pass backfill still reports a horizon', async () => {
   });
   assert.match(String(snapshot.estimate), /^~ \d+\.\d hrs left$/);
   assert.deepEqual(snapshot.backfill, ['calendar']);
+});
+
+// A RESTART MUST NOT RE-ADVERTISE WORK THAT CANNOT RUN.
+//
+// notReady is filled inside runSource, so it is empty at startup while
+// scheduleSource publishes immediately. Every daemon restart listed granola and
+// mail as pending for up to a full first-run stagger before their own ticks
+// corrected it — reported by the owner as "granola's started showing back up in
+// the activity menu when it isnt connected". The filter was fine; it had nothing
+// to filter on yet.
+test('an unprovisioned source is absent from the very first published queue', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'fb-restart-'));
+  try {
+    // Read the snapshot fast — well inside the 1s before any source first runs,
+    // so this can only pass if readiness was evaluated at startup.
+    const snapshot = await publishedSnapshot(
+      [source('granola', ['granola API key missing']), source('imessage')],
+      DONE,
+      { settleMs: 600 }
+    );
+    const queued = snapshot.queue.map((t) => t.connector);
+    assert.ok(!queued.includes('granola'),
+      `an unprovisioned source was published before it ticked: ${queued.join()}`);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

@@ -1191,6 +1191,25 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
           log.info('source_hidden', { connector: source.name });
         }
       });
+      // ASK WHAT CANNOT RUN BEFORE PUBLISHING A QUEUE, not after.
+      //
+      // notReady is populated inside runSource, so it is EMPTY at startup — and
+      // scheduleSource publishes immediately. Every daemon restart therefore
+      // listed granola and mail as pending work for up to a full stagger
+      // (~90s) before their first ticks corrected it. The owner saw exactly
+      // that: "granola's started showing back up in the activity menu when it
+      // isnt connected". It was not a regression of the filter; the filter had
+      // nothing to filter on yet.
+      //
+      // needs() is cheap — an existsSync or a token read — and the whole point
+      // of it being re-checked before every run is that it is safe to call. So
+      // call it once up front. Failures leave the source ABSENT from the map,
+      // which shows it: unknown must never read as unprovisioned.
+      Promise.allSettled(scheduledSources.map(async (source) => {
+        const missing = await source.needs({ config });
+        if (Array.isArray(missing) && missing.length > 0) notReady.set(source.name, missing);
+      })).then(() => publishWaiting());
+
       scheduledSources.forEach((source, i) => scheduleSource(source, 1_000 + i * FIRST_RUN_STAGGER_MS));
       scheduleMaintenance();
       log.info('daemon_started', {

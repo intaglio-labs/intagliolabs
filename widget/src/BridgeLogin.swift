@@ -654,18 +654,39 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   // The owner cannot be left staring at it. Retire the page and offer the route
   // that does work.
   private func evaluateRefusal(_ json: String, on webView: WKWebView) {
-    guard refusalArmed, !refusalShown, !finished else { return }
+    // EVERY EXIT SAYS WHY. The first version of this logged only on success, so a
+    // detector that never fired and a detector that never ran looked identical in
+    // the log — and the numbers said it should have fired, which left nothing to
+    // read. Silence is not evidence.
+    guard !refusalShown, !finished else { return }
+    guard refusalArmed else { loginLog("refusal-skip \(label) not-armed"); return }
     guard looksRefused(json) else { return }
     refusalArmed = false
+    loginLog("refusal-candidate \(label) — rechecking in 2.5s")
     // A SECOND LOOK, 2.5s later. The first sample cannot tell a refusal from a
     // React shell mid-mount; the second can, because a mounting page gains
     // layout and a refused one does not. The measured refusal held for minutes,
     // four separate times, so the delay is far past a mount and far short of it.
     DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self, weak webView] in
-      guard let self, let webView, !self.refusalShown, !self.finished else { return }
-      webView.evaluateJavaScript(Self.probeJS) { value, _ in
-        guard let again = value as? String, self.looksRefused(again) else { return }
-        guard !self.finished, !self.harvestStarted else { return }
+      guard let self else { return }
+      guard let webView else { self.loginLog("refusal-drop webview-gone"); return }
+      guard !self.refusalShown, !self.finished else {
+        self.loginLog("refusal-drop \(self.label) shown=\(self.refusalShown) finished=\(self.finished)")
+        return
+      }
+      webView.evaluateJavaScript(Self.probeJS) { value, error in
+        guard let again = value as? String else {
+          self.loginLog("refusal-drop \(self.label) recheck-no-value \(error?.localizedDescription ?? "")")
+          return
+        }
+        guard self.looksRefused(again) else {
+          self.loginLog("refusal-drop \(self.label) recheck-recovered \(again.prefix(160))")
+          return
+        }
+        guard !self.finished, !self.harvestStarted else {
+          self.loginLog("refusal-drop \(self.label) finished=\(self.finished) harvested=\(self.harvestStarted)")
+          return
+        }
         // Take the one-shot harvest funnel rather than racing it: a cookie poll
         // that lands after this returns early, and a genuine harvest that got
         // here first wins outright. One flag, two paths, no ordering to get wrong.
