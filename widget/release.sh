@@ -32,6 +32,40 @@ for arg in "$@"; do
   esac
 done
 
+# NOTARYTOOL EXITS 0 ON A REJECTED SUBMISSION. `submit --wait` returns success
+# as long as it managed to talk to Apple -- "status: Invalid" is a result, not a
+# tool error. So a rejected build walked straight into `stapler staple`, which
+# failed with "CloudKit query ... Record not found" and "Error 65". That message
+# is a symptom of there being no ticket, says nothing about WHY, and cost a
+# release cycle to not-diagnose (v0.4.0, 2026-08-30).
+#
+# Submit, read the status out of the JSON, and on anything but Accepted print
+# Apple's own per-file log and stop. That log is the only thing that ever names
+# which binary was unsigned or which entitlement was refused.
+notarize_or_die() {
+  what="$1"
+  out=$(xcrun notarytool submit "$what" \
+    --keychain-profile hazlie-notary --wait --output-format json) || {
+      echo "notarytool could not submit $what" >&2
+      printf '%s\n' "$out" >&2
+      exit 1
+    }
+  printf '%s\n' "$out"
+  id=$(printf '%s' "$out" | /usr/bin/python3 -c \
+    'import json,sys; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
+  status=$(printf '%s' "$out" | /usr/bin/python3 -c \
+    'import json,sys; print(json.load(sys.stdin).get("status",""))' 2>/dev/null || true)
+  if [ "$status" != "Accepted" ]; then
+    echo >&2
+    echo "NOTARIZATION REJECTED for $what (status: ${status:-unknown})" >&2
+    if [ -n "$id" ]; then
+      echo "--- Apple's notary log for $id ---" >&2
+      xcrun notarytool log "$id" --keychain-profile hazlie-notary >&2 2>&1 || true
+    fi
+    exit 1
+  fi
+}
+
 # --- provenance guard ---------------------------------------------------------
 #
 # WHAT THIS EXISTS TO PREVENT. Everything past this point signs with Developer
@@ -177,8 +211,7 @@ if [ "$NOTARIZE" = 1 ]; then
   # Notarize the app (zip is the submission container), then staple the
   # ticket to the app itself so it verifies offline.
   ditto -c -k --keepParent "$APP" "$DIST/IntaglioLabs-$VERSION.zip"
-  xcrun notarytool submit "$DIST/IntaglioLabs-$VERSION.zip" \
-    --keychain-profile hazlie-notary --wait
+  notarize_or_die "$DIST/IntaglioLabs-$VERSION.zip"
   xcrun stapler staple "$APP"
   rm "$DIST/IntaglioLabs-$VERSION.zip"
 fi
@@ -254,7 +287,7 @@ codesign --force -s "$IDENTITY" "$DMG"
 if [ "$NOTARIZE" = 1 ]; then
   # Notarize and staple the DMG too, so Gatekeeper clears it before the
   # user ever mounts it.
-  xcrun notarytool submit "$DMG" --keychain-profile hazlie-notary --wait
+  notarize_or_die "$DMG"
   xcrun stapler staple "$DMG"
   # The proof: what a downloader's Gatekeeper will conclude.
   spctl --assess --type open --context context:primary-signature -v "$DMG"
