@@ -2088,7 +2088,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
       Provision.ensureBridgeRuntime { ready in
         guard ready else {
-          done(["state": "nobridge", "error": "social connections could not start; open Docker Desktop and try again"])
+          done(["state": "nobridge",
+                    // Native provisioning runs first and Docker is only the fallback,
+                    // so naming Docker here tells a native install to fix the wrong
+                    // thing. The setup log names which provisioner actually ran.
+                    "error": "social connections could not start — see ~/.hazlie/logs/bridge-setup.log"])
           return
         }
         self.bridgeCall("POST", "api/bridge/begin", json: ["p": platform], timeout: 30, done)

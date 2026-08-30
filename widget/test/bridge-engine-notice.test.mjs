@@ -26,9 +26,20 @@ const swift = readFileSync(join(WIDGET, 'src/Bridge.swift'), 'utf8');
 
 // The notice the owner actually reads, not the comment above it explaining what
 // it used to say.
+// THE STRING THE CARD ACTUALLY RENDERS, not the table entry beside it.
+//
+// This selected /^\s*nobridge:/ — the NOTICES entry — while its own comment
+// claimed to be checking "the notice the owner actually reads". The card path
+// branches to nobridgeNotice(), which sets line.textContent directly, so the
+// table entry is a fallback the owner may never see. Correcting the entry
+// therefore passed this test and changed nothing on screen: the card still said
+// "Docker Desktop" on an install where Docker is not even the provisioner.
+//
+// Assert the rendered string. It is the fifth time this session a test matched
+// something adjacent to the thing it meant.
 const noticeLine = (text) => {
-  const line = text.split('\n').find((l) => /^\s*nobridge:/u.test(l));
-  assert.ok(line, 'every notice table must still carry a nobridge entry');
+  const line = text.split('\n').find((l) => /line\.textContent = 'social connections/u.test(l));
+  assert.ok(line, 'the nobridge card must set its own text');
   return line;
 };
 

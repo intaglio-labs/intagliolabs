@@ -811,7 +811,11 @@ function orderSources(sources) {
 // that one step as a button and say nothing else.
 function hzNobridgeNotice(tip) {
   const line = document.createElement('span');
-  line.textContent = 'social connections need Docker Desktop running.';
+  // Named by what it IS. Since the native runtime became the default and Docker
+  // only the fallback, telling a native install to start Docker sends the owner
+  // somewhere they do not need to go — and this hardcoded string is the one the
+  // card actually renders, so correcting the NOTICES entry alone changed nothing.
+  line.textContent = 'social connections need their local engine running.';
   const open = document.createElement('button');
   open.className = 'engine-open';
   open.textContent = 'open Docker ↗';
