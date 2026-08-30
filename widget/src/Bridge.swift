@@ -145,11 +145,37 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   private final class WorkTracker {
     private let lock = NSLock()
     private var jobs: [UUID: String] = [:]
+    private var namedJobs: [String: UUID] = [:]
 
     func begin(_ label: String) -> UUID {
       let id = UUID()
       lock.lock(); jobs[id] = label; lock.unlock()
       return id
+    }
+
+    func beginOnce(_ key: String, label: String) {
+      lock.lock()
+      if namedJobs[key] != nil { lock.unlock(); return }
+      let id = UUID()
+      namedJobs[key] = id
+      jobs[id] = label
+      lock.unlock()
+      // A destroyed webview cannot deliver the final poll that normally ends
+      // this named job. Bound that orphan so the ambient orb can never remain
+      // in its processing pose forever after the People window is closed.
+      DispatchQueue.global().asyncAfter(deadline: .now() + 30 * 60) { [weak self] in
+        guard let self else { return }
+        self.lock.lock(); defer { self.lock.unlock() }
+        guard self.namedJobs[key] == id else { return }
+        self.namedJobs.removeValue(forKey: key)
+        self.jobs.removeValue(forKey: id)
+      }
+    }
+
+    func finish(_ key: String) {
+      lock.lock(); defer { lock.unlock() }
+      guard let id = namedJobs.removeValue(forKey: key) else { return }
+      jobs.removeValue(forKey: id)
     }
 
     func finish(_ id: UUID) {
@@ -1023,16 +1049,34 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // A sleeping orb means no work is ACTUALLY underway. Scheduled queue
       // entries intentionally do not participate here: they belong in
       // Settings, not on the ambient desktop control.
+      let workLabel: String?
       if let label = Bridge.activeWork.label {
-        reply(webView, id, ["state": "working", "label": label])
+        workLabel = label
       } else if let model = ModelSetup.activity,
                 let phase = model["phase"] as? String,
                 let tier = model["tier"] as? String {
-        reply(webView, id, ["state": "working", "label": "\(phase) the \(tier) local model"])
+        workLabel = "\(phase) the \(tier) local model"
       } else if let label = Connectors.shared.activeWorkLabel {
-        reply(webView, id, ["state": "working", "label": label])
+        workLabel = label
       } else if let label = Distiller.shared.activity {
-        reply(webView, id, ["state": "working", "label": label])
+        workLabel = label
+      } else if let label = Connectors.shared.queuedWorkLabel {
+        // A waiting connector slice is still part of the same total-hours job
+        // shown in Settings. Falling through to idle here made the flywheel
+        // alternate with sleep between every source.
+        workLabel = label
+      } else {
+        workLabel = nil
+      }
+      if let workLabel {
+        var status: [String: Any] = ["state": "working", "label": workLabel]
+        // This is the same total queue horizon Settings shows, not a made-up
+        // duration for only the current slice. Interactive work can temporarily
+        // outrank a connector label while the total remains useful.
+        if let estimate = Connectors.shared.activityEstimate {
+          status["estimate"] = estimate
+        }
+        reply(webView, id, status)
       } else {
         reply(webView, id, ["state": "idle"])
       }
@@ -1391,9 +1435,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // served by hermes from the LOCAL model only.
       let sKey = String(payload["key"] as? String ?? "")
       let sYear = (payload["year"] as? Int) ?? Int(payload["year"] as? Double ?? 0)
-      let work = Bridge.activeWork.begin("writing a relationship summary")
+      let workKey = "\(sYear)|\(sKey)"
+      Bridge.activeWork.beginOnce(workKey, label: "writing a relationship summary")
       peopleCall("POST", "people/summary", json: ["key": sKey, "year": sYear]) { [weak self] data in
-        Bridge.activeWork.finish(work)
+        if data["pending"] as? Bool != true { Bridge.activeWork.finish(workKey) }
         self?.reply(webView, id, data)
       }
     default:
