@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'">
+<link rel="stylesheet" href="palette.css">
+<link rel="stylesheet" href="reconnect.css">
+</head>
+<!-- The reconnect card (L5 step 10): what the orb's notify state is about.
+     One card at a time, its receipt in full, and the owner's verdict as four
+     buttons. Every verdict is an rm_card_event joined to the immutable
+     snapshot of what was offered -- the popup IS the feedback loop. All text
+     lands via textContent; names never pass through markup. -->
+<body class="reconnect">
+  <div class="win">
+    <div class="rc-head">
+      <span class="rc-title">reconnect?</span>
+      <button class="rc-close" id="rcClose" title="Close">✕</button>
+    </div>
+    <div id="rcCard">
+      <div class="rc-name" id="rcName"></div>
+      <div class="rc-why" id="rcWhy"></div>
+      <blockquote class="rc-quote" id="rcQuote"></blockquote>
+      <dl class="rc-facts">
+        <div id="rcRoleRow"><dt>who they are</dt><dd id="rcRole"></dd></div>
+        <div id="rcLeftRow"><dt>how you left it</dt><dd id="rcLeft"></dd></div>
+        <div><dt>history</dt><dd id="rcHistory"></dd></div>
+      </dl>
+      <div class="rc-actions">
+        <button id="rcYes">will text them</button>
+        <button id="rcNo">not relevant</button>
+        <button id="rcMute">mute 30d</button>
+        <button id="rcNever">never this person</button>
+      </div>
+      <input id="rcFeedback" type="text" placeholder="why? (optional — this trains it)" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="rc-empty" id="rcEmpty" hidden>nothing to review — the orb will light up when there is.</div>
+  </div>
+  <script src="bridge.js"></script>
+  <script src="reconnect.js"></script>
+</body>
+</html>

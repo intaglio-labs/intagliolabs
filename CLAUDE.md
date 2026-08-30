@@ -43,7 +43,16 @@ Do not re-add these; their absence is a decision, not an oversight.
   still NOT here: the credentials to deploy with — they live in the
   `FIREBASE_SERVICE_ACCOUNT` repository secret, never in the tree — and the
   domain's owning account.
-- **Experiment code, results, and planning docs.**
+- **Experiment code, results, and** ~~**planning docs.**~~ Planning docs were
+  allowed in on 2026-08-28 (owner decision, PR #27): a plan is design
+  reasoning with no owner data in it, and it is most useful next to the code
+  that will implement it. The first is `L5-RELATIONSHIP-MEMORY-EXPERIMENT.md`.
+  Results remain excluded — they are owner data by definition (sealed lists of
+  real people, per-person counts, grades) — and the exclusion is now enforced,
+  not just written: results live in `~/.hazlie/experiments/`, and
+  `connectors/test/experimentResults.test.mjs` fails the suite on any
+  result-shaped file or `results/`/`experiments/`/`exp_*/` directory anywhere
+  in the working tree.
 
 ## Rules that bind everything
 

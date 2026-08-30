@@ -294,6 +294,19 @@ function orbTap() {
   burstTimer = setTimeout(endBurst, BURST_END);
 
   if (burst === 1) {
+    // A notify orb answers the tap with its card, not with voice: the state
+    // exists to be clicked, and the plan doc records the owner's decision to
+    // spend the click this way (voice tap-to-arm is still shipped as a
+    // tease). A second tap while the popup handles it falls through to the
+    // ordinary path.
+    if (cardPending && voiceOrbState === 'idle') {
+      hzSfx.wake();
+      wakeOrb();
+      hzPost('openReconnect');
+      cardPending = null; // seen; the poll re-lights it only if a card still serves
+      paintOrbState();
+      return;
+    }
     // An ordinary tap: wake, then either tease or arm. The wake animation and
     // its tone run either way — the orb still has to answer the finger.
     hzSfx.wake();
@@ -343,6 +356,11 @@ function setOrbState(state) {
 }
 let voiceOrbState = 'idle';
 let workLabel = '';
+// A reconnect card waiting for the owner (L5 step 10). Notify OUTRANKS the
+// sleeping pose and the processing crown (owner, 2026-08-29) -- a person to
+// reconnect with matters more than a backfill's progress -- but never an
+// active voice exchange.
+let cardPending = null;
 let workEstimate = '';
 let orbHovered = false;
 function workDetailText() {
@@ -364,6 +382,12 @@ orbBtn.addEventListener('pointerleave', () => {
 });
 function paintOrbState() {
   const processing = voiceOrbState === 'idle' && !!workLabel;
+  if (voiceOrbState === 'idle' && cardPending) {
+    setOrbState('notify');
+    orbEl.classList.toggle('processing', false);
+    orbBtn.title = 'someone to reconnect with';
+    return;
+  }
   setOrbState(voiceOrbState !== 'idle' ? voiceOrbState : (processing ? 'listening' : 'idle'));
   // `listening` is also a real voice state. Keep the electric crown on
   // background work only, so opening the mic does not claim a processor is
@@ -409,6 +433,36 @@ async function refreshWorkState() {
 }
 refreshWorkState();
 setInterval(refreshWorkState, 1500);
+
+// The reconnect poll: is there a card for the owner? Every 10 minutes, plus
+// once shortly after launch. 'shown' is recorded by HERMES when it first
+// hands a card out -- recording it here double-counted every widget relaunch
+// into the global cap and could race the popup out of the last cap slot
+// (audit, reproduced). The page just renders what it is given.
+async function refreshRelCard() {
+  try {
+    const out = await hzPost('relCard');
+    cardPending = out?.card ?? null;
+    if (cardPending) badge.textContent = '1';
+  } catch {
+    cardPending = null;
+  }
+  paintOrbState();
+}
+setTimeout(refreshRelCard, 15_000);
+setInterval(refreshRelCard, 600_000);
+
+// A refresh rebuilds candidates through the local model -- minutes of
+// inference -- so it runs at most once a day, kicked fire-and-forget on
+// launch. localStorage because this is a per-machine convenience stamp, not
+// state anyone else reads.
+try {
+  const last = Number(localStorage.getItem('hzRelRefreshAt') ?? 0);
+  if (Date.now() - last > 20 * 3_600_000) {
+    localStorage.setItem('hzRelRefreshAt', String(Date.now()));
+    setTimeout(() => hzPost('relRefresh').catch(() => {}), 30_000);
+  }
+} catch {}
 
 // Time of day lives in bridge.js so the onboarding orb reads the same bands.
 // A wake from sleep is when the clock is most likely to have moved a long way

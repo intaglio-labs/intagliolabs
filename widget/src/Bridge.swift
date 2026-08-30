@@ -22,6 +22,7 @@ protocol BridgeDelegate: AnyObject {
   func openConnections()
   func openPeople()
   func openMonths()
+  func openReconnect()
   func openConnectRoot() -> Bool
   func closeWindow(of webView: WKWebView)
   func dragWindow(of webView: WKWebView)
@@ -70,8 +71,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   ]
   static let pageCapabilities: [String: Set<String>] = [
     "widget": ["drag", "openChat", "openChatWith", "openConnections",
-               "openMonths", "voiceArm", "widgetBounds", "workStatus"],
+               "openMonths", "openReconnect", "voiceArm", "widgetBounds",
+               "workStatus", "relCard", "relEvent", "relRefresh"],
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
+    // The reconnect card popup (L5 step 10): reads the current card, posts
+    // the owner's verdict, and sizes itself. Nothing else -- the card page
+    // holds no token and can open no other surface.
+    "reconnect": ["relCard", "relEvent", "close", "fitContent"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "bridgeDiscordServer",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
@@ -533,6 +539,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": "ok"])
     case "openPeople":
       delegate?.openPeople()
+      reply(webView, id, ["state": "ok"])
+    case "openReconnect":
+      delegate?.openReconnect()
       reply(webView, id, ["state": "ok"])
     case "widgetSpot":
       // Where the widget sits inside the onboarding window, as FRACTIONS of
@@ -1070,6 +1079,31 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         reply(webView, id, status)
       } else {
         reply(webView, id, ["state": "idle"])
+      }
+
+    // Relationship Memory (L5 step 10): the orb's reconnect card. Thin bearer
+    // proxies to hermes -- the page never holds the token, and the card
+    // payload crosses as data the page renders with textContent only.
+    case "relCard":
+      relHermes("GET", "admin/relationship/card", json: nil) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
+    case "relRefresh":
+      relHermes("POST", "admin/relationship/refresh", json: [:]) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
+    case "relEvent":
+      var evt: [String: Any] = [:]
+      // "note" is the owner's free-text why -- the field the whole feedback
+      // loop exists to capture; the audit found this allowlist silently
+      // dropping it while every other layer handled it.
+      for k in ["snapshot_id", "person_key", "event", "reason", "note", "mute_days"] {
+        if let v = payload[k] { evt[k] = v }
+      }
+      relHermes("POST", "admin/relationship/event", json: evt) { [weak self] out in
+        self?.reply(webView, id, out)
       }
 
     case "modelDownload":
@@ -1991,6 +2025,23 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           .trimmingCharacters(in: .whitespacesAndNewlines) == "{\"ok\":true}"
       done(ok)
     }.resume()
+  }
+
+  private func relHermes(_ method: String, _ path: String, json: [String: Any]?,
+                         _ done: @escaping ([String: Any]) -> Void) {
+    guard let tok = bearerToken() else { done(["state": "auth"]); return }
+    let req = request(method, hermesBase, path, bearer: tok, json: json, timeout: 30)
+    let task = session.dataTask(with: req) { data, resp, err in
+      guard err == nil, let http = resp as? HTTPURLResponse, http.statusCode == 200,
+            let d = data,
+            let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else {
+        done(["state": "down"]); return
+      }
+      var out = obj
+      out["state"] = "ok"
+      done(out)
+    }
+    task.resume()
   }
 
   private func ask(_ utterance: String, _ done: @escaping ([String: Any]) -> Void) {

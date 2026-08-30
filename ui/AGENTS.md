@@ -27,9 +27,12 @@ temporarily absent.** Owner-approved on 2026-08-12:
   returns a quote so the owner can review a claim against the text it came
   from, which is the whole point of a review page. It is bearer-only, loopback,
   and deliberate. The real rule, stated so it is not overstated again: **no
-  route returns a context row to a browser or to the courier**; exactly one
-  bearer-only review route returns a quote, to the owner, about their own
-  corpus.
+  route returns a context row to a browser or to the courier**; ~~exactly one~~
+  (amended 2026-08-30: two) bearer-only routes return a quote, to the owner,
+  about their own corpus -- `GET /admin/memory/pending` for claim review, and
+  `GET /admin/relationship/card`, whose quote is resolved from the live row at
+  serve time so a deleted source stops quoting immediately. Both are loopback,
+  bearer-only, owner-facing surfaces; the count changed, the rule did not.
 - The Expo app's `askHazlie` (deleted with that app) had its `contextSnippets`
   parameter removed first: passing corpus text on a model call became a thrown
   error rather than a policy someone had to remember. The policy outlives the
