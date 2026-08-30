@@ -1035,6 +1035,18 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
       "h:document.body?document.body.scrollHeight:-1," +
       "vis:document.body?Array.from(document.body.querySelectorAll('*')).filter(function(e){return e.offsetHeight>0}).length:-1," +
       "wa:(window.__hzWA||null)," +
+      // WHAT IS ACTUALLY ON SCREEN. 11 laid-out elements and no text is a page
+      // whose chrome rendered and whose content did not. Tag names and the first
+      // class token only -- never text, never an attribute value, because this
+      // page is a second factor and everything on it is sensitive.
+      "shape:document.body?Array.from(document.body.querySelectorAll('*')).filter(function(e){return e.offsetHeight>0}).slice(0,14).map(function(e){return e.tagName.toLowerCase()+(e.className&&typeof e.className==='string'?'.'+e.className.split(' ')[0]:'')}):[]," +
+      // innerText does not pierce a shadow root, so a shadowed page reads as
+      // empty text with real height -- exactly this shape.
+      "shadow:document.body?Array.from(document.body.querySelectorAll('*')).filter(function(e){return !!e.shadowRoot}).length:-1," +
+      "ready:document.readyState," +
+      // A hidden content region is the other candidate: count what exists but
+      // has no box at all.
+      "hidden:document.body?Array.from(document.body.querySelectorAll('*')).filter(function(e){return e.offsetParent===null&&e.offsetHeight===0}).length:-1," +
       "x:document.body?document.body.innerText.trim().slice(0,120):''})"
     webView.evaluateJavaScript(js) { value, _ in
       let host = webView.url?.host ?? "?"
