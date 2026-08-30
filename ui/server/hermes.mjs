@@ -85,6 +85,11 @@ import {
   summariesDbPath,
   summarizeYear,
 } from './people/summary.mjs';
+import { mayWarmInBackground } from './people/power.mjs';
+// How many people one year-open may warm ahead of being asked for. The list
+// arrives in engagement rank; past the head it is speculation with a battery
+// cost attached.
+const WARM_AHEAD = 12;
 import { SummaryQueue } from './people/summaryQueue.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
@@ -4040,12 +4045,31 @@ async function handlePeople(db, req, res, cors, url, policy) {
     // Work begins after this turn of the event loop, so the year response paints
     // before the local model starts. A later click promotes that person above
     // every invisible queued row.
-    policy.peopleSummaryManager.queue.enqueue(
-      (out.people ?? [])
-        .filter((person) => Number(person.messages ?? 0) >= SUMMARY_MIN_ROWS)
-        .map((person) => ({ key: person.key, year })),
-      { priority: 1 },
-    );
+    // WARMING IS A LUXURY AND IT SPENDS THE OWNER'S BATTERY.
+    //
+    // This enqueued EVERY person on the page with at least MIN_ROWS messages
+    // for a full hierarchical summary — several local model calls each, and one
+    // 11,765-message friendship is 35 chunks before the reduce even starts.
+    // Nothing in this path had any notion of power: PowerBudget reads
+    // thermalState and isLowPowerModeEnabled, but it lives in the widget and
+    // hermes is a separate process that knew none of it. Opening one year on
+    // battery put the machine's fans at full blast (owner, 2026-08-30).
+    //
+    // Two limits doing two different jobs. On battery, warm NOTHING — a person
+    // the owner actually opens is foreground work at priority 2 and is never
+    // gated here, so the feature still works; it just stops speculatively
+    // summarising everyone else on the page. On AC, warm a bounded head of the
+    // list: it is already in engagement rank, so the head is what is most
+    // likely to be opened next and the tail is pure speculation.
+    const warmable = (out.people ?? [])
+      .filter((person) => Number(person.messages ?? 0) >= SUMMARY_MIN_ROWS);
+    mayWarmInBackground().then((may) => {
+      if (!may || warmable.length === 0) return;
+      policy.peopleSummaryManager.queue.enqueue(
+        warmable.slice(0, WARM_AHEAD).map((person) => ({ key: person.key, year })),
+        { priority: 1 },
+      );
+    }).catch(() => {});
     send(res, 200, out, cors);
     return;
   }
