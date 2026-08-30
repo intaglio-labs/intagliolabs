@@ -527,7 +527,21 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
       "  if (window.__hzErr.length < 6) {" +
       "    window.__hzErr.push('reject: ' + String((e && e.reason && e.reason.message) || e.reason || '?').slice(0, 110));" +
       "  }" +
-      "});"
+      "});" +
+      "window.__hzWA = {called: 0, settled: 0, err: ''};" +
+      "try {" +
+      "  if (navigator.credentials && navigator.credentials.get) {" +
+      "    var __g = navigator.credentials.get.bind(navigator.credentials);" +
+      "    navigator.credentials.get = function (o) {" +
+      "      window.__hzWA.called += 1;" +
+      "      var p = __g(o);" +
+      "      p.then(function () { window.__hzWA.settled += 1; }," +
+      "             function (e) { window.__hzWA.settled += 1;" +
+      "               window.__hzWA.err = String((e && e.name) || e).slice(0, 60); });" +
+      "      return p;" +
+      "    };" +
+      "  }" +
+      "} catch (e) {}"
     config.userContentController.addUserScript(WKUserScript(
       source: errorProbe, injectionTime: .atDocumentStart, forMainFrameOnly: false))
 
@@ -1014,6 +1028,13 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
       "kids:document.body?document.body.children.length:-1," +
       "html:document.body?document.body.innerHTML.length:-1," +
       "err:(window.__hzErr||[])," +
+      // A 2.5MB DOM with no rendered text is content that exists and is not
+      // shown. h/vis say whether ANYTHING has layout; wa says whether the page
+      // is waiting on a WebAuthn assertion that will never arrive, which is
+      // what a second-factor page in a non-browser WKWebView cannot get.
+      "h:document.body?document.body.scrollHeight:-1," +
+      "vis:document.body?Array.from(document.body.querySelectorAll('*')).filter(function(e){return e.offsetHeight>0}).length:-1," +
+      "wa:(window.__hzWA||null)," +
       "x:document.body?document.body.innerText.trim().slice(0,120):''})"
     webView.evaluateJavaScript(js) { value, _ in
       let host = webView.url?.host ?? "?"
