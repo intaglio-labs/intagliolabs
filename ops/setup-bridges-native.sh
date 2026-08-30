@@ -23,8 +23,13 @@
 #   file:/data/x.db           file:$M/<bridge>/x.db
 #
 #   compose DNS           ->  loopback
-#   http://synapse:8008       http://127.0.0.1:8008
-#   http://hazlie-meta:PORT   http://127.0.0.1:PORT
+#   the homeserver's name     127.0.0.1:8008
+#   each bridge's name        127.0.0.1:<its port>
+#
+# (Those names are spelled out nowhere on purpose: the egress wire in
+# connectors/test/egress.test.mjs reads every https host literal in tracked
+# source, and a container DNS name written out in a comment reads to it as an
+# undeclared destination -- correctly, now that nothing exempts them.)
 #
 # And one thing gets BETTER rather than merely equivalent: appservice.hostname
 # was 0.0.0.0 because a container has to bind every interface to be reachable
@@ -37,9 +42,12 @@
 # appeared; the binaries take -e (write example config) and -g (write
 # registration) and say what they did.
 #
-# WHAT THIS DOES NOT DO: supervise. It starts processes and writes pidfiles so
-# the stack can be exercised, but launchd is the real answer and is the next
-# leg. Anything that outlives a reboot must not depend on this.
+# WHAT THIS DOES: install eight launchd agents -- Synapse and one per bridge --
+# and wait until they answer. It does not hold the processes itself; RunAtLoad
+# plus KeepAlive means they survive a crash and a reboot without this script
+# running at all. Until 2026-08-30 that sentence read "WHAT THIS DOES NOT DO:
+# supervise", which was tolerable only while Compose's `restart:
+# unless-stopped` sat underneath as a fallback. It does not any more.
 
 set -eu
 
@@ -69,14 +77,19 @@ for arg in "$@"; do
   esac
 done
 
-# Separate roots make cross-poisoning impossible for a fresh install, but not
-# for a machine that already ran the old shared-path Docker script -- its state
-# is sitting at exactly $M. Refuse it rather than provisioning on top: the
-# alternative is a half-converted directory whose failure surfaces later, as a
-# bridge that will not start, with nothing pointing back at the cause.
+# A MACHINE THAT ALREADY RAN THE CONTAINER STACK HAS ITS STATE SITTING HERE.
+# Container-era homeserver.yaml holds the container's view of every path
+# (/data/...), which nothing on this side can start from, and provisioning on
+# top of it produces a half-converted directory whose failure surfaces later as
+# a bridge that will not start with nothing pointing back at the cause.
+#
+# Refuse it and say what to do. There is no longer a container stack to go back
+# to, so the instruction is to move the old directory aside and let this build
+# a fresh one -- the bridges re-link and backfill, which is slow but works,
+# where a silently mixed directory does not.
 #
 # .engine is the marker going forward. An install predating it is classified by
-# what its own homeserver.yaml says: container paths mean Docker wrote it.
+# what its own homeserver.yaml says.
 claim_state_root() {
   marker="$M/.engine"
   if [ -f "$marker" ]; then
@@ -91,16 +104,44 @@ claim_state_root() {
     found="native"
   fi
   if [ "$found" != "native" ]; then
-    echo "$M holds $found bridge state, not native." >&2
-    echo "Native will not provision on top of it. Either move it aside:" >&2
+    echo "$M was written by the $found stack, which this build no longer runs." >&2
+    echo "Move it aside and re-run; the bridges will re-link and backfill:" >&2
     echo "  mv \"$M\" \"$M.$found.bak\"" >&2
-    echo "or keep using the $found stack. Nothing was changed." >&2
+    echo "Nothing was changed." >&2
     exit 1
   fi
   mkdir -p "$M" && chmod 700 "$M"
   printf 'native\n' > "$marker"
 }
 [ "$MODE" = "status" ] || [ "$MODE" = "stop" ] || claim_state_root
+
+# THE FULL-HISTORY MARKER, WHICH HERE IS ALWAYS A NO-OP -- AND MUST STILL BE
+# WRITTEN.
+#
+# main added a one-time migration for installs provisioned with a 10000-message
+# portal cap: back the bridge databases up, wipe them, re-link so the full
+# history flows, and purge the derived corpus so it re-imports. That migration
+# lived only in the container provisioner, which is gone.
+#
+# It is not ported, because there is nothing here it could migrate. This script
+# has written 2147483647 since its first line of history -- the uncapped value
+# checkBridgeHardening demands -- so a natively provisioned install has never
+# had a capped portal to reset. A container-era directory does not reach this
+# point either: claim_state_root refuses it above and tells the owner to move it
+# aside, which produces a fresh uncapped install rather than a migrated one.
+#
+# What is NOT optional is writing the completion marker. Provision.swift reads
+# it, and its rule is "an existing runtime WITHOUT this marker needs the
+# migration" -- so leaving it unwritten made every launch of a working install
+# re-run the whole bridge setup, forever, looking for a migration no script
+# could perform any more. Written on a genuinely fresh directory before any
+# later step can fail, for the same reason the container script gave: a retry
+# must not mistake its own half-finished install for an old capped runtime.
+FULL_HISTORY_MARKER="$M/.full-history-reset-v1"
+mark_history_uncapped() {
+  [ -f "$FULL_HISTORY_MARKER" ] && return 0
+  ( umask 077; : > "$FULL_HISTORY_MARKER" )
+}
 
 # name  port   dbfile             binary
 bridge_rows() {
@@ -115,36 +156,153 @@ discord   29334 mautrix-discord   mautrix-discord-darwin-arm64
 ROWS
 }
 
-pidfile() { echo "$RUN/$1.pid"; }
+# LAUNCHD OWNS THESE PROCESSES, not this script.
+#
+# They used to be nohup children, and this file's own header said so: "WHAT
+# THIS DOES NOT DO: supervise ... launchd is the real answer and is the next
+# leg." That was survivable only while Docker was the fallback, because
+# Compose carried `restart: unless-stopped` underneath it. Docker is gone, so
+# the missing leg became the whole story: a crashed bridge stopped that
+# platform until somebody happened to re-run setup, and a reboot stopped
+# everything. Eight agents, RunAtLoad + KeepAlive, ThrottleInterval 60 so a
+# bridge that cannot start does not become a hot loop.
+UID_=$(id -u)
+AGENTS="$HOME/Library/LaunchAgents"
+
+label_for() {
+  case "$1" in
+    synapse) echo "io.intaglio.synapse" ;;
+    *)       echo "io.intaglio.bridge.$1" ;;
+  esac
+}
 
 alive() {
-  f=$(pidfile "$1")
-  [ -f "$f" ] || return 1
-  pid=$(cat "$f" 2>/dev/null) || return 1
-  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+  launchctl print "gui/$UID_/$(label_for "$1")" 2>/dev/null \
+    | grep -qE '^[[:space:]]*pid = [0-9]+'
+}
+
+agent_pid() {
+  launchctl print "gui/$UID_/$(label_for "$1")" 2>/dev/null \
+    | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\).*/\1/p' | head -1
+}
+
+# Render a template, LINT IT BEFORE INSTALLING, install 0600, and (re)load only
+# when the content actually changed -- the same shape ops/setup-connectors.sh
+# arrived at, including the ordering lesson it learned the hard way: validating
+# after the move leaves a broken plist on disk, and the unchanged-file branch
+# then compares it to itself forever.
+# WRITING THE PLIST AND LOADING IT ARE TWO STEPS ON PURPOSE. An unconfigured
+# telegram gets the file but not the load: connect/server.mjs finishes that
+# bridge's setup when the owner pastes an api_id, and it can only bootstrap an
+# agent whose plist is already on disk. Before this split it shelled `docker
+# start hazlie-telegram`, which is now a command that does nothing.
+render_agent() {
+  name="$1"; src="$2"; shift 2
+  label=$(label_for "$name")
+  dst="$AGENTS/$label.plist"
+  mkdir -p "$AGENTS"
+  rendered=$(sed "$@" "$src")
+  changed=1
+  if [ -f "$dst" ] && [ "$rendered" = "$(cat "$dst")" ]; then
+    changed=0
+  else
+    tmp=$(mktemp -t hazlie-bridge-plist)
+    printf '%s\n' "$rendered" > "$tmp"
+    if ! plutil -lint "$tmp" >/dev/null 2>&1; then
+      rm -f "$tmp"
+      echo "  !! $label: rendered plist is malformed -- not installed" >&2
+      return 1
+    fi
+    mv "$tmp" "$dst"
+  fi
+  # Reassert even when unchanged: a permissive mode must not survive a
+  # nominally idempotent run.
+  chmod 600 "$dst"
+}
+
+install_agent() {
+  render_agent "$@" || return 1
+  label=$(label_for "$1")
+  dst="$AGENTS/$label.plist"
+  if launchctl print "gui/$UID_/$label" >/dev/null 2>&1; then
+    if [ "$changed" = "1" ]; then
+      launchctl bootout "gui/$UID_/$label" 2>/dev/null || true
+      launchctl bootstrap "gui/$UID_" "$dst" 2>/dev/null || true
+      launchctl kickstart -k "gui/$UID_/$label" 2>/dev/null || true
+    fi
+  else
+    launchctl bootstrap "gui/$UID_" "$dst" 2>/dev/null || true
+    launchctl kickstart "gui/$UID_/$label" 2>/dev/null || true
+  fi
+}
+
+# RETIRE THE nohup ERA BEFORE CLAIMING ITS PORTS.
+#
+# Installs provisioned by the previous build of this branch are running as
+# nohup children with pidfiles under $RUN, and launchd knows nothing about
+# them. Bootstrapping the agents on top would put Synapse's agent into a
+# restart loop against a :8008 that pid-from-a-file is still holding, and the
+# seven appservice ports the same way -- a "native setup failed" on a machine
+# whose bridges are, at that moment, working.
+#
+# One-time, and safe to run when there is nothing to do: no pidfiles means no
+# loop body. SIGTERM, then a bounded wait, then SIGKILL -- these are Go
+# binaries and a Python homeserver, all of which close their SQLite handles on
+# a clean signal and none of which deserve an immediate -9.
+retire_pidfile_era() {
+  found=0
+  for f in "$RUN"/*.pid; do
+    [ -f "$f" ] || continue
+    pid=$(cat "$f" 2>/dev/null || true)
+    rm -f "$f"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    kill -0 "$pid" 2>/dev/null || continue
+    found=1
+    kill "$pid" 2>/dev/null || true
+  done
+  [ "$found" = "0" ] && return 0
+  echo "retiring the previous unsupervised bridge processes"
+  i=0
+  while [ "$i" -lt 20 ]; do
+    still=0
+    for pid in $(pgrep -f 'mautrix-.*-darwin-arm64|synapse.app.homeserver' 2>/dev/null || true); do
+      kill -0 "$pid" 2>/dev/null && still=1
+    done
+    [ "$still" = "0" ] && return 0
+    i=$((i + 1))
+    sleep 1
+  done
+  for pid in $(pgrep -f 'mautrix-.*-darwin-arm64|synapse.app.homeserver' 2>/dev/null || true); do
+    kill -9 "$pid" 2>/dev/null || true
+  done
 }
 
 stop_one() {
-  if alive "$1"; then
-    kill "$(cat "$(pidfile "$1")")" 2>/dev/null || true
+  label=$(label_for "$1")
+  if launchctl print "gui/$UID_/$label" >/dev/null 2>&1; then
+    launchctl bootout "gui/$UID_/$label" 2>/dev/null || true
     echo "stopped $1"
   fi
-  rm -f "$(pidfile "$1")"
+  # Leave the plist in place on a plain --stop: booting it out is what stops
+  # it, and keeping the file means --status can still say what is installed.
 }
 
 stop_all() {
   for n in synapse $(bridge_rows | awk '{print $1}'); do stop_one "$n"; done
+  # Also anything left from before launchd owned these, or `--stop` on an
+  # unmigrated install reports success and stops nothing.
+  retire_pidfile_era
 }
 
 status_all() {
-  # Docker first: if the old stack is up, saying so is more useful than
-  # reporting seven native processes as "down".
-  if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^hazlie-'; then
-    echo "the CONTAINER stack is running (ops/setup-bridges.sh). Native and container"
-    echo "stacks share \$M and these ports; stop one before starting the other."
-  fi
   for n in synapse $(bridge_rows | awk '{print $1}'); do
-    if alive "$n"; then echo "  up    $n (pid $(cat "$(pidfile "$n")"))"; else echo "  down  $n"; fi
+    if alive "$n"; then
+      echo "  up    $n (pid $(agent_pid "$n"))"
+    elif [ -f "$AGENTS/$(label_for "$n").plist" ]; then
+      echo "  down  $n (agent installed; launchd will retry)"
+    else
+      echo "  down  $n (no agent installed)"
+    fi
   done
 }
 
@@ -173,9 +331,16 @@ esac
 NODE="${HZ_NODE:-$HOME/.hazlie/bin/node}"
 [ -x "$NODE" ] || NODE=$(command -v node 2>/dev/null || true)
 
-if [ ! -x "$BIN/mautrix-meta-darwin-arm64" ] && [ -n "$NODE" ] \
-   && [ -f "$REPO/ops/fetch-bridges.mjs" ]; then
-  echo "fetching bridge binaries (first run)"
+# UNCONDITIONAL, because this gate used to read "is the Meta binary present".
+# The downloads are sequential: Meta lands, the network drops during LinkedIn,
+# and every later run sees Meta, skips the fetch forever, and dies at the
+# missing-binaries check below -- a partial install that could never resume.
+# fetch-bridges.mjs is written for exactly this ("fetch what is missing, verify
+# all"): it re-hashes what is already there and downloads only the gaps, so the
+# cost of running it every time is seven sha256s and the benefit is that an
+# interrupted install repairs itself.
+if [ -n "$NODE" ] && [ -f "$REPO/ops/fetch-bridges.mjs" ]; then
+  echo "verifying bridge binaries"
   "$NODE" "$REPO/ops/fetch-bridges.mjs" || {
     echo "bridge fetch failed" >&2; exit 1;
   }
@@ -218,10 +383,20 @@ done
   exit 1
 }
 
-YQ="${HZ_YQ:-}"
-[ -n "$YQ" ] || YQ=$(command -v yq 2>/dev/null || true)
-[ -n "$YQ" ] || YQ="$REPO/widget/build/Intaglio Labs.app/Contents/Resources/backend/tools/yq"
-[ -x "$YQ" ] || { echo "yq not found; set HZ_YQ" >&2; exit 1; }
+# THE BUNDLED COPY, BEFORE PATH. In a downloaded app $REPO is already
+# Contents/Resources/backend and build.sh puts yq at $REPO/tools/yq -- the old
+# third fallback appended an in-checkout "widget/build/Intaglio Labs.app/..."
+# path underneath that, which exists in no bundle. So on a stock Mac with no
+# Homebrew yq, every native setup died HERE, after paying for the bridge
+# binaries and the whole Synapse runtime. Same resolution order the Docker
+# provisioner already used, and for the same reason: pressing Connect must
+# never require Homebrew. HZ_YQ stays first for release/CI validation.
+YQ="${HZ_YQ:-$REPO/tools/yq}"
+[ -x "$YQ" ] || YQ="$(command -v yq 2>/dev/null || true)"
+[ -n "$YQ" ] && [ -x "$YQ" ] || {
+  echo "bridge config editor is missing from this install; reinstall Intaglio Labs." >&2
+  exit 1
+}
 
 PY="$SYN/venv/bin/python"
 mkdir -p "$M" "$RUN"
@@ -367,30 +542,44 @@ done
 [ "$MODE" = "provision" ] && { echo "provisioned (not started)"; exit 0; }
 
 # --- up -----------------------------------------------------------------------
-start_bg() {
-  name=$1; shift
-  alive "$name" && { echo "  already up: $name"; return 0; }
-  # setsid is not on macOS; nohup plus a detached redirect is the portable form.
-  nohup "$@" >"$RUN/$name.log" 2>&1 &
-  echo $! > "$(pidfile "$name")"
+# NOTHING IS LEFT RUNNING BY A SETUP THAT FAILED. Synapse binds :8008 before
+# the bridges are even installed, so an abort after this point used to leave a
+# homeserver holding the port with no bridges behind it -- and the next run,
+# or anything else wanting :8008, met a listener it had not started. Every exit
+# path below goes through this.
+abandon() {
+  echo "$1" >&2
+  stop_all
+  exit 1
 }
 
+retire_pidfile_era
+
 if [ "$NEEDS_RESTART" = "1" ]; then stop_one synapse; fi
-start_bg synapse "$PY" -m synapse.app.homeserver --config-path "$M/synapse/homeserver.yaml"
+install_agent synapse "$REPO/ops/io.intaglio.synapse.plist" \
+  -e "s|@PY@|$PY|g" \
+  -e "s|@CONFIG@|$M/synapse/homeserver.yaml|g" \
+  -e "s|@WORKDIR@|$M/synapse|g" \
+  -e "s|@LOG@|$RUN/synapse.log|g" \
+  || abandon "could not install the synapse agent"
 
 i=0
 until curl -sf "http://127.0.0.1:$SYNAPSE_PORT/health" >/dev/null 2>&1; do
   i=$((i + 1))
   if [ "$i" -gt 45 ]; then
-    echo "synapse never became healthy; see $RUN/synapse.log" >&2
     tail -20 "$RUN/synapse.log" >&2 2>/dev/null || true
-    exit 1
+    abandon "synapse never became healthy; see $RUN/synapse.log"
   fi
   sleep 2
 done
 echo "synapse: healthy on 127.0.0.1:$SYNAPSE_PORT"
 
 # --- the owner ----------------------------------------------------------------
+# BEFORE the credentials, not after: Provision reads "credentials present,
+# marker absent" as "this install needs the migration", so a run that died in
+# between would send every later launch back through the whole setup.
+mark_history_uncapped
+
 if [ ! -f "$M/owner-credentials.json" ]; then
   # REGISTERED THROUGH THE SHARED-SECRET ADMIN API, not through
   # register_new_matrix_user.
@@ -469,26 +658,115 @@ print("owner-credentials.json written (0600)")
 PY
 fi
 
-bridge_rows | while read -r name port dbfile binary; do
-  start_bg "$name" "$BIN/$binary" -c "$M/$name/config.yaml" -r "$M/$name/registration.yaml" -n
+# --- telegram's missing half --------------------------------------------------
+# PORTED FROM THE CONTAINER SCRIPT, which is where this lived and which is gone.
+# Without it Telegram regresses from "a phone-and-code login like every other
+# platform" to "register your own app at my.telegram.org first", for every user
+# of every build -- including builds that ship a credential precisely so nobody
+# has to. widget/build.sh still bakes the pair in and still says so.
+#
+# The generated config ships mautrix's EXAMPLE credentials (api_id 12345) and
+# the bridge refuses to start on them, so the example id is the reliable "not
+# yet configured" signal rather than an empty key.
+#
+# THREE PLACES A REAL PAIR CAN COME FROM, in this order. None of them is this
+# repository, and that is deliberate: it is public, and Telegram refuses logins
+# made with any api_id it finds in public code (API_ID_PUBLISHED_FLOOD). See
+# the note at PLATFORMS.telegram in connect/lib/bridge.mjs.
+#   1. $HZ_TELEGRAM_APP        -- an explicit run, or CI from a repo secret
+#   2. ~/.hazlie/secrets/telegram-app.txt -- this machine's own copy (0600)
+#   3. the installed app's bundled copy   -- what widget/build.sh baked in
+# The per-user walkthrough in the widget stays live underneath all three: it
+# writes the same two keys through the same path, so a flagged shipped id
+# degrades to "register your own" instead of to nothing.
+telegram_app_credential() {
+  if [ -n "${HZ_TELEGRAM_APP:-}" ]; then printf '%s' "$HZ_TELEGRAM_APP"; return; fi
+  if [ -f "$HOME/.hazlie/secrets/telegram-app.txt" ]; then
+    tr -d '[:space:]' < "$HOME/.hazlie/secrets/telegram-app.txt"; return
+  fi
+  for app in "/Applications/Intaglio Labs.app" "$HOME/Applications/Intaglio Labs.app"; do
+    if [ -f "$app/Contents/Resources/backend/telegram-app" ]; then
+      tr -d '[:space:]' < "$app/Contents/Resources/backend/telegram-app"; return
+    fi
+  done
+  printf ''
+}
+
+TELEGRAM_UNCONFIGURED=0
+if [ "$("$YQ" '.network.api_id // 0' "$M/telegram/config.yaml" 2>/dev/null)" = "12345" ]; then
+  TG_APP="$(telegram_app_credential)"
+  # An explicit CI/local override arrives in this process's environment. Drop it
+  # before sed or any other child can inherit the credential.
+  unset HZ_TELEGRAM_APP || true
+  # Shape-checked before it is written. A malformed pair produces a bridge that
+  # crash-loops with nothing on the machine naming the cause -- which under
+  # launchd's KeepAlive is exactly the hot loop ThrottleInterval exists for.
+  if printf '%s' "$TG_APP" | grep -Eq '^[0-9]{1,12}:[0-9a-fA-F]{32}$'; then
+    TG_ID="${TG_APP%%:*}"
+    TG_HASH="${TG_APP#*:}"
+    # Targeted line replacement, not a yq round trip: mautrix's generated config
+    # carries ~700 lines of comments that a re-serialise would flatten. Feed the
+    # replacement program over stdin so the API hash never appears in sed's argv
+    # (and therefore never flashes in another process's `ps` view).
+    {
+      printf 's/^\([[:space:]]*api_id:\).*/\1 %s/\n' "$TG_ID"
+      printf 's/^\([[:space:]]*api_hash:\).*/\1 "%s"/\n' "$TG_HASH"
+    } | /usr/bin/sed -i '' -f - "$M/telegram/config.yaml"
+    echo "telegram: configured from a shipped app credential"
+  else
+    TELEGRAM_UNCONFIGURED=1
+    echo "telegram: needs api_id + api_hash from my.telegram.org/apps"
+    echo "          the widget's Telegram tile walks you through it, or set them"
+    echo "          by hand in $M/telegram/config.yaml and then re-run this script."
+  fi
+fi
+
+# A `for` LOOP, NOT A PIPE. Every bridge_rows consumer in this file is a pipe
+# and therefore a subshell, which is what made the old exit-code bug invisible;
+# this one installs agents and must be able to report failure to the parent.
+for name in $(bridge_rows | awk '{print $1}'); do
+  # A bridge with no usable credential must not be supervised. KeepAlive would
+  # restart it every 60s forever, filling its log and burning the battery, to
+  # accomplish nothing a restart can fix -- the container script stopped the
+  # telegram container for exactly this reason. Boot out any agent a previous
+  # run installed, so removing the credential takes effect too.
+  binary=$(bridge_rows | awk -v n="$name" '$1 == n {print $4}')
+  if [ "$name" = "telegram" ] && [ "$TELEGRAM_UNCONFIGURED" = "1" ]; then
+    # Plist written, agent not loaded. The widget's Telegram walkthrough
+    # bootstraps this exact file once the owner supplies a credential.
+    render_agent telegram "$REPO/ops/io.intaglio.bridge.plist" \
+      -e "s|@LABEL@|io.intaglio.bridge.telegram|g" \
+      -e "s|@BINARY@|$BIN/$binary|g" \
+      -e "s|@CONFIG@|$M/telegram/config.yaml|g" \
+      -e "s|@REGISTRATION@|$M/telegram/registration.yaml|g" \
+      -e "s|@WORKDIR@|$M/telegram|g" \
+      -e "s|@LOG@|$RUN/telegram.log|g" || true
+    stop_one telegram
+    echo "  telegram: configured but not started (no api_id yet)"
+    continue
+  fi
+  install_agent "$name" "$REPO/ops/io.intaglio.bridge.plist" \
+    -e "s|@LABEL@|io.intaglio.bridge.$name|g" \
+    -e "s|@BINARY@|$BIN/$binary|g" \
+    -e "s|@CONFIG@|$M/$name/config.yaml|g" \
+    -e "s|@REGISTRATION@|$M/$name/registration.yaml|g" \
+    -e "s|@WORKDIR@|$M/$name|g" \
+    -e "s|@LOG@|$RUN/$name.log|g" \
+    || echo "  !! $name: agent not installed" >&2
 done
 
-# START IS NOT PROOF OF LIFE, AND THIS SCRIPT'S EXIT CODE IS LOAD-BEARING.
+# BOOTSTRAPPED IS NOT RUNNING, AND THIS SCRIPT'S EXIT CODE IS LOAD-BEARING.
 #
-# start_bg records $! the instant nohup forks, so the pidfile is written even
-# for a binary that is missing, unsigned, or dies on its own config a moment
-# later. Without a second look this script returned 0 no matter what happened,
-# and Provision.swift only tries the Docker script `where !success` -- so the
-# fallback it carefully keeps around was unreachable code. A native run that
-# started nothing reported the same success as one that started seven bridges.
-#
-# The re-check has to happen HERE, in the parent. The loop above is the right
-# side of a pipe and therefore a subshell: an `exit 1` inside it kills that
-# subshell and the script sails on to exit 0, which is exactly the failure this
-# is meant to catch.
-sleep 3
+# launchctl bootstrap succeeds for a plist pointing at a binary that is
+# missing, unsigned, or dies on its own config a moment later -- so a run that
+# started nothing would otherwise report exactly what a run that started seven
+# reports. Give launchd a moment to get past RunAtLoad, then ask it.
+sleep 5
 dead=""; live=0
 for name in $(bridge_rows | awk '{print $1}'); do
+  # Telegram-without-a-credential is a deliberate non-start, not a failure, and
+  # counting it as dead would report a healthy six-platform install as broken.
+  [ "$name" = "telegram" ] && [ "$TELEGRAM_UNCONFIGURED" = "1" ] && continue
   if alive "$name"; then live=$((live + 1)); else dead="$dead $name"; fi
 done
 
@@ -497,18 +775,19 @@ status_all
 
 if [ -n "$dead" ]; then
   echo >&2
-  echo "these bridges did not stay up:$dead" >&2
+  echo "these bridges did not come up:$dead" >&2
+  echo "launchd will keep retrying them (ThrottleInterval 60); the logs say why:" >&2
   for name in $dead; do
     echo "--- $name ---" >&2
-    tail -15 "$RUN/$name.log" >&2 2>/dev/null || echo "  (no log)" >&2
+    tail -15 "$RUN/$name.log" >&2 2>/dev/null || echo "  (no log yet)" >&2
   done
 fi
 
-# Partial failure is NOT a reason to fail the run. Falling back to Docker here
-# would tear down however many bridges are working and start a Linux VM to
-# replace them, which is a worse outcome than one dead bridge plus the log
-# above. Only a total washout means "native did not work on this machine".
+# Partial failure is NOT a failed run. Six working platforms and one that needs
+# a credential the owner has to create -- telegram's api_id is the standing
+# example -- is a working install with a note, and launchd keeps retrying the
+# odd one out. Only a total washout means the runtime itself did not work, and
+# that is the case where leaving a homeserver holding :8008 helps nobody.
 if [ "$live" -eq 0 ]; then
-  echo "no bridge stayed up; native setup failed" >&2
-  exit 1
+  abandon "no bridge came up; native setup failed"
 fi
