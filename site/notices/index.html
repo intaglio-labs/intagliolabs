@@ -310,6 +310,70 @@ Apache License, Version 2.0, reproduced in full as its section 4 requires:</p>
    limitations under the License.
 </pre>
 
+<h2 id="native-libraries">Native libraries in the macOS app</h2>
+<p>The macOS application bundle ships the following compiled library. It runs
+entirely on your Mac and is not our work:</p>
+
+<h3>libolm</h3>
+<p>Copyright &copy; 2015&ndash;2016 OpenMarket Ltd and copyright &copy;
+2018&ndash;2019 New Vector Ltd. Licensed under the Apache License, Version 2.0
+&mdash; the same license reproduced in full above, which satisfies its
+section 4 for this library too.</p>
+<p>libolm implements the Double Ratchet and Megolm cryptographic ratchets. The
+Matrix bridges that carry your chat history into Intaglio Labs link against it
+to decrypt end-to-end encrypted rooms; without it those bridges abort in dyld
+before they start. We build version 3.2.16 from
+<a href="https://gitlab.matrix.org/matrix-org/olm">gitlab.matrix.org</a> and
+ship the result, because upstream archived the project and publishes no macOS
+release binary.</p>
+<p>Three third-party components are compiled into that library and are
+therefore redistributed inside it:</p>
+<ul>
+  <li><strong>curve25519-donna</strong> &mdash; copyright &copy; 2008 Google
+    Inc., three-clause BSD, reproduced below as its binary-redistribution
+    clause requires. Written by Adam Langley, derived from public-domain code
+    by Daniel J. Bernstein.</li>
+  <li><strong>crypto-algorithms</strong> (AES and SHA-256) &mdash; by Brad
+    Conte, released into the public domain. The author requests
+    acknowledgement but does not require it; this is that acknowledgement.</li>
+  <li><strong>ed25519</strong> &mdash; released into the public domain.</li>
+</ul>
+<pre>Copyright 2008, Google Inc.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+* Redistributions of source code must retain the above copyright
+ notice, this list of conditions and the following disclaimer.
+* Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+* Neither the name of Google Inc. nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+&quot;AS IS&quot; AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.</pre>
+<!-- INCOMPLETE, AND KNOWINGLY SO. The app bundle also ships Node.js and yq,
+     and neither is named anywhere on this page. That gap predates the native
+     bridge work and is not fixed here; it is tracked rather than quietly
+     inherited. The Matrix bridge binaries are deliberately NOT listed: they
+     are AGPL-3.0 and we do not ship them -- the setup script downloads them
+     from mautrix's own release server onto your Mac, the same posture as the
+     downloaded models below. -->
+
 <h2 id="downloaded-models">Downloaded models</h2>
 <p>Intaglio Labs' one-time, user-run setup scripts download the following AI models
 from their publishers onto your Mac. They are not our work and are governed by

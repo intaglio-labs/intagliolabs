@@ -262,9 +262,41 @@ const HZ_HINT_FOR = (id) => (id.startsWith('mail:') ? HZ_HINTS.mail : HZ_HINTS[i
 // HZ_WHY — the one-line what-this-reads subheader — was yeeted with its twin
 // in connections.js (owner, 2026-08-25); the note there carries the reasoning.
 const HZ_STAY = "data stored locally";
+// THE ENGINE IS STARTING -- SAY SO, AND OFFER NOTHING TO PRESS.
+//
+// Two rewrites got this here. It first said "open Docker, then: bash
+// ops/setup-bridges.sh", which was wrong three ways at once: it named a repo
+// path a downloaded install does not have, it told the owner to run a script
+// the app ALREADY runs itself (Provision.ensureBridgeRuntime shells the bundled
+// copy on any nobridge), and it omitted the only fact that resolved the
+// situation -- press the tile again once Docker was up. Then it kept the "open
+// Docker" button while native became the default, sending native installs to a
+// VM they had no use for.
+//
+// There is no Docker now, so there is no owner step left to offer. Every
+// remedy this notice used to hand over is something the machine does: setup
+// runs itself on a nobridge, launchd restarts a bridge that died, and the
+// first run has a real download to finish before any of that is true. A
+// button that cannot help is worse than no button, so this says what is
+// happening and stops.
+function hzTileNobridgeNotice(tip) {
+  const line = document.createElement('span');
+  // This hardcoded string is the one the tile actually renders -- correcting
+  // the NOTICES entry alone changed nothing, which is how the Docker wording
+  // outlived two attempts to remove it.
+  line.textContent = 'social connections are still starting up — this can take a few minutes the first time.';
+  tip.append(line);
+}
+
 const HZ_NOTICES = {
-  // See connections.js NOTICES.nobridge — the engine, not the connection.
-  nobridge: 'the social bridge engine is not running — open Docker, then: bash ops/setup-bridges.sh',
+  // See connections.js NOTICES.nobridge — the engine, not the connection, and
+  // no longer an instruction: setup runs itself and launchd restarts what dies.
+  nobridge: 'social connections are still starting up.',
+  // The site refused to render a security step in an embedded window and the
+  // owner pressed the handoff. Not a failure state: the connect page is open
+  // in their browser, where that step does render.
+  browserLogin: 'this step needs a real browser — the connect page just opened; finish signing in there, then press this again.',
+
   down: 'checking the local connection…',
   auth: 'token mismatch — status unknown',
   noroute: 'connect service predates /api/status — status unknown',
@@ -506,7 +538,8 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
         (serverId, enabled) => hzPost('bridgeDiscordServer', { serverId, enabled })
       );
     } else if (data && data.state !== 'ok' && data.state !== 'cancelled' && !manual && !data.transcript) {
-      tip.append(HZ_NOTICES[data.state] || data.error || HZ_NOTICES.error);
+      if (data.state === 'nobridge') { hzTileNobridgeNotice(tip); }
+      else { tip.append(HZ_NOTICES[data.state] || data.error || HZ_NOTICES.error); }
     } else {
       // The bot's pending QUESTION, computed first because the log in button
       // below is hidden while one is outstanding (owner, 2026-08-25).

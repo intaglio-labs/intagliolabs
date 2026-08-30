@@ -24,7 +24,7 @@
 // LOG POLICY (connectors/AGENTS.md): counts and cursors only — never message
 // text, never a JID, never a contact name.
 
-import { rmSync } from 'node:fs';
+import { rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -67,10 +67,49 @@ export function createWhatsappSource({ home } = {}) {
     name: 'whatsapp',
     walksHistory: true,
 
-    // Readability is the honest probe, not a pre-check: FDA attributes per
-    // spawner (the iMessage rule). needs() answers "provisioned?" — the store
-    // exists once WhatsApp Desktop has run at least once.
+    // Provisioned? The store belongs to WhatsApp Desktop. If it is not there,
+    // there is nothing to read yet -- an unprovisioned source, not a broken one.
+    //
+    // This used to return [] unconditionally, on the reasoning that "the store
+    // exists once WhatsApp Desktop has run at least once". That premise is
+    // false, and the machine it was written for disproves it: WhatsApp is
+    // installed, its group container is populated, and ChatStorage.sqlite is
+    // simply absent -- the app was re-linked, which wipes the message store, and
+    // has not re-synced. So the connector failed 459 consecutive times over six
+    // days. snapshotStore() stats the source first (lib/storeReader.mjs), the
+    // ENOENT escaped run()'s catch-less try/finally, and the daemon recorded
+    // ok:false every fifteen minutes forever. An app that has nothing to give
+    // yet is not a fault to alarm about.
+    //
+    // ENOENT ONLY, and that is deliberately not existsSync. Every other gate in
+    // the roster (granola, notion, oura, calendar) stats a file THIS repo writes
+    // under ~/.hazlie/secrets, where collapsing "absent" and "denied" into one
+    // boolean costs nothing. This path is a third party's, inside a group
+    // container, and the rule every local-store source states -- readability is
+    // the run's job, because FDA attributes per spawner -- has to survive. A
+    // denial (EPERM/EACCES, checks.mjs DENIED_CODES) therefore falls through to
+    // the run, which is still the honest probe and still fails loudly. Same
+    // split realReadSqlite already makes: ENOENT is missing, EPERM is denied,
+    // and they are not one fact. existsSync would report a TCC denial as "not
+    // installed", turning a loud failure into a silent one.
+    //
+    // FRESHNESS IS NOT THIS GATE'S BUSINESS. A present-but-frozen store passes,
+    // so run() still reports the newest message's age and the watchdog can still
+    // say "open whatsapp on your mac so it can sync". That sentence is for a
+    // store that EXISTS and has stopped moving; this one is for a store that is
+    // not there at all. Keeping the two apart is the whole point of the header.
     needs() {
+      const store = chatStoragePath(home ?? homedir());
+      try {
+        statSync(store);
+      } catch (error) {
+        if (error?.code === 'ENOENT') {
+          return [
+            `whatsapp desktop store missing at ${store}: install WhatsApp Desktop ` +
+              "and link it to your phone (the connect page's WhatsApp panel has the steps)",
+          ];
+        }
+      }
       return [];
     },
 

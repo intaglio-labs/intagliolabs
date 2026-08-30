@@ -114,8 +114,15 @@ function encodeRoomMembers(members) {
   return JSON.stringify([...members.entries()]);
 }
 
+// The one bridge state root. There was briefly a second (~/.hazlie/matrix-docker)
+// while a Docker fallback existed and the two provisioners disagreed about
+// whether a path was host-absolute or a container's /data view. The fallback is
+// gone, so the split is too -- ops/setup-bridges-native.sh refuses to provision
+// on top of a directory a container wrote, rather than there being two.
+const matrixRoot = (home) => join(home, '.hazlie', 'matrix');
+
 export function credentialsPath(home) {
-  return join(home, '.hazlie', 'matrix', 'owner-credentials.json');
+  return join(matrixRoot(home), 'owner-credentials.json');
 }
 
 /** The owner's homeserver + token, or null when the stack was never set up. */
@@ -403,6 +410,15 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
       // hundreds of portal rooms still sitting at `invite`, invisible to every
       // later incremental /sync. One full snapshot re-discovers them; after
       // that, the private queue below makes incremental delivery safe.
+      //
+      // MEASURED on a real install before either fix existed (2026-08-29):
+      // 25 portal rooms sat at `invite` against 19 joined, so Discord and
+      // LinkedIn had bridge databases full of messages and ZERO rows in the
+      // corpus, indefinitely. A branch fix ran this snapshot on EVERY pass;
+      // this replaced it and is better, because setCursor(PENDING_INVITES_KEY)
+      // happens before setCursor(CURSOR_KEY) — the queue is durable before the
+      // token moves, so the hole cannot reopen, and no pass after the first
+      // pays for a full-state sync.
       const needsInviteRecovery = !ctx.state.getCursor(INVITE_RECOVERY_KEY);
       const since = (ctx.backfill || needsHistoryBootstrap || needsInviteRecovery)
         ? null

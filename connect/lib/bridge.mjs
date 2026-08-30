@@ -20,7 +20,13 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-const matrixDir = (home) => join(home, '.hazlie', 'matrix');
+// The one bridge state root. There was briefly a second (~/.hazlie/matrix-docker)
+// while a Docker fallback existed and the two provisioners disagreed about
+// whether a path was host-absolute or a container's /data view. The fallback is
+// gone, so the split is too -- ops/setup-bridges-native.sh refuses to provision
+// on top of a directory a container wrote, rather than there being two.
+const matrixRoot = (home) => join(home, '.hazlie', 'matrix');
+const matrixDir = (home) => matrixRoot(home);
 
 // THE WEB-LOGIN POLICY LIVES HERE AND ONLY HERE (added 2026-08-23).
 //
@@ -77,7 +83,41 @@ export const PLATFORMS = Object.freeze({
     cookieDomain: 'facebook.com',
     // Meta's login bounces across its own properties (account center, 2FA),
     // so the flow needs all three; `c_user` appearing means the session is up.
-    webLogin: { allowedHosts: ['facebook.com', 'messenger.com', 'meta.com'], sessionCookie: 'c_user' },
+    // WIDTH. Facebook's login page declares no viewport meta, and at 480pt it
+    // overflows: measured scrollWidth 515 against clientWidth 480, which is the
+    // horizontal scrollbar the owner saw. 1000 removes that.
+    //
+    // ~~"WebKit lays it out at the desktop default, so the form is off-screen to
+    // the right"~~ was the reasoning given when this landed and it is WRONG. That
+    // ~980px fallback viewport is iOS WKWebView behaviour; on macOS the page lays
+    // out at the view's width. A probe measured document.documentElement.clientWidth
+    // === 480 with the email field at {x:67,y:271,w:346,h:38} -- fully on screen --
+    // and a replica of this exact configuration renders the complete form at 480
+    // AND at 1000. The width was a real defect (35px of overflow) but it was NOT
+    // the cause of the blank window, which is still open. Kept because a
+    // scrollbar-free login window is better; the causal claim is retracted so the
+    // next reader does not inherit it.
+    //
+    // Policy, not a Swift constant, like every other per-platform difference.
+    webLogin: {
+      allowedHosts: ['facebook.com', 'messenger.com', 'meta.com'],
+      // SUBFRAMES: Meta frames its own challenge from its own sandbox host.
+      //
+      // fbsbx.com is where two-step verification is embedded, and with no
+      // allowedFrameHosts the fence cancelled it — measured 2026-08-30,
+      // "blocked-subframe Messenger www.fbsbx.com", after which the page sat
+      // there with a 2.5MB DOM rendering nothing. Five theories were spent on
+      // that blank page (viewport, data store, a JS crash, WebAuthn, and Meta
+      // refusing embedded webviews outright) and this fence was the cause the
+      // whole time.
+      //
+      // A subframe is not a destination. The main frame is where a password is
+      // typed and allowedHosts still governs it; this only says a Meta login page
+      // may embed content from Meta, which is what it does.
+      allowedFrameHosts: ['fbsbx.com', 'facebook.com', 'meta.com'],
+      sessionCookie: 'c_user',
+      windowWidth: 1000,
+    },
   },
   instagram: {
     id: 'instagram',
@@ -91,7 +131,13 @@ export const PLATFORMS = Object.freeze({
     loginUrl: 'https://www.instagram.com/accounts/login/',
     cookieDomain: 'instagram.com',
     // Instagram's login can hand off to Meta's account center mid-flow.
-    webLogin: { allowedHosts: ['instagram.com', 'facebook.com', 'meta.com'], sessionCookie: 'sessionid' },
+    // Same Meta infrastructure and the same challenge host: Instagram's login
+    // hands off to the account centre and can frame the identical widget.
+    webLogin: {
+      allowedHosts: ['instagram.com', 'facebook.com', 'meta.com'],
+      allowedFrameHosts: ['fbsbx.com', 'facebook.com', 'meta.com', 'instagram.com'],
+      sessionCookie: 'sessionid',
+    },
   },
   // Owner-gated in SOCIAL-BRIDGES-PLAN.md ("accept the account risk");
   // Owner said go, 2026-08-22. mautrix-twitter, same megabridge family —
@@ -197,7 +243,7 @@ export const PLATFORMS = Object.freeze({
     // config rather than assumed. mautrix ships api_id 12345 as its example
     // and the bridge refuses to start on it, so that value IS the "nobody has
     // configured this" signal — an empty key never appears. When a build ships
-    // an app credential (widget/build.sh → ops/setup-bridges.sh) this is
+    // an app credential (widget/build.sh → ops/setup-bridges-native.sh) this is
     // already real by the time anyone opens the card, and the card must not
     // ask for a paste that would overwrite a working pair.
     appCredential: { file: 'telegram/config.yaml', unset: /^\s*api_id:\s*12345\s*$/mu },
@@ -223,7 +269,7 @@ export const PLATFORMS = Object.freeze({
     // card drops straight to the phone-and-code conversation it already has.
     // Concretely: the pair is injected at BUILD time from a repository secret
     // (the same shape as FIREBASE_SERVICE_ACCOUNT, which this tree already
-    // keeps out of itself), ops/setup-bridges.sh writes it into config.yaml
+    // keeps out of itself), ops/setup-bridges-native.sh writes it into config.yaml
     // when one is present instead of stopping the container on the example
     // 12345, and the paste path stays as an OVERRIDE — HINTS.telegram's
     // walkthrough rendering only when no default is configured.
@@ -536,8 +582,12 @@ function assertLoopbackBase(base) {
   } catch {
     throw new Error(`matrix homeserver is not a valid URL: ${base}`);
   }
-  const ok = host === '127.0.0.1' || host === 'localhost' || host === '::1'
-    || host === 'synapse'; // the compose-internal name, used when run in-network
+  // `synapse` was accepted here too -- the compose network's internal DNS name,
+  // valid only inside a container. There is no container network, so this is a
+  // plain hostname now: something that resolves through DNS to whatever a
+  // resolver says, carrying the owner's homeserver token to it. Removed with
+  // the engine it belonged to. The native provisioner writes 127.0.0.1.
+  const ok = host === '127.0.0.1' || host === 'localhost' || host === '::1';
   if (!ok) {
     throw new Error(`matrix homeserver must be loopback, refusing ${host}`);
   }
@@ -563,7 +613,7 @@ export function loadCreds({ home = homedir() } = {}) {
 // were backfilling — but mautrix-discord is the pre-bridgev2 generation and
 // has no user_login table at all, so this query threw, the catch below read
 // the exception as "not connected", and the tile stayed grey through a
-// perfectly good login. ops/setup-bridges.sh has always said Discord is the
+// perfectly good login. the bridge setup has always said Discord is the
 // legacy one; nothing here asked.
 //
 // An override must return a column named remote_name, and the row's existence

@@ -263,7 +263,7 @@ export async function applyPendingSocialReimport({
   if (typeof purge !== 'function') throw new Error('social reimport requires a purge function');
   assertOwnerOnlyFile(pendingPath, {
     label: 'social reimport marker',
-    setupHint: 'rerun ops/setup-bridges.sh',
+    setupHint: 'rerun ops/setup-bridges-native.sh',
   });
 
   let deleted = 0;
@@ -336,6 +336,12 @@ const TOP_KEYS = Object.freeze([
   // `"linkedin": {}` fail before ANY connector could start.
   'linkedin',
   'retention',
+  // The Relationship Memory cap. hermes gates the whole reconnect card on
+  // relationshipMemory.capPerDay, and assertClosedKeys throws on any unknown
+  // top-level key — so before this line, writing the key that TURNS THE
+  // FEATURE ON stopped every connector from starting. The daemon does not read
+  // it; it only has to stop refusing it.
+  'relationshipMemory',
 ]);
 const MAIL_KEYS = Object.freeze([
   'host',
@@ -708,10 +714,26 @@ export function createDaemon({
   sources,
   ingestOpts,
   cacheDir = defaultCacheDir(),
+  // Injectable so a test can drive a real daemon without overwriting the owner's
+  // live activity snapshot at ~/.hazlie/connectors/activity.json.
+  activityPath = defaultActivityPath(),
   now = Date.now,
 }) {
   const timers = new Set();
   const nextRuns = new Map();
+  // WHY A SOURCE CANNOT RUN, as of its last evaluation.
+  //
+  // `runSource` already asks every source's needs() on every tick and returns
+  // early when anything is missing -- an unprovisioned source is scheduled, ticks,
+  // finds no credential and does nothing, forever. That answer was only ever
+  // logged. The activity queue is built from `nextRuns`, which knows the SCHEDULE
+  // and not the PREREQUISITES, so a source that can never do work still reached
+  // the owner as pending work.
+  //
+  // Absent from this map means "not evaluated yet", which is deliberately
+  // different from "ready": an unevaluated source is shown rather than hidden, so
+  // a needs() that is slow or throws can never silently empty the queue.
+  const notReady = new Map();
   let stopped = false;
   const historyRoster = sources.filter((source) => source.walksHistory === true)
     .map((source) => source.name);
@@ -721,6 +743,12 @@ export function createDaemon({
   // a polling interval in the UI. Keep every queued source in chronological
   // order so the compact activity line can expand into the next real tasks.
   const scheduledQueue = () => [...nextRuns.entries()]
+    // A source whose prerequisites are missing is scheduled but cannot work, and
+    // listing it as pending told the owner they had work queued for accounts they
+    // had never connected. matrix was already filtered this way through
+    // connectedSocialPlatforms() below; this applies the same test one level up,
+    // where it was missing.
+    .filter(([connector]) => !notReady.has(connector))
     .flatMap(([connector, nextTs]) => {
       if (connector !== 'matrix') return [{ connector, nextTs }];
       return connectedSocialPlatforms().map((platform) => ({
@@ -733,17 +761,32 @@ export function createDaemon({
     .sort((a, b) => a.nextTs - b.nextTs);
   const intervalMsFor = (connector) =>
     (config.intervals?.[connector] ?? DEFAULT_INTERVAL_S) * 1000;
-  // TOTAL QUEUE HORIZON, not the duration of the first/current row. The owner
-  // asked for one pinned answer to "when is all the work in this queue done?".
-  // Routine passes contribute their actual scheduler deadlines (including the
-  // idle-window maintenance pass); resumable Calendar/Matrix history can extend
-  // that horizon across additional bounded passes. Matrix pagination is opaque,
-  // so this remains deliberately approximate rather than claiming precision.
+  // HOW LONG THE OUTSTANDING WORK TAKES -- backfill only, and null when there is
+  // none.
+  //
+  // This used to seed the horizon with every routine scheduler deadline,
+  // including the idle-window maintenance pass. Those are WAITS, not work: an
+  // entirely idle daemon whose next maintenance sat at 03:30 tomorrow reported
+  // "~ 17.3 hrs left" while `backfill` was empty and nothing at all was running.
+  // The number was real and the sentence it formed was false, which is the worst
+  // combination a status line can have.
+  //
+  // A routine pass is a few seconds of work on a fifteen-minute timer; the gap
+  // before it says nothing about how much is left to do. Only resumable
+  // Calendar/Matrix history spans multiple bounded passes and can honestly be
+  // described in hours, so only that is counted here. Matrix pagination is
+  // opaque, so this stays deliberately approximate rather than claiming
+  // precision.
   const totalWorkEstimate = () => {
     const nowMs = now();
-    const completionTimes = scheduledQueue().map((task) => task.nextTs);
+    // completionTimes starts EMPTY on purpose. Seeding it from scheduledQueue()
+    // made an idle daemon report hours remaining off tomorrow's idle-window
+    // maintenance pass -- a wait rendered as work. Only genuinely multi-pass
+    // backfill may put a time in here.
+    const completionTimes = [];
     const yearly = yearlyBackfill.snapshot();
     const backfill = yearly.pending;
+    let backfillRooms = 0;
 
     if (backfill.includes('calendar')) {
       const ceiling = positiveNumber(
@@ -760,17 +803,48 @@ export function createDaemon({
       completionTimes.push(first + Math.max(0, passes - 1) * intervalMsFor('calendar'));
     }
 
+    // MATRIX CONTRIBUTES NO ETA, ONLY A COUNT.
+    //
+    // It used to compute `minimumPasses = ceil(rooms / pagesPerPass)` and render
+    // the result as an ETA. With 9 rooms and a rate of 11 that is ceil(9/11) = 1,
+    // so the answer was always exactly one interval away -- "~ 0.2 hrs left" on
+    // every single pass, while the per-room pagination cursors ran thousands of
+    // events deep. The owner watched it and asked the only sensible question:
+    // "why doesnt it ever progress from the first one / how do i knoe its working
+    // / how much is left" (2026-08-29).
+    //
+    // The variable was honestly named minimumPasses and then rendered as though
+    // it were a forecast. It is a FLOOR: Matrix pagination is opaque, a room can
+    // need one more page or four hundred, and nothing here can know which. A
+    // lower bound presented as time remaining is a fabricated metric in the sense
+    // CLAUDE.md's first hard rule means -- it is not measuring what its label
+    // claims. So: say how many conversations are being walked, and say nothing
+    // about when it ends.
+    //
+    // TWO THINGS CHANGED IN THE MERGE, both load-bearing. The guard is main's
+    // roster, not `!getCursor('matrix:history-done')`: under the year barrier
+    // that cursor is written ONLY on the non-yearly branch
+    // (sources/matrix.mjs), so the old guard would be permanently true. And the
+    // count reads the YEAR queue first, because that is the queue the yearly
+    // branch actually drains -- reading `matrix:history-rooms` there would show
+    // a number that never moves, which is precisely the complaint above wearing
+    // a different hat.
     if (backfill.includes('matrix')) {
-      const rooms = matrixHistoryRooms(state.getCursor('matrix:history-rooms'));
+      const rooms = matrixHistoryRooms(
+        state.getCursor('matrix:history-year-rooms') ?? state.getCursor('matrix:history-rooms')
+      );
       if (rooms > 0) {
-        const pagesPerPass = positiveNumber(state.getCursor(HISTORY_RATE_KEY('matrix')), 3);
-        const minimumPasses = Math.ceil(rooms / pagesPerPass);
-        const first = nextRuns.get('matrix') ?? nowMs + intervalMsFor('matrix');
-        completionTimes.push(first + Math.max(0, minimumPasses - 1) * intervalMsFor('matrix'));
+        backfillRooms = rooms;
       }
     }
 
-    if (completionTimes.length === 0) return null;
+    // A count with no estimate is still worth publishing: it is the difference
+    // between "something is happening to 9 conversations" and a silent panel.
+    if (completionTimes.length === 0) {
+      return backfill.length === 0
+        ? null
+        : { backfill, backfillRooms, ...(!yearly.complete ? { backfillYear: yearly.year } : {}) };
+    }
     const completion = Math.max(...completionTimes);
     const tenthsOfAnHour = Math.max(1, Math.round((completion - nowMs) / 360_000));
     // The estimate says that multi-pass work exists; `backfill` says which
@@ -781,12 +855,13 @@ export function createDaemon({
     return {
       estimate: `~ ${(tenthsOfAnHour / 10).toFixed(1)} hrs left`,
       backfill,
+      backfillRooms,
       ...(!yearly.complete ? { backfillYear: yearly.year } : {}),
     };
   };
   const publishActivity = (activity) => {
     const total = totalWorkEstimate();
-    writeActivity({ ...activity, queue: scheduledQueue(), ...(total ?? {}) });
+    writeActivity({ ...activity, queue: scheduledQueue(), ...(total ?? {}) }, activityPath);
   };
   const publishWaiting = () => {
     const next = scheduledQueue()[0];
@@ -877,9 +952,15 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
       yearlyBackfill.advance();
       // Not a failure: an unprovisioned source waits, loudly, and is
       // re-checked next cycle. recordRun stays clean of noise runs.
+      notReady.set(source.name, missing);
+      // COUNT, NOT THE STRINGS. Those messages embed absolute local paths --
+      // whatsapp's needs() returns "...missing at /Users/<name>/Library/Group
+      // Containers/..." -- and this line runs every tick.
       log.warn('source_not_ready', { connector: source.name, missing: missing.length });
+      publishWaiting();
       return;
     }
+    notReady.delete(source.name);
     const startedTs = now();
     const socialPlatforms = source.name === 'matrix' ? connectedSocialPlatforms() : [];
     yearlyBackfill.classify(
@@ -1110,6 +1191,25 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
           log.info('source_hidden', { connector: source.name });
         }
       });
+      // ASK WHAT CANNOT RUN BEFORE PUBLISHING A QUEUE, not after.
+      //
+      // notReady is populated inside runSource, so it is EMPTY at startup — and
+      // scheduleSource publishes immediately. Every daemon restart therefore
+      // listed granola and mail as pending work for up to a full stagger
+      // (~90s) before their first ticks corrected it. The owner saw exactly
+      // that: "granola's started showing back up in the activity menu when it
+      // isnt connected". It was not a regression of the filter; the filter had
+      // nothing to filter on yet.
+      //
+      // needs() is cheap — an existsSync or a token read — and the whole point
+      // of it being re-checked before every run is that it is safe to call. So
+      // call it once up front. Failures leave the source ABSENT from the map,
+      // which shows it: unknown must never read as unprovisioned.
+      Promise.allSettled(scheduledSources.map(async (source) => {
+        const missing = await source.needs({ config });
+        if (Array.isArray(missing) && missing.length > 0) notReady.set(source.name, missing);
+      })).then(() => publishWaiting());
+
       scheduledSources.forEach((source, i) => scheduleSource(source, 1_000 + i * FIRST_RUN_STAGGER_MS));
       scheduleMaintenance();
       log.info('daemon_started', {

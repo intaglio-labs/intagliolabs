@@ -9,9 +9,9 @@ const ROOT = join(WIDGET, '..');
 const release = readFileSync(join(WIDGET, 'release.sh'), 'utf8');
 const build = readFileSync(join(WIDGET, 'build.sh'), 'utf8');
 const workflow = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
-const compose = readFileSync(join(ROOT, 'bridges', 'docker-compose.yml'), 'utf8');
-const setupBridges = readFileSync(join(ROOT, 'ops', 'setup-bridges.sh'), 'utf8');
+const setupBridges = readFileSync(join(ROOT, 'ops', 'setup-bridges-native.sh'), 'utf8');
 const prefetchBridges = readFileSync(join(ROOT, 'ops', 'prefetch-bridges.sh'), 'utf8');
+const manifest = readFileSync(join(ROOT, 'bridges', 'native.json'), 'utf8');
 const provision = readFileSync(join(WIDGET, 'src', 'Provision.swift'), 'utf8');
 const privacy = readFileSync(join(ROOT, 'site', 'privacy', 'index.html'), 'utf8');
 
@@ -50,24 +50,29 @@ test('release builds never reuse executable dependencies from the installed app'
   );
 });
 
-test('Telegram setup and prefetch use the same immutable image as runtime', () => {
-  const image = /image:\s*(dock\.mau\.dev\/mautrix\/telegram@sha256:[a-f0-9]{64})/u
-    .exec(compose)?.[1];
-  assert.ok(image, 'the Telegram runtime image must be pinned by digest');
-  assert.ok(setupBridges.includes(image), 'fresh config generation must use the runtime digest');
-  assert.ok(prefetchBridges.includes(image), 'background prefetch must warm the runtime digest');
-  assert.match(setupBridges, /\| \/usr\/bin\/sed -i '' -f - "\$M\/telegram\/config\.yaml"/u,
-    'the Telegram API hash reaches sed over stdin rather than through process arguments');
+// THE PINNING INVARIANT SURVIVED THE ENGINE CHANGE; ITS ARTIFACT DID NOT.
+// These two tests compared setup and prefetch against docker-compose.yml's
+// image digests. There are no images. The thing that must still be immutable
+// is bridges/native.json's per-binary sha256, and the thing that must still be
+// true is that setup and prefetch consume that one manifest rather than each
+// reaching for its own copy of a version number.
+test('every bridge binary is pinned by sha256 in one manifest', () => {
+  const pins = [...manifest.matchAll(/"sha256":\s*"([0-9a-f]{64})"/gu)];
+  assert.ok(pins.length >= 7, `expected a pin per bridge, found ${pins.length}`);
+  assert.doesNotMatch(manifest, /"sha256":\s*""/u, 'an empty pin verifies nothing');
 });
 
-test('every bridge setup and prefetch image matches the immutable runtime image', () => {
-  const runtimeImages = [...compose.matchAll(/^\s*image:\s*(\S+)\s*$/gmu)].map((match) => match[1]);
-  assert.ok(runtimeImages.length >= 8, 'expected Synapse plus every social bridge');
-  for (const image of runtimeImages) {
-    assert.match(image, /@sha256:[0-9a-f]{64}$/u, `${image} is mutable`);
-    assert.ok(setupBridges.includes(image), `setup does not use runtime image ${image}`);
-    assert.ok(prefetchBridges.includes(image), `prefetch does not use runtime image ${image}`);
+test('setup and prefetch fetch through the manifest, never a hardcoded URL', () => {
+  for (const [what, text] of [['setup', setupBridges], ['prefetch', prefetchBridges]]) {
+    assert.match(text, /fetch-bridges\.mjs/u, `${what} must go through the verifying fetcher`);
+    assert.doesNotMatch(text, /https:\/\/github\.com\/mautrix/u,
+      `${what} must not carry its own download URL beside the manifest's`);
   }
+});
+
+test('the Telegram API hash never reaches the process table', () => {
+  assert.match(setupBridges, /-i '' -f - "\$M\/telegram\/config\.yaml"/u,
+    'the Telegram API hash reaches sed over stdin rather than through process arguments');
 });
 
 test('bridge setup requests maximum available history on every supported lane', () => {
@@ -83,32 +88,37 @@ test('bridge setup requests maximum available history on every supported lane', 
     assert.ok(setupBridges.includes(`.bridge.backfill.forward_limits.missed.${kind} = -1`));
   }
   assert.ok(setupBridges.includes('.bridge.startup_private_channel_create_limit = 2147483647'));
-  assert.match(setupBridges, /DISCORD_NEEDS_PORTAL_REFRESH/u);
-  assert.match(setupBridges, /docker compose restart mautrix-discord/u,
-    'an existing running Discord bridge must reload the corrected bind-mounted config');
+  // DISCORD_NEEDS_PORTAL_REFRESH and its `docker compose restart` went with the
+  // container engine: a bind-mounted config needed the container bounced to be
+  // re-read, and there is no container. The native bridge reads its config from
+  // disk at start and launchd restarts it, so the limits above are the whole
+  // invariant now.
 });
 
-test('existing capped bridge installs receive one recoverable automatic reset', () => {
-  assert.match(setupBridges, /\.full-history-reset-v1/u);
-  assert.match(setupBridges, /backups\/full-history-v1-/u);
-  assert.match(setupBridges, /docker compose stop/u,
-    'SQLite databases must not be moved while bridge containers are writing');
-  const migrationStop = setupBridges.match(/# its WAL is not a backup\.([\s\S]*?)backup_path\(\)/u)?.[1] ?? '';
-  assert.doesNotMatch(migrationStop, /\|\| true/u,
-    'a failed writer stop must abort before any SQLite file is moved');
-  assert.match(setupBridges, /printf '%s\\n' "\$RESET_BACKUP" > "\$FULL_HISTORY_PENDING"/u,
-    'an interrupted migration must resume into the same recovery backup');
-  assert.match(setupBridges, /if \[ -e "\$dst" \][\s\S]*RESET_RETRY_BACKUP/u,
-    'a retry must preserve, not overwrite, the original recovery copy');
-  assert.match(setupBridges, /! -f "\$M\/owner-credentials\.json"[\s\S]*: > "\$FULL_HISTORY_MARKER"/u,
-    'a partially completed fresh install must never be mistaken for a capped upgrade');
-  assert.match(setupBridges, /social-reimport-v1\.pending/u,
-    'the derived Hermes corpus must be purged with the source-side reset');
+test('a native install is marked as needing no history migration', () => {
+  // The capped-history migration -- back up, wipe, re-link, purge the derived
+  // corpus -- lived only in the container provisioner and went with it. Nothing
+  // here can be capped: this script has always written 2147483647, and a
+  // container-era directory is refused rather than migrated.
+  //
+  // The MARKER is what has to survive, because Provision reads its absence as
+  // "this install still needs the migration". Without it every launch of a
+  // working install re-ran the entire bridge setup looking for a migration no
+  // script could perform.
+  assert.match(setupBridges, /FULL_HISTORY_MARKER="\$M\/\.full-history-reset-v1"/u);
+  assert.match(setupBridges, /mark_history_uncapped/u);
+  const owner = setupBridges.indexOf('# --- the owner');
+  const mark = setupBridges.indexOf('\nmark_history_uncapped\n', owner);
+  const creds = setupBridges.indexOf('owner-credentials.json', owner);
+  assert.ok(mark > -1 && mark < creds,
+    'the marker must be written before the credentials, or a run that dies between them loops forever');
   assert.doesNotMatch(setupBridges, /rm\s+-[rRfF]*\s+[^\n]*homeserver\.db/u,
     'the old runtime must remain recoverable');
-  assert.match(provision, /matrix\/owner-credentials\.json/u);
-  assert.match(provision, /matrix\/\.full-history-reset-v1/u);
-  assert.match(provision, /matrix\/\.full-history-reset-v1\.pending/u,
+  assert.match(provision, /let matrixRoot = hazlie\.appendingPathComponent\("matrix"\)/u,
+    'one engine, one state root');
+  assert.match(provision, /matrixRoot\.appendingPathComponent\("owner-credentials\.json"\)/u);
+  assert.match(provision, /matrixRoot\.appendingPathComponent\("\.full-history-reset-v1"\)/u);
+  assert.match(provision, /matrixRoot\.appendingPathComponent\("\.full-history-reset-v1\.pending"\)/u,
     'an interrupted migration must retry even after owner credentials moved');
   assert.match(provision, /ensureBridgeRuntime \{ _ in \}/u,
     'an existing runtime must apply the migration automatically on app launch');

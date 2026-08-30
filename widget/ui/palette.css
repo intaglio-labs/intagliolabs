@@ -1742,6 +1742,10 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
   cursor: pointer;
 }
 .hint.hold .step-open:hover { color: var(--fg); }
+/* The nobridge notice's one action. Same treatment as .step-open, but NOT
+   scoped to .hint.hold -- this notice renders in a plain .hint, in both the
+   settings list and the tile popover, and a button that inherits no style there
+   reads as broken text rather than a control. */
 /* Every connected line leads with a green check (owner, 2026-08-25). One
    rule, not a per-site prefix: the check rides the .acct class, so it cannot
    be forgotten by the next connected state someone renders. */

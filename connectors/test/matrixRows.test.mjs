@@ -6,7 +6,7 @@
 // never become corpus rows. Everything else here is join-key plumbing.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { classifySender, eventToRow } from '../lib/matrixRows.mjs';
@@ -372,3 +372,39 @@ test('a first run queues older room history and the next slice resumes it', asyn
 function jsonResponse(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
+
+// ---- invites survive a token that has moved past them ----
+//
+// The bug, measured on a real install (2026-08-29): 25 portal rooms sat at
+// `invite` against 19 joined, so Discord and LinkedIn had bridge databases full
+// of messages and ZERO rows in the corpus. rooms.invite on an INCREMENTAL sync
+// reports changes since the token, so an invite appears in exactly one page —
+// miss it and the room is never offered again.
+//
+// This branch first fixed it with a since-less sync on every pass. That is
+// replaced by main's durable queue, which is better for a reason worth pinning
+// rather than trusting: the queue is written BEFORE the sync token advances, so
+// the hole cannot reopen even if a join fails, and only the one-time recovery
+// pays for a full-state sync. These assert the ordering and the recovery, not
+// the mechanism's shape.
+
+test('the pending-invite queue is durable before the sync token moves', () => {
+  const src = readFileSync(new URL('../sources/matrix.mjs', import.meta.url), 'utf8');
+  const queueAt = src.indexOf('setCursor(PENDING_INVITES_KEY');
+  const cursorAt = src.indexOf('setCursor(CURSOR_KEY');
+  assert.ok(queueAt > 0 && cursorAt > 0, 'both cursors must be written');
+  assert.ok(
+    queueAt < cursorAt,
+    'the invite queue must persist before the token advances, or a failed join is lost'
+  );
+});
+
+test('a one-time recovery forces a since-less sync for stranded invites', () => {
+  const src = readFileSync(new URL('../sources/matrix.mjs', import.meta.url), 'utf8');
+  assert.match(src, /INVITE_RECOVERY_KEY/u, 'the recovery must be gated by a cursor');
+  assert.match(
+    src,
+    /needsInviteRecovery\s*\)\s*\n?\s*\?\s*null/u,
+    'recovery must drop the since token so already-delivered invites reappear'
+  );
+});

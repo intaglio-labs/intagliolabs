@@ -150,8 +150,17 @@ test('a login window may leave the platform only for that platform\'s own SSO', 
   const frames = Object.fromEntries(
     entries.filter(([, p]) => p.webLogin).map(([id, p]) => [id, [...(p.webLogin.allowedFrameHosts ?? [])].sort()]));
   assert.deepEqual(frames.slack, ['www.google.com', 'www.recaptcha.net']);
+  // ~~"only slack has a challenge behind it"~~ was true until Meta's was
+  // measured: Facebook frames two-step verification from www.fbsbx.com, and with
+  // an empty fence here it was cancelled and the page rendered nothing
+  // (2026-08-30). Pinned explicitly rather than asserted empty, so the next
+  // addition is a decision somebody makes rather than a test somebody deletes.
+  assert.deepEqual(frames.messenger, ['facebook.com', 'fbsbx.com', 'meta.com']);
+  assert.deepEqual(frames.instagram,
+    ['facebook.com', 'fbsbx.com', 'instagram.com', 'meta.com']);
+  const framed = new Set(['slack', 'messenger', 'instagram']);
   for (const [id, hosts] of Object.entries(frames)) {
-    if (id !== 'slack') assert.deepEqual(hosts, [], `${id}: a frame fence with no challenge behind it`);
+    if (!framed.has(id)) assert.deepEqual(hosts, [], `${id}: a frame fence with no challenge behind it`);
   }
 
   // Every other platform's window stays on the platform's own hosts. Said as an
@@ -236,7 +245,7 @@ test('the platforms on a non-bridgev2 schema are the ones we expect', () => {
 test('the app-credential roster, and what it answers', () => {
   // A platform declares `appCredential` when its bridge cannot start until
   // someone supplies a credential the PRODUCT may ship (widget/build.sh bakes
-  // one in, ops/setup-bridges.sh writes it). Pinned as a roster because the
+  // one in, ops/setup-bridges-native.sh writes it). Pinned as a roster because the
   // answer drives whether the card shows a paste walkthrough, and offering to
   // overwrite a working pair is worse than not offering at all.
   const withApp = entries.filter(([, p]) => p.appCredential).map(([id]) => id).sort();
@@ -318,5 +327,55 @@ test('the field contract is declared per platform, for the two that need one', (
           `${id}: storageUrl is outside its own fence`);
       }
     }
+  }
+});
+
+// ---- a login window wide enough for the page it loads ----
+//
+// Facebook's login page declares no viewport meta, so WebKit lays it out at the
+// desktop default. In the login window's usual 480pt that rendered as the
+// top-left corner of a ~980px page -- the Meta mark, a broken image and a
+// horizontal scrollbar, with the form off-screen to the right (owner,
+// 2026-08-29). Instagram's page carries width=device-width and fits, which is
+// why the same window worked there and not here.
+
+test('Messenger asks for a window wide enough for a page with no viewport', () => {
+  const messenger = PLATFORMS.messenger;
+  assert.ok(messenger, 'the messenger platform must exist');
+  assert.ok(
+    Number(messenger.webLogin?.windowWidth) >= 900,
+    `a viewport-less desktop page needs room; got ${String(messenger.webLogin?.windowWidth)}`
+  );
+});
+
+test('a platform whose login page is responsive asks for nothing', () => {
+  // Instagram fits the default. Declaring a width for every platform would make
+  // the exception invisible, which is how it stops being read as an exception.
+  assert.equal(PLATFORMS.instagram.webLogin?.windowWidth, undefined);
+});
+
+// ---- a Meta login may frame Meta ----
+//
+// The blank two-step verification page was OUR fence, not Meta's refusal.
+// Messenger declared no allowedFrameHosts, so the challenge Facebook frames from
+// www.fbsbx.com was cancelled — measured 2026-08-30, "blocked-subframe Messenger
+// www.fbsbx.com" — leaving a 2.5MB DOM that rendered nothing. Five theories died
+// on that page before the fence was instrumented.
+
+test('the Meta platforms may embed Meta content in a subframe', () => {
+  for (const id of ['messenger', 'instagram']) {
+    const frames = PLATFORMS[id].webLogin?.allowedFrameHosts ?? [];
+    assert.ok(frames.includes('fbsbx.com'),
+      `${id} cannot frame Meta's challenge host, so a 2FA step renders blank`);
+  }
+});
+
+test('a subframe allowance is never a main-frame allowance', () => {
+  // The fence exists because the main frame is where a password is typed. A
+  // sandbox host must not become somewhere the window can navigate TO.
+  for (const id of ['messenger', 'instagram']) {
+    const w = PLATFORMS[id].webLogin;
+    assert.ok(!w.allowedHosts.includes('fbsbx.com'),
+      `${id} must not accept fbsbx.com as a main-frame destination`);
   }
 });

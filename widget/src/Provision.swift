@@ -164,13 +164,14 @@ enum Provision {
     }
   }
 
-  /// Warm the container-image cache after launch, without creating any social
-  /// state. The expensive download happens before a person chooses LinkedIn
-  /// (or another social source), while the actual Matrix/bridge setup remains
-  /// deferred until that explicit Connect action. Docker may be starting with
-  /// the app, so the script waits briefly off the main thread and then safely
-  /// gives up; a later launch retries.
-  static func prefetchBridgeImages() {
+  /// Warm the native bridge runtime after launch, without creating any social
+  /// state. The expensive part -- ~305 MB of hash-checked bridge binaries and
+  /// the Synapse runtime build -- happens before a person chooses LinkedIn (or
+  /// another social source), while the actual Matrix/bridge setup stays
+  /// deferred until that explicit Connect action. Every step is idempotent, so
+  /// a launch that gets interrupted is retried by the next one and, failing
+  /// that, by setup itself.
+  static func prefetchBridgeRuntime() {
     let script = backend.appendingPathComponent("ops/prefetch-bridges.sh")
     guard fm.fileExists(atPath: script.path) else {
       NSLog("Intaglio Labs: bundled bridge prefetch script is missing")
@@ -201,9 +202,12 @@ enum Provision {
         // Existing bridge installs need setup-bridges to apply versioned
         // migrations too. Fresh installs have no owner credentials and remain
         // consent-deferred; their first connector click still owns setup.
-        let existingRuntime = hazlie.appendingPathComponent("matrix/owner-credentials.json")
-        let historyMigration = hazlie.appendingPathComponent("matrix/.full-history-reset-v1")
-        let historyMigrationPending = hazlie.appendingPathComponent("matrix/.full-history-reset-v1.pending")
+        // One bridge state root. A second (~/.hazlie/matrix-docker) existed
+        // briefly, while a Docker fallback did; both are gone.
+        let matrixRoot = hazlie.appendingPathComponent("matrix")
+        let existingRuntime = matrixRoot.appendingPathComponent("owner-credentials.json")
+        let historyMigration = matrixRoot.appendingPathComponent(".full-history-reset-v1")
+        let historyMigrationPending = matrixRoot.appendingPathComponent(".full-history-reset-v1.pending")
         if p.terminationStatus == 0,
            fm.fileExists(atPath: historyMigrationPending.path)
              || (fm.fileExists(atPath: existingRuntime.path)
@@ -236,31 +240,61 @@ enum Provision {
     bridgeSetupLock.unlock()
 
     DispatchQueue.global(qos: .userInitiated).async {
-      let script = backend.appendingPathComponent("ops/setup-bridges.sh")
+      // NATIVE, AND ONLY NATIVE.
+      //
+      // One Synapse and seven mautrix bridges, run as launchd agents on this
+      // Mac. Docker Desktop was carried for a year because the bridges were
+      // believed to need it; they do not. Every bridge is Go with a published
+      // darwin-arm64 binary and matrix-synapse publishes a macOS arm64 wheel.
+      // Verified end to end on 2026-08-30: all seven bridges plus Synapse
+      // running with Docker never started, three real social logins delivered,
+      // thousands of messages ingested.
+      //
+      // The Docker fallback is GONE, deliberately, and it is worth writing down
+      // why a safety net was removed rather than kept. It was never reachable:
+      // the native script returned 0 whether it started seven bridges or none,
+      // so `where !success` never fired. When that was fixed the fallback got
+      // worse, not better -- Docker Desktop on macOS is a Linux VM, so "native
+      // failed" resolved to "silently install and boot a virtual machine",
+      // which is precisely the outcome this work existed to remove. A fallback
+      // nobody would consent to is not a safety net.
+      //
+      // What replaces it is the script being honest. setup-bridges-native.sh
+      // bootstraps itself -- fetches the published binaries hash-checked, takes
+      // the libolm the bundle ships, builds the Synapse runtime from wheels --
+      // and needs no toolchain here, only network, once. If that cannot
+      // complete it now tears down anything it started and exits non-zero, and
+      // the reason is in bridge-setup.log instead of being papered over by a VM.
+      let nativeScript = backend.appendingPathComponent("ops/setup-bridges-native.sh")
+      let scripts = [nativeScript]
       var success = false
-      if fm.isExecutableFile(atPath: script.path) {
-        let logDir = hazlie.appendingPathComponent("logs")
-        try? mkdir(logDir, 0o700)
-        let log = logDir.appendingPathComponent("bridge-setup.log")
-        if !fm.fileExists(atPath: log.path) { fm.createFile(atPath: log.path, contents: nil) }
-        if let out = try? FileHandle(forWritingTo: log) {
-          defer { try? out.close() }
-          _ = try? out.seekToEnd()
-          let p = Process()
-          p.executableURL = URL(fileURLWithPath: "/bin/sh")
-          p.arguments = [script.path]
-          var env = ProcessInfo.processInfo.environment
-          env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
-          p.environment = env
-          p.standardOutput = out
-          p.standardError = out
-          do {
-            try p.run()
-            p.waitUntilExit()
-            success = p.terminationStatus == 0
-          } catch {
-            NSLog("Intaglio Labs: bridge setup could not start: \(error)")
-          }
+      let logDir = hazlie.appendingPathComponent("logs")
+      try? mkdir(logDir, 0o700)
+      let log = logDir.appendingPathComponent("bridge-setup.log")
+      if !fm.fileExists(atPath: log.path) { fm.createFile(atPath: log.path, contents: nil) }
+      // Every attempt is written to bridge-setup.log with the script that ran,
+      // so what provisioned this machine is a fact in a file.
+      for candidate in scripts where !success {
+        guard fm.isExecutableFile(atPath: candidate.path) else { continue }
+        guard let out = try? FileHandle(forWritingTo: log) else { continue }
+        defer { try? out.close() }
+        _ = try? out.seekToEnd()
+        let banner = "\n=== \(Date()) running \(candidate.lastPathComponent) ===\n"
+        if let data = banner.data(using: .utf8) { out.write(data) }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = [candidate.path]
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+        p.environment = env
+        p.standardOutput = out
+        p.standardError = out
+        do {
+          try p.run()
+          p.waitUntilExit()
+          success = p.terminationStatus == 0
+        } catch {
+          NSLog("Intaglio Labs: bridge setup could not start: \(error)")
         }
       }
       bridgeSetupLock.lock()

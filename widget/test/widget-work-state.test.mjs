@@ -26,7 +26,20 @@ test('the widget gives real work the thinking pose and a current-task hover labe
   assert.match(script, /hzPost\('workStatus'\)/u);
   assert.match(script, /processing \? 'listening' : 'idle'/u);
   assert.match(script, /orbBtn\.title = workLabel \? workDetailText\(\)\.replace\('\\n', ' — '\)/u);
-  assert.match(script, /return `current: \$\{workLabel\}\\n\$\{workEstimate \|\| 'estimating time left…'\}`/u);
+  // ~~`${workEstimate || 'estimating time left…'}`~~ was pinned here, and the
+  // string it pinned is the defect. The daemon stopped publishing an estimate
+  // for matrix backfill on purpose — its arithmetic was a floor rendered as a
+  // forecast — so that fallback rendered a promise of a number that never
+  // arrives, forever. Absence of an estimate must read as SILENCE, and the
+  // count the daemon does publish is shown in its place when there is one.
+  assert.match(script, /const detail = workEstimate \|\| workScope;/u,
+    'a count may stand in for an estimate, but nothing may stand in for both');
+  // CODE ONLY. widget.js retracts the old string by quoting it, so a raw scan
+  // matches the retraction and reports the fixed defect as still present. That is
+  // the fifth time this session a test has asserted against its own comment.
+  const code = script.split('\n').filter((l) => !/^\s*\/\//u.test(l)).join('\n');
+  assert.doesNotMatch(code, /estimating time left/u,
+    'the widget must not promise a time it has not been given');
   assert.match(script, /setInterval\(refreshWorkState, 1500\)/u);
 });
 
@@ -89,8 +102,22 @@ test('native work status stays processing across bounded connector-queue pauses'
 });
 
 test('the total processing estimate uses the plain approximate-hours label', () => {
-  assert.match(daemon, /const completionTimes = scheduledQueue\(\)\.map\(\(task\) => task\.nextTs\)/u,
-    'the total reaches the final task in the live scheduler queue');
+  // WAS: /const completionTimes = scheduledQueue\(\).map\(\(task\) => task.nextTs\)/,
+  // "the total reaches the final task in the live scheduler queue".
+  //
+  // That contract shipped and the owner rejected it on sight: an idle daemon
+  // read "~ 17.3 HRS LEFT" because the idle-window maintenance pass was armed
+  // for 03:30 tomorrow and the horizon took the max over the whole queue
+  // ("whats gonna take 17h", 2026-08-29 -- backfill empty, nothing running).
+  // Routine passes are WAITS, not work: seconds of work on a fifteen-minute
+  // timer, so the gap before one says nothing about how much is left to do.
+  // Only resumable history spans multiple bounded passes and can honestly be
+  // described in hours. Not a goalpost move -- the estimate still exists and
+  // still counts real backfill, which the line below pins unchanged.
+  assert.match(daemon, /const completionTimes = \[\];/u,
+    'the horizon counts backfill work only, never the routine schedule');
+  assert.doesNotMatch(daemon, /const completionTimes = scheduledQueue\(\)/u,
+    'a routine poll must never be counted as work remaining');
   assert.match(daemon, /estimate: `~ \$\{\(tenthsOfAnHour \/ 10\)\.toFixed\(1\)\} hrs left`/u);
   assert.match(connectors, /estimate\.hasPrefix\("≥ "\) \|\| estimate\.hasPrefix\("≈ "\)/u,
     'a persisted snapshot is normalized before the daemon republishes it');
@@ -99,8 +126,17 @@ test('the total processing estimate uses the plain approximate-hours label', () 
   assert.match(connections, /activity-estimate/u);
   assert.match(connections, /estimate\.hidden = !total/u,
     'the total is pinned in the header and hidden only when no queue exists');
-  assert.ok(connectors.includes('"fetching \\($0) \\(subject)"'),
-    'yearly backfill rows name the exact value-producing year and connector');
+  // The row answers TWO questions now, and each side of the merge asserted on
+  // its own half of one string. Which year comes from the cross-connector
+  // barrier; how many conversations replaced an ETA that could not move (it was
+  // ceil(rooms/perPass), always 1). Assert the composed label rather than either
+  // fragment, or this goes red the next time the other half moves.
+  assert.ok(connectors.includes('"fetching \\($0) \\(subject)\\(scope)"'),
+    'a yearly row names the year, the connector, and how much is in flight');
+  assert.ok(connectors.includes('?? "backfilling \\(subject) history\\(scope)"'),
+    'and the non-yearly row still says how much');
+  assert.match(connectors, /raw\["backfillRooms"\] as\? Int/u,
+    'the scope must come from a published count, not be composed here');
   assert.match(connectors, /connector == "matrix" \? matrixPlatformLabels\(raw\)/u,
     'Matrix history is split into the connected platform labels');
   assert.doesNotMatch(connectors, /matrix": "social messages"/u,

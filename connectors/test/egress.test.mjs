@@ -131,16 +131,14 @@ const SKIP_FILE = new Set(['package-lock.json']);
 // file in the repo carries one.
 const stripDoctype = (text) => text.replace(/<!DOCTYPE[^>]*>/gu, '');
 
-// Loopback is not egress. `synapse` is the compose-internal DNS name the
-// bridge connector uses inside the docker network, and the `hazlie-*`
-// container names are the same class: appservice endpoints on the compose
-// `hazlie-bus` network (ops/setup-bridges.sh writes them into bridge
-// configs), resolvable only inside that network. Only one appears in tracked
-// source as a literal — the others are shell-interpolated — but all six are
-// listed so the next literal does not trip the wire for being spelled out.
-const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1', '0.0.0.0', 'synapse',
-  'hazlie-meta', 'hazlie-instagram', 'hazlie-twitter',
-  'hazlie-telegram', 'hazlie-discord', 'hazlie-slack']);
+// Loopback is not egress. `synapse` and the `hazlie-*` names used to be here
+// as well: compose-internal DNS for the bridge network, resolvable only inside
+// it. That network is gone with the container engine, and the native
+// provisioner writes 127.0.0.1 everywhere, so they are no longer exempt --
+// as plain hostnames they would resolve through DNS to whatever answered.
+// assertLoopbackBase in connect/lib/bridge.mjs dropped `synapse` for the same
+// reason and on the same day.
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1', '0.0.0.0']);
 
 // `depth` is 0 when `dir` IS a root, so its immediate children are the ones
 // SKIP_AT_ROOT applies to.
@@ -196,11 +194,10 @@ function foundHosts() {
         const host = m[1];
         if (LOOPBACK.has(host) || !found.has(host)) found.set(host, rel);
       }
-      // Container images: `image: ghcr.io/element-hq/synapse:v1.140.0` names a
-      // registry with no scheme, so the URL matcher above never sees it.
-      for (const m of text.matchAll(/^\s*image:\s*([A-Za-z0-9.-]+\.[A-Za-z]{2,})\//gmu)) {
-        if (!found.has(m[1])) found.set(m[1], rel);
-      }
+      // `image:` lines named a registry with no scheme, so the URL matcher
+      // above never saw them. No compose file remains to carry one; the
+      // equivalent today is bridges/native.json, whose download URLs the
+      // matcher above reads directly because they are ordinary https.
     }
   }
   for (const host of LOOPBACK) found.delete(host);

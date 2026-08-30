@@ -8,6 +8,15 @@
 import AppKit
 import WebKit
 
+/// Which page under the connect token the app may open. An ENUM, never a string
+/// from JS: connectLink() validates the base (http, loopback, re-read each time
+/// because minting a link revokes the last), and this closes the suffix, so no
+/// caller can steer the browser at an arbitrary path under a live token.
+enum ConnectPath: String {
+  case root = ""
+  case bridge = "/bridge"
+}
+
 protocol BridgeDelegate: AnyObject {
   func openChat()
   func openChat(with utterance: String)
@@ -23,7 +32,12 @@ protocol BridgeDelegate: AnyObject {
   func openPeople()
   func openMonths()
   func openReconnect()
-  func openConnectRoot() -> Bool
+  // Takes a path and a query since the login window can hand off to
+  // /bridge?p=<platform>. Both sides are load-bearing and picking either alone
+  // fails to compile — at a CALL SITE rather than here, which is the slow way to
+  // find it. This conflict also surfaced by luck: two lines higher and it would
+  // have merged clean and broken openReconnect's two callers silently.
+  func openConnectRoot(path: ConnectPath, query: [String: String]) -> Bool
   func closeWindow(of webView: WKWebView)
   func dragWindow(of webView: WKWebView)
   func motionAnywayChanged(_ on: Bool)
@@ -378,6 +392,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   private var pendingVoiceUtterance: String?
 
   // Only desktop applications named by the connector UI may be launched.
+  // com.docker.docker was here so the nobridge notice could offer to start
+  // Docker Desktop; nothing asks for it now that the bridges run natively, and
+  // an allowlist entry no caller uses is a capability granted for free.
   private let allowedApps: Set<String> = ["com.granola.app"]
 
   // The only external destinations this app will hand to the OS. Opening
@@ -802,6 +819,24 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           self.reply(webView, id, begin) // begin failed → pass the notice back
           return
         }
+        // ASK BEFORE THE PASSWORD, NOT AFTER.
+        //
+        // This route answers 200 even with no bridge stack behind it -- the GET
+        // falls back to policy-only so a fresh install still renders -- so "ok"
+        // used to mean "open the window". It did, on a machine with no
+        // homeserver: the owner typed a real Meta password into a real Meta page,
+        // the cookies were harvested, and beginBridgeLogin THEN discovered there
+        // was nothing to hand them to and dropped the session. Nothing queued,
+        // nothing resumed, and the next press was another fresh password.
+        //
+        // Only 'down' refuses. 'unknown' and 'up' both proceed, so an already
+        // connected platform, or any route that never probed, behaves exactly as
+        // it did. ensureBridgeRuntime still runs on the POST path below; this
+        // only stops us collecting a credential we cannot deliver.
+        if begin["engine"] as? String == "down" {
+          self.reply(webView, id, ["state": "nobridge"])
+          return
+        }
         // The web-login policy comes from the server's platform table. A
         // platform with no host list cannot be linked this way at all — Discord
         // and Slack want a pasted token, Telegram a phone code — so say so and
@@ -828,6 +863,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // exactly what the card kept showing (owner, 2026-08-26).
         let approval = begin["approval"] as? Bool ?? false
         let userAgent = String((begin["userAgent"] as? String ?? "").prefix(300))
+        // How wide the login window has to be for THIS platform's page.
+        // Server-authored like the rest; clamped because a fat-fingered or
+        // hostile value must not open a window whose close button the owner
+        // cannot reach. 0 keeps BridgeLogin's own default.
+        let windowWidth = min(max(begin["windowWidth"] as? Int ?? 0, 0), 1400)
         // Subframe-only hosts: a challenge widget's iframes. Same server-authored
         // shape as allowedHosts, enforced separately — see BridgeLogin's fence.
         let allowedFrameHosts = (begin["allowedFrameHosts"] as? [String])?.filter { !$0.isEmpty } ?? []
@@ -929,8 +969,32 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
             requiredCookies: requiredCookies, cookieFormat: cookieFormat,
             fields: fields, approval: approval, userAgent: userAgent,
             allowedFrameHosts: allowedFrameHosts, storageUrl: storageUrl,
+            windowWidth: windowWidth,
             afterHarvest: afterHarvest
           ) { cookiesJSON in
+            // THE HANDOFF SENTINEL, CHECKED BEFORE ANYTHING ELSE READS IT.
+            //
+            // The non-X path below POSTs any non-nil result verbatim to
+            // /api/bridge/cookies, so an unguarded sentinel would be relayed into
+            // the bridge bot as though it were a pasted credential blob. The
+            // string is also chosen to be neither valid JSON nor a valid Cookie
+            // header, so nothing downstream could mistake it for one either.
+            //
+            // It deliberately does NOT call beginBridgeLogin: begin's first act is
+            // to cancel, and the connect page has its own Begin control. Not
+            // calling it removes the hazard for every platform instead of fencing
+            // one, which matters because Slack's challenge window is genuinely
+            // mid-conversation.
+            let handoff: () -> Void = {
+              let opened = self.delegate?.openConnectRoot(
+                path: .bridge, query: ["p": p]
+              ) == true
+              self.reply(webView, id, opened
+                ? ["state": "browserLogin"]
+                : ["state": "browserLogin",
+                   "error": "the connect page isn't running — open Settings once, then retry"])
+            }
+            if cookiesJSON == BridgeLogin.browserHandoff { handoff(); return }
             if inlineX {
               guard cookiesJSON == "connected" else {
                 self.reply(webView, id, ["state": "cancelled"])
@@ -1050,6 +1114,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // entries intentionally do not participate here: they belong in
       // Settings, not on the ambient desktop control.
       let workLabel: String?
+      // Remembered, because the connector-queue horizon may only be attached to
+      // a connector label — see below.
+      let interactive = Bridge.activeWork.label != nil
       if let label = Bridge.activeWork.label {
         workLabel = label
       } else if let model = ModelSetup.activity,
@@ -1070,11 +1137,26 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
       if let workLabel {
         var status: [String: Any] = ["state": "working", "label": workLabel]
-        // This is the same total queue horizon Settings shows, not a made-up
-        // duration for only the current slice. Interactive work can temporarily
-        // outrank a connector label while the total remains useful.
-        if let estimate = Connectors.shared.activityEstimate {
-          status["estimate"] = estimate
+        // THE HORIZON BELONGS TO THE CONNECTOR QUEUE, so it may only ride a
+        // connector label.
+        //
+        // ~~"Interactive work can temporarily outrank a connector label while
+        // the total remains useful."~~ It is not useful there, it is wrong:
+        // asking the orb a question during a calendar backfill rendered
+        // "current: thinking about your question" above a queue duration, which
+        // reads as a duration for the question.
+        //
+        // And when the daemon publishes no estimate — now the normal case, since
+        // matrix backfill publishes a COUNT of conversations rather than a floor
+        // dressed as a forecast — pass that count instead, so the orb can say
+        // something true rather than promise a number that never arrives.
+        if !interactive {
+          if let estimate = Connectors.shared.activityEstimate {
+            status["estimate"] = estimate
+          }
+          if let rooms = Connectors.shared.activityBackfillRooms, rooms > 0 {
+            status["backfillRooms"] = rooms
+          }
         }
         reply(webView, id, status)
       } else {
@@ -1344,7 +1426,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // The cloud-connector setup door: the connect page's ROOT, in the
       // browser — a full setup flow (tokens, app passwords) that wants a real
       // browser.
-      if delegate?.openConnectRoot() == true {
+      if delegate?.openConnectRoot(path: .root, query: [:]) == true {
         reply(webView, id, ["state": "ok"])
       } else {
         reply(webView, id, ["state": "error", "error": "no connect link yet"])
@@ -2000,7 +2082,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
       Provision.ensureBridgeRuntime { ready in
         guard ready else {
-          done(["state": "nobridge", "error": "social connections could not start; open Docker Desktop and try again"])
+          done(["state": "nobridge",
+                    // Names the log, not a remedy. There is one provisioner and
+                    // it runs itself; whatever stopped it is written down there.
+                    "error": "social connections could not start — see ~/.hazlie/logs/bridge-setup.log"])
           return
         }
         self.bridgeCall("POST", "api/bridge/begin", json: ["p": platform], timeout: 30, done)

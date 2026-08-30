@@ -106,10 +106,26 @@ final class Connectors {
       let year = raw["backfillYear"] as? Int
       for connector in backfill {
         let subjects = connector == "matrix" ? matrixPlatformLabels(raw) : [labelFor(connector)]
+        // SAY HOW MANY, since we cannot honestly say how long. The daemon
+        // used to publish an ETA for this and it could not move: the
+        // arithmetic was ceil(rooms / perPass), which with 9 rooms and a rate
+        // of 11 is always 1, so the header read "~ 0.2 hrs left" on every
+        // pass while the per-room pagination cursors ran thousands of events
+        // deep. A count of conversations is a count of real objects, and it
+        // changes.
+        let rooms = raw["backfillRooms"] as? Int ?? 0
+        let scope = connector == "matrix" && rooms > 0
+          ? " (\(rooms) conversation\(rooms == 1 ? "" : "s"))"
+          : ""
         for subject in subjects.isEmpty ? [labelFor(connector)] : subjects {
           items.append([
             "kind": "backfill",
-            "label": year.map { "fetching \($0) \(subject)" } ?? "backfilling \(subject) history",
+            // WHICH YEAR and HOW MANY CONVERSATIONS answer different halves of
+            // the same question, so the row carries both. The year comes from
+            // the cross-connector barrier; the count replaced an ETA that could
+            // not move (see daemon.mjs totalWorkEstimate).
+            "label": year.map { "fetching \($0) \(subject)\(scope)" }
+              ?? "backfilling \(subject) history\(scope)",
           ])
         }
       }
@@ -137,6 +153,17 @@ final class Connectors {
   /// Approximate wall-clock horizon for every task currently represented by
   /// the daemon queue. Kept separate from activityItems so the UI can pin it in
   /// the card header instead of letting a long task label clip it away.
+  /// How many conversations the current backfill is walking, when the daemon
+  /// knows. This is what replaced the estimate for matrix history: a count of
+  /// real objects that changes, rather than ceil(rooms / perPass), which was
+  /// always 1 and so always read as one interval away.
+  var activityBackfillRooms: Int? {
+    guard let raw = activitySnapshot, let n = raw["backfillRooms"] as? Int, n > 0 else {
+      return nil
+    }
+    return n
+  }
+
   var activityEstimate: String? {
     guard let raw = activitySnapshot else { return nil }
     return normalizedActivityEstimate(raw)

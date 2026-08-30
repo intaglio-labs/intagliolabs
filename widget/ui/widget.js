@@ -362,10 +362,26 @@ let workLabel = '';
 // active voice exchange.
 let cardPending = null;
 let workEstimate = '';
+// The count the daemon publishes when it cannot honestly publish a time.
+let workScope = '';
 let orbHovered = false;
+// NO ESTIMATE MEANS NO SECOND LINE.
+//
+// ~~`${workEstimate || 'estimating time left…'}`~~ promised a number that
+// never arrives. The daemon deliberately stopped publishing an estimate for
+// matrix backfill — its arithmetic was ceil(rooms / perPass), always 1, so
+// the header read "~ 0.2 hrs left" on every pass while pagination ran
+// thousands of events deep — and with the field gone this fallback rendered
+// "estimating time left…" forever instead. That is the same defect
+// relocated: a fabricated number swapped for a promise of one, which is
+// worse, because a promise never resolves and a number at least changes.
+//
+// What the daemon does still publish is a count of real objects. Show that
+// when it exists, and show nothing when nothing is known.
 function workDetailText() {
   if (!workLabel) return '';
-  return `current: ${workLabel}\n${workEstimate || 'estimating time left…'}`;
+  const detail = workEstimate || workScope;
+  return detail ? `current: ${workLabel}\n${detail}` : `current: ${workLabel}`;
 }
 function showWorkDetails(dwellMs = 0) {
   if (workLabel) showTease(workDetailText(), dwellMs, 'work');
@@ -419,9 +435,16 @@ async function refreshWorkState() {
     workEstimate = workLabel && typeof status.estimate === 'string'
       ? status.estimate.slice(0, 60)
       : '';
+    // Real objects, counted. Only shown when there is no estimate, so this
+    // never competes with one.
+    const rooms = Number(status?.backfillRooms) || 0;
+    workScope = workLabel && rooms > 0
+      ? `${rooms} conversation${rooms === 1 ? '' : 's'}`
+      : '';
   } catch {
     workLabel = '';
     workEstimate = '';
+    workScope = '';
   }
   paintOrbState();
   if (dreamKind === 'work') {

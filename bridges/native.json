@@ -1,0 +1,104 @@
+{
+  "_readme": [
+    "THE NATIVE BRIDGE MANIFEST. What ops/fetch-bridges.mjs downloads to replace",
+    "seven of the eight containers the deleted docker-compose.yml once ran.",
+    "",
+    "WHY THIS EXISTS. Docker Desktop on macOS is a Linux virtual machine: several",
+    "GB of disk, a gig-plus of resident RAM, a commercial licence for business",
+    "use, and an install-time dependency on a product this one does not control.",
+    "It was carried because the bridges were believed to need it. They do not.",
+    "Every mautrix bridge in this stack is Go and publishes a prebuilt",
+    "darwin-arm64 binary; verified 2026-08-29 against the GitHub release API, and",
+    "one of them (linkedin) downloaded, checksum-matched and inspected by hand.",
+    "",
+    "PINNED BY SHA256, EVERY ONE. The compose file this replaced pinned its images by",
+    "digest but ops/prefetch-bridges.sh pulled discord, slack and linkedin by the",
+    "mutable ':latest' tag, so a first launch could warm the cache with different",
+    "code than the stack later ran. A manifest of content hashes cannot drift that",
+    "way: the sha256 IS the version.",
+    "",
+    "The sums below are upstream's own, read from each release's sha256sums.txt.",
+    "Do not hand-edit one. Re-run the release's sha256sums.txt and copy it, or the",
+    "check that makes this file worth having is the check you just disabled.",
+    "",
+    "libolm: every one of these binaries links @rpath/libolm.3.dylib, and upstream",
+    "does NOT ship that dylib as a release asset (its macOS CI produces it as a",
+    "build artifact only). The rpath lists @executable_path first, so the dylib",
+    "goes beside the binary. Providing it is a separate leg of this migration --",
+    "see ops/fetch-bridges.mjs, which verifies rather than assumes."
+  ],
+  "version": 1,
+  "last_verified": "2026-08-29",
+  "platform": "darwin-arm64",
+  "base": "https://github.com/mautrix",
+  "bridges": [
+    {
+      "id": "meta",
+      "repo": "meta",
+      "release": "v0.2608.0",
+      "asset": "mautrix-meta-darwin-arm64",
+      "sha256": "1f1c2d7ae185169b779bd3d62fa40533c9ffad85ef1b2e5a19870434f9c4df11",
+      "replaces": "dock.mau.dev/mautrix/meta",
+      "note": "Messenger. The meta repo ships two binaries; this is the Facebook one."
+    },
+    {
+      "id": "instagram",
+      "repo": "meta",
+      "release": "v0.2608.0",
+      "asset": "mautrix-instagram-darwin-arm64",
+      "sha256": "3c3eeec90b27406601882917ea7ed40263ebae2cbfcc040452f83bb4bcf75354",
+      "replaces": "dock.mau.dev/mautrix/meta (ig tag)",
+      "note": "Instagram. Same repo and release as meta, different binary -- the same two-bridge split bridges/README.md describes."
+    },
+    {
+      "id": "twitter",
+      "repo": "twitter",
+      "release": "v0.2608.0",
+      "asset": "mautrix-twitter-darwin-arm64",
+      "sha256": "fed54b9c639153ef8ee164aa17598083befe77f02de8e83576600dc81ee0f527",
+      "replaces": "dock.mau.dev/mautrix/twitter",
+      "note": "Ran on a 2026-08-25 dev-build digest under the container engine because released v26.08 could not complete an X login (HTTP 403 behind a Cloudflare challenge). This is the RELEASED build and X logs in on it: confirmed by the owner on 2026-08-30 against this manifest, after the login window stopped advertising WebAuthn it cannot perform. Kept as a note rather than deleted because the failure was real and a future Cloudflare change could bring it back."
+    },
+    {
+      "id": "telegram",
+      "repo": "telegram",
+      "release": "v0.2608.0",
+      "asset": "mautrix-telegram-darwin-arm64",
+      "sha256": "5fa2b7304b023851db71fe96beecb76b6f1d8133cca7d4b8aeb39245c2fd3e5f",
+      "replaces": "dock.mau.dev/mautrix/telegram",
+      "note": "Go since the April 2026 rewrite; it was the last Python bridge in this stack. Still needs the owner's own api_id/api_hash before it will start -- that is unchanged and has nothing to do with Docker."
+    },
+    {
+      "id": "discord",
+      "repo": "discord",
+      "release": "v0.7.7",
+      "asset": "mautrix-discord-darwin-arm64",
+      "sha256": "8db5ce8eb239acb79e9231e76f551bffde59b0f1aa0c3b70edae81fa1c97c79b",
+      "replaces": "dock.mau.dev/mautrix/discord:latest",
+      "exampleConfig": {
+        "url": "https://raw.githubusercontent.com/mautrix/discord/v0.7.7/example-config.yaml",
+        "sha256": "a17c8ae8ce8dcbaa62e93cb4a02e3dc614dcb35e7148296a8376aa2495eaf824",
+        "note": "Pre-bridgev2 binaries have no -e/--generate-example-config flag: the CONTAINER shipped example-config.yaml and its entrypoint copied it in, so `docker run` bare produced a config and the bare binary produces `failed to read config: no such file`. Fetched from the source tree at the same pinned tag as the binary, and hashed like everything else here."
+      },
+      "note": "Still pre-bridgev2, hence the different version line and the exampleConfig above. Was pulled by ':latest' before this file existed."
+    },
+    {
+      "id": "linkedin",
+      "repo": "linkedin",
+      "release": "v0.2608.0",
+      "asset": "mautrix-linkedin-darwin-arm64",
+      "sha256": "c01f338a673e18b26f423cc46d6d7d25024ed945e92a85934d1ab207b421453d",
+      "replaces": "dock.mau.dev/mautrix/linkedin:latest",
+      "note": "The binary this migration was proved against: downloaded 2026-08-29, sha256 matched upstream, Mach-O arm64, Signature=adhoc (linker-signed), links @rpath/libolm.3.dylib."
+    },
+    {
+      "id": "slack",
+      "repo": "slack",
+      "release": "v0.2608.0",
+      "asset": "mautrix-slack-darwin-arm64",
+      "sha256": "353c5482c827498999fc7cafd25b9bf7700212aecbb5dcea70f82c4bd3db9c0c",
+      "replaces": "dock.mau.dev/mautrix/slack:latest",
+      "note": "Was pulled by ':latest' before this file existed."
+    }
+  ]
+}

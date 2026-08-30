@@ -132,12 +132,32 @@ fi
 # resolves them at ../ops relative to itself, which is this path in the bundle
 # and the repo root in a checkout. Same relative path, both layouts.
 mkdir -p "$BE/ops"
-cp ../ops/gcal-auth.mjs ../ops/oura-auth.mjs ../ops/setup-bridges.sh \
-   ../ops/prefetch-bridges.sh "$BE/ops/"
+# THE BRIDGE RUNTIME, WHICH IS NOW THE ONLY ONE.
+#
+# setup-bridges-native.sh provisions Synapse and seven mautrix bridges as
+# launchd agents on this Mac. There used to be a second script that provisioned
+# the same stack in Docker, and it was shipped beside this one as a fallback;
+# both are gone. Docker Desktop on macOS is a Linux virtual machine — several GB
+# of disk, a gig-plus of resident RAM, a commercial licence for business use —
+# and the bridges never needed it: every mautrix bridge is Go with a published
+# darwin-arm64 binary, and matrix-synapse publishes a macOS arm64 wheel.
+#
+# A fallback that silently installs a VM is not a fallback anyone consented to,
+# and this one was unreachable in practice anyway. What replaces it is a setup
+# script that fetches its own dependencies, tears down what it started if it
+# cannot finish, and says why in ~/.hazlie/logs/bridge-setup.log.
+cp ../ops/gcal-auth.mjs ../ops/oura-auth.mjs \
+   ../ops/setup-bridges-native.sh ../ops/build-libolm.sh ../ops/build-synapse.sh \
+   ../ops/fetch-bridges.mjs ../ops/prefetch-bridges.sh "$BE/ops/"
+# The launchd templates the bridge setup renders. Without these the stack still
+# starts but nothing supervises it, which is the state this build left behind.
+cp ../ops/io.intaglio.synapse.plist ../ops/io.intaglio.bridge.plist "$BE/ops/"
 # A downloaded app executes these directly. Preserve the source mode, but also
 # set it explicitly so an archive or checkout that lost executable bits cannot
 # silently turn first-launch bridge warming off.
-chmod 755 "$BE/ops/setup-bridges.sh" "$BE/ops/prefetch-bridges.sh"
+chmod 755 "$BE/ops/prefetch-bridges.sh" \
+          "$BE/ops/setup-bridges-native.sh" "$BE/ops/build-libolm.sh" \
+          "$BE/ops/build-synapse.sh"
 clone_tree ../bridges "$BE/bridges"
 # The bridge installer needs yq to safely patch third-party YAML templates.
 # Ship the static editor in the app instead of requiring every downloaded-app
@@ -181,7 +201,7 @@ fi
 if printf '%s' "$TG_APP" | grep -Eq '^[0-9]{1,12}:[0-9a-fA-F]{32}$'; then
   printf '%s\n' "$TG_APP" > "$BE/telegram-app"
   chmod 600 "$BE/telegram-app"
-  echo "telegram: app credential baked in (ops/setup-bridges.sh will use it)"
+  echo "telegram: app credential baked in (ops/setup-bridges-native.sh will use it)"
 else
   [ -n "$TG_APP" ] && echo "telegram: ignoring a malformed credential — expected <api_id>:<api_hash>" >&2
   echo "telegram: no app credential on this machine; installs will use the per-user walkthrough"
@@ -261,6 +281,49 @@ if command -v llama-server >/dev/null 2>&1; then
 else
   echo "NOTE: llama-server not on PATH — the runtime will not be bundled." >&2
   echo "      brew install llama.cpp before building for distribution." >&2
+fi
+
+# libolm.3.dylib, PREBUILT AND SHIPPED, so a fresh install needs no toolchain.
+#
+# Every native mautrix bridge carries LC_LOAD_DYLIB on @rpath/libolm.3.dylib — a
+# hard link, so the process aborts in dyld before main() without it — and upstream
+# publishes that dylib only as a CI artifact, never as a release asset.
+#
+# ops/build-libolm.sh can build it, but it needs cmake, and cmake is NOT on a
+# stock Mac: Xcode's command line tools do not provide it, so the only cmake on
+# this build machine is Homebrew's. Making a consumer install depend on that
+# would trade a Docker dependency for a Homebrew one, which is not what removing
+# Docker was for. So the build machine pays that cost once and the result ships,
+# exactly as the llama dylibs above already do.
+#
+# libolm is Apache-2.0. This comment used to assert that site/notices already
+# reproduced that licence; it did not name libolm at all, and shipping a binary
+# on the strength of a licence note that does not exist is worse than shipping
+# it with no note. site/notices now carries a "Native libraries" section naming
+# OpenMarket and New Vector, pointing at the Apache text already on the page,
+# and reproducing the three-clause BSD notice for curve25519-donna — which is
+# compiled INTO this dylib (confirmed by nm) and whose binary clause requires
+# the notice appear in our documentation. Node and yq ship here too and are
+# still unnamed; that gap is older than this file and is flagged, not fixed.
+#
+# libolm is also archived upstream and does not compile unpatched against a
+# current clang — build-libolm.sh carries the one-line patch and the reasoning.
+mkdir -p "$BE/bridges/lib"
+if [ -f "$BE/bridges/lib/libolm.3.dylib" ]; then
+  : # already staged by a previous run in this tree
+elif [ -f "$HOME/.hazlie/bridges/bin/libolm.3.dylib" ]; then
+  cp "$HOME/.hazlie/bridges/bin/libolm.3.dylib" "$BE/bridges/lib/libolm.3.dylib"
+  echo "bundled libolm from the local native runtime"
+elif command -v cmake >/dev/null 2>&1; then
+  if sh ../ops/build-libolm.sh "$BE/bridges/lib" >/dev/null 2>&1; then
+    echo "bundled libolm (built from source)"
+  else
+    echo "NOTE: libolm build failed — native bridges will not start." >&2
+  fi
+else
+  echo "NOTE: no cmake and no prebuilt libolm — native bridges will not start." >&2
+  echo "      brew install cmake, or run ops/build-libolm.sh once, before" >&2
+  echo "      building for distribution." >&2
 fi
 
 # VOICE MODELS (ear STT + speak TTS), so voice works offline out of the box the

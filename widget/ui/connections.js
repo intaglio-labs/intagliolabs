@@ -69,6 +69,50 @@ const settleWebLogin = (platform, first, show, settled) => {
   setTimeout(poll, 1200);
 };
 
+// Put the open card back on its tile. Returns false when there is no tile to
+// put it on, which is the caller's cue to stop.
+//
+// THE ANCHOR IS RESOLVED, NOT ASSUMED. Every appender is supposed to mark its
+// row .open first, but an async painter can land after a close or a rebuild has
+// unmarked the world — and hzPlacePop's null-anchor guard then silently skips
+// placement, which shows the card wherever its stale styles left it. Fall back
+// to the live row that owns the card (both carry dataset.id for exactly this
+// kind of reunion), and if no live row owns it, close the host: an unplaceable
+// pop-over must not render.
+//
+// EXTRACTED so that scrolling can call it too. #grid is a ONE-LINE HORIZONTAL
+// SCROLLER (.list is display:flex with overflow-x:auto and overflow-y:hidden),
+// so most of the connector tiles are off screen at any moment, and pressing one
+// runs row.scrollIntoView({inline:'nearest', behavior:'smooth'}). The card was
+// placed once against the tile's rect and never again, so the smooth scroll then
+// slid the tile out from under its own card: the owner pressed Instagram, the
+// login succeeded, and the card ended up floating over the activity panel with
+// no tile beneath it ("the tab moved way to the right", 2026-08-29). The card
+// has to track its anchor for as long as the anchor can move.
+//
+// closeIfUnplaceable is a real difference between callers, not a knob. The
+// mutation observer has just been handed a card, so a card with no tile is an
+// error it must clear. The window fitter and the scroll listener run constantly
+// against whatever the DOM happens to be mid-rebuild, and a transient miss there
+// is not a reason to throw the owner's open card away.
+const placeOpenHint = ({ closeIfUnplaceable = false } = {}) => {
+  let anchor = document.querySelector('#grid .row.open');
+  if (!anchor) {
+    const cardEl = hintHost.querySelector('.hint');
+    const id = cardEl ? cardEl.dataset.id : null;
+    anchor = id
+      ? [...document.querySelectorAll('#grid .row')].find((r) => r.dataset.id === id) || null
+      : null;
+    if (anchor) anchor.classList.add('open'); // so the next tap closes, never relaunches
+  }
+  if (!anchor) {
+    if (closeIfUnplaceable) hintHost.replaceChildren();
+    return false;
+  }
+  hzPlacePop(hintHost, anchor);
+  return true;
+};
+
 const closeHint = () => {
   hintHost.replaceChildren();
   for (const r of document.querySelectorAll('#grid .row')) r.classList.remove('open');
@@ -97,17 +141,7 @@ new MutationObserver(() => {
     // left it. Fall back to the live row that owns the card (both carry
     // dataset.id for exactly this kind of reunion), and if no live row owns
     // it, close the host: an unplaceable pop-over must not render.
-    let anchor = document.querySelector('#grid .row.open');
-    if (!anchor) {
-      const cardEl = hintHost.querySelector('.hint');
-      const id = cardEl ? cardEl.dataset.id : null;
-      anchor = id
-        ? [...document.querySelectorAll('#grid .row')].find((r) => r.dataset.id === id) || null
-        : null;
-      if (anchor) anchor.classList.add('open'); // so the next tap closes, never relaunches
-    }
-    if (!anchor) { hintHost.replaceChildren(); return; }
-    hzPlacePop(hintHost, anchor);
+    if (!placeOpenHint({ closeIfUnplaceable: true })) return;
     if (!hintHost.querySelector('.hint-x')) {
       const x = document.createElement('button');
       x.className = 'hint-x';
@@ -120,6 +154,24 @@ new MutationObserver(() => {
     hintHost.replaceChildren(); // drop an orphaned x so :empty hides the host
   }
 }).observe(hintHost, { childList: true });
+// The strip scrolls, so the card must follow. Passive because this only reads
+// layout and repositions; blocking the scroll would make the very gesture that
+// exposes the bug feel worse than the bug. rAF-coalesced: a smooth scroll fires
+// this many times per second and hzPlacePop reads a rect each time.
+{
+  const grid = document.getElementById('grid');
+  if (grid) {
+    let queued = false;
+    grid.addEventListener('scroll', () => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => {
+        queued = false;
+        if (hintHost.querySelector('.hint')) placeOpenHint();
+      });
+    }, { passive: true });
+  }
+}
 const notice = document.getElementById('notice');
 const settings = document.getElementById('settings');
 
@@ -403,11 +455,10 @@ let fitQueued = false;
 // its new viewport rather than leaving it at the old, now-clipped coordinates.
 function repositionOpenHint() {
   if (!hintHost.classList.contains('open')) return;
-  const card = hintHost.querySelector('.hint');
-  const id = card?.dataset.id;
-  const anchor = document.querySelector('#grid .row.open')
-    || (id ? grid.querySelector(`.row[data-id="${CSS.escape(id)}"]`) : null);
-  if (anchor) hzPlacePop(hintHost, anchor);
+  // Same resolution as everywhere else. This used to do its own, without the
+  // .open reunion step, so a card whose row had been rebuilt could be placed by
+  // one path and skipped by the other.
+  placeOpenHint();
 }
 function fitConnections() {
   if (fitQueued) return; // coalesce a burst of DOM mutations into one measure
@@ -749,11 +800,44 @@ function orderSources(sources) {
 }
 
 // Fixed strings only — the widget reports states, it never invents them.
+// THE ENGINE IS STARTING -- SAY SO, AND OFFER NOTHING TO PRESS.
+//
+// Two rewrites got this here. It first said "open Docker, then: bash
+// ops/setup-bridges.sh", which was wrong three ways at once: it named a repo
+// path a downloaded install does not have, it told the owner to run a script
+// the app ALREADY runs itself (Provision.ensureBridgeRuntime shells the bundled
+// copy on any nobridge), and it omitted the only fact that resolved the
+// situation -- press the tile again once Docker was up. Then it kept the "open
+// Docker" button while native became the default, sending native installs to a
+// VM they had no use for.
+//
+// There is no Docker now, so there is no owner step left to offer. Every
+// remedy this notice used to hand over is something the machine does: setup
+// runs itself on a nobridge, launchd restarts a bridge that died, and the
+// first run has a real download to finish before any of that is true. A
+// button that cannot help is worse than no button, so this says what is
+// happening and stops.
+function hzNobridgeNotice(tip) {
+  const line = document.createElement('span');
+  // This hardcoded string is the one the card actually renders -- correcting
+  // the NOTICES entry alone changed nothing, which is how the Docker wording
+  // outlived two attempts to remove it.
+  line.textContent = 'social connections are still starting up — this can take a few minutes the first time.';
+  tip.append(line);
+}
+
 const NOTICES = {
-  // The social bridges need their local engine running (ops/setup-bridges.sh
-  // starts it). Named separately from `down` because the remedy is different
-  // and specific: this is not "unknown", it is "start it".
-  nobridge: 'the social bridge engine is not running — open Docker, then: bash ops/setup-bridges.sh',
+  // Named separately from `down` because the state is different: `down` is
+  // "cannot tell", this is "the engine is not up yet". It is not an
+  // instruction any more -- ops/setup-bridges-native.sh runs itself and
+  // launchd restarts what dies, so there is nothing here for the owner to do
+  // but wait out the first-run download.
+  nobridge: 'social connections are still starting up.',
+  // The site refused to render a security step in an embedded window and the
+  // owner pressed the handoff. Not a failure state: the connect page is open
+  // in their browser, where that step does render.
+  browserLogin: 'this step needs a real browser — the connect page just opened; finish signing in there, then press this again.',
+
   down: 'checking the local connection…',
   auth: 'token mismatch — status unknown',
   noroute: 'connect service predates /api/status — status unknown',
@@ -1643,7 +1727,8 @@ function card(src, keep) {
       tip.appendChild(add);
     } else if (data && data.state !== 'ok' && data.state !== 'cancelled'
                && data.state !== 'manual' && !data.transcript) {
-      tip.append(NOTICES[data.state] || data.error || NOTICES.error);
+      if (data.state === 'nobridge') { hzNobridgeNotice(tip); }
+      else { tip.append(NOTICES[data.state] || data.error || NOTICES.error); }
     } else if (flow === 'cookie' && !(data && data.state === 'manual')) {
       // PRIMARY, Beeper-style: one button opens the platform's real login page
       // in a Intaglio Labs-framed window; native harvests the session cookies. No

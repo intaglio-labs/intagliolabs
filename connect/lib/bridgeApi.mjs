@@ -75,7 +75,21 @@ export async function bridgeApiResponse({
   const platform = PLATFORMS[platformId];
   if (!platform) return { status: 404, body: { error: 'unknown platform' } };
 
-  const wrap = (transcript) => {
+  // `engine` is the honest answer to "is there a bridge stack behind this?", and
+  // it exists because this route could not say. The GET below deliberately falls
+  // back to wrap([]) on ANY failure so a fresh install still renders policy --
+  // correct for the panel, disastrous for the caller, because native reads this
+  // BEFORE presenting a login window and a 200 meant "go ahead". So the owner
+  // typed a real Meta password into a real Meta page, the cookies were harvested,
+  // and only THEN did POST begin discover there was no homeserver to hand them
+  // to. The session was dropped and nothing resumed.
+  //
+  // 'up' means loadPanel actually reached the stack. 'down' means it did not.
+  // 'unknown' means nothing probed it -- an already-connected platform, or a
+  // route with no reason to ask. Callers must treat only 'down' as a refusal;
+  // anything else keeps today's behaviour, which is what stops this from becoming
+  // a new way for a fresh install to fail closed.
+  const wrap = (transcript, { engine = 'unknown' } = {}) => {
     const st = bridgeStatus(platformId, { home });
     return {
       status: 200,
@@ -83,6 +97,7 @@ export async function bridgeApiResponse({
         platform: platformId,
         label: platform.label,
         connected: st.connected,
+        engine,
         name: st.name ?? null,
         transcript: safeTranscript(transcript),
         // Native uses this BEFORE presenting a browser window. That folds
@@ -133,6 +148,9 @@ export async function bridgeApiResponse({
         // A platform that refuses the default browser string gets its own.
         // Server-authored like the rest of this policy — Swift enforces it.
         userAgent: platform.webLogin?.userAgent ?? null,
+        // 0 means "use the window's default width". Only a platform whose login
+        // page does not declare a viewport needs to say anything here.
+        windowWidth: platform.webLogin?.windowWidth ?? 0,
         // A QR WINDOW instead of a web login: the bridge posts an image, the
         // window shows it, a phone scans it, and the bridge reports the
         // outcome itself. Nothing is navigated to and nothing is harvested,
@@ -173,9 +191,12 @@ export async function bridgeApiResponse({
       // an unreachable homeserver all still answer with policy alone.
       try {
         const { transcript } = await loadPanel(platformId, { home });
-        return wrap(transcript);
+        return wrap(transcript, { engine: 'up' });
       } catch {
-        return wrap([]);
+        // Same fallback as before -- policy alone, HTTP 200, fresh install
+        // unaffected -- but it now SAYS the stack was unreachable instead of
+        // looking identical to a healthy one.
+        return wrap([], { engine: 'down' });
       }
     }
     if (method === 'POST' && subpath === 'begin') {

@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The local Matrix homeserver the bridges hand messages to, on 127.0.0.1:8008
+  and nothing else. Runs the relocatable CPython that ops/build-synapse.sh
+  installs under ~/.hazlie/bridges/synapse, never a system or Homebrew python.
+
+  A TEMPLATE: launchd expands no variables, so @HOME@, @PY@, @CONFIG@ and
+  @LOG@ are placeholders that ops/setup-bridges-native.sh substitutes when it
+  installs the rendered copy into ~/Library/LaunchAgents/. Do not bootstrap
+  this file directly.
+
+  WHY THIS EXISTS AT ALL: the native runtime started these with nohup and said
+  so in its own header -- "WHAT THIS DOES NOT DO: supervise". That was
+  survivable while Docker was the fallback, because Compose carried
+  `restart: unless-stopped`. Docker is gone. Without launchd a crashed
+  homeserver stops every platform until somebody happens to re-run setup, and
+  a reboot stops the stack entirely.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.intaglio.synapse</string>
+
+  <!-- Same identifier as every other hazlie agent ON PURPOSE: it is what makes
+       Login Items show one entry for the app instead of one per process. -->
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>io.intaglio.widget</string>
+  </array>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@PY@</string>
+    <string>-m</string>
+    <string>synapse.app.homeserver</string>
+    <string>--config-path</string>
+    <string>@CONFIG@</string>
+  </array>
+
+  <!-- Relative paths in a generated config resolve against CWD, and launchd
+       gives a job none (so it is /). The bridges failed exactly this way on the
+       first launchd run; Synapse is given the same footing rather than being
+       left to be the next one to find out. -->
+  <key>WorkingDirectory</key>
+  <string>@WORKDIR@</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- 0077: the homeserver writes its media store and sqlite database under
+       this, and both hold message content. -->
+  <key>Umask</key>
+  <integer>63</integer>
+
+  <key>StandardOutPath</key>
+  <string>@LOG@</string>
+
+  <key>StandardErrorPath</key>
+  <string>@LOG@</string>
+
+  <!-- KeepAlive restarts on ANY exit, so a homeserver that cannot start -- a
+       corrupt config, :8008 already held by something else -- would respawn as
+       fast as launchd allows while looking "running" in `launchctl list`.
+       60 seconds is the floor launchd enforces. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+</dict>
+</plist>
