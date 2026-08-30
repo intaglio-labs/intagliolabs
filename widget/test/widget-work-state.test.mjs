@@ -30,25 +30,28 @@ test('the widget gives real work the thinking pose and a current-task hover labe
   assert.match(script, /setInterval\(refreshWorkState, 1500\)/u);
 });
 
-test('processing shows a crisp spinning flywheel with outward sparks without borrowing the voice state', () => {
-  assert.equal((html.match(/class="think-spark spark-/gu) || []).length, 3);
-  assert.match(html, /class="orb-thinker"/u);
-  assert.match(html, /class="think-wheel"/u);
+test('processing gives the orb an expressive thinking performance', () => {
+  assert.match(html, /class="orb-thoughts"/u);
+  assert.equal((html.match(/class="thought th[123]"/gu) || []).length, 3);
+  assert.doesNotMatch(html, /energy-bolt|energy-star|energy-trail/u,
+    'the old thunder and orbital treatment is fully removed');
   assert.match(script, /const processing = voiceOrbState === 'idle' && !!workLabel;/u);
   assert.match(script, /classList\.toggle\('processing', processing\)/u);
-  assert.match(palette, /\.orb\.processing \.orb-thinker \{ display: block; \}/u);
-  assert.match(palette, /@keyframes thinker-spin/u);
-  assert.match(palette, /@keyframes thinker-spark/u);
-  assert.match(palette, /\.orb-thinker \{[\s\S]*?z-index: 3;/u,
-    'the icon remains visible above the orb and the transparent window');
-  assert.match(palette, /animation: thinker-spin 1\.35s/u);
-  assert.match(palette, /animation: thinker-spark 1\.35s/u);
-  assert.match(palette, /stroke-linejoin: round;/u, 'the spinner and sparks have soft corners');
-  assert.match(palette, /drop-shadow\(0 1px 1px rgba\(0, 0, 0, 0\.82\)\)/u,
-    'a tight dark edge separates the cream icon from arbitrary wallpaper');
-  assert.match(palette, /top: -15px;[\s\S]*?right: -13px;/u,
-    'the complete thinking mark stays at the head’s upper-right');
-  assert.match(palette, /prefers-reduced-motion:[\s\S]*\.orb\.processing \.think-wheel \{ transform: rotate\(28deg\); \}/u);
+  assert.match(palette, /\.orb\.processing \.orb-thoughts \{ display: block; \}/u);
+  assert.match(palette, /@keyframes processing-ponder/u);
+  assert.match(palette, /@keyframes processing-glance/u);
+  assert.match(palette, /@keyframes thought-gather/u);
+  assert.match(palette, /@keyframes thought-cloud-gather/u);
+  assert.doesNotMatch(palette, /\.orb\.processing \.face::(?:before|after)/u,
+    'processing does not add stray half-circle marks to the face');
+  assert.match(palette, /\.orb-thoughts \.th3::before,[\s\S]*?\.orb-thoughts \.th3::after/u,
+    'the largest thought is an organic little cloud rather than another dot');
+  assert.match(palette, /\.orb-thoughts \{[\s\S]*?top: -10px;[\s\S]*?right: -2px;/u,
+    'the thought trail stays inside the window while gathering above the upper-right crown');
+  assert.match(palette, /\.orb-thoughts \.th1 \{ left: 14px; bottom: 5px;/u);
+  assert.match(palette, /\.orb-thoughts \.th2 \{ left: 16px; bottom: 8px;/u,
+    'the trail begins at the upper-right rim instead of the middle of the face');
+  assert.match(palette, /prefers-reduced-motion:[\s\S]*\.orb\.processing \.thought \{ opacity: 0\.82; transform: none; \}/u);
 });
 
 test('hover holds current work details and click pins the task plus total hours', () => {
