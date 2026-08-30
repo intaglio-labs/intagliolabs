@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The local Matrix stack: one Synapse and seven mautrix bridges, supervised by
+  ops/bridge-supervisor.mjs as children of THIS one agent.
+
+  A TEMPLATE: launchd expands no variables, so @HOME@ and @REPO@ are
+  placeholders that ops/setup-bridges-native.sh substitutes when it installs the
+  rendered copy into ~/Library/LaunchAgents/. Do not bootstrap this file
+  directly.
+
+  ONE AGENT, NOT EIGHT, AND THE REASON IS THE OWNER'S SCREEN. Eight agents
+  worked, and put eight entries in Login Items naming binaries nobody installed
+  by name -- "mautrix-discord-darwin-arm64 can run in the background", "python
+  can run in the background". AssociatedBundleIdentifiers is only honoured when
+  the job's program shares a TEAM with the bundle it names, and those binaries
+  are ad-hoc with no team. The supervisor's own comment carries the full
+  reasoning and the options that were rejected.
+
+  The interpreter is the STABLE binary at ~/.hazlie/bin/node, exactly as hermes
+  and connect use -- it is Developer ID signed with team 5K43Q6FF67, which is
+  what lets this agent group under intaglio labs instead of announcing itself,
+  and it is not the Homebrew node, which a brew upgrade can delete from under a
+  running KeepAlive process.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.intaglio.bridges</string>
+
+  <!-- Same identifier as every other hazlie agent ON PURPOSE: that is what
+       makes them one Login Items entry for the app rather than one per
+       process. -->
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>io.intaglio.widget</string>
+  </array>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@HOME@/.hazlie/bin/node</string>
+    <string>@REPO@/ops/bridge-supervisor.mjs</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- 0077: the children write session cookies and message databases under
+       ~/.hazlie/matrix, and this process creates their log files. -->
+  <key>Umask</key>
+  <integer>63</integer>
+
+  <key>StandardOutPath</key>
+  <string>@HOME@/.hazlie/bridges/run/supervisor.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>@HOME@/.hazlie/bridges/run/supervisor.log</string>
+
+  <!-- The supervisor throttles its OWN children at 60s; this is the floor for
+       the supervisor itself, so a node that cannot start does not hot-loop
+       either. 60 seconds is what launchd enforces regardless. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+</dict>
+</plist>

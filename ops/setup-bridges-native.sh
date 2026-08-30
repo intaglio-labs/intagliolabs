@@ -168,22 +168,39 @@ ROWS
 # bridge that cannot start does not become a hot loop.
 UID_=$(id -u)
 AGENTS="$HOME/Library/LaunchAgents"
+SUPERVISOR_LABEL="io.intaglio.bridges"
 
-label_for() {
-  case "$1" in
-    synapse) echo "io.intaglio.synapse" ;;
-    *)       echo "io.intaglio.bridge.$1" ;;
-  esac
-}
+# ONE AGENT SUPERVISES ALL EIGHT, and it is our own signed node that does it.
+#
+# This briefly installed eight launchd agents -- one per bridge plus Synapse --
+# which supervised correctly and put eight entries in the owner's Login Items
+# naming binaries they never installed by name. AssociatedBundleIdentifiers is
+# only honoured when the job's program shares a TEAM with the bundle it names,
+# and the mautrix binaries and Synapse's CPython are ad-hoc with no team at all.
+# ops/bridge-supervisor.mjs carries the full reasoning, including the two
+# alternatives that were rejected.
+#
+# Crash recovery is not given up: the supervisor restarts its children with the
+# same 60s floor launchd would have applied, and is itself RunAtLoad+KeepAlive.
 
 alive() {
-  launchctl print "gui/$UID_/$(label_for "$1")" 2>/dev/null \
+  launchctl print "gui/$UID_/$SUPERVISOR_LABEL" 2>/dev/null \
     | grep -qE '^[[:space:]]*pid = [0-9]+'
 }
 
-agent_pid() {
-  launchctl print "gui/$UID_/$(label_for "$1")" 2>/dev/null \
+supervisor_pid() {
+  launchctl print "gui/$UID_/$SUPERVISOR_LABEL" 2>/dev/null \
     | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\).*/\1/p' | head -1
+}
+
+# The children are ordinary processes now, not launchd jobs, so ask the process
+# table rather than launchctl. Matching on the binary path keeps this from
+# counting an unrelated python or a developer's own mautrix build.
+child_pid() {
+  case "$1" in
+    synapse) pgrep -f "$SYN/venv/bin/python -m synapse.app.homeserver" 2>/dev/null | head -1 ;;
+    *)       pgrep -f "$BIN/mautrix-$1-darwin-arm64 " 2>/dev/null | head -1 ;;
+  esac
 }
 
 # Render a template, LINT IT BEFORE INSTALLING, install 0600, and (re)load only
@@ -191,15 +208,9 @@ agent_pid() {
 # arrived at, including the ordering lesson it learned the hard way: validating
 # after the move leaves a broken plist on disk, and the unchanged-file branch
 # then compares it to itself forever.
-# WRITING THE PLIST AND LOADING IT ARE TWO STEPS ON PURPOSE. An unconfigured
-# telegram gets the file but not the load: connect/server.mjs finishes that
-# bridge's setup when the owner pastes an api_id, and it can only bootstrap an
-# agent whose plist is already on disk. Before this split it shelled `docker
-# start hazlie-telegram`, which is now a command that does nothing.
-render_agent() {
-  name="$1"; src="$2"; shift 2
-  label=$(label_for "$name")
-  dst="$AGENTS/$label.plist"
+install_agent() {
+  src="$1"; shift
+  dst="$AGENTS/$SUPERVISOR_LABEL.plist"
   mkdir -p "$AGENTS"
   rendered=$(sed "$@" "$src")
   changed=1
@@ -210,7 +221,7 @@ render_agent() {
     printf '%s\n' "$rendered" > "$tmp"
     if ! plutil -lint "$tmp" >/dev/null 2>&1; then
       rm -f "$tmp"
-      echo "  !! $label: rendered plist is malformed -- not installed" >&2
+      echo "  !! $SUPERVISOR_LABEL: rendered plist is malformed -- not installed" >&2
       return 1
     fi
     mv "$tmp" "$dst"
@@ -218,22 +229,51 @@ render_agent() {
   # Reassert even when unchanged: a permissive mode must not survive a
   # nominally idempotent run.
   chmod 600 "$dst"
-}
-
-install_agent() {
-  render_agent "$@" || return 1
-  label=$(label_for "$1")
-  dst="$AGENTS/$label.plist"
-  if launchctl print "gui/$UID_/$label" >/dev/null 2>&1; then
+  if launchctl print "gui/$UID_/$SUPERVISOR_LABEL" >/dev/null 2>&1; then
     if [ "$changed" = "1" ]; then
-      launchctl bootout "gui/$UID_/$label" 2>/dev/null || true
+      launchctl bootout "gui/$UID_/$SUPERVISOR_LABEL" 2>/dev/null || true
       launchctl bootstrap "gui/$UID_" "$dst" 2>/dev/null || true
-      launchctl kickstart -k "gui/$UID_/$label" 2>/dev/null || true
     fi
+    launchctl kickstart -k "gui/$UID_/$SUPERVISOR_LABEL" 2>/dev/null || true
   else
     launchctl bootstrap "gui/$UID_" "$dst" 2>/dev/null || true
-    launchctl kickstart "gui/$UID_/$label" 2>/dev/null || true
+    launchctl kickstart "gui/$UID_/$SUPERVISOR_LABEL" 2>/dev/null || true
   fi
+}
+
+# Booting the supervisor out stops its children: it forwards SIGTERM on the way
+# down. The eight per-bridge agents an earlier build installed are removed too,
+# or they would keep restarting the same processes this one is trying to own.
+stop_one() {
+  label="io.intaglio.bridge.$1"
+  [ "$1" = "synapse" ] && label="io.intaglio.synapse"
+  if launchctl print "gui/$UID_/$label" >/dev/null 2>&1; then
+    launchctl bootout "gui/$UID_/$label" 2>/dev/null || true
+  fi
+  rm -f "$AGENTS/$label.plist"
+}
+
+stop_all() {
+  if launchctl print "gui/$UID_/$SUPERVISOR_LABEL" >/dev/null 2>&1; then
+    launchctl bootout "gui/$UID_/$SUPERVISOR_LABEL" 2>/dev/null || true
+    echo "stopped the bridge supervisor"
+  fi
+  # The per-agent era, if this install came from that build.
+  for n in synapse $(bridge_rows | awk '{print $1}'); do stop_one "$n"; done
+  # And anything left from before launchd owned these at all.
+  retire_pidfile_era
+}
+
+status_all() {
+  if alive; then
+    echo "  up    supervisor (pid $(supervisor_pid))"
+  else
+    echo "  down  supervisor"
+  fi
+  for n in synapse $(bridge_rows | awk '{print $1}'); do
+    p=$(child_pid "$n")
+    if [ -n "$p" ]; then echo "  up    $n (pid $p)"; else echo "  down  $n"; fi
+  done
 }
 
 # RETIRE THE nohup ERA BEFORE CLAIMING ITS PORTS.
@@ -277,34 +317,6 @@ retire_pidfile_era() {
   done
 }
 
-stop_one() {
-  label=$(label_for "$1")
-  if launchctl print "gui/$UID_/$label" >/dev/null 2>&1; then
-    launchctl bootout "gui/$UID_/$label" 2>/dev/null || true
-    echo "stopped $1"
-  fi
-  # Leave the plist in place on a plain --stop: booting it out is what stops
-  # it, and keeping the file means --status can still say what is installed.
-}
-
-stop_all() {
-  for n in synapse $(bridge_rows | awk '{print $1}'); do stop_one "$n"; done
-  # Also anything left from before launchd owned these, or `--stop` on an
-  # unmigrated install reports success and stops nothing.
-  retire_pidfile_era
-}
-
-status_all() {
-  for n in synapse $(bridge_rows | awk '{print $1}'); do
-    if alive "$n"; then
-      echo "  up    $n (pid $(agent_pid "$n"))"
-    elif [ -f "$AGENTS/$(label_for "$n").plist" ]; then
-      echo "  down  $n (agent installed; launchd will retry)"
-    else
-      echo "  down  $n (no agent installed)"
-    fi
-  done
-}
 
 case "$MODE" in
   stop) stop_all; exit 0 ;;
@@ -555,13 +567,124 @@ abandon() {
 
 retire_pidfile_era
 
-if [ "$NEEDS_RESTART" = "1" ]; then stop_one synapse; fi
-install_agent synapse "$REPO/ops/io.intaglio.synapse.plist" \
-  -e "s|@PY@|$PY|g" \
-  -e "s|@CONFIG@|$M/synapse/homeserver.yaml|g" \
-  -e "s|@WORKDIR@|$M/synapse|g" \
-  -e "s|@LOG@|$RUN/synapse.log|g" \
-  || abandon "could not install the synapse agent"
+# RETIRE THE PER-PROCESS AGENT ERA TOO, AND ON THE SUCCESS PATH.
+#
+# The build between the nohup era and this one installed eight launchd agents,
+# one per process. They are still loaded on any machine that ran it, still hold
+# :8008 and the seven appservice ports, and launchd will keep restarting them --
+# so bringing the supervisor up beside them produces two of everything, with the
+# second copy failing to bind and retrying forever.
+#
+# This lived only inside stop_all(), which only abandon() calls, so it ran on
+# failure and never on the ordinary upgrade path. Measured: a successful run
+# left seven stale agents loaded next to the new supervisor.
+retire_per_agent_era() {
+  found=0
+  for n in synapse $(bridge_rows | awk '{print $1}'); do
+    label="io.intaglio.bridge.$n"
+    [ "$n" = "synapse" ] && label="io.intaglio.synapse"
+    if launchctl print "gui/$UID_/$label" >/dev/null 2>&1; then
+      launchctl bootout "gui/$UID_/$label" 2>/dev/null || true
+      found=1
+    fi
+    rm -f "$AGENTS/$label.plist"
+  done
+  [ "$found" = "1" ] && echo "retired the per-process bridge agents"
+  # Give launchd a moment to actually release the ports before the supervisor
+  # tries to claim them.
+  [ "$found" = "1" ] && sleep 3
+  return 0
+}
+retire_per_agent_era
+
+# --- telegram's missing half --------------------------------------------------
+# PORTED FROM THE CONTAINER SCRIPT, which is where this lived and which is gone.
+# Without it Telegram regresses from "a phone-and-code login like every other
+# platform" to "register your own app at my.telegram.org first", for every user
+# of every build -- including builds that ship a credential precisely so nobody
+# has to. widget/build.sh still bakes the pair in and still says so.
+#
+# The generated config ships mautrix's EXAMPLE credentials (api_id 12345) and
+# the bridge refuses to start on them, so the example id is the reliable "not
+# yet configured" signal rather than an empty key.
+#
+# THREE PLACES A REAL PAIR CAN COME FROM, in this order. None of them is this
+# repository, and that is deliberate: it is public, and Telegram refuses logins
+# made with any api_id it finds in public code (API_ID_PUBLISHED_FLOOD). See
+# the note at PLATFORMS.telegram in connect/lib/bridge.mjs.
+#   1. $HZ_TELEGRAM_APP        -- an explicit run, or CI from a repo secret
+#   2. ~/.hazlie/secrets/telegram-app.txt -- this machine's own copy (0600)
+#   3. the installed app's bundled copy   -- what widget/build.sh baked in
+# The per-user walkthrough in the widget stays live underneath all three: it
+# writes the same two keys through the same path, so a flagged shipped id
+# degrades to "register your own" instead of to nothing.
+telegram_app_credential() {
+  if [ -n "${HZ_TELEGRAM_APP:-}" ]; then printf '%s' "$HZ_TELEGRAM_APP"; return; fi
+  if [ -f "$HOME/.hazlie/secrets/telegram-app.txt" ]; then
+    tr -d '[:space:]' < "$HOME/.hazlie/secrets/telegram-app.txt"; return
+  fi
+  for app in "/Applications/Intaglio Labs.app" "$HOME/Applications/Intaglio Labs.app"; do
+    if [ -f "$app/Contents/Resources/backend/telegram-app" ]; then
+      tr -d '[:space:]' < "$app/Contents/Resources/backend/telegram-app"; return
+    fi
+  done
+  printf ''
+}
+
+TELEGRAM_UNCONFIGURED=0
+if [ "$("$YQ" '.network.api_id // 0' "$M/telegram/config.yaml" 2>/dev/null)" = "12345" ]; then
+  TG_APP="$(telegram_app_credential)"
+  # An explicit CI/local override arrives in this process's environment. Drop it
+  # before sed or any other child can inherit the credential.
+  unset HZ_TELEGRAM_APP || true
+  # Shape-checked before it is written. A malformed pair produces a bridge that
+  # crash-loops with nothing on the machine naming the cause -- which under
+  # launchd's KeepAlive is exactly the hot loop ThrottleInterval exists for.
+  if printf '%s' "$TG_APP" | grep -Eq '^[0-9]{1,12}:[0-9a-fA-F]{32}$'; then
+    TG_ID="${TG_APP%%:*}"
+    TG_HASH="${TG_APP#*:}"
+    # Targeted line replacement, not a yq round trip: mautrix's generated config
+    # carries ~700 lines of comments that a re-serialise would flatten. Feed the
+    # replacement program over stdin so the API hash never appears in sed's argv
+    # (and therefore never flashes in another process's `ps` view).
+    {
+      # DOUBLED BACKSLASHES, AND THEY ARE LOAD-BEARING. printf eats one level of
+      # escaping, so a single \1 here is not sed's backreference -- it is printf's
+      # octal escape for 0x01, and what reaches the config is a literal control
+      # character where the key name should be. That is exactly what happened
+      # when this block was ported from the container script: it replaced
+      # "api_id:" with ^A, and mautrix then refused the file with "yaml: control
+      # characters are not allowed". Verified with printf before re-committing.
+      printf 's/^\\([[:space:]]*api_id:\\).*/\\1 %s/\\n' "$TG_ID"
+      printf 's/^\\([[:space:]]*api_hash:\\).*/\\1 "%s"/\\n' "$TG_HASH"
+    } | /usr/bin/sed -i '' -f - "$M/telegram/config.yaml"
+    echo "telegram: configured from a shipped app credential"
+  else
+    TELEGRAM_UNCONFIGURED=1
+    echo "telegram: needs api_id + api_hash from my.telegram.org/apps"
+    echo "          the widget's Telegram tile walks you through it, or set them"
+    echo "          by hand in $M/telegram/config.yaml and then re-run this script."
+  fi
+fi
+
+# THE WHOLE STACK, UNDER ONE AGENT. The supervisor starts Synapse and every
+# configured bridge as its own children. Telegram's credential is written above
+# rather than below, so the supervisor's first pass either starts it with a real
+# api_id or knowingly skips it -- it does not spend a 60s retry on a config this
+# script was about to fix.
+#
+# NEEDS_RESTART used to boot the synapse agent out on its own; the supervisor
+# owns every process now, so a config change means restarting the supervisor,
+# which install_agent's kickstart -k does unconditionally.
+NODE_BIN="${HZ_NODE:-$HOME/.hazlie/bin/node}"
+[ -x "$NODE_BIN" ] || NODE_BIN=$(command -v node 2>/dev/null || true)
+[ -n "$NODE_BIN" ] && [ -x "$NODE_BIN" ] \
+  || abandon "no node to run the bridge supervisor with"
+
+install_agent "$REPO/ops/io.intaglio.bridges.plist" \
+  -e "s|@HOME@|$HOME|g" \
+  -e "s|@REPO@|$REPO|g" \
+  || abandon "could not install the bridge supervisor"
 
 i=0
 until curl -sf "http://127.0.0.1:$SYNAPSE_PORT/health" >/dev/null 2>&1; do
@@ -658,116 +781,19 @@ print("owner-credentials.json written (0600)")
 PY
 fi
 
-# --- telegram's missing half --------------------------------------------------
-# PORTED FROM THE CONTAINER SCRIPT, which is where this lived and which is gone.
-# Without it Telegram regresses from "a phone-and-code login like every other
-# platform" to "register your own app at my.telegram.org first", for every user
-# of every build -- including builds that ship a credential precisely so nobody
-# has to. widget/build.sh still bakes the pair in and still says so.
-#
-# The generated config ships mautrix's EXAMPLE credentials (api_id 12345) and
-# the bridge refuses to start on them, so the example id is the reliable "not
-# yet configured" signal rather than an empty key.
-#
-# THREE PLACES A REAL PAIR CAN COME FROM, in this order. None of them is this
-# repository, and that is deliberate: it is public, and Telegram refuses logins
-# made with any api_id it finds in public code (API_ID_PUBLISHED_FLOOD). See
-# the note at PLATFORMS.telegram in connect/lib/bridge.mjs.
-#   1. $HZ_TELEGRAM_APP        -- an explicit run, or CI from a repo secret
-#   2. ~/.hazlie/secrets/telegram-app.txt -- this machine's own copy (0600)
-#   3. the installed app's bundled copy   -- what widget/build.sh baked in
-# The per-user walkthrough in the widget stays live underneath all three: it
-# writes the same two keys through the same path, so a flagged shipped id
-# degrades to "register your own" instead of to nothing.
-telegram_app_credential() {
-  if [ -n "${HZ_TELEGRAM_APP:-}" ]; then printf '%s' "$HZ_TELEGRAM_APP"; return; fi
-  if [ -f "$HOME/.hazlie/secrets/telegram-app.txt" ]; then
-    tr -d '[:space:]' < "$HOME/.hazlie/secrets/telegram-app.txt"; return
-  fi
-  for app in "/Applications/Intaglio Labs.app" "$HOME/Applications/Intaglio Labs.app"; do
-    if [ -f "$app/Contents/Resources/backend/telegram-app" ]; then
-      tr -d '[:space:]' < "$app/Contents/Resources/backend/telegram-app"; return
-    fi
-  done
-  printf ''
-}
-
-TELEGRAM_UNCONFIGURED=0
-if [ "$("$YQ" '.network.api_id // 0' "$M/telegram/config.yaml" 2>/dev/null)" = "12345" ]; then
-  TG_APP="$(telegram_app_credential)"
-  # An explicit CI/local override arrives in this process's environment. Drop it
-  # before sed or any other child can inherit the credential.
-  unset HZ_TELEGRAM_APP || true
-  # Shape-checked before it is written. A malformed pair produces a bridge that
-  # crash-loops with nothing on the machine naming the cause -- which under
-  # launchd's KeepAlive is exactly the hot loop ThrottleInterval exists for.
-  if printf '%s' "$TG_APP" | grep -Eq '^[0-9]{1,12}:[0-9a-fA-F]{32}$'; then
-    TG_ID="${TG_APP%%:*}"
-    TG_HASH="${TG_APP#*:}"
-    # Targeted line replacement, not a yq round trip: mautrix's generated config
-    # carries ~700 lines of comments that a re-serialise would flatten. Feed the
-    # replacement program over stdin so the API hash never appears in sed's argv
-    # (and therefore never flashes in another process's `ps` view).
-    {
-      printf 's/^\([[:space:]]*api_id:\).*/\1 %s/\n' "$TG_ID"
-      printf 's/^\([[:space:]]*api_hash:\).*/\1 "%s"/\n' "$TG_HASH"
-    } | /usr/bin/sed -i '' -f - "$M/telegram/config.yaml"
-    echo "telegram: configured from a shipped app credential"
-  else
-    TELEGRAM_UNCONFIGURED=1
-    echo "telegram: needs api_id + api_hash from my.telegram.org/apps"
-    echo "          the widget's Telegram tile walks you through it, or set them"
-    echo "          by hand in $M/telegram/config.yaml and then re-run this script."
-  fi
-fi
-
-# A `for` LOOP, NOT A PIPE. Every bridge_rows consumer in this file is a pipe
-# and therefore a subshell, which is what made the old exit-code bug invisible;
-# this one installs agents and must be able to report failure to the parent.
-for name in $(bridge_rows | awk '{print $1}'); do
-  # A bridge with no usable credential must not be supervised. KeepAlive would
-  # restart it every 60s forever, filling its log and burning the battery, to
-  # accomplish nothing a restart can fix -- the container script stopped the
-  # telegram container for exactly this reason. Boot out any agent a previous
-  # run installed, so removing the credential takes effect too.
-  binary=$(bridge_rows | awk -v n="$name" '$1 == n {print $4}')
-  if [ "$name" = "telegram" ] && [ "$TELEGRAM_UNCONFIGURED" = "1" ]; then
-    # Plist written, agent not loaded. The widget's Telegram walkthrough
-    # bootstraps this exact file once the owner supplies a credential.
-    render_agent telegram "$REPO/ops/io.intaglio.bridge.plist" \
-      -e "s|@LABEL@|io.intaglio.bridge.telegram|g" \
-      -e "s|@BINARY@|$BIN/$binary|g" \
-      -e "s|@CONFIG@|$M/telegram/config.yaml|g" \
-      -e "s|@REGISTRATION@|$M/telegram/registration.yaml|g" \
-      -e "s|@WORKDIR@|$M/telegram|g" \
-      -e "s|@LOG@|$RUN/telegram.log|g" || true
-    stop_one telegram
-    echo "  telegram: configured but not started (no api_id yet)"
-    continue
-  fi
-  install_agent "$name" "$REPO/ops/io.intaglio.bridge.plist" \
-    -e "s|@LABEL@|io.intaglio.bridge.$name|g" \
-    -e "s|@BINARY@|$BIN/$binary|g" \
-    -e "s|@CONFIG@|$M/$name/config.yaml|g" \
-    -e "s|@REGISTRATION@|$M/$name/registration.yaml|g" \
-    -e "s|@WORKDIR@|$M/$name|g" \
-    -e "s|@LOG@|$RUN/$name.log|g" \
-    || echo "  !! $name: agent not installed" >&2
-done
-
 # BOOTSTRAPPED IS NOT RUNNING, AND THIS SCRIPT'S EXIT CODE IS LOAD-BEARING.
 #
-# launchctl bootstrap succeeds for a plist pointing at a binary that is
-# missing, unsigned, or dies on its own config a moment later -- so a run that
-# started nothing would otherwise report exactly what a run that started seven
-# reports. Give launchd a moment to get past RunAtLoad, then ask it.
-sleep 5
+# The supervisor being up says nothing about its children: it starts a bridge
+# whose binary is missing or whose config is bad exactly as readily as one that
+# works, and reports it in its own log. Give it a moment past its first spawn,
+# then ask the process table.
+sleep 6
 dead=""; live=0
 for name in $(bridge_rows | awk '{print $1}'); do
   # Telegram-without-a-credential is a deliberate non-start, not a failure, and
   # counting it as dead would report a healthy six-platform install as broken.
   [ "$name" = "telegram" ] && [ "$TELEGRAM_UNCONFIGURED" = "1" ] && continue
-  if alive "$name"; then live=$((live + 1)); else dead="$dead $name"; fi
+  if [ -n "$(child_pid "$name")" ]; then live=$((live + 1)); else dead="$dead $name"; fi
 done
 
 echo
@@ -776,7 +802,7 @@ status_all
 if [ -n "$dead" ]; then
   echo >&2
   echo "these bridges did not come up:$dead" >&2
-  echo "launchd will keep retrying them (ThrottleInterval 60); the logs say why:" >&2
+  echo "the supervisor will keep retrying them (60s floor); the logs say why:" >&2
   for name in $dead; do
     echo "--- $name ---" >&2
     tail -15 "$RUN/$name.log" >&2 2>/dev/null || echo "  (no log yet)" >&2
@@ -785,9 +811,9 @@ fi
 
 # Partial failure is NOT a failed run. Six working platforms and one that needs
 # a credential the owner has to create -- telegram's api_id is the standing
-# example -- is a working install with a note, and launchd keeps retrying the
-# odd one out. Only a total washout means the runtime itself did not work, and
-# that is the case where leaving a homeserver holding :8008 helps nobody.
+# example -- is a working install with a note, and the supervisor keeps retrying
+# the odd one out. Only a total washout means the runtime itself did not work,
+# and that is the case where leaving a homeserver holding :8008 helps nobody.
 if [ "$live" -eq 0 ]; then
   abandon "no bridge came up; native setup failed"
 fi

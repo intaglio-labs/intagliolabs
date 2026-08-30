@@ -149,9 +149,11 @@ mkdir -p "$BE/ops"
 cp ../ops/gcal-auth.mjs ../ops/oura-auth.mjs \
    ../ops/setup-bridges-native.sh ../ops/build-libolm.sh ../ops/build-synapse.sh \
    ../ops/fetch-bridges.mjs ../ops/prefetch-bridges.sh "$BE/ops/"
-# The launchd templates the bridge setup renders. Without these the stack still
-# starts but nothing supervises it, which is the state this build left behind.
-cp ../ops/io.intaglio.synapse.plist ../ops/io.intaglio.bridge.plist "$BE/ops/"
+# The bridge supervisor and the single agent that runs it. Without these the
+# stack still starts but nothing supervises it, and an earlier version of this
+# line shipped eight per-process agents that each announced themselves in Login
+# Items -- see ops/bridge-supervisor.mjs for why there is one now.
+cp ../ops/io.intaglio.bridges.plist ../ops/bridge-supervisor.mjs "$BE/ops/"
 # A downloaded app executes these directly. Preserve the source mode, but also
 # set it explicitly so an archive or checkout that lost executable bits cannot
 # silently turn first-launch bridge warming off.

@@ -18,7 +18,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -51,33 +51,50 @@ test('nothing reaches for the container path any more', () => {
   }
 });
 
-test('the stack is supervised, because nothing else is left to do it', () => {
+test('the stack is supervised, by ONE agent that is honestly ours', () => {
   // This script's header said "WHAT THIS DOES NOT DO: supervise" and that was
   // survivable only while Compose's `restart: unless-stopped` sat underneath.
-  // A crashed bridge now stops that platform until launchd restarts it.
-  assert.ok(buildSh.includes('io.intaglio.synapse.plist'), 'the synapse agent must ship');
-  assert.ok(buildSh.includes('io.intaglio.bridge.plist'), 'the bridge agent template must ship');
-  assert.match(nativeSh, /launchctl bootstrap/u, 'agents must actually be loaded');
-  // COMMENTS STRIPPED FIRST. The script explains at length what it replaced,
-  // and the word "nohup" appears in that explanation -- so matching the raw
-  // file asserts the presence of a comment, not the absence of a behaviour.
-  // That is the same mistake this branch has now made six times.
-  const code = nativeSh.split('\n').filter((l) => !/^\s*#/u.test(l)).join('\n');
-  assert.doesNotMatch(code, /\bnohup\b/u, 'an unsupervised child is what this replaced');
-  // NOT "no pidfile anywhere" -- that was the first version of this assertion
-  // and it was wrong: the script must still READ the old ones to retire an
-  // install provisioned before launchd owned these processes. What must never
-  // happen again is WRITING one, which is how the stack came to be untracked.
-  assert.doesNotMatch(code, /echo \$! ?>/u, 'nothing may record a pid of its own');
-  assert.match(code, /retire_pidfile_era/u,
-    'the pre-launchd processes must be retired, or they keep the ports');
-  for (const plist of ['io.intaglio.synapse.plist', 'io.intaglio.bridge.plist']) {
-    const text = readFileSync(join(ROOT, 'ops', plist), 'utf8');
-    assert.match(text, /<key>KeepAlive<\/key>\s*<true\/>/u, `${plist} must restart on crash`);
-    assert.match(text, /<key>RunAtLoad<\/key>\s*<true\/>/u, `${plist} must come back after a reboot`);
-    assert.match(text, /<key>ThrottleInterval<\/key>\s*<integer>60<\/integer>/u,
-      `${plist} without a throttle turns a broken config into a hot loop`);
-  }
+  // The first fix installed eight launchd agents, which supervised correctly
+  // and put eight entries in the owner's Login Items naming binaries they never
+  // installed: AssociatedBundleIdentifiers is only honoured when the job's
+  // program shares a TEAM with the bundle it names, and the mautrix binaries
+  // and Synapse's CPython are ad-hoc with no team at all.
+  assert.ok(buildSh.includes('io.intaglio.bridges.plist'), 'the agent must ship');
+  assert.ok(buildSh.includes('bridge-supervisor.mjs'), 'so must the supervisor it runs');
+  const plist = readFileSync(join(ROOT, 'ops', 'io.intaglio.bridges.plist'), 'utf8');
+  assert.match(plist, /<key>KeepAlive<\/key>\s*<true\/>/u, 'it must restart on crash');
+  assert.match(plist, /<key>RunAtLoad<\/key>\s*<true\/>/u, 'and come back after a reboot');
+  assert.match(plist, /<key>ThrottleInterval<\/key>\s*<integer>60<\/integer>/u,
+    'without a throttle a broken config is a hot loop');
+
+  // THE POINT OF THE REWRITE: the agent's program must be the node we sign, not
+  // a third-party binary. That team match is the whole reason this groups under
+  // the app instead of announcing each bridge by filename.
+  assert.match(plist, /<string>@HOME@\/\.hazlie\/bin\/node<\/string>/u,
+    'the agent must run the signed node, or Login Items names the executable');
+  // XML COMMENTS STRIPPED. The plist explains what it supervises, so "mautrix"
+  // appears in its prose -- matching the raw file asserts the absence of a
+  // sentence, not of a job program. Seventh time on this branch.
+  const keys = plist.replace(/<!--[\s\S]*?-->/gu, '');
+  assert.doesNotMatch(keys, /mautrix|synapse\.app/u,
+    'no ad-hoc binary may be a launchd job program');
+
+  // And exactly one agent, or the problem comes straight back.
+  assert.ok(!existsSync(join(ROOT, 'ops', 'io.intaglio.bridge.plist')),
+    'the per-bridge template must be gone');
+  assert.ok(!existsSync(join(ROOT, 'ops', 'io.intaglio.synapse.plist')),
+    'the per-synapse template must be gone');
+});
+
+test('the supervisor restarts children, with a floor on the rate', () => {
+  const sup = readFileSync(join(ROOT, 'ops', 'bridge-supervisor.mjs'), 'utf8');
+  assert.match(sup, /RESTART_FLOOR_MS = 60_000/u,
+    'a process that cannot start must not respawn as fast as the loop allows');
+  assert.match(sup, /child\.on\('exit'/u, 'a crashed child must be noticed');
+  assert.match(sup, /process\.on\('SIGTERM'/u,
+    'children are not in their own process group; a stop must be forwarded');
+  assert.match(sup, /cwd,/u,
+    "mautrix's relative log path needs a working directory or every bridge exits");
 });
 
 test('the native script can reach a working state by itself', () => {
