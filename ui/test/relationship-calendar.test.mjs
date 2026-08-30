@@ -84,19 +84,19 @@ test('suppression holds here exactly as it does for messages', () => {
 test('an invite display-name folds an email-only contact onto the named person', () => {
   const ctx = openDb(':memory:');
   const m = (ts, entity, name) => ({ ts, source: 'calendar', entity_id: entity, text: 'meeting',
-    meta: { attendees: [{ email: 'rn@personal.dev', ...(name ? { name } : {}) }] } });
+    meta: { attendees: [{ email: 'mt@personal.dev', ...(name ? { name } : {}) }] } });
   insertRows(ctx, [
-    m(NOW - 300 * DAY, 'c:1', 'Rishab Nayak'), m(NOW - 250 * DAY, 'c:2', 'Rishab Nayak'),
-    m(NOW - 200 * DAY, 'c:3', 'Rishab Nayak'), meeting(NOW + 20 * DAY, ['x@y.com'], 'c:9'),
+    m(NOW - 300 * DAY, 'c:1', 'Mika Tanaka'), m(NOW - 250 * DAY, 'c:2', 'Mika Tanaka'),
+    m(NOW - 200 * DAY, 'c:3', 'Mika Tanaka'), meeting(NOW + 20 * DAY, ['x@y.com'], 'c:9'),
   ]);
   // The spine knows the email only AS an email (calendar-sourced), and knows
   // the person by name through their phone.
   const svc = createRelationshipMemory({ contextDb: ctx, stateDb: stateDb([
-    ['rn@personal.dev', 'rn@personal.dev'], ['+15550009', 'Rishab Nayak']]) });
+    ['mt@personal.dev', 'mt@personal.dev'], ['+15550009', 'Mika Tanaka']]) });
   svc.registerSource(calendarReconnectAdapter());
   const cands = svc.candidates({ now: NOW, cap: CAP });
   assert.equal(cands.length, 1);
-  assert.equal(cands[0].personKey, 'name:rishab nayak', 'one human, one card, the owner-named key');
+  assert.equal(cands[0].personKey, 'name:mika tanaka', 'one human, one card, the owner-named key');
 });
 
 test('broadcast events do not create relationships', () => {
