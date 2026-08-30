@@ -75,9 +75,11 @@ const TEASE_TEXT = 'voice coming soon.\nhelp us build it :)';
 const CHAT_TEASE = true;
 const CHAT_TEASE_TEXT = 'chat coming soon. help us build it :)';
 const TEASE_MS = 2400;
+const WORK_DETAILS_MS = 4800;
 const dreamEl = document.getElementById('wdream');
 const dreamText = document.getElementById('wdreamtext');
 let teaseTimer = null;
+let dreamKind = '';
 // Set by native whenever a popup opens or closes. The popups sit directly above
 // the bar and grow upward, so ANY open one covers the band this bubble needs --
 // see notifyPanelState in main.swift for why the bubble yields rather than the
@@ -85,25 +87,31 @@ let teaseTimer = null;
 let panelCovering = false;
 window.__hzPanels = (on) => { panelCovering = on === true; if (panelCovering) hideTease(); };
 
-function showTease(text = TEASE_TEXT) {
+function showTease(text = TEASE_TEXT, dwellMs = TEASE_MS, kind = 'tease') {
   // Nothing to see: the bubble would render behind an open panel and time out
   // unread. The orb still wakes and still sounds -- the caller does both before
   // this -- so the tap is answered, just not with a line nobody can read.
   if (panelCovering) return;
   dreamText.textContent = text;
   dreamEl.classList.add('on');
-  clearTimeout(teaseTimer);
-  // Re-tapping restarts the dwell rather than stacking timers, so a second
-  // tap reads as "yes, still coming soon" instead of cutting the line short.
-  teaseTimer = setTimeout(() => {
-    dreamEl.classList.remove('on');
-    teaseTimer = null;
-  }, TEASE_MS);
-}
-function hideTease() {
-  if (!teaseTimer) return;
+  dreamKind = kind;
   clearTimeout(teaseTimer);
   teaseTimer = null;
+  // A hover passes zero and holds the thought open until pointerleave. Clicks
+  // retain the ordinary bounded dwell. Repeating either replaces, never
+  // stacks, the prior timer.
+  if (dwellMs > 0) {
+    teaseTimer = setTimeout(() => {
+      dreamEl.classList.remove('on');
+      teaseTimer = null;
+      dreamKind = '';
+    }, dwellMs);
+  }
+}
+function hideTease() {
+  if (teaseTimer) clearTimeout(teaseTimer);
+  teaseTimer = null;
+  dreamKind = '';
   dreamEl.classList.remove('on');
 }
 
@@ -269,6 +277,15 @@ function orbTap() {
   // arming voice out of a burst face would undo the joke, and the state ends
   // on its own in a few seconds.
   if (dazed) return;
+  // While the flywheel is present, the orb is a status control first. The
+  // click pins the same live detail hover shows instead of answering with the
+  // unrelated voice teaser.
+  if (workLabel) {
+    hzSfx.wake();
+    wakeOrb();
+    showWorkDetails(WORK_DETAILS_MS);
+    return;
+  }
   const now = Date.now();
   const fast = now - lastTap < SPAM_GAP;
   lastTap = now;
@@ -277,6 +294,19 @@ function orbTap() {
   burstTimer = setTimeout(endBurst, BURST_END);
 
   if (burst === 1) {
+    // A notify orb answers the tap with its card, not with voice: the state
+    // exists to be clicked, and the plan doc records the owner's decision to
+    // spend the click this way (voice tap-to-arm is still shipped as a
+    // tease). A second tap while the popup handles it falls through to the
+    // ordinary path.
+    if (cardPending && voiceOrbState === 'idle') {
+      hzSfx.wake();
+      wakeOrb();
+      hzPost('openReconnect');
+      cardPending = null; // seen; the poll re-lights it only if a card still serves
+      paintOrbState();
+      return;
+    }
     // An ordinary tap: wake, then either tease or arm. The wake animation and
     // its tone run either way — the orb still has to answer the finger.
     hzSfx.wake();
@@ -326,14 +356,60 @@ function setOrbState(state) {
 }
 let voiceOrbState = 'idle';
 let workLabel = '';
+// A reconnect card waiting for the owner (L5 step 10). Notify OUTRANKS the
+// sleeping pose and the processing crown (owner, 2026-08-29) -- a person to
+// reconnect with matters more than a backfill's progress -- but never an
+// active voice exchange.
+let cardPending = null;
+let workEstimate = '';
+// The count the daemon publishes when it cannot honestly publish a time.
+let workScope = '';
+let orbHovered = false;
+// NO ESTIMATE MEANS NO SECOND LINE.
+//
+// ~~`${workEstimate || 'estimating time left…'}`~~ promised a number that
+// never arrives. The daemon deliberately stopped publishing an estimate for
+// matrix backfill — its arithmetic was ceil(rooms / perPass), always 1, so
+// the header read "~ 0.2 hrs left" on every pass while pagination ran
+// thousands of events deep — and with the field gone this fallback rendered
+// "estimating time left…" forever instead. That is the same defect
+// relocated: a fabricated number swapped for a promise of one, which is
+// worse, because a promise never resolves and a number at least changes.
+//
+// What the daemon does still publish is a count of real objects. Show that
+// when it exists, and show nothing when nothing is known.
+function workDetailText() {
+  if (!workLabel) return '';
+  const detail = workEstimate || workScope;
+  return detail ? `current: ${workLabel}\n${detail}` : `current: ${workLabel}`;
+}
+function showWorkDetails(dwellMs = 0) {
+  if (workLabel) showTease(workDetailText(), dwellMs, 'work');
+}
+orbBtn.addEventListener('pointerenter', () => {
+  orbHovered = true;
+  if (workLabel && !dazed && !jackpotOn) showWorkDetails();
+});
+orbBtn.addEventListener('pointerleave', () => {
+  orbHovered = false;
+  // A click owns a timer and remains visible after the cursor leaves. A pure
+  // hover has no timer, so it folds away immediately.
+  if (dreamKind === 'work' && !teaseTimer) hideTease();
+});
 function paintOrbState() {
   const processing = voiceOrbState === 'idle' && !!workLabel;
+  if (voiceOrbState === 'idle' && cardPending) {
+    setOrbState('notify');
+    orbEl.classList.toggle('processing', false);
+    orbBtn.title = 'someone to reconnect with';
+    return;
+  }
   setOrbState(voiceOrbState !== 'idle' ? voiceOrbState : (processing ? 'listening' : 'idle'));
   // `listening` is also a real voice state. Keep the electric crown on
   // background work only, so opening the mic does not claim a processor is
   // running and voice temporarily outranks a simultaneous backfill.
   orbEl.classList.toggle('processing', processing);
-  orbBtn.title = workLabel ? `processing: ${workLabel}` : 'intaglio labs';
+  orbBtn.title = workLabel ? workDetailText().replace('\n', ' — ') : 'intaglio labs';
 }
 window.__hzOrb = (talking) => {
   voiceOrbState = talking === true ? 'talking' : 'idle';
@@ -356,13 +432,60 @@ async function refreshWorkState() {
     workLabel = status?.state === 'working' && typeof status.label === 'string'
       ? status.label.slice(0, 120)
       : '';
+    workEstimate = workLabel && typeof status.estimate === 'string'
+      ? status.estimate.slice(0, 60)
+      : '';
+    // Real objects, counted. Only shown when there is no estimate, so this
+    // never competes with one.
+    const rooms = Number(status?.backfillRooms) || 0;
+    workScope = workLabel && rooms > 0
+      ? `${rooms} conversation${rooms === 1 ? '' : 's'}`
+      : '';
   } catch {
     workLabel = '';
+    workEstimate = '';
+    workScope = '';
   }
   paintOrbState();
+  if (dreamKind === 'work') {
+    if (workLabel) dreamText.textContent = workDetailText();
+    else hideTease();
+  } else if (orbHovered && workLabel && !dazed && !jackpotOn) {
+    showWorkDetails();
+  }
 }
 refreshWorkState();
 setInterval(refreshWorkState, 1500);
+
+// The reconnect poll: is there a card for the owner? Every 10 minutes, plus
+// once shortly after launch. 'shown' is recorded by HERMES when it first
+// hands a card out -- recording it here double-counted every widget relaunch
+// into the global cap and could race the popup out of the last cap slot
+// (audit, reproduced). The page just renders what it is given.
+async function refreshRelCard() {
+  try {
+    const out = await hzPost('relCard');
+    cardPending = out?.card ?? null;
+    if (cardPending) badge.textContent = '1';
+  } catch {
+    cardPending = null;
+  }
+  paintOrbState();
+}
+setTimeout(refreshRelCard, 15_000);
+setInterval(refreshRelCard, 600_000);
+
+// A refresh rebuilds candidates through the local model -- minutes of
+// inference -- so it runs at most once a day, kicked fire-and-forget on
+// launch. localStorage because this is a per-machine convenience stamp, not
+// state anyone else reads.
+try {
+  const last = Number(localStorage.getItem('hzRelRefreshAt') ?? 0);
+  if (Date.now() - last > 20 * 3_600_000) {
+    localStorage.setItem('hzRelRefreshAt', String(Date.now()));
+    setTimeout(() => hzPost('relRefresh').catch(() => {}), 30_000);
+  }
+} catch {}
 
 // Time of day lives in bridge.js so the onboarding orb reads the same bands.
 // A wake from sleep is when the clock is most likely to have moved a long way

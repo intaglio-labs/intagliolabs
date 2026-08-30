@@ -159,9 +159,12 @@ test('the apply schema is closed at every level', () => {
       { run: RUN, claims: [{ ...claimFor(row), observed_at: 5 }] },
       /unknown field "observed_at"/u,
     ],
+    // subject stopped being an unknown field at v10 (L5 step 2); the closure
+    // moved from the field level to the value level, and a junk value still
+    // bounces the batch.
     [
       { run: RUN, claims: [{ ...claimFor(row), subject: 'someone' }] },
-      /unknown field "subject"/u,
+      /"subject" must be/u,
     ],
     [{ run: RUN, claims: [{ ...claimFor(row), kind: 'vibe' }] }, /"kind" must be one of/u],
     [{ run: RUN, claims: [{ ...claimFor(row), p_claim: 2 }] }, /"p_claim" must be a number/u],

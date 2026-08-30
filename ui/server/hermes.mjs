@@ -71,11 +71,21 @@ import {
   useTallyStore,
 } from './people/map.mjs';
 import { openTallyStore } from './people/tallyStore.mjs';
+import { createRelationshipMemory } from './relationship/service.mjs';
+import { buildMatchedCards, MATCH_RULES_VERSION } from './relationship/matcher.mjs';
 import {
   clearPeopleSearchCacheStorage,
   openPeopleSearchCache,
 } from './people/searchCache.mjs';
-import { summarizeYear } from './people/summary.mjs';
+import {
+  clearSummariesStorage,
+  isSummarySource,
+  MIN_ROWS as SUMMARY_MIN_ROWS,
+  readCachedSummary,
+  summariesDbPath,
+  summarizeYear,
+} from './people/summary.mjs';
+import { SummaryQueue } from './people/summaryQueue.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
 import { contentMatches } from './people/content.mjs';
@@ -132,6 +142,22 @@ export function defaultHermesTokenPath(home = homedir()) {
 export const DEFAULT_LLAMA_API_KEY_PATH = defaultLlamaApiKeyPath();
 export const DEFAULT_HERMES_TOKEN_PATH = defaultHermesTokenPath();
 export const DEFAULT_LLAMA_BASE_URL = 'http://127.0.0.1:51780';
+
+// Keep a custom corpus and every derived summary beside one another. Falling
+// back to the default summary store when only HERMES_DB was customized could
+// briefly serve stale prose derived from the owner's default corpus before the
+// exact-hash refresh corrected it.
+export function resolvePeopleSummariesPath({
+  explicitPath,
+  configuredDbPath,
+  resolvedDbPath,
+} = {}) {
+  if (explicitPath !== undefined) return explicitPath;
+  if (resolvedDbPath === ':memory:') return ':memory:';
+  return configuredDbPath !== undefined
+    ? `${resolvedDbPath}.people-summaries`
+    : summariesDbPath();
+}
 
 // EMPTY BY DEFAULT since 2026-08-23, and the reason is the whole point of the
 // browser channel having existed at all.
@@ -455,7 +481,17 @@ CREATE TABLE IF NOT EXISTS distill_run(
 CREATE TABLE IF NOT EXISTS claim(
   id          INTEGER PRIMARY KEY,
   run_id      INTEGER NOT NULL REFERENCES distill_run(id) ON DELETE CASCADE,
-  subject     TEXT NOT NULL CHECK (subject = 'owner'),
+  /* WHO THE CLAIM IS ABOUT. Closed to the literal 'owner' through v9; v10
+     (L5 step 2) admits 'person' -- a claim about someone in the owner's life,
+     keyed by the people-graph canonical key in subject_person_key.
+     Deliberately the SAME table: a person claim rides the identical
+     source-receipt, decision, validity and deletion machinery, because a
+     second trust lifecycle is the failure the L5 plan forbids by name. */
+  subject     TEXT NOT NULL CHECK (subject IN ('owner','person')),
+  /* Present exactly when subject = 'person'. Hermes stores the key opaquely:
+     the people graph owns key shape and resolution, and a hermes-side
+     spine check would give this database a second copy of identity. */
+  subject_person_key TEXT CHECK ((subject_person_key IS NOT NULL) = (subject = 'person')),
   kind        TEXT NOT NULL CHECK (kind IN
                 ('fact','preference','constraint','plan','commitment')),
   text        TEXT NOT NULL,
@@ -662,6 +698,154 @@ WHERE r.scope = 'day'
     ORDER BY r2.created_at DESC, r2.id DESC
     LIMIT 1
   );
+
+/* RELATIONSHIP MEMORY CONTROLS (L5 step 4) -- the owner's "leave me alone"
+   state, built BEFORE anything can generate a suggestion, per the plan's
+   ordering: there must never be a moment where the system can nag and the
+   owner cannot stop it. Operations live in ui/server/relationship/controls.mjs;
+   these tables are here because this database has the one writer, the one
+   deletion story, and the one place owner decisions already live
+   (claim_decision, energy_rating). No version bump: IF NOT EXISTS on a new
+   table needs none, same as energy_rating.
+
+   The 'kind' columns are deliberately UNCHECKED text. The suggestion-kind list is
+   owned by the relationship service and will grow; a CHECK here would demand
+   a v10-style table rebuild per new kind, a cost that migration just taught
+   us. The service validates kinds at its door.
+
+   rm_suppression is the permanent "never this person" control. Row present =
+   suppressed; reversal is a DELETE, offered only from Relationship Memory
+   settings. It is keyed by the person key AS SUPPRESSED, and the service
+   checks it through the alias map -- so an identity merge widens what the
+   suppression covers and can never silently clear it (the plan's exact
+   requirement). No expiry column on purpose: permanent means permanent. */
+CREATE TABLE IF NOT EXISTS rm_suppression(
+  person_key TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS rm_suppression_no_update
+BEFORE UPDATE ON rm_suppression BEGIN
+  SELECT RAISE(ABORT, 'suppression is present or absent: reverse it by DELETE from settings, never by edit');
+END;
+
+/* Temporary mute, three explicit scopes: person (kind NULL), kind
+   (person_key NULL), person-plus-kind (both). The CHECK refuses the fourth
+   shape -- a mute of nothing is a bug, not a global pause; the global pause
+   is the frequency cap's job. Mutes expire by the clock (until_at <= now);
+   expired rows are history, not garbage. */
+CREATE TABLE IF NOT EXISTS rm_mute(
+  id         INTEGER PRIMARY KEY,
+  person_key TEXT,
+  kind       TEXT,
+  until_at   INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  CHECK (person_key IS NOT NULL OR kind IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS rm_mute_until ON rm_mute(until_at);
+CREATE TRIGGER IF NOT EXISTS rm_mute_no_update
+BEFORE UPDATE ON rm_mute BEGIN
+  SELECT RAISE(ABORT, 'a mute is not edited: let it expire, or record a new one with the scope stated');
+END;
+
+/* Card outcome events, append-only: shown / opened / accepted / dismissed /
+   muted / suppressed, by person key, kind, LOCAL time band and rule version.
+   The plan's logging contract -- product events without SOURCE text: the
+   only text columns are the closed dismissal-reason enum and the owner's own
+   free-text note, never a row's content. 'shown' rows are what the
+   global frequency cap counts, and they are recorded by the SERVER when a
+   card is first handed out -- client-side recording double-counted
+   relaunches into the cap; a dismissal's structured reason rides the same
+   event rather than a parallel table, so one query answers "what happened to
+   this card". The experiment does not retune itself from these rows; they are
+   labeled input for a reviewed, versioned threshold change (the plan's exact
+   words). */
+CREATE TABLE IF NOT EXISTS rm_card_event(
+  id           INTEGER PRIMARY KEY,
+  person_key   TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  /* Which offered candidate this outcome belongs to, when there was one --
+     the join that makes "what happened to what we offered" one query.
+     Nullable: review-only events (an inbox decision) have no snapshot. Safe
+     to add in place: the rm_* tables have never shipped in a release, so no
+     installed database carries the narrower shape. */
+  snapshot_id  INTEGER REFERENCES rm_candidate_snapshot(id),
+  event        TEXT NOT NULL CHECK (event IN
+                 ('shown','opened','accepted','dismissed','muted','suppressed')),
+  /* Only a dismissal carries a reason, and only one of the five the card
+     offers. One-tap and optional: NULL is "dismissed, no reason given". */
+  reason       TEXT CHECK (reason IS NULL OR (event = 'dismissed' AND reason IN
+                 ('wrong-person','wrong-time','never-this-person','not-this-kind','not-useful'))),
+  /* The owner's free-text "why", from the card's feedback box -- the input
+     that steered thirteen shadow iterations, kept in the product loop. Owner
+     words about the owner's own data; rule 4 guards LOGS, not this store. */
+  note         TEXT,
+  rule_version TEXT NOT NULL,
+  time_band    TEXT NOT NULL CHECK (time_band IN ('morning','afternoon','evening','night')),
+  created_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS rm_card_event_shown ON rm_card_event(event, created_at);
+/* The card route's acted/shown checks key on snapshot_id against a table
+   whose no-delete trigger means it only ever grows. */
+CREATE INDEX IF NOT EXISTS rm_card_event_snapshot ON rm_card_event(snapshot_id);
+CREATE TRIGGER IF NOT EXISTS rm_card_event_no_update
+BEFORE UPDATE ON rm_card_event BEGIN
+  SELECT RAISE(ABORT, 'card events are append-only: the record of what the owner was shown is not editable');
+END;
+CREATE TRIGGER IF NOT EXISTS rm_card_event_no_delete
+BEFORE DELETE ON rm_card_event BEGIN
+  SELECT RAISE(ABORT, 'card events are append-only: deleting the frequency record is how a cap stops capping');
+END;
+
+/* CANDIDATE SNAPSHOTS (L5 step 7) -- what the system OFFERED, immutably.
+   Every pass through the aggregation door records a batch, including a pass
+   that yielded nothing and a pass the cap refused: a zero is a measurement
+   (the same lesson distill_run learned about empty episodes), and shadow
+   mode's numbers -- candidate frequency, repeat rate, cap pressure -- are
+   computed from these rows, not remembered. Snapshot rows never carry
+   SOURCE text: 'summary' is the producer's derived sentence, and 'evidence'
+   is counted facts plus references (a quote lands as quote_context_id and is
+   resolved against the live row at serve time, so deletion of the source
+   deletes the quote's availability -- see the card route). Immutable in fact:
+   update AND delete triggers, same as the event log, because a snapshot
+   that can be tidied up afterwards is not a snapshot. */
+CREATE TABLE IF NOT EXISTS rm_candidate_batch(
+  id              INTEGER PRIMARY KEY,
+  created_at      INTEGER NOT NULL,
+  candidate_count INTEGER NOT NULL,
+  /* 'open' or 'cap-closed': whether the door opened at all. cap_config is
+     the cap as asked (canonical JSON) or NULL for none-configured -- which
+     always closes the door, and the batch row is the proof it was asked. */
+  gate            TEXT NOT NULL CHECK (gate IN ('open','cap-closed')),
+  cap_config      TEXT
+);
+CREATE TABLE IF NOT EXISTS rm_candidate_snapshot(
+  id               INTEGER PRIMARY KEY,
+  batch_id         INTEGER NOT NULL REFERENCES rm_candidate_batch(id),
+  person_key       TEXT NOT NULL,
+  kind             TEXT NOT NULL,
+  summary          TEXT NOT NULL,
+  evidence         TEXT NOT NULL,   /* canonical JSON, counted facts only */
+  producer_version TEXT NOT NULL,
+  rank_strategy    TEXT,
+  created_at       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS rm_candidate_snapshot_person ON rm_candidate_snapshot(person_key, created_at);
+CREATE TRIGGER IF NOT EXISTS rm_candidate_batch_no_update
+BEFORE UPDATE ON rm_candidate_batch BEGIN
+  SELECT RAISE(ABORT, 'candidate batches are append-only: a pass happened or it did not');
+END;
+CREATE TRIGGER IF NOT EXISTS rm_candidate_batch_no_delete
+BEFORE DELETE ON rm_candidate_batch BEGIN
+  SELECT RAISE(ABORT, 'candidate batches are append-only: a pass happened or it did not');
+END;
+CREATE TRIGGER IF NOT EXISTS rm_candidate_snapshot_no_update
+BEFORE UPDATE ON rm_candidate_snapshot BEGIN
+  SELECT RAISE(ABORT, 'a snapshot that can be edited afterwards is not a snapshot');
+END;
+CREATE TRIGGER IF NOT EXISTS rm_candidate_snapshot_no_delete
+BEFORE DELETE ON rm_candidate_snapshot BEGIN
+  SELECT RAISE(ABORT, 'a snapshot that can be deleted afterwards is not a snapshot');
+END;
 `;
 
 // Bumped only when a migration must run at open. Version history:
@@ -694,7 +878,16 @@ WHERE r.scope = 'day'
 //   6  context_source_ts(source, ts, entity_id): per-source time-range reads
 //      (reconciliation slices, retain sweeps, the episodic shelf, the digest
 //      aggregate, the watchdog's max(ts)) all scanned without it.
-const SCHEMA_VERSION = 10;
+//  11  claim.subject widens to ('owner','person') plus subject_person_key --
+//      L5 step 2. A CHECK cannot be ALTERed, so the claim table is rebuilt in
+//      place with ids preserved. RENUMBERED from 10: the deep-search branch
+//      claimed 10 independently and shipped first, and a development open of
+//      that branch stamped the reference install's database at 10 while this
+//      branch's rebuild had not run -- the incident that made the rebuild key
+//      on the DDL rather than on this number (see rebuildClaimTableForV10).
+//      Two branches bumping the same version is exactly how a stamp comes to
+//      lie; the DDL check is why it no longer matters when one does.
+const SCHEMA_VERSION = 11;
 
 // The PRAGMAs that decide whether "deleted" means deleted, and whether the
 // memory tables' declared references mean anything. Applied to every
@@ -733,6 +926,18 @@ function hardenConnection(db) {
 function migrate(db) {
   const row = db.prepare('PRAGMA user_version').get();
   let version = Number(row?.user_version ?? 0);
+  // THE STAMP IS A CACHE; THE DDL IS THE TRUTH. Found 2026-08-29 on the
+  // reference install: the live database was stamped user_version 10 while
+  // still carrying the v9 claim table -- an open running mid-development
+  // branch code stamped without rebuilding, and every later open trusted the
+  // stamp and skipped the rebuild forever, which surfaces as 'no such
+  // column: c.subject_person_key' the first time pendingClaims runs. The v2
+  // migration already learned this lesson for ALTERs ("guarded by what
+  // table_info actually reports rather than by version arithmetic"); this
+  // applies it to the rebuild: the check runs on every open, costs one
+  // sqlite_master read, and heals a mis-stamped database no matter what the
+  // version says.
+  rebuildClaimTableForV10(db);
   if (version >= SCHEMA_VERSION) return;
   if (version < 1) {
     // Rewrites every page under secure_delete. Cheap on a small database and
@@ -916,7 +1121,132 @@ function migrate(db) {
     }
     version = 10;
   }
+  if (version < 11) {
+    // The claim rebuild itself ran above, stamp or no stamp; this branch only
+    // records the version. See rebuildClaimTableForV10.
+    version = 11;
+  }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+}
+
+// claim.subject widens from the single literal 'owner' (L5 step 2). A CHECK
+// constraint cannot be ALTERed in SQLite, so the table is rebuilt and rows
+// copied with their ids -- claim_source and claim_decision reference
+// claim(id), and preserved ids keep every receipt and every owner decision
+// pointing where it pointed. Runs from migrate() on EVERY open, keyed on the
+// DDL rather than on user_version -- see the incident note there.
+//
+// foreign_keys goes OFF first, and it is not ceremony: with enforcement
+// ON, DROP TABLE performs an implicit DELETE whose foreign-key ACTIONS
+// still run -- ON DELETE CASCADE on claim_source and claim_decision would
+// empty both child tables. OFF, the drop is purely structural. The toggle
+// is a no-op inside a transaction, which is why it brackets one rather
+// than joining it.
+function rebuildClaimTableForV10(db) {
+    const claimDef = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'claim'")
+      .get();
+    if (claimDef !== undefined && /subject\s*=\s*'owner'/u.test(String(claimDef.sql))) {
+      // This runs BEFORE the numbered branches, so a pre-v9 database (v0.1.0
+      // shipped at SCHEMA_VERSION 6) reaches it with no valid_to column yet
+      // -- and the copy below names valid_to. The audit caught this as a
+      // bricking bug: the copy threw 'no such column', the open failed, and
+      // failed identically forever. The guarded ALTER is v9's own, done
+      // early; v9's branch stays idempotent behind the same column check.
+      const cols = new Set(
+        db.prepare("SELECT name FROM pragma_table_info('claim')").all().map((c) => c.name)
+      );
+      if (!cols.has('valid_to')) db.exec('ALTER TABLE claim ADD COLUMN valid_to INTEGER');
+      db.exec('PRAGMA foreign_keys = OFF');
+      db.exec('BEGIN');
+      try {
+        db.exec(
+          "CREATE TABLE claim_v10(" +
+            'id INTEGER PRIMARY KEY, ' +
+            'run_id INTEGER NOT NULL REFERENCES distill_run(id) ON DELETE CASCADE, ' +
+            "subject TEXT NOT NULL CHECK (subject IN ('owner','person')), " +
+            'subject_person_key TEXT CHECK ((subject_person_key IS NOT NULL) = (subject = \'person\')), ' +
+            "kind TEXT NOT NULL CHECK (kind IN ('fact','preference','constraint','plan','commitment')), " +
+            'text TEXT NOT NULL, observed_at INTEGER, valid_to INTEGER, p_claim REAL, ' +
+            'created_at INTEGER NOT NULL)'
+        );
+        db.exec(
+          'INSERT INTO claim_v10(id, run_id, subject, kind, text, observed_at, valid_to, p_claim, created_at) ' +
+            'SELECT id, run_id, subject, kind, text, observed_at, valid_to, p_claim, created_at FROM claim'
+        );
+        // claim_fts goes FIRST, and not optionally: it is a content= index over
+        // the table being dropped, and ALTER ... RENAME re-parses every schema
+        // object that names the table -- with the fts index dangling, the
+        // rename itself fails with a bare 'SQL logic error' (observed while
+        // writing this migration). The v4 branch already established that the
+        // index is disposable: no claim data lives in it, and 'rebuild'
+        // repopulates it from the claim table it indexes.
+        db.exec('DROP TABLE claim_fts');
+        // v_claim_accepted references claim too, and it is the reason the fts
+        // drop alone was not enough: ALTER ... RENAME re-parses EVERY schema
+        // object, and a view naming a table that is mid-swap fails the whole
+        // rename. Recreated verbatim below, same as the triggers.
+        db.exec('DROP VIEW IF EXISTS v_claim_accepted');
+        // Drops claim_run, claim_valid_to and the fts triggers with it.
+        db.exec('DROP TABLE claim');
+        db.exec('ALTER TABLE claim_v10 RENAME TO claim');
+        db.exec(
+          "CREATE VIRTUAL TABLE claim_fts USING fts5(text, content='claim', content_rowid='id', tokenize='porter unicode61')"
+        );
+        db.exec("INSERT INTO claim_fts(claim_fts) VALUES('rebuild')");
+        // Re-assert secure-delete: it is a property of the (new) shadow
+        // tables, not of the connection, and v3 set it for a reason.
+        db.exec("INSERT INTO claim_fts(claim_fts, rank) VALUES('secure-delete', 1)");
+        // Every trigger on the old table died with it, and SCHEMA will not
+        // run again until the next open -- so ALL of them are recreated here,
+        // verbatim, INCLUDING the append-only guards: a process that kept
+        // running after this migration would otherwise accept its first
+        // UPDATE on claim in the product's history.
+        db.exec(
+          'CREATE TRIGGER IF NOT EXISTS claim_ai AFTER INSERT ON claim BEGIN ' +
+            'INSERT INTO claim_fts(rowid, text) VALUES (new.id, new.text); END'
+        );
+        db.exec(
+          'CREATE TRIGGER IF NOT EXISTS claim_ad AFTER DELETE ON claim BEGIN ' +
+            "INSERT INTO claim_fts(claim_fts, rowid, text) VALUES ('delete', old.id, old.text); END"
+        );
+        db.exec(
+          'CREATE TRIGGER IF NOT EXISTS claim_no_update BEFORE UPDATE ON claim BEGIN ' +
+            "SELECT RAISE(ABORT, 'claim is append-only: a correction appends a claim_decision or produces a new claim'); END"
+        );
+        db.exec(
+          'CREATE TRIGGER IF NOT EXISTS claim_no_replace BEFORE INSERT ON claim ' +
+            'WHEN new.id IS NOT NULL AND EXISTS (SELECT 1 FROM claim WHERE id = new.id) BEGIN ' +
+            "SELECT RAISE(ABORT, 'claim is append-only: an explicit id colliding with an existing row is a REPLACE in disguise'); END"
+        );
+        db.exec('CREATE INDEX IF NOT EXISTS claim_run ON claim(run_id)');
+        db.exec(
+          'CREATE INDEX IF NOT EXISTS claim_valid_to ON claim(valid_to) WHERE valid_to IS NOT NULL'
+        );
+        db.exec(
+          'CREATE VIEW IF NOT EXISTS v_claim_accepted AS ' +
+            'SELECT c.* FROM claim c WHERE (' +
+            'SELECT d.action FROM claim_decision d WHERE d.claim_id = c.id ' +
+            "ORDER BY d.created_at DESC, d.id DESC LIMIT 1) = 'accept'"
+        );
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        db.exec('PRAGMA foreign_keys = ON');
+        throw error;
+      }
+      db.exec('PRAGMA foreign_keys = ON');
+      // The receipts and decisions must still point at claims. An empty result
+      // is the postcondition; anything else takes the open down NOW, while the
+      // operator is looking at a migration, not weeks later as a claim whose
+      // receipt silently vanished.
+      for (const child of ['claim_source', 'claim_decision']) {
+        const broken = db.prepare(`PRAGMA foreign_key_check(${child})`).all();
+        if (broken.length > 0) {
+          throw new Error(`claim rebuild broke ${broken.length} reference(s) from ${child}`);
+        }
+      }
+    }
 }
 
 export function openDb(dbPath = DEFAULT_DB_PATH) {
@@ -1465,16 +1795,27 @@ const APPLY_RUN_FIELDS = Object.freeze([
   'episode_hash',
   'episode_context',
 ]);
-// Note what is NOT here: `subject` and `observed_at`. The model emits kind,
-// text and quote; subject is closed to 'owner' by the schema, and observed_at
-// is read off the cited context row by this server. A model-supplied
-// observed_at would let a claim date itself, which is how "he said that in
-// March" stops being checkable against anything.
+// Note what is NOT here: `observed_at`. It is read off the cited context row
+// by this server; a model-supplied observed_at would let a claim date itself,
+// which is how "he said that in March" stops being checkable against anything.
+//
+// `subject` WAS in that excluded list, closed to 'owner' by the schema, until
+// v10 (L5 step 2) -- struck rather than erased, because the original reasoning
+// still binds: a subject names who a claim characterizes, and the distiller
+// prompt still does not emit one (an absent subject defaults to 'owner', so
+// nothing changes for that producer). What v10 adds is 'person' with a
+// required subject_person_key, for the Relationship Memory service's
+// deterministic producers. The protections that made the closure safe to
+// relax are the ones that always bound: an exact quote from a context row the
+// owner can read, the same decision flow, and the same deletion cascade. The
+// L5 stop condition "the system characterizes a third party beyond the
+// owner's direct evidence" is enforced by those receipts, not by pretending
+// person claims do not exist.
 // when_phrase is the model's COPY of the time words in the message. It is not
 // stored: validity.mjs resolves it to valid_to here and the phrase itself has
 // no use afterwards, so keeping it would be a second, unversioned record of
 // what the message said.
-const APPLY_CLAIM_FIELDS = Object.freeze(['kind', 'text', 'when_phrase', 'p_claim', 'source']);
+const APPLY_CLAIM_FIELDS = Object.freeze(['kind', 'text', 'when_phrase', 'p_claim', 'source', 'subject', 'subject_person_key']);
 const DECIDE_FIELDS = Object.freeze(['claim_id', 'action', 'reason']);
 const PENDING_PARAMS = Object.freeze(['limit']);
 const RECALL_PARAMS = Object.freeze(['q', 'limit']);
@@ -1640,7 +1981,14 @@ export const REVIEW_FLOOR = 0.5;
 export function pendingClaims(db, { limit = PENDING_CAP } = {}) {
   const rows = db
     .prepare(
-      'SELECT c.id, c.kind, c.text, c.observed_at, c.p_claim, c.created_at, ' +
+      'SELECT c.id, c.subject, c.subject_person_key, c.kind, c.text, c.observed_at, c.p_claim, c.created_at, ' +
+        // The bitemporal names L5 step 2 asks the API to carry: recorded_at is
+        // TRANSACTION time (when hermes wrote the claim -- observed_at is when
+        // the world said it), and producer_version names which producer at
+        // which version asserted it, so a re-run after a prompt or code change
+        // is distinguishable from the run it replaces.
+        'c.created_at AS recorded_at, ' +
+        "r.model || '@' || r.prompt_sha AS producer_version, " +
         's.context_id, s.source, s.quote, s.content_hash AS snapshot_hash, ' +
         'r.model, r.prompt_path, r.prompt_sha, ' +
         'x.ts AS source_ts, x.content_hash AS current_hash ' +
@@ -1827,6 +2175,19 @@ export function applyMemoryBatch(db, body) {
     if (typeof claim.text !== 'string' || claim.text.trim().length === 0) {
       throw at('"text" must be a non-empty string');
     }
+    // Absent means 'owner' -- the pre-v10 producers never sent the field and
+    // must keep meaning what they always meant.
+    const subject = claim.subject ?? 'owner';
+    if (subject !== 'owner' && subject !== 'person') {
+      throw at('"subject" must be \'owner\' or \'person\'');
+    }
+    if (subject === 'person') {
+      if (typeof claim.subject_person_key !== 'string' || claim.subject_person_key.trim().length === 0) {
+        throw at('a person claim requires "subject_person_key" (the people-graph canonical key)');
+      }
+    } else if (claim.subject_person_key !== undefined && claim.subject_person_key !== null) {
+      throw at('"subject_person_key" is only accepted when subject is \'person\'');
+    }
     if (
       claim.p_claim !== undefined &&
       claim.p_claim !== null &&
@@ -1892,7 +2253,7 @@ export function applyMemoryBatch(db, body) {
     ) {
       throw at('"source.content_hash" must be a string');
     }
-    return { i, claim, src };
+    return { i, claim, subject, personKey: subject === 'person' ? claim.subject_person_key.trim() : null, src };
   });
 
   const now = Date.now();
@@ -1906,8 +2267,8 @@ export function applyMemoryBatch(db, body) {
       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?, ?)"
   );
   const insClaim = db.prepare(
-    'INSERT INTO claim(run_id, subject, kind, text, observed_at, valid_to, p_claim, created_at) ' +
-      "VALUES (?, 'owner', ?, ?, ?, ?, ?, ?)"
+    'INSERT INTO claim(run_id, subject, subject_person_key, kind, text, observed_at, valid_to, p_claim, created_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
   );
   const insSource = db.prepare(
     'INSERT INTO claim_source(claim_id, context_id, source, entity_id, content_hash, quote) ' +
@@ -1939,7 +2300,7 @@ export function applyMemoryBatch(db, body) {
         now
       ).lastInsertRowid
     );
-    for (const { i, claim, src } of staged) {
+    for (const { i, claim, subject, personKey, src } of staged) {
       const row = getRow.get(src.context_id);
       if (row === undefined) {
         rejected.push({ index: i, reason: 'no such context row' });
@@ -1960,6 +2321,8 @@ export function applyMemoryBatch(db, body) {
       const claimId = Number(
         insClaim.run(
           runId,
+          subject,
+          personKey,
           claim.kind,
           claim.text,
           // World time from the row, not the model. NULL stays NULL rather
@@ -2008,6 +2371,62 @@ export function applyMemoryBatch(db, body) {
   return { run_id: runId, applied, rejected };
 }
 
+// One relationship service per process, lazily built and cached on policy:
+// hermes' own db handle (sole writer holds the rm_* tables), the connectors'
+// state.db read-only for the spine, the resolutions db for aliases. A missing
+// state or resolutions file degrades to null rather than failing the route --
+// a fresh install has no contacts yet, and that is an answer.
+function relationshipState(db, policy) {
+  const holder = policy.relationshipHolder ?? policy; // per-process holder from start()
+  if (!holder.__relationship) {
+    let stateDb = null, resDb = null, owner = null;
+    try {
+      const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
+      if (existsSync(statePath)) stateDb = new DatabaseSync(statePath, { readOnly: true });
+    } catch {}
+    try { resDb = openResolutionsDb(); } catch {}
+    try { owner = loadOwner(); } catch {}
+    const service = createRelationshipMemory({ contextDb: db, stateDb, resolutionsDb: resDb,
+      ...(owner ? { owner } : {}) });
+    const llamaCall = async (messages, max_tokens = 120, temperature = 0.2) => {
+      // Same hardening as every other llama call site (summary.mjs's words:
+      // "same rule as every other llama call here"): a timeout so one hung
+      // completion cannot wedge rel.refreshing forever, and redirect:'error'
+      // so a compromised loopback cannot bounce the key or the content onto
+      // the network. The audit caught this copy without either.
+      const upstream = await fetch(`${policy.llama.baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        redirect: 'error',
+        signal: AbortSignal.timeout(120_000),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${policy.llama.apiKey()}` },
+        body: JSON.stringify({ messages, max_tokens, temperature }),
+      });
+      if (!upstream.ok) throw new Error(`llama answered ${upstream.status}`);
+      const body = await upstream.json();
+      return body?.choices?.[0]?.message?.content?.trim() ?? null;
+    };
+    holder.__relationship = { service, llamaCall, cards: [], batchId: null, refreshing: false, lastError: null };
+  }
+  return holder.__relationship;
+}
+
+// The global cap comes from the owner's config (relationshipMemory.capPerDay)
+// or a start() override for tests. No config means no cards -- fail closed,
+// per the step-4 rule: thresholds are the owner's or the gates artifact's to
+// set, never a default invented here.
+function relationshipCap(policy) {
+  // undefined means "not overridden: read the owner's config". null is an
+  // EXPLICIT no-cap -- the fail-closed scenario -- and tests pass it to stay
+  // isolated from whatever config the machine they run on happens to carry.
+  if (policy.relationshipCap !== undefined) return policy.relationshipCap;
+  try {
+    const cfg = JSON.parse(readFileSync(join(homedir(), '.hazlie', 'connectors', 'config.json'), 'utf8'));
+    const n = cfg?.relationshipMemory?.capPerDay;
+    if (Number.isInteger(n) && n > 0) return { max: n, windowMs: 86_400_000 };
+  } catch {}
+  return null;
+}
+
 async function handleAdmin(db, req, res, cors, url, channel, policy) {
   if (channel !== 'bearer') {
     // 403, not 401: the caller IS authenticated (allowlisted Origin) — it is
@@ -2025,6 +2444,124 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       },
       cors
     );
+    return;
+  }
+
+  // --- Relationship Memory (L5 step 10): the orb's card surface. ---------
+  // Bearer-only like every admin route. The card pipeline runs entirely on
+  // this box; refresh is minutes of loopback-llama time, so the widget fires
+  // it and polls the card endpoint rather than waiting.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/refresh') {
+    const rel = relationshipState(db, policy);
+    if (rel.refreshing) { send(res, 200, { started: false, already: true }, cors); return; }
+    rel.refreshing = true;
+    // Deliberately not awaited: the route answers now, the batch lands when
+    // the local model is done, and GET /card serves the previous batch (or
+    // nothing) in the meantime. Errors are recorded on the state, not lost.
+    rel.lastError = null;
+    (policy.relationshipMatcher ?? buildMatchedCards)(rel.service, {
+      llamaCall: rel.llamaCall, now: Date.now(),
+    }).then((result) => {
+      const now = Date.now();
+      const batchId = Number(db.prepare(
+        'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, ?, ?, ?)'
+      ).run(now, result.cards.length, 'open', null).lastInsertRowid);
+      const ins = db.prepare(
+        'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      for (const card of result.cards) {
+        // The quote lands as a REFERENCE (context id), never as copied text:
+        // this table refuses DELETE, and the audit caught verbatim message
+        // text headed into it -- words that would have outlived their row's
+        // deletion. Serve time resolves the reference against the live row,
+        // so a deleted source drops the quote (and the card) by construction.
+        card.snapshot_id = Number(ins.run(batchId, card.personKey, card.kind, card.sentence,
+          JSON.stringify({ quote_context_id: card.quoteContextId ?? null, role: card.role,
+            focus: card.focus, label: card.label, left: card.left, leftTone: card.leftTone,
+            ...card.evidence }),
+          card.producer_version, 'combined-v13', now).lastInsertRowid);
+      }
+      rel.batchId = batchId;
+      rel.cards = result.cards;
+      rel.refreshing = false;
+    }).catch((e) => { rel.refreshing = false; rel.lastError = String(e?.message ?? e); });
+    send(res, 200, { started: true }, cors);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/admin/relationship/card') {
+    const rel = relationshipState(db, policy);
+    const cap = relationshipCap(policy);
+    if (!cap) { send(res, 200, { card: null, reason: 'no-cap-configured' }, cors); return; }
+    for (const card of rel.cards) {
+      // A card leaves the queue when the owner has acted on it (accepted or
+      // dismissed), and suppression/mute/cap are re-checked at serve time --
+      // the plan's "immediately before display" call site.
+      const acted = db.prepare(
+        "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event IN ('accepted','dismissed') LIMIT 1"
+      ).get(card.snapshot_id);
+      if (acted) continue;
+      // 'shown' is recorded HERE, once per snapshot, when the card is first
+      // handed out for display -- not by the widget. Client-side recording
+      // (the audit's repro) double-counted every relaunch into the cap and
+      // made the last-slot card a phantom: its own 'shown' beat the popup's
+      // fetch to the cap check. A snapshot that already spent its slot passes
+      // the cap gate; the cap limits distinct interruptions, not fetches.
+      const alreadyShown = db.prepare(
+        "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event = 'shown' LIMIT 1"
+      ).get(card.snapshot_id);
+      if (!alreadyShown) {
+        const gate = rel.service.controls.allowCard({ personKey: card.personKey, kind: card.kind, cap });
+        if (!gate.allowed) { if (gate.reason === 'global-cap') break; continue; }
+        rel.service.controls.recordEvent({ personKey: card.personKey, kind: card.kind,
+          event: 'shown', ruleVersion: card.producer_version, snapshotId: card.snapshot_id });
+      } else {
+        const gate = rel.service.controls.allowCard({ personKey: card.personKey, kind: card.kind,
+          cap: { max: Number.MAX_SAFE_INTEGER, windowMs: 1 } });
+        if (!gate.allowed) continue; // suppression/mute still bind a shown card
+      }
+      // Resolve the quote from the LIVE row. Row gone or edited: the receipt
+      // is gone, so the card is gone -- the deletion cascade, honored at
+      // serve time instead of violated at store time.
+      let quote = null;
+      if (Number.isInteger(card.quoteContextId)) {
+        const row = db.prepare('SELECT text FROM context WHERE id = ?').get(card.quoteContextId);
+        if (row === undefined) continue;
+        quote = String(row.text).slice(0, 200);
+      }
+      send(res, 200, { card: { ...card, quote } }, cors);
+      return;
+    }
+    send(res, 200, { card: null, ...(rel.refreshing ? { refreshing: true } : {}),
+      ...(rel.lastError ? { lastError: rel.lastError } : {}) }, cors);
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/event') {
+    const rel = relationshipState(db, policy);
+    const body = await readJson(req);
+    const { snapshot_id, person_key, event, reason, note, mute_days } = body ?? {};
+    const ownerNote = typeof note === 'string' && note.trim().length > 0 ? note.trim() : null;
+    if (typeof person_key !== 'string' || person_key.length === 0) throw badRequest('"person_key" required');
+    if (!['shown', 'opened', 'accepted', 'dismissed', 'muted'].includes(event)) throw badRequest('unknown "event"');
+    const snapId = Number.isInteger(snapshot_id) ? snapshot_id : null;
+    if (event === 'muted') {
+      const days = Number.isFinite(mute_days) && mute_days > 0 ? mute_days : null;
+      if (days === null) throw badRequest('"mute_days" required for a mute');
+      rel.service.controls.mute({ personKey: person_key, kind: 'reconnect', untilAt: Date.now() + days * 86_400_000 });
+      rel.service.controls.recordEvent({ personKey: person_key, kind: 'reconnect', event: 'muted',
+        ruleVersion: MATCH_RULES_VERSION, snapshotId: snapId });
+    } else if (event === 'dismissed') {
+      // snapshotId rides along or the card comes BACK: the acted-check keys
+      // on it, and a NULL here made every plain dismissal a no-op (audit,
+      // reproduced live).
+      rel.service.controls.dismiss({ personKey: person_key, kind: 'reconnect',
+        reason: typeof reason === 'string' && reason.length > 0 ? reason : null,
+        note: ownerNote, ruleVersion: MATCH_RULES_VERSION, snapshotId: snapId });
+    } else {
+      rel.service.controls.recordEvent({ personKey: person_key, kind: 'reconnect', event,
+        note: ownerNote, ruleVersion: MATCH_RULES_VERSION, snapshotId: snapId });
+    }
+    send(res, 200, { ok: true }, cors);
     return;
   }
 
@@ -2164,6 +2701,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         db.exec('ROLLBACK');
         throw error;
       }
+      await resetPeopleSummaries(policy.peopleSummaryManager);
       send(res, 200, { cleared }, cors);
       return;
     }
@@ -2207,6 +2745,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         db.exec('ROLLBACK');
         throw e;
       }
+      if (isSummarySource(body.source)) await resetPeopleSummaries(policy.peopleSummaryManager);
       send(res, 200, { deleted, claims_deleted: claimsDeleted }, cors);
       return;
     }
@@ -2241,6 +2780,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       // a purged source's claims were legible in claim_fts by the same
       // mechanism.
       maintainNow(db);
+      if (isSummarySource(body.source)) await resetPeopleSummaries(policy.peopleSummaryManager);
       send(res, 200, { deleted, claims_deleted: claimsDeleted, maintained: true }, cors);
       return;
     }
@@ -2285,6 +2825,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         db.exec('ROLLBACK');
         throw e;
       }
+      if (isSummarySource(body.source)) await resetPeopleSummaries(policy.peopleSummaryManager);
       send(res, 200, { deleted, claims_deleted: claimsDeleted }, cors);
       return;
     }
@@ -3146,7 +3687,7 @@ async function handleVaultAsk(db, req, res, cors, policy) {
   }
 }
 
-function handle(db, req, res, cors, url, policy) {
+async function handle(db, req, res, cors, url, policy) {
   // Deliberately the one unauthenticated route: it is the liveness probe for a
   // process that is meant to run for months, and a probe that needs a
   // credential is a probe nobody runs. It answers a bare {ok:true} -- the row
@@ -3233,7 +3774,12 @@ function handle(db, req, res, cors, url, policy) {
   // a redirect to local -- an alias IS the unlaned default this exists to
   // remove.
   if (req.method === 'POST' && url.pathname === '/vault/ask') {
-    return handleVaultAsk(db, req, res, cors, policy);
+    const resumeSummaries = await policy.peopleSummaryManager.queue.pauseForInteractive();
+    try {
+      return await handleVaultAsk(db, req, res, cors, policy);
+    } finally {
+      resumeSummaries();
+    }
   }
 
   if (req.method === 'POST' && url.pathname === '/lane/local/v1/chat/completions') {
@@ -3241,7 +3787,15 @@ function handle(db, req, res, cors, url, policy) {
       send(res, 415, { error: 'content-type must be application/json' }, cors);
       return;
     }
-    return proxyLlama(req, res, cors, policy.llama);
+    // Interactive and ingest-time local-model work always wins over speculative
+    // summary warming. The current summary pass is abortable and resumes from
+    // its durable chunk cache when this request finishes.
+    const resumeSummaries = await policy.peopleSummaryManager.queue.pauseForInteractive();
+    try {
+      return await proxyLlama(req, res, cors, policy.llama);
+    } finally {
+      resumeSummaries();
+    }
   }
 
   // Refuses loudly rather than falling back to local. A silent downgrade would
@@ -3277,6 +3831,16 @@ const PEOPLE_DECIDE_FIELDS = Object.freeze(['verdict', 'a', 'b']);
 const PEOPLE_SELF_FIELDS = Object.freeze(['key']);
 const PEOPLE_ROLE_FIELDS = Object.freeze(['key', 'role', 'year']);
 const PEOPLE_SUMMARY_FIELDS = Object.freeze(['key', 'year']);
+
+async function resetPeopleSummaries(manager) {
+  manager.resetting = true;
+  try {
+    await manager.queue.reset();
+    clearSummariesStorage(manager.path);
+  } finally {
+    manager.resetting = false;
+  }
+}
 
 // Phase 1 routes. init and review both build the people map and return the
 // pairs still needing the owner's eyes; decide records one call. Split out so
@@ -3463,6 +4027,17 @@ async function handlePeople(db, req, res, cors, url, policy) {
       // one ingest behind must say so rather than pass as live.
       return { ...year_, freshness: peopleCoreFreshness(db, state, aliases, owner) };
     });
+    // The array is already the People page's engagement rank. Queue it in that
+    // exact order, skipping rows that cannot pass the summary's minimum count.
+    // Work begins after this turn of the event loop, so the year response paints
+    // before the local model starts. A later click promotes that person above
+    // every invisible queued row.
+    policy.peopleSummaryManager.queue.enqueue(
+      (out.people ?? [])
+        .filter((person) => Number(person.messages ?? 0) >= SUMMARY_MIN_ROWS)
+        .map((person) => ({ key: person.key, year })),
+      { priority: 1 },
+    );
     send(res, 200, out, cors);
     return;
   }
@@ -3502,38 +4077,30 @@ async function handlePeople(db, req, res, cors, url, policy) {
     if (!Number.isInteger(year) || year < 1990 || year > thisYear + 1) {
       throw badRequest(`"year" must be an integer 1990..${thisYear + 1}`);
     }
-    // withPeopleDbs closes its handles in finally — safe here because every
-    // database read in summarizeYear happens in its SYNCHRONOUS prologue
-    // (graph + row gather); only the llama fetch is awaited, and it touches
-    // no handle. If summarizeYear ever grows an await before its reads, this
-    // call site must change with it.
-    // A CLOSED ROW STOPS THE WORK. The reader can collapse a person, or close
-    // the panel, while the model is still writing their summary -- and the
-    // single-slot server means whatever generates next is queued behind it.
-    // Same wiring as /vault/ask: `res`, not `req`, because readJson has already
-    // consumed the request stream and its 'close' has fired.
-    const summaryAbort = new AbortController();
-    const onSummaryClose = () => {
-      if (!res.writableEnded) summaryAbort.abort();
-    };
-    res.once('close', onSummaryClose);
-    let out;
-    try {
-      out = await withPeopleDbs(db, (state, resDb) => {
-        const { aliases } = resolutionState(resDb);
-        return summarizeYear(db, state, {
-          personKey: body.key, year, owner, aliases, llama: policy.llama,
-          signal: summaryAbort.signal,
-        });
-      });
-    } catch (error) {
-      if (summaryAbort.signal.aborted) return;
-      if (isUnreachable(error)) throw unreachableError();
-      throw error;
-    } finally {
-      res.off('close', onSummaryClose);
+    // Exhaustive summaries can require several local-model reductions. Make
+    // that work resumable instead of holding one 30-second native request open:
+    // the first call starts it, later calls read aggregate progress, and closing
+    // the row does not throw away already-computed private reductions.
+    if (policy.peopleSummaryManager.resetting) {
+      throw Object.assign(new Error('relationship summaries are resetting'), { status: 503 });
     }
-    send(res, 200, out, cors);
+    const stale = readCachedSummary(policy.peopleSummaryManager.path, body.key, year);
+    const job = policy.peopleSummaryManager.queue.request(body.key, year);
+    if (job.state === 'done') {
+      policy.peopleSummaryManager.queue.consume(job);
+      send(res, 200, job.result, cors);
+      return;
+    }
+    if (job.state === 'failed') {
+      policy.peopleSummaryManager.queue.consume(job);
+      if (isUnreachable(job.error)) throw unreachableError();
+      throw job.error;
+    }
+    send(res, 200, {
+      pending: true,
+      progress: job.progress,
+      ...(stale ? { ...stale, refreshing: true } : {}),
+    }, cors);
     return;
   }
 
@@ -3583,6 +4150,11 @@ export async function start({
   askTimeoutMs = ASK_TIMEOUT_MS,
   bearerToken: fixedBearerToken,
   bearerTokenFile = process.env.HERMES_TOKEN_FILE ?? DEFAULT_HERMES_TOKEN_PATH,
+  // Test seams for the relationship card routes: a stub matcher (no llama)
+  // and a fixed cap (production reads the owner's config).
+  relationshipMatcher,
+  relationshipCap,
+  peopleSummariesPath,
 } = {}) {
   const allowedOriginSet = parseAllowedOrigins(allowedOrigins);
   let apiKey;
@@ -3615,7 +4187,13 @@ export async function start({
   const askCeilingMs = Number.isFinite(askTimeoutMs) && askTimeoutMs > 0
     ? askTimeoutMs
     : ASK_TIMEOUT_MS;
-  const db = openDb(dbPath ?? process.env.HERMES_DB ?? DEFAULT_DB_PATH);
+  // Stable across requests: the per-request policy object cannot carry cached
+  // state, and the relationship service (spine handle, resolutions handle,
+  // current card batch) must live for the process, not the request.
+  const relationshipHolder = {};
+  const configuredDbPath = dbPath ?? process.env.HERMES_DB;
+  const resolvedDbPath = configuredDbPath ?? DEFAULT_DB_PATH;
+  const db = openDb(resolvedDbPath);
   // The cache is derived and rebuildable, so keep it beside the exact corpus
   // handle it accelerates. In-memory test databases get no implicit disk
   // writes. The store persists only hashed inputs and constrained outputs.
@@ -3624,6 +4202,34 @@ export async function start({
   const peopleSearchCache = peopleSearchCachePath
     ? openPeopleSearchCache(peopleSearchCachePath)
     : null;
+  // Tests and embedded callers that name a corpus path get an equally isolated
+  // derived store. The ordinary app keeps the long-standing private location.
+  const resolvedSummariesPath = resolvePeopleSummariesPath({
+    explicitPath: peopleSummariesPath,
+    configuredDbPath,
+    resolvedDbPath,
+  });
+  const peopleSummaryQueue = new SummaryQueue({
+    isRetryable: (error) => isUnreachable(error) || isTimeout(error) || error?.status === 502,
+    run: ({ key, year, signal, onProgress }) => withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      return summarizeYear(db, state, {
+        personKey: key,
+        year,
+        owner: loadOwner(),
+        aliases,
+        llama,
+        summariesPath: resolvedSummariesPath,
+        signal,
+        onProgress,
+      });
+    }),
+  });
+  const peopleSummaryManager = {
+    queue: peopleSummaryQueue,
+    resetting: false,
+    path: resolvedSummariesPath,
+  };
 
   const server = createServer(async (req, res) => {
     const cors = corsHeaders(req, allowedOriginSet);
@@ -3652,6 +4258,10 @@ export async function start({
         llama,
         peopleSearchCache,
         peopleSearchCachePath,
+        relationshipMatcher,
+        relationshipCap,
+        relationshipHolder,
+        peopleSummaryManager,
       });
     } catch (e) {
       send(res, e.status ?? 500, { error: e.message ?? String(e) }, cors);
@@ -3667,10 +4277,15 @@ export async function start({
         port: server.address().port,
         close: () =>
           new Promise((done, fail) => {
-            server.close((err) => {
-              peopleSearchCache?.close();
-              db.close();
-              err ? fail(err) : done();
+            server.close(async (err) => {
+              try {
+                await peopleSummaryQueue.reset();
+                peopleSearchCache?.close();
+                db.close();
+                err ? fail(err) : done();
+              } catch (closeError) {
+                fail(closeError);
+              }
             });
           }),
       });

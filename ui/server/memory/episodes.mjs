@@ -102,11 +102,20 @@ export function approximateConversationKey(row, meta, ts) {
 // read at all: an episode widens WHAT REACHES the model without widening WHAT
 // MAY BE CITED, and the two boundaries have to agree about who the owner is or
 // the widening is unbounded.
+// The one from-me predicate. Connectors deliver is_from_me as true OR 1
+// depending on source; a caller checking only === true mislabels the numeric
+// form -- which under the relationship quote gate turned the owner's own
+// words into "their" evidence (audit, 2026-08-30). Import this; do not grow
+// a local copy.
+export function fromMe(meta) {
+  return meta?.is_from_me === 1 || meta?.is_from_me === true;
+}
+
 export function isQuotable(row) {
   if (!row) return false;
   const meta = parseMeta(row.meta);
   if (row.source === 'notes') return meta?.body_undecoded !== 1;
-  return meta?.is_from_me === 1 || meta?.is_from_me === true;
+  return fromMe(meta);
 }
 
 // Identity of an episode's CONTENT, in line order. content_hash is the server's

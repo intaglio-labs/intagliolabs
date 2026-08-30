@@ -208,8 +208,8 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 .orb {
   display: block; position: relative;
   width: 100%; height: 100%;
-  /* Keep the faint processing marks behind the body without letting their
-     negative z-index fall behind the transparent widget window itself. */
+  /* Give the processing thought trail a self-contained stacking context above the
+     transparent widget window. */
   isolation: isolate;
   /* THE ORB UNIT: this orb's size over 42, the widget's. Every px in the
      shared state animations (§ORB-STATES) is written against it, so one
@@ -392,72 +392,97 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
 .orb.listening .orb-blob.ba { animation-duration: 1.6s; }
 .orb.listening .orb-blob.bb { animation-duration: 1.25s; animation-delay: 0.4s; }
 
-/* PROCESSING — a quiet electrical murmur behind the orb, the awake counterpart
-   to idle's drifting z's. The old filled bolt crossed the silhouette and read
-   as a sticker on its forehead. These are thin, low-contrast strokes on a
-   negative layer: bzz, bzz in the background, never a warning badge. */
-@keyframes orb-buzz {
-  0%, 100% {
-    opacity: 0;
-    transform: translate(0, 2px) scale(0.78) rotate(var(--bolt-r));
-  }
-  22% {
-    opacity: 0.24;
-    transform: translate(0, 1px) scale(0.9) rotate(calc(var(--bolt-r) - 2deg));
-  }
-  46% {
-    opacity: 0.76;
-    transform: translate(var(--buzz-x), -1px) scale(1) rotate(calc(var(--bolt-r) + 2deg));
-  }
-  72% {
-    opacity: 0.28;
-    transform: translate(0, -2px) scale(0.92) rotate(var(--bolt-r));
-  }
+/* PROCESSING — the orb performs the thought instead of wearing a loading
+   symbol. It leans, glances upward, and releases a soft
+   three-beat thought trail from the upper-right crown. */
+@keyframes processing-ponder {
+  0%, 100% { transform: translateY(0) rotate(-2deg) scale(1.01, 0.99); }
+  28% { transform: translateY(-0.8px) rotate(0.5deg) scale(0.99, 1.02); }
+  56% { transform: translateY(-1.4px) rotate(2deg) scale(1.02, 0.98); }
+  76% { transform: translateY(-0.4px) rotate(-0.4deg) scale(0.995, 1.01); }
 }
-.orb-charge {
+@keyframes processing-glance {
+  0%, 14%, 100% { transform: translate(0.5px, -0.5px); }
+  38%, 68% { transform: translate(2.7px, -2.8px); }
+  82% { transform: translate(1.4px, -1.8px); }
+}
+@keyframes thought-gather {
+  0%, 12% { opacity: 0; transform: translate(1px, 4px) scale(0.35); }
+  34% { opacity: 0.92; transform: translate(-1px, 0) scale(1.08); }
+  54% { opacity: 0.86; transform: translate(1px, -1px) scale(0.94); }
+  72% { opacity: 0.9; transform: translate(0, -2px) scale(1); }
+  100% { opacity: 0; transform: translate(-2px, -5px) scale(0.82); }
+}
+@keyframes thought-cloud-gather {
+  0%, 16% { opacity: 0; transform: translate(4px, 4px) rotate(5deg) scale(0.45); }
+  38% { opacity: 0.96; transform: translate(-1px, -1px) rotate(-4deg) scale(1.08); }
+  60% { opacity: 0.9; transform: translate(1px, -2px) rotate(2deg) scale(0.98); }
+  78% { opacity: 0.94; transform: translate(-1px, -3px) rotate(-2deg) scale(1.03); }
+  100% { opacity: 0; transform: translate(-3px, -6px) rotate(-5deg) scale(0.88); }
+}
+.orb.processing { animation: processing-ponder 2.8s ease-in-out infinite; }
+.orb.processing .face {
+  gap: 4px;
+  animation: processing-glance 2.8s ease-in-out infinite;
+}
+.orb.processing .eye.el { width: 9px; height: 10.5px; transform: rotate(5deg); }
+.orb.processing .eye.er {
+  width: 8px; height: 9px;
+  transform: rotate(-13deg);
+  animation: none;
+}
+.orb-thoughts {
   position: absolute;
-  /* WebKit can drop a negative child behind the transparent panel despite
-     the isolated parent. Level zero keeps the crown in the orb's stacking
-     context; the body and face explicitly sit above it at 1 and 2. */
-  z-index: 0;
-  top: -12px;
-  left: -9px;
-  width: 60px;
-  height: 54px;
+  z-index: 3;
+  top: -10px;
+  right: -2px;
+  width: 27px;
+  height: 28px;
   display: none;
   pointer-events: none;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.74));
 }
-.orb.processing .orb-charge { display: block; }
-.orb-bolt {
+.orb.processing .orb-thoughts { display: block; }
+.orb-thoughts .thought {
   position: absolute;
-  overflow: visible;
-  color: rgba(244, 225, 192, 0.94);
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.55;
-  stroke-linejoin: round;
-  stroke-linecap: round;
+  display: block;
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 27%,
+    rgba(255, 255, 255, 0.98) 0 15%,
+    rgba(239, 225, 201, 0.96) 48%,
+    rgba(200, 169, 116, 0.92) 100%);
+  box-shadow: inset -1px -1px 2px rgba(113, 75, 33, 0.24),
+              0 0 4px rgba(241, 218, 175, 0.2);
   opacity: 0;
-  transform-origin: 50% 50%;
-  /* The widget floats on arbitrary wallpaper. The dark tight shadow separates
-     the cream stroke from bright photos; the warm outer glow keeps it soft. */
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.82))
-          drop-shadow(0 0 3px rgba(197, 165, 109, 0.42));
-  animation: orb-buzz 2.8s ease-in-out infinite;
+  animation: thought-gather 2.8s ease-in-out infinite;
 }
-/* All three murmurs leave one place: the crown's upper-right. Their staggered
-   cadence makes that one small patch go bzz-bzz rather than surrounding the
-   head with unrelated warning marks. Coordinates are in the 60×54 charge
-   plane; the 42px orb occupies x=9..51, y=12..54. */
-.orb-bolt.bolt-1 { --bolt-r: 8deg; --buzz-x: 1px; width: 8px; height: 14px; left: 40px; top: 0; }
-.orb-bolt.bolt-2 { --bolt-r: 27deg; --buzz-x: 2px; width: 7px; height: 12px; left: 48px; top: 5px; animation-delay: -0.93s; opacity: 0; }
-.orb-bolt.bolt-3 { --bolt-r: -24deg; --buzz-x: -2px; width: 7px; height: 12px; left: 34px; top: 7px; animation-delay: -1.86s; opacity: 0; }
+.orb-thoughts .th1 { left: 14px; bottom: 5px; width: 4px; height: 4px; }
+.orb-thoughts .th2 { left: 16px; bottom: 8px; width: 7px; height: 7px; animation-delay: 0.22s; }
+.orb-thoughts .th3 {
+  right: -1px;
+  top: 1px;
+  width: 16px;
+  height: 10px;
+  border-radius: 55% 48% 52% 46%;
+  animation-name: thought-cloud-gather;
+  animation-delay: 0.44s;
+}
+.orb-thoughts .th3::before,
+.orb-thoughts .th3::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  background: inherit;
+  box-shadow: inset -1px -1px 2px rgba(113, 75, 33, 0.18);
+}
+.orb-thoughts .th3::before { left: 2px; top: -4px; width: 9px; height: 9px; }
+.orb-thoughts .th3::after { right: 1px; top: -2px; width: 8px; height: 8px; }
 /* Jackpot and concussion keep their own visual language even if background
    work remains active underneath them. */
-.orb.processing.jackpot .orb-charge,
-.orb.processing.pop .orb-charge,
-.orb.processing.dazed .orb-charge,
-.orb.processing.undaze .orb-charge { display: none; }
+.orb.processing.jackpot .orb-thoughts,
+.orb.processing.pop .orb-thoughts,
+.orb.processing.dazed .orb-thoughts,
+.orb.processing.undaze .orb-thoughts { display: none; }
 
 /* TALKING — the eyes bounce with the voice. */
 .orb.talking .face {
@@ -1048,7 +1073,7 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
   body:not(.motion-anyway) .face,
   body:not(.motion-anyway) .eye,
   body:not(.motion-anyway) .zzz,
-  body:not(.motion-anyway) .orb-bolt,
+  body:not(.motion-anyway) .thought,
   body:not(.motion-anyway) .orb-badge { animation: none !important; }
   /* A jackpot is the one thing here that overrides all of this, and it does
      it from JS rather than from another dozen !important lines: widget.js
@@ -1060,8 +1085,10 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
      0 — so a still frame has to be supplied in its place. */
   body:not(.motion-anyway) .orb.idle .zzz { opacity: 0.95; }
   body:not(.motion-anyway) .orb.idle .zzz.z2 { opacity: 0.7; }
-  /* Hold a faint background buzz: the state survives, only its travel stops. */
-  body:not(.motion-anyway) .orb.processing .orb-bolt { opacity: 0.52; }
+  /* Hold a legible still thought trail: the idea survives, only travel stops. */
+  body:not(.motion-anyway) .orb.processing .thought { opacity: 0.82; transform: none; }
+  body:not(.motion-anyway) .orb.processing .th1 { opacity: 0.55; }
+  body:not(.motion-anyway) .orb.processing .th2 { opacity: 0.7; }
 }
 .orb-layer { position: absolute; inset: -30%; display: block; }
 .orb-layer.la { animation: orb-spin 4.5s linear infinite; }

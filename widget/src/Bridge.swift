@@ -31,6 +31,12 @@ protocol BridgeDelegate: AnyObject {
   func openConnections()
   func openPeople()
   func openMonths()
+  func openReconnect()
+  // Takes a path and a query since the login window can hand off to
+  // /bridge?p=<platform>. Both sides are load-bearing and picking either alone
+  // fails to compile — at a CALL SITE rather than here, which is the slow way to
+  // find it. This conflict also surfaced by luck: two lines higher and it would
+  // have merged clean and broken openReconnect's two callers silently.
   func openConnectRoot(path: ConnectPath, query: [String: String]) -> Bool
   func closeWindow(of webView: WKWebView)
   func dragWindow(of webView: WKWebView)
@@ -79,8 +85,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   ]
   static let pageCapabilities: [String: Set<String>] = [
     "widget": ["drag", "openChat", "openChatWith", "openConnections",
-               "openMonths", "voiceArm", "widgetBounds", "workStatus"],
+               "openMonths", "openReconnect", "voiceArm", "widgetBounds",
+               "workStatus", "relCard", "relEvent", "relRefresh"],
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
+    // The reconnect card popup (L5 step 10): reads the current card, posts
+    // the owner's verdict, and sizes itself. Nothing else -- the card page
+    // holds no token and can open no other surface.
+    "reconnect": ["relCard", "relEvent", "close", "fitContent"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "bridgeDiscordServer",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
@@ -148,11 +159,37 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   private final class WorkTracker {
     private let lock = NSLock()
     private var jobs: [UUID: String] = [:]
+    private var namedJobs: [String: UUID] = [:]
 
     func begin(_ label: String) -> UUID {
       let id = UUID()
       lock.lock(); jobs[id] = label; lock.unlock()
       return id
+    }
+
+    func beginOnce(_ key: String, label: String) {
+      lock.lock()
+      if namedJobs[key] != nil { lock.unlock(); return }
+      let id = UUID()
+      namedJobs[key] = id
+      jobs[id] = label
+      lock.unlock()
+      // A destroyed webview cannot deliver the final poll that normally ends
+      // this named job. Bound that orphan so the ambient orb can never remain
+      // in its processing pose forever after the People window is closed.
+      DispatchQueue.global().asyncAfter(deadline: .now() + 30 * 60) { [weak self] in
+        guard let self else { return }
+        self.lock.lock(); defer { self.lock.unlock() }
+        guard self.namedJobs[key] == id else { return }
+        self.namedJobs.removeValue(forKey: key)
+        self.jobs.removeValue(forKey: id)
+      }
+    }
+
+    func finish(_ key: String) {
+      lock.lock(); defer { lock.unlock() }
+      guard let id = namedJobs.removeValue(forKey: key) else { return }
+      jobs.removeValue(forKey: id)
     }
 
     func finish(_ id: UUID) {
@@ -525,6 +562,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": "ok"])
     case "openPeople":
       delegate?.openPeople()
+      reply(webView, id, ["state": "ok"])
+    case "openReconnect":
+      delegate?.openReconnect()
       reply(webView, id, ["state": "ok"])
     case "widgetSpot":
       // Where the widget sits inside the onboarding window, as FRACTIONS of
@@ -1079,18 +1119,79 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // A sleeping orb means no work is ACTUALLY underway. Scheduled queue
       // entries intentionally do not participate here: they belong in
       // Settings, not on the ambient desktop control.
+      let workLabel: String?
+      // Remembered, because the connector-queue horizon may only be attached to
+      // a connector label — see below.
+      let interactive = Bridge.activeWork.label != nil
       if let label = Bridge.activeWork.label {
-        reply(webView, id, ["state": "working", "label": label])
+        workLabel = label
       } else if let model = ModelSetup.activity,
                 let phase = model["phase"] as? String,
                 let tier = model["tier"] as? String {
-        reply(webView, id, ["state": "working", "label": "\(phase) the \(tier) local model"])
+        workLabel = "\(phase) the \(tier) local model"
       } else if let label = Connectors.shared.activeWorkLabel {
-        reply(webView, id, ["state": "working", "label": label])
+        workLabel = label
       } else if let label = Distiller.shared.activity {
-        reply(webView, id, ["state": "working", "label": label])
+        workLabel = label
+      } else if let label = Connectors.shared.queuedWorkLabel {
+        // A waiting connector slice is still part of the same total-hours job
+        // shown in Settings. Falling through to idle here made the flywheel
+        // alternate with sleep between every source.
+        workLabel = label
+      } else {
+        workLabel = nil
+      }
+      if let workLabel {
+        var status: [String: Any] = ["state": "working", "label": workLabel]
+        // THE HORIZON BELONGS TO THE CONNECTOR QUEUE, so it may only ride a
+        // connector label.
+        //
+        // ~~"Interactive work can temporarily outrank a connector label while
+        // the total remains useful."~~ It is not useful there, it is wrong:
+        // asking the orb a question during a calendar backfill rendered
+        // "current: thinking about your question" above a queue duration, which
+        // reads as a duration for the question.
+        //
+        // And when the daemon publishes no estimate — now the normal case, since
+        // matrix backfill publishes a COUNT of conversations rather than a floor
+        // dressed as a forecast — pass that count instead, so the orb can say
+        // something true rather than promise a number that never arrives.
+        if !interactive {
+          if let estimate = Connectors.shared.activityEstimate {
+            status["estimate"] = estimate
+          }
+          if let rooms = Connectors.shared.activityBackfillRooms, rooms > 0 {
+            status["backfillRooms"] = rooms
+          }
+        }
+        reply(webView, id, status)
       } else {
         reply(webView, id, ["state": "idle"])
+      }
+
+    // Relationship Memory (L5 step 10): the orb's reconnect card. Thin bearer
+    // proxies to hermes -- the page never holds the token, and the card
+    // payload crosses as data the page renders with textContent only.
+    case "relCard":
+      relHermes("GET", "admin/relationship/card", json: nil) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
+    case "relRefresh":
+      relHermes("POST", "admin/relationship/refresh", json: [:]) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
+    case "relEvent":
+      var evt: [String: Any] = [:]
+      // "note" is the owner's free-text why -- the field the whole feedback
+      // loop exists to capture; the audit found this allowlist silently
+      // dropping it while every other layer handled it.
+      for k in ["snapshot_id", "person_key", "event", "reason", "note", "mute_days"] {
+        if let v = payload[k] { evt[k] = v }
+      }
+      relHermes("POST", "admin/relationship/event", json: evt) { [weak self] out in
+        self?.reply(webView, id, out)
       }
 
     case "modelDownload":
@@ -1425,9 +1526,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // served by hermes from the LOCAL model only.
       let sKey = String(payload["key"] as? String ?? "")
       let sYear = (payload["year"] as? Int) ?? Int(payload["year"] as? Double ?? 0)
-      let work = Bridge.activeWork.begin("writing a relationship summary")
+      let workKey = "\(sYear)|\(sKey)"
+      Bridge.activeWork.beginOnce(workKey, label: "writing a relationship summary")
       peopleCall("POST", "people/summary", json: ["key": sKey, "year": sYear]) { [weak self] data in
-        Bridge.activeWork.finish(work)
+        if data["pending"] as? Bool != true { Bridge.activeWork.finish(workKey) }
         self?.reply(webView, id, data)
       }
     default:
@@ -2011,6 +2113,23 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           .trimmingCharacters(in: .whitespacesAndNewlines) == "{\"ok\":true}"
       done(ok)
     }.resume()
+  }
+
+  private func relHermes(_ method: String, _ path: String, json: [String: Any]?,
+                         _ done: @escaping ([String: Any]) -> Void) {
+    guard let tok = bearerToken() else { done(["state": "auth"]); return }
+    let req = request(method, hermesBase, path, bearer: tok, json: json, timeout: 30)
+    let task = session.dataTask(with: req) { data, resp, err in
+      guard err == nil, let http = resp as? HTTPURLResponse, http.statusCode == 200,
+            let d = data,
+            let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else {
+        done(["state": "down"]); return
+      }
+      var out = obj
+      out["state"] = "ok"
+      done(out)
+    }
+    task.resume()
   }
 
   private func ask(_ utterance: String, _ done: @escaping ([String: Any]) -> Void) {

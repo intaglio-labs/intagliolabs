@@ -58,6 +58,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // fit()/sidePlacedFrame clamp it to the screen — so this reads "as tall as
   // the screen allows", not 2000pt.
   private static let monthsBase = NSSize(width: 520, height: 2000)
+  // The reconnect card: one card, its receipt, four verdict buttons. Height
+  // is a base guess; the page fits itself via fitContent once rendered.
+  private static let reconnectBase = NSSize(width: 340, height: 430)
 
   private let bridge = Bridge()
   private var widgetWindow: WidgetWindow!
@@ -66,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   private var chatWeb: WKWebView?
   private var connectionsPanel: PopupPanel?
   private var peoplePanel: PopupPanel?
+  private var reconnectPanel: PopupPanel?
   private var monthsPanel: PopupPanel?
   private var onboardingPanel: PopupPanel?
   private var earWeb: WKWebView?
@@ -796,6 +800,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       (connectionsPanel?.contentView as? WKWebView)?
         .evaluateJavaScript("window.__hzConnectorsIntro && window.__hzConnectorsIntro(\(intro))")
     }
+  }
+
+  // The reconnect card popup (L5 step 10). Toggles like the gear; the panel
+  // survives hidden and the page refetches its card on every show, because a
+  // card acted on elsewhere must not linger.
+  func openReconnect() {
+    if let p = reconnectPanel, p.isVisible {
+      p.orderOut(nil)
+      return
+    }
+    if reconnectPanel == nil {
+      reconnectPanel = makePanel(page: "reconnect", size: capped(Self.scaled(Self.reconnectBase, Bridge.scale)))
+      reconnectPanel!.hasShadow = false
+    } else {
+      (reconnectPanel?.contentView as? WKWebView)?
+        .evaluateJavaScript("window.__hzReconnectShow && window.__hzReconnectShow()")
+    }
+    present(reconnectPanel!)
   }
 
   // The People popup — the door into the who's-who / person-index feature.

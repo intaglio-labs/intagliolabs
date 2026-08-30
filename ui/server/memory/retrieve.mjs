@@ -43,9 +43,15 @@ const FIELDS =
 function recentRows(db, limit) {
   return db
     .prepare(
+      // subject = 'owner' became load-bearing at schema v11: the CHECK that
+      // used to make every accepted claim an owner claim is gone, and a
+      // person-subject claim recalled here would be composed into an answer
+      // AS an owner memory -- a third party's commitment attributed to the
+      // owner. Person claims are the relationship surface's to serve.
       `SELECT ${FIELDS} FROM v_claim_accepted c ` +
         'JOIN claim_source s ON s.claim_id = c.id ' +
         'LEFT JOIN context x ON x.id = s.context_id ' +
+        "WHERE c.subject = 'owner' " +
         'ORDER BY COALESCE(c.observed_at, c.created_at) DESC, c.id DESC LIMIT ?'
     )
     .all(limit);
@@ -91,7 +97,7 @@ export function recallClaims(db, { match = null, limit = DEFAULT_RECALL_LIMIT, n
               'JOIN v_claim_accepted c ON c.id = f.rowid ' +
               'JOIN claim_source s ON s.claim_id = c.id ' +
               'LEFT JOIN context x ON x.id = s.context_id ' +
-              'WHERE claim_fts MATCH ? ' +
+              "WHERE c.subject = 'owner' AND claim_fts MATCH ? " +
               // bm25 returns a NEGATIVE score, more negative = better match,
               // so ASC is best-first.
               'ORDER BY rank ASC LIMIT ?' +
