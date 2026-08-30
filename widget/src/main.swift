@@ -106,7 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // backend copy remains asynchronous inside ensureBackend().
     Provision.ensureConnectorDefaults()
     Provision.ensureBackend()
-    Provision.prefetchBridgeImages()
+    Provision.prefetchBridgeRuntime()
 
     // The second half of the self-move (Bridge "moveToApplications"): the
     // old instance could not delete the bundle it was running from, so it

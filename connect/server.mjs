@@ -166,12 +166,19 @@ async function sendMemoryPage(res, token, opts = {}) {
 }
 
 // Put the owner's own Telegram api_id/api_hash into that bridge's generated
-// config, then start the container that has been refusing to run without them.
+// config, then start the bridge that has been refusing to run without them.
 // Line replacement, not a YAML round trip: the generated config is ~700 lines
 // of comments that a rewrite would flatten, and these two keys appear once.
-// The container start is best-effort — docker may not be running, and the
-// credentials are still saved either way, so the next setup-bridges run picks
-// them up.
+//
+// This used to run `docker start hazlie-telegram`. There is no container, and
+// leaving that call in place would have made this walkthrough silently
+// pointless: the credentials would land and nothing would ever pick them up
+// until the next full setup run. setup-bridges-native.sh deliberately WRITES
+// telegram's launchd plist even when it refuses to load it, precisely so this
+// path has something to bootstrap.
+//
+// Best-effort, as before: the credentials are saved either way, and a setup run
+// picks them up if launchctl is unavailable or the plist is not there yet.
 function writeBridgeConfig(bridge, { apiId, apiHash }) {
   const path = join(homedir(), '.hazlie', 'matrix', bridge, 'config.yaml');
   const text = readFileSync(path, 'utf8');
@@ -179,10 +186,21 @@ function writeBridgeConfig(bridge, { apiId, apiHash }) {
     .replace(/^(\s*api_id:).*$/mu, `$1 ${apiId}`)
     .replace(/^(\s*api_hash:).*$/mu, `$1 "${apiHash}"`);
   writeFileSync(path, next, { mode: 0o600 });
+  const label = `io.intaglio.bridge.${bridge}`;
+  const plist = join(homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
+  const domain = `gui/${process.getuid()}`;
   try {
-    execFileSync('docker', ['start', `hazlie-${bridge}`], { stdio: 'ignore', timeout: 15000 });
+    // bootstrap loads an agent that was written but never loaded; kickstart
+    // covers the case where it is already loaded and just needs a restart to
+    // re-read the config written above. Each is independently best-effort.
+    try {
+      execFileSync('launchctl', ['bootstrap', domain, plist], { stdio: 'ignore', timeout: 15000 });
+    } catch { /* already loaded, or no plist yet — kickstart still worth trying */ }
+    execFileSync('launchctl', ['kickstart', '-k', `${domain}/${label}`],
+      { stdio: 'ignore', timeout: 15000 });
   } catch {
-    // Not running, not installed, or already up — the credentials landed.
+    // Not installed, or launchctl refused — the credentials landed regardless,
+    // and the next setup-bridges-native.sh run starts the bridge with them.
   }
 }
 

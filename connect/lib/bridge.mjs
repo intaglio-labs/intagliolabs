@@ -16,28 +16,16 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-// WHICH ENGINE PROVISIONED THIS MACHINE.
-//
-// Native bridges keep ~/.hazlie/matrix; the Docker fallback moved to
-// ~/.hazlie/matrix-docker so the two provisioners cannot overwrite each other's
-// homeserver.yaml (they disagree about whether a path is host-absolute or the
-// container's /data view). That split is invisible from here, so resolve it by
-// looking for the artifact only a completed setup writes.
-//
-// Native wins a tie deliberately: it is the default engine, and when neither
-// root is provisioned this still returns the native path, so every "set up the
-// bridges" message keeps naming the directory the docs name.
-const matrixRoot = (home) => {
-  const native = join(home, '.hazlie', 'matrix');
-  const docker = join(home, '.hazlie', 'matrix-docker');
-  if (existsSync(join(native, 'owner-credentials.json'))) return native;
-  if (existsSync(join(docker, 'owner-credentials.json'))) return docker;
-  return native;
-};
+// The one bridge state root. There was briefly a second (~/.hazlie/matrix-docker)
+// while a Docker fallback existed and the two provisioners disagreed about
+// whether a path was host-absolute or a container's /data view. The fallback is
+// gone, so the split is too -- ops/setup-bridges-native.sh refuses to provision
+// on top of a directory a container wrote, rather than there being two.
+const matrixRoot = (home) => join(home, '.hazlie', 'matrix');
 const matrixDir = (home) => matrixRoot(home);
 
 // THE WEB-LOGIN POLICY LIVES HERE AND ONLY HERE (added 2026-08-23).
@@ -255,7 +243,7 @@ export const PLATFORMS = Object.freeze({
     // config rather than assumed. mautrix ships api_id 12345 as its example
     // and the bridge refuses to start on it, so that value IS the "nobody has
     // configured this" signal — an empty key never appears. When a build ships
-    // an app credential (widget/build.sh → ops/setup-bridges.sh) this is
+    // an app credential (widget/build.sh → ops/setup-bridges-native.sh) this is
     // already real by the time anyone opens the card, and the card must not
     // ask for a paste that would overwrite a working pair.
     appCredential: { file: 'telegram/config.yaml', unset: /^\s*api_id:\s*12345\s*$/mu },
@@ -281,7 +269,7 @@ export const PLATFORMS = Object.freeze({
     // card drops straight to the phone-and-code conversation it already has.
     // Concretely: the pair is injected at BUILD time from a repository secret
     // (the same shape as FIREBASE_SERVICE_ACCOUNT, which this tree already
-    // keeps out of itself), ops/setup-bridges.sh writes it into config.yaml
+    // keeps out of itself), ops/setup-bridges-native.sh writes it into config.yaml
     // when one is present instead of stopping the container on the example
     // 12345, and the paste path stays as an OVERRIDE — HINTS.telegram's
     // walkthrough rendering only when no default is configured.
@@ -594,8 +582,12 @@ function assertLoopbackBase(base) {
   } catch {
     throw new Error(`matrix homeserver is not a valid URL: ${base}`);
   }
-  const ok = host === '127.0.0.1' || host === 'localhost' || host === '::1'
-    || host === 'synapse'; // the compose-internal name, used when run in-network
+  // `synapse` was accepted here too -- the compose network's internal DNS name,
+  // valid only inside a container. There is no container network, so this is a
+  // plain hostname now: something that resolves through DNS to whatever a
+  // resolver says, carrying the owner's homeserver token to it. Removed with
+  // the engine it belonged to. The native provisioner writes 127.0.0.1.
+  const ok = host === '127.0.0.1' || host === 'localhost' || host === '::1';
   if (!ok) {
     throw new Error(`matrix homeserver must be loopback, refusing ${host}`);
   }
@@ -621,7 +613,7 @@ export function loadCreds({ home = homedir() } = {}) {
 // were backfilling — but mautrix-discord is the pre-bridgev2 generation and
 // has no user_login table at all, so this query threw, the catch below read
 // the exception as "not connected", and the tile stayed grey through a
-// perfectly good login. ops/setup-bridges.sh has always said Discord is the
+// perfectly good login. the bridge setup has always said Discord is the
 // legacy one; nothing here asked.
 //
 // An override must return a column named remote_name, and the row's existence

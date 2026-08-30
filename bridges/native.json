@@ -1,7 +1,7 @@
 {
   "_readme": [
     "THE NATIVE BRIDGE MANIFEST. What ops/fetch-bridges.mjs downloads to replace",
-    "seven of the eight containers in docker-compose.yml.",
+    "seven of the eight containers the deleted docker-compose.yml once ran.",
     "",
     "WHY THIS EXISTS. Docker Desktop on macOS is a Linux virtual machine: several",
     "GB of disk, a gig-plus of resident RAM, a commercial licence for business",
@@ -11,7 +11,7 @@
     "darwin-arm64 binary; verified 2026-08-29 against the GitHub release API, and",
     "one of them (linkedin) downloaded, checksum-matched and inspected by hand.",
     "",
-    "PINNED BY SHA256, EVERY ONE. bridges/docker-compose.yml pins its images by",
+    "PINNED BY SHA256, EVERY ONE. The compose file this replaced pinned its images by",
     "digest but ops/prefetch-bridges.sh pulled discord, slack and linkedin by the",
     "mutable ':latest' tag, so a first launch could warm the cache with different",
     "code than the stack later ran. A manifest of content hashes cannot drift that",
@@ -57,7 +57,7 @@
       "asset": "mautrix-twitter-darwin-arm64",
       "sha256": "fed54b9c639153ef8ee164aa17598083befe77f02de8e83576600dc81ee0f527",
       "replaces": "dock.mau.dev/mautrix/twitter",
-      "note": "THE ONE REGRESSION RISK IN THIS FILE. docker-compose.yml deliberately runs a 2026-08-25 dev-build digest because released v26.08 could not complete an X login (HTTP 403 behind a Cloudflare challenge). This is the RELEASED build, so X login may fail exactly as it did before that pin. Do not migrate Twitter off Docker until it is re-tested; the other six do not depend on it."
+      "note": "Ran on a 2026-08-25 dev-build digest under the container engine because released v26.08 could not complete an X login (HTTP 403 behind a Cloudflare challenge). This is the RELEASED build and X logs in on it: confirmed by the owner on 2026-08-30 against this manifest, after the login window stopped advertising WebAuthn it cannot perform. Kept as a note rather than deleted because the failure was real and a future Cloudflare change could bring it back."
     },
     {
       "id": "telegram",

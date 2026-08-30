@@ -263,7 +263,7 @@ export async function applyPendingSocialReimport({
   if (typeof purge !== 'function') throw new Error('social reimport requires a purge function');
   assertOwnerOnlyFile(pendingPath, {
     label: 'social reimport marker',
-    setupHint: 'rerun ops/setup-bridges.sh',
+    setupHint: 'rerun ops/setup-bridges-native.sh',
   });
 
   let deleted = 0;

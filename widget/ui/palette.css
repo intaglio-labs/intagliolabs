@@ -1746,15 +1746,6 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
    scoped to .hint.hold -- this notice renders in a plain .hint, in both the
    settings list and the tile popover, and a button that inherits no style there
    reads as broken text rather than a control. */
-.hint .engine-open {
-  display: block; margin-top: 6px; padding: 0;
-  border: none; background: none;
-  color: var(--hazelnut-light);
-  font: inherit; text-align: left;
-  cursor: pointer;
-}
-.hint .engine-open:hover { color: var(--fg); }
-.hint .engine-after { display: block; margin-top: 6px; }
 /* Every connected line leads with a green check (owner, 2026-08-25). One
    rule, not a per-site prefix: the check rides the .acct class, so it cannot
    be forgotten by the next connected state someone renders. */

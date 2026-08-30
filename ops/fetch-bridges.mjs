@@ -9,7 +9,7 @@
 // WHAT THIS IS PART OF. Docker Desktop on macOS is a Linux virtual machine, and
 // it is in this product for one reason: the social bridges were believed to need
 // it. They do not. Every mautrix bridge here is Go and publishes a prebuilt
-// darwin-arm64 binary. This fetches them; ops/setup-bridges.sh still owns the
+// darwin-arm64 binary. This fetches them; ops/setup-bridges-native.sh owns the
 // configuration, and Synapse is a separate leg (it has a macOS arm64 wheel, so
 // it is a venv rather than a container -- but that is not this file).
 //

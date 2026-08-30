@@ -245,7 +245,7 @@ test('the platforms on a non-bridgev2 schema are the ones we expect', () => {
 test('the app-credential roster, and what it answers', () => {
   // A platform declares `appCredential` when its bridge cannot start until
   // someone supplies a credential the PRODUCT may ship (widget/build.sh bakes
-  // one in, ops/setup-bridges.sh writes it). Pinned as a roster because the
+  // one in, ops/setup-bridges-native.sh writes it). Pinned as a roster because the
   // answer drives whether the card shows a paste walkthrough, and offering to
   // overwrite a working pair is worse than not offering at all.
   const withApp = entries.filter(([, p]) => p.appCredential).map(([id]) => id).sort();

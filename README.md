@@ -57,7 +57,7 @@ the setup intentionally uses a stable Node copy at `~/.hazlie/bin/node`.
 | `ui/server/` | `hermes`, the local context store and memory pipeline; sole database writer and deleter |
 | `connectors/` | Resident source pollers that deliver rows to Hermes over loopback |
 | `connect/` | Loopback-only onboarding page for connecting sources |
-| `bridges/` | Local Matrix bridges for chat platforms, run in Docker |
+| `bridges/` | Local Matrix bridges for chat platforms, run natively under launchd |
 | `ops/` | Setup scripts, launchd agents, runbooks, and probes |
 
 ## Guardrails

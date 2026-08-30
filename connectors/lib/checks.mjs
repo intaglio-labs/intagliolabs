@@ -1107,7 +1107,7 @@ export function checkBridgeHardening(home) {
     worst,
     problems.join('; '),
     'set the named keys in ~/.hazlie/matrix/<bridge>/config.yaml, then restart that bridge: ' +
-      'run ops/setup-bridges.sh to restore the maximum per-bridge history limits; ' +
+      'run ops/setup-bridges-native.sh to restore the maximum per-bridge history limits; ' +
       'full backfill is the owner decision (all connections pull maximum available history); ' +
       'double_puppet stays off so the bridge never acts as you on the remote account; ' +
       'logging.min_level stays at info so bridge logs do not record message request bodies.'

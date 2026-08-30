@@ -12,6 +12,12 @@
 //
 // A source scan, like connect-affordances.test.mjs: this drifts silently, and
 // the two UI files are deliberate duplicates that must change together.
+//
+// Updated 2026-08-30 when Docker was deleted outright. The notice has now been
+// wrong three times in three different ways -- a shell command, then a vendor
+// name on an install that did not use that vendor, then a button offering to
+// install a VM the build no longer wants -- so what is asserted below is the
+// absence of every one of them, not the presence of the latest wording.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -44,29 +50,35 @@ const noticeLine = (text) => {
 };
 
 for (const file of UI) {
-  test(`${file} tells a consumer to start an app, not to run a shell`, () => {
+  test(`${file} tells a consumer what is happening, not what to run`, () => {
     const line = noticeLine(src[file]);
     assert.doesNotMatch(line, /bash |\.sh\b|ops\//u, `a shell instruction survives: ${line.trim()}`);
-    // ~~/Docker/~~ was right when Docker was the only runtime. Since e9567ea the
-    // native path is the default and Docker is the fallback, so naming the
-    // vendor in the notice sent a native install somewhere it does not need to
-    // go. Assert that the notice names the thing that is missing — the engine —
-    // rather than one implementation of it. The Docker BUTTON is still pinned by
-    // the next test, because the fallback must stay reachable.
-    assert.match(line, /engine|Docker/u, 'it should still name what is actually needed');
-    assert.doesNotMatch(line, /Docker Desktop/u,
-      'the notice must not name a runtime the install may not be using');
+    // ~~/Docker/~~ ~~/engine|Docker/~~ -- both were right for the runtime of
+    // their day. Docker is deleted now, so the notice must not name it at all:
+    // there is no button to press, no app to open, and nothing the owner can do
+    // to hurry it. What is left is a fact -- the stack is still coming up -- and
+    // the machine doing the rest.
+    assert.doesNotMatch(line, /Docker/u,
+      'the notice must not name a runtime this build does not have');
+    assert.doesNotMatch(line, /press this again|then press/u,
+      'there is no owner action left to prompt for');
   });
 
-  test(`${file} offers Docker as a button rather than an instruction`, () => {
-    // Quoting varies between these files, so match the call, not a literal.
-    assert.match(
-      src[file],
-      /hzPost\(\s*['"`]openApp['"`]\s*,\s*\{\s*bundleId:\s*['"`]com\.docker\.docker['"`]/u,
-      'the notice must be able to launch Docker itself'
-    );
-    // ↗ is the repo's marker for "this leaves the app" (connect-affordances).
-    assert.match(src[file], /open Docker \\u2197|open Docker ↗/u, 'the button must say it leaves the app');
+  test(`${file} offers nothing to press`, () => {
+    // The notice used to build an "open Docker ↗" button. An affordance that
+    // cannot help is worse than none: it invites a click, opens a VM installer,
+    // and changes nothing about why the bridges are not up yet.
+    // COMMENTS STRIPPED. Both files explain at length what the notice used to
+    // say, and "open Docker" appears in that explanation -- matching the raw
+    // source asserts the absence of a comment, not of a button.
+    const code = src[file].split('\n').filter((l) => !/^\s*\/\//u.test(l)).join('\n');
+    assert.doesNotMatch(code, /com\.docker\.docker/u,
+      'nothing may still try to launch Docker');
+    assert.doesNotMatch(code, /open Docker/u, 'the button text must be gone too');
+    const fn = src[file].match(/function hz\w*NobridgeNotice\(tip\) \{[\s\S]*?\n\}/u)?.[0];
+    assert.ok(fn, 'the nobridge notice must still exist');
+    assert.doesNotMatch(fn, /createElement\('button'\)/u,
+      'the notice must not build a button it cannot make useful');
   });
 }
 
@@ -75,10 +87,13 @@ test('the two duplicated notice tables agree, as their comments require', () => 
   assert.equal(a, b, 'connections.js and connector-tile.js drifted');
 });
 
-test('Docker is launchable, so the button is not inert', () => {
+test('the openApp allowlist grants nothing the UI no longer asks for', () => {
+  // com.docker.docker lived here only so the nobridge button could launch it.
+  // An allowlist entry with no caller is a capability granted for free.
   const line = swift.split('\n').find((l) => l.includes('allowedApps'));
   assert.ok(line, 'allowedApps must exist');
-  assert.match(line, /com\.docker\.docker/u, 'openApp refuses any bundle id not in this set');
+  assert.doesNotMatch(line, /com\.docker\.docker/u, 'a caller-less entry must not linger');
+  assert.doesNotMatch(swift, /docker\.com/u, 'nor its download link in allowedExternal');
 });
 
 // THE ONE THAT MATTERS. Without this the app opens a real Meta login page on a

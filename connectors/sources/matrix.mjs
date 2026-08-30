@@ -22,7 +22,7 @@
 // LOG POLICY (connectors/AGENTS.md): counts, room counts and cursors only —
 // never message text, never a handle, never a display name.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { classifySender, eventToRow } from '../lib/matrixRows.mjs';
@@ -114,24 +114,12 @@ function encodeRoomMembers(members) {
   return JSON.stringify([...members.entries()]);
 }
 
-// WHICH ENGINE PROVISIONED THIS MACHINE.
-//
-// Native bridges keep ~/.hazlie/matrix; the Docker fallback moved to
-// ~/.hazlie/matrix-docker so the two provisioners cannot overwrite each other's
-// homeserver.yaml (they disagree about whether a path is host-absolute or the
-// container's /data view). That split is invisible from here, so resolve it by
-// looking for the artifact only a completed setup writes.
-//
-// Native wins a tie deliberately: it is the default engine, and when neither
-// root is provisioned this still returns the native path, so every "set up the
-// bridges" message keeps naming the directory the docs name.
-const matrixRoot = (home) => {
-  const native = join(home, '.hazlie', 'matrix');
-  const docker = join(home, '.hazlie', 'matrix-docker');
-  if (existsSync(join(native, 'owner-credentials.json'))) return native;
-  if (existsSync(join(docker, 'owner-credentials.json'))) return docker;
-  return native;
-};
+// The one bridge state root. There was briefly a second (~/.hazlie/matrix-docker)
+// while a Docker fallback existed and the two provisioners disagreed about
+// whether a path was host-absolute or a container's /data view. The fallback is
+// gone, so the split is too -- ops/setup-bridges-native.sh refuses to provision
+// on top of a directory a container wrote, rather than there being two.
+const matrixRoot = (home) => join(home, '.hazlie', 'matrix');
 
 export function credentialsPath(home) {
   return join(matrixRoot(home), 'owner-credentials.json');

@@ -280,7 +280,7 @@ jobs:
           HZ_RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
           # Telegram rejects app credentials published in source. Inject the
           # private pair only into the signed bundle; build.sh shape-checks it
-          # and setup-bridges.sh installs it into the local bridge config.
+          # and setup-bridges-native.sh installs it into the local bridge config.
           HZ_TELEGRAM_APP: ${{ secrets.TELEGRAM_APP_CREDENTIAL }}
         run: ./widget/release.sh
 

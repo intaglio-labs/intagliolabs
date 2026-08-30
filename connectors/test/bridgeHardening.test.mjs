@@ -70,7 +70,7 @@ test('backfill DISABLED is a FAIL — the owner wants bulk history pulled', () =
   );
   assert.equal(r.status, 'FAIL');
   assert.match(r.detail, /backfill\.enabled is false/u);
-  assert.match(r.fix, /ops\/setup-bridges\.sh/u);
+  assert.match(r.fix, /ops\/setup-bridges-native\.sh/u);
 });
 
 test('an enabled bridge with the old 10k cap still fails maximum-history policy', () => {

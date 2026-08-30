@@ -8,52 +8,56 @@ relays DMs into Matrix; one hazlie connector reads Matrix. Nothing federates,
 nothing listens off-loopback, no corpus data reaches a cloud model — the same
 inbound-fetch-of-your-own-data posture as the IMAP and Oura pollers.
 
-## Two engines, two state roots — read this first
+## One engine: native, supervised by launchd
 
-**Native is the default and Docker is the fallback**, as of the native-bridge
-work on 2026-08-30. Docker Desktop on macOS is a Linux VM, and requiring one to
-read your own DMs was the thing that had to go. `ops/setup-bridges-native.sh`
-runs the same seven mautrix binaries and the same Synapse directly on the Mac;
-`ops/setup-bridges.sh` (this file's subject) is what runs only if that fails.
+Docker is gone as of 2026-08-30. Docker Desktop on macOS is a Linux VM, and
+requiring one to read your own DMs was the thing this work existed to remove.
+`ops/setup-bridges-native.sh` runs Synapse and the seven mautrix bridges
+directly on the Mac, as eight launchd agents.
 
-They do not share state, and must not:
+- State root: `~/.hazlie/matrix` (0700), outside the repo.
+- Agents: `io.intaglio.synapse` and `io.intaglio.bridge.<platform>`, rendered
+  from the templates in `ops/` into `~/Library/LaunchAgents/`.
+- `RunAtLoad` + `KeepAlive` means a crashed bridge comes back and a reboot does
+  not stop the stack; `ThrottleInterval 60` means a bridge that *cannot* start
+  does not become a hot loop.
 
-| engine | script | state root |
-|---|---|---|
-| native (default) | `ops/setup-bridges-native.sh` | `~/.hazlie/matrix` |
-| docker (fallback) | `ops/setup-bridges.sh` | `~/.hazlie/matrix-docker` |
-
-A path means different things to the two of them — native writes host-absolute
-paths, Docker writes the container's `/data` view — so a directory provisioned
-by one cannot be started by the other. Each script writes `.engine` in its root
-and refuses a root claimed by the other. **Everything below says
-`~/.hazlie/matrix`; for the Docker stack read `~/.hazlie/matrix-docker`.** The
-first Docker run after the split moves a pre-split Docker directory across
-rather than starting over.
+There used to be a second provisioner (`ops/setup-bridges.sh`) and a second
+state root (`~/.hazlie/matrix-docker`). Both are deleted. A directory a
+container wrote holds the container's view of every path, which nothing here
+can start from, so setup refuses it and tells you to move it aside — the
+bridges then re-link and backfill into a fresh one.
 
 ## What's running
 
-| container | image | what | host port |
+| launchd agent | binary | what | listens on |
 |---|---|---|---|
-| `hazlie-synapse` | `ghcr.io/element-hq/synapse@sha256:2af5…` | the homeserver / bus | `127.0.0.1:8008` only |
-| `hazlie-meta` | `dock.mau.dev/mautrix/meta@sha256:662f…` | Facebook **Messenger** | none (internal) |
-| `hazlie-instagram` | `dock.mau.dev/mautrix/meta@sha256:4b27…` | **Instagram** DMs | none (internal) |
-| `hazlie-twitter` | `dock.mau.dev/mautrix/twitter@sha256:a780…` | **X/Twitter** DMs | none (internal) |
-| `hazlie-telegram` | `dock.mau.dev/mautrix/telegram@sha256:c073…` | **Telegram** | none (internal) |
-| `hazlie-discord` | `dock.mau.dev/mautrix/discord@sha256:0654…` | **Discord** DMs | none (internal) |
-| `hazlie-linkedin` | `dock.mau.dev/mautrix/linkedin@sha256:0bf6…` | **LinkedIn** DMs | none (internal) |
-| `hazlie-slack` | `dock.mau.dev/mautrix/slack@sha256:7761…` | **Slack** DMs | none (internal) |
+| `io.intaglio.synapse` | embedded CPython + `matrix-synapse` wheel | the homeserver / bus | `127.0.0.1:8008` |
+| `io.intaglio.bridge.meta` | `mautrix-meta-darwin-arm64` | Facebook **Messenger** | `127.0.0.1:29319` |
+| `io.intaglio.bridge.instagram` | `mautrix-instagram-darwin-arm64` | **Instagram** DMs | `127.0.0.1:29330` |
+| `io.intaglio.bridge.twitter` | `mautrix-twitter-darwin-arm64` | **X/Twitter** DMs | `127.0.0.1:29327` |
+| `io.intaglio.bridge.telegram` | `mautrix-telegram-darwin-arm64` | **Telegram** | `127.0.0.1:29317` |
+| `io.intaglio.bridge.discord` | `mautrix-discord-darwin-arm64` | **Discord** DMs | `127.0.0.1:29334` |
+| `io.intaglio.bridge.linkedin` | `mautrix-linkedin-darwin-arm64` | **LinkedIn** DMs | `127.0.0.1:29336` |
+| `io.intaglio.bridge.slack` | `mautrix-slack-darwin-arm64` | **Slack** DMs | `127.0.0.1:29335` |
 
-(The runtime Compose file, setup path, and background prefetch all use the same
-immutable image digests. A first install therefore cannot generate config with
-different bridge code from the container it later runs.)
+(Every binary is pinned by sha256 in `bridges/native.json` and verified on each
+fetch, so a first install cannot generate config with different bridge code from
+the binary it later runs. That was an image digest before; it is a file hash now
+and the guarantee is the same.)
+
+Those appservice ports are a real improvement over the container layout, not
+just a translation: a container has to bind `0.0.0.0` to be reachable across the
+compose network, so seven appservice listeners used to be reachable from the
+LAN. Native processes bind loopback and stay there.
 
 **Why two Meta bridges:** mautrix split them in July 2026 when Meta dropped the
 shared Instagram/Messenger API; the v26.08 `meta` binary is Messenger-only, the
 `ig-` tag is Instagram-only. **Why Synapse** (not the plan's Conduit): Conduit is
 dead-ended, its fork conduwuit is archived, and continuwuity has an
-appservice-registration bug that breaks encrypted bridges. Synapse is heavier but
-Docker contains that, and every mautrix path targets it.
+appservice-registration bug that breaks encrypted bridges. Synapse is heavier —
+a container used to hide that and a launchd agent does not — but every mautrix
+path targets it.
 
 - Server name: `hazlie.local` (never federates — baked into user IDs, don't change).
 - Owner Matrix user: `@you:hazlie.local`. Credentials + access token live 0600
@@ -63,9 +67,9 @@ Docker contains that, and every mautrix path targets it.
 
 ## Setting it up from nothing
 
-`bash ops/setup-bridges.sh` — idempotent, resumable, and the recipe for a
-fresh machine **on the Docker fallback**; `ops/setup-bridges-native.sh` is the one a
-fresh machine actually reaches first. It generates synapse's config (client-only, no federation, all
+`bash ops/setup-bridges-native.sh` — idempotent, resumable, and the only recipe
+for a fresh machine. It fetches and hash-checks the bridge binaries, builds the
+Synapse runtime from wheels, generates synapse's config (client-only, no federation, all
 seven appservices registered), each bridge's config and registration (hardened:
 backfill on, double puppeting off), brings the stack up, and creates the owner
 user + `~/.hazlie/matrix/owner-credentials.json`. Written 2026-08-25, the day
@@ -77,12 +81,21 @@ source build without one falls back to the per-user api_id/api_hash walkthrough.
 ## Operating it
 
 ```sh
-cd bridges
-docker compose ps                     # status
-docker compose up -d                  # start (survives reboot via restart: unless-stopped, once Docker is up)
-docker compose logs -f mautrix-meta   # watch a bridge
-docker compose down                   # stop (data persists in ~/.hazlie/matrix-docker)
-docker compose down && rm -rf ~/.hazlie/matrix-docker/*   # FULL teardown, wipes everything
+UID=$(id -u)
+bash ops/setup-bridges-native.sh --status   # what is up
+bash ops/setup-bridges-native.sh            # provision + start (idempotent)
+bash ops/setup-bridges-native.sh --stop     # boot every agent out
+tail -f ~/.hazlie/bridges/run/meta.log      # watch a bridge
+launchctl kickstart -k gui/$UID/io.intaglio.bridge.meta   # restart one
+```
+
+Full teardown wipes real message history and session cookies:
+
+```sh
+bash ops/setup-bridges-native.sh --stop
+rm -f ~/Library/LaunchAgents/io.intaglio.synapse.plist \
+      ~/Library/LaunchAgents/io.intaglio.bridge.*.plist
+rm -rf ~/.hazlie/matrix/*                   # FULL teardown, wipes everything
 ```
 
 ## Logging in a platform  (THE human step — nothing flows until this is done)
@@ -139,7 +152,7 @@ every known DM receives a portal at startup. The double-puppet key is
 `bridge.double_puppet_server_map`. `connectors/doctor.mjs` knows both shapes.
 
 On an existing install, setup detects the former capped values before replacing
-them and explicitly restarts `mautrix-discord`. Compose cannot detect a change
+them and explicitly restarts the discord bridge. Nothing detects a change
 inside the bind-mounted config file on its own. The restart preserves the login
 database while Discord re-discovers every private channel, creates the portals
 the old five-chat cap omitted, and repopulates existing portals through the
@@ -156,7 +169,7 @@ missed-message fetch-all lane.
   survive contact with the logs.
 
   The claim was that pulling history marks conversations read on the real
-  account. Checked 2026-08-22 against `docker compose logs mautrix-meta`, which
+  account. Checked 2026-08-22 against the meta bridge's log, which
   had been backfilling with `enabled: true` for 21 hours across 19 finished
   conversations:
 
@@ -187,7 +200,7 @@ missed-message fetch-all lane.
 
 ### Migrating a bridge whose config the image has outgrown
 
-Symptom: the container crash-loops on `Legacy bridge config detected, but hacky
+Symptom: the bridge crash-loops on `Legacy bridge config detected, but hacky
 network config migrator is not set`. It means the image has moved to bridgev2
 and the config on disk is the older format. Hit on `mautrix-slack` 2026-08-22.
 
@@ -198,14 +211,14 @@ preserve and this is free:
 sqlite3 -readonly ~/.hazlie/matrix/<bridge>/mautrix-<bridge>.db 'select count(*) from user_login;'
 ```
 
-Then, from `bridges/`:
+Then:
 
 ```sh
-docker compose stop mautrix-<bridge>
+UID=$(id -u)
+launchctl bootout gui/$UID/io.intaglio.bridge.<bridge>
 cd ~/.hazlie/matrix/<bridge>
 cp config.yaml config.yaml.legacy && rm config.yaml
-cd - && docker compose up mautrix-<bridge>        # writes a fresh default config, then exits
-docker compose stop mautrix-<bridge>
+~/.hazlie/bridges/bin/mautrix-<bridge>-darwin-arm64 -c config.yaml -e   # fresh default config
 ```
 
 The fresh config is generic, so carry the identity back over. **`as_token` and
@@ -237,9 +250,10 @@ yq -i '
 Two that bite, both found the hard way: the generated config's `database.uri` is
 a **postgres placeholder**, and `bridge.permissions` is an **example.com
 placeholder** that fails startup with `bridge.permissions not configured`. Then
-`docker compose restart mautrix-<bridge>` and look for `Bridge started`.
+`launchctl kickstart -k gui/$UID/io.intaglio.bridge.<bridge>` and look for
+`Bridge started` in `~/.hazlie/bridges/run/<bridge>.log`.
 
-**Image consistency:** `docker-compose.yml` pins every live bridge by digest.
+**Binary consistency:** `bridges/native.json` pins every bridge by sha256.
 Telegram's setup and prefetch entries use its runtime digest as well. The
 remaining setup/prefetch entries still use mutable tags and must also be
 aligned; until then, a mutable tag can move underneath a config that was fine

@@ -262,50 +262,36 @@ const HZ_HINT_FOR = (id) => (id.startsWith('mail:') ? HZ_HINTS.mail : HZ_HINTS[i
 // HZ_WHY — the one-line what-this-reads subheader — was yeeted with its twin
 // in connections.js (owner, 2026-08-25); the note there carries the reasoning.
 const HZ_STAY = "data stored locally";
-// THE ENGINE NEEDS DOCKER RUNNING -- offer that, do not print a shell command.
+// THE ENGINE IS STARTING -- SAY SO, AND OFFER NOTHING TO PRESS.
 //
-// This used to say "open Docker, then: bash ops/setup-bridges.sh", which was
-// wrong three ways at once: it named a repo path a downloaded install does not
-// have, it told the owner to run a script the app ALREADY runs itself
-// (Provision.ensureBridgeRuntime shells the bundled copy on any nobridge), and
-// it omitted the only fact that resolves the situation -- press the tile again
-// once Docker is up. Exactly one step here is genuinely the owner's, so offer
-// that one step as a button and say nothing else.
+// Two rewrites got this here. It first said "open Docker, then: bash
+// ops/setup-bridges.sh", which was wrong three ways at once: it named a repo
+// path a downloaded install does not have, it told the owner to run a script
+// the app ALREADY runs itself (Provision.ensureBridgeRuntime shells the bundled
+// copy on any nobridge), and it omitted the only fact that resolved the
+// situation -- press the tile again once Docker was up. Then it kept the "open
+// Docker" button while native became the default, sending native installs to a
+// VM they had no use for.
+//
+// There is no Docker now, so there is no owner step left to offer. Every
+// remedy this notice used to hand over is something the machine does: setup
+// runs itself on a nobridge, launchd restarts a bridge that died, and the
+// first run has a real download to finish before any of that is true. A
+// button that cannot help is worse than no button, so this says what is
+// happening and stops.
 function hzTileNobridgeNotice(tip) {
   const line = document.createElement('span');
-  // Named by what it IS. Since the native runtime became the default and Docker
-  // only the fallback, telling a native install to start Docker sends the owner
-  // somewhere they do not need to go — and this hardcoded string is the one the
-  // card actually renders, so correcting the NOTICES entry alone changed nothing.
-  line.textContent = 'social connections need their local engine running.';
-  const open = document.createElement('button');
-  open.className = 'engine-open';
-  open.textContent = 'open Docker ↗';
-  open.addEventListener('click', (e) => {
-    e.stopPropagation();
-    // Installed app first; openApp answers notInstalled rather than failing
-    // silently, and only then do we send them to the download.
-    hzPost('openApp', { bundleId: 'com.docker.docker' })
-      .then((d) => {
-        if (!d || d.state !== 'ok') {
-          hzPost('openExternal', { url: 'https://www.docker.com/products/docker-desktop/' }).catch(() => {});
-        }
-      })
-      .catch(() => {});
-  });
-  const after = document.createElement('span');
-  after.className = 'engine-after';
-  after.textContent = 'then press this again.';
-  tip.append(line, open, after);
+  // This hardcoded string is the one the tile actually renders -- correcting
+  // the NOTICES entry alone changed nothing, which is how the Docker wording
+  // outlived two attempts to remove it.
+  line.textContent = 'social connections are still starting up — this can take a few minutes the first time.';
+  tip.append(line);
 }
 
 const HZ_NOTICES = {
-  // See connections.js NOTICES.nobridge — the engine, not the connection.
-  // Named by what it IS, not by how it happens to run: since e9567ea the
-  // native runtime is the default and Docker is only the fallback, so a
-  // native install told to start Docker was being sent somewhere it does not
-  // need to go.
-  nobridge: 'social connections need their local engine running.',
+  // See connections.js NOTICES.nobridge — the engine, not the connection, and
+  // no longer an instruction: setup runs itself and launchd restarts what dies.
+  nobridge: 'social connections are still starting up.',
   // The site refused to render a security step in an embedded window and the
   // owner pressed the handoff. Not a failure state: the connect page is open
   // in their browser, where that step does render.

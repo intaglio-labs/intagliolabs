@@ -164,13 +164,14 @@ enum Provision {
     }
   }
 
-  /// Warm the container-image cache after launch, without creating any social
-  /// state. The expensive download happens before a person chooses LinkedIn
-  /// (or another social source), while the actual Matrix/bridge setup remains
-  /// deferred until that explicit Connect action. Docker may be starting with
-  /// the app, so the script waits briefly off the main thread and then safely
-  /// gives up; a later launch retries.
-  static func prefetchBridgeImages() {
+  /// Warm the native bridge runtime after launch, without creating any social
+  /// state. The expensive part -- ~305 MB of hash-checked bridge binaries and
+  /// the Synapse runtime build -- happens before a person chooses LinkedIn (or
+  /// another social source), while the actual Matrix/bridge setup stays
+  /// deferred until that explicit Connect action. Every step is idempotent, so
+  /// a launch that gets interrupted is retried by the next one and, failing
+  /// that, by setup itself.
+  static func prefetchBridgeRuntime() {
     let script = backend.appendingPathComponent("ops/prefetch-bridges.sh")
     guard fm.fileExists(atPath: script.path) else {
       NSLog("Intaglio Labs: bundled bridge prefetch script is missing")
@@ -201,20 +202,9 @@ enum Provision {
         // Existing bridge installs need setup-bridges to apply versioned
         // migrations too. Fresh installs have no owner credentials and remain
         // consent-deferred; their first connector click still owns setup.
-        // Native keeps ~/.hazlie/matrix; the Docker fallback provisions into
-        // ~/.hazlie/matrix-docker so neither engine can overwrite the other's
-        // homeserver.yaml. Look in both, native first, or a machine that fell
-        // back to Docker reads as never-provisioned and its migrations never
-        // run. Same order the JS resolvers use.
-        let matrixRoot: URL = {
-          for name in ["matrix", "matrix-docker"] {
-            let dir = hazlie.appendingPathComponent(name)
-            if fm.fileExists(atPath: dir.appendingPathComponent("owner-credentials.json").path) {
-              return dir
-            }
-          }
-          return hazlie.appendingPathComponent("matrix")
-        }()
+        // One bridge state root. A second (~/.hazlie/matrix-docker) existed
+        // briefly, while a Docker fallback did; both are gone.
+        let matrixRoot = hazlie.appendingPathComponent("matrix")
         let existingRuntime = matrixRoot.appendingPathComponent("owner-credentials.json")
         let historyMigration = matrixRoot.appendingPathComponent(".full-history-reset-v1")
         let historyMigrationPending = matrixRoot.appendingPathComponent(".full-history-reset-v1.pending")
@@ -250,54 +240,40 @@ enum Provision {
     bridgeSetupLock.unlock()
 
     DispatchQueue.global(qos: .userInitiated).async {
-      // NATIVE FIRST, DOCKER AS THE FALLBACK.
+      // NATIVE, AND ONLY NATIVE.
       //
-      // Both scripts provision the same stack — one Synapse and seven mautrix
-      // bridges — but the native one runs them as ordinary processes. Docker
-      // Desktop on macOS is a Linux VM, and it was carried only because the
-      // bridges were believed to need it. They do not: every bridge is Go with a
-      // published darwin-arm64 binary, and matrix-synapse publishes a macOS
-      // arm64 wheel. Verified end to end on 2026-08-30 — all seven bridges plus
-      // Synapse running with no Docker, three real social logins delivered, and
+      // One Synapse and seven mautrix bridges, run as launchd agents on this
+      // Mac. Docker Desktop was carried for a year because the bridges were
+      // believed to need it; they do not. Every bridge is Go with a published
+      // darwin-arm64 binary and matrix-synapse publishes a macOS arm64 wheel.
+      // Verified end to end on 2026-08-30: all seven bridges plus Synapse
+      // running with Docker never started, three real social logins delivered,
       // thousands of messages ingested.
       //
-      // The fallback is not ceremony. The native path needs libolm built from
-      // source (archived upstream, patched at build time) and ~305 MB of
-      // binaries fetched and hash-checked; a machine where either fails must
-      // still have a way through, and an install already running containers must
-      // keep working. Chosen by ARTIFACT, never by preference: .ready is written
-      // last by build-synapse.sh precisely so a half-built runtime is
-      // distinguishable from a good one.
-      // NATIVE IS THE PATH. Docker is the safety net, and only that.
+      // The Docker fallback is GONE, deliberately, and it is worth writing down
+      // why a safety net was removed rather than kept. It was never reachable:
+      // the native script returned 0 whether it started seven bridges or none,
+      // so `where !success` never fired. When that was fixed the fallback got
+      // worse, not better -- Docker Desktop on macOS is a Linux VM, so "native
+      // failed" resolved to "silently install and boot a virtual machine",
+      // which is precisely the outcome this work existed to remove. A fallback
+      // nobody would consent to is not a safety net.
       //
-      // ~~Gated on ~/.hazlie/bridges/synapse/.ready~~ this preferred native only
-      // where native was ALREADY built — which is never true on a fresh install,
-      // so every new machine fell through to Docker and started a Linux VM it did
-      // not need. A fallback that catches the common case is not a fallback, it is
-      // the default wearing a different name.
-      //
-      // setup-bridges-native.sh now bootstraps itself: it fetches the published
-      // bridge binaries, takes the libolm the bundle ships, and builds the Synapse
-      // runtime from wheels. None of that needs a toolchain on this machine — no
-      // Docker, no Homebrew, no Xcode — only network, once.
-      //
-      // Docker is still tried if native fails, because "the network was down on
-      // first launch" should not mean "no social connectors, ever". Which one ran
-      // is recorded in bridge-setup.log rather than inferred.
+      // What replaces it is the script being honest. setup-bridges-native.sh
+      // bootstraps itself -- fetches the published binaries hash-checked, takes
+      // the libolm the bundle ships, builds the Synapse runtime from wheels --
+      // and needs no toolchain here, only network, once. If that cannot
+      // complete it now tears down anything it started and exits non-zero, and
+      // the reason is in bridge-setup.log instead of being papered over by a VM.
       let nativeScript = backend.appendingPathComponent("ops/setup-bridges-native.sh")
-      let dockerScript = backend.appendingPathComponent("ops/setup-bridges.sh")
-      let scripts = fm.isExecutableFile(atPath: nativeScript.path)
-        ? [nativeScript, dockerScript]
-        : [dockerScript]
+      let scripts = [nativeScript]
       var success = false
       let logDir = hazlie.appendingPathComponent("logs")
       try? mkdir(logDir, 0o700)
       let log = logDir.appendingPathComponent("bridge-setup.log")
       if !fm.fileExists(atPath: log.path) { fm.createFile(atPath: log.path, contents: nil) }
-      // In order, stopping at the first that succeeds. Every attempt is written to
-      // bridge-setup.log with the script that ran, so which path provisioned this
-      // machine is a fact in a file rather than something to be inferred from
-      // whether Docker happens to be running.
+      // Every attempt is written to bridge-setup.log with the script that ran,
+      // so what provisioned this machine is a fact in a file.
       for candidate in scripts where !success {
         guard fm.isExecutableFile(atPath: candidate.path) else { continue }
         guard let out = try? FileHandle(forWritingTo: log) else { continue }

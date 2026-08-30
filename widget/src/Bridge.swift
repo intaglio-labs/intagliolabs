@@ -392,12 +392,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   private var pendingVoiceUtterance: String?
 
   // Only desktop applications named by the connector UI may be launched.
-  // Docker Desktop is here because the social bridges need it running and the
-  // owner should never be told to go and start it by hand. The openApp handler
-  // already replies state:"notInstalled" when a bundle is absent, so this one
-  // entry buys both branches: a working button when Docker is installed, and a
-  // distinguishable state to offer a download when it is not.
-  private let allowedApps: Set<String> = ["com.granola.app", "com.docker.docker"]
+  // com.docker.docker was here so the nobridge notice could offer to start
+  // Docker Desktop; nothing asks for it now that the bridges run natively, and
+  // an allowlist entry no caller uses is a capability granted for free.
+  private let allowedApps: Set<String> = ["com.granola.app"]
 
   // The only external destinations this app will hand to the OS. Opening
   // one launches the default browser (or System Settings) — the app itself
@@ -407,10 +405,6 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
     "https://myaccount.google.com/apppasswords",
     "https://granola.ai",
-    // Where to get Docker Desktop, for the nobridge notice's button when the app
-    // is not installed. openApp already distinguishes that case; this is the only
-    // destination that branch needs.
-    "https://www.docker.com/products/docker-desktop/",
     "https://cloud.ouraring.com/oauth/applications",
     "https://www.notion.so/my-integrations",
     // Telegram's app registration — each install gets its own api_id/api_hash.
@@ -2089,9 +2083,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       Provision.ensureBridgeRuntime { ready in
         guard ready else {
           done(["state": "nobridge",
-                    // Native provisioning runs first and Docker is only the fallback,
-                    // so naming Docker here tells a native install to fix the wrong
-                    // thing. The setup log names which provisioner actually ran.
+                    // Names the log, not a remedy. There is one provisioner and
+                    // it runs itself; whatever stopped it is written down there.
                     "error": "social connections could not start — see ~/.hazlie/logs/bridge-setup.log"])
           return
         }

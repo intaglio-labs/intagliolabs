@@ -17,7 +17,8 @@ The parts:
   deleter of the context store.
 - `connect/` — the local, token-gated onboarding page for linking sources.
 - `widget/` — the macOS app (Swift) and its voice pipeline.
-- `bridges/` — Docker compose for optional chat bridges (Matrix + mautrix).
+- `bridges/` — pinned manifest + docs for the chat bridges (Matrix + mautrix),
+  provisioned by `ops/setup-bridges-native.sh` as launchd agents. No Docker.
 - `ops/` — probes, runbooks, and `EGRESS.json`.
 
 **`connectors/AGENTS.md` and `ui/AGENTS.md` are binding and more specific than
