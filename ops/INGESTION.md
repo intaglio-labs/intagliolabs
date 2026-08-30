@@ -182,7 +182,7 @@ sources and a human can read provenance off the id:
 | `notion` | `notion:<page_id>` | |
 | `files` | `files:<absolute path>` | The path is the identity. |
 | `whatsapp` | `whatsapp:<stanza_id>` | |
-| `linkedin` | `linkedin:conn:<slug>` and `linkedin:msg:<sha8>` | Export seed: slug from the profile URL (hash fallback); messages keyed by a hash over conversation/date/sender/content. |
+| `messenger`, `instagram`, `linkedin`, `twitter`, `telegram`, `discord`, `slack` | `<source>:<matrix_event_id>` | Continuous bridge events use Matrix's stable event id. Pre-bridge LinkedIn export rows may still use `linkedin:conn:<slug>` / `linkedin:msg:<sha8>` and remain supported. |
 | `hazlie_digest` | `hazlie_digest:<date>` | Reruns replace the day's digest. |
 | `seed` | (none) | Dev fixtures stay unkeyed; re-seeding inserts again by design. |
 
@@ -366,6 +366,15 @@ response is capped at 5000 entities; above the cap the route answers a 413
 telling the caller to narrow the window — a silently truncated list would read
 to a reconciler as "these entities no longer exist", and it would delete the
 remainder.
+
+### `GET /admin/coverage`
+
+The local coverage audit's read path. Hermes returns only aggregate source
+counts, distinct conversation counts, oldest/newest timestamps, and row counts
+by local calendar year. Conversation keys are consumed inside SQLite's
+`COUNT(DISTINCT ...)` and discarded; entity ids, room ids, handles, speakers,
+metadata, and text never cross back into the connector process. The route is
+bearer-only and accepts no query parameters.
 
 ### `POST /admin/maintain {}`
 

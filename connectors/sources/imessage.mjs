@@ -56,6 +56,12 @@ const HISTORY_MESSAGES_PER_PASS = 2000;
 // scheduling passes that read nothing. Cleared by hand if history is ever
 // re-opened (a restored backup, a merged device).
 const HISTORY_DONE_KEY = 'imessage:history-done';
+const yearlyCursorKey = (year) => `imessage:history-year:${year}:ceiling`;
+const APPLE_EPOCH_MS = 978307200000;
+
+function msToAppleNanos(ms) {
+  return BigInt(Math.round((ms - APPLE_EPOCH_MS) * 1e6));
+}
 
 export function chatDbPath(home) {
   return join(home, 'Library', 'Messages', 'chat.db');
@@ -68,10 +74,12 @@ export function scanFloor({ storedCursor, backfill, nowMs, backfillDays }) {
   if (!backfill && typeof storedCursor === 'string' && /^\d+$/u.test(storedCursor)) {
     return { appleNanos: BigInt(storedCursor), reason: 'cursor' };
   }
-  const floorMs = nowMs - backfillDays * 86_400_000;
-  const APPLE_EPOCH_MS = 978307200000;
+  const rollingFloor = nowMs - backfillDays * 86_400_000;
+  const floorMs = backfill
+    ? rollingFloor
+    : Math.max(rollingFloor, new Date(new Date(nowMs).getFullYear(), 0, 1).getTime());
   return {
-    appleNanos: BigInt(Math.round((floorMs - APPLE_EPOCH_MS) * 1e6)),
+    appleNanos: msToAppleNanos(floorMs),
     reason: backfill ? 'backfill' : 'no-cursor',
   };
 }
@@ -86,9 +94,8 @@ export function historyCeiling({ storedCursor, nowMs, backfillDays }) {
     return { appleNanos: BigInt(storedCursor), reason: 'history-cursor' };
   }
   const floorMs = nowMs - backfillDays * 86_400_000;
-  const APPLE_EPOCH_MS = 978307200000;
   return {
-    appleNanos: BigInt(Math.round((floorMs - APPLE_EPOCH_MS) * 1e6)),
+    appleNanos: msToAppleNanos(floorMs),
     reason: 'history-start',
   };
 }
@@ -121,6 +128,8 @@ export function createImessageSource({ home } = {}) {
       let maxDate = null;
       let minDate = null;
       let scanned = 0;
+      let historyDone = false;
+      let historyHasOlder = true;
       // Which direction this pass runs. The DAEMON decides -- a source cannot
       // choose, or a forward and a history pass could overlap and each would
       // move a cursor the other was reading.
@@ -131,12 +140,22 @@ export function createImessageSource({ home } = {}) {
         const backfillDays = ctx.config?.imessage?.backfillDays ?? DEFAULT_BACKFILL_DAYS;
         // A history pass reads DOWN from its own cursor; an ordinary pass reads
         // UP from the forward one.
+        const yearly = isHistory && ctx.historyWindow?.year
+          ? {
+              appleNanos: BigInt(
+                ctx.state.getCursor(yearlyCursorKey(ctx.historyWindow.year))
+                  ?? msToAppleNanos(ctx.historyWindow.toTs)
+              ),
+              lowerNanos: msToAppleNanos(ctx.historyWindow.fromTs),
+              reason: 'yearly-history',
+            }
+          : null;
         const floor = isHistory
-          ? historyCeiling({
+          ? (yearly ?? historyCeiling({
               storedCursor: ctx.state.getCursor(HISTORY_CURSOR_KEY),
               nowMs: ctx.now(),
               backfillDays,
-            })
+            }))
           : scanFloor({
               storedCursor: ctx.state.getCursor(CURSOR_KEY),
               backfill: Boolean(ctx.backfill),
@@ -146,6 +165,7 @@ export function createImessageSource({ home } = {}) {
 
         // handle.id and the chat guid are joined here rather than looked up
         // per row: 633k messages make a per-row query a per-row round trip.
+        const yearLowerClause = yearly ? 'AND m.date >= ?' : '';
         const stmt = db.prepare(
           `SELECT m.guid AS guid, m.text AS text, m.attributedBody AS attributedBody,
                   m.date AS date, m.is_from_me AS is_from_me, m.service AS service,
@@ -156,7 +176,7 @@ export function createImessageSource({ home } = {}) {
            LEFT JOIN handle h ON h.ROWID = m.handle_id
            LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
            LEFT JOIN chat c ON c.ROWID = cmj.chat_id
-           WHERE m.date ${isHistory ? '<' : '>'} ?
+           WHERE m.date ${isHistory ? '<' : '>'} ? ${yearLowerClause}
            ORDER BY m.date ${isHistory ? 'DESC' : 'ASC'}
            LIMIT ?`
         );
@@ -164,8 +184,16 @@ export function createImessageSource({ home } = {}) {
         // than silently truncating, which is the behaviour we want.
         stmt.setReadBigInts(true);
         const perPass = isHistory ? HISTORY_MESSAGES_PER_PASS : MAX_MESSAGES_PER_SCAN;
-        const dbRows = stmt.all(floor.appleNanos, BigInt(perPass));
+        const dbRows = yearly
+          ? stmt.all(floor.appleNanos, yearly.lowerNanos, BigInt(perPass))
+          : stmt.all(floor.appleNanos, BigInt(perPass));
         scanned = dbRows.length;
+        if (yearly) {
+          historyDone = scanned < perPass;
+          const older = db.prepare('SELECT 1 AS found FROM message WHERE date < ? LIMIT 1');
+          older.setReadBigInts(true);
+          historyHasOlder = older.get(yearly.lowerNanos) !== undefined;
+        }
 
         for (const r of dbRows) {
           if (maxDate === null || r.date > maxDate) maxDate = r.date;
@@ -193,6 +221,7 @@ export function createImessageSource({ home } = {}) {
           // chat identifier, and 0 vs 1 is the whole diagnostic anyway.
           excludedThreads: excludeChatGuids.length,
           capped: dbRows.length >= MAX_MESSAGES_PER_SCAN,
+          ...(yearly ? { historyYear: ctx.historyWindow.year } : {}),
         });
       } finally {
         try {
@@ -211,14 +240,27 @@ export function createImessageSource({ home } = {}) {
       // alone. Advancing the forward cursor here would strand every message
       // between the two, permanently and with nothing to notice it by.
       if (isHistory) {
-        if (minDate !== null) ctx.state.setCursor(HISTORY_CURSOR_KEY, String(minDate));
+        if (ctx.historyWindow?.year) {
+          if (minDate !== null) {
+            ctx.state.setCursor(yearlyCursorKey(ctx.historyWindow.year), String(minDate));
+          }
+        } else if (minDate !== null) ctx.state.setCursor(HISTORY_CURSOR_KEY, String(minDate));
         // Nothing below the cursor: the store has been walked to its beginning.
         // Recorded so the daemon stops scheduling passes that read nothing.
-        if (scanned === 0) ctx.state.setCursor(HISTORY_DONE_KEY, '1');
+        if (!ctx.historyWindow?.year && scanned === 0) ctx.state.setCursor(HISTORY_DONE_KEY, '1');
       } else if (maxDate !== null) {
         ctx.state.setCursor(CURSOR_KEY, String(maxDate));
       }
-      return { ...totals, skipped, history: isHistory };
+      return {
+        ...totals,
+        skipped,
+        history: isHistory,
+        ...(ctx.historyWindow?.year ? {
+          historyDone,
+          historyHasOlder,
+          historyProgressed: scanned > 0,
+        } : {}),
+      };
     },
   };
 }

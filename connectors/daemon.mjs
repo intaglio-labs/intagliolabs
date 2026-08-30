@@ -44,7 +44,15 @@ import {
 import { assertOwnerOnlyFile, defaultHermesTokenPath } from './lib/secrets.mjs';
 import { openStateDb, runCounts } from './lib/state.mjs';
 import { createLogger } from './lib/log.mjs';
-import { retentionPass, maintainPass, msUntilIdleWindow, isInsideIdleWindow } from './retain.mjs';
+import { safeErrorFingerprint } from './lib/safeError.mjs';
+import { createYearlyBackfill } from './lib/yearlyBackfill.mjs';
+import {
+  retentionPass,
+  maintainPass,
+  msUntilIdleWindow,
+  isInsideIdleWindow,
+  wipeLocalArtifacts,
+} from './retain.mjs';
 import { PLATFORMS, bridgeStatus } from '../connect/lib/bridge.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -88,6 +96,12 @@ export const CONNECTOR_NAMES = Object.freeze([
 export const DEFAULT_DISABLED_CONNECTORS = Object.freeze([
   'oura', 'photos', 'files', 'notion', 'notes',
 ]);
+
+export function sourceRetryDelay(result, intervalMs) {
+  return Number.isFinite(result?.nextDelayMs) && result.nextDelayMs >= 1_000
+    ? Math.min(60_000, Math.floor(result.nextDelayMs))
+    : intervalMs;
+}
 
 // Connector name → the hermes `source` its rows land under. Oura is the
 // health connector (entity ids stay health:<metric>:<date> /
@@ -163,6 +177,14 @@ export function defaultActivityPath(home = homedir()) {
   return join(home, '.hazlie', 'connectors', 'activity.json');
 }
 
+export function defaultSocialReimportPendingPath(home = homedir()) {
+  return join(home, '.hazlie', 'connectors', 'social-reimport-v1.pending');
+}
+
+export function defaultSocialReimportCompletedPath(home = homedir()) {
+  return join(home, '.hazlie', 'connectors', 'social-reimport-v1.completed');
+}
+
 export function disableMarkerPath(name, home = homedir()) {
   return join(home, '.hazlie', 'connectors', `${name}.disabled`);
 }
@@ -223,6 +245,42 @@ function writeActivity(activity, path = defaultActivityPath()) {
   }
 }
 
+// Consume the marker written by setup-bridges' one-time full-history reset.
+// The bridge databases are source-side state; this is the matching derived-
+// data half. Purge every social Hermes source before forgetting Matrix's local
+// cursors, then atomically rename the marker. If any purge fails, the pending
+// marker and cursors survive so the next supervised daemon start safely retries
+// (already-purged sources are idempotent).
+export async function applyPendingSocialReimport({
+  pendingPath = defaultSocialReimportPendingPath(),
+  completedPath = defaultSocialReimportCompletedPath(),
+  state,
+  cacheDir = defaultCacheDir(),
+  log,
+  purge,
+}) {
+  if (!existsSync(pendingPath)) return { applied: false };
+  if (typeof purge !== 'function') throw new Error('social reimport requires a purge function');
+  assertOwnerOnlyFile(pendingPath, {
+    label: 'social reimport marker',
+    setupHint: 'rerun ops/setup-bridges.sh',
+  });
+
+  let deleted = 0;
+  for (const source of CONNECTOR_HERMES_SOURCE.matrix) {
+    const result = await purge({ source });
+    deleted += result?.deleted ?? 0;
+  }
+  const local = wipeLocalArtifacts('matrix', { state, cacheDir, log });
+  renameSync(pendingPath, completedPath);
+  log?.info('social_history_reimport_ready', {
+    sources: CONNECTOR_HERMES_SOURCE.matrix.length,
+    deleted,
+    cursorsDeleted: local.cursorsDeleted,
+  });
+  return { applied: true, deleted, ...local };
+}
+
 // --- config -------------------------------------------------------------------
 //
 // Closed key sets at every level, enforced with throws: an unknown key is a
@@ -249,6 +307,10 @@ const TOP_KEYS = Object.freeze([
   // Explicit graph identities marked by the owner as themselves. This is the
   // local fallback for sources whose identifiers are not email addresses.
   'ownerPersonKeys',
+  // Owner-confirmed schools used by the local people-search graph. This lives
+  // in the shared config, so the daemon must accept and validate the same key
+  // the UI reads; otherwise adding a school would stop every connector.
+  'highSchools',
   // Explicit relationship-role corrections. The people graph supplies a local
   // message-derived guess; these owner choices replace it per stable key.
   'personRoles',
@@ -360,7 +422,11 @@ export function validateConfig(raw) {
   if (raw.selfName !== undefined && (typeof raw.selfName !== 'string' || raw.selfName.length === 0)) {
     throw configError('"selfName" must be a non-empty string');
   }
-  for (const [field, values] of [['ownerEmails', raw.ownerEmails], ['ownerPersonKeys', raw.ownerPersonKeys]]) {
+  for (const [field, values] of [
+    ['ownerEmails', raw.ownerEmails],
+    ['ownerPersonKeys', raw.ownerPersonKeys],
+    ['highSchools', raw.highSchools],
+  ]) {
     if (values !== undefined && (!Array.isArray(values) || values.some((value) => typeof value !== 'string' || value.length === 0 || value.length > 300))) {
       throw configError(`"${field}" must be an array of non-empty strings`);
     }
@@ -663,6 +729,9 @@ export function createDaemon({
   // a needs() that is slow or throws can never silently empty the queue.
   const notReady = new Map();
   let stopped = false;
+  const historyRoster = sources.filter((source) => source.walksHistory === true)
+    .map((source) => source.name);
+  const yearlyBackfill = createYearlyBackfill({ state, connectors: historyRoster, now });
 
   // The settings queue is derived from the scheduler itself, not guessed from
   // a polling interval in the UI. Keep every queued source in chronological
@@ -704,12 +773,16 @@ export function createDaemon({
   // precision.
   const totalWorkEstimate = () => {
     const nowMs = now();
+    // completionTimes starts EMPTY on purpose. Seeding it from scheduledQueue()
+    // made an idle daemon report hours remaining off tomorrow's idle-window
+    // maintenance pass -- a wait rendered as work. Only genuinely multi-pass
+    // backfill may put a time in here.
     const completionTimes = [];
-    const backfill = [];
+    const yearly = yearlyBackfill.snapshot();
+    const backfill = yearly.pending;
     let backfillRooms = 0;
 
-    if (!state.getCursor('calendar:history-done')) {
-      backfill.push('calendar');
+    if (backfill.includes('calendar')) {
       const ceiling = positiveNumber(
         state.getCursor(CALENDAR_HISTORY_CURSOR_KEY),
         nowMs - 90 * 86_400_000
@@ -739,14 +812,22 @@ export function createDaemon({
     // need one more page or four hundred, and nothing here can know which. A
     // lower bound presented as time remaining is a fabricated metric in the sense
     // CLAUDE.md's first hard rule means -- it is not measuring what its label
-    // claims.
+    // claims. So: say how many conversations are being walked, and say nothing
+    // about when it ends.
     //
-    // So: say how many conversations are being walked, which is a real count of
-    // real objects, and say nothing about when it ends, which is not knowable.
-    if (!state.getCursor('matrix:history-done')) {
-      const rooms = matrixHistoryRooms(state.getCursor('matrix:history-rooms'));
+    // TWO THINGS CHANGED IN THE MERGE, both load-bearing. The guard is main's
+    // roster, not `!getCursor('matrix:history-done')`: under the year barrier
+    // that cursor is written ONLY on the non-yearly branch
+    // (sources/matrix.mjs), so the old guard would be permanently true. And the
+    // count reads the YEAR queue first, because that is the queue the yearly
+    // branch actually drains -- reading `matrix:history-rooms` there would show
+    // a number that never moves, which is precisely the complaint above wearing
+    // a different hat.
+    if (backfill.includes('matrix')) {
+      const rooms = matrixHistoryRooms(
+        state.getCursor('matrix:history-year-rooms') ?? state.getCursor('matrix:history-rooms')
+      );
       if (rooms > 0) {
-        backfill.push('matrix');
         backfillRooms = rooms;
       }
     }
@@ -754,7 +835,9 @@ export function createDaemon({
     // A count with no estimate is still worth publishing: it is the difference
     // between "something is happening to 9 conversations" and a silent panel.
     if (completionTimes.length === 0) {
-      return backfill.length === 0 ? null : { backfill, backfillRooms };
+      return backfill.length === 0
+        ? null
+        : { backfill, backfillRooms, ...(!yearly.complete ? { backfillYear: yearly.year } : {}) };
     }
     const completion = Math.max(...completionTimes);
     const tenthsOfAnHour = Math.max(1, Math.round((completion - nowMs) / 360_000));
@@ -767,6 +850,7 @@ export function createDaemon({
       estimate: `~ ${(tenthsOfAnHour / 10).toFixed(1)} hrs left`,
       backfill,
       backfillRooms,
+      ...(!yearly.complete ? { backfillYear: yearly.year } : {}),
     };
   };
   const publishActivity = (activity) => {
@@ -828,7 +912,7 @@ function matrixHistoryRooms(value) {
   }
 }
 
-const makeCtx = ({ history = false } = {}) => ({
+const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
     state,
     ingest: (rows) => ingest(rows, ingestOpts),
     admin,
@@ -838,6 +922,8 @@ const makeCtx = ({ history = false } = {}) => ({
     now,
     backfill: false,
     history,
+    historyComplete: yearlyBackfill.snapshot().complete,
+    ...(historyWindow ? { historyWindow } : {}),
   });
 
   async function runSource(source) {
@@ -846,6 +932,8 @@ const makeCtx = ({ history = false } = {}) => ({
     // `run.mjs <name> --disable` takes effect at the next tick without
     // bouncing the daemon.
     if (existsSync(disableMarkerPath(source.name))) {
+      yearlyBackfill.classify(source.name, false);
+      yearlyBackfill.advance();
       log.info('source_disabled', { connector: source.name });
       return;
     }
@@ -854,26 +942,45 @@ const makeCtx = ({ history = false } = {}) => ({
     // backend has no use for. Sources that ignore the argument are unaffected.
     const missing = await source.needs({ config });
     if (Array.isArray(missing) && missing.length > 0) {
+      yearlyBackfill.classify(source.name, false);
+      yearlyBackfill.advance();
       // Not a failure: an unprovisioned source waits, loudly, and is
       // re-checked next cycle. recordRun stays clean of noise runs.
       notReady.set(source.name, missing);
-      log.warn('source_not_ready', { connector: source.name, missing });
+      // COUNT, NOT THE STRINGS. Those messages embed absolute local paths --
+      // whatsapp's needs() returns "...missing at /Users/<name>/Library/Group
+      // Containers/..." -- and this line runs every tick.
+      log.warn('source_not_ready', { connector: source.name, missing: missing.length });
       publishWaiting();
       return;
     }
     notReady.delete(source.name);
     const startedTs = now();
     const socialPlatforms = source.name === 'matrix' ? connectedSocialPlatforms() : [];
+    yearlyBackfill.classify(
+      source.name,
+      source.walksHistory === true && (source.name !== 'matrix' || socialPlatforms.length > 0)
+    );
     publishActivity({
       phase: 'syncing',
       connector: source.name,
       ...(socialPlatforms.length ? { platforms: socialPlatforms.map((platform) => platform.label) } : {}),
       startedTs,
     });
+    let nextDelayMs = null;
     try {
       // The forward pass first, always: what arrived since last time is more
       // urgent than what happened in 2019, and history must never delay it.
-      const counts = runCounts((await source.run(makeCtx())) ?? {});
+      const forward = (await source.run(makeCtx())) ?? {};
+      // Sources may discover short-lived local work that should not wait for
+      // their ordinary polling interval. Matrix uses this after Synapse rate-
+      // limits a portal-join recovery pass. The source supplies only a bounded
+      // delay, never an identifier or cursor.
+      if (Number.isFinite(forward.retryAfterMs) && forward.retryAfterMs >= 1_000) {
+        nextDelayMs = Math.min(60_000, Math.floor(forward.retryAfterMs));
+      }
+      if (forward.historyReopened === true) yearlyBackfill.reopen(source.name);
+      const counts = runCounts(forward);
 
       // Then ONE slice of history, if this source walks backwards and has not
       // reached the beginning of its store. Sequential with the forward pass and
@@ -883,7 +990,8 @@ const makeCtx = ({ history = false } = {}) => ({
       // A history failure is logged and dropped rather than failing the run. The
       // forward pass already succeeded and its counts are real; history is
       // catch-up work that retries on the next interval regardless.
-      if (source.walksHistory === true && !state.getCursor(`${source.name}:history-done`)) {
+      const historyWindow = yearlyBackfill.task(source.name);
+      if (source.walksHistory === true && historyWindow) {
         // A TIME BUDGET, not a row count.
         //
         // One slice per cycle is too slow to be useful: 2,000 rows against a
@@ -900,7 +1008,7 @@ const makeCtx = ({ history = false } = {}) => ({
         let gained = 0;
         try {
           while (now() < deadline) {
-            const rawBack = (await source.run(makeCtx({ history: true }))) ?? {};
+            const rawBack = (await source.run(makeCtx({ history: true, historyWindow }))) ?? {};
             const back = runCounts(rawBack);
             slices += 1;
             // `ingested`, not `inserted`: runCounts NORMALISES a source's
@@ -911,7 +1019,11 @@ const makeCtx = ({ history = false } = {}) => ({
             gained += back.ingested + back.updated;
             // Nothing read means the walk reached the beginning of the store.
             // The source records that itself; stop asking.
-            if (state.getCursor(`${source.name}:history-done`)) break;
+            if (rawBack.historyDone === true) {
+              yearlyBackfill.record(source.name, rawBack);
+              yearlyBackfill.advance();
+              break;
+            }
             // A sparse calendar can have an empty historical year while still
             // advancing its private cursor. Let that source continue through
             // the gap; sources that did not explicitly report progress keep
@@ -926,13 +1038,18 @@ const makeCtx = ({ history = false } = {}) => ({
             // turn a known number of remaining history slices into elapsed
             // wall-clock time. It is private cursor state, never corpus.
             state.setCursor(HISTORY_RATE_KEY(source.name), String(slices));
-            log.info('history_pass', { connector: source.name, slices, gained });
+            log.info('history_pass', {
+              connector: source.name,
+              year: historyWindow.year,
+              slices,
+              gained,
+            });
           }
         } catch (error) {
           log.warn('history_pass_failed', {
             connector: source.name,
             slices,
-            error: String(error?.message ?? error).slice(0, 200),
+            error: safeErrorFingerprint(error),
           });
         }
       }
@@ -956,12 +1073,13 @@ const makeCtx = ({ history = false } = {}) => ({
         startedTs,
         finishedTs: now(),
         ok: false,
-        error: error?.message ?? String(error),
+        error: safeErrorFingerprint(error),
       });
-      log.error('source_failed', { connector: source.name, error: error?.message ?? String(error) });
+      log.error('source_failed', { connector: source.name, error: safeErrorFingerprint(error) });
     } finally {
       publishActivity({ phase: 'idle', connector: source.name, finishedTs: now() });
     }
+    return { nextDelayMs };
   }
 
   function schedule(fn, delayMs, reschedule) {
@@ -984,14 +1102,15 @@ const makeCtx = ({ history = false } = {}) => ({
       //
       // connectors/AGENTS.md: "A source failure is recorded in run_log and the
       // other sources keep running." This is what makes that true.
+      let result;
       try {
-        await fn();
+        result = await fn();
       } catch (error) {
         log.error('schedule_task_failed', {
-          error: String(error?.message ?? error).slice(0, 200),
+          error: safeErrorFingerprint(error),
         });
       }
-      if (!stopped) reschedule();
+      if (!stopped) reschedule(result);
     }, delayMs);
     timers.add(timer);
   }
@@ -1003,7 +1122,10 @@ const makeCtx = ({ history = false } = {}) => ({
     schedule(
       () => runSource(source),
       delayMs,
-      () => scheduleSource(source, intervalMs)
+      (result) => scheduleSource(
+        source,
+        sourceRetryDelay(result, intervalMs)
+      )
     );
   }
 
@@ -1045,7 +1167,7 @@ const makeCtx = ({ history = false } = {}) => ({
           await retentionPass({ config, state, log, ingestOpts, now });
           await maintainPass({ log, ingestOpts });
         } catch (error) {
-          log.error('maintenance_failed', { error: error?.message ?? String(error) });
+          log.error('maintenance_failed', { error: safeErrorFingerprint(error) });
         } finally {
           publishActivity({ phase: 'idle', connector: 'maintenance', finishedTs: now() });
         }
@@ -1169,6 +1291,12 @@ if (isMain) {
       baseUrl: process.env.HAZLIE_HERMES_URL ?? config.hermesUrl ?? DEFAULT_HERMES_BASE_URL,
       tokenFile: defaultHermesTokenPath(),
     };
+    await applyPendingSocialReimport({
+      state,
+      cacheDir: defaultCacheDir(),
+      log,
+      purge: (args) => adminPurge(args, ingestOpts),
+    });
     const daemon = createDaemon({ config, state, log, sources, ingestOpts });
     daemon.start();
 
@@ -1192,9 +1320,11 @@ if (isMain) {
   } catch (error) {
     // Refuse loudly: a daemon that half-starts is worse than one that names
     // its blocker and exits for launchd to report.
-    log.error('daemon_failed_to_start', { error: error?.message ?? String(error) });
+    log.error('daemon_failed_to_start', { error: safeErrorFingerprint(error) });
     releaseLock?.();
-    console.error(`connectors daemon failed to start: ${error?.message ?? error}`);
+    console.error(
+      `connectors daemon failed to start (${safeErrorFingerprint(error)}); run npm run doctor`
+    );
     process.exit(1);
   }
 }

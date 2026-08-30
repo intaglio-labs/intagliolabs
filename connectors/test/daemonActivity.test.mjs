@@ -31,8 +31,9 @@ const fakeState = (cursors = {}) => {
 
 const silent = { info() {}, warn() {}, error() {} };
 
-const source = (name, missing = []) => ({
+const source = (name, missing = [], { walksHistory = false } = {}) => ({
   name,
+  walksHistory,
   needs: async () => missing,
   run: async () => ({}),
 });
@@ -85,7 +86,11 @@ test('an idle daemon claims no time remaining', async () => {
 
 // The counterpart, so the fix above cannot be "delete the estimate".
 test('real multi-pass backfill still reports a horizon', async () => {
-  const snapshot = await publishedSnapshot([source('imessage')], {
+  // The roster is sources.filter(walksHistory === true) — a connector only
+  // enters the yearly backfill by declaring it, so a fixture that does not
+  // declare it produces an empty roster and this test asserts against nothing.
+  // That is a fixture bug, not a licence to relax the assertion.
+  const snapshot = await publishedSnapshot([source('calendar', [], { walksHistory: true })], {
     'matrix:history-done': '1',
     'calendar:history-ceiling-ts': String(Date.UTC(2016, 0, 1)),
     'calendar:history-slices-per-pass': '1',

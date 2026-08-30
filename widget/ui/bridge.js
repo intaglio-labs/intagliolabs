@@ -20,6 +20,87 @@ function hzPost(type, payload = {}) {
   });
 }
 
+// Discord private messages are always imported. Servers are intentionally
+// owner opt-ins: this renderer is shared by Settings and People so the same
+// connected account never presents two different policies. Names and opaque
+// IDs arrive only from the native bearer channel; textContent keeps names out
+// of HTML and this code never logs either value.
+function hzAppendDiscordServers(tip, data, renderBridge, readStatus, writeServer) {
+  if (!data || data.platform !== 'discord' || !Array.isArray(data.servers)) return;
+
+  const group = document.createElement('div');
+  group.className = 'discord-servers';
+  group.addEventListener('click', (e) => e.stopPropagation());
+
+  const title = document.createElement('span');
+  title.className = 'discord-servers-title';
+  title.textContent = 'servers';
+  const note = document.createElement('span');
+  note.className = 'discord-servers-note';
+  note.textContent = 'DMs sync automatically · choose servers to add';
+  group.append(title, note);
+
+  if (data.servers.length === 0) {
+    const empty = document.createElement('span');
+    empty.className = 'discord-servers-empty';
+    empty.textContent = 'no servers found';
+    group.appendChild(empty);
+  }
+
+  for (const server of data.servers) {
+    const row = document.createElement('label');
+    row.className = 'discord-server';
+    const check = document.createElement('input');
+    check.type = 'checkbox';
+    check.checked = server.enabled === true;
+    const name = document.createElement('span');
+    name.className = 'discord-server-name';
+    name.textContent = String(server.name || 'Discord server');
+    const state = document.createElement('span');
+    state.className = 'discord-server-state';
+    row.append(check, name, state);
+
+    check.addEventListener('change', () => {
+      const enabled = check.checked;
+      check.disabled = true;
+      row.classList.add('pending');
+      state.textContent = enabled ? 'adding…' : 'removing…';
+
+      const fail = () => {
+        check.checked = !enabled;
+        check.disabled = false;
+        row.classList.remove('pending');
+        row.classList.add('failed');
+        state.textContent = 'try again';
+      };
+      const waitForDurableState = (attempt = 0) => {
+        readStatus().then((next) => {
+          const current = Array.isArray(next.servers)
+            ? next.servers.find((item) => item.id === server.id)
+            : null;
+          if (current && current.enabled === enabled) {
+            renderBridge(next);
+          } else if (attempt < 30 && row.isConnected) {
+            state.textContent = enabled ? 'adding…' : 'removing…';
+            setTimeout(() => waitForDurableState(attempt + 1), 2000);
+          } else {
+            fail();
+          }
+        }).catch(fail);
+      };
+
+      writeServer(server.id, enabled)
+        .then((next) => {
+          if (next?.serverUpdate?.pending) waitForDurableState();
+          else renderBridge(next);
+        })
+        .catch(fail);
+    });
+    group.appendChild(row);
+  }
+  tip.appendChild(group);
+}
+
 // BRIDGE-PENDING-STATE-BEGIN
 // A bridge transcript is a rolling HISTORY, not a description of what is
 // currently pending. In particular, disconnecting X leaves its earlier Chat

@@ -5,6 +5,7 @@ import {
   CONNECTOR_NAMES,
   DEFAULT_DISABLED_CONNECTORS,
   RETENTION_SOURCES,
+  sourceRetryDelay,
   validateConfig,
 } from '../daemon.mjs';
 import { msUntilIdleWindow } from '../retain.mjs';
@@ -25,6 +26,7 @@ test('a full config validates', () => {
     selfName: 'Example Owner',
     ownerEmails: ['owner@example.test'],
     ownerPersonKeys: ['id:owner@example.test'],
+    highSchools: ['Lincoln High School'],
     personRoles: { 'name:casey example': 'friend' },
     personRolesByYear: {
       2024: { 'name:casey example': 'business' },
@@ -65,6 +67,8 @@ test('value shapes are enforced: intervals floor, port range, maintainHour forma
   assert.throws(() => validateConfig({ retention: { health: 1.5 } }), /retention\.health/);
   assert.throws(() => validateConfig({ ownerEmails: 'owner@example.test' }), /ownerEmails/);
   assert.throws(() => validateConfig({ ownerPersonKeys: [''] }), /ownerPersonKeys/);
+  assert.throws(() => validateConfig({ highSchools: 'Lincoln High School' }), /highSchools/);
+  assert.throws(() => validateConfig({ highSchools: [''] }), /highSchools/);
   assert.throws(() => validateConfig({ personRoles: [] }), /personRoles/u);
   assert.throws(() => validateConfig({ personRoles: { 'name:casey example': 'coworker' } }), /personRoles/u);
   assert.throws(() => validateConfig({ personRolesByYear: { recent: {} } }), /keys must be years/u);
@@ -94,6 +98,13 @@ test('hidden Settings integrations are inert in the daemon by default', () => {
   for (const name of DEFAULT_DISABLED_CONNECTORS) assert.ok(CONNECTOR_NAMES.includes(name));
 });
 
+test('a source can request a bounded urgent retry without changing its normal interval', () => {
+  assert.equal(sourceRetryDelay({ nextDelayMs: 8_500 }, 900_000), 8_500);
+  assert.equal(sourceRetryDelay({ nextDelayMs: 900_000 }, 900_000), 60_000);
+  assert.equal(sourceRetryDelay({ nextDelayMs: 500 }, 900_000), 900_000);
+  assert.equal(sourceRetryDelay({}, 900_000), 900_000);
+});
+
 test('a Matrix purge covers every bridged Hermes source and totals the response', async () => {
   const calls = [];
   const result = await purgeHermesSources(CONNECTOR_HERMES_SOURCE.matrix, { token: 'unused' }, {
@@ -104,6 +115,15 @@ test('a Matrix purge covers every bridged Hermes source and totals the response'
   });
   assert.deepEqual(calls, CONNECTOR_HERMES_SOURCE.matrix);
   assert.deepEqual(result, { deleted: 8, maintained: true });
+});
+
+test('a Contacts purge clears Hermes derived People state despite having no corpus source', async () => {
+  let cleared = 0;
+  const result = await purgeHermesSources(CONNECTOR_HERMES_SOURCE.contacts, { token: 'unused' }, {
+    clearPeople: async () => { cleared += 1; return { cleared: 3 }; },
+  });
+  assert.equal(cleared, 1);
+  assert.deepEqual(result, { deleted: 0, maintained: false });
 });
 
 test('msUntilIdleWindow lands on the next local occurrence, always in the future', () => {

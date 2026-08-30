@@ -21,10 +21,9 @@ inbound-fetch-of-your-own-data posture as the IMAP and Oura pollers.
 | `hazlie-linkedin` | `dock.mau.dev/mautrix/linkedin@sha256:0bf6…` | **LinkedIn** DMs | none (internal) |
 | `hazlie-slack` | `dock.mau.dev/mautrix/slack@sha256:7761…` | **Slack** DMs | none (internal) |
 
-(The runtime Compose file pins every bridge image by digest. Telegram's setup
-and prefetch paths now use that same digest too, so a first install cannot
-generate its config with different code from the container it later runs. The
-remaining setup/prefetch entries still need the same alignment.)
+(The runtime Compose file, setup path, and background prefetch all use the same
+immutable image digests. A first install therefore cannot generate config with
+different bridge code from the container it later runs.)
 
 **Why two Meta bridges:** mautrix split them in July 2026 when Meta dropped the
 shared Instagram/Messenger API; the v26.08 `meta` binary is Messenger-only, the
@@ -43,7 +42,7 @@ Docker contains that, and every mautrix path targets it.
 
 `bash ops/setup-bridges.sh` — idempotent, resumable, and the ONLY recipe for a
 fresh machine. It generates synapse's config (client-only, no federation, all
-six appservices registered), each bridge's config and registration (hardened:
+seven appservices registered), each bridge's config and registration (hardened:
 backfill on, double puppeting off), brings the stack up, and creates the owner
 user + `~/.hazlie/matrix/owner-credentials.json`. Written 2026-08-25, the day
 a wipe proved the original stack's recipe lived in nobody's head: the widget's
@@ -93,7 +92,11 @@ remote account. These are set in each bridge's `config.yaml` (under
 
 ```sh
 # per bridge dir (~/.hazlie/matrix/<bridge>):
-yq -i '.backfill.enabled = true | .double_puppet.secrets = {}' config.yaml
+yq -i '.backfill.enabled = true |
+  .backfill.max_initial_messages = 2147483647 |
+  .backfill.max_catchup_messages = 2147483647 |
+  .backfill.threads.max_initial_messages = 2147483647 |
+  .double_puppet.secrets = {}' config.yaml
 ```
 
 `homeserver.presence = false` used to be in that line. **Drop it — the key does
@@ -104,8 +107,19 @@ protection. Presence, where it is controllable at all, is
 `network.send_presence_on_typing` (meta only, already false by default).
 
 `mautrix-discord` is the older generation and uses different paths for both:
-`bridge.backfill.forward_limits.initial.dm` (0 means off) and
+`bridge.backfill.forward_limits.{initial,missed}.{dm,channel,thread}`. Initial
+backfill has no unlimited sentinel, so setup uses `2147483647`; missed-message
+backfill uses its documented `-1` fetch-all value. Setup also raises
+`bridge.startup_private_channel_create_limit` from five to `2147483647`, so
+every known DM receives a portal at startup. The double-puppet key is
 `bridge.double_puppet_server_map`. `connectors/doctor.mjs` knows both shapes.
+
+On an existing install, setup detects the former capped values before replacing
+them and explicitly restarts `mautrix-discord`. Compose cannot detect a change
+inside the bind-mounted config file on its own. The restart preserves the login
+database while Discord re-discovers every private channel, creates the portals
+the old five-chat cap omitted, and repopulates existing portals through the
+missed-message fetch-all lane.
 
 - **`double_puppet.secrets: {}`** — the bridge acts as a separate ghost, never
   as *you*, so it can never mark your DMs "seen" on Meta's side.
@@ -189,7 +203,9 @@ yq -i '
   .database.type            = "sqlite3-fk-wal" |
   .database.uri             = "file:/data/mautrix-<bridge>.db?_txlock=immediate" |
   .backfill.enabled         = true |
-  .backfill.max_initial_messages = 10000 |
+  .backfill.max_initial_messages = 2147483647 |
+  .backfill.max_catchup_messages = 2147483647 |
+  .backfill.threads.max_initial_messages = 2147483647 |
   .double_puppet.secrets    = {}
 ' config.yaml
 ```
@@ -210,17 +226,8 @@ yesterday.
 Bridging with your real cookies is a linked-device-style session. No mautrix-
 specific crackdown is known, and single-user read-your-own-DMs is far from the
 bulk-automation Meta actually hunts — but sessions get invalidated periodically
-(re-`login`), and a ban is rare-but-nonzero. The one-time LinkedIn export seed
-(2026-08-21) means even a worst case leaves relationship history intact.
+(re-`login`), and a ban is rare-but-nonzero.
 
-## Next (not yet built)
-
-- The hazlie **`matrix` connector** — one connector syncing from Synapse's client
-  API → hermes `/ingest`, mapping portal rooms/senders to rows
-  (`source: 'messenger' | 'instagram'`), joined through the contacts spine.
-  Built AFTER first login, against real bridged messages (the project's
-  probe-then-build discipline), the same way the WhatsApp connector was.
-- **LinkedIn** (`mautrix-linkedin`) — same bus, added only behind the explicit
-  "I accept the account risk" gate in the plan. (X shipped 2026-08-22:
-  `mautrix-twitter` is in the compose file above and `connect/lib/bridge.mjs`
-  drives its login.)
+The `matrix` connector is live for Messenger, Instagram, LinkedIn, X, Telegram,
+Discord and Slack. It maps each portal event back to the platform-specific
+Hermes source and walks history through the shared newest-year-first barrier.

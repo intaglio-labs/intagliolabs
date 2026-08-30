@@ -13,6 +13,8 @@ import { classifySender, eventToRow } from '../lib/matrixRows.mjs';
 import {
   createMatrixSource,
   invitesToJoin,
+  pendingPortalInviteCount,
+  pendingPortalInvites,
   readRoomMembers,
   syncToRows,
 } from '../sources/matrix.mjs';
@@ -189,6 +191,95 @@ test('only our own bridges\' invites are auto-joined', () => {
   assert.deepEqual(invitesToJoin({}), []);
 });
 
+test('pending portal invites survive an incremental sync and de-duplicate', () => {
+  const body = { rooms: { invite: {
+    '!new:hazlie.local': { invite_state: { events: [
+      { type: 'm.room.member', sender: '@telegrambot:hazlie.local',
+        content: { membership: 'invite' } },
+    ] } },
+  } } };
+  assert.deepEqual(
+    pendingPortalInvites(JSON.stringify(['!old:hazlie.local', '!new:hazlie.local']), body),
+    ['!old:hazlie.local', '!new:hazlie.local']
+  );
+  assert.equal(pendingPortalInviteCount(JSON.stringify([
+    '!old:hazlie.local', '!new:hazlie.local',
+  ])), 2);
+  assert.equal(pendingPortalInviteCount('not-json'), 0);
+});
+
+test('a rate-limited portal join stays queued after the sync cursor advances', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'matrix-invite-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const credentialsDir = join(dir, '.hazlie', 'matrix');
+  mkdirSync(credentialsDir, { recursive: true });
+  writeFileSync(join(credentialsDir, 'owner-credentials.json'), JSON.stringify({
+    homeserver: 'http://127.0.0.1:8008',
+    access_token: 'private-test-token',
+    user_id: '@you:hazlie.local',
+  }));
+
+  const invite = (sender) => ({ invite_state: { events: [
+    { type: 'm.room.member', sender, content: { membership: 'invite' } },
+  ] } });
+  let syncs = 0;
+  let rateLimited = true;
+  const joined = [];
+  const fetchImpl = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith('/sync')) {
+      syncs += 1;
+      return jsonResponse(syncs === 1 ? {
+        next_batch: 's-invites',
+        rooms: { invite: {
+          '!one:hazlie.local': invite('@facebookbot:hazlie.local'),
+          '!two:hazlie.local': invite('@instagrambot:hazlie.local'),
+          '!three:hazlie.local': invite('@telegrambot:hazlie.local'),
+        } },
+      } : { next_batch: 's-after', rooms: {} });
+    }
+    if (url.pathname.includes('/join/')) {
+      const room = decodeURIComponent(url.pathname.split('/join/')[1]);
+      if (room === '!two:hazlie.local' && rateLimited) {
+        rateLimited = false;
+        return jsonResponse({}, 429);
+      }
+      joined.push(room);
+      return jsonResponse({ room_id: room });
+    }
+    throw new Error(`unexpected Matrix URL ${url}`);
+  };
+
+  const cursors = new Map([['matrix:history-bootstrap-v1', '1']]);
+  const source = createMatrixSource({ home: dir, fetchImpl });
+  const ctx = {
+    state: {
+      getCursor: (key) => cursors.get(key) ?? null,
+      setCursor: (key, value) => cursors.set(key, value),
+      deleteCursor: (key) => cursors.delete(key),
+    },
+    ingest: async () => ({ inserted: 0, updated: 0, unchanged: 0 }),
+    config: { selfName: 'owner' },
+    log: { info() {} },
+    backfill: false,
+  };
+
+  const limited = await source.run(ctx);
+  assert.equal(limited.retryAfterMs, 15_000);
+  assert.deepEqual(joined, ['!one:hazlie.local']);
+  assert.deepEqual(JSON.parse(cursors.get('matrix:pending-portal-invites')), [
+    '!two:hazlie.local', '!three:hazlie.local',
+  ]);
+  assert.equal(cursors.get('matrix:since'), 's-invites', 'sync cursor may safely advance');
+
+  await source.run(ctx);
+  assert.deepEqual(joined, [
+    '!one:hazlie.local', '!two:hazlie.local', '!three:hazlie.local',
+  ]);
+  assert.deepEqual(JSON.parse(cursors.get('matrix:pending-portal-invites')), []);
+  assert.equal(cursors.get('matrix:since'), 's-after');
+});
+
 test('a first run queues older room history and the next slice resumes it', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'matrix-source-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -247,6 +338,8 @@ test('a first run queues older room history and the next slice resumes it', asyn
   const result = await source.run(ctx);
 
   assert.equal(result.inserted, 1);
+  assert.equal(result.historyReopened, true,
+    'a newly discovered portal must reopen Matrix year checkpoints');
   assert.deepEqual(ingested.map((row) => row.entity_id), ['instagram:$new']);
   assert.equal(cursors.get('matrix:history-rooms'), JSON.stringify(['!dm:hazlie.local']));
   assert.deepEqual(ingested.map((row) => row.entity_id).sort(), [
@@ -255,13 +348,24 @@ test('a first run queues older room history and the next slice resumes it', asyn
   assert.equal(cursors.get('matrix:since'), 's-first');
   assert.match(cursors.get('matrix:room:!dm:hazlie.local'), /instagram_7/u);
 
-  const history = await source.run({ ...ctx, history: true });
+  const history = await source.run({
+    ...ctx,
+    history: true,
+    historyWindow: {
+      year: 2020,
+      fromTs: new Date(2020, 0, 1).getTime(),
+      toTs: new Date(2021, 0, 1).getTime(),
+    },
+  });
   assert.equal(history.inserted, 1);
+  assert.equal(history.historyDone, true);
+  assert.equal(history.historyHasOlder, false);
   assert.deepEqual(ingested.map((row) => row.entity_id).sort(), [
     'instagram:$new',
     'instagram:$old',
   ]);
-  assert.equal(cursors.get('matrix:history-done'), '1');
+  assert.equal(cursors.get('matrix:history-done'), undefined,
+    'the shared year coordinator owns completion for yearly history');
   assert.equal(fetched.filter((url) => url.pathname.endsWith('/messages')).length, 1);
 });
 
@@ -269,37 +373,38 @@ function jsonResponse(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
-// ---- invites are reconciled, not merely observed ----
+// ---- invites survive a token that has moved past them ----
 //
-// The connector auto-joins portal invites, but it read them only from the
-// INCREMENTAL /sync page, whose rooms.invite reports CHANGES since the token.
-// An invite therefore appears in exactly one page; miss it — daemon down, login
-// landing between passes — and the token moves past it and the room is never
-// offered again. The code's own comment claimed the opposite: "A room that will
-// not join this tick is offered again next sync."
+// The bug, measured on a real install (2026-08-29): 25 portal rooms sat at
+// `invite` against 19 joined, so Discord and LinkedIn had bridge databases full
+// of messages and ZERO rows in the corpus. rooms.invite on an INCREMENTAL sync
+// reports changes since the token, so an invite appears in exactly one page —
+// miss it and the room is never offered again.
 //
-// Measured on the owner's machine 2026-08-29: 25 portal rooms invited, 19
-// joined, and Discord and LinkedIn holding full bridge databases with ZERO rows
-// in the corpus. A sync with no `since` returned all 25; the incremental sync
-// returned none.
+// This branch first fixed it with a since-less sync on every pass. That is
+// replaced by main's durable queue, which is better for a reason worth pinning
+// rather than trusting: the queue is written BEFORE the sync token advances, so
+// the hole cannot reopen even if a join fails, and only the one-time recovery
+// pays for a full-state sync. These assert the ordering and the recovery, not
+// the mechanism's shape.
 
-test('the invite sweep does not rely on the incremental page alone', () => {
+test('the pending-invite queue is durable before the sync token moves', () => {
   const src = readFileSync(new URL('../sources/matrix.mjs', import.meta.url), 'utf8');
-  const code = src.split('\n').filter((l) => !/^\s*\/\//u.test(l)).join('\n');
-  // A second sync with NO since token is the only thing that sees an invite the
-  // delta page has already moved past.
-  assert.match(code, /v3\/sync\?filter=\$\{filter\}&timeout=0/u,
-    'a reconcile sync must run alongside the incremental one');
-  assert.match(code, /timeline: \{ limit: 0 \}/u,
-    'the reconcile must be cheap — invite state only, no message bodies');
-  assert.doesNotMatch(code, /offered again next sync/u,
-    'the false claim must not survive in code');
+  const queueAt = src.indexOf('setCursor(PENDING_INVITES_KEY');
+  const cursorAt = src.indexOf('setCursor(CURSOR_KEY');
+  assert.ok(queueAt > 0 && cursorAt > 0, 'both cursors must be written');
+  assert.ok(
+    queueAt < cursorAt,
+    'the invite queue must persist before the token advances, or a failed join is lost'
+  );
 });
 
-test('both invite sources feed one join loop, without duplicates', () => {
+test('a one-time recovery forces a since-less sync for stranded invites', () => {
   const src = readFileSync(new URL('../sources/matrix.mjs', import.meta.url), 'utf8');
-  assert.match(src, /const pending = \[\.\.\.invitesToJoin\(body\)\]/u);
-  assert.match(src, /if \(!pending\.includes\(roomId\)\) pending\.push\(roomId\)/u,
-    'a room in both the delta and the reconcile must be joined once');
-  assert.match(src, /for \(const roomId of pending\)/u);
+  assert.match(src, /INVITE_RECOVERY_KEY/u, 'the recovery must be gated by a cursor');
+  assert.match(
+    src,
+    /needsInviteRecovery\s*\)\s*\n?\s*\?\s*null/u,
+    'recovery must drop the since token so already-delivered invites reappear'
+  );
 });

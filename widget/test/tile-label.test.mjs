@@ -86,7 +86,8 @@ test('a bridge press starts the login without a card', () => {
   const block = /if \(HZ_IS_BRIDGE\(src\) && !src\.connected\) \{([\s\S]*?)\n {2}\}/u.exec(tileSrc)?.[1];
   assert.ok(block, 'the un-connected bridge path must be its own branch');
   assert.match(block, /hzPost\('bridgeWebLogin'/u, 'it goes straight to the login');
-  assert.match(block, /onBusy\(true\)/u, 'the TILE carries the wait');
+  assert.match(block, /hzSetBridgeWaiting\(src\.id, true, onBusy\)/u,
+    'the TILE carries a source-level wait that survives repainting');
   // The card is built only where there is something to say.
   assert.ok(
     !/opening login…'\)/u.test(block),
@@ -103,4 +104,34 @@ test('the People ring shows the wait on the tile, as Settings does', () => {
   assert.match(palette, /^\.row\.logging-in \.dot \{/mu, 'the rule must stay unscoped, or the ring loses it');
   const html = readFileSync(join(WIDGET, 'ui/people.html'), 'utf8');
   assert.match(html, /palette\.css/u, 'people.html must keep loading palette.css');
+});
+
+test('the waiting ring survives the login-window focus refresh until connected status renders', () => {
+  const settings = readFileSync(join(WIDGET, 'ui/connections.js'), 'utf8');
+  const shared = readFileSync(join(WIDGET, 'ui/connector-tile.js'), 'utf8');
+
+  assert.match(settings, /const bridgeWaitingSources = new Set\(\)/u);
+  assert.match(settings, /bridgeWaitingSources\.has\(src\.id\)[\s\S]*row\.classList\.add\('logging-in'\)/u,
+    'a rebuilt Settings tile must inherit the source-level wait');
+  assert.match(settings, /if \(src\.connected && !src\.pending\) bridgeWaitingSources\.delete\(src\.id\)/u,
+    'only a connected, data-ready Settings payload turns the inherited wait into a check');
+  assert.match(settings, /if \(!\(final && final\.connected\)\) setBridgeWaiting\(src\.id, false\)/u,
+    'failed or cancelled Settings logins restore the resting dot');
+
+  assert.match(shared, /const hzBridgeWaitingSources = new Set\(\)/u);
+  assert.match(shared, /hzBridgeWaitingSources\.has\(src\.id\)[\s\S]*row\.classList\.add\('logging-in'\)/u,
+    'a rebuilt shared tile must inherit the source-level wait');
+  assert.match(shared, /if \(src\.connected && !src\.pending\) hzBridgeWaitingSources\.delete\(src\.id\)/u,
+    'the People/shared tile changes to a check only from connected, data-ready status');
+});
+
+test('backend import-pending status keeps a connected bridge spinning instead of green', () => {
+  const settings = readFileSync(join(WIDGET, 'ui/connections.js'), 'utf8');
+  const shared = readFileSync(join(WIDGET, 'ui/connector-tile.js'), 'utf8');
+  for (const [name, text] of [['Settings', settings], ['shared', shared]]) {
+    assert.match(text, /src\.connected && !src\.pending \? ' on'/u,
+      `${name}: pending authentication must not draw a green check`);
+    assert.match(text, /src\.pending \|\| [\w.]+\.has\(src\.id\)/u,
+      `${name}: backend pending must draw the waiting ring after a page refresh`);
+  }
 });

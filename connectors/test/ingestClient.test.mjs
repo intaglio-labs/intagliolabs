@@ -9,7 +9,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { start } from '../../ui/server/hermes.mjs';
 import {
+  adminCoverage,
   adminDeleteEntities,
+  adminClearPeopleProjection,
   adminEntities,
   adminMaintain,
   adminPurge,
@@ -315,6 +317,19 @@ test('adminEntities returns ids and timestamps ONLY, windowed', async () => {
   for (const e of entities) assert.deepEqual(Object.keys(e).sort(), ['entity_id', 'ts']);
 });
 
+test('adminCoverage returns aggregate source receipts only', async () => {
+  const body = await adminCoverage(opts);
+  assert.ok(Array.isArray(body.sources));
+  const granola = body.sources.find((row) => row.source === 'granola');
+  assert.ok(granola.rows >= 3);
+  assert.deepEqual(Object.keys(granola).sort(), [
+    'conversations', 'newest_ts', 'oldest_ts', 'rows', 'source', 'years',
+  ]);
+  const encoded = JSON.stringify(body);
+  assert.equal(encoded.includes('granola:win-a'), false);
+  assert.equal(encoded.includes('note a'), false);
+});
+
 test('adminDeleteEntities deletes the diff and chunks batches over 500', async () => {
   const T = 1500000000000;
   const ids = Array.from({ length: 501 }, (_, i) => `health:steps:2026-01-${i}`);
@@ -347,6 +362,12 @@ test('adminPurge deletes the whole source and reports the inline maintenance', a
   assert.equal(result.maintained, true);
   assert.ok(result.deleted >= 1);
   assert.deepEqual(await adminEntities({ source: 'granola' }, opts), []);
+});
+
+test('adminClearPeopleProjection round-trips without exposing rows', async () => {
+  const result = await adminClearPeopleProjection(opts);
+  assert.equal(typeof result.cleared, 'number');
+  assert.deepEqual(Object.keys(result), ['cleared']);
 });
 
 test('adminMaintain round-trips', async () => {

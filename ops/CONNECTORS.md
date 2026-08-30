@@ -101,6 +101,65 @@ alone, and the other sources are untouched. An install with no credentials at
 all returns without touching anything, because not being set up is not a
 failure.
 
+### Maximum-history order
+
+Historical ingestion has one durable, cross-connector barrier. Every available
+timeline source finishes the current local calendar year before any source may
+begin the previous year: 2026 across iMessage, WhatsApp, Gmail, Granola,
+Calendar and bridged platforms; then 2025; then 2024; and so on. A source that
+is not authorized does not block the barrier. If it is authorized later, its
+current-year work reopens without erasing completed checkpoints for the other
+sources.
+
+Each source owns a private per-year pagination cursor; the coordinator stores
+only source names, years and completion flags. Matrix page tokens are opaque,
+so a page crossing New Year's Day is replayed for the next year rather than
+dropping the older half. Calendar remains useful context, but cannot create
+older year tabs by itself: history stops at the oldest year reached by any
+non-calendar timeline.
+
+Modern mautrix bridges request the largest supported initial import and
+Discord uses an explicit `2147483647` initial limit (its initial backfill has
+no unlimited sentinel), `-1` for missed-message fetch-all, and creates every
+known private portal at startup for DMs. Discord servers are an explicit owner
+opt-in in the connected-account card: checking one bridges that guild with
+`--entire`, which creates its bridgeable channel and thread portals under the
+same uncapped initial and missed-message limits. Standard Synapse does not
+support mautrix's backward-insertion queue, so this uncapped initial portal import is the
+supported way to make remote history locally available; the Matrix connector
+then reveals it through the shared year barrier.
+
+### Upgrade from the old 10,000-message social cap
+
+The first launch after this history upgrade automatically rebuilds an existing
+private Matrix/bridge runtime once. Standard Synapse cannot reopen old mautrix
+portals to insert remote history that the former cap never imported. The app
+therefore stops the local bridge containers, moves their databases and Synapse
+state to `~/.hazlie/matrix/backups/full-history-v1-<UTC timestamp>/`, recreates
+the runtime under the uncapped policy, and clears the derived social corpus and
+Matrix cursors before ingestion resumes. Nothing is silently deleted and the
+migration is guarded by `~/.hazlie/matrix/.full-history-reset-v1`, so later
+launches cannot repeat it.
+
+Social accounts must be connected once after this migration. New installs are
+marked complete during their initial setup and are never reset on their next
+launch.
+
+Discord has one extra non-destructive upgrade step. When setup finds the old
+five-private-channel or capped backfill values, it rewrites them and explicitly
+restarts the Discord bridge. That rebuilds missing portal coverage under the
+new policy while preserving the authenticated account. The Connections tile
+then stays in its waiting-ring state until the bridge database contains message
+rows; authentication alone is no longer enough to paint it green.
+
+DM ingestion is automatic after Discord login. Server ingestion is not: the
+Connections card lists the servers discovered by the local bridge and stores
+the choice in mautrix-discord's owner-only database. Checking a server imports
+all bridgeable channels and threads; unchecking it invokes the bridge's
+supported unbridge operation and removes those local portal rooms. Server
+names and IDs are exposed only over the native bearer channel and are never
+written to connector logs or repository state.
+
 ## Source registry
 
 One namespace per source; the full `entity_id` grammar and upsert semantics
@@ -118,7 +177,7 @@ live in [`INGESTION.md`](INGESTION.md). What each connector puts in a row:
 | `notion` | `notion:<page_id>` | title + the page's text blocks, ≤20k chars | url, parent type, block count, `truncated` |
 | `files` | `files:<absolute path>` | filename + folder trail; file contents when local, small and text | `store`, `folder`, `ext`, `bytes`, **`online_only`**, `has_content` |
 | `whatsapp` | `whatsapp:<stanza_id>` | one message's text, from WhatsApp Desktop's local store | `stanza_id`, `is_from_me`, `is_group`, `chat_handle`, `chat_name`?, `sender_handle`? |
-| `linkedin` | `linkedin:conn:<slug>` · `linkedin:msg:<sha8>` | connection: name — position at company (+ connected date); message: content, ≤4000 chars | connection: name, url, email, company, position; message: conversation id, from/to, subject |
+| `messenger`, `instagram`, `linkedin`, `twitter`, `telegram`, `discord`, `slack` | `<source>:<matrix_event_id>` | one bridged message text event | Matrix event/room ids, direction, group flag and conversation/sender handles; legacy LinkedIn export rows remain readable |
 | `hazlie_digest` | `hazlie_digest:<date>` | the delivered digest text | composition facts |
 | `seed` | (none) | dev fixtures | — |
 
@@ -139,13 +198,14 @@ row text.
 
 | Source | Cursor | Notes |
 |---|---|---|
-| `imessage` | chat.db `ROWID` high-water mark | first run pins to `MAX(ROWID)` unless backfilling |
-| `calendar` | none — **window reconciliation** | scan −7d..+30d (backfill −90d..+60d); see below |
-| `mail` | Gmail `historyId` cursor | a history window Google has expired forces a bounded re-read; see `connectors/lib/gmailClient.mjs`. Was a per-folder IMAP `UID` cursor + `UIDVALIDITY` guard until mail moved to the Gmail API (2026-08-26). |
-| `granola` | `updated_after` timestamp, rewound 60 s | the skew absorbs clock drift; upsert makes the overlap free |
+| `imessage` | Apple-nanosecond forward high-water + per-year descending cursor | forward polling is independent of newest-to-oldest history |
+| `calendar` | one exact local-year window per barrier year | ordinary polling scans −7d..+30d; historical windows reconcile only after a complete successful scan |
+| `mail` | Gmail `internalDate` high-water + per-account/per-year page token | exact `after`/`before` year query; resumes until every page for every authorized account lands |
+| `granola` | `updated_after` timestamp, rewound 60 s | ordinary polling starts at local New Year on a fresh install; history filters the API's complete paginated metadata by barrier year |
 | `health` (Oura) | last completed poll day + **trailing 7-day re-poll** | Oura corrects daily summaries retroactively; the re-poll window catches corrections, and upsert lands them as `updated`/`unchanged` |
-| `whatsapp` | `ZMESSAGEDATE` high-water mark (Apple-epoch seconds) | reads a snapshot of WhatsApp Desktop's store; freshness is bounded by when the app last ran, and the store **prunes** — never reconcile by absence (see `PROBES.md`) |
-| `linkedin` | export files' mtimes | file-based, no API: scans only when a CSV in `~/.hazlie/imports/linkedin/` is newer than last seen; `--backfill` re-reads both files |
+| `whatsapp` | `ZMESSAGEDATE` forward high-water + per-year cursor (Apple-epoch seconds) | fresh forward polling starts at local New Year; history drains every locally available older year. The store **prunes** — never reconcile by absence (see `PROBES.md`) |
+| `matrix` | `/sync` forward token + per-room `/messages` tokens | bridge rooms rotate round-robin; a token is committed only after its page reaches Hermes |
+| bridged social sources | Matrix `/sync` forward token + per-room `/messages` tokens | the transport cursor is stored under `matrix`; rows retain their platform source (`messenger`, `instagram`, `linkedin`, `twitter`, `telegram`, `discord`, `slack`) |
 
 **Window reconciliation (calendar, and any future scanned-window source):**
 upserts cannot express deletion. After each successful window scan the
@@ -357,6 +417,26 @@ tokens or Google grants) or edges the store readers handle. Network
 checks are opt-in so a local diagnosis opens no third-party sockets as a side
 effect. Remember the attribution caveat above when reading `fda-*` rows from
 a shell.
+
+## Coverage audit
+
+After connectors are linked, verify what actually reached the corpus rather
+than treating a green login state as proof of history coverage:
+
+```
+(cd connectors && npm run coverage)
+(cd connectors && npm run coverage -- --json)
+```
+
+The report includes per-source row and conversation counts, oldest/newest
+dates, row counts by year, durable completed-year checkpoints, and the live
+scheduler/backfill queue. The Matrix transport line is a count of portal
+invites still waiting to be joined/replayed, so a rate-limited recovery is
+visible instead of looking stuck. It is deliberately aggregate-only. Hermes performs
+the grouping while it owns `context.db`; the connector process receives no
+message text, speakers, names, addresses, entity ids, room ids, or remote
+cursors. `contacts` is a count of local resolution records because that source
+does not write corpus rows.
 
 
 ## files — the dataless rule

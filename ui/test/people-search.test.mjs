@@ -15,6 +15,9 @@ test('intent fires on need language, not on episodic stat questions', () => {
   assert.equal(detectPersonSearch('who are the investors i talked to')?.kind, 'investor');
   assert.equal(detectPersonSearch('which vcs did i pitch')?.kind, 'investor');
   assert.equal(detectPersonSearch('who should i reconnect with')?.kind, 'reconnect');
+  assert.equal(detectPersonSearch('who should i invite to Italy?'), null,
+    'selection questions are evidence searches, not generic reconnect ranking');
+  assert.equal(detectPersonSearch('who do I know in LA?'), null);
   assert.equal(detectPersonSearch('who could mentor me')?.kind, 'mentor');
   // These belong to the episodic shelf / claim path, NOT person-search.
   assert.equal(detectPersonSearch('who did i text the most this month'), null);

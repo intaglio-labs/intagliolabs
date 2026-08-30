@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { openStateDb } from '../lib/state.mjs';
 import { wipeLocalArtifacts } from '../retain.mjs';
 
@@ -26,6 +27,24 @@ test('openStateDb enforces 0700 directory and 0600 file modes', (t) => {
     String(state.db.prepare('PRAGMA journal_mode').get().journal_mode).toLowerCase(),
     'delete'
   );
+});
+
+test('an existing contact spine migrates to person_ref without losing rows', (t) => {
+  const root = sandbox(t);
+  const dir = join(root, 'private');
+  mkdirSync(dir, { mode: 0o700 });
+  const path = join(dir, 'state.db');
+  const legacy = new DatabaseSync(path);
+  legacy.exec("CREATE TABLE contact_ids(identifier TEXT PRIMARY KEY, display_name TEXT NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'contacts', updated_ts INTEGER NOT NULL)");
+  legacy.prepare('INSERT INTO contact_ids VALUES (?,?,?,?,?)').run('old@example.test', 'Old Contact', 'email', 'contacts', 1);
+  legacy.close();
+  chmodSync(path, 0o600);
+
+  const state = openStateDb(path);
+  t.after(() => state.close());
+  const columns = new Set(state.db.prepare("SELECT name FROM pragma_table_info('contact_ids')").all().map((row) => row.name));
+  assert.ok(columns.has('person_ref'));
+  assert.equal(state.db.prepare('SELECT display_name FROM contact_ids WHERE identifier = ?').get('old@example.test').display_name, 'Old Contact');
 });
 
 test('openStateDb refuses a state directory that is not 0700', (t) => {
@@ -104,8 +123,8 @@ test('contacts upsert and resolve, with the kind set closed', (t) => {
   const state = openStateDb(join(sandbox(t), 'state.db'));
   t.after(() => state.close());
   state.upsertContacts([
-    { identifier: '+14155550142', displayName: 'Casey', kind: 'phone' },
-    { identifier: 'casey@example.com', displayName: 'Casey', kind: 'email' },
+    { identifier: '+14155550142', displayName: 'Casey', kind: 'phone', personRef: 'card-casey' },
+    { identifier: 'casey@example.com', displayName: 'Casey', kind: 'email', personRef: 'card-casey' },
   ]);
   assert.deepEqual(state.resolveIdentifier('+14155550142'), { displayName: 'Casey', kind: 'phone' });
   assert.equal(state.resolveIdentifier('+10000000000'), null);
@@ -113,6 +132,10 @@ test('contacts upsert and resolve, with the kind set closed', (t) => {
   state.upsertContacts({ identifier: '+14155550142', displayName: 'Casey K', kind: 'phone' });
   assert.equal(state.resolveIdentifier('+14155550142').displayName, 'Casey K');
   assert.equal(Number(state.db.prepare('SELECT count(*) AS n FROM contact_ids').get().n), 2);
+  assert.deepEqual(
+    state.db.prepare('SELECT DISTINCT person_ref FROM contact_ids').all().map((row) => row.person_ref),
+    ['card-casey']
+  );
   assert.throws(
     () => state.upsertContacts({ identifier: 'x', displayName: 'y', kind: 'carrier-pigeon' }),
     /"kind" must be one of/
@@ -131,6 +154,45 @@ test('a bad contact rejects the whole batch and writes none of it', (t) => {
     /contacts\[1\]/
   );
   assert.equal(Number(state.db.prepare('SELECT count(*) AS n FROM contact_ids').get().n), 0);
+});
+
+test('a full contact snapshot removes stale memberships but preserves calendar fallbacks', (t) => {
+  const state = openStateDb(join(sandbox(t), 'state.db'));
+  t.after(() => state.close());
+  state.upsertContacts([
+    { identifier: 'old@example.test', displayName: 'A Person', kind: 'email', personRef: 'card-a' },
+    { identifier: 'keep@example.test', displayName: 'A Person', kind: 'email', personRef: 'card-a' },
+    { identifier: 'invite@example.test', displayName: 'Invite Name', kind: 'email', source: 'calendar' },
+  ]);
+
+  state.replaceContacts([
+    { identifier: 'keep@example.test', displayName: 'A Person', kind: 'email', personRef: 'card-a' },
+    { identifier: 'new@example.test', displayName: 'A Person', kind: 'email', personRef: 'card-a' },
+  ]);
+
+  assert.equal(state.resolveIdentifier('old@example.test'), null);
+  assert.deepEqual(state.resolveIdentifier('invite@example.test'), { displayName: 'Invite Name', kind: 'email' });
+  assert.deepEqual(
+    state.db.prepare('SELECT identifier, person_ref FROM contact_ids WHERE source = ? ORDER BY identifier')
+      .all('contacts').map((row) => ({ ...row })),
+    [
+      { identifier: 'keep@example.test', person_ref: 'card-a' },
+      { identifier: 'new@example.test', person_ref: 'card-a' },
+    ]
+  );
+});
+
+test('an invalid full contact snapshot is rejected before deleting the old one', (t) => {
+  const state = openStateDb(join(sandbox(t), 'state.db'));
+  t.after(() => state.close());
+  state.replaceContacts({
+    identifier: 'safe@example.test', displayName: 'Safe', kind: 'email', personRef: 'safe-card',
+  });
+  assert.throws(
+    () => state.replaceContacts([{ identifier: '', displayName: 'Broken', kind: 'email' }]),
+    /contacts\[0\]/
+  );
+  assert.deepEqual(state.resolveIdentifier('safe@example.test'), { displayName: 'Safe', kind: 'email' });
 });
 
 test('contact avatar snapshots remove stale and deleted photos', (t) => {

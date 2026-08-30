@@ -42,10 +42,14 @@ test('it reports a count of conversations instead', () => {
 test('a backfill with no estimate is still published', () => {
   // Otherwise removing the false ETA would have made the panel go silent, which
   // is a worse answer to "how do I know it is working" than a wrong number.
+  // The early return also carries the year now: activeWorkLabel is gated on a
+  // non-empty estimate, so without it a matrix-only backfill loses the year label
+  // and the orb drops out of its processing pose. Matched literally rather than
+  // loosened — this assertion exists to catch the return going silent.
   assert.match(
     daemon,
-    /return backfill\.length === 0 \? null : \{ backfill, backfillRooms \}/u,
-    'work with no knowable end must still surface'
+    /\? null\s*\n\s*: \{ backfill, backfillRooms, \.\.\.\(!yearly\.complete \? \{ backfillYear: yearly\.year \} : \{\}\) \}/u,
+    'work with no knowable end must still surface, and still name its year'
   );
 });
 

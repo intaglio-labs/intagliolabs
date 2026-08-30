@@ -615,6 +615,78 @@ export function bridgeStatus(platformId, { home = homedir() } = {}) {
   }
 }
 
+// Discord DMs are created automatically by mautrix-discord. Guilds (Discord
+// servers) are deliberately different: the owner chooses them one by one, and
+// a checked server means `--entire` so every bridgeable channel and thread is
+// created up front for the history worker. This list is read from the bridge's
+// owner-only local database; it is returned only through the bearer-protected
+// native API and is never logged.
+export function discordServers({ home = homedir() } = {}) {
+  let db;
+  try {
+    db = new DatabaseSync(join(matrixDir(home), PLATFORMS.discord.db), { readOnly: true });
+    return db.prepare(`
+      SELECT dcid AS id,
+             COALESCE(NULLIF(plain_name, ''), NULLIF(name, ''), 'Discord server') AS name,
+             bridging_mode AS mode
+        FROM guild
+       ORDER BY name COLLATE NOCASE, dcid
+       LIMIT 250
+    `).all().map((row) => ({
+      id: String(row.id),
+      name: String(row.name),
+      // Only "everything" is checked. An older create-on-message portal is
+      // intentionally offered as unchecked so checking it upgrades that guild
+      // to a complete channel/thread import.
+      enabled: Number(row.mode) === 3,
+    }));
+  } catch {
+    return [];
+  } finally {
+    try {
+      db?.close();
+    } catch {}
+  }
+}
+
+export function discordServerCommand(serverId, enabled, { home = homedir() } = {}) {
+  const id = String(serverId ?? '');
+  if (!/^\d{5,24}$/u.test(id)) throw new Error('invalid Discord server');
+  const prefix = commandPrefix(PLATFORMS.discord, home);
+  return enabled
+    ? `${prefix} guilds bridge ${id} --entire`
+    : `${prefix} guilds unbridge ${id}`;
+}
+
+// Mutating a guild stays inside the bridge's supported command surface. The
+// command may need time to create many Matrix rooms, so verify the durable DB
+// result instead of treating a fast HTTP response as completion.
+export async function setDiscordServer(serverId, enabled, { home = homedir() } = {}) {
+  const id = String(serverId ?? '');
+  const want = enabled === true;
+  const before = discordServers({ home }).find((server) => server.id === id);
+  if (!before) throw new Error('Discord server is unavailable');
+  if (before.enabled === want) return { servers: discordServers({ home }), pending: false };
+
+  const command = discordServerCommand(id, want, { home });
+  // Leave headroom inside native's 60s request timeout. If a very large guild
+  // is still creating rooms after this window, the API returns pending and
+  // the checkbox keeps polling the durable mode instead of falsely failing.
+  const { transcript } = await relay('discord', command, { home, waitMs: 30000 });
+  const lastBot = [...transcript].reverse().find((message) => message.from === 'bot');
+  if (/\b(error|failed|not found|not bridged)\b/iu.test(String(lastBot?.body ?? ''))) {
+    throw new Error(`could not ${want ? 'add' : 'remove'} Discord server`);
+  }
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const servers = discordServers({ home });
+    const current = servers.find((server) => server.id === id);
+    if (current?.enabled === want) return { servers, pending: false };
+    await sleep(1000);
+  }
+  return { servers: discordServers({ home }), pending: true };
+}
+
 // Does this bridge still need the owner to register an app of their own?
 // True only for a platform that declares `appCredential` AND whose config
 // still carries the placeholder. Everything else — no declaration, no config,

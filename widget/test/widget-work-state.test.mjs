@@ -61,8 +61,9 @@ test('native work status includes active work and unfinished backfill, but exclu
   assert.match(connectors, /raw\["phase"\] as\? String == "syncing"/u);
   assert.match(connectors, /raw\["phase"\] as\? String == "waiting"/u);
   assert.match(connectors, /raw\["backfill"\] as\? \[String\]/u);
-  assert.ok(connectors.includes('return "backfilling \\(platform)"'));
-  assert.ok(connectors.includes('return "backfilling \\(labelFor(connector))"'));
+  assert.ok(connectors.includes('?? "backfilling \\(platform)"'));
+  assert.ok(connectors.includes('?? "backfilling \\(labelFor(connector))"'));
+  assert.ok(connectors.includes('"fetching \\($0) \\(platform)"'));
   assert.match(daemon, /return \{[\s\S]*?estimate:[\s\S]*?backfill,/u,
     'the daemon snapshot must distinguish unfinished history from a routine queue');
 });
@@ -92,12 +93,15 @@ test('the total processing estimate uses the plain approximate-hours label', () 
   assert.match(connections, /activity-estimate/u);
   assert.match(connections, /estimate\.hidden = !total/u,
     'the total is pinned in the header and hidden only when no queue exists');
-  // The row now carries a SCOPE as well as a subject. It used to end at
-  // "history" and the header beside it carried an ETA -- an ETA that could not
-  // move, because it was ceil(rooms / perPass) rendered as a forecast. The count
-  // replaced it, so the row is where "how much" now lives.
-  assert.ok(connectors.includes('"label": "backfilling \\(subject) history\\(scope)"'),
-    'the backfill rows name work and how much of it there is');
+  // The row answers TWO questions now, and each side of the merge asserted on
+  // its own half of one string. Which year comes from the cross-connector
+  // barrier; how many conversations replaced an ETA that could not move (it was
+  // ceil(rooms/perPass), always 1). Assert the composed label rather than either
+  // fragment, or this goes red the next time the other half moves.
+  assert.ok(connectors.includes('"fetching \\($0) \\(subject)\\(scope)"'),
+    'a yearly row names the year, the connector, and how much is in flight');
+  assert.ok(connectors.includes('?? "backfilling \\(subject) history\\(scope)"'),
+    'and the non-yearly row still says how much');
   assert.match(connectors, /raw\["backfillRooms"\] as\? Int/u,
     'the scope must come from a published count, not be composed here');
   assert.match(connectors, /connector == "matrix" \? matrixPlatformLabels\(raw\)/u,

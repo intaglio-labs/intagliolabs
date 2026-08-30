@@ -51,7 +51,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { recallClaims, groundingLines, pendingForQuery } from './memory/retrieve.mjs';
 import { episodicContext } from './memory/episodic.mjs';
 import { selectRows } from './memory/select.mjs';
-import { answerPersonSearch } from './people/search.mjs';
+import { answerPersonSearch, detectIntro, detectPersonSearch } from './people/search.mjs';
+import {
+  planGeneralPeopleQuestion,
+  prepareGeneralPeopleEvidence,
+  evaluateGeneralPeopleEvidence,
+  formatGeneralPeopleResult,
+  generalPeopleAnswerCacheInput,
+} from './people/generalSearch.mjs';
 import { loadOwner, markOwnerPerson, markPersonRole } from './people/owner.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
 import {
@@ -64,6 +71,10 @@ import {
   useTallyStore,
 } from './people/map.mjs';
 import { openTallyStore } from './people/tallyStore.mjs';
+import {
+  clearPeopleSearchCacheStorage,
+  openPeopleSearchCache,
+} from './people/searchCache.mjs';
 import { summarizeYear } from './people/summary.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
@@ -76,7 +87,13 @@ import {
   timeoutError,
   LLAMA_UNREACHABLE_STATUS,
 } from './llamaReady.mjs';
-import { buildGraph, loadSpine } from './people/graph.mjs';
+import { loadSpine } from './people/graph.mjs';
+import {
+  clearPeopleProjection,
+  ensurePeopleProjectionSchema,
+  isProjectedPeopleSource,
+  materializedPeopleGraph,
+} from './people/projection.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
 import { validToFor } from './memory/validity.mjs';
@@ -660,6 +677,8 @@ WHERE r.scope = 'day'
 //      verb forms. It is a partial win only -- see the note in SCHEMA.
 //   5  the entity uniqueness key becomes (source, entity_id) -- ids are only
 //      unique within a source; the incident is recorded on the v5 branch.
+//  10  Hermes-owned materialized people, identifiers, identity evidence, and
+//      activity tables. Raw context remains the rebuildable source of truth.
 //   9  claim.valid_to: a plan or commitment can finally say which day it was
 //      about. A private corpus showed that many old intentions were otherwise
 //      ageing exactly like standing facts.
@@ -675,7 +694,7 @@ WHERE r.scope = 'day'
 //   6  context_source_ts(source, ts, entity_id): per-source time-range reads
 //      (reconciliation slices, retain sweeps, the episodic shelf, the digest
 //      aggregate, the watchdog's max(ts)) all scanned without it.
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 // The PRAGMAs that decide whether "deleted" means deleted, and whether the
 // memory tables' declared references mean anything. Applied to every
@@ -882,6 +901,21 @@ function migrate(db) {
     );
     version = 9;
   }
+  if (version < 10) {
+    // The projection schema is ensured before migrate(), so fresh and upgraded
+    // databases both have the tables here. The guarded ALTER also repairs a
+    // short-lived development v9 schema that predated evidence confidence.
+    const evidenceColumns = new Set(
+      db.prepare("SELECT name FROM pragma_table_info('identity_evidence')").all().map((c) => c.name)
+    );
+    if (!evidenceColumns.has('confidence')) {
+      db.exec(
+        'ALTER TABLE identity_evidence ADD COLUMN confidence REAL NOT NULL DEFAULT 1 ' +
+          'CHECK (confidence >= 0 AND confidence <= 1)'
+      );
+    }
+    version = 10;
+  }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 
@@ -890,6 +924,7 @@ export function openDb(dbPath = DEFAULT_DB_PATH) {
     const db = new DatabaseSync(dbPath);
     hardenConnection(db);
     db.exec(SCHEMA);
+    ensurePeopleProjectionSchema(db);
     migrate(db);
     return db;
   }
@@ -920,6 +955,7 @@ export function openDb(dbPath = DEFAULT_DB_PATH) {
     chmodSync(dbPath, 0o600);
     hardenConnection(db);
     db.exec(SCHEMA);
+    ensurePeopleProjectionSchema(db);
     migrate(db);
     // Reassert after schema creation in case the platform replaced the file.
     chmodSync(dbPath, 0o600);
@@ -1499,6 +1535,73 @@ function maintainNow(db) {
 // longer exist", and it would then delete the remainder.
 const ENTITY_WINDOW_CAP = 5000;
 
+// A privacy-safe coverage receipt for the connector operator. This is the
+// only corpus-wide read exposed to the connector process, and every selected
+// value is an aggregate: no entity id, room id, handle, speaker, metadata, or
+// text crosses the Hermes boundary. Conversation keys are inspected only
+// inside COUNT(DISTINCT ...), then discarded by SQLite.
+//
+// Mail, calendar, and document-like sources deliberately report null for
+// conversations. Inventing a "conversation" from subject text or an entity id
+// would both misstate coverage and tempt this route to expose a private key.
+export function connectorCoverage(db) {
+  const conversationalSources = new Set([
+    'imessage', 'whatsapp', 'messenger', 'instagram', 'twitter',
+    'telegram', 'discord', 'slack', 'linkedin',
+  ]);
+  const sourceSlots = KNOWN_SOURCES.map(() => '?').join(',');
+  const totals = db
+    .prepare(
+      `SELECT source,
+              COUNT(*) AS rows,
+              MIN(ts) AS oldest_ts,
+              MAX(ts) AS newest_ts,
+              COUNT(DISTINCT CASE
+                WHEN NOT json_valid(meta) THEN NULL
+                WHEN source = 'imessage' THEN
+                  COALESCE(json_extract(meta, '$.chat_guid'), json_extract(meta, '$.handle'))
+                WHEN source = 'whatsapp' THEN json_extract(meta, '$.chat_handle')
+                WHEN source IN ('messenger', 'instagram', 'twitter', 'telegram',
+                                'discord', 'slack', 'linkedin') THEN
+                  json_extract(meta, '$.room_id')
+                ELSE NULL
+              END) AS conversations
+         FROM context
+        WHERE source IN (${sourceSlots})
+        GROUP BY source
+        ORDER BY source`
+    )
+    .all(...KNOWN_SOURCES);
+  const yearly = db
+    .prepare(
+      `SELECT source,
+              CAST(strftime('%Y', ts / 1000, 'unixepoch', 'localtime') AS INTEGER) AS year,
+              COUNT(*) AS rows
+         FROM context
+        WHERE source IN (${sourceSlots})
+        GROUP BY source, year
+        ORDER BY source, year DESC`
+    )
+    .all(...KNOWN_SOURCES);
+  const yearsBySource = new Map();
+  for (const row of yearly) {
+    if (!Number.isInteger(row.year)) continue;
+    const list = yearsBySource.get(row.source) ?? [];
+    list.push({ year: Number(row.year), rows: Number(row.rows) });
+    yearsBySource.set(row.source, list);
+  }
+  return {
+    sources: totals.map((row) => ({
+      source: row.source,
+      rows: Number(row.rows),
+      conversations: conversationalSources.has(row.source) ? Number(row.conversations) : null,
+      oldest_ts: Number(row.oldest_ts),
+      newest_ts: Number(row.newest_ts),
+      years: yearsBySource.get(row.source) ?? [],
+    })),
+  };
+}
+
 function parseTsParam(params, name, fallback) {
   const raw = params.get(name);
   if (raw === null || raw === '') return fallback;
@@ -1905,7 +2008,7 @@ export function applyMemoryBatch(db, body) {
   return { run_id: runId, applied, rejected };
 }
 
-async function handleAdmin(db, req, res, cors, url, channel) {
+async function handleAdmin(db, req, res, cors, url, channel, policy) {
   if (channel !== 'bearer') {
     // 403, not 401: the caller IS authenticated (allowlisted Origin) — it is
     // the channel that lacks the capability. The browser channel's Origin gate
@@ -1994,6 +2097,14 @@ async function handleAdmin(db, req, res, cors, url, channel) {
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/admin/coverage') {
+    if ([...url.searchParams.keys()].length > 0) {
+      throw badRequest('this route accepts no query parameters');
+    }
+    send(res, 200, connectorCoverage(db), cors);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/admin/entities') {
     for (const key of url.searchParams.keys()) {
       if (!ENTITIES_PARAMS.includes(key)) {
@@ -2040,6 +2151,23 @@ async function handleAdmin(db, req, res, cors, url, channel) {
       return;
     }
 
+    if (url.pathname === '/admin/people/clear') {
+      const body = await readJson(req);
+      assertClosedFields(body, MAINTAIN_FIELDS);
+      const cleared = Number(db.prepare('SELECT count(*) AS n FROM people').get().n);
+      clearPeopleSearchCacheStorage(policy.peopleSearchCache, policy.peopleSearchCachePath);
+      db.exec('BEGIN');
+      try {
+        clearPeopleProjection(db);
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+      send(res, 200, { cleared }, cors);
+      return;
+    }
+
     if (url.pathname === '/admin/retain') {
       const body = await readJson(req);
       assertClosedFields(body, RETAIN_FIELDS);
@@ -2048,6 +2176,7 @@ async function handleAdmin(db, req, res, cors, url, channel) {
       if (!Number.isInteger(keepDays) || keepDays < 1 || keepDays > 3650) {
         throw badRequest('"keep_days" must be an integer between 1 and 3650');
       }
+      clearPeopleSearchCacheStorage(policy.peopleSearchCache, policy.peopleSearchCachePath);
       // Routine retention deletes cheaply and leaves the physical cleanup to a
       // scheduled /admin/maintain; only an explicit purge pays for it inline.
       //
@@ -2068,6 +2197,11 @@ async function handleAdmin(db, req, res, cors, url, channel) {
           db.prepare('DELETE FROM context WHERE source = ? AND ts < ?').run(body.source, cutoff)
             .changes
         );
+        // An explicit deletion must also clear a stale derived copy even when
+        // the raw rows were already absent. Privacy deletion is idempotent;
+        // conditioning this on `deleted` made the second purge weaker than the
+        // first whenever projection state had drifted.
+        if (isProjectedPeopleSource(body.source)) clearPeopleProjection(db);
         db.exec('COMMIT');
       } catch (e) {
         db.exec('ROLLBACK');
@@ -2081,6 +2215,7 @@ async function handleAdmin(db, req, res, cors, url, channel) {
       const body = await readJson(req);
       assertClosedFields(body, PURGE_FIELDS);
       assertKnownSource(body.source);
+      clearPeopleSearchCacheStorage(policy.peopleSearchCache, policy.peopleSearchCachePath);
       let deleted = 0;
       let claimsDeleted = 0;
       db.exec('BEGIN');
@@ -2093,6 +2228,7 @@ async function handleAdmin(db, req, res, cors, url, channel) {
         claimsDeleted = swept.claimsDeleted;
         dropCachedDistillates(swept.contentHashes);
         deleted = Number(db.prepare('DELETE FROM context WHERE source = ?').run(body.source).changes);
+        if (isProjectedPeopleSource(body.source)) clearPeopleProjection(db);
         db.exec('COMMIT');
       } catch (e) {
         db.exec('ROLLBACK');
@@ -2122,6 +2258,7 @@ async function handleAdmin(db, req, res, cors, url, channel) {
           throw badRequest(`entity_ids[${i}] must be a non-empty string`);
         }
       });
+      clearPeopleSearchCacheStorage(policy.peopleSearchCache, policy.peopleSearchCachePath);
       // Source AND entity_id must both match. Ids are namespaced by convention
       // only ("imessage:<guid>"), not by constraint — requiring the pair means
       // a connector with a crossed-up id list cannot delete another source's
@@ -2142,6 +2279,7 @@ async function handleAdmin(db, req, res, cors, url, channel) {
           deleted += Number(del.run(body.source, id).changes);
         }
         dropCachedDistillates(cacheHashes);
+        if (isProjectedPeopleSource(body.source)) clearPeopleProjection(db);
         db.exec('COMMIT');
       } catch (e) {
         db.exec('ROLLBACK');
@@ -2608,18 +2746,76 @@ const MAX_UTTERANCE = 2000;
 // handle for questions that are not person-searches. Returns null on any
 // error or a non-match, so the ask route falls through unharmed.
 function tryPersonSearch(db, question) {
-  let state = null;
   try {
-    const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
-    state = existsSync(statePath) ? openStateReadOnly(statePath) : null;
-    return answerPersonSearch(db, state, question, { owner: loadOwner() });
+    return withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      return answerPersonSearch(db, state, question, { owner: loadOwner(), aliases });
+    });
   } catch {
     return null;
-  } finally {
-    try {
-      state?.close();
-    } catch {}
   }
+}
+
+// Unfamiliar people questions use the local model only as a constrained plan
+// compiler and evidence judge. The state/resolution handles are held only for
+// the synchronous projection + retrieval phase; no connector database stays
+// open while the single-slot model is generating.
+async function tryGeneralPeopleSearch(
+  db,
+  question,
+  llama,
+  { signal = null, cache = null, onStage = null } = {}
+) {
+  const now = Date.now();
+  const cacheGeneration = cache?.generation?.();
+  const owner = loadOwner();
+  const recalled = recallClaims(db, { match: ftsQuery(question), limit: 6 });
+  const ownerMemories = recalled.matched > 0
+    ? recalled.claims.map((claim) => claim.text).filter(Boolean)
+    : [];
+  const plan = await planGeneralPeopleQuestion(question, {
+    llama, signal, owner, ownerMemories, cache, onStage, now,
+  });
+  if (plan === null || plan.kind === 'not_people_search') return null;
+  let prepared;
+  let answerCacheInput = null;
+  let cachedAnswer = null;
+  try {
+    prepared = withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      if (cache) {
+        answerCacheInput = generalPeopleAnswerCacheInput(db, state, question, plan, {
+          owner, aliases, now, limit: 10, model: llama.model ?? llama.baseUrl,
+        });
+        cachedAnswer = cache.get('answer', answerCacheInput);
+        try {
+          onStage?.({ stage: 'answer', event: cachedAnswer === null ? 'cache_miss' : 'cache_hit' });
+        } catch {}
+        if (cachedAnswer !== null) return null;
+      }
+      return prepareGeneralPeopleEvidence(db, state, plan, {
+        owner, aliases, now,
+      });
+    });
+  } catch {
+    return {
+      text: `I couldn't refresh the local people evidence index just now. Your source data is unchanged; try again in a moment.`,
+      sources: [], count: 0,
+    };
+  }
+  if (cachedAnswer !== null) return cachedAnswer;
+  const matches = await evaluateGeneralPeopleEvidence(question, prepared, {
+    llama, signal, limit: 10, cache, onStage,
+  });
+  const result = formatGeneralPeopleResult(matches, prepared);
+  if (answerCacheInput) cache.put('answer', answerCacheInput, result, cacheGeneration);
+  return result;
+}
+
+function preferDeterministicRelationshipSearch(question) {
+  if (detectIntro(question) !== null) return true;
+  const intent = detectPersonSearch(question);
+  return intent?.kind === 'reconnect';
 }
 
 // The People-popup "initialize search" backend. Opens the spine read-only (like
@@ -2654,6 +2850,29 @@ function warmPeopleCore(db) {
     const { aliases } = resolutionState(resDb);
     return yearCore(db, state, { now: Date.now(), owner: loadOwner(), aliases, blocking: true });
   });
+}
+
+// Coalesce connector batches into one background projection refresh after the
+// ingest stream goes quiet. Rebuilding after every 200-row backfill batch would
+// be worse than rebuilding on search; waiting for a quiet edge preserves fresh
+// prepared tables without turning ingestion into repeated full graph work.
+const peopleProjectionTimers = new WeakMap();
+function schedulePeopleProjectionRefresh(db) {
+  const pending = peopleProjectionTimers.get(db);
+  if (pending) clearTimeout(pending);
+  const timer = setTimeout(() => {
+    peopleProjectionTimers.delete(db);
+    try {
+      withPeopleDbs(db, (state, resDb) => {
+        const { aliases } = resolutionState(resDb);
+        materializedPeopleGraph(db, state, { now: Date.now(), owner: loadOwner(), aliases });
+      });
+    } catch {
+      // It remains stale and the next search uses the raw fallback or retries.
+    }
+  }, 30_000);
+  timer.unref?.();
+  peopleProjectionTimers.set(db, timer);
 }
 
 // WAIT FOR THE WRITER; DO NOT GIVE UP AND CALL IT AN ANSWER.
@@ -2729,27 +2948,73 @@ async function handleVaultAsk(db, req, res, cors, policy) {
 
   const question = utterance.trim();
 
-  // Person-search (memory/people/search.mjs): "who are investors I talked to",
-  // "who should I reconnect with". Answered from the people GRAPH by code, not
-  // the claim/episodic path — the ranker is deterministic and the evidence
-  // lines are already human-readable, so no model is called and nobody can be
-  // hallucinated onto the list. Tried FIRST because its intent is narrow (a
-  // need word plus a people word); a miss returns null and falls straight
-  // through to the normal answer path below.
-  // Sync-status ("am i up to date?", "is anything behind?"): the freshest,
-  // narrowest intent, so it is tried before person-search. Timestamps only,
-  // computed by code — the same policy the watchdog alerts on, answered on
-  // demand. A non-match returns null and falls straight through.
+  // Sync-status ("am i up to date?", "is anything behind?") is the freshest,
+  // narrowest intent and stays first. Timestamps only, computed by code — the
+  // same policy the watchdog alerts on, answered on demand. A non-match falls
+  // through to graph relationship operations and then general evidence-based
+  // people search.
   const syncStatus = trySyncStatus(db, question);
   if (syncStatus !== null) {
     send(res, 200, { text: syncStatus.text, sources: syncStatus.sources, usedRows: syncStatus.count }, cors);
     return;
   }
 
-  const person = tryPersonSearch(db, question);
-  if (person !== null) {
-    send(res, 200, { text: person.text, sources: person.sources, usedRows: person.count }, cors);
+  // Warm paths and relationship-health searches are graph operations, not
+  // evidence questions, so they keep their purpose-built graph traversal and
+  // ranking. Every evidence-based selection question goes through the general
+  // planner below; there are no topic-specific shortcuts ahead of it.
+  const relationshipSearch = preferDeterministicRelationshipSearch(question);
+  if (relationshipSearch) {
+    const person = tryPersonSearch(db, question);
+    if (person !== null) {
+      send(res, 200, { text: person.text, sources: person.sources, usedRows: person.count }, cors);
+      return;
+    }
+  }
+
+  // Evidence-based people questions all reach the same general local planner.
+  // The first model call sees the question plus explicit owner-profile facts,
+  // code retrieves a bounded candidate set, and the second local call can
+  // return only supplied person + evidence ids.
+  const peopleController = new AbortController();
+  const peopleClosed = () => {
+    if (!res.writableEnded) peopleController.abort();
+  };
+  res.once('close', peopleClosed);
+  let generalPerson;
+  try {
+    generalPerson = await tryGeneralPeopleSearch(db, question, policy.llama, {
+      cache: policy.peopleSearchCache,
+      signal: AbortSignal.any([
+        peopleController.signal,
+        AbortSignal.timeout(policy.askTimeoutMs ?? ASK_TIMEOUT_MS),
+      ]),
+    });
+  } catch (error) {
+    if (peopleController.signal.aborted) return;
+    throw error;
+  } finally {
+    res.off('close', peopleClosed);
+  }
+  if (generalPerson !== null) {
+    send(res, 200, {
+      text: generalPerson.text,
+      sources: generalPerson.sources,
+      usedRows: generalPerson.count,
+    }, cors);
     return;
+  }
+
+  // Non-question-shaped legacy need queries (for example, "investors I spoke
+  // with") do not activate the general planner's conservative question gate.
+  // They retain the existing graph answer as a fallback, after the general
+  // path has had first refusal for any normal people question.
+  if (!relationshipSearch) {
+    const person = tryPersonSearch(db, question);
+    if (person !== null) {
+      send(res, 200, { text: person.text, sources: person.sources, usedRows: person.count }, cors);
+      return;
+    }
   }
 
   const recalled = recallClaims(db, { match: ftsQuery(question), limit: 12 });
@@ -2932,7 +3197,7 @@ function handle(db, req, res, cors, url, policy) {
   // — a browser probing /admin/anything learns "not your channel", not a route
   // map.
   if (url.pathname.startsWith('/admin/')) {
-    return handleAdmin(db, req, res, cors, url, channel);
+    return handleAdmin(db, req, res, cors, url, channel, policy);
   }
 
   if (req.method === 'POST' && url.pathname === '/ingest') {
@@ -2948,7 +3213,13 @@ function handle(db, req, res, cors, url, policy) {
       // insertRows returns exactly the response contract: how many rows were
       // new, how many replaced an entity in place, and how many were
       // redeliveries the canonical hash proved identical.
-      send(res, 200, insertRows(db, body), cors);
+      const touchesPeople = (Array.isArray(body) ? body : [body])
+        .some((row) => isProjectedPeopleSource(row?.source));
+      const counts = insertRows(db, body);
+      send(res, 200, counts, cors);
+      if (touchesPeople && (counts.inserted > 0 || counts.updated > 0)) {
+        schedulePeopleProjectionRefresh(db);
+      }
     });
   }
 
@@ -3060,7 +3331,7 @@ async function handlePeople(db, req, res, cors, url, policy) {
     }
     const marked = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
-      const person = buildGraph(db, state, { owner, aliases }).find((candidate) => candidate.key === body.key);
+      const person = materializedPeopleGraph(db, state, { owner, aliases }).find((candidate) => candidate.key === body.key);
       if (!person) throw badRequest('"key" is not a current person');
       return markOwnerPerson({ key: person.key, identifiers: person.identifiers });
     });
@@ -3084,7 +3355,7 @@ async function handlePeople(db, req, res, cors, url, policy) {
     }
     const marked = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
-      const person = buildGraph(db, state, { owner, aliases }).find((candidate) => candidate.key === body.key);
+      const person = materializedPeopleGraph(db, state, { owner, aliases }).find((candidate) => candidate.key === body.key);
       if (!person) throw badRequest('"key" is not a current person');
       return markPersonRole({ key: person.key, role: body.role, year: body.year ?? null });
     });
@@ -3345,6 +3616,14 @@ export async function start({
     ? askTimeoutMs
     : ASK_TIMEOUT_MS;
   const db = openDb(dbPath ?? process.env.HERMES_DB ?? DEFAULT_DB_PATH);
+  // The cache is derived and rebuildable, so keep it beside the exact corpus
+  // handle it accelerates. In-memory test databases get no implicit disk
+  // writes. The store persists only hashed inputs and constrained outputs.
+  const databaseFile = db.prepare('PRAGMA database_list').get()?.file ?? '';
+  const peopleSearchCachePath = databaseFile ? `${databaseFile}.people-search-cache` : null;
+  const peopleSearchCache = peopleSearchCachePath
+    ? openPeopleSearchCache(peopleSearchCachePath)
+    : null;
 
   const server = createServer(async (req, res) => {
     const cors = corsHeaders(req, allowedOriginSet);
@@ -3371,6 +3650,8 @@ export async function start({
         allowedOrigins: allowedOriginSet,
         bearerToken,
         llama,
+        peopleSearchCache,
+        peopleSearchCachePath,
       });
     } catch (e) {
       send(res, e.status ?? 500, { error: e.message ?? String(e) }, cors);
@@ -3387,6 +3668,7 @@ export async function start({
         close: () =>
           new Promise((done, fail) => {
             server.close((err) => {
+              peopleSearchCache?.close();
               db.close();
               err ? fail(err) : done();
             });

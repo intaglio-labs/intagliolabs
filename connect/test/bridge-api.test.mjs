@@ -99,3 +99,18 @@ test('every platform reports an engine state, never undefined', async (t) => {
   }
 });
 
+test('Discord server mutation is Discord-only and requires a boolean state', async (t) => {
+  const home = freshHome(t);
+  const wrongPlatform = await bridgeApiResponse({
+    method: 'POST', subpath: 'discord-server', authorization: `Bearer ${TOKEN}`,
+    body: { p: 'messenger', serverId: '1234567890', enabled: true }, home,
+  });
+  assert.equal(wrongPlatform.status, 400);
+
+  const missingState = await bridgeApiResponse({
+    method: 'POST', subpath: 'discord-server', authorization: `Bearer ${TOKEN}`,
+    body: { p: 'discord', serverId: '1234567890' }, home,
+  });
+  assert.equal(missingState.status, 400);
+  assert.equal(missingState.body.error, 'enabled must be boolean');
+});

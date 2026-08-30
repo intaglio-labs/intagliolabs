@@ -430,6 +430,7 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
         calendar: calendarTitle,
         all_day: allDay,
       };
+      if (typeof occ.location === 'string' && occ.location.trim()) meta.location = occ.location.trim();
       if (typeof occ.rrule === 'string' && occ.rrule.length > 0) meta.rrule = occ.rrule;
       const people = attendeesOf(occ);
       if (people.length > 0) meta.attendees = people;
@@ -726,11 +727,29 @@ export function createCalendarSource({ candidates = storeCandidatePaths() } = {}
 
     async run(ctx) {
       const isHistory = ctx.history === true;
-      const window = isHistory
-        ? historyWindow(ctx.now(), ctx.state.getCursor(HISTORY_CURSOR_KEY))
+      const yearly = isHistory && ctx.historyWindow?.year ? ctx.historyWindow : null;
+      let window = isHistory
+        ? (yearly ?? historyWindow(ctx.now(), ctx.state.getCursor(HISTORY_CURSOR_KEY)))
         : scanWindow(ctx.now(), Boolean(ctx.backfill));
+      if (!isHistory && !ctx.backfill && ctx.historyComplete !== true) {
+        window = {
+          ...window,
+          fromTs: Math.max(
+            window.fromTs,
+            new Date(new Date(ctx.now()).getFullYear(), 0, 1).getTime()
+          ),
+        };
+      }
       const finish = (result) => {
         if (!isHistory) return result;
+        if (yearly) {
+          return {
+            ...result,
+            historyDone: true,
+            historyHasOlder: true,
+            historyProgressed: true,
+          };
+        }
         // The cursor moves only after the selected backend read, ingest, and
         // window-limited reconciliation all succeeded. Re-running a slice is
         // harmless; skipping one would permanently lose calendar history.

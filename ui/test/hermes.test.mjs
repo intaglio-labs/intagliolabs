@@ -17,6 +17,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   DEFAULT_ALLOWED_ORIGINS,
   KNOWN_SOURCES,
+  connectorCoverage,
   defaultDbPath,
   defaultHermesTokenPath,
   insertRows,
@@ -26,6 +27,7 @@ import {
   readLlamaApiKey,
   start,
 } from '../server/hermes.mjs';
+import { refreshPeopleProjection } from '../server/people/projection.mjs';
 
 const TEST_LLAMA_KEY = 'a'.repeat(64);
 const TEST_BEARER_TOKEN = 'c'.repeat(64);
@@ -286,7 +288,7 @@ test('storage is hardened so deleted text does not survive in the free list', ()
       String(db.prepare('PRAGMA journal_mode').get().journal_mode).toLowerCase(),
       'delete'
     );
-    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 9);
+    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 10);
   } finally {
     db.close();
     rmSync(sandbox, { recursive: true, force: true });
@@ -300,7 +302,7 @@ test('in-memory databases are hardened too, minus what SQLite will not allow', (
   const db = openDb(':memory:');
   try {
     assert.equal(Number(db.prepare('PRAGMA secure_delete').get().secure_delete), 1);
-    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 9);
+    assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 10);
   } finally {
     db.close();
   }
@@ -948,7 +950,7 @@ CREATE TRIGGER IF NOT EXISTS context_au AFTER UPDATE ON context BEGIN
 END;
 `;
 
-test('a v1 database migrates in place to v9 with its rows preserved', () => {
+test('a v1 database migrates in place to v10 with its rows preserved', () => {
   const sandbox = mkdtempSync(join(tmpdir(), 'hermes-migrate-test-'));
   const dbPath = join(sandbox, 'context.db');
   try {
@@ -962,7 +964,7 @@ test('a v1 database migrates in place to v9 with its rows preserved', () => {
 
     const db = openDb(dbPath);
     try {
-      assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 9);
+      assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 10);
       const columns = db
         .prepare("SELECT name FROM pragma_table_info('context')")
         .all()
@@ -1004,6 +1006,11 @@ test('a v1 database migrates in place to v9 with its rows preserved', () => {
         .get();
       assert.ok(sourceTsIndex, 'the per-source time index exists on the migrated file');
       assert.match(sourceTsIndex.sql, /\(source, ts, entity_id\)/);
+      const evidenceColumns = db
+        .prepare("SELECT name FROM pragma_table_info('identity_evidence')")
+        .all()
+        .map((column) => column.name);
+      assert.ok(evidenceColumns.includes('confidence'), 'people identity evidence migrated with confidence');
       // ...and the upsert machinery works on the migrated file.
       const entityRow = {
         ts: 1700000001000,
@@ -1044,7 +1051,9 @@ test('every admin route refuses the browser channel with a 403', async () => {
     ['POST', '/admin/retain', { source: 'seed', keep_days: 30 }],
     ['POST', '/admin/purge', { source: 'seed' }],
     ['POST', '/admin/delete-entities', { source: 'seed', entity_ids: ['seed:x'] }],
+    ['POST', '/admin/people/clear', {}],
     ['POST', '/admin/maintain', {}],
+    ['GET', '/admin/coverage', undefined],
     ['GET', '/admin/entities?source=seed', undefined],
   ];
   for (const [method, path, body] of attempts) {
@@ -1219,9 +1228,15 @@ test('purge deletes a source and physically cleans the index, immediately', asyn
       source: 'granola',
       entity_id: 'granola:purge-1',
       text: `meeting notes about ${token} futures`,
+      meta: { participants: [{ name: 'Purge Witness', email: 'purge@example.test' }] },
     },
     { ts: 1755000001000, source: 'granola', text: `more ${token} discussion, unkeyed` },
   ]);
+  refreshPeopleProjection(admin.db, null, {
+    now: Date.now(), owner: { addresses: new Set(), names: [], keys: new Set() },
+  });
+  assert.ok(Number(admin.db.prepare('SELECT count(*) AS n FROM people').get().n) > 0);
+  assert.ok(Number(admin.db.prepare('SELECT count(*) AS n FROM person_event_links').get().n) > 0);
   assert.equal(ftsHits(admin.db, token), 2);
   const res = await adminPost('/admin/purge', { source: 'granola' });
   assert.equal(res.status, 200);
@@ -1236,10 +1251,58 @@ test('purge deletes a source and physically cleans the index, immediately', asyn
   );
   // Zero FTS matches, queried against context_fts directly...
   assert.equal(ftsHits(admin.db, token), 0);
+  assert.equal(Number(admin.db.prepare('SELECT count(*) AS n FROM people').get().n), 0,
+    'a privacy purge cannot leave derived people rows behind');
   // ...and the token is gone from the database FILE, not merely tombstoned:
   // the rebuild rewrote the index's own pages and VACUUM under secure_delete
   // zeroed the freed ones. This is the assertion that makes "purged" purged.
   assert.ok(!readFileSync(adminDbPath).includes(token));
+});
+
+test('an idempotent purge clears stale derived people even with no raw rows left', async () => {
+  await adminPost('/ingest', {
+    ts: 1755000001500,
+    source: 'instagram',
+    entity_id: 'instagram:stale-derived',
+    text: 'hello',
+    meta: { chat_handle: 'preview_person', is_from_me: false },
+  });
+  refreshPeopleProjection(admin.db, null, {
+    now: Date.now(), owner: { addresses: new Set(), names: [], keys: new Set() },
+  });
+  assert.ok(Number(admin.db.prepare('SELECT count(*) AS n FROM people').get().n) > 0);
+  assert.ok(Number(admin.db.prepare('SELECT count(*) AS n FROM person_event_links').get().n) > 0);
+
+  admin.db.prepare("DELETE FROM context WHERE source = 'instagram'").run();
+  assert.ok(Number(admin.db.prepare('SELECT count(*) AS n FROM people').get().n) > 0,
+    'the fixture intentionally leaves a stale projection behind');
+
+  const res = await adminPost('/admin/purge', { source: 'instagram' });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).deleted, 0);
+  assert.equal(Number(admin.db.prepare('SELECT count(*) AS n FROM people').get().n), 0);
+  assert.equal(Number(admin.db.prepare('SELECT count(*) AS n FROM person_event_links').get().n), 0);
+});
+
+test('the dedicated People clear route removes Contacts-derived projection rows', async () => {
+  await adminPost('/ingest', {
+    ts: 1755000001750,
+    source: 'imessage',
+    entity_id: 'imessage:contacts-clear',
+    text: 'hello',
+    meta: { chat_handle: '+15555550177', is_from_me: false },
+  });
+  refreshPeopleProjection(admin.db, null, {
+    now: Date.now(), owner: { addresses: new Set(), names: [], keys: new Set() },
+  });
+  assert.ok(Number(admin.db.prepare('SELECT count(*) AS n FROM people').get().n) > 0);
+  assert.ok(Number(admin.db.prepare('SELECT count(*) AS n FROM person_event_links').get().n) > 0);
+
+  const res = await adminPost('/admin/people/clear', {});
+  assert.equal(res.status, 200);
+  assert.ok((await res.json()).cleared > 0);
+  assert.equal(Number(admin.db.prepare('SELECT count(*) AS n FROM people').get().n), 0);
+  assert.equal(Number(admin.db.prepare('SELECT count(*) AS n FROM person_event_links').get().n), 0);
 });
 
 test('delete-entities requires source and entity_id to match as a pair', async () => {
@@ -1302,6 +1365,58 @@ test('the entities endpoint returns entity_id and ts only, windowed', async () =
     { entity_id: 'calendar:win-a', ts: T + 1000 },
     { entity_id: 'calendar:win-b', ts: T + 2000 },
   ]);
+});
+
+test('coverage returns aggregates only and keeps conversation keys inside Hermes', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE context(
+      ts INTEGER NOT NULL,
+      source TEXT NOT NULL,
+      entity_id TEXT,
+      speaker TEXT,
+      text TEXT NOT NULL,
+      meta TEXT NOT NULL
+    )
+  `);
+  const insert = db.prepare(
+    'INSERT INTO context(ts, source, entity_id, speaker, text, meta) VALUES (?, ?, ?, ?, ?, ?)'
+  );
+  const room = '!private-room:localhost';
+  const person = 'private-person@example.com';
+  insert.run(1704110400000, 'discord', '$private-event-1', person, 'private message one', JSON.stringify({ room_id: room }));
+  insert.run(1735689599000, 'discord', '$private-event-2', person, 'private message two', JSON.stringify({ room_id: room }));
+  insert.run(1706745600000, 'calendar', 'calendar:private', person, 'private event', '{}');
+  insert.run(1706745600000, 'private-source-name', 'private:id', person, 'legacy private row', '{}');
+  insert.run(1706745600000, 'discord', '$legacy-event', person, 'legacy message', 'not-json');
+  try {
+    const body = connectorCoverage(db);
+    const discord = body.sources.find((row) => row.source === 'discord');
+    assert.deepEqual(discord, {
+      source: 'discord',
+      rows: 3,
+      conversations: 1,
+      oldest_ts: 1704110400000,
+      newest_ts: 1735689599000,
+      years: [{ year: 2024, rows: 3 }],
+    });
+    assert.equal(body.sources.find((row) => row.source === 'calendar').conversations, null);
+    const encoded = JSON.stringify(body);
+    for (const secret of [
+      room, person, 'private message', '$private-event', 'calendar:private', 'private-source-name',
+    ]) {
+      assert.equal(encoded.includes(secret), false, `coverage leaked ${secret}`);
+    }
+  } finally {
+    db.close();
+  }
+});
+
+test('coverage endpoint is bearer-only and rejects query parameters', async () => {
+  const res = await adminGet('/admin/coverage');
+  assert.equal(res.status, 200);
+  assert.ok(Array.isArray((await res.json()).sources));
+  assert.equal((await adminGet('/admin/coverage?source=mail')).status, 400);
 });
 
 test('the entities endpoint rejects unknown params and non-numeric bounds', async () => {

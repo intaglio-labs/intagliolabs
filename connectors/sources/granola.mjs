@@ -84,16 +84,35 @@ const nonEmptyString = (v) => (typeof v === 'string' && v.length > 0 ? v : null)
 // order in hermes' content hash, and an unsorted list would read as an edit
 // on every delivery (ops/INGESTION.md). The same sorted list feeds both the
 // row text and meta so the two can never disagree.
-export function extractAttendees(detail) {
+export function extractParticipants(detail) {
   const raw = detail?.attendees ?? detail?.people ?? [];
   if (!Array.isArray(raw)) return [];
-  const names = [];
+  const participants = [];
   for (const a of raw) {
-    const name =
-      typeof a === 'string' ? a : (nonEmptyString(a?.name) ?? nonEmptyString(a?.email) ?? null);
-    if (name) names.push(name);
+    const name = typeof a === 'string' && !a.includes('@') ? a : nonEmptyString(a?.name);
+    const email = typeof a === 'string' && a.includes('@')
+      ? a.trim().toLowerCase()
+      : nonEmptyString(a?.email)?.trim().toLowerCase();
+    const id = typeof a === 'object' && a !== null
+      ? (nonEmptyString(a?.id) ?? nonEmptyString(a?.user_id) ?? nonEmptyString(a?.person_id))
+      : null;
+    if (!name && !email && !id) continue;
+    participants.push({
+      ...(name ? { name } : {}),
+      ...(email ? { email } : {}),
+      ...(id ? { id } : {}),
+    });
   }
-  return names.sort();
+  return participants.sort((a, b) =>
+    String(a.email ?? a.name ?? a.id).localeCompare(String(b.email ?? b.name ?? b.id))
+  );
+}
+
+export function extractAttendees(detail) {
+  return extractParticipants(detail)
+    .map((participant) => participant.name ?? participant.email ?? participant.id)
+    .filter(Boolean)
+    .sort();
 }
 
 // The note detail's field names beyond {summary_markdown, attendees} are not
@@ -145,7 +164,8 @@ export function noteStartMs(detail, listNote) {
 export function buildNoteRow(detail, listNote) {
   const id = listNote.id;
   const title = nonEmptyString(detail?.title) ?? nonEmptyString(listNote?.title);
-  const attendees = extractAttendees(detail);
+  const participants = extractParticipants(detail);
+  const attendees = participants.map((participant) => participant.name ?? participant.email ?? participant.id).filter(Boolean).sort();
   const summary = nonEmptyString(detail?.summary_markdown) ?? nonEmptyString(detail?.summary) ?? '';
   const parts = [];
   if (title) parts.push(title);
@@ -164,6 +184,7 @@ export function buildNoteRow(detail, listNote) {
       updated_at: nonEmptyString(detail?.updated_at) ?? nonEmptyString(listNote?.updated_at),
       folder: extractFolder(detail),
       attendees,
+      participants,
       calendar_event_id: extractCalendarEventId(detail),
     },
   };
@@ -207,6 +228,7 @@ export function createGranolaSource(overrides = {}) {
 
   return {
     name: 'granola',
+    walksHistory: true,
 
     async needs() {
       // existsSync only — the full permission gauntlet runs at read time in
@@ -218,6 +240,7 @@ export function createGranolaSource(overrides = {}) {
 
     async run(ctx) {
       const { state, ingest, admin, config, log, backfill } = ctx;
+      const yearly = ctx.history === true && ctx.historyWindow?.year ? ctx.historyWindow : null;
       const client = createGranolaClient({
         keyFile,
         cacheDir: join(ctx.cacheDir, 'granola'),
@@ -233,11 +256,13 @@ export function createGranolaSource(overrides = {}) {
         detail: 'Granola API returns only notes with a generated AI summary; unsummarized meetings are invisible to this connector',
       });
 
-      // Backfill paginates EVERYTHING; steady runs filter by the cursor. A
-      // steady run with no cursor yet (first ever run) is also a full scan —
-      // there is no high-water mark to pin to, and unlike chat.db the note
-      // corpus is small and bounded.
-      const updatedAfter = backfill ? null : state.getCursor(UPDATED_AFTER_CURSOR);
+      // A first steady run starts at local New Year's Day. Older notes belong
+      // to the durable year queue below; pulling the entire account here would
+      // defeat the newest-year-first UX before the coordinator gets a turn.
+      const firstSteadyFloor = new Date(new Date(ctx.now()).getFullYear(), 0, 1).toISOString();
+      const updatedAfter = (backfill || yearly)
+        ? null
+        : (state.getCursor(UPDATED_AFTER_CURSOR) ?? firstSteadyFloor);
 
       const listed = [];
       let cursor;
@@ -262,7 +287,28 @@ export function createGranolaSource(overrides = {}) {
         seenCursors.add(page.cursor);
         cursor = page.cursor;
       }
-      log.info('granola_listed', { count: listed.length, backfill: Boolean(backfill) });
+      log.info('granola_listed', {
+        count: listed.length,
+        backfill: Boolean(backfill),
+        ...(yearly ? { historyYear: yearly.year } : {}),
+      });
+
+      const currentYearFloor = new Date(new Date(ctx.now()).getFullYear(), 0, 1).getTime();
+      const selected = yearly
+        ? listed.filter((item) => {
+            const created = Date.parse(item?.created_at ?? '');
+            return Number.isFinite(created) && created >= yearly.fromTs && created < yearly.toTs;
+          })
+        : ((!backfill && ctx.historyComplete !== true)
+            ? listed.filter((item) => {
+                const created = Date.parse(item?.created_at ?? '');
+                return Number.isFinite(created) && created >= currentYearFloor;
+              })
+            : listed);
+      const oldestCreated = listed.reduce((oldest, item) => {
+        const created = Date.parse(item?.created_at ?? '');
+        return Number.isFinite(created) ? Math.min(oldest, created) : oldest;
+      }, Infinity);
 
       const rows = [];
       // Per-note transcript bookkeeping, applied only AFTER the ingest
@@ -271,7 +317,7 @@ export function createGranolaSource(overrides = {}) {
       const chunkPlans = [];
       let maxUpdatedMs = null;
 
-      for (const item of listed) {
+      for (const item of selected) {
         if (!nonEmptyString(item?.id)) throw new Error('granola /notes returned an item without an id');
         const detail = await client.getNote(item.id);
         const row = buildNoteRow(detail, item);
@@ -328,7 +374,7 @@ export function createGranolaSource(overrides = {}) {
       // Advance the cursor LAST, and only off timestamps hermes has actually
       // accepted — a run that failed above resumes from the old mark and the
       // overlap redelivers as `unchanged`. The 60 s rewind is the skew guard.
-      if (maxUpdatedMs !== null) {
+      if (!yearly && maxUpdatedMs !== null) {
         state.setCursor(UPDATED_AFTER_CURSOR, new Date(maxUpdatedMs - SKEW_GUARD_MS).toISOString());
       }
 
@@ -337,6 +383,11 @@ export function createGranolaSource(overrides = {}) {
         updated: totals.updated,
         unchanged: totals.unchanged,
         deleted,
+        ...(yearly ? {
+          historyDone: true,
+          historyHasOlder: oldestCreated < yearly.fromTs,
+          historyProgressed: selected.length > 0,
+        } : {}),
       };
     },
   };

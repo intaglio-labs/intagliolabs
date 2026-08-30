@@ -10,10 +10,13 @@
 //   GET  /api/bridge?p=<platform>          → { connected, name, transcript }
 //   POST /api/bridge/begin   {p}           → start login, returns the prompt
 //   POST /api/bridge/cookies {p, cookies}  → send the pasted cookies/cURL
+//   POST /api/bridge/discord-server {p, serverId, enabled}
+//                                             → opt one Discord server in/out
 
 import { homedir } from 'node:os';
 import {
   PLATFORMS, bridgeStatus, bridgeNeedsAppCredential, beginLogin, relay, loadPanel, loginUrlFrom,
+  discordServers, setDiscordServer,
 } from './bridge.mjs';
 import { maskOwn } from './bridgePage.mjs';
 import { bearerAuthorized } from './statusApi.mjs';
@@ -159,6 +162,10 @@ export async function bridgeApiResponse({
         // configured and the card goes straight to the login conversation.
         // Read off the config, so the same card is right either way.
         needsAppCredential: bridgeNeedsAppCredential(platformId, { home }),
+        // Discord DMs are automatic. Servers are owner opt-ins and only leave
+        // this process over the native bearer channel; server names and IDs
+        // are never written to logs or the public repository.
+        servers: platformId === 'discord' && st.connected ? discordServers({ home }) : null,
       },
     };
   };
@@ -201,6 +208,19 @@ export async function bridgeApiResponse({
       if (cookies.trim().length === 0) return { status: 400, body: { error: 'no cookies provided' } };
       const { transcript } = await relay(platformId, cookies, { home });
       return wrap(transcript);
+    }
+    if (method === 'POST' && subpath === 'discord-server') {
+      if (platformId !== 'discord') return { status: 400, body: { error: 'Discord only' } };
+      if (typeof body?.enabled !== 'boolean') {
+        return { status: 400, body: { error: 'enabled must be boolean' } };
+      }
+      const update = await setDiscordServer(body?.serverId, body.enabled, { home });
+      const response = wrap([]);
+      response.body.serverUpdate = {
+        enabled: body.enabled,
+        pending: update.pending,
+      };
+      return response;
     }
     return { status: 404, body: { error: 'no such bridge route' } };
   } catch (e) {

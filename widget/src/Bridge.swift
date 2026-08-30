@@ -73,6 +73,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                "openMonths", "voiceArm", "widgetBounds", "workStatus"],
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
+                    "bridgeDiscordServer",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
                     "status", "setConnectorEnabled", "setMotion", "setScale", "setSounds",
                     "openOnboarding", "markHandheld",
@@ -98,6 +99,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // map from the wrong file cost one broken popup in review.
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
+               "bridgeDiscordServer",
                "connectorsIntroSeen", "openExternal", "setConnectorEnabled", "connectSecret", "openApp",
                "openFullDiskAccess", "googleAuth"],
     // peopleFind: search across every year, server-ranked. peopleMap: the
@@ -692,6 +694,19 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       beginBridgeLogin(p) { [weak self] d in
         self?.reply(webView, id, d)
       }
+    case "bridgeDiscordServer":
+      // Discord DMs are automatic; this narrowly scoped write toggles one
+      // numeric guild ID from the server list returned by the local bridge.
+      // Connect validates the ID again before it reaches mautrix-discord.
+      let serverId = String((payload["serverId"] as? String ?? "").prefix(24))
+      let enabled = payload["enabled"] as? Bool ?? false
+      bridgeCall(
+        "POST", "api/bridge/discord-server",
+        json: ["p": "discord", "serverId": serverId, "enabled": enabled],
+        timeout: 60
+      ) { [weak self] d in
+        self?.reply(webView, id, d)
+      }
     case "googleAuth":
       // START THE GOOGLE SIGN-IN FROM THE TILE, with no terminal in the way.
       // The connect service spawns ops/gcal-auth.mjs, which listens on its own
@@ -824,6 +839,21 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // press on a detached row and leave only its spinner behind. This GET
         // already carries both policy and the server-authored current question:
         // resume it here, otherwise present the window below.
+        if p == "twitter", let pending = self.xPasscodeQuestion(begin) {
+          let submit = self.xPasscodeSubmit(initial: begin)
+          DispatchQueue.main.async {
+            BridgeLogin.presentPasscode(label: label, question: pending, submit: submit) { result in
+              guard result == "connected" else {
+                self.reply(webView, id, ["state": "cancelled"])
+                return
+              }
+              self.bridgeCall("GET", "api/bridge", query: ["p": p]) { final in
+                self.reply(webView, id, final)
+              }
+            }
+          }
+          return
+        }
         if let pending = begin["pendingQuestion"] as? String, !pending.isEmpty {
           self.reply(webView, id, begin)
           return
@@ -856,14 +886,59 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           return
         }
         DispatchQueue.main.async {
+          let inlineX = p == "twitter"
+          var afterHarvest: BridgeLogin.HarvestContinuation?
+          if inlineX {
+            afterHarvest = { cookiesJSON, login in
+              self.beginBridgeLogin(p) { started in
+                guard started["state"] as? String == "ok" else {
+                  let message = started["error"] as? String ?? "couldn't start the local X connector"
+                  DispatchQueue.main.async { login.showFailure(message) }
+                  return
+                }
+                self.bridgeCall(
+                  "POST", "api/bridge/cookies",
+                  json: ["p": p, "cookies": cookiesJSON], timeout: 15
+                ) { first in
+                  self.awaitXBridgeStep(first) { next in
+                    DispatchQueue.main.async {
+                      if next["connected"] as? Bool == true {
+                        login.completeInlineLogin()
+                      } else if let question = self.xPasscodeQuestion(next) {
+                        login.showPasscode(
+                          question: question,
+                          submit: self.xPasscodeSubmit(initial: next)
+                        )
+                      } else {
+                        let message = next["error"] as? String
+                          ?? "X didn't finish linking — close and try again"
+                        login.showFailure(message)
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
           BridgeLogin.present(
             label: label, loginUrl: loginUrl, cookieDomain: cookieDomain,
             sessionCookie: sessionCookie, allowedHosts: allowedHosts,
             requiredCookies: requiredCookies, cookieFormat: cookieFormat,
             fields: fields, approval: approval, userAgent: userAgent,
             allowedFrameHosts: allowedFrameHosts, storageUrl: storageUrl,
-            windowWidth: windowWidth
+            windowWidth: windowWidth,
+            afterHarvest: afterHarvest
           ) { cookiesJSON in
+            if inlineX {
+              guard cookiesJSON == "connected" else {
+                self.reply(webView, id, ["state": "cancelled"])
+                return
+              }
+              self.bridgeCall("GET", "api/bridge", query: ["p": p]) { final in
+                self.reply(webView, id, final)
+              }
+              return
+            }
             guard let cookiesJSON else {
               self.reply(webView, id, ["state": "cancelled"])
               return
@@ -1690,7 +1765,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     var endingStreak = 0
     // Main thread: this is reached from a URLSession completion, and it puts a
     // window on screen.
-    DispatchQueue.main.async {
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
       BridgeLogin.presentQR(
         label: label,
         // Owner's wording (2026-08-26). Not "the Discord app": a phone camera
@@ -1744,6 +1820,72 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // paints from the same source every other path uses.
         self.bridgeCall("GET", "api/bridge", query: ["p": p]) { done in
           self.reply(webView, id, done)
+        }
+      }
+    }
+  }
+
+  private func xPasscodeQuestion(_ state: [String: Any]) -> String? {
+    guard let question = state["pendingQuestion"] as? String,
+          !question.isEmpty,
+          question.range(of: "\\b(pin|passcode)\\b", options: [.regularExpression, .caseInsensitive]) != nil
+    else { return nil }
+    return question
+  }
+
+  /// Only bot lines count as progress. The relay echoes the owner's masked
+  /// answer immediately, while the bridge may take several more seconds to
+  /// accept or reject it; treating that echo as a reply would offer a retry
+  /// before X had answered.
+  private func bridgeBotSignature(_ state: [String: Any]) -> String {
+    let transcript = state["transcript"] as? [[String: Any]] ?? []
+    return transcript.compactMap { line -> String? in
+      guard line["from"] as? String == "bot" else { return nil }
+      return "\(line["ts"] ?? "")|\(line["body"] as? String ?? "")"
+    }.joined(separator: "\u{0000}")
+  }
+
+  /// Wait for X's bridge—not merely the HTTP request—to advance. Used once
+  /// after cookies (waiting for the encrypted-DM question) and after each
+  /// passcode answer (waiting for connected or a validation response).
+  private func awaitXBridgeStep(
+    _ state: [String: Any], afterBotSignature: String? = nil, attempt: Int = 0,
+    _ done: @escaping ([String: Any]) -> Void
+  ) {
+    if state["connected"] as? Bool == true { done(state); return }
+    let botChanged = afterBotSignature == nil || bridgeBotSignature(state) != afterBotSignature
+    if botChanged && xPasscodeQuestion(state) != nil { done(state); return }
+    if state["state"] as? String != "ok" || attempt >= 14 { done(state); return }
+    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 1.25) { [weak self] in
+      guard let self else { return }
+      self.bridgeCall("GET", "api/bridge", query: ["p": "twitter"]) { next in
+        self.awaitXBridgeStep(
+          next, afterBotSignature: afterBotSignature, attempt: attempt + 1, done
+        )
+      }
+    }
+  }
+
+  private func xPasscodeSubmit(initial state: [String: Any]) -> BridgeLogin.PasscodeSubmit {
+    var current = state
+    return { [weak self] value, report in
+      guard let self else { report(.retry("the local X connector stopped — try again")); return }
+      let before = self.bridgeBotSignature(current)
+      self.bridgeCall(
+        "POST", "api/bridge/cookies", json: ["p": "twitter", "cookies": value], timeout: 15
+      ) { first in
+        self.awaitXBridgeStep(first, afterBotSignature: before) { final in
+          current = final
+          if final["connected"] as? Bool == true {
+            report(.connected)
+          } else if self.xPasscodeQuestion(final) != nil {
+            report(.retry("that passcode didn't work — try again"))
+          } else {
+            let detail = final["error"] as? String
+            report(.retry(detail?.isEmpty == false
+              ? detail!
+              : "X is still finishing — try again in a moment"))
+          }
         }
       }
     }

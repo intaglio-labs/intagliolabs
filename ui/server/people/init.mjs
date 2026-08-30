@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { buildGraph } from './graph.mjs';
+import { materializedPeopleGraph } from './projection.mjs';
 import { ensureResolutionsSchema, resolutionState, candidatePairs, recordDecision } from './resolve.mjs';
 
 const DAY = 86_400_000;
@@ -60,7 +60,7 @@ function sinceFromDays(days, now) {
 export function peopleReview(contextDb, stateDb, resDb, { days = 0, now = Date.now(), owner, limit = 40 } = {}) {
   const { aliases, decided } = resolutionState(resDb);
   const sinceTs = sinceFromDays(days, now);
-  const graph = buildGraph(contextDb, stateDb, { now, owner, sinceTs, aliases });
+  const graph = materializedPeopleGraph(contextDb, stateDb, { now, owner, sinceTs, aliases });
   const { pairs, total, dropped } = candidatePairs(graph, { decided, limit });
   return { people: graph.length, review: total, dropped, days: Number(days) || 0, pairs };
 }
