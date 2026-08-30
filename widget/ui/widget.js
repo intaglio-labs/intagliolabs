@@ -435,22 +435,15 @@ refreshWorkState();
 setInterval(refreshWorkState, 1500);
 
 // The reconnect poll: is there a card for the owner? Every 10 minutes, plus
-// once shortly after launch. A served card lights the notify face and posts
-// its 'shown' event exactly once per snapshot -- 'shown' is what the global
-// frequency cap counts, so it must mean "the orb actually lit", not "the
-// widget asked".
-const relShown = new Set();
+// once shortly after launch. 'shown' is recorded by HERMES when it first
+// hands a card out -- recording it here double-counted every widget relaunch
+// into the global cap and could race the popup out of the last cap slot
+// (audit, reproduced). The page just renders what it is given.
 async function refreshRelCard() {
   try {
     const out = await hzPost('relCard');
-    const card = out?.card ?? null;
-    cardPending = card;
-    if (card && Number.isInteger(card.snapshot_id) && !relShown.has(card.snapshot_id)) {
-      relShown.add(card.snapshot_id);
-      badge.textContent = '1';
-      hzPost('relEvent', { snapshot_id: card.snapshot_id, person_key: card.personKey, event: 'shown' })
-        .catch(() => {});
-    }
+    cardPending = out?.card ?? null;
+    if (cardPending) badge.textContent = '1';
   } catch {
     cardPending = null;
   }

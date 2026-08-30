@@ -100,10 +100,10 @@ export function createControls(db, { canonicalOf = (k) => k } = {}) {
     // reached from a card -- the plan lists it among the reasons precisely so
     // suppression is one tap away; the reason row and the suppression row
     // land in the same transaction so neither can exist without the other.
-    dismiss({ personKey, kind, reason = null, note = null, ruleVersion, now = Date.now() }) {
+    dismiss({ personKey, kind, reason = null, note = null, ruleVersion, snapshotId = null, now = Date.now() }) {
       db.exec('BEGIN');
       try {
-        this.recordEvent({ personKey, kind, event: 'dismissed', reason, note, ruleVersion, now });
+        this.recordEvent({ personKey, kind, event: 'dismissed', reason, note, ruleVersion, snapshotId, now });
         if (reason === 'never-this-person') this.suppress(personKey, now);
         db.exec('COMMIT');
       } catch (error) {

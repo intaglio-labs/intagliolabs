@@ -1,6 +1,8 @@
 # L5 Relationship Memory experiment
 
-Status: plan only; nothing in this document is shipped.
+Status: ~~plan only; nothing in this document is shipped~~ steps 1-10 of the
+implementation order are built on the experiment branch as of 2026-08-30; the
+sealed Phase 0 (step 8) and shadow-mode scheduling (step 9) remain open.
 
 This branch is an explicit exception to the repository's normal rule against
 checking in experiment plans. It exists so the L5 memory experiment can be
@@ -517,10 +519,15 @@ accurate, auditable, and not a reason anyone would act on. Content-grounded
 matching enters scope: rank dormant candidates by overlap between the
 owner's CURRENT conversation topics (last 45 days, curated topic signals,
 code only) and each candidate's topical history, and compose the one-line
-"why" with the LOCAL model from labels and counts only. Message text still
-never reaches any model for this surface, and nothing leaves the box. The
-counted-facts receipt remains on every card as the audit trail; what changed
-is which facts lead.
+"why" with the LOCAL model. ~~from labels and counts only. Message text still
+never reaches any model for this surface~~ Corrected 2026-08-30 (the audit
+caught this sentence describing an earlier iteration): the shipped matcher
+feeds speaker-tagged message excerpts and the last conversation's tail to the
+LOCAL model -- the same class of read the distiller has always performed --
+and what never happens is any of it leaving the box. The card's quote is
+stored by reference and resolved from the live row at serve time, so source
+deletion silences it. The counted-facts receipt remains on every card as the
+audit trail; what changed is which facts lead.
 
 ## Continuous evaluation
 

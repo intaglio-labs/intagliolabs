@@ -45,7 +45,14 @@ export const VOUCH_STALE_AFTER = Object.freeze({
 
 export const RECONNECT_RULES_VERSION = 'rm-reconnect-v1';
 
-export function reconnectAdapter({ intervalDays, minMessages, limit = 15 } = {}) {
+// The pre-registered Phase 0 control gates, exported so every consumer -- this
+// adapter, the rank baseline, and the matcher -- reads ONE set of numbers.
+// The audit found the matcher re-inlining these as literals, which made the
+// documented tuning knob (these defaults, overridden by the promotion-gates
+// artifact) a knob that tuned nothing production ran.
+export const RECONNECT_GATES = Object.freeze({ minMessages: 8, intervalDays: 180 });
+
+export function reconnectAdapter({ intervalDays = RECONNECT_GATES.intervalDays, minMessages = RECONNECT_GATES.minMessages, limit = 15 } = {}) {
   return {
     name: 'reconnect-messages',
     candidates(service, { now = Date.now() } = {}) {

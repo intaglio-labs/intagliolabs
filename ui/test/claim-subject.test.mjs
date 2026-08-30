@@ -163,6 +163,22 @@ test('v10 rebuilds the claim table: rows, receipts, decisions and FTS all surviv
   ).run(), /CHECK/);
 });
 
+test('a pre-v9 database (no valid_to) migrates without bricking -- the v0.1.0 case', () => {
+  // v0.1.0 shipped at SCHEMA_VERSION 6: claim table with the old CHECK and
+  // no valid_to column. The rebuild runs before the v9 branch, so it must
+  // supply the column itself or every open fails forever.
+  const path = join(mkdtempSync(join(tmpdir(), 'claim-v10-')), 'context.db');
+  buildV9Db(path);
+  const raw = new DatabaseSync(path);
+  raw.exec('PRAGMA foreign_keys = OFF');
+  raw.exec('ALTER TABLE claim DROP COLUMN valid_to');
+  raw.exec('PRAGMA user_version = 6');
+  raw.close();
+  const db = openDb(path);
+  assert.equal(db.prepare('SELECT text FROM claim WHERE id = 7').get().text, 'the owner prefers fridays');
+  assert.equal(Number(db.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('claim') WHERE name='subject_person_key'").get().n), 1);
+});
+
 test('a mis-stamped database heals: v10 stamp, v9 table -- the production incident', () => {
   // The exact state found on the reference install 2026-08-29: something
   // stamped user_version 10 without rebuilding, and a stamp-trusting migrate

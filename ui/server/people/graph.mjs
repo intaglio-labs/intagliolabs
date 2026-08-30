@@ -81,6 +81,12 @@ export function relationshipHistoryFloor(contextDb, now = Date.now()) {
   return Number.isFinite(oldest) ? oldest : null;
 }
 
+// Exported as normPersonName: the relationship modules mint 'name:<norm>'
+// person keys and MUST normalize identically or one human splits into two
+// keys across modules -- the audit found four private copies of this
+// function. resolve.mjs keeps its own copy with the same body by documented
+// intent ("Same normalizer the graph uses"); new code imports this one.
+export { normName as normPersonName };
 function normName(s) {
   return String(s ?? '')
     .toLowerCase()

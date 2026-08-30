@@ -1096,7 +1096,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
 
     case "relEvent":
       var evt: [String: Any] = [:]
-      for k in ["snapshot_id", "person_key", "event", "reason", "mute_days"] {
+      // "note" is the owner's free-text why -- the field the whole feedback
+      // loop exists to capture; the audit found this allowlist silently
+      // dropping it while every other layer handled it.
+      for k in ["snapshot_id", "person_key", "event", "reason", "note", "mute_days"] {
         if let v = payload[k] { evt[k] = v }
       }
       relHermes("POST", "admin/relationship/event", json: evt) { [weak self] out in

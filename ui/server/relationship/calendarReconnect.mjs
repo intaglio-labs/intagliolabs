@@ -24,6 +24,9 @@
 // scoring tweak in the Phase 0 join arm.
 
 export const CAL_RECONNECT_RULES_VERSION = 'rm-cal-reconnect-v1';
+
+// Phase 0 arm-3 gates, one copy for adapter and matcher alike.
+export const CAL_GATES = Object.freeze({ minMeetings: 3, dormancyDays: 120, maxAttendees: 8 });
 const DAY = 86_400_000;
 
 function normName(s) {
@@ -35,7 +38,7 @@ function normName(s) {
     .trim();
 }
 
-export function calendarReconnectAdapter({ minMeetings = 3, dormancyDays = 120, maxAttendees = 8, limit = 15 } = {}) {
+export function calendarReconnectAdapter({ minMeetings = CAL_GATES.minMeetings, dormancyDays = CAL_GATES.dormancyDays, maxAttendees = CAL_GATES.maxAttendees, limit = 15 } = {}) {
   return {
     name: 'reconnect-calendar',
     candidates(service, { now = Date.now() } = {}) {

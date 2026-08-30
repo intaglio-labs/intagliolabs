@@ -749,9 +749,12 @@ END;
 
 /* Card outcome events, append-only: shown / opened / accepted / dismissed /
    muted / suppressed, by person key, kind, LOCAL time band and rule version.
-   The plan's logging contract -- product events without source text (rule 4
-   binds here too: no text column exists to misuse). 'shown' rows are what the
-   global frequency cap counts; a dismissal's structured reason rides the same
+   The plan's logging contract -- product events without SOURCE text: the
+   only text columns are the closed dismissal-reason enum and the owner's own
+   free-text note, never a row's content. 'shown' rows are what the
+   global frequency cap counts, and they are recorded by the SERVER when a
+   card is first handed out -- client-side recording double-counted
+   relaunches into the cap; a dismissal's structured reason rides the same
    event rather than a parallel table, so one query answers "what happened to
    this card". The experiment does not retune itself from these rows; they are
    labeled input for a reviewed, versioned threshold change (the plan's exact
@@ -781,6 +784,9 @@ CREATE TABLE IF NOT EXISTS rm_card_event(
   created_at   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS rm_card_event_shown ON rm_card_event(event, created_at);
+/* The card route's acted/shown checks key on snapshot_id against a table
+   whose no-delete trigger means it only ever grows. */
+CREATE INDEX IF NOT EXISTS rm_card_event_snapshot ON rm_card_event(snapshot_id);
 CREATE TRIGGER IF NOT EXISTS rm_card_event_no_update
 BEFORE UPDATE ON rm_card_event BEGIN
   SELECT RAISE(ABORT, 'card events are append-only: the record of what the owner was shown is not editable');
@@ -795,9 +801,11 @@ END;
    that yielded nothing and a pass the cap refused: a zero is a measurement
    (the same lesson distill_run learned about empty episodes), and shadow
    mode's numbers -- candidate frequency, repeat rate, cap pressure -- are
-   computed from these rows, not remembered. Snapshot rows carry counted
-   facts only; there is no text column to misuse, and 'evidence' is the
-   candidate's counted-facts object as canonical JSON. Immutable in fact:
+   computed from these rows, not remembered. Snapshot rows never carry
+   SOURCE text: 'summary' is the producer's derived sentence, and 'evidence'
+   is counted facts plus references (a quote lands as quote_context_id and is
+   resolved against the live row at serve time, so deletion of the source
+   deletes the quote's availability -- see the card route). Immutable in fact:
    update AND delete triggers, same as the event log, because a snapshot
    that can be tidied up afterwards is not a snapshot. */
 CREATE TABLE IF NOT EXISTS rm_candidate_batch(
@@ -1139,6 +1147,16 @@ function rebuildClaimTableForV10(db) {
       .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'claim'")
       .get();
     if (claimDef !== undefined && /subject\s*=\s*'owner'/u.test(String(claimDef.sql))) {
+      // This runs BEFORE the numbered branches, so a pre-v9 database (v0.1.0
+      // shipped at SCHEMA_VERSION 6) reaches it with no valid_to column yet
+      // -- and the copy below names valid_to. The audit caught this as a
+      // bricking bug: the copy threw 'no such column', the open failed, and
+      // failed identically forever. The guarded ALTER is v9's own, done
+      // early; v9's branch stays idempotent behind the same column check.
+      const cols = new Set(
+        db.prepare("SELECT name FROM pragma_table_info('claim')").all().map((c) => c.name)
+      );
+      if (!cols.has('valid_to')) db.exec('ALTER TABLE claim ADD COLUMN valid_to INTEGER');
       db.exec('PRAGMA foreign_keys = OFF');
       db.exec('BEGIN');
       try {
@@ -2371,11 +2389,19 @@ function relationshipState(db, policy) {
     const service = createRelationshipMemory({ contextDb: db, stateDb, resolutionsDb: resDb,
       ...(owner ? { owner } : {}) });
     const llamaCall = async (messages, max_tokens = 120, temperature = 0.2) => {
+      // Same hardening as every other llama call site (summary.mjs's words:
+      // "same rule as every other llama call here"): a timeout so one hung
+      // completion cannot wedge rel.refreshing forever, and redirect:'error'
+      // so a compromised loopback cannot bounce the key or the content onto
+      // the network. The audit caught this copy without either.
       const upstream = await fetch(`${policy.llama.baseUrl}/v1/chat/completions`, {
         method: 'POST',
+        redirect: 'error',
+        signal: AbortSignal.timeout(120_000),
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${policy.llama.apiKey()}` },
         body: JSON.stringify({ messages, max_tokens, temperature }),
       });
+      if (!upstream.ok) throw new Error(`llama answered ${upstream.status}`);
       const body = await upstream.json();
       return body?.choices?.[0]?.message?.content?.trim() ?? null;
     };
@@ -2443,9 +2469,15 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       const ins = db.prepare(
         'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
       for (const card of result.cards) {
+        // The quote lands as a REFERENCE (context id), never as copied text:
+        // this table refuses DELETE, and the audit caught verbatim message
+        // text headed into it -- words that would have outlived their row's
+        // deletion. Serve time resolves the reference against the live row,
+        // so a deleted source drops the quote (and the card) by construction.
         card.snapshot_id = Number(ins.run(batchId, card.personKey, card.kind, card.sentence,
-          JSON.stringify({ quote: card.quote, role: card.role, focus: card.focus, label: card.label,
-            left: card.left, leftTone: card.leftTone, ...card.evidence }),
+          JSON.stringify({ quote_context_id: card.quoteContextId ?? null, role: card.role,
+            focus: card.focus, label: card.label, left: card.left, leftTone: card.leftTone,
+            ...card.evidence }),
           card.producer_version, 'combined-v13', now).lastInsertRowid);
       }
       rel.batchId = batchId;
@@ -2468,9 +2500,35 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event IN ('accepted','dismissed') LIMIT 1"
       ).get(card.snapshot_id);
       if (acted) continue;
-      const gate = rel.service.controls.allowCard({ personKey: card.personKey, kind: card.kind, cap });
-      if (!gate.allowed) { if (gate.reason === 'global-cap') break; continue; }
-      send(res, 200, { card }, cors);
+      // 'shown' is recorded HERE, once per snapshot, when the card is first
+      // handed out for display -- not by the widget. Client-side recording
+      // (the audit's repro) double-counted every relaunch into the cap and
+      // made the last-slot card a phantom: its own 'shown' beat the popup's
+      // fetch to the cap check. A snapshot that already spent its slot passes
+      // the cap gate; the cap limits distinct interruptions, not fetches.
+      const alreadyShown = db.prepare(
+        "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event = 'shown' LIMIT 1"
+      ).get(card.snapshot_id);
+      if (!alreadyShown) {
+        const gate = rel.service.controls.allowCard({ personKey: card.personKey, kind: card.kind, cap });
+        if (!gate.allowed) { if (gate.reason === 'global-cap') break; continue; }
+        rel.service.controls.recordEvent({ personKey: card.personKey, kind: card.kind,
+          event: 'shown', ruleVersion: card.producer_version, snapshotId: card.snapshot_id });
+      } else {
+        const gate = rel.service.controls.allowCard({ personKey: card.personKey, kind: card.kind,
+          cap: { max: Number.MAX_SAFE_INTEGER, windowMs: 1 } });
+        if (!gate.allowed) continue; // suppression/mute still bind a shown card
+      }
+      // Resolve the quote from the LIVE row. Row gone or edited: the receipt
+      // is gone, so the card is gone -- the deletion cascade, honored at
+      // serve time instead of violated at store time.
+      let quote = null;
+      if (Number.isInteger(card.quoteContextId)) {
+        const row = db.prepare('SELECT text FROM context WHERE id = ?').get(card.quoteContextId);
+        if (row === undefined) continue;
+        quote = String(row.text).slice(0, 200);
+      }
+      send(res, 200, { card: { ...card, quote } }, cors);
       return;
     }
     send(res, 200, { card: null, ...(rel.refreshing ? { refreshing: true } : {}),
@@ -2493,9 +2551,12 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       rel.service.controls.recordEvent({ personKey: person_key, kind: 'reconnect', event: 'muted',
         ruleVersion: MATCH_RULES_VERSION, snapshotId: snapId });
     } else if (event === 'dismissed') {
+      // snapshotId rides along or the card comes BACK: the acted-check keys
+      // on it, and a NULL here made every plain dismissal a no-op (audit,
+      // reproduced live).
       rel.service.controls.dismiss({ personKey: person_key, kind: 'reconnect',
         reason: typeof reason === 'string' && reason.length > 0 ? reason : null,
-        note: ownerNote, ruleVersion: MATCH_RULES_VERSION });
+        note: ownerNote, ruleVersion: MATCH_RULES_VERSION, snapshotId: snapId });
     } else {
       rel.service.controls.recordEvent({ personKey: person_key, kind: 'reconnect', event,
         note: ownerNote, ruleVersion: MATCH_RULES_VERSION, snapshotId: snapId });

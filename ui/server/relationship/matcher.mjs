@@ -27,7 +27,17 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { TOPIC_SIGNALS, isAutomatedRow } from '../people/topics.mjs';
-import { VOUCHABLE_CHANNELS, VOUCH_STALE_AFTER } from './reconnect.mjs';
+import { fromMe } from '../memory/episodes.mjs';
+import { normPersonName as normName } from '../people/graph.mjs';
+import { VOUCHABLE_CHANNELS, VOUCH_STALE_AFTER, RECONNECT_GATES } from './reconnect.mjs';
+import { CAL_GATES } from './calendarReconnect.mjs';
+
+// hermes is single-threaded and node:sqlite calls are synchronous: a refresh
+// that scans thousands of rows per candidate back-to-back pins the event loop
+// and every other surface -- people page, summaries, chat -- reads as a
+// frozen app (owner report, 2026-08-30). Yield between units of work so the
+// server keeps answering while the matcher grinds.
+const breathe = () => new Promise((resolve) => setImmediate(resolve));
 
 export const MATCH_RULES_VERSION = 'rm-match-v13';
 
@@ -44,10 +54,7 @@ const STOP = new Set(['texting', 'text', 'them', 'their', 'they', 'helps', 'help
   'feedback', 'testing', 'experience', 'input', 'thoughts', 'review', 'reviewing', 'refine',
   'refining', 'issues', 'prioritize', 'prioritizing']);
 
-function normName(s) {
-  return String(s ?? '').toLowerCase().normalize('NFKD')
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/gu, ' ').trim();
-}
+
 
 function parseJson(raw) {
   try { return JSON.parse(String(raw).replace(/^```json?\s*|```\s*$/g, '')); } catch { return null; }
@@ -81,12 +88,12 @@ export async function buildMatchedCards(service, { llamaCall, now = Date.now(), 
     }
   }
   for (const r of contextDb.prepare(
-    `SELECT text, meta FROM context WHERE ts > ? AND source IN ${MSG_SOURCES} ORDER BY ts DESC`)
+    `SELECT text, meta FROM context WHERE ts > ? AND source IN ${MSG_SOURCES} ORDER BY ts DESC LIMIT 6000`)
     .all(now - 45 * DAY)) {
     if (ownerLines.length >= 90) break;
-    let fromMe = false;
-    try { fromMe = JSON.parse(r.meta ?? '{}')?.is_from_me === true; } catch {}
-    if (!fromMe) continue;
+    let mine = false;
+    try { mine = fromMe(JSON.parse(r.meta ?? '{}')); } catch {}
+    if (!mine) continue;
     const t = String(r.text);
     if (isAutomatedRow(t)) continue;
     if (currentTopics.some(([topic]) => TOPIC_SIGNALS[topic].test(t))) ownerLines.push(t.slice(0, 200));
@@ -112,7 +119,14 @@ export async function buildMatchedCards(service, { llamaCall, now = Date.now(), 
 
   // ---- calendar stats for everyone --------------------------------------
   const calStats = new Map();
-  if (stateDb) {
+  // Forward coverage first, same gate as calendarReconnect.mjs (the audit
+  // caught this copy WITHOUT it): if the calendar pipe is not demonstrably
+  // delivering ahead of now, every future count would read zero, the
+  // seeing-them-Tuesday veto could never fire, and "nothing scheduled" would
+  // be a claim about a dead sync. No forward rows, no calendar signal at all.
+  const calMaxTs = Number(contextDb.prepare(
+    "SELECT MAX(ts) AS m FROM context WHERE source = 'calendar'").get()?.m ?? 0);
+  if (stateDb && calMaxTs > now) {
     const byEmail = new Map(); const namedKeys = new Set();
     for (const r of stateDb.prepare('SELECT identifier, display_name FROM contact_ids').all()) {
       const id = String(r.identifier).toLowerCase();
@@ -120,10 +134,12 @@ export async function buildMatchedCards(service, { llamaCall, now = Date.now(), 
       if (!emailShaped) namedKeys.add(normName(r.display_name));
       if (id.includes('@')) byEmail.set(id, { key: `name:${normName(r.display_name)}`, emailShaped });
     }
+    let calSeen = 0;
     for (const row of contextDb.prepare(
-      `SELECT ts, text, meta FROM context WHERE source='calendar' AND meta LIKE '%"attendees"%'`).all()) {
+      `SELECT id, ts, text, meta FROM context WHERE source='calendar' AND meta LIKE '%"attendees"%'`).all()) {
+      if ((calSeen += 1) % 2000 === 0) await breathe();
       let atts; try { atts = JSON.parse(row.meta)?.attendees; } catch { continue; }
-      if (!Array.isArray(atts) || atts.length === 0 || atts.length > 8) continue;
+      if (!Array.isArray(atts) || atts.length === 0 || atts.length > CAL_GATES.maxAttendees) continue;
       for (const a of atts) {
         if (a?.response === 'declined') continue;
         const hit = byEmail.get(String(a?.email ?? '').toLowerCase());
@@ -138,7 +154,8 @@ export async function buildMatchedCards(service, { llamaCall, now = Date.now(), 
         if (row.ts <= now) {
           c.met += 1; if (row.ts > c.lastMet) c.lastMet = row.ts;
           if (c.titles.length < 12 && String(row.text).length > 3) {
-            c.titles.push(`meeting [${new Date(row.ts).getFullYear()}]: ${String(row.text).slice(0, 120)}`);
+            c.titles.push({ tag: `meeting [${new Date(row.ts).getFullYear()}]: ${String(row.text).slice(0, 120)}`,
+              cid: Number(row.id) });
           }
         } else c.future += 1;
       }
@@ -151,11 +168,13 @@ export async function buildMatchedCards(service, { llamaCall, now = Date.now(), 
     if (!p.key.startsWith('name:')) return false;
     const cal = calStats.get(p.key);
     if (cal && cal.future > 0) return false; // seeing them Tuesday: no card
-    const msgEligible = p.messages >= 8 && p.dormancyDays !== null && p.dormancyDays >= 180 &&
+    const msgEligible = p.messages >= RECONNECT_GATES.minMessages &&
+      p.dormancyDays !== null && p.dormancyDays >= RECONNECT_GATES.intervalDays &&
       (p.channels ?? []).some((ch) => VOUCHABLE_CHANNELS.includes(ch)) &&
       (p.channels ?? []).filter((ch) => VOUCHABLE_CHANNELS.includes(ch))
         .every((ch) => coverage.spansDormancy(ch, p.dormancyDays));
-    const calEligible = cal && cal.met >= 3 && (now - cal.lastMet) >= 120 * DAY;
+    const calEligible = cal && cal.met >= CAL_GATES.minMeetings &&
+      (now - cal.lastMet) >= CAL_GATES.dormancyDays * DAY;
     if (!msgEligible && !calEligible) return false;
     return !service.controls.isSuppressed(p.key) &&
       !service.controls.isMuted({ personKey: p.key, kind: 'reconnect', now });
@@ -163,12 +182,12 @@ export async function buildMatchedCards(service, { llamaCall, now = Date.now(), 
 
   // ---- topical history + combined score ----------------------------------
   const memberTexts = contextDb.prepare(
-    `SELECT e.id AS eid, e.started_at, x.text, x.meta
+    `SELECT e.id AS eid, e.started_at, x.id AS cid, x.text, x.meta
      FROM episode e JOIN episode_member m ON m.episode_id = e.id
      JOIN context x ON x.id = m.context_id
      WHERE e.counterparty_key = ? ORDER BY e.started_at DESC LIMIT 4000`);
   const speakerOf = (meta) => {
-    try { return JSON.parse(meta ?? '{}')?.is_from_me === true ? 'you' : 'them'; } catch { return 'them'; }
+    try { return fromMe(JSON.parse(meta ?? '{}')) ? 'you' : 'them'; } catch { return 'them'; }
   };
   function topicHistory(key) {
     const perTopic = new Map();
@@ -189,26 +208,40 @@ export async function buildMatchedCards(service, { llamaCall, now = Date.now(), 
       years: h.minY === h.maxY ? String(h.minY) : `${h.minY}–${h.maxY}`,
     })).sort((a, b) => b.conversations - a.conversations);
   }
+  // Excerpts carry the context id of the row behind each line: the card's
+  // quote is stored BY REFERENCE (context_id + resolve-at-serve), never as
+  // copied text -- the audit found verbatim quotes landing in the
+  // no-delete snapshot table, where a deleted message's words would have
+  // survived forever. The plan's words: "references and rule results, not
+  // copied source text."
   function excerptsFor(key) {
     const work = [], social = [];
     for (const r of memberTexts.all(key)) {
       if (work.length >= 20) break;
       const t = String(r.text);
       if (isAutomatedRow(t) || t.length < 40) continue;
-      const tag = `${speakerOf(r.meta)} [${new Date(r.started_at).getFullYear()}]: ${t.slice(0, 180)}`;
-      if (TOPIC_SIGNALS['product & startup'].test(t) || TOPIC_SIGNALS['fundraising'].test(t)) work.push(tag);
-      else if (currentTopics.some(([topic]) => TOPIC_SIGNALS[topic].test(t))) social.push(tag);
+      const entry = { tag: `${speakerOf(r.meta)} [${new Date(r.started_at).getFullYear()}]: ${t.slice(0, 180)}`,
+        cid: Number(r.cid) };
+      if (TOPIC_SIGNALS['product & startup'].test(t) || TOPIC_SIGNALS['fundraising'].test(t)) work.push(entry);
+      else if (currentTopics.some(([topic]) => TOPIC_SIGNALS[topic].test(t))) social.push(entry);
     }
     return [...work, ...social.slice(0, Math.max(0, 20 - work.length))];
   }
 
-  const scored = pool.map((p) => {
+  // The scoring pass is the freeze: one synchronous multi-thousand-row scan
+  // per pool member, hundreds of members. Yield between each so hermes keeps
+  // answering; the work is the same, the event loop just breathes.
+  const prescored = [];
+  for (const p of pool) {
     const hist = topicHistory(p.key);
     const cal = calStats.get(p.key) ?? null;
     const topicScore = hist.reduce((s, h) => s + h.conversations, 0);
     const score = topicScore + 4 * Math.log(1 + (cal?.met ?? 0));
-    return { p, hist, cal, score, topicScore, label: labelFor(p) };
-  }).filter((c) => c.topicScore >= 3 || (c.cal?.met ?? 0) >= 3)
+    prescored.push({ p, hist, cal, score, topicScore, label: labelFor(p) });
+    await breathe();
+  }
+  const scored = prescored
+    .filter((c) => c.topicScore >= 3 || (c.cal?.met ?? 0) >= CAL_GATES.minMeetings)
     .sort((a, b) => b.score - a.score).slice(0, limit);
 
   // ---- last-conversation ending ------------------------------------------
@@ -232,9 +265,10 @@ export async function buildMatchedCards(service, { llamaCall, now = Date.now(), 
 
   // ---- write, then verify ------------------------------------------------
   async function why(c) {
-    const excerpts = excerptsFor(c.p.key);
-    if (c.cal?.titles?.length) excerpts.push(...c.cal.titles.slice(0, 8));
-    if (excerpts.length === 0) return null;
+    const entries = excerptsFor(c.p.key);
+    if (c.cal?.titles?.length) entries.push(...c.cal.titles.slice(0, 8));
+    if (entries.length === 0) return null;
+    const excerpts = entries.map((e) => e.tag);
     const messages = [
       { role: 'system', content:
         'The owner has current focus items (numbered) and excerpt lines from past conversations with one person; each line is prefixed "you:" (the owner spoke), "them:" (this person spoke), or "meeting" (a shared calendar event title). Answer in STRICT JSON, nothing else: {"focus": <the ONE focus item this person genuinely helps with, copied verbatim from the numbered list>, "role": <what this person actually does / is to the owner, 3-8 words, judged ONLY from the excerpts>, "sentence": <ONE sentence: why texting them helps with that focus item>, "quote": <one "them:" or "meeting" excerpt line, COPIED VERBATIM with its prefix, showing the thing the sentence relies on>}. Rules: the quote must be THEIR words or a shared meeting, never a "you:" line. The need in the sentence must be the chosen focus item, never a topic imported from their conversation. The ask must fit what the person DOES. The sentence must propose or point at a concrete ACTION -- an intro, an invite, a demo, a specific ask. When a relationship label is given, the ask must make sense FOR that relationship. Never write: reignite, meaningful, shared history, suggests, foundation, insights, strategies. No day counts.' },
@@ -246,11 +280,13 @@ export async function buildMatchedCards(service, { llamaCall, now = Date.now(), 
       const { focus, role, sentence, quote } = obj ?? {};
       if (typeof sentence !== 'string' || sentence.length < 20 || FILLER.test(sentence)) return null;
       if (typeof quote !== 'string') return null;
-      const matched = excerpts.find((e) => e === quote || e.includes(quote.slice(0, 60)));
+      const matchedEntry = entries.find((e) => e.tag === quote || e.tag.includes(quote.slice(0, 60)));
+      const matched = matchedEntry?.tag;
       if (!matched || !(matched.startsWith('them') || matched.startsWith('meeting'))) return null;
       const claimed = String(focus ?? '').trim().toLowerCase();
       if (!focusItems.some((f) => f === claimed || f.includes(claimed) || claimed.includes(f))) return null;
-      return { role: String(role ?? ''), sentence, quote: quote.replace(/^them\s*/, ''), focus: String(focus), excerpts };
+      return { role: String(role ?? ''), sentence, quote: quote.replace(/^them\s*/, ''),
+        quoteContextId: matchedEntry.cid, focus: String(focus), excerpts };
     };
     const verify = async (r) => {
       if (SOCIAL_ANCHOR.test(r.sentence)) return false;
@@ -288,7 +324,7 @@ export async function buildMatchedCards(service, { llamaCall, now = Date.now(), 
     }
     cards.push({
       personKey: c.p.key, name: c.p.name, kind: 'reconnect',
-      sentence: r.sentence, quote: r.quote, role: r.role, focus: r.focus,
+      sentence: r.sentence, quoteContextId: r.quoteContextId, role: r.role, focus: r.focus,
       label: c.label, left: left?.clause ?? null, leftTone: left?.tone ?? null,
       evidence: {
         topics: c.hist, messages: c.p.messages, dormancyDays: c.p.dormancyDays,
