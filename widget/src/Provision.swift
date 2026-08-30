@@ -96,7 +96,8 @@ enum Provision {
     }
   }
   // The llama plist hard-codes Homebrew's binary path; provision points it at
-  // the stable copy instead.
+  // the stable copy instead -- ~/.hazlie/llama/llama-server, beside the ggml
+  // backend modules it dlopens through @loader_path.
   private static let brewLlama = "/opt/homebrew/bin/llama-server"
 
   // Call once at launch. Runs off the main thread — copying node and booting
@@ -341,20 +342,30 @@ enum Provision {
     // finds them), and the ~4.7GB model -> ~/.hazlie/models. The model is
     // cloned (cp -c: instant copy-on-write on the same APFS volume) rather than
     // read+written. All left alone if already present.
-    let llamaBin = backend.appendingPathComponent("llama/bin/llama-server")
-    if fm.fileExists(atPath: llamaBin.path) {
-      let stableLlama = hazlie.appendingPathComponent("bin/llama-server")
-      if !fm.fileExists(atPath: stableLlama.path) {
-        try fm.copyItem(at: llamaBin, to: stableLlama)
-        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stableLlama.path)
-      }
-      let llamaLib = backend.appendingPathComponent("llama/lib")
-      if let libs = try? fm.contentsOfDirectory(at: llamaLib, includingPropertiesForKeys: nil) {
-        for lib in libs {
-          let dst = hazlie.appendingPathComponent("lib/\(lib.lastPathComponent)")
-          if !fm.fileExists(atPath: dst.path) { try? fm.copyItem(at: lib, to: dst) }
+    // FLAT, and it has to stay flat. llama.cpp's own release puts the server
+    // and every ggml backend module in ONE directory with an rpath of
+    // @loader_path; they find each other by sitting together. The previous
+    // layout split them into ~/.hazlie/bin and ~/.hazlie/lib, which is exactly
+    // the arrangement that stops the backends being found -- see the header of
+    // widget/bundle-llama.py for what that cost.
+    let llamaSrc = backend.appendingPathComponent("llama/bin")
+    let llamaDst = hazlie.appendingPathComponent("llama")
+    if fm.fileExists(atPath: llamaSrc.appendingPathComponent("llama-server").path) {
+      try? mkdir(llamaDst, 0o700)
+      if let staged = try? fm.contentsOfDirectory(at: llamaSrc, includingPropertiesForKeys: nil) {
+        for file in staged {
+          let dst = llamaDst.appendingPathComponent(file.lastPathComponent)
+          // REPLACE, do not skip-if-present. The old code copied only when the
+          // destination was absent, so an upgrade never refreshed the runtime:
+          // the owner's stayed on a build from a week earlier and broke when
+          // Homebrew moved out from under it. There is nothing user-owned in
+          // this directory to preserve.
+          try? fm.removeItem(at: dst)
+          try? fm.copyItem(at: file, to: dst)
         }
       }
+      try? fm.setAttributes([.posixPermissions: 0o755],
+                            ofItemAtPath: llamaDst.appendingPathComponent("llama-server").path)
       let model = backend.appendingPathComponent("models/model.gguf")
       let stableModel = hazlie.appendingPathComponent("models/model.gguf")
       if fm.fileExists(atPath: model.path), !fm.fileExists(atPath: stableModel.path) {
@@ -500,24 +511,28 @@ enum Provision {
   /// caller can refuse to install an agent that could only fail.
   @discardableResult
   static func ensureLlamaRuntime() -> Bool {
-    let src = backend.appendingPathComponent("llama/bin/llama-server")
-    let dst = hazlie.appendingPathComponent("bin/llama-server")
+    // ONE FLAT DIRECTORY. The dylibs used to be dropped into ~/.hazlie/lib
+    // beside libnode, on the reasoning that the binary's @loader_path/../lib
+    // rpath would find them. It does find the LINKED ones -- and ggml's compute
+    // backends are dlopen'd, not linked, and are only ever looked for beside
+    // the executable. Splitting them is what left llama-server crash-looping on
+    // "no backends are loaded". Keep them together.
+    let srcDir = backend.appendingPathComponent("llama/bin")
+    let dstDir = hazlie.appendingPathComponent("llama")
+    let src = srcDir.appendingPathComponent("llama-server")
+    let dst = dstDir.appendingPathComponent("llama-server")
     guard fm.fileExists(atPath: src.path) else { return fm.fileExists(atPath: dst.path) }
-    if !fm.fileExists(atPath: dst.path) {
-      try? mkdir(hazlie.appendingPathComponent("bin"), 0o700)
-      try? fm.copyItem(at: src, to: dst)
-      try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dst.path)
-    }
-    // Its dylibs share ~/.hazlie/lib with libnode; the binary's
-    // @loader_path/../lib rpath finds them there.
-    let libSrc = backend.appendingPathComponent("llama/lib")
-    if let libs = try? fm.contentsOfDirectory(at: libSrc, includingPropertiesForKeys: nil) {
-      try? mkdir(hazlie.appendingPathComponent("lib"), 0o700)
-      for lib in libs {
-        let to = hazlie.appendingPathComponent("lib/\(lib.lastPathComponent)")
-        if !fm.fileExists(atPath: to.path) { try? fm.copyItem(at: lib, to: to) }
+    try? mkdir(dstDir, 0o700)
+    if let staged = try? fm.contentsOfDirectory(at: srcDir, includingPropertiesForKeys: nil) {
+      for file in staged {
+        let to = dstDir.appendingPathComponent(file.lastPathComponent)
+        // Replace rather than skip-if-present: an upgrade has to be able to
+        // refresh a runtime that a Homebrew move already broke once.
+        try? fm.removeItem(at: to)
+        try? fm.copyItem(at: file, to: to)
       }
     }
+    try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dst.path)
     return fm.fileExists(atPath: dst.path)
   }
 
@@ -557,7 +572,7 @@ enum Provision {
     text = text.replacingOccurrences(of: "@HOME@", with: home.path)
     text = text.replacingOccurrences(of: "@REPO@", with: backend.path)
     // The llama plist hard-codes Homebrew's binary; point it at the copy.
-    text = text.replacingOccurrences(of: brewLlama, with: hazlie.appendingPathComponent("bin/llama-server").path)
+    text = text.replacingOccurrences(of: brewLlama, with: hazlie.appendingPathComponent("llama/llama-server").path)
     let dst = launchAgents.appendingPathComponent("\(label).plist")
     do {
       try mkdir(launchAgents, 0o755)

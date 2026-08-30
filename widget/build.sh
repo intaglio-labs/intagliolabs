@@ -241,11 +241,11 @@ if [ -n "$LIBREF" ]; then
 fi
 
 # LLAMA RUNTIME + MODEL, so the local "ask" model works offline on a fresh Mac.
-# The portable llama-server + its dylibs (bundle-llama.py rewrites the install
-# names; Metal GPU inference verified) and the ~4.7GB gguf. cp -c clones the
-# model on APFS — instant copy-on-write, no multi-GB copy per build.
-# Guarded so a plain `git clone && ./build.sh` (no llama.cpp, no provisioned
-# model) still builds a working app — just without the bundled "ask".
+# The llama runtime: bundle-llama.py fetches llama.cpp's own sha256-pinned macOS
+# release and stages it flat, backends included, so it runs on a Mac that has
+# never heard of Homebrew. (It used to repackage Homebrew's build, which could
+# not work anywhere but the build machine — that file's header has the whole
+# measurement.) The model is not bundled; see the split below.
 # THE RUNTIME SHIPS. THE WEIGHTS DO NOT.
 #
 # Both used to be bundled, and the app was 5.3 GB — 4.7 GB of it one .gguf.
@@ -278,12 +278,13 @@ fi
 # This does not weaken "nothing leaves the box": a setup-time fetch the owner
 # asked for is a different act from a runtime call, and the runtime still has no
 # network fallback of any kind. It fails closed exactly as before.
-if command -v llama-server >/dev/null 2>&1; then
-  python3 bundle-llama.py "$BE/llama"
-else
-  echo "NOTE: llama-server not on PATH — the runtime will not be bundled." >&2
-  echo "      brew install llama.cpp before building for distribution." >&2
-fi
+# NO `command -v llama-server` GUARD ANY MORE. This used to repackage whatever
+# Homebrew had installed, so a build machine without llama.cpp silently produced
+# an app with no local answering at all. It now fetches llama.cpp's own
+# sha256-pinned macOS release: the build needs nothing installed, and every
+# build gets the same bytes. A fetch failure is fatal on purpose -- shipping the
+# app without its runtime is what used to happen quietly.
+python3 bundle-llama.py "$BE/llama"
 
 # libolm.3.dylib, PREBUILT AND SHIPPED, so a fresh install needs no toolchain.
 #
@@ -443,8 +444,13 @@ if [ -n "$IDENTITY" ]; then
   # the server with the same JIT + Metal entitlements node uses (V8 and Metal
   # both need allow-jit / allow-unsigned-executable-memory; disable-library-
   # validation lets the rewritten dylibs load).
+  # The llama runtime is FLAT in llama/bin now (binary + every ggml backend
+  # module together, resolving each other through @loader_path), so the dylib
+  # sweep looks there rather than in a lib/ that no longer exists. Missing this
+  # would leave ad-hoc backends inside a Developer ID bundle, which release.sh
+  # now refuses to submit.
   if [ -f "$BE/llama/bin/llama-server" ]; then
-    for dylib in "$BE/llama/lib/"*.dylib; do
+    for dylib in "$BE/llama/bin/"*.dylib; do
       [ -f "$dylib" ] && codesign --force --options runtime -s "$IDENTITY" "$dylib"
     done
     codesign --force --options runtime \

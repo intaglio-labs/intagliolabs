@@ -1,130 +1,142 @@
 #!/usr/bin/env python3
-# Make a copy of Homebrew's llama-server + every non-system dylib it needs
-# (recursively), with all install names rewritten to @rpath/<name> and an rpath
-# of @loader_path/../lib on the binary. Usage: bundle-llama.py <destdir>
+# Stage llama.cpp's OWN macOS release into the app bundle, flat, verified by
+# sha256. Usage: bundle-llama.py <destdir>  (writes <destdir>/bin)
 #
-# IT IS NOT PORTABLE, AND THIS COMMENT USED TO SAY IT WAS. The claim was
-# "Verified to keep Metal GPU inference working (the Metal backend is embedded
-# in libggml)". That was true of the llama.cpp of the day and is not true of
-# Homebrew's build now: ggml splits its backends into separately dlopen'd
-# modules, Homebrew ships them as <ggml-cellar>/libexec/libggml-{metal,cpu-*,
-# blas}.so, and libggml has that ABSOLUTE Cellar path compiled in as the only
-# place it looks.
+# THIS USED TO REPACKAGE HOMEBREW'S BUILD, AND THAT COULD NOT WORK.
 #
-# Two consequences, both measured 2026-08-30:
+# It copied llama-server plus every non-system dylib reachable through
+# `otool -L`, rewrote install names to @rpath, and called the result portable.
+# Its header said Metal kept working because "the Metal backend is embedded in
+# libggml". That was true of the llama.cpp of the day and stopped being true:
+# ggml now splits its backends into separately dlopen'd modules, and a dlopen'd
+# module is nobody's link dependency, so the recursive walk collected none of
+# them. Worse, Homebrew compiles an ABSOLUTE path to its own Cellar --
+# /opt/homebrew/Cellar/ggml/<version>/libexec -- into libggml as the only place
+# it looks for them.
 #
-#   1. A bundled runtime finds no backends on any Mac without that exact
-#      Homebrew ggml version. Reproduced with `sandbox-exec` denying reads under
-#      /opt/homebrew/Cellar/ggml: the freshly-staged bundle fails with "no
-#      backends are loaded", which is the same error the owner's llama-server
-#      agent had been crash-looping on.
-#   2. It breaks on the BUILD machine too, on the next `brew upgrade`. The
-#      owner's runtime was ggml 0.21.0 pointing at .../ggml/0.21.0/libexec;
-#      Homebrew moved to 0.22.0 and deleted that directory underneath it.
+# Both halves were measured on 2026-08-30:
 #
-# Things that do NOT work, so nobody re-tries them: putting the .so files beside
-# the executable or beside the dylibs (ggml makes zero load attempts -- it does
-# not search either), and GGML_BACKEND_PATH (it dlopens the one literal path it
-# is given, takes no separator, and one backend is not enough -- Metal alone
-# then fails with "make_cpu_buft_list: no CPU backend found").
+#   The shipped app could never run local answering on a user's Mac. Reproduced
+#   with `sandbox-exec` denying reads under /opt/homebrew/Cellar/ggml: a freshly
+#   staged bundle dies with "no backends are loaded", the exact error the
+#   owner's llama-server agent had been crash-looping on.
 #
-# The real fix is to stop consuming Homebrew's dynamic-backend build: either
-# compile llama.cpp with -DGGML_BACKEND_DL=OFF so Metal and CPU are linked into
-# libggml as this comment once assumed, or ship llama.cpp's own release
-# binaries. Both are build-pipeline decisions, so this script reports the
-# problem loudly rather than pretending to have solved it.
-import subprocess, os, re, shutil, sys
+#   It broke on the BUILD machine too, at the next `brew upgrade`. The owner's
+#   runtime was ggml 0.21.0 pointing at .../ggml/0.21.0/libexec; Homebrew moved
+#   to 0.22.0 and deleted that directory underneath it. That is what took the
+#   agent down, and the top-line error -- "failed to load model, model.gguf" --
+#   pointed at a model file that was never the problem.
+#
+# Things that do NOT work, recorded so nobody re-tries them: putting the backend
+# modules beside the executable or beside the dylibs (Homebrew's ggml makes zero
+# load attempts -- it does not search either), and GGML_BACKEND_PATH (it dlopens
+# the one literal path it is given, takes no separator, and one backend is not
+# enough -- Metal alone then fails with "make_cpu_buft_list: no CPU backend
+# found").
+#
+# WHAT UPSTREAM SHIPS INSTEAD. llama.cpp publishes a macos-arm64 tarball whose
+# binary and every dylib -- backends included -- sit in ONE directory and use
+# @loader_path. Nothing absolute, nothing from Homebrew: verified with `strings`
+# (zero /opt/homebrew references) and by running it under the same sandbox that
+# kills the Homebrew build, where it loads the model and serves. So this fetches
+# that, keeps the layout flat because @loader_path requires it, and stops
+# needing llama.cpp installed on the build machine at all.
+
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
 
 dest = sys.argv[1]
-os.makedirs(dest + '/bin', exist_ok=True)
-os.makedirs(dest + '/lib', exist_ok=True)
-SRC = shutil.which('llama-server') or '/opt/homebrew/bin/llama-server'
 
+# PINNED, and pinned the same way bridges/native.json pins the mautrix binaries:
+# a tag plus a sha256 taken from the file that was actually tested. A release
+# asset is mutable in principle -- the hash is what makes this reproducible, and
+# a mismatch fails the build rather than shipping something unexamined.
+TAG = 'b10701'
+ASSET = f'llama-{TAG}-bin-macos-arm64.tar.gz'
+URL = f'https://github.com/ggml-org/llama.cpp/releases/download/{TAG}/{ASSET}'
+SHA256 = 'b696c798c58e3e02332c8ba2e4dc60ed5bd1508b7c49fb59b1216ca47f7be568'
 
-def deps(b):
-    out = subprocess.run(['otool', '-L', b], capture_output=True, text=True).stdout.splitlines()[1:]
-    return [l.split()[0] for l in out if l.strip()]
+# Only what the server needs. The tarball also carries llama-cli, llama-bench
+# and friends; they are not shipped because nothing runs them, and every extra
+# Mach-O is another thing build.sh has to sign and Apple has to notarize.
+KEEP_PREFIXES = ('libggml', 'libllama', 'libmtmd')
 
+bindir = os.path.join(dest, 'bin')
+os.makedirs(bindir, exist_ok=True)
 
-def rpaths(b):
-    out = subprocess.run(['otool', '-l', b], capture_output=True, text=True).stdout
-    return re.findall(r'path (\S+) \(offset', out)
+with tempfile.TemporaryDirectory() as work:
+    tarball = os.path.join(work, ASSET)
+    print(f'fetching llama.cpp {TAG}')
+    urllib.request.urlretrieve(URL, tarball)
 
+    got = hashlib.sha256(open(tarball, 'rb').read()).hexdigest()
+    if got != SHA256:
+        # Deleted, not left on disk: a mismatched archive is the one thing that
+        # must never become a build input, and a half-trusted file sitting in a
+        # temp dir is how that happens by accident later.
+        os.unlink(tarball)
+        sys.exit(f'ERROR: {ASSET} sha256 {got}\n       expected {SHA256}')
+    print(f'  sha256 verified ({os.path.getsize(tarball) // 1024 // 1024} MB)')
 
-def resolve(ref, origin):
-    if ref.startswith('@rpath/'):
-        for rp in rpaths(origin):
-            c = rp.replace('@loader_path', os.path.dirname(origin)) + '/' + ref[7:]
-            if os.path.exists(c):
-                return os.path.realpath(c)
-        for base in ['/opt/homebrew/lib', '/opt/homebrew/opt/ggml/lib']:
-            c = base + '/' + ref[7:]
-            if os.path.exists(c):
-                return os.path.realpath(c)
-    elif ref.startswith('/') and os.path.exists(ref):
-        return os.path.realpath(ref)
-    return None
+    with tarfile.open(tarball) as tf:
+        tf.extractall(work, filter='data')
 
+    src = None
+    for root, _dirs, files in os.walk(work):
+        if 'llama-server' in files:
+            src = root
+            break
+    if src is None:
+        sys.exit('ERROR: no llama-server in the release tarball')
 
-# Recursive collection of every non-system dependency.
-seen, queue, libs = set(), [SRC], set()
-while queue:
-    b = queue.pop()
-    if b in seen:
-        continue
-    seen.add(b)
-    for d in deps(b):
-        if d.startswith('/usr/lib') or d.startswith('/System/'):
+    # FLAT, deliberately. Both the binary and every backend module carry an
+    # rpath of @loader_path, so they resolve each other by sitting together.
+    # Splitting them into bin/ and lib/ -- which is what the previous layout did
+    # -- breaks exactly the dlopen this whole file exists to fix.
+    staged = 0
+    for name in sorted(os.listdir(src)):
+        path = os.path.join(src, name)
+        if not os.path.isfile(path):
             continue
-        r = resolve(d, b)
-        if r:
-            libs.add(r)
-            if r not in seen:
-                queue.append(r)
+        if name == 'llama-server' or (name.endswith('.dylib') and name.startswith(KEEP_PREFIXES)):
+            shutil.copy2(path, os.path.join(bindir, name))
+            staged += 1
+    os.chmod(os.path.join(bindir, 'llama-server'), 0o755)
 
-shutil.copy2(SRC, dest + '/bin/llama-server')
-libset = {os.path.realpath(x) for x in libs}
-for l in libs:
-    shutil.copy2(os.path.realpath(l), dest + '/lib/' + os.path.basename(os.path.realpath(l)))
+backends = sorted(f for f in os.listdir(bindir)
+                  if f.startswith(('libggml-metal', 'libggml-cpu', 'libggml-blas')))
+print(f'staged llama-server + {staged - 1} dylibs -> {bindir}')
+print(f'  backends: {", ".join(backends) or "NONE"}')
 
+# THE CHECK THIS FILE SHOULD ALWAYS HAVE HAD, in both directions.
+#
+# A runtime with no backend module cannot load a model anywhere, and a runtime
+# naming an absolute Homebrew path can only load one on the machine that built
+# it. Either shipped silently before. Both stop the build now: local answering
+# should not fail quietly at a user's first question.
+problems = []
+if not backends:
+    problems.append('no ggml backend modules were staged (Metal/CPU/BLAS)')
+for name in sorted(os.listdir(bindir)):
+    with open(os.path.join(bindir, name), 'rb') as fh:
+        if b'/opt/homebrew' in fh.read():
+            problems.append(f'{name} references /opt/homebrew, so it is not portable')
+if problems:
+    for p in problems:
+        print(f'  ERROR: {p}', file=sys.stderr)
+    sys.exit(1)
 
-def rewrite(path, is_bin):
-    for orig in deps(path):
-        if orig.startswith('/usr/lib') or orig.startswith('/System/'):
-            continue
-        r = resolve(orig, path)
-        if r and os.path.realpath(r) in libset:
-            subprocess.run(['install_name_tool', '-change', orig,
-                            '@rpath/' + os.path.basename(os.path.realpath(r)), path])
-    if not is_bin:
-        subprocess.run(['install_name_tool', '-id', '@rpath/' + os.path.basename(path), path])
-    rp = '@loader_path/../lib' if is_bin else '@loader_path'
-    subprocess.run(['install_name_tool', '-add_rpath', rp, path], capture_output=True)
-
-
-rewrite(dest + '/bin/llama-server', True)
-for l in os.listdir(dest + '/lib'):
-    rewrite(dest + '/lib/' + l, False)
-os.chmod(dest + '/bin/llama-server', 0o755)
-print(f'bundled llama-server + {len(libset)} dylibs -> {dest}')
-
-# THE PORTABILITY CHECK THIS SCRIPT SHOULD ALWAYS HAVE HAD. Look for the
-# compiled-in Cellar backend directory and say so. A silent pass here shipped a
-# local-answering feature that cannot start on any machine but the builder's.
-import glob
-cellar = set()
-for lib in glob.glob(dest + '/lib/*.dylib'):
-    with open(lib, 'rb') as fh:
-        for m in re.findall(rb'/opt/homebrew/Cellar/ggml/[0-9.]+/libexec', fh.read()):
-            cellar.add(m.decode())
-if cellar:
-    print()
-    print('  WARNING: this llama runtime is NOT portable.', file=sys.stderr)
-    for c in sorted(cellar):
-        print(f'    libggml looks for its backends in {c}', file=sys.stderr)
-    print('    That path exists only on a machine with this exact Homebrew ggml.',
-          file=sys.stderr)
-    print('    Everywhere else llama-server exits with "no backends are loaded".',
-          file=sys.stderr)
-    print('    See the header of this file for what was tried and what is left.',
-          file=sys.stderr)
+# rpath is @loader_path in upstream's build; assert it rather than assume, since
+# a future release changing it would reintroduce this class of bug quietly.
+rpaths = subprocess.run(['otool', '-l', os.path.join(bindir, 'llama-server')],
+                        capture_output=True, text=True).stdout
+if '@loader_path' not in rpaths:
+    sys.exit('ERROR: llama-server no longer uses @loader_path; the flat layout '
+             'above depends on it')
+print('  portable: no absolute paths, backends present, @loader_path intact')
