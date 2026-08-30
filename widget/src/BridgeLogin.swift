@@ -498,12 +498,38 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     // both counts: it changed nothing about rendering, and it emptied the app's
     // SHARED default store, which belongs to every other webview in the process.
     //
-    // The blank page was never about storage. Facebook's login page declares no
-    // viewport, so it laid out at desktop width inside a 480pt window; the fix
-    // is windowWidth above.
+    // The blank page was never about storage OR width. Measured from the login
+    // window itself (~/.hazlie/logs/bridge-login.log, 2026-08-30): the LOGIN page
+    // renders correctly -- "Log into Facebook / Log in / Forgot password?", 983
+    // wide -- and the blank document is a DIFFERENT page reached 24 seconds
+    // later, www.facebook.com/two_step_verification/authentication, which loads
+    // with an empty body. Two theories died on that one line.
     let dataStore = WKWebsiteDataStore.nonPersistent()
     config.websiteDataStore = dataStore
     websiteDataStore = dataStore
+
+    // WHY IS THE BODY EMPTY? An empty body is two different failures wearing
+    // the same face: a page that legitimately rendered nothing, and a page whose
+    // script threw before it could render. Only a handler installed BEFORE the
+    // page's own code can tell them apart, so this goes in at document start and
+    // accumulates; didFinish reads it back.
+    //
+    // Errors only, capped at six, message text only -- no stack and no source
+    // URL, so nothing here can carry a query string or a token into a log file.
+    let errorProbe =
+      "window.__hzErr = [];" +
+      "window.addEventListener('error', function (e) {" +
+      "  if (window.__hzErr.length < 6) {" +
+      "    window.__hzErr.push(String((e && e.message) || 'error').slice(0, 120));" +
+      "  }" +
+      "}, true);" +
+      "window.addEventListener('unhandledrejection', function (e) {" +
+      "  if (window.__hzErr.length < 6) {" +
+      "    window.__hzErr.push('reject: ' + String((e && e.reason && e.reason.message) || e.reason || '?').slice(0, 110));" +
+      "  }" +
+      "});"
+    config.userContentController.addUserScript(WKUserScript(
+      source: errorProbe, injectionTime: .atDocumentStart, forMainFrameOnly: false))
 
     // HEADER CAPTURE, only when the bridge asked for headers. LinkedIn's login
     // step wants X-LI-Track and X-LI-Page-Instance, which its own JavaScript
@@ -978,10 +1004,17 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   }
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+    // kids/html distinguish "no DOM at all" from "DOM present, no text": a React
+    // shell that mounted and rendered nothing looks nothing like a script that
+    // died at parse. err is why, when there is a why.
     let js = "JSON.stringify({t:document.title,n:document.images.length," +
       "b:Array.from(document.images).filter(i=>!i.naturalWidth).length," +
       "w:document.documentElement.clientWidth,s:document.documentElement.scrollWidth," +
-      "f:document.querySelectorAll('iframe').length,x:document.body?document.body.innerText.trim().slice(0,120):''})"
+      "f:document.querySelectorAll('iframe').length," +
+      "kids:document.body?document.body.children.length:-1," +
+      "html:document.body?document.body.innerHTML.length:-1," +
+      "err:(window.__hzErr||[])," +
+      "x:document.body?document.body.innerText.trim().slice(0,120):''})"
     webView.evaluateJavaScript(js) { value, _ in
       let host = webView.url?.host ?? "?"
       let path = webView.url?.path ?? "?"
