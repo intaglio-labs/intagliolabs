@@ -201,9 +201,23 @@ enum Provision {
         // Existing bridge installs need setup-bridges to apply versioned
         // migrations too. Fresh installs have no owner credentials and remain
         // consent-deferred; their first connector click still owns setup.
-        let existingRuntime = hazlie.appendingPathComponent("matrix/owner-credentials.json")
-        let historyMigration = hazlie.appendingPathComponent("matrix/.full-history-reset-v1")
-        let historyMigrationPending = hazlie.appendingPathComponent("matrix/.full-history-reset-v1.pending")
+        // Native keeps ~/.hazlie/matrix; the Docker fallback provisions into
+        // ~/.hazlie/matrix-docker so neither engine can overwrite the other's
+        // homeserver.yaml. Look in both, native first, or a machine that fell
+        // back to Docker reads as never-provisioned and its migrations never
+        // run. Same order the JS resolvers use.
+        let matrixRoot: URL = {
+          for name in ["matrix", "matrix-docker"] {
+            let dir = hazlie.appendingPathComponent(name)
+            if fm.fileExists(atPath: dir.appendingPathComponent("owner-credentials.json").path) {
+              return dir
+            }
+          }
+          return hazlie.appendingPathComponent("matrix")
+        }()
+        let existingRuntime = matrixRoot.appendingPathComponent("owner-credentials.json")
+        let historyMigration = matrixRoot.appendingPathComponent(".full-history-reset-v1")
+        let historyMigrationPending = matrixRoot.appendingPathComponent(".full-history-reset-v1.pending")
         if p.terminationStatus == 0,
            fm.fileExists(atPath: historyMigrationPending.path)
              || (fm.fileExists(atPath: existingRuntime.path)

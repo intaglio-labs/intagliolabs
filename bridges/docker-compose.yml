@@ -17,7 +17,8 @@
 # listens on a routable interface — this is inbound fetch of the owner's own
 # DMs, the same posture as the IMAP and Oura pollers.
 #
-# Data lives OUTSIDE the repo, under ~/.hazlie/matrix/* (0700), because it holds
+# Data lives OUTSIDE the repo, under ~/.hazlie/matrix-docker/* (0700), because it
+# holds
 # session cookies and message content. Only this compose file and the templated
 # configs are committed. HAZLIE_MATRIX (bridges/.env, gitignored) names that
 # tree, and every volume below uses compose's `:?` required form: unset, the
@@ -37,17 +38,17 @@ services:
     ports:
       - "127.0.0.1:8008:8008"
     volumes:
-      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/synapse:/data
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix-docker}/synapse:/data
       # Each bridge's registration.yaml, mounted read-only from that bridge's own
       # data dir so synapse always sees the CURRENT tokens (no stale copies).
       # homeserver.yaml lists these paths under app_service_config_files.
-      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/meta/registration.yaml:/registrations/meta.yaml:ro
-      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/instagram/registration.yaml:/registrations/instagram.yaml:ro
-      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/twitter/registration.yaml:/registrations/twitter.yaml:ro
-      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/telegram/registration.yaml:/registrations/telegram.yaml:ro
-      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/discord/registration.yaml:/registrations/discord.yaml:ro
-      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/slack/registration.yaml:/registrations/slack.yaml:ro
-      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/linkedin/registration.yaml:/registrations/linkedin.yaml:ro
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix-docker}/meta/registration.yaml:/registrations/meta.yaml:ro
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix-docker}/instagram/registration.yaml:/registrations/instagram.yaml:ro
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix-docker}/twitter/registration.yaml:/registrations/twitter.yaml:ro
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix-docker}/telegram/registration.yaml:/registrations/telegram.yaml:ro
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix-docker}/discord/registration.yaml:/registrations/discord.yaml:ro
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix-docker}/slack/registration.yaml:/registrations/slack.yaml:ro
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix-docker}/linkedin/registration.yaml:/registrations/linkedin.yaml:ro
     environment:
       - SYNAPSE_CONFIG_DIR=/data
       - SYNAPSE_CONFIG_PATH=/data/homeserver.yaml
@@ -62,7 +63,7 @@ services:
     depends_on:
       - synapse
     volumes:
-      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/meta:/data
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix-docker}/meta:/data
     networks:
       - bus
 
@@ -74,7 +75,7 @@ services:
     depends_on:
       - synapse
     volumes:
-      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/instagram:/data
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix-docker}/instagram:/data
     networks:
       - bus
 
@@ -96,7 +97,7 @@ services:
     depends_on:
       - synapse
     volumes:
-      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/twitter:/data
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix-docker}/twitter:/data
     networks:
       - bus
 
@@ -121,7 +122,7 @@ services:
   # Owner
   # asked for all three, 2026-08-22. Telegram additionally needs an
   # api_id/api_hash from my.telegram.org/apps in
-  # ~/.hazlie/matrix/telegram/config.yaml before its login works — the
+  # ~/.hazlie/matrix-docker/telegram/config.yaml before its login works — the
   # container runs without it, the login just can't start until it's set.
   mautrix-telegram:
     # Locally exercised 0.2 image, pinned before the mutable latest tag moved.
@@ -131,7 +132,7 @@ services:
     depends_on:
       - synapse
     volumes:
-      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/telegram:/data
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix-docker}/telegram:/data
     networks:
       - bus
 
@@ -143,7 +144,7 @@ services:
     depends_on:
       - synapse
     volumes:
-      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/discord:/data
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix-docker}/discord:/data
     networks:
       - bus
 
@@ -161,7 +162,7 @@ services:
     depends_on:
       - synapse
     volumes:
-      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/linkedin:/data
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix-docker}/linkedin:/data
     networks:
       - bus
 
@@ -173,7 +174,7 @@ services:
     depends_on:
       - synapse
     volumes:
-      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix}/slack:/data
+      - ${HAZLIE_MATRIX:?set HAZLIE_MATRIX in bridges/.env to ~/.hazlie/matrix-docker}/slack:/data
     networks:
       - bus
 

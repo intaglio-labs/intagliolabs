@@ -106,9 +106,17 @@ test('existing capped bridge installs receive one recoverable automatic reset', 
     'the derived Hermes corpus must be purged with the source-side reset');
   assert.doesNotMatch(setupBridges, /rm\s+-[rRfF]*\s+[^\n]*homeserver\.db/u,
     'the old runtime must remain recoverable');
-  assert.match(provision, /matrix\/owner-credentials\.json/u);
-  assert.match(provision, /matrix\/\.full-history-reset-v1/u);
-  assert.match(provision, /matrix\/\.full-history-reset-v1\.pending/u,
+  // These three used to match the literal "matrix/owner-credentials.json" and
+  // friends. The path is now assembled from a resolved root, because native and
+  // Docker provision into different directories -- so a literal match would
+  // have failed for the right change and, worse, would have passed for a
+  // version that only ever looked in the native root. Assert the resolution and
+  // the three artifacts separately, which is what the migration actually needs.
+  assert.match(provision, /\["matrix", "matrix-docker"\]/u,
+    'provision must look in both engines\' state roots, native first');
+  assert.match(provision, /matrixRoot\.appendingPathComponent\("owner-credentials\.json"\)/u);
+  assert.match(provision, /matrixRoot\.appendingPathComponent\("\.full-history-reset-v1"\)/u);
+  assert.match(provision, /matrixRoot\.appendingPathComponent\("\.full-history-reset-v1\.pending"\)/u,
     'an interrupted migration must retry even after owner credentials moved');
   assert.match(provision, /ensureBridgeRuntime \{ _ in \}/u,
     'an existing runtime must apply the migration automatically on app launch');

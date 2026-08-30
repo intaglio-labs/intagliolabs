@@ -8,6 +8,29 @@ relays DMs into Matrix; one hazlie connector reads Matrix. Nothing federates,
 nothing listens off-loopback, no corpus data reaches a cloud model — the same
 inbound-fetch-of-your-own-data posture as the IMAP and Oura pollers.
 
+## Two engines, two state roots — read this first
+
+**Native is the default and Docker is the fallback**, as of the native-bridge
+work on 2026-08-30. Docker Desktop on macOS is a Linux VM, and requiring one to
+read your own DMs was the thing that had to go. `ops/setup-bridges-native.sh`
+runs the same seven mautrix binaries and the same Synapse directly on the Mac;
+`ops/setup-bridges.sh` (this file's subject) is what runs only if that fails.
+
+They do not share state, and must not:
+
+| engine | script | state root |
+|---|---|---|
+| native (default) | `ops/setup-bridges-native.sh` | `~/.hazlie/matrix` |
+| docker (fallback) | `ops/setup-bridges.sh` | `~/.hazlie/matrix-docker` |
+
+A path means different things to the two of them — native writes host-absolute
+paths, Docker writes the container's `/data` view — so a directory provisioned
+by one cannot be started by the other. Each script writes `.engine` in its root
+and refuses a root claimed by the other. **Everything below says
+`~/.hazlie/matrix`; for the Docker stack read `~/.hazlie/matrix-docker`.** The
+first Docker run after the split moves a pre-split Docker directory across
+rather than starting over.
+
 ## What's running
 
 | container | image | what | host port |
@@ -40,8 +63,9 @@ Docker contains that, and every mautrix path targets it.
 
 ## Setting it up from nothing
 
-`bash ops/setup-bridges.sh` — idempotent, resumable, and the ONLY recipe for a
-fresh machine. It generates synapse's config (client-only, no federation, all
+`bash ops/setup-bridges.sh` — idempotent, resumable, and the recipe for a
+fresh machine **on the Docker fallback**; `ops/setup-bridges-native.sh` is the one a
+fresh machine actually reaches first. It generates synapse's config (client-only, no federation, all
 seven appservices registered), each bridge's config and registration (hardened:
 backfill on, double puppeting off), brings the stack up, and creates the owner
 user + `~/.hazlie/matrix/owner-credentials.json`. Written 2026-08-25, the day
@@ -57,8 +81,8 @@ cd bridges
 docker compose ps                     # status
 docker compose up -d                  # start (survives reboot via restart: unless-stopped, once Docker is up)
 docker compose logs -f mautrix-meta   # watch a bridge
-docker compose down                   # stop (data persists in ~/.hazlie/matrix)
-docker compose down && rm -rf ~/.hazlie/matrix/*   # FULL teardown, wipes everything
+docker compose down                   # stop (data persists in ~/.hazlie/matrix-docker)
+docker compose down && rm -rf ~/.hazlie/matrix-docker/*   # FULL teardown, wipes everything
 ```
 
 ## Logging in a platform  (THE human step — nothing flows until this is done)

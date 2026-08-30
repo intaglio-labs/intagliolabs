@@ -44,6 +44,14 @@
 set -eu
 
 REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# ONE STATE ROOT PER ENGINE. Native and Docker both used to write
+# ~/.hazlie/matrix, and the two provisioners disagree about what a path means:
+# native writes host-absolute paths (/Users/you/.hazlie/...) and Docker writes
+# the container's view (/data/...). Whichever ran second left a homeserver.yaml
+# the other one cannot start from, so a Docker fallback triggered on a machine
+# with a working native install would not fall back -- it would break both.
+# Native keeps this path because it is the one checks.mjs and bridges/README
+# already point owners at; Docker moved to ~/.hazlie/matrix-docker.
 M="$HOME/.hazlie/matrix"
 BIN="$HOME/.hazlie/bridges/bin"
 SYN="$HOME/.hazlie/bridges/synapse"
@@ -60,6 +68,39 @@ for arg in "$@"; do
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
+
+# Separate roots make cross-poisoning impossible for a fresh install, but not
+# for a machine that already ran the old shared-path Docker script -- its state
+# is sitting at exactly $M. Refuse it rather than provisioning on top: the
+# alternative is a half-converted directory whose failure surfaces later, as a
+# bridge that will not start, with nothing pointing back at the cause.
+#
+# .engine is the marker going forward. An install predating it is classified by
+# what its own homeserver.yaml says: container paths mean Docker wrote it.
+claim_state_root() {
+  marker="$M/.engine"
+  if [ -f "$marker" ]; then
+    found=$(cat "$marker" 2>/dev/null || echo unknown)
+  elif [ -f "$M/synapse/homeserver.yaml" ]; then
+    if grep -qE '(^|: )/data(/|$)' "$M/synapse/homeserver.yaml" 2>/dev/null; then
+      found="docker"
+    else
+      found="native"
+    fi
+  else
+    found="native"
+  fi
+  if [ "$found" != "native" ]; then
+    echo "$M holds $found bridge state, not native." >&2
+    echo "Native will not provision on top of it. Either move it aside:" >&2
+    echo "  mv \"$M\" \"$M.$found.bak\"" >&2
+    echo "or keep using the $found stack. Nothing was changed." >&2
+    exit 1
+  fi
+  mkdir -p "$M" && chmod 700 "$M"
+  printf 'native\n' > "$marker"
+}
+[ "$MODE" = "status" ] || [ "$MODE" = "stop" ] || claim_state_root
 
 # name  port   dbfile             binary
 bridge_rows() {
@@ -368,10 +409,14 @@ if [ ! -f "$M/owner-credentials.json" ]; then
   # owner is created via the shared secret" the container path described; this
   # calls it directly instead of through a broken wrapper.
   PW="$(openssl rand -hex 24)"
-  python3 - "$PW" "$SYNAPSE_PORT" "$SERVER_NAME" "$M/synapse/homeserver.yaml" <<'PY'
+  # $M is passed, not assumed. The guard above tests "$M/owner-credentials.json"
+  # while the write below named ~/.hazlie/matrix outright; the two agreed only
+  # because this engine's root happens to be that path. Same latent split as the
+  # docker script had, fixed the same way.
+  python3 - "$PW" "$SYNAPSE_PORT" "$SERVER_NAME" "$M/synapse/homeserver.yaml" "$M" <<'PY'
 import hashlib, hmac, json, os, re, sys, urllib.request
 
-pw, port, server, config = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+pw, port, server, config, state_root = sys.argv[1:6]
 base = 'http://127.0.0.1:' + port
 
 # Read the secret without a YAML parser. This runs on the SYSTEM python, which
@@ -414,7 +459,7 @@ tok = post('/_matrix/client/v3/login', {
     'identifier': {'type': 'm.id.user', 'user': 'you'},
     'password': pw,
 })['access_token']
-path = os.path.expanduser('~/.hazlie/matrix/owner-credentials.json')
+path = os.path.join(state_root, 'owner-credentials.json')
 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, 'w') as f:
     json.dump({"homeserver": base,
@@ -428,5 +473,42 @@ bridge_rows | while read -r name port dbfile binary; do
   start_bg "$name" "$BIN/$binary" -c "$M/$name/config.yaml" -r "$M/$name/registration.yaml" -n
 done
 
+# START IS NOT PROOF OF LIFE, AND THIS SCRIPT'S EXIT CODE IS LOAD-BEARING.
+#
+# start_bg records $! the instant nohup forks, so the pidfile is written even
+# for a binary that is missing, unsigned, or dies on its own config a moment
+# later. Without a second look this script returned 0 no matter what happened,
+# and Provision.swift only tries the Docker script `where !success` -- so the
+# fallback it carefully keeps around was unreachable code. A native run that
+# started nothing reported the same success as one that started seven bridges.
+#
+# The re-check has to happen HERE, in the parent. The loop above is the right
+# side of a pipe and therefore a subshell: an `exit 1` inside it kills that
+# subshell and the script sails on to exit 0, which is exactly the failure this
+# is meant to catch.
+sleep 3
+dead=""; live=0
+for name in $(bridge_rows | awk '{print $1}'); do
+  if alive "$name"; then live=$((live + 1)); else dead="$dead $name"; fi
+done
+
 echo
 status_all
+
+if [ -n "$dead" ]; then
+  echo >&2
+  echo "these bridges did not stay up:$dead" >&2
+  for name in $dead; do
+    echo "--- $name ---" >&2
+    tail -15 "$RUN/$name.log" >&2 2>/dev/null || echo "  (no log)" >&2
+  done
+fi
+
+# Partial failure is NOT a reason to fail the run. Falling back to Docker here
+# would tear down however many bridges are working and start a Linux VM to
+# replace them, which is a worse outcome than one dead bridge plus the log
+# above. Only a total washout means "native did not work on this machine".
+if [ "$live" -eq 0 ]; then
+  echo "no bridge stayed up; native setup failed" >&2
+  exit 1
+fi

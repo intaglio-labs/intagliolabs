@@ -10,10 +10,10 @@
 #
 # Idempotent by construction: every step checks for its own artifact first, so
 # re-running after a partial failure resumes rather than clobbers. State lands
-# in ~/.hazlie/matrix (0700), never in the repo.
+# in ~/.hazlie/matrix-docker (0700), never in the repo.
 #
 # What it builds, in order:
-#   1. bridges/.env pointing compose at ~/.hazlie/matrix
+#   1. bridges/.env pointing compose at ~/.hazlie/matrix-docker
 #   2. synapse's generated homeserver.yaml, patched: client-only listener,
 #      no federation, no trusted key servers, the seven appservice registrations,
 #      registration closed (the owner is created via the shared secret)
@@ -21,7 +21,7 @@
 #      sqlite, permissions, backfill ON, double-puppet OFF — the hardening
 #      checkBridgeHardening() enforces) and its registration.yaml
 #   4. the stack, via docker compose
-#   5. the owner user @you:hazlie.local + ~/.hazlie/matrix/owner-credentials.json
+#   5. the owner user @you:hazlie.local + ~/.hazlie/matrix-docker/owner-credentials.json
 #      (0600 — access token, user id, homeserver; the connect page's
 #      lib/bridge.mjs contract)
 #
@@ -33,7 +33,19 @@ set -eu
 OPS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$OPS_DIR/.."
 
-M="$HOME/.hazlie/matrix"
+# MOVED OFF THE SHARED PATH, 2026-08-30. This was ~/.hazlie/matrix, which is
+# also where ops/setup-bridges-native.sh writes -- and the two provisioners
+# mean different things by a path. Native writes host-absolute paths; the
+# compose file below bind-mounts directories into containers that see /data.
+# Running one after the other left a homeserver.yaml the other could not start
+# from. Since this script is now only the FALLBACK, reached when the native
+# path failed, the shared root meant the fallback would land on top of a
+# half-working native install and take it out too.
+#
+# Native kept the original path -- it is what checks.mjs and bridges/README
+# tell owners to look at, and it is what is actually running on the one
+# machine this has shipped to. Docker takes the new one.
+M="$HOME/.hazlie/matrix-docker"
 SYNAPSE_IMAGE="ghcr.io/element-hq/synapse@sha256:2af5409da4e155123ef1f8ab30914fb14ba36b8b909197073498db733298fcd7"
 DISCORD_IMAGE="dock.mau.dev/mautrix/discord@sha256:065405ca2f961b2687ca577c4eb65592c139d641342a9611d98b5394f30cf84a"
 
@@ -51,7 +63,25 @@ if [ -z "$YQ" ] || [ ! -x "$YQ" ]; then
   exit 1
 fi
 
+# The old shared path may still hold a Docker install from before the move.
+# Adopt it rather than silently starting over -- provisioning fresh here
+# would orphan the bridge databases holding the owner's message history and
+# re-bridge every account from scratch. Only adopt what is provably ours.
+LEGACY="$HOME/.hazlie/matrix"
+if [ ! -d "$M" ] && [ -f "$LEGACY/synapse/homeserver.yaml" ] \
+   && grep -qE '(^|: )/data(/|$)' "$LEGACY/synapse/homeserver.yaml" 2>/dev/null; then
+  echo "adopting the docker bridge state at $LEGACY -> $M"
+  mv "$LEGACY" "$M"
+fi
 mkdir -p "$M" && chmod 700 "$M"
+# Refuse a root that belongs to the native stack. Reached when someone points
+# this at a native directory by hand; the automatic fallback cannot, now that
+# the roots differ.
+if [ -f "$M/.engine" ] && [ "$(cat "$M/.engine" 2>/dev/null)" != "docker" ]; then
+  echo "$M holds $(cat "$M/.engine") bridge state, not docker. Nothing was changed." >&2
+  exit 1
+fi
+printf 'docker\n' > "$M/.engine"
 # The compose file interpolates this environment variable. Keeping it in this
 # process rather than bridges/.env means the downloaded app never needs to
 # mutate its own signed bundle just to set up a user's private bridge state.
@@ -379,9 +409,15 @@ if [ ! -f "$M/owner-credentials.json" ]; then
   PW="$(openssl rand -hex 24)"
   docker exec hazlie-synapse register_new_matrix_user http://localhost:8008 \
     -c /data/homeserver.yaml -u you -p "$PW" --no-admin
-  python3 - "$PW" <<'PY'
+  # $M, not a literal path. The guard above tests "$M/owner-credentials.json"
+  # and this block used to write ~/.hazlie/matrix/owner-credentials.json
+  # regardless -- harmless only while the two were the same directory, and this
+  # script no longer lives there. Left alone it would have overwritten the
+  # NATIVE stack's owner token with the Docker stack's on the first fallback.
+  python3 - "$PW" "$M" <<'PY'
 import json, os, sys, urllib.request
 pw = sys.argv[1]
+state_root = sys.argv[2]
 req = urllib.request.Request(
     'http://127.0.0.1:8008/_matrix/client/v3/login',
     data=json.dumps({"type": "m.login.password",
@@ -389,7 +425,7 @@ req = urllib.request.Request(
                      "password": pw}).encode(),
     headers={'Content-Type': 'application/json'})
 tok = json.load(urllib.request.urlopen(req))['access_token']
-path = os.path.expanduser('~/.hazlie/matrix/owner-credentials.json')
+path = os.path.join(state_root, 'owner-credentials.json')
 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, 'w') as f:
     json.dump({"homeserver": "http://127.0.0.1:8008",
