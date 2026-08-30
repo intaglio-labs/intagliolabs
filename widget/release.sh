@@ -207,6 +207,39 @@ mkdir -p "$DIST"
 
 codesign --verify --strict --deep "$APP"
 
+# NO AD-HOC MACH-O ANYWHERE IN THE BUNDLE. `--deep --strict` above does not
+# catch this: an ad-hoc signature IS a valid signature, so the bundle verifies
+# locally and Apple rejects it minutes later with a message that names nothing.
+# That is how libolm shipped unsigned into v0.4.0 -- it was staged into
+# bridges/lib, never added to build.sh's signing walk, and carried the ad-hoc
+# signature build-libolm.sh gave it.
+#
+# Sweep before submitting, because the round trip is the expensive part: a
+# notarization failure costs minutes and arrives as "Record not found" at
+# staple time. `file` decides what is Mach-O rather than a path allowlist, so a
+# binary added anywhere in the bundle in future is covered without anybody
+# remembering to update a list.
+adhoc=""
+while IFS= read -r f; do
+  case "$(file -b "$f" 2>/dev/null)" in
+    *Mach-O*) ;;
+    *) continue ;;
+  esac
+  if codesign -dv "$f" 2>&1 | grep -q 'Signature=adhoc'; then
+    adhoc="$adhoc
+  $f"
+  fi
+done <<EOF
+$(find "$APP" -type f)
+EOF
+if [ -n "$adhoc" ]; then
+  echo "AD-HOC SIGNED Mach-O inside a Developer ID bundle:$adhoc" >&2
+  echo >&2
+  echo "Apple will reject this. Add each to the signing walk in widget/build.sh" >&2
+  echo "(beside libolm and yq), then rebuild." >&2
+  exit 1
+fi
+
 if [ "$NOTARIZE" = 1 ]; then
   # Notarize the app (zip is the submission container), then staple the
   # ticket to the app itself so it verifies offline.

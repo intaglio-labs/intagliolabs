@@ -468,6 +468,20 @@ if [ -n "$IDENTITY" ]; then
   if [ -f "$BE/tools/yq" ]; then
     codesign --force --options runtime -s "$IDENTITY" "$BE/tools/yq"
   fi
+  # libolm. A plain dylib, so no entitlements -- the same treatment the llama
+  # dylibs and libnode get, and for the reason spelled out at the top of this
+  # block: nested Mach-O must carry its own Developer ID signature BEFORE the
+  # app seals it or notarization rejects the whole bundle.
+  #
+  # It arrived after v0.3.0 carrying an ad-hoc signature from build-libolm.sh,
+  # was staged into the bundle, and was never added here. v0.4.0's notarization
+  # came back Invalid and the run died at `stapler staple` with "Record not
+  # found" -- a symptom that names nothing. An ad-hoc signature is the failure
+  # mode that looks most like success: `codesign -dv` prints a real
+  # CodeDirectory and only the "Signature=adhoc" line gives it away.
+  if [ -f "$BE/bridges/lib/libolm.3.dylib" ]; then
+    codesign --force --options runtime -s "$IDENTITY" "$BE/bridges/lib/libolm.3.dylib"
+  fi
   # Signing nested Mach-O can restore this Finder attribute on the bundle.
   # Remove it immediately before the app-level signature.
   xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
