@@ -107,3 +107,31 @@ test('the owner is told something, not shown a dead end', () => {
   assert.match(line, /browser/iu);
   assert.match(line, /connect page/iu, 'it must say where they were sent');
 });
+
+// ---- do not advertise WebAuthn we cannot perform ----
+//
+// WKWebView in a non-browser app exposes window.PublicKeyCredential, so a site's
+// feature detection passes and it routes to passkeys — then
+// navigator.credentials.get() has no platform authenticator behind it. X did
+// exactly that: twitter.com/i/u2f_bridge, titled "Passkey verification",
+// rendering perfectly and promising a prompt that never comes (2026-08-30).
+//
+// The entitlement that would make it real is Apple-managed and browser-only, so
+// the capability is not coming. Feature detection exists so a site can pick a
+// method that works; the honest move is to stop claiming this one.
+
+test('the login window does not advertise WebAuthn', () => {
+  const code = login.split('\n').filter((l) => !/^\s*\/\//u.test(l)).join('\n');
+  assert.match(code, /delete window\.PublicKeyCredential/u,
+    'a capability we cannot deliver must not pass feature detection');
+  assert.match(code, /injectionTime: \.atDocumentStart/u,
+    'it must be gone before the page reads it');
+});
+
+test('the opt-out is narrow: password credential APIs survive', () => {
+  const code = login.split('\n').filter((l) => !/^\s*\/\//u.test(l)).join('\n');
+  // navigator.credentials also carries the password credential API that autofill
+  // uses. Removing it wholesale would trade one dead end for another.
+  assert.doesNotMatch(code, /delete navigator\.credentials/u,
+    'only the WebAuthn flag goes, not the whole credentials API');
+});

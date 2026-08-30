@@ -924,6 +924,34 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     //
     // Errors only, capped at six, message text only -- no stack and no source
     // URL, so nothing here can carry a query string or a token into a log file.
+    // STOP CLAIMING A CAPABILITY THIS WINDOW DOES NOT HAVE.
+    //
+    // WKWebView inside a non-browser app exposes window.PublicKeyCredential, so
+    // a site's feature detection passes — and then navigator.credentials.get()
+    // has no platform authenticator behind it. X takes exactly that route: it
+    // sent the owner to twitter.com/i/u2f_bridge, a page titled "Passkey
+    // verification" that renders perfectly and says "your browser will prompt
+    // you for your security key". It never will. Measured 2026-08-30.
+    //
+    // The honest fix is not to intercept the prompt, it is to stop advertising.
+    // Feature detection exists precisely so a site can pick a method that works,
+    // and this webview genuinely cannot do WebAuthn: the entitlement that would
+    // allow it is Apple-managed and browser-only. Removing the advertisement
+    // routes X to a second factor it CAN complete — an authenticator code — and
+    // does the same for any other site that offers a choice.
+    //
+    // Deleted narrowly. navigator.credentials stays: it also carries password
+    // credential APIs that autofill uses, and breaking those would trade one
+    // dead end for another. Only the WebAuthn feature flag goes.
+    let webAuthnOptOut =
+      "try {" +
+      "  if (window.PublicKeyCredential) { delete window.PublicKeyCredential; }" +
+      "  if (window.AuthenticatorAssertionResponse) { delete window.AuthenticatorAssertionResponse; }" +
+      "  if (window.AuthenticatorAttestationResponse) { delete window.AuthenticatorAttestationResponse; }" +
+      "} catch (e) {}"
+    config.userContentController.addUserScript(WKUserScript(
+      source: webAuthnOptOut, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+
     let errorProbe =
       "window.__hzErr = [];" +
       "window.addEventListener('error', function (e) {" +
