@@ -142,6 +142,19 @@ final class Connectors {
     return normalizedActivityEstimate(raw)
   }
 
+  /// Keeps the ambient processing state continuous between bounded connector
+  /// passes. The daemon intentionally publishes `waiting` after one source
+  /// finishes and before the next scheduled source starts; that is a pause in
+  /// one queue, not completion of the multi-hour job Settings is displaying.
+  /// Requiring both a non-empty queue and its total estimate prevents a stale
+  /// or malformed activity file from waking the orb on its own.
+  var queuedWorkLabel: String? {
+    guard let raw = activitySnapshot,
+          normalizedActivityEstimate(raw) != nil,
+          !scheduledActivityTasks(raw).isEmpty else { return nil }
+    return "working through connector queue"
+  }
+
   /// The one connector operation happening now, if any. Unlike activityItems,
   /// this deliberately excludes the routine scheduled queue. Unfinished
   /// historical backfill is different: the short rests between its bounded

@@ -18,3 +18,13 @@ test('multiple person rows stay open and request their own summaries', () => {
   assert.match(click, /if \(expanded\.has\(rk\)\) \{[\s\S]*?expanded\.delete\(rk\);[\s\S]*?\} else \{[\s\S]*?expanded\.add\(rk\);[\s\S]*?requestSummary\(key, rowYear\);/u);
   assert.doesNotMatch(click, /expanded = /u);
 });
+
+test('exhaustive summaries poll aggregate progress and render coverage plus depth', () => {
+  assert.match(source, /if \(r && r\.pending\)[\s\S]*?setTimeout\(poll, 1200\)/u);
+  assert.match(source, /state: 'refreshing'[\s\S]*?text: r\.text[\s\S]*?coverage: r\.coverage/u,
+    'a previous summary stays visible while fresher evidence is processed');
+  assert.match(source, /all \$\{number\(coverage\.messages\)\} direct messages/u);
+  assert.match(source, /coverage\.conversations/u);
+  assert.match(source, /summarySectionsHtml\(sum\.sections\)/u);
+  assert.match(source, /reading \$\{progress\.month\}/u);
+});

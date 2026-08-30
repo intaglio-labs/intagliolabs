@@ -75,9 +75,11 @@ const TEASE_TEXT = 'voice coming soon.\nhelp us build it :)';
 const CHAT_TEASE = true;
 const CHAT_TEASE_TEXT = 'chat coming soon. help us build it :)';
 const TEASE_MS = 2400;
+const WORK_DETAILS_MS = 4800;
 const dreamEl = document.getElementById('wdream');
 const dreamText = document.getElementById('wdreamtext');
 let teaseTimer = null;
+let dreamKind = '';
 // Set by native whenever a popup opens or closes. The popups sit directly above
 // the bar and grow upward, so ANY open one covers the band this bubble needs --
 // see notifyPanelState in main.swift for why the bubble yields rather than the
@@ -85,25 +87,31 @@ let teaseTimer = null;
 let panelCovering = false;
 window.__hzPanels = (on) => { panelCovering = on === true; if (panelCovering) hideTease(); };
 
-function showTease(text = TEASE_TEXT) {
+function showTease(text = TEASE_TEXT, dwellMs = TEASE_MS, kind = 'tease') {
   // Nothing to see: the bubble would render behind an open panel and time out
   // unread. The orb still wakes and still sounds -- the caller does both before
   // this -- so the tap is answered, just not with a line nobody can read.
   if (panelCovering) return;
   dreamText.textContent = text;
   dreamEl.classList.add('on');
-  clearTimeout(teaseTimer);
-  // Re-tapping restarts the dwell rather than stacking timers, so a second
-  // tap reads as "yes, still coming soon" instead of cutting the line short.
-  teaseTimer = setTimeout(() => {
-    dreamEl.classList.remove('on');
-    teaseTimer = null;
-  }, TEASE_MS);
-}
-function hideTease() {
-  if (!teaseTimer) return;
+  dreamKind = kind;
   clearTimeout(teaseTimer);
   teaseTimer = null;
+  // A hover passes zero and holds the thought open until pointerleave. Clicks
+  // retain the ordinary bounded dwell. Repeating either replaces, never
+  // stacks, the prior timer.
+  if (dwellMs > 0) {
+    teaseTimer = setTimeout(() => {
+      dreamEl.classList.remove('on');
+      teaseTimer = null;
+      dreamKind = '';
+    }, dwellMs);
+  }
+}
+function hideTease() {
+  if (teaseTimer) clearTimeout(teaseTimer);
+  teaseTimer = null;
+  dreamKind = '';
   dreamEl.classList.remove('on');
 }
 
@@ -269,6 +277,15 @@ function orbTap() {
   // arming voice out of a burst face would undo the joke, and the state ends
   // on its own in a few seconds.
   if (dazed) return;
+  // While the flywheel is present, the orb is a status control first. The
+  // click pins the same live detail hover shows instead of answering with the
+  // unrelated voice teaser.
+  if (workLabel) {
+    hzSfx.wake();
+    wakeOrb();
+    showWorkDetails(WORK_DETAILS_MS);
+    return;
+  }
   const now = Date.now();
   const fast = now - lastTap < SPAM_GAP;
   lastTap = now;
@@ -326,6 +343,25 @@ function setOrbState(state) {
 }
 let voiceOrbState = 'idle';
 let workLabel = '';
+let workEstimate = '';
+let orbHovered = false;
+function workDetailText() {
+  if (!workLabel) return '';
+  return `current: ${workLabel}\n${workEstimate || 'estimating time left…'}`;
+}
+function showWorkDetails(dwellMs = 0) {
+  if (workLabel) showTease(workDetailText(), dwellMs, 'work');
+}
+orbBtn.addEventListener('pointerenter', () => {
+  orbHovered = true;
+  if (workLabel && !dazed && !jackpotOn) showWorkDetails();
+});
+orbBtn.addEventListener('pointerleave', () => {
+  orbHovered = false;
+  // A click owns a timer and remains visible after the cursor leaves. A pure
+  // hover has no timer, so it folds away immediately.
+  if (dreamKind === 'work' && !teaseTimer) hideTease();
+});
 function paintOrbState() {
   const processing = voiceOrbState === 'idle' && !!workLabel;
   setOrbState(voiceOrbState !== 'idle' ? voiceOrbState : (processing ? 'listening' : 'idle'));
@@ -333,7 +369,7 @@ function paintOrbState() {
   // background work only, so opening the mic does not claim a processor is
   // running and voice temporarily outranks a simultaneous backfill.
   orbEl.classList.toggle('processing', processing);
-  orbBtn.title = workLabel ? `processing: ${workLabel}` : 'intaglio labs';
+  orbBtn.title = workLabel ? workDetailText().replace('\n', ' — ') : 'intaglio labs';
 }
 window.__hzOrb = (talking) => {
   voiceOrbState = talking === true ? 'talking' : 'idle';
@@ -356,10 +392,20 @@ async function refreshWorkState() {
     workLabel = status?.state === 'working' && typeof status.label === 'string'
       ? status.label.slice(0, 120)
       : '';
+    workEstimate = workLabel && typeof status.estimate === 'string'
+      ? status.estimate.slice(0, 60)
+      : '';
   } catch {
     workLabel = '';
+    workEstimate = '';
   }
   paintOrbState();
+  if (dreamKind === 'work') {
+    if (workLabel) dreamText.textContent = workDetailText();
+    else hideTease();
+  } else if (orbHovered && workLabel && !dazed && !jackpotOn) {
+    showWorkDetails();
+  }
 }
 refreshWorkState();
 setInterval(refreshWorkState, 1500);
