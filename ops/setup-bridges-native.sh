@@ -204,6 +204,20 @@ bridge_rows | while read -r name port dbfile binary; do
     echo "$name: config written"
   fi
 
+  # THE LIMITS AND THE LOG LEVEL ARE MAIN'S, PORTED VERBATIM, and both are
+  # load-bearing rather than cosmetic.
+  #
+  # 2147483647 uncaps history: this used to write 10000, which silently decided
+  # how much of somebody's own past they were allowed to keep. connectors/lib/
+  # checks.mjs checkBridgeHardening FAILs anything lower, so a native install
+  # with the old numbers reported broken and its fix string pointed at the
+  # Docker script.
+  #
+  # logging.min_level = info is a PRIVACY setting, not a verbosity preference:
+  # the check's own words are "debug logs may contain message bodies". Neither
+  # setup script set it before, so it is the one hardening failure that bites
+  # Docker installs too until they re-provision.
+  #
   # Re-applied every run, not only on first write: a bridge whose first attempt
   # wrote an example config and then failed before registration must be fixable
   # by re-running, and mautrix only writes registration.yaml once the homeserver
@@ -220,8 +234,15 @@ bridge_rows | while read -r name port dbfile binary; do
       .appservice.database.type = \"sqlite3-fk-wal\" |
       .appservice.database.uri = \"file:$M/$name/$dbfile.db?_txlock=immediate\" |
       .bridge.permissions = {\"$SERVER_NAME\": \"user\", \"@you:$SERVER_NAME\": \"admin\"} |
-      .bridge.backfill.forward_limits.initial.dm = 10000 |
-      .bridge.double_puppet_server_map = {}
+      .bridge.startup_private_channel_create_limit = 2147483647 |
+      .bridge.backfill.forward_limits.initial.dm = 2147483647 |
+      .bridge.backfill.forward_limits.initial.channel = 2147483647 |
+      .bridge.backfill.forward_limits.initial.thread = 2147483647 |
+      .bridge.backfill.forward_limits.missed.dm = -1 |
+      .bridge.backfill.forward_limits.missed.channel = -1 |
+      .bridge.backfill.forward_limits.missed.thread = -1 |
+      .bridge.double_puppet_server_map = {} |
+      .logging.min_level = \"info\"
     " "$cfg"
   else
     "$YQ" -i "
@@ -234,8 +255,11 @@ bridge_rows | while read -r name port dbfile binary; do
       .database.uri = \"file:$M/$name/$dbfile.db?_txlock=immediate\" |
       .bridge.permissions = {\"$SERVER_NAME\": \"user\", \"@you:$SERVER_NAME\": \"admin\"} |
       .backfill.enabled = true |
-      .backfill.max_initial_messages = 10000 |
-      .double_puppet.secrets = {}
+      .backfill.max_initial_messages = 2147483647 |
+      .backfill.max_catchup_messages = 2147483647 |
+      .backfill.threads.max_initial_messages = 2147483647 |
+      .double_puppet.secrets = {} |
+      .logging.min_level = \"info\"
     " "$cfg"
   fi
 

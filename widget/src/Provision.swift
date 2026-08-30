@@ -236,7 +236,32 @@ enum Provision {
     bridgeSetupLock.unlock()
 
     DispatchQueue.global(qos: .userInitiated).async {
-      let script = backend.appendingPathComponent("ops/setup-bridges.sh")
+      // NATIVE FIRST, DOCKER AS THE FALLBACK.
+      //
+      // Both scripts provision the same stack — one Synapse and seven mautrix
+      // bridges — but the native one runs them as ordinary processes. Docker
+      // Desktop on macOS is a Linux VM, and it was carried only because the
+      // bridges were believed to need it. They do not: every bridge is Go with a
+      // published darwin-arm64 binary, and matrix-synapse publishes a macOS
+      // arm64 wheel. Verified end to end on 2026-08-30 — all seven bridges plus
+      // Synapse running with no Docker, three real social logins delivered, and
+      // thousands of messages ingested.
+      //
+      // The fallback is not ceremony. The native path needs libolm built from
+      // source (archived upstream, patched at build time) and ~305 MB of
+      // binaries fetched and hash-checked; a machine where either fails must
+      // still have a way through, and an install already running containers must
+      // keep working. Chosen by ARTIFACT, never by preference: .ready is written
+      // last by build-synapse.sh precisely so a half-built runtime is
+      // distinguishable from a good one.
+      let nativeScript = backend.appendingPathComponent("ops/setup-bridges-native.sh")
+      let nativeReady = hazlie
+        .appendingPathComponent("bridges/synapse/.ready")
+      let useNative = fm.isExecutableFile(atPath: nativeScript.path)
+        && fm.fileExists(atPath: nativeReady.path)
+      let script = useNative
+        ? nativeScript
+        : backend.appendingPathComponent("ops/setup-bridges.sh")
       var success = false
       if fm.isExecutableFile(atPath: script.path) {
         let logDir = hazlie.appendingPathComponent("logs")

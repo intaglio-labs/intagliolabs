@@ -132,12 +132,27 @@ fi
 # resolves them at ../ops relative to itself, which is this path in the bundle
 # and the repo root in a checkout. Same relative path, both layouts.
 mkdir -p "$BE/ops"
+# THE NATIVE BRIDGE RUNTIME SHIPS TOO.
+#
+# setup-bridges.sh provisions the stack in Docker; setup-bridges-native.sh
+# provisions the same stack as ordinary processes, and Provision.swift prefers
+# it. Docker Desktop on macOS is a Linux virtual machine — several GB of disk, a
+# gig-plus of resident RAM, a commercial licence for business use — and the
+# bridges never needed it: every mautrix bridge is Go with a published
+# darwin-arm64 binary, and matrix-synapse publishes a macOS arm64 wheel.
+#
+# Both are copied. The Docker script stays because an install already running
+# containers keeps working, and because a machine that cannot build libolm or
+# fetch the binaries must still have a way through.
 cp ../ops/gcal-auth.mjs ../ops/oura-auth.mjs ../ops/setup-bridges.sh \
-   ../ops/prefetch-bridges.sh "$BE/ops/"
+   ../ops/setup-bridges-native.sh ../ops/build-libolm.sh ../ops/build-synapse.sh \
+   ../ops/fetch-bridges.mjs ../ops/prefetch-bridges.sh "$BE/ops/"
 # A downloaded app executes these directly. Preserve the source mode, but also
 # set it explicitly so an archive or checkout that lost executable bits cannot
 # silently turn first-launch bridge warming off.
-chmod 755 "$BE/ops/setup-bridges.sh" "$BE/ops/prefetch-bridges.sh"
+chmod 755 "$BE/ops/setup-bridges.sh" "$BE/ops/prefetch-bridges.sh" \
+          "$BE/ops/setup-bridges-native.sh" "$BE/ops/build-libolm.sh" \
+          "$BE/ops/build-synapse.sh"
 clone_tree ../bridges "$BE/bridges"
 # The bridge installer needs yq to safely patch third-party YAML templates.
 # Ship the static editor in the app instead of requiring every downloaded-app
