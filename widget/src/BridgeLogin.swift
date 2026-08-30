@@ -1561,6 +1561,19 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
       list.contains { host == $0 || host.hasSuffix("." + $0) }
     }
     let ok = matches(allowedSuffixes) || (!inMain && matches(allowedFrameSuffixes))
+    // A CANCELLED SUBFRAME MUST NOT BE SILENT.
+    //
+    // The header notice below only fires for a main-frame block, so once the
+    // targetFrame fix started classifying new subframes correctly, every
+    // subframe this fence killed disappeared without a trace — and a challenge
+    // widget IS a subframe. Facebook's 2FA page grew an iframe 2.5s after load
+    // (f: 0 -> 1) and still rendered nothing, which is exactly the shape of a
+    // frame that was created and then refused.
+    //
+    // Host only. A subframe URL can carry a challenge token in its query.
+    if !ok && !inMain {
+      loginLog("blocked-subframe \(label) \(host)")
+    }
     if !ok && inMain {
       headerNotice?.stringValue = "blocked redirect to \(host) — close and retry"
       headerNotice?.textColor = NSColor(red: 0xff / 255, green: 0x90 / 255, blue: 0x68 / 255, alpha: 1)
