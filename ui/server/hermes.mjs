@@ -71,6 +71,8 @@ import {
   useTallyStore,
 } from './people/map.mjs';
 import { openTallyStore } from './people/tallyStore.mjs';
+import { createRelationshipMemory } from './relationship/service.mjs';
+import { buildMatchedCards, MATCH_RULES_VERSION } from './relationship/matcher.mjs';
 import {
   clearPeopleSearchCacheStorage,
   openPeopleSearchCache,
@@ -746,6 +748,10 @@ CREATE TABLE IF NOT EXISTS rm_card_event(
      offers. One-tap and optional: NULL is "dismissed, no reason given". */
   reason       TEXT CHECK (reason IS NULL OR (event = 'dismissed' AND reason IN
                  ('wrong-person','wrong-time','never-this-person','not-this-kind','not-useful'))),
+  /* The owner's free-text "why", from the card's feedback box -- the input
+     that steered thirteen shadow iterations, kept in the product loop. Owner
+     words about the owner's own data; rule 4 guards LOGS, not this store. */
+  note         TEXT,
   rule_version TEXT NOT NULL,
   time_band    TEXT NOT NULL CHECK (time_band IN ('morning','afternoon','evening','night')),
   created_at   INTEGER NOT NULL
@@ -2323,6 +2329,54 @@ export function applyMemoryBatch(db, body) {
   return { run_id: runId, applied, rejected };
 }
 
+// One relationship service per process, lazily built and cached on policy:
+// hermes' own db handle (sole writer holds the rm_* tables), the connectors'
+// state.db read-only for the spine, the resolutions db for aliases. A missing
+// state or resolutions file degrades to null rather than failing the route --
+// a fresh install has no contacts yet, and that is an answer.
+function relationshipState(db, policy) {
+  const holder = policy.relationshipHolder ?? policy; // per-process holder from start()
+  if (!holder.__relationship) {
+    let stateDb = null, resDb = null, owner = null;
+    try {
+      const statePath = join(homedir(), '.hazlie', 'connectors', 'state.db');
+      if (existsSync(statePath)) stateDb = new DatabaseSync(statePath, { readOnly: true });
+    } catch {}
+    try { resDb = openResolutionsDb(); } catch {}
+    try { owner = loadOwner(); } catch {}
+    const service = createRelationshipMemory({ contextDb: db, stateDb, resolutionsDb: resDb,
+      ...(owner ? { owner } : {}) });
+    const llamaCall = async (messages, max_tokens = 120, temperature = 0.2) => {
+      const upstream = await fetch(`${policy.llama.baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${policy.llama.apiKey()}` },
+        body: JSON.stringify({ messages, max_tokens, temperature }),
+      });
+      const body = await upstream.json();
+      return body?.choices?.[0]?.message?.content?.trim() ?? null;
+    };
+    holder.__relationship = { service, llamaCall, cards: [], batchId: null, refreshing: false, lastError: null };
+  }
+  return holder.__relationship;
+}
+
+// The global cap comes from the owner's config (relationshipMemory.capPerDay)
+// or a start() override for tests. No config means no cards -- fail closed,
+// per the step-4 rule: thresholds are the owner's or the gates artifact's to
+// set, never a default invented here.
+function relationshipCap(policy) {
+  // undefined means "not overridden: read the owner's config". null is an
+  // EXPLICIT no-cap -- the fail-closed scenario -- and tests pass it to stay
+  // isolated from whatever config the machine they run on happens to carry.
+  if (policy.relationshipCap !== undefined) return policy.relationshipCap;
+  try {
+    const cfg = JSON.parse(readFileSync(join(homedir(), '.hazlie', 'connectors', 'config.json'), 'utf8'));
+    const n = cfg?.relationshipMemory?.capPerDay;
+    if (Number.isInteger(n) && n > 0) return { max: n, windowMs: 86_400_000 };
+  } catch {}
+  return null;
+}
+
 async function handleAdmin(db, req, res, cors, url, channel, policy) {
   if (channel !== 'bearer') {
     // 403, not 401: the caller IS authenticated (allowlisted Origin) — it is
@@ -2340,6 +2394,89 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       },
       cors
     );
+    return;
+  }
+
+  // --- Relationship Memory (L5 step 10): the orb's card surface. ---------
+  // Bearer-only like every admin route. The card pipeline runs entirely on
+  // this box; refresh is minutes of loopback-llama time, so the widget fires
+  // it and polls the card endpoint rather than waiting.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/refresh') {
+    const rel = relationshipState(db, policy);
+    if (rel.refreshing) { send(res, 200, { started: false, already: true }, cors); return; }
+    rel.refreshing = true;
+    // Deliberately not awaited: the route answers now, the batch lands when
+    // the local model is done, and GET /card serves the previous batch (or
+    // nothing) in the meantime. Errors are recorded on the state, not lost.
+    rel.lastError = null;
+    (policy.relationshipMatcher ?? buildMatchedCards)(rel.service, {
+      llamaCall: rel.llamaCall, now: Date.now(),
+    }).then((result) => {
+      const now = Date.now();
+      const batchId = Number(db.prepare(
+        'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, ?, ?, ?)'
+      ).run(now, result.cards.length, 'open', null).lastInsertRowid);
+      const ins = db.prepare(
+        'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      for (const card of result.cards) {
+        card.snapshot_id = Number(ins.run(batchId, card.personKey, card.kind, card.sentence,
+          JSON.stringify({ quote: card.quote, role: card.role, focus: card.focus, label: card.label,
+            left: card.left, leftTone: card.leftTone, ...card.evidence }),
+          card.producer_version, 'combined-v13', now).lastInsertRowid);
+      }
+      rel.batchId = batchId;
+      rel.cards = result.cards;
+      rel.refreshing = false;
+    }).catch((e) => { rel.refreshing = false; rel.lastError = String(e?.message ?? e); });
+    send(res, 200, { started: true }, cors);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/admin/relationship/card') {
+    const rel = relationshipState(db, policy);
+    const cap = relationshipCap(policy);
+    if (!cap) { send(res, 200, { card: null, reason: 'no-cap-configured' }, cors); return; }
+    for (const card of rel.cards) {
+      // A card leaves the queue when the owner has acted on it (accepted or
+      // dismissed), and suppression/mute/cap are re-checked at serve time --
+      // the plan's "immediately before display" call site.
+      const acted = db.prepare(
+        "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event IN ('accepted','dismissed') LIMIT 1"
+      ).get(card.snapshot_id);
+      if (acted) continue;
+      const gate = rel.service.controls.allowCard({ personKey: card.personKey, kind: card.kind, cap });
+      if (!gate.allowed) { if (gate.reason === 'global-cap') break; continue; }
+      send(res, 200, { card }, cors);
+      return;
+    }
+    send(res, 200, { card: null, ...(rel.refreshing ? { refreshing: true } : {}),
+      ...(rel.lastError ? { lastError: rel.lastError } : {}) }, cors);
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/event') {
+    const rel = relationshipState(db, policy);
+    const body = await readJson(req);
+    const { snapshot_id, person_key, event, reason, note, mute_days } = body ?? {};
+    const ownerNote = typeof note === 'string' && note.trim().length > 0 ? note.trim() : null;
+    if (typeof person_key !== 'string' || person_key.length === 0) throw badRequest('"person_key" required');
+    if (!['shown', 'opened', 'accepted', 'dismissed', 'muted'].includes(event)) throw badRequest('unknown "event"');
+    const snapId = Number.isInteger(snapshot_id) ? snapshot_id : null;
+    if (event === 'muted') {
+      const days = Number.isFinite(mute_days) && mute_days > 0 ? mute_days : null;
+      if (days === null) throw badRequest('"mute_days" required for a mute');
+      rel.service.controls.mute({ personKey: person_key, kind: 'reconnect', untilAt: Date.now() + days * 86_400_000 });
+      rel.service.controls.recordEvent({ personKey: person_key, kind: 'reconnect', event: 'muted',
+        ruleVersion: MATCH_RULES_VERSION, snapshotId: snapId });
+    } else if (event === 'dismissed') {
+      rel.service.controls.dismiss({ personKey: person_key, kind: 'reconnect',
+        reason: typeof reason === 'string' && reason.length > 0 ? reason : null,
+        note: ownerNote, ruleVersion: MATCH_RULES_VERSION });
+    } else {
+      rel.service.controls.recordEvent({ personKey: person_key, kind: 'reconnect', event,
+        note: ownerNote, ruleVersion: MATCH_RULES_VERSION, snapshotId: snapId });
+    }
+    send(res, 200, { ok: true }, cors);
     return;
   }
 
@@ -3898,6 +4035,10 @@ export async function start({
   askTimeoutMs = ASK_TIMEOUT_MS,
   bearerToken: fixedBearerToken,
   bearerTokenFile = process.env.HERMES_TOKEN_FILE ?? DEFAULT_HERMES_TOKEN_PATH,
+  // Test seams for the relationship card routes: a stub matcher (no llama)
+  // and a fixed cap (production reads the owner's config).
+  relationshipMatcher,
+  relationshipCap,
 } = {}) {
   const allowedOriginSet = parseAllowedOrigins(allowedOrigins);
   let apiKey;
@@ -3930,6 +4071,10 @@ export async function start({
   const askCeilingMs = Number.isFinite(askTimeoutMs) && askTimeoutMs > 0
     ? askTimeoutMs
     : ASK_TIMEOUT_MS;
+  // Stable across requests: the per-request policy object cannot carry cached
+  // state, and the relationship service (spine handle, resolutions handle,
+  // current card batch) must live for the process, not the request.
+  const relationshipHolder = {};
   const db = openDb(dbPath ?? process.env.HERMES_DB ?? DEFAULT_DB_PATH);
   // The cache is derived and rebuildable, so keep it beside the exact corpus
   // handle it accelerates. In-memory test databases get no implicit disk
@@ -3967,6 +4112,9 @@ export async function start({
         llama,
         peopleSearchCache,
         peopleSearchCachePath,
+        relationshipMatcher,
+        relationshipCap,
+        relationshipHolder,
       });
     } catch (e) {
       send(res, e.status ?? 500, { error: e.message ?? String(e) }, cors);

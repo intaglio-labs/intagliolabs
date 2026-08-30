@@ -385,12 +385,15 @@ The orb communicates three distinct states:
 - **Useful now:** a trusted, timely L5 suggestion is available.
 - **Conflict:** existing relationship memory may be outdated.
 
-The orb's primary click already belongs to voice tap-to-arm (currently replaced
+~~The orb's primary click already belongs to voice tap-to-arm (currently replaced
 by a shipping tease behind one constant), so L5 must not silently take that
-gesture. Proactive state uses a badge and hue without changing the orb's
-silhouette: shape is the existing armed/idle signal. Clicking the accessible
-badge or the associated thought-bubble affordance opens one contextual card;
-clicking the orb retains its voice behavior. The complete Relationship Memory
+gesture.~~ Amended 2026-08-29 (owner decision, not silent): while the orb is
+in the notify state -- and only then -- its click opens the reconnect card;
+voice tap-to-arm is still a shipped tease, so the click was spending its
+value on a joke. If tap-to-arm ships for real, this decision gets revisited,
+not routed around. Proactive state uses a badge and hue without changing the
+orb's silhouette: shape is the existing armed/idle signal. Outside the notify
+state, clicking the orb retains its voice behavior. The complete Relationship Memory
 view can be added later as a secondary history and control center.
 
 Each proactive state has a still, non-motion equivalent. With Reduce Motion,

@@ -82,7 +82,7 @@ export function createControls(db, { canonicalOf = (k) => k } = {}) {
     },
 
     // ---- events and structured dismissal --------------------------------
-    recordEvent({ personKey, kind, event, reason = null, ruleVersion, snapshotId = null, now = Date.now() }) {
+    recordEvent({ personKey, kind, event, reason = null, note = null, ruleVersion, snapshotId = null, now = Date.now() }) {
       if (event === 'dismissed' && reason !== null && !DISMISS_REASONS.includes(reason)) {
         throw new Error(`dismissal reason must be one of: ${DISMISS_REASONS.join(', ')}`);
       }
@@ -90,19 +90,20 @@ export function createControls(db, { canonicalOf = (k) => k } = {}) {
         throw new Error('only a dismissal carries a reason');
       }
       db.prepare(
-        'INSERT INTO rm_card_event(person_key, kind, event, reason, rule_version, snapshot_id, time_band, created_at) ' +
-          'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO rm_card_event(person_key, kind, event, reason, note, rule_version, snapshot_id, time_band, created_at) ' +
+          'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(requireKey(personKey, 'personKey'), requireKey(kind, 'kind'), event, reason,
+        note === null ? null : String(note).slice(0, 500),
         requireKey(ruleVersion, 'ruleVersion'), snapshotId, timeBand(now), now);
     },
     // The one-tap dismissal. 'never-this-person' IS the permanent control
     // reached from a card -- the plan lists it among the reasons precisely so
     // suppression is one tap away; the reason row and the suppression row
     // land in the same transaction so neither can exist without the other.
-    dismiss({ personKey, kind, reason = null, ruleVersion, now = Date.now() }) {
+    dismiss({ personKey, kind, reason = null, note = null, ruleVersion, now = Date.now() }) {
       db.exec('BEGIN');
       try {
-        this.recordEvent({ personKey, kind, event: 'dismissed', reason, ruleVersion, now });
+        this.recordEvent({ personKey, kind, event: 'dismissed', reason, note, ruleVersion, now });
         if (reason === 'never-this-person') this.suppress(personKey, now);
         db.exec('COMMIT');
       } catch (error) {
