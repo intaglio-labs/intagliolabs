@@ -132,25 +132,30 @@ fi
 # resolves them at ../ops relative to itself, which is this path in the bundle
 # and the repo root in a checkout. Same relative path, both layouts.
 mkdir -p "$BE/ops"
-# THE NATIVE BRIDGE RUNTIME SHIPS TOO.
+# THE BRIDGE RUNTIME, WHICH IS NOW THE ONLY ONE.
 #
-# setup-bridges.sh provisions the stack in Docker; setup-bridges-native.sh
-# provisions the same stack as ordinary processes, and Provision.swift prefers
-# it. Docker Desktop on macOS is a Linux virtual machine — several GB of disk, a
-# gig-plus of resident RAM, a commercial licence for business use — and the
-# bridges never needed it: every mautrix bridge is Go with a published
+# setup-bridges-native.sh provisions Synapse and seven mautrix bridges as
+# launchd agents on this Mac. There used to be a second script that provisioned
+# the same stack in Docker, and it was shipped beside this one as a fallback;
+# both are gone. Docker Desktop on macOS is a Linux virtual machine — several GB
+# of disk, a gig-plus of resident RAM, a commercial licence for business use —
+# and the bridges never needed it: every mautrix bridge is Go with a published
 # darwin-arm64 binary, and matrix-synapse publishes a macOS arm64 wheel.
 #
-# Both are copied. The Docker script stays because an install already running
-# containers keeps working, and because a machine that cannot build libolm or
-# fetch the binaries must still have a way through.
-cp ../ops/gcal-auth.mjs ../ops/oura-auth.mjs ../ops/setup-bridges.sh \
+# A fallback that silently installs a VM is not a fallback anyone consented to,
+# and this one was unreachable in practice anyway. What replaces it is a setup
+# script that fetches its own dependencies, tears down what it started if it
+# cannot finish, and says why in ~/.hazlie/logs/bridge-setup.log.
+cp ../ops/gcal-auth.mjs ../ops/oura-auth.mjs \
    ../ops/setup-bridges-native.sh ../ops/build-libolm.sh ../ops/build-synapse.sh \
    ../ops/fetch-bridges.mjs ../ops/prefetch-bridges.sh "$BE/ops/"
+# The launchd templates the bridge setup renders. Without these the stack still
+# starts but nothing supervises it, which is the state this build left behind.
+cp ../ops/io.intaglio.synapse.plist ../ops/io.intaglio.bridge.plist "$BE/ops/"
 # A downloaded app executes these directly. Preserve the source mode, but also
 # set it explicitly so an archive or checkout that lost executable bits cannot
 # silently turn first-launch bridge warming off.
-chmod 755 "$BE/ops/setup-bridges.sh" "$BE/ops/prefetch-bridges.sh" \
+chmod 755 "$BE/ops/prefetch-bridges.sh" \
           "$BE/ops/setup-bridges-native.sh" "$BE/ops/build-libolm.sh" \
           "$BE/ops/build-synapse.sh"
 clone_tree ../bridges "$BE/bridges"
@@ -196,7 +201,7 @@ fi
 if printf '%s' "$TG_APP" | grep -Eq '^[0-9]{1,12}:[0-9a-fA-F]{32}$'; then
   printf '%s\n' "$TG_APP" > "$BE/telegram-app"
   chmod 600 "$BE/telegram-app"
-  echo "telegram: app credential baked in (ops/setup-bridges.sh will use it)"
+  echo "telegram: app credential baked in (ops/setup-bridges-native.sh will use it)"
 else
   [ -n "$TG_APP" ] && echo "telegram: ignoring a malformed credential — expected <api_id>:<api_hash>" >&2
   echo "telegram: no app credential on this machine; installs will use the per-user walkthrough"
