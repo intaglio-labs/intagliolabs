@@ -95,6 +95,20 @@ export const PLATFORMS = Object.freeze({
     // Policy, not a Swift constant, like every other per-platform difference.
     webLogin: {
       allowedHosts: ['facebook.com', 'messenger.com', 'meta.com'],
+      // SUBFRAMES: Meta frames its own challenge from its own sandbox host.
+      //
+      // fbsbx.com is where two-step verification is embedded, and with no
+      // allowedFrameHosts the fence cancelled it — measured 2026-08-30,
+      // "blocked-subframe Messenger www.fbsbx.com", after which the page sat
+      // there with a 2.5MB DOM rendering nothing. Five theories were spent on
+      // that blank page (viewport, data store, a JS crash, WebAuthn, and Meta
+      // refusing embedded webviews outright) and this fence was the cause the
+      // whole time.
+      //
+      // A subframe is not a destination. The main frame is where a password is
+      // typed and allowedHosts still governs it; this only says a Meta login page
+      // may embed content from Meta, which is what it does.
+      allowedFrameHosts: ['fbsbx.com', 'facebook.com', 'meta.com'],
       sessionCookie: 'c_user',
       windowWidth: 1000,
     },
@@ -111,7 +125,13 @@ export const PLATFORMS = Object.freeze({
     loginUrl: 'https://www.instagram.com/accounts/login/',
     cookieDomain: 'instagram.com',
     // Instagram's login can hand off to Meta's account center mid-flow.
-    webLogin: { allowedHosts: ['instagram.com', 'facebook.com', 'meta.com'], sessionCookie: 'sessionid' },
+    // Same Meta infrastructure and the same challenge host: Instagram's login
+    // hands off to the account centre and can frame the identical widget.
+    webLogin: {
+      allowedHosts: ['instagram.com', 'facebook.com', 'meta.com'],
+      allowedFrameHosts: ['fbsbx.com', 'facebook.com', 'meta.com', 'instagram.com'],
+      sessionCookie: 'sessionid',
+    },
   },
   // Owner-gated in SOCIAL-BRIDGES-PLAN.md ("accept the account risk");
   // Owner said go, 2026-08-22. mautrix-twitter, same megabridge family —

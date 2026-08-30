@@ -623,6 +623,16 @@
       "credential": "none -- a public file in a public repository",
       "decision": "Same posture as the bridge binaries themselves: an upstream artifact fetched to the owner's machine, pinned by sha256 in bridges/native.json and deleted on mismatch. A config that seeds a bridge holding live session cookies is not a file to fetch on trust, which is why it is hashed like the executables rather than merely downloaded.",
       "evidence": "bridges/native.json discord.exampleConfig.url"
+    },
+    {
+      "host": "fbsbx.com",
+      "kind": "login-webview",
+      "component": "connect/lib/bridge.mjs messenger + instagram webLogin.allowedFrameHosts",
+      "direction": "inbound-fetch",
+      "purpose": "the SUBFRAME Facebook embeds its two-step verification challenge in. Meta serves it from its own sandbox host rather than from facebook.com, so the login window has to be allowed to render a frame from here or the security step arrives as an empty page",
+      "credential": "none of ours -- the owner is signing in to Meta in a window whose cookies are harvested for the bridge; nothing is sent to this host that Meta did not put in the page",
+      "decision": "SUBFRAME ONLY, and that distinction is the whole point: fbsbx.com is deliberately absent from allowedHosts, so the window can never NAVIGATE here — the main frame is where a password is typed. Measured 2026-08-30 as \"blocked-subframe Messenger www.fbsbx.com\", after which the 2FA page sat with a 2.5MB DOM rendering nothing; five theories were spent on that blank page, including a wrong conclusion that Meta refuses embedded webviews outright, before the fence itself was instrumented.",
+      "evidence": "connect/lib/bridge.mjs webLogin.allowedFrameHosts for messenger and instagram; ~/.hazlie/logs/bridge-login.log blocked-subframe"
     }
   ],
   "_loopback": [

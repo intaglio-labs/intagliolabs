@@ -150,8 +150,17 @@ test('a login window may leave the platform only for that platform\'s own SSO', 
   const frames = Object.fromEntries(
     entries.filter(([, p]) => p.webLogin).map(([id, p]) => [id, [...(p.webLogin.allowedFrameHosts ?? [])].sort()]));
   assert.deepEqual(frames.slack, ['www.google.com', 'www.recaptcha.net']);
+  // ~~"only slack has a challenge behind it"~~ was true until Meta's was
+  // measured: Facebook frames two-step verification from www.fbsbx.com, and with
+  // an empty fence here it was cancelled and the page rendered nothing
+  // (2026-08-30). Pinned explicitly rather than asserted empty, so the next
+  // addition is a decision somebody makes rather than a test somebody deletes.
+  assert.deepEqual(frames.messenger, ['facebook.com', 'fbsbx.com', 'meta.com']);
+  assert.deepEqual(frames.instagram,
+    ['facebook.com', 'fbsbx.com', 'instagram.com', 'meta.com']);
+  const framed = new Set(['slack', 'messenger', 'instagram']);
   for (const [id, hosts] of Object.entries(frames)) {
-    if (id !== 'slack') assert.deepEqual(hosts, [], `${id}: a frame fence with no challenge behind it`);
+    if (!framed.has(id)) assert.deepEqual(hosts, [], `${id}: a frame fence with no challenge behind it`);
   }
 
   // Every other platform's window stays on the platform's own hosts. Said as an
@@ -343,4 +352,30 @@ test('a platform whose login page is responsive asks for nothing', () => {
   // Instagram fits the default. Declaring a width for every platform would make
   // the exception invisible, which is how it stops being read as an exception.
   assert.equal(PLATFORMS.instagram.webLogin?.windowWidth, undefined);
+});
+
+// ---- a Meta login may frame Meta ----
+//
+// The blank two-step verification page was OUR fence, not Meta's refusal.
+// Messenger declared no allowedFrameHosts, so the challenge Facebook frames from
+// www.fbsbx.com was cancelled — measured 2026-08-30, "blocked-subframe Messenger
+// www.fbsbx.com" — leaving a 2.5MB DOM that rendered nothing. Five theories died
+// on that page before the fence was instrumented.
+
+test('the Meta platforms may embed Meta content in a subframe', () => {
+  for (const id of ['messenger', 'instagram']) {
+    const frames = PLATFORMS[id].webLogin?.allowedFrameHosts ?? [];
+    assert.ok(frames.includes('fbsbx.com'),
+      `${id} cannot frame Meta's challenge host, so a 2FA step renders blank`);
+  }
+});
+
+test('a subframe allowance is never a main-frame allowance', () => {
+  // The fence exists because the main frame is where a password is typed. A
+  // sandbox host must not become somewhere the window can navigate TO.
+  for (const id of ['messenger', 'instagram']) {
+    const w = PLATFORMS[id].webLogin;
+    assert.ok(!w.allowedHosts.includes('fbsbx.com'),
+      `${id} must not accept fbsbx.com as a main-frame destination`);
+  }
 });
