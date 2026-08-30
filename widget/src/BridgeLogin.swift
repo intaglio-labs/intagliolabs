@@ -680,7 +680,17 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
           return
         }
         guard self.looksRefused(again) else {
-          self.loginLog("refusal-drop \(self.label) recheck-recovered \(again.prefix(160))")
+          // NUMBERS, not a raw slice. JSON.stringify preserves insertion order,
+          // so a 160-byte prefix of this object carried whatever the earlier keys
+          // held regardless of what the last one was -- fixing `x` alone would not
+          // have closed the channel.
+          let d = (try? JSONSerialization.jsonObject(with: Data(again.utf8))) as? [String: Any]
+          self.loginLog("refusal-drop \(self.label) recheck-recovered"
+            + " vis=\(d?["vis"] as? Int ?? -1)"
+            + " kids=\(d?["kids"] as? Int ?? -1)"
+            + " html=\(d?["html"] as? Int ?? -1)"
+            + " textLen=\(d?["x"] as? Int ?? -1)"
+            + " shadow=\(d?["shadow"] as? Int ?? -1)")
           return
         }
         guard !self.finished, !self.harvestStarted else {
@@ -708,7 +718,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     guard let data = json.data(using: .utf8),
           let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
           (o["ready"] as? String) == "complete",
-          (o["x"] as? String)?.isEmpty == true,
+          (o["x"] as? Int) == 0,
           (o["shadow"] as? Int) == 0,
           let html = o["html"] as? Int, html >= 400_000,
           let kids = o["kids"] as? Int, kids >= 24,
@@ -956,12 +966,17 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
       "window.__hzErr = [];" +
       "window.addEventListener('error', function (e) {" +
       "  if (window.__hzErr.length < 6) {" +
-      "    window.__hzErr.push(String((e && e.message) || 'error').slice(0, 120));" +
+      // A CLASS, NOT A MESSAGE. e.message is site-controlled free text — a page
+      // that throws `new Error('login failed: ' + body)` puts that body in our
+      // log. The name answers the only question this was ever asked ("did a
+      // script die before the page rendered"), and across every recorded sample
+      // this array was empty, so nothing diagnostic is lost.
+      "    window.__hzErr.push(String((e && e.error && e.error.name) || 'error').slice(0, 40));" +
       "  }" +
       "}, true);" +
       "window.addEventListener('unhandledrejection', function (e) {" +
       "  if (window.__hzErr.length < 6) {" +
-      "    window.__hzErr.push('reject: ' + String((e && e.reason && e.reason.message) || e.reason || '?').slice(0, 110));" +
+      "    window.__hzErr.push('reject:' + String((e && e.reason && e.reason.name) || '?').slice(0, 40));" +
       "  }" +
       "});" +
       "window.__hzWA = {called: 0, settled: 0, err: ''};" +
@@ -1471,17 +1486,55 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   // A hidden content region is the other candidate: count what exists but
   // has no box at all.
   "hidden:document.body?Array.from(document.body.querySelectorAll('*')).filter(function(e){return e.offsetParent===null&&e.offsetHeight===0}).length:-1," +
-  "x:document.body?document.body.innerText.trim().slice(0,120):''})"
+  // A LENGTH, NEVER THE CHARACTERS. This sliced the first 120 characters of
+  // rendered text and loginLog wrote it verbatim, always on, for a window whose
+  // entire purpose is a platform login and its second factor -- where that copy
+  // is a masked phone fragment, an account hint, or the address a code went to.
+  // The block above already refuses to log text or attribute values for exactly
+  // this reason; this line was the hole in it. connectors/AGENTS.md forbids the
+  // same thing in as many words, and there is no rotation or delete path on
+  // this file at all. Behaviour-identical: looksRefused only ever asked whether
+  // this was empty, so a count answers the same question.
+  "x:document.body?document.body.innerText.trim().length:-1})"
 
   private func loginLog(_ line: String) {
-    let f = FileManager.default.homeDirectoryForCurrentUser
+    let fm = FileManager.default
+    let f = fm.homeDirectoryForCurrentUser
       .appendingPathComponent(".hazlie/logs/bridge-login.log")
     let msg = "\(ISO8601DateFormatter().string(from: Date())) \(line)\n"
     guard let data = msg.data(using: .utf8) else { return }
-    if let h = try? FileHandle(forWritingTo: f) {
-      h.seekToEndOfFile(); h.write(data); try? h.close()
+    // OWNER-ONLY, 0600. This landed as 0644 because `write(to:atomically:)`
+    // takes the process umask, and a world-readable file is the wrong mode for a
+    // record of which login pages somebody opened and what they rendered. Set on
+    // creation AND corrected on an existing file, so an install that already has
+    // the 0644 version is repaired rather than left as it was.
+    if !fm.fileExists(atPath: f.path) {
+      fm.createFile(atPath: f.path, contents: nil, attributes: [.posixPermissions: 0o600])
     } else {
-      try? msg.write(to: f, atomically: true, encoding: .utf8)
+      try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: f.path)
+    }
+    // AND IT HAS TO END SOMEWHERE. This file had no rotation and no delete
+    // path: it grew for the life of the install, and every line named a login
+    // page the owner opened and when. Nothing else on this machine keeps a
+    // record like that indefinitely -- hermes has a retention policy and the
+    // corpus has /admin/purge. A debugging log for a first-run flow does not
+    // need to outlive the first run, let alone the install.
+    //
+    // Drop the older half rather than the whole file, so a session that goes
+    // wrong right after a rotation still has the lines leading up to it.
+    if let h = try? FileHandle(forWritingTo: f) {
+      h.seekToEndOfFile()
+      if h.offsetInFile > 256 * 1024,
+         let existing = try? Data(contentsOf: f) {
+        let kept = existing.suffix(128 * 1024)
+        // Start at a line boundary; a half-line at the top reads as corruption.
+        let start = kept.firstIndex(of: 0x0A).map { kept.index(after: $0) } ?? kept.startIndex
+        try? (kept[start...] + data).write(to: f, options: .atomic)
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: f.path)
+        try? h.close()
+        return
+      }
+      h.write(data); try? h.close()
     }
   }
 
