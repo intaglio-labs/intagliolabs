@@ -124,3 +124,23 @@ test('an unprovisioned source is absent from the very first published queue', as
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('startup advances an already-completed durable year before the first tick', async () => {
+  const checkpoints = { 'yearly-backfill:year': '2024' };
+  for (const year of [2026, 2025, 2024]) {
+    checkpoints[`yearly-backfill:connector:imessage:done:${year}`] = '1';
+    checkpoints[`yearly-backfill:connector:calendar:done:${year}`] = '1';
+  }
+  checkpoints['yearly-backfill:connector:calendar:done:2023'] = '1';
+  const snapshot = await publishedSnapshot(
+    [
+      source('imessage', [], { walksHistory: true }),
+      source('calendar', [], { walksHistory: true }),
+    ],
+    checkpoints,
+    { settleMs: 600 }
+  );
+
+  assert.equal(snapshot.backfillYear, 2023);
+  assert.deepEqual(snapshot.backfill, ['imessage']);
+});

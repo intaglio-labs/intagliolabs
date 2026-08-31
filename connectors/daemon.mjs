@@ -1206,9 +1206,37 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
       // call it once up front. Failures leave the source ABSENT from the map,
       // which shows it: unknown must never read as unprovisioned.
       Promise.allSettled(scheduledSources.map(async (source) => {
+        // Match runSource's first gate. A manually disabled history source is
+        // unavailable for the barrier even if all of its ordinary credentials
+        // remain present.
+        if (existsSync(disableMarkerPath(source.name))) {
+          yearlyBackfill.classify(source.name, false);
+          return;
+        }
         const missing = await source.needs({ config });
-        if (Array.isArray(missing) && missing.length > 0) notReady.set(source.name, missing);
-      })).then(() => publishWaiting());
+        if (Array.isArray(missing) && missing.length > 0) {
+          notReady.set(source.name, missing);
+          yearlyBackfill.classify(source.name, false);
+          return;
+        }
+        const socialPlatforms = source.name === 'matrix' ? connectedSocialPlatforms() : [];
+        yearlyBackfill.classify(
+          source.name,
+          source.walksHistory === true
+            && (source.name !== 'matrix' || socialPlatforms.length > 0)
+        );
+      })).then(() => {
+        const recovery = yearlyBackfill.reconcile();
+        if (recovery.advanced > 0) {
+          log.info('history_restart_reconciled', {
+            fromYear: recovery.fromYear,
+            toYear: recovery.year,
+            barriers: recovery.advanced,
+            complete: recovery.complete,
+          });
+        }
+        publishWaiting();
+      });
 
       scheduledSources.forEach((source, i) => scheduleSource(source, 1_000 + i * FIRST_RUN_STAGGER_MS));
       scheduleMaintenance();

@@ -151,6 +151,33 @@ export function createYearlyBackfill({ state, connectors, now = Date.now } = {})
     return true;
   }
 
+  // Rebuild the durable barrier after a process restart. `classified` and
+  // `active` are intentionally process-local, while per-year completion is
+  // durable. Once every source has been classified again, the saved year can
+  // already be complete for all active sources. Waiting for another history
+  // task to call advance() then deadlocks: there is no task left in that year
+  // to make the call. Walk completed barriers now and stop at the first year
+  // that has real pending work (or at global completion).
+  function reconcile() {
+    const fromYear = year();
+    let advanced = 0;
+    while (true) {
+      const before = snapshot();
+      if (
+        !before.classified
+        || before.complete
+        || before.active.length === 0
+        || before.pending.length > 0
+      ) break;
+      const previousYear = before.year;
+      if (!advance()) break;
+      advanced += 1;
+      const after = snapshot();
+      if (after.complete || after.year >= previousYear) break;
+    }
+    return { fromYear, advanced, ...snapshot() };
+  }
+
   function snapshot() {
     const value = year();
     return {
@@ -162,5 +189,5 @@ export function createYearlyBackfill({ state, connectors, now = Date.now } = {})
     };
   }
 
-  return { classify, reopen, task, record, advance, snapshot };
+  return { classify, reopen, task, record, advance, reconcile, snapshot };
 }

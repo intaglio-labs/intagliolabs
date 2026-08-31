@@ -71,6 +71,33 @@ test('all available sources finish a year before the barrier moves backwards', (
   assert.equal(q.snapshot().year, 2025);
 });
 
+test('restart reconciliation skips a completed durable barrier', () => {
+  const state = memoryState();
+  state.setCursor('yearly-backfill:year', '2024');
+  for (const year of [2026, 2025, 2024]) {
+    state.setCursor(`yearly-backfill:connector:matrix:done:${year}`, '1');
+    state.setCursor(`yearly-backfill:connector:calendar:done:${year}`, '1');
+  }
+  // Calendar had already scanned farther before Matrix joined. Matrix is the
+  // first source that still has work once the 2024 barrier is reconciled.
+  state.setCursor('yearly-backfill:connector:calendar:done:2023', '1');
+  const q = createYearlyBackfill({
+    state,
+    connectors: ['matrix', 'calendar'],
+    now: () => NOW,
+  });
+  q.classify('matrix', true);
+  q.classify('calendar', true);
+
+  const recovered = q.reconcile();
+
+  assert.equal(recovered.fromYear, 2024);
+  assert.equal(recovered.year, 2023);
+  assert.equal(recovered.advanced, 1);
+  assert.deepEqual(recovered.pending, ['matrix']);
+  assert.equal(q.task('matrix')?.year, 2023);
+});
+
 test('unavailable sources do not block and calendar stops at the oldest real timeline', () => {
   const state = memoryState();
   const q = createYearlyBackfill({ state, connectors: ['imessage', 'calendar', 'mail'], now: () => NOW });
