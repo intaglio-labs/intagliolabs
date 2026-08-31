@@ -44,11 +44,49 @@ const CHUNK_ROW_CAP = 600;
 // too long and produced unnecessarily large intermediate notes.
 const BATCH_CHAR_CAP = 48_000;
 const BATCH_ITEM_CAP = 2;
+// BATCHING STILL CORRELATES THE ANSWERS, and 2 halves that rather than ending
+// it. Measured on the pre-#36 corpus at cap 4: 13.5% of leaf reductions were
+// byte-identical to a sibling, and an adjacency control proved it a BATCHING
+// artifact rather than thin evidence -- chronologically adjacent chunks came
+// back identical 9.3% of the time inside a batch versus 1.4% across a batch
+// boundary. Asking for N independent reductions in one call gets fewer than N
+// independent answers, for any N above 1.
+//
+// Left at 2 deliberately. #36 chose it for slot occupancy, which is a real
+// constraint for the year-by-year queue it introduced and one this measurement
+// says nothing about; overriding that from the outside would trade a latency
+// property somebody designed for against a duplication rate nobody has
+// re-measured since the caps changed. Re-measuring at 2 is the open question,
+// not the cap itself.
 const SESSION_GAP_MS = 6 * 60 * 60 * 1000;
 
 export const MIN_ROWS = 10;
 export const MIN_SUBSTANTIVE_ROWS = 3;
-export const SUMMARY_REVISION = 6;
+// ONE REVISION PER CACHE STAGE, because one number for all three cost 86.8% of a
+// 14h15m rebuild. A single SUMMARY_REVISION gated the leaf reductions, the month
+// consolidations AND the annual summary identically, so commit 1900838 -- which
+// changed one line of the ANNUAL prompt -- invalidated all 1,385 leaf reductions
+// the annual prompt never touches. Stage-scoped, that edit costs ~60 minutes.
+//
+// ALL THREE AT 6, matching what #36 set the flat constant to. That bump is
+// justified on its own terms and the split does not undo it: #36 changed
+// BATCH_CHAR_CAP and BATCH_ITEM_CAP, and batch composition genuinely changes
+// leaf output -- the 13.5% identical-sibling result above is that same coupling
+// seen from the other side. So this rebuild happens either way; what the split
+// buys is the NEXT annual-only edit, which no longer drags 1,385 leaf reductions
+// with it.
+//
+// Bump the narrowest one that actually changed. A leaf-prompt or batch-shape
+// change still bumps all three, because the stages above consume its output; an
+// annual-prompt change bumps only ANNUAL.
+export const LEAF_REVISION = 6;
+export const MONTH_REVISION = 6;
+export const ANNUAL_REVISION = 6;
+
+// Kept as the leaf value so anything still importing it invalidates the most,
+// not the least -- a stale importer should over-rebuild, never silently
+// under-rebuild.
+export const SUMMARY_REVISION = LEAF_REVISION;
 
 const CHUNK_SCHEMA = Object.freeze({
   name: 'relationship_summary_chunk', strict: true,
@@ -591,14 +629,14 @@ export async function summarizeYear(contextDb, stateDb, {
 
   const chunks = chunkRows(rows);
   const coverage = coverageForRows(rows, chunks);
-  const evidenceHash = hash({ revision: SUMMARY_REVISION, rows });
+  const evidenceHash = hash({ revision: ANNUAL_REVISION, rows });
   const db = summariesDb ?? openSummariesDb(summariesPath);
   try {
     const hit = db.prepare(
       'SELECT text, rows_seen, code_rev, evidence_hash, coverage_json, sections_json ' +
       'FROM summaries WHERE person_key = ? AND year = ?'
     ).get(personKey, year);
-    if (hit?.code_rev === SUMMARY_REVISION && summaryStillValid(hit.evidence_hash, evidenceHash)) {
+    if (hit?.code_rev === ANNUAL_REVISION && summaryStillValid(hit.evidence_hash, evidenceHash)) {
       const cachedCoverage = readJson(hit.coverage_json);
       const cachedSections = readJson(hit.sections_json);
       if (cachedCoverage && Array.isArray(cachedSections)) {
@@ -612,13 +650,13 @@ export async function summarizeYear(contextDb, stateDb, {
     onProgress?.({ stage: 'reading', completed: 0, total: chunks.length + 1 });
     const keep = new Set();
     const prepared = chunks.map((chunk) => {
-      const fingerprint = hash({ revision: SUMMARY_REVISION, rows: chunk.rows });
+      const fingerprint = hash({ revision: LEAF_REVISION, rows: chunk.rows });
       keep.add(`${chunk.month}:${chunk.index}:${fingerprint}`);
       const cached = db.prepare(
         'SELECT fingerprint, reduction_json, code_rev FROM summary_chunks ' +
         'WHERE person_key = ? AND year = ? AND month = ? AND chunk_index = ?'
       ).get(personKey, year, chunk.month, chunk.index);
-      const reduction = cached?.code_rev === SUMMARY_REVISION && cached.fingerprint === fingerprint
+      const reduction = cached?.code_rev === LEAF_REVISION && cached.fingerprint === fingerprint
         ? sanitizeChunk(readJson(cached.reduction_json)) : null;
       return { chunk, fingerprint, reduction };
     });
@@ -634,7 +672,7 @@ export async function summarizeYear(contextDb, stateDb, {
         'messages=excluded.messages, generated_ms=excluded.generated_ms, code_rev=excluded.code_rev'
       ).run(
         personKey, year, chunk.month, chunk.index, fingerprint,
-        JSON.stringify(reduction), chunk.rows.length, now, SUMMARY_REVISION
+        JSON.stringify(reduction), chunk.rows.length, now, LEAF_REVISION
       );
     };
 
@@ -728,7 +766,7 @@ export async function summarizeYear(contextDb, stateDb, {
         continue;
       }
       const fingerprint = hash({
-        revision: SUMMARY_REVISION,
+        revision: MONTH_REVISION,
         reductions: items.map(({ part, reduction }) => ({ part, reduction })),
       });
       keep.add(`${month}:-1:${fingerprint}`);
@@ -736,7 +774,7 @@ export async function summarizeYear(contextDb, stateDb, {
         'SELECT fingerprint, reduction_json, code_rev FROM summary_chunks ' +
         'WHERE person_key = ? AND year = ? AND month = ? AND chunk_index = -1'
       ).get(personKey, year, month);
-      let reduction = cached?.code_rev === SUMMARY_REVISION && cached.fingerprint === fingerprint
+      let reduction = cached?.code_rev === MONTH_REVISION && cached.fingerprint === fingerprint
         ? sanitizeChunk(readJson(cached.reduction_json)) : null;
       if (!reduction) {
         onProgress?.({
@@ -765,7 +803,7 @@ export async function summarizeYear(contextDb, stateDb, {
         ).run(
           personKey, year, month, -1, fingerprint, JSON.stringify(reduction),
           chunks.filter((chunk) => chunk.month === month).reduce((sum, chunk) => sum + chunk.rows.length, 0),
-          now, SUMMARY_REVISION
+          now, MONTH_REVISION
         );
       }
       consolidated += 1;
@@ -808,7 +846,7 @@ export async function summarizeYear(contextDb, stateDb, {
       'code_rev=excluded.code_rev, evidence_hash=excluded.evidence_hash, ' +
       'coverage_json=excluded.coverage_json, sections_json=excluded.sections_json'
     ).run(
-      personKey, year, annual.overview, rows.length, now, SUMMARY_REVISION,
+      personKey, year, annual.overview, rows.length, now, ANNUAL_REVISION,
       evidenceHash, JSON.stringify(coverage), JSON.stringify(sections)
     );
     onProgress?.({
