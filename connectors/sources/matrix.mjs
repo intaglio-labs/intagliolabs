@@ -35,6 +35,11 @@ const HISTORY_EXHAUSTED_ROOMS_KEY = 'matrix:history-exhausted-rooms';
 const HISTORY_YEAR_KEY = 'matrix:history-year';
 const HISTORY_YEAR_QUEUE_KEY = 'matrix:history-year-rooms';
 const HISTORY_DONE_KEY = 'matrix:history-done';
+// Joining a portal adds another conversation to the history walk. During the
+// initial invite drain that happens hundreds of times, but the shared yearly
+// coordinator must reopen only ONCE, after discovery settles. This durable bit
+// survives an app restart between the first joined portal and the last.
+const HISTORY_DISCOVERY_DIRTY_KEY = 'matrix:history-discovery-dirty';
 const HISTORY_BOOTSTRAP_KEY = 'matrix:history-bootstrap-v1';
 const PENDING_INVITES_KEY = 'matrix:pending-portal-invites';
 const INVITE_RECOVERY_KEY = 'matrix:invite-recovery-v1';
@@ -580,14 +585,30 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
         ctx.state.deleteCursor?.(HISTORY_YEAR_KEY);
         ctx.state.deleteCursor?.(HISTORY_YEAR_QUEUE_KEY);
         clearHistoryDone(ctx.state);
+        ctx.state.setCursor(HISTORY_DISCOVERY_DIRTY_KEY, '1');
       }
+      const historyDiscoveryPending = pendingInvites.length;
+      // Mark the batch even before a newly joined room appears in /sync. A
+      // successful /join is normally visible on the following sync, and an app
+      // restart in that gap must still reopen the completed year checkpoints
+      // once the durable invite queue reaches zero.
+      if (historyDiscoveryPending > 0) {
+        ctx.state.setCursor(HISTORY_DISCOVERY_DIRTY_KEY, '1');
+      }
+      // One barrier reset after the backlog drains, never one reset per room.
+      // The daemon pauses yearly history while this count is non-zero, so every
+      // room discovered in the batch participates in the one clean traversal.
+      const historyReopened = historyDiscoveryPending === 0
+        && ctx.state.getCursor(HISTORY_DISCOVERY_DIRTY_KEY) === '1';
+      if (historyReopened) ctx.state.deleteCursor?.(HISTORY_DISCOVERY_DIRTY_KEY);
       if (needsHistoryBootstrap) ctx.state.setCursor(HISTORY_BOOTSTRAP_KEY, '1');
       if (needsInviteRecovery) ctx.state.setCursor(INVITE_RECOVERY_KEY, '1');
       if (mapped.next) ctx.state.setCursor(CURSOR_KEY, mapped.next);
       return {
         ...totals,
         skipped: 0,
-        historyReopened: addedHistoryRoom,
+        historyDiscoveryPending,
+        historyReopened,
         ...(pendingInvites.length > 0 ? { retryAfterMs: inviteRetryMs ?? 15_000 } : {}),
       };
     },

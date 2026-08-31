@@ -39,6 +39,15 @@ test('it reports a count of conversations instead', () => {
   assert.match(daemon, /backfillRooms,/u, 'and include it in the published object');
 });
 
+test('portal discovery is counted and suppresses the paused year', () => {
+  assert.match(daemon, /portalInvitesPending = matrixHistoryRooms/u);
+  assert.match(daemon, /portalInvitesPending === 0[\s\S]*?backfillYear/u,
+    'a year label may appear only after portal discovery finishes');
+  assert.match(connectors, /raw\["portalInvitesPending"\] as\? Int/u);
+  assert.ok(connectors.includes('"label": "joining \\(portalInvitesPending) conversation'),
+    'the activity row must name the finite work actually underway');
+});
+
 test('a backfill with no estimate is still published', () => {
   // Otherwise removing the false ETA would have made the panel go silent, which
   // is a worse answer to "how do I know it is working" than a wrong number.
@@ -48,7 +57,7 @@ test('a backfill with no estimate is still published', () => {
   // loosened — this assertion exists to catch the return going silent.
   assert.match(
     daemon,
-    /\? null\s*\n\s*: \{ backfill, backfillRooms, \.\.\.\(!yearly\.complete \? \{ backfillYear: yearly\.year \} : \{\}\) \}/u,
+    /backfill\.length === 0 && portalInvitesPending === 0\s*\n\s*\? null/u,
     'work with no knowable end must still surface, and still name its year'
   );
 });

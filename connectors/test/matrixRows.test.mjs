@@ -231,11 +231,22 @@ test('a rate-limited portal join stays queued after the sync cursor advances', a
       syncs += 1;
       return jsonResponse(syncs === 1 ? {
         next_batch: 's-invites',
-        rooms: { invite: {
-          '!one:hazlie.local': invite('@facebookbot:hazlie.local'),
-          '!two:hazlie.local': invite('@instagrambot:hazlie.local'),
-          '!three:hazlie.local': invite('@telegrambot:hazlie.local'),
-        } },
+        rooms: {
+          invite: {
+            '!one:hazlie.local': invite('@facebookbot:hazlie.local'),
+            '!two:hazlie.local': invite('@instagrambot:hazlie.local'),
+            '!three:hazlie.local': invite('@telegrambot:hazlie.local'),
+          },
+          // A room discovered while more invitations remain must dirty the
+          // traversal without reopening it yet.
+          join: { '!existing:hazlie.local': {
+            state: { events: [
+              { type: 'm.room.member', state_key: '@instagram_9:hazlie.local',
+                content: { membership: 'join', displayname: 'Synthetic' } },
+            ] },
+            timeline: { prev_batch: 'back-existing', events: [] },
+          } },
+        },
       } : { next_batch: 's-after', rooms: {} });
     }
     if (url.pathname.includes('/join/')) {
@@ -266,17 +277,23 @@ test('a rate-limited portal join stays queued after the sync cursor advances', a
 
   const limited = await source.run(ctx);
   assert.equal(limited.retryAfterMs, 15_000);
+  assert.equal(limited.historyDiscoveryPending, 2);
+  assert.equal(limited.historyReopened, false,
+    'a new room must not restart yearly history while more rooms are undiscovered');
   assert.deepEqual(joined, ['!one:hazlie.local']);
   assert.deepEqual(JSON.parse(cursors.get('matrix:pending-portal-invites')), [
     '!two:hazlie.local', '!three:hazlie.local',
   ]);
   assert.equal(cursors.get('matrix:since'), 's-invites', 'sync cursor may safely advance');
 
-  await source.run(ctx);
+  const drained = await source.run(ctx);
   assert.deepEqual(joined, [
     '!one:hazlie.local', '!two:hazlie.local', '!three:hazlie.local',
   ]);
   assert.deepEqual(JSON.parse(cursors.get('matrix:pending-portal-invites')), []);
+  assert.equal(drained.historyDiscoveryPending, 0);
+  assert.equal(drained.historyReopened, true,
+    'the whole discovery batch reopens yearly history once, when it drains');
   assert.equal(cursors.get('matrix:since'), 's-after');
 });
 

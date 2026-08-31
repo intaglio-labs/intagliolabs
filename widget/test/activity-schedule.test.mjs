@@ -27,6 +27,13 @@ test('scheduled connector rows share one header countdown', () => {
   assert.ok(connectors.includes('deltaMs < -90_000'), 'an overdue schedule must be visible');
 });
 
+test('portal discovery replaces the retry countdown with remaining work', () => {
+  assert.ok(connectors.includes('return "\\(n) to join"'));
+  assert.match(connectors,
+    /var activityScheduleEstimate: String\?[\s\S]*?portalInvitesPending[\s\S]*?return nil/u,
+    'the next retry is not an estimate of when portal discovery completes');
+});
+
 test('a queue-only activity view does not add an internal-jargon preamble', () => {
   assert.doesNotMatch(connections, /catch-up/u);
   assert.doesNotMatch(connections, /scheduled checks only/u);

@@ -787,6 +787,12 @@ export function createDaemon({
     const yearly = yearlyBackfill.snapshot();
     const backfill = yearly.pending;
     let backfillRooms = 0;
+    // Portal discovery is finite work with a real remaining count. Do not call
+    // it a year and do not turn its retry timer into an ETA: Matrix may admit
+    // one room and rate-limit the next, so elapsed time is not predictable.
+    const portalInvitesPending = matrixHistoryRooms(
+      state.getCursor('matrix:pending-portal-invites')
+    );
 
     if (backfill.includes('calendar')) {
       const ceiling = positiveNumber(
@@ -841,9 +847,16 @@ export function createDaemon({
     // A count with no estimate is still worth publishing: it is the difference
     // between "something is happening to 9 conversations" and a silent panel.
     if (completionTimes.length === 0) {
-      return backfill.length === 0
+      return backfill.length === 0 && portalInvitesPending === 0
         ? null
-        : { backfill, backfillRooms, ...(!yearly.complete ? { backfillYear: yearly.year } : {}) };
+        : {
+            backfill,
+            backfillRooms,
+            portalInvitesPending,
+            ...(!yearly.complete && portalInvitesPending === 0
+              ? { backfillYear: yearly.year }
+              : {}),
+          };
     }
     const completion = Math.max(...completionTimes);
     const tenthsOfAnHour = Math.max(1, Math.round((completion - nowMs) / 360_000));
@@ -856,7 +869,8 @@ export function createDaemon({
       estimate: `~ ${(tenthsOfAnHour / 10).toFixed(1)} hrs left`,
       backfill,
       backfillRooms,
-      ...(!yearly.complete ? { backfillYear: yearly.year } : {}),
+      portalInvitesPending,
+      ...(!yearly.complete && portalInvitesPending === 0 ? { backfillYear: yearly.year } : {}),
     };
   };
   const publishActivity = (activity) => {
@@ -997,7 +1011,14 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
       // forward pass already succeeded and its counts are real; history is
       // catch-up work that retries on the next interval regardless.
       const historyWindow = yearlyBackfill.task(source.name);
-      if (source.walksHistory === true && historyWindow) {
+      // Matrix discovers one portal room per conversation. During a large
+      // first-run invite backlog, starting yearly history immediately means
+      // each newly joined room invalidates the traversal that just ran:
+      // 2026→2025→2024→2026, over and over. Forward sync still lands every new
+      // event; only the backwards walk waits until the finite discovery queue
+      // reaches zero, then runs once across the complete room roster.
+      const historyDiscoveryPending = Number(forward.historyDiscoveryPending) > 0;
+      if (source.walksHistory === true && historyWindow && !historyDiscoveryPending) {
         // A TIME BUDGET, not a row count.
         //
         // One slice per cycle is too slow to be useful: 2,000 rows against a

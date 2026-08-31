@@ -99,6 +99,35 @@ test('real multi-pass backfill still reports a horizon', async () => {
   assert.deepEqual(snapshot.backfill, ['calendar']);
 });
 
+test('yearly history waits for finite source discovery to finish', async () => {
+  let historyRuns = 0;
+  const discovering = {
+    name: 'archive',
+    walksHistory: true,
+    needs: async () => [],
+    run: async (ctx) => {
+      if (ctx.history) {
+        historyRuns += 1;
+        return { historyDone: true, historyHasOlder: false };
+      }
+      return { historyDiscoveryPending: 3 };
+    },
+  };
+  await publishedSnapshot([discovering], {});
+  assert.equal(historyRuns, 0,
+    'starting a year before the source roster settles makes every discovery restart it');
+});
+
+test('portal discovery publishes a remaining count instead of a year', async () => {
+  const snapshot = await publishedSnapshot([source('imessage')], {
+    'matrix:pending-portal-invites': JSON.stringify(['synthetic-a', 'synthetic-b', 'synthetic-c']),
+    'yearly-backfill:year': '2024',
+  });
+  assert.equal(snapshot.portalInvitesPending, 3);
+  assert.equal(snapshot.backfillYear, undefined,
+    'a paused year must not be rendered as though it is being fetched');
+});
+
 // A RESTART MUST NOT RE-ADVERTISE WORK THAT CANNOT RUN.
 //
 // notReady is filled inside runSource, so it is empty at startup while

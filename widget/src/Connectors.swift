@@ -105,6 +105,7 @@ final class Connectors {
     let labelFor = { (connector: String) in names[connector] ?? String(connector.prefix(32)) }
     let now = Date().timeIntervalSince1970 * 1000
     var items: [[String: Any]] = []
+    let portalInvitesPending = raw["portalInvitesPending"] as? Int ?? 0
     if raw["phase"] as? String == "syncing",
        let connector = raw["connector"] as? String,
        let started = raw["startedTs"] as? Double,
@@ -116,11 +117,22 @@ final class Connectors {
       items.append(["kind": "current", "label": "current: syncing \(label)"])
     }
 
+    if portalInvitesPending > 0 {
+      items.append([
+        "kind": "discovery",
+        "label": "joining \(portalInvitesPending) conversation\(portalInvitesPending == 1 ? "" : "s")",
+      ])
+    }
+
     // Historical catch-up remains a named job in the list. Its duration is not
     // repeated here: the pinned header is the horizon for the ENTIRE queue.
     if let backfill = raw["backfill"] as? [String], !backfill.isEmpty {
       let year = raw["backfillYear"] as? Int
       for connector in backfill {
+        // Matrix history is deliberately paused until every existing portal
+        // invitation is joined. Showing a year here would claim the backwards
+        // walk is active while the app is still discovering its room roster.
+        if connector == "matrix" && portalInvitesPending > 0 { continue }
         let subjects = connector == "matrix" ? matrixPlatformLabels(raw) : [labelFor(connector)]
         // SAY HOW MANY, since we cannot honestly say how long. The daemon
         // used to publish an ETA for this and it could not move: the
@@ -178,7 +190,10 @@ final class Connectors {
   /// real objects that changes, rather than ceil(rooms / perPass), which was
   /// always 1 and so always read as one interval away.
   var activityBackfillRooms: Int? {
-    guard let raw = activitySnapshot, let n = raw["backfillRooms"] as? Int, n > 0 else {
+    guard let raw = activitySnapshot else { return nil }
+    let n = (raw["portalInvitesPending"] as? Int).flatMap { $0 > 0 ? $0 : nil }
+      ?? (raw["backfillRooms"] as? Int).flatMap { $0 > 0 ? $0 : nil }
+    guard let n else {
       return nil
     }
     return n
@@ -186,6 +201,9 @@ final class Connectors {
 
   var activityEstimate: String? {
     guard let raw = activitySnapshot else { return nil }
+    if let n = raw["portalInvitesPending"] as? Int, n > 0 {
+      return "\(n) to join"
+    }
     return normalizedActivityEstimate(raw)
   }
 
@@ -194,6 +212,9 @@ final class Connectors {
   /// finishes, while a genuine finite backfill has activityEstimate above.
   var activityScheduleEstimate: String? {
     guard let raw = activitySnapshot else { return nil }
+    // A retry countdown is not a completion estimate. During portal discovery
+    // the finite remaining count above is both more useful and actually true.
+    if let n = raw["portalInvitesPending"] as? Int, n > 0 { return nil }
     let now = Date().timeIntervalSince1970 * 1000
     guard let next = scheduledActivityTasks(raw)
       .filter({ $0.connector != "maintenance" })
@@ -208,9 +229,11 @@ final class Connectors {
   /// Requiring both a non-empty queue and its total estimate prevents a stale
   /// or malformed activity file from waking the orb on its own.
   var queuedWorkLabel: String? {
-    guard let raw = activitySnapshot,
-          normalizedActivityEstimate(raw) != nil,
-          !scheduledActivityTasks(raw).isEmpty else { return nil }
+    guard let raw = activitySnapshot, !scheduledActivityTasks(raw).isEmpty else { return nil }
+    if let n = raw["portalInvitesPending"] as? Int, n > 0 {
+      return "joining social conversations"
+    }
+    guard normalizedActivityEstimate(raw) != nil else { return nil }
     return "working through connector queue"
   }
 
@@ -232,6 +255,10 @@ final class Connectors {
         return "syncing \(platforms.joined(separator: " · "))"
       }
       return "syncing \(labelFor(connector))"
+    }
+    if raw["phase"] as? String == "waiting",
+       let n = raw["portalInvitesPending"] as? Int, n > 0 {
+      return "joining social conversations"
     }
     if raw["phase"] as? String == "waiting",
        let estimate = raw["estimate"] as? String,

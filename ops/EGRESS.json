@@ -309,6 +309,16 @@
       "evidence": "connect/lib/bridge.mjs PLATFORMS.*.webLogin.allowedHosts; enforced in widget/src/BridgeLogin.swift decidePolicyFor; asserted in connect/test/bridgePolicy.test.mjs"
     },
     {
+      "host": "www.messenger.com",
+      "kind": "login-webview",
+      "component": "widget/src/BridgeLogin.swift (start URL from connect/lib/bridge.mjs)",
+      "direction": "outbound",
+      "purpose": "Messenger's bridge-declared cookie login start page",
+      "credential": "the owner types their own password into the platform's real page; session cookies are harvested from the isolated non-persistent store",
+      "decision": "Same owner-approved Messenger login represented by the messenger.com fence entry; mautrix-meta v0.2608.0 declares the www host as this flow's start URL.",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.messenger.loginUrl; mautrix-meta v0.2608.0 pkg/connector/login.go"
+    },
+    {
       "host": "meta.com",
       "kind": "login-webview",
       "component": "widget/src/BridgeLogin.swift (fence from connect/lib/bridge.mjs)",
