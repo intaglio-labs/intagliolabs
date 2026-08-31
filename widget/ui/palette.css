@@ -2350,6 +2350,12 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
 .activity-item:nth-child(n + 2) .activity-dot {
   animation: none; box-shadow: none; opacity: 0.52;
 }
+.activity-item.activity-queue { color: var(--muted); }
+/* A future check is context, not current work. It must stay quiet even when
+   it is the first line in the list. */
+.activity-item.activity-queue .activity-dot {
+  animation: none; box-shadow: none; opacity: 0.52;
+}
 .activity-idle { color: var(--muted); font-size: 11px; }
 @keyframes activity-pulse { 50% { opacity: 0.35; transform: scale(0.75); } }
 

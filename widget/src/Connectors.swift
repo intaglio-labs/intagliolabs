@@ -65,6 +65,22 @@ final class Connectors {
       .sorted { $0.nextTs < $1.nextTs }
   }
 
+  /// A scheduled start is useful context, but it is never an estimate of how
+  /// long a connector will take. Keeping those two facts separate prevents an
+  /// idle queue from looking like a stalled processing job.
+  private func scheduledDelayLabel(_ nextTs: Double, now: Double) -> String {
+    let deltaMs = nextTs - now
+    if deltaMs < -90_000 { return "overdue" }
+    if deltaMs <= 0 { return "due now" }
+    let minutes = Int(ceil(deltaMs / 60_000))
+    if minutes == 1 { return "in 1 min" }
+    if minutes < 60 { return "in \(minutes) min" }
+    let hours = minutes / 60
+    let remainder = minutes % 60
+    if remainder == 0 { return "in \(hours)h" }
+    return "in \(hours)h \(remainder)m"
+  }
+
   /// Matrix is one local transport for several user-facing connectors. The
   /// daemon expands it into one queued task per connected platform; preserve
   /// those names anywhere Settings describes Matrix work instead of leaking
@@ -134,9 +150,14 @@ final class Connectors {
     let queue = scheduledActivityTasks(raw)
     for task in queue {
       // A scheduled time is when work STARTS, not work happening now and not a
-      // duration. Every future entry therefore says only "next"; a real live
-      // pass is the syncing row above and ongoing catch-up is the backfill row.
-      items.append(["kind": "queue", "label": "next: \(task.label ?? labelFor(task.connector))"])
+      // duration. Name the countdown explicitly: a bare "next: calendar" was
+      // drawn with the live-work dot and read as a job that had been stuck for
+      // days, even when the daemon was simply waiting for its normal poll.
+      let label = task.label ?? labelFor(task.connector)
+      items.append([
+        "kind": "queue",
+        "label": "next check: \(label) · \(scheduledDelayLabel(task.nextTs, now: now))",
+      ])
     }
 
     // Bundles built before the queue schema retain a useful one-line NEXT row.
@@ -145,7 +166,7 @@ final class Connectors {
        raw["phase"] as? String == "waiting",
        let connector = raw["connector"] as? String {
       let label = raw["label"] as? String ?? labelFor(connector)
-      items.append(["kind": "queue", "label": "next: \(label)"])
+      items.append(["kind": "queue", "label": "next check: \(label)"])
     }
     return items
   }

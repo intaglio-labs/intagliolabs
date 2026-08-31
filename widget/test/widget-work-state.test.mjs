@@ -145,7 +145,7 @@ test('the total processing estimate uses the plain approximate-hours label', () 
 
 test('only live work says current; scheduled connectors show only future order', () => {
   assert.ok(connectors.includes('"label": "current: syncing \\(label)"'));
-  assert.ok(connectors.includes('next: \\(task.label ?? labelFor(task.connector))'));
+  assert.ok(connectors.includes('next check: \\(label) · \\(scheduledDelayLabel(task.nextTs, now: now))'));
   assert.doesNotMatch(connectors, /remainingFor/u,
     'a scheduled start countdown is not time remaining on current work');
   assert.ok(!connectors.includes('"current: \\(task'),
