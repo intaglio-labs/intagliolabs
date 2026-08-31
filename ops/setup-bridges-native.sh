@@ -232,13 +232,75 @@ install_agent() {
   if launchctl print "gui/$UID_/$SUPERVISOR_LABEL" >/dev/null 2>&1; then
     if [ "$changed" = "1" ]; then
       launchctl bootout "gui/$UID_/$SUPERVISOR_LABEL" 2>/dev/null || true
-      launchctl bootstrap "gui/$UID_" "$dst" 2>/dev/null || true
+      wait_booted_out || return 1
+      bootstrap_supervisor "$dst" || return 1
     fi
     launchctl kickstart -k "gui/$UID_/$SUPERVISOR_LABEL" 2>/dev/null || true
   else
-    launchctl bootstrap "gui/$UID_" "$dst" 2>/dev/null || true
+    bootstrap_supervisor "$dst" || return 1
     launchctl kickstart "gui/$UID_/$SUPERVISOR_LABEL" 2>/dev/null || true
   fi
+}
+
+# BOOTOUT IS ASYNCHRONOUS, AND BOOTSTRAPPING INTO ITS WAKE FAILS.
+#
+# `launchctl bootout` returns before the service name is released, so a
+# bootstrap issued immediately afterwards loses a race and answers
+# "Bootstrap failed: 5: Input/output error". Both calls were `|| true`, so the
+# script sailed on with NOTHING LOADED, found no bridges alive, and called
+# abandon -- which tore down the stack it had just failed to start. That is how
+# a routine re-run left the owner's machine with no bridges at all
+# (2026-08-31). ops/setup-connectors.sh had already learned this and retries;
+# this is the same fix, plus an explicit wait so the common case does not need
+# the retries.
+# THE JOB GOING AWAY IS NOT THE PORTS GOING AWAY. Booting the supervisor out
+# stops its children, but the next supervisor starts its own Synapse the instant
+# it is bootstrapped -- and if the previous one has not finished releasing :8008,
+# the new one dies with "Couldn't listen on ::1:8008: Address already in use",
+# the health wait times out, and abandon tears the whole stack down. That is a
+# routine re-run leaving the machine with no bridges, and it happened twice on
+# 2026-08-31 before this waited for the right thing.
+#
+# So wait for all three: the launchd job, the child processes, and the port.
+wait_booted_out() {
+  i=0
+  while launchctl print "gui/$UID_/$SUPERVISOR_LABEL" >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -gt 20 ]; then
+      echo "  !! $SUPERVISOR_LABEL would not boot out" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  i=0
+  while [ -n "$(pgrep -f 'mautrix-.*-darwin-arm64|synapse\.app\.homeserver' 2>/dev/null)" ] \
+        || lsof -nP -iTCP:"$SYNAPSE_PORT" -sTCP:LISTEN >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -gt 25 ]; then
+      # Stragglers, not a reason to give up: SIGKILL what is left rather than
+      # bootstrapping a supervisor whose children cannot bind.
+      echo "  stragglers from the previous stack; forcing them down" >&2
+      pkill -9 -f 'mautrix-.*-darwin-arm64' 2>/dev/null || true
+      pkill -9 -f 'synapse\.app\.homeserver' 2>/dev/null || true
+      sleep 2
+      break
+    fi
+    sleep 1
+  done
+  return 0
+}
+
+bootstrap_supervisor() {
+  for _attempt in 1 2 3 4 5; do
+    if launchctl bootstrap "gui/$UID_" "$1" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  # NOT `|| true`. A supervisor that did not load is the whole stack missing,
+  # and the caller has to know that before it decides anything else.
+  echo "  !! could not bootstrap $SUPERVISOR_LABEL after 5 attempts" >&2
+  return 1
 }
 
 # Booting the supervisor out stops its children: it forwards SIGTERM on the way
