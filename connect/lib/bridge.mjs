@@ -114,7 +114,17 @@ export const PLATFORMS = Object.freeze({
       // A subframe is not a destination. The main frame is where a password is
       // typed and allowedHosts still governs it; this only says a Meta login page
       // may embed content from Meta, which is what it does.
-      allowedFrameHosts: ['fbsbx.com', 'facebook.com', 'meta.com'],
+      // The two-step page also embeds reCAPTCHA Enterprise. Blocking
+      // www.google.com produced Meta's explanatory shell with no actual
+      // challenge (measured 2026-08-31). The alternate reCAPTCHA domain is the
+      // same narrow precaution already used by Slack's challenge policy.
+      allowedFrameHosts: [
+        'fbsbx.com', 'facebook.com', 'meta.com', 'www.google.com', 'www.recaptcha.net',
+      ],
+      // A browser has a different cookie jar, so handing a failed Messenger
+      // webview to it cannot finish this automatic bridge login. Keep failure
+      // and retry inside the app instead of opening facebook.com externally.
+      browserHandoff: false,
       sessionCookie: 'c_user',
       windowWidth: 1000,
     },

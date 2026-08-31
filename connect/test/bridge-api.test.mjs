@@ -32,6 +32,7 @@ test('fresh installs can fetch web-login policy before Matrix exists', async (t)
   assert.equal(res.body.loginUrl, 'https://www.facebook.com/login/');
   assert.deepEqual(res.body.allowedHosts, ['facebook.com', 'messenger.com', 'meta.com']);
   assert.equal(res.body.sessionCookie, 'c_user');
+  assert.equal(res.body.browserHandoff, false);
 });
 
 test('fresh manual bridges report their policy instead of a Matrix error', async (t) => {

@@ -116,6 +116,10 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
   /// Hosts allowed in SUBFRAMES only — a challenge widget's iframes. Never the
   /// main frame: see the fence for why the two lists are not one.
   private let allowedFrameSuffixes: [String]
+  /// Whether a persistently refused page may offer the external connect page.
+  /// False for Messenger: a browser has a different cookie jar and cannot
+  /// complete the app's automatic session handoff.
+  private let allowsBrowserHandoff: Bool
   private let done: (String?) -> Void
 
   /// Cookie logins normally finish as soon as their cookie payload is ready.
@@ -181,6 +185,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     label: String, cookieDomain: String, sessionCookie: String, allowedHosts: [String],
     requiredCookies: [String], cookieFormat: String, fields: [[String: String]],
     approval: Bool, userAgent: String, allowedFrameHosts: [String],
+    browserHandoff: Bool,
     storageUrl: String, windowWidth: Int,
     afterHarvest: HarvestContinuation?,
     done: @escaping (String?) -> Void
@@ -196,6 +201,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     self.approval = approval
     self.userAgent = userAgent
     self.allowedFrameSuffixes = allowedFrameHosts
+    self.allowsBrowserHandoff = browserHandoff
     self.storageUrl = storageUrl
     self.allowedSuffixes = allowedHosts
     // WIDE ENOUGH FOR THE PAGE THIS PLATFORM ACTUALLY SERVES.
@@ -235,6 +241,7 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     sessionCookie: String, allowedHosts: [String], requiredCookies: [String] = [],
     cookieFormat: String = "json", fields: [[String: String]] = [],
     approval: Bool = false, userAgent: String = "", allowedFrameHosts: [String] = [],
+    browserHandoff: Bool = true,
     storageUrl: String = "", windowWidth: Int = 0,
     afterHarvest: HarvestContinuation? = nil,
     done: @escaping (String?) -> Void
@@ -253,7 +260,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
       sessionCookie: sessionCookie, allowedHosts: allowedHosts,
       requiredCookies: requiredCookies, cookieFormat: cookieFormat,
       fields: fields, approval: approval, userAgent: userAgent,
-      allowedFrameHosts: allowedFrameHosts, storageUrl: storageUrl,
+      allowedFrameHosts: allowedFrameHosts, browserHandoff: browserHandoff,
+      storageUrl: storageUrl,
       windowWidth: windowWidth, afterHarvest: afterHarvest, done: done
     )
     current = ctl
@@ -274,7 +282,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     let ctl = BridgeLogin(
       label: label, cookieDomain: "", sessionCookie: "", allowedHosts: [],
       requiredCookies: [], cookieFormat: "json", fields: [],
-      approval: false, userAgent: "", allowedFrameHosts: [], storageUrl: "",
+      approval: false, userAgent: "", allowedFrameHosts: [], browserHandoff: true,
+      storageUrl: "",
       // The passcode window renders its own body and loads no platform page,
       // so 0 keeps the default. This call site carries NO conflict marker --
       // presentPasscode is new on main and never saw the windowWidth parameter,
@@ -324,7 +333,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     let ctl = BridgeLogin(
       label: label, cookieDomain: "", sessionCookie: "", allowedHosts: [],
       requiredCookies: [], cookieFormat: "json", fields: [],
-      approval: false, userAgent: "", allowedFrameHosts: [], storageUrl: "",
+      approval: false, userAgent: "", allowedFrameHosts: [], browserHandoff: true,
+      storageUrl: "",
       // The QR window sizes itself in showQR and never loads a platform page.
       windowWidth: 0, afterHarvest: nil, done: done
     )
@@ -702,8 +712,13 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
         // here first wins outright. One flag, two paths, no ordering to get wrong.
         self.harvestStarted = true
         self.refusalShown = true
-        self.loginLog("refused \(self.label) — site rendered nothing, offering browser handoff")
-        self.showBrowserHandoff()
+        if self.allowsBrowserHandoff {
+          self.loginLog("refused \(self.label) — site rendered nothing, offering browser handoff")
+          self.showBrowserHandoff()
+        } else {
+          self.loginLog("refused \(self.label) — browser handoff disabled, offering in-app retry")
+          self.showFailure("The security check didn't load — close this window and try again.")
+        }
       }
     }
   }

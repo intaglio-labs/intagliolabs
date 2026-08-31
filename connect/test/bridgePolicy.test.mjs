@@ -155,7 +155,8 @@ test('a login window may leave the platform only for that platform\'s own SSO', 
   // an empty fence here it was cancelled and the page rendered nothing
   // (2026-08-30). Pinned explicitly rather than asserted empty, so the next
   // addition is a decision somebody makes rather than a test somebody deletes.
-  assert.deepEqual(frames.messenger, ['facebook.com', 'fbsbx.com', 'meta.com']);
+  assert.deepEqual(frames.messenger,
+    ['facebook.com', 'fbsbx.com', 'meta.com', 'www.google.com', 'www.recaptcha.net']);
   assert.deepEqual(frames.instagram,
     ['facebook.com', 'fbsbx.com', 'instagram.com', 'meta.com']);
   assert.deepEqual(frames.linkedin,
@@ -370,6 +371,14 @@ test('the Meta platforms may embed Meta content in a subframe', () => {
     assert.ok(frames.includes('fbsbx.com'),
       `${id} cannot frame Meta's challenge host, so a 2FA step renders blank`);
   }
+});
+
+test('Messenger keeps reCAPTCHA and failure recovery inside the app', () => {
+  const web = PLATFORMS.messenger.webLogin;
+  assert.ok(web.allowedFrameHosts.includes('www.google.com'),
+    'Meta security verification cannot render without its reCAPTCHA frame');
+  assert.equal(web.browserHandoff, false,
+    'an external browser has a different cookie jar and cannot finish this login');
 });
 
 test('a subframe allowance is never a main-frame allowance', () => {

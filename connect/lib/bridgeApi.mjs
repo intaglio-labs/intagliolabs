@@ -161,6 +161,10 @@ export async function bridgeApiResponse({
         // is typed and a widget is not a destination — BridgeLogin enforces the
         // split, this file authors it.
         allowedFrameHosts: platform.webLogin?.allowedFrameHosts ?? null,
+        // Some sites can complete a refused embedded step on the connect page.
+        // Messenger cannot: the browser's cookies are not the app webview's
+        // cookies, so its fallback is an in-app retry instead.
+        browserHandoff: platform.webLogin?.browserHandoff !== false,
         // A platform that refuses the default browser string gets its own.
         // Server-authored like the rest of this policy — Swift enforces it.
         userAgent: platform.webLogin?.userAgent ?? null,

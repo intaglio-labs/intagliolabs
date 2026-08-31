@@ -188,12 +188,12 @@
     {
       "host": "www.google.com",
       "kind": "login-webview",
-      "component": "widget/src/BridgeLogin.swift + connect/lib/bridge.mjs PLATFORMS.slack/PLATFORMS.linkedin",
+      "component": "widget/src/BridgeLogin.swift + connect/lib/bridge.mjs PLATFORMS.messenger/PLATFORMS.slack/PLATFORMS.linkedin",
       "direction": "bidirectional",
-      "purpose": "Challenge iframes inside Slack's and LinkedIn's own login pages in the bridge login window.",
+      "purpose": "Challenge iframes inside Messenger's, Slack's, and LinkedIn's own login pages in the bridge login window.",
       "credential": "none. The frames carry the challenge and its answer; the app reads only the response token reCAPTCHA writes into the page after a human passes, which is the receipt the Slack bridge asks for.",
-      "decision": "SUBFRAMES ONLY, never the top-level window: BridgeLogin's fence has two lists and this host is on the frame one. That distinction is the decision. Allowing it in the main list would let the window navigate itself to Google in the one webview where the owner types a password. Measured 2026-08-26 on Google's own reCAPTCHA demo page inside a fenced WKWebView, then observed again during LinkedIn's security-verification checkpoint on 2026-08-31.",
-      "evidence": "connect/lib/bridge.mjs PLATFORMS.slack/PLATFORMS.linkedin webLogin.allowedFrameHosts; widget/src/BridgeLogin.swift fence"
+      "decision": "SUBFRAMES ONLY, never the top-level window: BridgeLogin's fence has two lists and this host is on the frame one. That distinction is the decision. Allowing it in the main list would let the window navigate itself to Google in the one webview where the owner types a password. Measured 2026-08-26 on Google's own reCAPTCHA demo page, observed during LinkedIn's security-verification checkpoint, and then observed blocked twice on Messenger's two-step page on 2026-08-31.",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.messenger/PLATFORMS.slack/PLATFORMS.linkedin webLogin.allowedFrameHosts; widget/src/BridgeLogin.swift fence"
     },
     {
       "host": "li.protechts.net",
@@ -208,12 +208,12 @@
     {
       "host": "www.recaptcha.net",
       "kind": "login-webview",
-      "component": "widget/src/BridgeLogin.swift + connect/lib/bridge.mjs PLATFORMS.slack",
+      "component": "widget/src/BridgeLogin.swift + connect/lib/bridge.mjs PLATFORMS.messenger/PLATFORMS.slack",
       "direction": "bidirectional",
       "purpose": "The same reCAPTCHA widget, from Google's alternate domain.",
       "credential": "none, as above.",
-      "decision": "NOT OBSERVED, and listed anyway \u2014 the one row in this file that is precaution rather than measurement, said plainly so nobody mistakes it for evidence. Google serves the identical widget from this domain for networks where google.com is unreachable, and which one a page gets is decided by the script URL the site loads. Slack loads that script lazily from a bundle, so it was not cheap to determine. If it is never used this row is unused; if it is, its absence would have been an empty challenge box that reproduces on nobody's machine but the owner's.",
-      "evidence": "connect/lib/bridge.mjs PLATFORMS.slack.webLogin.allowedFrameHosts"
+      "decision": "NOT OBSERVED, and listed anyway \u2014 the one row in this file that is precaution rather than measurement, said plainly so nobody mistakes it for evidence. Google serves the identical widget from this domain for networks where google.com is unreachable, and which one a page gets is decided by the script URL the site loads. If it is never used this row is unused; if it is, its absence would have been an empty challenge box that reproduces on nobody's machine but the owner's.",
+      "evidence": "connect/lib/bridge.mjs PLATFORMS.messenger/PLATFORMS.slack.webLogin.allowedFrameHosts"
     },
     {
       "host": "web.telegram.org",

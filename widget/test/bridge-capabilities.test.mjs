@@ -252,7 +252,7 @@ test('native web login carries every server-authored policy feature to the login
 
   for (const field of [
     'requiredCookies', 'cookieFormat', 'fields', 'approval', 'userAgent',
-    'allowedFrameHosts', 'storageUrl',
+    'allowedFrameHosts', 'browserHandoff', 'storageUrl',
   ]) {
     assert.match(block, new RegExp(`begin\\["${field}"\\]`, 'u'), `${field} is read from server policy`);
     assert.match(block, new RegExp(`${field}: ${field}`, 'u'), `${field} is passed to BridgeLogin`);
