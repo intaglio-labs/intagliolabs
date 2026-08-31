@@ -54,6 +54,8 @@ test('People is a year-completion phase, not a fake connector fetch', () => {
   assert.ok(connectors.includes('"\\($0) profiles ready · summaries paused on battery"'));
   assert.ok(connectors.includes('return "finishing \\(year) people"'));
   assert.doesNotMatch(connectors, /fetching \\?\(.*people/u);
+  assert.match(daemon, /remainingWorkLabel\(peopleRemainingMs/u,
+    'the current People year must publish its aggregate remaining-work ETA');
 });
 
 test('a backfill with no estimate is still published', () => {

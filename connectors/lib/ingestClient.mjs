@@ -263,7 +263,8 @@ export async function adminCompletePeopleYear({ year }, opts) {
   const body = await expectOk(res, '/admin/people/complete-year');
   for (const field of [
     'year', 'profiles', 'summariesTotal', 'summariesComplete',
-    'summariesSkipped', 'summariesPending',
+    'summariesSkipped', 'summariesPending', 'workUnitsTotal',
+    'workUnitsComplete', 'estimatedRemainingMs',
   ]) {
     if (!Number.isFinite(body?.[field])) {
       throw new Error(`hermes people-year response is missing numeric "${field}"`);

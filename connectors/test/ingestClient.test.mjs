@@ -375,8 +375,9 @@ test('adminCompletePeopleYear returns aggregate progress only', async () => {
   const result = await adminCompletePeopleYear({ year: new Date().getFullYear() }, opts);
   assert.equal(result.complete, true);
   assert.deepEqual(Object.keys(result).sort(), [
-    'complete', 'profiles', 'startedMs', 'state', 'summariesComplete',
-    'summariesPending', 'summariesSkipped', 'summariesTotal', 'year',
+    'complete', 'estimatedRemainingMs', 'profiles', 'startedMs', 'state',
+    'summariesComplete', 'summariesPending', 'summariesSkipped', 'summariesTotal',
+    'workUnitsComplete', 'workUnitsTotal', 'year',
   ]);
 });
 

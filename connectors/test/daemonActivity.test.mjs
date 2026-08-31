@@ -12,7 +12,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createDaemon } from '../daemon.mjs';
+import { createDaemon, remainingWorkLabel } from '../daemon.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -86,6 +86,9 @@ test('a completed connector year surfaces People completion before the prior yea
         summariesComplete: 7,
         summariesSkipped: 2,
         summariesPending: 16,
+        workUnitsTotal: 80,
+        workUnitsComplete: 20,
+        estimatedRemainingMs: 5_400_000,
         retryAfterMs: 15_000,
       }),
     }
@@ -100,7 +103,18 @@ test('a completed connector year surfaces People completion before the prior yea
     summariesComplete: 7,
     summariesSkipped: 2,
     summariesPending: 16,
+    workUnitsTotal: 80,
+    workUnitsComplete: 20,
+    estimatedRemainingMs: 5_400_000,
   });
+  assert.equal(snapshot.estimate, '~ 1.5 hrs left');
+});
+
+test('remaining work is formatted as approximate compute time, including pauses', () => {
+  assert.equal(remainingWorkLabel(17 * 60_000), '~ 20 min left');
+  assert.equal(remainingWorkLabel(5_400_000), '~ 1.5 hrs left');
+  assert.equal(remainingWorkLabel(5_400_000, { paused: true }), '~ 1.5 hrs work left');
+  assert.equal(remainingWorkLabel(0), null);
 });
 
 const DONE = { 'calendar:history-done': '1', 'matrix:history-done': '1' };

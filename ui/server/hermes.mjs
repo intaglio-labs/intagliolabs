@@ -4289,6 +4289,7 @@ export async function start({
   const peopleSummaryQueue = new SummaryQueue({
     isRetryable: (error) => isUnreachable(error) || isTimeout(error) || error?.status === 502,
     onSettled: (receipt) => peopleYearCompletion?.record(receipt),
+    onProgress: (receipt) => peopleYearCompletion?.progress(receipt),
     run: ({ key, year, signal, onProgress }) => withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
       return summarizeYear(db, state, {

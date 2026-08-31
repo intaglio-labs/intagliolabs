@@ -104,6 +104,19 @@ export function sourceRetryDelay(result, intervalMs) {
     : intervalMs;
 }
 
+export function remainingWorkLabel(milliseconds, { paused = false } = {}) {
+  const ms = Number(milliseconds);
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  const minutes = Math.max(1, Math.ceil(ms / 60_000));
+  const qualifier = paused ? ' work' : '';
+  if (minutes < 60) {
+    const rounded = Math.max(5, Math.ceil(minutes / 5) * 5);
+    return `~ ${rounded} min${qualifier} left`;
+  }
+  const tenths = Math.max(1, Math.round(ms / 360_000));
+  return `~ ${(tenths / 10).toFixed(1)} hrs${qualifier} left`;
+}
+
 const PORTAL_JOIN_SAMPLE_KEY = 'matrix:portal-join-rate-sample';
 
 function median(values) {
@@ -876,6 +889,28 @@ export function createDaemon({
       completionTimes.push(nowMs + portalInvitesPending * portalMsPerRoom);
     }
 
+    // People summaries have a real finite workload: bounded message chunks
+    // plus one annual synthesis per eligible person. Hermes refines the count
+    // to exact chunks as each person starts, while the daemon only receives
+    // aggregate units and milliseconds. This is the current YEAR's horizon,
+    // not the recurring connector retry timer it replaces in the header.
+    const peopleRemainingMs = Number(peopleCompletion?.estimatedRemainingMs);
+    const peopleEstimate = backfill.includes('people')
+      ? remainingWorkLabel(peopleRemainingMs, {
+          paused: peopleCompletion?.state === 'waiting_for_power',
+        })
+      : null;
+    if (peopleEstimate) {
+      return {
+        estimate: peopleEstimate,
+        backfill,
+        backfillRooms,
+        portalInvitesPending,
+        peopleCompletion,
+        ...(!yearly.complete && portalInvitesPending === 0 ? { backfillYear: yearly.year } : {}),
+      };
+    }
+
     if (backfill.includes('calendar')) {
       const ceiling = positiveNumber(
         state.getCursor(CALENDAR_HISTORY_CURSOR_KEY),
@@ -992,6 +1027,9 @@ export function createDaemon({
           summariesComplete: result.summariesComplete,
           summariesSkipped: result.summariesSkipped,
           summariesPending: result.summariesPending,
+          workUnitsTotal: result.workUnitsTotal,
+          workUnitsComplete: result.workUnitsComplete,
+          estimatedRemainingMs: result.estimatedRemainingMs,
         };
         if (result.complete === true) {
           yearlyBackfill.recordBarrier('people', year);

@@ -501,12 +501,15 @@ function ensureSummariesSchema(db) {
       'started_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL);' +
     'CREATE TABLE IF NOT EXISTS summary_year_people (' +
       'year INTEGER NOT NULL, person_key TEXT NOT NULL, state TEXT NOT NULL, ' +
+      'work_units INTEGER NOT NULL DEFAULT 1, work_done INTEGER NOT NULL DEFAULT 0, ' +
       'PRIMARY KEY (year, person_key));'
   );
   ensureColumn(db, 'summaries', 'code_rev', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'summaries', 'evidence_hash', 'TEXT');
   ensureColumn(db, 'summaries', 'coverage_json', 'TEXT');
   ensureColumn(db, 'summaries', 'sections_json', 'TEXT');
+  ensureColumn(db, 'summary_year_people', 'work_units', 'INTEGER NOT NULL DEFAULT 1');
+  ensureColumn(db, 'summary_year_people', 'work_done', 'INTEGER NOT NULL DEFAULT 0');
 }
 
 // Privacy deletion clears the derived store too. DELETE alone leaves old prose

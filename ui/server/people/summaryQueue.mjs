@@ -16,6 +16,7 @@ export class SummaryQueue {
     isRetryable = () => false,
     retryDelayMs = 30_000,
     onSettled = () => {},
+    onProgress = () => {},
   } = {}) {
     if (typeof run !== 'function') throw new TypeError('SummaryQueue requires run');
     this.run = run;
@@ -23,6 +24,7 @@ export class SummaryQueue {
     this.isRetryable = isRetryable;
     this.retryDelayMs = retryDelayMs;
     this.onSettled = onSettled;
+    this.onProgress = onProgress;
     this.jobs = new Map();
     this.pending = [];
     this.active = null;
@@ -159,7 +161,10 @@ export class SummaryQueue {
       key: job.key,
       year: job.year,
       signal: job.abort.signal,
-      onProgress: (progress) => { job.progress = progress; },
+      onProgress: (progress) => {
+        job.progress = progress;
+        try { this.onProgress({ key: job.key, year: job.year, progress }); } catch {}
+      },
     })).then((result) => {
       job.state = 'done';
       job.result = result;

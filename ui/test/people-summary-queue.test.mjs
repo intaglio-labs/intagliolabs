@@ -123,3 +123,20 @@ test('a completion observer can persist a receipt without retaining the job', as
   assert.deepEqual(settled, [{ key: 'first', year: 2026, result: { text: 'summary for first' } }]);
   assert.equal(queue.view('first', 2026), null, 'background prose is not retained in process memory');
 });
+
+test('a progress observer receives aggregate work without retaining it in the queue API', async () => {
+  const observed = [];
+  const queue = new SummaryQueue({
+    run: async ({ onProgress }) => {
+      onProgress({ stage: 'reading', completed: 2, total: 5 });
+      return { text: 'done' };
+    },
+    onProgress: (receipt) => observed.push(receipt),
+  });
+  queue.enqueue([{ key: 'first', year: 2026 }]);
+  await until(() => observed.length === 1, 'progress receipt');
+  assert.deepEqual(observed, [{
+    key: 'first', year: 2026,
+    progress: { stage: 'reading', completed: 2, total: 5 },
+  }]);
+});
