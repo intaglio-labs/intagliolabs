@@ -6,10 +6,8 @@
 // is SERVER-SIDE and crosses every year (the filter row was yeeted — owner,
 // 2026-08-25): filtering the open year's loaded list could not reach a person
 // in another year, nor one past the 250 that list holds, which is most of them
-// once history lands. Expanding a row shows one
-// thing: a generated summary fetched on demand. The
-// taxonomy and specifics lines were yeeted in turn (owner, 2026-08-25); the
-// row's own chips are the whole counted topic surface, five of them.
+// once history lands. The row's own role, topic chips, activity count, and
+// source buttons are the complete surface; rows do not start model work.
 // (The file keeps its historical name; renaming the page id would ripple
 // through the bridge allowlist and panel factory for no behavioral gain.)
 //
@@ -106,10 +104,6 @@
 
   let year = new Date().getFullYear();
   let years = []; // every year with activity, from the server
-  // More than one relationship can be worth reading at once. Keep every open
-  // row rather than treating a new click as a command to collapse the last
-  // one; each row owns its own summary request and progress state.
-  const expanded = new Set(); // '<personKey>|<year>' rows showing detail
   const cache = new Map(); // year -> payload
   const staleYears = new Set(); // cached years owed a silent freshness check
   const refreshing = new Map(); // year -> in-flight refresh promise
@@ -124,12 +118,10 @@
   let findRows = null;
   let findState = 'idle'; // 'pending' | 'done' | 'degraded'
   let findCapped = false; // the corpus scan hit its row ceiling; counts are a floor
-  const summaries = new Map(); // '<personKey>|<year>' -> {state, text?, reason?}
   // Role edits have two client-side phases. `pendingRoles` paints the selected
   // role immediately with an inline saving indicator; `confirmedRoles` keeps
   // the successful correction authoritative while stale year/map requests
-  // quietly catch up. Neither phase needs to blank the list or discard a
-  // summary the user already opened.
+  // quietly catch up. Neither phase needs to blank the list.
   const pendingRoles = new Map(); // person+year (or all-time) -> role being saved
   const confirmedRoles = new Map(); // person+year (or all-time) -> saved role
   let selfMenu = null;
@@ -141,100 +133,6 @@
     return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   }
 
-  // ---- the model-written summary, fetched on demand per expanded row ----
-  function requestSummary(key, y) {
-    const sk = `${key}|${y}`;
-    if (summaries.has(sk)) return;
-    summaries.set(sk, { state: 'pending', progress: { stage: 'starting' } });
-    const poll = () => hzPost('peopleSummary', { key, year: y })
-      .then((r) => {
-        if (r && r.pending) {
-          summaries.set(sk, r.text ? {
-            state: 'refreshing', progress: r.progress || { stage: 'starting' },
-            text: r.text, coverage: r.coverage || null,
-            sections: Array.isArray(r.sections) ? r.sections : [],
-          } : { state: 'pending', progress: r.progress || { stage: 'starting' } });
-          render();
-          setTimeout(poll, 1200);
-          return;
-        }
-        summaries.set(sk, r && r.text ? {
-          state: 'done', text: r.text,
-          coverage: r.coverage || null,
-          sections: Array.isArray(r.sections) ? r.sections : [],
-        } : { state: 'none', reason: (r && r.reason) || 'unavailable' });
-        render();
-      })
-      .catch(() => {
-        summaries.set(sk, { state: 'none', reason: 'unavailable' });
-        render();
-      });
-    poll();
-  }
-
-  function summaryProgress(progress, y) {
-    if (progress?.stage === 'writing') return `writing ${y} summary…`;
-    if (progress?.stage === 'reading' && progress.month) {
-      const count = Number.isFinite(progress.completed) && Number.isFinite(progress.total)
-        ? ` · ${progress.completed + 1}/${Math.max(1, progress.total - 1)}` : '';
-      return `reading ${progress.month}${count}…`;
-    }
-    return `preparing ${y} summary…`;
-  }
-
-  function coverageHtml(coverage) {
-    if (!coverage) return '';
-    const number = (value) => Number(value || 0).toLocaleString();
-    return (
-      `<div class="pm-sum-coverage">all ${number(coverage.messages)} direct messages` +
-      ` · ${number(coverage.conversations)} conversations` +
-      ` · ${number(coverage.months)} active months` +
-      ` · ${number(coverage.platforms)} platform${coverage.platforms === 1 ? '' : 's'}</div>`
-    );
-  }
-
-  function summarySectionsHtml(sections) {
-    return (sections || []).map((section) => {
-      const items = Array.isArray(section.items) ? section.items : [];
-      if (!section.title || !items.length) return '';
-      return (
-        `<section class="pm-sum-section"><h4>${esc(section.title)}</h4>` +
-        items.map((item) => `<p>${esc(item)}</p>`).join('') + `</section>`
-      );
-    }).join('');
-  }
-
-  function summaryContentHtml(sum) {
-    return (
-      `${coverageHtml(sum.coverage)}` +
-      `<div class="pm-sum-overview">${esc(sum.text)}</div>` +
-      `${summarySectionsHtml(sum.sections)}`
-    );
-  }
-
-  function detailHtml(p, y) {
-    const bits = [];
-    const sk = `${p.key}|${y}`;
-    const sum = summaries.get(sk);
-    if (sum && sum.state === 'pending') {
-      bits.push(`<div class="pl-d pm-sum pm-sum-wait">${esc(summaryProgress(sum.progress, y))}</div>`);
-    } else if (sum && sum.state === 'refreshing') {
-      bits.push(
-        `<div class="pl-d pm-sum">` + summaryContentHtml(sum) +
-        `<div class="pm-sum-refresh">${esc(summaryProgress(sum.progress, y))}</div></div>`
-      );
-    } else if (sum && sum.state === 'done') {
-      bits.push(`<div class="pl-d pm-sum">${summaryContentHtml(sum)}</div>`);
-    } else if (sum && sum.state === 'none') {
-      bits.push(`<div class="pl-d pl-dim">no summary — ${esc(sum.reason)}</div>`);
-    }
-    if (!bits.length) bits.push('<div class="pl-d pl-dim">…</div>');
-    return `<div class="pl-detail">${bits.join('')}</div>`;
-  }
-
-  // `y` is the row's own year, which in search results is NOT the open tab --
-  // a person found in 2021 must carry 2021, or their summary and their message
-  // count would be fetched for a year they were never in.
   // WHY THIS PERSON IS IN A SEARCH RESULT. A row that matched on what you talked
   // about is otherwise indistinguishable from a row that matched on their name,
   // and the corpus tier can surface somebody whose name looks nothing like the
@@ -371,15 +269,13 @@
       (p.topics || []).slice(0, 3)
       .map((t) => `<button class="pl-chip pl-topic" type="button" data-topic-filter="${esc(t.label)}" data-tip="click to see everyone">${esc(t.label)}</button>`)
       .join('');
-    const rowKey = `${p.key}|${y}`;
-    const open = expanded.has(rowKey);
     const srcIcons = (p.channels || [])
       .map((c) => `<button class="pm-src-ic" type="button" data-channel-filter="${esc(c)}"` +
         ` data-tip="show everyone from ${esc(CHAN_LABEL[c] || c)} in ${y}"` +
         ` aria-label="show everyone from ${esc(CHAN_LABEL[c] || c)} in ${y}">${hzGlyph(c)}</button>`)
       .join('');
     return (
-      `<div class="pl-row${open ? ' open' : ''}" role="button" data-rk="${esc(rowKey)}" data-person-key="${esc(p.key)}" data-person-name="${esc(p.name)}"${roleYear === null ? '' : ` data-person-year="${roleYear}"`}>` +
+      `<div class="pl-row" data-person-key="${esc(p.key)}" data-person-name="${esc(p.name)}"${roleYear === null ? '' : ` data-person-year="${roleYear}"`}>` +
         `<div class="pl-main">` +
           `<div class="pl-nameline">` +
             `<span class="pl-identity">` +
@@ -402,9 +298,9 @@
             (p.messages > 0
               ? `<span class="pm-msgs">${p.messages} msg${p.messages === 1 ? '' : 's'}</span>`
               : '') +
-            // The globe is truly all-time; its internal latest year chooses a
-            // summary only and must not appear as though the list is filtered
-            // to that year. Search results remain cross-year and keep the cue.
+            // The globe is truly all-time and must not appear as though the
+            // list is filtered to one year. Search results remain cross-year
+            // and keep the cue.
             (scope === 'all' || y === year ? '' : `<span class="pm-yr-badge">${y}</span>`) +
             // ONLY EVER IN A ROOM. Until now these rendered exactly like people
             // the owner actually talks to, which is what made every nudge about
@@ -415,7 +311,6 @@
           `</div>` +
           excerptHtml(p) +
           (chips ? `<div class="pl-src pm-chip-row">${chips}</div>` : '') +
-          (open ? detailHtml(p, y) : '') +
         `</div>` +
       `</div>`
     );
@@ -583,8 +478,8 @@
       : awardFilter
         ? `no one has the ${esc(awardFilter)} award in ${where}`
       : `no one matches in ${where}`;
-    // The row's own year: in all-years each person carries the last year they
-    // were active, so their summary is fetched for a year they appear in.
+    // In all-years each person carries the last year they were active so the
+    // activity count and source labels stay tied to a real year.
     listEl.innerHTML = rows.map((pp) => rowHtml(pp, scope === 'all' ? (pp.latestYear || year) : year)).join('')
       || `<div class="pl-empty">${empty}</div>`;
     // The overflow line counts one year's rows, so it has no meaning under a
@@ -698,8 +593,7 @@
   function openAwardFilter(kind) {
     if (!kind) return;
     // A row trophy means the same thing as the matching card heading: show
-    // every recipient in the open year. Keep this route independent from row
-    // expansion so the same click never starts an individual summary.
+    // every recipient in the open year.
     findId++;
     findTerm = '';
     findRows = null;
@@ -712,7 +606,6 @@
     awardFilter = kind;
     view = 'list';
     scope = 'year';
-    expanded.clear();
     render();
     listEl.scrollTop = 0;
   }
@@ -1627,7 +1520,7 @@
   }
 
   // Native calls this on every panel re-open. The webview SURVIVES hidden, so
-  // keep its already-painted years and summaries, mark the year payloads stale,
+  // keep its already-painted years, mark the year payloads stale,
   // and refresh only the visible year behind the existing rows. Other years
   // refresh silently when first revisited. This avoids both the blank loading
   // screen and a fan-out request for every historical year on every open.
@@ -1715,8 +1608,6 @@
       staleYears.clear();
       mapData = null;
       mapStale = false;
-      summaries.clear();
-      expanded.clear();
       findTerm = '';
       findRows = null;
       findState = 'idle';
@@ -1839,7 +1730,6 @@
     awardFilter = control.classList.contains('pm-card-more')
       ? kind
       : awardFilter === kind ? null : kind;
-    expanded.clear();
     render();
     if (control.classList.contains('pm-card-more')) listEl.scrollTop = 0;
   });
@@ -1875,9 +1765,8 @@
   });
 
   listEl.addEventListener('click', (e) => {
-    // Pills are navigation, not row expansion. Handle them before looking for
-    // the containing row so one click cannot both open a filtered page and
-    // start generating that person's summary underneath it.
+    // The row itself is inert. Its pills, trophies, source icons, and role menu
+    // are the explicit navigation and editing controls.
     const trophy = e.target.closest('.pl-award[data-award-kind]');
     if (trophy) {
       e.preventDefault();
@@ -1916,21 +1805,6 @@
       openPillFilter({ role: rolePill.dataset.roleFilter });
       return;
     }
-    const row = e.target.closest('.pl-row');
-    if (!row) return;
-    const rk = row.getAttribute('data-rk');
-    if (expanded.has(rk)) {
-      expanded.delete(rk);
-    } else {
-      expanded.add(rk);
-      const cut = rk.lastIndexOf('|');
-      const key = rk.slice(0, cut);
-      // The row's own year -- a 2021 result summarised against the open tab
-      // would be a summary of a year that person may not appear in at all.
-      const rowYear = Number(rk.slice(cut + 1)) || year;
-      requestSummary(key, rowYear);
-    }
-    render();
   });
 
   // The globe is a dense all-time surface. Zoom is a real WebKit layout zoom,

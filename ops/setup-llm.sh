@@ -54,13 +54,10 @@ LLAMA_PARALLEL=1
 LLAMA_BATCH_SIZE=512
 LLAMA_UBATCH_SIZE=128
 LLAMA_MODELS_MAX=1
-SUMMARY_CONCURRENCY=1
-DUAL_MODEL_SUMMARIES=0
 AUTO_MODEL_TIER=4b
 if command -v node >/dev/null 2>&1; then
   IFS=$'\t' read -r PROFILE_ID LLAMA_CTX_SIZE LLAMA_PARALLEL LLAMA_BATCH_SIZE \
-    LLAMA_UBATCH_SIZE LLAMA_MODELS_MAX SUMMARY_CONCURRENCY DUAL_MODEL_SUMMARIES \
-    AUTO_MODEL_TIER <<<"$(
+    LLAMA_UBATCH_SIZE LLAMA_MODELS_MAX AUTO_MODEL_TIER <<<"$(
       node "$SCRIPT_DIR/inference-profile.mjs" --memory-bytes "$HOST_MEMORY_BYTES" \
         --cores "$HOST_CORES" --gpu-cores "$HOST_GPU_CORES" --tsv
     )"
@@ -198,42 +195,6 @@ if [[ "$VERIFY" == 1 ]]; then
 fi
 chmod 600 "$MODEL_PATH"
 
-# Performance-class machines use the smaller model for bounded monthly
-# reductions and retain the selected model for the final annual synthesis.
-# Smaller machines deliberately keep one model: loading two there costs more
-# than the reducer saves. The second file is downloaded only when the selected
-# profile can keep both resident.
-if [[ "$DUAL_MODEL_SUMMARIES" == 1 && "$MODEL_FILE" != "Qwen3-4B-Instruct-2507-Q4_K_M.gguf" ]]; then
-  REDUCER_FILE="Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
-  REDUCER_SIZE=2497281120
-  REDUCER_SHA256="3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597"
-  REDUCER_PATH="$MODEL_DIR/$REDUCER_FILE"
-  REDUCER_URL="https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/$REDUCER_FILE"
-  reducer_have=$([[ -f "$REDUCER_PATH" ]] && stat -f %z "$REDUCER_PATH" || echo 0)
-  if [[ "$reducer_have" != "$REDUCER_SIZE" ]]; then
-    step "summary reducer weights ($REDUCER_FILE, 2 GB)"
-    curl -q --fail --location -C - --retry 3 --retry-delay 5 \
-      -o "$REDUCER_PATH" "$REDUCER_URL"
-    reducer_got=$(stat -f %z "$REDUCER_PATH")
-    [[ "$reducer_got" == "$REDUCER_SIZE" ]] || {
-      echo "ERROR: downloaded $reducer_got reducer bytes, expected $REDUCER_SIZE." >&2
-      exit 1
-    }
-  else
-    echo "    summary reducer present: $REDUCER_PATH"
-  fi
-  if [[ "$VERIFY" == 1 ]]; then
-    reducer_sha=$(shasum -a 256 "$REDUCER_PATH" | awk '{print $1}')
-    [[ "$reducer_sha" == "$REDUCER_SHA256" ]] || {
-      echo "ERROR: summary reducer sha256 mismatch." >&2
-      exit 1
-    }
-  fi
-  chmod 600 "$REDUCER_PATH"
-else
-  REDUCER_FILE="$MODEL_FILE"
-fi
-
 # llama-server is loopback-only, but loopback alone does not stop a hostile web
 # page from sending a no-CORS POST that consumes inference and mutates the prompt
 # cache. Generate a stable, owner-only bearer key. Hermes reads this file and is
@@ -334,13 +295,7 @@ chmod 700 "$ROUTER_MODEL_DIR"
 rm -f "$ROUTER_MODEL_DIR/Qwen3-4B-Instruct-2507-Q4_K_M.gguf" \
       "$ROUTER_MODEL_DIR/Qwen3-8B-Q4_K_M.gguf"
 ln -s "../$MODEL_FILE" "$ROUTER_MODEL_DIR/$MODEL_FILE"
-if [[ "$REDUCER_FILE" != "$MODEL_FILE" ]]; then
-  ln -s "../$REDUCER_FILE" "$ROUTER_MODEL_DIR/$REDUCER_FILE"
-else
-  LLAMA_MODELS_MAX=1
-fi
 LLAMA_MAIN_MODEL="${MODEL_FILE%.gguf}"
-LLAMA_REDUCER_MODEL="${REDUCER_FILE%.gguf}"
 
 # ── (c) launchd agent ─────────────────────────────────────────────────────────
 step "launchd agent ($LABEL)"

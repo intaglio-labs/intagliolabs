@@ -125,7 +125,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // ALL-YEARS source behind the constellation — every person, uncapped, with
     // their per-year topics. monthsView: where the popup was left, so a restart
     // resumes on it rather than snapping back to this year.
-    "people-months": ["close", "peopleYear", "peopleFind", "peopleSummary", "peopleSelf", "peopleRole",
+    "people-months": ["close", "peopleYear", "peopleFind", "peopleSelf", "peopleRole",
                       "openPeople", "monthsView", "peopleMap", "peopleAvatars"],
     "ear": ["orbState", "voiceError", "voiceTranscript"],
   ]
@@ -153,42 +153,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
 
   /// Interactive local-model work started from a panel. The connector, index
   /// and model-download states already have their own truthful owners; this
-  /// small tracker covers asks and person summaries so the desktop orb does
-  /// not fall asleep while the user is waiting for a result they requested.
+  /// small tracker covers asks so the desktop orb does not fall asleep while
+  /// the user is waiting for a result they requested.
   private final class WorkTracker {
     private let lock = NSLock()
     private var jobs: [UUID: String] = [:]
-    private var namedJobs: [String: UUID] = [:]
 
     func begin(_ label: String) -> UUID {
       let id = UUID()
       lock.lock(); jobs[id] = label; lock.unlock()
       return id
-    }
-
-    func beginOnce(_ key: String, label: String) {
-      lock.lock()
-      if namedJobs[key] != nil { lock.unlock(); return }
-      let id = UUID()
-      namedJobs[key] = id
-      jobs[id] = label
-      lock.unlock()
-      // A destroyed webview cannot deliver the final poll that normally ends
-      // this named job. Bound that orphan so the ambient orb can never remain
-      // in its processing pose forever after the People window is closed.
-      DispatchQueue.global().asyncAfter(deadline: .now() + 30 * 60) { [weak self] in
-        guard let self else { return }
-        self.lock.lock(); defer { self.lock.unlock() }
-        guard self.namedJobs[key] == id else { return }
-        self.namedJobs.removeValue(forKey: key)
-        self.jobs.removeValue(forKey: id)
-      }
-    }
-
-    func finish(_ key: String) {
-      lock.lock(); defer { lock.unlock() }
-      guard let id = namedJobs.removeValue(forKey: key) else { return }
-      jobs.removeValue(forKey: id)
     }
 
     func finish(_ id: UUID) {
@@ -1405,25 +1379,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
             }
             return
           }
-          // A performance profile keeps a small reducer beside the selected
-          // answer model. It is an implementation detail, not a tier switch:
-          // activate=false leaves model.gguf pointing at the owner's choice.
-          if tier == "8b" && InferenceTuning.selected().dualModelSummaries {
-            ModelSetup.download(
-              tierId: "4b", activate: false,
-              progress: { [weak self] got, total in
-                self?.delegate?.setupProgress([
-                  "phase": "downloading", "got": got, "total": total, "tier": "summary helper",
-                ])
-              },
-              done: { reducerFailure in
-                if reducerFailure == "cancelled" { return }
-                finishSetup()
-              }
-            )
-          } else {
-            finishSetup()
-          }
+          finishSetup()
         }
       )
       reply(webView, id, ["state": "ok"])
@@ -1694,17 +1650,6 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "peopleAvatars":
       let keys = (payload["keys"] as? [String])?.prefix(400).map { String($0.prefix(200)) } ?? []
       peopleCall("POST", "people/avatars", json: ["keys": Array(keys)]) { [weak self] data in
-        self?.reply(webView, id, data)
-      }
-    case "peopleSummary":
-      // Model-written year summary for one person; generated on demand,
-      // served by hermes from the LOCAL model only.
-      let sKey = String(payload["key"] as? String ?? "")
-      let sYear = (payload["year"] as? Int) ?? Int(payload["year"] as? Double ?? 0)
-      let workKey = "\(sYear)|\(sKey)"
-      Bridge.activeWork.beginOnce(workKey, label: "writing a relationship summary")
-      peopleCall("POST", "people/summary", json: ["key": sKey, "year": sYear]) { [weak self] data in
-        if data["pending"] as? Bool != true { Bridge.activeWork.finish(workKey) }
         self?.reply(webView, id, data)
       }
     default:

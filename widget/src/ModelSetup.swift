@@ -258,8 +258,8 @@ enum ModelSetup {
         let sum = digest(of: existing)
         guard !isCancelled else { finish("cancelled"); return }
         if sum == tier.sha256 {
-          // Relink only for the selected answer model. The 4B summary reducer
-          // lives beside it but must never silently replace that selection.
+          // Relink only when this is the selected answer model. A staged
+          // automatic upgrade must never silently replace that selection.
           do {
             if activate { try link(tier) }
             finish(nil)

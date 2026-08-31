@@ -41,7 +41,7 @@
 
 import { createServer } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -77,19 +77,6 @@ import {
   clearPeopleSearchCacheStorage,
   openPeopleSearchCache,
 } from './people/searchCache.mjs';
-import {
-  clearSummariesStorage,
-  isSummarySource,
-  MIN_ROWS as SUMMARY_MIN_ROWS,
-  pickWarmSet,
-  readCachedSummary,
-  summariesDbPath,
-  summarizeYear,
-} from './people/summary.mjs';
-import { mayWarmInBackground, performanceMode } from './people/power.mjs';
-
-import { SummaryQueue } from './people/summaryQueue.mjs';
-import { PeopleYearCompletion, yearCompletionStamp } from './people/yearCompletion.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
 import { contentMatches } from './people/content.mjs';
@@ -147,20 +134,14 @@ export const DEFAULT_LLAMA_API_KEY_PATH = defaultLlamaApiKeyPath();
 export const DEFAULT_HERMES_TOKEN_PATH = defaultHermesTokenPath();
 export const DEFAULT_LLAMA_BASE_URL = 'http://127.0.0.1:51780';
 
-// Keep a custom corpus and every derived summary beside one another. Falling
-// back to the default summary store when only HERMES_DB was customized could
-// briefly serve stale prose derived from the owner's default corpus before the
-// exact-hash refresh corrected it.
-export function resolvePeopleSummariesPath({
-  explicitPath,
-  configuredDbPath,
-  resolvedDbPath,
-} = {}) {
-  if (explicitPath !== undefined) return explicitPath;
-  if (resolvedDbPath === ':memory:') return ':memory:';
-  return configuredDbPath !== undefined
+function removeRetiredPeopleSummaries(configuredDbPath, resolvedDbPath) {
+  if (resolvedDbPath === ':memory:') return;
+  const base = configuredDbPath !== undefined
     ? `${resolvedDbPath}.people-summaries`
-    : summariesDbPath();
+    : join(homedir(), '.hazlie', 'people', 'summaries.db');
+  for (const path of [base, `${base}-wal`, `${base}-shm`]) {
+    rmSync(path, { force: true });
+  }
 }
 
 // EMPTY BY DEFAULT since 2026-08-23, and the reason is the whole point of the
@@ -2393,8 +2374,7 @@ function relationshipState(db, policy) {
     const service = createRelationshipMemory({ contextDb: db, stateDb, resolutionsDb: resDb,
       ...(owner ? { owner } : {}) });
     const llamaCall = async (messages, max_tokens = 120, temperature = 0.2) => {
-      // Same hardening as every other llama call site (summary.mjs's words:
-      // "same rule as every other llama call here"): a timeout so one hung
+      // Same hardening as every other llama call site: a timeout so one hung
       // completion cannot wedge rel.refreshing forever, and redirect:'error'
       // so a compromised loopback cannot bounce the key or the content onto
       // the network. The audit caught this copy without either.
@@ -2456,9 +2436,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
 
   // The newest-to-oldest onboarding barrier. Connectors call this only after
   // every available historical source has completed the named year. Profile
-  // construction is deterministic and blocking once; summaries then use the
-  // existing resumable one-slot queue. The response contains counts and a year
-  // only—never people, identifiers, messages, or derived prose.
+  // construction is deterministic and blocking once. The response contains
+  // counts and a year only—never people, identifiers, or messages.
   if (req.method === 'POST' && url.pathname === '/admin/people/complete-year') {
     if (!hasJsonMediaType(req)) {
       send(res, 415, { error: 'content-type must be application/json' }, cors);
@@ -2471,27 +2450,16 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     if (!Number.isInteger(year) || year < 1900 || year > thisYear) {
       throw badRequest(`"year" must be an integer 1900..${thisYear}`);
     }
-    if (policy.peopleSummaryManager.resetting) {
-      throw Object.assign(new Error('relationship summaries are resetting'), { status: 503 });
-    }
-    const completion = policy.peopleSummaryManager.yearCompletion;
-    const status = withPeopleDbs(db, (state, resDb) => {
+    const profiles = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
-      const stamp = yearCompletionStamp(db, state, aliases, year);
-      const existing = completion.existing(year, stamp);
-      if (existing) return completion.resume(year, stamp);
       // The year barrier explicitly asks for fresh profiles, so it pays the
       // blocking graph rebuild instead of accepting stale-while-refresh data.
       yearCore(db, state, { now: Date.now(), owner: loadOwner(), aliases, blocking: true });
-      const people = buildYear(db, state, {
+      return buildYear(db, state, {
         year, owner: loadOwner(), aliases, cap: Infinity,
-      }).people;
-      return completion.begin({ year, corpusStamp: stamp, people });
+      }).people.length;
     });
-    send(res, 200, {
-      ...status,
-      ...(!status.complete ? { retryAfterMs: 15_000 } : {}),
-    }, cors);
+    send(res, 200, { year, profiles, complete: true, state: 'complete' }, cors);
     return;
   }
 
@@ -2507,17 +2475,9 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // the local model is done, and GET /card serves the previous batch (or
     // nothing) in the meantime. Errors are recorded on the state, not lost.
     rel.lastError = null;
-    // Held behind the same gate the summary queue uses, so a refresh cannot run
-    // while the owner is mid-question. pauseForInteractive returns a resume
-    // handle; taking one here means the summary queue also stands down for the
-    // duration rather than the two of them interleaving on one local model.
-    const summaryQueue = policy?.peopleSummaryManager?.queue;
-    (summaryQueue ? summaryQueue.pauseForInteractive() : Promise.resolve(null))
-      .then((resumeSummaries) =>
-        (policy.relationshipMatcher ?? buildMatchedCards)(rel.service, {
-          llamaCall: rel.llamaCall, now: Date.now(),
-        }).finally(() => { try { resumeSummaries?.(); } catch {} })
-      ).then((result) => {
+    (policy.relationshipMatcher ?? buildMatchedCards)(rel.service, {
+      llamaCall: rel.llamaCall, now: Date.now(),
+    }).then((result) => {
       const now = Date.now();
       const batchId = Number(db.prepare(
         'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, ?, ?, ?)'
@@ -2757,7 +2717,6 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         db.exec('ROLLBACK');
         throw error;
       }
-      await resetPeopleSummaries(policy.peopleSummaryManager);
       send(res, 200, { cleared }, cors);
       return;
     }
@@ -2801,7 +2760,6 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         db.exec('ROLLBACK');
         throw e;
       }
-      if (isSummarySource(body.source)) await resetPeopleSummaries(policy.peopleSummaryManager);
       send(res, 200, { deleted, claims_deleted: claimsDeleted }, cors);
       return;
     }
@@ -2836,7 +2794,6 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       // a purged source's claims were legible in claim_fts by the same
       // mechanism.
       maintainNow(db);
-      if (isSummarySource(body.source)) await resetPeopleSummaries(policy.peopleSummaryManager);
       send(res, 200, { deleted, claims_deleted: claimsDeleted, maintained: true }, cors);
       return;
     }
@@ -2881,7 +2838,6 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         db.exec('ROLLBACK');
         throw e;
       }
-      if (isSummarySource(body.source)) await resetPeopleSummaries(policy.peopleSummaryManager);
       send(res, 200, { deleted, claims_deleted: claimsDeleted }, cors);
       return;
     }
@@ -3832,12 +3788,7 @@ async function handle(db, req, res, cors, url, policy) {
   // a redirect to local -- an alias IS the unlaned default this exists to
   // remove.
   if (req.method === 'POST' && url.pathname === '/vault/ask') {
-    const resumeSummaries = await policy.peopleSummaryManager.queue.pauseForInteractive();
-    try {
-      return await handleVaultAsk(db, req, res, cors, policy);
-    } finally {
-      resumeSummaries();
-    }
+    return handleVaultAsk(db, req, res, cors, policy);
   }
 
   if (req.method === 'POST' && url.pathname === '/lane/local/v1/chat/completions') {
@@ -3845,15 +3796,7 @@ async function handle(db, req, res, cors, url, policy) {
       send(res, 415, { error: 'content-type must be application/json' }, cors);
       return;
     }
-    // Interactive and ingest-time local-model work always wins over speculative
-    // summary warming. The current summary pass is abortable and resumes from
-    // its durable chunk cache when this request finishes.
-    const resumeSummaries = await policy.peopleSummaryManager.queue.pauseForInteractive();
-    try {
-      return await proxyLlama(req, res, cors, policy.llama);
-    } finally {
-      resumeSummaries();
-    }
+    return proxyLlama(req, res, cors, policy.llama);
   }
 
   // Refuses loudly rather than falling back to local. A silent downgrade would
@@ -3870,7 +3813,7 @@ async function handle(db, req, res, cors, url, policy) {
   // map and WRITE the owner's merge decisions, neither of which is a browser
   // capability. The Origin channel is authenticated but not entitled here, so
   // 403 (not 401), matching handleAdmin's reasoning.
-  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/self' || url.pathname === '/people/role' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/summary' || url.pathname === '/people/avatars') {
+  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/self' || url.pathname === '/people/role' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/avatars') {
     if (channel !== 'bearer') {
       send(res, 403, { error: 'people routes are bearer-only: call with the token from ~/.hazlie/secrets/hermes-token.txt and no Origin header.' }, cors);
       return;
@@ -3888,18 +3831,7 @@ const PEOPLE_INIT_FIELDS = Object.freeze(['days']);
 const PEOPLE_DECIDE_FIELDS = Object.freeze(['verdict', 'a', 'b']);
 const PEOPLE_SELF_FIELDS = Object.freeze(['key']);
 const PEOPLE_ROLE_FIELDS = Object.freeze(['key', 'role', 'year']);
-const PEOPLE_SUMMARY_FIELDS = Object.freeze(['key', 'year']);
 const PEOPLE_YEAR_COMPLETION_FIELDS = Object.freeze(['year']);
-
-async function resetPeopleSummaries(manager) {
-  manager.resetting = true;
-  try {
-    await manager.queue.reset();
-    clearSummariesStorage(manager.path);
-  } finally {
-    manager.resetting = false;
-  }
-}
 
 // Phase 1 routes. init and review both build the people map and return the
 // pairs still needing the owner's eyes; decide records one call. Split out so
@@ -4086,34 +4018,6 @@ async function handlePeople(db, req, res, cors, url, policy) {
       // one ingest behind must say so rather than pass as live.
       return { ...year_, freshness: peopleCoreFreshness(db, state, aliases, owner) };
     });
-    // The array is already the People page's engagement rank. Queue it in that
-    // exact order, skipping rows that cannot pass the summary's minimum count.
-    // Work begins after this turn of the event loop, so the year response paints
-    // before the local model starts. A later click promotes that person above
-    // every invisible queued row.
-    // WARMING IS BOUNDED AND OBEYS THE OWNER'S PERFORMANCE MODE.
-    //
-    // This enqueued EVERY person on the page with at least MIN_ROWS messages
-    // for a full hierarchical summary — several local model calls each, and one
-    // 11,765-message friendship is 35 chunks before the reduce even starts.
-    // This used to infer permission from AC power. That silently stopped year
-    // completion on battery and made charger changes control app state. Both
-    // modes now admit work; SummaryQueue changes its concurrency dynamically.
-    //
-    // The bounded head remains important in both modes: it is already in
-    // engagement rank, so the head is what is most likely to be opened next and
-    // the tail is pure speculation. Battery Saver runs the picked work one at a
-    // time; God Mode uses the machine-specific ceiling.
-    const warmable = (out.people ?? [])
-      .filter((person) => Number(person.messages ?? 0) >= SUMMARY_MIN_ROWS);
-    mayWarmInBackground().then((may) => {
-      if (!may || warmable.length === 0) return;
-      // Bounded by COST, not headcount — see pickWarmSet, which owns the caps
-      // and is exported so the tests exercise it rather than a copy.
-      const picked = pickWarmSet(warmable, year);
-      if (picked.length === 0) return;
-      policy.peopleSummaryManager.queue.enqueue(picked, { priority: 1 });
-    }).catch(() => {});
     send(res, 200, out, cors);
     return;
   }
@@ -4134,49 +4038,6 @@ async function handlePeople(db, req, res, cors, url, policy) {
       return { avatars };
     });
     send(res, 200, out, cors);
-    return;
-  }
-
-  // The year summary: model-written, LOCAL llama only, generated on demand
-  // for one person and cached against the corpus stamp (people/summary.mjs
-  // carries the boundary reasoning). POST because the person key is data,
-  // not a path.
-  if (req.method === 'POST' && url.pathname === '/people/summary') {
-    if (!hasJsonMediaType(req)) { send(res, 415, { error: 'content-type must be application/json' }, cors); return; }
-    const body = await readJson(req);
-    assertClosedFields(body, PEOPLE_SUMMARY_FIELDS);
-    if (typeof body?.key !== 'string' || body.key.length === 0 || body.key.length > 300) {
-      throw badRequest('"key" must be a person key');
-    }
-    const thisYear = new Date().getFullYear();
-    const year = Number(body?.year);
-    if (!Number.isInteger(year) || year < 1990 || year > thisYear + 1) {
-      throw badRequest(`"year" must be an integer 1990..${thisYear + 1}`);
-    }
-    // Exhaustive summaries can require several local-model reductions. Make
-    // that work resumable instead of holding one 30-second native request open:
-    // the first call starts it, later calls read aggregate progress, and closing
-    // the row does not throw away already-computed private reductions.
-    if (policy.peopleSummaryManager.resetting) {
-      throw Object.assign(new Error('relationship summaries are resetting'), { status: 503 });
-    }
-    const stale = readCachedSummary(policy.peopleSummaryManager.path, body.key, year);
-    const job = policy.peopleSummaryManager.queue.request(body.key, year);
-    if (job.state === 'done') {
-      policy.peopleSummaryManager.queue.consume(job);
-      send(res, 200, job.result, cors);
-      return;
-    }
-    if (job.state === 'failed') {
-      policy.peopleSummaryManager.queue.consume(job);
-      if (isUnreachable(job.error)) throw unreachableError();
-      throw job.error;
-    }
-    send(res, 200, {
-      pending: true,
-      progress: job.progress,
-      ...(stale ? { ...stale, refreshing: true } : {}),
-    }, cors);
     return;
   }
 
@@ -4230,10 +4091,7 @@ export async function start({
   // and a fixed cap (production reads the owner's config).
   relationshipMatcher,
   relationshipCap,
-  peopleSummariesPath,
-  summaryConcurrency = Number(process.env.HAZLIE_SUMMARY_CONCURRENCY ?? 1),
   llamaModel = process.env.HAZLIE_MAIN_MODEL,
-  llamaReducerModel = process.env.HAZLIE_REDUCER_MODEL,
 } = {}) {
   const allowedOriginSet = parseAllowedOrigins(allowedOrigins);
   let apiKey;
@@ -4263,7 +4121,6 @@ export async function start({
     baseUrl: canonicalLoopbackBase(llamaBaseUrl),
     apiKey,
     ...(llamaModel ? { model: llamaModel } : {}),
-    ...(llamaReducerModel ? { reducerModel: llamaReducerModel } : {}),
   };
   const askCeilingMs = Number.isFinite(askTimeoutMs) && askTimeoutMs > 0
     ? askTimeoutMs
@@ -4274,6 +4131,11 @@ export async function start({
   const relationshipHolder = {};
   const configuredDbPath = dbPath ?? process.env.HERMES_DB;
   const resolvedDbPath = configuredDbPath ?? DEFAULT_DB_PATH;
+  // Summary generation was retired. Remove its private derived database and
+  // SQLite sidecars once the replacement process starts so old model prose is
+  // not left behind indefinitely. These are exact legacy paths, never a
+  // directory or wildcard.
+  removeRetiredPeopleSummaries(configuredDbPath, resolvedDbPath);
   const db = openDb(resolvedDbPath);
   // The cache is derived and rebuildable, so keep it beside the exact corpus
   // handle it accelerates. In-memory test databases get no implicit disk
@@ -4283,54 +4145,6 @@ export async function start({
   const peopleSearchCache = peopleSearchCachePath
     ? openPeopleSearchCache(peopleSearchCachePath)
     : null;
-  // Tests and embedded callers that name a corpus path get an equally isolated
-  // derived store. The ordinary app keeps the long-standing private location.
-  const resolvedSummariesPath = resolvePeopleSummariesPath({
-    explicitPath: peopleSummariesPath,
-    configuredDbPath,
-    resolvedDbPath,
-  });
-  let peopleYearCompletion = null;
-  const maximumSummaryConcurrency = Math.max(1, Math.min(4,
-    Number.isFinite(summaryConcurrency) ? Math.floor(summaryConcurrency) : 1));
-  const peopleSummaryQueue = new SummaryQueue({
-    concurrency: maximumSummaryConcurrency,
-    // Battery Saver still completes the year, one summary at a time. God Mode
-    // uses the machine-sized ceiling selected during provisioning.
-    concurrencyProvider: () => performanceMode() === 'battery_saver'
-      ? 1 : maximumSummaryConcurrency,
-    isRetryable: (error) => isUnreachable(error) || isTimeout(error) || error?.status === 502,
-    onSettled: (receipt) => peopleYearCompletion?.record(receipt),
-    onProgress: (receipt) => peopleYearCompletion?.progress(receipt),
-    run: ({ key, year, signal, onProgress }) => withPeopleDbs(db, (state, resDb) => {
-      const { aliases } = resolutionState(resDb);
-      return summarizeYear(db, state, {
-        personKey: key,
-        year,
-        owner: loadOwner(),
-        aliases,
-        llama,
-        summariesPath: resolvedSummariesPath,
-        signal,
-        onProgress,
-      });
-    }),
-  });
-  peopleYearCompletion = new PeopleYearCompletion({
-    path: resolvedSummariesPath,
-    queue: peopleSummaryQueue,
-    isCorpusStampCurrent: (year, corpusStamp) => withPeopleDbs(db, (state, resDb) => {
-      const { aliases } = resolutionState(resDb);
-      return yearCompletionStamp(db, state, aliases, year) === corpusStamp;
-    }),
-  });
-  const peopleSummaryManager = {
-    queue: peopleSummaryQueue,
-    yearCompletion: peopleYearCompletion,
-    resetting: false,
-    path: resolvedSummariesPath,
-  };
-
   const server = createServer(async (req, res) => {
     const cors = corsHeaders(req, allowedOriginSet);
 
@@ -4361,7 +4175,6 @@ export async function start({
         relationshipMatcher,
         relationshipCap,
         relationshipHolder,
-        peopleSummaryManager,
       });
     } catch (e) {
       send(res, e.status ?? 500, { error: e.message ?? String(e) }, cors);
@@ -4379,7 +4192,6 @@ export async function start({
           new Promise((done, fail) => {
             server.close(async (err) => {
               try {
-                await peopleSummaryQueue.reset();
                 peopleSearchCache?.close();
                 db.close();
                 err ? fail(err) : done();

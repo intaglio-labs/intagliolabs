@@ -25,8 +25,7 @@ test('machine profiles scale conservatively and never exceed tested concurrency'
   for (const profile of profiles) {
     assert.ok(profile.contextSize <= 32768);
     assert.ok(profile.parallel >= 1 && profile.parallel <= 2);
-    assert.ok(profile.summaryConcurrency >= 1 && profile.summaryConcurrency <= 2);
-    if (profile.dualModelSummaries) assert.ok(profile.modelsMax >= 2);
+    assert.equal(profile.modelsMax, 1);
     assert.ok(['4b', '8b'].includes(profile.modelTier));
   }
 });
@@ -76,6 +75,6 @@ test('the app bundle and both launch agents consume the shared profile', () => {
     '@LLAMA_UBATCH_SIZE@', '@LLAMA_MODELS_MAX@',
   ]) assert.ok(llama.includes(placeholder));
   assert.ok(hermes.includes('@LLAMA_MAIN_MODEL@'));
-  assert.ok(hermes.includes('@LLAMA_REDUCER_MODEL@'));
-  assert.ok(hermes.includes('@SUMMARY_CONCURRENCY@'));
+  assert.ok(!hermes.includes('@LLAMA_REDUCER_MODEL@'));
+  assert.ok(!hermes.includes('@SUMMARY_CONCURRENCY@'));
 });

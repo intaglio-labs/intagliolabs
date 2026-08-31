@@ -98,7 +98,6 @@ final class Distiller {
   /// Begin supervising. Safe to call repeatedly.
   func start() {
     guard timer == nil, !stopping, !modelMaintenancePaused else { return }
-    PowerBudget.startWatching()
     // Re-decide the moment the owner changes performance mode rather than
     // serving out an interval chosen under the old setting.
     NotificationCenter.default.addObserver(
@@ -111,7 +110,7 @@ final class Distiller {
   }
 
   /// Paired with Connectors' short model-activation hold. Called only after
-  /// activity is idle, so invalidating the timer never interrupts a summary.
+  /// activity is idle, so invalidating the timer never interrupts a model pass.
   func pauseForModelMaintenance() {
     modelMaintenancePaused = true
     timer?.invalidate()

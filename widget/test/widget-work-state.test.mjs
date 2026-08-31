@@ -79,10 +79,7 @@ test('hover holds current work details and click pins the task plus total hours'
 
 test('native work status stays processing across bounded connector-queue pauses', () => {
   assert.match(bridge, /case "workStatus":/u);
-  assert.match(bridge, /writing a relationship summary/u);
-  assert.match(bridge, /beginOnce\(workKey, label: "writing a relationship summary"\)/u);
-  assert.match(bridge, /data\["pending"\] as\? Bool != true \{ Bridge\.activeWork\.finish\(workKey\) \}/u,
-    'summary polling holds one continuous native work state until the background job is complete');
+  assert.doesNotMatch(bridge, /writing a relationship summary|peopleSummary/u);
   assert.match(bridge, /thinking about your question/u);
   assert.match(bridge, /status\["estimate"\] = estimate/u,
     'the hover card receives the same total-hours horizon as Settings');
@@ -128,7 +125,7 @@ test('the total processing estimate uses the plain approximate-hours label', () 
     'the total is pinned in the header and hidden only when no queue exists');
   assert.match(connections, /estimateLine\.hidden = !total/u,
     'the explanation stays beside a real estimate and disappears with it');
-  assert.ok(connections.includes('Your Mac is importing and summarizing everything privately. More chats and years mean more time.'),
+  assert.ok(connections.includes('Your Mac is importing and indexing everything privately. More chats and years mean more time.'),
     'the estimate explains the wait in two simple sentences');
   assert.ok(connections.includes("'Why is this taking so long?'"),
     'the hint icon has an accessible question');

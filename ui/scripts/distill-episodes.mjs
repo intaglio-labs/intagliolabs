@@ -113,10 +113,8 @@ async function askModel(episode, lines, model) {
     body: JSON.stringify(buildEpisodeRequest({ system, episode, lines, model, context: withContext })),
     signal: AbortSignal.timeout(180_000),
     // A compromised or misconfigured loopback service must not redirect a
-    // household conversation (or the API key) onto the network. hermes and
-    // people/summary.mjs both state this rule -- summary.mjs's comment even
-    // calls it "the same rule as every other llama call here" -- and these two,
-    // which send whole conversations, were the exceptions.
+    // household conversation (or the API key) onto the network. These scripts
+    // send whole conversations, so redirects are never acceptable.
     redirect: 'error',
   });
   if (!res.ok) throw new Error(`llama-server returned ${res.status}`);

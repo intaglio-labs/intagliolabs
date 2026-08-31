@@ -32,25 +32,8 @@ STABLE_NODE="$BIN_DIR/node"
 NODE_VERSION_STAMP="$BIN_DIR/node.version"
 HERMES_HEALTH_URL="http://127.0.0.1:${HERMES_PORT:-51789}/health"  # hermes.mjs default port (canonical since 2026-08-20)
 
-HOST_MEMORY_BYTES="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
-HOST_CORES="$(sysctl -n hw.logicalcpu 2>/dev/null || echo 0)"
-PROFILE_ID="compact"
-SUMMARY_CONCURRENCY=1
-DUAL_MODEL_SUMMARIES=0
-if command -v node >/dev/null 2>&1; then
-  IFS=$'\t' read -r PROFILE_ID _CTX _PARALLEL _BATCH _UBATCH _MODELS \
-    SUMMARY_CONCURRENCY DUAL_MODEL_SUMMARIES <<<"$(
-      node "$SCRIPT_DIR/inference-profile.mjs" --memory-bytes "$HOST_MEMORY_BYTES" \
-        --cores "$HOST_CORES" --tsv
-    )"
-fi
 LLAMA_MAIN_FILE="$(cat "$HAZLIE/models/active-model.txt" 2>/dev/null || echo Qwen3-4B-Instruct-2507-Q4_K_M.gguf)"
-LLAMA_REDUCER_FILE="$LLAMA_MAIN_FILE"
-if [[ "$DUAL_MODEL_SUMMARIES" == 1 && -f "$HAZLIE/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf" ]]; then
-  LLAMA_REDUCER_FILE="Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
-fi
 LLAMA_MAIN_MODEL="${LLAMA_MAIN_FILE%.gguf}"
-LLAMA_REDUCER_MODEL="${LLAMA_REDUCER_FILE%.gguf}"
 
 REPLACE_NODE=0
 for arg in "$@"; do
@@ -302,9 +285,7 @@ install_agent() {
   [[ -f "$src" ]] || { echo "ERROR: $src missing." >&2; exit 1; }
   local rendered changed=1
   rendered=$(sed -e "s|@HOME@|$HOME|g" -e "s|@REPO@|$REPO_ROOT|g" \
-    -e "s|@LLAMA_MAIN_MODEL@|$LLAMA_MAIN_MODEL|g" \
-    -e "s|@LLAMA_REDUCER_MODEL@|$LLAMA_REDUCER_MODEL|g" \
-    -e "s|@SUMMARY_CONCURRENCY@|$SUMMARY_CONCURRENCY|g" "$src")
+    -e "s|@LLAMA_MAIN_MODEL@|$LLAMA_MAIN_MODEL|g" "$src")
   if [[ -f "$dst" ]] && [[ "$rendered" == "$(cat "$dst")" ]]; then
     changed=0
     echo "    $label: installed plist already current"

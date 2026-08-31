@@ -12,8 +12,6 @@ struct InferenceProfile: Decodable {
   let batchSize: Int
   let microBatchSize: Int
   let modelsMax: Int
-  let summaryConcurrency: Int
-  let dualModelSummaries: Bool
 }
 
 struct MachineCapabilities {
@@ -53,8 +51,7 @@ enum InferenceTuning {
   private static let fallback = InferenceProfile(
     id: "compact", minMemoryGB: 0, minCores: 0, minGPUCores: 0,
     modelTier: "4b", contextSize: 32768,
-    parallel: 1, batchSize: 512, microBatchSize: 128, modelsMax: 1,
-    summaryConcurrency: 1, dualModelSummaries: false)
+    parallel: 1, batchSize: 512, microBatchSize: 128, modelsMax: 1)
 
   static func selected(
     resourceURL: URL? = Bundle.main.resourceURL,

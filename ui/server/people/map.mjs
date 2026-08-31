@@ -189,8 +189,7 @@ function hasRelationship(p) {
 // that axis changes nothing a month view can show.
 const yearMemo = new WeakMap();
 
-// Exported for people/summary.mjs, which needs the same graph and pays the
-// same memo.
+// Exported so callers that need an exact rebuild can share the same memo.
 // THE STAMP, in one place, because it was wrong in three.
 //
 // It was (row count, max rowid, alias count) on `context` alone, and it missed

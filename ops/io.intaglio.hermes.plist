@@ -51,10 +51,6 @@
   <dict>
     <key>HAZLIE_MAIN_MODEL</key>
     <string>@LLAMA_MAIN_MODEL@</string>
-    <key>HAZLIE_REDUCER_MODEL</key>
-    <string>@LLAMA_REDUCER_MODEL@</string>
-    <key>HAZLIE_SUMMARY_CONCURRENCY</key>
-    <string>@SUMMARY_CONCURRENCY@</string>
   </dict>
 
   <key>RunAtLoad</key>

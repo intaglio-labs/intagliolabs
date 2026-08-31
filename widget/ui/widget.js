@@ -422,8 +422,8 @@ window.__hzOrbState = (state) => {
   }
 };
 
-// Background connectors, local model setup, indexing, chat and on-demand
-// relationship summaries all report one current label through native. The
+// Background connectors, local model setup, indexing, and chat all report one
+// current label through native. The
 // widget is deliberately interested only in WORK NOW, never the future queue:
 // the sleeping pose should return the instant the current operation settles.
 async function refreshWorkState() {

@@ -901,45 +901,6 @@ body.plist .pm-sky-note {
   body.plist .pm-core { animation: none; }
 }
 
-/* The generated year summary in the expanded row. Coverage is explicit: the
-   reader can distinguish an exhaustive year from a thin one without trusting
-   prose. Deeper sections stay visually subordinate to the direct overview. */
-body.plist .pm-sum {
-  color: var(--secondary);
-  display: grid;
-  gap: 8px;
-  max-width: 760px;
-}
-body.plist .pm-sum-wait { animation: pm-pulse 1.2s ease-in-out infinite; }
-body.plist .pm-sum-coverage {
-  color: var(--gold);
-  font-size: 9px;
-  letter-spacing: 0.035em;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.78;
-}
-body.plist .pm-sum-overview { color: var(--secondary); }
-body.plist .pm-sum-refresh {
-  color: var(--muted);
-  font-size: 9px;
-  animation: pm-pulse 1.2s ease-in-out infinite;
-}
-body.plist .pm-sum-section {
-  display: grid;
-  gap: 3px;
-  padding-left: 9px;
-  border-left: 1px solid color-mix(in srgb, var(--gold) 35%, transparent);
-}
-body.plist .pm-sum-section h4 {
-  margin: 0 0 1px;
-  color: var(--fg);
-  font: inherit;
-  font-size: 9px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-body.plist .pm-sum-section p { margin: 0; }
-
 /* The year a SEARCH result was found in. Only drawn when it differs from the
    open tab, because a cross-year hit without its year is a message count from
    a year you are not looking at. Reads as a tab, not as another chip: the

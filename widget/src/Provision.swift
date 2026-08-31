@@ -99,7 +99,7 @@ enum Provision {
   // the stable copy instead -- ~/.hazlie/llama/llama-server, beside the ggml
   // backend modules it dlopens through @loader_path.
   private static let brewLlama = "/opt/homebrew/bin/llama-server"
-  private static let reducerFilename = "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+  private static let defaultModelFilename = "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
 
   private static func modelID(_ filename: String) -> String {
     URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
@@ -107,38 +107,29 @@ enum Provision {
 
   private static func inferenceValues() -> [String: String] {
     let profile = InferenceTuning.selected()
-    let mainFilename = ModelSetup.installed?.file ?? reducerFilename
-    let reducerPath = hazlie.appendingPathComponent("models/\(reducerFilename)")
-    let reducerFilenameForHost = profile.dualModelSummaries && fm.fileExists(atPath: reducerPath.path)
-      ? reducerFilename : mainFilename
+    let mainFilename = ModelSetup.installed?.file ?? defaultModelFilename
     return [
       "@LLAMA_CTX_SIZE@": String(profile.contextSize),
       "@LLAMA_PARALLEL@": String(profile.parallel),
       "@LLAMA_BATCH_SIZE@": String(profile.batchSize),
       "@LLAMA_UBATCH_SIZE@": String(profile.microBatchSize),
-      "@LLAMA_MODELS_MAX@": String(reducerFilenameForHost == mainFilename ? 1 : profile.modelsMax),
-      "@SUMMARY_CONCURRENCY@": String(profile.summaryConcurrency),
+      "@LLAMA_MODELS_MAX@": String(profile.modelsMax),
       "@LLAMA_MAIN_MODEL@": modelID(mainFilename),
-      "@LLAMA_REDUCER_MODEL@": modelID(reducerFilenameForHost),
     ]
   }
 
   @discardableResult
   private static func prepareModelRouter() -> Bool {
     guard let main = ModelSetup.installed else { return false }
-    let profile = InferenceTuning.selected()
     let modelDir = hazlie.appendingPathComponent("models")
     let router = modelDir.appendingPathComponent("router")
-    let wantsReducer = profile.dualModelSummaries && main.file != reducerFilename
     do {
       try mkdir(router, 0o700)
       for tier in ModelSetup.tiers {
         let link = router.appendingPathComponent(tier.file)
         try? fm.removeItem(at: link)
         let source = modelDir.appendingPathComponent(tier.file)
-        guard tier.file == main.file ||
-          (wantsReducer && tier.file == reducerFilename && fm.fileExists(atPath: source.path))
-        else { continue }
+        guard tier.file == main.file else { continue }
         try fm.createSymbolicLink(at: link, withDestinationURL: source)
       }
       return true

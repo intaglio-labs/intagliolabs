@@ -250,9 +250,8 @@ export async function adminClearPeopleProjection(opts) {
 }
 
 // Advance the product-level year barrier after connector data is complete.
-// The response is deliberately aggregate: the connector process may schedule
-// and display progress, but person keys and derived summaries remain inside
-// Hermes with the corpus.
+// The response is deliberately aggregate: the connector process may advance
+// the year barrier, but person keys remain inside Hermes with the corpus.
 export async function adminCompletePeopleYear({ year }, opts) {
   if (!Number.isInteger(year) || year < 1900 || year > 3000) {
     throw new Error('adminCompletePeopleYear requires an integer year');
@@ -261,11 +260,7 @@ export async function adminCompletePeopleYear({ year }, opts) {
   const token = readHermesTokenFile(ctx.tokenFile);
   const res = await request(ctx, 'POST', '/admin/people/complete-year', token, { year });
   const body = await expectOk(res, '/admin/people/complete-year');
-  for (const field of [
-    'year', 'profiles', 'summariesTotal', 'summariesComplete',
-    'summariesSkipped', 'summariesPending', 'workUnitsTotal',
-    'workUnitsComplete', 'estimatedRemainingMs',
-  ]) {
+  for (const field of ['year', 'profiles']) {
     if (!Number.isFinite(body?.[field])) {
       throw new Error(`hermes people-year response is missing numeric "${field}"`);
     }

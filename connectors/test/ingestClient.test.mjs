@@ -371,15 +371,11 @@ test('adminClearPeopleProjection round-trips without exposing rows', async () =>
   assert.deepEqual(Object.keys(result), ['cleared']);
 });
 
-test('adminCompletePeopleYear returns aggregate progress only', async () => {
+test('adminCompletePeopleYear returns profile completion only', async () => {
   const result = await adminCompletePeopleYear({ year: 1900 }, opts);
   assert.equal(result.complete, true);
   assert.equal(result.year, 1900, 'the API accepts the coordinator history floor');
-  assert.deepEqual(Object.keys(result).sort(), [
-    'complete', 'estimatedRemainingMs', 'profiles', 'startedMs', 'state',
-    'summariesComplete', 'summariesPending', 'summariesSkipped', 'summariesTotal',
-    'workUnitsComplete', 'workUnitsTotal', 'year',
-  ]);
+  assert.deepEqual(Object.keys(result).sort(), ['complete', 'profiles', 'state', 'year']);
 });
 
 test('adminMaintain round-trips', async () => {

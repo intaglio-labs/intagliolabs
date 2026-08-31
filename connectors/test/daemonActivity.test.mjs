@@ -12,7 +12,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createDaemon, remainingWorkLabel } from '../daemon.mjs';
+import { createDaemon } from '../daemon.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -71,7 +71,7 @@ async function publishedSnapshot(sources, cursors, {
   }
 }
 
-test('a completed connector year surfaces People completion before the prior year', async () => {
+test('a completed connector year builds People profiles and advances immediately', async () => {
   const snapshot = await publishedSnapshot(
     [source('imessage', [], { walksHistory: true })],
     { 'yearly-backfill:connector:imessage:done:2026': '1' },
@@ -79,41 +79,16 @@ test('a completed connector year surfaces People completion before the prior yea
       settleMs: 600,
       completePeopleYear: async ({ year }) => ({
         year,
-        state: 'summarizing',
-        complete: false,
+        state: 'complete',
+        complete: true,
         profiles: 40,
-        summariesTotal: 25,
-        summariesComplete: 7,
-        summariesSkipped: 2,
-        summariesPending: 16,
-        workUnitsTotal: 80,
-        workUnitsComplete: 20,
-        estimatedRemainingMs: 5_400_000,
-        retryAfterMs: 15_000,
       }),
     }
   );
-  assert.equal(snapshot.backfillYear, 2026);
-  assert.deepEqual(snapshot.backfill, ['people']);
-  assert.deepEqual(snapshot.peopleCompletion, {
-    year: 2026,
-    state: 'summarizing',
-    profiles: 40,
-    summariesTotal: 25,
-    summariesComplete: 7,
-    summariesSkipped: 2,
-    summariesPending: 16,
-    workUnitsTotal: 80,
-    workUnitsComplete: 20,
-    estimatedRemainingMs: 5_400_000,
-  });
-  assert.equal(snapshot.estimate, '~ 1.5 hrs left');
-});
-
-test('remaining work is formatted as approximate compute time', () => {
-  assert.equal(remainingWorkLabel(17 * 60_000), '~ 20 min left');
-  assert.equal(remainingWorkLabel(5_400_000), '~ 1.5 hrs left');
-  assert.equal(remainingWorkLabel(0), null);
+  assert.equal(snapshot.backfillYear, 2025);
+  assert.deepEqual(snapshot.backfill, ['imessage']);
+  assert.equal(snapshot.peopleCompletion, undefined);
+  assert.equal(snapshot.estimate, undefined);
 });
 
 const DONE = { 'calendar:history-done': '1', 'matrix:history-done': '1' };

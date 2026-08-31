@@ -11,10 +11,7 @@ import IOKit.pwr_mgt
 //
 //   god mode      the machine-specific concurrency ceiling, large passes,
 //                 user-initiated process priority
-//   battery saver one summary at a time, small passes, utility priority
-//
-// The selected mode is mirrored into a private runtime file because Hermes is
-// a separate Node process and cannot read this app's UserDefaults domain.
+//   battery saver small passes and utility priority
 enum PerformanceMode: String {
   case godMode = "god_mode"
   case batterySaver = "battery_saver"
@@ -40,7 +37,6 @@ enum PowerBudget {
     }
     set {
       UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey)
-      syncRuntimeFile()
       NotificationCenter.default.post(name: didChange, object: nil)
     }
   }
@@ -49,32 +45,6 @@ enum PowerBudget {
     mode == .godMode ? .full : .trickle
   }
 
-  private static var runtimeFile: URL {
-    FileManager.default.homeDirectoryForCurrentUser
-      .appendingPathComponent(".hazlie/performance-mode")
-  }
-
-  /// Keep Hermes and the app on one policy. The file contains one allow-listed
-  /// word, is atomically replaced, and is owner-readable only.
-  static func syncRuntimeFile() {
-    let fm = FileManager.default
-    let root = runtimeFile.deletingLastPathComponent()
-    do {
-      try fm.createDirectory(at: root, withIntermediateDirectories: true,
-                             attributes: [.posixPermissions: 0o700])
-      try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
-      try Data("\(mode.rawValue)\n".utf8).write(to: runtimeFile, options: .atomic)
-      try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: runtimeFile.path)
-    } catch {
-      NSLog("Intaglio Labs: could not store performance mode: \(error.localizedDescription)")
-    }
-  }
-
-  /// Kept as the supervisor's launch hook. There are deliberately no power or
-  /// thermal observers now: those signals no longer change the policy.
-  static func startWatching() {
-    syncRuntimeFile()
-  }
 }
 
 // SAFE IDLE-SLEEP PREVENTION.

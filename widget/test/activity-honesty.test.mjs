@@ -50,11 +50,10 @@ test('portal discovery is counted and suppresses the blocked year', () => {
 
 test('People is a year-completion phase, not a fake connector fetch', () => {
   assert.ok(connectors.includes('"building \\($0) people profiles"'));
-  assert.ok(connectors.includes('"\\($0) profiles ready · summarizing \\(pending) person'));
-  assert.ok(connectors.includes('return "finishing \\(year) people"'));
+  assert.doesNotMatch(connectors, /summarizing|summariesPending|peopleCompletion/u);
   assert.doesNotMatch(connectors, /fetching \\?\(.*people/u);
-  assert.match(daemon, /remainingWorkLabel\(peopleRemainingMs/u,
-    'the current People year must publish its aggregate remaining-work ETA');
+  assert.doesNotMatch(daemon, /peopleRemainingMs|remainingWorkLabel/u,
+    'profile construction must not invent a long-running summary ETA');
 });
 
 test('a backfill with no estimate is still published', () => {

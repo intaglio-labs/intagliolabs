@@ -11,9 +11,7 @@
       "parallel": 1,
       "batchSize": 512,
       "microBatchSize": 128,
-      "modelsMax": 1,
-      "summaryConcurrency": 1,
-      "dualModelSummaries": false
+      "modelsMax": 1
     },
     {
       "id": "balanced",
@@ -25,9 +23,7 @@
       "parallel": 1,
       "batchSize": 1024,
       "microBatchSize": 256,
-      "modelsMax": 1,
-      "summaryConcurrency": 1,
-      "dualModelSummaries": false
+      "modelsMax": 1
     },
     {
       "id": "performance",
@@ -39,9 +35,7 @@
       "parallel": 2,
       "batchSize": 2048,
       "microBatchSize": 512,
-      "modelsMax": 2,
-      "summaryConcurrency": 2,
-      "dualModelSummaries": true
+      "modelsMax": 1
     }
   ]
 }

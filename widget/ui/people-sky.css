@@ -105,10 +105,8 @@ body.plist .pl-row {
   gap: 10px;
   padding: 9px 10px;
   border-radius: 10px;
-  cursor: pointer;
 }
 body.plist .pl-row:hover { background: rgba(234, 234, 234, 0.05); }
-body.plist .pl-row.open { background: rgba(234, 234, 234, 0.06); }
 body.plist .pl-main { min-width: 0; flex: 1 1 auto; }
 /* Name and source chips share one line: name on the left (ellipsizes if long),
    chips flowing to its right. */
@@ -162,14 +160,6 @@ body.plist .pl-chip:focus-visible {
   filter: brightness(1.25);
   outline: none;
 }
-body.plist .pl-detail {
-  margin-top: 7px;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-body.plist .pl-d { font-size: 11.5px; color: var(--secondary); word-break: break-all; }
-body.plist .pl-d.pl-dim { color: var(--muted); }
 body.plist .pl-empty {
   text-align: center;
   padding: 40px 0;

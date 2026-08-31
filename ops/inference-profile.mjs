@@ -44,8 +44,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   if (process.argv.includes('--tsv')) {
     process.stdout.write([
       profile.id, profile.contextSize, profile.parallel, profile.batchSize,
-      profile.microBatchSize, profile.modelsMax, profile.summaryConcurrency,
-      profile.dualModelSummaries ? 1 : 0, profile.modelTier,
+      profile.microBatchSize, profile.modelsMax, profile.modelTier,
     ].join('\t'));
   } else {
     process.stdout.write(`${JSON.stringify(profile)}\n`);

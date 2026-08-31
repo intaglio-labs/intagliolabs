@@ -104,18 +104,6 @@ export function sourceRetryDelay(result, intervalMs) {
     : intervalMs;
 }
 
-export function remainingWorkLabel(milliseconds) {
-  const ms = Number(milliseconds);
-  if (!Number.isFinite(ms) || ms <= 0) return null;
-  const minutes = Math.max(1, Math.ceil(ms / 60_000));
-  if (minutes < 60) {
-    const rounded = Math.max(5, Math.ceil(minutes / 5) * 5);
-    return `~ ${rounded} min left`;
-  }
-  const tenths = Math.max(1, Math.round(ms / 360_000));
-  return `~ ${(tenths / 10).toFixed(1)} hrs left`;
-}
-
 const PORTAL_JOIN_SAMPLE_KEY = 'matrix:portal-join-rate-sample';
 
 function median(values) {
@@ -809,7 +797,7 @@ export function createDaemon({
     .map((source) => source.name);
   // Install the product-level barrier once. Existing connector year receipts
   // remain useful, so an upgrade rewinds to the current year without re-fetching
-  // it: only People profiles/summaries run before the older connector walk
+  // it: only People profiles run before the older connector walk
   // resumes. Years and booleans only—no corpus state enters the cursor store.
   const peopleBarrierVersionKey = 'yearly-backfill:people-barrier-version';
   if (peopleBarrierEnabled && state.getCursor(peopleBarrierVersionKey) !== '1') {
@@ -825,7 +813,6 @@ export function createDaemon({
     barriers: peopleBarrierEnabled ? ['people'] : [],
     now,
   });
-  let peopleCompletion = null;
   let peopleGateTimer = null;
   let peopleGateRunning = false;
 
@@ -888,26 +875,6 @@ export function createDaemon({
       completionTimes.push(nowMs + portalInvitesPending * portalMsPerRoom);
     }
 
-    // People summaries have a real finite workload: bounded message chunks
-    // plus one annual synthesis per eligible person. Hermes refines the count
-    // to exact chunks as each person starts, while the daemon only receives
-    // aggregate units and milliseconds. This is the current YEAR's horizon,
-    // not the recurring connector retry timer it replaces in the header.
-    const peopleRemainingMs = Number(peopleCompletion?.estimatedRemainingMs);
-    const peopleEstimate = backfill.includes('people')
-      ? remainingWorkLabel(peopleRemainingMs)
-      : null;
-    if (peopleEstimate) {
-      return {
-        estimate: peopleEstimate,
-        backfill,
-        backfillRooms,
-        portalInvitesPending,
-        peopleCompletion,
-        ...(!yearly.complete && portalInvitesPending === 0 ? { backfillYear: yearly.year } : {}),
-      };
-    }
-
     if (backfill.includes('calendar')) {
       const ceiling = positiveNumber(
         state.getCursor(CALENDAR_HISTORY_CURSOR_KEY),
@@ -967,7 +934,6 @@ export function createDaemon({
             backfill,
             backfillRooms,
             portalInvitesPending,
-            ...(peopleCompletion ? { peopleCompletion } : {}),
             ...(!yearly.complete && portalInvitesPending === 0
               ? { backfillYear: yearly.year }
               : {}),
@@ -985,7 +951,6 @@ export function createDaemon({
       backfill,
       backfillRooms,
       portalInvitesPending,
-      ...(peopleCompletion ? { peopleCompletion } : {}),
       ...(!yearly.complete && portalInvitesPending === 0 ? { backfillYear: yearly.year } : {}),
     };
   };
@@ -1016,22 +981,9 @@ export function createDaemon({
       let retryDelayMs = null;
       try {
         const result = await completePeopleYear({ year }, ingestOpts);
-        peopleCompletion = {
-          year: result.year,
-          state: result.state,
-          profiles: result.profiles,
-          summariesTotal: result.summariesTotal,
-          summariesComplete: result.summariesComplete,
-          summariesSkipped: result.summariesSkipped,
-          summariesPending: result.summariesPending,
-          workUnitsTotal: result.workUnitsTotal,
-          workUnitsComplete: result.workUnitsComplete,
-          estimatedRemainingMs: result.estimatedRemainingMs,
-        };
         if (result.complete === true) {
           yearlyBackfill.recordBarrier('people', year);
           yearlyBackfill.advance();
-          peopleCompletion = null;
         }
         publishWaiting();
         if (result.complete !== true) {

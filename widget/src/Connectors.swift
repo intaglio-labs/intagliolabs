@@ -135,18 +135,8 @@ final class Connectors {
         // walk is active while the app is still discovering its room roster.
         if connector == "matrix" && portalInvitesPending > 0 { continue }
         if connector == "people" {
-          let progress = raw["peopleCompletion"] as? [String: Any]
-          let progressYear = progress?["year"] as? Int ?? year
-          let pending = progress?["summariesPending"] as? Int ?? 0
-          let label: String
-          if progress == nil {
-            label = progressYear.map { "building \($0) people profiles" }
-              ?? "building people profiles"
-          } else {
-            label = progressYear.map {
-              "\($0) profiles ready · summarizing \(pending) person\(pending == 1 ? "" : "s")"
-            } ?? "summarizing \(pending) person\(pending == 1 ? "" : "s")"
-          }
+          let label = year.map { "building \($0) people profiles" }
+            ?? "building people profiles"
           items.append(["kind": "backfill", "label": label])
           continue
         }
@@ -248,11 +238,6 @@ final class Connectors {
     if let n = raw["portalInvitesPending"] as? Int, n > 0 {
       return "importing social chats"
     }
-    if let progress = raw["peopleCompletion"] as? [String: Any],
-       let year = progress["year"] as? Int,
-       (progress["summariesPending"] as? Int ?? 0) > 0 {
-      return "finishing \(year) people"
-    }
     if (raw["backfill"] as? [String])?.contains("people") == true,
        let year = raw["backfillYear"] as? Int {
       return "building \(year) people profiles"
@@ -271,11 +256,6 @@ final class Connectors {
     guard let raw = activitySnapshot else { return nil }
     let names = ["imessage": "iMessage", "matrix": "connected platforms"]
     let labelFor = { (connector: String) in names[connector] ?? String(connector.prefix(32)) }
-    if let progress = raw["peopleCompletion"] as? [String: Any],
-       let year = progress["year"] as? Int,
-       (progress["summariesPending"] as? Int ?? 0) > 0 {
-      return "summarizing \(year) people"
-    }
     if (raw["backfill"] as? [String])?.contains("people") == true,
        let year = raw["backfillYear"] as? Int {
       return "building \(year) people profiles"

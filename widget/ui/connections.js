@@ -363,7 +363,7 @@ function rangeRow({ name, note, value, min, max, step, message, format }) {
 
 // One explicit performance switch replaces the old implicit charger/thermal
 // policy. On is God Mode; off is Battery Saver. Both keep processing — only
-// concurrency, batch size and QoS change.
+// pass size and process priority change.
 function performanceRow(selected) {
   const el = document.createElement('div');
   el.className = 'setting performance-setting';
@@ -377,7 +377,7 @@ function performanceRow(selected) {
   labelLine.className = 'setting-label-line';
   labelLine.append(name, settingHint(
     'performance',
-    'God Mode uses this Mac’s safe maximum so imports and summaries finish sooner. Leave it selected unless you need to conserve battery.'
+    'God Mode uses this Mac’s safe maximum so imports and local indexing finish sooner. Leave it selected unless you need to conserve battery.'
   ));
   text.append(labelLine);
 
@@ -441,7 +441,7 @@ function activityRow() {
   estimateLine.className = 'activity-estimate-line';
   estimateLine.hidden = true;
   estimateLine.append(estimate, infoHint(
-    'Your Mac is importing and summarizing everything privately. More chats and years mean more time.',
+    'Your Mac is importing and indexing everything privately. More chats and years mean more time.',
     'Why is this taking so long?'
   ));
   head.append(name, estimateLine);
@@ -584,7 +584,7 @@ async function renderSettings() {
   }));
   rows.push(settingRow({
     name: 'keep mac awake',
-    hint: 'Keeps imports and summaries moving while you step away, so they finish sooner. It still allows manual sleep and lid-close.',
+    hint: 'Keeps imports and local indexing moving while you step away, so they finish sooner. It still allows manual sleep and lid-close.',
     on: p && p.keepAwake === true,
     message: 'setKeepAwake',
   }));

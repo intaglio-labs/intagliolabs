@@ -447,9 +447,9 @@ test('role corrections paint an inline saving state before the bridge request fi
   assert.match(sharedCss, /\.pl-role-wait > span \{[\s\S]*?animation: pl-role-saving/u);
 });
 
-test('expanded summaries omit the local-model attribution', () => {
-  assert.doesNotMatch(page, /written by the local model/u);
-  assert.doesNotMatch(page, /pm-sum-tag/u);
+test('person rows do not expose an expandable model-written surface', () => {
+  assert.doesNotMatch(page, /requestSummary|peopleSummary|pm-sum/u);
+  assert.doesNotMatch(page, /data-rk=|role="button"/u);
 });
 
 test('topic pills stay all-time while role labels open everyone in the selected year', () => {
@@ -464,8 +464,8 @@ test('topic pills stay all-time while role labels open everyone in the selected 
   assert.match(page, /if \(topicPill\)[\s\S]*?openPillFilter\(\{ topicLabel:/u);
   assert.match(page, /if \(rolePill\)[\s\S]*?openPillFilter\(\{ role:/u);
   const handler = page.slice(page.indexOf("listEl.addEventListener('click'"), page.indexOf('// The globe is a dense all-time surface'));
-  assert.ok(handler.indexOf('topicPill') < handler.indexOf("closest('.pl-row')"),
-    'pill navigation is handled before a row can expand');
+  assert.doesNotMatch(handler, /closest\('\.pl-row'\)/u,
+    'the row has no expansion action competing with pill navigation');
 });
 
 test('connector glyphs open an uncapped connector list for the selected year', () => {
@@ -476,8 +476,8 @@ test('connector glyphs open an uncapped connector list for the selected year', (
     'the connector page upgrades past the normal quick-page cap');
   assert.match(page, /const connector = e\.target\.closest\('\.pm-src-ic\[data-channel-filter\]'\)[\s\S]*?openChannelFilter\(connector\.dataset\.channelFilter\)/u);
   const handler = page.slice(page.indexOf("listEl.addEventListener('click'"), page.indexOf('// The globe is a dense all-time surface'));
-  assert.ok(handler.indexOf('data-channel-filter') < handler.indexOf("closest('.pl-row')"),
-    'a connector click filters rather than expanding its source row');
+  assert.doesNotMatch(handler, /closest\('\.pl-row'\)/u,
+    'a connector click cannot expand its source row');
   assert.match(css, /\.pm-src-ic \{[\s\S]*?border: 0;[\s\S]*?cursor: pointer;/u);
 });
 
@@ -486,8 +486,8 @@ test('row trophy buttons open everyone with that trophy in the selected year', (
   assert.match(page, /function openAwardFilter\(kind\)[\s\S]*?awardFilter = kind;[\s\S]*?scope = 'year';/u);
   assert.match(page, /const trophy = e\.target\.closest\('\.pl-award\[data-award-kind\]'\)[\s\S]*?openAwardFilter\(trophy\.dataset\.awardKind\)/u);
   const handler = page.slice(page.indexOf("listEl.addEventListener('click'"), page.indexOf('// The globe is a dense all-time surface'));
-  assert.ok(handler.indexOf('data-award-kind') < handler.indexOf("closest('.pl-row')"),
-    'a trophy click filters rather than expanding its person row');
+  assert.doesNotMatch(handler, /closest\('\.pl-row'\)/u,
+    'a trophy click cannot expand its person row');
   assert.match(css, /\.pl-award \{[\s\S]*?border: 0;[\s\S]*?cursor: pointer;/u);
 });
 
