@@ -57,6 +57,26 @@ test('a sized queue runs two summaries together without starting a third', async
   await until(() => queue.active === null && queue.pending.length === 0, 'empty queue');
 });
 
+test('a live concurrency provider can switch between saver and god mode', async () => {
+  const runner = controlledRunner();
+  let limit = 1;
+  const queue = new SummaryQueue({
+    run: runner.run,
+    concurrency: 2,
+    concurrencyProvider: () => limit,
+  });
+  queue.enqueue(['first', 'second', 'third'].map((key) => ({ key, year: 2026 })));
+  await until(() => runner.starts.length === 1, 'Battery Saver slot');
+  assert.deepEqual(runner.starts, ['first']);
+  limit = 2;
+  runner.release('first');
+  await until(() => runner.starts.length === 3, 'God Mode slots');
+  assert.deepEqual(runner.starts, ['first', 'second', 'third']);
+  runner.release('second');
+  runner.release('third');
+  await until(() => queue.active === null && queue.pending.length === 0, 'empty queue');
+});
+
 test('a clicked person preempts background work, which then resumes in rank order', async () => {
   const runner = controlledRunner();
   const queue = new SummaryQueue({ run: runner.run });

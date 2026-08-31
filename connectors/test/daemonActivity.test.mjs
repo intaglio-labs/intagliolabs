@@ -110,10 +110,9 @@ test('a completed connector year surfaces People completion before the prior yea
   assert.equal(snapshot.estimate, '~ 1.5 hrs left');
 });
 
-test('remaining work is formatted as approximate compute time, including pauses', () => {
+test('remaining work is formatted as approximate compute time', () => {
   assert.equal(remainingWorkLabel(17 * 60_000), '~ 20 min left');
   assert.equal(remainingWorkLabel(5_400_000), '~ 1.5 hrs left');
-  assert.equal(remainingWorkLabel(5_400_000, { paused: true }), '~ 1.5 hrs work left');
   assert.equal(remainingWorkLabel(0), null);
 });
 
@@ -186,7 +185,7 @@ test('portal discovery publishes a remaining count instead of a year', async () 
   assert.match(String(snapshot.estimate), /^~ \d+\.\d hrs left$/,
     'the header estimates completion from measured queue throughput');
   assert.equal(snapshot.backfillYear, undefined,
-    'a paused year must not be rendered as though it is being fetched');
+    'a year blocked on portal discovery must not look like it is being fetched');
 });
 
 // A RESTART MUST NOT RE-ADVERTISE WORK THAT CANNOT RUN.

@@ -107,6 +107,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     Provision.ensureConnectorDefaults()
     Provision.ensureBackend()
     Provision.prefetchBridgeRuntime()
+    // Hermes is a separate local process, so mirror the native performance
+    // preference into its owner-only runtime file before background work starts.
+    PowerBudget.syncRuntimeFile()
 
     // The second half of the self-move (Bridge "moveToApplications"): the
     // old instance could not delete the bundle it was running from, so it
@@ -1419,6 +1422,7 @@ extension AppDelegate {
   // The child dies with us rather than outliving the app that is responsible
   // for it, holding a database handle and a set of cursors open.
   func applicationWillTerminate(_ notification: Notification) {
+    KeepMacAwake.stop()
     Connectors.shared.stop()
     Distiller.shared.stop()
   }

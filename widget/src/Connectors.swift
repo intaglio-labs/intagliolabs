@@ -137,14 +137,10 @@ final class Connectors {
           let progress = raw["peopleCompletion"] as? [String: Any]
           let progressYear = progress?["year"] as? Int ?? year
           let pending = progress?["summariesPending"] as? Int ?? 0
-          let state = progress?["state"] as? String
           let label: String
           if progress == nil {
             label = progressYear.map { "building \($0) people profiles" }
               ?? "building people profiles"
-          } else if state == "waiting_for_power" {
-            label = progressYear.map { "\($0) profiles ready · summaries paused on battery" }
-              ?? "profiles ready · summaries paused on battery"
           } else {
             label = progressYear.map {
               "\($0) profiles ready · summarizing \(pending) person\(pending == 1 ? "" : "s")"
@@ -277,9 +273,7 @@ final class Connectors {
     if let progress = raw["peopleCompletion"] as? [String: Any],
        let year = progress["year"] as? Int,
        (progress["summariesPending"] as? Int ?? 0) > 0 {
-      return progress["state"] as? String == "waiting_for_power"
-        ? "waiting to finish \(year) people"
-        : "summarizing \(year) people"
+      return "summarizing \(year) people"
     }
     if (raw["backfill"] as? [String])?.contains("people") == true,
        let year = raw["backfillYear"] as? Int {
@@ -325,6 +319,13 @@ final class Connectors {
 
   var isRunning: Bool { process?.isRunning == true }
 
+  /// Update scheduling policy without interrupting an in-flight connector
+  /// pass. Restarting here would throw away exactly the work this setting is
+  /// meant to speed up or soften.
+  func applyPerformanceMode() {
+    process?.qualityOfService = PowerBudget.current == .full ? .userInitiated : .utility
+  }
+
   /// Start the daemon if it is not already up and its config exists. Safe to
   /// call repeatedly — onboarding calls it the moment it writes the config.
   func start(bypassingThrottle: Bool = false) {
@@ -348,11 +349,9 @@ final class Connectors {
 
     let p = Process()
     p.executableURL = node
-    // Same reasoning as the distiller: a scheduled ingest is background work and
-    // has no business competing for performance cores with what the owner is
-    // doing. Not paused on battery -- an ingest is short and keeping the corpus
-    // current is the point of the app -- just scheduled politely.
-    p.qualityOfService = .utility
+    // God Mode gives imports foreground-class scheduling. Battery Saver keeps
+    // them polite at utility QoS. Both continue on battery and when thermally hot.
+    p.qualityOfService = PowerBudget.current == .full ? .userInitiated : .utility
     p.arguments = [script.path]
     var environment = ProcessInfo.processInfo.environment
     environment["INTAGLIO_CONNECTOR_OWNER_PID"] = String(ProcessInfo.processInfo.processIdentifier)

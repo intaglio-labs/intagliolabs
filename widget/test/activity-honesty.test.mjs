@@ -39,7 +39,7 @@ test('it reports a count of conversations instead', () => {
   assert.match(daemon, /backfillRooms,/u, 'and include it in the published object');
 });
 
-test('portal discovery is counted and suppresses the paused year', () => {
+test('portal discovery is counted and suppresses the blocked year', () => {
   assert.match(daemon, /portalInvitesPending = matrixHistoryRooms/u);
   assert.match(daemon, /portalInvitesPending === 0[\s\S]*?backfillYear/u,
     'a year label may appear only after portal discovery finishes');
@@ -51,7 +51,6 @@ test('portal discovery is counted and suppresses the paused year', () => {
 test('People is a year-completion phase, not a fake connector fetch', () => {
   assert.ok(connectors.includes('"building \\($0) people profiles"'));
   assert.ok(connectors.includes('"\\($0) profiles ready · summarizing \\(pending) person'));
-  assert.ok(connectors.includes('"\\($0) profiles ready · summaries paused on battery"'));
   assert.ok(connectors.includes('return "finishing \\(year) people"'));
   assert.doesNotMatch(connectors, /fetching \\?\(.*people/u);
   assert.match(daemon, /remainingWorkLabel\(peopleRemainingMs/u,

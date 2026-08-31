@@ -104,17 +104,16 @@ export function sourceRetryDelay(result, intervalMs) {
     : intervalMs;
 }
 
-export function remainingWorkLabel(milliseconds, { paused = false } = {}) {
+export function remainingWorkLabel(milliseconds) {
   const ms = Number(milliseconds);
   if (!Number.isFinite(ms) || ms <= 0) return null;
   const minutes = Math.max(1, Math.ceil(ms / 60_000));
-  const qualifier = paused ? ' work' : '';
   if (minutes < 60) {
     const rounded = Math.max(5, Math.ceil(minutes / 5) * 5);
-    return `~ ${rounded} min${qualifier} left`;
+    return `~ ${rounded} min left`;
   }
   const tenths = Math.max(1, Math.round(ms / 360_000));
-  return `~ ${(tenths / 10).toFixed(1)} hrs${qualifier} left`;
+  return `~ ${(tenths / 10).toFixed(1)} hrs left`;
 }
 
 const PORTAL_JOIN_SAMPLE_KEY = 'matrix:portal-join-rate-sample';
@@ -896,9 +895,7 @@ export function createDaemon({
     // not the recurring connector retry timer it replaces in the header.
     const peopleRemainingMs = Number(peopleCompletion?.estimatedRemainingMs);
     const peopleEstimate = backfill.includes('people')
-      ? remainingWorkLabel(peopleRemainingMs, {
-          paused: peopleCompletion?.state === 'waiting_for_power',
-        })
+      ? remainingWorkLabel(peopleRemainingMs)
       : null;
     if (peopleEstimate) {
       return {

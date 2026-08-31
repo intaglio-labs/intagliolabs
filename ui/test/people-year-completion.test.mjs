@@ -24,7 +24,7 @@ test('one year queues every summary-eligible profile and survives restart', () =
       { key: 'person-b', messages: 10 },
       { key: 'too-thin', messages: 9 },
     ];
-    const first = fx.manager.begin({ year: 2026, corpusStamp: 'a'.repeat(64), people, allowWork: true });
+    const first = fx.manager.begin({ year: 2026, corpusStamp: 'a'.repeat(64), people });
     assert.equal(first.profiles, 3);
     assert.equal(first.summariesTotal, 2);
     assert.equal(first.workUnitsTotal, 4);
@@ -37,7 +37,7 @@ test('one year queues every summary-eligible profile and survives restart', () =
     const restarted = new PeopleYearCompletion({
       path: join(fx.dir, 'summaries.db'), queue: fx.manager.queue, now: () => 5678,
     });
-    const status = restarted.resume(2026, 'a'.repeat(64), false);
+    const status = restarted.resume(2026, 'a'.repeat(64));
     assert.equal(status.summariesComplete, 1);
     assert.equal(status.summariesPending, 1);
     assert.equal(status.workUnitsComplete, 2);
@@ -52,7 +52,7 @@ test('active chunk progress refines and advances the remaining-work estimate', (
   try {
     fx.manager.begin({
       year: 2026, corpusStamp: 'e'.repeat(64),
-      people: [{ key: 'person-a', messages: 10 }], allowWork: false,
+      people: [{ key: 'person-a', messages: 10 }],
     });
     assert.equal(fx.manager.progress({
       key: 'person-a', year: 2026,
@@ -72,7 +72,7 @@ test('thin evidence is a terminal skip and completes the year', () => {
   try {
     fx.manager.begin({
       year: 2026, corpusStamp: 'b'.repeat(64),
-      people: [{ key: 'person-a', messages: 10 }], allowWork: false,
+      people: [{ key: 'person-a', messages: 10 }],
     });
     fx.manager.record({
       key: 'person-a', year: 2026,
@@ -92,13 +92,12 @@ test('a changed year stamp resets only that year work receipt', () => {
   try {
     fx.manager.begin({
       year: 2026, corpusStamp: 'c'.repeat(64),
-      people: [{ key: 'person-a', messages: 10 }], allowWork: false,
+      people: [{ key: 'person-a', messages: 10 }],
     });
     fx.manager.record({ key: 'person-a', year: 2026, result: { text: 'done' } });
     const reset = fx.manager.begin({
       year: 2026, corpusStamp: 'd'.repeat(64),
       people: [{ key: 'person-a', messages: 12 }, { key: 'person-b', messages: 30 }],
-      allowWork: false,
     });
     assert.equal(reset.complete, false);
     assert.equal(reset.summariesTotal, 2);

@@ -16,6 +16,7 @@ export class SummaryQueue {
     isRetryable = () => false,
     retryDelayMs = 30_000,
     concurrency = 1,
+    concurrencyProvider = null,
     onSettled = () => {},
     onProgress = () => {},
   } = {}) {
@@ -25,6 +26,8 @@ export class SummaryQueue {
     this.isRetryable = isRetryable;
     this.retryDelayMs = retryDelayMs;
     this.concurrency = Math.max(1, Math.min(4, Number.isInteger(concurrency) ? concurrency : 1));
+    this.concurrencyProvider = typeof concurrencyProvider === 'function'
+      ? concurrencyProvider : null;
     this.onSettled = onSettled;
     this.onProgress = onProgress;
     this.jobs = new Map();
@@ -41,6 +44,17 @@ export class SummaryQueue {
   // summary is active. Detailed progress remains attached to each job.
   get active() {
     return this.running.values().next().value ?? null;
+  }
+
+  get concurrencyLimit() {
+    if (!this.concurrencyProvider) return this.concurrency;
+    try {
+      const requested = this.concurrencyProvider();
+      return Math.max(1, Math.min(this.concurrency,
+        Number.isInteger(requested) ? requested : this.concurrency));
+    } catch {
+      return this.concurrency;
+    }
   }
 
   // A viewed year is priority 1; a clicked person is priority 2. Re-enqueuing
@@ -70,7 +84,7 @@ export class SummaryQueue {
     // A click should wait for at most the current fetch cancellation, not every
     // invisible person above it. The interrupted background job returns to the
     // queue with its completed chunk cache intact.
-    if (priority >= 2 && this.running.size >= this.concurrency) {
+    if (priority >= 2 && this.running.size >= this.concurrencyLimit) {
       const victim = [...this.running]
         .filter((candidate) => candidate.id !== id && candidate.priority < priority)
         .sort((a, b) => (a.priority - b.priority) || (b.order - a.order))[0];
@@ -154,7 +168,7 @@ export class SummaryQueue {
   }
 
   kick() {
-    if (this.pumpScheduled || this.running.size >= this.concurrency || this.retryTimer || this.pauses > 0 || this.resetting || !this.pending.length) return;
+    if (this.pumpScheduled || this.running.size >= this.concurrencyLimit || this.retryTimer || this.pauses > 0 || this.resetting || !this.pending.length) return;
     this.pumpScheduled = true;
     this.defer(() => {
       this.pumpScheduled = false;
@@ -164,7 +178,8 @@ export class SummaryQueue {
 
   pump() {
     if (this.pauses > 0 || this.resetting) return;
-    while (this.running.size < this.concurrency && this.pending.length && !this.retryTimer) {
+    const limit = this.concurrencyLimit;
+    while (this.running.size < limit && this.pending.length && !this.retryTimer) {
       const job = this.pending.shift();
       if (!job) break;
       this.start(job);

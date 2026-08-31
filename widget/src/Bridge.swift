@@ -96,6 +96,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     "bridgeDiscordServer",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
                     "status", "setConnectorEnabled", "setMotion", "setScale", "setSounds",
+                    "setPerformance", "setKeepAwake",
                     "openOnboarding", "markHandheld",
                     // Same setup controls, reachable from the gear after the
                     // flow — a skipped step must stay reachable.
@@ -634,6 +635,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         "state": "ok",
         "motion": Bridge.motionAnyway,
         "sounds": Bridge.soundsOn,
+        "performance": PowerBudget.mode.rawValue,
+        "keepAwake": KeepMacAwake.enabled,
         "onboarded": !Bridge.needsOnboarding,
         "scale": Bridge.scale,
         "scaleMin": Bridge.scaleRange.lowerBound,
@@ -685,6 +688,19 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       Bridge.soundsOn = on
       delegate?.soundsChanged(on)
       reply(webView, id, ["state": "ok", "sounds": on])
+    case "setPerformance":
+      guard let raw = payload["mode"] as? String,
+            let mode = PerformanceMode(rawValue: raw) else {
+        reply(webView, id, ["state": "error", "error": "unknown performance mode"])
+        return
+      }
+      PowerBudget.mode = mode
+      Connectors.shared.applyPerformanceMode()
+      reply(webView, id, ["state": "ok", "performance": mode.rawValue])
+    case "setKeepAwake":
+      let on = payload["on"] as? Bool ?? false
+      KeepMacAwake.enabled = on
+      reply(webView, id, ["state": "ok", "keepAwake": on])
     case "close":
       delegate?.closeWindow(of: webView)
       reply(webView, id, ["state": "ok"])
@@ -1139,6 +1155,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         workLabel = nil
       }
       if let workLabel {
+        KeepMacAwake.update(processing: true)
         var status: [String: Any] = ["state": "working", "label": workLabel]
         // THE HORIZON BELONGS TO THE CONNECTOR QUEUE, so it may only ride a
         // connector label.
@@ -1163,6 +1180,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         }
         reply(webView, id, status)
       } else {
+        KeepMacAwake.update(processing: false)
         reply(webView, id, ["state": "idle"])
       }
 

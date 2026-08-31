@@ -86,7 +86,7 @@ import {
   summariesDbPath,
   summarizeYear,
 } from './people/summary.mjs';
-import { mayWarmInBackground } from './people/power.mjs';
+import { mayWarmInBackground, performanceMode } from './people/power.mjs';
 
 import { SummaryQueue } from './people/summaryQueue.mjs';
 import { PeopleYearCompletion, yearCompletionStamp } from './people/yearCompletion.mjs';
@@ -2474,25 +2474,23 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     if (policy.peopleSummaryManager.resetting) {
       throw Object.assign(new Error('relationship summaries are resetting'), { status: 503 });
     }
-    const allowWork = await mayWarmInBackground();
     const completion = policy.peopleSummaryManager.yearCompletion;
     const status = withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
       const stamp = yearCompletionStamp(db, state, aliases, year);
       const existing = completion.existing(year, stamp);
-      if (existing) return completion.resume(year, stamp, allowWork);
+      if (existing) return completion.resume(year, stamp);
       // The year barrier explicitly asks for fresh profiles, so it pays the
       // blocking graph rebuild instead of accepting stale-while-refresh data.
       yearCore(db, state, { now: Date.now(), owner: loadOwner(), aliases, blocking: true });
       const people = buildYear(db, state, {
         year, owner: loadOwner(), aliases, cap: Infinity,
       }).people;
-      return completion.begin({ year, corpusStamp: stamp, people, allowWork });
+      return completion.begin({ year, corpusStamp: stamp, people });
     });
     send(res, 200, {
       ...status,
-      ...(!status.complete && !allowWork ? { state: 'waiting_for_power' } : {}),
-      ...(!status.complete ? { retryAfterMs: allowWork ? 15_000 : 60_000 } : {}),
+      ...(!status.complete ? { retryAfterMs: 15_000 } : {}),
     }, cors);
     return;
   }
@@ -4093,22 +4091,19 @@ async function handlePeople(db, req, res, cors, url, policy) {
     // Work begins after this turn of the event loop, so the year response paints
     // before the local model starts. A later click promotes that person above
     // every invisible queued row.
-    // WARMING IS A LUXURY AND IT SPENDS THE OWNER'S BATTERY.
+    // WARMING IS BOUNDED AND OBEYS THE OWNER'S PERFORMANCE MODE.
     //
     // This enqueued EVERY person on the page with at least MIN_ROWS messages
     // for a full hierarchical summary — several local model calls each, and one
     // 11,765-message friendship is 35 chunks before the reduce even starts.
-    // Nothing in this path had any notion of power: PowerBudget reads
-    // thermalState and isLowPowerModeEnabled, but it lives in the widget and
-    // hermes is a separate process that knew none of it. Opening one year on
-    // battery put the machine's fans at full blast (owner, 2026-08-30).
+    // This used to infer permission from AC power. That silently stopped year
+    // completion on battery and made charger changes control app state. Both
+    // modes now admit work; SummaryQueue changes its concurrency dynamically.
     //
-    // Two limits doing two different jobs. On battery, warm NOTHING — a person
-    // the owner actually opens is foreground work at priority 2 and is never
-    // gated here, so the feature still works; it just stops speculatively
-    // summarising everyone else on the page. On AC, warm a bounded head of the
-    // list: it is already in engagement rank, so the head is what is most
-    // likely to be opened next and the tail is pure speculation.
+    // The bounded head remains important in both modes: it is already in
+    // engagement rank, so the head is what is most likely to be opened next and
+    // the tail is pure speculation. Battery Saver runs the picked work one at a
+    // time; God Mode uses the machine-specific ceiling.
     const warmable = (out.people ?? [])
       .filter((person) => Number(person.messages ?? 0) >= SUMMARY_MIN_ROWS);
     mayWarmInBackground().then((may) => {
@@ -4296,9 +4291,14 @@ export async function start({
     resolvedDbPath,
   });
   let peopleYearCompletion = null;
+  const maximumSummaryConcurrency = Math.max(1, Math.min(4,
+    Number.isFinite(summaryConcurrency) ? Math.floor(summaryConcurrency) : 1));
   const peopleSummaryQueue = new SummaryQueue({
-    concurrency: Math.max(1, Math.min(4,
-      Number.isFinite(summaryConcurrency) ? Math.floor(summaryConcurrency) : 1)),
+    concurrency: maximumSummaryConcurrency,
+    // Battery Saver still completes the year, one summary at a time. God Mode
+    // uses the machine-sized ceiling selected during provisioning.
+    concurrencyProvider: () => performanceMode() === 'battery_saver'
+      ? 1 : maximumSummaryConcurrency,
     isRetryable: (error) => isUnreachable(error) || isTimeout(error) || error?.status === 502,
     onSettled: (receipt) => peopleYearCompletion?.record(receipt),
     onProgress: (receipt) => peopleYearCompletion?.progress(receipt),

@@ -51,6 +51,8 @@ enum DefaultsMigration {
     // setting. Losing it silently reverts a choice they had to go and make.
     "HazlieMotionAnyway",
     "HazlieSounds",
+    "HazliePerformanceMode",
+    "HazlieKeepMacAwake",
     "HazlieHandheld",
     "NSWindow Frame HazlieWidget",
   ]

@@ -68,7 +68,7 @@ export class PeopleYearCompletion {
     });
   }
 
-  begin({ year, corpusStamp, people, allowWork }) {
+  begin({ year, corpusStamp, people }) {
     const eligible = (people ?? [])
       .filter((person) => typeof person?.key === 'string' && Number(person.messages ?? 0) >= MIN_ROWS)
       .map((person) => ({
@@ -105,10 +105,10 @@ export class PeopleYearCompletion {
         throw error;
       }
     });
-    return this.resume(year, corpusStamp, allowWork);
+    return this.resume(year, corpusStamp);
   }
 
-  resume(year, corpusStamp, allowWork) {
+  resume(year, corpusStamp) {
     const pending = this.withDb((db) => {
       const run = db.prepare('SELECT corpus_stamp FROM summary_year_runs WHERE year = ?').get(year);
       if (!run || run.corpus_stamp !== corpusStamp) return null;
@@ -117,10 +117,10 @@ export class PeopleYearCompletion {
       ).all(year).map((row) => row.person_key);
     });
     if (pending === null) return null;
-    if (allowWork && pending.length > 0) {
+    if (pending.length > 0) {
       this.queue.enqueue(pending.map((key) => ({ key, year })), { priority: 1 });
     }
-    return this.existing(year, corpusStamp, allowWork);
+    return this.existing(year, corpusStamp);
   }
 
   record({ key, year, result }) {

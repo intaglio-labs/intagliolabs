@@ -306,6 +306,63 @@ function rangeRow({ name, note, value, min, max, step, message, format }) {
   return el;
 }
 
+// One explicit performance choice replaces the old implicit charger/thermal
+// policy. Both modes keep processing; only concurrency, batch size and QoS
+// change. The labels are the product language the owner chose.
+function performanceRow(selected) {
+  const el = document.createElement('div');
+  el.className = 'setting setting-col performance-setting';
+  const head = document.createElement('div');
+  head.className = 'setting-head';
+  const name = document.createElement('span');
+  name.className = 'setting-name';
+  name.textContent = 'performance';
+  head.append(name);
+
+  const choices = document.createElement('div');
+  choices.className = 'performance-pick';
+  const modes = [
+    { id: 'god_mode', label: 'god mode', title: 'maximize local processing' },
+    { id: 'battery_saver', label: 'battery saver', title: 'use less energy while continuing to process' },
+  ];
+  let active = modes.some((mode) => mode.id === selected) ? selected : 'god_mode';
+  const paint = () => {
+    for (const button of choices.children) {
+      const on = button.dataset.mode === active;
+      button.classList.toggle('on', on);
+      button.setAttribute('aria-pressed', String(on));
+    }
+  };
+  for (const mode of modes) {
+    const button = document.createElement('button');
+    button.className = 'model-pick-button';
+    button.dataset.mode = mode.id;
+    button.textContent = mode.label;
+    button.title = mode.title;
+    button.addEventListener('click', async () => {
+      if (mode.id === active) return;
+      const previous = active;
+      active = mode.id;
+      paint();
+      try {
+        const response = await hzPost('setPerformance', { mode: active });
+        active = response && response.performance === mode.id ? mode.id : previous;
+      } catch {
+        active = previous;
+      }
+      paint();
+    });
+    choices.appendChild(button);
+  }
+  paint();
+
+  const note = document.createElement('span');
+  note.className = 'setting-note';
+  note.textContent = 'both keep processing on battery';
+  el.append(head, choices, note);
+  return el;
+}
+
 // The answer model is a Settings choice, not an onboarding gate. Fresh installs
 // default to the roughly 5 GB tier; this row keeps the smaller option available
 // for a Mac that needs less memory.
@@ -522,6 +579,13 @@ async function renderSettings() {
       message: 'setMotion',
     }));
   }
+  rows.push(performanceRow(p && p.performance));
+  rows.push(settingRow({
+    name: 'keep mac awake',
+    note: 'while processing',
+    on: p && p.keepAwake === true,
+    message: 'setKeepAwake',
+  }));
   // Sounds always show: there is no system setting behind them, so this is
   // the only place they can be turned off.
   rows.push(settingRow({
