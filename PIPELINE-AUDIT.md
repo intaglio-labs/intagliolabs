@@ -8,6 +8,23 @@ appear anywhere in this document.
 
 ---
 
+> **Read this first — much of section 2b, 3 and 4 is now history.**
+>
+> This audit was written on 2026-08-31 against the pipeline as it then stood.
+> Later the same day, `c00541a` **removed relationship summary generation
+> entirely** — `ui/server/people/summary.mjs`, `summaryQueue.mjs`,
+> `yearCompletion.mjs`, `power.mjs` and their tests, plus 240 lines of
+> `hermes.mjs`. That is direction C from the three this report set out.
+>
+> What that makes obsolete: the summarisation quality findings (2b), the
+> summarisation stage (3), the whole overnight-rebuild analysis (4), and the
+> incremental design (5). They are kept unedited because the reasoning is why
+> the layer was removed, and because section 1's scorecard is the argument.
+>
+> What still stands: ingest, segmentation, distillation, the people layer, the
+> claims findings, and the measurement gap in section 1 — there is still no eval
+> harness and still no read telemetry.
+
 ## 1. The answer to your question
 
 **It is not "feeding a bunch of shit to an LLM and asking it to summarize" — but
