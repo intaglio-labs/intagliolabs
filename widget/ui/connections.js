@@ -356,10 +356,7 @@ function performanceRow(selected) {
   }
   paint();
 
-  const note = document.createElement('span');
-  note.className = 'setting-note';
-  note.textContent = 'both keep processing on battery';
-  el.append(head, choices, note);
+  el.append(head, choices);
   return el;
 }
 
