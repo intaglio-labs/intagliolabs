@@ -561,13 +561,6 @@ async function renderSettings() {
       message: 'setMotion',
     }));
   }
-  rows.push(performanceRow(p && p.performance));
-  rows.push(settingRow({
-    name: 'keep mac awake',
-    hint: 'Keeps imports and summaries moving while you step away, so they finish sooner. It still allows manual sleep and lid-close.',
-    on: p && p.keepAwake === true,
-    message: 'setKeepAwake',
-  }));
   // Sounds always show: there is no system setting behind them, so this is
   // the only place they can be turned off.
   rows.push(settingRow({
@@ -575,6 +568,13 @@ async function renderSettings() {
     on: !p || p.sounds !== false,
     message: 'setSounds',
   }));
+  rows.push(settingRow({
+    name: 'keep mac awake',
+    hint: 'Keeps imports and summaries moving while you step away, so they finish sooner. It still allows manual sleep and lid-close.',
+    on: p && p.keepAwake === true,
+    message: 'setKeepAwake',
+  }));
+  rows.push(performanceRow(p && p.performance));
   // The size slider was yeeted (owner, 2026-08-24): everything runs at 100%.
   // Native's setScale plumbing survives untouched, so a stored non-1 scale
   // from the slider era is snapped back to 1 here — without the control, a

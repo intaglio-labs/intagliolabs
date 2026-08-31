@@ -37,6 +37,19 @@ test('Settings exposes the owner language and validates the bridge value', () =>
   assert.match(bridge, /"keepAwake": KeepMacAwake\.enabled/u);
 });
 
+test('Settings orders everyday controls before performance tuning', () => {
+  const block = /async function renderSettings\(\) \{([\s\S]*?)settings\.replaceChildren/u.exec(settings)?.[1];
+  assert.ok(block, 'renderSettings block not found');
+  const positions = [
+    block.indexOf("name: 'animations'"),
+    block.indexOf("name: 'sounds'"),
+    block.indexOf("name: 'keep mac awake'"),
+    block.indexOf('rows.push(performanceRow'),
+  ];
+  assert.ok(positions.every((position) => position >= 0));
+  assert.deepEqual(positions, [...positions].sort((a, b) => a - b));
+});
+
 test('keep awake is scoped to processing and uses a safe idle-sleep assertion', () => {
   const code = power.split('\n').filter((line) => !/^\s*\/\//u.test(line)).join('\n');
   assert.match(power, /if enabled && processing/u);
