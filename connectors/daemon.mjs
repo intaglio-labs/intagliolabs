@@ -103,6 +103,60 @@ export function sourceRetryDelay(result, intervalMs) {
     : intervalMs;
 }
 
+const PORTAL_JOIN_SAMPLE_KEY = 'matrix:portal-join-rate-sample';
+
+function median(values) {
+  const ordered = [...values].sort((a, b) => a - b);
+  if (ordered.length === 0) return null;
+  const middle = Math.floor(ordered.length / 2);
+  return ordered.length % 2 === 1
+    ? ordered[middle]
+    : (ordered[middle - 1] + ordered[middle]) / 2;
+}
+
+// Measure what the queue actually does on this machine. Matrix may join many
+// rooms in one burst or admit one and rate-limit the next, so neither the raw
+// queue length nor the retry timer is a completion forecast. Wall-clock change
+// between bounded passes is. Counts and timestamps only; no room identifiers.
+export function observePortalJoinRate(state, pending, observedTs, seedMsPerRoom = null) {
+  if (!Number.isInteger(pending) || pending < 0 || !Number.isFinite(observedTs)) return null;
+  let previous = null;
+  try { previous = JSON.parse(state.getCursor(PORTAL_JOIN_SAMPLE_KEY) ?? 'null'); } catch {}
+  const samples = Array.isArray(previous?.samples)
+    ? previous.samples.filter((n) => Number.isFinite(n) && n >= 1_000 && n <= 120_000).slice(-7)
+    : [];
+  // The first pass has no previous wall-clock sample. If that pass was rate
+  // limited, its server-authored retry delay is a useful initial per-room
+  // estimate; the rolling wall-clock median replaces it on following passes.
+  if (samples.length === 0 && Number.isFinite(seedMsPerRoom)
+      && seedMsPerRoom >= 1_000 && seedMsPerRoom <= 120_000) {
+    samples.push(seedMsPerRoom);
+  }
+  if (Number.isInteger(previous?.pending) && pending < previous.pending) {
+    const elapsed = observedTs - Number(previous.ts);
+    const joined = previous.pending - pending;
+    const msPerRoom = elapsed / joined;
+    // Ignore app downtime and clock jumps. The next live pair will replace the
+    // baseline one pass later instead of poisoning an hours-long estimate.
+    if (elapsed >= 1_000 && elapsed <= 120_000 && msPerRoom >= 1_000 && msPerRoom <= 120_000) {
+      samples.push(msPerRoom);
+    }
+  }
+  state.setCursor(PORTAL_JOIN_SAMPLE_KEY, JSON.stringify({ pending, ts: observedTs, samples }));
+  return median(samples);
+}
+
+export function portalJoinMsPerRoom(state) {
+  try {
+    const saved = JSON.parse(state.getCursor(PORTAL_JOIN_SAMPLE_KEY) ?? 'null');
+    return median((saved?.samples ?? []).filter(
+      (n) => Number.isFinite(n) && n >= 1_000 && n <= 120_000
+    ));
+  } catch {
+    return null;
+  }
+}
+
 // Connector name → the hermes `source` its rows land under. Oura is the
 // health connector (entity ids stay health:<metric>:<date> /
 // health:workout:<start_iso> — the id scheme names the data, not the
@@ -787,12 +841,16 @@ export function createDaemon({
     const yearly = yearlyBackfill.snapshot();
     const backfill = yearly.pending;
     let backfillRooms = 0;
-    // Portal discovery is finite work with a real remaining count. Do not call
-    // it a year and do not turn its retry timer into an ETA: Matrix may admit
-    // one room and rate-limit the next, so elapsed time is not predictable.
+    // Portal discovery is finite work with a real remaining count. Its retry
+    // timer is not an ETA, but its observed wall-clock throughput is: a short
+    // rolling median absorbs Meta/Synapse's one-room bursts and rate limits.
     const portalInvitesPending = matrixHistoryRooms(
       state.getCursor('matrix:pending-portal-invites')
     );
+    const portalMsPerRoom = portalJoinMsPerRoom(state);
+    if (portalInvitesPending > 0 && portalMsPerRoom) {
+      completionTimes.push(nowMs + portalInvitesPending * portalMsPerRoom);
+    }
 
     if (backfill.includes('calendar')) {
       const ceiling = positiveNumber(
@@ -809,7 +867,7 @@ export function createDaemon({
       completionTimes.push(first + Math.max(0, passes - 1) * intervalMsFor('calendar'));
     }
 
-    // MATRIX CONTRIBUTES NO ETA, ONLY A COUNT.
+    // MATRIX HISTORY CONTRIBUTES NO ETA, ONLY A COUNT.
     //
     // It used to compute `minimumPasses = ceil(rooms / pagesPerPass)` and render
     // the result as an ETA. With 9 rooms and a rate of 11 that is ceil(9/11) = 1,
@@ -992,6 +1050,16 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
       // The forward pass first, always: what arrived since last time is more
       // urgent than what happened in 2019, and history must never delay it.
       const forward = (await source.run(makeCtx())) ?? {};
+      if (source.name === 'matrix' && Number.isInteger(forward.historyDiscoveryPending)) {
+        observePortalJoinRate(
+          state,
+          forward.historyDiscoveryPending,
+          now(),
+          forward.historyDiscoveryPending > 0 && forward.historyDiscoveryJoined > 0
+            ? forward.retryAfterMs
+            : null
+        );
+      }
       // Sources may discover short-lived local work that should not wait for
       // their ordinary polling interval. Matrix uses this after Synapse rate-
       // limits a portal-join recovery pass. The source supplies only a bounded

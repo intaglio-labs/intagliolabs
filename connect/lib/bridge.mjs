@@ -70,23 +70,25 @@ export const PLATFORMS = Object.freeze({
     bot: '@facebookbot:hazlie.local',
     dir: 'meta',
     db: 'meta/mautrix-meta.db',
-    // The bare login command. The pinned mautrix-meta release exposes separate
-    // facebook.com and messenger.com cookie flows; this connector is Messenger,
-    // so harvesting Facebook's login page is the wrong contract. It can finish
-    // 2FA yet return to /login without ever creating a Messenger session.
-    // Prefixed with the bridge's command_prefix at send time so it works in any
-    // room, not only the bot's management room.
-    initial: 'login messenger',
+    // This is still the Messenger connector; `facebook` names the cookie
+    // transport used to authenticate it. The live in-app trace reached a fully
+    // signed-in facebook.com home after 2FA, then messenger.com opened a fresh
+    // logged-out landing page because WebKit correctly kept the two domains'
+    // cookies separate. Waiting for messenger.com therefore discarded a valid
+    // login. Hand the Facebook session to mautrix-meta's Facebook-cookie flow
+    // instead. Prefixed at send time so it works outside the management room.
+    initial: 'login facebook',
     prefix: '!fb', // fallback if config can't be read
-    site: 'messenger.com',
+    site: 'facebook.com',
     // For the widget's in-app (Beeper-style) login: the page to load in the
     // embedded webview, and the cookie domain to harvest once the user is in.
     // The bot also emits a "Login URL:" line we prefer at runtime; these are
     // the stable defaults.
-    // These are the exact URL and cookie domain declared by mautrix-meta
-    // v0.2608.0's Messenger cookie flow.
-    loginUrl: 'https://www.messenger.com/?no_redirect=true',
-    cookieDomain: 'messenger.com',
+    // Login and harvest on the same first-party domain. The previous split
+    // (start on Messenger, finish on Facebook, then wait on Messenger again)
+    // is exactly how a completed login turned back into a disconnected tile.
+    loginUrl: 'https://www.facebook.com/login/',
+    cookieDomain: 'facebook.com',
     // Meta's login bounces across its own properties (account center, 2FA),
     // so the navigation fence needs all three first-party host families.
     // WIDTH. Facebook's login page declares no viewport meta, and at 480pt it
@@ -127,12 +129,13 @@ export const PLATFORMS = Object.freeze({
       allowedFrameHosts: [
         'fbsbx.com', 'facebook.com', 'meta.com', 'www.google.com', 'www.recaptcha.net',
       ],
-      // A browser has a different cookie jar, so handing a failed Messenger
+      // A browser has a different cookie jar, so handing a failed Facebook
       // webview to it cannot finish this automatic bridge login. Keep failure
       // and retry inside the app instead of opening Meta externally.
       browserHandoff: false,
-      // The bridge only considers a Meta session logged in when `xs` exists,
-      // and refuses a partial handoff unless all three required cookies exist.
+      // Do not fire on c_user alone. A checkpoint can write part of the session
+      // before it has finished; the bridge needs the complete Facebook cookie
+      // set and should receive it only once all three values exist.
       sessionCookie: 'xs',
       requiredCookies: ['xs', 'c_user', 'datr'],
       windowWidth: 1000,
@@ -572,8 +575,8 @@ export function loginUrlFrom(transcript, platform) {
 }
 
 // The bridge's actual command prefix, read from its config.yaml. A bare command
-// like `login messenger` is only obeyed in the bot's management room; prefixing
-// it (`!fb login messenger`) makes it work in whatever DM we're using. Read with
+// like `login facebook` is only obeyed in the bot's management room; prefixing
+// it (`!fb login facebook`) makes it work in whatever DM we're using. Read with
 // a line match rather than a YAML dependency — connect/ is node-builtins only,
 // and command_prefix is always a simple scalar.
 function commandPrefix(platform, home) {

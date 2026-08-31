@@ -121,9 +121,14 @@ test('yearly history waits for finite source discovery to finish', async () => {
 test('portal discovery publishes a remaining count instead of a year', async () => {
   const snapshot = await publishedSnapshot([source('imessage')], {
     'matrix:pending-portal-invites': JSON.stringify(['synthetic-a', 'synthetic-b', 'synthetic-c']),
+    'matrix:portal-join-rate-sample': JSON.stringify({
+      pending: 3, ts: 1_000_000, samples: [12_000, 15_000, 11_000],
+    }),
     'yearly-backfill:year': '2024',
   });
   assert.equal(snapshot.portalInvitesPending, 3);
+  assert.match(String(snapshot.estimate), /^~ \d+\.\d hrs left$/,
+    'the header estimates completion from measured queue throughput');
   assert.equal(snapshot.backfillYear, undefined,
     'a paused year must not be rendered as though it is being fetched');
 });

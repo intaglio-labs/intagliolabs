@@ -278,6 +278,7 @@ test('a rate-limited portal join stays queued after the sync cursor advances', a
   const limited = await source.run(ctx);
   assert.equal(limited.retryAfterMs, 15_000);
   assert.equal(limited.historyDiscoveryPending, 2);
+  assert.equal(limited.historyDiscoveryJoined, 1);
   assert.equal(limited.historyReopened, false,
     'a new room must not restart yearly history while more rooms are undiscovered');
   assert.deepEqual(joined, ['!one:hazlie.local']);
@@ -292,6 +293,7 @@ test('a rate-limited portal join stays queued after the sync cursor advances', a
   ]);
   assert.deepEqual(JSON.parse(cursors.get('matrix:pending-portal-invites')), []);
   assert.equal(drained.historyDiscoveryPending, 0);
+  assert.equal(drained.historyDiscoveryJoined, 2);
   assert.equal(drained.historyReopened, true,
     'the whole discovery batch reopens yearly history once, when it drains');
   assert.equal(cursors.get('matrix:since'), 's-after');

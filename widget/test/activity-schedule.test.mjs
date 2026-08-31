@@ -28,7 +28,8 @@ test('scheduled connector rows share one header countdown', () => {
 });
 
 test('portal discovery replaces the retry countdown with remaining work', () => {
-  assert.ok(connectors.includes('return "\\(n) to join"'));
+  assert.doesNotMatch(connectors, /return "\\\(n\) to join"/u,
+    'the header is a measured completion ETA, never the raw queue length');
   assert.match(connectors,
     /var activityScheduleEstimate: String\?[\s\S]*?portalInvitesPending[\s\S]*?return nil/u,
     'the next retry is not an estimate of when portal discovery completes');

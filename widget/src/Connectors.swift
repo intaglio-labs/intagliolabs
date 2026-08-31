@@ -201,9 +201,6 @@ final class Connectors {
 
   var activityEstimate: String? {
     guard let raw = activitySnapshot else { return nil }
-    if let n = raw["portalInvitesPending"] as? Int, n > 0 {
-      return "\(n) to join"
-    }
     return normalizedActivityEstimate(raw)
   }
 

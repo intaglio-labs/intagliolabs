@@ -608,6 +608,7 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
         ...totals,
         skipped: 0,
         historyDiscoveryPending,
+        historyDiscoveryJoined: joined,
         historyReopened,
         ...(pendingInvites.length > 0 ? { retryAfterMs: inviteRetryMs ?? 15_000 } : {}),
       };
