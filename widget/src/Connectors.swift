@@ -120,7 +120,7 @@ final class Connectors {
     if portalInvitesPending > 0 {
       items.append([
         "kind": "discovery",
-        "label": "joining \(portalInvitesPending) conversation\(portalInvitesPending == 1 ? "" : "s")",
+        "label": "importing \(portalInvitesPending) chat\(portalInvitesPending == 1 ? "" : "s")",
       ])
     }
 
@@ -228,7 +228,7 @@ final class Connectors {
   var queuedWorkLabel: String? {
     guard let raw = activitySnapshot, !scheduledActivityTasks(raw).isEmpty else { return nil }
     if let n = raw["portalInvitesPending"] as? Int, n > 0 {
-      return "joining social conversations"
+      return "importing social chats"
     }
     guard normalizedActivityEstimate(raw) != nil else { return nil }
     return "working through connector queue"
@@ -255,7 +255,7 @@ final class Connectors {
     }
     if raw["phase"] as? String == "waiting",
        let n = raw["portalInvitesPending"] as? Int, n > 0 {
-      return "joining social conversations"
+      return "importing social chats"
     }
     if raw["phase"] as? String == "waiting",
        let estimate = raw["estimate"] as? String,

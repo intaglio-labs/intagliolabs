@@ -44,7 +44,7 @@ test('portal discovery is counted and suppresses the paused year', () => {
   assert.match(daemon, /portalInvitesPending === 0[\s\S]*?backfillYear/u,
     'a year label may appear only after portal discovery finishes');
   assert.match(connectors, /raw\["portalInvitesPending"\] as\? Int/u);
-  assert.ok(connectors.includes('"label": "joining \\(portalInvitesPending) conversation'),
+  assert.ok(connectors.includes('"label": "importing \\(portalInvitesPending) chat'),
     'the activity row must name the finite work actually underway');
 });
 
