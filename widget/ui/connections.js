@@ -415,16 +415,6 @@ function activityRow() {
       idle.textContent = 'nothing processing right now';
       list.appendChild(idle);
     } else {
-      // Routine checks are deliberately visible, but they are not catch-up
-      // work. Without this line and the queue-specific styling below, the
-      // first scheduled check got the pulsing live-work dot and read as a
-      // processing task that had been stuck indefinitely.
-      if (!active.length && queued.length) {
-        const scheduled = document.createElement('span');
-        scheduled.className = 'activity-idle';
-        scheduled.textContent = 'no catch-up running — scheduled checks only';
-        list.appendChild(scheduled);
-      }
       for (const item of items) {
         const row = document.createElement('div');
         row.className = 'activity-item';

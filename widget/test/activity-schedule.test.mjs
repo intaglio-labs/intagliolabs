@@ -15,9 +15,9 @@ test('a scheduled connector is explicitly a next check, not an active task', () 
   assert.ok(connectors.includes('deltaMs < -90_000'), 'an overdue schedule must be visible');
 });
 
-test('a queue-only activity view says that catch-up is not running', () => {
-  assert.ok(connections.includes('no catch-up running — scheduled checks only'));
-  assert.match(connections, /if \(!active\.length && queued\.length\)/u);
+test('a queue-only activity view does not add an internal-jargon preamble', () => {
+  assert.doesNotMatch(connections, /catch-up/u);
+  assert.doesNotMatch(connections, /scheduled checks only/u);
 });
 
 test('future queue rows never receive the pulsing live-work treatment', () => {
