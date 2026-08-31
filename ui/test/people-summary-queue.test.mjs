@@ -213,3 +213,81 @@ test('an old foreground receipt cannot consume its replacement generation', asyn
   await until(() => replacement.state === 'done', 'replacement completion');
   queue.consume(replacement);
 });
+
+// BATTERY SAVER HAS TO DO SOMETHING ON THE MACHINE IT WAS ADDED FOR.
+//
+// Its only consumer was the concurrency provider, and ops/inference-profiles.json
+// gives summaryConcurrency 1 to both `compact` and `balanced` — so on every Mac
+// under 24 GB it resolved `battery_saver ? 1 : 1` and the setting was inert.
+// Measured on an 18 GB / 12-core machine. Resting between background passes is a
+// lever that works at concurrency 1, which is the whole point.
+
+test('battery saver rests between background jobs', async () => {
+  const started = [];
+  const q = new SummaryQueue({
+    run: ({ key }) => { started.push(key); return Promise.resolve({ text: 'x' }); },
+    restProvider: () => 5,
+  });
+  q.enqueue([{ key: 'a', year: 2026 }, { key: 'b', year: 2026 }], { priority: 1 });
+  await new Promise((r) => setTimeout(r, 2));
+  assert.equal(started.length, 1, 'the second job waits out the rest');
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(started.length, 2, 'and then runs');
+});
+
+test('god mode does not rest', async () => {
+  const started = [];
+  const q = new SummaryQueue({
+    run: ({ key }) => { started.push(key); return Promise.resolve({ text: 'x' }); },
+    restProvider: () => 0,
+  });
+  q.enqueue([{ key: 'a', year: 2026 }, { key: 'b', year: 2026 }], { priority: 1 });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(started.length, 2, 'both run without an interval');
+});
+
+test('a foreground click cuts through the rest', async () => {
+  // Otherwise a background power policy becomes foreground latency, which is
+  // the failure the whole seam exists to avoid.
+  const started = [];
+  const q = new SummaryQueue({
+    run: ({ key }) => { started.push(key); return Promise.resolve({ text: 'x' }); },
+    restProvider: () => 10_000,
+  });
+  q.enqueue([{ key: 'a', year: 2026 }, { key: 'b', year: 2026 }], { priority: 1 });
+  await new Promise((r) => setTimeout(r, 2));
+  assert.equal(started.length, 1, 'resting after the first');
+  q.enqueue([{ key: 'urgent', year: 2026 }], { priority: 2 });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(started.includes('urgent'),
+    'the clicked person must not wait out a 10s nap');
+});
+
+test('an empty queue does not rest', async () => {
+  const started = [];
+  const q = new SummaryQueue({
+    run: ({ key }) => { started.push(key); return Promise.resolve({ text: 'x' }); },
+    restProvider: () => 10_000,
+  });
+  q.enqueue([{ key: 'only', year: 2026 }], { priority: 1 });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(started.length, 1);
+  assert.equal(q.restTimer, null, 'nothing is waiting, so there is nothing to throttle');
+});
+
+test('back-to-back foreground jobs never rest between each other', () => {
+  // The rest is a BACKGROUND policy. Someone clicking through three people in a
+  // row must not collect a nap between each one — that turns a battery setting
+  // into latency at exactly the moment they are watching.
+  const started = [];
+  const q = new SummaryQueue({
+    run: ({ key }) => { started.push(key); return Promise.resolve({ text: 'x' }); },
+    restProvider: () => 10_000,
+  });
+  q.enqueue([{ key: 'one', year: 2026 }, { key: 'two', year: 2026 }], { priority: 2 });
+  return new Promise((r) => setTimeout(r, 30)).then(() => {
+    assert.deepEqual(started.sort(), ['one', 'two'],
+      'both foreground jobs ran without waiting out a rest');
+    assert.equal(q.restTimer, null);
+  });
+});

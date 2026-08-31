@@ -87,7 +87,7 @@ import {
   summariesDbPath,
   summarizeYear,
 } from './people/summary.mjs';
-import { mayWarmInBackground, performanceMode } from './people/power.mjs';
+import { jobRestMs, mayWarmInBackground, performanceMode } from './people/power.mjs';
 
 import { SummaryQueue } from './people/summaryQueue.mjs';
 import { PeopleYearCompletion, yearCompletionStamp } from './people/yearCompletion.mjs';
@@ -4317,6 +4317,12 @@ export async function start({
     // uses the machine-sized ceiling selected during provisioning.
     concurrencyProvider: () => performanceMode() === 'battery_saver'
       ? 1 : maximumSummaryConcurrency,
+    // AND A LEVER THAT WORKS WHEN CONCURRENCY CANNOT BE THE LEVER.
+    // ops/inference-profiles.json gives summaryConcurrency 1 to `compact` AND
+    // `balanced`, so on every Mac below 24 GB the provider above resolves
+    // `battery_saver ? 1 : 1` and the setting does nothing at all. Resting
+    // between background passes lowers sustained load at any concurrency.
+    restProvider: () => jobRestMs(),
     isRetryable: (error) => isUnreachable(error) || isTimeout(error) || error?.status === 502,
     onSettled: (receipt) => peopleYearCompletion?.record(receipt),
     onProgress: (receipt) => peopleYearCompletion?.progress(receipt),

@@ -9,9 +9,20 @@ import IOKit.pwr_mgt
 // now run under every one of those conditions. The choice only controls HOW
 // aggressively local background work runs:
 //
-//   god mode      the machine-specific concurrency ceiling, large passes,
-//                 user-initiated process priority
-//   battery saver one summary at a time, small passes, utility priority
+//   god mode      the machine-specific concurrency ceiling, and no rest between
+//                 background passes
+//   battery saver one summary at a time, and a rest between background passes
+//
+// ~~"small passes, utility priority"~~ neither was ever implemented. Grepping the
+// tree for `battery_saver` found exactly ONE consumer -- the concurrency provider
+// in hermes.mjs -- and ops/inference-profiles.json gives summaryConcurrency 1 to
+// both `compact` and `balanced`, so on every Mac under 24 GB that provider
+// resolved `battery_saver ? 1 : 1` and this entire setting did nothing. Measured
+// on an 18 GB / 12-core machine, which is the machine it was added for.
+//
+// The rest interval is the lever that works at concurrency 1. A summary pass is
+// ~90s of sustained GPU; once you cannot run fewer at a time, the only remaining
+// control is not running them back to back.
 //
 // The selected mode is mirrored into a private runtime file because Hermes is
 // a separate Node process and cannot read this app's UserDefaults domain.

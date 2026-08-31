@@ -17,6 +17,10 @@ export class SummaryQueue {
     retryDelayMs = 30_000,
     concurrency = 1,
     concurrencyProvider = null,
+    // How long to leave the queue idle after a job settles. Injected the same
+    // way concurrency is, so the queue owns no policy and the tests can drive it
+    // without a clock.
+    restProvider = null,
     onSettled = () => {},
     onProgress = () => {},
   } = {}) {
@@ -28,6 +32,8 @@ export class SummaryQueue {
     this.concurrency = Math.max(1, Math.min(4, Number.isInteger(concurrency) ? concurrency : 1));
     this.concurrencyProvider = typeof concurrencyProvider === 'function'
       ? concurrencyProvider : null;
+    this.restProvider = typeof restProvider === 'function' ? restProvider : null;
+    this.restTimer = null;
     this.onSettled = onSettled;
     this.onProgress = onProgress;
     this.jobs = new Map();
@@ -59,7 +65,19 @@ export class SummaryQueue {
 
   // A viewed year is priority 1; a clicked person is priority 2. Re-enqueuing
   // a year never reverses its top-to-bottom order.
+  // A FOREGROUND ARRIVAL CANCELS THE REST. Somebody clicked a person; making
+  // them wait out a battery-saver nap would turn a background policy into
+  // foreground latency, which is the failure this seam exists to avoid.
+  clearRest() {
+    if (this.restTimer) {
+      clearTimeout(this.restTimer);
+      this.restTimer = null;
+    }
+  }
+
   enqueue(items, { priority = 1 } = {}) {
+    // A person the owner clicked must not wait out a battery-saver rest.
+    if (priority >= 2) this.clearRest();
     for (const item of items ?? []) {
       this.schedule(item.key, item.year, { priority, corpusStamp: item.corpusStamp });
     }
@@ -205,8 +223,21 @@ export class SummaryQueue {
     });
   }
 
+  get restMs() {
+    if (!this.restProvider) return 0;
+    try {
+      const ms = this.restProvider();
+      return Number.isFinite(ms) && ms > 0 ? Math.min(ms, 600_000) : 0;
+    } catch {
+      return 0;
+    }
+  }
+
   pump() {
-    if (this.pauses > 0 || this.resetting) return;
+    // RESTING IS NOT PAUSING. `pauses` is the interactive preemption seam and
+    // must stay untouched: a foreground request has to cut in front of a rest,
+    // not queue behind it. This only holds back the NEXT background start.
+    if (this.pauses > 0 || this.resetting || this.restTimer) return;
     const limit = this.concurrencyLimit;
     while (this.running.size < limit && this.pending.length && !this.retryTimer) {
       const job = this.pending.shift();
@@ -292,7 +323,20 @@ export class SummaryQueue {
         }, FOREGROUND_RESULT_TTL_MS);
         job.expiry.unref?.();
       }
-      this.kick();
+        // REST ONLY AFTER BACKGROUND WORK, and only when something is waiting.
+        // A foreground job (priority 2) is somebody looking at a screen, and an
+        // empty queue has nothing to throttle -- resting in either case would be
+        // latency bought for no saving.
+        const rest = job.priority >= 2 ? 0 : this.restMs;
+        if (rest > 0 && this.pending.length > 0) {
+          this.restTimer = setTimeout(() => {
+            this.restTimer = null;
+            this.kick();
+          }, rest);
+          this.restTimer.unref?.();
+          return;
+        }
+        this.kick();
     });
   }
 }
