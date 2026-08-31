@@ -24,6 +24,7 @@ const MESSAGE_SOURCES = Object.freeze([
   'imessage', 'whatsapp', 'messenger', 'instagram', 'twitter',
   'telegram', 'discord', 'slack', 'linkedin',
 ]);
+export const SUMMARY_SOURCES = MESSAGE_SOURCES;
 export const isSummarySource = (source) => MESSAGE_SOURCES.includes(source);
 const SOURCE_SQL = MESSAGE_SOURCES.map((source) => `'${source}'`).join(',');
 const SUBSTANTIVE_TEXT_CHARS = 25;
@@ -492,7 +493,15 @@ function ensureSummariesSchema(db) {
       'person_key TEXT NOT NULL, year INTEGER NOT NULL, month INTEGER NOT NULL, chunk_index INTEGER NOT NULL, ' +
       'fingerprint TEXT NOT NULL, reduction_json TEXT NOT NULL, messages INTEGER NOT NULL, ' +
       'generated_ms INTEGER NOT NULL, code_rev INTEGER NOT NULL, ' +
-      'PRIMARY KEY (person_key, year, month, chunk_index));'
+      'PRIMARY KEY (person_key, year, month, chunk_index));' +
+    'CREATE TABLE IF NOT EXISTS summary_year_runs (' +
+      'year INTEGER PRIMARY KEY, corpus_stamp TEXT NOT NULL, state TEXT NOT NULL, ' +
+      'profiles INTEGER NOT NULL, summary_total INTEGER NOT NULL, ' +
+      'completed INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0, ' +
+      'started_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL);' +
+    'CREATE TABLE IF NOT EXISTS summary_year_people (' +
+      'year INTEGER NOT NULL, person_key TEXT NOT NULL, state TEXT NOT NULL, ' +
+      'PRIMARY KEY (year, person_key));'
   );
   ensureColumn(db, 'summaries', 'code_rev', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'summaries', 'evidence_hash', 'TEXT');
@@ -509,7 +518,10 @@ export function clearSummariesStorage(path = summariesDbPath()) {
     db.exec('PRAGMA secure_delete = ON');
     const summaries = Number(db.prepare('SELECT count(*) AS n FROM summaries').get().n);
     const chunks = Number(db.prepare('SELECT count(*) AS n FROM summary_chunks').get().n);
-    db.exec('DELETE FROM summary_chunks; DELETE FROM summaries; VACUUM');
+    db.exec(
+      'DELETE FROM summary_year_people; DELETE FROM summary_year_runs; ' +
+      'DELETE FROM summary_chunks; DELETE FROM summaries; VACUUM'
+    );
     return { cleared: summaries + chunks };
   } finally {
     db.close();

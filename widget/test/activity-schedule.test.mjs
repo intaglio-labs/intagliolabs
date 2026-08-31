@@ -35,6 +35,10 @@ test('portal discovery replaces the retry countdown with remaining work', () => 
     'the next retry is not an estimate of when portal discovery completes');
 });
 
+test('People completion hides the unrelated connector retry countdown', () => {
+  assert.ok(connectors.includes('(raw["backfill"] as? [String])?.contains("people") == true'));
+});
+
 test('a queue-only activity view does not add an internal-jargon preamble', () => {
   assert.doesNotMatch(connections, /catch-up/u);
   assert.doesNotMatch(connections, /scheduled checks only/u);

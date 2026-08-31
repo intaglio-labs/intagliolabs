@@ -25,6 +25,12 @@ const fakeState = (cursors = {}) => {
   return {
     getCursor: (name) => map.get(name),
     setCursor: (name, value) => map.set(name, value),
+    deleteCursor: (name) => map.delete(name),
+    deleteCursors: (prefix) => {
+      for (const key of [...map.keys()]) {
+        if (key === prefix || key.startsWith(`${prefix}:`)) map.delete(key);
+      }
+    },
     recordRun: () => {},
   };
 };
@@ -39,7 +45,10 @@ const source = (name, missing = [], { walksHistory = false } = {}) => ({
 });
 
 // Drive a real daemon for one tick and hand back what it published.
-async function publishedSnapshot(sources, cursors, { settleMs = FIRST_TICK_MS } = {}) {
+async function publishedSnapshot(sources, cursors, {
+  settleMs = FIRST_TICK_MS,
+  completePeopleYear = null,
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hazlie-activity-'));
   const activityPath = join(dir, 'activity.json');
   const daemon = createDaemon({
@@ -47,7 +56,8 @@ async function publishedSnapshot(sources, cursors, { settleMs = FIRST_TICK_MS } 
     state: fakeState(cursors),
     log: silent,
     sources,
-    ingestOpts: {},
+    ingestOpts: completePeopleYear ? { tokenFile: '/synthetic/hermes-token' } : {},
+    completePeopleYear,
     cacheDir: dir,
     activityPath,
   });
@@ -60,6 +70,38 @@ async function publishedSnapshot(sources, cursors, { settleMs = FIRST_TICK_MS } 
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+test('a completed connector year surfaces People completion before the prior year', async () => {
+  const snapshot = await publishedSnapshot(
+    [source('imessage', [], { walksHistory: true })],
+    { 'yearly-backfill:connector:imessage:done:2026': '1' },
+    {
+      settleMs: 600,
+      completePeopleYear: async ({ year }) => ({
+        year,
+        state: 'summarizing',
+        complete: false,
+        profiles: 40,
+        summariesTotal: 25,
+        summariesComplete: 7,
+        summariesSkipped: 2,
+        summariesPending: 16,
+        retryAfterMs: 15_000,
+      }),
+    }
+  );
+  assert.equal(snapshot.backfillYear, 2026);
+  assert.deepEqual(snapshot.backfill, ['people']);
+  assert.deepEqual(snapshot.peopleCompletion, {
+    year: 2026,
+    state: 'summarizing',
+    profiles: 40,
+    summariesTotal: 25,
+    summariesComplete: 7,
+    summariesSkipped: 2,
+    summariesPending: 16,
+  });
+});
 
 const DONE = { 'calendar:history-done': '1', 'matrix:history-done': '1' };
 

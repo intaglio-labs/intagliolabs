@@ -110,3 +110,16 @@ test('a retryable background outage backs off instead of failing every queued pe
   assert.deepEqual(starts, ['first', 'first', 'second']);
   await until(() => queue.active === null && queue.pending.length === 0, 'empty queue');
 });
+
+test('a completion observer can persist a receipt without retaining the job', async () => {
+  const settled = [];
+  const queue = new SummaryQueue({
+    run: async ({ key }) => ({ text: `summary for ${key}` }),
+    onSettled: (receipt) => settled.push(receipt),
+  });
+  queue.enqueue([{ key: 'first', year: 2026 }]);
+  await until(() => settled.length === 1, 'completion receipt');
+  await until(() => queue.active === null && queue.pending.length === 0, 'empty queue');
+  assert.deepEqual(settled, [{ key: 'first', year: 2026, result: { text: 'summary for first' } }]);
+  assert.equal(queue.view('first', 2026), null, 'background prose is not retained in process memory');
+});

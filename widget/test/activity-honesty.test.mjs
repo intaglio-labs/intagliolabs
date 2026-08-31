@@ -48,6 +48,14 @@ test('portal discovery is counted and suppresses the paused year', () => {
     'the activity row must name the finite work actually underway');
 });
 
+test('People is a year-completion phase, not a fake connector fetch', () => {
+  assert.ok(connectors.includes('"building \\($0) people profiles"'));
+  assert.ok(connectors.includes('"\\($0) profiles ready · summarizing \\(pending) person'));
+  assert.ok(connectors.includes('"\\($0) profiles ready · summaries paused on battery"'));
+  assert.ok(connectors.includes('return "finishing \\(year) people"'));
+  assert.doesNotMatch(connectors, /fetching \\?\(.*people/u);
+});
+
 test('a backfill with no estimate is still published', () => {
   // Otherwise removing the false ETA would have made the panel go silent, which
   // is a worse answer to "how do I know it is working" than a wrong number.

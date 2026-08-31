@@ -33,6 +33,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runChecks } from './lib/checks.mjs';
 import {
   DEFAULT_HERMES_BASE_URL,
+  adminCompletePeopleYear,
   adminDeleteEntities,
   adminEntities,
   adminMaintain,
@@ -772,6 +773,7 @@ export function createDaemon({
   // live activity snapshot at ~/.hazlie/connectors/activity.json.
   activityPath = defaultActivityPath(),
   now = Date.now,
+  completePeopleYear = adminCompletePeopleYear,
 }) {
   const timers = new Set();
   const nextRuns = new Map();
@@ -789,9 +791,31 @@ export function createDaemon({
   // a needs() that is slow or throws can never silently empty the queue.
   const notReady = new Map();
   let stopped = false;
+  const peopleBarrierEnabled = typeof completePeopleYear === 'function'
+    && typeof ingestOpts?.tokenFile === 'string';
   const historyRoster = sources.filter((source) => source.walksHistory === true)
     .map((source) => source.name);
-  const yearlyBackfill = createYearlyBackfill({ state, connectors: historyRoster, now });
+  // Install the product-level barrier once. Existing connector year receipts
+  // remain useful, so an upgrade rewinds to the current year without re-fetching
+  // it: only People profiles/summaries run before the older connector walk
+  // resumes. Years and booleans only—no corpus state enters the cursor store.
+  const peopleBarrierVersionKey = 'yearly-backfill:people-barrier-version';
+  if (peopleBarrierEnabled && state.getCursor(peopleBarrierVersionKey) !== '1') {
+    const currentYear = new Date(now()).getFullYear();
+    state.deleteCursor('yearly-backfill:complete');
+    state.deleteCursor(`yearly-backfill:barrier:people:done:${currentYear}`);
+    state.setCursor('yearly-backfill:year', String(currentYear));
+    state.setCursor(peopleBarrierVersionKey, '1');
+  }
+  const yearlyBackfill = createYearlyBackfill({
+    state,
+    connectors: historyRoster,
+    barriers: peopleBarrierEnabled ? ['people'] : [],
+    now,
+  });
+  let peopleCompletion = null;
+  let peopleGateTimer = null;
+  let peopleGateRunning = false;
 
   // The settings queue is derived from the scheduler itself, not guessed from
   // a polling interval in the UI. Keep every queued source in chronological
@@ -911,6 +935,7 @@ export function createDaemon({
             backfill,
             backfillRooms,
             portalInvitesPending,
+            ...(peopleCompletion ? { peopleCompletion } : {}),
             ...(!yearly.complete && portalInvitesPending === 0
               ? { backfillYear: yearly.year }
               : {}),
@@ -928,6 +953,7 @@ export function createDaemon({
       backfill,
       backfillRooms,
       portalInvitesPending,
+      ...(peopleCompletion ? { peopleCompletion } : {}),
       ...(!yearly.complete && portalInvitesPending === 0 ? { backfillYear: yearly.year } : {}),
     };
   };
@@ -939,6 +965,61 @@ export function createDaemon({
     const next = scheduledQueue()[0];
     if (next) publishActivity({ phase: 'waiting', ...next });
   };
+
+  const peopleGateReady = () => {
+    const snapshot = yearlyBackfill.snapshot();
+    return !snapshot.complete
+      && snapshot.pending.length === 1
+      && snapshot.pending[0] === 'people';
+  };
+
+  function schedulePeopleGate(delayMs = 0) {
+    if (!peopleBarrierEnabled || stopped || peopleGateRunning || peopleGateTimer || !peopleGateReady()) return;
+    const timer = setTimeout(async () => {
+      timers.delete(timer);
+      if (peopleGateTimer === timer) peopleGateTimer = null;
+      if (stopped || !peopleGateReady()) return;
+      peopleGateRunning = true;
+      const year = yearlyBackfill.snapshot().year;
+      let retryDelayMs = null;
+      try {
+        const result = await completePeopleYear({ year }, ingestOpts);
+        peopleCompletion = {
+          year: result.year,
+          state: result.state,
+          profiles: result.profiles,
+          summariesTotal: result.summariesTotal,
+          summariesComplete: result.summariesComplete,
+          summariesSkipped: result.summariesSkipped,
+          summariesPending: result.summariesPending,
+        };
+        if (result.complete === true) {
+          yearlyBackfill.recordBarrier('people', year);
+          yearlyBackfill.advance();
+          peopleCompletion = null;
+        }
+        publishWaiting();
+        if (result.complete !== true) {
+          retryDelayMs = Math.max(5_000, Math.min(60_000, Number(result.retryAfterMs) || 15_000));
+        }
+      } catch (error) {
+        log.warn('people_year_completion_failed', {
+          year,
+          error: safeErrorFingerprint(error),
+        });
+        publishWaiting();
+        retryDelayMs = 30_000;
+      } finally {
+        peopleGateRunning = false;
+        // A completed receipt can reveal that the next older year already has
+        // connector receipts from a pre-upgrade run. Start its People phase
+        // immediately instead of waiting for a source's next 15-minute tick.
+        if (!stopped && peopleGateReady()) schedulePeopleGate(retryDelayMs ?? 0);
+      }
+    }, delayMs);
+    peopleGateTimer = timer;
+    timers.add(timer);
+  }
 
   const admin = {
     retain: (args) => adminRetain(args, ingestOpts),
@@ -1012,6 +1093,7 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
     if (existsSync(disableMarkerPath(source.name))) {
       yearlyBackfill.classify(source.name, false);
       yearlyBackfill.advance();
+      schedulePeopleGate();
       log.info('source_disabled', { connector: source.name });
       return;
     }
@@ -1022,6 +1104,7 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
     if (Array.isArray(missing) && missing.length > 0) {
       yearlyBackfill.classify(source.name, false);
       yearlyBackfill.advance();
+      schedulePeopleGate();
       // Not a failure: an unprovisioned source waits, loudly, and is
       // re-checked next cycle. recordRun stays clean of noise runs.
       notReady.set(source.name, missing);
@@ -1117,6 +1200,7 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
             if (rawBack.historyDone === true) {
               yearlyBackfill.record(source.name, rawBack);
               yearlyBackfill.advance();
+              schedulePeopleGate();
               break;
             }
             // A sparse calendar can have an empty historical year while still
@@ -1324,6 +1408,7 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
             complete: recovery.complete,
           });
         }
+        schedulePeopleGate();
         publishWaiting();
       });
 
@@ -1342,6 +1427,7 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
       stopped = true;
       for (const timer of timers) clearTimeout(timer);
       timers.clear();
+      peopleGateTimer = null;
     },
   };
 }

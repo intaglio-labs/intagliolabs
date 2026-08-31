@@ -133,6 +133,26 @@ final class Connectors {
         // invitation is joined. Showing a year here would claim the backwards
         // walk is active while the app is still discovering its room roster.
         if connector == "matrix" && portalInvitesPending > 0 { continue }
+        if connector == "people" {
+          let progress = raw["peopleCompletion"] as? [String: Any]
+          let progressYear = progress?["year"] as? Int ?? year
+          let pending = progress?["summariesPending"] as? Int ?? 0
+          let state = progress?["state"] as? String
+          let label: String
+          if progress == nil {
+            label = progressYear.map { "building \($0) people profiles" }
+              ?? "building people profiles"
+          } else if state == "waiting_for_power" {
+            label = progressYear.map { "\($0) profiles ready · summaries paused on battery" }
+              ?? "profiles ready · summaries paused on battery"
+          } else {
+            label = progressYear.map {
+              "\($0) profiles ready · summarizing \(pending) person\(pending == 1 ? "" : "s")"
+            } ?? "summarizing \(pending) person\(pending == 1 ? "" : "s")"
+          }
+          items.append(["kind": "backfill", "label": label])
+          continue
+        }
         let subjects = connector == "matrix" ? matrixPlatformLabels(raw) : [labelFor(connector)]
         // SAY HOW MANY, since we cannot honestly say how long. The daemon
         // used to publish an ETA for this and it could not move: the
@@ -212,6 +232,7 @@ final class Connectors {
     // A retry countdown is not a completion estimate. During portal discovery
     // the finite remaining count above is both more useful and actually true.
     if let n = raw["portalInvitesPending"] as? Int, n > 0 { return nil }
+    if (raw["backfill"] as? [String])?.contains("people") == true { return nil }
     let now = Date().timeIntervalSince1970 * 1000
     guard let next = scheduledActivityTasks(raw)
       .filter({ $0.connector != "maintenance" })
@@ -226,10 +247,20 @@ final class Connectors {
   /// Requiring both a non-empty queue and its total estimate prevents a stale
   /// or malformed activity file from waking the orb on its own.
   var queuedWorkLabel: String? {
-    guard let raw = activitySnapshot, !scheduledActivityTasks(raw).isEmpty else { return nil }
+    guard let raw = activitySnapshot else { return nil }
     if let n = raw["portalInvitesPending"] as? Int, n > 0 {
       return "importing social chats"
     }
+    if let progress = raw["peopleCompletion"] as? [String: Any],
+       let year = progress["year"] as? Int,
+       (progress["summariesPending"] as? Int ?? 0) > 0 {
+      return "finishing \(year) people"
+    }
+    if (raw["backfill"] as? [String])?.contains("people") == true,
+       let year = raw["backfillYear"] as? Int {
+      return "building \(year) people profiles"
+    }
+    guard !scheduledActivityTasks(raw).isEmpty else { return nil }
     guard normalizedActivityEstimate(raw) != nil else { return nil }
     return "working through connector queue"
   }
@@ -243,6 +274,17 @@ final class Connectors {
     guard let raw = activitySnapshot else { return nil }
     let names = ["imessage": "iMessage", "matrix": "connected platforms"]
     let labelFor = { (connector: String) in names[connector] ?? String(connector.prefix(32)) }
+    if let progress = raw["peopleCompletion"] as? [String: Any],
+       let year = progress["year"] as? Int,
+       (progress["summariesPending"] as? Int ?? 0) > 0 {
+      return progress["state"] as? String == "waiting_for_power"
+        ? "waiting to finish \(year) people"
+        : "summarizing \(year) people"
+    }
+    if (raw["backfill"] as? [String])?.contains("people") == true,
+       let year = raw["backfillYear"] as? Int {
+      return "building \(year) people profiles"
+    }
     if raw["phase"] as? String == "syncing",
        let connector = raw["connector"] as? String,
        let started = raw["startedTs"] as? Double,

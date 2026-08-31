@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { start } from '../../ui/server/hermes.mjs';
 import {
   adminCoverage,
+  adminCompletePeopleYear,
   adminDeleteEntities,
   adminClearPeopleProjection,
   adminEntities,
@@ -368,6 +369,15 @@ test('adminClearPeopleProjection round-trips without exposing rows', async () =>
   const result = await adminClearPeopleProjection(opts);
   assert.equal(typeof result.cleared, 'number');
   assert.deepEqual(Object.keys(result), ['cleared']);
+});
+
+test('adminCompletePeopleYear returns aggregate progress only', async () => {
+  const result = await adminCompletePeopleYear({ year: new Date().getFullYear() }, opts);
+  assert.equal(result.complete, true);
+  assert.deepEqual(Object.keys(result).sort(), [
+    'complete', 'profiles', 'startedMs', 'state', 'summariesComplete',
+    'summariesPending', 'summariesSkipped', 'summariesTotal', 'year',
+  ]);
 });
 
 test('adminMaintain round-trips', async () => {

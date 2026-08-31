@@ -15,12 +15,14 @@ export class SummaryQueue {
     defer = (fn) => setImmediate(fn),
     isRetryable = () => false,
     retryDelayMs = 30_000,
+    onSettled = () => {},
   } = {}) {
     if (typeof run !== 'function') throw new TypeError('SummaryQueue requires run');
     this.run = run;
     this.defer = defer;
     this.isRetryable = isRetryable;
     this.retryDelayMs = retryDelayMs;
+    this.onSettled = onSettled;
     this.jobs = new Map();
     this.pending = [];
     this.active = null;
@@ -161,6 +163,11 @@ export class SummaryQueue {
     })).then((result) => {
       job.state = 'done';
       job.result = result;
+      // Completion observers receive only the job identity and the constrained
+      // summary result already returned by the runner. Their failure must not
+      // turn a successfully cached summary into a failed foreground request;
+      // a durable coordinator can rediscover the cache on its next poll.
+      try { this.onSettled({ key: job.key, year: job.year, result }); } catch {}
     }).catch((error) => {
       if (job.preempted && abortError(job.abort.signal)) {
         job.state = 'queued';

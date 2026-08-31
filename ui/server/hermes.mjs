@@ -89,6 +89,7 @@ import {
 import { mayWarmInBackground } from './people/power.mjs';
 
 import { SummaryQueue } from './people/summaryQueue.mjs';
+import { PeopleYearCompletion, yearCompletionStamp } from './people/yearCompletion.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
 import { contentMatches } from './people/content.mjs';
@@ -2450,6 +2451,49 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     return;
   }
 
+  // The newest-to-oldest onboarding barrier. Connectors call this only after
+  // every available historical source has completed the named year. Profile
+  // construction is deterministic and blocking once; summaries then use the
+  // existing resumable one-slot queue. The response contains counts and a year
+  // only—never people, identifiers, messages, or derived prose.
+  if (req.method === 'POST' && url.pathname === '/admin/people/complete-year') {
+    if (!hasJsonMediaType(req)) {
+      send(res, 415, { error: 'content-type must be application/json' }, cors);
+      return;
+    }
+    const body = await readJson(req);
+    assertClosedFields(body, PEOPLE_YEAR_COMPLETION_FIELDS);
+    const thisYear = new Date().getFullYear();
+    const year = Number(body?.year);
+    if (!Number.isInteger(year) || year < 1990 || year > thisYear) {
+      throw badRequest(`"year" must be an integer 1990..${thisYear}`);
+    }
+    if (policy.peopleSummaryManager.resetting) {
+      throw Object.assign(new Error('relationship summaries are resetting'), { status: 503 });
+    }
+    const allowWork = await mayWarmInBackground();
+    const completion = policy.peopleSummaryManager.yearCompletion;
+    const status = withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      const stamp = yearCompletionStamp(db, state, aliases, year);
+      const existing = completion.existing(year, stamp);
+      if (existing) return completion.resume(year, stamp, allowWork);
+      // The year barrier explicitly asks for fresh profiles, so it pays the
+      // blocking graph rebuild instead of accepting stale-while-refresh data.
+      yearCore(db, state, { now: Date.now(), owner: loadOwner(), aliases, blocking: true });
+      const people = buildYear(db, state, {
+        year, owner: loadOwner(), aliases, cap: Infinity,
+      }).people;
+      return completion.begin({ year, corpusStamp: stamp, people, allowWork });
+    });
+    send(res, 200, {
+      ...status,
+      ...(!status.complete && !allowWork ? { state: 'waiting_for_power' } : {}),
+      ...(!status.complete ? { retryAfterMs: allowWork ? 15_000 : 60_000 } : {}),
+    }, cors);
+    return;
+  }
+
   // --- Relationship Memory (L5 step 10): the orb's card surface. ---------
   // Bearer-only like every admin route. The card pipeline runs entirely on
   // this box; refresh is minutes of loopback-llama time, so the widget fires
@@ -3842,6 +3886,7 @@ const PEOPLE_DECIDE_FIELDS = Object.freeze(['verdict', 'a', 'b']);
 const PEOPLE_SELF_FIELDS = Object.freeze(['key']);
 const PEOPLE_ROLE_FIELDS = Object.freeze(['key', 'role', 'year']);
 const PEOPLE_SUMMARY_FIELDS = Object.freeze(['key', 'year']);
+const PEOPLE_YEAR_COMPLETION_FIELDS = Object.freeze(['year']);
 
 async function resetPeopleSummaries(manager) {
   manager.resetting = true;
@@ -4240,8 +4285,10 @@ export async function start({
     configuredDbPath,
     resolvedDbPath,
   });
+  let peopleYearCompletion = null;
   const peopleSummaryQueue = new SummaryQueue({
     isRetryable: (error) => isUnreachable(error) || isTimeout(error) || error?.status === 502,
+    onSettled: (receipt) => peopleYearCompletion?.record(receipt),
     run: ({ key, year, signal, onProgress }) => withPeopleDbs(db, (state, resDb) => {
       const { aliases } = resolutionState(resDb);
       return summarizeYear(db, state, {
@@ -4256,8 +4303,13 @@ export async function start({
       });
     }),
   });
+  peopleYearCompletion = new PeopleYearCompletion({
+    path: resolvedSummariesPath,
+    queue: peopleSummaryQueue,
+  });
   const peopleSummaryManager = {
     queue: peopleSummaryQueue,
+    yearCompletion: peopleYearCompletion,
     resetting: false,
     path: resolvedSummariesPath,
   };

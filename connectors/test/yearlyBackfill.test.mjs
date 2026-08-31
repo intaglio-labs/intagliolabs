@@ -71,6 +71,22 @@ test('all available sources finish a year before the barrier moves backwards', (
   assert.equal(q.snapshot().year, 2025);
 });
 
+test('a product barrier completes People before connector history enters the prior year', () => {
+  const state = memoryState();
+  const q = createYearlyBackfill({
+    state, connectors: ['imessage', 'calendar'], barriers: ['people'], now: () => NOW,
+  });
+  q.classify('imessage', true);
+  q.classify('calendar', true);
+  q.record('imessage', { historyDone: true, historyHasOlder: true });
+  q.record('calendar', { historyDone: true, historyHasOlder: true });
+  assert.deepEqual(q.snapshot().pending, ['people']);
+  assert.equal(q.advance(), false, '2025 must wait for 2026 People completion');
+  assert.equal(q.recordBarrier('people'), true);
+  assert.equal(q.advance(), true);
+  assert.equal(q.snapshot().year, 2025);
+});
+
 test('restart reconciliation skips a completed durable barrier', () => {
   const state = memoryState();
   state.setCursor('yearly-backfill:year', '2024');
