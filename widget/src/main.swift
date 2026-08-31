@@ -107,9 +107,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     Provision.ensureConnectorDefaults()
     Provision.ensureBackend()
     Provision.prefetchBridgeRuntime()
-    // Hermes is a separate local process, so mirror the native performance
-    // preference into its owner-only runtime file before background work starts.
-    PowerBudget.syncRuntimeFile()
+      // ~~PowerBudget.syncRuntimeFile()~~ removed with its reader. The mirror
+      // existed because hermes could not see this app's UserDefaults; c00541a
+      // deleted ui/server/people/power.mjs along with summary generation, so
+      // nothing reads the file any more. The definition went with that commit
+      // and this call site did not, which left main unable to compile:
+      //
+      //   main.swift:112: type 'PowerBudget' has no member 'syncRuntimeFile'
+      //
+      // The setting still does real work -- Distiller.swift sizes its pass from
+      // it (40 rows vs 8) and both it and Connectors.swift set process QoS from
+      // it -- but all of that is in THIS process and needs no file. If a node
+      // service needs the mode again, restore the mirror with the reader that
+      // wants it, not before.
 
     // The second half of the self-move (Bridge "moveToApplications"): the
     // old instance could not delete the bundle it was running from, so it
