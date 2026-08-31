@@ -2326,8 +2326,14 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
 .ob-cta:hover { filter: brightness(1.06); }
 .ob-cta:active { transform: scale(1.06, 0.94); }
 
-.model-pick, .performance-pick { display: flex; gap: 6px; }
-.performance-pick .model-pick-button { flex: 1; }
+.model-pick { display: flex; gap: 6px; }
+.performance-toggle {
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  flex: 0 0 auto;
+}
+.performance-mode-label {
+  color: var(--hazelnut-light); font-size: 10px; white-space: nowrap;
+}
 .model-pick-button {
   flex: 1; min-width: 0; padding: 5px 7px;
   border: 1px solid rgba(197, 165, 109, 0.35); border-radius: 7px;

@@ -23,8 +23,10 @@ test('performance is explicit and never pauses for battery or heat', () => {
 
 test('Settings exposes the owner language and validates the bridge value', () => {
   assert.match(settings, /name\.textContent = 'performance'/u);
-  assert.match(settings, /label: 'god mode'/u);
-  assert.match(settings, /label: 'battery saver'/u);
+  assert.match(settings, /modeLabel\.textContent = godMode \? 'god mode' : 'battery saver'/u);
+  assert.match(settings, /sw\.setAttribute\('role', 'switch'\)/u);
+  assert.match(settings, /const requested = active === 'god_mode' \? 'battery_saver' : 'god_mode'/u);
+  assert.doesNotMatch(settings, /performance-pick/u);
   assert.match(settings, /name: 'keep mac awake'/u);
   assert.match(settings, /function settingHint\(label, copy\)/u);
   assert.match(settings, /Why leave \$\{label\} on\?/u);

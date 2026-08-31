@@ -355,14 +355,15 @@ function rangeRow({ name, note, value, min, max, step, message, format }) {
   return el;
 }
 
-// One explicit performance choice replaces the old implicit charger/thermal
-// policy. Both modes keep processing; only concurrency, batch size and QoS
-// change. The labels are the product language the owner chose.
+// One explicit performance switch replaces the old implicit charger/thermal
+// policy. On is God Mode; off is Battery Saver. Both keep processing — only
+// concurrency, batch size and QoS change.
 function performanceRow(selected) {
   const el = document.createElement('div');
-  el.className = 'setting setting-col performance-setting';
-  const head = document.createElement('div');
-  head.className = 'setting-head';
+  el.className = 'setting performance-setting';
+
+  const text = document.createElement('div');
+  text.className = 'setting-text';
   const name = document.createElement('span');
   name.className = 'setting-name';
   name.textContent = 'performance';
@@ -372,46 +373,47 @@ function performanceRow(selected) {
     'performance',
     'God Mode uses this Mac’s safe maximum so imports and summaries finish sooner. Leave it selected unless you need to conserve battery.'
   ));
-  head.append(labelLine);
+  text.append(labelLine);
 
-  const choices = document.createElement('div');
-  choices.className = 'performance-pick';
-  const modes = [
-    { id: 'god_mode', label: 'god mode', title: 'maximize local processing' },
-    { id: 'battery_saver', label: 'battery saver', title: 'use less energy while continuing to process' },
-  ];
-  let active = modes.some((mode) => mode.id === selected) ? selected : 'god_mode';
+  const control = document.createElement('div');
+  control.className = 'performance-toggle';
+  const modeLabel = document.createElement('span');
+  modeLabel.className = 'performance-mode-label';
+  modeLabel.setAttribute('aria-live', 'polite');
+  const sw = document.createElement('button');
+  sw.className = 'switch';
+  sw.type = 'button';
+  sw.setAttribute('role', 'switch');
+  const knob = document.createElement('span');
+  knob.className = 'knob';
+  sw.appendChild(knob);
+
+  let active = selected === 'battery_saver' ? 'battery_saver' : 'god_mode';
   const paint = () => {
-    for (const button of choices.children) {
-      const on = button.dataset.mode === active;
-      button.classList.toggle('on', on);
-      button.setAttribute('aria-pressed', String(on));
-    }
+    const godMode = active === 'god_mode';
+    modeLabel.textContent = godMode ? 'god mode' : 'battery saver';
+    sw.classList.toggle('on', godMode);
+    sw.setAttribute('aria-checked', String(godMode));
+    sw.setAttribute('aria-label', `Performance: ${godMode ? 'God Mode' : 'Battery Saver'}`);
+    sw.title = godMode ? 'God Mode is on' : 'Battery Saver is on';
   };
-  for (const mode of modes) {
-    const button = document.createElement('button');
-    button.className = 'model-pick-button';
-    button.dataset.mode = mode.id;
-    button.textContent = mode.label;
-    button.title = mode.title;
-    button.addEventListener('click', async () => {
-      if (mode.id === active) return;
-      const previous = active;
-      active = mode.id;
-      paint();
-      try {
-        const response = await hzPost('setPerformance', { mode: active });
-        active = response && response.performance === mode.id ? mode.id : previous;
-      } catch {
-        active = previous;
-      }
-      paint();
-    });
-    choices.appendChild(button);
-  }
+  sw.addEventListener('click', async () => {
+    const previous = active;
+    const requested = active === 'god_mode' ? 'battery_saver' : 'god_mode';
+    active = requested;
+    paint();
+    try {
+      const response = await hzPost('setPerformance', { mode: requested });
+      active = response && response.performance === requested ? requested : previous;
+    } catch {
+      active = previous;
+    }
+    paint();
+  });
   paint();
+  control.append(modeLabel, sw);
 
-  el.append(head, choices);
+  el.append(text, control);
   return el;
 }
 
