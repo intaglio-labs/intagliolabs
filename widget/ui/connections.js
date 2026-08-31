@@ -579,7 +579,6 @@ async function renderSettings() {
   rows.push(performanceRow(p && p.performance));
   rows.push(settingRow({
     name: 'keep mac awake',
-    note: 'while processing',
     on: p && p.keepAwake === true,
     message: 'setKeepAwake',
   }));
