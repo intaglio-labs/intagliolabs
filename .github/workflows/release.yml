@@ -127,6 +127,14 @@ jobs:
       - name: install connector dependencies
         run: npm ci --prefix connectors --ignore-scripts
 
+      # THE SUITE, before any signing work. Nothing else gates it: no hook, no
+      # other workflow. main sat red on widget/test from 373e4dc until somebody
+      # happened to run it by hand (2a4a5e0 records the find), and v0.2.1
+      # through v0.3.0 shipped without it ever running. ~2 minutes against a
+      # 40-minute build; connectors deps are already installed by the step above.
+      - name: run the test suite
+        run: node --test "connectors/test/*.test.mjs" "ui/test/*.test.mjs" "connect/test/*.test.mjs" "widget/test/*.test.mjs"
+
       # VOICE MODELS, built here rather than downloaded.
       #
       # This step used to fetch a 496 MB tarball the owner uploaded by hand,
