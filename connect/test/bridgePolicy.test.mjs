@@ -381,6 +381,15 @@ test('Messenger keeps reCAPTCHA and failure recovery inside the app', () => {
     'an external browser has a different cookie jar and cannot finish this login');
 });
 
+test('Messenger uses mautrix-meta\'s Messenger cookie contract', () => {
+  const messenger = PLATFORMS.messenger;
+  assert.equal(messenger.initial, 'login messenger');
+  assert.equal(messenger.loginUrl, 'https://www.messenger.com/?no_redirect=true');
+  assert.equal(messenger.cookieDomain, 'messenger.com');
+  assert.equal(messenger.webLogin.sessionCookie, 'xs');
+  assert.deepEqual(messenger.webLogin.requiredCookies, ['xs', 'c_user', 'datr']);
+});
+
 test('a subframe allowance is never a main-frame allowance', () => {
   // The fence exists because the main frame is where a password is typed. A
   // sandbox host must not become somewhere the window can navigate TO.

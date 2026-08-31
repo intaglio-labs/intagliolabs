@@ -66,12 +66,12 @@ test('Discord server commands use whole-server import and the supported unbridge
 });
 
 test('the panel renders the login surface when not connected', () => {
-  const html = renderBridgePage(PLATFORMS.messenger, { token: 'T', transcript: [], begin: '!fb login facebook' });
+  const html = renderBridgePage(PLATFORMS.messenger, { token: 'T', transcript: [], begin: '!fb login messenger' });
   assert.match(html, /<title>Connect Messenger/u);
   assert.ok(html.includes('<textarea'), 'has a paste box');
   assert.ok(html.includes('Begin login'), 'has the begin button');
   assert.ok(html.includes('Copy as cURL'), 'has the cookie steps');
-  assert.ok(html.includes('!fb login facebook'), 'begin command is the prefixed one');
+  assert.ok(html.includes('!fb login messenger'), 'begin command is the prefixed one');
   // No script: the panel must keep the strict CSP intact.
   assert.ok(!/<script/u.test(html), 'no script tags');
 });

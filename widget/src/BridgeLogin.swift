@@ -157,10 +157,9 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
 
   private var window: NSWindow?
   private var web: WKWebView?
-  // Messenger's current consent/bootstrap page does not complete in an
-  // ephemeral WebKit store. It gets the default store for this one window,
-  // then finish() explicitly removes every record again; no Facebook session
-  // survives the handoff to the local bridge.
+  // Retain this window's ephemeral store for the life of the login. It is never
+  // the process-wide default store, so closing the window drops the web session
+  // without touching any other webview in the app.
   private var websiteDataStore: WKWebsiteDataStore?
   private var poll: Timer?
   private var finished = false
@@ -1729,8 +1728,8 @@ final class BridgeLogin: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowD
     if !finished { finish(nil) }
   }
 
-  // Single exit for every path: report once, stop polling, clear Messenger's
-  // temporary persistent store, close the window, release self.
+  // Single exit for every path: report once, stop polling, release the
+  // ephemeral website store, close the window, release self.
   private func finish(_ result: String?) {
     if finished { return }
     finished = true

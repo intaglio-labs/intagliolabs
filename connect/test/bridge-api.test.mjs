@@ -29,9 +29,10 @@ test('fresh installs can fetch web-login policy before Matrix exists', async (t)
   });
   assert.equal(res.status, 200);
   assert.equal(res.body.connected, false);
-  assert.equal(res.body.loginUrl, 'https://www.facebook.com/login/');
+  assert.equal(res.body.loginUrl, 'https://www.messenger.com/?no_redirect=true');
   assert.deepEqual(res.body.allowedHosts, ['facebook.com', 'messenger.com', 'meta.com']);
-  assert.equal(res.body.sessionCookie, 'c_user');
+  assert.equal(res.body.sessionCookie, 'xs');
+  assert.deepEqual(res.body.requiredCookies, ['xs', 'c_user', 'datr']);
   assert.equal(res.body.browserHandoff, false);
 });
 
@@ -100,7 +101,7 @@ test('a fresh install still gets its policy, and is told the engine is down', as
   // Unchanged: policy renders without Matrix. This is the behaviour the
   // fallback exists for and it must not regress.
   assert.equal(res.status, 200);
-  assert.equal(res.body.loginUrl, 'https://www.facebook.com/login/');
+  assert.equal(res.body.loginUrl, 'https://www.messenger.com/?no_redirect=true');
   assert.equal(res.body.connected, false);
   // New: and it no longer looks identical to a healthy stack.
   assert.equal(res.body.engine, 'down');
