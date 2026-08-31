@@ -26,6 +26,10 @@ test('Settings exposes the owner language and validates the bridge value', () =>
   assert.match(settings, /label: 'god mode'/u);
   assert.match(settings, /label: 'battery saver'/u);
   assert.match(settings, /name: 'keep mac awake'/u);
+  assert.match(settings, /function settingHint\(label, copy\)/u);
+  assert.match(settings, /Why leave \$\{label\} on\?/u);
+  assert.match(settings, /God Mode uses this Mac’s safe maximum/u);
+  assert.match(settings, /It still allows manual sleep and lid-close/u);
   assert.match(bridge, /PerformanceMode\(rawValue: raw\)/u);
   assert.match(bridge, /"performance": PowerBudget\.mode\.rawValue/u);
   assert.match(bridge, /"keepAwake": KeepMacAwake\.enabled/u);

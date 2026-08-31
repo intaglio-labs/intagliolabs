@@ -175,10 +175,55 @@ new MutationObserver(() => {
 const notice = document.getElementById('notice');
 const settings = document.getElementById('settings');
 
+let settingHintSerial = 0;
+
+// A small, keyboard-accessible explanation beside a setting label. CSS reveals
+// it on hover/focus; click pins it until another click, Escape, or an outside
+// press. The copy is textContent only.
+function settingHint(label, copy) {
+  const wrap = document.createElement('span');
+  wrap.className = 'setting-hint';
+  const button = document.createElement('button');
+  button.className = 'setting-hint-icon';
+  button.type = 'button';
+  button.textContent = '?';
+  button.setAttribute('aria-label', `Why leave ${label} on?`);
+  button.setAttribute('aria-expanded', 'false');
+  const tip = document.createElement('span');
+  tip.className = 'setting-hint-copy';
+  tip.id = `setting-hint-${settingHintSerial += 1}`;
+  tip.setAttribute('role', 'tooltip');
+  tip.textContent = copy;
+  button.setAttribute('aria-describedby', tip.id);
+
+  const close = () => {
+    wrap.classList.remove('open');
+    button.setAttribute('aria-expanded', 'false');
+  };
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const open = !wrap.classList.contains('open');
+    document.querySelectorAll('.setting-hint.open').forEach((other) => {
+      other.classList.remove('open');
+      other.querySelector('.setting-hint-icon')?.setAttribute('aria-expanded', 'false');
+    });
+    wrap.classList.toggle('open', open);
+    button.setAttribute('aria-expanded', String(open));
+  });
+  button.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') close();
+  });
+  document.addEventListener('click', (event) => {
+    if (!wrap.contains(event.target)) close();
+  });
+  wrap.append(button, tip);
+  return wrap;
+}
+
 // One row per setting: a name, a line of context, and a switch. Generic
 // because there are two of them now and they differ only in wording, in which
 // bridge message they send, and in whether they are shown at all.
-function settingRow({ name, note, on, message }) {
+function settingRow({ name, note, hint, on, message }) {
   const el = document.createElement('div');
   el.className = 'setting';
 
@@ -187,7 +232,11 @@ function settingRow({ name, note, on, message }) {
   const label = document.createElement('span');
   label.className = 'setting-name';
   label.textContent = name;
-  text.appendChild(label);
+  const labelLine = document.createElement('span');
+  labelLine.className = 'setting-label-line';
+  labelLine.appendChild(label);
+  if (hint) labelLine.appendChild(settingHint(name, hint));
+  text.appendChild(labelLine);
   // The note is optional now — both switch rows shed theirs (owner,
   // 2026-08-25): "Reduce Motion is on for this Mac" and "presses, sending
   // and replies" explained controls whose names already say it.
@@ -317,7 +366,13 @@ function performanceRow(selected) {
   const name = document.createElement('span');
   name.className = 'setting-name';
   name.textContent = 'performance';
-  head.append(name);
+  const labelLine = document.createElement('span');
+  labelLine.className = 'setting-label-line';
+  labelLine.append(name, settingHint(
+    'performance',
+    'God Mode uses this Mac’s safe maximum so imports and summaries finish sooner. Leave it selected unless you need to conserve battery.'
+  ));
+  head.append(labelLine);
 
   const choices = document.createElement('div');
   choices.className = 'performance-pick';
@@ -579,6 +634,7 @@ async function renderSettings() {
   rows.push(performanceRow(p && p.performance));
   rows.push(settingRow({
     name: 'keep mac awake',
+    hint: 'Keeps imports and summaries moving while you step away, so they finish sooner. It still allows manual sleep and lid-close.',
     on: p && p.keepAwake === true,
     message: 'setKeepAwake',
   }));
