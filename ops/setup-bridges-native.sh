@@ -717,8 +717,8 @@ if [ "$("$YQ" '.network.api_id // 0' "$M/telegram/config.yaml" 2>/dev/null)" = "
       # when this block was ported from the container script: it replaced
       # "api_id:" with ^A, and mautrix then refused the file with "yaml: control
       # characters are not allowed". Verified with printf before re-committing.
-      printf 's/^\\([[:space:]]*api_id:\\).*/\\1 %s/\\n' "$TG_ID"
-      printf 's/^\\([[:space:]]*api_hash:\\).*/\\1 "%s"/\\n' "$TG_HASH"
+      printf 's/^\\([[:space:]]*api_id:\\).*/\\1 %s/\n' "$TG_ID"
+      printf 's/^\\([[:space:]]*api_hash:\\).*/\\1 "%s"/\n' "$TG_HASH"
     } | /usr/bin/sed -i '' -f - "$M/telegram/config.yaml"
     echo "telegram: configured from a shipped app credential"
   else

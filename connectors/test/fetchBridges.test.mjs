@@ -17,10 +17,16 @@ import { fileURLToPath } from 'node:url';
 
 import {
   loadManifest, assetUrl, binDir, sha256File, signatureState, missingLibraries, fetchBridges,
+  isMainModule,
 } from '../../ops/fetch-bridges.mjs';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const MANIFEST = join(REPO, 'bridges', 'native.json');
+
+test('the bundled CLI runs from an application path containing spaces', () => {
+  const path = '/Applications/Intaglio Labs.app/Contents/Resources/backend/ops/fetch-bridges.mjs';
+  assert.equal(isMainModule(new URL(`file://${path.replaceAll(' ', '%20')}`).href, path), true);
+});
 
 // ---- the manifest itself ----
 
