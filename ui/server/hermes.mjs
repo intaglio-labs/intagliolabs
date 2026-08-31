@@ -49,6 +49,7 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { recallClaims, groundingLines, pendingForQuery } from './memory/retrieve.mjs';
+import { supportOf, supportBand } from './memory/support.mjs';
 import { episodicContext } from './memory/episodic.mjs';
 import { selectRows } from './memory/select.mjs';
 import { answerPersonSearch, detectIntro, detectPersonSearch } from './people/search.mjs';
@@ -2021,7 +2022,24 @@ export function pendingClaims(db, { limit = PENDING_CAP } = {}) {
     )
     .all(Math.min(limit, PENDING_CAP) + 1);
   const more = rows.length > Math.min(limit, PENDING_CAP);
-  return { claims: more ? rows.slice(0, -1) : rows, more };
+  const page = more ? rows.slice(0, -1) : rows;
+  // SUPPORT IS COMPUTED HERE, not stored, and deliberately. It is a pure
+  // function of the claim and the row it cites, so a column would be a
+  // denormalised copy that goes stale the moment the scorer changes -- and it
+  // keeps the scorer out of the write path: nothing about ingest or
+  // distillation changes because the way claims are TRIAGED changed.
+  //
+  // Fetched per claim rather than joined, so message bodies do not enter every
+  // /admin/memory/pending response whether or not anyone scores them.
+  const rowText = db.prepare('SELECT text FROM context WHERE id = ?');
+  const scored = page.map((row) => {
+    const source = row.context_id === null || row.context_id === undefined
+      ? null
+      : rowText.get(row.context_id);
+    const support = supportOf(row.text, source?.text ?? '', row.quote ?? '');
+    return { ...row, support, support_band: supportBand(support) };
+  });
+  return { claims: scored, more };
 }
 
 // Counts only -- this is what `hz memory` is allowed to send through Messages.

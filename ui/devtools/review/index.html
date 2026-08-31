@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claim review — dev</title>
+<style>
+  :root {
+    --ground:#f4f5f7; --surface:#fff; --surface-2:#eceef2;
+    --line:#d3d7e0; --fg:#191d26; --fg-2:#4d5566; --fg-3:#79808f;
+    --accent:#a86a1c;
+    --bad:#a3352f; --bad-soft:#f8e5e3;
+    --weak:#8a6d1f; --weak-soft:#f7eeda;
+    --ok:#1f6b63; --ok-soft:#dcefec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:#14171d; --surface:#1b1f27; --surface-2:#232833;
+      --line:#2f3542; --fg:#e6e9ef; --fg-2:#a8b0bf; --fg-3:#7a8293;
+      --accent:#d9a24e;
+      --bad:#e08079; --bad-soft:#35211f;
+      --weak:#d9b85e; --weak-soft:#332c1a;
+      --ok:#5fb8ac; --ok-soft:#16302d;
+    }
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--ground); color:var(--fg);
+    font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  }
+  header {
+    position:sticky; top:0; z-index:5; background:var(--surface);
+    border-bottom:1px solid var(--line); padding:.85rem 1.25rem;
+    display:flex; gap:1rem; align-items:center; flex-wrap:wrap;
+  }
+  h1 { font-size:.95rem; margin:0; font-weight:600; letter-spacing:-.01em; }
+  .dev {
+    font-size:.62rem; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
+    background:var(--bad-soft); color:var(--bad); padding:.2rem .45rem; border-radius:3px;
+  }
+  .counts { margin-left:auto; display:flex; gap:1rem; font-size:.8rem; color:var(--fg-3); }
+  .counts b { color:var(--fg); font-variant-numeric:tabular-nums; }
+  .filters { display:flex; gap:.35rem; flex-wrap:wrap; }
+  button {
+    font:inherit; font-size:.78rem; padding:.3rem .6rem; border-radius:4px;
+    border:1px solid var(--line); background:var(--surface-2); color:var(--fg-2);
+    cursor:pointer;
+  }
+  button[aria-pressed="true"] { background:var(--fg); color:var(--surface); border-color:var(--fg); }
+  button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  main { max-width:56rem; margin:0 auto; padding:1.25rem; display:flex; flex-direction:column; gap:.7rem; }
+  .claim {
+    background:var(--surface); border:1px solid var(--line); border-radius:5px;
+    padding:.9rem 1rem; display:grid; gap:.55rem;
+  }
+  .claim[data-band="unsupported"] { border-left:3px solid var(--bad); }
+  .claim[data-band="weak"]        { border-left:3px solid var(--weak); }
+  .claim[data-band="supported"]   { border-left:3px solid var(--ok); }
+  .claim.gone { opacity:.35; }
+  .text { font-size:1.02rem; line-height:1.45; }
+  .meta { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; font-size:.74rem; color:var(--fg-3); }
+  .tag {
+    font-size:.64rem; font-weight:600; letter-spacing:.07em; text-transform:uppercase;
+    padding:.16rem .4rem; border-radius:3px; background:var(--surface-2); color:var(--fg-2);
+  }
+  .tag.unsupported { background:var(--bad-soft); color:var(--bad); }
+  .tag.weak        { background:var(--weak-soft); color:var(--weak); }
+  .tag.supported   { background:var(--ok-soft); color:var(--ok); }
+  .evidence {
+    font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:.8rem;
+    background:var(--surface-2); border:1px solid var(--line); border-radius:4px;
+    padding:.5rem .65rem; color:var(--fg-2); white-space:pre-wrap; word-break:break-word;
+  }
+  .evidence .q { color:var(--fg); background:color-mix(in srgb, var(--accent) 22%, transparent); border-radius:2px; }
+  .acts { display:flex; gap:.4rem; }
+  .acts button { padding:.32rem .8rem; }
+  .acts .keep:hover  { border-color:var(--ok);  color:var(--ok); }
+  .acts .drop:hover  { border-color:var(--bad); color:var(--bad); }
+  .empty, .err { color:var(--fg-3); padding:2rem 0; text-align:center; }
+  .err { color:var(--bad); }
+  kbd {
+    font:inherit; font-size:.7rem; background:var(--surface-2);
+    border:1px solid var(--line); border-radius:3px; padding:0 .3rem;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Claim review</h1>
+  <span class="dev">dev only</span>
+  <div class="filters" id="filters"></div>
+  <div class="counts" id="counts"></div>
+</header>
+
+<main>
+  <div id="list"></div>
+  <p class="empty" id="hint">
+    <kbd>a</kbd> keep · <kbd>x</kbd> drop · <kbd>j</kbd>/<kbd>k</kbd> move
+  </p>
+</main>
+
+<script>
+const BANDS = ['unsupported', 'weak', 'supported', 'all'];
+let band = 'unsupported';   // the interesting one first: no content word shared with its source
+let claims = [];
+let cursor = 0;
+
+const el = (t, c, txt) => { const n = document.createElement(t); if (c) n.className = c; if (txt !== undefined) n.textContent = txt; return n; };
+
+function renderFilters() {
+  const box = document.getElementById('filters');
+  box.replaceChildren(...BANDS.map((b) => {
+    const btn = el('button', null, b);
+    btn.setAttribute('aria-pressed', String(b === band));
+    btn.addEventListener('click', () => { band = b; cursor = 0; render(); });
+    return btn;
+  }));
+}
+
+// The quote is a verbatim span of the row. Highlight it in place rather than
+// showing it separately, so it is obvious whether the span actually carries the
+// claim or is a fragment that happens to be real.
+function evidence(row) {
+  const box = el('div', 'evidence');
+  const text = row.source_text ?? '';
+  const q = row.quote ?? '';
+  const at = q && text ? text.indexOf(q) : -1;
+  if (at === -1) {
+    box.append(text || '(source row unavailable)');
+    if (q) { box.append('\n\nquote: '); const s = el('span', 'q', q); box.append(s); }
+    return box;
+  }
+  box.append(text.slice(0, at));
+  box.append(el('span', 'q', q));
+  box.append(text.slice(at + q.length));
+  return box;
+}
+
+function card(row, i) {
+  const node = el('div', 'claim');
+  node.dataset.band = row.support_band ?? 'unscorable';
+  node.dataset.id = String(row.id);
+  if (i === cursor) node.style.outline = '2px solid var(--accent)';
+
+  node.append(el('div', 'text', row.text));
+
+  const meta = el('div', 'meta');
+  meta.append(el('span', 'tag ' + (row.support_band ?? ''), row.support_band ?? 'unscorable'));
+  meta.append(el('span', 'tag', row.kind));
+  const s = row.support ?? {};
+  meta.append(el('span', null,
+    `${s.inRow ?? 0}/${s.words ?? 0} words in source · p=${row.p_claim ?? '—'} · ${row.source ?? ''}`));
+  node.append(meta);
+
+  node.append(evidence(row));
+
+  const acts = el('div', 'acts');
+  const keep = el('button', 'keep', 'Keep');
+  const drop = el('button', 'drop', 'Drop');
+  keep.addEventListener('click', () => decide(row, 'accept', node));
+  drop.addEventListener('click', () => decide(row, 'reject', node));
+  acts.append(keep, drop);
+  node.append(acts);
+  return node;
+}
+
+function visible() {
+  return band === 'all' ? claims : claims.filter((c) => (c.support_band ?? 'unscorable') === band);
+}
+
+function render() {
+  renderFilters();
+  const list = document.getElementById('list');
+  const rows = visible();
+  if (rows.length === 0) {
+    list.replaceChildren(el('p', 'empty', 'Nothing left in this band.'));
+    return;
+  }
+  cursor = Math.max(0, Math.min(cursor, rows.length - 1));
+  list.replaceChildren(...rows.map(card));
+  const active = list.children[cursor];
+  if (active && active.scrollIntoView) active.scrollIntoView({ block: 'nearest' });
+}
+
+async function decide(row, action, node) {
+  node.classList.add('gone');
+  try {
+    const res = await fetch('/api/decide', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // The reason is what makes a decision auditable six months on. "reviewed
+      // in the dev desk" is honest about where it came from.
+      body: JSON.stringify({ claim_id: row.id, action, reason: 'reviewed in the dev review desk' }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    claims = claims.filter((c) => c.id !== row.id);
+    render();
+    counts();
+  } catch (err) {
+    node.classList.remove('gone');
+    document.getElementById('hint').textContent = 'could not save: ' + err.message;
+  }
+}
+
+function counts() {
+  const by = {};
+  for (const c of claims) by[c.support_band ?? 'unscorable'] = (by[c.support_band ?? 'unscorable'] ?? 0) + 1;
+  document.getElementById('counts').replaceChildren(
+    ...Object.entries(by).map(([k, v]) => {
+      const s = el('span', null, k + ' ');
+      s.append(el('b', null, String(v)));
+      return s;
+    })
+  );
+}
+
+document.addEventListener('keydown', (e) => {
+  const rows = visible();
+  if (rows.length === 0) return;
+  if (e.key === 'j') { cursor = Math.min(cursor + 1, rows.length - 1); render(); }
+  if (e.key === 'k') { cursor = Math.max(cursor - 1, 0); render(); }
+  if (e.key === 'a' || e.key === 'x') {
+    const row = rows[cursor];
+    const node = document.getElementById('list').children[cursor];
+    if (row && node) decide(row, e.key === 'a' ? 'accept' : 'reject', node);
+  }
+});
+
+(async function load() {
+  try {
+    const res = await fetch('/api/pending?limit=500');
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    claims = data.claims ?? [];
+    counts();
+    render();
+  } catch (err) {
+    document.getElementById('list').replaceChildren(el('p', 'err', 'could not load: ' + err.message));
+  }
+}());
+</script>
+</body>
+</html>
