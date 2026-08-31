@@ -13,8 +13,20 @@ const settings = readFileSync(join(WIDGET, 'ui/connections.js'), 'utf8');
 
 test('performance is explicit and never pauses for battery or heat', () => {
   const code = power.split('\n').filter((line) => !/^\s*\/\//u.test(line)).join('\n');
-  assert.match(code, /case godMode = "god_mode"/u);
-  assert.match(code, /case batterySaver = "battery_saver"/u);
+  // ~~godMode / batterySaver~~ renamed to say what they do. "God Mode" told the
+  // owner nothing about the machine and "Battery Saver" implied it was about the
+  // charger, which it is not -- the assertion two lines down is precisely that
+  // neither setting reads a power source.
+  assert.match(code, /case fullSpeed = "full_speed"/u);
+  assert.match(code, /case lessPower = "less_power"/u);
+  // Old preferences must still resolve, or the rename silently flips somebody's
+  // setting to the other one.
+  assert.match(code, /case "god_mode": return \.fullSpeed/u);
+  assert.match(code, /case "battery_saver": return \.lessPower/u);
+  // AND THE DEFAULT IS THE GENTLE ONE. Defaulting to maximum was more aggressive
+  // than anything that shipped before the setting existed, and a fresh install
+  // is the run with the most work to do.
+  assert.match(code, /return \.lessPower/u);
   assert.doesNotMatch(code, /thermalState|isLowPowerModeEnabled|IOPSCopyPowerSourcesInfo/u);
   assert.doesNotMatch(code, /case paused/u);
   assert.match(distiller, /PowerBudget\.current == \.trickle \? trickleBatch : batch/u);
@@ -23,16 +35,20 @@ test('performance is explicit and never pauses for battery or heat', () => {
 
 test('Settings exposes the owner language and validates the bridge value', () => {
   assert.match(settings, /name\.textContent = 'performance'/u);
-  assert.match(settings, /modeLabel\.textContent = godMode \? 'god mode' : 'battery saver'/u);
+  assert.match(settings, /modeLabel\.textContent = full \? 'full speed' : 'use less power'/u);
   assert.match(settings, /sw\.setAttribute\('role', 'switch'\)/u);
-  assert.match(settings, /const requested = active === 'god_mode' \? 'battery_saver' : 'god_mode'/u);
+  assert.match(settings, /const requested = active === FULL \? LESS : FULL/u);
+  // A stored pre-rename value must not read as the opposite setting.
+  assert.match(settings, /v === 'god_mode' \? FULL : LESS/u);
   assert.doesNotMatch(settings, /performance-pick/u);
   assert.match(settings, /name: 'keep mac awake'/u);
   assert.match(settings, /function settingHint\(label, copy\)/u);
   assert.match(settings, /Why leave \$\{label\} on\?/u);
-  assert.match(settings, /God Mode uses this Mac’s safe maximum/u);
+  // The hint states the difference instead of recommending a side.
+  assert.match(settings, /Full speed does more work in each pass/u);
+  assert.match(settings, /Both keep running on battery; neither one stops/u);
   assert.match(settings, /It still allows manual sleep and lid-close/u);
-  assert.match(bridge, /PerformanceMode\(rawValue: raw\)/u);
+  assert.match(bridge, /PerformanceMode\.migrate\(raw\)/u);
   assert.match(bridge, /"performance": PowerBudget\.mode\.rawValue/u);
   assert.match(bridge, /"keepAwake": KeepMacAwake\.enabled/u);
 });
