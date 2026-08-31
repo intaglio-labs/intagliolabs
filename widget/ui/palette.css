@@ -2342,10 +2342,10 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
   font-variant-numeric: tabular-nums; white-space: nowrap; text-transform: uppercase;
 }
 .activity-list { display: flex; flex-direction: column; gap: 5px; min-height: 15px; }
-/* Seven 15px task lines plus six 5px gaps. The scheduler can carry more, but
-   Settings should not grow forever; the rest remains reachable by scrolling. */
+/* Three 15px task lines plus two 5px gaps: current + next two. The scheduler
+   can carry more, but the rest remains reachable by scrolling. */
 .activity-list {
-  max-height: 135px; overflow-y: scroll; scrollbar-gutter: stable; padding-right: 3px;
+  max-height: 55px; overflow-y: scroll; scrollbar-gutter: stable; padding-right: 3px;
 }
 .activity-list::-webkit-scrollbar { width: 5px; }
 .activity-list::-webkit-scrollbar-thumb {

@@ -143,6 +143,15 @@ test('the total processing estimate uses the plain approximate-hours label', () 
     'the transport name never replaces a user-facing platform name');
 });
 
+test('activity shows current plus two queued rows and keeps the full queue scrollable', () => {
+  assert.match(palette, /\.activity-list \{[\s\S]*?max-height: 55px; overflow-y: scroll;/u,
+    'three 15px rows and two 5px gaps fit in the activity viewport');
+  assert.match(connections, /for \(const item of items\)/u,
+    'the remaining queue stays in the DOM so it can be reached by scrolling');
+  assert.doesNotMatch(connections, /items\.slice\(0, 3\)/u,
+    'the viewport, not the data, limits what is visible');
+});
+
 test('only live work says current; scheduled connectors show only future order', () => {
   assert.ok(connectors.includes('"label": "current: syncing \\(label)"'));
   assert.ok(connectors.includes('"label": "next: \\(label)"'));

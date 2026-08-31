@@ -442,8 +442,8 @@ function activityRow() {
     estimate.textContent = total;
     estimate.hidden = !total;
     const latestItems = data && Array.isArray(data.items) ? data.items : [];
-    // The queue is always visible: the first row is current and the remaining
-    // real scheduled work follows in order. Seven rows fit; more scroll here.
+    // The queue stays intact: the first row is current and the remaining real
+    // scheduled work follows in order. Current + next two fit; more scroll here.
     const active = latestItems.filter((item) => item && item.kind !== 'queue');
     const queued = latestItems.filter((item) => item && item.kind === 'queue');
     const items = [...active, ...queued];
