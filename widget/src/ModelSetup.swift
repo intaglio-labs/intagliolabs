@@ -157,6 +157,7 @@ enum ModelSetup {
   /// human-readable reason on failure.
   static func download(
     tierId: String,
+    activate: Bool = true,
     progress: @escaping (Int64, Int64) -> Void,
     done: @escaping (String?) -> Void
   ) {
@@ -211,30 +212,32 @@ enum ModelSetup {
         let sum = digest(of: existing)
         guard !isCancelled else { finish("cancelled"); return }
         if sum == tier.sha256 {
-          // Relink only; the bytes are already correct and already here.
+          // Relink only for the selected answer model. The 4B summary reducer
+          // lives beside it but must never silently replace that selection.
           do {
-            try link(tier)
+            if activate { try link(tier) }
             finish(nil)
           } catch {
             finish("could not put the model in place")
           }
         } else {
           try? fm.removeItem(at: existing)
-          startDownload(tier: tier, progress: progress, finish: finish)
+          startDownload(tier: tier, activate: activate, progress: progress, finish: finish)
         }
       }
       return
     }
-    startDownload(tier: tier, progress: progress, finish: finish)
+    startDownload(tier: tier, activate: activate, progress: progress, finish: finish)
   }
 
   private static func startDownload(
     tier: ModelTier,
+    activate: Bool,
     progress: @escaping (Int64, Int64) -> Void,
     finish: @escaping (String?) -> Void
   ) {
 
-    let d = Driver(tier: tier, progress: progress, finish: finish)
+    let d = Driver(tier: tier, activate: activate, progress: progress, finish: finish)
     driver = d
     let session = URLSession(configuration: .default, delegate: d, delegateQueue: nil)
     let t = session.downloadTask(with: tier.url)
@@ -251,12 +254,12 @@ enum ModelSetup {
   /// Put a verified file in place: name it after the tier, point model.gguf at
   /// it, and stamp the active model the way setup-llm.sh does so a later run of
   /// that script agrees about what is installed.
-  fileprivate static func install(_ tmp: URL, _ tier: ModelTier) throws {
+  fileprivate static func install(_ tmp: URL, _ tier: ModelTier, activate: Bool) throws {
     let dst = modelDir.appendingPathComponent(tier.file)
     if fm.fileExists(atPath: dst.path) { try fm.removeItem(at: dst) }
     try fm.moveItem(at: tmp, to: dst)
     try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: dst.path)
-    try link(tier)
+    if activate { try link(tier) }
   }
 
   /// Point model.gguf at this tier and stamp it, the way setup-llm.sh does, so
@@ -289,11 +292,13 @@ enum ModelSetup {
 
   private final class Driver: NSObject, URLSessionDownloadDelegate {
     let tier: ModelTier
+    let activate: Bool
     let progress: (Int64, Int64) -> Void
     let finish: (String?) -> Void
 
-    init(tier: ModelTier, progress: @escaping (Int64, Int64) -> Void, finish: @escaping (String?) -> Void) {
+    init(tier: ModelTier, activate: Bool, progress: @escaping (Int64, Int64) -> Void, finish: @escaping (String?) -> Void) {
       self.tier = tier
+      self.activate = activate
       self.progress = progress
       self.finish = finish
     }
@@ -339,7 +344,7 @@ enum ModelSetup {
         return
       }
       do {
-        try ModelSetup.install(staged, tier)
+        try ModelSetup.install(staged, tier, activate: activate)
       } catch {
         try? ModelSetup.fm.removeItem(at: staged)
         finish("could not put the model in place")

@@ -44,6 +44,19 @@ test('background summaries run in exact top-to-bottom order', async () => {
   assert.deepEqual(runner.starts, ['first', 'second', 'third']);
 });
 
+test('a sized queue runs two summaries together without starting a third', async () => {
+  const runner = controlledRunner();
+  const queue = new SummaryQueue({ run: runner.run, concurrency: 2 });
+  queue.enqueue(['first', 'second', 'third'].map((key) => ({ key, year: 2026 })));
+  await until(() => runner.starts.length === 2, 'two concurrent summaries');
+  assert.deepEqual(runner.starts, ['first', 'second']);
+  runner.release('first');
+  await until(() => runner.starts.length === 3, 'third summary after a slot opens');
+  runner.release('second');
+  runner.release('third');
+  await until(() => queue.active === null && queue.pending.length === 0, 'empty queue');
+});
+
 test('a clicked person preempts background work, which then resumes in rank order', async () => {
   const runner = controlledRunner();
   const queue = new SummaryQueue({ run: runner.run });

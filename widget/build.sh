@@ -349,6 +349,8 @@ fi
 mkdir -p "$BE/agents"
 cp ../ops/io.intaglio.connect.plist ../ops/io.intaglio.hermes.plist \
    ../ops/io.intaglio.connectors.plist ../ops/io.intaglio.llama-server.plist "$BE/agents/"
+mkdir -p "$BE/config"
+cp ../ops/inference-profiles.json "$BE/config/"
 
 # SIGNING, AND WHY IT IS NOT AD-HOC ANY MORE.
 #

@@ -261,10 +261,9 @@ test('native web login carries every server-authored policy feature to the login
   assert.match(block, /begin\["qrLogin"\]/u, 'QR policy is handled by the native QR window');
 });
 
-test('model setup restarts the launch agents provisioning actually installs', () => {
+test('model setup reinstalls both launch agents with the selected machine profile', () => {
   assert.match(swift, /Provision\.installAgent\("io\.intaglio\.llama-server"\)/u);
-  assert.match(swift, /Provision\.kickstart\("io\.intaglio\.llama-server"\)/u);
-  assert.match(swift, /Provision\.kickstart\("io\.intaglio\.hermes"\)/u);
+  assert.match(swift, /Provision\.installAgent\("io\.intaglio\.hermes"\)/u);
   assert.doesNotMatch(swift, /com\.hazlie\.(?:llama-server|hermes)/u);
 });
 

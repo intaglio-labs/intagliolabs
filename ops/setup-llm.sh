@@ -44,6 +44,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # should leave it at auto so an 8 GB machine cannot install a model it cannot
 # decode.
 HOST_MEMORY_BYTES="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
+HOST_CORES="$(sysctl -n hw.logicalcpu 2>/dev/null || echo 0)"
+PROFILE_ID="compact"
+LLAMA_CTX_SIZE=32768
+LLAMA_PARALLEL=1
+LLAMA_BATCH_SIZE=512
+LLAMA_UBATCH_SIZE=128
+LLAMA_MODELS_MAX=1
+SUMMARY_CONCURRENCY=1
+DUAL_MODEL_SUMMARIES=0
+if command -v node >/dev/null 2>&1; then
+  IFS=$'\t' read -r PROFILE_ID LLAMA_CTX_SIZE LLAMA_PARALLEL LLAMA_BATCH_SIZE \
+    LLAMA_UBATCH_SIZE LLAMA_MODELS_MAX SUMMARY_CONCURRENCY DUAL_MODEL_SUMMARIES <<<"$(
+      node "$SCRIPT_DIR/inference-profile.mjs" --memory-bytes "$HOST_MEMORY_BYTES" \
+        --cores "$HOST_CORES" --tsv
+    )"
+fi
+echo "    inference profile: $PROFILE_ID (${HOST_MEMORY_BYTES} bytes RAM, ${HOST_CORES} cores)"
 MODEL_TIER_REQUEST="${HAZLIE_MODEL_TIER:-auto}"
 case "$MODEL_TIER_REQUEST" in
   auto)
@@ -176,6 +193,42 @@ if [[ "$VERIFY" == 1 ]]; then
 fi
 chmod 600 "$MODEL_PATH"
 
+# Performance-class machines use the smaller model for bounded monthly
+# reductions and retain the selected model for the final annual synthesis.
+# Smaller machines deliberately keep one model: loading two there costs more
+# than the reducer saves. The second file is downloaded only when the selected
+# profile can keep both resident.
+if [[ "$DUAL_MODEL_SUMMARIES" == 1 && "$MODEL_FILE" != "Qwen3-4B-Instruct-2507-Q4_K_M.gguf" ]]; then
+  REDUCER_FILE="Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+  REDUCER_SIZE=2497281120
+  REDUCER_SHA256="3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597"
+  REDUCER_PATH="$MODEL_DIR/$REDUCER_FILE"
+  REDUCER_URL="https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/$REDUCER_FILE"
+  reducer_have=$([[ -f "$REDUCER_PATH" ]] && stat -f %z "$REDUCER_PATH" || echo 0)
+  if [[ "$reducer_have" != "$REDUCER_SIZE" ]]; then
+    step "summary reducer weights ($REDUCER_FILE, 2 GB)"
+    curl -q --fail --location -C - --retry 3 --retry-delay 5 \
+      -o "$REDUCER_PATH" "$REDUCER_URL"
+    reducer_got=$(stat -f %z "$REDUCER_PATH")
+    [[ "$reducer_got" == "$REDUCER_SIZE" ]] || {
+      echo "ERROR: downloaded $reducer_got reducer bytes, expected $REDUCER_SIZE." >&2
+      exit 1
+    }
+  else
+    echo "    summary reducer present: $REDUCER_PATH"
+  fi
+  if [[ "$VERIFY" == 1 ]]; then
+    reducer_sha=$(shasum -a 256 "$REDUCER_PATH" | awk '{print $1}')
+    [[ "$reducer_sha" == "$REDUCER_SHA256" ]] || {
+      echo "ERROR: summary reducer sha256 mismatch." >&2
+      exit 1
+    }
+  fi
+  chmod 600 "$REDUCER_PATH"
+else
+  REDUCER_FILE="$MODEL_FILE"
+fi
+
 # llama-server is loopback-only, but loopback alone does not stop a hostile web
 # page from sending a no-CORS POST that consumes inference and mutates the prompt
 # cache. Generate a stable, owner-only bearer key. Hermes reads this file and is
@@ -270,6 +323,19 @@ if [[ -f "$ACTIVE_MODEL_STAMP" ]] && [[ "$(cat "$ACTIVE_MODEL_STAMP")" == "$MODE
 fi
 ln -sfn "$MODEL_FILE" "$MODEL_DIR/model.gguf"
 echo "    model.gguf -> $MODEL_FILE"
+ROUTER_MODEL_DIR="$MODEL_DIR/router"
+mkdir -p "$ROUTER_MODEL_DIR"
+chmod 700 "$ROUTER_MODEL_DIR"
+rm -f "$ROUTER_MODEL_DIR/Qwen3-4B-Instruct-2507-Q4_K_M.gguf" \
+      "$ROUTER_MODEL_DIR/Qwen3-8B-Q4_K_M.gguf"
+ln -s "../$MODEL_FILE" "$ROUTER_MODEL_DIR/$MODEL_FILE"
+if [[ "$REDUCER_FILE" != "$MODEL_FILE" ]]; then
+  ln -s "../$REDUCER_FILE" "$ROUTER_MODEL_DIR/$REDUCER_FILE"
+else
+  LLAMA_MODELS_MAX=1
+fi
+LLAMA_MAIN_MODEL="${MODEL_FILE%.gguf}"
+LLAMA_REDUCER_MODEL="${REDUCER_FILE%.gguf}"
 
 # ── (c) launchd agent ─────────────────────────────────────────────────────────
 step "launchd agent ($LABEL)"
@@ -293,7 +359,7 @@ fi
 # start and KeepAlive would respawn it in a loop, which reads as "LLM down"
 # with nothing in the obvious place saying why.
 help_text=$("$LLAMA_BIN" --help 2>&1 || true)
-for required in --offline --no-slots; do
+for required in --offline --no-slots --models-dir --models-max; do
   if ! grep -qe "$required" <<<"$help_text"; then
     echo "ERROR: $LLAMA_BIN does not support $required; refusing to install a" >&2
     echo "plist it cannot boot. Upgrade llama-server or remove the flag from" >&2
@@ -313,7 +379,14 @@ if grep -qe '--slot-save-path' -e 'LLAMA_ARG_SLOT_SAVE_PATH' -e 'LLAMA_ARG_CACHE
   exit 1
 fi
 
-rendered=$(sed "s|@HOME@|$HOME|g" "$PLIST_SRC")
+rendered=$(sed \
+  -e "s|@HOME@|$HOME|g" \
+  -e "s|@LLAMA_CTX_SIZE@|$LLAMA_CTX_SIZE|g" \
+  -e "s|@LLAMA_PARALLEL@|$LLAMA_PARALLEL|g" \
+  -e "s|@LLAMA_BATCH_SIZE@|$LLAMA_BATCH_SIZE|g" \
+  -e "s|@LLAMA_UBATCH_SIZE@|$LLAMA_UBATCH_SIZE|g" \
+  -e "s|@LLAMA_MODELS_MAX@|$LLAMA_MODELS_MAX|g" \
+  "$PLIST_SRC")
 changed=1
 if [[ -f "$PLIST_DST" ]] && [[ "$rendered" == "$(cat "$PLIST_DST")" ]]; then
   changed=0
@@ -387,7 +460,7 @@ fi
 step "verifying one-token inference"
 if ! llama_curl -fsS --max-time 120 "$INFERENCE_URL" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"local","messages":[{"role":"user","content":"Reply OK"}],"temperature":0,"max_tokens":1}' \
+  -d "{\"model\":\"$LLAMA_MAIN_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply OK\"}],\"temperature\":0,\"max_tokens\":1}" \
   >/dev/null; then
   echo "ERROR: health passed but inference failed." >&2
   echo "Check: tail -50 $LOG_DIR/llama-server.err.log" >&2

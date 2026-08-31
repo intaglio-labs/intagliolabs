@@ -1193,6 +1193,33 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
 
     case "modelDownload":
       let tier = String((payload["tier"] as? String ?? "").prefix(8))
+      let finishSetup: () -> Void = { [weak self] in
+        guard let self else { return }
+        self.delegate?.setupProgress(["phase": "installing", "tier": tier])
+        DispatchQueue.global(qos: .utility).async {
+          guard Provision.ensureLlamaRuntime() else {
+            self.delegate?.setupProgress([
+              "phase": "failed", "tier": tier,
+              "error": "the model is saved, but the engine that runs it is missing",
+            ])
+            return
+          }
+          Provision.installAgent("io.intaglio.llama-server")
+          Provision.installAgent("io.intaglio.hermes")
+          if Provision.waitForLlama() {
+            self.delegate?.setupProgress(["phase": "ready", "tier": tier])
+            ModelSetup.notify(
+              title: "Intaglio Labs can answer now",
+              body: "The models finished downloading and are ready.")
+          } else {
+            let why = "The model is saved but didn’t start. Reopen the app to try again."
+            self.delegate?.setupProgress([
+              "phase": "failed", "tier": tier, "error": why,
+            ])
+            ModelSetup.notify(title: "Setup didn’t finish", body: why)
+          }
+        }
+      }
       ModelSetup.download(
         tierId: tier,
         progress: { [weak self] got, total in
@@ -1209,42 +1236,24 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
             }
             return
           }
-          // The weights exist now, so the agent that needs them can. Installed
-          // here rather than at next launch, because "downloaded but you must
-          // restart the app" is not finished.
-          self.delegate?.setupProgress(["phase": "installing", "tier": tier])
-          DispatchQueue.global(qos: .utility).async {
-            // THE RUNTIME BEFORE THE AGENT. provision() no-ops on an
-            // already-set-up machine, so a binary the bundle gained later never
-            // came out -- and installing an agent that points at a missing
-            // binary just parks it at exit 78 while this screen waits forever.
-            guard Provision.ensureLlamaRuntime() else {
-              self.delegate?.setupProgress([
-                "phase": "failed", "tier": tier,
-                "error": "the model is saved, but the engine that runs it is missing",
-              ])
-              return
-            }
-            Provision.installAgent("io.intaglio.llama-server")
-            Provision.kickstart("io.intaglio.llama-server")
-            // hermes holds the llama base URL open; restart it so the first ask
-            // after setup does not meet a proxy pointed at nothing.
-            Provision.kickstart("io.intaglio.hermes")
-            // REACH AN ENDING. Loading several GB of weights takes a while, so
-            // wait -- but bounded, and then say which way it went. A screen that
-            // says "checking" forever is the one state that is never true.
-            if Provision.waitForLlama() {
-              self.delegate?.setupProgress(["phase": "ready", "tier": tier])
-              ModelSetup.notify(
-                title: "Intaglio Labs can answer now",
-                body: "The model finished downloading and is ready.")
-            } else {
-              let why = "The model is saved but didn’t start. Reopen the app to try again."
-              self.delegate?.setupProgress([
-                "phase": "failed", "tier": tier, "error": why,
-              ])
-              ModelSetup.notify(title: "Setup didn’t finish", body: why)
-            }
+          // A performance profile keeps a small reducer beside the selected
+          // answer model. It is an implementation detail, not a tier switch:
+          // activate=false leaves model.gguf pointing at the owner's choice.
+          if tier == "8b" && InferenceTuning.selected().dualModelSummaries {
+            ModelSetup.download(
+              tierId: "4b", activate: false,
+              progress: { [weak self] got, total in
+                self?.delegate?.setupProgress([
+                  "phase": "downloading", "got": got, "total": total, "tier": "summary helper",
+                ])
+              },
+              done: { reducerFailure in
+                if reducerFailure == "cancelled" { return }
+                finishSetup()
+              }
+            )
+          } else {
+            finishSetup()
           }
         }
       )

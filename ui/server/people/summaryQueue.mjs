@@ -1,4 +1,4 @@
-// One local-model slot, one honest queue.
+// One honest queue, with a machine-sized number of local-model slots.
 //
 // Background summary warming follows the People list's rank order. A person
 // the reader clicks is promoted ahead of that work; interactive chat can pause
@@ -15,6 +15,7 @@ export class SummaryQueue {
     defer = (fn) => setImmediate(fn),
     isRetryable = () => false,
     retryDelayMs = 30_000,
+    concurrency = 1,
     onSettled = () => {},
     onProgress = () => {},
   } = {}) {
@@ -23,16 +24,23 @@ export class SummaryQueue {
     this.defer = defer;
     this.isRetryable = isRetryable;
     this.retryDelayMs = retryDelayMs;
+    this.concurrency = Math.max(1, Math.min(4, Number.isInteger(concurrency) ? concurrency : 1));
     this.onSettled = onSettled;
     this.onProgress = onProgress;
     this.jobs = new Map();
     this.pending = [];
-    this.active = null;
+    this.running = new Set();
     this.pauses = 0;
     this.pumpScheduled = false;
     this.resetting = false;
     this.nextOrder = 0;
     this.retryTimer = null;
+  }
+
+  // Compatibility for status/UI callers that only need to know whether some
+  // summary is active. Detailed progress remains attached to each job.
+  get active() {
+    return this.running.values().next().value ?? null;
   }
 
   // A viewed year is priority 1; a clicked person is priority 2. Re-enqueuing
@@ -62,8 +70,11 @@ export class SummaryQueue {
     // A click should wait for at most the current fetch cancellation, not every
     // invisible person above it. The interrupted background job returns to the
     // queue with its completed chunk cache intact.
-    if (priority >= 2 && this.active && this.active.id !== id && this.active.priority < priority) {
-      this.preemptActive();
+    if (priority >= 2 && this.running.size >= this.concurrency) {
+      const victim = [...this.running]
+        .filter((candidate) => candidate.id !== id && candidate.priority < priority)
+        .sort((a, b) => (a.priority - b.priority) || (b.order - a.order))[0];
+      if (victim) this.preempt(victim);
     }
     // A human click never waits behind the speculative retry backoff.
     if (priority >= 2 && this.retryTimer) {
@@ -91,7 +102,7 @@ export class SummaryQueue {
 
   pause() {
     this.pauses += 1;
-    this.preemptActive();
+    for (const job of this.running) this.preempt(job);
     let resumed = false;
     return () => {
       if (resumed) return;
@@ -103,23 +114,23 @@ export class SummaryQueue {
 
   async pauseForInteractive() {
     const resume = this.pause();
-    const running = this.active?.promise ?? null;
-    if (running) await Promise.allSettled([running]);
+    const running = [...this.running].map((job) => job.promise).filter(Boolean);
+    if (running.length) await Promise.allSettled(running);
     return resume;
   }
 
   async reset() {
     this.resetting = true;
     this.pauses += 1;
-    const running = this.active?.promise ?? null;
-    this.active?.abort?.abort();
-    if (running) await Promise.allSettled([running]);
+    const running = [...this.running].map((job) => job.promise).filter(Boolean);
+    for (const job of this.running) job.abort?.abort();
+    if (running.length) await Promise.allSettled(running);
     for (const job of this.jobs.values()) clearTimeout(job.expiry);
     clearTimeout(this.retryTimer);
     this.retryTimer = null;
     this.pending.length = 0;
     this.jobs.clear();
-    this.active = null;
+    this.running.clear();
     this.pauses = Math.max(0, this.pauses - 1);
     this.resetting = false;
   }
@@ -132,13 +143,18 @@ export class SummaryQueue {
   }
 
   preemptActive() {
-    if (!this.active || this.active.preempted) return;
-    this.active.preempted = true;
-    this.active.abort?.abort();
+    const job = this.active;
+    if (job) this.preempt(job);
+  }
+
+  preempt(job) {
+    if (!job || job.preempted) return;
+    job.preempted = true;
+    job.abort?.abort();
   }
 
   kick() {
-    if (this.pumpScheduled || this.active || this.retryTimer || this.pauses > 0 || this.resetting || !this.pending.length) return;
+    if (this.pumpScheduled || this.running.size >= this.concurrency || this.retryTimer || this.pauses > 0 || this.resetting || !this.pending.length) return;
     this.pumpScheduled = true;
     this.defer(() => {
       this.pumpScheduled = false;
@@ -147,10 +163,16 @@ export class SummaryQueue {
   }
 
   pump() {
-    if (this.active || this.pauses > 0 || this.resetting) return;
-    const job = this.pending.shift();
-    if (!job) return;
-    this.active = job;
+    if (this.pauses > 0 || this.resetting) return;
+    while (this.running.size < this.concurrency && this.pending.length && !this.retryTimer) {
+      const job = this.pending.shift();
+      if (!job) break;
+      this.start(job);
+    }
+  }
+
+  start(job) {
+    this.running.add(job);
     job.state = 'running';
     job.error = null;
     job.preempted = false;
@@ -197,7 +219,7 @@ export class SummaryQueue {
         job.error = error;
       }
     }).finally(() => {
-      if (this.active === job) this.active = null;
+      this.running.delete(job);
       // Background completions live in the durable summary cache, not this
       // process map. Foreground completions stay until the polling request has
       // consumed their result, with a short expiry so an abandoned row cannot

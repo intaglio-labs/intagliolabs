@@ -2403,7 +2403,10 @@ function relationshipState(db, policy) {
         redirect: 'error',
         signal: AbortSignal.timeout(120_000),
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${policy.llama.apiKey()}` },
-        body: JSON.stringify({ messages, max_tokens, temperature }),
+        body: JSON.stringify({
+          ...(policy.llama.model ? { model: policy.llama.model } : {}),
+          messages, max_tokens, temperature,
+        }),
       });
       if (!upstream.ok) throw new Error(`llama answered ${upstream.status}`);
       const body = await upstream.json();
@@ -3224,8 +3227,9 @@ function send(res, status, body, extraHeaders = {}) {
   res.end(JSON.stringify(body));
 }
 
-async function proxyLlama(req, res, cors, { baseUrl, apiKey }) {
+async function proxyLlama(req, res, cors, { baseUrl, apiKey, model }) {
   const body = await readJson(req);
+  if (model && !body.model) body.model = model;
   // Read the outbound credential BEFORE the try below. Evaluated inline in the
   // headers literal it lands inside that try, and every readSecretFile message
   // -- "must not be accessible by group or other users", "file is missing; run
@@ -3669,6 +3673,7 @@ async function handleVaultAsk(db, req, res, cors, policy) {
         Authorization: `Bearer ${policy.llama.apiKey()}`,
       },
       body: JSON.stringify({
+        ...(policy.llama.model ? { model: policy.llama.model } : {}),
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: buildAnswerPrompt({ lines: allLines, question }) },
@@ -4231,6 +4236,9 @@ export async function start({
   relationshipMatcher,
   relationshipCap,
   peopleSummariesPath,
+  summaryConcurrency = Number(process.env.HAZLIE_SUMMARY_CONCURRENCY ?? 1),
+  llamaModel = process.env.HAZLIE_MAIN_MODEL,
+  llamaReducerModel = process.env.HAZLIE_REDUCER_MODEL,
 } = {}) {
   const allowedOriginSet = parseAllowedOrigins(allowedOrigins);
   let apiKey;
@@ -4259,6 +4267,8 @@ export async function start({
   const llama = {
     baseUrl: canonicalLoopbackBase(llamaBaseUrl),
     apiKey,
+    ...(llamaModel ? { model: llamaModel } : {}),
+    ...(llamaReducerModel ? { reducerModel: llamaReducerModel } : {}),
   };
   const askCeilingMs = Number.isFinite(askTimeoutMs) && askTimeoutMs > 0
     ? askTimeoutMs
@@ -4287,6 +4297,8 @@ export async function start({
   });
   let peopleYearCompletion = null;
   const peopleSummaryQueue = new SummaryQueue({
+    concurrency: Math.max(1, Math.min(4,
+      Number.isFinite(summaryConcurrency) ? Math.floor(summaryConcurrency) : 1)),
     isRetryable: (error) => isUnreachable(error) || isTimeout(error) || error?.status === 502,
     onSettled: (receipt) => peopleYearCompletion?.record(receipt),
     onProgress: (receipt) => peopleYearCompletion?.progress(receipt),
