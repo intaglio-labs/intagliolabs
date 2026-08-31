@@ -206,6 +206,12 @@ export const PLATFORMS = Object.freeze({
     // fills it in without knowing what any of it means.
     webLogin: {
       allowedHosts: ['linkedin.com', 'www.linkedin.com'],
+      // LinkedIn's security-verification page embeds its challenge rather than
+      // navigating the login window away from linkedin.com. These are the
+      // exact subframe hosts measured during a real checkpoint on 2026-08-31.
+      // Keep them out of allowedHosts: none is a destination where this window
+      // may ask for the owner's LinkedIn password.
+      allowedFrameHosts: ['li.protechts.net', 'www.google.com'],
       sessionCookie: 'li_at',
       requiredCookies: ['li_at', 'JSESSIONID'],
       fields: [

@@ -158,7 +158,9 @@ test('a login window may leave the platform only for that platform\'s own SSO', 
   assert.deepEqual(frames.messenger, ['facebook.com', 'fbsbx.com', 'meta.com']);
   assert.deepEqual(frames.instagram,
     ['facebook.com', 'fbsbx.com', 'instagram.com', 'meta.com']);
-  const framed = new Set(['slack', 'messenger', 'instagram']);
+  assert.deepEqual(frames.linkedin,
+    ['li.protechts.net', 'www.google.com']);
+  const framed = new Set(['slack', 'messenger', 'instagram', 'linkedin']);
   for (const [id, hosts] of Object.entries(frames)) {
     if (!framed.has(id)) assert.deepEqual(hosts, [], `${id}: a frame fence with no challenge behind it`);
   }
@@ -377,5 +379,10 @@ test('a subframe allowance is never a main-frame allowance', () => {
     const w = PLATFORMS[id].webLogin;
     assert.ok(!w.allowedHosts.includes('fbsbx.com'),
       `${id} must not accept fbsbx.com as a main-frame destination`);
+  }
+  const linkedin = PLATFORMS.linkedin.webLogin;
+  for (const host of linkedin.allowedFrameHosts) {
+    assert.ok(!linkedin.allowedHosts.includes(host),
+      `LinkedIn challenge host ${host} must remain subframe-only`);
   }
 });

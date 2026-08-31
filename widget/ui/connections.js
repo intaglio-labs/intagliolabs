@@ -1451,8 +1451,19 @@ function card(src, keep) {
     // newest bot line is the error and the question is one line behind it.
     // Treat both shapes as one pending prompt so closing/reopening the card —
     // or retrying a wrong X Chat passcode — never turns into a fresh login.
-    const pendingQuestion = () => askedFor()
-      || (RETRYABLE.test(botSaid() || '') ? lastQuestion() : null);
+    const pendingQuestion = () => {
+      // The local service knows which bridge prompts its fenced web login
+      // fulfils automatically. In particular LinkedIn's bot asks for cookies
+      // or a copied cURL command; that is an implementation detail, never a
+      // form the person should see. Preserve the local parser only for an old
+      // service during an app update.
+      if (data && Object.prototype.hasOwnProperty.call(data, 'pendingQuestion')) {
+        return typeof data.pendingQuestion === 'string' && data.pendingQuestion.trim()
+          ? data.pendingQuestion.trim()
+          : null;
+      }
+      return askedFor() || (RETRYABLE.test(botSaid() || '') ? lastQuestion() : null);
+    };
     const xPasscodeStep = () => kindOf(src.id) === 'twitter'
       && /\b(pin|passcode)\b/iu.test(pendingQuestion() || '');
     const xPasscodeCopy = () => (/\bcreate\b/iu.test(pendingQuestion() || '')

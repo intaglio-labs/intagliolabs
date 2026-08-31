@@ -4,7 +4,9 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { bridgeApiResponse, pendingBridgeQuestion } from '../lib/bridgeApi.mjs';
+import {
+  bridgeApiResponse, pendingBridgeQuestion, pendingUserQuestion,
+} from '../lib/bridgeApi.mjs';
 
 const TOKEN = 'ab'.repeat(32);
 
@@ -60,6 +62,23 @@ test('only a currently pending bridge question blocks a fresh login', () => {
     pendingBridgeQuestion([bot('Please enter your passcode'), you('1234'), bot('Invalid passcode')]),
     'Please enter your passcode',
     'validation keeps the preceding question active'
+  );
+});
+
+test('web logins never expose their internal cookie prompt', () => {
+  const bot = (body) => ({ from: 'bot', body });
+  const raw = bot('Enter a JSON object with your cookies, or a cURL command copied from browser devtools.');
+  assert.equal(pendingUserQuestion('linkedin', [raw]), null);
+  assert.equal(pendingUserQuestion('messenger', [bot('Please enter your cookies')]), null);
+  assert.equal(
+    pendingUserQuestion('twitter', [bot('Please create your PIN code')]),
+    'Please create your PIN code',
+    'X Chat passcode remains a real user step after browser login'
+  );
+  assert.equal(
+    pendingUserQuestion('telegram', [bot('Please enter your phone number')]),
+    'Please enter your phone number',
+    'non-browser bridge conversations remain interactive'
   );
 });
 
