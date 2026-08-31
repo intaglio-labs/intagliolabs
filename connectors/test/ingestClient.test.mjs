@@ -372,8 +372,9 @@ test('adminClearPeopleProjection round-trips without exposing rows', async () =>
 });
 
 test('adminCompletePeopleYear returns aggregate progress only', async () => {
-  const result = await adminCompletePeopleYear({ year: new Date().getFullYear() }, opts);
+  const result = await adminCompletePeopleYear({ year: 1900 }, opts);
   assert.equal(result.complete, true);
+  assert.equal(result.year, 1900, 'the API accepts the coordinator history floor');
   assert.deepEqual(Object.keys(result).sort(), [
     'complete', 'estimatedRemainingMs', 'profiles', 'startedMs', 'state',
     'summariesComplete', 'summariesPending', 'summariesSkipped', 'summariesTotal',

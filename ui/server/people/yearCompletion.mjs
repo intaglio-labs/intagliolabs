@@ -13,6 +13,7 @@ import { resolutionFingerprint } from './resolve.mjs';
 const sourceSql = SUMMARY_SOURCES.map((source) => `'${source}'`).join(',');
 const terminalSkip = (result) => typeof result?.reason === 'string'
   && /^only \d+ substantive messages in \d{4}$/u.test(result.reason);
+export const MAX_INVALID_SUMMARY_ATTEMPTS = 3;
 // Measured on the owner's machine over a multi-hour summary run. A work unit
 // is one bounded message chunk or one final person-year synthesis. It is an
 // estimate, explicitly rendered with "~", and is refined to the summarizer's
@@ -44,12 +45,13 @@ export function yearCompletionStamp(contextDb, stateDb, aliases, year) {
 }
 
 export class PeopleYearCompletion {
-  constructor({ path, queue, now = Date.now } = {}) {
+  constructor({ path, queue, now = Date.now, isCorpusStampCurrent = () => true } = {}) {
     if (!path) throw new Error('PeopleYearCompletion requires a summary database path');
     if (!queue) throw new Error('PeopleYearCompletion requires a summary queue');
     this.path = path;
     this.queue = queue;
     this.now = now;
+    this.isCorpusStampCurrent = isCorpusStampCurrent;
   }
 
   withDb(fn) {
@@ -118,57 +120,76 @@ export class PeopleYearCompletion {
     });
     if (pending === null) return null;
     if (pending.length > 0) {
-      this.queue.enqueue(pending.map((key) => ({ key, year })), { priority: 1 });
+      this.queue.enqueue(pending.map((key) => ({ key, year, corpusStamp })), { priority: 1 });
     }
     return this.existing(year, corpusStamp);
   }
 
-  record({ key, year, result }) {
-    const state = typeof result?.text === 'string' && result.text.length > 0
+  record({ key, year, corpusStamp, result }) {
+    // The durable receipt may not have been rebuilt yet when recurring current-
+    // year ingestion changes the corpus. Validate against the live corpus too,
+    // so that unseen new data cannot slip through the barrier.
+    if (!this.isCorpusStampCurrent(year, corpusStamp)) return false;
+    const terminalState = typeof result?.text === 'string' && result.text.length > 0
       ? 'complete'
       : terminalSkip(result) ? 'skipped' : null;
-    if (!state) return false;
     return this.withDb((db) => {
-      const row = db.prepare(
-        "SELECT state FROM summary_year_people WHERE year = ? AND person_key = ?"
-      ).get(year, key);
-      if (!row || row.state !== 'pending') return false;
-      db.prepare(
-        'UPDATE summary_year_people SET state = ?, work_done = work_units ' +
-          'WHERE year = ? AND person_key = ?'
-      ).run(state, year, key);
-      const counts = db.prepare(
-        "SELECT COUNT(*) AS total, " +
-          "SUM(CASE WHEN state = 'complete' THEN 1 ELSE 0 END) AS completed, " +
-          "SUM(CASE WHEN state = 'skipped' THEN 1 ELSE 0 END) AS skipped, " +
-          "SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) AS pending " +
-          'FROM summary_year_people WHERE year = ?'
-      ).get(year);
-      db.prepare(
-        'UPDATE summary_year_runs SET state = ?, completed = ?, skipped = ?, updated_ms = ? WHERE year = ?'
-      ).run(Number(counts.pending) === 0 ? 'complete' : 'processing',
-        Number(counts.completed), Number(counts.skipped), this.now(), year);
-      return true;
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const run = db.prepare(
+          'SELECT corpus_stamp FROM summary_year_runs WHERE year = ?'
+        ).get(year);
+        const row = db.prepare(
+          "SELECT state, attempts FROM summary_year_people WHERE year = ? AND person_key = ?"
+        ).get(year, key);
+        if (!run || run.corpus_stamp !== corpusStamp || !row || row.state !== 'pending') {
+          db.exec('ROLLBACK');
+          return false;
+        }
+        const attempts = Number(row.attempts) + (terminalState ? 0 : 1);
+        const state = terminalState
+          ?? (attempts >= MAX_INVALID_SUMMARY_ATTEMPTS ? 'skipped' : 'pending');
+        db.prepare(
+          'UPDATE summary_year_people SET state = ?, attempts = ?, ' +
+            'work_done = CASE WHEN ? = \'pending\' THEN work_done ELSE work_units END ' +
+            'WHERE year = ? AND person_key = ?'
+        ).run(state, attempts, state, year, key);
+        const counts = db.prepare(
+          "SELECT COUNT(*) AS total, " +
+            "SUM(CASE WHEN state = 'complete' THEN 1 ELSE 0 END) AS completed, " +
+            "SUM(CASE WHEN state = 'skipped' THEN 1 ELSE 0 END) AS skipped, " +
+            "SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) AS pending " +
+            'FROM summary_year_people WHERE year = ?'
+        ).get(year);
+        db.prepare(
+          'UPDATE summary_year_runs SET state = ?, completed = ?, skipped = ?, updated_ms = ? ' +
+            'WHERE year = ? AND corpus_stamp = ?'
+        ).run(Number(counts.pending) === 0 ? 'complete' : 'processing',
+          Number(counts.completed), Number(counts.skipped), this.now(), year, corpusStamp);
+        db.exec('COMMIT');
+        return true;
+      } catch (error) {
+        try { db.exec('ROLLBACK'); } catch {}
+        throw error;
+      }
     });
   }
 
-  progress({ key, year, progress }) {
+  progress({ key, year, corpusStamp, progress }) {
     const total = Math.floor(Number(progress?.total));
     const completed = Math.floor(Number(progress?.completed));
     if (!Number.isFinite(total) || total < 1 || !Number.isFinite(completed) || completed < 0) {
       return false;
     }
     return this.withDb((db) => {
-      const row = db.prepare(
-        "SELECT state FROM summary_year_people WHERE year = ? AND person_key = ?"
-      ).get(year, key);
-      if (!row || row.state !== 'pending') return false;
-      db.prepare(
+      const updated = db.prepare(
         'UPDATE summary_year_people SET ' +
           'work_units = MAX(work_units, ?), work_done = MAX(work_done, MIN(?, ?)) ' +
-          'WHERE year = ? AND person_key = ?'
-      ).run(total, completed, total, year, key);
-      return true;
+          "WHERE year = ? AND person_key = ? AND state = 'pending' " +
+          'AND EXISTS (SELECT 1 FROM summary_year_runs ' +
+            'WHERE year = ? AND corpus_stamp = ?)'
+      ).run(total, completed, total, year, key, year, corpusStamp);
+      return Number(updated.changes) > 0;
     });
   }
 

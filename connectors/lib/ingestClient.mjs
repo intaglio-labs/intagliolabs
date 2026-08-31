@@ -254,7 +254,7 @@ export async function adminClearPeopleProjection(opts) {
 // and display progress, but person keys and derived summaries remain inside
 // Hermes with the corpus.
 export async function adminCompletePeopleYear({ year }, opts) {
-  if (!Number.isInteger(year) || year < 1990 || year > 3000) {
+  if (!Number.isInteger(year) || year < 1900 || year > 3000) {
     throw new Error('adminCompletePeopleYear requires an integer year');
   }
   const ctx = requireOpts(opts);

@@ -55,7 +55,8 @@ test('automatic model changes are staged and activated only while idle', () => {
   assert.match(bridge, /Distiller\.shared\.activity == nil/u);
   assert.match(bridge, /ModelSetup\.activate\(tierId: tier\)/u);
   assert.match(bridge, /rollbackAutomaticModel/u);
-  assert.match(bridge, /pauseAutomaticModelSupervisors\(\)[\s\S]{0,120}stageAutomaticModel/u);
+  assert.doesNotMatch(bridge, /pauseAutomaticModelSupervisors\(\)[\s\S]{0,120}stageAutomaticModel/u);
+  assert.match(bridge, /activateAutomaticModel[\s\S]{0,500}pauseAutomaticModelSupervisors\(\)/u);
   assert.match(bridge, /resumeAutomaticModelSupervisors/u);
   assert.match(connectors, /func pauseForModelMaintenance\(\)/u);
   assert.match(connectors, /guard !isRunning, !stopping, !modelMaintenancePaused/u);

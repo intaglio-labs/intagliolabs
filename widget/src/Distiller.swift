@@ -110,8 +110,8 @@ final class Distiller {
     schedule(after: 20) // let hermes and llama-server settle first
   }
 
-  /// Paired with Connectors' maintenance hold. Called only after activity is
-  /// idle, so invalidating the next timer never interrupts a running summary.
+  /// Paired with Connectors' short model-activation hold. Called only after
+  /// activity is idle, so invalidating the timer never interrupts a summary.
   func pauseForModelMaintenance() {
     modelMaintenancePaused = true
     timer?.invalidate()

@@ -502,6 +502,7 @@ function ensureSummariesSchema(db) {
     'CREATE TABLE IF NOT EXISTS summary_year_people (' +
       'year INTEGER NOT NULL, person_key TEXT NOT NULL, state TEXT NOT NULL, ' +
       'work_units INTEGER NOT NULL DEFAULT 1, work_done INTEGER NOT NULL DEFAULT 0, ' +
+      'attempts INTEGER NOT NULL DEFAULT 0, ' +
       'PRIMARY KEY (year, person_key));'
   );
   ensureColumn(db, 'summaries', 'code_rev', 'INTEGER NOT NULL DEFAULT 0');
@@ -510,6 +511,7 @@ function ensureSummariesSchema(db) {
   ensureColumn(db, 'summaries', 'sections_json', 'TEXT');
   ensureColumn(db, 'summary_year_people', 'work_units', 'INTEGER NOT NULL DEFAULT 1');
   ensureColumn(db, 'summary_year_people', 'work_done', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'summary_year_people', 'attempts', 'INTEGER NOT NULL DEFAULT 0');
 }
 
 // Privacy deletion clears the derived store too. DELETE alone leaves old prose
@@ -661,6 +663,7 @@ export async function summarizeYear(contextDb, stateDb, {
             user: batchPrompt(batchItems, year), maxTokens: 360 * batchItems.length,
             model: llama.reducerModel ?? llama.model,
           }, { fetchFn, signal });
+          signal?.throwIfAborted();
         } catch (error) {
           // llama-server rejects an over-context or unsupported batched grammar
           // as a client error. Fall back to the independently safe chunks. A
@@ -690,6 +693,7 @@ export async function summarizeYear(contextDb, stateDb, {
           user: chunkPrompt(chunk, year), maxTokens: 360,
           model: llama.reducerModel ?? llama.model,
         }, { fetchFn, signal });
+        signal?.throwIfAborted();
         const reduction = sanitizeChunk(value);
         if (!reduction) return { text: null, reason: 'local model returned an invalid monthly summary' };
         saveReduction(item, reduction);
@@ -749,6 +753,7 @@ export async function summarizeYear(contextDb, stateDb, {
           maxTokens: 420,
           model: llama.reducerModel ?? llama.model,
         }, { fetchFn, signal });
+        signal?.throwIfAborted();
         reduction = sanitizeChunk(value);
         if (!reduction) return { text: null, reason: 'local model returned an invalid monthly consolidation' };
         db.prepare(
@@ -791,6 +796,7 @@ export async function summarizeYear(contextDb, stateDb, {
       user: yearPrompt(year, coverage, reductions), maxTokens: 700,
       model: llama.model,
     }, { fetchFn, signal });
+    signal?.throwIfAborted();
     const annual = sanitizeYear(annualValue);
     if (!annual) return { text: null, reason: 'local model returned an invalid annual summary' };
     const sections = sectionsFromYear(annual);

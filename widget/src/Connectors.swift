@@ -428,9 +428,8 @@ final class Connectors {
     p.terminate()
   }
 
-  /// Automatic model replacement is allowed only between connector jobs. Once
-  /// that idle point is reached, hold the always-running daemon so its next
-  /// scheduled check cannot begin halfway through a multi-gigabyte download.
+  /// Hold the always-running daemon only for the short model activation handoff.
+  /// The multi-gigabyte staging download runs beside the active model.
   func pauseForModelMaintenance() {
     modelMaintenancePaused = true
     process?.terminate()

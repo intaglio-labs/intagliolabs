@@ -51,7 +51,7 @@ export function detectEraWindow(question, { now = Date.now() } = {}) {
   const d = new Date(now);
   const thisYear = d.getFullYear();
   const nowYm = `${thisYear}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-  const yr = (y) => Math.min(Math.max(Number(y), 1990), thisYear + 1);
+  const yr = (y) => Math.min(Math.max(Number(y), 1900), thisYear + 1);
   let m = q.match(/\b(?:from|between)?\s*((?:19|20)\d{2})\s*(?:-|\u2013|\u2014|to|and|until|through)\s*((?:19|20)\d{2})\b/u);
   if (m) {
     const a = yr(m[1]);

@@ -153,7 +153,10 @@ test('a completion observer can persist a receipt without retaining the job', as
   queue.enqueue([{ key: 'first', year: 2026 }]);
   await until(() => settled.length === 1, 'completion receipt');
   await until(() => queue.active === null && queue.pending.length === 0, 'empty queue');
-  assert.deepEqual(settled, [{ key: 'first', year: 2026, result: { text: 'summary for first' } }]);
+  assert.deepEqual(settled, [{
+    key: 'first', year: 2026, corpusStamp: null,
+    result: { text: 'summary for first' },
+  }]);
   assert.equal(queue.view('first', 2026), null, 'background prose is not retained in process memory');
 });
 
@@ -169,7 +172,44 @@ test('a progress observer receives aggregate work without retaining it in the qu
   queue.enqueue([{ key: 'first', year: 2026 }]);
   await until(() => observed.length === 1, 'progress receipt');
   assert.deepEqual(observed, [{
-    key: 'first', year: 2026,
+    key: 'first', year: 2026, corpusStamp: null,
     progress: { stage: 'reading', completed: 2, total: 5 },
   }]);
+});
+
+test('a new corpus generation cancels the old job and settles only the new one', async () => {
+  const runner = controlledRunner();
+  const settled = [];
+  const queue = new SummaryQueue({
+    run: runner.run,
+    onSettled: (receipt) => settled.push(receipt),
+  });
+  queue.enqueue([{
+    key: 'first', year: 2026, corpusStamp: 'a'.repeat(64),
+  }]);
+  await until(() => runner.starts.length === 1, 'old generation');
+  queue.enqueue([{
+    key: 'first', year: 2026, corpusStamp: 'b'.repeat(64),
+  }]);
+  await until(() => runner.starts.length === 2, 'replacement generation');
+  runner.release('first', { text: 'fresh summary' });
+  await until(() => settled.length === 1, 'fresh completion receipt');
+  assert.equal(settled[0].corpusStamp, 'b'.repeat(64));
+  assert.equal(settled[0].result.text, 'fresh summary');
+  await until(() => queue.active === null && queue.pending.length === 0, 'empty queue');
+});
+
+test('an old foreground receipt cannot consume its replacement generation', async () => {
+  const queue = new SummaryQueue({ run: async ({ corpusStamp }) => ({ text: corpusStamp ?? 'old' }) });
+  const old = queue.request('first', 2026);
+  await until(() => old.state === 'done', 'old foreground completion');
+  queue.enqueue([{
+    key: 'first', year: 2026, corpusStamp: 'c'.repeat(64),
+  }]);
+  const replacement = queue.view('first', 2026);
+  assert.notEqual(replacement, old);
+  queue.consume(old);
+  assert.equal(queue.view('first', 2026), replacement);
+  await until(() => replacement.state === 'done', 'replacement completion');
+  queue.consume(replacement);
 });

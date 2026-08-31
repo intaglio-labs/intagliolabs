@@ -2468,8 +2468,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     assertClosedFields(body, PEOPLE_YEAR_COMPLETION_FIELDS);
     const thisYear = new Date().getFullYear();
     const year = Number(body?.year);
-    if (!Number.isInteger(year) || year < 1990 || year > thisYear) {
-      throw badRequest(`"year" must be an integer 1990..${thisYear}`);
+    if (!Number.isInteger(year) || year < 1900 || year > thisYear) {
+      throw badRequest(`"year" must be an integer 1900..${thisYear}`);
     }
     if (policy.peopleSummaryManager.resetting) {
       throw Object.assign(new Error('relationship summaries are resetting'), { status: 503 });
@@ -4319,6 +4319,10 @@ export async function start({
   peopleYearCompletion = new PeopleYearCompletion({
     path: resolvedSummariesPath,
     queue: peopleSummaryQueue,
+    isCorpusStampCurrent: (year, corpusStamp) => withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      return yearCompletionStamp(db, state, aliases, year) === corpusStamp;
+    }),
   });
   const peopleSummaryManager = {
     queue: peopleSummaryQueue,

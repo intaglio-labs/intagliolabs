@@ -227,7 +227,6 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       retryAutomaticModelReconciliation()
       return
     }
-    pauseAutomaticModelSupervisors()
     stageAutomaticModel(tier, replacingExisting: replacingExisting)
   }
 
@@ -287,6 +286,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   }
 
   private func activateAutomaticModel(_ tier: String) {
+    // The download is safe beside the live model. Stop local workers only for
+    // the short symlink/service handoff, after one last idle check.
+    guard automaticModelSwitchIsSafe else {
+      waitToActivateAutomaticModel(tier)
+      return
+    }
+    pauseAutomaticModelSupervisors()
     let previous = ModelSetup.installed?.id
     do {
       try ModelSetup.activate(tierId: tier)
