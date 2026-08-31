@@ -362,8 +362,13 @@ function rangeRow({ name, note, value, min, max, step, message, format }) {
 }
 
 // One explicit performance switch replaces the old implicit charger/thermal
-// policy. On is God Mode; off is Battery Saver. Both keep processing — only
-// pass size and process priority change.
+// policy. Both settings keep processing — only pass size and process priority
+// change, and neither reads the charger.
+//
+// NAMED FOR THE EFFECT. "God Mode" said nothing about the machine and "Battery
+// Saver" implied it was about the charger, which it is not. The switch is on for
+// "full speed" and off for "use less power", and the hint states the actual
+// difference rather than recommending one.
 function performanceRow(selected) {
   const el = document.createElement('div');
   el.className = 'setting performance-setting';
@@ -377,7 +382,10 @@ function performanceRow(selected) {
   labelLine.className = 'setting-label-line';
   labelLine.append(name, settingHint(
     'performance',
-    'God Mode uses this Mac’s safe maximum so imports and local indexing finish sooner. Leave it selected unless you need to conserve battery.'
+    'Full speed does more work in each pass and asks macOS for foreground priority, '
+    + 'so imports and local indexing finish sooner. Using less power does the same work '
+    + 'in smaller passes at background priority — slower, but the machine stays quiet. '
+    + 'Both keep running on battery; neither one stops.'
   ));
   text.append(labelLine);
 
@@ -394,18 +402,28 @@ function performanceRow(selected) {
   knob.className = 'knob';
   sw.appendChild(knob);
 
-  let active = selected === 'battery_saver' ? 'battery_saver' : 'god_mode';
+  // Old values are still accepted: a preference written before the rename must
+  // not silently read as the other setting.
+  const FULL = 'full_speed';
+  const LESS = 'less_power';
+  const normalise = (v) => (v === FULL || v === 'god_mode' ? FULL : LESS);
+  let active = normalise(selected);
   const paint = () => {
-    const godMode = active === 'god_mode';
-    modeLabel.textContent = godMode ? 'god mode' : 'battery saver';
-    sw.classList.toggle('on', godMode);
-    sw.setAttribute('aria-checked', String(godMode));
-    sw.setAttribute('aria-label', `Performance: ${godMode ? 'God Mode' : 'Battery Saver'}`);
-    sw.title = godMode ? 'God Mode is on' : 'Battery Saver is on';
+    const full = active === FULL;
+    modeLabel.textContent = full ? 'full speed' : 'use less power';
+    sw.classList.toggle('on', full);
+    sw.setAttribute('aria-checked', String(full));
+    // The accessible name says what the switch DOES, since a screen reader user
+    // gets no hint text alongside it.
+    sw.setAttribute('aria-label',
+      full ? 'Processing: full speed' : 'Processing: use less power');
+    sw.title = full
+      ? 'Larger passes, foreground priority'
+      : 'Smaller passes, background priority';
   };
   sw.addEventListener('click', async () => {
     const previous = active;
-    const requested = active === 'god_mode' ? 'battery_saver' : 'god_mode';
+    const requested = active === FULL ? LESS : FULL;
     active = requested;
     paint();
     try {

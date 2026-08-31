@@ -817,7 +817,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": "ok", "sounds": on])
     case "setPerformance":
       guard let raw = payload["mode"] as? String,
-            let mode = PerformanceMode(rawValue: raw) else {
+            // migrate(), not init(rawValue:): a panel still holding the
+            // pre-rename value must set the setting it means, not be rejected.
+            let mode = PerformanceMode.migrate(raw) else {
         reply(webView, id, ["state": "error", "error": "unknown performance mode"])
         return
       }

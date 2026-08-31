@@ -169,6 +169,8 @@ END;
 `;
 
 const schemaReady = new WeakSet();
+let warnedProjectionFailure = false;
+
 export function ensurePeopleProjectionSchema(db) {
   if (schemaReady.has(db)) return;
   db.exec(PEOPLE_PROJECTION_SCHEMA);
@@ -431,7 +433,59 @@ function projectionWriters(db) {
   };
 }
 
+// ONE AMBIGUOUS HANDLE MUST NOT DISABLE THE WHOLE CACHE.
+//
+// person_identifiers.identifier is UNIQUE, and identity resolution can hand the
+// same handle to two different person keys. When it did, this threw "UNIQUE
+// constraint failed" out of replaceProjection into materializedPeopleGraph's bare
+// catch, and the projection silently fell back to a raw rebuild -- forever. On
+// the owner's machine that is what happened: 2 collisions out of 5,682
+// identifiers left `people` at 0 rows for the life of the install while the boot
+// log reported 4,253, and every launch paid ~10s rebuilding what this table
+// exists to avoid.
+//
+// The projection is an optimization over rebuildable data, so the right response
+// to an ambiguous identifier is to drop THAT IDENTIFIER and keep the projection,
+// not to discard the projection and keep the ambiguity. First key wins, and
+// graph order is stable, so the choice is deterministic between runs -- it is
+// not a claim about which person is correct. The caller reports what was dropped.
+/**
+ * Which identifiers each person may keep, given that person_identifiers.identifier
+ * is UNIQUE and two people can arrive claiming one handle.
+ *
+ * Pure, exported and separately tested because the DB-level version of this is
+ * almost impossible to provoke from a fixture -- the collision depends on how
+ * identity resolution keys people, and a fixture that merely looks like it should
+ * collide silently does not. A test that passes whether or not the guard exists
+ * is worse than no test.
+ *
+ * First key wins, and graph order is stable, so the choice is deterministic
+ * between runs. It is not a claim about which person is correct: a collision
+ * means identity resolution is wrong somewhere upstream, which is why the caller
+ * reports what it dropped instead of quietly resolving it.
+ */
+export function resolveIdentifierClaims(graph) {
+  const claimed = new Map();
+  const collisions = [];
+  const keep = new Map();
+  for (const person of graph ?? []) {
+    const mine = [];
+    for (const identifier of [...new Set(person.identifiers ?? [])].sort()) {
+      const holder = claimed.get(identifier);
+      if (holder !== undefined && holder !== person.key) {
+        collisions.push({ identifier, kept: holder, dropped: person.key });
+        continue;
+      }
+      claimed.set(identifier, person.key);
+      mine.push(identifier);
+    }
+    keep.set(person.key, mine);
+  }
+  return { keep, collisions };
+}
+
 function insertPeople(writers, graph, now) {
+  const { keep, collisions } = resolveIdentifierClaims(graph);
   for (const person of graph) {
     writers.person.run(
       person.key, person.name, person.firstSeen ?? null, person.lastSeen ?? null,
@@ -441,9 +495,9 @@ function insertPeople(writers, graph, now) {
       person.role ?? 'friend', JSON.stringify(canonical(person.rolesByYear ?? {})),
       person.linkedin ? JSON.stringify(canonical(person.linkedin)) : null, now
     );
-    for (const identifier of [...new Set(person.identifiers ?? [])].sort()) {
-      writers.identifier.run(identifier, person.key);
-    }
+      for (const identifier of keep.get(person.key) ?? []) {
+        writers.identifier.run(identifier, person.key);
+      }
     for (const item of person.identityEvidence ?? []) {
       writers.evidence.run(person.key, item.identifier, item.type, item.source, item.confidence ?? 1);
     }
@@ -456,6 +510,7 @@ function insertPeople(writers, graph, now) {
     }
     for (const activeDay of [...new Set(person.activeDays ?? [])].sort()) writers.day.run(person.key, activeDay);
   }
+  return collisions;
 }
 
 function insertEventLinks(writer, eventLinks) {
@@ -477,11 +532,36 @@ function replaceProjection(db, graph, eventLinks, { revision, identityFingerprin
       'DELETE FROM person_event_links; DELETE FROM identity_evidence; DELETE FROM person_identifiers; DELETE FROM person_channels; ' +
       'DELETE FROM person_activity; DELETE FROM person_active_days; DELETE FROM people;'
     );
-    insertPeople(writers, graph, now);
+    const collisions = insertPeople(writers, graph, now);
+    if (collisions.length > 0) {
+      // Surfaced, not swallowed. Two people claiming one handle is an identity
+      // resolution fault; dropping the identifier keeps the projection usable but
+      // it is still wrong somewhere upstream, and silence here is what let this
+      // disable the cache entirely for the life of an install.
+      console.warn(`people projection: ${collisions.length} identifier collision(s) dropped`);
+      for (const c of collisions.slice(0, 5)) {
+        console.warn(`  identifier held by ${c.kept}, also claimed by ${c.dropped}`);
+      }
+    }
     insertEventLinks(writers.event, eventLinks);
 
     const loaded = readPeopleProjection(db, { now });
-    if (hashJson(comparable(loaded)) !== hashJson(comparable(graph))) {
+    // COMPARE AGAINST WHAT WAS INTENTIONALLY WRITTEN, not the graph handed in. A
+    // dropped collision is a deliberate difference; this check exists to catch
+    // ACCIDENTAL ones. Comparing to the raw graph would make every collision a
+    // verification failure, roll the transaction back, and reproduce exactly the
+    // never-commits behaviour this change fixes.
+    const lostByKey = new Map();
+    for (const c of collisions) {
+      if (!lostByKey.has(c.dropped)) lostByKey.set(c.dropped, new Set());
+      lostByKey.get(c.dropped).add(c.identifier);
+    }
+    const projected = lostByKey.size === 0 ? graph : graph.map((person) => {
+      const lost = lostByKey.get(person.key);
+      if (!lost) return person;
+      return { ...person, identifiers: (person.identifiers ?? []).filter((i) => !lost.has(i)) };
+    });
+    if (hashJson(comparable(loaded)) !== hashJson(comparable(projected))) {
       throw new Error('people projection verification failed');
     }
     const storedLinks = Number(db.prepare('SELECT count(*) AS n FROM person_event_links').get().n);
@@ -654,9 +734,25 @@ export function materializedPeopleGraph(
   let graph;
   try {
     graph = refreshPeopleProjection(contextDb, stateDb, { now, owner, aliases, force }).graph;
-  } catch {
+  } catch (err) {
     // The projection is an optimization over rebuildable data. A schema or
     // serialization failure must not turn a correct raw answer into no answer.
+    //
+    // BUT SAY SO. This was a bare `catch {}`, and the fallback worked so well
+    // that nobody noticed the projection has NEVER committed on the owner's
+    // machine: `select count(*) from people` returns 0 while the boot log
+    // reports 4,253 people, because every start silently takes this branch and
+    // rebuilds from raw. That is the ~10s "people core warm" on every launch,
+    // and it is the whole reason the durable half of this file exists.
+    //
+    // A swallowed exception that degrades correctly is still a permanent
+    // failure wearing a working system's clothes. Once per process keeps a hot
+    // path from becoming a log flood.
+    if (!warnedProjectionFailure) {
+      warnedProjectionFailure = true;
+      console.error('people projection could not commit; falling back to raw rebuild:',
+        err?.stack ?? err);
+    }
     return buildGraph(contextDb, stateDb, { now, owner, aliases, contentSignals });
   }
   if (contentSignals) {
