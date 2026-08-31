@@ -126,6 +126,14 @@ test('the total processing estimate uses the plain approximate-hours label', () 
   assert.match(connections, /activity-estimate/u);
   assert.match(connections, /estimate\.hidden = !total/u,
     'the total is pinned in the header and hidden only when no queue exists');
+  assert.match(connections, /estimateLine\.hidden = !total/u,
+    'the explanation stays beside a real estimate and disappears with it');
+  assert.ok(connections.includes('Your Mac is importing and summarizing everything privately. More chats and years mean more time.'),
+    'the estimate explains the wait in two simple sentences');
+  assert.ok(connections.includes("'Why is this taking so long?'"),
+    'the hint icon has an accessible question');
+  assert.match(palette, /\.activity-estimate-line \.setting-hint-copy \{[\s\S]*?right: 0;/u,
+    'the right-edge hint grows inward instead of clipping');
   // The row answers TWO questions now, and each side of the merge asserted on
   // its own half of one string. Which year comes from the cross-connector
   // barrier; how many conversations replaced an ETA that could not move (it was
@@ -143,9 +151,18 @@ test('the total processing estimate uses the plain approximate-hours label', () 
     'the transport name never replaces a user-facing platform name');
 });
 
+test('activity shows current plus two queued rows and keeps the full queue scrollable', () => {
+  assert.match(palette, /\.activity-list \{[\s\S]*?max-height: 55px; overflow-y: scroll;/u,
+    'three 15px rows and two 5px gaps fit in the activity viewport');
+  assert.match(connections, /for \(const item of items\)/u,
+    'the remaining queue stays in the DOM so it can be reached by scrolling');
+  assert.doesNotMatch(connections, /items\.slice\(0, 3\)/u,
+    'the viewport, not the data, limits what is visible');
+});
+
 test('only live work says current; scheduled connectors show only future order', () => {
   assert.ok(connectors.includes('"label": "current: syncing \\(label)"'));
-  assert.ok(connectors.includes('next: \\(task.label ?? labelFor(task.connector))'));
+  assert.ok(connectors.includes('"label": "next: \\(label)"'));
   assert.doesNotMatch(connectors, /remainingFor/u,
     'a scheduled start countdown is not time remaining on current work');
   assert.ok(!connectors.includes('"current: \\(task'),

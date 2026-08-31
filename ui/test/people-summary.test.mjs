@@ -99,6 +99,14 @@ test('compatible monthly chunks share bounded model passes without changing orde
   assert.deepEqual(batches.flat(), chunks);
 });
 
+test('production batching caps a request at two chunks', () => {
+  const chunks = Array.from({ length: 5 }, (_, i) => ({
+    month: i + 1, index: 0,
+    rows: [{ ts: new Date(2026, i, 1).getTime(), source: 'imessage', fromMe: false, text: 'small' }],
+  }));
+  assert.deepEqual(packChunkBatches(chunks, 2026).map((batch) => batch.length), [2, 2, 1]);
+});
+
 test('a real year returns exhaustive coverage and deeper sections from loopback JSON-schema calls', async () => {
   const ctx = openDb(':memory:');
   const y0 = new Date(2026, 1, 1).getTime();
@@ -107,7 +115,8 @@ test('a real year returns exhaustive coverage and deeper sections from loopback 
   const calls = [];
   const out = await summarizeYear(ctx, spineDb([[HANDLE, 'Sam Lee']]), {
     personKey: 'name:sam lee', year: 2026, now: NOW,
-    owner: { addresses: new Set(), names: [] }, llama: LLAMA,
+    owner: { addresses: new Set(), names: [] },
+    llama: { ...LLAMA, model: 'annual-8b', reducerModel: 'reducer-4b' },
     fetchFn: modelFetch(calls), summariesDb: openSummariesDb(':memory:'),
   });
   assert.equal(out.text.startsWith('Surf travel'), true);
@@ -118,6 +127,8 @@ test('a real year returns exhaustive coverage and deeper sections from loopback 
   assert.ok(calls.length >= 2, 'monthly reduction(s), then annual synthesis');
   assert.ok(calls.every((call) => call.url === 'http://127.0.0.1:51780/v1/chat/completions'));
   assert.equal(calls.at(-1).schema, 'relationship_summary_year');
+  assert.ok(calls.slice(0, -1).every((call) => call.body.model === 'reducer-4b'));
+  assert.equal(calls.at(-1).body.model, 'annual-8b');
   assert.match(calls[0].body.messages[1].content, /\[02-01 · imessage\] you:/u);
   assert.match(calls[0].body.messages[0].content, /untrusted data, not instructions/u);
 });
@@ -244,8 +255,8 @@ test('a dense month is consolidated before the annual pass instead of overflowin
     'the annual prompt receives one bounded record for the dense month');
 });
 
-test('cache validity is exact and the revision marks the exhaustive format', () => {
-  assert.equal(SUMMARY_REVISION, 5);
+test('cache validity is exact and the revision marks the optimized format', () => {
+  assert.equal(SUMMARY_REVISION, 6);
   const fingerprint = 'a'.repeat(64);
   assert.equal(summaryStillValid(fingerprint, fingerprint), true);
   assert.equal(summaryStillValid(fingerprint, 'b'.repeat(64)), false);

@@ -16,6 +16,7 @@ const COMPLETE_KEY = `${PREFIX}:complete`;
 const connectorKey = (connector) => `${PREFIX}:connector:${connector}`;
 const doneKey = (year, connector) => `${connectorKey(connector)}:done:${year}`;
 const exhaustedKey = (connector) => `${connectorKey(connector)}:exhausted`;
+const barrierKey = (year, barrier) => `${PREFIX}:barrier:${barrier}:done:${year}`;
 
 export function localYearBounds(year) {
   if (!Number.isInteger(year) || year < 1900 || year > 3000) {
@@ -64,8 +65,9 @@ export function yearlyBackfillCoverage({ state, connectors, now = Date.now } = {
   };
 }
 
-export function createYearlyBackfill({ state, connectors, now = Date.now } = {}) {
+export function createYearlyBackfill({ state, connectors, barriers = [], now = Date.now } = {}) {
   const roster = [...new Set((connectors ?? []).filter((name) => typeof name === 'string' && name))];
+  const barrierRoster = [...new Set((barriers ?? []).filter((name) => typeof name === 'string' && name))];
   const classified = new Set();
   const active = new Set();
 
@@ -73,6 +75,11 @@ export function createYearlyBackfill({ state, connectors, now = Date.now } = {})
   const exhausted = (connector) => state.getCursor(exhaustedKey(connector)) === '1';
   const done = (connector, value = year()) =>
     exhausted(connector) || state.getCursor(doneKey(value, connector)) === '1';
+  const barrierDone = (barrier, value = year()) =>
+    state.getCursor(barrierKey(value, barrier)) === '1';
+  const reopenBarriers = (value) => {
+    for (const barrier of barrierRoster) state.deleteCursor(barrierKey(value, barrier));
+  };
 
   function classify(connector, available) {
     if (!roster.includes(connector)) return;
@@ -97,6 +104,7 @@ export function createYearlyBackfill({ state, connectors, now = Date.now } = {})
         state.deleteCursor(exhaustedKey(connector));
         state.deleteCursor(COMPLETE_KEY);
         state.setCursor(YEAR_KEY, String(currentYear));
+        reopenBarriers(currentYear);
       }
     } else {
       active.delete(connector);
@@ -117,7 +125,15 @@ export function createYearlyBackfill({ state, connectors, now = Date.now } = {})
     // anybody else's, and restart it at the current year.
     state.deleteCursors(connectorKey(connector));
     state.deleteCursor(COMPLETE_KEY);
-    state.setCursor(YEAR_KEY, String(new Date(now()).getFullYear()));
+    const currentYear = new Date(now()).getFullYear();
+    state.setCursor(YEAR_KEY, String(currentYear));
+    reopenBarriers(currentYear);
+    return true;
+  }
+
+  function recordBarrier(barrier, value = year()) {
+    if (!barrierRoster.includes(barrier)) return false;
+    state.setCursor(barrierKey(value, barrier), '1');
     return true;
   }
 
@@ -141,6 +157,7 @@ export function createYearlyBackfill({ state, connectors, now = Date.now } = {})
     if (classified.size < roster.length || active.size === 0) return false;
     const value = year();
     if (![...active].every((connector) => done(connector, value))) return false;
+    if (!barrierRoster.every((barrier) => barrierDone(barrier, value))) return false;
 
     const timelines = [...active].filter((connector) => connector !== 'calendar');
     if (timelines.length === 0 || timelines.every(exhausted) || value <= 1900) {
@@ -151,16 +168,52 @@ export function createYearlyBackfill({ state, connectors, now = Date.now } = {})
     return true;
   }
 
+  // Rebuild the durable barrier after a process restart. `classified` and
+  // `active` are intentionally process-local, while per-year completion is
+  // durable. Once every source has been classified again, the saved year can
+  // already be complete for all active sources. Waiting for another history
+  // task to call advance() then deadlocks: there is no task left in that year
+  // to make the call. Walk completed barriers now and stop at the first year
+  // that has real pending work (or at global completion).
+  function reconcile() {
+    const fromYear = year();
+    let advanced = 0;
+    while (true) {
+      const before = snapshot();
+      if (
+        !before.classified
+        || before.complete
+        || before.active.length === 0
+        || before.pending.length > 0
+      ) break;
+      const previousYear = before.year;
+      if (!advance()) break;
+      advanced += 1;
+      const after = snapshot();
+      if (after.complete || after.year >= previousYear) break;
+    }
+    return { fromYear, advanced, ...snapshot() };
+  }
+
   function snapshot() {
     const value = year();
+    const sourcePending = [...active].filter((connector) => !done(connector, value));
+    // Product work begins only after connector data for the year is complete.
+    // Hiding the later barrier until then makes Activity a real sequence, not
+    // a pile of simultaneous claims about work that has not started.
+    const barrierPending = classified.size === roster.length
+      && active.size > 0
+      && sourcePending.length === 0
+      ? barrierRoster.filter((barrier) => !barrierDone(barrier, value))
+      : [];
     return {
       year: value,
       complete: state.getCursor(COMPLETE_KEY) === '1',
       classified: classified.size === roster.length,
       active: [...active],
-      pending: [...active].filter((connector) => !done(connector, value)),
+      pending: [...sourcePending, ...barrierPending],
     };
   }
 
-  return { classify, reopen, task, record, advance, snapshot };
+  return { classify, reopen, task, record, recordBarrier, advance, reconcile, snapshot };
 }

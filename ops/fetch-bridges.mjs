@@ -35,7 +35,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -255,7 +255,16 @@ export async function fetchBridges({
   return { platform: manifest.platform, results };
 }
 
-const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+// pathToFileURL matters in the shipped app: its path is "Intaglio Labs.app".
+// Comparing import.meta.url with a hand-built `file://${argv}` leaves the
+// space unescaped, so the CLI body silently never runs and setup reports a
+// successful fetch with no binaries on disk.
+export function isMainModule(metaUrl, argvPath) {
+  return typeof argvPath === 'string' && argvPath.length > 0
+    && metaUrl === pathToFileURL(argvPath).href;
+}
+
+const isMain = isMainModule(import.meta.url, process.argv[1]);
 if (isMain) {
   const args = process.argv.slice(2);
   const valueOf = (flag) => {

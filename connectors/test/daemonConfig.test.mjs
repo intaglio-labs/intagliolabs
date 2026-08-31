@@ -4,6 +4,8 @@ import {
   CONNECTOR_HERMES_SOURCE,
   CONNECTOR_NAMES,
   DEFAULT_DISABLED_CONNECTORS,
+  observePortalJoinRate,
+  portalJoinMsPerRoom,
   RETENTION_SOURCES,
   sourceRetryDelay,
   validateConfig,
@@ -103,6 +105,22 @@ test('a source can request a bounded urgent retry without changing its normal in
   assert.equal(sourceRetryDelay({ nextDelayMs: 900_000 }, 900_000), 60_000);
   assert.equal(sourceRetryDelay({ nextDelayMs: 500 }, 900_000), 900_000);
   assert.equal(sourceRetryDelay({}, 900_000), 900_000);
+});
+
+test('portal join ETA uses measured wall-clock throughput and ignores downtime', () => {
+  const cursors = new Map();
+  const state = {
+    getCursor: (key) => cursors.get(key),
+    setCursor: (key, value) => cursors.set(key, value),
+  };
+  assert.equal(observePortalJoinRate(state, 400, 1_000_000, 15_000), 15_000,
+    'the first rate-limited pass can show an immediate provisional ETA');
+  assert.equal(observePortalJoinRate(state, 399, 1_012_000), 13_500);
+  assert.equal(observePortalJoinRate(state, 397, 1_032_000), 12_000,
+    'median smooths the provisional, one-room, and two-room rates');
+  assert.equal(portalJoinMsPerRoom(state), 12_000);
+  assert.equal(observePortalJoinRate(state, 396, 1_332_000), 12_000,
+    'a long app pause is not counted as processing time');
 });
 
 test('a Matrix purge covers every bridged Hermes source and totals the response', async () => {

@@ -175,10 +175,61 @@ new MutationObserver(() => {
 const notice = document.getElementById('notice');
 const settings = document.getElementById('settings');
 
+let settingHintSerial = 0;
+
+// A small, keyboard-accessible explanation. CSS reveals it on hover/focus;
+// click pins it until another click, Escape, or an outside press. The copy is
+// textContent only.
+function infoHint(copy, ariaLabel) {
+  const wrap = document.createElement('span');
+  wrap.className = 'setting-hint';
+  const button = document.createElement('button');
+  button.className = 'setting-hint-icon';
+  button.type = 'button';
+  button.textContent = '?';
+  button.setAttribute('aria-label', ariaLabel);
+  button.setAttribute('aria-expanded', 'false');
+  const tip = document.createElement('span');
+  tip.className = 'setting-hint-copy';
+  tip.id = `setting-hint-${settingHintSerial += 1}`;
+  tip.setAttribute('role', 'tooltip');
+  tip.textContent = copy;
+  button.setAttribute('aria-describedby', tip.id);
+
+  const close = () => {
+    wrap.classList.remove('open');
+    button.setAttribute('aria-expanded', 'false');
+  };
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const open = !wrap.classList.contains('open');
+    document.querySelectorAll('.setting-hint.open').forEach((other) => {
+      other.classList.remove('open');
+      other.querySelector('.setting-hint-icon')?.setAttribute('aria-expanded', 'false');
+    });
+    wrap.classList.toggle('open', open);
+    button.setAttribute('aria-expanded', String(open));
+  });
+  button.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') close();
+  });
+  document.addEventListener('click', (event) => {
+    if (!wrap.contains(event.target)) close();
+  });
+  wrap.append(button, tip);
+  return wrap;
+}
+
+// Setting hints share one question; other surfaces can use infoHint with an
+// accessible label that actually matches what their icon explains.
+function settingHint(label, copy) {
+  return infoHint(copy, `Why leave ${label} on?`);
+}
+
 // One row per setting: a name, a line of context, and a switch. Generic
 // because there are two of them now and they differ only in wording, in which
 // bridge message they send, and in whether they are shown at all.
-function settingRow({ name, note, on, message }) {
+function settingRow({ name, note, hint, on, message }) {
   const el = document.createElement('div');
   el.className = 'setting';
 
@@ -187,7 +238,11 @@ function settingRow({ name, note, on, message }) {
   const label = document.createElement('span');
   label.className = 'setting-name';
   label.textContent = name;
-  text.appendChild(label);
+  const labelLine = document.createElement('span');
+  labelLine.className = 'setting-label-line';
+  labelLine.appendChild(label);
+  if (hint) labelLine.appendChild(settingHint(name, hint));
+  text.appendChild(labelLine);
   // The note is optional now — both switch rows shed theirs (owner,
   // 2026-08-25): "Reduce Motion is on for this Mac" and "presses, sending
   // and replies" explained controls whose names already say it.
@@ -306,75 +361,65 @@ function rangeRow({ name, note, value, min, max, step, message, format }) {
   return el;
 }
 
-// The answer model is a Settings choice, not an onboarding gate. Fresh installs
-// default to the roughly 5 GB tier; this row keeps the smaller option available
-// for a Mac that needs less memory.
-function modelRow() {
+// One explicit performance switch replaces the old implicit charger/thermal
+// policy. On is God Mode; off is Battery Saver. Both keep processing — only
+// concurrency, batch size and QoS change.
+function performanceRow(selected) {
   const el = document.createElement('div');
-  el.className = 'setting setting-col model-setting';
-  const head = document.createElement('div');
-  head.className = 'setting-head';
+  el.className = 'setting performance-setting';
+
+  const text = document.createElement('div');
+  text.className = 'setting-text';
   const name = document.createElement('span');
   name.className = 'setting-name';
-  name.textContent = 'local model size';
-  // The corner GB readout was yeeted (owner, 2026-08-25): the highlighted
-  // tier button says the same thing one line lower.
-  head.append(name);
-  const choices = document.createElement('div');
-  choices.className = 'model-pick';
-  const status = document.createElement('span');
-  status.className = 'setting-note model-status';
-  const bar = document.createElement('span');
-  bar.className = 'model-progress';
-  el.append(head, choices, bar, status);
+  name.textContent = 'performance';
+  const labelLine = document.createElement('span');
+  labelLine.className = 'setting-label-line';
+  labelLine.append(name, settingHint(
+    'performance',
+    'God Mode uses this Mac’s safe maximum so imports and summaries finish sooner. Leave it selected unless you need to conserve battery.'
+  ));
+  text.append(labelLine);
 
-  // The bar and the status line have nothing to say until a download is in
-  // flight, but they still held their height (and their flex gaps) under the
-  // tier buttons on every visit to Settings. Route every status write through
-  // here so .busy — which is what gives them their height back — can never
-  // drift out of sync with whether there is actually text to show.
-  const say = (text) => {
-    status.textContent = text;
-    el.classList.toggle('busy', text !== '');
-  };
+  const control = document.createElement('div');
+  control.className = 'performance-toggle';
+  const modeLabel = document.createElement('span');
+  modeLabel.className = 'performance-mode-label';
+  modeLabel.setAttribute('aria-live', 'polite');
+  const sw = document.createElement('button');
+  sw.className = 'switch';
+  sw.type = 'button';
+  sw.setAttribute('role', 'switch');
+  const knob = document.createElement('span');
+  knob.className = 'knob';
+  sw.appendChild(knob);
 
-  let state = null;
-  const gb = (bytes) => `${(bytes / 1e9).toFixed(1)} GB`;
-  function paint() {
-    if (!state) return;
-    const active = state.model || '';
-    choices.replaceChildren();
-    for (const tier of state.tiers || []) {
-      const b = document.createElement('button');
-      b.className = 'model-pick-button' + (tier.id === active ? ' on' : '');
-      b.textContent = `${tier.label} · ${gb(tier.bytes)}`;
-      b.title = tier.detail;
-      b.addEventListener('click', () => {
-        say(tier.id === active ? 'already selected' : 'starting download…');
-        bar.style.width = tier.id === active ? '100%' : '0%';
-        hzPost('modelDownload', { tier: tier.id }).catch(() => {
-          say('could not start the download');
-        });
-      });
-      choices.appendChild(b);
-    }
-  }
-  window.__hzSetup = (d) => {
-    if (!d || typeof d !== 'object') return;
-    if (d.phase === 'downloading' && d.total > 0) {
-      bar.style.width = `${Math.min(100, (d.got / d.total) * 100)}%`;
-      say(`${gb(d.got)} of ${gb(d.total)}`);
-    } else if (d.phase === 'installing') {
-      bar.style.width = '100%';
-      say('starting the local engine…');
-    } else if (d.phase === 'ready') {
-      say('ready');
-      hzPost('setupState').then((next) => { state = next; paint(); }).catch(() => {});
-    } else if (d.phase === 'failed') {
-      say(d.error || 'download failed');
-    }
+  let active = selected === 'battery_saver' ? 'battery_saver' : 'god_mode';
+  const paint = () => {
+    const godMode = active === 'god_mode';
+    modeLabel.textContent = godMode ? 'god mode' : 'battery saver';
+    sw.classList.toggle('on', godMode);
+    sw.setAttribute('aria-checked', String(godMode));
+    sw.setAttribute('aria-label', `Performance: ${godMode ? 'God Mode' : 'Battery Saver'}`);
+    sw.title = godMode ? 'God Mode is on' : 'Battery Saver is on';
   };
-  hzPost('setupState').then((next) => { state = next; paint(); }).catch(() => {});
+  sw.addEventListener('click', async () => {
+    const previous = active;
+    const requested = active === 'god_mode' ? 'battery_saver' : 'god_mode';
+    active = requested;
+    paint();
+    try {
+      const response = await hzPost('setPerformance', { mode: requested });
+      active = response && response.performance === requested ? requested : previous;
+    } catch {
+      active = previous;
+    }
+    paint();
+  });
+  paint();
+  control.append(modeLabel, sw);
+
+  el.append(text, control);
   return el;
 }
 
@@ -392,7 +437,14 @@ function activityRow() {
   const estimate = document.createElement('span');
   estimate.className = 'activity-estimate';
   estimate.hidden = true;
-  head.append(name, estimate);
+  const estimateLine = document.createElement('span');
+  estimateLine.className = 'activity-estimate-line';
+  estimateLine.hidden = true;
+  estimateLine.append(estimate, infoHint(
+    'Your Mac is importing and summarizing everything privately. More chats and years mean more time.',
+    'Why is this taking so long?'
+  ));
+  head.append(name, estimateLine);
   const list = document.createElement('div');
   list.className = 'activity-list';
   el.append(head, list);
@@ -402,9 +454,10 @@ function activityRow() {
     const total = data && typeof data.estimate === 'string' ? data.estimate.trim() : '';
     estimate.textContent = total;
     estimate.hidden = !total;
+    estimateLine.hidden = !total;
     const latestItems = data && Array.isArray(data.items) ? data.items : [];
-    // The queue is always visible: the first row is current and the remaining
-    // real scheduled work follows in order. Seven rows fit; more scroll here.
+    // The queue stays intact: the first row is current and the remaining real
+    // scheduled work follows in order. Current + next two fit; more scroll here.
     const active = latestItems.filter((item) => item && item.kind !== 'queue');
     const queued = latestItems.filter((item) => item && item.kind === 'queue');
     const items = [...active, ...queued];
@@ -419,6 +472,7 @@ function activityRow() {
         const row = document.createElement('div');
         row.className = 'activity-item';
         if (item.kind === 'backfill') row.classList.add('activity-backfill');
+        if (item.kind === 'queue') row.classList.add('activity-queue');
         const dot = document.createElement('span');
         dot.className = 'activity-dot';
         const text = document.createElement('span');
@@ -528,6 +582,13 @@ async function renderSettings() {
     on: !p || p.sounds !== false,
     message: 'setSounds',
   }));
+  rows.push(settingRow({
+    name: 'keep mac awake',
+    hint: 'Keeps imports and summaries moving while you step away, so they finish sooner. It still allows manual sleep and lid-close.',
+    on: p && p.keepAwake === true,
+    message: 'setKeepAwake',
+  }));
+  rows.push(performanceRow(p && p.performance));
   // The size slider was yeeted (owner, 2026-08-24): everything runs at 100%.
   // Native's setScale plumbing survives untouched, so a stored non-1 scale
   // from the slider era is snapped back to 1 here — without the control, a
@@ -535,7 +596,6 @@ async function renderSettings() {
   if (p && typeof p.scale === 'number' && Math.abs(p.scale - 1) > 0.001) {
     hzPost('setScale', { scale: 1 }).catch(() => {});
   }
-  rows.push(modelRow());
   rows.push(activityRow());
   // The onboarding row was yeeted (owner, 2026-08-25): ~~a `run` pill that
   // replayed the welcome flow~~. Settings is where you change what the app
@@ -1450,8 +1510,19 @@ function card(src, keep) {
     // newest bot line is the error and the question is one line behind it.
     // Treat both shapes as one pending prompt so closing/reopening the card —
     // or retrying a wrong X Chat passcode — never turns into a fresh login.
-    const pendingQuestion = () => askedFor()
-      || (RETRYABLE.test(botSaid() || '') ? lastQuestion() : null);
+    const pendingQuestion = () => {
+      // The local service knows which bridge prompts its fenced web login
+      // fulfils automatically. In particular LinkedIn's bot asks for cookies
+      // or a copied cURL command; that is an implementation detail, never a
+      // form the person should see. Preserve the local parser only for an old
+      // service during an app update.
+      if (data && Object.prototype.hasOwnProperty.call(data, 'pendingQuestion')) {
+        return typeof data.pendingQuestion === 'string' && data.pendingQuestion.trim()
+          ? data.pendingQuestion.trim()
+          : null;
+      }
+      return askedFor() || (RETRYABLE.test(botSaid() || '') ? lastQuestion() : null);
+    };
     const xPasscodeStep = () => kindOf(src.id) === 'twitter'
       && /\b(pin|passcode)\b/iu.test(pendingQuestion() || '');
     const xPasscodeCopy = () => (/\bcreate\b/iu.test(pendingQuestion() || '')

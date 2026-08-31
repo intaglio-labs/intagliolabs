@@ -155,10 +155,13 @@ test('a login window may leave the platform only for that platform\'s own SSO', 
   // an empty fence here it was cancelled and the page rendered nothing
   // (2026-08-30). Pinned explicitly rather than asserted empty, so the next
   // addition is a decision somebody makes rather than a test somebody deletes.
-  assert.deepEqual(frames.messenger, ['facebook.com', 'fbsbx.com', 'meta.com']);
+  assert.deepEqual(frames.messenger,
+    ['facebook.com', 'fbsbx.com', 'meta.com', 'www.google.com', 'www.recaptcha.net']);
   assert.deepEqual(frames.instagram,
     ['facebook.com', 'fbsbx.com', 'instagram.com', 'meta.com']);
-  const framed = new Set(['slack', 'messenger', 'instagram']);
+  assert.deepEqual(frames.linkedin,
+    ['li.protechts.net', 'www.google.com']);
+  const framed = new Set(['slack', 'messenger', 'instagram', 'linkedin']);
   for (const [id, hosts] of Object.entries(frames)) {
     if (!framed.has(id)) assert.deepEqual(hosts, [], `${id}: a frame fence with no challenge behind it`);
   }
@@ -370,6 +373,23 @@ test('the Meta platforms may embed Meta content in a subframe', () => {
   }
 });
 
+test('Messenger keeps reCAPTCHA and failure recovery inside the app', () => {
+  const web = PLATFORMS.messenger.webLogin;
+  assert.ok(web.allowedFrameHosts.includes('www.google.com'),
+    'Meta security verification cannot render without its reCAPTCHA frame');
+  assert.equal(web.browserHandoff, false,
+    'an external browser has a different cookie jar and cannot finish this login');
+});
+
+test('Messenger uses mautrix-meta\'s Facebook-cookie flow after the real Meta login', () => {
+  const messenger = PLATFORMS.messenger;
+  assert.equal(messenger.initial, 'login facebook');
+  assert.equal(messenger.loginUrl, 'https://www.facebook.com/login/');
+  assert.equal(messenger.cookieDomain, 'facebook.com');
+  assert.equal(messenger.webLogin.sessionCookie, 'xs');
+  assert.deepEqual(messenger.webLogin.requiredCookies, ['xs', 'c_user', 'datr']);
+});
+
 test('a subframe allowance is never a main-frame allowance', () => {
   // The fence exists because the main frame is where a password is typed. A
   // sandbox host must not become somewhere the window can navigate TO.
@@ -377,5 +397,10 @@ test('a subframe allowance is never a main-frame allowance', () => {
     const w = PLATFORMS[id].webLogin;
     assert.ok(!w.allowedHosts.includes('fbsbx.com'),
       `${id} must not accept fbsbx.com as a main-frame destination`);
+  }
+  const linkedin = PLATFORMS.linkedin.webLogin;
+  for (const host of linkedin.allowedFrameHosts) {
+    assert.ok(!linkedin.allowedHosts.includes(host),
+      `LinkedIn challenge host ${host} must remain subframe-only`);
   }
 });

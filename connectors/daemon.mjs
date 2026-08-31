@@ -33,6 +33,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runChecks } from './lib/checks.mjs';
 import {
   DEFAULT_HERMES_BASE_URL,
+  adminCompletePeopleYear,
   adminDeleteEntities,
   adminEntities,
   adminMaintain,
@@ -101,6 +102,72 @@ export function sourceRetryDelay(result, intervalMs) {
   return Number.isFinite(result?.nextDelayMs) && result.nextDelayMs >= 1_000
     ? Math.min(60_000, Math.floor(result.nextDelayMs))
     : intervalMs;
+}
+
+export function remainingWorkLabel(milliseconds) {
+  const ms = Number(milliseconds);
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  const minutes = Math.max(1, Math.ceil(ms / 60_000));
+  if (minutes < 60) {
+    const rounded = Math.max(5, Math.ceil(minutes / 5) * 5);
+    return `~ ${rounded} min left`;
+  }
+  const tenths = Math.max(1, Math.round(ms / 360_000));
+  return `~ ${(tenths / 10).toFixed(1)} hrs left`;
+}
+
+const PORTAL_JOIN_SAMPLE_KEY = 'matrix:portal-join-rate-sample';
+
+function median(values) {
+  const ordered = [...values].sort((a, b) => a - b);
+  if (ordered.length === 0) return null;
+  const middle = Math.floor(ordered.length / 2);
+  return ordered.length % 2 === 1
+    ? ordered[middle]
+    : (ordered[middle - 1] + ordered[middle]) / 2;
+}
+
+// Measure what the queue actually does on this machine. Matrix may join many
+// rooms in one burst or admit one and rate-limit the next, so neither the raw
+// queue length nor the retry timer is a completion forecast. Wall-clock change
+// between bounded passes is. Counts and timestamps only; no room identifiers.
+export function observePortalJoinRate(state, pending, observedTs, seedMsPerRoom = null) {
+  if (!Number.isInteger(pending) || pending < 0 || !Number.isFinite(observedTs)) return null;
+  let previous = null;
+  try { previous = JSON.parse(state.getCursor(PORTAL_JOIN_SAMPLE_KEY) ?? 'null'); } catch {}
+  const samples = Array.isArray(previous?.samples)
+    ? previous.samples.filter((n) => Number.isFinite(n) && n >= 1_000 && n <= 120_000).slice(-7)
+    : [];
+  // The first pass has no previous wall-clock sample. If that pass was rate
+  // limited, its server-authored retry delay is a useful initial per-room
+  // estimate; the rolling wall-clock median replaces it on following passes.
+  if (samples.length === 0 && Number.isFinite(seedMsPerRoom)
+      && seedMsPerRoom >= 1_000 && seedMsPerRoom <= 120_000) {
+    samples.push(seedMsPerRoom);
+  }
+  if (Number.isInteger(previous?.pending) && pending < previous.pending) {
+    const elapsed = observedTs - Number(previous.ts);
+    const joined = previous.pending - pending;
+    const msPerRoom = elapsed / joined;
+    // Ignore app downtime and clock jumps. The next live pair will replace the
+    // baseline one pass later instead of poisoning an hours-long estimate.
+    if (elapsed >= 1_000 && elapsed <= 120_000 && msPerRoom >= 1_000 && msPerRoom <= 120_000) {
+      samples.push(msPerRoom);
+    }
+  }
+  state.setCursor(PORTAL_JOIN_SAMPLE_KEY, JSON.stringify({ pending, ts: observedTs, samples }));
+  return median(samples);
+}
+
+export function portalJoinMsPerRoom(state) {
+  try {
+    const saved = JSON.parse(state.getCursor(PORTAL_JOIN_SAMPLE_KEY) ?? 'null');
+    return median((saved?.samples ?? []).filter(
+      (n) => Number.isFinite(n) && n >= 1_000 && n <= 120_000
+    ));
+  } catch {
+    return null;
+  }
 }
 
 // Connector name → the hermes `source` its rows land under. Oura is the
@@ -718,6 +785,7 @@ export function createDaemon({
   // live activity snapshot at ~/.hazlie/connectors/activity.json.
   activityPath = defaultActivityPath(),
   now = Date.now,
+  completePeopleYear = adminCompletePeopleYear,
 }) {
   const timers = new Set();
   const nextRuns = new Map();
@@ -735,9 +803,31 @@ export function createDaemon({
   // a needs() that is slow or throws can never silently empty the queue.
   const notReady = new Map();
   let stopped = false;
+  const peopleBarrierEnabled = typeof completePeopleYear === 'function'
+    && typeof ingestOpts?.tokenFile === 'string';
   const historyRoster = sources.filter((source) => source.walksHistory === true)
     .map((source) => source.name);
-  const yearlyBackfill = createYearlyBackfill({ state, connectors: historyRoster, now });
+  // Install the product-level barrier once. Existing connector year receipts
+  // remain useful, so an upgrade rewinds to the current year without re-fetching
+  // it: only People profiles/summaries run before the older connector walk
+  // resumes. Years and booleans only—no corpus state enters the cursor store.
+  const peopleBarrierVersionKey = 'yearly-backfill:people-barrier-version';
+  if (peopleBarrierEnabled && state.getCursor(peopleBarrierVersionKey) !== '1') {
+    const currentYear = new Date(now()).getFullYear();
+    state.deleteCursor('yearly-backfill:complete');
+    state.deleteCursor(`yearly-backfill:barrier:people:done:${currentYear}`);
+    state.setCursor('yearly-backfill:year', String(currentYear));
+    state.setCursor(peopleBarrierVersionKey, '1');
+  }
+  const yearlyBackfill = createYearlyBackfill({
+    state,
+    connectors: historyRoster,
+    barriers: peopleBarrierEnabled ? ['people'] : [],
+    now,
+  });
+  let peopleCompletion = null;
+  let peopleGateTimer = null;
+  let peopleGateRunning = false;
 
   // The settings queue is derived from the scheduler itself, not guessed from
   // a polling interval in the UI. Keep every queued source in chronological
@@ -787,6 +877,36 @@ export function createDaemon({
     const yearly = yearlyBackfill.snapshot();
     const backfill = yearly.pending;
     let backfillRooms = 0;
+    // Portal discovery is finite work with a real remaining count. Its retry
+    // timer is not an ETA, but its observed wall-clock throughput is: a short
+    // rolling median absorbs Meta/Synapse's one-room bursts and rate limits.
+    const portalInvitesPending = matrixHistoryRooms(
+      state.getCursor('matrix:pending-portal-invites')
+    );
+    const portalMsPerRoom = portalJoinMsPerRoom(state);
+    if (portalInvitesPending > 0 && portalMsPerRoom) {
+      completionTimes.push(nowMs + portalInvitesPending * portalMsPerRoom);
+    }
+
+    // People summaries have a real finite workload: bounded message chunks
+    // plus one annual synthesis per eligible person. Hermes refines the count
+    // to exact chunks as each person starts, while the daemon only receives
+    // aggregate units and milliseconds. This is the current YEAR's horizon,
+    // not the recurring connector retry timer it replaces in the header.
+    const peopleRemainingMs = Number(peopleCompletion?.estimatedRemainingMs);
+    const peopleEstimate = backfill.includes('people')
+      ? remainingWorkLabel(peopleRemainingMs)
+      : null;
+    if (peopleEstimate) {
+      return {
+        estimate: peopleEstimate,
+        backfill,
+        backfillRooms,
+        portalInvitesPending,
+        peopleCompletion,
+        ...(!yearly.complete && portalInvitesPending === 0 ? { backfillYear: yearly.year } : {}),
+      };
+    }
 
     if (backfill.includes('calendar')) {
       const ceiling = positiveNumber(
@@ -803,7 +923,7 @@ export function createDaemon({
       completionTimes.push(first + Math.max(0, passes - 1) * intervalMsFor('calendar'));
     }
 
-    // MATRIX CONTRIBUTES NO ETA, ONLY A COUNT.
+    // MATRIX HISTORY CONTRIBUTES NO ETA, ONLY A COUNT.
     //
     // It used to compute `minimumPasses = ceil(rooms / pagesPerPass)` and render
     // the result as an ETA. With 9 rooms and a rate of 11 that is ceil(9/11) = 1,
@@ -841,9 +961,17 @@ export function createDaemon({
     // A count with no estimate is still worth publishing: it is the difference
     // between "something is happening to 9 conversations" and a silent panel.
     if (completionTimes.length === 0) {
-      return backfill.length === 0
+      return backfill.length === 0 && portalInvitesPending === 0
         ? null
-        : { backfill, backfillRooms, ...(!yearly.complete ? { backfillYear: yearly.year } : {}) };
+        : {
+            backfill,
+            backfillRooms,
+            portalInvitesPending,
+            ...(peopleCompletion ? { peopleCompletion } : {}),
+            ...(!yearly.complete && portalInvitesPending === 0
+              ? { backfillYear: yearly.year }
+              : {}),
+          };
     }
     const completion = Math.max(...completionTimes);
     const tenthsOfAnHour = Math.max(1, Math.round((completion - nowMs) / 360_000));
@@ -856,7 +984,9 @@ export function createDaemon({
       estimate: `~ ${(tenthsOfAnHour / 10).toFixed(1)} hrs left`,
       backfill,
       backfillRooms,
-      ...(!yearly.complete ? { backfillYear: yearly.year } : {}),
+      portalInvitesPending,
+      ...(peopleCompletion ? { peopleCompletion } : {}),
+      ...(!yearly.complete && portalInvitesPending === 0 ? { backfillYear: yearly.year } : {}),
     };
   };
   const publishActivity = (activity) => {
@@ -867,6 +997,64 @@ export function createDaemon({
     const next = scheduledQueue()[0];
     if (next) publishActivity({ phase: 'waiting', ...next });
   };
+
+  const peopleGateReady = () => {
+    const snapshot = yearlyBackfill.snapshot();
+    return !snapshot.complete
+      && snapshot.pending.length === 1
+      && snapshot.pending[0] === 'people';
+  };
+
+  function schedulePeopleGate(delayMs = 0) {
+    if (!peopleBarrierEnabled || stopped || peopleGateRunning || peopleGateTimer || !peopleGateReady()) return;
+    const timer = setTimeout(async () => {
+      timers.delete(timer);
+      if (peopleGateTimer === timer) peopleGateTimer = null;
+      if (stopped || !peopleGateReady()) return;
+      peopleGateRunning = true;
+      const year = yearlyBackfill.snapshot().year;
+      let retryDelayMs = null;
+      try {
+        const result = await completePeopleYear({ year }, ingestOpts);
+        peopleCompletion = {
+          year: result.year,
+          state: result.state,
+          profiles: result.profiles,
+          summariesTotal: result.summariesTotal,
+          summariesComplete: result.summariesComplete,
+          summariesSkipped: result.summariesSkipped,
+          summariesPending: result.summariesPending,
+          workUnitsTotal: result.workUnitsTotal,
+          workUnitsComplete: result.workUnitsComplete,
+          estimatedRemainingMs: result.estimatedRemainingMs,
+        };
+        if (result.complete === true) {
+          yearlyBackfill.recordBarrier('people', year);
+          yearlyBackfill.advance();
+          peopleCompletion = null;
+        }
+        publishWaiting();
+        if (result.complete !== true) {
+          retryDelayMs = Math.max(5_000, Math.min(60_000, Number(result.retryAfterMs) || 15_000));
+        }
+      } catch (error) {
+        log.warn('people_year_completion_failed', {
+          year,
+          error: safeErrorFingerprint(error),
+        });
+        publishWaiting();
+        retryDelayMs = 30_000;
+      } finally {
+        peopleGateRunning = false;
+        // A completed receipt can reveal that the next older year already has
+        // connector receipts from a pre-upgrade run. Start its People phase
+        // immediately instead of waiting for a source's next 15-minute tick.
+        if (!stopped && peopleGateReady()) schedulePeopleGate(retryDelayMs ?? 0);
+      }
+    }, delayMs);
+    peopleGateTimer = timer;
+    timers.add(timer);
+  }
 
   const admin = {
     retain: (args) => adminRetain(args, ingestOpts),
@@ -940,6 +1128,7 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
     if (existsSync(disableMarkerPath(source.name))) {
       yearlyBackfill.classify(source.name, false);
       yearlyBackfill.advance();
+      schedulePeopleGate();
       log.info('source_disabled', { connector: source.name });
       return;
     }
@@ -950,6 +1139,7 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
     if (Array.isArray(missing) && missing.length > 0) {
       yearlyBackfill.classify(source.name, false);
       yearlyBackfill.advance();
+      schedulePeopleGate();
       // Not a failure: an unprovisioned source waits, loudly, and is
       // re-checked next cycle. recordRun stays clean of noise runs.
       notReady.set(source.name, missing);
@@ -978,6 +1168,16 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
       // The forward pass first, always: what arrived since last time is more
       // urgent than what happened in 2019, and history must never delay it.
       const forward = (await source.run(makeCtx())) ?? {};
+      if (source.name === 'matrix' && Number.isInteger(forward.historyDiscoveryPending)) {
+        observePortalJoinRate(
+          state,
+          forward.historyDiscoveryPending,
+          now(),
+          forward.historyDiscoveryPending > 0 && forward.historyDiscoveryJoined > 0
+            ? forward.retryAfterMs
+            : null
+        );
+      }
       // Sources may discover short-lived local work that should not wait for
       // their ordinary polling interval. Matrix uses this after Synapse rate-
       // limits a portal-join recovery pass. The source supplies only a bounded
@@ -997,7 +1197,14 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
       // forward pass already succeeded and its counts are real; history is
       // catch-up work that retries on the next interval regardless.
       const historyWindow = yearlyBackfill.task(source.name);
-      if (source.walksHistory === true && historyWindow) {
+      // Matrix discovers one portal room per conversation. During a large
+      // first-run invite backlog, starting yearly history immediately means
+      // each newly joined room invalidates the traversal that just ran:
+      // 2026→2025→2024→2026, over and over. Forward sync still lands every new
+      // event; only the backwards walk waits until the finite discovery queue
+      // reaches zero, then runs once across the complete room roster.
+      const historyDiscoveryPending = Number(forward.historyDiscoveryPending) > 0;
+      if (source.walksHistory === true && historyWindow && !historyDiscoveryPending) {
         // A TIME BUDGET, not a row count.
         //
         // One slice per cycle is too slow to be useful: 2,000 rows against a
@@ -1028,6 +1235,7 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
             if (rawBack.historyDone === true) {
               yearlyBackfill.record(source.name, rawBack);
               yearlyBackfill.advance();
+              schedulePeopleGate();
               break;
             }
             // A sparse calendar can have an empty historical year while still
@@ -1206,9 +1414,38 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
       // call it once up front. Failures leave the source ABSENT from the map,
       // which shows it: unknown must never read as unprovisioned.
       Promise.allSettled(scheduledSources.map(async (source) => {
+        // Match runSource's first gate. A manually disabled history source is
+        // unavailable for the barrier even if all of its ordinary credentials
+        // remain present.
+        if (existsSync(disableMarkerPath(source.name))) {
+          yearlyBackfill.classify(source.name, false);
+          return;
+        }
         const missing = await source.needs({ config });
-        if (Array.isArray(missing) && missing.length > 0) notReady.set(source.name, missing);
-      })).then(() => publishWaiting());
+        if (Array.isArray(missing) && missing.length > 0) {
+          notReady.set(source.name, missing);
+          yearlyBackfill.classify(source.name, false);
+          return;
+        }
+        const socialPlatforms = source.name === 'matrix' ? connectedSocialPlatforms() : [];
+        yearlyBackfill.classify(
+          source.name,
+          source.walksHistory === true
+            && (source.name !== 'matrix' || socialPlatforms.length > 0)
+        );
+      })).then(() => {
+        const recovery = yearlyBackfill.reconcile();
+        if (recovery.advanced > 0) {
+          log.info('history_restart_reconciled', {
+            fromYear: recovery.fromYear,
+            toYear: recovery.year,
+            barriers: recovery.advanced,
+            complete: recovery.complete,
+          });
+        }
+        schedulePeopleGate();
+        publishWaiting();
+      });
 
       scheduledSources.forEach((source, i) => scheduleSource(source, 1_000 + i * FIRST_RUN_STAGGER_MS));
       scheduleMaintenance();
@@ -1225,6 +1462,7 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
       stopped = true;
       for (const timer of timers) clearTimeout(timer);
       timers.clear();
+      peopleGateTimer = null;
     },
   };
 }

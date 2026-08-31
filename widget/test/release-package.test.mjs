@@ -75,6 +75,17 @@ test('the Telegram API hash never reaches the process table', () => {
     'the Telegram API hash reaches sed over stdin rather than through process arguments');
 });
 
+test('the Telegram sed program contains real command separators', () => {
+  const formats = [...setupBridges.matchAll(
+    /^\s*printf '([^']+)' "\$TG_(?:ID|HASH)"$/gmu
+  )].map((match) => match[1]);
+  assert.equal(formats.length, 2, 'expected one private sed command per Telegram credential field');
+  for (const format of formats) {
+    assert.ok(format.endsWith('/\\n'), 'printf must turn \\n into a command-separating newline');
+    assert.ok(!format.endsWith('/\\\\n'), 'a literal \\n makes macOS sed reject the program');
+  }
+});
+
 test('bridge setup requests maximum available history on every supported lane', () => {
   for (const key of [
     'max_initial_messages',

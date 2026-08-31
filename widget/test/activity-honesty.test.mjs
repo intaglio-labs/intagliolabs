@@ -39,6 +39,24 @@ test('it reports a count of conversations instead', () => {
   assert.match(daemon, /backfillRooms,/u, 'and include it in the published object');
 });
 
+test('portal discovery is counted and suppresses the blocked year', () => {
+  assert.match(daemon, /portalInvitesPending = matrixHistoryRooms/u);
+  assert.match(daemon, /portalInvitesPending === 0[\s\S]*?backfillYear/u,
+    'a year label may appear only after portal discovery finishes');
+  assert.match(connectors, /raw\["portalInvitesPending"\] as\? Int/u);
+  assert.ok(connectors.includes('"label": "importing \\(portalInvitesPending) chat'),
+    'the activity row must name the finite work actually underway');
+});
+
+test('People is a year-completion phase, not a fake connector fetch', () => {
+  assert.ok(connectors.includes('"building \\($0) people profiles"'));
+  assert.ok(connectors.includes('"\\($0) profiles ready · summarizing \\(pending) person'));
+  assert.ok(connectors.includes('return "finishing \\(year) people"'));
+  assert.doesNotMatch(connectors, /fetching \\?\(.*people/u);
+  assert.match(daemon, /remainingWorkLabel\(peopleRemainingMs/u,
+    'the current People year must publish its aggregate remaining-work ETA');
+});
+
 test('a backfill with no estimate is still published', () => {
   // Otherwise removing the false ETA would have made the panel go silent, which
   // is a worse answer to "how do I know it is working" than a wrong number.
@@ -48,7 +66,7 @@ test('a backfill with no estimate is still published', () => {
   // loosened — this assertion exists to catch the return going silent.
   assert.match(
     daemon,
-    /\? null\s*\n\s*: \{ backfill, backfillRooms, \.\.\.\(!yearly\.complete \? \{ backfillYear: yearly\.year \} : \{\}\) \}/u,
+    /backfill\.length === 0 && portalInvitesPending === 0\s*\n\s*\? null/u,
     'work with no knowable end must still surface, and still name its year'
   );
 });
