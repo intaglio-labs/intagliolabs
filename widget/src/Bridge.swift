@@ -1104,7 +1104,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         items.append(["kind": "index", "label": label])
       }
       var activity: [String: Any] = ["state": "ok", "items": items]
-      if let estimate = Connectors.shared.activityEstimate {
+      if let estimate = Connectors.shared.activityEstimate
+        ?? Connectors.shared.activityScheduleEstimate {
         activity["estimate"] = estimate
       }
       reply(webView, id, activity)

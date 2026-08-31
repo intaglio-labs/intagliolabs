@@ -150,13 +150,12 @@ final class Connectors {
     let queue = scheduledActivityTasks(raw)
     for task in queue {
       // A scheduled time is when work STARTS, not work happening now and not a
-      // duration. Name the countdown explicitly: a bare "next: calendar" was
-      // drawn with the live-work dot and read as a job that had been stuck for
-      // days, even when the daemon was simply waiting for its normal poll.
+      // duration. The one countdown belongs in the Activity header; repeating
+      // it on every row made a single schedule look like many stalled jobs.
       let label = task.label ?? labelFor(task.connector)
       items.append([
         "kind": "queue",
-        "label": "next check: \(label) · \(scheduledDelayLabel(task.nextTs, now: now))",
+        "label": "next: \(label)",
       ])
     }
 
@@ -166,7 +165,7 @@ final class Connectors {
        raw["phase"] as? String == "waiting",
        let connector = raw["connector"] as? String {
       let label = raw["label"] as? String ?? labelFor(connector)
-      items.append(["kind": "queue", "label": "next check: \(label)"])
+      items.append(["kind": "queue", "label": "next: \(label)"])
     }
     return items
   }
@@ -188,6 +187,18 @@ final class Connectors {
   var activityEstimate: String? {
     guard let raw = activitySnapshot else { return nil }
     return normalizedActivityEstimate(raw)
+  }
+
+  /// The next recurring connector run, rendered once in Activity's header.
+  /// This is deliberately not called "time left": routine polling never
+  /// finishes, while a genuine finite backfill has activityEstimate above.
+  var activityScheduleEstimate: String? {
+    guard let raw = activitySnapshot else { return nil }
+    let now = Date().timeIntervalSince1970 * 1000
+    guard let next = scheduledActivityTasks(raw)
+      .filter({ $0.connector != "maintenance" })
+      .first else { return nil }
+    return "next run \(scheduledDelayLabel(next.nextTs, now: now))"
   }
 
   /// Keeps the ambient processing state continuous between bounded connector
