@@ -8,6 +8,7 @@ import {
   materializedPeopleGraph,
   projectionState,
   refreshPeopleProjection,
+  resolveIdentifierClaims,
 } from '../server/people/projection.mjs';
 
 const NOW = Date.UTC(2027, 0, 1, 12);
@@ -254,4 +255,59 @@ test('a failed replacement rolls back to the last good projection and search fal
 
   const fallback = materializedPeopleGraph(db, spine, { now: NOW, owner: owner() });
   assert.equal(fallback[0].received, 2, 'a projection failure does not cost the current raw answer');
+});
+
+// AN AMBIGUOUS IDENTIFIER MUST NOT DISABLE THE PROJECTION.
+//
+// person_identifiers.identifier is UNIQUE. When identity resolution handed the
+// same handle to two person keys, insertPeople threw "UNIQUE constraint failed",
+// replaceProjection rolled back, and materializedPeopleGraph's bare `catch {}`
+// silently fell back to a raw rebuild — forever. On the owner's machine, 2
+// collisions out of 5,682 identifiers meant `people` sat at 0 rows for the life
+// of the install while the boot log reported thousands, and every launch paid
+// ~10s rebuilding what the table exists to avoid. After the fix: 5,339 rows, and
+// the warm path went from ~10s to 77ms.
+//
+// TESTED AS A PURE FUNCTION, deliberately. The first version of this test drove
+// the real writer with a fixture built to look like the owner's collision — and
+// passed identically with the guard REMOVED, because the fixture never actually
+// produced one. Provoking a collision through insertRows needs the resolution
+// rules to cooperate; asserting on the resolution itself needs nothing.
+test('two people claiming one identifier: the second loses the identifier, not the projection', () => {
+  const graph = [
+    { key: 'name:shared person', identifiers: ['handle-a', 'shared-handle'] },
+    { key: 'id:shared@example.test', identifiers: ['shared-handle', 'handle-b'] },
+  ];
+  const { keep, collisions } = resolveIdentifierClaims(graph);
+
+  assert.deepEqual(keep.get('name:shared person'), ['handle-a', 'shared-handle'],
+    'the first claimant keeps it');
+  assert.deepEqual(keep.get('id:shared@example.test'), ['handle-b'],
+    'the second loses only the contested identifier, not its own');
+  assert.equal(collisions.length, 1, 'and the collision is reported, not swallowed');
+  assert.deepEqual(collisions[0],
+    { identifier: 'shared-handle', kept: 'name:shared person', dropped: 'id:shared@example.test' });
+
+  // The UNIQUE constraint that used to be fatal must now be satisfiable.
+  const all = [...keep.values()].flat();
+  assert.equal(new Set(all).size, all.length, 'no identifier is claimed twice');
+});
+
+test('a clean graph is untouched and reports nothing', () => {
+  const graph = [
+    { key: 'a', identifiers: ['x', 'y'] },
+    { key: 'b', identifiers: ['z'] },
+  ];
+  const { keep, collisions } = resolveIdentifierClaims(graph);
+  assert.equal(collisions.length, 0);
+  assert.deepEqual(keep.get('a'), ['x', 'y']);
+  assert.deepEqual(keep.get('b'), ['z']);
+});
+
+test('one person repeating an identifier is not a collision with itself', () => {
+  const { keep, collisions } = resolveIdentifierClaims([
+    { key: 'a', identifiers: ['x', 'x', 'y'] },
+  ]);
+  assert.equal(collisions.length, 0, 'a duplicate within one person is just a duplicate');
+  assert.deepEqual(keep.get('a'), ['x', 'y']);
 });
