@@ -31,6 +31,7 @@ final class Distiller {
   private var process: Process?
   private var timer: Timer?
   private var stopping = false
+  private var modelMaintenancePaused = false
   private var rebuildingIndex = false
 
   /// Rows per pass. Small enough that a pass finishes in a visible amount of time
@@ -96,7 +97,7 @@ final class Distiller {
 
   /// Begin supervising. Safe to call repeatedly.
   func start() {
-    guard timer == nil, !stopping else { return }
+    guard timer == nil, !stopping, !modelMaintenancePaused else { return }
     PowerBudget.startWatching()
     // Re-decide the moment the owner changes performance mode rather than
     // serving out an interval chosen under the old setting.
@@ -109,6 +110,20 @@ final class Distiller {
     schedule(after: 20) // let hermes and llama-server settle first
   }
 
+  /// Paired with Connectors' maintenance hold. Called only after activity is
+  /// idle, so invalidating the next timer never interrupts a running summary.
+  func pauseForModelMaintenance() {
+    modelMaintenancePaused = true
+    timer?.invalidate()
+    timer = nil
+  }
+
+  func resumeAfterModelMaintenance() {
+    guard modelMaintenancePaused, !stopping else { return }
+    modelMaintenancePaused = false
+    start()
+  }
+
   func stop() {
     stopping = true
     timer?.invalidate()
@@ -119,7 +134,7 @@ final class Distiller {
 
   private func schedule(after seconds: TimeInterval) {
     timer?.invalidate()
-    guard !stopping else { return }
+    guard !stopping, !modelMaintenancePaused else { return }
     let t = Timer(timeInterval: seconds, repeats: false) { [weak self] _ in self?.runOnce() }
     RunLoop.main.add(t, forMode: .common)
     timer = t

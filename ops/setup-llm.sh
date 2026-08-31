@@ -23,7 +23,7 @@
 # Qwen3-8B is the original HYBRID-thinking model, not a non-thinking instruct.
 # It also cannot complete a first decode on the target 8 GB M2: Metal exhausts
 # unified memory even with one slot and smaller batches. The default is now the
-# roughly 5 GB 8B model; 4B remains available as an explicit override.
+# roughly 5 GB 8B model on a capable Mac; lower-powered Macs receive 4B.
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -45,6 +45,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # decode.
 HOST_MEMORY_BYTES="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
 HOST_CORES="$(sysctl -n hw.logicalcpu 2>/dev/null || echo 0)"
+HOST_GPU_CORES="$(ioreg -r -c AGXAccelerator -l 2>/dev/null |
+  awk -F'= ' '/"gpu-core-count"/ { gsub(/[^0-9]/, "", $2); print $2; exit }')"
+HOST_GPU_CORES="${HOST_GPU_CORES:-0}"
 PROFILE_ID="compact"
 LLAMA_CTX_SIZE=32768
 LLAMA_PARALLEL=1
@@ -53,21 +56,23 @@ LLAMA_UBATCH_SIZE=128
 LLAMA_MODELS_MAX=1
 SUMMARY_CONCURRENCY=1
 DUAL_MODEL_SUMMARIES=0
+AUTO_MODEL_TIER=4b
 if command -v node >/dev/null 2>&1; then
   IFS=$'\t' read -r PROFILE_ID LLAMA_CTX_SIZE LLAMA_PARALLEL LLAMA_BATCH_SIZE \
-    LLAMA_UBATCH_SIZE LLAMA_MODELS_MAX SUMMARY_CONCURRENCY DUAL_MODEL_SUMMARIES <<<"$(
+    LLAMA_UBATCH_SIZE LLAMA_MODELS_MAX SUMMARY_CONCURRENCY DUAL_MODEL_SUMMARIES \
+    AUTO_MODEL_TIER <<<"$(
       node "$SCRIPT_DIR/inference-profile.mjs" --memory-bytes "$HOST_MEMORY_BYTES" \
-        --cores "$HOST_CORES" --tsv
+        --cores "$HOST_CORES" --gpu-cores "$HOST_GPU_CORES" --tsv
     )"
 fi
-echo "    inference profile: $PROFILE_ID (${HOST_MEMORY_BYTES} bytes RAM, ${HOST_CORES} cores)"
+echo "    inference profile: $PROFILE_ID (${HOST_MEMORY_BYTES} bytes RAM, ${HOST_CORES} CPU cores, ${HOST_GPU_CORES} GPU cores)"
 MODEL_TIER_REQUEST="${HAZLIE_MODEL_TIER:-auto}"
 case "$MODEL_TIER_REQUEST" in
   auto)
-    if (( HOST_MEMORY_BYTES > 0 && HOST_MEMORY_BYTES <= 12884901888 )); then
-      MODEL_TIER="4B 2507 instruct (default for host RAM)"
+    if [[ "$AUTO_MODEL_TIER" == "4b" ]]; then
+      MODEL_TIER="4B 2507 instruct (default for host hardware)"
     else
-      MODEL_TIER="8B hybrid-thinking (default)"
+      MODEL_TIER="8B hybrid-thinking (default for host hardware)"
     fi
     ;;
   4b) MODEL_TIER="4B 2507 instruct (explicit override)" ;;

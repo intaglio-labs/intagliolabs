@@ -55,9 +55,55 @@ enum ModelSetup {
     ),
   ]
 
-  // Default to the roughly 5 GB model. The smaller tier remains available as
-  // an explicit choice from Settings for machines that need it.
-  static var recommended: String { "8b" }
+  // Model QUALITY follows the machine, never the battery/performance toggle.
+  // The shared profile considers RAM plus CPU and (when macOS publishes it)
+  // GPU cores. setup-llm.sh consumes the same profile file.
+  static var recommended: String { InferenceTuning.selected().modelTier }
+
+  // Which hardware/app revision the automatic choice was last reconciled on.
+  // Existing manually-selected installs are adopted once, not immediately
+  // replaced by the migration that removes the picker. A later hardware/app
+  // change re-evaluates them and may stage the newly appropriate tier.
+  private static let automaticFingerprintKey = "HazlieAutomaticModelFingerprintV1"
+
+  private static var automaticFingerprint: String {
+    let machine = MachineCapabilities.current
+    let info = Bundle.main.infoDictionary ?? [:]
+    let version = info["CFBundleShortVersionString"] as? String ?? "unknown"
+    let build = info["CFBundleVersion"] as? String ?? "unknown"
+    let source = info["HZSourceCommit"] as? String ?? "unknown"
+    return [
+      "policy-1", String(machine.memoryBytes), String(machine.cpuCores),
+      String(machine.gpuCores), version, build, source,
+    ].joined(separator: "|")
+  }
+
+  /// The tier an automatic launch-time reconciliation should stage, if any.
+  /// A missing model is automatic only after onboarding has completed; the
+  /// first-run CTA owns the initial multi-gigabyte fetch.
+  static func automaticTarget(allowFreshInstall: Bool) -> String? {
+    let defaults = UserDefaults.standard
+    let fingerprint = automaticFingerprint
+    guard let current = installed else {
+      return allowFreshInstall ? recommended : nil
+    }
+    guard let previous = defaults.string(forKey: automaticFingerprintKey) else {
+      // Migration from the old manual picker: respect what is already active,
+      // then let the next real hardware/app change re-evaluate it.
+      defaults.set(fingerprint, forKey: automaticFingerprintKey)
+      return nil
+    }
+    guard previous != fingerprint else { return nil }
+    guard current.id != recommended else {
+      defaults.set(fingerprint, forKey: automaticFingerprintKey)
+      return nil
+    }
+    return recommended
+  }
+
+  static func markAutomaticSelectionCurrent() {
+    UserDefaults.standard.set(automaticFingerprint, forKey: automaticFingerprintKey)
+  }
 
   /// The download outlives its screen — onboarding moves on after a few
   /// seconds and the fetch keeps going — so the ending has to find the owner
@@ -274,6 +320,33 @@ enum ModelSetup {
     try fm.createSymbolicLink(atPath: link.path, withDestinationPath: tier.file)
     try? tier.file.write(to: modelDir.appendingPathComponent("active-model.txt"),
                          atomically: true, encoding: .utf8)
+  }
+
+  /// Activate weights that were downloaded with activate=false. Automatic
+  /// upgrades use this only after the processing queues are idle, so a large
+  /// fetch can happen in the background without changing the model underneath
+  /// work already in flight.
+  static func activate(tierId: String) throws {
+    guard let tier = tiers.first(where: { $0.id == tierId }) else {
+      throw NSError(domain: "io.intaglio.model", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "unknown model"])
+    }
+    let path = modelDir.appendingPathComponent(tier.file)
+    guard fm.fileExists(atPath: path.path) else {
+      throw NSError(domain: "io.intaglio.model", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "model is not downloaded"])
+    }
+    try link(tier)
+  }
+
+  /// Undo activation when an automatic first install cannot start its engine.
+  /// The verified weights stay cached, so the next attempt hashes and reuses
+  /// them instead of downloading gigabytes again.
+  static func deactivate(tierId: String) {
+    guard installed?.id == tierId else { return }
+    let link = modelDir.appendingPathComponent("model.gguf")
+    try? fm.removeItem(at: link)
+    try? fm.removeItem(at: modelDir.appendingPathComponent("active-model.txt"))
   }
 
   /// Streamed so a 4.7 GB file is never held in memory.

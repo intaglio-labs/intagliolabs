@@ -292,14 +292,15 @@ window.__hzRehome = () => {
 document.getElementById('homeDone').addEventListener('click', () => finish());
 
 // ---------------- flow ----------------
-// Welcome -> demo -> home spotlight. Connections and model choice live in Settings.
+// Welcome -> demo -> home spotlight. The model is selected from this Mac's
+// hardware; there is no setup question whose answer the app can measure.
 document.getElementById('cta').addEventListener('click', () => {
   hzSfx.wake();
-  // Fresh installs use the roughly 5 GB model without interrupting the welcome
-  // flow. An existing choice is respected; changing it lives in Settings.
-  hzPost('setupState', { rows: true }).then((st) => {
+  // Fresh installs fetch the hardware-selected tier without interrupting the
+  // welcome flow. An installed model is never replaced here.
+  hzPost('setupState').then((st) => {
     if (st && !st.model && !st.downloading) {
-      hzPost('modelDownload', { tier: '8b' }).catch(() => {});
+      hzPost('modelDownload', {}).catch(() => {});
     }
   }).catch(() => {});
   showScreen(2);

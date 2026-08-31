@@ -417,78 +417,6 @@ function performanceRow(selected) {
   return el;
 }
 
-// The answer model is a Settings choice, not an onboarding gate. Fresh installs
-// default to the roughly 5 GB tier; this row keeps the smaller option available
-// for a Mac that needs less memory.
-function modelRow() {
-  const el = document.createElement('div');
-  el.className = 'setting setting-col model-setting';
-  const head = document.createElement('div');
-  head.className = 'setting-head';
-  const name = document.createElement('span');
-  name.className = 'setting-name';
-  name.textContent = 'local model size';
-  // The corner GB readout was yeeted (owner, 2026-08-25): the highlighted
-  // tier button says the same thing one line lower.
-  head.append(name);
-  const choices = document.createElement('div');
-  choices.className = 'model-pick';
-  const status = document.createElement('span');
-  status.className = 'setting-note model-status';
-  const bar = document.createElement('span');
-  bar.className = 'model-progress';
-  el.append(head, choices, bar, status);
-
-  // The bar and the status line have nothing to say until a download is in
-  // flight, but they still held their height (and their flex gaps) under the
-  // tier buttons on every visit to Settings. Route every status write through
-  // here so .busy — which is what gives them their height back — can never
-  // drift out of sync with whether there is actually text to show.
-  const say = (text) => {
-    status.textContent = text;
-    el.classList.toggle('busy', text !== '');
-  };
-
-  let state = null;
-  const gb = (bytes) => `${(bytes / 1e9).toFixed(1)} GB`;
-  function paint() {
-    if (!state) return;
-    const active = state.model || '';
-    choices.replaceChildren();
-    for (const tier of state.tiers || []) {
-      const b = document.createElement('button');
-      b.className = 'model-pick-button' + (tier.id === active ? ' on' : '');
-      b.textContent = `${tier.label} · ${gb(tier.bytes)}`;
-      b.title = tier.detail;
-      b.addEventListener('click', () => {
-        say(tier.id === active ? 'already selected' : 'starting download…');
-        bar.style.width = tier.id === active ? '100%' : '0%';
-        hzPost('modelDownload', { tier: tier.id }).catch(() => {
-          say('could not start the download');
-        });
-      });
-      choices.appendChild(b);
-    }
-  }
-  window.__hzSetup = (d) => {
-    if (!d || typeof d !== 'object') return;
-    if (d.phase === 'downloading' && d.total > 0) {
-      bar.style.width = `${Math.min(100, (d.got / d.total) * 100)}%`;
-      say(`${gb(d.got)} of ${gb(d.total)}`);
-    } else if (d.phase === 'installing') {
-      bar.style.width = '100%';
-      say('starting the local engine…');
-    } else if (d.phase === 'ready') {
-      say('ready');
-      hzPost('setupState').then((next) => { state = next; paint(); }).catch(() => {});
-    } else if (d.phase === 'failed') {
-      say(d.error || 'download failed');
-    }
-  };
-  hzPost('setupState').then((next) => { state = next; paint(); }).catch(() => {});
-  return el;
-}
-
 // A small live view of work this app is ACTUALLY doing. It intentionally does
 // not call a connector "active" just because its daemon is running: only model
 // bytes in flight and app-owned indexing/distillation phases appear here.
@@ -654,7 +582,6 @@ async function renderSettings() {
   if (p && typeof p.scale === 'number' && Math.abs(p.scale - 1) > 0.001) {
     hzPost('setScale', { scale: 1 }).catch(() => {});
   }
-  rows.push(modelRow());
   rows.push(activityRow());
   // The onboarding row was yeeted (owner, 2026-08-25): ~~a `run` pill that
   // replayed the welcome flow~~. Settings is where you change what the app

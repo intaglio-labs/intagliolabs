@@ -29,6 +29,7 @@ final class Connectors {
 
   private var process: Process?
   private var stopping = false
+  private var modelMaintenancePaused = false
   private var lastStart = Date.distantPast
   /// Matches the ThrottleInterval the launchd agent used to carry, for the same
   /// reason: a daemon that fails instantly should not be respawned in a tight
@@ -329,7 +330,7 @@ final class Connectors {
   /// Start the daemon if it is not already up and its config exists. Safe to
   /// call repeatedly — onboarding calls it the moment it writes the config.
   func start(bypassingThrottle: Bool = false) {
-    guard !isRunning, !stopping else { return }
+    guard !isRunning, !stopping, !modelMaintenancePaused else { return }
     let node = home.appendingPathComponent(".hazlie/bin/node")
     let script = backend.appendingPathComponent("connectors/daemon.mjs")
     let config = home.appendingPathComponent(".hazlie/connectors/config.json")
@@ -418,13 +419,28 @@ final class Connectors {
   /// the daemon until the app was relaunched. Which is the very restart this
   /// exists to make unnecessary.
   func restart() {
-    guard !stopping else { return }
+    guard !stopping, !modelMaintenancePaused else { return }
     guard let p = process, p.isRunning else {
       start() // not up: nothing to replace, and start() is idempotent
       return
     }
     NSLog("Intaglio Labs: respawning connectors to pick up a new grant")
     p.terminate()
+  }
+
+  /// Automatic model replacement is allowed only between connector jobs. Once
+  /// that idle point is reached, hold the always-running daemon so its next
+  /// scheduled check cannot begin halfway through a multi-gigabyte download.
+  func pauseForModelMaintenance() {
+    modelMaintenancePaused = true
+    process?.terminate()
+    process = nil
+  }
+
+  func resumeAfterModelMaintenance() {
+    guard modelMaintenancePaused, !stopping else { return }
+    modelMaintenancePaused = false
+    start(bypassingThrottle: true)
   }
 
   /// Called on quit. Terminate rather than leave an orphan holding cursors and

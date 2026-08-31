@@ -308,8 +308,8 @@ test('Google OAuth opens in the system browser, never an embedded webview', () =
 
 test('Settings mounts its controls without the retired memory-review row', () => {
   assert.match(connections, /rows\.push\(settingRow\(/u);
-  assert.match(connections, /rows\.push\(modelRow\(\)\)/u);
   assert.match(connections, /settings\.replaceChildren\(\.\.\.rows\)/u);
+  assert.doesNotMatch(connections, /modelRow|local model size|model-pick/u);
   assert.doesNotMatch(connections, /actionRow|what i have learned|openMemoryReview/u);
   assert.doesNotMatch(swift, /openMemoryReview/u);
 });
@@ -560,12 +560,10 @@ test('Calendar and Contacts status follows their frameworks, not obsolete databa
 
 // The Settings panel must not wait on the network to say what is on disk.
 //
-// setupState carries two kinds of fact: local ones (the installed model tier, the
-// voice tree, the static tier list) and one remote one (hermes' row count, an
-// HTTP call). Bundling them meant the panel's "local model size" row waited for
-// hermes — which is single-threaded and blocks for its whole boot warm, so the
-// call timed out at 4s and the answer arrived seconds late despite having been on
-// disk the entire time.
+// setupState carries two kinds of fact: local ones (the installed model and
+// voice tree) and one remote one (hermes' row count, an HTTP call). The welcome
+// CTA needs only the local answer to start the automatic model fetch; the old
+// picker made that action wait on hermes for no reason.
 test('setupState answers from disk immediately, and fetches rows only when asked', () => {
   const block = /case "setupState":([\s\S]*?)case "modelDownload":/u.exec(swift)?.[1];
   assert.ok(block, 'setupState case not found');
@@ -578,12 +576,13 @@ test('setupState answers from disk immediately, and fetches rows only when asked
   assert.match(block, /rows \{ n, memory in/u, 'the row count is still available on request');
 });
 
-test('only the onboarding scenes pay for the row count', () => {
+test('only onboarding code that reads rows pays for the row count', () => {
   const onboarding = readFileSync(join(WIDGET, 'ui/onboarding.js'), 'utf8');
   const connections = readFileSync(join(WIDGET, 'ui/connections.js'), 'utf8');
-  assert.ok(
-    !/hzPost\('setupState'\)/u.test(onboarding),
-    'onboarding reads rows/memory, so every call there must ask for them'
+  assert.match(
+    onboarding,
+    /document\.getElementById\('cta'\)[\s\S]{0,260}hzPost\('setupState'\)/u,
+    'the welcome CTA must start model selection from the instant local state'
   );
   assert.match(onboarding, /hzPost\('setupState', \{ rows: true \}\)/u);
   assert.ok(
