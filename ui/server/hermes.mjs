@@ -81,15 +81,13 @@ import {
   clearSummariesStorage,
   isSummarySource,
   MIN_ROWS as SUMMARY_MIN_ROWS,
+  pickWarmSet,
   readCachedSummary,
   summariesDbPath,
   summarizeYear,
 } from './people/summary.mjs';
 import { mayWarmInBackground } from './people/power.mjs';
-// How many people one year-open may warm ahead of being asked for. The list
-// arrives in engagement rank; past the head it is speculation with a battery
-// cost attached.
-const WARM_AHEAD = 12;
+
 import { SummaryQueue } from './people/summaryQueue.mjs';
 import { resolutionState } from './people/resolve.mjs';
 import { rankAcrossYears } from './people/find.mjs';
@@ -4065,10 +4063,11 @@ async function handlePeople(db, req, res, cors, url, policy) {
       .filter((person) => Number(person.messages ?? 0) >= SUMMARY_MIN_ROWS);
     mayWarmInBackground().then((may) => {
       if (!may || warmable.length === 0) return;
-      policy.peopleSummaryManager.queue.enqueue(
-        warmable.slice(0, WARM_AHEAD).map((person) => ({ key: person.key, year })),
-        { priority: 1 },
-      );
+      // Bounded by COST, not headcount — see pickWarmSet, which owns the caps
+      // and is exported so the tests exercise it rather than a copy.
+      const picked = pickWarmSet(warmable, year);
+      if (picked.length === 0) return;
+      policy.peopleSummaryManager.queue.enqueue(picked, { priority: 1 });
     }).catch(() => {});
     send(res, 200, out, cors);
     return;

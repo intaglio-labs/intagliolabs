@@ -175,6 +175,64 @@ function rowLine(row) {
 }
 
 // Every input row appears in exactly one output chunk, in chronological order.
+// WHAT WARMING A PERSON WILL COST, BEFORE COMMITTING TO IT.
+//
+// The summary path is priced in chunks: each becomes part of a batch prompt,
+// and BATCH_CHAR_CAP packs those to 80,000 characters -- about 27,600 tokens
+// against llama-server's 32,768 context. Measured 2026-08-30 on the owner's
+// machine: a 28,160-token batch took 148s of solid GPU at ~190 tok/s, and
+// summary_chunks advanced by exactly one every 90 seconds for two and a quarter
+// hours. So a chunk is roughly a minute and a half, and a person with 12,000
+// messages is twenty of them.
+//
+// A ROW COUNT IS A FLOOR, NOT AN ANSWER. chunkRows splits on whichever of
+// charCap and rowCap it reaches first, so a person with long messages produces
+// more chunks than this predicts. That is the right direction for a budget --
+// it under-promises and the real work is bounded by the budget anyway -- but it
+// is why this is named estimate and not count.
+export function estimateChunks(messages, { rowCap = CHUNK_ROW_CAP } = {}) {
+  const rows = Number(messages ?? 0);
+  if (!Number.isFinite(rows) || rows <= 0) return 0;
+  return Math.max(1, Math.ceil(rows / rowCap));
+}
+
+// HOW MUCH SPECULATIVE WARMING ONE PAGE-OPEN MAY BUY.
+//
+// Lives here, beside the caps it prices against, and is exported so the tests
+// exercise the real selection rather than a copy of it -- this branch has had
+// seven tests that matched something adjacent to the code they meant.
+//
+// The three limits stop three different failures. WARM_AHEAD bounds headcount.
+// personChunkCap keeps one heavy relationship from eating the whole budget, and
+// those are exactly the ones worth skipping: slowest to build, no more likely
+// to be opened than anyone else on the page. chunkBudget bounds the page-open
+// itself. Headcount alone was the bug -- twelve people is modest until one of
+// them is worth twenty chunks at ninety seconds each.
+export const WARM_AHEAD = 12;
+export const WARM_PERSON_CHUNK_CAP = 4;
+export const WARM_CHUNK_BUDGET = 12;
+
+export function pickWarmSet(people, year, {
+  ahead = WARM_AHEAD,
+  personChunkCap = WARM_PERSON_CHUNK_CAP,
+  chunkBudget = WARM_CHUNK_BUDGET,
+} = {}) {
+  const picked = [];
+  let spent = 0;
+  for (const person of people ?? []) {
+    if (picked.length >= ahead || spent >= chunkBudget) break;
+    const cost = estimateChunks(person?.messages);
+    if (cost === 0 || cost > personChunkCap) continue;
+    // `continue`, not `break`: the list is in engagement rank, and a cheap
+    // person further down is still worth warming after an expensive one is
+    // skipped. Breaking here would let a single whale truncate the whole set.
+    if (spent + cost > chunkBudget) continue;
+    picked.push({ key: person.key, year });
+    spent += cost;
+  }
+  return picked;
+}
+
 export function chunkRows(rows, { charCap = CHUNK_CHAR_CAP, rowCap = CHUNK_ROW_CAP } = {}) {
   const months = new Map();
   for (const row of rows) {
