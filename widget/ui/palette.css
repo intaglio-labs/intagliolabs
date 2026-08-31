@@ -2341,6 +2341,17 @@ body.onboarding .orb-blob.bc { filter: blur(10px); }
   color: var(--hazelnut-light); font-size: 10px; letter-spacing: 0.08em;
   font-variant-numeric: tabular-nums; white-space: nowrap; text-transform: uppercase;
 }
+.activity-estimate-line { display: inline-flex; align-items: center; gap: 5px; }
+.activity-estimate-line[hidden] { display: none; }
+/* The estimate sits on the card's right edge, so its hint grows inward. */
+.activity-estimate-line .setting-hint-copy {
+  left: auto; right: 0; transform: translate(0, -2px);
+}
+.activity-estimate-line .setting-hint:hover .setting-hint-copy,
+.activity-estimate-line .setting-hint:focus-within .setting-hint-copy,
+.activity-estimate-line .setting-hint.open .setting-hint-copy {
+  transform: translate(0, 0);
+}
 .activity-list { display: flex; flex-direction: column; gap: 5px; min-height: 15px; }
 /* Three 15px task lines plus two 5px gaps: current + next two. The scheduler
    can carry more, but the rest remains reachable by scrolling. */

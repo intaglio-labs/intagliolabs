@@ -126,6 +126,14 @@ test('the total processing estimate uses the plain approximate-hours label', () 
   assert.match(connections, /activity-estimate/u);
   assert.match(connections, /estimate\.hidden = !total/u,
     'the total is pinned in the header and hidden only when no queue exists');
+  assert.match(connections, /estimateLine\.hidden = !total/u,
+    'the explanation stays beside a real estimate and disappears with it');
+  assert.ok(connections.includes('Your Mac is importing and summarizing everything privately. More chats and years mean more time.'),
+    'the estimate explains the wait in two simple sentences');
+  assert.ok(connections.includes("'Why is this taking so long?'"),
+    'the hint icon has an accessible question');
+  assert.match(palette, /\.activity-estimate-line \.setting-hint-copy \{[\s\S]*?right: 0;/u,
+    'the right-edge hint grows inward instead of clipping');
   // The row answers TWO questions now, and each side of the merge asserted on
   // its own half of one string. Which year comes from the cross-connector
   // barrier; how many conversations replaced an ETA that could not move (it was

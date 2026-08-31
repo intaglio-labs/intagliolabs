@@ -177,17 +177,17 @@ const settings = document.getElementById('settings');
 
 let settingHintSerial = 0;
 
-// A small, keyboard-accessible explanation beside a setting label. CSS reveals
-// it on hover/focus; click pins it until another click, Escape, or an outside
-// press. The copy is textContent only.
-function settingHint(label, copy) {
+// A small, keyboard-accessible explanation. CSS reveals it on hover/focus;
+// click pins it until another click, Escape, or an outside press. The copy is
+// textContent only.
+function infoHint(copy, ariaLabel) {
   const wrap = document.createElement('span');
   wrap.className = 'setting-hint';
   const button = document.createElement('button');
   button.className = 'setting-hint-icon';
   button.type = 'button';
   button.textContent = '?';
-  button.setAttribute('aria-label', `Why leave ${label} on?`);
+  button.setAttribute('aria-label', ariaLabel);
   button.setAttribute('aria-expanded', 'false');
   const tip = document.createElement('span');
   tip.className = 'setting-hint-copy';
@@ -218,6 +218,12 @@ function settingHint(label, copy) {
   });
   wrap.append(button, tip);
   return wrap;
+}
+
+// Setting hints share one question; other surfaces can use infoHint with an
+// accessible label that actually matches what their icon explains.
+function settingHint(label, copy) {
+  return infoHint(copy, `Why leave ${label} on?`);
 }
 
 // One row per setting: a name, a line of context, and a switch. Generic
@@ -431,7 +437,14 @@ function activityRow() {
   const estimate = document.createElement('span');
   estimate.className = 'activity-estimate';
   estimate.hidden = true;
-  head.append(name, estimate);
+  const estimateLine = document.createElement('span');
+  estimateLine.className = 'activity-estimate-line';
+  estimateLine.hidden = true;
+  estimateLine.append(estimate, infoHint(
+    'Your Mac is importing and summarizing everything privately. More chats and years mean more time.',
+    'Why is this taking so long?'
+  ));
+  head.append(name, estimateLine);
   const list = document.createElement('div');
   list.className = 'activity-list';
   el.append(head, list);
@@ -441,6 +454,7 @@ function activityRow() {
     const total = data && typeof data.estimate === 'string' ? data.estimate.trim() : '';
     estimate.textContent = total;
     estimate.hidden = !total;
+    estimateLine.hidden = !total;
     const latestItems = data && Array.isArray(data.items) ? data.items : [];
     // The queue stays intact: the first row is current and the remaining real
     // scheduled work follows in order. Current + next two fit; more scroll here.
