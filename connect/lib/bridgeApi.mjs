@@ -59,6 +59,22 @@ export function pendingBridgeQuestion(transcript) {
   return null;
 }
 
+// A bridge question is not automatically a question for the person. Cookie
+// bridges begin by asking their Matrix bot for cookies or a copied cURL
+// command; the app fulfils that step from its fenced login window, so exposing
+// it as a text box is both confusing and needlessly invites secrets through
+// the clipboard. X's encrypted-DM passcode is the one known post-browser step.
+// Bridges without a web login (Telegram/Discord) remain bot conversations and
+// keep their questions unchanged.
+export function pendingUserQuestion(platformId, transcript) {
+  const question = pendingBridgeQuestion(transcript);
+  if (!question) return null;
+  const platform = PLATFORMS[platformId];
+  if (!platform?.webLogin) return question;
+  if (platformId === 'twitter' && /\b(pin|passcode)\b/iu.test(question)) return question;
+  return null;
+}
+
 export async function bridgeApiResponse({
   method,
   subpath = '',
@@ -104,7 +120,7 @@ export async function bridgeApiResponse({
         // "resume a live passcode" and "open a fresh login" into one tile
         // request instead of making the UI perform a preliminary status call
         // whose row can be replaced by the panel's focus refresh.
-        pendingQuestion: pendingBridgeQuestion(transcript),
+        pendingQuestion: pendingUserQuestion(platformId, transcript),
         // For the widget's in-app (Beeper-style) login: where to point the
         // embedded webview, and which domain's cookies to harvest once the user
         // has logged in there. loginUrl prefers the bot's own "Login URL:" line.
@@ -145,6 +161,10 @@ export async function bridgeApiResponse({
         // is typed and a widget is not a destination — BridgeLogin enforces the
         // split, this file authors it.
         allowedFrameHosts: platform.webLogin?.allowedFrameHosts ?? null,
+        // Some sites can complete a refused embedded step on the connect page.
+        // Messenger cannot: the browser's cookies are not the app webview's
+        // cookies, so its fallback is an in-app retry instead.
+        browserHandoff: platform.webLogin?.browserHandoff !== false,
         // A platform that refuses the default browser string gets its own.
         // Server-authored like the rest of this policy — Swift enforces it.
         userAgent: platform.webLogin?.userAgent ?? null,

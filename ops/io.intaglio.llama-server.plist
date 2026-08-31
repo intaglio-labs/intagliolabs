@@ -11,8 +11,9 @@
 
   Flags, against llama-server build 10360, checked 2026-08-11. (An XML comment
   cannot contain a double hyphen, so flags are named bare here.)
-    model.gguf         a symlink kept by setup-llm.sh, so swapping models never
-                       touches this file.
+    models-dir/max     an owner-only directory of verified model symlinks. The
+                       router can keep the 4B reducer and 8B final model loaded
+                       together only on the machine profiles that can afford it.
     jinja              model chat template via the jinja engine. Default-enabled
                        in this build; stated explicitly because the JSON-schema
                        envelope depends on it.
@@ -69,29 +70,31 @@
   <key>ProgramArguments</key>
   <array>
     <string>/opt/homebrew/bin/llama-server</string>
-    <string>-m</string>
-    <string>@HOME@/.hazlie/models/model.gguf</string>
+    <string>--models-dir</string>
+    <string>@HOME@/.hazlie/models/router</string>
+    <string>--models-max</string>
+    <string>@LLAMA_MODELS_MAX@</string>
     <string>--host</string>
     <string>127.0.0.1</string>
     <string>--port</string>
     <string>51780</string>
     <string>--ctx-size</string>
-    <string>32768</string>
+    <string>@LLAMA_CTX_SIZE@</string>
     <string>--cache-type-k</string>
     <string>q8_0</string>
     <string>--cache-type-v</string>
     <string>q8_0</string>
     <string>--flash-attn</string>
     <string>on</string>
-    <!-- Auto parallelism created four 8K slots on an 8 GB M2 and exhausted
-         unified GPU memory before the first token. Intaglio Labs serves one household
-         turn at a time, so one slot is both sufficient and deterministic. -->
+    <!-- Selected from inference-profiles.json. Compact Macs remain at one
+         slot; measured higher-memory Macs can use two when total throughput
+         improves without memory pressure. -->
     <string>--parallel</string>
-    <string>1</string>
+    <string>@LLAMA_PARALLEL@</string>
     <string>--batch-size</string>
-    <string>512</string>
+    <string>@LLAMA_BATCH_SIZE@</string>
     <string>--ubatch-size</string>
-    <string>128</string>
+    <string>@LLAMA_UBATCH_SIZE@</string>
     <string>--jinja</string>
     <string>--reasoning</string>
     <string>off</string>

@@ -249,6 +249,33 @@ export async function adminClearPeopleProjection(opts) {
   return expectOk(res, '/admin/people/clear'); // {cleared}
 }
 
+// Advance the product-level year barrier after connector data is complete.
+// The response is deliberately aggregate: the connector process may schedule
+// and display progress, but person keys and derived summaries remain inside
+// Hermes with the corpus.
+export async function adminCompletePeopleYear({ year }, opts) {
+  if (!Number.isInteger(year) || year < 1900 || year > 3000) {
+    throw new Error('adminCompletePeopleYear requires an integer year');
+  }
+  const ctx = requireOpts(opts);
+  const token = readHermesTokenFile(ctx.tokenFile);
+  const res = await request(ctx, 'POST', '/admin/people/complete-year', token, { year });
+  const body = await expectOk(res, '/admin/people/complete-year');
+  for (const field of [
+    'year', 'profiles', 'summariesTotal', 'summariesComplete',
+    'summariesSkipped', 'summariesPending', 'workUnitsTotal',
+    'workUnitsComplete', 'estimatedRemainingMs',
+  ]) {
+    if (!Number.isFinite(body?.[field])) {
+      throw new Error(`hermes people-year response is missing numeric "${field}"`);
+    }
+  }
+  if (typeof body.complete !== 'boolean' || typeof body.state !== 'string') {
+    throw new Error('hermes people-year response is missing completion state');
+  }
+  return body;
+}
+
 // Hermes accepts 1–500 ids per call; this wrapper chunks a larger list so a
 // reconciler can hand over one diff without knowing the transport cap, and
 // sums the deleted counts. Deleting an already-deleted id deletes zero rows,

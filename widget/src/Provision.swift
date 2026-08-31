@@ -99,6 +99,54 @@ enum Provision {
   // the stable copy instead -- ~/.hazlie/llama/llama-server, beside the ggml
   // backend modules it dlopens through @loader_path.
   private static let brewLlama = "/opt/homebrew/bin/llama-server"
+  private static let reducerFilename = "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+
+  private static func modelID(_ filename: String) -> String {
+    URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
+  }
+
+  private static func inferenceValues() -> [String: String] {
+    let profile = InferenceTuning.selected()
+    let mainFilename = ModelSetup.installed?.file ?? reducerFilename
+    let reducerPath = hazlie.appendingPathComponent("models/\(reducerFilename)")
+    let reducerFilenameForHost = profile.dualModelSummaries && fm.fileExists(atPath: reducerPath.path)
+      ? reducerFilename : mainFilename
+    return [
+      "@LLAMA_CTX_SIZE@": String(profile.contextSize),
+      "@LLAMA_PARALLEL@": String(profile.parallel),
+      "@LLAMA_BATCH_SIZE@": String(profile.batchSize),
+      "@LLAMA_UBATCH_SIZE@": String(profile.microBatchSize),
+      "@LLAMA_MODELS_MAX@": String(reducerFilenameForHost == mainFilename ? 1 : profile.modelsMax),
+      "@SUMMARY_CONCURRENCY@": String(profile.summaryConcurrency),
+      "@LLAMA_MAIN_MODEL@": modelID(mainFilename),
+      "@LLAMA_REDUCER_MODEL@": modelID(reducerFilenameForHost),
+    ]
+  }
+
+  @discardableResult
+  private static func prepareModelRouter() -> Bool {
+    guard let main = ModelSetup.installed else { return false }
+    let profile = InferenceTuning.selected()
+    let modelDir = hazlie.appendingPathComponent("models")
+    let router = modelDir.appendingPathComponent("router")
+    let wantsReducer = profile.dualModelSummaries && main.file != reducerFilename
+    do {
+      try mkdir(router, 0o700)
+      for tier in ModelSetup.tiers {
+        let link = router.appendingPathComponent(tier.file)
+        try? fm.removeItem(at: link)
+        let source = modelDir.appendingPathComponent(tier.file)
+        guard tier.file == main.file ||
+          (wantsReducer && tier.file == reducerFilename && fm.fileExists(atPath: source.path))
+        else { continue }
+        try fm.createSymbolicLink(at: link, withDestinationURL: source)
+      }
+      return true
+    } catch {
+      NSLog("Intaglio Labs: model router setup failed: \(error)")
+      return false
+    }
+  }
 
   // Call once at launch. Runs off the main thread — copying node and booting
   // launchd agents should not block the UI coming up.
@@ -571,6 +619,10 @@ enum Provision {
     guard var text = try? String(contentsOf: template, encoding: .utf8) else { return false }
     text = text.replacingOccurrences(of: "@HOME@", with: home.path)
     text = text.replacingOccurrences(of: "@REPO@", with: backend.path)
+    if label == "io.intaglio.llama-server" && !prepareModelRouter() { return false }
+    for (placeholder, value) in inferenceValues() {
+      text = text.replacingOccurrences(of: placeholder, with: value)
+    }
     // The llama plist hard-codes Homebrew's binary; point it at the copy.
     text = text.replacingOccurrences(of: brewLlama, with: hazlie.appendingPathComponent("llama/llama-server").path)
     let dst = launchAgents.appendingPathComponent("\(label).plist")
@@ -581,6 +633,13 @@ enum Provision {
       return false
     }
     try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: dst.path)
+    // launchd snapshots ProgramArguments and EnvironmentVariables at bootstrap;
+    // replacing the plist alone leaves the old machine profile running.
+    let out = Process()
+    out.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    out.arguments = ["bootout", "gui/\(getuid())/\(label)"]
+    try? out.run()
+    out.waitUntilExit()
     bootstrap(dst)
     return true
   }

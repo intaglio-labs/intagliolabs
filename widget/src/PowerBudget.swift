@@ -1,85 +1,136 @@
 import Foundation
-import IOKit.ps
+import IOKit.pwr_mgt
 
-// WHETHER THE MACHINE CAN AFFORD BACKGROUND WORK RIGHT NOW.
+// THE OWNER CHOOSES THE PERFORMANCE POLICY.
 //
-// The distiller is a local model pass over every conversation in the corpus. A
-// mature corpus can require hours of repeated passes. Run flat out it is indistinguishable
-// from a stress test: the owner's laptop gets hot, kernel_task starts stealing
-// cycles to cool it, and everything else on the machine slows down to pay for
-// catching up on a backlog that nobody is waiting on.
+// The previous policy inferred intent from the charger, Low Power Mode and the
+// thermal state. That made a long import silently stop when the Mac was
+// unplugged or warm, then resume after a power-source change. Both modes below
+// now run under every one of those conditions. The choice only controls HOW
+// aggressively local background work runs:
 //
-// Nothing here throttles work the owner ASKED for. A question typed into the
-// panel is answered at whatever speed the machine can manage, always. This
-// governs only the passes that run on their own.
+//   god mode      the machine-specific concurrency ceiling, large passes,
+//                 user-initiated process priority
+//   battery saver one summary at a time, small passes, utility priority
+//
+// The selected mode is mirrored into a private runtime file because Hermes is
+// a separate Node process and cannot read this app's UserDefaults domain.
+enum PerformanceMode: String {
+  case godMode = "god_mode"
+  case batterySaver = "battery_saver"
+}
+
 enum PowerBudget {
-  /// Plugged in and cool: drain the backlog at the busy cadence.
   case full
-  /// On battery, or warm: keep up with what just arrived and let the backlog
-  /// wait for a charger. The app stays current; the battery is not spent on
-  /// history that has been sitting there for years.
   case trickle
-  /// Low Power Mode, or thermals the OS calls serious. Stop until it clears --
-  /// Low Power Mode is the owner saying so in the one place macOS provides.
-  case paused
+
+  static let defaultsKey = "HazliePerformanceMode"
+  static let didChange = Notification.Name("io.intaglio.performanceModeDidChange")
+
+  static var mode: PerformanceMode {
+    get {
+      guard let raw = UserDefaults.standard.string(forKey: defaultsKey),
+            let mode = PerformanceMode(rawValue: raw) else {
+        // Preserve the adaptive high-performance behaviour installed before
+        // this control existed. Battery Saver is an explicit choice, not a
+        // surprise downgrade on upgrade.
+        return .godMode
+      }
+      return mode
+    }
+    set {
+      UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey)
+      syncRuntimeFile()
+      NotificationCenter.default.post(name: didChange, object: nil)
+    }
+  }
 
   static var current: PowerBudget {
-    let info = ProcessInfo.processInfo
-    // The owner asked for less. Nothing background runs.
-    if info.isLowPowerModeEnabled { return .paused }
-    switch info.thermalState {
-    case .critical, .serious:
-      // .serious is already "fans at maximum, and the OS is throttling". Adding
-      // an inference loop to that is how a warm machine becomes an unusable one.
-      return .paused
-    case .fair:
-      return onACPower ? .trickle : .paused
-    default:
-      return onACPower ? .full : .trickle
+    mode == .godMode ? .full : .trickle
+  }
+
+  private static var runtimeFile: URL {
+    FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".hazlie/performance-mode")
+  }
+
+  /// Keep Hermes and the app on one policy. The file contains one allow-listed
+  /// word, is atomically replaced, and is owner-readable only.
+  static func syncRuntimeFile() {
+    let fm = FileManager.default
+    let root = runtimeFile.deletingLastPathComponent()
+    do {
+      try fm.createDirectory(at: root, withIntermediateDirectories: true,
+                             attributes: [.posixPermissions: 0o700])
+      try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+      try Data("\(mode.rawValue)\n".utf8).write(to: runtimeFile, options: .atomic)
+      try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: runtimeFile.path)
+    } catch {
+      NSLog("Intaglio Labs: could not store performance mode: \(error.localizedDescription)")
     }
   }
 
-  /// True on AC, and true on any machine with no battery to speak of -- a Mac
-  /// that cannot be unplugged should never be told to conserve.
-  static var onACPower: Bool {
-    guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
-          let kind = IOPSGetProvidingPowerSourceType(snapshot)?.takeRetainedValue()
-    else { return true }
-    return (kind as String) == kIOPMACPowerKey
-  }
-
-  /// Posted when the answer above may have changed, so a supervisor can
-  /// re-decide instead of waiting out an interval it chose under old conditions.
-  /// Plugging in should start the backlog draining, not be noticed a quarter of
-  /// an hour later.
-  static let didChange = Notification.Name("io.intaglio.powerBudgetDidChange")
-
-  private static var watching = false
-
-  /// Begin forwarding thermal, low-power and power-source changes to `didChange`.
-  /// Idempotent; call from the main thread at launch.
+  /// Kept as the supervisor's launch hook. There are deliberately no power or
+  /// thermal observers now: those signals no longer change the policy.
   static func startWatching() {
-    guard !watching else { return }
-    watching = true
-    let center = NotificationCenter.default
-    let relay: (Notification) -> Void = { _ in
-      NotificationCenter.default.post(name: PowerBudget.didChange, object: nil)
-    }
-    center.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification,
-                       object: nil, queue: .main, using: relay)
-    center.addObserver(forName: NSNotification.Name.NSProcessInfoPowerStateDidChange,
-                       object: nil, queue: .main, using: relay)
+    syncRuntimeFile()
+  }
+}
 
-    // The power SOURCE has no NotificationCenter equivalent -- it is a run loop
-    // source from IOKit. The callback is a C function pointer and so cannot
-    // capture anything, which is why it does nothing but post the notification
-    // everything else already listens for.
-    if let source = IOPSNotificationCreateRunLoopSource({ _ in
-      DispatchQueue.main.async {
-        NotificationCenter.default.post(name: PowerBudget.didChange, object: nil)
-      }
-    }, nil)?.takeRetainedValue() {
-      CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+// SAFE IDLE-SLEEP PREVENTION.
+//
+// This uses macOS's power-management assertion API instead of spawning a
+// long-lived `caffeinate` process. The assertion exists only while the setting
+// is on AND the app reports finite work pending/running. It prevents idle
+// system sleep; it does not block a manual sleep, shutdown, or closing the lid.
+// The OS also drops it automatically if this process exits.
+enum KeepMacAwake {
+  static let defaultsKey = "HazlieKeepMacAwake"
+
+  static var enabled: Bool {
+    get { UserDefaults.standard.bool(forKey: defaultsKey) }
+    set {
+      UserDefaults.standard.set(newValue, forKey: defaultsKey)
+      refresh(enabled: newValue, processing: processing)
     }
+  }
+
+  private static var processing = false
+  private static var assertionID = IOPMAssertionID(0)
+
+  static func update(processing next: Bool) {
+    processing = next
+    refresh(enabled: enabled, processing: next)
+  }
+
+  static func stop() {
+    processing = false
+    release()
+  }
+
+  private static func refresh(enabled: Bool, processing: Bool) {
+    if enabled && processing {
+      guard assertionID == 0 else { return }
+      var next = IOPMAssertionID(0)
+      let result = IOPMAssertionCreateWithName(
+        kIOPMAssertionTypeNoIdleSleep as CFString,
+        IOPMAssertionLevel(kIOPMAssertionLevelOn),
+        "Intaglio Labs is processing local data" as CFString,
+        &next
+      )
+      if result == kIOReturnSuccess {
+        assertionID = next
+      } else {
+        NSLog("Intaglio Labs: could not keep Mac awake (IOKit \(result))")
+      }
+    } else {
+      release()
+    }
+  }
+
+  private static func release() {
+    guard assertionID != 0 else { return }
+    IOPMAssertionRelease(assertionID)
+    assertionID = IOPMAssertionID(0)
   }
 }

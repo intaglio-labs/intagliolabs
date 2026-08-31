@@ -107,6 +107,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     Provision.ensureConnectorDefaults()
     Provision.ensureBackend()
     Provision.prefetchBridgeRuntime()
+    // Hermes is a separate local process, so mirror the native performance
+    // preference into its owner-only runtime file before background work starts.
+    PowerBudget.syncRuntimeFile()
 
     // The second half of the self-move (Bridge "moveToApplications"): the
     // old instance could not delete the bundle it was running from, so it
@@ -259,6 +262,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // into anything answerable, so every question abstained on a full
       // database — see Distiller.swift.
       DispatchQueue.main.async { Distiller.shared.start() }
+      // Hardware/app upgrades may change the safest model tier. The bridge
+      // waits for the published processing queues to become idle, stages the
+      // new weights beside the current model, and only then switches it.
+      DispatchQueue.main.async { self.bridge.reconcileAutomaticModelWhenSafe() }
       // And notice the grant arriving later. Granting Full Disk Access makes
       // macOS offer "Quit & Reopen"; this app does not need either half of that
       // offer, but the daemon just started above does need respawning. See
@@ -1419,6 +1426,7 @@ extension AppDelegate {
   // The child dies with us rather than outliving the app that is responsible
   // for it, holding a database handle and a set of cursors open.
   func applicationWillTerminate(_ notification: Notification) {
+    KeepMacAwake.stop()
     Connectors.shared.stop()
     Distiller.shared.stop()
   }

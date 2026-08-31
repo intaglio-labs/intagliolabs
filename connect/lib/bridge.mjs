@@ -60,8 +60,9 @@ const matrixDir = (home) => matrixRoot(home);
 //
 // The platforms this page can link, and everything that differs between
 // them. `initial` is the first command that starts login: Messenger lists four
-// flows so we pick `facebook` (cookies from an existing session — the low-risk
-// path); Instagram has a single flow; X names its cookie flow `cookies`.
+// flows. Messenger must use `messenger`: that flow validates messenger.com
+// cookies and is the one this connector actually represents. Instagram has a
+// single flow; X names its cookie flow `cookies`.
 export const PLATFORMS = Object.freeze({
   messenger: {
     id: 'messenger',
@@ -69,9 +70,13 @@ export const PLATFORMS = Object.freeze({
     bot: '@facebookbot:hazlie.local',
     dir: 'meta',
     db: 'meta/mautrix-meta.db',
-    // The bare login command. `facebook` = cookies from an existing session,
-    // the low-risk flow. Prefixed with the bridge's command_prefix at send
-    // time so it works in any room, not only the bot's management room.
+    // This is still the Messenger connector; `facebook` names the cookie
+    // transport used to authenticate it. The live in-app trace reached a fully
+    // signed-in facebook.com home after 2FA, then messenger.com opened a fresh
+    // logged-out landing page because WebKit correctly kept the two domains'
+    // cookies separate. Waiting for messenger.com therefore discarded a valid
+    // login. Hand the Facebook session to mautrix-meta's Facebook-cookie flow
+    // instead. Prefixed at send time so it works outside the management room.
     initial: 'login facebook',
     prefix: '!fb', // fallback if config can't be read
     site: 'facebook.com',
@@ -79,10 +84,13 @@ export const PLATFORMS = Object.freeze({
     // embedded webview, and the cookie domain to harvest once the user is in.
     // The bot also emits a "Login URL:" line we prefer at runtime; these are
     // the stable defaults.
+    // Login and harvest on the same first-party domain. The previous split
+    // (start on Messenger, finish on Facebook, then wait on Messenger again)
+    // is exactly how a completed login turned back into a disconnected tile.
     loginUrl: 'https://www.facebook.com/login/',
     cookieDomain: 'facebook.com',
     // Meta's login bounces across its own properties (account center, 2FA),
-    // so the flow needs all three; `c_user` appearing means the session is up.
+    // so the navigation fence needs all three first-party host families.
     // WIDTH. Facebook's login page declares no viewport meta, and at 480pt it
     // overflows: measured scrollWidth 515 against clientWidth 480, which is the
     // horizontal scrollbar the owner saw. 1000 removes that.
@@ -114,8 +122,22 @@ export const PLATFORMS = Object.freeze({
       // A subframe is not a destination. The main frame is where a password is
       // typed and allowedHosts still governs it; this only says a Meta login page
       // may embed content from Meta, which is what it does.
-      allowedFrameHosts: ['fbsbx.com', 'facebook.com', 'meta.com'],
-      sessionCookie: 'c_user',
+      // The two-step page also embeds reCAPTCHA Enterprise. Blocking
+      // www.google.com produced Meta's explanatory shell with no actual
+      // challenge (measured 2026-08-31). The alternate reCAPTCHA domain is the
+      // same narrow precaution already used by Slack's challenge policy.
+      allowedFrameHosts: [
+        'fbsbx.com', 'facebook.com', 'meta.com', 'www.google.com', 'www.recaptcha.net',
+      ],
+      // A browser has a different cookie jar, so handing a failed Facebook
+      // webview to it cannot finish this automatic bridge login. Keep failure
+      // and retry inside the app instead of opening Meta externally.
+      browserHandoff: false,
+      // Do not fire on c_user alone. A checkpoint can write part of the session
+      // before it has finished; the bridge needs the complete Facebook cookie
+      // set and should receive it only once all three values exist.
+      sessionCookie: 'xs',
+      requiredCookies: ['xs', 'c_user', 'datr'],
       windowWidth: 1000,
     },
   },
@@ -206,6 +228,12 @@ export const PLATFORMS = Object.freeze({
     // fills it in without knowing what any of it means.
     webLogin: {
       allowedHosts: ['linkedin.com', 'www.linkedin.com'],
+      // LinkedIn's security-verification page embeds its challenge rather than
+      // navigating the login window away from linkedin.com. These are the
+      // exact subframe hosts measured during a real checkpoint on 2026-08-31.
+      // Keep them out of allowedHosts: none is a destination where this window
+      // may ask for the owner's LinkedIn password.
+      allowedFrameHosts: ['li.protechts.net', 'www.google.com'],
       sessionCookie: 'li_at',
       requiredCookies: ['li_at', 'JSESSIONID'],
       fields: [

@@ -29,6 +29,7 @@ final class Connectors {
 
   private var process: Process?
   private var stopping = false
+  private var modelMaintenancePaused = false
   private var lastStart = Date.distantPast
   /// Matches the ThrottleInterval the launchd agent used to carry, for the same
   /// reason: a daemon that fails instantly should not be respawned in a tight
@@ -65,6 +66,22 @@ final class Connectors {
       .sorted { $0.nextTs < $1.nextTs }
   }
 
+  /// A scheduled start is useful context, but it is never an estimate of how
+  /// long a connector will take. Keeping those two facts separate prevents an
+  /// idle queue from looking like a stalled processing job.
+  private func scheduledDelayLabel(_ nextTs: Double, now: Double) -> String {
+    let deltaMs = nextTs - now
+    if deltaMs < -90_000 { return "overdue" }
+    if deltaMs <= 0 { return "due now" }
+    let minutes = Int(ceil(deltaMs / 60_000))
+    if minutes == 1 { return "in 1 min" }
+    if minutes < 60 { return "in \(minutes) min" }
+    let hours = minutes / 60
+    let remainder = minutes % 60
+    if remainder == 0 { return "in \(hours)h" }
+    return "in \(hours)h \(remainder)m"
+  }
+
   /// Matrix is one local transport for several user-facing connectors. The
   /// daemon expands it into one queued task per connected platform; preserve
   /// those names anywhere Settings describes Matrix work instead of leaking
@@ -89,6 +106,7 @@ final class Connectors {
     let labelFor = { (connector: String) in names[connector] ?? String(connector.prefix(32)) }
     let now = Date().timeIntervalSince1970 * 1000
     var items: [[String: Any]] = []
+    let portalInvitesPending = raw["portalInvitesPending"] as? Int ?? 0
     if raw["phase"] as? String == "syncing",
        let connector = raw["connector"] as? String,
        let started = raw["startedTs"] as? Double,
@@ -100,11 +118,38 @@ final class Connectors {
       items.append(["kind": "current", "label": "current: syncing \(label)"])
     }
 
+    if portalInvitesPending > 0 {
+      items.append([
+        "kind": "discovery",
+        "label": "importing \(portalInvitesPending) chat\(portalInvitesPending == 1 ? "" : "s")",
+      ])
+    }
+
     // Historical catch-up remains a named job in the list. Its duration is not
     // repeated here: the pinned header is the horizon for the ENTIRE queue.
     if let backfill = raw["backfill"] as? [String], !backfill.isEmpty {
       let year = raw["backfillYear"] as? Int
       for connector in backfill {
+        // Matrix history is deliberately paused until every existing portal
+        // invitation is joined. Showing a year here would claim the backwards
+        // walk is active while the app is still discovering its room roster.
+        if connector == "matrix" && portalInvitesPending > 0 { continue }
+        if connector == "people" {
+          let progress = raw["peopleCompletion"] as? [String: Any]
+          let progressYear = progress?["year"] as? Int ?? year
+          let pending = progress?["summariesPending"] as? Int ?? 0
+          let label: String
+          if progress == nil {
+            label = progressYear.map { "building \($0) people profiles" }
+              ?? "building people profiles"
+          } else {
+            label = progressYear.map {
+              "\($0) profiles ready · summarizing \(pending) person\(pending == 1 ? "" : "s")"
+            } ?? "summarizing \(pending) person\(pending == 1 ? "" : "s")"
+          }
+          items.append(["kind": "backfill", "label": label])
+          continue
+        }
         let subjects = connector == "matrix" ? matrixPlatformLabels(raw) : [labelFor(connector)]
         // SAY HOW MANY, since we cannot honestly say how long. The daemon
         // used to publish an ETA for this and it could not move: the
@@ -134,9 +179,13 @@ final class Connectors {
     let queue = scheduledActivityTasks(raw)
     for task in queue {
       // A scheduled time is when work STARTS, not work happening now and not a
-      // duration. Every future entry therefore says only "next"; a real live
-      // pass is the syncing row above and ongoing catch-up is the backfill row.
-      items.append(["kind": "queue", "label": "next: \(task.label ?? labelFor(task.connector))"])
+      // duration. The one countdown belongs in the Activity header; repeating
+      // it on every row made a single schedule look like many stalled jobs.
+      let label = task.label ?? labelFor(task.connector)
+      items.append([
+        "kind": "queue",
+        "label": "next: \(label)",
+      ])
     }
 
     // Bundles built before the queue schema retain a useful one-line NEXT row.
@@ -158,7 +207,10 @@ final class Connectors {
   /// real objects that changes, rather than ceil(rooms / perPass), which was
   /// always 1 and so always read as one interval away.
   var activityBackfillRooms: Int? {
-    guard let raw = activitySnapshot, let n = raw["backfillRooms"] as? Int, n > 0 else {
+    guard let raw = activitySnapshot else { return nil }
+    let n = (raw["portalInvitesPending"] as? Int).flatMap { $0 > 0 ? $0 : nil }
+      ?? (raw["backfillRooms"] as? Int).flatMap { $0 > 0 ? $0 : nil }
+    guard let n else {
       return nil
     }
     return n
@@ -169,6 +221,22 @@ final class Connectors {
     return normalizedActivityEstimate(raw)
   }
 
+  /// The next recurring connector run, rendered once in Activity's header.
+  /// This is deliberately not called "time left": routine polling never
+  /// finishes, while a genuine finite backfill has activityEstimate above.
+  var activityScheduleEstimate: String? {
+    guard let raw = activitySnapshot else { return nil }
+    // A retry countdown is not a completion estimate. During portal discovery
+    // the finite remaining count above is both more useful and actually true.
+    if let n = raw["portalInvitesPending"] as? Int, n > 0 { return nil }
+    if (raw["backfill"] as? [String])?.contains("people") == true { return nil }
+    let now = Date().timeIntervalSince1970 * 1000
+    guard let next = scheduledActivityTasks(raw)
+      .filter({ $0.connector != "maintenance" })
+      .first else { return nil }
+    return "next run \(scheduledDelayLabel(next.nextTs, now: now))"
+  }
+
   /// Keeps the ambient processing state continuous between bounded connector
   /// passes. The daemon intentionally publishes `waiting` after one source
   /// finishes and before the next scheduled source starts; that is a pause in
@@ -176,9 +244,21 @@ final class Connectors {
   /// Requiring both a non-empty queue and its total estimate prevents a stale
   /// or malformed activity file from waking the orb on its own.
   var queuedWorkLabel: String? {
-    guard let raw = activitySnapshot,
-          normalizedActivityEstimate(raw) != nil,
-          !scheduledActivityTasks(raw).isEmpty else { return nil }
+    guard let raw = activitySnapshot else { return nil }
+    if let n = raw["portalInvitesPending"] as? Int, n > 0 {
+      return "importing social chats"
+    }
+    if let progress = raw["peopleCompletion"] as? [String: Any],
+       let year = progress["year"] as? Int,
+       (progress["summariesPending"] as? Int ?? 0) > 0 {
+      return "finishing \(year) people"
+    }
+    if (raw["backfill"] as? [String])?.contains("people") == true,
+       let year = raw["backfillYear"] as? Int {
+      return "building \(year) people profiles"
+    }
+    guard !scheduledActivityTasks(raw).isEmpty else { return nil }
+    guard normalizedActivityEstimate(raw) != nil else { return nil }
     return "working through connector queue"
   }
 
@@ -191,6 +271,15 @@ final class Connectors {
     guard let raw = activitySnapshot else { return nil }
     let names = ["imessage": "iMessage", "matrix": "connected platforms"]
     let labelFor = { (connector: String) in names[connector] ?? String(connector.prefix(32)) }
+    if let progress = raw["peopleCompletion"] as? [String: Any],
+       let year = progress["year"] as? Int,
+       (progress["summariesPending"] as? Int ?? 0) > 0 {
+      return "summarizing \(year) people"
+    }
+    if (raw["backfill"] as? [String])?.contains("people") == true,
+       let year = raw["backfillYear"] as? Int {
+      return "building \(year) people profiles"
+    }
     if raw["phase"] as? String == "syncing",
        let connector = raw["connector"] as? String,
        let started = raw["startedTs"] as? Double,
@@ -200,6 +289,10 @@ final class Connectors {
         return "syncing \(platforms.joined(separator: " · "))"
       }
       return "syncing \(labelFor(connector))"
+    }
+    if raw["phase"] as? String == "waiting",
+       let n = raw["portalInvitesPending"] as? Int, n > 0 {
+      return "importing social chats"
     }
     if raw["phase"] as? String == "waiting",
        let estimate = raw["estimate"] as? String,
@@ -227,10 +320,17 @@ final class Connectors {
 
   var isRunning: Bool { process?.isRunning == true }
 
+  /// Update scheduling policy without interrupting an in-flight connector
+  /// pass. Restarting here would throw away exactly the work this setting is
+  /// meant to speed up or soften.
+  func applyPerformanceMode() {
+    process?.qualityOfService = PowerBudget.current == .full ? .userInitiated : .utility
+  }
+
   /// Start the daemon if it is not already up and its config exists. Safe to
   /// call repeatedly — onboarding calls it the moment it writes the config.
   func start(bypassingThrottle: Bool = false) {
-    guard !isRunning, !stopping else { return }
+    guard !isRunning, !stopping, !modelMaintenancePaused else { return }
     let node = home.appendingPathComponent(".hazlie/bin/node")
     let script = backend.appendingPathComponent("connectors/daemon.mjs")
     let config = home.appendingPathComponent(".hazlie/connectors/config.json")
@@ -250,11 +350,9 @@ final class Connectors {
 
     let p = Process()
     p.executableURL = node
-    // Same reasoning as the distiller: a scheduled ingest is background work and
-    // has no business competing for performance cores with what the owner is
-    // doing. Not paused on battery -- an ingest is short and keeping the corpus
-    // current is the point of the app -- just scheduled politely.
-    p.qualityOfService = .utility
+    // God Mode gives imports foreground-class scheduling. Battery Saver keeps
+    // them polite at utility QoS. Both continue on battery and when thermally hot.
+    p.qualityOfService = PowerBudget.current == .full ? .userInitiated : .utility
     p.arguments = [script.path]
     var environment = ProcessInfo.processInfo.environment
     environment["INTAGLIO_CONNECTOR_OWNER_PID"] = String(ProcessInfo.processInfo.processIdentifier)
@@ -321,13 +419,27 @@ final class Connectors {
   /// the daemon until the app was relaunched. Which is the very restart this
   /// exists to make unnecessary.
   func restart() {
-    guard !stopping else { return }
+    guard !stopping, !modelMaintenancePaused else { return }
     guard let p = process, p.isRunning else {
       start() // not up: nothing to replace, and start() is idempotent
       return
     }
     NSLog("Intaglio Labs: respawning connectors to pick up a new grant")
     p.terminate()
+  }
+
+  /// Hold the always-running daemon only for the short model activation handoff.
+  /// The multi-gigabyte staging download runs beside the active model.
+  func pauseForModelMaintenance() {
+    modelMaintenancePaused = true
+    process?.terminate()
+    process = nil
+  }
+
+  func resumeAfterModelMaintenance() {
+    guard modelMaintenancePaused, !stopping else { return }
+    modelMaintenancePaused = false
+    start(bypassingThrottle: true)
   }
 
   /// Called on quit. Terminate rather than leave an orphan holding cursors and

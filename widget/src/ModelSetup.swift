@@ -55,9 +55,55 @@ enum ModelSetup {
     ),
   ]
 
-  // Default to the roughly 5 GB model. The smaller tier remains available as
-  // an explicit choice from Settings for machines that need it.
-  static var recommended: String { "8b" }
+  // Model QUALITY follows the machine, never the battery/performance toggle.
+  // The shared profile considers RAM plus CPU and (when macOS publishes it)
+  // GPU cores. setup-llm.sh consumes the same profile file.
+  static var recommended: String { InferenceTuning.selected().modelTier }
+
+  // Which hardware/app revision the automatic choice was last reconciled on.
+  // Existing manually-selected installs are adopted once, not immediately
+  // replaced by the migration that removes the picker. A later hardware/app
+  // change re-evaluates them and may stage the newly appropriate tier.
+  private static let automaticFingerprintKey = "HazlieAutomaticModelFingerprintV1"
+
+  private static var automaticFingerprint: String {
+    let machine = MachineCapabilities.current
+    let info = Bundle.main.infoDictionary ?? [:]
+    let version = info["CFBundleShortVersionString"] as? String ?? "unknown"
+    let build = info["CFBundleVersion"] as? String ?? "unknown"
+    let source = info["HZSourceCommit"] as? String ?? "unknown"
+    return [
+      "policy-1", String(machine.memoryBytes), String(machine.cpuCores),
+      String(machine.gpuCores), version, build, source,
+    ].joined(separator: "|")
+  }
+
+  /// The tier an automatic launch-time reconciliation should stage, if any.
+  /// A missing model is automatic only after onboarding has completed; the
+  /// first-run CTA owns the initial multi-gigabyte fetch.
+  static func automaticTarget(allowFreshInstall: Bool) -> String? {
+    let defaults = UserDefaults.standard
+    let fingerprint = automaticFingerprint
+    guard let current = installed else {
+      return allowFreshInstall ? recommended : nil
+    }
+    guard let previous = defaults.string(forKey: automaticFingerprintKey) else {
+      // Migration from the old manual picker: respect what is already active,
+      // then let the next real hardware/app change re-evaluate it.
+      defaults.set(fingerprint, forKey: automaticFingerprintKey)
+      return nil
+    }
+    guard previous != fingerprint else { return nil }
+    guard current.id != recommended else {
+      defaults.set(fingerprint, forKey: automaticFingerprintKey)
+      return nil
+    }
+    return recommended
+  }
+
+  static func markAutomaticSelectionCurrent() {
+    UserDefaults.standard.set(automaticFingerprint, forKey: automaticFingerprintKey)
+  }
 
   /// The download outlives its screen — onboarding moves on after a few
   /// seconds and the fetch keeps going — so the ending has to find the owner
@@ -157,6 +203,7 @@ enum ModelSetup {
   /// human-readable reason on failure.
   static func download(
     tierId: String,
+    activate: Bool = true,
     progress: @escaping (Int64, Int64) -> Void,
     done: @escaping (String?) -> Void
   ) {
@@ -211,30 +258,32 @@ enum ModelSetup {
         let sum = digest(of: existing)
         guard !isCancelled else { finish("cancelled"); return }
         if sum == tier.sha256 {
-          // Relink only; the bytes are already correct and already here.
+          // Relink only for the selected answer model. The 4B summary reducer
+          // lives beside it but must never silently replace that selection.
           do {
-            try link(tier)
+            if activate { try link(tier) }
             finish(nil)
           } catch {
             finish("could not put the model in place")
           }
         } else {
           try? fm.removeItem(at: existing)
-          startDownload(tier: tier, progress: progress, finish: finish)
+          startDownload(tier: tier, activate: activate, progress: progress, finish: finish)
         }
       }
       return
     }
-    startDownload(tier: tier, progress: progress, finish: finish)
+    startDownload(tier: tier, activate: activate, progress: progress, finish: finish)
   }
 
   private static func startDownload(
     tier: ModelTier,
+    activate: Bool,
     progress: @escaping (Int64, Int64) -> Void,
     finish: @escaping (String?) -> Void
   ) {
 
-    let d = Driver(tier: tier, progress: progress, finish: finish)
+    let d = Driver(tier: tier, activate: activate, progress: progress, finish: finish)
     driver = d
     let session = URLSession(configuration: .default, delegate: d, delegateQueue: nil)
     let t = session.downloadTask(with: tier.url)
@@ -251,12 +300,12 @@ enum ModelSetup {
   /// Put a verified file in place: name it after the tier, point model.gguf at
   /// it, and stamp the active model the way setup-llm.sh does so a later run of
   /// that script agrees about what is installed.
-  fileprivate static func install(_ tmp: URL, _ tier: ModelTier) throws {
+  fileprivate static func install(_ tmp: URL, _ tier: ModelTier, activate: Bool) throws {
     let dst = modelDir.appendingPathComponent(tier.file)
     if fm.fileExists(atPath: dst.path) { try fm.removeItem(at: dst) }
     try fm.moveItem(at: tmp, to: dst)
     try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: dst.path)
-    try link(tier)
+    if activate { try link(tier) }
   }
 
   /// Point model.gguf at this tier and stamp it, the way setup-llm.sh does, so
@@ -271,6 +320,33 @@ enum ModelSetup {
     try fm.createSymbolicLink(atPath: link.path, withDestinationPath: tier.file)
     try? tier.file.write(to: modelDir.appendingPathComponent("active-model.txt"),
                          atomically: true, encoding: .utf8)
+  }
+
+  /// Activate weights that were downloaded with activate=false. Automatic
+  /// upgrades use this only after the processing queues are idle, so a large
+  /// fetch can happen in the background without changing the model underneath
+  /// work already in flight.
+  static func activate(tierId: String) throws {
+    guard let tier = tiers.first(where: { $0.id == tierId }) else {
+      throw NSError(domain: "io.intaglio.model", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "unknown model"])
+    }
+    let path = modelDir.appendingPathComponent(tier.file)
+    guard fm.fileExists(atPath: path.path) else {
+      throw NSError(domain: "io.intaglio.model", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "model is not downloaded"])
+    }
+    try link(tier)
+  }
+
+  /// Undo activation when an automatic first install cannot start its engine.
+  /// The verified weights stay cached, so the next attempt hashes and reuses
+  /// them instead of downloading gigabytes again.
+  static func deactivate(tierId: String) {
+    guard installed?.id == tierId else { return }
+    let link = modelDir.appendingPathComponent("model.gguf")
+    try? fm.removeItem(at: link)
+    try? fm.removeItem(at: modelDir.appendingPathComponent("active-model.txt"))
   }
 
   /// Streamed so a 4.7 GB file is never held in memory.
@@ -289,11 +365,13 @@ enum ModelSetup {
 
   private final class Driver: NSObject, URLSessionDownloadDelegate {
     let tier: ModelTier
+    let activate: Bool
     let progress: (Int64, Int64) -> Void
     let finish: (String?) -> Void
 
-    init(tier: ModelTier, progress: @escaping (Int64, Int64) -> Void, finish: @escaping (String?) -> Void) {
+    init(tier: ModelTier, activate: Bool, progress: @escaping (Int64, Int64) -> Void, finish: @escaping (String?) -> Void) {
       self.tier = tier
+      self.activate = activate
       self.progress = progress
       self.finish = finish
     }
@@ -339,7 +417,7 @@ enum ModelSetup {
         return
       }
       do {
-        try ModelSetup.install(staged, tier)
+        try ModelSetup.install(staged, tier, activate: activate)
       } catch {
         try? ModelSetup.fm.removeItem(at: staged)
         finish("could not put the model in place")

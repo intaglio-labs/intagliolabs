@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "compact",
+      "minMemoryGB": 0,
+      "minCores": 0,
+      "minGPUCores": 0,
+      "modelTier": "4b",
+      "contextSize": 32768,
+      "parallel": 1,
+      "batchSize": 512,
+      "microBatchSize": 128,
+      "modelsMax": 1,
+      "summaryConcurrency": 1,
+      "dualModelSummaries": false
+    },
+    {
+      "id": "balanced",
+      "minMemoryGB": 13,
+      "minCores": 4,
+      "minGPUCores": 8,
+      "modelTier": "8b",
+      "contextSize": 32768,
+      "parallel": 1,
+      "batchSize": 1024,
+      "microBatchSize": 256,
+      "modelsMax": 1,
+      "summaryConcurrency": 1,
+      "dualModelSummaries": false
+    },
+    {
+      "id": "performance",
+      "minMemoryGB": 24,
+      "minCores": 8,
+      "minGPUCores": 12,
+      "modelTier": "8b",
+      "contextSize": 32768,
+      "parallel": 2,
+      "batchSize": 2048,
+      "microBatchSize": 512,
+      "modelsMax": 2,
+      "summaryConcurrency": 2,
+      "dualModelSummaries": true
+    }
+  ]
+}

@@ -12,7 +12,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createDaemon } from '../daemon.mjs';
+import { createDaemon, remainingWorkLabel } from '../daemon.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -25,6 +25,12 @@ const fakeState = (cursors = {}) => {
   return {
     getCursor: (name) => map.get(name),
     setCursor: (name, value) => map.set(name, value),
+    deleteCursor: (name) => map.delete(name),
+    deleteCursors: (prefix) => {
+      for (const key of [...map.keys()]) {
+        if (key === prefix || key.startsWith(`${prefix}:`)) map.delete(key);
+      }
+    },
     recordRun: () => {},
   };
 };
@@ -39,7 +45,10 @@ const source = (name, missing = [], { walksHistory = false } = {}) => ({
 });
 
 // Drive a real daemon for one tick and hand back what it published.
-async function publishedSnapshot(sources, cursors, { settleMs = FIRST_TICK_MS } = {}) {
+async function publishedSnapshot(sources, cursors, {
+  settleMs = FIRST_TICK_MS,
+  completePeopleYear = null,
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hazlie-activity-'));
   const activityPath = join(dir, 'activity.json');
   const daemon = createDaemon({
@@ -47,7 +56,8 @@ async function publishedSnapshot(sources, cursors, { settleMs = FIRST_TICK_MS } 
     state: fakeState(cursors),
     log: silent,
     sources,
-    ingestOpts: {},
+    ingestOpts: completePeopleYear ? { tokenFile: '/synthetic/hermes-token' } : {},
+    completePeopleYear,
     cacheDir: dir,
     activityPath,
   });
@@ -60,6 +70,51 @@ async function publishedSnapshot(sources, cursors, { settleMs = FIRST_TICK_MS } 
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+test('a completed connector year surfaces People completion before the prior year', async () => {
+  const snapshot = await publishedSnapshot(
+    [source('imessage', [], { walksHistory: true })],
+    { 'yearly-backfill:connector:imessage:done:2026': '1' },
+    {
+      settleMs: 600,
+      completePeopleYear: async ({ year }) => ({
+        year,
+        state: 'summarizing',
+        complete: false,
+        profiles: 40,
+        summariesTotal: 25,
+        summariesComplete: 7,
+        summariesSkipped: 2,
+        summariesPending: 16,
+        workUnitsTotal: 80,
+        workUnitsComplete: 20,
+        estimatedRemainingMs: 5_400_000,
+        retryAfterMs: 15_000,
+      }),
+    }
+  );
+  assert.equal(snapshot.backfillYear, 2026);
+  assert.deepEqual(snapshot.backfill, ['people']);
+  assert.deepEqual(snapshot.peopleCompletion, {
+    year: 2026,
+    state: 'summarizing',
+    profiles: 40,
+    summariesTotal: 25,
+    summariesComplete: 7,
+    summariesSkipped: 2,
+    summariesPending: 16,
+    workUnitsTotal: 80,
+    workUnitsComplete: 20,
+    estimatedRemainingMs: 5_400_000,
+  });
+  assert.equal(snapshot.estimate, '~ 1.5 hrs left');
+});
+
+test('remaining work is formatted as approximate compute time', () => {
+  assert.equal(remainingWorkLabel(17 * 60_000), '~ 20 min left');
+  assert.equal(remainingWorkLabel(5_400_000), '~ 1.5 hrs left');
+  assert.equal(remainingWorkLabel(0), null);
+});
 
 const DONE = { 'calendar:history-done': '1', 'matrix:history-done': '1' };
 
@@ -99,6 +154,40 @@ test('real multi-pass backfill still reports a horizon', async () => {
   assert.deepEqual(snapshot.backfill, ['calendar']);
 });
 
+test('yearly history waits for finite source discovery to finish', async () => {
+  let historyRuns = 0;
+  const discovering = {
+    name: 'archive',
+    walksHistory: true,
+    needs: async () => [],
+    run: async (ctx) => {
+      if (ctx.history) {
+        historyRuns += 1;
+        return { historyDone: true, historyHasOlder: false };
+      }
+      return { historyDiscoveryPending: 3 };
+    },
+  };
+  await publishedSnapshot([discovering], {});
+  assert.equal(historyRuns, 0,
+    'starting a year before the source roster settles makes every discovery restart it');
+});
+
+test('portal discovery publishes a remaining count instead of a year', async () => {
+  const snapshot = await publishedSnapshot([source('imessage')], {
+    'matrix:pending-portal-invites': JSON.stringify(['synthetic-a', 'synthetic-b', 'synthetic-c']),
+    'matrix:portal-join-rate-sample': JSON.stringify({
+      pending: 3, ts: 1_000_000, samples: [12_000, 15_000, 11_000],
+    }),
+    'yearly-backfill:year': '2024',
+  });
+  assert.equal(snapshot.portalInvitesPending, 3);
+  assert.match(String(snapshot.estimate), /^~ \d+\.\d hrs left$/,
+    'the header estimates completion from measured queue throughput');
+  assert.equal(snapshot.backfillYear, undefined,
+    'a year blocked on portal discovery must not look like it is being fetched');
+});
+
 // A RESTART MUST NOT RE-ADVERTISE WORK THAT CANNOT RUN.
 //
 // notReady is filled inside runSource, so it is empty at startup while
@@ -123,4 +212,24 @@ test('an unprovisioned source is absent from the very first published queue', as
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('startup advances an already-completed durable year before the first tick', async () => {
+  const checkpoints = { 'yearly-backfill:year': '2024' };
+  for (const year of [2026, 2025, 2024]) {
+    checkpoints[`yearly-backfill:connector:imessage:done:${year}`] = '1';
+    checkpoints[`yearly-backfill:connector:calendar:done:${year}`] = '1';
+  }
+  checkpoints['yearly-backfill:connector:calendar:done:2023'] = '1';
+  const snapshot = await publishedSnapshot(
+    [
+      source('imessage', [], { walksHistory: true }),
+      source('calendar', [], { walksHistory: true }),
+    ],
+    checkpoints,
+    { settleMs: 600 }
+  );
+
+  assert.equal(snapshot.backfillYear, 2023);
+  assert.deepEqual(snapshot.backfill, ['imessage']);
 });

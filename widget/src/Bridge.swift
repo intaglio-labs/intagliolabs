@@ -96,10 +96,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     "bridgeDiscordServer",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
                     "status", "setConnectorEnabled", "setMotion", "setScale", "setSounds",
+                    "setPerformance", "setKeepAwake",
                     "openOnboarding", "markHandheld",
-                    // Same setup controls, reachable from the gear after the
-                    // flow — a skipped step must stay reachable.
-                    "setupState", "modelDownload", "modelCancel", "activity",
+                    "activity",
                     "openFullDiskAccess", "startSources",
                     // In-panel API-key walkthroughs and Google OAuth.
                     "connectSecret", "openApp", "googleAuth",
@@ -202,6 +201,161 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     }
   }
   private static let activeWork = WorkTracker()
+  private var automaticModelTimer: Timer?
+  private var automaticModelWorkLabel: String?
+  private var automaticModelSupervisorsPaused = false
+
+  /// Re-evaluate the hardware-selected model after launch, but never replace a
+  /// live model under queued or active work. The first check waits a minute so
+  /// the connector daemon has time to publish its real queue after an app
+  /// upgrade. A pending change survives restarts in the fingerprint mismatch;
+  /// no separate fragile "upgrade in progress" flag is needed.
+  func reconcileAutomaticModelWhenSafe() {
+    automaticModelTimer?.invalidate()
+    automaticModelTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: false) {
+      [weak self] _ in self?.beginAutomaticModelReconciliation()
+    }
+  }
+
+  private func beginAutomaticModelReconciliation() {
+    let allowFreshInstall = !Bridge.needsOnboarding
+    guard let tier = ModelSetup.automaticTarget(allowFreshInstall: allowFreshInstall) else {
+      return
+    }
+    let replacingExisting = ModelSetup.installed != nil
+    if !automaticModelSwitchIsSafe {
+      retryAutomaticModelReconciliation()
+      return
+    }
+    stageAutomaticModel(tier, replacingExisting: replacingExisting)
+  }
+
+  private var automaticModelSwitchIsSafe: Bool {
+    !ModelSetup.isDownloading
+      && Bridge.activeWork.label == nil
+      && Connectors.shared.activeWorkLabel == nil
+      && Connectors.shared.queuedWorkLabel == nil
+      && Distiller.shared.activity == nil
+  }
+
+  private func retryAutomaticModelReconciliation(after seconds: TimeInterval = 30) {
+    automaticModelTimer?.invalidate()
+    automaticModelTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) {
+      [weak self] _ in self?.beginAutomaticModelReconciliation()
+    }
+  }
+
+  /// Download beside the active model. activate=false is load-bearing: work is
+  /// free to start during a multi-gigabyte fetch, and the symlink must continue
+  /// pointing at the old model until a second idle check passes.
+  private func stageAutomaticModel(_ tier: String, replacingExisting: Bool) {
+    automaticModelWorkLabel = "preparing the best local model for this Mac"
+    ModelSetup.download(
+      tierId: tier, activate: false,
+      progress: { [weak self] got, total in
+        self?.delegate?.setupProgress([
+          "phase": "downloading", "got": got, "total": total, "tier": tier,
+        ])
+      },
+      done: { [weak self] failure in
+        guard let self else { return }
+        if let failure {
+          self.automaticModelWorkLabel = nil
+          self.resumeAutomaticModelSupervisors()
+          if failure != "cancelled" {
+            ModelSetup.notify(title: "Model update didn’t finish", body: failure)
+          }
+          return
+        }
+        if replacingExisting && !self.automaticModelSwitchIsSafe {
+          self.waitToActivateAutomaticModel(tier)
+        } else {
+          self.activateAutomaticModel(tier)
+        }
+      })
+  }
+
+  private func waitToActivateAutomaticModel(_ tier: String) {
+    automaticModelTimer?.invalidate()
+    automaticModelTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) {
+      [weak self] _ in
+      guard let self else { return }
+      if self.automaticModelSwitchIsSafe { self.activateAutomaticModel(tier) }
+      else { self.waitToActivateAutomaticModel(tier) }
+    }
+  }
+
+  private func activateAutomaticModel(_ tier: String) {
+    // The download is safe beside the live model. Stop local workers only for
+    // the short symlink/service handoff, after one last idle check.
+    guard automaticModelSwitchIsSafe else {
+      waitToActivateAutomaticModel(tier)
+      return
+    }
+    pauseAutomaticModelSupervisors()
+    let previous = ModelSetup.installed?.id
+    do {
+      try ModelSetup.activate(tierId: tier)
+    } catch {
+      automaticModelWorkLabel = nil
+      resumeAutomaticModelSupervisors()
+      return
+    }
+    automaticModelWorkLabel = "starting the best local model for this Mac"
+    delegate?.setupProgress(["phase": "installing", "tier": tier])
+    DispatchQueue.global(qos: .utility).async { [weak self] in
+      guard let self else { return }
+      guard Provision.ensureLlamaRuntime() else {
+        self.rollbackAutomaticModel(to: previous)
+        return
+      }
+      Provision.installAgent("io.intaglio.llama-server")
+      Provision.installAgent("io.intaglio.hermes")
+      if Provision.waitForLlama() {
+        ModelSetup.markAutomaticSelectionCurrent()
+        DispatchQueue.main.async {
+          self.automaticModelWorkLabel = nil
+          self.resumeAutomaticModelSupervisors()
+          self.delegate?.setupProgress(["phase": "ready", "tier": tier])
+          ModelSetup.notify(
+            title: "Local model optimized",
+            body: "Intaglio Labs selected the best safe model for this Mac.")
+        }
+      } else {
+        self.rollbackAutomaticModel(to: previous)
+      }
+    }
+  }
+
+  private func rollbackAutomaticModel(to previous: String?) {
+    if let previous { try? ModelSetup.activate(tierId: previous) }
+    else if let attempted = ModelSetup.installed?.id { ModelSetup.deactivate(tierId: attempted) }
+    Provision.installAgent("io.intaglio.llama-server")
+    Provision.installAgent("io.intaglio.hermes")
+    DispatchQueue.main.async { [weak self] in
+      self?.automaticModelWorkLabel = nil
+      self?.resumeAutomaticModelSupervisors()
+      ModelSetup.notify(
+        title: "Model update didn’t finish",
+        body: previous == nil
+          ? "The model is saved and Intaglio Labs will try to start it again later."
+          : "The previous local model is still active. Intaglio Labs will try again later.")
+    }
+  }
+
+  private func pauseAutomaticModelSupervisors() {
+    guard !automaticModelSupervisorsPaused else { return }
+    automaticModelSupervisorsPaused = true
+    Connectors.shared.pauseForModelMaintenance()
+    Distiller.shared.pauseForModelMaintenance()
+  }
+
+  private func resumeAutomaticModelSupervisors() {
+    guard automaticModelSupervisorsPaused else { return }
+    automaticModelSupervisorsPaused = false
+    Connectors.shared.resumeAfterModelMaintenance()
+    Distiller.shared.resumeAfterModelMaintenance()
+  }
 
   // The per-app Reduce Motion override. macOS Reduce Motion is a SYSTEM
   // accessibility setting and the widget honours it by default; this is the
@@ -634,6 +788,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         "state": "ok",
         "motion": Bridge.motionAnyway,
         "sounds": Bridge.soundsOn,
+        "performance": PowerBudget.mode.rawValue,
+        "keepAwake": KeepMacAwake.enabled,
         "onboarded": !Bridge.needsOnboarding,
         "scale": Bridge.scale,
         "scaleMin": Bridge.scaleRange.lowerBound,
@@ -685,6 +841,19 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       Bridge.soundsOn = on
       delegate?.soundsChanged(on)
       reply(webView, id, ["state": "ok", "sounds": on])
+    case "setPerformance":
+      guard let raw = payload["mode"] as? String,
+            let mode = PerformanceMode(rawValue: raw) else {
+        reply(webView, id, ["state": "error", "error": "unknown performance mode"])
+        return
+      }
+      PowerBudget.mode = mode
+      Connectors.shared.applyPerformanceMode()
+      reply(webView, id, ["state": "ok", "performance": mode.rawValue])
+    case "setKeepAwake":
+      let on = payload["on"] as? Bool ?? false
+      KeepMacAwake.enabled = on
+      reply(webView, id, ["state": "ok", "keepAwake": on])
     case "close":
       delegate?.closeWindow(of: webView)
       reply(webView, id, ["state": "ok"])
@@ -871,6 +1040,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // Subframe-only hosts: a challenge widget's iframes. Same server-authored
         // shape as allowedHosts, enforced separately — see BridgeLogin's fence.
         let allowedFrameHosts = (begin["allowedFrameHosts"] as? [String])?.filter { !$0.isEmpty } ?? []
+        let browserHandoff = begin["browserHandoff"] as? Bool ?? true
         // Where a storage field's value lives, when signing in does not land
         // there. Server-authored like the rest; the window uses it at most once.
         let storageUrl = String((begin["storageUrl"] as? String ?? "").prefix(300))
@@ -968,7 +1138,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
             sessionCookie: sessionCookie, allowedHosts: allowedHosts,
             requiredCookies: requiredCookies, cookieFormat: cookieFormat,
             fields: fields, approval: approval, userAgent: userAgent,
-            allowedFrameHosts: allowedFrameHosts, storageUrl: storageUrl,
+            allowedFrameHosts: allowedFrameHosts, browserHandoff: browserHandoff,
+            storageUrl: storageUrl,
             windowWidth: windowWidth,
             afterHarvest: afterHarvest
           ) { cookiesJSON in
@@ -1047,7 +1218,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // ---- setup: what onboarding needs to know and do ----------------------
     case "setupState":
       // Everything the setup scenes render from, in one round trip. Deliberately
-      // says what IS rather than what SHOULD BE: the model tier is read off the
+      // says what IS rather than what SHOULD BE: the model is read off the
       // symlink, voice from the presence of the tree the ear actually loads, and
       // "is any data flowing" from hermes' own row count rather than from a
       // permission check. macOS gives no honest answer about Full Disk Access
@@ -1060,26 +1231,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         "state": "ok",
         "voice": FileManager.default.fileExists(atPath: voiceDir.path),
         "downloading": ModelSetup.isDownloading,
-        "recommended": ModelSetup.recommended,
-        // nodePath was here and is deliberately gone. No page ever read it, and a
-        // payload that carries the path to a unix binary is one render away from
-        // putting "node" in front of somebody again — which is the whole thing this
-        // app spent a day removing. The daemon is a child of the app; the app is what
-        // holds the grants and the app is what the UI names.
-        "tiers": ModelSetup.tiers.map { t in
-          ["id": t.id, "label": t.label, "detail": t.detail, "bytes": t.bytes]
-        },
       ]
       state["model"] = ModelSetup.installed?.id ?? ""
       // THE ROW COUNT IS OPT-IN, because it is the only slow thing in here.
       //
-      // Everything above is local and instant -- a symlink read, two file
-      // existence checks, a static tier list. The row count is an HTTP call to
+      // Everything above is local and instant -- a symlink read and two file
+      // existence checks. The row count is an HTTP call to
       // hermes, which is single-threaded and blocks for the length of its boot
       // warm (12-20s measured), so this request times out at 4s and the WHOLE
-      // reply waited for it. The visible symptom was the Settings panel's "local
-      // model size" row arriving seconds late, on a machine where the answer had
-      // been on disk the entire time.
+      // reply waited for it. The old Settings model-size row made that delay
+      // especially visible; the automatic selector no longer renders that row.
       //
       // Only the onboarding scenes read `rows`/`memory` -- they use it for "is any
       // data flowing yet". Settings never touches it and should never wait for it.
@@ -1099,12 +1260,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // being installed or enabled. The page polls this small local snapshot.
       var items: [[String: Any]] = []
       if let model = ModelSetup.activity { items.append(model) }
+      if let label = automaticModelWorkLabel {
+        items.append(["kind": "model", "label": label])
+      }
       items.append(contentsOf: Connectors.shared.activityItems)
       if let label = Distiller.shared.activity {
         items.append(["kind": "index", "label": label])
       }
       var activity: [String: Any] = ["state": "ok", "items": items]
-      if let estimate = Connectors.shared.activityEstimate {
+      if let estimate = Connectors.shared.activityEstimate
+        ?? Connectors.shared.activityScheduleEstimate {
         activity["estimate"] = estimate
       }
       reply(webView, id, activity)
@@ -1123,6 +1288,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                 let phase = model["phase"] as? String,
                 let tier = model["tier"] as? String {
         workLabel = "\(phase) the \(tier) local model"
+      } else if let label = automaticModelWorkLabel {
+        workLabel = label
       } else if let label = Connectors.shared.activeWorkLabel {
         workLabel = label
       } else if let label = Distiller.shared.activity {
@@ -1136,6 +1303,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         workLabel = nil
       }
       if let workLabel {
+        KeepMacAwake.update(processing: true)
         var status: [String: Any] = ["state": "working", "label": workLabel]
         // THE HORIZON BELONGS TO THE CONNECTOR QUEUE, so it may only ride a
         // connector label.
@@ -1160,6 +1328,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         }
         reply(webView, id, status)
       } else {
+        KeepMacAwake.update(processing: false)
         reply(webView, id, ["state": "idle"])
       }
 
@@ -1189,7 +1358,37 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
 
     case "modelDownload":
-      let tier = String((payload["tier"] as? String ?? "").prefix(8))
+      // Hardware owns model quality. Performance mode only changes concurrency,
+      // so no page gets to smuggle a manual tier choice back into this path.
+      let tier = ModelSetup.recommended
+      let finishSetup: () -> Void = { [weak self] in
+        guard let self else { return }
+        self.delegate?.setupProgress(["phase": "installing", "tier": tier])
+        DispatchQueue.global(qos: .utility).async {
+          guard Provision.ensureLlamaRuntime() else {
+            self.delegate?.setupProgress([
+              "phase": "failed", "tier": tier,
+              "error": "the model is saved, but the engine that runs it is missing",
+            ])
+            return
+          }
+          Provision.installAgent("io.intaglio.llama-server")
+          Provision.installAgent("io.intaglio.hermes")
+          if Provision.waitForLlama() {
+            ModelSetup.markAutomaticSelectionCurrent()
+            self.delegate?.setupProgress(["phase": "ready", "tier": tier])
+            ModelSetup.notify(
+              title: "Intaglio Labs can answer now",
+              body: "The models finished downloading and are ready.")
+          } else {
+            let why = "The model is saved but didn’t start. Reopen the app to try again."
+            self.delegate?.setupProgress([
+              "phase": "failed", "tier": tier, "error": why,
+            ])
+            ModelSetup.notify(title: "Setup didn’t finish", body: why)
+          }
+        }
+      }
       ModelSetup.download(
         tierId: tier,
         progress: { [weak self] got, total in
@@ -1206,42 +1405,24 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
             }
             return
           }
-          // The weights exist now, so the agent that needs them can. Installed
-          // here rather than at next launch, because "downloaded but you must
-          // restart the app" is not finished.
-          self.delegate?.setupProgress(["phase": "installing", "tier": tier])
-          DispatchQueue.global(qos: .utility).async {
-            // THE RUNTIME BEFORE THE AGENT. provision() no-ops on an
-            // already-set-up machine, so a binary the bundle gained later never
-            // came out -- and installing an agent that points at a missing
-            // binary just parks it at exit 78 while this screen waits forever.
-            guard Provision.ensureLlamaRuntime() else {
-              self.delegate?.setupProgress([
-                "phase": "failed", "tier": tier,
-                "error": "the model is saved, but the engine that runs it is missing",
-              ])
-              return
-            }
-            Provision.installAgent("io.intaglio.llama-server")
-            Provision.kickstart("io.intaglio.llama-server")
-            // hermes holds the llama base URL open; restart it so the first ask
-            // after setup does not meet a proxy pointed at nothing.
-            Provision.kickstart("io.intaglio.hermes")
-            // REACH AN ENDING. Loading several GB of weights takes a while, so
-            // wait -- but bounded, and then say which way it went. A screen that
-            // says "checking" forever is the one state that is never true.
-            if Provision.waitForLlama() {
-              self.delegate?.setupProgress(["phase": "ready", "tier": tier])
-              ModelSetup.notify(
-                title: "Intaglio Labs can answer now",
-                body: "The model finished downloading and is ready.")
-            } else {
-              let why = "The model is saved but didn’t start. Reopen the app to try again."
-              self.delegate?.setupProgress([
-                "phase": "failed", "tier": tier, "error": why,
-              ])
-              ModelSetup.notify(title: "Setup didn’t finish", body: why)
-            }
+          // A performance profile keeps a small reducer beside the selected
+          // answer model. It is an implementation detail, not a tier switch:
+          // activate=false leaves model.gguf pointing at the owner's choice.
+          if tier == "8b" && InferenceTuning.selected().dualModelSummaries {
+            ModelSetup.download(
+              tierId: "4b", activate: false,
+              progress: { [weak self] got, total in
+                self?.delegate?.setupProgress([
+                  "phase": "downloading", "got": got, "total": total, "tier": "summary helper",
+                ])
+              },
+              done: { reducerFailure in
+                if reducerFailure == "cancelled" { return }
+                finishSetup()
+              }
+            )
+          } else {
+            finishSetup()
           }
         }
       )
