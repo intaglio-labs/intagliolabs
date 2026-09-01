@@ -365,10 +365,9 @@ function rangeRow({ name, note, value, min, max, step, message, format }) {
 // policy. Both settings keep processing — only pass size and process priority
 // change, and neither reads the charger.
 //
-// NAMED FOR THE EFFECT. "God Mode" said nothing about the machine and "Battery
-// Saver" implied it was about the charger, which it is not. The switch is on for
-// "full speed" and off for "use less power", and the hint states the actual
-// difference rather than recommending one.
+// The high-throughput label remains the owner's compact "maxx" name. The low
+// side says what it does: use less power. The hint carries the concrete
+// difference rather than making either label do too much work.
 function performanceRow(selected) {
   const el = document.createElement('div');
   el.className = 'setting performance-setting';
@@ -382,7 +381,7 @@ function performanceRow(selected) {
   labelLine.className = 'setting-label-line';
   labelLine.append(name, settingHint(
     'performance',
-    'Full speed does more work in each pass and asks macOS for foreground priority, '
+    'maxx does more work in each pass and asks macOS for foreground priority, '
     + 'so imports and local indexing finish sooner. Using less power does the same work '
     + 'in smaller passes at background priority — slower, but the machine stays quiet. '
     + 'Both keep running on battery; neither one stops.'
@@ -410,15 +409,15 @@ function performanceRow(selected) {
   let active = normalise(selected);
   const paint = () => {
     const full = active === FULL;
-    modeLabel.textContent = full ? 'full speed' : 'use less power';
+    modeLabel.textContent = full ? 'maxx' : 'use less power';
     sw.classList.toggle('on', full);
     sw.setAttribute('aria-checked', String(full));
     // The accessible name says what the switch DOES, since a screen reader user
     // gets no hint text alongside it.
     sw.setAttribute('aria-label',
-      full ? 'Processing: full speed' : 'Processing: use less power');
+      full ? 'Processing: maxx' : 'Processing: use less power');
     sw.title = full
-      ? 'Larger passes, foreground priority'
+      ? 'maxx: larger passes, foreground priority'
       : 'Smaller passes, background priority';
   };
   sw.addEventListener('click', async () => {

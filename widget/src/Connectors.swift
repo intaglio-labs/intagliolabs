@@ -66,22 +66,6 @@ final class Connectors {
       .sorted { $0.nextTs < $1.nextTs }
   }
 
-  /// A scheduled start is useful context, but it is never an estimate of how
-  /// long a connector will take. Keeping those two facts separate prevents an
-  /// idle queue from looking like a stalled processing job.
-  private func scheduledDelayLabel(_ nextTs: Double, now: Double) -> String {
-    let deltaMs = nextTs - now
-    if deltaMs < -90_000 { return "overdue" }
-    if deltaMs <= 0 { return "due now" }
-    let minutes = Int(ceil(deltaMs / 60_000))
-    if minutes == 1 { return "in 1 min" }
-    if minutes < 60 { return "in \(minutes) min" }
-    let hours = minutes / 60
-    let remainder = minutes % 60
-    if remainder == 0 { return "in \(hours)h" }
-    return "in \(hours)h \(remainder)m"
-  }
-
   /// Matrix is one local transport for several user-facing connectors. The
   /// daemon expands it into one queued task per connected platform; preserve
   /// those names anywhere Settings describes Matrix work instead of leaking
@@ -169,8 +153,8 @@ final class Connectors {
     let queue = scheduledActivityTasks(raw)
     for task in queue {
       // A scheduled time is when work STARTS, not work happening now and not a
-      // duration. The one countdown belongs in the Activity header; repeating
-      // it on every row made a single schedule look like many stalled jobs.
+      // duration. Keep the row so the owner can see what follows, but never turn
+      // that schedule into the processing-time estimate in Activity's header.
       let label = task.label ?? labelFor(task.connector)
       items.append([
         "kind": "queue",
@@ -209,22 +193,6 @@ final class Connectors {
   var activityEstimate: String? {
     guard let raw = activitySnapshot else { return nil }
     return normalizedActivityEstimate(raw)
-  }
-
-  /// The next recurring connector run, rendered once in Activity's header.
-  /// This is deliberately not called "time left": routine polling never
-  /// finishes, while a genuine finite backfill has activityEstimate above.
-  var activityScheduleEstimate: String? {
-    guard let raw = activitySnapshot else { return nil }
-    // A retry countdown is not a completion estimate. During portal discovery
-    // the finite remaining count above is both more useful and actually true.
-    if let n = raw["portalInvitesPending"] as? Int, n > 0 { return nil }
-    if (raw["backfill"] as? [String])?.contains("people") == true { return nil }
-    let now = Date().timeIntervalSince1970 * 1000
-    guard let next = scheduledActivityTasks(raw)
-      .filter({ $0.connector != "maintenance" })
-      .first else { return nil }
-    return "next run \(scheduledDelayLabel(next.nextTs, now: now))"
   }
 
   /// Keeps the ambient processing state continuous between bounded connector

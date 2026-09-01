@@ -80,6 +80,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   private var pendingUtterances: [String] = []
   // A voice failure raised before the chat page is alive; same handshake.
   private var pendingVoiceNote: String?
+  // Mirrored from the page so repeated focus/blur notifications do not repeat
+  // panel work. The widget itself stays compact in both states.
+  private var chatBarOpen = false
 
   func applicationDidFinishLaunching(_ note: Notification) {
     bridge.delegate = self
@@ -490,6 +493,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     }
   }
 
+  func chatBarOpenChanged(_ open: Bool) {
+    guard chatBarOpen != open else { return }
+    chatBarOpen = open
+    if !open {
+      chatPanel?.orderOut(nil)
+      // orderOut completes after this call returns; recount on the next turn so
+      // the widget's dream band no longer thinks hidden messages cover it.
+      DispatchQueue.main.async { [weak self] in self?.notifyPanelState() }
+    }
+  }
+
   private func place(_ panel: PopupPanel) {
     panel.setFrame(chosenFrame(panel, panel.frame.size), display: false)
   }
@@ -688,7 +702,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     p.makeKeyAndOrderFront(nil)
   }
 
-  func openChat() {
+  private func ensureChatPanel() {
     if chatPanel == nil {
       // No glass, no box: the chat is transparent and its elements float
       // directly on the wallpaper. Window shadow off — AppKit would draw
@@ -710,11 +724,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       chatPanel = p
       chatWeb = web
     }
-    present(chatPanel!)
+  }
+
+  func openChat() {
+    ensureChatPanel()
+    guard let panel = chatPanel, let web = chatWeb else { return }
+    // The page owns the session log. Ask it whether there is anything to show
+    // before placing a transparent window that would otherwise intercept
+    // desktop clicks despite drawing no bubbles.
+    web.evaluateJavaScript("window.__hzShowHistory && window.__hzShowHistory()") {
+      [weak self, weak panel] result, _ in
+      guard let self, let panel, (result as? Bool) == true else { return }
+      self.present(panel)
+    }
   }
 
   func openChat(with utterance: String) {
-    if chatPanel != nil, let web = chatWeb {
+    ensureChatPanel()
+    if let web = chatWeb {
       // The panel existing does not mean chat.js has finished loading —
       // __hzIncoming is defined late. Probe for it: a not-yet-loaded page
       // answers false and the message falls back to the chatReady handshake,
@@ -727,10 +754,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
         guard let self, (result as? Bool) != true else { return }
         self.pendingUtterances.append(utterance)
       }
-    } else {
-      pendingUtterances.append(utterance)
     }
-    openChat()
+    if let panel = chatPanel { present(panel) }
   }
 
   // Pops ONE queued message per call — the chatReady handshake and the
@@ -772,7 +797,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       present(chatPanel!)
     } else {
       pendingVoiceNote = message
-      openChat()
+      ensureChatPanel()
+      if let panel = chatPanel { present(panel) }
     }
   }
 

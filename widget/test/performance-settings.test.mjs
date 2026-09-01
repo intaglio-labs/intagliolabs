@@ -9,6 +9,7 @@ const power = readFileSync(join(WIDGET, 'src/PowerBudget.swift'), 'utf8');
 const bridge = readFileSync(join(WIDGET, 'src/Bridge.swift'), 'utf8');
 const connectors = readFileSync(join(WIDGET, 'src/Connectors.swift'), 'utf8');
 const distiller = readFileSync(join(WIDGET, 'src/Distiller.swift'), 'utf8');
+const main = readFileSync(join(WIDGET, 'src/main.swift'), 'utf8');
 const settings = readFileSync(join(WIDGET, 'ui/connections.js'), 'utf8');
 
 test('performance is explicit and never pauses for battery or heat', () => {
@@ -33,9 +34,15 @@ test('performance is explicit and never pauses for battery or heat', () => {
   assert.match(connectors, /PowerBudget\.current == \.full \? \.userInitiated : \.utility/u);
 });
 
+test('startup does not call the retired Hermes performance-file bridge', () => {
+  const code = main.split('\n').filter((line) => !/^\s*\/\//u.test(line)).join('\n');
+  assert.doesNotMatch(code, /PowerBudget\.syncRuntimeFile/u,
+    'relationship-summary workers and their runtime performance file were removed together');
+});
+
 test('Settings exposes the owner language and validates the bridge value', () => {
   assert.match(settings, /name\.textContent = 'performance'/u);
-  assert.match(settings, /modeLabel\.textContent = full \? 'full speed' : 'use less power'/u);
+  assert.match(settings, /modeLabel\.textContent = full \? 'maxx' : 'use less power'/u);
   assert.match(settings, /sw\.setAttribute\('role', 'switch'\)/u);
   assert.match(settings, /const requested = active === FULL \? LESS : FULL/u);
   // A stored pre-rename value must not read as the opposite setting.
@@ -45,8 +52,10 @@ test('Settings exposes the owner language and validates the bridge value', () =>
   assert.match(settings, /function settingHint\(label, copy\)/u);
   assert.match(settings, /Why leave \$\{label\} on\?/u);
   // The hint states the difference instead of recommending a side.
-  assert.match(settings, /Full speed does more work in each pass/u);
+  assert.match(settings, /maxx does more work in each pass/u);
   assert.match(settings, /Both keep running on battery; neither one stops/u);
+  assert.doesNotMatch(settings, /God Mode|god mode/u,
+    'the retired performance name must not remain in user-facing Settings copy');
   assert.match(settings, /It still allows manual sleep and lid-close/u);
   assert.match(bridge, /PerformanceMode\.migrate\(raw\)/u);
   assert.match(bridge, /"performance": PowerBudget\.mode\.rawValue/u);

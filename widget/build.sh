@@ -13,6 +13,25 @@
 set -eu
 cd "$(dirname "$0")"
 
+# FILE PROVIDER CONFLICT GUARD.
+#
+# Documents-backed checkouts can acquire conflict copies named `foo 2.ext`.
+# Swift compiles every src/*.swift file, and the connector loader imports every
+# sources/*.mjs file, so one conflict copy either breaks compilation or ships a
+# bundle whose connector daemon exits on a duplicate source name. Refuse before
+# producing or installing anything. Do not silently pick one copy: a conflict
+# can contain edits, and choosing for the owner would lose them.
+FILE_PROVIDER_CONFLICTS=""
+if ! FILE_PROVIDER_CONFLICTS="$(
+  scripts/check-file-provider-conflicts.sh \
+    src ui ../connect ../connectors ../ui/server ../ui/scripts ../ops ../prompts ../bridges
+)"; then
+  echo "ERROR: File Provider conflict copies would make this build ambiguous:" >&2
+  printf '%s\n' "$FILE_PROVIDER_CONFLICTS" >&2
+  echo "Move those files out of the checkout after comparing them, then rebuild." >&2
+  exit 1
+fi
+
 mkdir -p build
 # Pin the target: swiftc's default is the SDK's OS, which can be NEWER than
 # the running system — LaunchServices then refuses the app with -10825.
@@ -124,6 +143,14 @@ if [ -z "${HAZLIE_STAGE_DIR:-}" ] \
 else
   clone_tree ../connectors/node_modules "$BE/connectors/node_modules"
 fi
+
+# STAGED CONNECTOR ROSTER.
+#
+# Exercise the exact source discovery code from the exact tree that will ship.
+# This catches duplicate names, malformed exports and copy mistakes before the
+# installed app is touched. The old build first learned about these after it had
+# killed the healthy daemon and launched the broken replacement.
+node scripts/check-staged-connectors.mjs "$BE/connectors"
 # THE AUTH SCRIPTS, because a downloaded install has no repo to run them from.
 # The connect page's Google and Oura rows told the owner to run
 # `node ops/gcal-auth.mjs`, and ops/ was never copied into the bundle — so that
@@ -544,13 +571,58 @@ LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServic
 # that comes back is guaranteed to be reading the bundle just installed.
 # Failures are tolerated: a machine that has never provisioned the agents has
 # nothing to restart, which is a normal state and not a build error.
+HERMES_RESTARTED=0
 for svc in io.intaglio.hermes io.intaglio.connect io.intaglio.llama-server; do
   if launchctl print "gui/$(id -u)/$svc" >/dev/null 2>&1; then
-    launchctl kickstart -k "gui/$(id -u)/$svc" >/dev/null 2>&1 \
-      && echo "restarted: $svc" \
-      || echo "WARNING: $svc did not restart; it may still be running old code" >&2
+    if launchctl kickstart -k "gui/$(id -u)/$svc" >/dev/null 2>&1; then
+      echo "restarted: $svc"
+      [ "$svc" = io.intaglio.hermes ] && HERMES_RESTARTED=1
+    else
+      echo "WARNING: $svc did not restart; it may still be running old code" >&2
+    fi
   fi
 done
+
+# WAIT FOR HERMES.
+#
+# The connector child treats an unavailable Hermes identity as a fatal startup
+# check. Opening the app immediately after kickstart made every rebuild race the
+# 12-20 second people-index warm-up, flash native connectors red, and depend on
+# retry timing to recover. A configured local service must be healthy before the
+# app is allowed to spawn its connector child.
+if [ "$HERMES_RESTARTED" = 1 ]; then
+  HERMES_READY=0
+  for _ in $(seq 1 120); do
+    if curl -fsS --max-time 1 http://127.0.0.1:51789/health >/dev/null 2>&1; then
+      HERMES_READY=1
+      break
+    fi
+    sleep 0.25
+  done
+  if [ "$HERMES_READY" != 1 ]; then
+    echo "ERROR: Hermes did not become healthy after restart; the app was not relaunched." >&2
+    exit 1
+  fi
+  echo "ready: io.intaglio.hermes"
+fi
+
+# PROVE THE CONNECTOR CHILD.
+#
+# A build with connector config is not successful until the replacement app's
+# daemon survives startup. This checks the installed script path, so an orphan
+# from the previous bundle cannot satisfy it.
+verify_connector_child() {
+  [ -f "$HOME/.hazlie/connectors/config.json" ] || return 0
+  for _ in $(seq 1 120); do
+    if pgrep -f "$DEST/Contents/Resources/backend/connectors/daemon\\.mjs" >/dev/null 2>&1; then
+      echo "running: connector daemon"
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "ERROR: the rebuilt app's connector daemon did not survive startup." >&2
+  return 1
+}
 
 # RESTART THE APP TOO, for exactly the same reason as the agents above.
 #
@@ -598,8 +670,12 @@ if pgrep -x Hazlie >/dev/null 2>&1; then
     # look broken.
     pkill -f 'ui/scripts/distill-(episodes|once)\.mjs' 2>/dev/null \
       && echo "reaped: orphaned distiller pass" || true
-    open "$DEST" && echo "restarted: Intaglio Labs.app"
+    open "$DEST"
+    echo "restarted: Intaglio Labs.app"
+    verify_connector_child
   fi
 elif [ "${1:-}" = "--run" ]; then
   open "$DEST"
+  echo "started: Intaglio Labs.app"
+  verify_connector_child
 fi

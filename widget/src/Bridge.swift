@@ -45,6 +45,7 @@ protocol BridgeDelegate: AnyObject {
   func scaleChanged(_ scale: Double, committed: Bool, from webView: WKWebView?)
   func fitPopup(_ webView: WKWebView, contentHeight: Double)
   func widgetSpot() -> [String: Double]
+  func chatBarOpenChanged(_ open: Bool)
   func widgetBoundsChanged()
   func spotlightWidget(_ on: Bool)
   func openOnboarding()
@@ -86,6 +87,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   static let pageCapabilities: [String: Set<String>] = [
     "widget": ["drag", "openChat", "openChatWith", "openConnections",
                "openMonths", "openReconnect", "voiceArm", "widgetBounds",
+               "chatBarOpen",
                "workStatus", "relCard", "relEvent", "relRefresh"],
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
     // The reconnect card popup (L5 step 10): reads the current card, posts
@@ -836,6 +838,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     case "drag":
       delegate?.dragWindow(of: webView)
       reply(webView, id, ["state": "ok"])
+    case "chatBarOpen":
+      delegate?.chatBarOpenChanged(payload["open"] as? Bool ?? false)
+      reply(webView, id, ["state": "ok"])
     case "widgetBounds":
       // Where the VISIBLE widget starts inside its mostly-transparent window,
       // in CSS px from the window's left edge. The widget window is 312pt wide
@@ -1244,8 +1249,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         items.append(["kind": "index", "label": label])
       }
       var activity: [String: Any] = ["state": "ok", "items": items]
-      if let estimate = Connectors.shared.activityEstimate
-        ?? Connectors.shared.activityScheduleEstimate {
+      if let estimate = Connectors.shared.activityEstimate {
         activity["estimate"] = estimate
       }
       reply(webView, id, activity)
