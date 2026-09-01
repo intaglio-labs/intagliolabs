@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { buildMap, clusterOf } from '../server/people/map.mjs';
+import { buildMap, clusterOf, isAnonymousContact } from '../server/people/map.mjs';
 
 const DAY = 86_400_000;
 const NOW = 1_700_000_000_000;
@@ -256,4 +256,45 @@ test('the contacts app outranks any threshold', () => {
   spine.prepare('INSERT INTO contact_ids VALUES (?,?,?,?)').run('+15550312', 'Mika Tanaka', 'phone', NOW);
   assert.equal(buildMap(ctx, spine, { now: NOW, owner }).counts.people, 1,
     'one message, but the owner deliberately saved them');
+});
+
+// AN INVITE IS NOT A RELATIONSHIP.
+//
+// Every attendee address on every calendar event becomes a person, which is
+// right -- attendee emails are the one join key that reaches across platforms.
+// But an address that appears on an invite, is never named anywhere in the
+// calendar data, and has never exchanged a message is a list row that shows an
+// email and nothing else. Measured on the owner's corpus: 451 of 1,077 entries
+// in the 2026 list were exactly that, against 2,324 people with real names and
+// real messages. After the filter: 630 entries, 4 bare addresses, and all four
+// have messages so they are kept on purpose.
+
+test('a contact with only an address is anonymous; one with a name is not', () => {
+  assert.equal(isAnonymousContact({ name: 'Sam Lee' }), false);
+  assert.equal(isAnonymousContact({ name: 'Dr. A. B-C' }), false);
+  assert.equal(isAnonymousContact({ name: 'a@b.com' }), true);
+  assert.equal(isAnonymousContact({ name: '  a@b.com  ' }), true, 'whitespace does not rescue it');
+  // The projection falls back to the key when it has nothing better, so the
+  // prefixed form renders as an address too.
+  assert.equal(isAnonymousContact({ name: 'id:a@b.com' }), true);
+  assert.equal(isAnonymousContact({ name: 'k', key: 'k' }), true, 'a key used as a name is not a name');
+  assert.equal(isAnonymousContact({ name: '' }), true);
+  assert.equal(isAnonymousContact({}), true);
+});
+
+test('a name that merely contains an address is still a name', () => {
+  // "Sam Lee sam@x.com" is how some address books render, and it is more than an
+  // address. Only a bare one counts.
+  assert.equal(isAnonymousContact({ name: 'Sam Lee sam@x.com' }), false);
+});
+
+test('the filter keeps the people the list exists for', () => {
+  // The rule is nameless AND no messages AND no room messages. Each clause has to
+  // be load-bearing, or it removes somebody it should not: a colleague seen
+  // weekly and never messaged is a real relationship, and the comment above
+  // buildYear's engagement check is right to defend them.
+  const named = { name: 'Sam Lee' };
+  const anon = { name: 'a@b.com' };
+  assert.equal(isAnonymousContact(named), false, 'a named calendar-only contact stays');
+  assert.equal(isAnonymousContact(anon), true, 'an unnamed one is a candidate for removal');
 });

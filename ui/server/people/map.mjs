@@ -444,6 +444,28 @@ export function buildAvatars(contextDb, stateDb, { keys, now = Date.now(), owner
   return out;
 }
 
+/**
+ * Does this person have a name, or only an address?
+ *
+ * Exported and tested directly rather than through buildYear, because a fixture
+ * built to look like the case can silently fail to produce it -- that happened
+ * on this branch already, with a projection test that passed identically after
+ * the guard it tested had been removed.
+ *
+ * A key used as a name counts as anonymous: the projection falls back to the key
+ * when it has nothing better, so `id:someone@example.com` renders as an address
+ * just as surely as a bare one does.
+ */
+export function isAnonymousContact(person) {
+  const name = String(person?.name ?? '').trim();
+  if (!name) return true;
+  if (person?.key !== undefined && name === person.key) return true;
+  // Deliberately not a strict email regex: the question is "does this render as
+  // an address to somebody reading the list", and anything with an @ and no
+  // spaces does.
+  return /^(?:id:)?[^@\s]+@[^@\s]+$/u.test(name);
+}
+
 export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, aliases = null, cap = 250 } = {}) {
   const { graph, topics } = yearCore(contextDb, stateDb, { now, owner, aliases });
 
@@ -475,6 +497,26 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
     // that vanishes cannot give it. Room volume deliberately does NOT enter
     // engagement: it would buy rank with other people's conversations.
     if (engagement === 0 && roomMessages === 0) continue;
+    // AN INVITE IS NOT A RELATIONSHIP.
+    //
+    // Every attendee email on every calendar event becomes a person, which is
+    // right -- attendee addresses are the one join key that reaches across
+    // platforms, and connectors/sources/calendar.mjs:108 exists to preserve
+    // them. It is how a meeting and a message thread resolve to one person.
+    //
+    // But an address that appears on an invite, carries no name anywhere in the
+    // calendar data, and has never exchanged a message is not somebody the owner
+    // has a relationship with. It is a row that shows an email and nothing else,
+    // and there are 1,356 of them against 2,324 people with real names and real
+    // messages -- the noise outnumbers the signal on the page it is about.
+    //
+    // NAMELESS is the test, not "calendar-only", and the distinction matters: a
+    // colleague seen weekly and never messaged is a real relationship and the
+    // comment above is right to defend them, so anyone the calendar ever named
+    // stays. Only the anonymous remainder goes, and it goes from the LIST, not
+    // the graph -- identity resolution, search and the cross-platform join key
+    // all keep working exactly as before.
+      if (isAnonymousContact(p) && messages === 0 && roomMessages === 0) continue;
     entries.push({ p, messages, met, meetingNotes, engagement, roomMessages, channels: [...channels].sort() });
   }
   entries.sort((a, b) => b.engagement - a.engagement);
