@@ -67,7 +67,7 @@ async function send(utterance, { echo = true } = {}) {
   let data;
   try {
     data = await hzPost('ask', { utterance });
-  } catch {
+  } catch (_error) {
     data = { state: 'error' };
   }
   busy = false;
@@ -190,6 +190,14 @@ function setFolded(v) {
   document.body.classList.toggle('folded', v);
   if (!v) { log.scrollTop = log.scrollHeight; placeFold(); }
 }
+// Expanding the message bar reopens this reused page. Return whether there is
+// actually a conversation to show so native never places an empty transparent
+// window over the desktop on a first, history-free open.
+window.__hzShowHistory = () => {
+  if (!log.lastElementChild) return false;
+  setFolded(false);
+  return true;
+};
 const fold = document.getElementById('fold');
 fold.addEventListener('click', () => { hzSfx.close(); setFolded(true); });
 

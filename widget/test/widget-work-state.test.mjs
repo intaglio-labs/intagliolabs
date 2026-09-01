@@ -40,6 +40,8 @@ test('the widget gives real work the thinking pose and a current-task hover labe
   const code = script.split('\n').filter((l) => !/^\s*\/\//u.test(l)).join('\n');
   assert.doesNotMatch(code, /estimating time left/u,
     'the widget must not promise a time it has not been given');
+  assert.doesNotMatch(code, /`current: \$\{workLabel\}/u,
+    'the work bubble must show the activity directly, without a current: prefix');
   assert.match(script, /setInterval\(refreshWorkState, 1500\)/u);
 });
 

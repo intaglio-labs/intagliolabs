@@ -69,11 +69,8 @@ const VOICE_TEASE = true;
 // The explicit break keeps the smiley with its sentence instead of letting
 // WebKit strand it on a third line inside the fixed-width thought bubble.
 const TEASE_TEXT = 'voice coming soon.\nhelp us build it :)';
-// Chat wears the same sign for now (owner, 2026-08-25): the pill no longer
-// expands, and pressing it answers with a line instead of an input. Flip
-// this off to give the bar back.
-const CHAT_TEASE = true;
-const CHAT_TEASE_TEXT = 'chat coming soon. help us build it :)';
+// Owner direction, 2026-08-31: move the chat-unlock changes onto UI-updates
+// and keep this entry point accessible for natural-language Deep Search.
 const TEASE_MS = 2400;
 const WORK_DETAILS_MS = 4800;
 const dreamEl = document.getElementById('wdream');
@@ -381,7 +378,7 @@ let orbHovered = false;
 function workDetailText() {
   if (!workLabel) return '';
   const detail = workEstimate || workScope;
-  return detail ? `current: ${workLabel}\n${detail}` : `current: ${workLabel}`;
+  return detail ? `${workLabel}\n${detail}` : workLabel;
 }
 function showWorkDetails(dwellMs = 0) {
   if (workLabel) showTease(workDetailText(), dwellMs, 'work');
@@ -496,8 +493,9 @@ winput.addEventListener('keydown', (e) => {
 });
 // Collapsed, the pill is a sliver carrying the .wchat glyph; the real
 // placeholder only reads once a click has focused it and slid the bar out.
-// Expansion is click-driven — hover proved twitchy. Focus also surfaces the
-// chat window, so the conversation is on screen before the first keystroke.
+// Expansion is click-driven — hover proved twitchy. The closed-to-open
+// transition also surfaces the retained chat log, so the latest conversation
+// is on screen before the first keystroke.
 // A class, not :focus — the widget lives in a nonactivating panel, where
 // WebKit fires focus/blur events but does not reliably apply the :focus
 // pseudo-class. barMinimized overrides everything, draft included: the bar
@@ -512,9 +510,17 @@ const chatBtn = document.getElementById('wchat');
 let barOpen = false;
 function syncBar() {
   const open = !barMinimized && (document.activeElement === winput || winput.value.length > 0);
-  if (open && !barWasOpen) hzSfx.expand();
+  const changed = open !== barOpen;
+  if (open && !barWasOpen) {
+    hzSfx.expand();
+    hzPost('openChat').catch((error) => console.warn('could not show chat history', error));
+  }
   barWasOpen = open;
   barOpen = open;
+  if (changed) {
+    hzPost('chatBarOpen', { open })
+      .catch((error) => console.warn('could not align the chat bar', error));
+  }
   // Collapsed, the glyph in .wchat says 'chat' instead — so no placeholder
   // text at all, or the two would stack on top of each other.
   winput.placeholder = open ? 'Message…' : '';
@@ -533,19 +539,10 @@ function syncChatGlyph() {
   chatBtn.title = ready ? 'Send' : (barOpen ? 'Collapse' : 'Chat');
 }
 winput.addEventListener('focus', () => {
-  if (CHAT_TEASE) {
-    // The collapsed sliver can still catch a click; it answers with the sign
-    // too, and never opens.
-    winput.blur();
-    showTease(CHAT_TEASE_TEXT);
-    return;
-  }
   barMinimized = false; hideTease(); syncBar();
 });
-// NOT on focus: the native openChat makes the chat panel key, which yanks
-// focus off this input mid-click and the bar snaps shut before a keystroke
-// lands. Until the bridge can order the chat front without focusing it,
-// the chat appears on send instead.
+// Native orders the retained history forward without making it key, so this
+// input keeps focus while the owner reads the messages above it.
 winput.addEventListener('blur', syncBar);
 
 // Where the VISIBLE widget starts inside this mostly-transparent window, in
@@ -608,13 +605,7 @@ winput.addEventListener('input', () => { hideTease(); syncChatGlyph(); });
 // of the two paths wins the race, and it feels quicker besides.
 chatBtn.addEventListener('pointerdown', (e) => {
   e.preventDefault(); // or the button takes focus off the input on the way down
-  if (CHAT_TEASE) {
-    // Chat is signed off for now: the press is answered with the same dream
-    // cloud the orb uses, and the bar stays shut.
-    showTease(CHAT_TEASE_TEXT);
-    return;
-  }
-  hideTease();        // reaching for the bar means the line has been read
+  hideTease();        // reaching for the bar dismisses any voice/work bubble
   if (winput.value.trim()) {
     // Focus stays in the pill, so the next message can be typed straight away.
     submitFromWidget();

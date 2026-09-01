@@ -1719,6 +1719,11 @@ h1 { font-size: 26px; font-weight: 700; margin: 2px 0 0; }
 .setting-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .setting-label-line { display: inline-flex; align-items: center; gap: 5px; }
 .setting-hint { position: relative; display: inline-flex; flex: 0 0 auto; z-index: 8; }
+/* Every closed icon shares the base layer. Lift only the hint being read so
+   later settings rows cannot paint their icons or card surfaces over its box. */
+.setting-hint:hover,
+.setting-hint:focus-within,
+.setting-hint.open { z-index: 30; }
 .setting-hint-icon {
   width: 15px; height: 15px; padding: 0; border-radius: 50%;
   border: 1px solid rgba(197, 165, 109, 0.42);
@@ -2062,10 +2067,17 @@ body.chat .close { position: static; }
   border: 1px solid rgba(234, 234, 234, 0.10);
 }
 .msg.assistant {
-  /* Stretched, not content-sized — but stopping just short of the ×'s
-     column (× is 22px wide at a 6px inset), not at the widget edge. */
+  /* Chat is 420px wide and the compact widget is 312px, with their right edges
+     aligned. The bar begins 126px into chat (108px width difference + 6px body
+     padding + 12px margin). The log already contributes 20px, so its 106px
+     left margin puts the LEFT assistant bubble on that exact edge. The user
+     bubble above remains right-aligned and content-sized.
+
+     Stretched, not content-sized — but stopping just short of the ×'s column
+     (× is 22px wide at a 6px inset), not at the widget edge. */
   align-self: stretch;
   max-width: none;
+  margin-left: 106px;
   margin-right: 28px;
   background: rgba(44, 38, 27, 0.94);
   border: 1px solid rgba(197, 165, 109, 0.38);
