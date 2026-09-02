@@ -2102,6 +2102,70 @@ body.chat .close { position: static; }
 }
 /* display:block above would otherwise defeat the hidden attribute. */
 .msg .src-hint[hidden] { display: none; }
+
+/* FRONTIER HANDOFF. The local answer stays an ordinary assistant bubble; these
+   quiet controls open a second, explicit review step. Nothing styled as a send
+   button appears until the exact outbound text is visible in a textarea. */
+.frontier-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin-top: 10px; padding-top: 9px;
+  border-top: 1px solid rgba(197, 165, 109, 0.18);
+}
+.frontier-lead,
+.frontier-note,
+.frontier-disclosure,
+.frontier-receipt {
+  font-size: 10px; line-height: 1.4; color: var(--muted);
+}
+.frontier-lead { margin-right: 2px; }
+.frontier-note { flex-basis: 100%; }
+.frontier-row,
+.frontier-review-row { display: inline-flex; gap: 6px; }
+.frontier-row button,
+.frontier-review-row button {
+  font: inherit; font-size: 11px;
+  padding: 4px 11px; border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: rgba(20, 20, 18, 0.45); color: var(--secondary);
+  cursor: pointer;
+}
+.frontier-row button:hover:not(:disabled),
+.frontier-review-row button:hover:not(:disabled) {
+  border-color: var(--secondary); color: var(--fg);
+}
+.frontier-row button:disabled,
+.frontier-review-row button:disabled { opacity: 0.42; cursor: default; }
+
+.msg.frontier-review {
+  display: flex; flex-direction: column; gap: 9px;
+  max-width: none; margin-right: 28px;
+}
+.frontier-review-lead {
+  font-size: 12px; font-weight: 650; color: var(--hazelnut-light);
+}
+.frontier-prompt {
+  box-sizing: border-box; width: 100%; min-height: 190px; max-height: 320px;
+  resize: vertical; padding: 10px 11px;
+  border: 1px solid rgba(197, 165, 109, 0.32); border-radius: 8px;
+  outline: none; background: rgba(12, 12, 11, 0.72); color: var(--fg);
+  font: inherit; font-size: 11px; line-height: 1.48;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.frontier-prompt:focus {
+  border-color: rgba(197, 165, 109, 0.72);
+  box-shadow: 0 0 0 2px rgba(197, 165, 109, 0.08);
+}
+.frontier-disclosure { color: var(--secondary); }
+.frontier-review-row { justify-content: flex-end; }
+.frontier-review-row .frontier-approve {
+  border-color: rgba(51, 255, 102, 0.34); color: var(--status-ok);
+}
+.frontier-review-row .frontier-approve:hover:not(:disabled) {
+  background: rgba(51, 255, 102, 0.08);
+}
+.msg.frontier-sent { display: flex; flex-direction: column; gap: 7px; }
+.frontier-receipt { align-self: flex-end; color: var(--secondary); }
+.frontier-provider { text-transform: none; }
 /* The fold ×: rides the bottom edge of the log, level with the newest
    message; pressing it hides the log (body.folded), leaving the head. */
 .fold {

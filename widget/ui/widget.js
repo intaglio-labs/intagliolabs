@@ -69,10 +69,12 @@ const VOICE_TEASE = true;
 // The explicit break keeps the smiley with its sentence instead of letting
 // WebKit strand it on a third line inside the fixed-width thought bubble.
 const TEASE_TEXT = 'voice coming soon.\nhelp us build it :)';
-// Chat wears the same sign for now (owner, 2026-08-25): the pill no longer
-// expands, and pressing it answers with a line instead of an input. Flip
-// this off to give the bar back.
-const CHAT_TEASE = true;
+// ~~Chat wore the same sign as voice (owner, 2026-08-25): the pill did not
+// expand, and pressing it answered with a line instead of an input.~~ Reversed
+// 2026-08-31 by owner direction for the explicit frontier handoff: chat is the
+// only place where the exact outbound prompt can be reviewed and edited, so
+// leaving its only entry point teased would ship an unreachable consent UI.
+const CHAT_TEASE = false;
 const CHAT_TEASE_TEXT = 'chat coming soon. help us build it :)';
 const TEASE_MS = 2400;
 const WORK_DETAILS_MS = 4800;

@@ -26,8 +26,12 @@ Ask questions such as:
 
 ## Privacy, precisely
 
-**No corpus text is sent to a cloud model.** Reasoning and narration run
-locally against loopback model servers.
+Answers start locally against loopback model servers. Intaglio never attaches
+raw corpus rows, quotes or hidden retrieval context to a cloud request. After a
+local answer, you may choose ChatGPT or Claude, review and edit the complete
+outbound prompt, and explicitly send that text through the provider's installed
+client. The sent text can contain private facts from the local answer; what you
+see in the review box is the privacy boundary.
 
 That does not mean that nothing ever leaves your Mac: connected services,
 software distribution, and other network access have their own explicit paths.
@@ -64,7 +68,9 @@ the setup intentionally uses a stable Node copy at `~/.hazlie/bin/node`.
 
 - **Hermes is the only writer and deleter.** Connectors use `POST /ingest`;
   deletion is requested through bearer-only `/admin/*` routes.
-- **Corpus text never rides a cloud request.**
+- **No automatic cloud context.** Raw rows, quotes and hidden snippets never
+  ride a cloud request. A frontier handoff sends only the text the user reviews
+  and explicitly approves.
 - **Logs never contain row content.** `connectors/lib/log.mjs` rejects
   content-shaped field names.
 - **Reconciliation cannot mass-delete.** A scan that observes nothing cannot

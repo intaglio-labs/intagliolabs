@@ -727,8 +727,11 @@ const BRIDGE_HELP = {
 // renders under EVERY tile including the social bridges, which hold a live
 // authenticated session to the platform — so "your data never leaves this
 // mac" was false there (the ops/EGRESS.json ledger enumerates the real
-// paths). What IS true everywhere: hazlie reasons over it locally and no
-// cloud model sees it.
+// paths). What IS true everywhere: ~~hazlie reasons over it locally and no
+// cloud model sees it~~ (stale 2026-08-31: the owner-reviewed frontier
+// handoff can send reviewed text to a cloud model) — the rows themselves stay
+// local, and no cloud model receives anything the owner did not review and
+// approve in chat.
 const STAY = "data stored locally";
 
 const kindOf = (id) => (id.startsWith('mail:') ? 'mail' : id);

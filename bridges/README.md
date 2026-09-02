@@ -4,9 +4,10 @@ This is Lane 1 of the social-bridges plan (`SOCIAL-BRIDGES-PLAN.md`, a plan
 file that stayed in the private repo): the Beeper trick, run entirely on
 this Mac. A tiny Matrix homeserver is an aggregation bus; one bridge per platform
 speaks that platform's own client protocol as the owner's linked session and
-relays DMs into Matrix; one hazlie connector reads Matrix. Nothing federates,
-nothing listens off-loopback, no corpus data reaches a cloud model — the same
-inbound-fetch-of-your-own-data posture as the IMAP and Oura pollers.
+relays DMs into Matrix; one hazlie connector reads Matrix. Nothing federates and
+nothing listens off-loopback. This bridge never sends its rows to a model; the
+separate, user-reviewed frontier handoff can send only the exact text shown in
+its approval box.
 
 ## One engine: native, supervised by launchd
 
