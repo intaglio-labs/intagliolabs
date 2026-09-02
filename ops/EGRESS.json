@@ -1,7 +1,11 @@
 {
   "_readme": [
-    "THE EGRESS LEDGER. Every host this repo can reach is enumerated here, and",
-    "here ONLY. This file exists because the same claim used to be written out",
+    "THE EGRESS LEDGER. Every host reached by networking implemented in this repo",
+    "is enumerated here, and here ONLY. Installed provider clients are a narrower",
+    "exception: their vendor-controlled supporting host set is not implemented or",
+    "pinned by this repo, so their root service destinations and boundary are",
+    "recorded here without pretending an external binary's internals are ours.",
+    "This file exists because the same claim used to be written out",
     "longhand in nine prose files -- ui/AGENTS.md, connectors/AGENTS.md,",
     "README.md, four sections of site/privacy/index.html, connect/lib/status.mjs,",
     "widget/ui/connections.js -- and by 2026-08-22 every one of them was false.",
@@ -52,7 +56,7 @@
     "2026-08-23. The login-webview kind was DEFINED here and had ZERO entries, while the in-app login had been navigating Meta's hosts since it shipped. The tripwire could not see them: allowedSuffixes was a Swift array of BARE host strings ('instagram.com'), and the scan matches https?://host. So a host list that is a fence rather than a URL is invisible to it -- worth knowing, because a fence is exactly a list of places the code can go. The five entries added here close that, and connect/test/bridgePolicy.test.mjs now asserts each platform's loginUrl is inside its own fence."
   ],
   "version": 1,
-  "last_reviewed": "2026-08-24",
+  "last_reviewed": "2026-08-31",
   "_kinds": {
     "api": "the daemon or server opens this socket itself, on a timer or on demand",
     "bridge": "a local container holds a standing authenticated session to this platform",
@@ -61,20 +65,44 @@
     "model-asset": "model or vendor asset download",
     "user-browser-link": "NOT this program's egress -- a link handed to the owner's own browser",
     "website": "a host the public marketing site in site/ reaches: a subresource the visitor's browser loads, or a link it hands them. Not the product's egress -- no daemon opens these",
+    "frontier-client": "an installed official provider client receives one user-reviewed prompt on stdin and owns its subscription login and vendor-controlled network stack; the app neither implements its socket nor reads its credential",
     "loopback": "never leaves the machine"
   },
   "_the_claim": [
     "The narrow claim this system actually keeps, stated once:",
-    "HAZLIE SENDS NO CORPUS TEXT TO A CLOUD MODEL. All reasoning and narration",
-    "happen locally, on loopback llama-server instances.",
+    "ANSWERS BEGIN LOCALLY. HAZLIE NEVER ATTACHES RAW CORPUS ROWS, QUOTES OR",
+    "HIDDEN RETRIEVAL CONTEXT TO A CLOUD REQUEST. A frontier handoff sends only",
+    "the exact text the user reviews, may edit, and explicitly approves.",
     "",
     "That is much narrower than 'nothing leaves this Mac', which is false and",
     "must not be written anywhere. Data leaves on every `api`, `bridge` and",
-    "`login-webview` path below. What does not leave is corpus text on a model",
-    "call: ui/server/hermes.mjs' sealed reader holds the only DB handle, carries",
-    "no cloud credential, and talks only to its own loopback llama-server."
+    "`login-webview` path below, and reviewed prompt text leaves on a",
+    "`frontier-client` path. The local answer inside that prompt may contain",
+    "private derived facts. ui/server/hermes.mjs keeps the only DB handle; the",
+    "provider clients receive no handle, row, quote, hidden snippet or app-held",
+    "credential."
   ],
   "paths": [
+    {
+      "host": "chatgpt.com",
+      "kind": "frontier-client",
+      "component": "widget/src/FrontierRunner.swift -> installed codex app-server",
+      "direction": "outbound-send",
+      "purpose": "send one prompt whose complete text the owner reviewed and approved, then receive one answer. chatgpt.com is the root service destination; the installed Codex client may use additional vendor-controlled supporting hosts outside this repository's implementation and literal-host tripwire",
+      "credential": "owned and refreshed by the installed Codex client through Sign in with ChatGPT; Intaglio never reads, copies or logs it",
+      "decision": "Owner-directed 2026-08-31. Allowed only after the local answer, through the visible editable review box and a provider-named send button. The process gets a separate empty private working directory, read-only sandbox, no approvals, no app database handle and no inherited API-key variables. Its sibling isolated CODEX_HOME is deleted and rebuilt before every run with only a symlink to Codex's own auth file — client state from earlier handoffs cannot linger — so the model-visible working directory contains no credential and ordinary Codex plugins, hooks, MCP servers, skills, history and config cannot observe the prompt. The exact sent text remains visible as a receipt.",
+      "evidence": "widget/ui/chat.js frontierPrompt/openFrontierReview; widget/src/Bridge.swift frontierSend; widget/src/FrontierRunner.swift CodexFrontierJob"
+    },
+    {
+      "host": "api.anthropic.com",
+      "kind": "frontier-client",
+      "component": "widget/src/FrontierRunner.swift -> installed claude -p",
+      "direction": "outbound-send",
+      "purpose": "send one prompt whose complete text the owner reviewed and approved, then receive one answer. api.anthropic.com is the root service destination; the installed Claude client may use additional vendor-controlled supporting hosts outside this repository's implementation and literal-host tripwire",
+      "credential": "owned and refreshed by the installed Claude client through its subscription login; Intaglio never reads, copies or logs it",
+      "decision": "Owner-directed 2026-08-31 under the same visible-review boundary as ChatGPT. Claude is invoked in safe mode with an empty tool set, no permission prompts, strict empty MCP configuration, empty settings sources, no browser and no session persistence; the approved prompt is written to stdin rather than argv.",
+      "evidence": "widget/ui/chat.js frontierPrompt/openFrontierReview; widget/src/Bridge.swift frontierSend; widget/src/FrontierRunner.swift ClaudeFrontierJob"
+    },
     {
       "host": "api.notion.com",
       "kind": "api",
