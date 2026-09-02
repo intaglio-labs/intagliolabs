@@ -18,7 +18,14 @@ final class FrontierRunner {
   private let lock = DispatchQueue(label: "io.intaglio.frontier-runner")
   private var active: FrontierJob?
 
-  private init() {}
+  private init() {
+    // A write to a pipe whose reader already exited raises SIGPIPE, whose
+    // default disposition kills the WHOLE app — reachable by an installed
+    // client old enough to reject one of our flags and exit before the prompt
+    // lands (review 2026-08-31). Ignored process-wide so the write throws
+    // EPIPE and the job settles as an ordinary error instead.
+    signal(SIGPIPE, SIG_IGN)
+  }
 
   func run(
     provider: FrontierProvider,
@@ -27,7 +34,7 @@ final class FrontierRunner {
   ) {
     lock.async { [self] in
       guard self.active == nil else {
-        DispatchQueue.main.async { completion(["state": "busy"]) }
+        DispatchQueue.main.async { completion(["state": "busy", "sent": false]) }
         return
       }
       let finish: ([String: Any]) -> Void = { [weak self] result in
@@ -78,8 +85,17 @@ private func frontierDirectory() throws -> URL {
   return base
 }
 
-private func frontierWorkingDirectory() throws -> URL {
+// The model-visible working directory is wiped per run for the same reason as
+// the codex home below: "empty" must be a property of every run, not of the
+// first (review 2026-08-31 — the old create-if-needed version let anything a
+// client ever dropped there sit inside every later run's workspace root, from
+// either provider). Called once per job, in start(), before the process runs;
+// never mid-protocol.
+private func freshFrontierWorkingDirectory() throws -> URL {
   let work = try frontierDirectory().appendingPathComponent("work", isDirectory: true)
+  if FileManager.default.fileExists(atPath: work.path) {
+    try FileManager.default.removeItem(at: work)
+  }
   try FileManager.default.createDirectory(
     at: work,
     withIntermediateDirectories: true,
@@ -160,6 +176,17 @@ private func frontierEnvironment() -> [String: String] {
   return out
 }
 
+// Structured JSON-RPC error fields only. Rendering whole params objects with
+// String(describing:) fed the turn's own input — owner-reviewed prompt text —
+// back into the substring classifier below, which could then misread failure
+// words inside the prompt as the provider's own error (review 2026-08-31).
+private func frontierFailureText(_ error: Any?) -> String {
+  guard let dict = error as? [String: Any] else { return "" }
+  let code = dict["code"].map { "code \($0)" } ?? ""
+  let message = dict["message"] as? String ?? ""
+  return code + " " + message
+}
+
 private func providerFailure(_ text: String) -> [String: Any] {
   let lower = text.lowercased()
   if lower.contains("not logged in") || lower.contains("unauthorized") ||
@@ -188,6 +215,8 @@ private final class ClaudeFrontierJob: FrontierJob {
   private var stderrClosed = false
   private var exitStatus: Int32?
   private var settled = false
+  private var finished = false
+  private var dispatched = false
   private var timer: DispatchSourceTimer?
   private let outputLimit = 1_000_000
 
@@ -208,7 +237,7 @@ private final class ClaudeFrontierJob: FrontierJob {
         let output = Pipe()
         let errors = Pipe()
         process.executableURL = binary
-        process.currentDirectoryURL = try frontierWorkingDirectory()
+        process.currentDirectoryURL = try freshFrontierWorkingDirectory()
         process.environment = frontierEnvironment()
         process.arguments = [
           "-p",
@@ -273,6 +302,10 @@ private final class ClaudeFrontierJob: FrontierJob {
         }
         try process.run()
         try input.fileHandleForWriting.write(contentsOf: Data(self.prompt.utf8))
+        // The receipt's ground truth: prompt bytes reached the child. Set
+        // here, not at exit — a pre-dispatch throw above must report
+        // sent:false so the UI never records a send that did not happen.
+        self.dispatched = true
         try input.fileHandleForWriting.close()
         self.startTimer()
       } catch {
@@ -290,18 +323,23 @@ private final class ClaudeFrontierJob: FrontierJob {
 
   private func maybeFinish() {
     guard !settled, let status = exitStatus, stdoutClosed, stderrClosed else { return }
-    let raw = String(data: stdout, encoding: .utf8) ?? ""
     let err = String(data: stderr, encoding: .utf8) ?? ""
-    guard status == 0,
-          let data = raw.data(using: .utf8),
-          let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-          let text = obj["result"] as? String,
-          !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    else {
-      settle(providerFailure(raw + "\n" + err))
+    let obj = (try? JSONSerialization.jsonObject(with: stdout)) as? [String: Any]
+    if status == 0, let obj,
+       obj["is_error"] as? Bool != true,
+       let text = obj["result"] as? String,
+       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      settle(["state": "ok", "text": text.trimmingCharacters(in: .whitespacesAndNewlines)])
       return
     }
-    settle(["state": "ok", "text": text.trimmingCharacters(in: .whitespacesAndNewlines)])
+    // Classify from the envelope's own error fields and stderr. A parsed
+    // envelope's answer body never reaches the classifier — failure words
+    // INSIDE an owner's answer forged a false "not sent" receipt (review
+    // 2026-08-31). Stdout that fails to parse as the envelope at all is error
+    // prose, not an answer, and stays scannable.
+    let structured = obj?["is_error"] as? Bool == true ? (obj?["result"] as? String ?? "") : ""
+    let prose = obj == nil ? (String(data: stdout, encoding: .utf8) ?? "") : ""
+    settle(providerFailure([structured, prose, err].joined(separator: "\n")))
   }
 
   private func startTimer() {
@@ -326,8 +364,31 @@ private final class ClaudeFrontierJob: FrontierJob {
     try? stderrHandle?.close()
     stdoutHandle = nil
     stderrHandle = nil
+    var out = result
+    out["sent"] = dispatched
+    let proc = process
     process = nil
-    finish(result)
+    guard let proc, proc.isRunning else {
+      deliver(out)
+      return
+    }
+    // Do not release the one-job slot while the child lives: the busy guard
+    // and the per-run wipes assume at most one client on disk. Reap first —
+    // TERM, then KILL if the client traps it — and finish only then. Merely
+    // nilling the reference here left a cancelled claude running its billed
+    // request with no handle able to stop it (review 2026-08-31).
+    proc.terminationHandler = { [weak self] _ in self?.queue.async { self?.deliver(out) } }
+    proc.terminate()
+    if !proc.isRunning { deliver(out) }
+    queue.asyncAfter(deadline: .now() + 5) {
+      if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
+    }
+  }
+
+  private func deliver(_ out: [String: Any]) {
+    guard !finished else { return }
+    finished = true
+    finish(out)
   }
 }
 
@@ -341,10 +402,14 @@ private final class CodexFrontierJob: FrontierJob {
   private var stderrHandle: FileHandle?
   private var stdoutBuffer = Data()
   private var stderr = Data()
+  private var stdoutClosed = false
   private var stderrClosed = false
   private var exitStatus: Int32?
   private var answer = ""
   private var settled = false
+  private var finished = false
+  private var dispatched = false
+  private var cwd = NSTemporaryDirectory()
   private var timer: DispatchSourceTimer?
   private let outputLimit = 1_000_000
 
@@ -365,7 +430,13 @@ private final class CodexFrontierJob: FrontierJob {
         let stdout = Pipe()
         let errors = Pipe()
         process.executableURL = binary
-        process.currentDirectoryURL = try frontierWorkingDirectory()
+        let workDir = try freshFrontierWorkingDirectory()
+        process.currentDirectoryURL = workDir
+        // Resolved once, used for thread/start and turn/start below: the old
+        // per-message recompute could hand the protocol a DIFFERENT directory
+        // than the process was launched in if a mid-run filesystem error made
+        // its try? fall back to the temp dir.
+        self.cwd = workDir.path
         var environment = frontierEnvironment()
         environment["CODEX_HOME"] = try isolatedCodexHome().path
         process.environment = environment
@@ -402,7 +473,11 @@ private final class CodexFrontierJob: FrontierJob {
         // 2026-08-31).
         self.stdoutHandle?.readabilityHandler = { [weak self] handle in
           let data = handle.availableData
-          if data.isEmpty { handle.readabilityHandler = nil; return }
+          if data.isEmpty {
+            handle.readabilityHandler = nil
+            self?.queue.async { self?.stdoutClosed = true; self?.maybeFailAfterExit() }
+            return
+          }
           self?.queue.async { self?.consume(data) }
         }
         self.stderrHandle?.readabilityHandler = { [weak self] handle in
@@ -423,6 +498,9 @@ private final class CodexFrontierJob: FrontierJob {
             self?.maybeFailAfterExit()
           }
         }
+        // The Codex signed-out throw above (NSError 401) must surface as
+        // "auth", not the generic error — a pre-dispatch auth failure used to
+        // render "could not answer that" AND a false "sent" receipt.
         try process.run()
         self.send([
           "method": "initialize",
@@ -437,6 +515,9 @@ private final class CodexFrontierJob: FrontierJob {
           ],
         ])
         self.startTimer()
+      } catch let error as NSError
+        where error.domain == "IntaglioFrontier" && error.code == 401 {
+        self.settle(["state": "auth"])
       } catch {
         self.settle(["state": "error"])
       }
@@ -466,13 +547,12 @@ private final class CodexFrontierJob: FrontierJob {
   private func receive(_ obj: [String: Any]) {
     if let id = obj["id"] as? Int, obj["method"] == nil {
       if obj["error"] != nil {
-        settle(providerFailure(String(describing: obj["error"]!)))
+        settle(providerFailure(frontierFailureText(obj["error"])))
         return
       }
       switch id {
       case 1:
         send(["method": "initialized", "params": [:]])
-        let cwd = (try? frontierWorkingDirectory().path) ?? NSTemporaryDirectory()
         send([
           "method": "thread/start",
           "id": 2,
@@ -493,7 +573,10 @@ private final class CodexFrontierJob: FrontierJob {
               let thread = result["thread"] as? [String: Any],
               let threadId = thread["id"] as? String
         else { settle(["state": "error"]); return }
-        let cwd = (try? frontierWorkingDirectory().path) ?? NSTemporaryDirectory()
+        // This is the message that carries the reviewed prompt: past here the
+        // receipt must say "sent". Marked before the write so an ambiguous
+        // failure errs toward sent, never toward a false "nothing left".
+        dispatched = true
         send([
           "method": "turn/start",
           "id": 3,
@@ -528,15 +611,16 @@ private final class CodexFrontierJob: FrontierJob {
       return
     }
     if method == "error" {
-      settle(providerFailure(String(describing: params["error"] ?? params)))
+      settle(providerFailure(frontierFailureText(params["error"])))
       return
     }
     if method == "turn/completed" {
-      guard let turn = params["turn"] as? [String: Any],
-            turn["status"] as? String == "completed",
+      let turn = params["turn"] as? [String: Any]
+      guard turn?["status"] as? String == "completed",
             !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       else {
-        settle(providerFailure(String(describing: params)))
+        let status = turn?["status"] as? String ?? "unknown"
+        settle(providerFailure(frontierFailureText(turn?["error"]) + " turn \(status)"))
         return
       }
       // The thread was started as ephemeral, so app-server never writes it to
@@ -569,10 +653,13 @@ private final class CodexFrontierJob: FrontierJob {
     }
   }
 
-  // An exit before turn/completed is a failure, classified from stderr — so
-  // this waits for stderr's EOF as well as the exit code before reading it.
+  // An exit before turn/completed is a failure — but only after BOTH pipes
+  // report EOF. Gating on stderr alone left the same race the Claude job
+  // closed: a turn/completed still undrained in stdoutBuffer while the exit
+  // hop ran first discarded a produced, billed answer as an error (review
+  // 2026-08-31).
   private func maybeFailAfterExit() {
-    guard !settled, let status = exitStatus, stderrClosed else { return }
+    guard !settled, let status = exitStatus, stdoutClosed, stderrClosed else { return }
     let err = String(data: stderr, encoding: .utf8) ?? ""
     settle(providerFailure(err + " exit \(status)"))
   }
@@ -608,8 +695,28 @@ private final class CodexFrontierJob: FrontierJob {
     try? stderrHandle?.close()
     stdoutHandle = nil
     stderrHandle = nil
-    if process?.isRunning == true { process?.terminate() }
+    var out = result
+    out["sent"] = dispatched
+    let proc = process
     process = nil
-    finish(result)
+    guard let proc, proc.isRunning else {
+      deliver(out)
+      return
+    }
+    // Same reap-before-finish as the Claude job: the one-job slot and the
+    // per-run wipes assume at most one client on disk, so the slot is
+    // released only once the child is gone — TERM, then KILL if trapped.
+    proc.terminationHandler = { [weak self] _ in self?.queue.async { self?.deliver(out) } }
+    proc.terminate()
+    if !proc.isRunning { deliver(out) }
+    queue.asyncAfter(deadline: .now() + 5) {
+      if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
+    }
+  }
+
+  private func deliver(_ out: [String: Any]) {
+    guard !finished else { return }
+    finished = true
+    finish(out)
   }
 }

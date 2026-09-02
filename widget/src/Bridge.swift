@@ -1,11 +1,14 @@
 // The bridge: every JS↔native message and every byte of HTTP, in one file.
 //
-// This file is the egress choke point. Its own URLSession still reaches only
-// the two loopback bases below; redirects are refused; the webviews themselves
-// can load only local app assets (Windows.swift + each page's CSP). The one
-// explicit handoff out is `frontierSend`: after the owner edits and approves a
-// bounded prompt, FrontierRunner gives that text on stdin to an installed,
-// official provider client. No webview or database gets a provider credential.
+// This file is the egress choke point. ~~The audit for "nothing leaves the
+// box" was: the only two URLs this process can reach are the loopback bases
+// below.~~ Narrowed 2026-08-31 by the owner's frontier decision; the audit
+// now reads: its own URLSession still reaches only the two loopback bases
+// below; redirects are refused; the webviews themselves can load only local
+// app assets (Windows.swift + each page's CSP). The one explicit handoff out
+// is `frontierSend`: after the owner edits and approves a bounded prompt,
+// FrontierRunner gives that text on stdin to an installed, official provider
+// client. No webview or database gets a provider credential.
 import AppKit
 import WebKit
 
@@ -688,6 +691,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       delegate?.soundsChanged(on)
       reply(webView, id, ["state": "ok", "sounds": on])
     case "close":
+      // Closing chat hides the pending bubbles — the only cancel affordance —
+      // so work left running would bill and block for up to its timeout with
+      // nothing on screen naming it (review 2026-08-31). Chat only: another
+      // page's close must not touch chat's jobs.
+      if pageOf[ObjectIdentifier(webView)] == "chat" {
+        askTask?.cancel()
+        FrontierRunner.shared.cancel()
+      }
       delegate?.closeWindow(of: webView)
       reply(webView, id, ["state": "ok"])
     case "drag":

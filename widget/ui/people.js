@@ -211,7 +211,10 @@ function openSearchDetails() {
   for (const line of [
     'maps every person you have talked to, across all connected sources',
     `within your timeframe — ${TIME_LABEL[searchDays] || searchDays + ' days'}`,
-    'the map is built on this mac; no cloud model sees it',
+    // ~~'no cloud model sees it'~~ (stale 2026-08-31: the owner-reviewed
+    // frontier handoff can send reviewed text to a cloud model — the map and
+    // its rows still never leave).
+    'the map is built and kept on this mac',
     'builds your private people-map; searching it for specifics comes next',
   ]) {
     const li = document.createElement('li');

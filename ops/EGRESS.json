@@ -53,7 +53,9 @@
     "unscanned fails the suite. Note what these entries are NOT -- no process in",
     "this repo opens them. They are what a VISITOR's browser fetches or follows.",
     "",
-    "2026-08-23. The login-webview kind was DEFINED here and had ZERO entries, while the in-app login had been navigating Meta's hosts since it shipped. The tripwire could not see them: allowedSuffixes was a Swift array of BARE host strings ('instagram.com'), and the scan matches https?://host. So a host list that is a fence rather than a URL is invisible to it -- worth knowing, because a fence is exactly a list of places the code can go. The five entries added here close that, and connect/test/bridgePolicy.test.mjs now asserts each platform's loginUrl is inside its own fence."
+    "2026-08-23. The login-webview kind was DEFINED here and had ZERO entries, while the in-app login had been navigating Meta's hosts since it shipped. The tripwire could not see them: allowedSuffixes was a Swift array of BARE host strings ('instagram.com'), and the scan matches https?://host. So a host list that is a fence rather than a URL is invisible to it -- worth knowing, because a fence is exactly a list of places the code can go. The five entries added here close that, and connect/test/bridgePolicy.test.mjs now asserts each platform's loginUrl is inside its own fence.",
+    "",
+    "2026-08-31. First model egress, and _the_claim narrowed with it. It used to read: 'HAZLIE SENDS NO CORPUS TEXT TO A CLOUD MODEL. All reasoning and narration happen locally, on loopback llama-server instances.' The owner-reviewed frontier handoff (kind frontier-client) replaced that absolute: answers still begin locally and no raw row, quote or hidden context is ever attached, but text the owner reviews and approves now leaves through installed official provider clients. The old sentence is kept here, struck by this paragraph rather than deleted, so nobody re-derives it as still current."
   ],
   "version": 1,
   "last_reviewed": "2026-08-31",
