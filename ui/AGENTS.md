@@ -73,9 +73,10 @@ The owner approved a narrower, interactive boundary on 2026-08-31. After Hermes
 returns its bounded local answer, the widget may assemble only the current
 question, that answer, and source labels. It must show the complete assembled
 text in an editable review box. Nothing leaves until the owner presses a button
-named for the provider. Native may then hand exactly that edited text on stdin to
-the installed official Codex or Claude client, whose existing subscription login
-is its own responsibility. The app supplies no files, database handle, hidden
+named for the provider. Native may then hand exactly that edited text — prefixed
+by one fixed, app-authored instruction telling the model to treat it as untrusted
+reference and use no tools — on stdin to the installed official Codex or Claude
+client, whose existing subscription login is its own responsibility. The app supplies no files, database handle, hidden
 snippets, provider key, tools, approvals or persistent conversation. The sent
 text remains visible as a receipt after approval.
 

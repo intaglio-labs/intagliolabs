@@ -43,6 +43,13 @@ test('the assembled context package has only question, local answer and source l
   assert.match(assembly, /utterance/u);
   assert.match(assembly, /localAnswer/u);
   assert.match(assembly, /sources/u);
+  // Truncation cuts ONLY the local answer, leaving typing room: slicing the
+  // assembled whole removed the END fence first, letting trailing analysis
+  // text read as top-level instructions, and a box prefilled to maxLength
+  // silently rejected every keystroke (review 2026-08-31).
+  assert.match(assembly, /FRONTIER_EDIT_ROOM/u);
+  assert.doesNotMatch(assembly, /\.join\('\\n'\)\.slice\(/u,
+    'the fence and label lines must survive any truncation');
   for (const forbidden of ['row', 'quote', 'snippet', 'database', 'contextSnippets', 'identifier']) {
     // Comments explain the forbidden fields; only executable identifiers and
     // object keys matter here, so strip line comments before scanning.
@@ -91,6 +98,13 @@ test('cancelling one job cannot kill the other', () => {
   assert.match(fp, /hzPost\('frontierCancel'\)/u);
   assert.doesNotMatch(fp, /hzPost\('cancel'\)/u,
     'the frontier pending bubble must cancel only its own job');
+
+  // Closing chat hides every pending bubble — the only cancel affordance —
+  // so close cancels chat's jobs (and only when the closer IS chat).
+  const closeCase = between(bridge, 'case "close":', 'case "drag":');
+  assert.match(closeCase, /pageOf\[ObjectIdentifier\(webView\)\] == "chat"/u);
+  assert.match(closeCase, /askTask\?\.cancel\(\)/u);
+  assert.match(closeCase, /FrontierRunner\.shared\.cancel\(\)/u);
 });
 
 test('the receipt cannot claim a send that did not happen', () => {
@@ -106,9 +120,57 @@ test('the receipt cannot claim a send that did not happen', () => {
   assert.ok(sent > posted, 'lifecycle.sent() must run after the dispatch, not before');
   const sentReceipt = review.indexOf('`sent to ${name}`');
   assert.ok(sentReceipt > posted, 'the "sent to" receipt must be written after the reply');
-  assert.match(review,
-    /data\.state === 'missing' \|\| data\.state === 'auth' \|\| data\.state === 'busy'/u);
+  // The UI reads native's own record of dispatch, never a state-name list — a
+  // list went stale the first time a new pre-dispatch failure state appeared
+  // and stamped "sent" for a prompt that never left (review 2026-08-31).
+  assert.match(review, /data\.sent === true/u);
+  assert.doesNotMatch(review, /data\.state === 'missing'/u,
+    'the receipt must not re-derive dispatch from state names');
   assert.match(review, /not sent — nothing left this Mac/u);
+
+  // Native's side of that contract: sent is set where prompt bytes are
+  // written (stdin for claude, the turn/start write for codex), attached to
+  // every settle, and false on the busy fast-path.
+  assert.ok((runner.match(/out\["sent"\] = dispatched/gu) || []).length >= 2,
+    'both jobs must attach the dispatch record to their reply');
+  assert.match(runner, /"state": "busy", "sent": false/u);
+  const claudeJob = between(runner, 'private final class ClaudeFrontierJob', 'private final class CodexFrontierJob');
+  const claudeWrite = claudeJob.indexOf('write(contentsOf: Data(self.prompt.utf8))');
+  const claudeMark = claudeJob.indexOf('self.dispatched = true');
+  assert.ok(claudeWrite >= 0 && claudeMark > claudeWrite,
+    'claude marks dispatched at the stdin write');
+  const codexJob = runner.slice(runner.indexOf('private final class CodexFrontierJob'));
+  const codexMark = codexJob.indexOf('dispatched = true');
+  const codexTurn = codexJob.indexOf('"method": "turn/start"');
+  assert.ok(codexMark >= 0 && codexTurn > codexMark,
+    'codex marks dispatched at the turn/start write');
+  // A pre-spawn signed-out throw surfaces as auth, not generic error.
+  assert.match(codexJob, /error\.domain == "IntaglioFrontier" && error\.code == 401/u);
+  assert.match(codexJob, /\["state": "auth"\]/u);
+});
+
+test('failure classification never reads the answer body, and children are reaped', () => {
+  const claude = between(runner, 'private final class ClaudeFrontierJob', 'private final class CodexFrontierJob');
+  const codex = runner.slice(runner.indexOf('private final class CodexFrontierJob'));
+  // Substring classification over text containing the owner's own prompt or
+  // answer forged receipts (review 2026-08-31): claude classifies from the
+  // envelope's structured fields, codex from JSON-RPC error code+message.
+  assert.match(claude, /is_error/u);
+  assert.doesNotMatch(claude, /providerFailure\(raw/u,
+    'raw stdout holding an answer must not reach the classifier');
+  assert.match(codex, /frontierFailureText\(/u);
+  assert.doesNotMatch(codex, /String\(describing: params\)/u,
+    'whole params objects echo the turn input into the classifier');
+  // Reap before release: the one-job slot clears only once the child is gone,
+  // TERM then KILL — dropping the reference orphaned a cancelled, billed run.
+  for (const job of [claude, codex]) {
+    assert.match(job, /proc\.terminate\(\)/u);
+    assert.match(job, /SIGKILL/u);
+    assert.match(job, /deliver\(out\)/u);
+  }
+  // And SIGPIPE from a child that died before its stdin write cannot kill the
+  // app.
+  assert.match(runner, /signal\(SIGPIPE, SIG_IGN\)/u);
 });
 
 test('provider output is parsed at pipe EOF, never at bare process exit', () => {
@@ -121,7 +183,8 @@ test('provider output is parsed at pipe EOF, never at bare process exit', () => 
   assert.doesNotMatch(claude, /func terminated\(/u,
     'the exit-time parse path must stay deleted');
   const codex = runner.slice(runner.indexOf('private final class CodexFrontierJob'));
-  assert.match(codex, /guard !settled, let status = exitStatus, stderrClosed/u);
+  assert.match(codex, /guard !settled, let status = exitStatus, stdoutClosed, stderrClosed/u,
+    'codex must gate its exit-failure parse on BOTH pipes reaching EOF');
   assert.doesNotMatch(codex, /func terminated\(/u);
   // A handler left armed spins on an exhausted pipe; both jobs clear theirs
   // at EOF and on settle.
@@ -159,6 +222,14 @@ test('the official clients receive prompts over stdin without inherited API cred
   const wipe = codexHome.indexOf('removeItem(at: directory)');
   const relink = codexHome.indexOf('createSymbolicLink(at: link');
   assert.ok(wipe >= 0 && relink > wipe, 'the auth symlink must be recreated after the wipe');
+
+  // The model-visible working directory gets the same per-run wipe — "empty"
+  // must be a property of every run, not of the first (review 2026-08-31).
+  const workDir = between(runner, 'private func freshFrontierWorkingDirectory', 'private func executable');
+  assert.match(workDir, /removeItem\(at:\s*work\)/u,
+    'the shared work directory must be emptied before every run');
+  assert.doesNotMatch(runner, /frontierWorkingDirectory\(\)\.path/u,
+    'the cwd is resolved once at start, never recomputed mid-protocol');
   assert.doesNotMatch(runner, /process\.environment\s*=\s*ProcessInfo/u,
     'the subprocess environment must be copied through an allowlist');
 });
