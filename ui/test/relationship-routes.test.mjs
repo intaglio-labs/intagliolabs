@@ -9,7 +9,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { start } from '../server/hermes.mjs';
+import { start, openDb } from '../server/hermes.mjs';
 
 const TOKEN = 'e'.repeat(64);
 const CAP = { max: 5, windowMs: 86_400_000 };
@@ -171,5 +171,60 @@ test('bearerless requests bounce', async () => {
   try {
     const res = await fetch(`http://127.0.0.1:${server.port}/admin/relationship/card`);
     assert.equal(res.status, 401);
+  } finally { await server.close(); }
+});
+
+test('a restart hydrates cards from the last committed batch, without a refresh', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-routes-hydrate-'));
+  const dbPath = join(dir, 'context.db');
+  const now = Date.now();
+
+  // Seed one batch and two snapshots directly, in the exact shape the refresh
+  // route itself writes -- no refresh ever runs in this test.
+  const seed = openDb(dbPath);
+  const batchId = Number(
+    seed.prepare(
+      'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, ?, ?, ?)'
+    ).run(now, 2, 'open', null).lastInsertRowid
+  );
+  const insSnap = seed.prepare(
+    'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  );
+  const snap1 = Number(insSnap.run(
+    batchId, 'name:sam carter', 'reconnect', 'Text them to demo the launch.',
+    JSON.stringify({
+      quote_context_id: null, role: 'studio founder', focus: 'launching a personal CRM app',
+      label: 'business', left: 'ended warmly', leftTone: 'warm',
+      messages: 42, dormancyDays: 300, meetings: 3, lastMeetingDaysAgo: 200, topics: [],
+    }),
+    'rm-match-v13', 'combined-v13', now,
+  ).lastInsertRowid);
+  insSnap.run(
+    batchId, 'name:second friend', 'reconnect', 'Text them to co-host demo day.',
+    JSON.stringify({
+      quote_context_id: null, role: 'event organizer', focus: 'in-person demo day', label: null,
+      left: null, leftTone: null, messages: 20, dormancyDays: 250, meetings: 0,
+      lastMeetingDaysAgo: null, topics: [],
+    }),
+    'rm-match-v13', 'combined-v13', now,
+  );
+  seed.close();
+
+  const server = await start({
+    port: 0, dbPath, llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN, relationshipCap: CAP,
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/admin/relationship/card`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    assert.equal(res.status, 200);
+    const { card } = await res.json();
+    assert.ok(card, 'the card queue is populated straight from the DB -- no refresh was called');
+    assert.equal(card.snapshot_id, snap1);
+    assert.equal(card.sentence, 'Text them to demo the launch.');
+    assert.equal(card.personKey, 'name:sam carter');
+    assert.equal(card.evidence.messages, 42);
+    assert.equal(card.evidence.dormancyDays, 300);
+    assert.equal(card.evidence.meetings, 3);
   } finally { await server.close(); }
 });

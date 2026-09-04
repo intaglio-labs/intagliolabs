@@ -67,6 +67,13 @@ before(async () => {
     llamaApiKey: TEST_LLAMA_KEY,
     bearerToken: TEST_BEARER_TOKEN,
     allowedOrigins: ALLOWED_ORIGIN,
+    // The lifecycle tests below assert people/person_event_links are empty in
+    // the instant after /admin/people/clear, /admin/retain, /admin/purge and
+    // /admin/delete-entities respond -- an assertion the eager background
+    // rebuild (schedulePeopleRebuild) makes racy by design, since it runs on
+    // setImmediate rather than waiting for anyone to ask. Those tests opt out
+    // of the new default here; the feature itself has its own dedicated tests.
+    peopleProjectionAutoRebuild: false,
   });
   adminBase = `http://127.0.0.1:${admin.port}`;
 });
@@ -111,7 +118,8 @@ test('stats requires authentication and reports the row count', async () => {
   assert.equal((await fetch(`${base}/stats`)).status, 401);
   const res = await authedGet('/stats');
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), {
+  const body = await res.json();
+  assert.deepEqual({ rows: body.rows, memory: body.memory }, {
     rows: 0,
     // Ingesting rows and being able to ANSWER about them are different things,
     // and reporting only the first is what made a half-built memory look
@@ -129,6 +137,16 @@ test('stats requires authentication and reports the row count', async () => {
       runs: 0, done: 0, pending: 0, total: 0, running: false, state: 'idle',
     },
   });
+  // peopleProjection is a live read of people_projection_state plus the
+  // in-process rebuild flag (see schedulePeopleRebuild). An empty context db
+  // has nobody to project, so peopleCount stays 0 whether or not the
+  // post-boot rebuild has run by the time this fetch lands.
+  assert.ok(body.peopleProjection && typeof body.peopleProjection === 'object');
+  assert.equal(body.peopleProjection.peopleCount, 0);
+  assert.equal(typeof body.peopleProjection.projectedRevision, 'number');
+  assert.equal(typeof body.peopleProjection.sourceRevision, 'number');
+  assert.equal(typeof body.peopleProjection.rebuilding, 'boolean');
+  assert.equal(body.peopleProjection.lastRebuildError, null);
 });
 
 test('stats reports work still to do as "reading", not as an empty memory', async () => {
@@ -165,6 +183,76 @@ test('stats reports work still to do as "reading", not as an empty memory', asyn
     assert.equal(body.memory.total, 1);
     assert.equal(body.memory.state, 'reading', 'pending work is "reading", never "idle"');
     assert.equal(body.memory.review, 0, 'nothing distilled yet, so nothing to review');
+  } finally {
+    await srv.close();
+  }
+});
+
+const pollStats = async (port, predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) => {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  for (;;) {
+    const res = await fetch(`http://127.0.0.1:${port}/stats`, {
+      headers: { Authorization: `Bearer ${TEST_BEARER_TOKEN}` },
+    });
+    last = await res.json();
+    if (predicate(last)) return last;
+    if (Date.now() >= deadline) {
+      throw new Error(`peopleProjection never satisfied the predicate: ${JSON.stringify(last.peopleProjection)}`);
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+};
+
+test('a fresh people projection rebuilds itself after hermes starts, with nobody opening the People page', async () => {
+  // Its OWN store and server, same reasoning as the test above: this one
+  // needs real imessage rows dirtying source_revision, seeded before boot.
+  const rebuildDb = join(dir, 'rebuild-boot.db');
+  const seed = openDb(rebuildDb);
+  insertRows(seed, [
+    { ts: Date.now(), source: 'imessage', entity_id: 'i:1', text: 'hi',
+      meta: { chat_handle: '+15550100', is_from_me: false } },
+  ]);
+  seed.close();
+
+  const srv = await start({
+    port: 0, dbPath: rebuildDb, llamaApiKey: TEST_LLAMA_KEY, bearerToken: TEST_BEARER_TOKEN,
+  });
+  try {
+    const stats = await pollStats(srv.port, (s) => s.peopleProjection?.peopleCount > 0);
+    assert.ok(stats.peopleProjection.projectedRevision >= 0);
+    assert.equal(stats.peopleProjection.lastRebuildError, null);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('/admin/people/clear triggers an eager rebuild, not a wait for the People page', async () => {
+  const rebuildDb = join(dir, 'rebuild-clear.db');
+  const seed = openDb(rebuildDb);
+  insertRows(seed, [
+    { ts: Date.now(), source: 'imessage', entity_id: 'i:1', text: 'hi',
+      meta: { chat_handle: '+15550100', is_from_me: false } },
+  ]);
+  seed.close();
+
+  const srv = await start({
+    port: 0, dbPath: rebuildDb, llamaApiKey: TEST_LLAMA_KEY, bearerToken: TEST_BEARER_TOKEN,
+  });
+  try {
+    // Let the post-boot rebuild land first, so the clear below is measured
+    // against a known-populated projection rather than racing the boot one.
+    await pollStats(srv.port, (s) => s.peopleProjection?.peopleCount > 0);
+
+    const cleared = await fetch(`http://127.0.0.1:${srv.port}/admin/people/clear`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TEST_BEARER_TOKEN}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(cleared.status, 200);
+
+    const stats = await pollStats(srv.port, (s) => s.peopleProjection?.peopleCount > 0);
+    assert.ok(stats.peopleProjection.projectedRevision >= 0, 'rebuilt without anyone opening the People page');
   } finally {
     await srv.close();
   }

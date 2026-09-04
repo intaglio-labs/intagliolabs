@@ -94,6 +94,7 @@ import {
   ensurePeopleProjectionSchema,
   isProjectedPeopleSource,
   materializedPeopleGraph,
+  projectionState,
 } from './people/projection.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
@@ -2356,6 +2357,51 @@ export function applyMemoryBatch(db, body) {
   return { run_id: runId, applied, rejected };
 }
 
+// Reconstruct the card queue from whatever the last refresh already committed
+// to rm_candidate_batch/rm_candidate_snapshot. Without this, every hermes
+// restart answered {card:null} out of an empty in-memory cache even though
+// the DB held already-computed, unactioned snapshots -- a process restart is
+// not evidence that the owner acted on them. Mirrors exactly the shape the
+// refresh route stores and the card route/widget expect: see the INSERT INTO
+// rm_candidate_snapshot call below for the encoding this decodes.
+function hydrateCards(db) {
+  try {
+    const batch = db.prepare('SELECT id FROM rm_candidate_batch ORDER BY id DESC LIMIT 1').get();
+    if (!batch) return { cards: [], batchId: null };
+    const batchId = Number(batch.id);
+    const rows = db.prepare(
+      'SELECT id, person_key, kind, summary, evidence, producer_version FROM rm_candidate_snapshot ' +
+      'WHERE batch_id = ? ORDER BY id'
+    ).all(batchId);
+    // people may be empty or absent (a fresh projection) -- the person_key
+    // string is a legible fallback name, never a thrown error.
+    let nameStmt = null;
+    try { nameStmt = db.prepare('SELECT display_name FROM people WHERE person_key = ?'); } catch {}
+    const cards = rows.map((row) => {
+      const evidence = JSON.parse(row.evidence);
+      const { quote_context_id, role, focus, label, left, leftTone, ...cardEvidence } = evidence;
+      let name = row.person_key;
+      try {
+        const person = nameStmt?.get(row.person_key);
+        if (person?.display_name) name = person.display_name;
+      } catch {}
+      return {
+        personKey: row.person_key, name, kind: row.kind, sentence: row.summary,
+        quoteContextId: quote_context_id ?? null, role: role ?? null, focus: focus ?? null,
+        label: label ?? null, left: left ?? null, leftTone: leftTone ?? null,
+        evidence: cardEvidence, producer_version: row.producer_version,
+        snapshot_id: Number(row.id),
+      };
+    });
+    return { cards, batchId };
+  } catch {
+    // A missing rm_candidate_batch/snapshot table (fresh DB, or a schema this
+    // process has not migrated yet) means "no history to hydrate", not a
+    // startup failure.
+    return { cards: [], batchId: null };
+  }
+}
+
 // One relationship service per process, lazily built and cached on policy:
 // hermes' own db handle (sole writer holds the rm_* tables), the connectors'
 // state.db read-only for the spine, the resolutions db for aliases. A missing
@@ -2392,7 +2438,9 @@ function relationshipState(db, policy) {
       const body = await upstream.json();
       return body?.choices?.[0]?.message?.content?.trim() ?? null;
     };
-    holder.__relationship = { service, llamaCall, cards: [], batchId: null, refreshing: false, lastError: null };
+    const hydrated = hydrateCards(db);
+    holder.__relationship = { service, llamaCall, cards: hydrated.cards, batchId: hydrated.batchId,
+      refreshing: false, lastError: null };
   }
   return holder.__relationship;
 }
@@ -2717,6 +2765,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         db.exec('ROLLBACK');
         throw error;
       }
+      schedulePeopleRebuild(db, policy, 'admin/people/clear');
       send(res, 200, { cleared }, cors);
       return;
     }
@@ -2760,6 +2809,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         db.exec('ROLLBACK');
         throw e;
       }
+      if (isProjectedPeopleSource(body.source)) schedulePeopleRebuild(db, policy, 'admin/retain');
       send(res, 200, { deleted, claims_deleted: claimsDeleted }, cors);
       return;
     }
@@ -2794,6 +2844,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       // a purged source's claims were legible in claim_fts by the same
       // mechanism.
       maintainNow(db);
+      if (isProjectedPeopleSource(body.source)) schedulePeopleRebuild(db, policy, 'admin/purge');
       send(res, 200, { deleted, claims_deleted: claimsDeleted, maintained: true }, cors);
       return;
     }
@@ -2838,6 +2889,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         db.exec('ROLLBACK');
         throw e;
       }
+      if (isProjectedPeopleSource(body.source)) schedulePeopleRebuild(db, policy, 'admin/delete-entities');
       send(res, 200, { deleted, claims_deleted: claimsDeleted }, cors);
       return;
     }
@@ -3172,6 +3224,30 @@ function memoryProgress(db) {
   }
 }
 
+// The observability half of the eager rebuild: live state from
+// people_projection_state, plus the in-process rebuilding/lastRebuildError
+// that schedulePeopleRebuild records. Null if the state table is absent
+// (same "never let a progress read break /stats" discipline as memoryProgress
+// above) rather than throwing.
+function peopleProjectionStatus(db, policy) {
+  try {
+    const state = projectionState(db);
+    if (!state) return null;
+    const holder = policy.peopleProjectionHolder ?? policy;
+    const rel = holder.__peopleProjection ?? { rebuilding: false, lastRebuildError: null };
+    return {
+      projectedRevision: Number(state.projected_revision),
+      sourceRevision: Number(state.source_revision),
+      peopleCount: Number(state.people_count),
+      builtAt: state.built_at === null || state.built_at === undefined ? null : Number(state.built_at),
+      rebuilding: rel.rebuilding === true,
+      lastRebuildError: rel.lastRebuildError ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function send(res, status, body, extraHeaders = {}) {
   res.writeHead(status, {
     ...PRIVATE_RESPONSE_HEADERS,
@@ -3427,6 +3503,60 @@ function schedulePeopleProjectionRefresh(db) {
   }, 30_000);
   timer.unref?.();
   peopleProjectionTimers.set(db, timer);
+}
+
+// The rebuild that was missing entirely: clearPeopleProjection() (a privacy
+// purge, or /admin/people/clear) leaves `people` empty and
+// projected_revision at -1 until something calls materializedPeopleGraph --
+// which previously only happened when the People page or search ran. Every
+// server-side reader in between (including a fresh boot, when the state was
+// already -1/0 from a purge that ran before the last restart) saw an empty
+// table. This is the eager trigger for both of those moments.
+//
+// Holder-per-process, same pattern as relationshipState: rebuilding/
+// lastRebuildError live on policy.peopleProjectionHolder (or policy itself,
+// for callers -- tests -- that pass a bare holder), not on the module, so
+// concurrent hermes instances in one process (tests) do not share state.
+// setImmediate, not a new timer/scheduler: this fires once, after the
+// request that triggered it (server.listen, or the clear/retain/purge/
+// delete-entities route) has already returned.
+//
+// policy.peopleProjectionAutoRebuild (default true; a start() test seam like
+// relationshipMatcher/relationshipCap) exists because "returns first" is not
+// "runs so much later that a synchronous DB check after the response
+// resolves stays clean" -- a bare setImmediate can and does land inside the
+// same tick a fast-running test's `await fetch(...)` resumes in. Several
+// existing lifecycle tests assert the projection is empty in the instant
+// after a clear/purge, which this feature makes racy by design; they opt out
+// with this flag rather than the production default changing for them.
+function schedulePeopleRebuild(db, policy, reason) {
+  if (policy.peopleProjectionAutoRebuild === false) return;
+  const holder = policy.peopleProjectionHolder ?? policy;
+  if (!holder.__peopleProjection) {
+    holder.__peopleProjection = { rebuilding: false, lastRebuildError: null };
+  }
+  const state = holder.__peopleProjection;
+  if (state.rebuilding) return;
+  state.rebuilding = true;
+  setImmediate(() => {
+    try {
+      withPeopleDbs(db, (peopleDb, resDb) => {
+        const { aliases } = resolutionState(resDb);
+        materializedPeopleGraph(db, peopleDb, { now: Date.now(), owner: loadOwner(), aliases, force: false });
+      });
+      state.lastRebuildError = null;
+    } catch (e) {
+      // Surfaced on /stats' peopleProjection.lastRebuildError rather than
+      // thrown: the request that scheduled this already answered, and a
+      // failed rebuild leaves the previous (possibly empty) projection in
+      // place for the raw-rebuild fallback to cover, same as every other
+      // projection failure in this file.
+      state.lastRebuildError = String(e?.message ?? e);
+      console.error(`people projection rebuild (${reason}) failed:`, e?.stack ?? e);
+    } finally {
+      state.rebuilding = false;
+    }
+  });
 }
 
 // WAIT FOR THE WRITER; DO NOT GIVE UP AND CALL IT AN ANSWER.
@@ -3737,7 +3867,9 @@ async function handle(db, req, res, cors, url, policy) {
 
   if (req.method === 'GET' && url.pathname === '/stats') {
     const { n } = db.prepare('SELECT count(*) AS n FROM context').get();
-    send(res, 200, { rows: Number(n), memory: memoryProgress(db) }, cors);
+    send(res, 200,
+      { rows: Number(n), memory: memoryProgress(db), peopleProjection: peopleProjectionStatus(db, policy) },
+      cors);
     return;
   }
 
@@ -4091,6 +4223,10 @@ export async function start({
   // and a fixed cap (production reads the owner's config).
   relationshipMatcher,
   relationshipCap,
+  // Test seam: production always wants the eager rebuild (see
+  // schedulePeopleRebuild); a test asserting synchronous post-clear/purge
+  // emptiness opts out rather than the production default changing for it.
+  peopleProjectionAutoRebuild = true,
   llamaModel = process.env.HAZLIE_MAIN_MODEL,
 } = {}) {
   const allowedOriginSet = parseAllowedOrigins(allowedOrigins);
@@ -4129,6 +4265,10 @@ export async function start({
   // state, and the relationship service (spine handle, resolutions handle,
   // current card batch) must live for the process, not the request.
   const relationshipHolder = {};
+  // Same reasoning, for the eager people-projection rebuild: rebuilding/
+  // lastRebuildError must survive across the requests that trigger and poll
+  // it (schedulePeopleRebuild, and GET /stats).
+  const peopleProjectionHolder = {};
   const configuredDbPath = dbPath ?? process.env.HERMES_DB;
   const resolvedDbPath = configuredDbPath ?? DEFAULT_DB_PATH;
   // Summary generation was retired. Remove its private derived database and
@@ -4175,6 +4315,8 @@ export async function start({
         relationshipMatcher,
         relationshipCap,
         relationshipHolder,
+        peopleProjectionHolder,
+        peopleProjectionAutoRebuild,
       });
     } catch (e) {
       send(res, e.status ?? 500, { error: e.message ?? String(e) }, cors);
@@ -4184,6 +4326,17 @@ export async function start({
   return new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', () => {
+      // A projection left at -1/0 by a purge that ran before the last
+      // restart (or a fresh install) would otherwise sit empty until the
+      // People page or a search happened to ask for it. Read-only and
+      // skipped on any error -- a missing/unreadable state table means
+      // nothing to correct here, not a startup failure.
+      try {
+        const state = projectionState(db);
+        if (!state || Number(state.projected_revision) < 0 || Number(state.people_count) === 0) {
+          schedulePeopleRebuild(db, { peopleProjectionHolder, peopleProjectionAutoRebuild }, 'startup');
+        }
+      } catch {}
       resolve({
         server,
         db,
