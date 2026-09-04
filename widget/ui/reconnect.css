@@ -10,6 +10,10 @@ body.reconnect { margin: 0; -webkit-user-select: none; user-select: none; }
 .rc-title { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; opacity: 0.6; }
 .rc-close { background: none; border: 0; color: inherit; opacity: 0.55; cursor: pointer; font-size: 13px; }
 .rc-close:hover { opacity: 1; }
+.rc-trigger {
+  font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+  opacity: 0.55; margin: 0 0 4px;
+}
 .rc-name { font-size: 17px; font-weight: 650; margin: 2px 0 6px; }
 .rc-why { color: var(--accent-soft, #cea); margin-bottom: 8px; }
 .rc-quote {

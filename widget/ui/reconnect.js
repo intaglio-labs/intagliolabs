@@ -21,10 +21,25 @@ function renderEmpty() {
   fit();
 }
 
+function triggerLine(c) {
+  const ev = c.evidence ?? {};
+  const nums = [];
+  if (ev.dormancyDays) nums.push(`quiet ${ev.dormancyDays}d`);
+  if (ev.meetings) nums.push(`met ${ev.meetings}×`);
+  if (ev.messages) nums.push(`${ev.messages} msgs`);
+  const parts = [];
+  if (c.focus) parts.push(`NEED · focus: ${c.focus}`);
+  if (nums.length) parts.push(nums.join(' · '));
+  return parts.join(' · ');
+}
+
 function render(c) {
   card = c;
   el('rcCard').hidden = false;
   el('rcEmpty').hidden = true;
+  const trigger = triggerLine(c);
+  el('rcTrigger').textContent = trigger;
+  el('rcTrigger').hidden = !trigger;
   el('rcName').textContent = c.name ?? c.personKey;
   el('rcWhy').textContent = c.sentence ?? '';
   el('rcQuote').textContent = c.quote ? `“${c.quote}”` : '';
