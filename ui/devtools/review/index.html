@@ -160,7 +160,7 @@ const el = (t, c, txt) => { const n = document.createElement(t); if (c) n.classN
 
 // ---- tabs: claims (existing) / cards (new) --------------------------------
 const VIEWS = ['claims', 'cards'];
-let view = 'claims';
+let view = 'cards';
 let cardsLoaded = false;
 
 function renderTabs() {
@@ -451,7 +451,7 @@ async function loadHealth() {
 }
 
 renderTabs();
-selectView('claims');
+selectView('cards');
 
 (async function load() {
   try {
