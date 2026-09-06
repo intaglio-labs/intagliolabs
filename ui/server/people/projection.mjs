@@ -15,7 +15,7 @@ import { buildPersonEventLinkBatch, buildPersonEventLinks } from './evidence.mjs
 import { resolutionFingerprint } from './resolve.mjs';
 
 const DAY = 86_400_000;
-const PROJECTION_VERSION = 4;
+const PROJECTION_VERSION = 5;
 const sourceSql = RELATIONSHIP_SOURCES.map((source) => `'${source.replaceAll("'", "''")}'`).join(',');
 
 export const PEOPLE_PROJECTION_SCHEMA = `
@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS people(
   role             TEXT NOT NULL,
   roles_by_year    TEXT NOT NULL, /* canonical JSON object */
   linkedin         TEXT,          /* canonical JSON object or NULL */
+  sub_roles        TEXT NOT NULL DEFAULT '[]', /* canonical JSON array of strings */
   built_at         INTEGER NOT NULL
 );
 
@@ -183,6 +184,16 @@ export function ensurePeopleProjectionSchema(db) {
         'CHECK (owner_authored IN (0,1))'
     );
   }
+  const peopleColumns = new Set(
+    db.prepare("SELECT name FROM pragma_table_info('people')").all().map((row) => row.name)
+  );
+  if (!peopleColumns.has('sub_roles')) {
+    // CREATE TABLE IF NOT EXISTS leaves an old-shape `people` table alone, so an
+    // install that predates sub-role tags needs an explicit migration -- an
+    // existing DB must rebuild cleanly, not throw "no such column" on the next
+    // insert.
+    db.exec("ALTER TABLE people ADD COLUMN sub_roles TEXT NOT NULL DEFAULT '[]'");
+  }
   db.exec(
     'CREATE INDEX IF NOT EXISTS person_event_links_source_owner_authored ' +
       'ON person_event_links(source, owner_authored, context_id)'
@@ -264,6 +275,7 @@ export function peopleIdentityFingerprint(stateDb, aliases, owner) {
       highSchools: owner?.highSchools ?? [],
       roles: owner?.roles ?? new Map(),
       rolesByYear: owner?.rolesByYear ?? new Map(),
+      subRoles: owner?.subRoles ?? new Map(),
     },
   });
 }
@@ -325,6 +337,7 @@ export function readPeopleProjection(db, { now = Date.now() } = {}) {
       identityEvidence: [],
       role: row.role,
       rolesByYear: parseJson(row.roles_by_year, {}),
+      subRoles: parseJson(row.sub_roles, []),
     });
   }
 
@@ -399,6 +412,7 @@ function comparable(graph) {
     lastFromOwner: person.lastFromOwner,
     role: person.role,
     rolesByYear: person.rolesByYear ?? {},
+    subRoles: [...(person.subRoles ?? [])].sort(),
     linkedin: person.linkedin ?? null,
     activity: [...(person.activity ?? [])].sort((a, b) =>
       a.ym.localeCompare(b.ym) || a.source.localeCompare(b.source)
@@ -414,8 +428,9 @@ function projectionWriters(db) {
   return {
     person: db.prepare(
     'INSERT INTO people(person_key, display_name, first_seen, last_seen, last_from_them, last_from_owner, ' +
-      'sent, received, met_in_person, room_messages, direct_messages, meeting_notes, role, roles_by_year, linkedin, built_at) ' +
-      'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+      'sent, received, met_in_person, room_messages, direct_messages, meeting_notes, role, roles_by_year, linkedin, ' +
+      'sub_roles, built_at) ' +
+      'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
     ),
     identifier: db.prepare('INSERT INTO person_identifiers(identifier, person_key) VALUES(?,?)'),
     evidence: db.prepare(
@@ -493,7 +508,8 @@ function insertPeople(writers, graph, now) {
       person.sent ?? 0, person.received ?? 0, person.metInPerson ?? 0,
       person.roomMessages ?? 0, person.directMessages ?? 0, person.meetingNotes ?? 0,
       person.role ?? 'friend', JSON.stringify(canonical(person.rolesByYear ?? {})),
-      person.linkedin ? JSON.stringify(canonical(person.linkedin)) : null, now
+      person.linkedin ? JSON.stringify(canonical(person.linkedin)) : null,
+      JSON.stringify([...new Set(person.subRoles ?? [])].sort()), now
     );
       for (const identifier of keep.get(person.key) ?? []) {
         writers.identifier.run(identifier, person.key);

@@ -577,6 +577,9 @@ export function buildYear(contextDb, stateDb, { year, now = Date.now(), owner, a
         // to the lifetime role here: that is how an early romantic period used
         // to paint every later year romantic too.
         role: e.p.rolesByYear?.[year] ?? 'friend',
+        // Investor/founder/operator filter tags -- relationship-level, like
+        // roomOnly above, since a LinkedIn title is not scoped to one year.
+        subRoles: e.p.subRoles ?? [],
         // Five chips, not three (owner, 2026-08-25) — and no separate
         // taxonomy or specifics fields: the chips ARE the topic surface, and
         // the expanded row's only extra is the model-written summary.
@@ -641,6 +644,7 @@ export function buildSearchYears(contextDb, stateDb, { now = Date.now(), owner, 
         engagement,
         roomOnly: p.roomOnly === true,
         role: p.rolesByYear?.[y] ?? 'friend',
+        subRoles: p.subRoles ?? [],
         // Each person-year doc is touched once across the whole loop, so this
         // is one pass over the docs rather than one per year.
         topics: topTopics(topics.docs.get(`${p.key}|${y}`), topics.docFreq, topics.totalDocs, { limit: 5 }),
@@ -788,6 +792,7 @@ export function buildMap(contextDb, stateDb, { now = Date.now(), owner, sinceTs 
       // measurable from the payload rather than only from the graph behind it.
       roomOnly: p.roomOnly === true,
       role: p.role,
+      subRoles: p.subRoles ?? [],
       // The room count travels with the flag, because a consumer deciding
       // whether to draw somebody needs to tell "no contact" from "not there at
       // all" -- and `messages` alone can no longer make that distinction.

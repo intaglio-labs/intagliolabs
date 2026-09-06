@@ -13,6 +13,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 const RELATIONSHIP_ROLES = new Set(['friend', 'business', 'romantic', 'family']);
+const SUB_ROLES = new Set(['investor', 'founder', 'operator']);
 
 export function ownerConfigPath(home = homedir()) {
   return join(home, '.hazlie', 'connectors', 'config.json');
@@ -75,7 +76,18 @@ export function loadOwner({ home = homedir(), configPath = null } = {}) {
     if (yearRoles.size) rolesByYear.set(year, yearRoles);
   }
   const schools = [...new Set(asStrings(raw?.highSchools).map((school) => school.trim()).filter(Boolean))];
-  return { addresses, names, keys, roles, rolesByYear, schools, highSchools: schools };
+  // Owner corrections for sub-role tags (investor/founder/operator), keyed by
+  // graph person key -- same shape and same override-wins posture as
+  // personRoles above, read from the same local, gitignored config.
+  const subRoles = new Map();
+  if (raw?.personSubRoles && typeof raw.personSubRoles === 'object' && !Array.isArray(raw.personSubRoles)) {
+    for (const [key, values] of Object.entries(raw.personSubRoles)) {
+      if (typeof key !== 'string' || key.length === 0) continue;
+      const list = [...new Set(asStrings(values).filter((role) => SUB_ROLES.has(role)))].sort();
+      subRoles.set(key, list);
+    }
+  }
+  return { addresses, names, keys, roles, rolesByYear, subRoles, schools, highSchools: schools };
 }
 
 function readMutableConfig(configPath) {

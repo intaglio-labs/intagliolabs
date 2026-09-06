@@ -26,6 +26,7 @@
 // thread, never stored -- see memory/threadKind.mjs for why it is not a field.
 import { threadKind, isRoom, counterpartyFromThread, GROUP } from '../memory/threadKind.mjs';
 import { inferRelationshipRoleIndex } from './roles.mjs';
+import { subRolesFor } from './subRoles.mjs';
 
 const DAY = 86_400_000;
 
@@ -964,6 +965,9 @@ export function buildGraph(
       ...person,
       role: owner?.roles?.get(person.key) ?? inferredRoles.roles.get(person.key) ?? 'friend',
       rolesByYear,
+      // Investor/founder/operator tags derived from the LinkedIn export, or
+      // the owner's own correction (config.personSubRoles) when one exists.
+      subRoles: subRolesFor(person, owner?.subRoles),
     };
   });
   // THE "≥2" EXISTENCE BAR IS GONE (owner, 2026-08-21). Every resolved person
