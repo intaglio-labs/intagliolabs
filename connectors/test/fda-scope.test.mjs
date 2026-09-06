@@ -55,3 +55,12 @@ test('every fda- check names a real source', async () => {
     assert.ok(names.has(source), `${check} maps to "${source}", which is not a loaded source`);
   }
 });
+
+// The export connector was removed and restored (sources/linkedin.mjs); this
+// pins that the loader actually accepts it again. loadSources() requires
+// source.name to be in CONNECTOR_NAMES, so this fails loudly if the file
+// comes back without its registration, or the other way around.
+test('the linkedin export connector loads and is registered', async () => {
+  const names = new Set((await loadSources()).map((s) => s.name));
+  assert.ok(names.has('linkedin'), 'sources/linkedin.mjs did not load, or its name is not in CONNECTOR_NAMES');
+});

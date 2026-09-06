@@ -87,6 +87,15 @@ export const CONNECTOR_NAMES = Object.freeze([
   // for seven platforms: the row's `source` comes from which bridge's ghost
   // sent it (lib/matrixRows.mjs), so messenger and slack land as themselves.
   'matrix',
+  // Back as a second, independent source of `linkedin` rows. The bridge
+  // (above) supplies live DMs but not the export's connection metadata
+  // (name, position, company, Connected On) or the historical message
+  // archive — nothing about a live chat session can produce those. Same
+  // hermes source name as the bridge's LinkedIn rows, different entity_id
+  // namespace (linkedin:conn:/linkedin:msg: vs the bridge's linkedin:<event
+  // id>), so the two coexist without colliding row-for-row. See
+  // sources/linkedin.mjs.
+  'linkedin',
 ]);
 
 // Settings deliberately keeps these integrations out of the current product
@@ -175,6 +184,11 @@ export const CONNECTOR_HERMES_SOURCE = Object.freeze({
   notion: 'notion',
   files: 'files',
   whatsapp: 'whatsapp',
+  // The file-based export. Same hermes source as the bridge's LinkedIn rows
+  // below (deliberately — every people-graph join that reads `linkedin`
+  // keeps working regardless of which connector wrote a row); the two never
+  // collide because their entity_id namespaces are disjoint.
+  linkedin: 'linkedin',
   // Unlike contacts, Matrix DOES write corpus — one source for every bridge.
   // Keep the full set here because run.mjs --purge uses this mapping too: a
   // null sentinel means "no corpus" and previously made a Matrix purge report
@@ -385,10 +399,11 @@ const TOP_KEYS = Object.freeze([
   'notion',
   'files',
   'matrix',
-  // Accepted and ignored for upgrade compatibility. LinkedIn used to be a
-  // standalone export connector with an empty config section; removing the
-  // key from this closed schema made every existing config carrying
-  // `"linkedin": {}` fail before ANY connector could start.
+  // The export connector's config section. Still empty (LINKEDIN_KEYS === []
+  // below) — it takes no options — but the key has to stay in this closed
+  // schema for the same reason every other connector's does: an existing
+  // config carrying `"linkedin": {}` from before the connector was restored
+  // must not fail before ANY connector could start.
   'linkedin',
   'retention',
   // The Relationship Memory cap. hermes gates the whole reconnect card on
@@ -426,8 +441,10 @@ const GRANOLA_KEYS = Object.freeze(['includeTranscripts']);
 const OURA_KEYS = Object.freeze(['backfillDays']);
 const PHOTOS_KEYS = Object.freeze(['backfillDays']);
 const NOTION_KEYS = Object.freeze([]);
-// Retired but still validated for upgrade compatibility. The export connector
-// took no config, so only the empty object old installs already carry is valid.
+// The export connector is back (it supplies connection metadata and the
+// message archive the Matrix bridge cannot — see CONNECTOR_NAMES above) and
+// still takes no config of its own: only the empty object is valid, same as
+// before it was retired.
 const LINKEDIN_KEYS = Object.freeze([]);
 // `roots` overrides the discovered cloud folders; `materializeDataless` is the
 // opt-in that lets the walk OPEN online-only files. It defaults false and the
@@ -521,9 +538,10 @@ export function validateConfig(raw) {
     }
   }
   if (raw.intervals !== undefined) {
-    // `intervals.linkedin` belonged to the retired export poller. Accept it as
-    // a no-op so an upgrade keeps booting; Matrix has its own interval now.
-    assertClosedKeys(raw.intervals, [...CONNECTOR_NAMES, 'linkedin'], '"intervals"');
+    // `intervals.linkedin` is the export connector's own poll cadence again,
+    // now that CONNECTOR_NAMES includes it — no longer a special-cased
+    // upgrade no-op.
+    assertClosedKeys(raw.intervals, CONNECTOR_NAMES, '"intervals"');
     for (const [name, seconds] of Object.entries(raw.intervals)) {
       assertPositiveInt(seconds, `intervals.${name} (seconds)`, { min: MIN_INTERVAL_S, max: 86_400 });
     }
