@@ -1,10 +1,14 @@
 // The bridge: every JS↔native message and every byte of HTTP, in one file.
 //
-// This file is the egress choke point. The audit for "nothing leaves the
-// box" is: the only two URLs this process can reach are the loopback bases
-// below; redirects are refused; the webviews themselves can load only
-// file: URLs (Windows.swift + each page's CSP). If a future edit adds a
-// third base or follows a redirect, it should have to happen HERE, loudly.
+// This file is the egress choke point. ~~The audit for "nothing leaves the
+// box" was: the only two URLs this process can reach are the loopback bases
+// below.~~ Narrowed 2026-08-31 by the owner's frontier decision; the audit
+// now reads: its own URLSession still reaches only the two loopback bases
+// below; redirects are refused; the webviews themselves can load only local
+// app assets (Windows.swift + each page's CSP). The one explicit handoff out
+// is `frontierSend`: after the owner edits and approves a bounded prompt,
+// FrontierRunner gives that text on stdin to an installed, official provider
+// client. No webview or database gets a provider credential.
 import AppKit
 import WebKit
 
@@ -89,7 +93,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                "openMonths", "openReconnect", "voiceArm", "widgetBounds",
                "chatBarOpen",
                "workStatus", "relCard", "relEvent", "relRefresh"],
-    "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
+    "chat": ["ask", "cancel", "chatReady", "close", "decideClaim",
+             "frontierSend", "frontierCancel"],
     // The reconnect card popup (L5 step 10): reads the current card, posts
     // the owner's verdict, sizes itself, and (the mode picker) asks for a
     // fresh batch under a different mode. Nothing else -- the card page
@@ -834,6 +839,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       KeepMacAwake.enabled = on
       reply(webView, id, ["state": "ok", "keepAwake": on])
     case "close":
+      // Closing chat hides the pending bubbles — the only cancel affordance —
+      // so work left running would bill and block for up to its timeout with
+      // nothing on screen naming it (review 2026-08-31). Chat only: another
+      // page's close must not touch chat's jobs.
+      if pageOf[ObjectIdentifier(webView)] == "chat" {
+        askTask?.cancel()
+        FrontierRunner.shared.cancel()
+      }
       delegate?.closeWindow(of: webView)
       reply(webView, id, ["state": "ok"])
     case "drag":
@@ -1546,6 +1559,36 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           self?.reply(webView, id, ["state": ok ? "ok" : "error"])
         }
       }.resume()
+    case "frontierSend":
+      // THIS IS THE CONSENT BOUNDARY. chat.js sends the value of the visible,
+      // editable textarea only after the owner presses the provider-named send
+      // button. The wire shape is exactly {provider, prompt} and anything else
+      // is refused outright — a denylist of suspicious names was proven
+      // bypassable by a field called "notes" in review (2026-08-31), so the
+      // guard is on the whole key set, not on names someone thought of.
+      guard payload.keys.allSatisfy({ $0 == "provider" || $0 == "prompt" }) else {
+        reply(webView, id, ["state": "error", "error": "bad frontier request"])
+        break
+      }
+      let providerName = String((payload["provider"] as? String ?? "").prefix(16))
+      let prompt = String((payload["prompt"] as? String ?? "")
+        .trimmingCharacters(in: .whitespacesAndNewlines).prefix(12_000))
+      guard let provider = FrontierProvider(rawValue: providerName), !prompt.isEmpty else {
+        reply(webView, id, ["state": "error", "error": "bad frontier request"])
+        break
+      }
+      let work = Bridge.activeWork.begin("waiting for \(providerName)")
+      FrontierRunner.shared.run(provider: provider, prompt: prompt) { [weak self] result in
+        Bridge.activeWork.finish(work)
+        self?.reply(webView, id, result)
+      }
+    case "frontierCancel":
+      // Two cancel verbs on purpose. The shared "cancel" briefly cancelled the
+      // frontier job too, so cancelling a slow local ask silently discarded a
+      // frontier answer that was already sent and billed — and vice versa
+      // (review 2026-08-31). Each pending bubble cancels only its own job.
+      FrontierRunner.shared.cancel()
+      reply(webView, id, ["state": "ok"])
     case "cancel":
       askTask?.cancel()
       reply(webView, id, ["state": "ok"])

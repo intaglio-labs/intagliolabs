@@ -67,8 +67,9 @@ Do not re-add these; their absence is a decision, not an oversight.
    describing the product. Correct stale comments in place with the history kept
    — a stale comment that reads as authority does more damage than a missing one.
 
-3. **Nothing leaves the box, and the list is enforced.** Every host this software
-   may contact is enumerated in `ops/EGRESS.json`, and
+3. **Every outbound path is explicit, and the list is enforced.** Every host
+   reached by repository-owned networking is enumerated in `ops/EGRESS.json`,
+   which also records the narrower boundary for installed provider clients, and
    `connectors/test/egress.test.mjs` fails the suite on any undeclared host found
    in tracked source. That is a tripwire, not a document. If you add a network
    call, declare it there with a real justification, or the build stops.
