@@ -31,13 +31,21 @@ const EXPIRY_SKEW_MS = 60_000;
 
 // A 52k-message backfill trips Gmail's per-user "Units per minute" quota
 // mid-run; a smaller mailbox never does, which is why one account worked and
-// the other never did. Full-jitter exponential backoff (base 1s, cap 32s) on
-// 429 and on the 403s that are actually quota, bounded at 6 attempts total —
-// unbounded retry inside a resident poller is a hang wearing a progress
-// indicator, same reasoning as notionClient.mjs's MAX_RATE_LIMIT_RETRIES.
-const RATE_LIMIT_BASE_MS = 1000;
-const RATE_LIMIT_CAP_MS = 32_000;
-const MAX_RATE_LIMIT_ATTEMPTS = 6;
+// the other never did. MEASURED (2026-09, daemon paused, two separate Google
+// accounts, each in a fresh minute at 250ms between `messages.get` calls):
+// both hit HTTP 403 "Quota exceeded ... Units per minute per user" after
+// exactly ~102 calls, i.e. ~37 seconds in. The effective budget is ~100 gets
+// (~500 units) per user per minute, regardless of what the console displays
+// (it shows 6,000) — so the earlier base-1s/cap-32s backoff could never
+// outlast the window it was retrying against: a rolling one-minute quota
+// needs a wait that can exceed a minute, not one bounded at 32 seconds. On a
+// quota 429/403 (Retry-After still wins when Google sends one), the wait is
+// now 60s plus 0-10s jitter, bounded at 5 attempts total — unbounded retry
+// inside a resident poller is a hang wearing a progress indicator, same
+// reasoning as notionClient.mjs's MAX_RATE_LIMIT_RETRIES.
+const RATE_LIMIT_QUOTA_WAIT_MS = 60_000;
+const RATE_LIMIT_QUOTA_JITTER_MS = 10_000;
+const MAX_RATE_LIMIT_ATTEMPTS = 5;
 
 // Reasons Google's error body uses for a 403 that is really a rate/quota
 // limit, not a permissions problem. `insufficientPermissions` and friends
@@ -72,14 +80,19 @@ function isQuotaLimited(status, bodyText) {
   return /quota exceeded/iu.test(String(error?.message ?? bodyText ?? ''));
 }
 
-// Retry-After (seconds) wins when Google sends it; otherwise full jitter
-// (AWS's formula: uniform(0, min(cap, base * 2^attempt))) so many callers
-// backing off at once don't all retry in lockstep.
-function rateLimitDelayMs(res, attempt) {
-  const retryAfter = Number(res.headers?.get?.('retry-after'));
+// Retry-After (seconds) wins when Google sends it. Otherwise a flat 60s plus
+// 0-10s jitter: the measured budget is a per-minute window, so every wait has
+// to be able to outlast a full minute regardless of which attempt this is —
+// backing off shorter than the window it's waiting out just fails again.
+// Jitter keeps many callers backing off at once from all retrying in lockstep.
+function rateLimitDelayMs(res) {
+  // `Number(null)` is 0, so a genuinely absent header must be checked before
+  // the numeric parse — otherwise no Retry-After silently becomes
+  // "Retry-After: 0" and the quota wait never actually happens.
+  const raw = res.headers?.get?.('retry-after');
+  const retryAfter = raw === null || raw === undefined ? NaN : Number(raw);
   if (Number.isFinite(retryAfter) && retryAfter >= 0) return retryAfter * 1000;
-  const ceiling = Math.min(RATE_LIMIT_CAP_MS, RATE_LIMIT_BASE_MS * 2 ** attempt);
-  return Math.random() * ceiling;
+  return RATE_LIMIT_QUOTA_WAIT_MS + Math.random() * RATE_LIMIT_QUOTA_JITTER_MS;
 }
 
 export function createGmailClient({
@@ -214,7 +227,7 @@ export function createGmailClient({
       // caller's bug or the caller's instruction, and throws immediately —
       // only a genuine rate/quota limit is worth waiting out.
       if (isQuotaLimited(res.status, bodyText) && attempt < MAX_RATE_LIMIT_ATTEMPTS - 1) {
-        await sleep(rateLimitDelayMs(res, attempt));
+        await sleep(rateLimitDelayMs(res));
         continue;
       }
       throw statusError(res.status, `Gmail ${name} failed: HTTP ${res.status} ${bodyText.slice(0, 200)}`);

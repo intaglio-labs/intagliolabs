@@ -420,6 +420,7 @@ const MAIL_KEYS = Object.freeze([
   'folders',
   'backfillDays',
   'maxBodyBytes',
+  'getsPerMinute',
   'accounts',
 ]);
 // Per-account overrides. No nested `accounts`: one level of mailboxes, not a tree.
@@ -430,6 +431,7 @@ const MAIL_ACCOUNT_KEYS = Object.freeze([
   'folders',
   'backfillDays',
   'maxBodyBytes',
+  'getsPerMinute',
 ]);
 const IMESSAGE_KEYS = Object.freeze(['backfillDays']);
 // `backend` selects where occurrences come from: the local macOS store
@@ -570,6 +572,15 @@ export function validateConfig(raw) {
     if (raw.mail.maxBodyBytes !== undefined) {
       assertPositiveInt(raw.mail.maxBodyBytes, 'mail.maxBodyBytes', { min: 1024 });
     }
+    // MEASURED (2026-09): a clean probe against two Google accounts hit the
+    // per-user "Units per minute" quota after ~102 `messages.get` calls in a
+    // fresh minute, i.e. ~100 gets/minute regardless of what the console
+    // shows. 100 is allowed as an upper bound so an owner who wants to lean
+    // right up against the measured ceiling can, but no config can ask for
+    // more than what was actually measured.
+    if (raw.mail.getsPerMinute !== undefined) {
+      assertPositiveInt(raw.mail.getsPerMinute, 'mail.getsPerMinute', { max: 100 });
+    }
     // Several mailboxes, because Gmail issues app passwords per account and
     // the owner's mail is split across addresses. The keys outside `accounts`
     // stay as the defaults every account inherits, so the single-account
@@ -597,6 +608,9 @@ export function validateConfig(raw) {
         }
         if (account.backfillDays !== undefined) {
           assertPositiveInt(account.backfillDays, `mail.accounts[${i}].backfillDays`, { max: 3650 });
+        }
+        if (account.getsPerMinute !== undefined) {
+          assertPositiveInt(account.getsPerMinute, `mail.accounts[${i}].getsPerMinute`, { max: 100 });
         }
         if (account.folders !== undefined) {
           if (

@@ -1,6 +1,8 @@
 // Gmail's per-user "Units per minute" quota trips mid-backfill on a large
-// mailbox (reproduced live against a 52k-message account): apiGet must retry
-// a 429, and a 403 whose body says the same thing, with full-jitter backoff —
+// mailbox (reproduced live against a 52k-message account, and measured at
+// ~100 gets/minute against a clean probe): apiGet must retry a 429, and a 403
+// whose body says the same thing, waiting 60s plus 0-10s jitter per attempt so
+// the wait can outlast the rolling one-minute window it's retrying against —
 // but a 403 that is a real permissions problem must still throw immediately,
 // because retrying it only delays a failure the owner needs to see.
 import test from 'node:test';
@@ -68,6 +70,9 @@ test('a 403 quota body is retried and succeeds on the 3rd attempt', async (t) =>
   assert.deepEqual(result, { id: 'm1' });
   assert.equal(calls, 3, 'exactly 3 fetch calls: 2 failures then a success');
   assert.equal(sleeps.length, 2, 'one backoff sleep per retried failure');
+  for (const ms of sleeps) {
+    assert.ok(ms >= 60_000 && ms < 70_000, `wait must be 60s plus 0-10s jitter, got ${ms}`);
+  }
 });
 
 test('a 403 insufficientPermissions throws immediately, never retried', async (t) => {
@@ -100,7 +105,7 @@ test('a Retry-After header is honored instead of the jittered backoff', async (t
   assert.deepEqual(sleeps, [2000], 'Retry-After: 2 must produce exactly a 2000ms wait, not a jittered one');
 });
 
-test('after 6 failed attempts the error propagates with status intact', async (t) => {
+test('after 5 failed attempts the error propagates with status intact', async (t) => {
   let calls = 0;
   const fetchImpl = async () => {
     calls += 1;
@@ -111,7 +116,7 @@ test('after 6 failed attempts the error propagates with status intact', async (t
     assert.equal(err.status, 403, 'the original error shape keeps its status');
     return true;
   });
-  assert.equal(calls, 6, 'exactly 6 attempts total, then give up');
+  assert.equal(calls, 5, 'exactly 5 attempts total, then give up');
 });
 
 test('userRateLimitExceeded and quotaExceeded reasons are treated the same as rateLimitExceeded', async (t) => {

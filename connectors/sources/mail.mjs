@@ -48,12 +48,18 @@ const DEFAULT_BACKFILL_DAYS = 30;
 const MAX_MESSAGES_PER_ACCOUNT = 2000;
 const PAGE_SIZE = 100;
 
-// Gentle pacing between messages.get calls. A 52k-message backfill answered
-// with `Quota exceeded for quota metric 'Total Query Cost' and limit 'Units
-// per minute per user' of service 'gmail.googleapis.com'` — gmailClient.mjs
-// now retries that, but spreading a 100-message page over ~5s keeps a normal
-// run under the per-minute quota by default instead of leaning on the retry.
-const MESSAGE_GET_PACING_MS = 50;
+// Pacing between Gmail API calls. A 52k-message backfill answered with
+// `Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per
+// minute per user' of service 'gmail.googleapis.com'` — gmailClient.mjs
+// retries that, but pacing exists so a normal run stays under the quota
+// instead of leaning on the retry. MEASURED (2026-09, daemon paused, two
+// separate Google accounts, each in a fresh minute at 250ms spacing): both
+// accounts hit the 403 after exactly ~102 `messages.get` calls (~37s), i.e.
+// an effective budget of ~100 gets (~500 units) per user per minute —
+// regardless of what the console displays (it shows 6,000). The old fixed
+// 50ms delay saturates that budget in five seconds; this default keeps a
+// little under the measured ceiling instead.
+const DEFAULT_MAIL_GETS_PER_MINUTE = 90;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Coarse, type-only classification for logging (connectors/AGENTS.md: counts
@@ -151,12 +157,14 @@ export function accountSettings(config, email) {
   return {
     backfillDays: per?.backfillDays ?? mail.backfillDays ?? DEFAULT_BACKFILL_DAYS,
     maxBodyBytes: per?.maxBodyBytes ?? mail.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
+    getsPerMinute: per?.getsPerMinute ?? mail.getsPerMinute ?? DEFAULT_MAIL_GETS_PER_MINUTE,
   };
 }
 
 export function createMailSource({
   accountsForScope = accountsWithScope,
   makeClient = createGmailClient,
+  sleep: sleepImpl = sleep,
 } = {}) {
   return {
     name: 'mail',
@@ -191,7 +199,18 @@ export function createMailSource({
           historyHasOlder ||= state.getCursor(historyOlderKey(account.email, yearly.year)) === '1';
           continue;
         }
-        const { backfillDays, maxBodyBytes } = accountSettings(config, account.email);
+        const { backfillDays, maxBodyBytes, getsPerMinute } = accountSettings(config, account.email);
+        const spacingMs = 60_000 / getsPerMinute;
+        // A minimum spacing enforced between every Gmail API call this
+        // account makes this run, list calls included (the measurement above
+        // was taken with one list call per page, so it counts against the
+        // same per-minute budget). The very first call of the account's run
+        // never waits — there is nothing before it to space from.
+        let firstApiCall = true;
+        const pace = async () => {
+          if (!firstApiCall) await sleepImpl(spacingMs);
+          firstApiCall = false;
+        };
         const stored = Number(state.getCursor(cursorKey(account.email)));
         const rollingFloor = now() - backfillDays * 86_400_000;
         const freshFloor = Math.max(
@@ -221,12 +240,13 @@ export function createMailSource({
           const rows = [];
 
           page: do {
+            await pace();
             const list = await client.listMessages({ q, pageToken, maxResults: PAGE_SIZE });
             if (yearly) historyProgressed = true;
             pageToken = list.nextPageToken;
             for (const [stubIndex, stub] of (list.messages ?? []).entries()) {
               if (!yearly && seen >= MAX_MESSAGES_PER_ACCOUNT) break page;
-              if (stubIndex > 0) await sleep(MESSAGE_GET_PACING_MS);
+              if (stubIndex > 0) await sleepImpl(spacingMs);
               seen += 1;
               const full = await client.getMessage(stub.id);
               const internal = Number(full?.internalDate);
@@ -271,6 +291,7 @@ export function createMailSource({
               historyDone = false;
             } else {
               state.deleteCursor(historyPageKey(account.email, yearly.year));
+              await pace();
               const older = await client.listMessages({
                 q: `before:${Math.floor(yearly.fromTs / 1000)}`,
                 maxResults: 1,

@@ -84,6 +84,61 @@ test('yearly mail history resumes one page at a time until the whole year is dra
   assert.equal(state.getCursor('mail:owner@example.test:history-year:2026:done'), '1');
 });
 
+test('a page of N stubs is paced at 60000/getsPerMinute ms between messages.get calls', async () => {
+  const N = 4;
+  const stubs = Array.from({ length: N }, (_, i) => ({ id: `m${i}` }));
+  const sleeps = [];
+  const source = createMailSource({
+    accountsForScope: () => [{ email: 'owner@example.test' }],
+    makeClient: () => ({
+      listMessages: async () => ({ messages: stubs }),
+      getMessage: async (id) => message(id, 1),
+    }),
+    sleep: async (ms) => { sleeps.push(ms); },
+  });
+  const ctx = {
+    state: memoryState(),
+    config: { mail: { getsPerMinute: 90 } },
+    home: '/tmp/mail-test-home',
+    now: () => YEAR.fromTs,
+    ingest: async (rows) => ({ inserted: rows.length, updated: 0, unchanged: 0 }),
+    log: { info() {}, warn() {} },
+  };
+
+  await source.run(ctx);
+
+  const spacingMs = 60_000 / 90;
+  assert.equal(sleeps.length, N - 1, `${N} stubs must produce ${N - 1} spacing waits`);
+  for (const ms of sleeps) assert.equal(ms, spacingMs);
+});
+
+test('mail.getsPerMinute from config changes the spacing between messages.get calls', async () => {
+  const stubs = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+  const sleeps = [];
+  const source = createMailSource({
+    accountsForScope: () => [{ email: 'owner@example.test' }],
+    makeClient: () => ({
+      listMessages: async () => ({ messages: stubs }),
+      getMessage: async (id) => message(id, 1),
+    }),
+    sleep: async (ms) => { sleeps.push(ms); },
+  });
+  const ctx = {
+    state: memoryState(),
+    config: { mail: { getsPerMinute: 30 } },
+    home: '/tmp/mail-test-home',
+    now: () => YEAR.fromTs,
+    ingest: async (rows) => ({ inserted: rows.length, updated: 0, unchanged: 0 }),
+    log: { info() {}, warn() {} },
+  };
+
+  await source.run(ctx);
+
+  const spacingMs = 60_000 / 30;
+  assert.equal(sleeps.length, 2);
+  for (const ms of sleeps) assert.equal(ms, spacingMs, 'a lower getsPerMinute must widen the spacing');
+});
+
 test('mail failures never copy account addresses or provider bodies into logs', async () => {
   const events = [];
   const source = createMailSource({
