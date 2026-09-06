@@ -72,8 +72,8 @@ const TEASE_TEXT = 'voice coming soon.\nhelp us build it :)';
 // Owner direction, 2026-08-31: move the chat-unlock changes onto UI-updates
 // and keep this entry point accessible for natural-language Deep Search. This
 // also covers the frontier handoff's requirement (chat is the only place the
-// exact outbound prompt can be reviewed and edited): the CHAT_TEASE flag that
-// briefly existed for that reason alone was superseded by this permanent
+// exact outbound prompt can be reviewed and edited): the tease flag that
+// briefly gated chat for that reason alone was superseded by this permanent
 // removal, so it never shipped separately.
 const TEASE_MS = 2400;
 const WORK_DETAILS_MS = 4800;

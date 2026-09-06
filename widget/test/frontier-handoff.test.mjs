@@ -268,7 +268,16 @@ test('ChatGPT uses app-server in a restricted read-only ephemeral thread', () =>
 });
 
 test('chat is reachable and the bridge grants frontierSend only to chat', () => {
-  assert.match(widget, /const CHAT_TEASE = false;/u);
+  // No literal CHAT_TEASE = false check: owner direction 2026-08-31 made chat
+  // unconditionally reachable (moved onto UI-updates, for Deep Search as much
+  // as for this handoff), so the flag itself never shipped. Assert the actual
+  // invariant instead — no tease gate anywhere, and the two handlers that used
+  // to carry one don't gate on it either.
+  assert.doesNotMatch(widget, /CHAT_TEASE/u);
+  const focusHandler = between(widget, "winput.addEventListener('focus'", "winput.addEventListener('blur'");
+  assert.doesNotMatch(focusHandler, /showTease|CHAT_TEASE/u);
+  const pointerdownHandler = between(widget, "chatBtn.addEventListener('pointerdown'", "syncChatGlyph();\n");
+  assert.doesNotMatch(pointerdownHandler, /showTease|CHAT_TEASE/u);
   const caps = between(bridge, 'static let pageCapabilities', 'private var pageOf:');
   assert.match(caps, /"chat":\s*\[[^\]]*"frontierSend"/su);
   const otherCaps = caps.replace(/"chat":\s*\[[^\]]*\]/su, '');

@@ -36,6 +36,10 @@ async function withServer(fn, opts = {}) {
     port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
     relationshipMatcher: async () => ({ cards: structuredClone(STUB_CARDS), focus: 'x', currentTopics: [] }),
     relationshipCap: CAP,
+    // Isolated from the machine's config: these tests exercise the matcher
+    // path, and the owner's config on a dev Mac may select the eligibility
+    // producer. Same reason relationshipCap is pinned above.
+    relationshipProducerConfig: { producer: 'matcher', mode: 'any' },
     ...opts,
   });
   const base = `http://127.0.0.1:${server.port}`;
