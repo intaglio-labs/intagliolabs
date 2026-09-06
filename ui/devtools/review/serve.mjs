@@ -203,6 +203,14 @@ const server = createServer(async (req, res) => {
     // Header of the Cards view wants hermes's health, including the
     // peopleProjection field when it exists. Proxied rather than fetched
     // directly from the browser: this page already knows hermes's address.
+    // The ranked eligible pool per mode, straight from hermes's producer.
+    // Read-only; mode is validated by hermes, not here.
+    if (req.method === 'GET' && url.pathname === '/api/pool') {
+      const mode = url.searchParams.get('mode') ?? 'any';
+      const out = await hermes('/admin/relationship/pool?mode=' + encodeURIComponent(mode));
+      return send(res, out.status, out.text);
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/health') {
       const out = await hermes('/stats'); // peopleProjection lives on /stats; /health is a frozen wire contract
       return send(res, out.status, out.text);

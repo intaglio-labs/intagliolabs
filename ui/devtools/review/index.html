@@ -88,6 +88,10 @@
   }
   .tabs button[aria-pressed="true"] { background:var(--fg); color:var(--surface); border-color:var(--fg); }
   .health { font-size:.74rem; color:var(--fg-3); }
+  .poolbar { display:flex; gap:.4rem; margin:.5rem 0; }
+  table.pool { border-collapse:collapse; width:100%; font-size:.85rem; }
+  table.pool th, table.pool td { text-align:left; padding:.35rem .5rem; border-bottom:1px solid var(--line, #333); }
+  table.pool td.n { text-align:right; font-variant-numeric:tabular-nums; }
   .health b { color:var(--fg); font-variant-numeric:tabular-nums; }
   .health.stale { color:var(--weak); }
   .card5 {
@@ -150,6 +154,12 @@
   <div id="cardsList"></div>
 </main>
 
+<main id="poolView" hidden>
+  <div class="poolbar" id="poolbar"></div>
+  <p class="health" id="poolNote"></p>
+  <div id="poolList"></div>
+</main>
+
 <script>
 const BANDS = ['unsupported', 'weak', 'supported', 'all'];
 let band = 'unsupported';   // the interesting one first: no content word shared with its source
@@ -159,7 +169,7 @@ let cursor = 0;
 const el = (t, c, txt) => { const n = document.createElement(t); if (c) n.className = c; if (txt !== undefined) n.textContent = txt; return n; };
 
 // ---- tabs: claims (existing) / cards (new) --------------------------------
-const VIEWS = ['claims', 'cards'];
+const VIEWS = ['claims', 'cards', 'pool'];
 let view = 'cards';
 let cardsLoaded = false;
 
@@ -178,10 +188,57 @@ function selectView(v) {
   renderTabs();
   document.getElementById('claimsView').hidden = v !== 'claims';
   document.getElementById('cardsView').hidden = v !== 'cards';
+  document.getElementById('poolView').hidden = v !== 'pool';
   document.getElementById('filters').hidden = v !== 'claims';
   document.getElementById('counts').hidden = v !== 'claims';
   document.getElementById('health').hidden = v !== 'cards';
   if (v === 'cards' && !cardsLoaded) { cardsLoaded = true; loadCards(); loadHealth(); }
+  if (v === 'pool') { renderPoolBar(); loadPool(); }
+}
+
+// ---- pool: the producer's ranked eligible set, per mode -------------------
+const MODES = ['investor', 'founder', 'any'];
+let poolMode = 'investor';
+function renderPoolBar() {
+  const box = document.getElementById('poolbar');
+  box.replaceChildren(...MODES.map((m) => {
+    const btn = el('button', null, m);
+    btn.setAttribute('aria-pressed', String(m === poolMode));
+    btn.addEventListener('click', () => { poolMode = m; renderPoolBar(); loadPool(); });
+    return btn;
+  }));
+}
+async function loadPool() {
+  const list = document.getElementById('poolList');
+  const note = document.getElementById('poolNote');
+  list.replaceChildren(el('p', 'health', 'loading…'));
+  try {
+    const res = await fetch('/api/pool?mode=' + encodeURIComponent(poolMode));
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    const rows = data.rows ?? [];
+    note.textContent = poolMode + ' · ' + rows.length + ' eligible · ranked by depth, then change, then quiet. Eligible = two-way or met, quiet ≥180d on the DM clock, nothing scheduled, they wrote to you at least once, not muted/suppressed/never.';
+    const table = el('table', 'pool');
+    const head = el('tr');
+    for (const h of ['#', 'name', 'tags', 'role', 'depth', 'msgs', 'met', 'quiet d', 'they wrote last']) head.appendChild(el('th', null, h));
+    table.appendChild(head);
+    rows.forEach((r, i) => {
+      const tr = el('tr');
+      tr.appendChild(el('td', 'n', String(i + 1)));
+      tr.appendChild(el('td', null, r.name ?? r.personKey));
+      tr.appendChild(el('td', null, (r.subRoles ?? []).join(', ')));
+      tr.appendChild(el('td', null, r.role ?? ''));
+      tr.appendChild(el('td', 'n', String(r.depth ?? '')));
+      tr.appendChild(el('td', 'n', String(r.messages ?? '')));
+      tr.appendChild(el('td', 'n', String(r.meetings ?? '')));
+      tr.appendChild(el('td', 'n', String(r.quietDays ?? '')));
+      tr.appendChild(el('td', null, r.theyWroteLast ? 'yes' : ''));
+      table.appendChild(tr);
+    });
+    list.replaceChildren(table);
+  } catch (err) {
+    list.replaceChildren(el('p', 'err', 'could not load: ' + err.message));
+  }
 }
 
 function renderFilters() {
