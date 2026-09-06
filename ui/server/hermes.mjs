@@ -73,6 +73,7 @@ import {
 import { openTallyStore } from './people/tallyStore.mjs';
 import { createRelationshipMemory } from './relationship/service.mjs';
 import { buildMatchedCards, MATCH_RULES_VERSION } from './relationship/matcher.mjs';
+import { eligiblePool, produceBatch } from './relationship/producer.mjs';
 import {
   clearPeopleSearchCacheStorage,
   openPeopleSearchCache,
@@ -1805,6 +1806,8 @@ const APPLY_CLAIM_FIELDS = Object.freeze(['kind', 'text', 'when_phrase', 'p_clai
 const DECIDE_FIELDS = Object.freeze(['claim_id', 'action', 'reason']);
 const PENDING_PARAMS = Object.freeze(['limit']);
 const RECALL_PARAMS = Object.freeze(['q', 'limit']);
+const RELATIONSHIP_POOL_PARAMS = Object.freeze(['mode']);
+const RELATIONSHIP_MODES = Object.freeze(['investor', 'founder', 'any']);
 const DECISION_ACTIONS = Object.freeze(['accept', 'reject', 'retract']);
 // The review page is the v1 product surface and it has to show the receipt, so
 // this cap is about one sitting's reading, not about safety.
@@ -2462,6 +2465,27 @@ function relationshipCap(policy) {
   return null;
 }
 
+// Which candidate producer /admin/relationship/refresh runs, from the same
+// config file relationshipCap reads (relationshipMemory.producer /
+// relationshipMemory.mode) -- or a start() override for tests, same seam
+// discipline as relationshipCap/relationshipMatcher above. Anything other
+// than the literal 'eligibility' keeps the existing matcher path; that is
+// the safe default for an owner who has never touched this key.
+function relationshipProducerConfig(policy) {
+  if (policy.relationshipProducerConfig !== undefined) return policy.relationshipProducerConfig;
+  try {
+    const cfg = JSON.parse(readFileSync(join(homedir(), '.hazlie', 'connectors', 'config.json'), 'utf8'));
+    const producer = cfg?.relationshipMemory?.producer;
+    const mode = cfg?.relationshipMemory?.mode;
+    return {
+      producer: producer === 'eligibility' ? 'eligibility' : 'matcher',
+      mode: RELATIONSHIP_MODES.includes(mode) ? mode : 'any',
+    };
+  } catch {
+    return { producer: 'matcher', mode: 'any' };
+  }
+}
+
 async function handleAdmin(db, req, res, cors, url, channel, policy) {
   if (channel !== 'bearer') {
     // 403, not 401: the caller IS authenticated (allowlisted Origin) — it is
@@ -2511,6 +2535,25 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     return;
   }
 
+  // The eligibility producer's own inspection surface: the full ranked pool
+  // for a mode, no snapshot written, no card taken off anyone's queue --
+  // this is what the dev desk reads to see what the gates currently allow,
+  // separate from the one-card refresh/serve cycle below.
+  if (req.method === 'GET' && url.pathname === '/admin/relationship/pool') {
+    for (const key of url.searchParams.keys()) {
+      if (!RELATIONSHIP_POOL_PARAMS.includes(key)) {
+        throw badRequest(`unknown query parameter ${JSON.stringify(key)}`);
+      }
+    }
+    const rawMode = url.searchParams.get('mode') ?? 'any';
+    if (!RELATIONSHIP_MODES.includes(rawMode)) {
+      throw badRequest(`"mode" must be one of: ${RELATIONSHIP_MODES.join(', ')}`);
+    }
+    const rows = eligiblePool(db, { mode: rawMode, now: Date.now() });
+    send(res, 200, { mode: rawMode, count: rows.length, rows }, cors);
+    return;
+  }
+
   // --- Relationship Memory (L5 step 10): the orb's card surface. ---------
   // Bearer-only like every admin route. The card pipeline runs entirely on
   // this box; refresh is minutes of loopback-llama time, so the widget fires
@@ -2519,10 +2562,32 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     const rel = relationshipState(db, policy);
     if (rel.refreshing) { send(res, 200, { started: false, already: true }, cors); return; }
     rel.refreshing = true;
+    rel.lastError = null;
+
+    // The eligibility producer (no model, deterministic) short-circuits the
+    // matcher path entirely: it writes its own batch/snapshot rows (same
+    // shape hydrateCards reads) and returns. Selected by config so an owner
+    // who has not opted in keeps the existing matcher behavior untouched.
+    const producerConfig = relationshipProducerConfig(policy);
+    if (producerConfig.producer === 'eligibility') {
+      const body = await readJson(req).catch(() => null);
+      const mode = RELATIONSHIP_MODES.includes(body?.mode) ? body.mode : producerConfig.mode;
+      try {
+        const { batchId, cards } = produceBatch(db, { mode, now: Date.now() });
+        rel.batchId = batchId;
+        rel.cards = cards;
+        rel.refreshing = false;
+      } catch (e) {
+        rel.refreshing = false;
+        rel.lastError = String(e?.message ?? e);
+      }
+      send(res, 200, { started: true }, cors);
+      return;
+    }
+
     // Deliberately not awaited: the route answers now, the batch lands when
     // the local model is done, and GET /card serves the previous batch (or
     // nothing) in the meantime. Errors are recorded on the state, not lost.
-    rel.lastError = null;
     (policy.relationshipMatcher ?? buildMatchedCards)(rel.service, {
       llamaCall: rel.llamaCall, now: Date.now(),
     }).then((result) => {
@@ -2553,6 +2618,11 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
   }
 
   if (req.method === 'GET' && url.pathname === '/admin/relationship/card') {
+    // A `mode` query param is accepted-and-ignored here for v1: this route
+    // only ever serves whatever the last refresh's batch produced (any mode
+    // it ran with), and re-filtering by a mode the caller now prefers is a
+    // ranking decision, not a serve-time one. Re-refresh with the mode you
+    // want instead.
     const rel = relationshipState(db, policy);
     const cap = relationshipCap(policy);
     if (!cap) { send(res, 200, { card: null, reason: 'no-cap-configured' }, cors); return; }
@@ -4219,10 +4289,12 @@ export async function start({
   askTimeoutMs = ASK_TIMEOUT_MS,
   bearerToken: fixedBearerToken,
   bearerTokenFile = process.env.HERMES_TOKEN_FILE ?? DEFAULT_HERMES_TOKEN_PATH,
-  // Test seams for the relationship card routes: a stub matcher (no llama)
-  // and a fixed cap (production reads the owner's config).
+  // Test seams for the relationship card routes: a stub matcher (no llama),
+  // a fixed cap, and a fixed producer selection (production reads all three
+  // from the owner's config).
   relationshipMatcher,
   relationshipCap,
+  relationshipProducerConfig,
   // Test seam: production always wants the eager rebuild (see
   // schedulePeopleRebuild); a test asserting synchronous post-clear/purge
   // emptiness opts out rather than the production default changing for it.
@@ -4314,6 +4386,7 @@ export async function start({
         peopleSearchCachePath,
         relationshipMatcher,
         relationshipCap,
+        relationshipProducerConfig,
         relationshipHolder,
         peopleProjectionHolder,
         peopleProjectionAutoRebuild,

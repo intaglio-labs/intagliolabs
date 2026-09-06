@@ -8,6 +8,30 @@
 const el = (id) => document.getElementById(id);
 let card = null;
 
+// The mode picker: 'any' · 'founder' · 'investor', persisted per-viewer in
+// localStorage (this is a display preference, not a fact worth losing on
+// reload, and it never needs to reach hermes -- only the CHOICE, made when
+// the owner taps refresh, does). Failure to read/write storage falls back
+// to 'any' silently; a popup that cannot remember a button press is not a
+// popup that should break.
+const MODES = ['any', 'founder', 'investor'];
+function readMode() {
+  try {
+    const stored = localStorage.getItem('rcMode');
+    return MODES.includes(stored) ? stored : 'any';
+  } catch { return 'any'; }
+}
+function writeMode(mode) {
+  try { localStorage.setItem('rcMode', mode); } catch {}
+}
+let currentMode = readMode();
+
+function renderModes() {
+  el('rcModeAny').classList.toggle('rc-mode-active', currentMode === 'any');
+  el('rcModeFounder').classList.toggle('rc-mode-active', currentMode === 'founder');
+  el('rcModeInvestor').classList.toggle('rc-mode-active', currentMode === 'investor');
+}
+
 function fit() {
   requestAnimationFrame(() => {
     hzPost('fitContent', { height: Math.ceil(document.body.scrollHeight) }).catch(() => {});
@@ -85,6 +109,18 @@ el('rcNo').addEventListener('click', () => verdict('dismissed', { reason: 'not-u
 el('rcMute').addEventListener('click', () => verdict('muted', { mute_days: 30 }));
 el('rcNever').addEventListener('click', () => verdict('dismissed', { reason: 'never-this-person' }));
 el('rcClose').addEventListener('click', () => hzPost('close').catch(() => {}));
+
+function selectMode(mode) {
+  if (!MODES.includes(mode) || mode === currentMode) return;
+  currentMode = mode;
+  writeMode(mode);
+  renderModes();
+  hzPost('relRefresh', { mode }).then(pull, () => {});
+}
+el('rcModeAny').addEventListener('click', () => selectMode('any'));
+el('rcModeFounder').addEventListener('click', () => selectMode('founder'));
+el('rcModeInvestor').addEventListener('click', () => selectMode('investor'));
+renderModes();
 
 // A hidden panel that comes back must refetch: a card acted on elsewhere
 // must not linger. Native pokes this on every re-show.

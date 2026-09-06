@@ -91,9 +91,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                "workStatus", "relCard", "relEvent", "relRefresh"],
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim"],
     // The reconnect card popup (L5 step 10): reads the current card, posts
-    // the owner's verdict, and sizes itself. Nothing else -- the card page
+    // the owner's verdict, sizes itself, and (the mode picker) asks for a
+    // fresh batch under a different mode. Nothing else -- the card page
     // holds no token and can open no other surface.
-    "reconnect": ["relCard", "relEvent", "close", "fitContent"],
+    "reconnect": ["relCard", "relEvent", "relRefresh", "close", "fitContent"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "bridgeDiscordServer",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
@@ -1321,7 +1322,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
 
     case "relRefresh":
-      relHermes("POST", "admin/relationship/refresh", json: [:]) { [weak self] out in
+      // "mode" is the only field the widget's mode picker sends; an absent
+      // or unrecognized value falls through to hermes' own config default
+      // (relationshipMemory.mode ?? 'any'), so no allowlist beyond the one
+      // key is needed here.
+      var refreshBody: [String: Any] = [:]
+      if let mode = payload["mode"] { refreshBody["mode"] = mode }
+      relHermes("POST", "admin/relationship/refresh", json: refreshBody) { [weak self] out in
         self?.reply(webView, id, out)
       }
 
