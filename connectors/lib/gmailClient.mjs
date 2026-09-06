@@ -29,10 +29,57 @@ const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const API_BASE = 'https://www.googleapis.com/gmail/v1';
 const EXPIRY_SKEW_MS = 60_000;
 
+// A 52k-message backfill trips Gmail's per-user "Units per minute" quota
+// mid-run; a smaller mailbox never does, which is why one account worked and
+// the other never did. Full-jitter exponential backoff (base 1s, cap 32s) on
+// 429 and on the 403s that are actually quota, bounded at 6 attempts total —
+// unbounded retry inside a resident poller is a hang wearing a progress
+// indicator, same reasoning as notionClient.mjs's MAX_RATE_LIMIT_RETRIES.
+const RATE_LIMIT_BASE_MS = 1000;
+const RATE_LIMIT_CAP_MS = 32_000;
+const MAX_RATE_LIMIT_ATTEMPTS = 6;
+
+// Reasons Google's error body uses for a 403 that is really a rate/quota
+// limit, not a permissions problem. `insufficientPermissions` and friends
+// must still throw immediately — retrying a real permissions error just
+// delays the failure the owner needs to see.
+const QUOTA_403_REASONS = new Set(['rateLimitExceeded', 'userRateLimitExceeded', 'quotaExceeded']);
+
 function statusError(status, message) {
   const e = new Error(message);
   e.status = status;
   return e;
+}
+
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Parses just enough of the error body to tell a quota 403 from any other
+// 403, without assuming the body is JSON (a proxy or an outage can hand back
+// plain text). `bodyText` is passed in already read, once, by the caller.
+function isQuotaLimited(status, bodyText) {
+  if (status === 429) return true;
+  if (status !== 403) return false;
+  let parsed;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    parsed = null;
+  }
+  const error = parsed?.error;
+  const reasons = Array.isArray(error?.errors) ? error.errors.map((e) => e?.reason) : [];
+  if (reasons.some((r) => QUOTA_403_REASONS.has(r))) return true;
+  if (QUOTA_403_REASONS.has(error?.status)) return true;
+  return /quota exceeded/iu.test(String(error?.message ?? bodyText ?? ''));
+}
+
+// Retry-After (seconds) wins when Google sends it; otherwise full jitter
+// (AWS's formula: uniform(0, min(cap, base * 2^attempt))) so many callers
+// backing off at once don't all retry in lockstep.
+function rateLimitDelayMs(res, attempt) {
+  const retryAfter = Number(res.headers?.get?.('retry-after'));
+  if (Number.isFinite(retryAfter) && retryAfter >= 0) return retryAfter * 1000;
+  const ceiling = Math.min(RATE_LIMIT_CAP_MS, RATE_LIMIT_BASE_MS * 2 ** attempt);
+  return Math.random() * ceiling;
 }
 
 export function createGmailClient({
@@ -40,6 +87,7 @@ export function createGmailClient({
   home = homedir(),
   tokensPath = null,
   fetchImpl = fetch,
+  sleep = defaultSleep,
 } = {}) {
   // Reuse the path discovered from disk first. The first per-account release
   // used slug-only filenames; new grants use a collision-resistant suffix.
@@ -145,23 +193,32 @@ export function createGmailClient({
     const url = `${API_BASE}${subpath}?${new URLSearchParams(params)}`;
     const call = (tk) =>
       fetchImpl(url, { headers: { Authorization: `Bearer ${tk}` }, redirect: 'error' });
-    let res = await call(token);
-    if (res.status === 401) {
-      // Reactive refresh, ONCE. A second 401 on a freshly rotated token is not
-      // an expiry problem and refreshing again cannot fix it.
-      token = (await refreshTokens(token)).access_token;
-      res = await call(token);
+
+    for (let attempt = 0; ; attempt += 1) {
+      let res = await call(token);
       if (res.status === 401) {
-        throw statusError(401,
-          `Gmail ${name} still answers 401 after a refresh — the authorization is likely revoked; ` +
-          'rerun `node ops/gcal-auth.mjs`');
+        // Reactive refresh, ONCE. A second 401 on a freshly rotated token is
+        // not an expiry problem and refreshing again cannot fix it.
+        token = (await refreshTokens(token)).access_token;
+        res = await call(token);
+        if (res.status === 401) {
+          throw statusError(401,
+            `Gmail ${name} still answers 401 after a refresh — the authorization is likely revoked; ` +
+            'rerun `node ops/gcal-auth.mjs`');
+        }
       }
+      if (res.ok) return res.json();
+
+      const bodyText = await res.text();
+      // Every other 4xx (including a real insufficientPermissions 403) is the
+      // caller's bug or the caller's instruction, and throws immediately —
+      // only a genuine rate/quota limit is worth waiting out.
+      if (isQuotaLimited(res.status, bodyText) && attempt < MAX_RATE_LIMIT_ATTEMPTS - 1) {
+        await sleep(rateLimitDelayMs(res, attempt));
+        continue;
+      }
+      throw statusError(res.status, `Gmail ${name} failed: HTTP ${res.status} ${bodyText.slice(0, 200)}`);
     }
-    if (!res.ok) {
-      throw statusError(res.status,
-        `Gmail ${name} failed: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
-    }
-    return res.json();
   }
 
   return {

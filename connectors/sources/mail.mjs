@@ -48,6 +48,34 @@ const DEFAULT_BACKFILL_DAYS = 30;
 const MAX_MESSAGES_PER_ACCOUNT = 2000;
 const PAGE_SIZE = 100;
 
+// Gentle pacing between messages.get calls. A 52k-message backfill answered
+// with `Quota exceeded for quota metric 'Total Query Cost' and limit 'Units
+// per minute per user' of service 'gmail.googleapis.com'` — gmailClient.mjs
+// now retries that, but spreading a 100-message page over ~5s keeps a normal
+// run under the per-minute quota by default instead of leaning on the retry.
+const MESSAGE_GET_PACING_MS = 50;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Coarse, type-only classification for logging (connectors/AGENTS.md: counts
+// and error types, never provider text). `error.message` may echo the
+// provider's own body, so it is inspected here to pick a bucket and never
+// itself logged.
+function classifyMailError(error) {
+  const status = Number.isFinite(error?.status) ? error.status : null;
+  if (status === null) return { status, kind: 'network' };
+  if (status === 401) return { status, kind: 'auth' };
+  if (status === 429) return { status, kind: 'quota' };
+  if (status === 403) {
+    return {
+      status,
+      kind: /quota exceeded|rateLimitExceeded|userRateLimitExceeded|quotaExceeded/iu.test(String(error?.message ?? ''))
+        ? 'quota'
+        : 'auth',
+    };
+  }
+  return { status, kind: 'other' };
+}
+
 const cursorKey = (email) => `mail:${String(email).toLowerCase()}:internalDate`;
 const historyPageKey = (email, year) =>
   `mail:${String(email).toLowerCase()}:history-year:${year}:page`;
@@ -196,8 +224,9 @@ export function createMailSource({
             const list = await client.listMessages({ q, pageToken, maxResults: PAGE_SIZE });
             if (yearly) historyProgressed = true;
             pageToken = list.nextPageToken;
-            for (const stub of list.messages ?? []) {
+            for (const [stubIndex, stub] of (list.messages ?? []).entries()) {
               if (!yearly && seen >= MAX_MESSAGES_PER_ACCOUNT) break page;
+              if (stubIndex > 0) await sleep(MESSAGE_GET_PACING_MS);
               seen += 1;
               const full = await client.getMessage(stub.id);
               const internal = Number(full?.internalDate);
@@ -263,7 +292,8 @@ export function createMailSource({
           // One mailbox failing must not cost the others theirs — separate
           // grants, separate tokens, separate fates.
           failures.push(accountIndex);
-          log.warn('mail_account_failed', { connector: 'mail', accountIndex });
+          const { status, kind } = classifyMailError(error);
+          log.warn('mail_account_failed', { connector: 'mail', accountIndex, status, kind });
         }
       }
 
