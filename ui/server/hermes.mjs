@@ -40,7 +40,7 @@
 // web framework showcase.
 
 import { createServer } from 'node:http';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -48,6 +48,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { canonicalHash } from './contentHash.mjs';
 import { recallClaims, groundingLines, pendingForQuery } from './memory/retrieve.mjs';
 import { episodicContext } from './memory/episodic.mjs';
 import { selectRows } from './memory/select.mjs';
@@ -1376,48 +1377,12 @@ export function openDb(dbPath = DEFAULT_DB_PATH) {
 
 // --- canonical content hash --------------------------------------------------
 //
-// Computed HERE and only here. The hash decides whether an upsert is a real
-// change, so a second implementation in a client is a fork waiting to disagree
-// on serialization — at which point every redelivery becomes a spurious UPDATE
-// (plus FTS churn), or worse, a real edit hashes equal and is dropped.
-// Connectors send plain rows; Hermes hashes them.
-//
-// Canonical form of {ts, speaker, text, meta}: object keys sorted recursively;
-// null-valued and missing keys normalized to the same absence (omitted), so
-// {"speaker":null} and {} describe the same row; meta is canonicalized as the
-// parsed JSON value it arrives as, never as whatever string a client happened
-// to serialize. Arrays keep their order and their nulls — order and arity are
-// data in an array, and a generic canonicalizer cannot know which arrays are
-// really sets. CONNECTORS MUST THEREFORE PRE-SORT semantically-unordered
-// arrays (attendees, recipients) before ingest, or a reordered attendee list
-// reads as an edit; the rule is written down in ops/INGESTION.md.
-function canonicalize(value) {
-  if (value === null || value === undefined) return undefined;
-  if (Array.isArray(value)) {
-    return value.map((item) => {
-      const c = canonicalize(item);
-      return c === undefined ? null : c;
-    });
-  }
-  if (typeof value === 'object') {
-    const out = {};
-    for (const key of Object.keys(value).sort()) {
-      const c = canonicalize(value[key]);
-      if (c !== undefined) out[key] = c;
-    }
-    return out;
-  }
-  return value;
-}
-
-// Hashes the NORMALIZED row — ts after truncation/default, speaker collapsed
-// to absence when null — so the hash describes what would be stored, not what
-// the wire happened to carry. Exported for tests; clients must not grow one.
-export function canonicalHash({ ts, speaker, text, meta }) {
-  return createHash('sha256')
-    .update(JSON.stringify(canonicalize({ ts, speaker, text, meta })))
-    .digest('hex');
-}
+// Extracted to ./contentHash.mjs and re-exported here (L5 step 6, public
+// lookup): ui/server/relationship/lookup.mjs writes its own source='web'
+// context rows and needs the SAME hash this file computes for every other
+// row, rather than forking a second implementation that could disagree on
+// serialization. See contentHash.mjs for the full canonicalization contract.
+export { canonicalHash };
 
 // Validates everything before writing anything, so a bad row midway through a
 // batch rejects the whole batch instead of leaving half of it behind — the
