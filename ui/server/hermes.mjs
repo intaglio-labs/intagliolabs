@@ -596,6 +596,101 @@ CREATE TABLE IF NOT EXISTS person_sweep_proposal(
 );
 CREATE INDEX IF NOT EXISTS person_sweep_proposal_run ON person_sweep_proposal(run_id);
 
+/* Public lookup (L5 step 6, relationship/lookup.mjs): a small, capped, web
+   search over public identifiers the owner's corpus already holds for ONE
+   person at a time (name, firm, a public handle, a public LinkedIn profile
+   URL), proposing PENDING person claims the same way sweep.mjs and pages.mjs
+   do. Four tables:
+
+   person_lookup_state -- per-person watermark and tier, mirroring
+   person_sweep_cursor. NO FK to people, for the identical reason
+   person_sweep_cursor has none: clearPeopleProjection deletes every row of
+   people on every identity rebuild, and a cascade from a people FK would
+   erase every lookup watermark along with it, forcing every person to be
+   looked up again (at model AND search cost) on the next rebuild. A stale
+   key after an identity merge simply never matches a live person_key again.
+   anchors_hash is the hash of the anchors buildLookupQuery last saw for this
+   person -- a change (a new firm, a LinkedIn URL that finally resolved)
+   makes them due again even before next_due_at, the same "something changed"
+   reasoning next_due_at alone cannot capture.
+
+   person_lookup_run -- one row per PASS (not per person), including a pass
+   that skipped or did nothing -- a skip is a measurement, same reasoning as
+   person_sweep_run and rm_candidate_batch. distill_run_id is nullable
+   because a skipped pass never spends a model call and so never creates a
+   distill_run row.
+
+   lookup_log -- THE RECEIPT FOR WHAT WAS SENT, per person per lookup. query
+   is the assembled string buildLookupQuery produced (public identifiers
+   only, by construction -- a log the owner cannot read is not a receipt);
+   fields_used names WHICH allowlisted fields contributed, never their
+   values redundantly. Rendered on the desk's own person page so the owner
+   can see exactly what left the house and why the pass reached the verdict
+   it did (status).
+
+   person_lookup_change -- which KIND of change a stored claim is, and the
+   url/date it cites. Mirrors person_sweep_proposal's role (a claim carries
+   no section/kind of its own -- this table is what lets a lookup-derived
+   claim be reconstructed and grouped later) but is its own table because a
+   lookup change's shape (url NOT NULL, change_date, no value column) does
+   not match a sweep proposal's. claim_id is the primary key and references
+   claim(id) ON DELETE CASCADE, same append-then-cascade discipline as
+   person_page_item. */
+CREATE TABLE IF NOT EXISTS person_lookup_state(
+  person_key     TEXT PRIMARY KEY,
+  tier           TEXT NOT NULL CHECK (tier IN ('eligible','tagged','other')),
+  anchors_hash   TEXT NOT NULL,
+  last_looked_at INTEGER,
+  next_due_at    INTEGER NOT NULL,
+  last_status    TEXT,
+  lookups        INTEGER NOT NULL DEFAULT 0,
+  proposals      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS person_lookup_state_due ON person_lookup_state(next_due_at);
+CREATE TABLE IF NOT EXISTS person_lookup_run(
+  id              INTEGER PRIMARY KEY,
+  distill_run_id  INTEGER REFERENCES distill_run(id),
+  started_at      INTEGER NOT NULL, ended_at INTEGER,
+  power_mode      TEXT NOT NULL CHECK (power_mode IN ('full','trickle')),
+  engine          TEXT NOT NULL, budget INTEGER NOT NULL, scope_size INTEGER NOT NULL,
+  candidates      INTEGER NOT NULL DEFAULT 0, looked_up INTEGER NOT NULL DEFAULT 0,
+  model_calls     INTEGER NOT NULL DEFAULT 0, searches INTEGER NOT NULL DEFAULT 0,
+  proposed        INTEGER NOT NULL DEFAULT 0, dropped INTEGER NOT NULL DEFAULT 0,
+  cost_usd        REAL NOT NULL DEFAULT 0,
+  skip_reason     TEXT CHECK (skip_reason IS NULL OR skip_reason IN
+                    ('disabled','battery','thermal','quota','busy-model','no-scope','no-due','no-engine')),
+  status          TEXT NOT NULL CHECK (status IN ('running','complete','skipped','failed'))
+);
+CREATE INDEX IF NOT EXISTS person_lookup_run_started ON person_lookup_run(started_at);
+CREATE TABLE IF NOT EXISTS lookup_log(
+  id                  INTEGER PRIMARY KEY,
+  person_key          TEXT NOT NULL,
+  run_id              INTEGER REFERENCES person_lookup_run(id),
+  at                  INTEGER NOT NULL,
+  engine              TEXT NOT NULL,
+  query               TEXT NOT NULL,
+  query_hash          TEXT NOT NULL,
+  fields_used         TEXT NOT NULL,
+  searches            INTEGER NOT NULL DEFAULT 0,
+  urls_seen           INTEGER NOT NULL DEFAULT 0,
+  identity_confidence TEXT CHECK (identity_confidence IS NULL OR identity_confidence IN ('match','ambiguous','no_match')),
+  changes_proposed    INTEGER NOT NULL DEFAULT 0,
+  changes_dropped     INTEGER NOT NULL DEFAULT 0,
+  cost_usd            REAL,
+  status              TEXT NOT NULL CHECK (status IN
+                        ('proposed','empty','ambiguous','ungrounded','engine-error','parse-error','no-anchors'))
+);
+CREATE INDEX IF NOT EXISTS lookup_log_person ON lookup_log(person_key, at DESC);
+CREATE TABLE IF NOT EXISTS person_lookup_change(
+  claim_id    INTEGER PRIMARY KEY REFERENCES claim(id) ON DELETE CASCADE,
+  log_id      INTEGER NOT NULL REFERENCES lookup_log(id),
+  kind        TEXT NOT NULL CHECK (kind IN ('role','company','raise','launch','move','other')),
+  url         TEXT NOT NULL,
+  change_date TEXT,
+  applied_at  INTEGER
+);
+CREATE INDEX IF NOT EXISTS person_lookup_change_log ON person_lookup_change(log_id);
+
 /* The porter stemmer, because this index is queried with the owner's own
    English: it unifies morning/mornings, allergy/allergies, take/takes.
    MEASURED LIMIT, so nobody assumes more of it than it does: porter does NOT
@@ -953,7 +1048,11 @@ END;
 //      SCHEMA's own IF NOT EXISTS, so nothing here ALTERs anything; the
 //      version < 12 branch below only (re-)asserts their indexes, same
 //      belt-and-suspenders posture as the ALTER-guarded branches above.
-const SCHEMA_VERSION = 12;
+//  13  person_lookup_state, person_lookup_run, lookup_log, person_lookup_change
+//      (L5 step 6, public lookup). All four are brand-new tables created by
+//      SCHEMA's own IF NOT EXISTS, so nothing here ALTERs anything; the
+//      version < 13 branch below only (re-)asserts their indexes.
+const SCHEMA_VERSION = 13;
 
 // The PRAGMAs that decide whether "deleted" means deleted, and whether the
 // memory tables' declared references mean anything. Applied to every
@@ -1200,6 +1299,18 @@ function migrate(db) {
     db.exec('CREATE INDEX IF NOT EXISTS person_sweep_run_started ON person_sweep_run(started_at)');
     db.exec('CREATE INDEX IF NOT EXISTS person_sweep_proposal_run ON person_sweep_proposal(run_id)');
     version = 12;
+  }
+  if (version < 13) {
+    // person_lookup_state/_run, lookup_log, person_lookup_change were already
+    // created above by SCHEMA (CREATE TABLE IF NOT EXISTS, no pre-existing
+    // column to guard) -- this branch exists only to (re-)assert their
+    // indexes, which is harmless under IF NOT EXISTS, and to record the
+    // version.
+    db.exec('CREATE INDEX IF NOT EXISTS person_lookup_state_due ON person_lookup_state(next_due_at)');
+    db.exec('CREATE INDEX IF NOT EXISTS person_lookup_run_started ON person_lookup_run(started_at)');
+    db.exec('CREATE INDEX IF NOT EXISTS lookup_log_person ON lookup_log(person_key, at DESC)');
+    db.exec('CREATE INDEX IF NOT EXISTS person_lookup_change_log ON person_lookup_change(log_id)');
+    version = 13;
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
