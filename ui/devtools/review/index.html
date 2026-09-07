@@ -240,6 +240,7 @@
 </main>
 
 <main id="cardsView" hidden>
+  <p class="health" id="cardStatsLine"></p>
   <div id="cardsList"></div>
 </main>
 
@@ -304,6 +305,7 @@ function selectView(v) {
   document.getElementById('counts').hidden = v !== 'claims';
   document.getElementById('health').hidden = v !== 'cards';
   if (v === 'cards' && !cardsLoaded) { cardsLoaded = true; loadCards(); loadHealth(); }
+  if (v === 'cards') loadCardStatsLine();
   if (v === 'pool') { renderPoolBar(); loadPool(); }
   if (v === 'pages') { renderPagesBar(); loadPagesList(); loadSweepStatus(); loadLookupStatus(); }
   if (v === 'lint') { renderLintBar(); loadLintStatus(); loadLintFindings(); }
@@ -864,6 +866,37 @@ async function loadLookupStatus() {
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     box.textContent = lookupLine(data.lookup);
+  } catch {
+    box.textContent = '';
+  }
+}
+
+// The `cards` key (cardStats, relationship/controls.mjs) off the same
+// /api/health body -- no serve.mjs change needed, same as sweep/lookup
+// above. One line per producer (owe, reconnect), 56-day-window numbers:
+// shown, accept rate (a raw fraction, never a verdict -- reading this as
+// pass/fail is the sealed Phase 0 gates artifact's job, not this line's),
+// and the never-this-person/not-useful dismissal shares.
+function pct(x) { return x == null ? '—' : `${Math.round(x * 100)}%`; }
+function cardKindLine(kind, k) {
+  if (!k || k.shown === 0) return `${kind} · never shown`;
+  return `${kind} · ${k.shown} shown (${k.daysServed}d) · accept ${pct(k.acceptRate)} · `
+    + `dismissed ${k.dismissed} (never-person ${pct(k.neverThisPersonShare)}, not-useful ${pct(k.notUsefulShare)})`;
+}
+
+async function loadCardStatsLine() {
+  const box = document.getElementById('cardStatsLine');
+  if (!box) return;
+  try {
+    const res = await fetch('/api/health');
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    const c = data.cards;
+    if (!c) { box.textContent = ''; return; }
+    box.replaceChildren();
+    for (const kind of ['owe', 'reconnect']) {
+      box.append(el('div', null, `${c.windowDays}d · ${cardKindLine(kind, c.perKind[kind])}`));
+    }
   } catch {
     box.textContent = '';
   }

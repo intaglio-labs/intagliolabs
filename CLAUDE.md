@@ -100,6 +100,19 @@ Do not re-add these; their absence is a decision, not an oversight.
    resolves each finding by hand; the only automatic transition is a finding
    closing itself once the condition that produced it is gone.
 
+   The orb's card queue now has TWO producers, not one: the eligibility
+   producer (`ui/server/relationship/producer.mjs`, kind `reconnect`) and Owe
+   (`ui/server/relationship/owe.mjs`, kind `owe` — an unanswered
+   direct-message question, or an owner commitment/page-ask past its due
+   date). Neither calls a model. `ui/server/relationship/daily.mjs`
+   alternates between them (whichever kind was least recently shown goes
+   next) over one shared queue, one frequency cap, and the same owner
+   controls (`rm_suppression`/`rm_mute`) — scoped per-kind wherever the two
+   must not interfere with each other's judged/mute history (a dismissal on
+   one kind must not silence the other), and kind-agnostic wherever a shown
+   card of either kind really is one interruption (the 7-day recently-shown
+   cooldown, the global frequency cap).
+
 4. **Logs never carry row content.** The logger refuses fields named like message
    content. Counts, timings, IDs and error types only. This holds for probes too.
 
