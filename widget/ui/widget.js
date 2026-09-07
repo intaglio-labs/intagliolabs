@@ -33,6 +33,12 @@ function submitFromWidget() {
 // `talking` goes on the inner one.
 const orbBtn = document.getElementById('orb');
 const orbEl = orbBtn.querySelector('.orb');
+// The direct door to the reconnect card, next to People and Settings in the
+// gear row -- see paintReconnectBtn below for how its badge/title track the
+// same cardPending the notify orb answers to.
+const reconnectBtn = document.getElementById('reconnect');
+const reconnectBadge = document.getElementById('reconnectBadge');
+reconnectBtn.addEventListener('click', () => hzPost('openReconnect'));
 // The wake fires HERE, off the click, not off the voice stack. Arming has to
 // reach native, start the ear page, load models and speak a greeting before
 // any state comes back — and if voice is not provisioned, none ever does.
@@ -405,7 +411,15 @@ function cardTeaseText(card) {
   const days = card.evidence?.dormancyDays;
   return days ? `${card.name} · quiet ${days} days` : card.name;
 }
+// The gear-row door mirrors the orb's own notify tease (same badge digit,
+// same title text) rather than having its own opinion about whether a card
+// is waiting -- two doors into the same card should never disagree.
+function paintReconnectBtn() {
+  reconnectBadge.hidden = !cardPending;
+  reconnectBtn.title = cardPending ? cardTeaseText(cardPending) : 'Reconnect';
+}
 function paintOrbState() {
+  paintReconnectBtn();
   const processing = voiceOrbState === 'idle' && !!workLabel;
   if (voiceOrbState === 'idle' && cardPending) {
     setOrbState('notify');

@@ -34,7 +34,21 @@ function renderModes() {
 
 function fit() {
   requestAnimationFrame(() => {
-    hzPost('fitContent', { height: Math.ceil(document.body.scrollHeight) }).catch(() => {});
+    // rc-body (reconnect.css) is the one element allowed to clip its own
+    // overflow, so its rendered box can already be shorter than its content.
+    // document.body.scrollHeight alone would just echo that clipped number
+    // straight back -- a page that has already scrolled its content out of
+    // sight could never ask native for more room to show it. An element's
+    // own `scrollHeight` always reports the FULL content height regardless
+    // of clipping, so swap that in for the win's total before posting; the
+    // rest of the layout (head, modes, footer) is fixed chrome either way.
+    const win = document.querySelector('.win');
+    let height = win.scrollHeight;
+    if (!el('rcCard').hidden) {
+      const body = el('rcBody');
+      height += body.scrollHeight - body.getBoundingClientRect().height;
+    }
+    hzPost('fitContent', { height: Math.ceil(height) }).catch(() => {});
   });
 }
 

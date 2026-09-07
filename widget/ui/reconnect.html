@@ -24,28 +24,35 @@
       <button class="rc-mode" id="rcModeInvestor" data-mode="investor">investor</button>
     </div>
     <div id="rcCard">
-      <div class="rc-trigger" id="rcTrigger"></div>
-      <div class="rc-name" id="rcName"></div>
-      <div class="rc-who" id="rcWho"></div>
-      <div class="rc-why" id="rcWhy"></div>
-      <blockquote class="rc-quote" id="rcQuote"></blockquote>
-      <div class="rc-asks" id="rcAsksRow" hidden>
-        <div class="rc-asks-label">asked you for</div>
-        <ul class="rc-asks-list" id="rcAsksList"></ul>
+      <div class="rc-body" id="rcBody">
+        <div class="rc-trigger" id="rcTrigger"></div>
+        <div class="rc-name" id="rcName"></div>
+        <div class="rc-who" id="rcWho"></div>
+        <div class="rc-why" id="rcWhy"></div>
+        <blockquote class="rc-quote" id="rcQuote"></blockquote>
+        <div class="rc-asks" id="rcAsksRow" hidden>
+          <div class="rc-asks-label">asked you for</div>
+          <ul class="rc-asks-list" id="rcAsksList"></ul>
+        </div>
+        <dl class="rc-facts">
+          <div id="rcRoleRow"><dt>who they are</dt><dd id="rcRole"></dd></div>
+          <div id="rcLeftRow"><dt>how you left it</dt><dd id="rcLeft"></dd></div>
+          <div><dt>history</dt><dd id="rcHistory"></dd></div>
+        </dl>
       </div>
-      <dl class="rc-facts">
-        <div id="rcRoleRow"><dt>who they are</dt><dd id="rcRole"></dd></div>
-        <div id="rcLeftRow"><dt>how you left it</dt><dd id="rcLeft"></dd></div>
-        <div><dt>history</dt><dd id="rcHistory"></dd></div>
-      </dl>
-      <div class="rc-actions">
-        <button id="rcYes">will text them</button>
-        <button id="rcNo">not relevant</button>
-        <button id="rcMute">mute 30d</button>
-        <button id="rcNever">never this person</button>
-        <button id="rcNotThisKind">not this kind</button>
+      <!-- Pinned footer (reconnect.css): rc-body above scrolls on its own, so
+           the verdict buttons stay reachable even when a page's who/tie/quote/
+           asks push the card past the panel's height. -->
+      <div class="rc-footer">
+        <div class="rc-actions">
+          <button id="rcYes">will text them</button>
+          <button id="rcNo">not relevant</button>
+          <button id="rcMute">mute 30d</button>
+          <button id="rcNever">never this person</button>
+          <button id="rcNotThisKind">not this kind</button>
+        </div>
+        <input id="rcFeedback" type="text" placeholder="why? (optional — this trains it)" autocomplete="off" spellcheck="false">
       </div>
-      <input id="rcFeedback" type="text" placeholder="why? (optional — this trains it)" autocomplete="off" spellcheck="false">
     </div>
     <div class="rc-empty" id="rcEmpty" hidden>
       <p class="rc-empty-msg">nothing to review — the orb will light up when there is.</p>

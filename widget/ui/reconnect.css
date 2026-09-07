@@ -2,15 +2,33 @@
    through fitContent like every popup. */
 body.reconnect { margin: 0; -webkit-user-select: none; user-select: none; }
 .reconnect .win {
+  /* .win is already `height:100%; display:flex; flex-direction:column`
+     (palette.css, shared popup shell) -- that's what lets #rcCard below claim
+     the rest of the column instead of just sizing to its own content. */
   padding: 14px 16px 16px;
   font: 13px/1.5 -apple-system, sans-serif;
   color: var(--ink, #ddd);
 }
-.rc-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.rc-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; flex: 0 0 auto; }
 .rc-title { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; opacity: 0.6; }
 .rc-close { background: none; border: 0; color: inherit; opacity: 0.55; cursor: pointer; font-size: 13px; }
 .rc-close:hover { opacity: 1; }
-.rc-modes { display: flex; gap: 5px; margin: 0 0 10px; }
+.rc-modes { display: flex; gap: 5px; margin: 0 0 10px; flex: 0 0 auto; }
+/* #rcCard fills whatever the win column has left after the head/modes rows.
+   rc-body is the ONLY thing that scrolls: min-height:0 lets a flex item
+   shrink below its content size (the default is content-based and would
+   otherwise push the footer off, right back into the original bug), and
+   overflow-y:auto is what makes the rest of a long card reachable once it
+   does. rc-footer sits below it as a plain flex item, never clipped, so the
+   verdict buttons and the feedback field stay visible whenever the card
+   fits and reachable by scrolling rc-body when it doesn't -- see reconnect.js
+   `fit()` for how the requested window height tracks the card's real size. */
+#rcCard { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.rc-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.rc-footer {
+  flex: 0 0 auto; margin-top: 8px; padding-top: 8px;
+  border-top: 1px solid rgba(234, 234, 234, 0.08);
+}
 .rc-mode {
   flex: 1; border: 1px solid var(--edge, #444); background: rgba(127, 127, 127, 0.1);
   color: inherit; opacity: 0.7; border-radius: 6px; padding: 4px 6px;

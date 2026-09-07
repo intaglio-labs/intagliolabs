@@ -982,7 +982,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // change again, and acting on it is what turned one drag into a stream of
     // window resizes.
     if scaleDragging {
-      for (panel, _) in [(connectionsPanel, 0), (chatPanel, 0), (peoplePanel, 0), (monthsPanel, 0)] {
+      for (panel, _) in [(connectionsPanel, 0), (chatPanel, 0), (peoplePanel, 0), (monthsPanel, 0), (reconnectPanel, 0)] {
         guard let p = panel, p.contentView === webView
           || p.contentView?.subviews.first === webView else { continue }
         contentHeights[p] = CGFloat(contentHeight)
@@ -993,6 +993,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     let panels: [(PopupPanel?, NSSize)] = [
       (connectionsPanel, Self.connectionsBase), (chatPanel, Self.chatBase),
       (peoplePanel, Self.peopleBase), (monthsPanel, Self.monthsBase),
+      // The reconnect card's own content varies a lot per-card (a page's who
+      // line, tie, quote and asks list can push it well past reconnectBase) --
+      // it was missing from this list entirely, so its fitContent posts were
+      // silent no-ops and the panel never grew past its fixed base height.
+      // capped() still applies (it is not overlay-placed), so this only
+      // reaches as tall as popupCeiling allows; the page's own scrolling
+      // footer covers whatever is left over.
+      (reconnectPanel, Self.reconnectBase),
     ]
     for (panel, base) in panels {
       guard let p = panel, p.contentView === webView
