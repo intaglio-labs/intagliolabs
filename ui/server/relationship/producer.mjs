@@ -221,8 +221,10 @@ export function eligiblePool(db, { mode, now = Date.now(), includeOffered = fals
 // The latest context row FROM them, in a direct (non-room) channel -- the
 // same "reference, not copied text" discipline matcher.mjs and hermes.mjs's
 // snapshot writer use for quotes: this id is resolved against the live row
-// at serve time, never copied here.
-function latestAuthoredContextId(db, personKey) {
+// at serve time, never copied here. Exported so owe.mjs's open-loop
+// candidate can reuse the exact same "their latest authored message" query
+// rather than re-deriving it.
+export function latestAuthoredContextId(db, personKey) {
   const row = db.prepare(
     `SELECT c.id AS id FROM person_event_links pel
      JOIN context c ON c.id = pel.context_id
