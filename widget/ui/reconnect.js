@@ -42,10 +42,31 @@ function renderEmpty() {
   card = null;
   el('rcCard').hidden = true;
   el('rcEmpty').hidden = false;
+  // Reset to the reconnect defaults between cards: the empty state is where
+  // the mode picker (reconnect's own) lives while nothing is showing, so it
+  // must not stay hidden from a previous Owe card.
+  el('rcTitle').textContent = 'reconnect?';
+  el('rcYes').textContent = 'will text them';
+  el('rcModes').hidden = false;
   fit();
 }
 
+// Owe cards (kind==='owe') get their own trigger line, built from
+// evidence.owe_kind/overdueDays rather than the reconnect dormancy/meetings/
+// messages counts -- those facts don't exist on an Owe card, and "quiet Xd"
+// would say the wrong thing about a card whose whole point is a specific
+// outstanding ask or commitment, not general silence.
+function oweTriggerLine(c) {
+  const ev = c.evidence ?? {};
+  const days = Number.isFinite(ev.overdueDays) ? ev.overdueDays : null;
+  if (ev.owe_kind === 'owe:expired-commitment') {
+    return `OWE · you said you would${days !== null ? ` · ${days}d past` : ''}`;
+  }
+  return `OWE · you never answered${days !== null ? ` · ${days}d` : ''}`;
+}
+
 function triggerLine(c) {
+  if (c.kind === 'owe') return oweTriggerLine(c);
   const ev = c.evidence ?? {};
   const nums = [];
   if (ev.dormancyDays) nums.push(`quiet ${ev.dormancyDays}d`);
@@ -61,6 +82,16 @@ function render(c) {
   card = c;
   el('rcCard').hidden = false;
   el('rcEmpty').hidden = true;
+
+  // Owe cards are a different ask ("will you reply to this specific thing")
+  // than reconnect's ("will you reach out at all"), and have no mode --
+  // the mode picker is reconnect's own any/founder/investor split, so it
+  // hides rather than showing three buttons that do nothing for an owe card.
+  const isOwe = c.kind === 'owe';
+  el('rcTitle').textContent = isOwe ? 'owe?' : 'reconnect?';
+  el('rcYes').textContent = isOwe ? 'will reply' : 'will text them';
+  el('rcModes').hidden = isOwe;
+
   const trigger = triggerLine(c);
   el('rcTrigger').textContent = trigger;
   el('rcTrigger').hidden = !trigger;
@@ -133,6 +164,10 @@ el('rcYes').addEventListener('click', () => verdict('accepted'));
 el('rcNo').addEventListener('click', () => verdict('dismissed', { reason: 'not-useful' }));
 el('rcMute').addEventListener('click', () => verdict('muted', { mute_days: 30 }));
 el('rcNever').addEventListener('click', () => verdict('dismissed', { reason: 'never-this-person' }));
+// The person-scoped analogue for a KIND: "not this kind of thing, for me,
+// for a while" -- mutes this person for this card's own kind (owe or
+// reconnect) server-side, never every kind for them (that is rcNever).
+el('rcNotThisKind').addEventListener('click', () => verdict('dismissed', { reason: 'not-this-kind' }));
 el('rcClose').addEventListener('click', () => hzPost('close').catch(() => {}));
 // The empty state ("nothing to review") left the panel with nothing useful to
 // do -- the mode picker above still works, but there was no way to ask for a

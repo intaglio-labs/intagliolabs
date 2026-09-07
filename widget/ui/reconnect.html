@@ -15,7 +15,7 @@
 <body class="reconnect">
   <div class="win">
     <div class="rc-head">
-      <span class="rc-title">reconnect?</span>
+      <span class="rc-title" id="rcTitle">reconnect?</span>
       <button class="rc-close" id="rcClose" title="Close">✕</button>
     </div>
     <div class="rc-modes" id="rcModes" role="group" aria-label="reconnect mode">
@@ -43,6 +43,7 @@
         <button id="rcNo">not relevant</button>
         <button id="rcMute">mute 30d</button>
         <button id="rcNever">never this person</button>
+        <button id="rcNotThisKind">not this kind</button>
       </div>
       <input id="rcFeedback" type="text" placeholder="why? (optional — this trains it)" autocomplete="off" spellcheck="false">
     </div>
