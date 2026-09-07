@@ -148,6 +148,61 @@ function insertThread(db, personKey, { chatGuid = `chat:${personKey}`, ts, them,
   return { themId, meId };
 }
 
+// Seeds one person with more new history than a single SWEEP_MAX_CHARS
+// budget: three long-message filler episodes (together well over budget on
+// their own), then a newest episode where the owner speaks FIRST and the
+// person's newest authored row follows -- so that row (not a later ME
+// reply) is the highest context id in the table, matching the person's true
+// newest authored row. Shared by the budget-overflow newRowsFor test and the
+// budget-truncated-then-second-pass runSweepPass test below.
+function seedBudgetOverflowPerson(db, key, name) {
+  insertPerson(db, { key, name });
+  for (let i = 0; i < 3; i++) {
+    insertThread(db, key, {
+      chatGuid: `chat:filler${i}`,
+      ts: NOW - (6 - i * 2) * DAY,
+      them: `filler message ${i} `.padEnd(2500, 'x'),
+      me: 'ok',
+    });
+  }
+
+  const chatGuid = 'chat:final';
+  db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', ?, ?)"
+  ).run(NOW - 1 * DAY, 'checking in', JSON.stringify({ chat_guid: chatGuid, is_from_me: true }));
+  const meId = Number(db.prepare('SELECT last_insert_rowid() AS id').get().id);
+  db.prepare(
+    `INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+     VALUES (?, ?, 'imessage', 'counterparty', 0, 1, 0, 1, ?)`
+  ).run(key, meId, chatGuid);
+  const themId = Number(db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', ?, ?)"
+  ).run(NOW - 1 * DAY + 60_000, 'all set, thanks', JSON.stringify({ chat_guid: chatGuid, is_from_me: false })).lastInsertRowid);
+  db.prepare(
+    `INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+     VALUES (?, ?, 'imessage', 'counterparty', 1, 0, 0, 1, ?)`
+  ).run(key, themId, chatGuid);
+
+  const maxAuthored = Number(
+    db.prepare(
+      `SELECT MAX(context_id) AS maxId FROM person_event_links WHERE person_key = ? AND authored = 1 AND room = 0`
+    ).get(key).maxId
+  );
+  return { themId, maxAuthored };
+}
+
+test('a person whose new rows exceed the char budget still advances the cursor to their newest authored row', () => {
+  const db = openDb(':memory:');
+  const key = 'name:budget overflow';
+  const { themId, maxAuthored } = seedBudgetOverflowPerson(db, key, 'Budget Overflow');
+  assert.equal(maxAuthored, themId, 'sanity: the final episode holds the true newest authored row');
+
+  const gathered = newRowsFor(db, key, 0);
+  assert.equal(gathered.maxContextId, maxAuthored, 'maxContextId reaches the newest authored row despite budget overflow');
+  const contextIds = gathered.excerpts.map((e) => e.contextId);
+  assert.ok(contextIds.includes(themId), 'the newest authored row is included, not starved out by an older, longer episode');
+});
+
 test('newRowsFor returns only episodes containing an authored row past the cursor', () => {
   const db = openDb(':memory:');
   const key = 'name:old and new';
@@ -382,6 +437,27 @@ test('a second runSweepPass makes zero model calls once nothing is new -- THE CH
   assert.equal(second.status, 'skipped');
   assert.equal(second.skip_reason, 'no-new-rows');
   assert.equal(engine.counters.calls, 1, 'no new model call was made on the second pass');
+});
+
+test('the second pass after a budget-truncated first pass makes zero model calls', async () => {
+  const db = openDb(':memory:');
+  const key = 'name:budget overflow sweep';
+  const { themId, maxAuthored } = seedBudgetOverflowPerson(db, key, 'Budget Overflow Sweep');
+  assert.equal(maxAuthored, themId, 'sanity: the final episode holds the true newest authored row');
+
+  const engine = fakeSweepEngine(() => JSON.stringify({ tags: [], firm: null, page_lines: [] }));
+
+  const first = await runSweepPass(db, engine, {}, { powerMode: 'trickle', now: NOW });
+  assert.equal(first.status, 'complete');
+  assert.equal(engine.counters.calls, 1);
+
+  const cursor = db.prepare('SELECT * FROM person_sweep_cursor WHERE person_key = ?').get(key);
+  assert.equal(Number(cursor.swept_through_context_id), maxAuthored, 'the cursor lands on the newest authored row despite the overflow');
+
+  const second = await runSweepPass(db, engine, {}, { powerMode: 'trickle', now: NOW + 1000 });
+  assert.equal(second.status, 'skipped');
+  assert.equal(second.skip_reason, 'no-new-rows');
+  assert.equal(engine.counters.calls, 1, 'no new model call was made on the second pass -- the budget-truncated first pass still advanced the cursor to the newest authored row');
 });
 
 test('an engine error keeps the cursor and a grounded-empty answer advances it', async () => {

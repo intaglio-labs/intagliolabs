@@ -141,9 +141,19 @@ function isReceiptItem(v) {
 // contain at least one authored (THEM) row past `cursor` -- an episode
 // entirely before the cursor has nothing new to sweep, even if the owner's
 // own reply (never authored, never THEM) landed inside it after the cursor.
-// The 8 most recent qualifying episodes, budgeted to maxChars, most-recent
-// episode consumed FIRST so an old, long-running thread cannot starve a
-// short new one out of the budget -- same ordering discipline as
+// The 8 most recent qualifying episodes, budgeted to maxChars, filled
+// NEWEST-ROW-FIRST across all of them (not most-recent-episode-first): every
+// candidate row from the chosen episodes is pooled and sorted by context id
+// (monotonic on insert) before the budget is applied, so a person whose new
+// history overflows the budget always has their newest authored rows
+// admitted rather than starved by an old, long-running thread that happens
+// to sort first. The backlog of a heavy person is bounded by the budget BY
+// DESIGN -- it is never the whole history; older rows beyond the budget are
+// skipped, not replayed. Because maxContextId (below) is computed over shown
+// rows only, and newest-first admission means the shown rows' max is now
+// also the person's newest authored row among the chosen episodes, the
+// cursor lands on it and a second pass finds nothing new to sweep. Admitted
+// rows are re-sorted chronologically afterward for display, same as
 // gatherPersonContext.
 export function newRowsFor(db, personKey, cursor, { maxEpisodes = SWEEP_MAX_EPISODES, maxChars = SWEEP_MAX_CHARS } = {}) {
   const linked = db
@@ -179,10 +189,12 @@ export function newRowsFor(db, personKey, cursor, { maxEpisodes = SWEEP_MAX_EPIS
   );
   const chosen = newEpisodes.slice(0, maxEpisodes);
 
-  const excerpts = [];
-  let charBudget = maxChars;
-  let maxContextId = cursorId;
-  outer: for (const ep of chosen) {
+  // Pool every candidate row from the chosen episodes, then sort newest-first
+  // by context id (monotonic on insert) so budget admission below always
+  // reaches a heavy person's newest rows first, regardless of which episode
+  // they landed in.
+  const candidates = [];
+  for (const ep of chosen) {
     for (const member of ep.members) {
       const row = member.row;
       const speaker = authoredIds.has(Number(row.id))
@@ -195,21 +207,33 @@ export function newRowsFor(db, personKey, cursor, { maxEpisodes = SWEEP_MAX_EPIS
       if (speaker === null) continue;
       const text = String(row.text ?? '');
       if (text.length === 0) continue;
-      if (text.length > charBudget) {
-        if (excerpts.length === 0) {
-          excerpts.push({ contextId: Number(row.id), speaker, text: text.slice(0, charBudget), ts: Number(row.ts) });
-          maxContextId = Math.max(maxContextId, Number(row.id));
-        }
-        break outer;
-      }
-      charBudget -= text.length;
-      excerpts.push({ contextId: Number(row.id), speaker, text, ts: Number(row.ts) });
-      maxContextId = Math.max(maxContextId, Number(row.id));
+      candidates.push({ contextId: Number(row.id), speaker, text, ts: Number(row.ts) });
     }
   }
-  // Oldest-first within the most-recent-first episode selection above, same
-  // reasoning as gatherPersonContext: a reader sees each conversation in the
-  // order it happened even though older conversations were dropped first.
+  candidates.sort((a, b) => b.contextId - a.contextId);
+
+  const excerpts = [];
+  let charBudget = maxChars;
+  let maxContextId = cursorId;
+  for (const c of candidates) {
+    if (c.text.length > charBudget) {
+      // Guarantee at least one excerpt even if the single newest row alone
+      // overflows the whole budget, same guard the previous per-episode
+      // loop had.
+      if (excerpts.length === 0) {
+        excerpts.push({ contextId: c.contextId, speaker: c.speaker, text: c.text.slice(0, charBudget), ts: c.ts });
+        maxContextId = Math.max(maxContextId, c.contextId);
+      }
+      break;
+    }
+    charBudget -= c.text.length;
+    excerpts.push({ contextId: c.contextId, speaker: c.speaker, text: c.text, ts: c.ts });
+    maxContextId = Math.max(maxContextId, c.contextId);
+  }
+  // Oldest-first for display, same reasoning as gatherPersonContext: a
+  // reader sees each conversation in the order it happened even though the
+  // admission order above (newest-first) is what decided which rows made it
+  // into the budget.
   excerpts.sort((a, b) => a.ts - b.ts);
 
   const meetingTitles = [];
