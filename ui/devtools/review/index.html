@@ -194,6 +194,31 @@
     background:var(--surface-2); border:1px solid var(--line); border-radius:4px;
     padding:.4rem .55rem; color:var(--fg-2); white-space:pre-wrap; word-break:break-word;
   }
+
+  /* ---- Lint view: step 5½'s findings, grouped by check ---- */
+  .lint-check-head {
+    display:flex; gap:.6rem; align-items:baseline; margin:1.1rem 0 .3rem;
+    font-size:.72rem; color:var(--fg-3); text-transform:uppercase; letter-spacing:.05em;
+  }
+  .lint-check-head:first-child { margin-top:0; }
+  .lint-check-head b { color:var(--fg-2); font-variant-numeric:tabular-nums; }
+  .lint-row {
+    border:1px solid var(--line); border-radius:5px; padding:.7rem .8rem; display:grid; gap:.5rem;
+  }
+  .lint-row.gone { opacity:.35; }
+  .lint-who { font-size:.92rem; font-weight:600; }
+  .lint-age { font-size:.72rem; color:var(--fg-3); }
+  .lint-detail {
+    font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:.78rem;
+    background:var(--surface-2); border:1px solid var(--line); border-radius:4px;
+    padding:.45rem .6rem; color:var(--fg-2); white-space:pre-wrap; word-break:break-word;
+  }
+  .lint-acts { display:flex; gap:.4rem; flex-wrap:wrap; }
+  .lint-acts button { padding:.28rem .7rem; }
+  .lint-acts .dismiss:hover { border-color:var(--bad); color:var(--bad); }
+  .lint-acts .keep-export:hover,
+  .lint-acts .keep-derived:hover,
+  .lint-acts .both:hover { border-color:var(--ok); color:var(--ok); }
 </style>
 </head>
 <body>
@@ -238,6 +263,12 @@
   </div>
 </main>
 
+<main id="lintView" hidden>
+  <div class="poolbar" id="lintBar"></div>
+  <p class="health" id="lintStatusLine"></p>
+  <div id="lintList"></div>
+</main>
+
 <script>
 const BANDS = ['unsupported', 'weak', 'supported', 'all'];
 let band = 'unsupported';   // the interesting one first: no content word shared with its source
@@ -247,7 +278,7 @@ let cursor = 0;
 const el = (t, c, txt) => { const n = document.createElement(t); if (c) n.className = c; if (txt !== undefined) n.textContent = txt; return n; };
 
 // ---- tabs: claims (existing) / cards (new) --------------------------------
-const VIEWS = ['claims', 'cards', 'pool', 'pages'];
+const VIEWS = ['claims', 'cards', 'pool', 'pages', 'lint'];
 let view = 'cards';
 let cardsLoaded = false;
 
@@ -268,12 +299,14 @@ function selectView(v) {
   document.getElementById('cardsView').hidden = v !== 'cards';
   document.getElementById('poolView').hidden = v !== 'pool';
   document.getElementById('pagesView').hidden = v !== 'pages';
+  document.getElementById('lintView').hidden = v !== 'lint';
   document.getElementById('filters').hidden = v !== 'claims';
   document.getElementById('counts').hidden = v !== 'claims';
   document.getElementById('health').hidden = v !== 'cards';
   if (v === 'cards' && !cardsLoaded) { cardsLoaded = true; loadCards(); loadHealth(); }
   if (v === 'pool') { renderPoolBar(); loadPool(); }
   if (v === 'pages') { renderPagesBar(); loadPagesList(); loadSweepStatus(); loadLookupStatus(); }
+  if (v === 'lint') { renderLintBar(); loadLintStatus(); loadLintFindings(); }
 }
 
 // ---- pool: the producer's ranked eligible set, per mode -------------------
@@ -1065,6 +1098,157 @@ async function lookupNow(btn) {
     await loadLookupLog();
   } catch (err) {
     document.getElementById('pagesRight').append(el('p', 'err', 'could not look up: ' + err.message));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---- Lint view: step 5½'s findings, grouped by check_name ---------------
+// Data: /api/lint/findings?open=1 (verbatim hermes proxy, enriched server-
+// side with displayName/claimText off the desk's own read-only handle --
+// see serve.mjs). Status line reuses /api/health the same way the Pages
+// tab's sweep/lookup lines do (lint's own key on the same /stats body, no
+// extra serve.mjs route needed). Actions: Dismiss works on any finding;
+// role_conflict's own three (keep-export/keep-derived/both) only render for
+// that check. On success the row is removed locally and the status line is
+// refetched, rather than reloading the whole findings list.
+const LINT_CHECK_LABELS = {
+  expired_claim: 'expired claim',
+  role_conflict: 'role conflict',
+  anchored_no_page: 'anchored, no page',
+  page_no_anchors: 'page, no anchors',
+  orphan_card_quote: 'orphan card quote',
+};
+let lintFindingsData = [];
+
+function renderLintBar() {
+  const box = document.getElementById('lintBar');
+  const btn = el('button', null, 'run lint now');
+  btn.addEventListener('click', () => runLintNow(btn));
+  box.replaceChildren(btn);
+}
+
+function lintLine(l) {
+  if (!l || l.lastPassAt == null) return 'lint · never run';
+  const openParts = Object.entries(l.openByCheck ?? {})
+    .map(([k, v]) => `${LINT_CHECK_LABELS[k] ?? k} ${v}`).join(', ');
+  const truncNote = (l.truncated ?? []).length ? ` · truncated: ${l.truncated.join(', ')}` : '';
+  return `lint · ${l.open ?? 0} open (${openParts || 'none'}) · ${l.dismissed ?? 0} dismissed · `
+    + `last pass ${relTime(l.lastPassAt)} (+${l.newLastPass ?? 0} new, ${l.closedLastPass ?? 0} closed)${truncNote}`;
+}
+
+async function loadLintStatus() {
+  const box = document.getElementById('lintStatusLine');
+  if (!box) return;
+  try {
+    const res = await fetch('/api/health');
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    box.textContent = lintLine(data.lint);
+  } catch {
+    box.textContent = '';
+  }
+}
+
+function lintAge(firstSeenAt) {
+  if (firstSeenAt == null) return '—';
+  const d = Math.floor((Date.now() - firstSeenAt) / 86_400_000);
+  return d <= 0 ? 'today' : `${d}d`;
+}
+
+async function resolveLintFindingClick(f, resolution, node) {
+  for (const b of node.querySelectorAll('button')) b.disabled = true;
+  try {
+    const res = await fetch('/api/lint/resolve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ findingKey: f.findingKey, resolution }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    lintFindingsData = lintFindingsData.filter((x) => x.findingKey !== f.findingKey);
+    node.remove();
+    if (lintFindingsData.length === 0) renderLintFindings();
+    loadLintStatus();
+  } catch (err) {
+    for (const b of node.querySelectorAll('button')) b.disabled = false;
+    node.append(el('span', 'err', 'could not save: ' + err.message));
+  }
+}
+
+function lintRowNode(f) {
+  const node = el('div', 'lint-row');
+  node.append(el('div', 'lint-who', f.displayName ?? f.personKey ?? '(no person)'));
+  node.append(el('div', 'lint-age', 'open ' + lintAge(f.firstSeenAt)));
+  if (f.claimText) node.append(el('div', 'lint-detail', f.claimText));
+  node.append(el('div', 'lint-detail', JSON.stringify(f.detail ?? {})));
+
+  const acts = el('div', 'lint-acts');
+  const dismiss = el('button', 'dismiss', 'Dismiss');
+  dismiss.addEventListener('click', () => resolveLintFindingClick(f, 'dismiss', node));
+  acts.append(dismiss);
+
+  // role_conflict's own three resolutions -- keep-export/keep-derived/both
+  // are refused by the route on every other check, so they only render here.
+  if (f.checkName === 'role_conflict') {
+    const exportRoles = Array.isArray(f.detail?.exportRoles) ? f.detail.exportRoles : [];
+    const tag = f.detail?.tag ?? '';
+    const keepExport = el('button', 'keep-export', `Keep export (${exportRoles.join('/') || '—'})`);
+    keepExport.addEventListener('click', () => resolveLintFindingClick(f, 'keep-export', node));
+    const keepDerived = el('button', 'keep-derived', `Keep message (${tag})`);
+    keepDerived.addEventListener('click', () => resolveLintFindingClick(f, 'keep-derived', node));
+    const both = el('button', 'both', 'Both');
+    both.addEventListener('click', () => resolveLintFindingClick(f, 'both', node));
+    acts.append(keepExport, keepDerived, both);
+  }
+  node.append(acts);
+  return node;
+}
+
+function renderLintFindings() {
+  const list = document.getElementById('lintList');
+  if (lintFindingsData.length === 0) {
+    list.replaceChildren(el('p', 'empty', 'no open findings.'));
+    return;
+  }
+  const byCheck = new Map();
+  for (const f of lintFindingsData) {
+    if (!byCheck.has(f.checkName)) byCheck.set(f.checkName, []);
+    byCheck.get(f.checkName).push(f);
+  }
+  const nodes = [];
+  for (const [check, rows] of byCheck) {
+    const head = el('div', 'lint-check-head');
+    head.append(el('span', null, LINT_CHECK_LABELS[check] ?? check), el('b', null, String(rows.length)));
+    nodes.push(head, ...rows.map(lintRowNode));
+  }
+  list.replaceChildren(...nodes);
+}
+
+async function loadLintFindings() {
+  const list = document.getElementById('lintList');
+  list.replaceChildren(el('p', 'health', 'loading…'));
+  try {
+    const res = await fetch('/api/lint/findings?open=1&limit=500');
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    lintFindingsData = data.findings ?? [];
+    renderLintFindings();
+  } catch (err) {
+    list.replaceChildren(el('p', 'err', 'could not load: ' + err.message));
+  }
+}
+
+async function runLintNow(btn) {
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/lint', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    if (!res.ok) throw new Error(await res.text());
+    await loadLintStatus();
+    await loadLintFindings();
+  } catch (err) {
+    document.getElementById('lintList').append(el('p', 'err', 'could not run: ' + err.message));
   } finally {
     btn.disabled = false;
   }

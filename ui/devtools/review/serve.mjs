@@ -350,6 +350,59 @@ const server = createServer(async (req, res) => {
       return send(res, out.status, out.text);
     }
 
+    // LINT (step 5½). /api/lint and /api/lint/resolve are verbatim hermes
+    // proxies, same shape as every write above -- this page never decides
+    // what a check means or what a resolution does, only that the click
+    // happened. /api/lint/findings is the one read this view enriches:
+    // hermes's own finding rows carry only ids (person_key, claim_id) by
+    // design (detail is canonical JSON -- ids, counts, public title/company,
+    // never a quote or context line), so display_name and, for an
+    // expired_claim finding specifically, the claim's own text are added
+    // HERE, off the same read-only corpus handle /api/pending already uses
+    // above -- wrapped in try/catch, same reasoning as sweepProposal there:
+    // a stale/partial local schema must not take the Lint tab down.
+    if (req.method === 'GET' && url.pathname === '/api/lint/findings') {
+      const qs = new URLSearchParams();
+      for (const key of ['check', 'open', 'limit']) {
+        const v = url.searchParams.get(key);
+        if (v !== null) qs.set(key, v);
+      }
+      const out = await hermes('/admin/relationship/lint/findings' + (qs.toString() ? '?' + qs.toString() : ''));
+      if (out.status !== 200) return send(res, out.status, out.text);
+      const data = JSON.parse(out.text);
+      const nameStmt = corpus.prepare('SELECT display_name FROM people WHERE person_key = ?');
+      const claimTextStmt = corpus.prepare('SELECT text FROM claim WHERE id = ?');
+      data.findings = (data.findings ?? []).map((f) => {
+        let displayName = null;
+        let claimText = null;
+        try {
+          if (f.personKey) displayName = nameStmt.get(f.personKey)?.display_name ?? null;
+          if (f.checkName === 'expired_claim' && f.claimId != null) {
+            claimText = claimTextStmt.get(f.claimId)?.text ?? null;
+          }
+        } catch {
+          // pre-migration or partial schema -- display context only, never
+          // required for the tab to render.
+        }
+        return { ...f, displayName, claimText };
+      });
+      return send(res, 200, JSON.stringify(data));
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/lint') {
+      let raw = '';
+      for await (const chunk of req) raw += chunk;
+      const out = await hermes('/admin/relationship/lint', { method: 'POST', body: raw });
+      return send(res, out.status, out.text);
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/lint/resolve') {
+      let raw = '';
+      for await (const chunk of req) raw += chunk;
+      const out = await hermes('/admin/relationship/lint/resolve', { method: 'POST', body: raw });
+      return send(res, out.status, out.text);
+    }
+
     send(res, 404, JSON.stringify({ error: 'not found' }));
   } catch (err) {
     send(res, 500, JSON.stringify({ error: String(err?.message ?? err) }));
