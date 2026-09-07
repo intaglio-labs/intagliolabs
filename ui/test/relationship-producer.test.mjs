@@ -181,6 +181,25 @@ test('mode=investor requires the investor sub_role; mode=founder requires founde
   assert.ok(!founders.includes('name:isabel investor'), 'investor-tagged person excluded from founder mode');
 });
 
+// isAnonymousContact (people/map.mjs) is reused directly rather than
+// re-derived, so the pool's anonymity gate matches map.mjs's own definition
+// of "renders as a bare address" byte for byte -- a nameless `id:+1...`
+// phone-number key is the exact repro that motivated the gate. Mutation
+// check: dropping the `isAnonymousContact` call in producer.mjs's
+// eligiblePool loop admits this person into the default-mode pool.
+test('an anonymous (nameless) person is excluded from the pool by default, and included with includeAnonymous', () => {
+  const db = buildFixture();
+  insertPerson(db, { key: 'id:+15555550100', name: '', sent: 30, received: 30 });
+  insertAuthored(db, 'id:+15555550100');
+  insertActiveDay(db, 'id:+15555550100', day(200));
+
+  const pool = keysOf(eligiblePool(db, { mode: 'any', now: NOW }));
+  assert.ok(!pool.includes('id:+15555550100'), 'a bare phone-number person with no display name is excluded by default');
+
+  const widened = keysOf(eligiblePool(db, { mode: 'any', now: NOW, includeAnonymous: true }));
+  assert.ok(widened.includes('id:+15555550100'), 'includeAnonymous:true admits them');
+});
+
 test('mode=any admits the romantic-free pool; romantic is admitted under no mode', () => {
   const db = buildFixture();
   for (const mode of ['any', 'investor', 'founder']) {
@@ -270,6 +289,35 @@ test('GET /admin/relationship/pool serves the ranked pool without writing a snap
 
     const bad = await call('/admin/relationship/pool?mode=nonsense');
     assert.equal(bad.status, 400);
+  } finally {
+    await server.close();
+  }
+});
+
+test('GET /admin/relationship/pool excludes an anonymous contact by default; ?includeAnonymous=1 is desk-only', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-producer-anon-'));
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: 'e'.repeat(64),
+    relationshipCap: { max: 10, windowMs: 86_400_000 },
+    peopleProjectionAutoRebuild: false,
+  });
+  try {
+    const db = server.db;
+    ensureSubRoles(db);
+    insertPerson(db, { key: 'id:+15555550100', name: '', sent: 30, received: 30 });
+    insertAuthored(db, 'id:+15555550100');
+    insertActiveDay(db, 'id:+15555550100', day(200));
+
+    const base = `http://127.0.0.1:${server.port}`;
+    const call = (path) => fetch(base + path, { headers: { Authorization: `Bearer ${'e'.repeat(64)}` } });
+
+    const withoutFlag = await (await call('/admin/relationship/pool?mode=any')).json();
+    assert.ok(!withoutFlag.rows.some((r) => r.personKey === 'id:+15555550100'),
+      'the anonymous person is excluded from the ordinary pool view');
+
+    const withFlag = await (await call('/admin/relationship/pool?mode=any&includeAnonymous=1')).json();
+    assert.ok(withFlag.rows.some((r) => r.personKey === 'id:+15555550100'),
+      '?includeAnonymous=1 (the desk-only override) admits them');
   } finally {
     await server.close();
   }

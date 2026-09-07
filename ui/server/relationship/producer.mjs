@@ -59,6 +59,7 @@
 
 import { RECONNECT_GATES } from './reconnect.mjs';
 import { CAL_GATES } from './calendarReconnect.mjs';
+import { isAnonymousContact } from '../people/map.mjs';
 
 export const PRODUCER_VERSION = 'eligibility-v1';
 export const RANK_STRATEGY = 'depth-change-quiet';
@@ -159,7 +160,7 @@ function poolSql(db, { includeOffered = false } = {}) {
   `;
 }
 
-export function eligiblePool(db, { mode, now = Date.now(), includeOffered = false, minDepth = MIN_DEPTH_MESSAGES } = {}) {
+export function eligiblePool(db, { mode, now = Date.now(), includeOffered = false, minDepth = MIN_DEPTH_MESSAGES, includeAnonymous = false } = {}) {
   const params = [now, CAL_GATES.maxAttendees, minDepth, now];
   if (!includeOffered) params.push(now - RECENTLY_OFFERED_DAYS * DAY);
   const rows = db.prepare(poolSql(db, { includeOffered })).all(...params);
@@ -167,6 +168,14 @@ export function eligiblePool(db, { mode, now = Date.now(), includeOffered = fals
   const out = [];
   for (const row of rows) {
     if (row.lastActiveDay === null || row.lastActiveDay === undefined) continue;
+    // A bare address (a phone number, an email, a raw `id:` key with no name
+    // anywhere in the contacts spine) is not somebody the owner can be asked
+    // to reconnect with by name -- map.mjs's own anonymity test, reused
+    // rather than re-derived, so the two surfaces never disagree about who
+    // counts as a real person. Desk-only escape hatch via ?includeAnonymous=1
+    // on /admin/relationship/pool; the ordinary batch-producing path never
+    // widens this.
+    if (!includeAnonymous && isAnonymousContact({ name: row.name, key: row.personKey })) continue;
     const quietDays = Math.floor((now - Date.parse(`${row.lastActiveDay}T00:00:00Z`)) / DAY);
     if (!Number.isFinite(quietDays) || quietDays < RECONNECT_GATES.intervalDays) continue;
 

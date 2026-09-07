@@ -341,6 +341,145 @@ test('card route falls back to the template sentence when no page exists', async
 });
 
 // ---------------------------------------------------------------------------
+// (d.1) page-first card queue: a refill kicks off a background page-build
+// pass over its own batch, and the card route prefers whichever unjudged
+// candidate already has a page over a higher-ranked one that does not.
+// ---------------------------------------------------------------------------
+
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+test('a refill builds pages in the background, and the card route prefers a lower-ranked candidate with a page', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-pages-refill-'));
+  let calls = 0;
+  const engine = {
+    name: 'fake', model: 'fake-model', counters: { calls: 0, totalCostUsd: 0, totalDurationMs: 0 },
+    async complete() {
+      calls += 1;
+      engine.counters.calls += 1;
+      // Rank one (built first, since produceBatch orders by depth desc and
+      // the background pass processes candidates in that same order) fails;
+      // rank two succeeds. So the page that exists belongs to the
+      // LOWER-ranked candidate -- the only way "prefers a page over rank" is
+      // distinguishable from "prefers rank".
+      if (calls === 1) throw new Error('synthetic engine failure for rank one');
+      return JSON.stringify({
+        who: { text: 'Rank two is a contact worth reconnecting with.', quote: 'lets catch up soon' },
+        asks: [], objection: null, how_left: null, notable: [],
+      });
+    },
+  };
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
+    relationshipCap: CAP,
+    relationshipProducerConfig: { producer: 'eligibility', mode: 'any' },
+    relationshipMemoryEngine: engine,
+    peopleProjectionAutoRebuild: false,
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const call = (method, path, body) => fetch(base + path, {
+    method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  try {
+    const db = server.db;
+    // Rank one: higher depth (80), built first, engine call fails for it.
+    insertPerson(db, { key: 'name:rank one', name: 'Rank One', sent: 40, received: 40 });
+    insertThread(db, 'name:rank one', { them: 'happy to reconnect whenever works' });
+    insertActiveDay(db, 'name:rank one', day(200));
+    // Rank two: lower depth (40), built second, engine call succeeds for it.
+    insertPerson(db, { key: 'name:rank two', name: 'Rank Two', sent: 20, received: 20 });
+    insertThread(db, 'name:rank two', { them: 'lets catch up soon, it has been a while' });
+    insertActiveDay(db, 'name:rank two', day(200));
+
+    const refreshOut = await (await call('POST', '/admin/relationship/refresh')).json();
+    assert.equal(refreshOut.started, true);
+
+    // Poll until the background pass over both candidates finishes.
+    let last = null;
+    for (let i = 0; i < 30; i++) {
+      last = await (await call('GET', '/admin/relationship/card')).json();
+      if (last.pagesBuilding && last.pagesBuilding.done >= last.pagesBuilding.total && last.pagesBuilding.total > 0) break;
+      await sleep(200);
+    }
+    assert.ok(last.pagesBuilding, 'progress is exposed on the card route response');
+    assert.equal(last.pagesBuilding.total, 2, 'both new candidates lacked a page and were queued');
+    assert.equal(last.pagesBuilding.done, 2, 'the background pass finished');
+    assert.equal(engine.counters.calls, 2, 'both candidates were attempted, sequentially');
+
+    const final = await (await call('GET', '/admin/relationship/card')).json();
+    assert.ok(final.card);
+    assert.equal(final.card.personKey, 'name:rank two',
+      'rank two (which now has a built page) is preferred over rank one (which does not), despite ranking lower');
+    assert.ok(final.card.page);
+    assert.equal(final.card.page.sections.who.text, 'Rank two is a contact worth reconnecting with.');
+  } finally {
+    await server.close();
+  }
+});
+
+test('a second refill while a build is running does not start a second builder', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-pages-guard-'));
+  const engine = {
+    name: 'fake', model: 'fake-model', counters: { calls: 0, totalCostUsd: 0, totalDurationMs: 0 },
+    async complete() {
+      engine.counters.calls += 1;
+      await sleep(400); // slow enough that a genuinely concurrent second builder would be caught
+      return JSON.stringify({
+        who: { text: 'A contact worth reconnecting with.', quote: 'lets catch up soon' },
+        asks: [], objection: null, how_left: null, notable: [],
+      });
+    },
+  };
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
+    relationshipCap: CAP,
+    relationshipProducerConfig: { producer: 'eligibility', mode: 'any' },
+    relationshipMemoryEngine: engine,
+    peopleProjectionAutoRebuild: false,
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const call = (method, path, body) => fetch(base + path, {
+    method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  try {
+    const db = server.db;
+    insertPerson(db, { key: 'name:guard a', name: 'Guard A', sent: 40, received: 40 });
+    insertThread(db, 'name:guard a', { them: 'lets catch up soon sometime' });
+    insertActiveDay(db, 'name:guard a', day(200));
+
+    const first = await (await call('POST', '/admin/relationship/refresh')).json();
+    assert.equal(first.started, true);
+
+    // A candidate that only becomes eligible now -- inserted AFTER the first
+    // refresh's batch, so the second refresh's producer finds a genuinely
+    // different, non-empty batch rather than the "recently offered" gate
+    // emptying it (which would make the guard untestable: an empty batch
+    // starts no builder regardless of the guard).
+    insertPerson(db, { key: 'name:guard b', name: 'Guard B', sent: 40, received: 40 });
+    insertThread(db, 'name:guard b', { them: 'lets catch up soon sometime' });
+    insertActiveDay(db, 'name:guard b', day(200));
+
+    const second = await (await call('POST', '/admin/relationship/refresh')).json();
+    assert.equal(second.started, true, 'the producer itself still runs a second time -- only page building is guarded');
+
+    // Guard A's build is still in flight (400ms). If the guard were missing,
+    // the second refill's own batch (Guard B) would start building
+    // concurrently, and calls would reach 2 well before A's build can finish.
+    await sleep(150);
+    assert.equal(engine.counters.calls, 1, 'the in-flight build was not joined by a second, concurrent one');
+
+    // Even after A's pass has had time to finish, Guard B was never queued:
+    // the second refill's startPageBuilds call was a no-op under the guard,
+    // and nothing later re-triggers a build for that batch.
+    await sleep(500);
+    assert.equal(engine.counters.calls, 1, 'Guard B was never built -- its own refill\'s builder call was suppressed');
+  } finally {
+    await server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // (e) depth floor: excludes a 4-message person, includes a 4-message person
 //     who met once.
 // ---------------------------------------------------------------------------

@@ -1822,7 +1822,7 @@ const APPLY_CLAIM_FIELDS = Object.freeze(['kind', 'text', 'when_phrase', 'p_clai
 const DECIDE_FIELDS = Object.freeze(['claim_id', 'action', 'reason']);
 const PENDING_PARAMS = Object.freeze(['limit']);
 const RECALL_PARAMS = Object.freeze(['q', 'limit']);
-const RELATIONSHIP_POOL_PARAMS = Object.freeze(['mode', 'includeOffered', 'minDepth']);
+const RELATIONSHIP_POOL_PARAMS = Object.freeze(['mode', 'includeOffered', 'minDepth', 'includeAnonymous']);
 const RELATIONSHIP_MODES = Object.freeze(['investor', 'founder', 'any']);
 const RELATIONSHIP_PAGE_BUILD_FIELDS = Object.freeze(['personKey', 'engine']);
 const RELATIONSHIP_PAGE_PARAMS = Object.freeze(['personKey']);
@@ -2519,6 +2519,80 @@ function relationshipMemoryEngine(policy, engineOverride) {
   return createEngine({ ...cfg, relationshipMemory, llama: policy.llama });
 }
 
+// Page-first card queue (L5 step 10 follow-on): a batch the eligibility
+// producer just wrote is, for most of its candidates, a person with no built
+// page yet -- and a card with a page (a real how_left/ask in the person's own
+// words) beats the template tie sentence every time. So a refill kicks off a
+// background page-building pass over the new batch, and the card route learns
+// to prefer whichever unjudged candidate already has one.
+//
+// A LITERAL SECOND PER PERSON, SEQUENTIAL, NEVER AWAITED BY THE REQUEST.
+// Each buildPersonPage call spends the owner's own model subscription (or the
+// loopback llama), so five candidates run one at a time with a pause between
+// them rather than five at once -- the same "do not hammer the one local
+// model" discipline the rest of this file already applies to llama calls.
+// Progress lives on `rel` (the same per-process holder /card and /refresh
+// already share) so a request that lands mid-build can report it without
+// blocking on it.
+const PAGE_BUILD_PAUSE_MS = 1000;
+const PAGE_RECENT_BUILD_MS = 7 * 86_400_000;
+
+function sleep(ms) {
+  return new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
+}
+
+// "Has a page" for the card route's serving preference: any section readPersonPage
+// still returns (it already omits rejected items, so what is left is accepted
+// or pending) -- freshness does not matter here, only whether one exists.
+function hasBuiltPage(page) {
+  return page.sections.who !== null || page.sections.objection !== null ||
+    page.sections.how_left !== null || page.sections.asks.length > 0 || page.sections.notable.length > 0;
+}
+
+// "Lacks a page built in the last 7 days" for the BUILD decision: a page that
+// exists but is stale is still worth refreshing; one built this week is not
+// worth spending another model call on.
+function pageBuiltRecently(db, personKey, now) {
+  const page = readPersonPage(db, personKey);
+  return page.builtAt !== null && page.builtAt > now - PAGE_RECENT_BUILD_MS;
+}
+
+async function runPageBuilds(db, engine, rel, batchId, personKeys) {
+  const now = Date.now();
+  const toBuild = personKeys.filter((personKey) => !pageBuiltRecently(db, personKey, now));
+  rel.pagesBuilding = { batchId, done: 0, total: toBuild.length, lastError: null };
+  for (let i = 0; i < toBuild.length; i++) {
+    try {
+      await buildPersonPage(db, engine, toBuild[i], { now: Date.now() });
+    } catch (e) {
+      // Never throw into the request: this loop runs unawaited, well after
+      // the refill/refresh response already went out. Record the failure and
+      // keep going -- one person's engine error must not stall the rest of
+      // the batch.
+      rel.pagesBuilding.lastError = String(e?.message ?? e);
+    }
+    rel.pagesBuilding.done += 1;
+    if (i < toBuild.length - 1) await sleep(PAGE_BUILD_PAUSE_MS);
+  }
+}
+
+// Kicks off the background pass for a freshly produced batch, called after
+// produceBatch in both the eligibility /refresh branch and the card route's
+// synchronous refill. Guarded on `rel.pagesBuildingActive` so two refills in
+// quick succession (a real one racing the desk's, or the same batch getting
+// re-offered before the first pass finishes) never run two builders at once;
+// the guard clears when the pass ends, successfully or not, so the NEXT
+// refill's own batch gets its own pass.
+function startPageBuilds(db, policy, rel, batchId, cards) {
+  if (rel.pagesBuildingActive) return;
+  rel.pagesBuildingActive = true;
+  const engine = relationshipMemoryEngine(policy);
+  const personKeys = cards.map((c) => c.personKey);
+  runPageBuilds(db, engine, rel, batchId, personKeys)
+    .catch((e) => { rel.pagesBuilding = { ...(rel.pagesBuilding ?? {}), lastError: String(e?.message ?? e) }; })
+    .finally(() => { rel.pagesBuildingActive = false; });
+}
+
 async function handleAdmin(db, req, res, cors, url, channel, policy) {
   if (channel !== 'bearer') {
     // 403, not 401: the caller IS authenticated (allowlisted Origin) — it is
@@ -2586,6 +2660,10 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // one place the "recently offered" exclusion (below, and in produceBatch)
     // is optional rather than automatic.
     const includeOffered = url.searchParams.get('includeOffered') === '1';
+    // Desk override only, same reasoning as includeOffered: the ordinary
+    // batch-producing path (produceBatch) never widens past the anonymity
+    // gate, but the desk's Pool tab can ask to see bare-address people too.
+    const includeAnonymous = url.searchParams.get('includeAnonymous') === '1';
     // Desk override only: absent, eligiblePool applies its own default
     // (MIN_DEPTH_MESSAGES). The ordinary batch-producing path (produceBatch,
     // called without this param) never widens the floor.
@@ -2598,7 +2676,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       }
     }
     const rows = eligiblePool(db, {
-      mode: rawMode, now: Date.now(), includeOffered,
+      mode: rawMode, now: Date.now(), includeOffered, includeAnonymous,
       ...(minDepth !== undefined ? { minDepth } : {}),
     });
     send(res, 200, { mode: rawMode, count: rows.length, rows }, cors);
@@ -2628,6 +2706,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         rel.batchId = batchId;
         rel.cards = cards;
         rel.refreshing = false;
+        startPageBuilds(db, policy, rel, batchId, cards);
       } catch (e) {
         rel.refreshing = false;
         rel.lastError = String(e?.message ?? e);
@@ -2699,20 +2778,32 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
           const { batchId, cards } = produceBatch(db, { mode: producerConfig.mode, now: Date.now() });
           rel.batchId = batchId;
           rel.cards = cards;
+          startPageBuilds(db, policy, rel, batchId, cards);
         } catch (e) {
           rel.lastError = String(e?.message ?? e);
         }
       }
     }
 
-    for (const card of rel.cards) {
-      // A card leaves the queue when the owner has acted on it (accepted or
-      // dismissed), and suppression/mute/cap are re-checked at serve time --
-      // the plan's "immediately before display" call site.
-      const acted = db.prepare(
-        "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event IN ('accepted','dismissed') LIMIT 1"
-      ).get(card.snapshot_id);
-      if (acted) continue;
+    // PAGE-FIRST: among the unjudged candidates, serve whichever already has
+    // a built page (accepted or pending items -- readPersonPage already omits
+    // rejected ones) before falling back to rank order. A page-first refill
+    // usually means the top of the batch is still being built when this GET
+    // lands, so the desk should not have to wait on it -- prefer what is
+    // ready now, in the same relative rank order within each group, and fall
+    // straight through to today's behavior (first unjudged, no blocking) once
+    // no candidate has a page yet.
+    const unjudgedCards = rel.cards.filter((card) => !db.prepare(
+      "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event IN ('accepted','dismissed') LIMIT 1"
+    ).get(card.snapshot_id));
+    const withPage = [];
+    const withoutPage = [];
+    for (const card of unjudgedCards) {
+      (hasBuiltPage(readPersonPage(db, card.personKey)) ? withPage : withoutPage).push(card);
+    }
+    const orderedCards = [...withPage, ...withoutPage];
+
+    for (const card of orderedCards) {
       // 'shown' is recorded HERE, once per snapshot, when the card is first
       // handed out for display -- not by the widget. Client-side recording
       // (the audit's repro) double-counted every relaunch into the cap and
@@ -2750,11 +2841,13 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       // neither leaves `sentence` exactly as it was.
       const page = readPersonPage(db, card.personKey);
       const sentence = page.sections.how_left?.text ?? page.sections.asks[0]?.text ?? card.sentence;
-      send(res, 200, { card: { ...card, quote, sentence, who: page.sections.who?.text ?? null, page } }, cors);
+      send(res, 200, { card: { ...card, quote, sentence, who: page.sections.who?.text ?? null, page },
+        ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
       return;
     }
     send(res, 200, { card: null, ...(rel.refreshing ? { refreshing: true } : {}),
-      ...(rel.lastError ? { lastError: rel.lastError } : {}) }, cors);
+      ...(rel.lastError ? { lastError: rel.lastError } : {}),
+      ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
     return;
   }
 
