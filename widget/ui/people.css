@@ -12,9 +12,9 @@ body.people {
      free above the widget (main.swift popupCeiling()), and the base `body`
      rule (palette.css) hides overflow — a popup taller than that room would
      have its bottom silently, unreachably clipped, with no scrollbar to say
-     so. The ring's own size already scales down for a short connector list
-     (see .p-ring), so this should rarely engage, but when the room is
-     genuinely too small it must be a scroll, never a disappearance. */
+     so. The header + status-line layout is short enough this should rarely
+     engage, but when the room is genuinely too small it must be a scroll,
+     never a disappearance. */
   overflow-y: auto;
 }
 
@@ -50,21 +50,40 @@ body.people .win {
   gap: 8px;
 }
 
-.p-title {
+/* The compact header (owner, 2026-09-07), replacing the ring landing: names
+   the page's actual job instead of a decorative ring of connector icons. */
+body.people .p-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+  padding: 2px 4px 0;
+}
+body.people .p-h-title {
   margin: 0;
-  /* Tied to the ring so a squeeze cannot land tiles on the title. The wide
-     line is "unify your": 10 mono chars at ~0.6em advance is 6 font-sizes of
-     width, so half of it fits inside the ring's clear zone (r minus the 27px
-     half-tile, minus a 4px breath) when font-size <= (r - 31) / 3. At the
-     design radii this solves to ~19px — the size this always was — and it
-     only bites when --ring-cap has shrunk the ring below design. */
-  font-size: clamp(11px, calc((var(--ring-r, 89px) - 31px) / 3), 19px);
+  font-size: 15px;
   line-height: 1.2;
   font-weight: 600;
   letter-spacing: -0.01em;
-  text-align: center;
   color: var(--fg);
 }
+body.people .p-h-sub {
+  margin: 0;
+  max-width: 30ch;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--secondary);
+}
+body.people .p-status {
+  margin-top: 2px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+body.people .p-status-line { font-size: 11px; color: var(--muted); }
+body.people .p-status-waiting { font-size: 11px; color: var(--hazelnut); }
 
 .p-stay {
   margin: 4px 0 0;
@@ -98,16 +117,22 @@ body.people .p-explain {
 }
 body.people .p-explain b { color: var(--secondary); font-weight: 600; }
 body.people .p-explain a { color: var(--hazelnut); text-decoration: underline; cursor: pointer; }
-/* The ring and the controls row sit centered under it — the timeframe
-   dropdown and the search button, side by side, no label row above them (the
-   dropdown's own text names the timeframe). */
+/* The controls row sits centered under the header — the timeframe dropdown
+   and the kickoff button, side by side, one row, with a caption underneath
+   naming the timeframe in full (the dropdown itself just says "1 yr" etc). */
 body.people .p-controls {
   align-self: center;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  margin-top: 2px;
+  margin-top: 6px;
+}
+body.people .p-caption {
+  align-self: center;
+  margin: 2px 0 0;
+  font-size: 10.5px;
+  color: var(--muted);
 }
 body.people .p-init {
   min-height: 40px;
@@ -133,17 +158,16 @@ body.people .p-specs {
 }
 body.people .p-specs:hover { color: var(--hazelnut); }
 
+/* Demoted to a small, quiet text link (owner, 2026-09-07): the widget bar now
+   carries its own direct reconnect button, so this is a secondary door and
+   reads a size smaller and a shade quieter than "read specs" above it. */
 body.people .p-reconnect {
   align-self: center;
   margin-top: 2px;
-  font-family: inherit;
-  font-size: 12px;
-  color: var(--secondary);
-  background: none;
-  border: 0;
+  font-size: 11px;
+  color: var(--muted);
   text-decoration: underline;
   cursor: pointer;
-  padding: 0;
 }
 body.people .p-reconnect:hover { color: var(--hazelnut); }
 
@@ -160,93 +184,13 @@ body.people .p-select {
 }
 body.people .p-select:focus { outline: none; border-color: rgba(197, 165, 109, 0.5); }
 
-/* The ring: a stage the tiles sit on, centered in the popup, with the title
-   floating in the middle. --ring-r (and therefore the whole popup's height)
-   scales with --n (people.js), the actual connector count — a handful of
-   sources gets a small ring instead of every install always paying for the
-   worst case. The clamp's floor keeps a short list from looking cramped; its
-   ceiling is picked so even a full house of ~16 tiles (40px each) doesn't
-   overlap around the circle — see the chord-length math where .row's
-   transform is defined below before moving either number. */
-body.people .p-ring {
-  /* --ring-cap is the second constraint, set by people.js from the height the
-     window was ACTUALLY granted: native clamps every popup to the room above
-     the widget (main.swift popupCeiling()), and a ring sized only by count
-     answered that clamp by scrolling — the bottom arc of tiles and the search
-     controls just looked amputated, with an overlay scrollbar nobody can see.
-     Absent (10000px), it constrains nothing; the count term stays the design
-     size. The clamp's 64px floor still wins below it: past that point the
-     tiles would overlap, so a genuinely tiny window scrolls instead. */
-  --ring-r: clamp(64px, min(calc(36px + var(--n, 8) * 4.4px), var(--ring-cap, 10000px)), 104px);
-  position: relative;
-  width: calc(var(--ring-r) * 2 + 44px);
-  height: calc(var(--ring-r) * 2 + 44px);
-  margin: 0 auto;
-  flex: 0 0 auto;
-}
-body.people .p-ring-center {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 30px; /* keeps the two-line title clear of the ring of tiles */
-  pointer-events: none; /* only the tiles are interactive, not the stage */
-}
-/* Overrides the shared shelf (.list is normally a horizontal scroller): the
-   ring absolutely positions every tile via the --i/--n custom properties
-   people.js sets on each .row, evenly spaced by transform instead of flex
-   flow, so it holds up for any connector count without a rewrite. */
-body.people .p-ring .list {
-  position: absolute;
-  inset: 0;
-  display: block;
-  padding: 0;
-  margin: 0;
-  overflow: visible;
-  -webkit-mask-image: none;
-  mask-image: none;
-}
-body.people .p-ring .row {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  /* Half the 40px tile, so the transform's origin is the tile's own center
-     rather than its top-left corner. */
-  margin: -20px 0 0 -20px;
-  /* --ring-r is read from .p-ring (custom properties inherit down), the same
-     value that sizes the stage, so the tiles are always inscribed exactly on
-     its edge regardless of connector count. */
-  transform:
-    rotate(calc(360deg / var(--n, 1) * var(--i, 0)))
-    translate(0, calc(-1 * var(--ring-r, 96px)))
-    rotate(calc(-360deg / var(--n, 1) * var(--i, 0)));
-}
-
-/* Messages is the first-run door into the people map. During the onboarding
-   handoff (or whenever no people connector is attached) it keeps a warm halo
-   and hops as a whole tile. `translate` is the independent transform property,
-   so the animation composes with the ring-positioning `transform` above rather
-   than replacing it and snapping the tile into the centre. */
-body.people .p-ring .row.p-imessage-nudge {
-  border-color: rgba(229, 204, 158, 0.9);
-  box-shadow:
-    inset 0 2px 3px rgba(255, 244, 222, 0.2),
-    inset 0 -4px 8px rgba(0, 0, 0, 0.55),
-    0 0 0 3px rgba(197, 165, 109, 0.18),
-    0 7px 22px rgba(229, 204, 158, 0.38);
-  animation: p-imessage-jump 1.35s cubic-bezier(0.3, 0.75, 0.3, 1) infinite;
-}
-body.people .p-ring .row.p-imessage-nudge .mark { color: #f2dfbb; }
-@keyframes p-imessage-jump {
-  0%, 58%, 100% { translate: 0 0; }
-  18% { translate: 0 -8px; }
-  32% { translate: 0 1px; }
-  43% { translate: 0 -3px; }
-}
-@media (prefers-reduced-motion: reduce) {
-  body.people .p-ring .row.p-imessage-nudge { animation: none; }
-}
+/* ~~The ring: a stage the tiles sit on, centered in the popup, with the title
+   floating in the middle, sized by --ring-r/--ring-cap/--n and positioned by
+   --i/--n transforms on each .row; Messages carried a p-imessage-nudge hop
+   animation while attention-worthy.~~ Retired with the ring landing (owner,
+   2026-09-07): the page opens on a header naming its job and a status line
+   instead, so there is no ring left to size, cap, or position tiles around.
+   Per-connector login now lives only in the Connections popup. */
 
 body.people .p-what {
   margin: 6px 0 2px;
@@ -377,22 +321,11 @@ body.people .rv-done p { margin: 0; font-size: 12px; color: var(--secondary); }
 body.people .rv-done .rv-next { color: var(--muted); }
 body.people .rv-done .p-init { margin-top: 8px; }
 
-/* The shared tile's hover tooltip (connector-tile.js). Same styling the
-   settings shelf gives it (palette.css scopes that to body.connections), so the
-   hover label reads identically on the People bar. */
-body.people .tile-tip {
-  position: fixed; z-index: 40;
-  padding: 3px 8px;
-  font-size: 11px; white-space: nowrap;
-  color: var(--hazelnut-light);
-  background: rgba(20, 20, 18, 0.96);
-  border: 1px solid rgba(234, 234, 234, 0.14);
-  border-radius: 7px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
-  pointer-events: none;
-  opacity: 0; transition: opacity 0.12s ease;
-}
-body.people .tile-tip.on { opacity: 1; }
+/* ~~The shared tile's hover tooltip (connector-tile.js), styled to match the
+   settings shelf's.~~ Retired with the ring landing (owner, 2026-09-07): no
+   connector tile renders on this page any more, so there is no tooltip to
+   style. connector-tile.js and its tooltip still serve the Connections popup
+   via palette.css's body.connections scope. */
 
 /* ~~The connector's flow was a left SIDE PANEL here too — flex 236px,
    extraWidth grew the popup leftward, hz-fold-in turned it like a page.~~
