@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import IOKit.ps
 
 // THE STEP THAT MAKES THE CORPUS ANSWERABLE, and until now nothing ran it.
 //
@@ -29,6 +30,7 @@ final class Distiller {
   private init() {}
 
   private var process: Process?
+  private var sweepProcess: Process?
   private var timer: Timer?
   private var stopping = false
   private var modelMaintenancePaused = false
@@ -40,6 +42,12 @@ final class Distiller {
   /// The same pass under Battery Saver. It still advances on battery and under
   /// thermal pressure; only the amount of work in one pass changes.
   private let trickleBatch = 8
+  /// Discovery-sweep batch sizes (L5 step 5), chosen by PowerBudget the same
+  /// way batch/trickleBatch are -- deliberately smaller than the distiller's
+  /// own, since a sweep call is one small model call per person rather than a
+  /// whole conversation's worth of claims.
+  private let sweepBatch = 12
+  private let sweepTrickleBatch = 3
   /// Between passes while catching up, and while idle. Catching up is not urgent
   /// enough to saturate the machine the owner is using.
   private let busyInterval: TimeInterval = 45
@@ -78,6 +86,16 @@ final class Distiller {
   /// records an owner's choice to stop something that works, this one records
   /// that the product is not ready for the output yet.
   private var enableMarker: URL { home.appendingPathComponent(".hazlie/distill.enabled") }
+
+  /// The discovery sweep's OWN marker -- deliberately not `enableMarker` above.
+  /// distill.enabled is off because "no in-app way to review claims yet"
+  /// (see announceDisabledOnce()); that reasoning does not hold for the
+  /// sweep, whose proposals show up in the SAME place every other pending
+  /// claim does (the dev review desk, ui/devtools/review) -- the sweep
+  /// already has a review door, so gating it on an unrelated feature's
+  /// switch would tie its rollout to distill's instead of to its own.
+  private var sweepEnableMarker: URL { home.appendingPathComponent(".hazlie/sweep.enabled") }
+  private var sweepEnabled: Bool { fm.fileExists(atPath: sweepEnableMarker.path) }
 
   private var fm: FileManager { .default }
   private var home: URL { fm.homeDirectoryForCurrentUser }
@@ -129,6 +147,8 @@ final class Distiller {
     timer = nil
     process?.terminate()
     process = nil
+    sweepProcess?.terminate()
+    sweepProcess = nil
   }
 
   private func schedule(after seconds: TimeInterval) {
@@ -305,7 +325,10 @@ final class Distiller {
         case .trickle: next = self.idleInterval
         case .full: next = drained ? self.idleInterval : self.busyInterval
         }
-        self.schedule(after: next)
+        // Run the discovery sweep AFTER the distiller's own child has fully
+        // exited, and reschedule only after the SWEEP's child exits too --
+        // never two model-consuming children running at once.
+        self.runSweep { self.schedule(after: next) }
       }
     }
 
@@ -315,6 +338,102 @@ final class Distiller {
     } catch {
       NSLog("Intaglio Labs: could not start the distiller: \(error.localizedDescription)")
       schedule(after: idleInterval)
+    }
+  }
+
+  /// Discovery sweep (L5 step 5): spawns ui/scripts/sweep-once.mjs, which
+  /// POSTs hermes's own /admin/relationship/sweep -- same never-touch-the-db
+  /// reasoning as startDistiller above. Called from the distiller child's own
+  /// termination handler so the two model-consuming children never overlap:
+  /// this spawns only once the distiller's child has already exited, and
+  /// `done` (the reschedule) runs only once THIS child exits too.
+  private func runSweep(done: @escaping () -> Void) {
+    guard sweepEnabled, !stopping else { done(); return }
+
+    let node = home.appendingPathComponent(".hazlie/bin/node")
+    let script = backend.appendingPathComponent("ui/scripts/sweep-once.mjs")
+    guard fm.fileExists(atPath: node.path), fm.fileExists(atPath: script.path) else {
+      done()
+      return
+    }
+
+    let budget = PowerBudget.current
+    let size = budget == .trickle ? sweepTrickleBatch : sweepBatch
+    var args = [script.path, "--limit", String(size), "--power", budget == .full ? "full" : "trickle"]
+    if let reading = powerSourceReading() {
+      args += ["--battery", String(reading.battery), "--on-ac", reading.onAc ? "1" : "0"]
+    }
+    args += ["--thermal", thermalStateArg()]
+
+    let p = Process()
+    p.executableURL = node
+    p.arguments = args
+    // Same QoS split as the distiller's own child: neither choice depends on
+    // charger or heat, only on the owner's chosen performance mode.
+    p.qualityOfService = budget == .full ? .userInitiated : .utility
+    // sweep-once.mjs resolves prompts/ relative to the backend root, exactly
+    // like distill-episodes.mjs, so it has to run from ui/ too.
+    p.currentDirectoryURL = backend.appendingPathComponent("ui")
+
+    // stdout is the pass's JSON summary (counts only -- never a person key or
+    // any excerpt); logs carry counts and reasons only, same as distill's.
+    let logs = home.appendingPathComponent(".hazlie/logs")
+    try? fm.createDirectory(at: logs, withIntermediateDirectories: true,
+                            attributes: [.posixPermissions: 0o700])
+    let out = Pipe()
+    p.standardOutput = out
+    if let errURL = try? logFile(logs.appendingPathComponent("sweep.err.log")) {
+      p.standardError = errURL
+    }
+
+    p.terminationHandler = { [weak self] proc in
+      _ = out.fileHandleForReading.readDataToEndOfFile()
+      guard let self else { DispatchQueue.main.async { done() }; return }
+      self.sweepProcess = nil
+      if proc.terminationStatus != 0 {
+        NSLog("Intaglio Labs: sweep pass failed (status \(proc.terminationStatus))")
+      }
+      DispatchQueue.main.async { done() }
+    }
+
+    do {
+      try p.run()
+      sweepProcess = p
+    } catch {
+      NSLog("Intaglio Labs: could not start the sweep: \(error.localizedDescription)")
+      done()
+    }
+  }
+
+  /// Battery percentage and AC state via IOKit, for the sweep's own
+  /// --battery/--on-ac flags. `pmset -g therm` (used nowhere in this file)
+  /// reports CPU power warnings, not thermal state, and powermetrics needs
+  /// root -- so battery/AC go through IOKit here, and thermal state goes
+  /// through ProcessInfo below. Returns nil if the power-source APIs give
+  /// nothing usable; runSweep then sends neither flag, and the route treats
+  /// an absent field as unknown rather than as a reason to skip.
+  private func powerSourceReading() -> (battery: Int, onAc: Bool)? {
+    guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue() else { return nil }
+    guard let sources = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef],
+          let first = sources.first else { return nil }
+    guard let description = IOPSGetPowerSourceDescription(blob, first)?.takeUnretainedValue()
+            as? [String: Any] else { return nil }
+    guard let capacity = description[kIOPSCurrentCapacityKey as String] as? Int else { return nil }
+    let state = description[kIOPSPowerSourceStateKey as String] as? String
+    let onAc = (state == kIOPSACPowerValue as String)
+    return (capacity, onAc)
+  }
+
+  /// ProcessInfo.thermalState mapped to the four values the sweep route
+  /// accepts. The only usable thermal reading on this platform without root
+  /// (see powerSourceReading's comment above).
+  private func thermalStateArg() -> String {
+    switch ProcessInfo.processInfo.thermalState {
+    case .nominal: return "nominal"
+    case .fair: return "fair"
+    case .serious: return "serious"
+    case .critical: return "critical"
+    @unknown default: return "nominal"
     }
   }
 
