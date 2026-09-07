@@ -31,6 +31,7 @@ final class Distiller {
 
   private var process: Process?
   private var sweepProcess: Process?
+  private var lookupProcess: Process?
   private var timer: Timer?
   private var stopping = false
   private var modelMaintenancePaused = false
@@ -48,6 +49,11 @@ final class Distiller {
   /// whole conversation's worth of claims.
   private let sweepBatch = 12
   private let sweepTrickleBatch = 3
+  /// Public-lookup batch sizes (L5 step 6), smaller again than the sweep's own:
+  /// a lookup call spends real search quota per person, not just one small
+  /// model call.
+  private let lookupBatch = 4
+  private let lookupTrickleBatch = 1
   /// Between passes while catching up, and while idle. Catching up is not urgent
   /// enough to saturate the machine the owner is using.
   private let busyInterval: TimeInterval = 45
@@ -96,6 +102,13 @@ final class Distiller {
   /// switch would tie its rollout to distill's instead of to its own.
   private var sweepEnableMarker: URL { home.appendingPathComponent(".hazlie/sweep.enabled") }
   private var sweepEnabled: Bool { fm.fileExists(atPath: sweepEnableMarker.path) }
+
+  /// Public lookup's OWN marker -- same reasoning as sweepEnableMarker above:
+  /// lookup's proposals land in the same dev review desk every other pending
+  /// claim does, so its rollout is gated on its own switch rather than on
+  /// distill's or the sweep's.
+  private var lookupEnableMarker: URL { home.appendingPathComponent(".hazlie/lookup.enabled") }
+  private var lookupEnabled: Bool { fm.fileExists(atPath: lookupEnableMarker.path) }
 
   private var fm: FileManager { .default }
   private var home: URL { fm.homeDirectoryForCurrentUser }
@@ -149,6 +162,8 @@ final class Distiller {
     process = nil
     sweepProcess?.terminate()
     sweepProcess = nil
+    lookupProcess?.terminate()
+    lookupProcess = nil
   }
 
   private func schedule(after seconds: TimeInterval) {
@@ -207,7 +222,7 @@ final class Distiller {
         // here, then the long interval -- with no distill passes running there
         // is no backlog to chase, and the index only needs to keep up with
         // what arrives.
-        self.runSweep { self.schedule(after: self.idleInterval) }
+        self.runSweep { self.runLookup { self.schedule(after: self.idleInterval) } }
         return
       }
       self.startDistiller(node: node, script: script)
@@ -329,9 +344,10 @@ final class Distiller {
         case .full: next = drained ? self.idleInterval : self.busyInterval
         }
         // Run the discovery sweep AFTER the distiller's own child has fully
-        // exited, and reschedule only after the SWEEP's child exits too --
-        // never two model-consuming children running at once.
-        self.runSweep { self.schedule(after: next) }
+        // exited, then the public lookup after the sweep's, and reschedule
+        // only once the LOOKUP's child exits too -- never two model-consuming
+        // children running at once.
+        self.runSweep { self.runLookup { self.schedule(after: next) } }
       }
     }
 
@@ -404,6 +420,71 @@ final class Distiller {
       sweepProcess = p
     } catch {
       NSLog("Intaglio Labs: could not start the sweep: \(error.localizedDescription)")
+      done()
+    }
+  }
+
+  /// Public lookup (L5 step 6): spawns ui/scripts/lookup-once.mjs, which POSTs
+  /// hermes's own /admin/relationship/lookup -- same never-touch-the-db
+  /// reasoning as startDistiller and runSweep above. Called from the sweep's
+  /// own termination handler so the model-consuming children never overlap:
+  /// this spawns only once the sweep's child has already exited, and `done`
+  /// (the reschedule) runs only once THIS child exits too.
+  private func runLookup(done: @escaping () -> Void) {
+    guard lookupEnabled, !stopping else { done(); return }
+
+    let node = home.appendingPathComponent(".hazlie/bin/node")
+    let script = backend.appendingPathComponent("ui/scripts/lookup-once.mjs")
+    guard fm.fileExists(atPath: node.path), fm.fileExists(atPath: script.path) else {
+      done()
+      return
+    }
+
+    let budget = PowerBudget.current
+    let size = budget == .trickle ? lookupTrickleBatch : lookupBatch
+    var args = [script.path, "--limit", String(size), "--power", budget == .full ? "full" : "trickle"]
+    if let reading = powerSourceReading() {
+      args += ["--battery", String(reading.battery), "--on-ac", reading.onAc ? "1" : "0"]
+    }
+    args += ["--thermal", thermalStateArg()]
+
+    let p = Process()
+    p.executableURL = node
+    p.arguments = args
+    // Same QoS split as the distiller's and sweep's own children: neither
+    // choice depends on charger or heat, only on the owner's chosen
+    // performance mode.
+    p.qualityOfService = budget == .full ? .userInitiated : .utility
+    // lookup-once.mjs resolves prompts/ relative to the backend root, exactly
+    // like sweep-once.mjs, so it has to run from ui/ too.
+    p.currentDirectoryURL = backend.appendingPathComponent("ui")
+
+    // stdout is the pass's JSON summary (counts only -- never a person key or
+    // any excerpt); logs carry counts and reasons only, same as the sweep's.
+    let logs = home.appendingPathComponent(".hazlie/logs")
+    try? fm.createDirectory(at: logs, withIntermediateDirectories: true,
+                            attributes: [.posixPermissions: 0o700])
+    let out = Pipe()
+    p.standardOutput = out
+    if let errURL = try? logFile(logs.appendingPathComponent("lookup.err.log")) {
+      p.standardError = errURL
+    }
+
+    p.terminationHandler = { [weak self] proc in
+      _ = out.fileHandleForReading.readDataToEndOfFile()
+      guard let self else { DispatchQueue.main.async { done() }; return }
+      self.lookupProcess = nil
+      if proc.terminationStatus != 0 {
+        NSLog("Intaglio Labs: lookup pass failed (status \(proc.terminationStatus))")
+      }
+      DispatchQueue.main.async { done() }
+    }
+
+    do {
+      try p.run()
+      lookupProcess = p
+    } catch {
+      NSLog("Intaglio Labs: could not start the lookup: \(error.localizedDescription)")
       done()
     }
   }
