@@ -29,7 +29,12 @@ const DEFAULT_MAX_MEETINGS = 20;
 // section -> claim.kind, exactly as specified: who/how_left/notable read as
 // stable facts, an ask is a plan (something the PERSON wants, not the
 // owner's), an objection is a constraint on the relationship or the ask.
-const SECTION_KIND = Object.freeze({
+// Exported for relationship/sweep.mjs: a page_line proposal reuses this exact
+// section -> kind map (a sub_role or firm proposal never touches it -- see
+// the person_sweep_proposal comment in hermes.mjs's SCHEMA), so the sweep and
+// the page builder can never quietly disagree about what an "ask" or a
+// "how_left" claim's kind is.
+export const SECTION_KIND = Object.freeze({
   who: 'fact',
   ask: 'plan',
   objection: 'constraint',
@@ -255,7 +260,11 @@ export function groundPage(page, gathered) {
   return { kept, dropped };
 }
 
-function alreadyStored(db, personKey, section, text) {
+// Exported for relationship/sweep.mjs's storeSweep, which runs the identical
+// dedupe check for a page_line proposal rather than duplicating this query --
+// a page built by pages.mjs and a page line proposed by a sweep pass share
+// one dedupe rule, not two that could drift apart.
+export function alreadyStored(db, personKey, section, text) {
   const row = db
     .prepare(
       `SELECT c.id FROM claim c
