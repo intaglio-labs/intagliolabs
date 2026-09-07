@@ -162,3 +162,14 @@ test('run.mjs argument parsing is a closed set: sources, flags, exclusivity', ()
   assert.throws(() => parseArgs(['mail', '--force']), /unknown flag/);
   assert.throws(() => parseArgs(['mail', '--purge', '--backfill']), /mutually exclusive/);
 });
+
+test('mail.historyPagesPerPass is a recognised key, bounded, and inheritable per account', () => {
+  // The daemon refused to start on a real machine after this key was set in
+  // config before it was on the allowlist -- a strict allowlist is right, and
+  // this pins that the key the mail source reads is also the key the daemon
+  // accepts.
+  const ok = { mail: { historyPagesPerPass: 12, accounts: [{ user: 'a@example.com', historyPagesPerPass: 3 }] } };
+  assert.deepEqual(validateConfig(ok), ok);
+  assert.throws(() => validateConfig({ mail: { historyPagesPerPass: 0 } }), /historyPagesPerPass/u);
+  assert.throws(() => validateConfig({ mail: { historyPagesPerPass: 51 } }), /historyPagesPerPass/u);
+});

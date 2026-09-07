@@ -421,6 +421,7 @@ const MAIL_KEYS = Object.freeze([
   'backfillDays',
   'maxBodyBytes',
   'getsPerMinute',
+  'historyPagesPerPass',
   'accounts',
 ]);
 // Per-account overrides. No nested `accounts`: one level of mailboxes, not a tree.
@@ -432,6 +433,7 @@ const MAIL_ACCOUNT_KEYS = Object.freeze([
   'backfillDays',
   'maxBodyBytes',
   'getsPerMinute',
+  'historyPagesPerPass',
 ]);
 const IMESSAGE_KEYS = Object.freeze(['backfillDays']);
 // `backend` selects where occurrences come from: the local macOS store
@@ -580,6 +582,12 @@ export function validateConfig(raw) {
     // more than what was actually measured.
     if (raw.mail.getsPerMinute !== undefined) {
       assertPositiveInt(raw.mail.getsPerMinute, 'mail.getsPerMinute', { max: 100 });
+    }
+    // How many API pages one historical pass may drain per account. Pacing
+    // (getsPerMinute) is what protects the quota; this only bounds how long a
+    // single pass runs, so the ceiling is generous but finite.
+    if (raw.mail.historyPagesPerPass !== undefined) {
+      assertPositiveInt(raw.mail.historyPagesPerPass, 'mail.historyPagesPerPass', { max: 50 });
     }
     // Several mailboxes, because Gmail issues app passwords per account and
     // the owner's mail is split across addresses. The keys outside `accounts`
