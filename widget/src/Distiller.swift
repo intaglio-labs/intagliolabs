@@ -32,6 +32,7 @@ final class Distiller {
   private var process: Process?
   private var sweepProcess: Process?
   private var lookupProcess: Process?
+  private var lintProcess: Process?
   private var timer: Timer?
   private var stopping = false
   private var modelMaintenancePaused = false
@@ -110,6 +111,13 @@ final class Distiller {
   private var lookupEnableMarker: URL { home.appendingPathComponent(".hazlie/lookup.enabled") }
   private var lookupEnabled: Bool { fm.fileExists(atPath: lookupEnableMarker.path) }
 
+  /// Lint's (step 5½) OWN marker -- same reasoning as sweepEnableMarker/
+  /// lookupEnableMarker above: its findings land in the same dev review desk,
+  /// so its rollout is gated on its own switch rather than on any of the
+  /// other three's.
+  private var lintEnableMarker: URL { home.appendingPathComponent(".hazlie/lint.enabled") }
+  private var lintEnabled: Bool { fm.fileExists(atPath: lintEnableMarker.path) }
+
   private var fm: FileManager { .default }
   private var home: URL { fm.homeDirectoryForCurrentUser }
   private var backend: URL {
@@ -164,6 +172,8 @@ final class Distiller {
     sweepProcess = nil
     lookupProcess?.terminate()
     lookupProcess = nil
+    lintProcess?.terminate()
+    lintProcess = nil
   }
 
   private func schedule(after seconds: TimeInterval) {
@@ -217,9 +227,10 @@ final class Distiller {
       guard let self, !self.stopping else { return }
       guard self.distillationEnabled else {
         self.announceDisabledOnce()
-        // Sweep and lookup have their own switches; the distiller being off
-        // must not take them down. Then the long interval: no backlog to chase.
-        self.runSweep { self.runLookup { self.schedule(after: self.idleInterval) } }
+        // Sweep, lookup and lint have their own switches; the distiller being
+        // off must not take them down. Then the long interval: no backlog to
+        // chase.
+        self.runSweep { self.runLookup { self.runLint { self.schedule(after: self.idleInterval) } } }
         return
       }
       self.startDistiller(node: node, script: script)
@@ -341,10 +352,12 @@ final class Distiller {
         case .full: next = drained ? self.idleInterval : self.busyInterval
         }
         // Run the discovery sweep AFTER the distiller's own child has fully
-        // exited, then the public lookup after the sweep's, and reschedule
-        // only once the LOOKUP's child exits too -- never two model-consuming
-        // children running at once.
-        self.runSweep { self.runLookup { self.schedule(after: next) } }
+        // exited, then the public lookup after the sweep's, then lint after
+        // the lookup's, and reschedule only once LINT's child exits too --
+        // never two model-consuming children running at once (lint itself
+        // spends no model, but still shares this chain so it never overlaps
+        // the others' database writes).
+        self.runSweep { self.runLookup { self.runLint { self.schedule(after: next) } } }
       }
     }
 
@@ -482,6 +495,70 @@ final class Distiller {
       lookupProcess = p
     } catch {
       NSLog("Intaglio Labs: could not start the lookup: \(error.localizedDescription)")
+      done()
+    }
+  }
+
+  /// Lint (step 5½): spawns ui/scripts/lint-once.mjs, which POSTs hermes's
+  /// own /admin/relationship/lint -- same never-touch-the-db reasoning as
+  /// startDistiller/runSweep/runLookup above. Called from the lookup's own
+  /// termination handler so it never overlaps the other three's database
+  /// writes, even though it spends no model itself; `done` (the reschedule)
+  /// runs only once THIS child exits too.
+  ///
+  /// runLookup, minus every power-mode argument: lint has no model call, so
+  /// there is no battery/on-AC/thermal reading to pass and no batch size to
+  /// choose between trickle and full -- qualityOfService is unconditionally
+  /// .utility, unlike the distiller's/sweep's/lookup's own children, because
+  /// there is no inference cost here for God Mode to prioritize.
+  private func runLint(done: @escaping () -> Void) {
+    guard lintEnabled, !stopping else { done(); return }
+
+    let node = home.appendingPathComponent(".hazlie/bin/node")
+    let script = backend.appendingPathComponent("ui/scripts/lint-once.mjs")
+    guard fm.fileExists(atPath: node.path), fm.fileExists(atPath: script.path) else {
+      done()
+      return
+    }
+
+    let p = Process()
+    p.executableURL = node
+    p.arguments = [script.path]
+    // Unconditionally .utility: no model call means no reason to ask for
+    // foreground-class scheduling the way God Mode does for the other three.
+    p.qualityOfService = .utility
+    // lint-once.mjs resolves nothing relative to the backend root today (it
+    // has no prompt file), but runs from ui/ anyway for consistency with its
+    // three siblings.
+    p.currentDirectoryURL = backend.appendingPathComponent("ui")
+
+    // stdout is the pass's JSON summary (counts only -- never a person key,
+    // a claim's text, or any excerpt); logs carry counts and reasons only,
+    // same as the other three.
+    let logs = home.appendingPathComponent(".hazlie/logs")
+    try? fm.createDirectory(at: logs, withIntermediateDirectories: true,
+                            attributes: [.posixPermissions: 0o700])
+    let out = Pipe()
+    p.standardOutput = out
+    if let errURL = try? logFile(logs.appendingPathComponent("lint.err.log")) {
+      p.standardError = errURL
+    }
+
+    p.terminationHandler = { [weak self] proc in
+      _ = out.fileHandleForReading.readDataToEndOfFile()
+      guard let self else { DispatchQueue.main.async { done() }; return }
+      self.lintProcess = nil
+      if proc.terminationStatus != 0 {
+        NSLog("Intaglio Labs: lint pass failed (status \(proc.terminationStatus))")
+      }
+      DispatchQueue.main.async { done() }
+    }
+
+    do {
+      try p.run()
+      lintProcess = p
+    } catch {
+      NSLog("Intaglio Labs: could not start lint: \(error.localizedDescription)")
       done()
     }
   }
