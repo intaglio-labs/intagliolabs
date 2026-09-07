@@ -9,7 +9,8 @@ import assert from 'node:assert/strict';
 import { openDb } from '../server/hermes.mjs';
 import { eligiblePool } from '../server/relationship/producer.mjs';
 import {
-  groundSweep, newRowsFor, sweepScope, storeSweep, SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, tokensEstFor,
+  groundSweep, newRowsFor, sweepScope, storeSweep, sweepGate, runSweepPass,
+  SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, tokensEstFor,
 } from '../server/relationship/sweep.mjs';
 
 const NOW = Date.parse('2026-09-01T12:00:00Z');
@@ -341,4 +342,116 @@ test('storeSweep rejects a firm whose name vanished from the live row between ga
   assert.equal(result.rejected, 1);
   const n = db.prepare('SELECT COUNT(*) AS n FROM claim WHERE subject_person_key = ?').get(key);
   assert.equal(n.n, 0);
+});
+
+// ---------------------------------------------------------------------------
+// (11-12) runSweepPass: the no-new-rows checkpoint, and per-person hold/
+// advance on failure vs. a grounded-empty answer.
+// ---------------------------------------------------------------------------
+
+function fakeSweepEngine(respond) {
+  const engine = {
+    name: 'fake', model: 'fake-model', counters: { calls: 0, totalCostUsd: 0, totalDurationMs: 0 },
+    async complete(args) {
+      engine.counters.calls += 1;
+      return respond(args);
+    },
+  };
+  return engine;
+}
+
+test('a second runSweepPass makes zero model calls once nothing is new -- THE CHECKPOINT', async () => {
+  const db = openDb(':memory:');
+  const key = 'name:checkpoint person';
+  insertPerson(db, { key, name: 'Checkpoint Person', role: 'business', sent: 10, received: 10 });
+  insertThread(db, key, { ts: NOW - 1 * DAY, them: 'just checking in, nothing new to report', me: 'sounds good' });
+
+  const engine = fakeSweepEngine(() => JSON.stringify({ tags: [], firm: null, page_lines: [] }));
+
+  const first = await runSweepPass(db, engine, {}, { powerMode: 'trickle', now: NOW });
+  assert.equal(first.status, 'complete');
+  assert.equal(Number(first.model_calls), 1);
+  assert.equal(Number(first.swept), 1);
+  assert.equal(engine.counters.calls, 1);
+
+  const second = await runSweepPass(db, engine, {}, { powerMode: 'trickle', now: NOW + 1000 });
+  assert.equal(second.status, 'skipped');
+  assert.equal(second.skip_reason, 'no-new-rows');
+  assert.equal(engine.counters.calls, 1, 'no new model call was made on the second pass');
+});
+
+test('an engine error keeps the cursor and a grounded-empty answer advances it', async () => {
+  const db = openDb(':memory:');
+  const errKey = 'name:error case';
+  const okKey = 'name:ok case';
+  insertPerson(db, { key: errKey, name: 'Error Case', role: 'business', sent: 10, received: 10 });
+  insertThread(db, errKey, { ts: NOW - 1 * DAY, them: 'hello there', me: 'hi' });
+  insertPerson(db, { key: okKey, name: 'Ok Case', role: 'business', sent: 10, received: 10 });
+  insertThread(db, okKey, { ts: NOW - 1 * DAY, them: 'hello there too', me: 'hi' });
+
+  const engine = fakeSweepEngine(({ user }) => {
+    if (user.includes('Person: Error Case')) throw new Error('synthetic engine failure');
+    return JSON.stringify({ tags: [], firm: null, page_lines: [] });
+  });
+
+  await runSweepPass(db, engine, {}, { powerMode: 'trickle', budget: 2, now: NOW });
+
+  const errCursor = db.prepare('SELECT * FROM person_sweep_cursor WHERE person_key = ?').get(errKey);
+  assert.equal(errCursor.last_status, 'engine-error');
+  assert.equal(Number(errCursor.swept_through_context_id), 0, 'the cursor is held, not advanced, on an engine error');
+
+  const okCursor = db.prepare('SELECT * FROM person_sweep_cursor WHERE person_key = ?').get(okKey);
+  assert.equal(okCursor.last_status, 'empty');
+  assert.ok(Number(okCursor.swept_through_context_id) > 0, 'a grounded-empty answer still advances the cursor');
+});
+
+// ---------------------------------------------------------------------------
+// (14-16) sweepGate.
+// ---------------------------------------------------------------------------
+
+test('sweepGate skips on battery under 40% while off AC, not while on AC', () => {
+  const db = openDb(':memory:');
+  const key = 'name:battery test';
+  insertPerson(db, { key, name: 'Battery Test', role: 'business', sent: 10, received: 10 });
+  insertThread(db, key, { ts: NOW - 1 * DAY, them: 'hello', me: 'hi' });
+
+  const offAc = sweepGate(db, {}, { onAc: false, battery: 20, engine: 'fake' });
+  assert.equal(offAc.ok, false);
+  assert.equal(offAc.reason, 'battery');
+
+  const onAc = sweepGate(db, {}, { onAc: true, battery: 20, engine: 'fake' });
+  assert.equal(onAc.ok, true, 'battery is never a reason to skip while on AC power');
+});
+
+test('sweepGate skips when a page build is running', () => {
+  const db = openDb(':memory:');
+  const key = 'name:busy test';
+  insertPerson(db, { key, name: 'Busy Test', role: 'business', sent: 10, received: 10 });
+  insertThread(db, key, { ts: NOW - 1 * DAY, them: 'hello', me: 'hi' });
+
+  const gate = sweepGate(db, { pagesBuildingActive: true }, { engine: 'fake' });
+  assert.equal(gate.ok, false);
+  assert.equal(gate.reason, 'busy-model');
+});
+
+test('sweepGate skips at 90% of the daily call cap, never for llama', () => {
+  const db = openDb(':memory:');
+  const key = 'name:quota test';
+  insertPerson(db, { key, name: 'Quota Test', role: 'business', sent: 10, received: 10 });
+  insertThread(db, key, { ts: NOW - 1 * DAY, them: 'hello', me: 'hi' });
+
+  const cap = 200;
+  const used = Math.ceil(cap * 0.9);
+  db.prepare(
+    `INSERT INTO person_sweep_run(distill_run_id, started_at, ended_at, power_mode, engine, budget, scope_size,
+       candidates, swept, model_calls, proposed, dropped, tokens_est, skip_reason, status)
+     VALUES (NULL, ?, ?, 'trickle', 'fake', 3, 1, 1, 1, ?, 0, 0, 0, NULL, 'complete')`
+  ).run(Date.now(), Date.now(), used);
+
+  const claude = sweepGate(db, {}, { engine: 'claude-cli' });
+  assert.equal(claude.ok, false);
+  assert.equal(claude.reason, 'quota');
+
+  const llama = sweepGate(db, {}, { engine: 'llama' });
+  assert.equal(llama.ok, true, 'llama is exempt from the local call cap');
 });

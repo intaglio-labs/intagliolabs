@@ -19,6 +19,8 @@
 // talking to, which is exactly who an ingest sweep must keep current.
 // sweepScope runs its own, much narrower SQL instead (see below).
 
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildEpisodes, isQuotable } from '../memory/episodes.mjs';
@@ -38,6 +40,27 @@ export const SWEEP_PROMPT_PATH = join(here, '..', '..', '..', 'prompts', 'sweep.
 export const SWEEP_MAX_CHARS = 6_000;
 export const SWEEP_MAX_EPISODES = 8;
 export const SWEEP_BUDGET = Object.freeze({ full: 12, trickle: 3 });
+
+// A LOCAL rolling call cap over the sweep's own run log (conflict #4: PCC
+// does not exist in this repo, so there is no quota API to ask -- this is
+// what "PCC quota approaching" becomes in practice). Overridable via
+// config.relationshipMemory.sweepDailyCallCap.
+export const SWEEP_DAILY_CALL_CAP_DEFAULT = 200;
+
+// Matches hermes.mjs's own PAGE_BUILD_PAUSE_MS -- the same "do not hammer
+// the one local model" pause between people, applied here to sweeping
+// instead of page-building. Not imported (PAGE_BUILD_PAUSE_MS is private to
+// hermes.mjs); duplicated as a constant instead.
+const SWEEP_PAUSE_MS = 1000;
+const DAY = 86_400_000;
+
+function sleep(ms) {
+  return new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
+}
+
+function promptSha(text) {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
 
 const SECTIONS = new Set(Object.keys(SECTION_KIND));
 
@@ -372,4 +395,262 @@ export function storeSweep(db, { personKey, engineName, model, kept, sweepRunId,
   }
 
   return { stored, skipped, rejected };
+}
+
+function renderSweepPrompt(candidate, gathered) {
+  const subRoles = Array.isArray(candidate.subRoles) ? candidate.subRoles : [];
+  const roleLine = candidate.role ? ` (${candidate.role}${subRoles.length ? `, ${subRoles.join('/')}` : ''})` : '';
+  const lines = gathered.excerpts.map((e, i) => `${i + 1}   ${e.speaker}: ${e.text}`);
+  const meetings = gathered.meetingTitles.length
+    ? `\nMeetings attended together:\n${gathered.meetingTitles.map((t) => `- ${t}`).join('\n')}\n`
+    : '';
+  return (
+    `Person: ${candidate.name}${roleLine}\n` +
+    `BEGIN EXCERPTS\n${lines.join('\n')}\nEND EXCERPTS\n` +
+    meetings
+  );
+}
+
+function parseSweepJson(raw) {
+  if (typeof raw !== 'string') return { ok: false, reason: 'no content' };
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/u);
+  const body = (fenced ? fenced[1] : raw).trim();
+  const start = body.indexOf('{');
+  const end = body.lastIndexOf('}');
+  if (start === -1 || end <= start) return { ok: false, reason: 'no JSON object in output' };
+  try {
+    return { ok: true, proposal: JSON.parse(body.slice(start, end + 1)) };
+  } catch {
+    return { ok: false, reason: 'output is not valid JSON' };
+  }
+}
+
+function isEmptyProposal(proposal) {
+  const tags = Array.isArray(proposal?.tags) ? proposal.tags : [];
+  const pageLines = Array.isArray(proposal?.page_lines) ? proposal.page_lines : [];
+  const firm = proposal?.firm;
+  return tags.length === 0 && pageLines.length === 0 && (firm === null || firm === undefined);
+}
+
+// gather -> prompt -> engine -> parse -> ground -> store, one person. Status
+// is one of person_sweep_cursor.last_status's five values:
+//   'proposed'     -- at least one item survived grounding and was stored.
+//   'empty'        -- the model was asked and, correctly, found nothing (the
+//                     literal {"tags":[],"firm":null,"page_lines":[]} answer
+//                     prompts/sweep.md calls "a normal, expected answer").
+//   'ungrounded'    -- the model proposed something, but every item failed
+//                     grounding (a hallucinated quote, a tag outside the
+//                     closed set). Distinct from 'empty' because it names a
+//                     different failure mode even though both advance the
+//                     cursor the same way (see runSweepPass).
+//   'engine-error'  -- the model call itself threw.
+//   'parse-error'   -- the model's output was not the expected JSON shape.
+export async function sweepPerson(db, engine, candidate, { sweepRunId, distillRunId, now = Date.now() } = {}) {
+  const gathered = newRowsFor(db, candidate.personKey, candidate.cursor, {
+    maxEpisodes: SWEEP_MAX_EPISODES, maxChars: SWEEP_MAX_CHARS,
+  });
+  if (gathered.excerpts.filter((e) => e.speaker === 'THEM').length === 0) {
+    return {
+      personKey: candidate.personKey, calls: 0, proposed: 0, dropped: 0, tokensEst: 0,
+      status: 'empty', maxContextId: gathered.maxContextId,
+    };
+  }
+
+  const system = readFileSync(SWEEP_PROMPT_PATH, 'utf8');
+  const user = renderSweepPrompt(candidate, gathered);
+  const tokensEst = tokensEstFor(system) + tokensEstFor(user);
+
+  let raw;
+  try {
+    raw = await engine.complete({ system, user, maxTokens: 512 });
+  } catch {
+    return {
+      personKey: candidate.personKey, calls: 1, proposed: 0, dropped: 0, tokensEst,
+      status: 'engine-error', maxContextId: gathered.maxContextId,
+    };
+  }
+
+  const parsed = parseSweepJson(raw);
+  if (!parsed.ok) {
+    return {
+      personKey: candidate.personKey, calls: 1, proposed: 0, dropped: 0, tokensEst,
+      status: 'parse-error', maxContextId: gathered.maxContextId,
+    };
+  }
+
+  const { kept, dropped } = groundSweep(parsed.proposal, gathered);
+  if (kept.length === 0) {
+    const status = isEmptyProposal(parsed.proposal) ? 'empty' : 'ungrounded';
+    return {
+      personKey: candidate.personKey, calls: 1, proposed: 0, dropped: dropped.length, tokensEst,
+      status, maxContextId: gathered.maxContextId,
+    };
+  }
+
+  const result = storeSweep(db, {
+    personKey: candidate.personKey, engineName: engine.name, model: engine.model,
+    kept, sweepRunId, distillRunId, now,
+  });
+  return {
+    personKey: candidate.personKey, calls: 1, proposed: result.stored, dropped: dropped.length,
+    tokensEst, status: 'proposed', maxContextId: gathered.maxContextId,
+  };
+}
+
+// policy carries the same per-process relationship holder every other
+// relationship route reads (policy.relationshipHolder.__relationship, or
+// policy itself when no holder wraps it -- the same `?? policy` fallback
+// hermes.mjs's own relationshipState/startPageBuilds use), so a page build
+// in progress and a sweep in progress see each other through the one shared
+// flag pair without this module reaching into hermes.mjs's private state.
+function relFlags(policy) {
+  const holder = policy?.relationshipHolder ?? policy ?? {};
+  return holder.__relationship ?? holder;
+}
+
+// Skip order (each writing a person_sweep_run row status='skipped', never a
+// silent return -- see runSweepPass): 'disabled' is Swift-side, before the
+// node process is even spawned, and never appears here. An ABSENT power
+// field is unknown, not a skip -- a terminal run with no power telemetry at
+// all must still work.
+export function sweepGate(db, policy, { powerMode = 'trickle', battery = null, onAc = null, thermal = null, engine } = {}) {
+  void powerMode;
+  if (onAc === false && typeof battery === 'number' && battery < 40) {
+    return { ok: false, reason: 'battery' };
+  }
+  if (thermal === 'serious' || thermal === 'critical') {
+    return { ok: false, reason: 'thermal' };
+  }
+  const rel = relFlags(policy);
+  if (rel?.pagesBuildingActive || rel?.sweepActive) {
+    return { ok: false, reason: 'busy-model' };
+  }
+  // LOCAL cap (conflict #4), llama exempt: a loopback model has no external
+  // quota to approach.
+  if (engine !== 'llama') {
+    const cap = Number(policy?.relationshipMemory?.sweepDailyCallCap ?? SWEEP_DAILY_CALL_CAP_DEFAULT);
+    const since = Date.now() - DAY;
+    const used = Number(
+      db.prepare('SELECT COALESCE(SUM(model_calls), 0) AS n FROM person_sweep_run WHERE started_at >= ?')
+        .get(since).n
+    );
+    if (used >= 0.9 * cap) return { ok: false, reason: 'quota' };
+  }
+  const scope = sweepScope(db, { now: Date.now() });
+  if (scope.length === 0) return { ok: false, reason: 'no-scope' };
+  return { ok: true, reason: null };
+}
+
+function insertSkippedRun(db, { now, powerMode, engineName, budget, scopeSize, reason }) {
+  const id = Number(
+    db.prepare(
+      `INSERT INTO person_sweep_run(distill_run_id, started_at, ended_at, power_mode, engine, budget, scope_size,
+         candidates, swept, model_calls, proposed, dropped, tokens_est, skip_reason, status)
+       VALUES (NULL, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, ?, 'skipped')`
+    ).run(now, now, powerMode, engineName, budget, scopeSize, reason).lastInsertRowid
+  );
+  return db.prepare('SELECT * FROM person_sweep_run WHERE id = ?').get(id);
+}
+
+// One pass: gate -> scope -> (skip, or) one distill_run row for the WHOLE
+// pass (conflict #7 -- unlike storePage, which writes one per person) ->
+// sweepPerson in sequence, one BEGIN..COMMIT cursor write per person
+// (advance on proposed/empty/ungrounded, hold on engine-error/parse-error --
+// see section 5 of the design and sweepPerson's status doc above), paused
+// SWEEP_PAUSE_MS between people. Returns the person_sweep_run row.
+export async function runSweepPass(db, engine, policy, {
+  powerMode = 'trickle', battery = null, onAc = null, thermal = null, budget, now = Date.now(),
+} = {}) {
+  const effectiveBudget = Number.isInteger(budget) ? budget : (SWEEP_BUDGET[powerMode] ?? SWEEP_BUDGET.trickle);
+  const engineName = engine?.name ?? 'unknown';
+
+  const gate = sweepGate(db, policy, { powerMode, battery, onAc, thermal, engine: engineName });
+  const scope = sweepScope(db, { now });
+  if (!gate.ok) {
+    return insertSkippedRun(db, {
+      now, powerMode, engineName, budget: effectiveBudget, scopeSize: scope.length, reason: gate.reason,
+    });
+  }
+
+  // The pre-model, arithmetic gate (section 5): a candidate whose max
+  // authored context id is already at or below its cursor has nothing new,
+  // and is dropped BEFORE newRowsFor and before any engine call.
+  const candidates = scope.filter((c) => c.maxAuthoredContextId > c.cursor).slice(0, effectiveBudget);
+  if (candidates.length === 0) {
+    return insertSkippedRun(db, {
+      now, powerMode, engineName, budget: effectiveBudget, scopeSize: scope.length, reason: 'no-new-rows',
+    });
+  }
+
+  const promptText = readFileSync(SWEEP_PROMPT_PATH, 'utf8');
+  const sha = promptSha(promptText);
+  const distillRunId = Number(
+    db.prepare(
+      `INSERT INTO distill_run(model, prompt_path, prompt_sha, params, episode_context, rows_in, claims_out, status, started_at, ended_at)
+       VALUES (?, ?, ?, '{}', 'on', ?, 0, 'running', ?, NULL)`
+    ).run(`${engineName}:${engine?.model ?? 'unknown'}`, SWEEP_PROMPT_PATH, sha, candidates.length, now).lastInsertRowid
+  );
+  const sweepRunId = Number(
+    db.prepare(
+      `INSERT INTO person_sweep_run(distill_run_id, started_at, ended_at, power_mode, engine, budget, scope_size,
+         candidates, swept, model_calls, proposed, dropped, tokens_est, skip_reason, status)
+       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, NULL, 'running')`
+    ).run(distillRunId, now, powerMode, engineName, effectiveBudget, scope.length, candidates.length).lastInsertRowid
+  );
+
+  const upsertCursor = db.prepare(
+    `INSERT INTO person_sweep_cursor(person_key, swept_through_context_id, last_swept_at, last_status, proposals)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(person_key) DO UPDATE SET swept_through_context_id = excluded.swept_through_context_id,
+       last_swept_at = excluded.last_swept_at, last_status = excluded.last_status,
+       proposals = person_sweep_cursor.proposals + excluded.proposals`
+  );
+  const holdCursor = db.prepare(
+    `INSERT INTO person_sweep_cursor(person_key, swept_through_context_id, last_swept_at, last_status, proposals)
+     VALUES (?, ?, ?, ?, 0)
+     ON CONFLICT(person_key) DO UPDATE SET last_swept_at = excluded.last_swept_at, last_status = excluded.last_status`
+  );
+
+  let swept = 0;
+  let modelCalls = 0;
+  let proposed = 0;
+  let dropped = 0;
+  let tokensEst = 0;
+
+  for (let i = 0; i < candidates.length; i++) {
+    const candidate = candidates[i];
+    const result = await sweepPerson(db, engine, candidate, { sweepRunId, distillRunId, now });
+    modelCalls += result.calls;
+    proposed += result.proposed;
+    dropped += result.dropped;
+    tokensEst += result.tokensEst;
+    swept += 1;
+
+    // proposed/empty/ungrounded ALL advance: the model read those rows, and
+    // re-asking costs the same and answers the same (section 5). Only a
+    // failure to get a usable answer at all (engine-error/parse-error) holds
+    // the cursor, so the same rows are offered again next pass.
+    const advance = result.status === 'proposed' || result.status === 'empty' || result.status === 'ungrounded';
+    db.exec('BEGIN');
+    try {
+      if (advance) {
+        upsertCursor.run(candidate.personKey, result.maxContextId, now, result.status, result.proposed);
+      } else {
+        holdCursor.run(candidate.personKey, candidate.cursor, now, result.status);
+      }
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+    if (i < candidates.length - 1) await sleep(SWEEP_PAUSE_MS);
+  }
+
+  db.prepare(
+    `UPDATE person_sweep_run SET ended_at = ?, swept = ?, model_calls = ?, proposed = ?, dropped = ?, tokens_est = ?, status = 'complete' WHERE id = ?`
+  ).run(Date.now(), swept, modelCalls, proposed, dropped, tokensEst, sweepRunId);
+  db.prepare("UPDATE distill_run SET claims_out = ?, status = 'complete', ended_at = ? WHERE id = ?")
+    .run(proposed, Date.now(), distillRunId);
+
+  return db.prepare('SELECT * FROM person_sweep_run WHERE id = ?').get(sweepRunId);
 }
