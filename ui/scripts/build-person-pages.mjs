@@ -100,7 +100,7 @@ function sleep(ms) {
 
 async function candidatesForMode(mode) {
   if (onlyPerson) return [{ personKey: onlyPerson, name: onlyPerson }];
-  const { rows } = await call('GET', `/admin/relationship/pool?mode=${encodeURIComponent(mode)}`);
+  const { rows } = await call('GET', `/admin/relationship/pool?mode=${encodeURIComponent(mode)}&includeOffered=1`);
   return rows.slice(0, limit);
 }
 
