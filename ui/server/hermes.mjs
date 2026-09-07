@@ -75,7 +75,7 @@ import { openTallyStore } from './people/tallyStore.mjs';
 import { createRelationshipMemory } from './relationship/service.mjs';
 import { buildMatchedCards, MATCH_RULES_VERSION } from './relationship/matcher.mjs';
 import { buildPersonPage, readPersonPage } from './relationship/pages.mjs';
-import { runSweepPass, applySweepDecision } from './relationship/sweep.mjs';
+import { runSweepPass, applySweepDecision, sweepStatus } from './relationship/sweep.mjs';
 import { createEngine } from './relationship/engines.mjs';
 import { eligiblePool, produceBatch } from './relationship/producer.mjs';
 import {
@@ -4325,8 +4325,17 @@ async function handle(db, req, res, cors, url, policy) {
 
   if (req.method === 'GET' && url.pathname === '/stats') {
     const { n } = db.prepare('SELECT count(*) AS n FROM context').get();
+    // sweepStatus is a plain aggregate over brand-new tables and should
+    // never be able to take /stats down; wrapped the same defensive way a
+    // partial/pre-migration database is handled elsewhere in this route.
+    let sweep = null;
+    try {
+      sweep = sweepStatus(db);
+    } catch {
+      sweep = null;
+    }
     send(res, 200,
-      { rows: Number(n), memory: memoryProgress(db), peopleProjection: peopleProjectionStatus(db, policy) },
+      { rows: Number(n), memory: memoryProgress(db), peopleProjection: peopleProjectionStatus(db, policy), sweep },
       cors);
     return;
   }

@@ -742,3 +742,43 @@ export function applySweepDecision(db, policy, { claimId, action, configPath } =
   db.prepare('UPDATE person_sweep_proposal SET applied_at = ? WHERE claim_id = ?').run(Date.now(), claimId);
   return { applied: true, kind: proposal.kind, rebuildNeeded };
 }
+
+// For /stats' `sweep` key (hermes.mjs) and the desk's one-line status. Every
+// number here is a plain aggregate over person_sweep_cursor/_run and
+// person_sweep_proposal -- no engine call, no scope-widening side effect.
+export function sweepStatus(db) {
+  const scope = sweepScope(db, { now: Date.now() }).length;
+  const swept = Number(db.prepare('SELECT COUNT(*) AS n FROM person_sweep_cursor').get().n);
+  const pending = Number(
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM person_sweep_proposal psp
+         JOIN claim c ON c.id = psp.claim_id
+         WHERE NOT EXISTS (SELECT 1 FROM claim_decision d WHERE d.claim_id = c.id)`
+      )
+      .get().n
+  );
+  const last = db.prepare('SELECT * FROM person_sweep_run ORDER BY id DESC LIMIT 1').get();
+  const since = Date.now() - DAY;
+  const agg = db
+    .prepare(
+      'SELECT COALESCE(SUM(tokens_est), 0) AS tok, COALESCE(SUM(model_calls), 0) AS calls ' +
+        'FROM person_sweep_run WHERE started_at >= ?'
+    )
+    .get(since);
+
+  return {
+    scope,
+    swept,
+    pending,
+    lastPassAt: last?.started_at ?? null,
+    lastPassStatus: last?.status ?? null,
+    lastSkipReason: last?.skip_reason ?? null,
+    budget: last?.budget ?? null,
+    powerMode: last?.power_mode ?? null,
+    engine: last?.engine ?? null,
+    tokensEst24h: Number(agg.tok),
+    calls24h: Number(agg.calls),
+    callCap: SWEEP_DAILY_CALL_CAP_DEFAULT,
+  };
+}

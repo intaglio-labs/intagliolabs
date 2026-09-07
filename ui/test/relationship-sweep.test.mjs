@@ -9,7 +9,7 @@ import { mkdtempSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { openDb } from '../server/hermes.mjs';
+import { start, openDb } from '../server/hermes.mjs';
 import { eligiblePool } from '../server/relationship/producer.mjs';
 import { ownerConfigPath } from '../server/people/owner.mjs';
 import {
@@ -553,4 +553,62 @@ test('accepting a firm proposal stamps applied_at with no projection write', () 
 
   const after = db.prepare('SELECT sub_roles FROM people WHERE person_key = ?').get(key);
   assert.deepEqual(after, before);
+});
+
+// ---------------------------------------------------------------------------
+// (20-21) routes: /stats carries sweep, /health is untouched, and a sweep
+// proposal appears in /admin/memory/pending like any other pending claim.
+// ---------------------------------------------------------------------------
+
+const TOKEN = 'f'.repeat(64);
+
+test('/stats carries a sweep key and /health is still exactly {"ok":true}, and a stored proposal appears in /admin/memory/pending', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-sweep-'));
+  const engine = {
+    name: 'fake', model: 'fake-model', counters: { calls: 0, totalCostUsd: 0.02, totalDurationMs: 5 },
+    async complete() {
+      engine.counters.calls += 1;
+      return JSON.stringify({ tags: [{ tag: 'investor', text: 'raising a fund', quote: 'raising a fund' }], firm: null, page_lines: [] });
+    },
+  };
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
+    relationshipMemoryEngine: engine, peopleProjectionAutoRebuild: false,
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const call = (method, path, body) => fetch(base + path, {
+    method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  try {
+    const db = server.db;
+    const key = 'name:stats sweep person';
+    insertPerson(db, { key, name: 'Stats Sweep Person', role: 'business', sent: 10, received: 10 });
+    insertThread(db, key, { ts: NOW - 1 * DAY, them: 'I am raising a fund right now', me: 'nice' });
+
+    const health = await (await call('GET', '/health')).json();
+    assert.deepEqual(health, { ok: true });
+
+    const sweepResult = await (await call('POST', '/admin/relationship/sweep', { power: 'trickle' })).json();
+    assert.equal(sweepResult.status, 'complete');
+    assert.equal(sweepResult.proposed, 1);
+
+    const health2 = await (await call('GET', '/health')).json();
+    assert.deepEqual(health2, { ok: true }, '/health stays exactly {"ok":true} after the sweep route runs');
+
+    const stats = await (await call('GET', '/stats')).json();
+    assert.ok(stats.sweep, '/stats carries a sweep key');
+    assert.equal(stats.sweep.swept, 1);
+    assert.equal(stats.sweep.pending, 1);
+    assert.equal(stats.sweep.lastPassStatus, 'complete');
+    assert.equal(typeof stats.sweep.callCap, 'number');
+
+    const pending = await (await call('GET', '/admin/memory/pending')).json();
+    const claim = pending.claims.find((c) => c.subject_person_key === key);
+    assert.ok(claim, 'the sweep-stored proposal appears in /admin/memory/pending like any other pending claim');
+    assert.equal(claim.text, 'raising a fund');
+    assert.equal(claim.quote, 'raising a fund');
+  } finally {
+    await server.close();
+  }
 });
