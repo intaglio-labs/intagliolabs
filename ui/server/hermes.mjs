@@ -2388,7 +2388,7 @@ export function applyMemoryBatch(db, body) {
 function hydrateCards(db) {
   try {
     const batch = db.prepare('SELECT id FROM rm_candidate_batch ORDER BY id DESC LIMIT 1').get();
-    if (!batch) return { cards: [], batchId: null };
+    if (!batch) return { cards: [], batchId: null, mode: null };
     const batchId = Number(batch.id);
     const rows = db.prepare(
       'SELECT id, person_key, kind, summary, evidence, producer_version FROM rm_candidate_snapshot ' +
@@ -2414,12 +2414,18 @@ function hydrateCards(db) {
         snapshot_id: Number(row.id),
       };
     });
-    return { cards, batchId };
+    // The mode the latest batch was produced in (every snapshot in a batch
+    // carries the same one) is the owner's last pick from the widget's mode
+    // picker -- recovered here so a restart does not silently fall back to
+    // the config default the next time the card route refills.
+    const lastMode = rows.length ? JSON.parse(rows[0].evidence)?.mode : null;
+    const mode = RELATIONSHIP_MODES.includes(lastMode) ? lastMode : null;
+    return { cards, batchId, mode };
   } catch {
     // A missing rm_candidate_batch/snapshot table (fresh DB, or a schema this
     // process has not migrated yet) means "no history to hydrate", not a
     // startup failure.
-    return { cards: [], batchId: null };
+    return { cards: [], batchId: null, mode: null };
   }
 }
 
@@ -2461,7 +2467,7 @@ function relationshipState(db, policy) {
     };
     const hydrated = hydrateCards(db);
     holder.__relationship = { service, llamaCall, cards: hydrated.cards, batchId: hydrated.batchId,
-      refreshing: false, lastError: null };
+      mode: hydrated.mode, refreshing: false, lastError: null };
   }
   return holder.__relationship;
 }
@@ -2700,9 +2706,10 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     const producerConfig = relationshipProducerConfig(policy);
     if (producerConfig.producer === 'eligibility') {
       const body = await readJson(req).catch(() => null);
-      const mode = RELATIONSHIP_MODES.includes(body?.mode) ? body.mode : producerConfig.mode;
+      const mode = RELATIONSHIP_MODES.includes(body?.mode) ? body.mode : (rel.mode ?? producerConfig.mode);
       try {
         const { batchId, cards } = produceBatch(db, { mode, now: Date.now() });
+        rel.mode = mode;
         rel.batchId = batchId;
         rel.cards = cards;
         rel.refreshing = false;
@@ -2775,7 +2782,10 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       ).get(card.snapshot_id));
       if (!hasUnjudged) {
         try {
-          const { batchId, cards } = produceBatch(db, { mode: producerConfig.mode, now: Date.now() });
+          // The owner's last pick from the mode picker wins over the config
+          // default: a refill on an empty queue must keep serving the mode
+          // they asked for, not quietly widen back to 'any'.
+          const { batchId, cards } = produceBatch(db, { mode: rel.mode ?? producerConfig.mode, now: Date.now() });
           rel.batchId = batchId;
           rel.cards = cards;
           startPageBuilds(db, policy, rel, batchId, cards);

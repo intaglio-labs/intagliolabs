@@ -65,9 +65,14 @@ export const PRODUCER_VERSION = 'eligibility-v1';
 export const RANK_STRATEGY = 'depth-change-quiet';
 const DAY = 86_400_000;
 
-// How long a person stays off the pool after a snapshot offers them, so a
-// synchronous refill (the card route, on an empty queue) cannot re-offer the
-// same handful of names it just wrote. Separate from rm_suppression/rm_mute
+// How long a person stays off the pool after the owner was actually SHOWN
+// their card (rm_card_event 'shown'), so a refill cannot hand back a name the
+// owner just looked at and did not judge. Deliberately not "after a snapshot
+// wrote them": a batch's five names are a queue, and four of them are never
+// served before the next refresh replaces the batch. Cooling those down burned
+// the whole investor pool (five people) on refreshes nobody saw -- the gate
+// measures what reached the screen, not what the producer wrote. Judged
+// people are excluded separately and indefinitely. Separate from rm_suppression/rm_mute
 // (owner-driven, indefinite): this is a system-driven cooldown with no
 // setting, so it is a plain constant rather than something read from config.
 const RECENTLY_OFFERED_DAYS = 7;
@@ -103,8 +108,8 @@ function parseSubRoles(raw) {
 // JSON-array membership (mode). Both of those are cheap over an already-small
 // result.
 //
-// `includeOffered` skips the last gate only (recently judged or recently
-// snapshotted): the desk's Pool tab wants to see everyone the other gates
+// `includeOffered` skips the last gate only (already judged or recently
+// shown): the desk's Pool tab wants to see everyone the other gates
 // admit, offered or not, via ?includeOffered=1 on /admin/relationship/pool --
 // but the ordinary batch-producing path (refresh, and the card route's
 // synchronous refill) always applies it, or a refill could hand the owner
@@ -155,7 +160,7 @@ function poolSql(db, { includeOffered = false } = {}) {
         SELECT person_key FROM rm_card_event WHERE event IN ('accepted', 'dismissed')
       )
       AND p.person_key NOT IN (
-        SELECT person_key FROM rm_candidate_snapshot WHERE created_at > ?
+        SELECT person_key FROM rm_card_event WHERE event = 'shown' AND created_at > ?
       )`}
   `;
 }

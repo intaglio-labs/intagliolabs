@@ -170,6 +170,60 @@ test('two-way-plus-authored people clear the pool; cc-only, romantic-in-any, fut
   assert.ok(!keys.includes('name:mia muted'), 'an active mute removes the person entirely');
 });
 
+// The recently-offered cooldown fires off an actual 'shown' rm_card_event,
+// never off a bare snapshot: a batch's five names are a queue and most are
+// never served, so cooling down snapshotted-but-never-shown people would
+// empty a small pool on refreshes nobody saw. Mutation check: reverting the
+// gate in producer.mjs's poolSql back to reading rm_candidate_snapshot alone
+// turns the first assertion below into a failure (the snapshot-only person
+// would be excluded).
+test('the 7-day cooldown keys off a shown card, not a bare snapshot', () => {
+  const db = buildFixture();
+  const key = 'name:shown gate person';
+  insertPerson(db, { key, name: 'Shown Gate Person', sent: 20, received: 20 });
+  insertAuthored(db, key);
+  insertActiveDay(db, key, day(200));
+
+  const batchId = Number(db.prepare(
+    'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, ?, ?, ?)'
+  ).run(NOW - 1 * DAY, 1, 'open', null).lastInsertRowid);
+  const snapshotId = Number(db.prepare(
+    'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) ' +
+    'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(batchId, key, 'reconnect', 'summary', '{}', PRODUCER_VERSION, RANK_STRATEGY, NOW - 1 * DAY).lastInsertRowid);
+
+  // A snapshot from 1 day ago with NO 'shown' event: still selected.
+  assert.ok(keysOf(eligiblePool(db, { mode: 'any', now: NOW })).includes(key),
+    'a snapshot alone, 1 day old, does not cool the person down');
+
+  // The same person WITH a 'shown' event 1 day ago: excluded.
+  db.prepare(
+    'INSERT INTO rm_card_event(person_key, kind, snapshot_id, event, reason, note, rule_version, time_band, created_at) ' +
+    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(key, 'reconnect', snapshotId, 'shown', null, null, PRODUCER_VERSION, 'morning', NOW - 1 * DAY);
+  assert.ok(!keysOf(eligiblePool(db, { mode: 'any', now: NOW })).includes(key),
+    'a shown event 1 day ago cools the person down for 7 days');
+
+  // A 'shown' event 30 days ago: outside the 7-day window, does not exclude.
+  const key30 = 'name:shown gate person old';
+  insertPerson(db, { key: key30, name: 'Shown Gate Person Old', sent: 20, received: 20 });
+  insertAuthored(db, key30);
+  insertActiveDay(db, key30, day(200));
+  const batchId30 = Number(db.prepare(
+    'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, ?, ?, ?)'
+  ).run(NOW - 30 * DAY, 1, 'open', null).lastInsertRowid);
+  const snapshotId30 = Number(db.prepare(
+    'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) ' +
+    'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(batchId30, key30, 'reconnect', 'summary', '{}', PRODUCER_VERSION, RANK_STRATEGY, NOW - 30 * DAY).lastInsertRowid);
+  db.prepare(
+    'INSERT INTO rm_card_event(person_key, kind, snapshot_id, event, reason, note, rule_version, time_band, created_at) ' +
+    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(key30, 'reconnect', snapshotId30, 'shown', null, null, PRODUCER_VERSION, 'morning', NOW - 30 * DAY);
+  assert.ok(keysOf(eligiblePool(db, { mode: 'any', now: NOW })).includes(key30),
+    'a shown event 30 days ago is outside the 7-day window and does not exclude');
+});
+
 test('mode=investor requires the investor sub_role; mode=founder requires founder', () => {
   const db = buildFixture();
   const investors = keysOf(eligiblePool(db, { mode: 'investor', now: NOW }));
@@ -388,11 +442,11 @@ test('GET /admin/relationship/card refills an exhausted queue, and never re-offe
     const leftover = keys[5]; // rank six: never in the first batch of 5
 
     // A person judged in the DISTANT past (dismissed 30 days ago, off a
-    // snapshot also 30 days old) -- outside the 7-day recently-snapshotted
+    // snapshot also 30 days old) -- outside the 7-day recently-shown
     // window, so only the separate "already judged" gate keeps them off the
     // pool. Given the top rank (depth 999), they would otherwise be the very
     // first card in the batch below: this is what makes dropping the
-    // judged-exclusion (as opposed to the recently-snapshotted one) its own,
+    // judged-exclusion (as opposed to the recently-shown one) its own,
     // distinguishable failure.
     const oldJudgedKey = 'name:refill judged long ago';
     insertPerson(db, { key: oldJudgedKey, name: 'Judged Long Ago', sent: 500, received: 499 });
@@ -423,7 +477,7 @@ test('GET /admin/relationship/card refills an exhausted queue, and never re-offe
     ).all().map((r) => r.person_key);
     assert.ok(!firstBatchKeys.includes(oldJudgedKey),
       'a person judged 30 days ago is excluded even though their own snapshot is well outside the 7-day window -- ' +
-      'this is the "already judged" gate specifically, not the "recently snapshotted" one');
+      'this is the "already judged" gate specifically, not the "recently shown" one');
 
     // Judge (dismiss) every card the first batch produced -- the top 5 of 6.
     const judged = new Set();
@@ -443,8 +497,8 @@ test('GET /admin/relationship/card refills an exhausted queue, and never re-offe
     // Every card in the queue is now judged: the NEXT GET must refill
     // synchronously (a batch depth of 5 is exactly why a queue can now go
     // empty on one sitting) and serve rank six -- the only person left that
-    // is neither judged (rm_card_event) nor recently snapshotted (within 7
-    // days), both of which the other five now are.
+    // is neither judged (rm_card_event) nor recently shown (a 'shown'
+    // rm_card_event within 7 days), both of which the other five now are.
     const refilled = await (await call('GET', '/admin/relationship/card')).json();
     assert.ok(refilled.card, 'the card route refills instead of answering null forever');
     assert.equal(refilled.card.personKey, leftover,
