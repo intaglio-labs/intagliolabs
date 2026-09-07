@@ -538,6 +538,62 @@ CREATE TABLE IF NOT EXISTS person_page_item(
   built_at  INTEGER NOT NULL
 );
 
+/* Discovery sweep (L5 step 5, relationship/sweep.mjs): reads only the NEW
+   messages from one person since the last sweep of them, one small model
+   call per person, proposing sub-role tags / a firm / page lines -- same
+   trust lifecycle as every other claim here, PENDING until the owner
+   decides. Three tables:
+
+   person_sweep_cursor -- per-person watermark. DELIBERATELY NO FOREIGN KEY
+   to people: clearPeopleProjection deletes every row of people on every
+   identity rebuild, and a cascade from a people FK would erase every cursor
+   along with it, forcing a full re-sweep (at model cost) on every rebuild.
+   A stale key after an identity merge is a dead row, not a bug -- it simply
+   never matches a live person_key again and sits inert.
+
+   person_sweep_run -- one row per PASS (not per person), including a pass
+   that skipped or did nothing: a skip is a measurement, same reasoning as
+   rm_candidate_batch above. distill_run_id is nullable because a skipped
+   pass (power/thermal/quota/busy/no-scope/no-new-rows) never spends a model
+   call and so never creates a distill_run row at all.
+
+   person_sweep_proposal -- which KIND of proposal a stored claim is.
+   sub_role and firm are NOT person_page_item rows: person_page_item.section
+   is a closed five-value CHECK that cannot be ALTERed, so a sub-role or firm
+   proposal cannot live there. A page_line proposal is both: a claim here
+   AND, separately, a person_page_item row in one of the five existing
+   sections, so it renders through the same page machinery pages.mjs already
+   built. value is NULL for page_line (the section column on
+   person_page_item already carries what a reader needs); applied_at is
+   stamped only when accepting actually did something beyond writing
+   claim_decision (a sub-role union, a firm mark) -- see
+   relationship/sweep.mjs's applySweepDecision. */
+CREATE TABLE IF NOT EXISTS person_sweep_cursor(
+  person_key               TEXT PRIMARY KEY,
+  swept_through_context_id INTEGER NOT NULL,
+  last_swept_at            INTEGER NOT NULL,
+  last_status              TEXT NOT NULL CHECK (last_status IN ('proposed','empty','ungrounded','engine-error','parse-error')),
+  proposals                INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS person_sweep_run(
+  id INTEGER PRIMARY KEY, distill_run_id INTEGER REFERENCES distill_run(id),
+  started_at INTEGER NOT NULL, ended_at INTEGER,
+  power_mode TEXT NOT NULL CHECK (power_mode IN ('full','trickle')),
+  engine TEXT NOT NULL, budget INTEGER NOT NULL, scope_size INTEGER NOT NULL,
+  candidates INTEGER NOT NULL DEFAULT 0, swept INTEGER NOT NULL DEFAULT 0, model_calls INTEGER NOT NULL DEFAULT 0,
+  proposed INTEGER NOT NULL DEFAULT 0, dropped INTEGER NOT NULL DEFAULT 0, tokens_est INTEGER NOT NULL DEFAULT 0,
+  skip_reason TEXT CHECK (skip_reason IS NULL OR skip_reason IN ('disabled','battery','thermal','quota','busy-model','no-new-rows','no-scope')),
+  status TEXT NOT NULL CHECK (status IN ('running','complete','skipped','failed'))
+);
+CREATE INDEX IF NOT EXISTS person_sweep_run_started ON person_sweep_run(started_at);
+CREATE TABLE IF NOT EXISTS person_sweep_proposal(
+  claim_id INTEGER PRIMARY KEY REFERENCES claim(id) ON DELETE CASCADE,
+  run_id INTEGER NOT NULL REFERENCES person_sweep_run(id),
+  kind TEXT NOT NULL CHECK (kind IN ('sub_role','firm','page_line')),
+  value TEXT, applied_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS person_sweep_proposal_run ON person_sweep_proposal(run_id);
+
 /* The porter stemmer, because this index is queried with the owner's own
    English: it unifies morning/mornings, allergy/allergies, take/takes.
    MEASURED LIMIT, so nobody assumes more of it than it does: porter does NOT
@@ -890,7 +946,12 @@ END;
 //      on the DDL rather than on this number (see rebuildClaimTableForV10).
 //      Two branches bumping the same version is exactly how a stamp comes to
 //      lie; the DDL check is why it no longer matters when one does.
-const SCHEMA_VERSION = 11;
+//  12  person_sweep_cursor, person_sweep_run, person_sweep_proposal (L5 step
+//      5, the discovery sweep). All three are brand-new tables created by
+//      SCHEMA's own IF NOT EXISTS, so nothing here ALTERs anything; the
+//      version < 12 branch below only (re-)asserts their indexes, same
+//      belt-and-suspenders posture as the ALTER-guarded branches above.
+const SCHEMA_VERSION = 12;
 
 // The PRAGMAs that decide whether "deleted" means deleted, and whether the
 // memory tables' declared references mean anything. Applied to every
@@ -1128,6 +1189,15 @@ function migrate(db) {
     // The claim rebuild itself ran above, stamp or no stamp; this branch only
     // records the version. See rebuildClaimTableForV10.
     version = 11;
+  }
+  if (version < 12) {
+    // person_sweep_cursor/_run/_proposal were already created above by SCHEMA
+    // (CREATE TABLE IF NOT EXISTS, no pre-existing column to guard) -- this
+    // branch exists only to (re-)assert their indexes, which is harmless
+    // under IF NOT EXISTS, and to record the version.
+    db.exec('CREATE INDEX IF NOT EXISTS person_sweep_run_started ON person_sweep_run(started_at)');
+    db.exec('CREATE INDEX IF NOT EXISTS person_sweep_proposal_run ON person_sweep_proposal(run_id)');
+    version = 12;
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
