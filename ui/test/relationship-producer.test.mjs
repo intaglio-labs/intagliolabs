@@ -509,6 +509,170 @@ test('GET /admin/relationship/card refills an exhausted queue, and never re-offe
   }
 });
 
+test('hydrateCards skips an empty latest batch and restores the last real one', async () => {
+  // Reproduces the restart bug: hydrateCards used to load whatever batch row
+  // was newest, even one produceBatch wrote with zero candidates (the mode's
+  // pool exhausted). That silently dropped the two unjudged, already-shown
+  // cards from the last REAL batch on every hermes restart, even though
+  // their owner never judged them.
+  const dir = mkdtempSync(join(tmpdir(), 'rel-hydrate-empty-'));
+  const dbPath = join(dir, 'context.db');
+  const opts = {
+    port: 0, dbPath, llamaApiKey: 'd'.repeat(64), bearerToken: 'e'.repeat(64),
+    relationshipCap: { max: 20, windowMs: 86_400_000 },
+    relationshipProducerConfig: { producer: 'eligibility', mode: 'any' },
+    peopleProjectionAutoRebuild: false,
+  };
+  const server = await start(opts);
+  try {
+    const db = server.db;
+    ensureSubRoles(db);
+    insertPerson(db, { key: 'name:real card', name: 'Real Card', sent: 50, received: 50 });
+    insertAuthored(db, 'name:real card');
+    insertActiveDay(db, 'name:real card', day(200));
+
+    // A real, non-empty batch (produceBatch writes it directly -- no need to
+    // go through the HTTP route for this fixture).
+    const real = produceBatch(db, { mode: 'any', now: NOW });
+    assert.equal(real.cards.length, 1);
+
+    // A LATER, empty batch -- e.g. from a refill attempt against an
+    // already-exhausted mode ('founder', with no founder in the fixture).
+    // This is now the newest row in rm_candidate_batch.
+    const empty = produceBatch(db, { mode: 'founder', now: NOW + 1000 });
+    assert.equal(empty.cards.length, 0);
+    const latestBatch = db.prepare('SELECT candidate_count FROM rm_candidate_batch ORDER BY id DESC LIMIT 1').get();
+    assert.equal(latestBatch.candidate_count, 0, 'the empty batch really is the newest row');
+  } finally {
+    await server.close();
+  }
+
+  // Restart-equivalent: a fresh process (fresh in-memory holder) against the
+  // same on-disk db. hydrateCards runs again, lazily, on the first request.
+  const restarted = await start(opts);
+  try {
+    const base = `http://127.0.0.1:${restarted.port}`;
+    const out = await (await fetch(base + '/admin/relationship/card', {
+      headers: { Authorization: `Bearer ${'e'.repeat(64)}` },
+    })).json();
+    assert.ok(out.card, 'the card from the last REAL batch is served, not card:null');
+    assert.equal(out.card.personKey, 'name:real card');
+  } finally {
+    await restarted.close();
+  }
+});
+
+test('an exhausted pool does not write a batch per poll', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-refill-throttle-'));
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: 'e'.repeat(64),
+    relationshipCap: { max: 20, windowMs: 86_400_000 },
+    relationshipProducerConfig: { producer: 'eligibility', mode: 'any' },
+    peopleProjectionAutoRebuild: false,
+  });
+  try {
+    const db = server.db;
+    ensureSubRoles(db);
+    // A small pool (2 people, both inside the default batch depth of 5) so
+    // the FIRST refresh already exhausts it entirely once both are judged --
+    // no lower-ranked leftover the way the depth/refill fixtures above have.
+    insertPerson(db, { key: 'name:throttle one', name: 'Throttle One', sent: 40, received: 40 });
+    insertAuthored(db, 'name:throttle one');
+    insertActiveDay(db, 'name:throttle one', day(200));
+    insertPerson(db, { key: 'name:throttle two', name: 'Throttle Two', sent: 30, received: 30 });
+    insertAuthored(db, 'name:throttle two');
+    insertActiveDay(db, 'name:throttle two', day(200));
+
+    const base = `http://127.0.0.1:${server.port}`;
+    const call = (method, path, body) => fetch(base + path, {
+      method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${'e'.repeat(64)}` },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+
+    await call('POST', '/admin/relationship/refresh');
+    const batchesAfterRefresh = Number(db.prepare('SELECT COUNT(*) AS n FROM rm_candidate_batch').get().n);
+    assert.equal(batchesAfterRefresh, 1);
+
+    // Judge both cards so the pool is now fully exhausted.
+    for (let i = 0; i < 2; i++) {
+      const out = await (await call('GET', '/admin/relationship/card')).json();
+      assert.ok(out.card, `card ${i + 1} of 2`);
+      const ev = await call('POST', '/admin/relationship/event', {
+        snapshot_id: out.card.snapshot_id, person_key: out.card.personKey, event: 'dismissed',
+      });
+      assert.equal(ev.status, 200);
+    }
+
+    // Five polls against the now-exhausted pool.
+    const results = [];
+    for (let i = 0; i < 5; i++) {
+      results.push(await (await call('GET', '/admin/relationship/card')).json());
+    }
+    for (const r of results) assert.equal(r.card, null, 'the pool really is exhausted -- no card to serve');
+
+    const batchesAfterPolling = Number(db.prepare('SELECT COUNT(*) AS n FROM rm_candidate_batch').get().n);
+    assert.equal(batchesAfterPolling, batchesAfterRefresh + 1,
+      'exactly one new (empty) batch row across all five polls, not one per poll');
+
+    // The first poll is the one that actually ran produceBatch and
+    // discovered the pool empty; the later four are throttled and never
+    // called produceBatch at all -- that is what the batch-row count above
+    // proves, and this asserts the throttled response shape too.
+    for (const r of results.slice(1)) {
+      assert.equal(r.reason, 'pool-exhausted');
+      assert.ok(Number.isFinite(r.retryAfterMs) && r.retryAfterMs > 0);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test('an explicit refresh bypasses the refill throttle', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-refresh-bypass-'));
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: 'e'.repeat(64),
+    relationshipCap: { max: 20, windowMs: 86_400_000 },
+    relationshipProducerConfig: { producer: 'eligibility', mode: 'any' },
+    peopleProjectionAutoRebuild: false,
+  });
+  try {
+    const db = server.db;
+    ensureSubRoles(db);
+    insertPerson(db, { key: 'name:bypass one', name: 'Bypass One', sent: 40, received: 40 });
+    insertAuthored(db, 'name:bypass one');
+    insertActiveDay(db, 'name:bypass one', day(200));
+
+    const base = `http://127.0.0.1:${server.port}`;
+    const call = (method, path, body) => fetch(base + path, {
+      method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${'e'.repeat(64)}` },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+
+    await call('POST', '/admin/relationship/refresh');
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    await call('POST', '/admin/relationship/event', {
+      snapshot_id: out.card.snapshot_id, person_key: out.card.personKey, event: 'dismissed',
+    });
+
+    // Exhaust and arm the throttle (mirrors the previous test's first poll).
+    const armed = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(armed.card, null);
+    const throttled = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(throttled.reason, 'pool-exhausted', 'the throttle is now armed');
+    const batchesBeforeRefresh = Number(db.prepare('SELECT COUNT(*) AS n FROM rm_candidate_batch').get().n);
+
+    // An explicit refresh, called well within REFILL_RETRY_MS of the throttled
+    // poll above, must still run produceBatch -- the owner asked directly.
+    const refreshOut = await (await call('POST', '/admin/relationship/refresh')).json();
+    assert.equal(refreshOut.started, true);
+    const batchesAfterRefresh = Number(db.prepare('SELECT COUNT(*) AS n FROM rm_candidate_batch').get().n);
+    assert.equal(batchesAfterRefresh, batchesBeforeRefresh + 1,
+      'the explicit refresh wrote its own batch row, unthrottled');
+  } finally {
+    await server.close();
+  }
+});
+
 test('/people/sub-roles writes an owner override that the next projection read reflects', async () => {
   const home = mkdtempSync(join(tmpdir(), 'rel-subroles-home-'));
   const prevHome = process.env.HOME;

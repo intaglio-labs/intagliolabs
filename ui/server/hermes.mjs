@@ -2556,7 +2556,15 @@ export function applyMemoryBatch(db, body) {
 // rm_candidate_snapshot call below for the encoding this decodes.
 function hydrateCards(db) {
   try {
-    const batch = db.prepare('SELECT id FROM rm_candidate_batch ORDER BY id DESC LIMIT 1').get();
+    // The latest batch with at least one snapshot, not merely the latest row:
+    // the card route's own refill throttle (see REFILL_RETRY_MS below) can
+    // leave an empty batch as the newest row when a mode's pool is exhausted,
+    // and hydrating from THAT row on restart silently drops the two unjudged,
+    // already-shown cards from the last real batch (card: null) even though
+    // their owner never judged them.
+    const batch = db.prepare(
+      'SELECT id FROM rm_candidate_batch WHERE candidate_count > 0 ORDER BY id DESC LIMIT 1'
+    ).get();
     if (!batch) return { cards: [], batchId: null, mode: null };
     const batchId = Number(batch.id);
     const rows = db.prepare(
@@ -2636,7 +2644,11 @@ function relationshipState(db, policy) {
     };
     const hydrated = hydrateCards(db);
     holder.__relationship = { service, llamaCall, cards: hydrated.cards, batchId: hydrated.batchId,
-      mode: hydrated.mode, refreshing: false, lastError: null };
+      mode: hydrated.mode, refreshing: false, lastError: null,
+      // Refill throttle (see REFILL_RETRY_MS): lastRefillAt/lastRefillEmpty
+      // describe the most recent synchronous refill the card route ran, not
+      // any refill ever -- an explicit /refresh does not touch these.
+      lastRefillAt: null, lastRefillEmpty: false };
   }
   return holder.__relationship;
 }
@@ -2727,6 +2739,17 @@ function relationshipLookupEngine(policy) {
 // blocking on it.
 const PAGE_BUILD_PAUSE_MS = 1000;
 const PAGE_RECENT_BUILD_MS = 7 * 86_400_000;
+
+// How long the card route's synchronous refill stays throttled after a
+// refill that produced zero candidates (the mode's pool is exhausted --
+// everyone recently shown or judged). Without this, every poll of an
+// exhausted queue wrote a fresh empty batch (44 batches, 28 empty, observed
+// on the live machine since 09:12): the route would call produceBatch again
+// on the very next GET, learn nothing new, and write another empty row. A
+// refill that DOES produce candidates resets the throttle immediately (see
+// the card route below); an explicit POST /admin/relationship/refresh is
+// never throttled -- the owner asked for it directly.
+const REFILL_RETRY_MS = 15 * 60_000;
 
 function sleep(ms) {
   return new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
@@ -2893,12 +2916,19 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       const body = await readJson(req).catch(() => null);
       const mode = RELATIONSHIP_MODES.includes(body?.mode) ? body.mode : (rel.mode ?? producerConfig.mode);
       try {
-        const { batchId, cards } = produceBatch(db, { mode, now: Date.now() });
+        const now = Date.now();
+        const { batchId, cards } = produceBatch(db, { mode, now });
         rel.mode = mode;
         rel.batchId = batchId;
         rel.cards = cards;
         rel.refreshing = false;
-        startPageBuilds(db, policy, rel, batchId, cards);
+        // An explicit refresh is a refill too (just never throttled -- the
+        // owner asked for it directly): keep the card route's own throttle
+        // bookkeeping current so a poll right after this doesn't act on a
+        // stale lastRefillEmpty from before the owner's ask.
+        rel.lastRefillAt = now;
+        rel.lastRefillEmpty = cards.length === 0;
+        if (cards.length > 0) startPageBuilds(db, policy, rel, batchId, cards);
       } catch (e) {
         rel.refreshing = false;
         rel.lastError = String(e?.message ?? e);
@@ -2961,23 +2991,43 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // not opted into the eligibility producer keeps today's behavior
     // (refill only via an explicit /refresh call).
     const producerConfig = relationshipProducerConfig(policy);
+    let refillThrottled = false;
     if (producerConfig.producer === 'eligibility' && !rel.refreshing) {
       const hasUnjudged = rel.cards.some((card) => !db.prepare(
         "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event IN ('accepted','dismissed') LIMIT 1"
       ).get(card.snapshot_id));
       if (!hasUnjudged) {
-        try {
-          // The owner's last pick from the mode picker wins over the config
-          // default: a refill on an empty queue must keep serving the mode
-          // they asked for, not quietly widen back to 'any'.
-          const { batchId, cards } = produceBatch(db, { mode: rel.mode ?? producerConfig.mode, now: Date.now() });
-          rel.batchId = batchId;
-          rel.cards = cards;
-          startPageBuilds(db, policy, rel, batchId, cards);
-        } catch (e) {
-          rel.lastError = String(e?.message ?? e);
+        // Throttle: a refill that just produced zero candidates (the pool is
+        // exhausted -- everyone recently shown or judged) means calling
+        // produceBatch again right now would learn nothing and write another
+        // empty batch row per poll. Skip the call entirely until
+        // REFILL_RETRY_MS has passed since that empty refill; a refill that
+        // DID produce candidates resets the throttle below.
+        const now = Date.now();
+        if (rel.lastRefillEmpty && rel.lastRefillAt != null && now - rel.lastRefillAt < REFILL_RETRY_MS) {
+          refillThrottled = true;
+        } else {
+          try {
+            // The owner's last pick from the mode picker wins over the config
+            // default: a refill on an empty queue must keep serving the mode
+            // they asked for, not quietly widen back to 'any'.
+            const { batchId, cards } = produceBatch(db, { mode: rel.mode ?? producerConfig.mode, now });
+            rel.batchId = batchId;
+            rel.cards = cards;
+            rel.lastRefillAt = now;
+            rel.lastRefillEmpty = cards.length === 0;
+            if (cards.length > 0) startPageBuilds(db, policy, rel, batchId, cards);
+          } catch (e) {
+            rel.lastError = String(e?.message ?? e);
+          }
         }
       }
+    }
+    if (refillThrottled) {
+      send(res, 200, { card: null, reason: 'pool-exhausted',
+        retryAfterMs: Math.max(0, REFILL_RETRY_MS - (Date.now() - rel.lastRefillAt)),
+        ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
+      return;
     }
 
     // PAGE-FIRST: among the unjudged candidates, serve whichever already has
