@@ -3226,22 +3226,34 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         return;
       }
     }
+    // The kind and rule version this verdict is ABOUT come from the snapshot
+    // the caller names, never a hardcoded 'reconnect' -- an Owe card's
+    // dismissal used to land as a reconnect-kind rm_card_event/rm_mute,
+    // silently misfiling every control action a second producer ever took.
+    // Falling back to 'reconnect'/MATCH_RULES_VERSION when there is no
+    // snapshot (a review-only event, or a bad id) keeps today's behavior for
+    // exactly that case, not for a named card.
+    const snap = snapId !== null
+      ? db.prepare('SELECT kind, producer_version FROM rm_candidate_snapshot WHERE id = ?').get(snapId)
+      : undefined;
+    const kind = snap?.kind ?? 'reconnect';
+    const ruleVersion = snap?.producer_version ?? MATCH_RULES_VERSION;
     if (event === 'muted') {
       const days = Number.isFinite(mute_days) && mute_days > 0 ? mute_days : null;
       if (days === null) throw badRequest('"mute_days" required for a mute');
-      rel.service.controls.mute({ personKey: person_key, kind: 'reconnect', untilAt: Date.now() + days * 86_400_000 });
-      rel.service.controls.recordEvent({ personKey: person_key, kind: 'reconnect', event: 'muted',
-        ruleVersion: MATCH_RULES_VERSION, snapshotId: snapId });
+      rel.service.controls.mute({ personKey: person_key, kind, untilAt: Date.now() + days * 86_400_000 });
+      rel.service.controls.recordEvent({ personKey: person_key, kind, event: 'muted',
+        ruleVersion, snapshotId: snapId });
     } else if (event === 'dismissed') {
       // snapshotId rides along or the card comes BACK: the acted-check keys
       // on it, and a NULL here made every plain dismissal a no-op (audit,
       // reproduced live).
-      rel.service.controls.dismiss({ personKey: person_key, kind: 'reconnect',
+      rel.service.controls.dismiss({ personKey: person_key, kind,
         reason: typeof reason === 'string' && reason.length > 0 ? reason : null,
-        note: ownerNote, ruleVersion: MATCH_RULES_VERSION, snapshotId: snapId });
+        note: ownerNote, ruleVersion, snapshotId: snapId });
     } else {
-      rel.service.controls.recordEvent({ personKey: person_key, kind: 'reconnect', event,
-        note: ownerNote, ruleVersion: MATCH_RULES_VERSION, snapshotId: snapId });
+      rel.service.controls.recordEvent({ personKey: person_key, kind, event,
+        note: ownerNote, ruleVersion, snapshotId: snapId });
     }
     send(res, 200, { ok: true }, cors);
     return;

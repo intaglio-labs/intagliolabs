@@ -10,6 +10,13 @@ export const DISMISS_REASONS = Object.freeze([
 ]);
 export const MUTE_SCOPES = Object.freeze(['person', 'kind', 'person-and-kind']);
 
+const DAY = 86_400_000;
+// How long a 'not-this-kind' dismissal mutes THIS PERSON for THIS KIND --
+// long enough to outlast the 8-week read the plan's rollout section names,
+// short enough that a kind whose relevance changes (a new commitment made,
+// a new open loop opened) is not muted forever off one tap.
+export const NOT_THIS_KIND_MUTE_DAYS = 90;
+
 // Local time band, deterministic from the machine's own clock zone. These are
 // product events about the OWNER's day, so local time is the honest axis; a
 // UTC band would call a Honolulu evening "morning".
@@ -100,11 +107,18 @@ export function createControls(db, { canonicalOf = (k) => k } = {}) {
     // reached from a card -- the plan lists it among the reasons precisely so
     // suppression is one tap away; the reason row and the suppression row
     // land in the same transaction so neither can exist without the other.
+    // 'not-this-kind' is the analogous one-tap control for a KIND rather than
+    // a person: person+kind scoped (never global -- a global 'owe' mute is a
+    // settings-surface decision, not a single card's), landing in the same
+    // transaction for the same reason.
     dismiss({ personKey, kind, reason = null, note = null, ruleVersion, snapshotId = null, now = Date.now() }) {
       db.exec('BEGIN');
       try {
         this.recordEvent({ personKey, kind, event: 'dismissed', reason, note, ruleVersion, snapshotId, now });
         if (reason === 'never-this-person') this.suppress(personKey, now);
+        if (reason === 'not-this-kind') {
+          this.mute({ personKey, kind, untilAt: now + NOT_THIS_KIND_MUTE_DAYS * DAY, now });
+        }
         db.exec('COMMIT');
       } catch (error) {
         db.exec('ROLLBACK');

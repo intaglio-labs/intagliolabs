@@ -164,6 +164,60 @@ test('mute records the event and quiets the person', async () => {
   });
 });
 
+// /admin/relationship/event used to hardcode kind:'reconnect' and
+// ruleVersion:MATCH_RULES_VERSION in every branch (mute/dismiss/recordEvent),
+// so a verdict on a card from any OTHER producer's snapshot -- kind and
+// producer_version both -- landed misfiled. The fix reads both off the named
+// snapshot; this drives a card whose snapshot kind is 'owe' through mute,
+// dismiss (with 'not-this-kind'), and a plain event, checking each lands
+// under 'owe'/'owe-v1', never 'reconnect'/rm-match's version.
+test("an event's kind and rule_version come from the snapshot, not a hardcoded 'reconnect'", async () => {
+  const OWE_CARDS = [{
+    personKey: 'name:owe person', name: 'Owe Person', kind: 'owe',
+    sentence: 'You said you would, and that came due 9 days ago.',
+    role: 'friend', focus: null, label: null, left: null, leftTone: null,
+    evidence: { owe_kind: 'owe:expired-commitment', overdueDays: 9 },
+    producer_version: 'owe-v1',
+  }];
+  await withServer(async ({ call, db }) => {
+    await call('POST', '/admin/relationship/refresh'); await settle();
+    const { card } = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(card.kind, 'owe');
+
+    await call('POST', '/admin/relationship/event', { snapshot_id: card.snapshot_id,
+      person_key: card.personKey, event: 'muted', mute_days: 30 });
+    const muteRow = db.prepare('SELECT kind FROM rm_mute ORDER BY id DESC LIMIT 1').get();
+    assert.equal(muteRow.kind, 'owe', 'the mute recorded under the snapshot\'s own kind');
+    const mutedEvent = db.prepare("SELECT kind, rule_version FROM rm_card_event WHERE event = 'muted'").get();
+    assert.equal(mutedEvent.kind, 'owe');
+    assert.equal(mutedEvent.rule_version, 'owe-v1');
+  }, { relationshipMatcher: async () => ({ cards: structuredClone(OWE_CARDS), focus: 'x', currentTopics: [] }) });
+
+  await withServer(async ({ call, db }) => {
+    await call('POST', '/admin/relationship/refresh'); await settle();
+    const { card } = await (await call('GET', '/admin/relationship/card')).json();
+    await call('POST', '/admin/relationship/event', { snapshot_id: card.snapshot_id,
+      person_key: card.personKey, event: 'dismissed', reason: 'not-this-kind' });
+    const dismissedEvent = db.prepare("SELECT kind, rule_version, reason FROM rm_card_event WHERE event = 'dismissed'").get();
+    assert.equal(dismissedEvent.kind, 'owe');
+    assert.equal(dismissedEvent.rule_version, 'owe-v1');
+    assert.equal(dismissedEvent.reason, 'not-this-kind');
+    const muteRow = db.prepare('SELECT person_key, kind FROM rm_mute').get();
+    assert.equal(muteRow.person_key, card.personKey);
+    assert.equal(muteRow.kind, 'owe', 'not-this-kind mutes under the card\'s own kind, not reconnect');
+  }, { relationshipMatcher: async () => ({ cards: structuredClone(OWE_CARDS), focus: 'x', currentTopics: [] }) });
+
+  await withServer(async ({ call, db }) => {
+    await call('POST', '/admin/relationship/refresh'); await settle();
+    const { card } = await (await call('GET', '/admin/relationship/card')).json();
+    await call('POST', '/admin/relationship/event', { snapshot_id: card.snapshot_id,
+      person_key: card.personKey, event: 'opened' });
+    const openedEvent = db.prepare("SELECT kind, rule_version FROM rm_card_event WHERE event = 'opened'").get();
+    assert.equal(openedEvent.kind, 'owe');
+    assert.equal(openedEvent.rule_version, 'owe-v1');
+  }, { relationshipMatcher: async () => ({ cards: structuredClone(OWE_CARDS), focus: 'x', currentTopics: [] }) });
+});
+
 test('a repeated accepted for the same snapshot inserts once and reports duplicate', async () => {
   await withServer(async ({ call, db }) => {
     await call('POST', '/admin/relationship/refresh'); await settle();

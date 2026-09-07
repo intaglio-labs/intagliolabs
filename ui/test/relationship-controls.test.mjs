@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import { openDb } from '../server/hermes.mjs';
-import { createControls, timeBand, DISMISS_REASONS } from '../server/relationship/controls.mjs';
+import { createControls, timeBand, DISMISS_REASONS, NOT_THIS_KIND_MUTE_DAYS } from '../server/relationship/controls.mjs';
 import { createRelationshipMemory } from '../server/relationship/service.mjs';
 
 const NOW = Date.now();
@@ -79,6 +79,33 @@ test('dismissal reasons are the five on the card, and never-this-person suppress
     { event: 'dismissed', reason: 'never-this-person' },
     { event: 'dismissed', reason: null },
   ]);
+});
+
+// 'not-this-kind' is the analogous one-tap control to 'never-this-person',
+// scoped to a person+kind pair rather than the whole person: a card the
+// owner says is the wrong KIND of thing to be shown for them mutes that
+// kind, for them, for NOT_THIS_KIND_MUTE_DAYS -- never a global kind mute
+// (that is a settings-surface decision) and never every kind for them
+// (that would be 'never-this-person').
+test("'not-this-kind' mutes this person for this kind, and only this kind", () => {
+  const db = openDb(':memory:');
+  const c = ctl(db);
+  c.dismiss({ personKey: 'name:e', kind: 'owe', reason: 'not-this-kind', ruleVersion: 'owe-v1', now: NOW });
+  assert.equal(c.isMuted({ personKey: 'name:e', kind: 'owe', now: NOW }), true, 'owe is muted for this person');
+  assert.equal(c.isMuted({ personKey: 'name:e', kind: 'reconnect', now: NOW }), false,
+    'a different kind, same person, is untouched');
+  assert.equal(c.isSuppressed('name:e'), false, 'not-this-kind never suppresses the person outright');
+
+  const mute = db.prepare('SELECT person_key, kind, until_at FROM rm_mute').get();
+  assert.equal(mute.person_key, 'name:e');
+  assert.equal(mute.kind, 'owe');
+  assert.equal(mute.until_at, NOW + NOT_THIS_KIND_MUTE_DAYS * 86_400_000);
+
+  // Just past the mute window: no longer muted.
+  assert.equal(
+    c.isMuted({ personKey: 'name:e', kind: 'owe', now: NOW + (NOT_THIS_KIND_MUTE_DAYS + 1) * 86_400_000 }),
+    false
+  );
 });
 
 test('the global cap counts every kind together, and an unconfigured cap shows nothing', () => {
