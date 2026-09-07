@@ -1,22 +1,26 @@
 // Tests for public lookup (L5 step 6): buildLookupQuery's input gate,
 // parseLookupStream's stream-json reader, groundLookup's grounding rules
-// (all pure, no DB), and the DB half -- anchorsFor, lookupScope, lookupGate,
-// storeLookup, lookupPerson, runLookupPass. lookupStatus/lookupLogFor/
-// newestWebChange and the HTTP routes get their own tests alongside the
-// routes themselves (a later commit).
+// (all pure, no DB), the DB half -- anchorsFor, lookupScope, lookupGate,
+// storeLookup, lookupPerson, runLookupPass -- and the HTTP routes
+// (/admin/relationship/lookup, /lookup/person, /lookups; /stats.lookup;
+// the card's `changed` field).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { openDb } from '../server/hermes.mjs';
+import { openDb, start } from '../server/hermes.mjs';
 import {
   buildLookupQuery, parseLookupStream, groundLookup,
   anchorsFor, lookupScope, lookupGate, storeLookup, lookupPerson, runLookupPass,
   LOOKUP_REFRESH_DAYS,
 } from '../server/relationship/lookup.mjs';
+
+const TOKEN = 'b'.repeat(64);
 
 const NOW = Date.parse('2026-06-01T12:00:00Z');
 const DAY = 86_400_000;
@@ -534,4 +538,171 @@ test('lookupGate skips on battery, thermal, quota, and while a sweep runs', () =
   const quota = lookupGate(db, {}, { engine: 'fake' });
   assert.equal(quota.ok, false);
   assert.equal(quota.reason, 'quota');
+});
+
+// --- routes ---------------------------------------------------------------
+
+function insertPersonRow(db, key, name, { linkedin = null } = {}) {
+  db.prepare(
+    `INSERT INTO people(person_key, display_name, first_seen, last_seen, last_from_them, last_from_owner,
+       sent, received, met_in_person, room_messages, direct_messages, meeting_notes, role, roles_by_year,
+       linkedin, built_at, sub_roles)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).run(key, name, Date.now(), Date.now(), Date.now(), Date.now(), 1, 0, 0, 0, 1, 0, 'friend', '{}',
+    linkedin ? JSON.stringify(linkedin) : null, Date.now(), '[]');
+}
+
+// A fake lookup engine returning a real stream-json `type:'result'` line --
+// see fakeRawResult above for why one line is enough for parseLookupStream.
+function fakeLookupEngine(onCall) {
+  const counters = { calls: 0, totalCostUsd: 0, totalDurationMs: 0, errors: 0 };
+  return {
+    name: 'fake-lookup', model: 'fake', counters,
+    async complete({ system, user }) {
+      counters.calls += 1;
+      counters.totalCostUsd += 0.02;
+      const envelope = onCall ? onCall({ system, user }) : { identity_confidence: 'match', changes: [] };
+      return fakeRawResult(envelope, { cost: 0.02 });
+    },
+  };
+}
+
+// 20: POST /admin/relationship/lookup/person jumps the ordinary tier/
+// recency queue for one person (next_due_at forced to 0 regardless of
+// schedule), but still honours the same daily call cap an ordinary pass
+// respects.
+test('POST /admin/relationship/lookup/person jumps the queue but honours the cap', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-lookup-'));
+  const engine = fakeLookupEngine();
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
+    relationshipLookupEngine: engine, peopleProjectionAutoRebuild: false,
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const call = (method, path, body) => fetch(base + path, {
+    method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  try {
+    const db = server.db;
+    const key = 'name:jump the queue';
+    insertPersonRow(db, key, 'Jump The Queue', { linkedin: { company: 'Acme Corp' } });
+    // NOT due under the ordinary schedule: next_due_at is 100 days out.
+    db.prepare(
+      `INSERT INTO person_lookup_state(person_key, tier, anchors_hash, last_looked_at, next_due_at, last_status, lookups, proposals)
+       VALUES (?, 'other', 'stale', ?, ?, 'empty', 1, 0)`
+    ).run(key, Date.now(), Date.now() + 100 * 86_400_000);
+
+    const result = await (await call('POST', '/admin/relationship/lookup/person', { personKey: key })).json();
+    assert.equal(engine.counters.calls, 1, 'the engine WAS called even though next_due_at was far in the future');
+    assert.ok(result.log, 'a log row is returned');
+    assert.equal(result.log.personKey, key);
+    assert.deepEqual(result.changes, []);
+
+    // Now saturate the daily call cap and confirm the SAME route honours it.
+    const cap = 20; // LOOKUP_DAILY_CALL_CAP_DEFAULT
+    db.prepare(
+      `INSERT INTO person_lookup_run(distill_run_id, started_at, ended_at, power_mode, engine, budget, scope_size,
+         candidates, looked_up, model_calls, searches, proposed, dropped, cost_usd, skip_reason, status)
+       VALUES (NULL, ?, ?, 'trickle', 'fake', 1, 1, 1, 1, ?, 0, 0, 0, 0, NULL, 'complete')`
+    ).run(Date.now(), Date.now(), Math.ceil(cap * 0.9));
+
+    const capped = await (await call('POST', '/admin/relationship/lookup/person', { personKey: key })).json();
+    assert.equal(engine.counters.calls, 1, 'the engine was not called a second time once the cap gate fires');
+    assert.equal(capped.log, null);
+    assert.deepEqual(capped.changes, []);
+    assert.equal(capped.reason, 'quota');
+  } finally {
+    await server.close();
+  }
+});
+
+// 21: /stats carries a lookup key with real (not estimated) cost; the card
+// route carries `changed`, resolved live and null once the web row is gone.
+test('/stats carries lookup with real cost; the card carries `changed`, null once the web row is deleted', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-lookup-stats-'));
+  const CAP = { max: 5, windowMs: 86_400_000 };
+  const personKey = 'name:web change person';
+  const STUB_CARDS = [{
+    personKey, name: 'Web Change Person', kind: 'reconnect',
+    sentence: 'Text them to catch up.',
+    role: 'founder', focus: 'reconnecting', label: 'business',
+    left: null, leftTone: null,
+    evidence: { topics: [], messages: 10, dormancyDays: 300, meetings: 0, lastMeetingDaysAgo: null },
+    producer_version: 'rm-match-v13',
+  }];
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
+    relationshipMatcher: async () => ({ cards: structuredClone(STUB_CARDS), focus: 'x', currentTopics: [] }),
+    relationshipCap: CAP,
+    relationshipProducerConfig: { producer: 'matcher', mode: 'any' },
+    peopleProjectionAutoRebuild: false,
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const call = (method, path, body) => fetch(base + path, {
+    method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  try {
+    const db = server.db;
+    insertPersonRow(db, personKey, 'Web Change Person');
+
+    // Build one lookup end to end via the real DB-half functions, exactly
+    // the way runLookupPass would, so the log's cost_usd is a real number
+    // /stats can sum.
+    const distillRunId = Number(db.prepare(
+      `INSERT INTO distill_run(model, prompt_path, prompt_sha, params, episode_context, rows_in, claims_out, status, started_at, ended_at)
+       VALUES ('fake', 'x', 'x', '{}', 'off', 1, 0, 'running', ?, NULL)`
+    ).run(Date.now()).lastInsertRowid);
+    const runId = Number(db.prepare(
+      `INSERT INTO person_lookup_run(distill_run_id, started_at, ended_at, power_mode, engine, budget, scope_size,
+         candidates, looked_up, model_calls, searches, proposed, dropped, cost_usd, skip_reason, status)
+       VALUES (?, ?, NULL, 'trickle', 'fake', 1, 1, 1, 1, 0, 1, 0, 0, 0.0345, NULL, 'complete')`
+    ).run(distillRunId, Date.now()).lastInsertRowid);
+    const logId = Number(db.prepare(
+      `INSERT INTO lookup_log(person_key, run_id, at, engine, query, query_hash, fields_used, searches, urls_seen,
+         identity_confidence, changes_proposed, changes_dropped, cost_usd, status)
+       VALUES (?, ?, ?, 'fake', '"Web Change Person" "Acme"', 'abc123', '["name"]', 1, 1, 'match', 1, 0, 0.0345, 'proposed')`
+    ).run(personKey, runId, Date.now()).lastInsertRowid);
+
+    const kept = [{
+      kind: 'company', text: 'Now VP of Engineering at Acme.',
+      url: 'https://acme.example/news', quote: 'now VP of Engineering', date: '2026-05',
+    }];
+    storeLookup(db, { personKey, kept, logId, distillRunId, now: Date.now() });
+
+    const stats = await (await call('GET', '/stats')).json();
+    assert.ok(stats.lookup, '/stats carries a lookup key');
+    assert.equal(typeof stats.lookup.callCap, 'number');
+    assert.ok(stats.lookup.costUsd24h >= 0.0345, '/stats.lookup.costUsd24h sums the real per-lookup cost_usd');
+
+    await (await call('POST', '/admin/relationship/refresh')).json();
+    await new Promise((r) => setTimeout(r, 50)); // refresh is fire-and-forget
+
+    const before = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(before.card.name, 'Web Change Person');
+    assert.ok(before.card.changed, 'the card carries `changed`');
+    assert.equal(before.card.changed.url, 'https://acme.example/news');
+    assert.equal(before.card.changed.kind, 'company');
+    assert.equal(before.card.changed.quote, 'now VP of Engineering');
+    assert.equal(before.card.changed.date, '2026-05');
+    assert.notEqual(before.card.sentence, undefined, '`changed` never displaces `sentence`');
+
+    // Delete the web row -- the receipt is gone, so `changed` must be gone.
+    // `changed` is resolved fresh from the live row on every serve (never
+    // cached with the rest of the card), so re-fetching the SAME
+    // already-shown snapshot is enough to observe this -- no new refresh
+    // needed.
+    // claim_source references context(id) with no ON DELETE CASCADE (a
+    // deliberate snapshot, not a live pointer -- see hermes.mjs's own
+    // schema comment), so a real deletion path unlinks it first; this test
+    // does the same rather than tripping the FK.
+    db.prepare("DELETE FROM claim_source WHERE context_id IN (SELECT id FROM context WHERE source = 'web')").run();
+    db.prepare("DELETE FROM context WHERE source = 'web'").run();
+    const after = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(after.card.name, 'Web Change Person');
+    assert.equal(after.card.changed, null, '`changed` is null once the web row is gone');
+  } finally {
+    await server.close();
+  }
 });

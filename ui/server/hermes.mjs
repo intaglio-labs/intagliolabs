@@ -77,7 +77,10 @@ import { createRelationshipMemory } from './relationship/service.mjs';
 import { buildMatchedCards, MATCH_RULES_VERSION } from './relationship/matcher.mjs';
 import { buildPersonPage, readPersonPage } from './relationship/pages.mjs';
 import { runSweepPass, applySweepDecision, sweepStatus } from './relationship/sweep.mjs';
-import { createEngine } from './relationship/engines.mjs';
+import {
+  runLookupPass, lookupGate, lookupTierFor, lookupStatus, lookupLogFor, newestWebChange,
+} from './relationship/lookup.mjs';
+import { createEngine, createLookupEngine } from './relationship/engines.mjs';
 import { eligiblePool, produceBatch } from './relationship/producer.mjs';
 import {
   clearPeopleSearchCacheStorage,
@@ -1985,6 +1988,13 @@ const RELATIONSHIP_PAGE_PARAMS = Object.freeze(['personKey']);
 // itself thinks of the same number as the pass's budget (SWEEP_BUDGET).
 const RELATIONSHIP_SWEEP_FIELDS = Object.freeze(['power', 'budget', 'battery', 'onAc', 'thermal', 'engine', 'limit']);
 const SWEEP_THERMAL_VALUES = Object.freeze(['nominal', 'fair', 'serious', 'critical']);
+// Same field set and validation as the sweep route above (power/budget/
+// battery/onAc/thermal/limit); public lookup has no per-request engine
+// override -- llama is never a valid lookup engine (see engines.mjs
+// createLookupEngine), so there is nothing safe for that field to select.
+const RELATIONSHIP_LOOKUP_FIELDS = Object.freeze(['power', 'budget', 'battery', 'onAc', 'thermal', 'limit']);
+const RELATIONSHIP_LOOKUP_PERSON_FIELDS = Object.freeze(['personKey']);
+const RELATIONSHIP_LOOKUPS_PARAMS = Object.freeze(['personKey']);
 const DECISION_ACTIONS = Object.freeze(['accept', 'reject', 'retract']);
 // The review page is the v1 product surface and it has to show the receipt, so
 // this cap is about one sitting's reading, not about safety.
@@ -2684,6 +2694,22 @@ function relationshipMemoryEngine(policy, engineOverride) {
   return createEngine({ ...cfg, relationshipMemory, llama: policy.llama });
 }
 
+// The engine public lookup uses -- same seam discipline as
+// relationshipMemoryEngine, its own test-seam override
+// (policy.relationshipLookupEngine, a pre-built engine object OR null)
+// winning outright, else createLookupEngine() reads the owner's config and
+// picks claude-cli when the binary resolves, else null (no llama fallback --
+// see engines.mjs createLookupEngine). No per-request engine override: there
+// is only one valid non-null choice, so nothing to select.
+function relationshipLookupEngine(policy) {
+  if (policy.relationshipLookupEngine !== undefined) return policy.relationshipLookupEngine;
+  let cfg = {};
+  try {
+    cfg = JSON.parse(readFileSync(join(homedir(), '.hazlie', 'connectors', 'config.json'), 'utf8'));
+  } catch {}
+  return createLookupEngine({ ...cfg, relationshipMemory: cfg.relationshipMemory });
+}
+
 // Page-first card queue (L5 step 10 follow-on): a batch the eligibility
 // producer just wrote is, for most of its candidates, a person with no built
 // page yet -- and a card with a page (a real how_left/ask in the person's own
@@ -3010,7 +3036,19 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       // neither leaves `sentence` exactly as it was.
       const page = readPersonPage(db, card.personKey);
       const sentence = page.sections.how_left?.text ?? page.sections.asks[0]?.text ?? card.sentence;
-      send(res, 200, { card: { ...card, quote, sentence, who: page.sections.who?.text ?? null, page },
+      // `changed`: public lookup's own signal (L5 step 6), separate from
+      // `sentence` and never displacing it -- the newest non-rejected
+      // public-web change about this person, resolved through its live
+      // context row (row gone -> null). Wrapped the same defensively as
+      // sweepStatus below: a missing/pre-migration lookup table must not
+      // take the card route down.
+      let changed = null;
+      try {
+        changed = newestWebChange(db, card.personKey);
+      } catch {
+        changed = null;
+      }
+      send(res, 200, { card: { ...card, quote, sentence, who: page.sections.who?.text ?? null, page, changed },
         ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
       return;
     }
@@ -3143,6 +3181,112 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       now: Date.now(),
     });
     send(res, 200, { ...result, cost_usd: engine.counters?.totalCostUsd ?? null }, cors);
+    return;
+  }
+
+  // Public lookup (L5 step 6): one pass over lookupScope's own due
+  // candidates, spawned by the Distiller's timer (Swift-side, a later
+  // commit's lookup-once.mjs) or by hand from the desk. Bearer-only, same
+  // reasoning as /admin/relationship/sweep -- this spends the owner's own
+  // model subscription (and real web-search rate-limit budget) and writes
+  // PENDING claims about real people, this time from the public web rather
+  // than the owner's own corpus.
+  //
+  // rel.lookupActive is set and cleared by runLookupPass itself (mirrors
+  // sweepActive's own reasoning) -- the read below is only a cheap early
+  // exit; the authoritative check is lookupGate's, inside runLookupPass.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/lookup') {
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_LOOKUP_FIELDS);
+    if (body.power !== undefined && body.power !== 'full' && body.power !== 'trickle') {
+      throw badRequest('"power" must be "full" or "trickle"');
+    }
+    const budget = body.budget ?? body.limit;
+    if (budget !== undefined && budget !== null && (!Number.isInteger(budget) || budget < 1)) {
+      throw badRequest('"budget"/"limit" must be a positive integer');
+    }
+    if (body.battery !== undefined && body.battery !== null
+        && (typeof body.battery !== 'number' || !Number.isFinite(body.battery) || body.battery < 0 || body.battery > 100)) {
+      throw badRequest('"battery" must be a number from 0 through 100');
+    }
+    if (body.onAc !== undefined && body.onAc !== null && typeof body.onAc !== 'boolean') {
+      throw badRequest('"onAc" must be a boolean');
+    }
+    if (body.thermal !== undefined && body.thermal !== null && !SWEEP_THERMAL_VALUES.includes(body.thermal)) {
+      throw badRequest(`"thermal" must be one of: ${SWEEP_THERMAL_VALUES.join(', ')}`);
+    }
+
+    const rel = relationshipState(db, policy);
+    if (rel.lookupActive) {
+      send(res, 200, { started: false, reason: 'already running' }, cors);
+      return;
+    }
+    const engine = relationshipLookupEngine(policy);
+    const result = await runLookupPass(db, engine, policy, {
+      powerMode: body.power ?? 'trickle',
+      budget: budget ?? undefined,
+      battery: body.battery ?? null,
+      onAc: body.onAc ?? null,
+      thermal: body.thermal ?? null,
+      now: Date.now(),
+    });
+    send(res, 200, { ...result, cost_usd: engine?.counters?.totalCostUsd ?? null }, cors);
+    return;
+  }
+
+  // "Look this person up now" -- jumps public lookup's ordinary tier/recency
+  // queue for exactly one already-known person (next_due_at forced to 0
+  // before the pass, budget 1, scope narrowed to this one personKey via
+  // runLookupPass's onlyPersonKey), but is still gated and capped through
+  // the SAME lookupGate check and the same daily call cap as an ordinary
+  // pass -- a desk click cannot bypass either.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/lookup/person') {
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_LOOKUP_PERSON_FIELDS);
+    if (typeof body.personKey !== 'string' || body.personKey.length === 0) {
+      throw badRequest('"personKey" is required');
+    }
+
+    const rel = relationshipState(db, policy);
+    if (rel.lookupActive) {
+      send(res, 200, { started: false, reason: 'already running' }, cors);
+      return;
+    }
+    const engine = relationshipLookupEngine(policy);
+    const gate = lookupGate(db, policy, { engine });
+    if (!gate.ok) {
+      send(res, 200, { log: null, changes: [], reason: gate.reason }, cors);
+      return;
+    }
+
+    const tier = lookupTierFor(db, body.personKey, { now: Date.now() });
+    db.prepare(
+      `INSERT INTO person_lookup_state(person_key, tier, anchors_hash, last_looked_at, next_due_at, last_status, lookups, proposals)
+       VALUES (?, ?, '', NULL, 0, NULL, 0, 0)
+       ON CONFLICT(person_key) DO UPDATE SET next_due_at = 0`
+    ).run(body.personKey, tier);
+
+    await runLookupPass(db, engine, policy, { budget: 1, now: Date.now(), onlyPersonKey: body.personKey });
+
+    const log = lookupLogFor(db, body.personKey, { limit: 1 })[0] ?? null;
+    const changes = log
+      ? db.prepare('SELECT * FROM person_lookup_change WHERE log_id = ?').all(log.id)
+      : [];
+    send(res, 200, { log, changes }, cors);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/admin/relationship/lookups') {
+    for (const key of url.searchParams.keys()) {
+      if (!RELATIONSHIP_LOOKUPS_PARAMS.includes(key)) {
+        throw badRequest(`unknown query parameter ${JSON.stringify(key)}`);
+      }
+    }
+    const personKey = url.searchParams.get('personKey');
+    if (typeof personKey !== 'string' || personKey.length === 0) {
+      throw badRequest('"personKey" query parameter is required');
+    }
+    send(res, 200, { lookups: lookupLogFor(db, personKey) }, cors);
     return;
   }
 
@@ -4417,8 +4561,17 @@ async function handle(db, req, res, cors, url, policy) {
     } catch {
       sweep = null;
     }
+    // lookupStatus is a plain aggregate over brand-new tables, same
+    // defensive wrap as sweep above -- a missing/pre-migration lookup
+    // schema must never take /stats down.
+    let lookup = null;
+    try {
+      lookup = lookupStatus(db);
+    } catch {
+      lookup = null;
+    }
     send(res, 200,
-      { rows: Number(n), memory: memoryProgress(db), peopleProjection: peopleProjectionStatus(db, policy), sweep },
+      { rows: Number(n), memory: memoryProgress(db), peopleProjection: peopleProjectionStatus(db, policy), sweep, lookup },
       cors);
     return;
   }
@@ -4809,6 +4962,11 @@ export async function start({
   // loopback llama-server. Production leaves this undefined and
   // relationshipMemoryEngine() reads the owner's config file per call.
   relationshipMemoryEngine: relationshipMemoryEngineOverride,
+  // Test seam for public lookup (L5 step 6): a pre-built `{name, complete}`
+  // engine (or null, to exercise the no-engine path), same discipline as
+  // relationshipMemoryEngine above. Production leaves this undefined and
+  // relationshipLookupEngine() reads the owner's config file per call.
+  relationshipLookupEngine: relationshipLookupEngineOverride,
   // Test seam: production always wants the eager rebuild (see
   // schedulePeopleRebuild); a test asserting synchronous post-clear/purge
   // emptiness opts out rather than the production default changing for it.
@@ -4902,6 +5060,7 @@ export async function start({
         relationshipCap,
         relationshipProducerConfig,
         relationshipMemoryEngine: relationshipMemoryEngineOverride,
+        relationshipLookupEngine: relationshipLookupEngineOverride,
         relationshipHolder,
         peopleProjectionHolder,
         peopleProjectionAutoRebuild,

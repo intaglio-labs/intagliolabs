@@ -506,12 +506,24 @@ export function lookupTierFor(db, personKey, { now = Date.now() } = {}) {
 // runSweepPass's own split between an empty scope and "no new rows").
 // ORDER BY tier (eligible, tagged, other), then least-recently-looked-up
 // first.
-export function lookupScope(db, { now = Date.now() } = {}) {
-  const rows = db.prepare(
-    `SELECT p.person_key AS personKey, p.display_name AS name
-     FROM people p
-     WHERE p.person_key NOT IN (SELECT person_key FROM rm_suppression)`
-  ).all();
+// `personKey`, when given, narrows the base population to that one person --
+// used by the /admin/relationship/lookup/person route (a later commit) to
+// build a one-candidate scope for "look this person up now" rather than
+// letting the ordinary tier/recency ordering pick who runLookupPass spends
+// its budget on. Omitted (the default), this is the full population every
+// ordinary pass considers.
+export function lookupScope(db, { now = Date.now(), personKey = null } = {}) {
+  const rows = personKey
+    ? db.prepare(
+        `SELECT p.person_key AS personKey, p.display_name AS name
+         FROM people p
+         WHERE p.person_key = ? AND p.person_key NOT IN (SELECT person_key FROM rm_suppression)`
+      ).all(personKey)
+    : db.prepare(
+        `SELECT p.person_key AS personKey, p.display_name AS name
+         FROM people p
+         WHERE p.person_key NOT IN (SELECT person_key FROM rm_suppression)`
+      ).all();
 
   const stateStmt = db.prepare(
     `SELECT anchors_hash AS anchorsHash, last_looked_at AS lastLookedAt, next_due_at AS nextDueAt
@@ -843,14 +855,20 @@ function sleep(ms) {
 // either produced a real answer or correctly asked-and-found-nothing/had-
 // nothing-to-ask; hold on engine-error/parse-error, which asked and got
 // nothing usable back), paused LOOKUP_PAUSE_MS between people.
+// `onlyPersonKey`, when given, narrows lookupScope to that one person --
+// the /admin/relationship/lookup/person route's "look this person up now"
+// (jumps the ordinary tier/recency queue for exactly one already-known
+// person, but is still gated and capped through the same lookupGate check
+// and the same budget/due machinery as an ordinary pass).
 export async function runLookupPass(db, engine, policy, {
   powerMode = 'trickle', battery = null, onAc = null, thermal = null, budget, now = Date.now(),
+  onlyPersonKey = null,
 } = {}) {
   const effectiveBudget = Number.isInteger(budget) ? budget : (LOOKUP_BUDGET[powerMode] ?? LOOKUP_BUDGET.trickle);
   const engineName = engine?.name ?? 'none';
 
   const gate = lookupGate(db, policy, { powerMode, battery, onAc, thermal, engine });
-  const scope = lookupScope(db, { now });
+  const scope = lookupScope(db, { now, personKey: onlyPersonKey });
   if (!gate.ok) {
     return insertSkippedLookupRun(db, {
       now, powerMode, engineName, budget: effectiveBudget, scopeSize: scope.length, reason: gate.reason,
