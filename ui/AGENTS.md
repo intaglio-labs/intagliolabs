@@ -169,6 +169,19 @@ written down anywhere else. For what is reachable *today*, read the ledger.
    fetched page, and every query is logged verbatim — field names, the
    assembled string, and its hash — in `lookup_log`, on the person's own page.
 
+**Lint (step 5½, `relationship/lint.mjs`) is not a seventh entry here, on
+purpose.** It runs on the Distiller's own schedule immediately after public
+lookup (`runSweep { runLookup { runLint { schedule } } }`, both call sites in
+`widget/src/Distiller.swift`), but it makes **no model call and opens no
+socket at all** — every one of its five checks is SQL against the local
+context store, or SQL plus a pure JS recomputation, so there is nothing for
+it to declare in `ops/EGRESS.json`. If a future change to `lint.mjs` ever
+needs a model or a network call, that is no longer "lint" as this file
+defines it and belongs in its own reviewed egress entry, not folded quietly
+into this one. It also **never auto-fixes**: the only automatic transition a
+finding makes is `'gone'` (the condition itself stopped being true); every
+other resolution is the owner's own click in the review desk's Lint tab.
+
 Recorded rejections: **Sendblue** (would relay message content through a third
 party's Mac farm from a number that isn't the owner's — fails the claim above three
 ways). Automatic cloud LLM calls carrying rows or hidden context remain

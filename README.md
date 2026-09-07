@@ -79,6 +79,12 @@ the setup intentionally uses a stable Node copy at `~/.hazlie/bin/node`.
 - **Reconciliation cannot mass-delete.** A scan that observes nothing cannot
   delete anything; see `connectors/lib/reconcile.mjs`.
 - **Secrets are read at use time** from `0600` files inside a `0700` directory.
+- **Lint never calls a model and never fixes anything by itself.** A
+  scheduled pass (run after public lookup on the same timer) checks the local
+  database's own consistency — an accepted claim past its own expiry, a page
+  that can no longer be refreshed, and similar — and surfaces what it finds
+  for your own review; the only thing it ever changes automatically is
+  marking a finding resolved once its underlying condition is gone.
 
 `connectors/AGENTS.md` and `ui/AGENTS.md` contain behavior-critical guidance
 for work in those directories.

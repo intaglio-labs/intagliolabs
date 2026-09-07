@@ -92,6 +92,14 @@ Do not re-add these; their absence is a decision, not an oversight.
    no fetched page, and records every query in lookup_log — field names, the
    assembled string, and its hash — on the person's own page.
 
+   Lint (step 5½, ui/server/relationship/lint.mjs) runs right after public
+   lookup on the same schedule and is deliberately the opposite of it: no
+   model call, no outbound socket, nothing to declare in ops/EGRESS.json.
+   Every check is SQL against the local store, or SQL plus a pure JS
+   recomputation. It also never auto-fixes anything it finds — the owner
+   resolves each finding by hand; the only automatic transition is a finding
+   closing itself once the condition that produced it is gone.
+
 4. **Logs never carry row content.** The logger refuses fields named like message
    content. Counts, timings, IDs and error types only. This holds for probes too.
 
