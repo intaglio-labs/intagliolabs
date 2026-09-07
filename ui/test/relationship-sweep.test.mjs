@@ -17,6 +17,25 @@ import {
   SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, tokensEstFor,
 } from '../server/relationship/sweep.mjs';
 
+// A context row from a non-message source (e.g. an imported LinkedIn
+// connection, linked authored=1 room=0 the way people/graph.mjs's
+// PERSON_SOURCE_POLICY treats it as a 'participant' identity signal), which
+// buildEpisodes (memory/episodes.mjs) can never turn into a quotable
+// excerpt -- exactly the row shape that used to make a person a permanent,
+// zero-call sweep candidate (audit, 2026-09).
+function insertLinkedinAuthoredRow(db, personKey, { ts }) {
+  const id = Number(
+    db
+      .prepare("INSERT INTO context(ts, source, text, meta) VALUES (?, 'linkedin', ?, ?)")
+      .run(ts, 'Imported LinkedIn connection', JSON.stringify({})).lastInsertRowid
+  );
+  db.prepare(
+    `INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+     VALUES (?, ?, 'linkedin', 'counterparty', 1, 0, 0, 1, ?)`
+  ).run(personKey, id, `linkedin:${personKey}`);
+  return id;
+}
+
 const NOW = Date.parse('2026-09-01T12:00:00Z');
 const DAY = 86_400_000;
 const day = (offsetDays) => new Date(NOW - offsetDays * DAY).toISOString().slice(0, 10);
@@ -293,6 +312,27 @@ test('sweepScope excludes a suppressed person and an anonymous contact', () => {
   assert.ok(!keys.includes(anonKey), 'an anonymous (bare-address) contact is excluded');
 });
 
+test('an authored row from a non-message source does not make a person a sweep candidate', async () => {
+  const db = openDb(':memory:');
+  const key = 'name:linkedin only';
+  insertPerson(db, { key, name: 'Linkedin Only', role: 'business', sent: 0, received: 0 });
+  // The only row this person ever authored (past the cursor, which starts at
+  // 0 for a never-swept person) is a LinkedIn import -- never a message.
+  insertLinkedinAuthoredRow(db, key, { ts: NOW - 1 * DAY });
+
+  const scope = sweepScope(db, { now: NOW });
+  assert.ok(
+    !scope.map((c) => c.personKey).includes(key),
+    'sweepScope excludes a person whose only authored row is a non-message source'
+  );
+
+  const engine = fakeSweepEngine(() => JSON.stringify({ tags: [], firm: null, page_lines: [] }));
+  const pass = await runSweepPass(db, engine, {}, { powerMode: 'trickle', now: NOW });
+  assert.equal(engine.counters.calls, 0, 'no engine call is ever made for a linkedin-only authored row');
+  assert.equal(pass.status, 'skipped');
+  assert.equal(pass.skip_reason, 'no-scope');
+});
+
 // ---------------------------------------------------------------------------
 // (10, 13) storeSweep: the trusted apply path, re-checked against the LIVE
 // row. storeSweep itself does not create the distill_run/person_sweep_run
@@ -483,6 +523,43 @@ test('an engine error keeps the cursor and a grounded-empty answer advances it',
   const okCursor = db.prepare('SELECT * FROM person_sweep_cursor WHERE person_key = ?').get(okKey);
   assert.equal(okCursor.last_status, 'empty');
   assert.ok(Number(okCursor.swept_through_context_id) > 0, 'a grounded-empty answer still advances the cursor');
+});
+
+test('a person with nothing showable is advanced past all their rows and not re-selected', async () => {
+  const db = openDb(':memory:');
+  const key = 'name:nothing showable';
+  insertPerson(db, { key, name: 'Nothing Showable', role: 'business', sent: 0, received: 0 });
+  // A message-source (imessage) authored row with NO owner reply anywhere in
+  // its thread -- buildEpisodes' makeEpisode requires at least one quotable
+  // (owner) row before it will yield an episode at all (memory/episodes.mjs),
+  // so this row is a genuine sweep candidate (it clears the SWEEP_SOURCES
+  // gate) that newRowsFor still comes back with zero excerpts for -- the
+  // belt path in sweepPerson, not the SWEEP_SOURCES gate.
+  const themId = Number(
+    db
+      .prepare("INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', ?, ?)")
+      .run(NOW - 1 * DAY, 'a lone message with no owner reply', JSON.stringify({ chat_guid: 'chat:lonely', is_from_me: false }))
+      .lastInsertRowid
+  );
+  db.prepare(
+    `INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+     VALUES (?, ?, 'imessage', 'counterparty', 1, 0, 0, 1, 'chat:lonely')`
+  ).run(key, themId);
+
+  const engine = fakeSweepEngine(() => JSON.stringify({ tags: [], firm: null, page_lines: [] }));
+
+  const first = await runSweepPass(db, engine, {}, { powerMode: 'trickle', now: NOW });
+  assert.equal(first.status, 'complete');
+  assert.equal(engine.counters.calls, 0, 'nothing showable means no engine call at all');
+
+  const cursor = db.prepare('SELECT * FROM person_sweep_cursor WHERE person_key = ?').get(key);
+  assert.equal(cursor.last_status, 'empty');
+  assert.equal(Number(cursor.swept_through_context_id), themId, 'the cursor advances past the unshowable row, over all sources');
+
+  const second = await runSweepPass(db, engine, {}, { powerMode: 'trickle', now: NOW + 1000 });
+  assert.equal(second.status, 'skipped');
+  assert.equal(second.skip_reason, 'no-new-rows');
+  assert.equal(engine.counters.calls, 0, 'a second pass makes zero calls -- the person is not re-selected');
 });
 
 // ---------------------------------------------------------------------------

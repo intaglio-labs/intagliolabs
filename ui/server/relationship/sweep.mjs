@@ -27,7 +27,33 @@ import { buildEpisodes, isQuotable } from '../memory/episodes.mjs';
 import { SUB_ROLES } from '../people/subRoles.mjs';
 import { isAnonymousContact } from '../people/map.mjs';
 import { markPersonSubRoles } from '../people/owner.mjs';
+import { PERSON_SOURCE_POLICY } from '../people/graph.mjs';
 import { SECTION_KIND, alreadyStored } from './pages.mjs';
+
+// The sources a person could actually have WRITTEN a message in, past tense
+// -- what the candidate gate (sweepScope's max-id query) and newRowsFor must
+// agree on, or a row that counts for one and never shows for the other loops
+// a person forever (audit, 2026-09: a 'linkedin' context row -- an imported
+// connection record, linked authored=1 room=0 -- sat past a person's cursor
+// while buildEpisodes (memory/episodes.mjs) never yields a quotable episode
+// for it at all, so the person was a candidate every pass, the model was
+// never shown anything, and the cursor could never reach past it).
+//
+// Derived from PERSON_SOURCE_POLICY (people/graph.mjs), whose 'participant'
+// sources may mint or strengthen a person -- but 'calendar' and 'linkedin'
+// are participant sources for IDENTITY purposes only (an attendee row, an
+// imported connection) and never carry a message a person authored to the
+// owner: a calendar row has no is_from_me flag for isQuotable to key off of,
+// and a LinkedIn import row is not a message at all. buildEpisodes drops any
+// episode with zero quotable rows, so neither ever reaches newRowsFor's
+// excerpts regardless of this constant -- SWEEP_SOURCES exists so the
+// candidate gate reaches the same conclusion BEFORE a model would ever be
+// asked, not after.
+export const SWEEP_SOURCES = Object.freeze(
+  Object.entries(PERSON_SOURCE_POLICY)
+    .filter(([source, policy]) => policy === 'participant' && source !== 'calendar' && source !== 'linkedin')
+    .map(([source]) => source)
+);
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -101,9 +127,18 @@ export function sweepScope(db, { now = Date.now() } = {}) {
     )
     .all();
 
+  // Joined against context and filtered to SWEEP_SOURCES so this agrees with
+  // newRowsFor about which rows count: a person whose only authored row past
+  // the cursor is a non-message source (a LinkedIn import, a calendar
+  // attendee row) must not look like fresh, unswept history here, because
+  // newRowsFor's episode builder can never show that row (see SWEEP_SOURCES
+  // above).
+  const sourcePlaceholders = SWEEP_SOURCES.map(() => '?').join(',');
   const maxIdStmt = db.prepare(
     `SELECT MAX(pel.context_id) AS maxId FROM person_event_links pel
-     WHERE pel.person_key = ? AND pel.authored = 1 AND pel.room = 0`
+     JOIN context c ON c.id = pel.context_id
+     WHERE pel.person_key = ? AND pel.authored = 1 AND pel.room = 0
+       AND c.source IN (${sourcePlaceholders})`
   );
   const cursorStmt = db.prepare(
     `SELECT swept_through_context_id FROM person_sweep_cursor WHERE person_key = ?`
@@ -115,8 +150,14 @@ export function sweepScope(db, { now = Date.now() } = {}) {
     // the two surfaces never disagree about who counts as a real,
     // by-name-addressable person.
     if (isAnonymousContact({ name: row.name, key: row.personKey })) continue;
-    const maxRow = maxIdStmt.get(row.personKey);
-    if (maxRow?.maxId === null || maxRow?.maxId === undefined) continue; // defensive: the EXISTS gate above should make this unreachable
+    const maxRow = maxIdStmt.get(row.personKey, ...SWEEP_SOURCES);
+    // No longer purely defensive: the EXISTS gate above counts ANY authored
+    // row (any source), but this now filters to SWEEP_SOURCES -- so a person
+    // whose only direct row ever was a non-message source (e.g. every
+    // authored row is 'linkedin') legitimately has no message-like history
+    // and is skipped here rather than becoming a permanent zero-call
+    // candidate.
+    if (maxRow?.maxId === null || maxRow?.maxId === undefined) continue;
     const cursorRow = cursorStmt.get(row.personKey);
     out.push({
       personKey: row.personKey,
@@ -156,9 +197,20 @@ function isReceiptItem(v) {
 // rows are re-sorted chronologically afterward for display, same as
 // gatherPersonContext.
 export function newRowsFor(db, personKey, cursor, { maxEpisodes = SWEEP_MAX_EPISODES, maxChars = SWEEP_MAX_CHARS } = {}) {
+  // Joined against context and filtered to SWEEP_SOURCES, same as
+  // sweepScope's max-id query above -- a row the builder would never show
+  // (a non-message source) is excluded from the candidate pool here too,
+  // rather than being pooled and then silently dropped by buildEpisodes'
+  // own zero-quotable-episode rule downstream.
+  const sourcePlaceholders = SWEEP_SOURCES.map(() => '?').join(',');
   const linked = db
-    .prepare(`SELECT DISTINCT context_id FROM person_event_links WHERE person_key = ? AND room = 0`)
-    .all(personKey);
+    .prepare(
+      `SELECT DISTINCT pel.context_id AS context_id
+       FROM person_event_links pel
+       JOIN context c ON c.id = pel.context_id
+       WHERE pel.person_key = ? AND pel.room = 0 AND c.source IN (${sourcePlaceholders})`
+    )
+    .all(personKey, ...SWEEP_SOURCES);
   const ids = linked.map((r) => Number(r.context_id));
 
   let rows = [];
@@ -470,14 +522,39 @@ function isEmptyProposal(proposal) {
 //                     cursor the same way (see runSweepPass).
 //   'engine-error'  -- the model call itself threw.
 //   'parse-error'   -- the model's output was not the expected JSON shape.
+// Belt (see SWEEP_SOURCES above, and the caller below): the person's max
+// authored context id over EVERY source, not just SWEEP_SOURCES -- used only
+// once newRowsFor has already come back with nothing to show, so the cursor
+// can jump past a row that yields no excerpt for ANY reason (a source
+// SWEEP_SOURCES does not yet exclude, a future connector, anything else that
+// makes buildEpisodes drop the episode) rather than re-offering that same
+// row as a candidate on every future pass.
+function maxAuthoredContextIdAnySource(db, personKey) {
+  const row = db
+    .prepare(
+      `SELECT MAX(context_id) AS maxId FROM person_event_links
+       WHERE person_key = ? AND authored = 1 AND room = 0`
+    )
+    .get(personKey);
+  return row?.maxId === null || row?.maxId === undefined ? null : Number(row.maxId);
+}
+
 export async function sweepPerson(db, engine, candidate, { sweepRunId, distillRunId, now = Date.now() } = {}) {
   const gathered = newRowsFor(db, candidate.personKey, candidate.cursor, {
     maxEpisodes: SWEEP_MAX_EPISODES, maxChars: SWEEP_MAX_CHARS,
   });
   if (gathered.excerpts.filter((e) => e.speaker === 'THEM').length === 0) {
+    // A row that yields no excerpt has still been evaluated and found
+    // unshowable -- advance past ALL of this person's authored rows (every
+    // source, not just what newRowsFor could show) so a mismatch between the
+    // candidate gate and the episode builder can never strand this person as
+    // a permanent zero-call candidate, even one SWEEP_SOURCES does not
+    // anticipate. No engine call: there is nothing to show it.
+    const anySourceMax = maxAuthoredContextIdAnySource(db, candidate.personKey);
+    const maxContextId = Math.max(gathered.maxContextId, anySourceMax ?? gathered.maxContextId);
     return {
       personKey: candidate.personKey, calls: 0, proposed: 0, dropped: 0, tokensEst: 0,
-      status: 'empty', maxContextId: gathered.maxContextId,
+      status: 'empty', maxContextId,
     };
   }
 
