@@ -71,6 +71,18 @@ const DAY = 86_400_000;
 // setting, so it is a plain constant rather than something read from config.
 const RECENTLY_OFFERED_DAYS = 7;
 
+// The floor below which a relationship does not make the pool at all, absent
+// an in-person meeting. Added (L5 step 4 desk feedback) after the pool's own
+// review surface made a 4-message tie visible for the first time -- two
+// replies to a mailing-list blast is not a relationship the eligibility
+// producer should be offering to reconnect on. `meetings >= 1` is still a
+// separate, sufficient path: a single in-person meeting can outweigh a thin
+// message count the same way `depth`'s `3*meetings` weighting already treats
+// it as worth three messages. Overridable per-request via ?minDepth= on
+// /admin/relationship/pool, for the desk to widen or narrow the view without
+// a redeploy; the ordinary batch-producing path always uses the default.
+export const MIN_DEPTH_MESSAGES = 20;
+
 function hasColumn(db, table, column) {
   return db.prepare(`SELECT 1 FROM pragma_table_info(?) WHERE name = ?`).get(table, column) !== undefined;
 }
@@ -126,7 +138,7 @@ function poolSql(db, { includeOffered = false } = {}) {
       q.last_active_day AS lastActiveDay
     FROM people p
     LEFT JOIN quiet q ON q.person_key = p.person_key
-    WHERE ((p.sent > 0 AND p.received > 0) OR p.met_in_person > 0)
+    WHERE ((p.sent + p.received) >= ? OR p.met_in_person > 0)
       AND p.person_key IN (SELECT person_key FROM authored)
       AND p.person_key NOT IN (SELECT person_key FROM future_meetings)
       AND p.person_key NOT IN (SELECT person_key FROM rm_suppression)
@@ -147,8 +159,8 @@ function poolSql(db, { includeOffered = false } = {}) {
   `;
 }
 
-export function eligiblePool(db, { mode, now = Date.now(), includeOffered = false } = {}) {
-  const params = [now, CAL_GATES.maxAttendees, now];
+export function eligiblePool(db, { mode, now = Date.now(), includeOffered = false, minDepth = MIN_DEPTH_MESSAGES } = {}) {
+  const params = [now, CAL_GATES.maxAttendees, minDepth, now];
   if (!includeOffered) params.push(now - RECENTLY_OFFERED_DAYS * DAY);
   const rows = db.prepare(poolSql(db, { includeOffered })).all(...params);
 

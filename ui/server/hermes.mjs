@@ -74,6 +74,8 @@ import {
 import { openTallyStore } from './people/tallyStore.mjs';
 import { createRelationshipMemory } from './relationship/service.mjs';
 import { buildMatchedCards, MATCH_RULES_VERSION } from './relationship/matcher.mjs';
+import { buildPersonPage, readPersonPage } from './relationship/pages.mjs';
+import { createEngine } from './relationship/engines.mjs';
 import { eligiblePool, produceBatch } from './relationship/producer.mjs';
 import {
   clearPeopleSearchCacheStorage,
@@ -522,6 +524,19 @@ CREATE TABLE IF NOT EXISTS claim_decision(
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS claim_decision_claim ON claim_decision(claim_id, id);
+
+/* Which SECTION of a built person page a claim came from (L5 step 4,
+   relationship/pages.mjs). The claim itself carries no section -- it is a
+   claim like any other, subject='person', reviewed through the same
+   claim_decision machinery -- this table exists only so a page can be
+   reconstructed grouped the way it was built (who / asks / objection /
+   how_left / notable) without guessing from claim.text. One row per kept
+   item; deleting the claim (ON DELETE CASCADE) deletes this row with it. */
+CREATE TABLE IF NOT EXISTS person_page_item(
+  claim_id  INTEGER PRIMARY KEY REFERENCES claim(id) ON DELETE CASCADE,
+  section   TEXT NOT NULL CHECK (section IN ('who','ask','objection','how_left','notable')),
+  built_at  INTEGER NOT NULL
+);
 
 /* The porter stemmer, because this index is queried with the owner's own
    English: it unifies morning/mornings, allergy/allergies, take/takes.
@@ -1807,8 +1822,10 @@ const APPLY_CLAIM_FIELDS = Object.freeze(['kind', 'text', 'when_phrase', 'p_clai
 const DECIDE_FIELDS = Object.freeze(['claim_id', 'action', 'reason']);
 const PENDING_PARAMS = Object.freeze(['limit']);
 const RECALL_PARAMS = Object.freeze(['q', 'limit']);
-const RELATIONSHIP_POOL_PARAMS = Object.freeze(['mode', 'includeOffered']);
+const RELATIONSHIP_POOL_PARAMS = Object.freeze(['mode', 'includeOffered', 'minDepth']);
 const RELATIONSHIP_MODES = Object.freeze(['investor', 'founder', 'any']);
+const RELATIONSHIP_PAGE_BUILD_FIELDS = Object.freeze(['personKey', 'engine']);
+const RELATIONSHIP_PAGE_PARAMS = Object.freeze(['personKey']);
 const DECISION_ACTIONS = Object.freeze(['accept', 'reject', 'retract']);
 // The review page is the v1 product surface and it has to show the receipt, so
 // this cap is about one sitting's reading, not about safety.
@@ -2487,6 +2504,21 @@ function relationshipProducerConfig(policy) {
   }
 }
 
+// The engine person-page building uses, same seam discipline as
+// relationshipCap/relationshipProducerConfig: a start()-time override
+// (`policy.relationshipMemoryEngine`, a pre-built `{name, complete}`) wins
+// outright for tests, else createEngine() reads the owner's config file and
+// picks claude-cli when the binary is resolvable, else llama.
+function relationshipMemoryEngine(policy, engineOverride) {
+  if (policy.relationshipMemoryEngine !== undefined) return policy.relationshipMemoryEngine;
+  let cfg = {};
+  try {
+    cfg = JSON.parse(readFileSync(join(homedir(), '.hazlie', 'connectors', 'config.json'), 'utf8'));
+  } catch {}
+  const relationshipMemory = { ...cfg.relationshipMemory, ...(engineOverride ? { engine: engineOverride } : {}) };
+  return createEngine({ ...cfg, relationshipMemory, llama: policy.llama });
+}
+
 async function handleAdmin(db, req, res, cors, url, channel, policy) {
   if (channel !== 'bearer') {
     // 403, not 401: the caller IS authenticated (allowlisted Origin) — it is
@@ -2554,7 +2586,21 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // one place the "recently offered" exclusion (below, and in produceBatch)
     // is optional rather than automatic.
     const includeOffered = url.searchParams.get('includeOffered') === '1';
-    const rows = eligiblePool(db, { mode: rawMode, now: Date.now(), includeOffered });
+    // Desk override only: absent, eligiblePool applies its own default
+    // (MIN_DEPTH_MESSAGES). The ordinary batch-producing path (produceBatch,
+    // called without this param) never widens the floor.
+    const rawMinDepth = url.searchParams.get('minDepth');
+    let minDepth;
+    if (rawMinDepth !== null) {
+      minDepth = Number(rawMinDepth);
+      if (!Number.isInteger(minDepth) || minDepth < 0) {
+        throw badRequest('"minDepth" must be a non-negative integer');
+      }
+    }
+    const rows = eligiblePool(db, {
+      mode: rawMode, now: Date.now(), includeOffered,
+      ...(minDepth !== undefined ? { minDepth } : {}),
+    });
     send(res, 200, { mode: rawMode, count: rows.length, rows }, cors);
     return;
   }
@@ -2695,7 +2741,16 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         if (row === undefined) continue;
         quote = String(row.text).slice(0, 200);
       }
-      send(res, 200, { card: { ...card, quote } }, cors);
+      // The person page, when one has been built (accepted+pending items;
+      // readPersonPage already omits rejected ones). how_left is the freshest
+      // signal a page can carry -- how things were actually left, in the
+      // person's own words -- so it outranks the template tie sentence and
+      // the eligibility producer's own summary; the first ask is the next
+      // best thing when nothing names how things were left. A page with
+      // neither leaves `sentence` exactly as it was.
+      const page = readPersonPage(db, card.personKey);
+      const sentence = page.sections.how_left?.text ?? page.sections.asks[0]?.text ?? card.sentence;
+      send(res, 200, { card: { ...card, quote, sentence, who: page.sections.who?.text ?? null, page } }, cors);
       return;
     }
     send(res, 200, { card: null, ...(rel.refreshing ? { refreshing: true } : {}),
@@ -2741,6 +2796,45 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         note: ownerNote, ruleVersion: MATCH_RULES_VERSION, snapshotId: snapId });
     }
     send(res, 200, { ok: true }, cors);
+    return;
+  }
+
+  // Build (or rebuild) one person's page, in-process on the database's only
+  // writer -- the same reasoning /admin/episodes/rebuild documents for why a
+  // second process must never open this file read-write. Bearer-only (the
+  // blanket guard at the top of this function), because this is the route
+  // that spends the owner's own model subscription and writes PENDING claims
+  // about a real person; a browser has no business triggering either.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/pages/build') {
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_PAGE_BUILD_FIELDS);
+    if (typeof body.personKey !== 'string' || body.personKey.length === 0) {
+      throw badRequest('"personKey" must be a non-empty string');
+    }
+    if (body.engine !== undefined && body.engine !== 'claude-cli' && body.engine !== 'llama') {
+      throw badRequest('"engine" must be "claude-cli" or "llama"');
+    }
+    // A per-call engine override (the runner's --engine flag) selects among
+    // the owner's own config; a test-seam override (policy.relationshipMemoryEngine)
+    // still wins outright, so a route test's fake engine cannot be bypassed
+    // by a body field it did not anticipate.
+    const engine = relationshipMemoryEngine(policy, body.engine);
+    const result = await buildPersonPage(db, engine, body.personKey, { now: Date.now() });
+    send(res, 200, { ...result, cost_usd: engine.counters?.totalCostUsd ?? null }, cors);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/admin/relationship/page') {
+    for (const key of url.searchParams.keys()) {
+      if (!RELATIONSHIP_PAGE_PARAMS.includes(key)) {
+        throw badRequest(`unknown query parameter ${JSON.stringify(key)}`);
+      }
+    }
+    const personKey = url.searchParams.get('personKey');
+    if (typeof personKey !== 'string' || personKey.length === 0) {
+      throw badRequest('"personKey" query parameter is required');
+    }
+    send(res, 200, { page: readPersonPage(db, personKey) }, cors);
     return;
   }
 
@@ -4369,6 +4463,11 @@ export async function start({
   relationshipMatcher,
   relationshipCap,
   relationshipProducerConfig,
+  // Test seam for the person-page builder: a pre-built `{name, complete}`
+  // engine, so a route test never spawns the real claude CLI or reaches
+  // loopback llama-server. Production leaves this undefined and
+  // relationshipMemoryEngine() reads the owner's config file per call.
+  relationshipMemoryEngine: relationshipMemoryEngineOverride,
   // Test seam: production always wants the eager rebuild (see
   // schedulePeopleRebuild); a test asserting synchronous post-clear/purge
   // emptiness opts out rather than the production default changing for it.
@@ -4461,6 +4560,7 @@ export async function start({
         relationshipMatcher,
         relationshipCap,
         relationshipProducerConfig,
+        relationshipMemoryEngine: relationshipMemoryEngineOverride,
         relationshipHolder,
         peopleProjectionHolder,
         peopleProjectionAutoRebuild,
