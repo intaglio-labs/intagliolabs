@@ -43,10 +43,16 @@ import { DEFAULT_MAX_BODY_BYTES, messageToRow } from '../lib/mailRows.mjs';
 
 const DEFAULT_BACKFILL_DAYS = 30;
 // Forward scans stay bounded so a first run cannot monopolize the daemon.
-// Historical scans are bounded by ONE API page per pass instead; their durable
-// page token eventually drains the whole year without imposing a data cap.
+// Historical scans are bounded by `historyPagesPerPass` API pages per pass
+// instead (default below); their durable page token eventually drains the
+// whole year without imposing a data cap. MEASURED (2026-09): one page per
+// 12-minute daemon cycle gained ~1,000 messages/hour across 3 accounts, well
+// under the ~90 gets/min pacing budget this file already enforces — the
+// cadence was the bottleneck, not the quota, so a pass now drains several
+// pages instead of running the daemon more often.
 const MAX_MESSAGES_PER_ACCOUNT = 2000;
 const PAGE_SIZE = 100;
+const DEFAULT_HISTORY_PAGES_PER_PASS = 5;
 
 // Pacing between Gmail API calls. A 52k-message backfill answered with
 // `Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per
@@ -158,6 +164,7 @@ export function accountSettings(config, email) {
     backfillDays: per?.backfillDays ?? mail.backfillDays ?? DEFAULT_BACKFILL_DAYS,
     maxBodyBytes: per?.maxBodyBytes ?? mail.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
     getsPerMinute: per?.getsPerMinute ?? mail.getsPerMinute ?? DEFAULT_MAIL_GETS_PER_MINUTE,
+    historyPagesPerPass: per?.historyPagesPerPass ?? mail.historyPagesPerPass ?? DEFAULT_HISTORY_PAGES_PER_PASS,
   };
 }
 
@@ -199,7 +206,7 @@ export function createMailSource({
           historyHasOlder ||= state.getCursor(historyOlderKey(account.email, yearly.year)) === '1';
           continue;
         }
-        const { backfillDays, maxBodyBytes, getsPerMinute } = accountSettings(config, account.email);
+        const { backfillDays, maxBodyBytes, getsPerMinute, historyPagesPerPass } = accountSettings(config, account.email);
         const spacingMs = 60_000 / getsPerMinute;
         // A minimum spacing enforced between every Gmail API call this
         // account makes this run, list calls included (the measurement above
@@ -232,81 +239,132 @@ export function createMailSource({
         const client = makeClient({ email: account.email, ...(home ? { home } : {}) });
 
         try {
-          let pageToken = yearly
-            ? (state.getCursor(historyPageKey(account.email, yearly.year)) ?? undefined)
-            : undefined;
           let seen = 0;
           let highest = Number.isFinite(stored) ? stored : 0;
           const rows = [];
+          let pagesFetched = 0;
 
-          page: do {
-            await pace();
-            const list = await client.listMessages({ q, pageToken, maxResults: PAGE_SIZE });
-            if (yearly) historyProgressed = true;
-            pageToken = list.nextPageToken;
-            for (const [stubIndex, stub] of (list.messages ?? []).entries()) {
-              if (!yearly && seen >= MAX_MESSAGES_PER_ACCOUNT) break page;
-              if (stubIndex > 0) await sleepImpl(spacingMs);
-              seen += 1;
-              const full = await client.getMessage(stub.id);
-              const internal = Number(full?.internalDate);
-              // The exact bound the query could only approximate.
-              if (yearly) {
-                if (!Number.isFinite(internal) || internal < yearly.fromTs || internal >= yearly.toTs) continue;
-              } else if (Number.isFinite(internal) && internal <= floor && stored > 0) continue;
-              const parsed = gmailMessageToParsed(full);
-              const row = messageToRow(parsed, {
-                account: account.email,
-                folder: 'INBOX',
-                uid: stub.id,
-                uidValidity: 'gmail',
-                maxBodyBytes,
-              });
-              if (row !== null) {
-                rows.push(row);
-                if (Number.isFinite(internal) && internal > highest) highest = internal;
-              }
-            }
-            // One historical page per source invocation. The daemon's time
-            // budget can immediately invoke the source again, while the saved
-            // token makes every completed page crash-safe and removes the old
-            // 2,000-message-per-year ceiling.
-            if (yearly) break page;
-          } while (pageToken && seen < MAX_MESSAGES_PER_ACCOUNT);
-
-          if (rows.length > 0) {
-            const totals = await ingest(rows);
-            inserted += totals?.inserted ?? 0;
-            updated += totals?.updated ?? 0;
-            unchanged += totals?.unchanged ?? 0;
-            // ADVANCED ONLY FROM ROWS THAT LANDED. A cursor moved past
-            // messages that were fetched but never ingested is the failure the
-            // old UIDVALIDITY comment warned about, wearing different clothes:
-            // nothing errors, and that window is never fetched again.
-            if (!yearly && highest > 0) state.setCursor(cursorKey(account.email), String(highest));
-          }
           if (yearly) {
-            if (pageToken) {
-              state.setCursor(historyPageKey(account.email, yearly.year), pageToken);
-              historyDone = false;
-            } else {
-              state.deleteCursor(historyPageKey(account.email, yearly.year));
+            let pageToken = state.getCursor(historyPageKey(account.email, yearly.year)) ?? undefined;
+            let yearDone = false;
+
+            // Drain up to historyPagesPerPass pages this pass instead of one.
+            // Pacing between gets is unchanged (same getsPerMinute limiter
+            // below); this just lets the loop run longer per invocation
+            // rather than the daemon invoking the source more often.
+            for (let page = 0; page < historyPagesPerPass; page += 1) {
               await pace();
-              const older = await client.listMessages({
-                q: `before:${Math.floor(yearly.fromTs / 1000)}`,
-                maxResults: 1,
-              });
-              const hasOlder = (older.messages?.length ?? 0) > 0;
-              state.setCursor(historyDoneKey(account.email, yearly.year), '1');
-              state.setCursor(historyOlderKey(account.email, yearly.year), hasOlder ? '1' : '0');
-              historyHasOlder ||= hasOlder;
+              const list = await client.listMessages({ q, pageToken, maxResults: PAGE_SIZE });
+              historyProgressed = true;
+              pagesFetched += 1;
+              pageToken = list.nextPageToken;
+              const stubs = list.messages ?? [];
+              const pageRows = [];
+              for (const [stubIndex, stub] of stubs.entries()) {
+                if (stubIndex > 0) await sleepImpl(spacingMs);
+                seen += 1;
+                const full = await client.getMessage(stub.id);
+                const internal = Number(full?.internalDate);
+                // The exact bound the query could only approximate.
+                if (!Number.isFinite(internal) || internal < yearly.fromTs || internal >= yearly.toTs) continue;
+                const parsed = gmailMessageToParsed(full);
+                const row = messageToRow(parsed, {
+                  account: account.email,
+                  folder: 'INBOX',
+                  uid: stub.id,
+                  uidValidity: 'gmail',
+                  maxBodyBytes,
+                });
+                if (row !== null) {
+                  pageRows.push(row);
+                  if (Number.isFinite(internal) && internal > highest) highest = internal;
+                }
+              }
+
+              // Ingest and persist THIS PAGE's token before moving on, so a
+              // failure on a later page in the same pass never leaves the
+              // durable token ahead of rows that were fetched but never
+              // ingested — the same invariant the old single-page pass kept.
+              if (pageRows.length > 0) {
+                const totals = await ingest(pageRows);
+                inserted += totals?.inserted ?? 0;
+                updated += totals?.updated ?? 0;
+                unchanged += totals?.unchanged ?? 0;
+                rows.push(...pageRows);
+              }
+
+              if (pageToken) {
+                state.setCursor(historyPageKey(account.email, yearly.year), pageToken);
+              } else {
+                state.deleteCursor(historyPageKey(account.email, yearly.year));
+                await pace();
+                const older = await client.listMessages({
+                  q: `before:${Math.floor(yearly.fromTs / 1000)}`,
+                  maxResults: 1,
+                });
+                const hasOlder = (older.messages?.length ?? 0) > 0;
+                state.setCursor(historyDoneKey(account.email, yearly.year), '1');
+                state.setCursor(historyOlderKey(account.email, yearly.year), hasOlder ? '1' : '0');
+                historyHasOlder ||= hasOlder;
+                yearDone = true;
+              }
+
+              // Stop early: the year finished, or this page had nothing left
+              // to give — draining further pages this pass would just spend
+              // the budget on empty list calls.
+              if (yearDone || stubs.length === 0) break;
+            }
+
+            if (!yearDone) historyDone = false;
+          } else {
+            let pageToken;
+            page: do {
+              await pace();
+              const list = await client.listMessages({ q, pageToken, maxResults: PAGE_SIZE });
+              pagesFetched += 1;
+              pageToken = list.nextPageToken;
+              for (const [stubIndex, stub] of (list.messages ?? []).entries()) {
+                if (seen >= MAX_MESSAGES_PER_ACCOUNT) break page;
+                if (stubIndex > 0) await sleepImpl(spacingMs);
+                seen += 1;
+                const full = await client.getMessage(stub.id);
+                const internal = Number(full?.internalDate);
+                if (Number.isFinite(internal) && internal <= floor && stored > 0) continue;
+                const parsed = gmailMessageToParsed(full);
+                const row = messageToRow(parsed, {
+                  account: account.email,
+                  folder: 'INBOX',
+                  uid: stub.id,
+                  uidValidity: 'gmail',
+                  maxBodyBytes,
+                });
+                if (row !== null) {
+                  rows.push(row);
+                  if (Number.isFinite(internal) && internal > highest) highest = internal;
+                }
+              }
+            } while (pageToken && seen < MAX_MESSAGES_PER_ACCOUNT);
+
+            if (rows.length > 0) {
+              const totals = await ingest(rows);
+              inserted += totals?.inserted ?? 0;
+              updated += totals?.updated ?? 0;
+              unchanged += totals?.unchanged ?? 0;
+              // ADVANCED ONLY FROM ROWS THAT LANDED. A cursor moved past
+              // messages that were fetched but never ingested is the failure
+              // the old UIDVALIDITY comment warned about, wearing different
+              // clothes: nothing errors, and that window is never fetched
+              // again.
+              if (highest > 0) state.setCursor(cursorKey(account.email), String(highest));
             }
           }
+
           log.info('mail_account_scan', {
             connector: 'mail',
             account: account.email,
             fetched: seen,
             rows: rows.length,
+            pages: pagesFetched,
             ...(yearly ? { historyYear: yearly.year } : {}),
           });
         } catch (error) {
