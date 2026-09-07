@@ -23,6 +23,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildEpisodes, isQuotable } from '../memory/episodes.mjs';
 import { SUB_ROLES } from '../people/subRoles.mjs';
+import { isAnonymousContact } from '../people/map.mjs';
 import { SECTION_KIND } from './pages.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -42,6 +43,67 @@ const SECTIONS = new Set(Object.keys(SECTION_KIND));
 
 export function tokensEstFor(text) {
   return Math.ceil(String(text ?? '').length / 4);
+}
+
+function parseSubRoles(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+// The sweep's OWN scope query -- deliberately not eligiblePool
+// (producer.mjs), whose quiet-days gate and future-meeting veto exclude
+// exactly the people this ingest sweep exists to keep current (see the
+// header note above). Gates: at least one direct (non-room) authored
+// message ever, AND (a business relationship OR at least one in-person
+// meeting), NOT suppressed. No quiet gate, no future-meeting veto, and
+// (unlike eligiblePool) no romantic/family exclusion is needed because the
+// business/met_in_person gate already narrows past them.
+export function sweepScope(db, { now = Date.now() } = {}) {
+  const rows = db
+    .prepare(
+      `SELECT p.person_key AS personKey, p.display_name AS name, p.role AS role, COALESCE(p.sub_roles, '[]') AS subRolesJson
+       FROM people p
+       WHERE (p.role = 'business' OR p.met_in_person > 0)
+         AND EXISTS (
+           SELECT 1 FROM person_event_links pel
+           WHERE pel.person_key = p.person_key AND pel.authored = 1 AND pel.room = 0
+         )
+         AND p.person_key NOT IN (SELECT person_key FROM rm_suppression)`
+    )
+    .all();
+
+  const maxIdStmt = db.prepare(
+    `SELECT MAX(pel.context_id) AS maxId FROM person_event_links pel
+     WHERE pel.person_key = ? AND pel.authored = 1 AND pel.room = 0`
+  );
+  const cursorStmt = db.prepare(
+    `SELECT swept_through_context_id FROM person_sweep_cursor WHERE person_key = ?`
+  );
+
+  const out = [];
+  for (const row of rows) {
+    // Same anonymity test the eligibility producer uses (people/map.mjs), so
+    // the two surfaces never disagree about who counts as a real,
+    // by-name-addressable person.
+    if (isAnonymousContact({ name: row.name, key: row.personKey })) continue;
+    const maxRow = maxIdStmt.get(row.personKey);
+    if (maxRow?.maxId === null || maxRow?.maxId === undefined) continue; // defensive: the EXISTS gate above should make this unreachable
+    const cursorRow = cursorStmt.get(row.personKey);
+    out.push({
+      personKey: row.personKey,
+      name: row.name,
+      role: row.role,
+      subRoles: parseSubRoles(row.subRolesJson),
+      maxAuthoredContextId: Number(maxRow.maxId),
+      cursor: cursorRow ? Number(cursorRow.swept_through_context_id) : 0,
+    });
+  }
+  return out;
 }
 
 function isReceiptItem(v) {

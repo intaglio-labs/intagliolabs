@@ -7,12 +7,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { openDb } from '../server/hermes.mjs';
+import { eligiblePool } from '../server/relationship/producer.mjs';
 import {
-  groundSweep, newRowsFor, SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, tokensEstFor,
+  groundSweep, newRowsFor, sweepScope, SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, tokensEstFor,
 } from '../server/relationship/sweep.mjs';
 
 const NOW = Date.parse('2026-09-01T12:00:00Z');
 const DAY = 86_400_000;
+const day = (offsetDays) => new Date(NOW - offsetDays * DAY).toISOString().slice(0, 10);
 
 // ---------------------------------------------------------------------------
 // (1-5) GROUNDING: pure, no DB, no model. Mirrors relationship-pages.test.mjs's
@@ -117,6 +119,10 @@ function insertPerson(db, { key, name, role = 'business', subRoles = [], sent = 
     sent, received, met, 0, sent + received, 0, role, '{}', null, NOW, JSON.stringify(subRoles));
 }
 
+function insertActiveDay(db, key, activeDay) {
+  db.prepare('INSERT OR IGNORE INTO person_active_days(person_key, day) VALUES (?, ?)').run(key, activeDay);
+}
+
 function insertThread(db, personKey, { chatGuid = `chat:${personKey}`, ts, them, me }) {
   const themId = Number(db.prepare(
     "INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', ?, ?)"
@@ -186,4 +192,43 @@ test('newRowsFor takes at most 8 episodes, most recent first, under the char bud
   const totalChars = gathered.excerpts.reduce((n, e) => n + e.text.length, 0);
   assert.ok(totalChars <= SWEEP_MAX_CHARS, 'stays under the char budget');
   assert.ok(tokensEstFor('x'.repeat(totalChars)) <= 2000, 'tokensEst stays at or under 2000');
+});
+
+// ---------------------------------------------------------------------------
+// (8-9) sweepScope: its own SQL, deliberately not eligiblePool.
+// ---------------------------------------------------------------------------
+
+test('sweepScope includes an actively-talking business contact that eligiblePool excludes', () => {
+  const db = openDb(':memory:');
+  const key = 'name:active business contact';
+  insertPerson(db, { key, name: 'Active Business Contact', role: 'business', sent: 30, received: 30 });
+  insertThread(db, key, { ts: NOW - 1 * DAY, them: 'talking to you right now', me: 'yep' });
+  insertActiveDay(db, key, day(0)); // active TODAY -- nowhere near eligiblePool's 180-day quiet floor
+
+  const pool = eligiblePool(db, { mode: 'any', now: NOW });
+  assert.ok(!pool.map((p) => p.personKey).includes(key), 'eligiblePool excludes an actively-talking contact (not quiet)');
+
+  const scope = sweepScope(db, { now: NOW });
+  const entry = scope.find((c) => c.personKey === key);
+  assert.ok(entry, 'sweepScope includes the same actively-talking business contact');
+  assert.equal(entry.cursor, 0, 'a never-swept person starts at cursor 0');
+  assert.ok(entry.maxAuthoredContextId > 0);
+});
+
+test('sweepScope excludes a suppressed person and an anonymous contact', () => {
+  const db = openDb(':memory:');
+
+  const suppressedKey = 'name:suppressed business contact';
+  insertPerson(db, { key: suppressedKey, name: 'Suppressed Business Contact', role: 'business', sent: 30, received: 30 });
+  insertThread(db, suppressedKey, { ts: NOW - 1 * DAY, them: 'hello', me: 'hi' });
+  db.prepare('INSERT INTO rm_suppression(person_key, created_at) VALUES (?, ?)').run(suppressedKey, NOW);
+
+  const anonKey = 'id:anon@example.test';
+  insertPerson(db, { key: anonKey, name: 'anon@example.test', role: 'business', sent: 30, received: 30 });
+  insertThread(db, anonKey, { ts: NOW - 1 * DAY, them: 'hello', me: 'hi' });
+
+  const scope = sweepScope(db, { now: NOW });
+  const keys = scope.map((c) => c.personKey);
+  assert.ok(!keys.includes(suppressedKey), 'a suppressed person is excluded');
+  assert.ok(!keys.includes(anonKey), 'an anonymous (bare-address) contact is excluded');
 });
