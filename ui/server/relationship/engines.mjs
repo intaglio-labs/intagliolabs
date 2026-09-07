@@ -16,7 +16,7 @@
 
 import { spawn } from 'node:child_process';
 import { accessSync, constants as fsConstants, existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir, userInfo } from 'node:os';
 import { delimiter, join } from 'node:path';
 
 const CLAUDE_TIMEOUT_MS = 120_000;
@@ -107,7 +107,17 @@ function createClaudeCliEngine(config = {}) {
         // isolated working directory and environment are built for the same
         // reason -- the installed client owns its own subscription login and
         // must see nothing else.
-        env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? homedir() },
+        // USER/LOGNAME are not decoration: without them the CLI's keychain
+        // credential lookup fails and it answers "Not logged in" (measured
+        // 2026-09-07 under hermes' launchd environment). TMPDIR for its own
+        // scratch. Nothing else is inherited.
+        env: {
+          PATH: process.env.PATH ?? '',
+          HOME: process.env.HOME ?? homedir(),
+          USER: process.env.USER ?? userInfo().username,
+          LOGNAME: process.env.LOGNAME ?? process.env.USER ?? userInfo().username,
+          TMPDIR: process.env.TMPDIR ?? tmpdir(),
+        },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
