@@ -202,9 +202,12 @@ final class Distiller {
       guard let self, !self.stopping else { return }
       guard self.distillationEnabled else {
         self.announceDisabledOnce()
-        // The long interval: with no passes running there is no backlog to
-        // chase, and the index only needs to keep up with what arrives.
-        self.schedule(after: self.idleInterval)
+        // The sweep has its own switch (sweep.enabled) and its own review
+        // door, so the distiller being off must not take it down too: run it
+        // here, then the long interval -- with no distill passes running there
+        // is no backlog to chase, and the index only needs to keep up with
+        // what arrives.
+        self.runSweep { self.schedule(after: self.idleInterval) }
         return
       }
       self.startDistiller(node: node, script: script)
