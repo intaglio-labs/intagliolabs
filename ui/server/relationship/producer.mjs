@@ -64,6 +64,13 @@ export const PRODUCER_VERSION = 'eligibility-v1';
 export const RANK_STRATEGY = 'depth-change-quiet';
 const DAY = 86_400_000;
 
+// How long a person stays off the pool after a snapshot offers them, so a
+// synchronous refill (the card route, on an empty queue) cannot re-offer the
+// same handful of names it just wrote. Separate from rm_suppression/rm_mute
+// (owner-driven, indefinite): this is a system-driven cooldown with no
+// setting, so it is a plain constant rather than something read from config.
+const RECENTLY_OFFERED_DAYS = 7;
+
 function hasColumn(db, table, column) {
   return db.prepare(`SELECT 1 FROM pragma_table_info(?) WHERE name = ?`).get(table, column) !== undefined;
 }
@@ -77,11 +84,19 @@ function parseSubRoles(raw) {
 }
 
 // The one SQL statement: every set-membership gate (history, authored,
-// future-meeting veto, suppression, mute) as a WHERE clause or an anti-join,
-// so the only rows that ever reach JS are rows that already cleared every
-// gate but the two that need date arithmetic (quiet days) or JSON-array
-// membership (mode). Both of those are cheap over an already-small result.
-function poolSql(db) {
+// future-meeting veto, suppression, mute, recently-offered) as a WHERE clause
+// or an anti-join, so the only rows that ever reach JS are rows that already
+// cleared every gate but the two that need date arithmetic (quiet days) or
+// JSON-array membership (mode). Both of those are cheap over an already-small
+// result.
+//
+// `includeOffered` skips the last gate only (recently judged or recently
+// snapshotted): the desk's Pool tab wants to see everyone the other gates
+// admit, offered or not, via ?includeOffered=1 on /admin/relationship/pool --
+// but the ordinary batch-producing path (refresh, and the card route's
+// synchronous refill) always applies it, or a refill could hand the owner
+// back the same names their last batch just showed them.
+function poolSql(db, { includeOffered = false } = {}) {
   const subRolesExpr = hasColumn(db, 'people', 'sub_roles') ? "COALESCE(p.sub_roles, '[]')" : "'[]'";
   return `
     WITH future_meetings AS (
@@ -122,11 +137,20 @@ function poolSql(db) {
           AND (m.person_key IS NOT NULL OR m.kind IS NOT NULL)
           AND m.until_at > ?
       )
+      ${includeOffered ? '' : `
+      AND p.person_key NOT IN (
+        SELECT person_key FROM rm_card_event WHERE event IN ('accepted', 'dismissed')
+      )
+      AND p.person_key NOT IN (
+        SELECT person_key FROM rm_candidate_snapshot WHERE created_at > ?
+      )`}
   `;
 }
 
-export function eligiblePool(db, { mode, now = Date.now() } = {}) {
-  const rows = db.prepare(poolSql(db)).all(now, CAL_GATES.maxAttendees, now);
+export function eligiblePool(db, { mode, now = Date.now(), includeOffered = false } = {}) {
+  const params = [now, CAL_GATES.maxAttendees, now];
+  if (!includeOffered) params.push(now - RECENTLY_OFFERED_DAYS * DAY);
+  const rows = db.prepare(poolSql(db, { includeOffered })).all(...params);
 
   const out = [];
   for (const row of rows) {
@@ -193,8 +217,8 @@ function tieSentence(mode, candidate) {
 // no claim about any of them) plus messages/dormancyDays/meetings/topics,
 // and the mode/depth/subRoles fields the widget's mode picker and future
 // ranking passes will want.
-export function produceBatch(db, { mode = 'any', now = Date.now(), limit = 1 } = {}) {
-  const pool = eligiblePool(db, { mode, now });
+export function produceBatch(db, { mode = 'any', now = Date.now(), limit = 5, includeOffered = false } = {}) {
+  const pool = eligiblePool(db, { mode, now, includeOffered });
   const chosen = pool.slice(0, limit);
 
   const batchId = Number(db.prepare(

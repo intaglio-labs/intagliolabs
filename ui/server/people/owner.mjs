@@ -177,3 +177,30 @@ export function markPersonRole({ key, role, year = null, configPath = ownerConfi
   writeMutableConfig(configPath, raw);
   return { key, role };
 }
+
+// Owner corrections for sub-role tags (investor/founder/operator), same
+// override-wins posture and same atomic-write path (readMutableConfig ->
+// writeMutableConfig, one file) as markPersonRole above. An empty array is a
+// valid, explicit override -- "none of these" -- not "no override": subRoles.mjs's
+// subRolesFor distinguishes an explicit empty override from no override at
+// all (overrideFor returns undefined only when the key is absent), so this
+// must persist [] rather than treating it as nothing to write.
+export function markPersonSubRoles({ key, subRoles, configPath = ownerConfigPath() } = {}) {
+  if (typeof key !== 'string' || key.length === 0 || key.length > 300) {
+    throw new Error('person key must be a non-empty string of at most 300 characters');
+  }
+  if (!Array.isArray(subRoles) || !subRoles.every((role) => typeof role === 'string' && SUB_ROLES.has(role))) {
+    throw new Error('subRoles must be an array drawn from investor, founder, operator');
+  }
+  const list = [...new Set(subRoles)].sort();
+  const raw = readMutableConfig(configPath);
+  const existing = raw.personSubRoles && typeof raw.personSubRoles === 'object' && !Array.isArray(raw.personSubRoles)
+    ? raw.personSubRoles
+    : {};
+  raw.personSubRoles = Object.fromEntries([
+    ...Object.entries(existing).filter(([storedKey]) => storedKey !== key),
+    [key, list],
+  ]);
+  writeMutableConfig(configPath, raw);
+  return { key, subRoles: list };
+}

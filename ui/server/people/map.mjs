@@ -348,13 +348,21 @@ function ownerRoleStamp(owner, { years = true } = {}) {
   const lifetime = [...(owner?.roles ?? new Map()).entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, role]) => `${key}:${role}`);
-  if (!years) return [...identity, ...lifetime].join('|');
+  // Same reasoning as `lifetime` above, for the sub-role override map
+  // (config.personSubRoles, /people/sub-roles): without this term, a person
+  // whose sub-roles the owner just corrected keeps whatever tag this memo
+  // last computed, because nothing else in this stamp changed and the
+  // yearCore cache below never re-derives it.
+  const subRoleStamp = [...(owner?.subRoles ?? new Map()).entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, roles]) => `${key}:${[...roles].sort().join(',')}`);
+  if (!years) return [...identity, ...lifetime, ...subRoleStamp].join('|');
   const perYear = [...(owner?.rolesByYear ?? new Map()).entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .flatMap(([year, roles]) => [...roles.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([key, role]) => `${year}:${key}:${role}`));
-  return [...identity, ...lifetime, ...perYear].join('|');
+  return [...identity, ...lifetime, ...subRoleStamp, ...perYear].join('|');
 }
 
 export function yearCore(contextDb, stateDb, { now, owner, aliases, blocking = false }) {

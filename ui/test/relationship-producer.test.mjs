@@ -25,7 +25,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -271,6 +271,198 @@ test('GET /admin/relationship/pool serves the ranked pool without writing a snap
     const bad = await call('/admin/relationship/pool?mode=nonsense');
     assert.equal(bad.status, 400);
   } finally {
+    await server.close();
+  }
+});
+
+// A shared six-person, strictly-ranked fixture for the batch-depth and
+// refill tests below: depth (sent+received, met=0) decreases monotonically
+// across `${prefix} one`..`${prefix} six`, so "the top 5" and "the one left
+// over" are each a single, unambiguous person key.
+function insertRankedPeople(db, prefix) {
+  const labels = ['one', 'two', 'three', 'four', 'five', 'six'];
+  const counts = [100, 90, 80, 70, 60, 50];
+  return labels.map((label, i) => {
+    const key = `name:${prefix} ${label}`;
+    insertPerson(db, { key, name: `${prefix} ${label}`, sent: counts[i], received: counts[i] });
+    insertAuthored(db, key);
+    insertActiveDay(db, key, day(200));
+    return key;
+  });
+}
+
+test('produceBatch writes a batch of 5 (the default depth) in rank order', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-producer-depth-'));
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: 'e'.repeat(64),
+    relationshipCap: { max: 20, windowMs: 86_400_000 },
+    relationshipProducerConfig: { producer: 'eligibility', mode: 'any' },
+    peopleProjectionAutoRebuild: false,
+  });
+  try {
+    const db = server.db;
+    ensureSubRoles(db);
+    const keys = insertRankedPeople(db, 'depth');
+
+    const base = `http://127.0.0.1:${server.port}`;
+    const call = (method, path, body) => fetch(base + path, {
+      method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${'e'.repeat(64)}` },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+
+    const refreshOut = await (await call('POST', '/admin/relationship/refresh')).json();
+    assert.equal(refreshOut.started, true);
+    assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM rm_candidate_batch').get().n), 1);
+    const batch = db.prepare('SELECT id, candidate_count FROM rm_candidate_batch ORDER BY id DESC LIMIT 1').get();
+    assert.equal(batch.candidate_count, 5, 'default batch depth is 5, not the old 1');
+    const snapshotKeys = db.prepare(
+      'SELECT person_key FROM rm_candidate_snapshot WHERE batch_id = ? ORDER BY id'
+    ).all(batch.id).map((r) => r.person_key);
+    assert.deepEqual(snapshotKeys, keys.slice(0, 5),
+      'the top 5 by depth, written in rank order; the sixth (lowest depth) is dropped by the cap');
+  } finally {
+    await server.close();
+  }
+});
+
+test('GET /admin/relationship/card refills an exhausted queue, and never re-offers a judged person', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-producer-refill-'));
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: 'e'.repeat(64),
+    relationshipCap: { max: 20, windowMs: 86_400_000 },
+    relationshipProducerConfig: { producer: 'eligibility', mode: 'any' },
+    peopleProjectionAutoRebuild: false,
+  });
+  try {
+    const db = server.db;
+    ensureSubRoles(db);
+    const keys = insertRankedPeople(db, 'refill');
+    const leftover = keys[5]; // rank six: never in the first batch of 5
+
+    // A person judged in the DISTANT past (dismissed 30 days ago, off a
+    // snapshot also 30 days old) -- outside the 7-day recently-snapshotted
+    // window, so only the separate "already judged" gate keeps them off the
+    // pool. Given the top rank (depth 999), they would otherwise be the very
+    // first card in the batch below: this is what makes dropping the
+    // judged-exclusion (as opposed to the recently-snapshotted one) its own,
+    // distinguishable failure.
+    const oldJudgedKey = 'name:refill judged long ago';
+    insertPerson(db, { key: oldJudgedKey, name: 'Judged Long Ago', sent: 500, received: 499 });
+    insertAuthored(db, oldJudgedKey);
+    insertActiveDay(db, oldJudgedKey, day(200));
+    const oldBatchId = Number(db.prepare(
+      'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, ?, ?, ?)'
+    ).run(NOW - 30 * DAY, 1, 'open', null).lastInsertRowid);
+    const oldSnapshotId = Number(db.prepare(
+      'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(oldBatchId, oldJudgedKey, 'reconnect', 'old summary', '{}', PRODUCER_VERSION, RANK_STRATEGY, NOW - 30 * DAY).lastInsertRowid);
+    db.prepare(
+      'INSERT INTO rm_card_event(person_key, kind, snapshot_id, event, reason, note, rule_version, time_band, created_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(oldJudgedKey, 'reconnect', oldSnapshotId, 'dismissed', null, null, PRODUCER_VERSION, 'morning', NOW - 30 * DAY);
+
+    const base = `http://127.0.0.1:${server.port}`;
+    const call = (method, path, body) => fetch(base + path, {
+      method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${'e'.repeat(64)}` },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+
+    const refreshOut = await (await call('POST', '/admin/relationship/refresh')).json();
+    assert.equal(refreshOut.started, true);
+    const firstBatchKeys = db.prepare(
+      'SELECT person_key FROM rm_candidate_snapshot WHERE batch_id = (SELECT MAX(id) FROM rm_candidate_batch) ORDER BY id'
+    ).all().map((r) => r.person_key);
+    assert.ok(!firstBatchKeys.includes(oldJudgedKey),
+      'a person judged 30 days ago is excluded even though their own snapshot is well outside the 7-day window -- ' +
+      'this is the "already judged" gate specifically, not the "recently snapshotted" one');
+
+    // Judge (dismiss) every card the first batch produced -- the top 5 of 6.
+    const judged = new Set();
+    for (let i = 0; i < 5; i++) {
+      const out = await (await call('GET', '/admin/relationship/card')).json();
+      assert.ok(out.card, `card ${i + 1} of 5`);
+      assert.ok(!judged.has(out.card.personKey), 'never the same person twice within the first batch');
+      judged.add(out.card.personKey);
+      const ev = await call('POST', '/admin/relationship/event', {
+        snapshot_id: out.card.snapshot_id, person_key: out.card.personKey, event: 'dismissed',
+      });
+      assert.equal(ev.status, 200);
+    }
+    assert.equal(judged.size, 5);
+    assert.ok(!judged.has(leftover), 'rank six was never in the first batch');
+
+    // Every card in the queue is now judged: the NEXT GET must refill
+    // synchronously (a batch depth of 5 is exactly why a queue can now go
+    // empty on one sitting) and serve rank six -- the only person left that
+    // is neither judged (rm_card_event) nor recently snapshotted (within 7
+    // days), both of which the other five now are.
+    const refilled = await (await call('GET', '/admin/relationship/card')).json();
+    assert.ok(refilled.card, 'the card route refills instead of answering null forever');
+    assert.equal(refilled.card.personKey, leftover,
+      'the refill serves the next-ranked person, never one already judged');
+    assert.notEqual(refilled.card.personKey, oldJudgedKey, 'the long-ago-judged person stays excluded on refill too');
+  } finally {
+    await server.close();
+  }
+});
+
+test('/people/sub-roles writes an owner override that the next projection read reflects', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'rel-subroles-home-'));
+  const prevHome = process.env.HOME;
+  const dir = mkdtempSync(join(tmpdir(), 'rel-subroles-db-'));
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: 'e'.repeat(64),
+    peopleProjectionAutoRebuild: false,
+  });
+  try {
+    process.env.HOME = home;
+    const base = `http://127.0.0.1:${server.port}`;
+    const call = (method, path, body) => fetch(base + path, {
+      method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${'e'.repeat(64)}` },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+
+    // A real, graph-derived person -- not a row poked into `people` directly
+    // -- because /people/sub-roles finds its target through
+    // materializedPeopleGraph, the same door /people/role uses. Three direct
+    // messages clears the map's own hasRelationship floor.
+    const handle = '+15555550199';
+    await call('POST', '/ingest', [0, 1, 2].map((i) => ({
+      ts: NOW - (200 - i) * DAY, source: 'imessage', entity_id: `imessage:subroles-${i}`,
+      text: 'hello', meta: { chat_handle: handle, is_from_me: false },
+    })));
+
+    // A read BEFORE the override warms map.mjs's own yearCore memo -- the
+    // scenario the ownerRoleStamp fix targets: without a sub-role term in
+    // that stamp, this same memo could mask a later /people/sub-roles call
+    // and rebuildPeopleCore would return the stale, pre-override core.
+    const before = await (await call('GET', '/people/map')).json();
+    const person = before.people.find((p) => p.key && p.key.length > 0);
+    assert.ok(person, 'the ingested contact materializes as a person');
+    assert.deepEqual(person.subRoles ?? [], [], 'no sub-role tag yet');
+
+    const res = await call('POST', '/people/sub-roles', { personKey: person.key, subRoles: ['investor'] });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true, personKey: person.key, subRoles: ['investor'] });
+
+    const after = await (await call('GET', '/people/map')).json();
+    const updated = after.people.find((p) => p.key === person.key);
+    assert.ok(updated, 'the person is still present after the override');
+    assert.deepEqual(updated.subRoles, ['investor'], 'the next projection read reflects the override');
+
+    // Validation: a value outside the closed three-role set must 400, and
+    // must not have touched the config the 200 above already wrote.
+    const bad = await call('POST', '/people/sub-roles', { personKey: person.key, subRoles: ['ceo'] });
+    assert.equal(bad.status, 400);
+    const unchanged = await (await call('GET', '/people/map')).json();
+    assert.deepEqual(
+      unchanged.people.find((p) => p.key === person.key).subRoles, ['investor'],
+      'a rejected write leaves the prior override in place'
+    );
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
     await server.close();
   }
 });

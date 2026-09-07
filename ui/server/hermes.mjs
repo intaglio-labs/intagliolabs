@@ -59,7 +59,8 @@ import {
   formatGeneralPeopleResult,
   generalPeopleAnswerCacheInput,
 } from './people/generalSearch.mjs';
-import { loadOwner, markOwnerPerson, markPersonRole } from './people/owner.mjs';
+import { loadOwner, markOwnerPerson, markPersonRole, markPersonSubRoles } from './people/owner.mjs';
+import { SUB_ROLES as SUB_ROLE_VALUES } from './people/subRoles.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
 import {
   buildAvatars,
@@ -1806,7 +1807,7 @@ const APPLY_CLAIM_FIELDS = Object.freeze(['kind', 'text', 'when_phrase', 'p_clai
 const DECIDE_FIELDS = Object.freeze(['claim_id', 'action', 'reason']);
 const PENDING_PARAMS = Object.freeze(['limit']);
 const RECALL_PARAMS = Object.freeze(['q', 'limit']);
-const RELATIONSHIP_POOL_PARAMS = Object.freeze(['mode']);
+const RELATIONSHIP_POOL_PARAMS = Object.freeze(['mode', 'includeOffered']);
 const RELATIONSHIP_MODES = Object.freeze(['investor', 'founder', 'any']);
 const DECISION_ACTIONS = Object.freeze(['accept', 'reject', 'retract']);
 // The review page is the v1 product surface and it has to show the receipt, so
@@ -2549,7 +2550,11 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     if (!RELATIONSHIP_MODES.includes(rawMode)) {
       throw badRequest(`"mode" must be one of: ${RELATIONSHIP_MODES.join(', ')}`);
     }
-    const rows = eligiblePool(db, { mode: rawMode, now: Date.now() });
+    // The desk's Pool tab reviews the gate set itself, offered or not -- the
+    // one place the "recently offered" exclusion (below, and in produceBatch)
+    // is optional rather than automatic.
+    const includeOffered = url.searchParams.get('includeOffered') === '1';
+    const rows = eligiblePool(db, { mode: rawMode, now: Date.now(), includeOffered });
     send(res, 200, { mode: rawMode, count: rows.length, rows }, cors);
     return;
   }
@@ -2626,6 +2631,34 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     const rel = relationshipState(db, policy);
     const cap = relationshipCap(policy);
     if (!cap) { send(res, 200, { card: null, reason: 'no-cap-configured' }, cors); return; }
+
+    // Refill on empty: with a batch depth of 5 (produceBatch's default), the
+    // owner judging every card in a batch used to leave the queue permanently
+    // empty until something called /refresh -- the widget's orb never lit
+    // again. The eligibility producer is one SQL statement plus a handful of
+    // inserts (no model call), so this can run synchronously in the GET
+    // itself rather than needing the fire-and-forget shape /refresh uses for
+    // the matcher path. Gated on rel.refreshing so a refill can never race an
+    // in-flight /refresh; gated on the eligibility producer because the
+    // matcher path has no cheap synchronous equivalent -- an owner who has
+    // not opted into the eligibility producer keeps today's behavior
+    // (refill only via an explicit /refresh call).
+    const producerConfig = relationshipProducerConfig(policy);
+    if (producerConfig.producer === 'eligibility' && !rel.refreshing) {
+      const hasUnjudged = rel.cards.some((card) => !db.prepare(
+        "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event IN ('accepted','dismissed') LIMIT 1"
+      ).get(card.snapshot_id));
+      if (!hasUnjudged) {
+        try {
+          const { batchId, cards } = produceBatch(db, { mode: producerConfig.mode, now: Date.now() });
+          rel.batchId = batchId;
+          rel.cards = cards;
+        } catch (e) {
+          rel.lastError = String(e?.message ?? e);
+        }
+      }
+    }
+
     for (const card of rel.cards) {
       // A card leaves the queue when the owner has acted on it (accepted or
       // dismissed), and suppression/mute/cap are re-checked at serve time --
@@ -4027,7 +4060,7 @@ async function handle(db, req, res, cors, url, policy) {
   // map and WRITE the owner's merge decisions, neither of which is a browser
   // capability. The Origin channel is authenticated but not entitled here, so
   // 403 (not 401), matching handleAdmin's reasoning.
-  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/self' || url.pathname === '/people/role' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/avatars') {
+  if (url.pathname === '/people/find' || url.pathname === '/people/init' || url.pathname === '/people/review' || url.pathname === '/people/decide' || url.pathname === '/people/self' || url.pathname === '/people/role' || url.pathname === '/people/sub-roles' || url.pathname === '/people/map' || url.pathname === '/people/year' || url.pathname === '/people/avatars') {
     if (channel !== 'bearer') {
       send(res, 403, { error: 'people routes are bearer-only: call with the token from ~/.hazlie/secrets/hermes-token.txt and no Origin header.' }, cors);
       return;
@@ -4045,6 +4078,7 @@ const PEOPLE_INIT_FIELDS = Object.freeze(['days']);
 const PEOPLE_DECIDE_FIELDS = Object.freeze(['verdict', 'a', 'b']);
 const PEOPLE_SELF_FIELDS = Object.freeze(['key']);
 const PEOPLE_ROLE_FIELDS = Object.freeze(['key', 'role', 'year']);
+const PEOPLE_SUB_ROLES_FIELDS = Object.freeze(['personKey', 'subRoles']);
 const PEOPLE_YEAR_COMPLETION_FIELDS = Object.freeze(['year']);
 
 // Phase 1 routes. init and review both build the people map and return the
@@ -4130,6 +4164,34 @@ async function handlePeople(db, req, res, cors, url, policy) {
     });
     rebuildPeopleCore(db);
     send(res, 200, { state: 'ok', ...marked }, cors);
+    return;
+  }
+
+  // The owner's correction for the eligibility producer's investor/founder
+  // mode filter (relationship/producer.mjs): same shape and posture as
+  // /people/role above, just a different override map (personSubRoles,
+  // subRoles.mjs's subRolesFor) and a closed three-value set instead of a
+  // closed four-value one. An empty array is accepted and means "none of
+  // these" -- not "no correction" -- so the override always wins once the
+  // owner has made this call for a person, even to clear every tag.
+  if (req.method === 'POST' && url.pathname === '/people/sub-roles') {
+    if (!hasJsonMediaType(req)) { send(res, 415, { error: 'content-type must be application/json' }, cors); return; }
+    const body = await readJson(req);
+    assertClosedFields(body, PEOPLE_SUB_ROLES_FIELDS);
+    if (typeof body?.personKey !== 'string' || body.personKey.length === 0 || body.personKey.length > 300) {
+      throw badRequest('"personKey" must be a person key');
+    }
+    if (!Array.isArray(body?.subRoles) || !body.subRoles.every((role) => typeof role === 'string' && SUB_ROLE_VALUES.includes(role))) {
+      throw badRequest(`"subRoles" must be an array drawn from: ${SUB_ROLE_VALUES.join(', ')}`);
+    }
+    const marked = withPeopleDbs(db, (state, resDb) => {
+      const { aliases } = resolutionState(resDb);
+      const person = materializedPeopleGraph(db, state, { owner, aliases }).find((candidate) => candidate.key === body.personKey);
+      if (!person) throw badRequest('"personKey" is not a current person');
+      return markPersonSubRoles({ key: person.key, subRoles: body.subRoles });
+    });
+    rebuildPeopleCore(db);
+    send(res, 200, { ok: true, personKey: marked.key, subRoles: marked.subRoles }, cors);
     return;
   }
 
