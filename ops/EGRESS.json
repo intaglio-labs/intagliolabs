@@ -55,10 +55,11 @@
     "",
     "2026-08-23. The login-webview kind was DEFINED here and had ZERO entries, while the in-app login had been navigating Meta's hosts since it shipped. The tripwire could not see them: allowedSuffixes was a Swift array of BARE host strings ('instagram.com'), and the scan matches https?://host. So a host list that is a fence rather than a URL is invisible to it -- worth knowing, because a fence is exactly a list of places the code can go. The five entries added here close that, and connect/test/bridgePolicy.test.mjs now asserts each platform's loginUrl is inside its own fence.",
     "",
-    "2026-08-31. First model egress, and _the_claim narrowed with it. It used to read: 'HAZLIE SENDS NO CORPUS TEXT TO A CLOUD MODEL. All reasoning and narration happen locally, on loopback llama-server instances.' The owner-reviewed frontier handoff (kind frontier-client) replaced that absolute: answers still begin locally and no raw row, quote or hidden context is ever attached, but text the owner reviews and approves now leaves through installed official provider clients. The old sentence is kept here, struck by this paragraph rather than deleted, so nobody re-derives it as still current."
+    "2026-08-31. First model egress, and _the_claim narrowed with it. It used to read: 'HAZLIE SENDS NO CORPUS TEXT TO A CLOUD MODEL. All reasoning and narration happen locally, on loopback llama-server instances.' The owner-reviewed frontier handoff (kind frontier-client) replaced that absolute: answers still begin locally and no raw row, quote or hidden context is ever attached, but text the owner reviews and approves now leaves through installed official provider clients. The old sentence is kept here, struck by this paragraph rather than deleted, so nobody re-derives it as still current.",
+    "2026-09-07. Second api.anthropic.com entry, new kind public-lookup (L5 step 6). The installed claude client engines.mjs already drives headless (the frontier-client row above, person-page building) is now ALSO driven headless with WebSearch as its one enabled tool, to look a person up on the public web using only public identifiers the owner's corpus already holds. Same host, same installed binary, a materially different tool grant and prompt content -- so it gets its own kind and its own decision rather than being folded into the existing row, per this file's own rule that duplicate hosts in `paths` are fine (declaredHosts is a Set) but a row's `decision` must describe what THAT invocation actually does."
   ],
-  "version": 1,
-  "last_reviewed": "2026-08-31",
+  "version": 2,
+  "last_reviewed": "2026-09-07",
   "_kinds": {
     "api": "the daemon or server opens this socket itself, on a timer or on demand",
     "bridge": "a local container holds a standing authenticated session to this platform",
@@ -68,6 +69,7 @@
     "user-browser-link": "NOT this program's egress -- a link handed to the owner's own browser",
     "website": "a host the public marketing site in site/ reaches: a subresource the visitor's browser loads, or a link it hands them. Not the product's egress -- no daemon opens these",
     "frontier-client": "an installed official provider client receives one user-reviewed prompt on stdin and owns its subscription login and vendor-controlled network stack; the app neither implements its socket nor reads its credential",
+    "public-lookup": "the installed claude client is driven headless, with WebSearch as its one enabled tool, to search the public web for a person the owner already knows using only public identifiers (name, firm, a public handle, a public profile URL) the owner's own corpus already holds; no per-call review box -- the review happens afterward through the PENDING claim queue, same as every other producer here",
     "loopback": "never leaves the machine"
   },
   "_the_claim": [
@@ -104,6 +106,16 @@
       "credential": "owned and refreshed by the installed Claude client through its subscription login; Intaglio never reads, copies or logs it",
       "decision": "Owner-directed 2026-08-31 under the same visible-review boundary as ChatGPT. Claude is invoked in safe mode with an empty tool set, no permission prompts, strict empty MCP configuration, empty settings sources, no browser and no session persistence; the approved prompt is written to stdin rather than argv. Owner decision 2026-09-07 (prototype, recorded in the session that built it): the installed claude client may ALSO be driven headless by ui/server/relationship/engines.mjs to build person pages from the owner's own corpus, with no per-call review box; the review happens afterwards through the PENDING claim queue on the desk, where nothing becomes an accepted fact until the owner decides. Revisit before this leaves the house.",
       "evidence": "widget/ui/chat.js frontierPrompt/openFrontierReview; widget/src/Bridge.swift frontierSend; widget/src/FrontierRunner.swift ClaudeFrontierJob; ui/server/relationship/engines.mjs -> installed claude -p (person-page builder, L5 step 4: no per-call visible-review box -- the owner authorized the feature and the isolated-invocation posture below, and reviews its output afterward through the existing PENDING claim queue, the same review gate every other producer in this system uses)"
+    },
+    {
+      "host": "api.anthropic.com",
+      "kind": "public-lookup",
+      "component": "ui/server/relationship/lookup.mjs -> installed claude -p --allowedTools WebSearch",
+      "direction": "outbound-send",
+      "purpose": "search the public web for a person the owner already knows, using only public identifiers the owner's own corpus already holds (display name, firm/company, a public handle already in the corpus, a public LinkedIn profile URL), then receive a search-grounded answer. The search itself executes on Anthropic's side; this repo opens no other socket for it and stores no fetched page, only the search result's own quoted text and the URL it cited",
+      "credential": "owned and refreshed by the installed Claude client through its subscription login; Intaglio never reads, copies or logs it",
+      "decision": "Owner-directed prototype decision, 2026-09-07 (recorded in the session that built it). A second, narrower invocation of the same installed client as the row above: an empty tool set is replaced with exactly one enabled tool (WebSearch) and everything else -- empty MCP config, empty settings sources, no permission prompts, no browser, no session persistence, the prompt on stdin never argv -- stays the same isolation posture engines.mjs already uses. The prompt is told nothing about why it is being asked (no message/transcript text, no claim text, no email or phone number, no calendar contents, no person_key, not even that this is for a reconnect) and is built by buildLookupQuery's own input gate, which refuses any field outside that public-identifier allowlist before it reads a single property. No per-call review box -- the review happens afterward through the PENDING claim queue, the same gate every other producer in this system uses. Revisit before this leaves the house.",
+      "evidence": "ui/server/relationship/lookup.mjs buildLookupQuery, anchorsFor, groundLookup, storeLookup; ui/server/relationship/engines.mjs createLookupEngine; prompts/public_lookup.md"
     },
     {
       "host": "api.notion.com",
