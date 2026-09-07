@@ -15,7 +15,7 @@ import { buildPersonEventLinkBatch, buildPersonEventLinks } from './evidence.mjs
 import { resolutionFingerprint } from './resolve.mjs';
 
 const DAY = 86_400_000;
-const PROJECTION_VERSION = 6;
+const PROJECTION_VERSION = 7; // 7: sub-role rules changed (investing platforms are fund-side); rows must be re-derived
 const sourceSql = RELATIONSHIP_SOURCES.map((source) => `'${source.replaceAll("'", "''")}'`).join(',');
 
 export const PEOPLE_PROJECTION_SCHEMA = `
