@@ -85,6 +85,8 @@ import {
 } from './relationship/lint.mjs';
 import { createEngine, createLookupEngine } from './relationship/engines.mjs';
 import { eligiblePool, produceBatch } from './relationship/producer.mjs';
+import { produceOweBatch } from './relationship/owe.mjs';
+import { CARD_PRODUCERS, REFILL_RETRY_MS, produceDailyBatch } from './relationship/daily.mjs';
 import {
   clearPeopleSearchCacheStorage,
   openPeopleSearchCache,
@@ -2652,55 +2654,70 @@ export function applyMemoryBatch(db, body) {
 // not evidence that the owner acted on them. Mirrors exactly the shape the
 // refresh route stores and the card route/widget expect: see the INSERT INTO
 // rm_candidate_snapshot call below for the encoding this decodes.
+//
+// BOTH-KIND, restored independently per CARD_PRODUCERS entry: the latest
+// batch that actually wrote a snapshot of that kind (MAX(batch_id) FROM
+// rm_candidate_snapshot WHERE kind = ?), not merely the latest
+// rm_candidate_batch row -- a kind's own refill throttle can leave an empty
+// batch as ITS newest row when that kind's pool is exhausted, and an empty
+// batch never inserts a snapshot, so it can never be this MAX by
+// construction (no separate candidate_count>0 check needed here, unlike the
+// single-producer version this replaces). rel.mode is recovered from the
+// latest RECONNECT batch only -- Owe cards always carry evidence.mode: null,
+// so asking Owe's batch for a mode would only ever erase the owner's last
+// picker choice.
 function hydrateCards(db) {
+  const empty = () => ({ cards: [], batch: { owe: null, reconnect: null }, mode: null });
   try {
-    // The latest batch with at least one snapshot, not merely the latest row:
-    // the card route's own refill throttle (see REFILL_RETRY_MS below) can
-    // leave an empty batch as the newest row when a mode's pool is exhausted,
-    // and hydrating from THAT row on restart silently drops the two unjudged,
-    // already-shown cards from the last real batch (card: null) even though
-    // their owner never judged them.
-    const batch = db.prepare(
-      'SELECT id FROM rm_candidate_batch WHERE candidate_count > 0 ORDER BY id DESC LIMIT 1'
-    ).get();
-    if (!batch) return { cards: [], batchId: null, mode: null };
-    const batchId = Number(batch.id);
-    const rows = db.prepare(
-      'SELECT id, person_key, kind, summary, evidence, producer_version FROM rm_candidate_snapshot ' +
-      'WHERE batch_id = ? ORDER BY id'
-    ).all(batchId);
-    // people may be empty or absent (a fresh projection) -- the person_key
-    // string is a legible fallback name, never a thrown error.
     let nameStmt = null;
     try { nameStmt = db.prepare('SELECT display_name FROM people WHERE person_key = ?'); } catch {}
-    const cards = rows.map((row) => {
-      const evidence = JSON.parse(row.evidence);
-      const { quote_context_id, role, focus, label, left, leftTone, ...cardEvidence } = evidence;
-      let name = row.person_key;
-      try {
-        const person = nameStmt?.get(row.person_key);
-        if (person?.display_name) name = person.display_name;
-      } catch {}
-      return {
-        personKey: row.person_key, name, kind: row.kind, sentence: row.summary,
-        quoteContextId: quote_context_id ?? null, role: role ?? null, focus: focus ?? null,
-        label: label ?? null, left: left ?? null, leftTone: leftTone ?? null,
-        evidence: cardEvidence, producer_version: row.producer_version,
-        snapshot_id: Number(row.id),
-      };
-    });
-    // The mode the latest batch was produced in (every snapshot in a batch
-    // carries the same one) is the owner's last pick from the widget's mode
-    // picker -- recovered here so a restart does not silently fall back to
-    // the config default the next time the card route refills.
-    const lastMode = rows.length ? JSON.parse(rows[0].evidence)?.mode : null;
-    const mode = RELATIONSHIP_MODES.includes(lastMode) ? lastMode : null;
-    return { cards, batchId, mode };
+
+    const cards = [];
+    const batch = { owe: null, reconnect: null };
+    let mode = null;
+    for (const kind of CARD_PRODUCERS) {
+      const latest = db.prepare(
+        'SELECT MAX(batch_id) AS batchId FROM rm_candidate_snapshot WHERE kind = ?'
+      ).get(kind);
+      const batchId = latest?.batchId != null ? Number(latest.batchId) : null;
+      if (batchId === null) continue;
+      batch[kind] = batchId;
+      const rows = db.prepare(
+        'SELECT id, person_key, kind, summary, evidence, producer_version FROM rm_candidate_snapshot ' +
+        'WHERE batch_id = ? ORDER BY id'
+      ).all(batchId);
+      for (const row of rows) {
+        const evidence = JSON.parse(row.evidence);
+        const { quote_context_id, role, focus, label, left, leftTone, ...cardEvidence } = evidence;
+        let name = row.person_key;
+        try {
+          const person = nameStmt?.get(row.person_key);
+          if (person?.display_name) name = person.display_name;
+        } catch {}
+        cards.push({
+          personKey: row.person_key, name, kind: row.kind, sentence: row.summary,
+          quoteContextId: quote_context_id ?? null, role: role ?? null, focus: focus ?? null,
+          label: label ?? null, left: left ?? null, leftTone: leftTone ?? null,
+          evidence: cardEvidence, producer_version: row.producer_version,
+          snapshot_id: Number(row.id),
+        });
+      }
+      if (kind === 'reconnect') {
+        // The mode the latest reconnect batch was produced in (every
+        // snapshot in a batch carries the same one) is the owner's last pick
+        // from the widget's mode picker -- recovered here so a restart does
+        // not silently fall back to the config default the next time the
+        // card route refills reconnect.
+        const lastMode = rows.length ? JSON.parse(rows[0].evidence)?.mode : null;
+        mode = RELATIONSHIP_MODES.includes(lastMode) ? lastMode : null;
+      }
+    }
+    return { cards, batch, mode };
   } catch {
     // A missing rm_candidate_batch/snapshot table (fresh DB, or a schema this
     // process has not migrated yet) means "no history to hydrate", not a
     // startup failure.
-    return { cards: [], batchId: null, mode: null };
+    return empty();
   }
 }
 
@@ -2741,12 +2758,14 @@ function relationshipState(db, policy) {
       return body?.choices?.[0]?.message?.content?.trim() ?? null;
     };
     const hydrated = hydrateCards(db);
-    holder.__relationship = { service, llamaCall, cards: hydrated.cards, batchId: hydrated.batchId,
+    holder.__relationship = { service, llamaCall, cards: hydrated.cards, batch: hydrated.batch,
       mode: hydrated.mode, refreshing: false, lastError: null,
-      // Refill throttle (see REFILL_RETRY_MS): lastRefillAt/lastRefillEmpty
-      // describe the most recent synchronous refill the card route ran, not
-      // any refill ever -- an explicit /refresh does not touch these.
-      lastRefillAt: null, lastRefillEmpty: false };
+      // Per-kind refill throttle (see daily.mjs's REFILL_RETRY_MS):
+      // refill.owe/refill.reconnect each describe the most recent
+      // synchronous refill the card route ran FOR THAT KIND, not any refill
+      // ever -- an explicit /refresh does not touch these, and one kind's
+      // throttle never blocks the other's.
+      refill: { owe: { at: null, empty: false }, reconnect: { at: null, empty: false } } };
   }
   return holder.__relationship;
 }
@@ -2838,16 +2857,13 @@ function relationshipLookupEngine(policy) {
 const PAGE_BUILD_PAUSE_MS = 1000;
 const PAGE_RECENT_BUILD_MS = 7 * 86_400_000;
 
-// How long the card route's synchronous refill stays throttled after a
-// refill that produced zero candidates (the mode's pool is exhausted --
-// everyone recently shown or judged). Without this, every poll of an
-// exhausted queue wrote a fresh empty batch (44 batches, 28 empty, observed
-// on the live machine since 09:12): the route would call produceBatch again
-// on the very next GET, learn nothing new, and write another empty row. A
-// refill that DOES produce candidates resets the throttle immediately (see
-// the card route below); an explicit POST /admin/relationship/refresh is
-// never throttled -- the owner asked for it directly.
-const REFILL_RETRY_MS = 15 * 60_000;
+// The per-kind refill throttle (REFILL_RETRY_MS, and its owe/reconnect
+// isolation) now lives in daily.mjs, imported above: without it, every poll
+// of an exhausted queue wrote a fresh empty batch (44 batches, 28 empty,
+// observed on the live machine since 09:12). A refill that DOES produce
+// candidates resets the throttle immediately (see the card route below); an
+// explicit POST /admin/relationship/refresh is never throttled -- the owner
+// asked for it directly.
 
 function sleep(ms) {
   return new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
@@ -3017,15 +3033,16 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         const now = Date.now();
         const { batchId, cards } = produceBatch(db, { mode, now });
         rel.mode = mode;
-        rel.batchId = batchId;
-        rel.cards = cards;
+        rel.batch.reconnect = batchId;
+        // Replace only reconnect's OWN slice of the shared queue -- an
+        // explicit reconnect refresh must never drop Owe's unjudged cards.
+        rel.cards = [...rel.cards.filter((c) => c.kind !== 'reconnect'), ...cards];
         rel.refreshing = false;
         // An explicit refresh is a refill too (just never throttled -- the
-        // owner asked for it directly): keep the card route's own throttle
-        // bookkeeping current so a poll right after this doesn't act on a
-        // stale lastRefillEmpty from before the owner's ask.
-        rel.lastRefillAt = now;
-        rel.lastRefillEmpty = cards.length === 0;
+        // owner asked for it directly): keep the card route's own per-kind
+        // throttle bookkeeping current so a poll right after this doesn't
+        // act on a stale rel.refill.reconnect from before the owner's ask.
+        rel.refill.reconnect = { at: now, empty: cards.length === 0 };
         if (cards.length > 0) startPageBuilds(db, policy, rel, batchId, cards);
       } catch (e) {
         rel.refreshing = false;
@@ -3059,8 +3076,13 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
             ...card.evidence }),
           card.producer_version, 'combined-v13', now).lastInsertRowid);
       }
-      rel.batchId = batchId;
-      rel.cards = result.cards;
+      // The matcher path has always dealt only in reconnect-kind cards; it
+      // predates Owe. Same "replace only this kind's slice" merge as the
+      // eligibility branch above, generalized over whatever kind(s) this
+      // batch actually carries rather than hardcoding 'reconnect'.
+      rel.batch.reconnect = batchId;
+      const kinds = new Set(result.cards.map((c) => c.kind));
+      rel.cards = [...rel.cards.filter((c) => !kinds.has(c.kind)), ...result.cards];
       rel.refreshing = false;
     }).catch((e) => { rel.refreshing = false; rel.lastError = String(e?.message ?? e); });
     send(res, 200, { started: true }, cors);
@@ -3077,56 +3099,66 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     const cap = relationshipCap(policy);
     if (!cap) { send(res, 200, { card: null, reason: 'no-cap-configured' }, cors); return; }
 
-    // Refill on empty: with a batch depth of 5 (produceBatch's default), the
-    // owner judging every card in a batch used to leave the queue permanently
-    // empty until something called /refresh -- the widget's orb never lit
-    // again. The eligibility producer is one SQL statement plus a handful of
-    // inserts (no model call), so this can run synchronously in the GET
-    // itself rather than needing the fire-and-forget shape /refresh uses for
-    // the matcher path. Gated on rel.refreshing so a refill can never race an
-    // in-flight /refresh; gated on the eligibility producer because the
-    // matcher path has no cheap synchronous equivalent -- an owner who has
-    // not opted into the eligibility producer keeps today's behavior
-    // (refill only via an explicit /refresh call).
+    // Refill on empty: with a batch depth of 5 (produceBatch's/produceOweBatch's
+    // default), the owner judging every card in a batch used to leave the
+    // queue permanently empty until something called /refresh -- the
+    // widget's orb never lit again. Both eligibility-family producers are one
+    // SQL statement plus a handful of inserts (no model call), so this can
+    // run synchronously in the GET itself. Gated on rel.refreshing so a
+    // refill can never race an in-flight /refresh; gated on the eligibility
+    // producer because the matcher path has no cheap synchronous equivalent
+    // -- an owner who has not opted into the eligibility producer keeps
+    // today's behavior (refill only via an explicit /refresh call, serving
+    // from the whole queue with no per-kind split).
+    //
+    // `servingKind` names which producer's kind this request is serving from
+    // (daily.mjs's alternation decision) -- null means "serve from the whole
+    // queue, unfiltered", the matcher path's only mode.
     const producerConfig = relationshipProducerConfig(policy);
     let refillThrottled = false;
+    let retryAfterMs = 0;
+    let servingKind = null;
     if (producerConfig.producer === 'eligibility' && !rel.refreshing) {
-      const hasUnjudged = rel.cards.some((card) => !db.prepare(
-        "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event IN ('accepted','dismissed') LIMIT 1"
-      ).get(card.snapshot_id));
-      if (!hasUnjudged) {
-        // Throttle: a refill that just produced zero candidates (the pool is
-        // exhausted -- everyone recently shown or judged) means calling
-        // produceBatch again right now would learn nothing and write another
-        // empty batch row per poll. Skip the call entirely until
-        // REFILL_RETRY_MS has passed since that empty refill; a refill that
-        // DID produce candidates resets the throttle below.
-        const now = Date.now();
-        if (rel.lastRefillEmpty && rel.lastRefillAt != null && now - rel.lastRefillAt < REFILL_RETRY_MS) {
+      const now = Date.now();
+      const dailyPolicy = {
+        producers: {
+          owe: (dailyDb, { now: at }) => produceOweBatch(dailyDb, { now: at }),
+          // The owner's last pick from the mode picker wins over the config
+          // default: a refill on an empty queue must keep serving the mode
+          // they asked for, not quietly widen back to 'any'.
+          reconnect: (dailyDb, { now: at }) => produceBatch(dailyDb, { mode: rel.mode ?? producerConfig.mode, now: at }),
+        },
+        refillRetryMs: REFILL_RETRY_MS,
+        onBatchProduced: (kind, batchId, cards) => {
+          if (cards.length > 0) startPageBuilds(db, policy, rel, batchId, cards);
+        },
+      };
+      try {
+        const decision = produceDailyBatch(db, dailyPolicy, rel, { now });
+        if (decision.servingKind === null) {
           refillThrottled = true;
+          // Both kinds are exhausted (or throttled from a previous request):
+          // retry after whichever kind was most recently attempted cools down.
+          const at = Math.max(rel.refill.owe.at ?? 0, rel.refill.reconnect.at ?? 0);
+          retryAfterMs = Math.max(0, REFILL_RETRY_MS - (now - at));
         } else {
-          try {
-            // The owner's last pick from the mode picker wins over the config
-            // default: a refill on an empty queue must keep serving the mode
-            // they asked for, not quietly widen back to 'any'.
-            const { batchId, cards } = produceBatch(db, { mode: rel.mode ?? producerConfig.mode, now });
-            rel.batchId = batchId;
-            rel.cards = cards;
-            rel.lastRefillAt = now;
-            rel.lastRefillEmpty = cards.length === 0;
-            if (cards.length > 0) startPageBuilds(db, policy, rel, batchId, cards);
-          } catch (e) {
-            rel.lastError = String(e?.message ?? e);
-          }
+          servingKind = decision.servingKind;
         }
+      } catch (e) {
+        rel.lastError = String(e?.message ?? e);
       }
     }
     if (refillThrottled) {
-      send(res, 200, { card: null, reason: 'pool-exhausted',
-        retryAfterMs: Math.max(0, REFILL_RETRY_MS - (Date.now() - rel.lastRefillAt)),
+      send(res, 200, { card: null, reason: 'pool-exhausted', retryAfterMs,
         ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
       return;
     }
+
+    // The serving set: the single kind daily.mjs picked (eligibility path),
+    // or the whole queue (matcher path, or an eligibility-path exception
+    // above -- serve whatever is already there rather than answering nothing
+    // on a transient error).
+    const servingQueue = servingKind === null ? rel.cards : rel.cards.filter((c) => c.kind === servingKind);
 
     // PAGE-FIRST: among the unjudged candidates, serve whichever already has
     // a built page (accepted or pending items -- readPersonPage already omits
@@ -3135,8 +3167,10 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // lands, so the desk should not have to wait on it -- prefer what is
     // ready now, in the same relative rank order within each group, and fall
     // straight through to today's behavior (first unjudged, no blocking) once
-    // no candidate has a page yet.
-    const unjudgedCards = rel.cards.filter((card) => !db.prepare(
+    // no candidate has a page yet. Owe cards do not require a page to serve;
+    // this ordering just happens to also work for them, since an Owe card
+    // with no page falls into `withoutPage` and still serves in rank order.
+    const unjudgedCards = servingQueue.filter((card) => !db.prepare(
       "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event IN ('accepted','dismissed') LIMIT 1"
     ).get(card.snapshot_id));
     const withPage = [];
@@ -3175,15 +3209,42 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         if (row === undefined) continue;
         quote = String(row.text).slice(0, 200);
       }
+      // owe:expired-commitment carries a LIVE claim reference
+      // (evidence.commitment_claim_id), never copied text -- the same
+      // deletion-cascade discipline as the quote just above. Resolved here,
+      // at serve time: the claim's current text becomes `left` (the widget's
+      // existing "how you left it" row), and a claim that is gone (source
+      // deleted) or whose latest decision is now 'reject' (rejected between
+      // produce and serve) drops the card entirely rather than showing stale
+      // or retracted evidence.
+      let left = card.left;
+      let leftTone = card.leftTone;
+      const commitmentClaimId = card.evidence?.commitment_claim_id;
+      if (Number.isInteger(commitmentClaimId)) {
+        const claimRow = db.prepare('SELECT text FROM claim WHERE id = ?').get(commitmentClaimId);
+        if (!claimRow) continue;
+        const decision = db.prepare(
+          'SELECT action FROM claim_decision WHERE claim_id = ? ORDER BY created_at DESC, id DESC LIMIT 1'
+        ).get(commitmentClaimId);
+        if (decision?.action === 'reject') continue;
+        left = claimRow.text;
+        leftTone = 'bad';
+      }
       // The person page, when one has been built (accepted+pending items;
       // readPersonPage already omits rejected ones). how_left is the freshest
       // signal a page can carry -- how things were actually left, in the
       // person's own words -- so it outranks the template tie sentence and
       // the eligibility producer's own summary; the first ask is the next
       // best thing when nothing names how things were left. A page with
-      // neither leaves `sentence` exactly as it was.
+      // neither leaves `sentence` exactly as it was. GATED to kind==='reconnect':
+      // Owe's tie sentence ("you said you would...", "they asked...") IS the
+      // receipt for a specific overdue thing, and a page's how_left/ask text
+      // -- about the relationship in general -- must never silently replace
+      // that specific claim.
       const page = readPersonPage(db, card.personKey);
-      const sentence = page.sections.how_left?.text ?? page.sections.asks[0]?.text ?? card.sentence;
+      const sentence = card.kind === 'reconnect'
+        ? (page.sections.how_left?.text ?? page.sections.asks[0]?.text ?? card.sentence)
+        : card.sentence;
       // `changed`: public lookup's own signal (L5 step 6), separate from
       // `sentence` and never displacing it -- the newest non-rejected
       // public-web change about this person, resolved through its live
@@ -3196,7 +3257,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       } catch {
         changed = null;
       }
-      send(res, 200, { card: { ...card, quote, sentence, who: page.sections.who?.text ?? null, page, changed },
+      send(res, 200, { card: { ...card, quote, sentence, left, leftTone, who: page.sections.who?.text ?? null, page, changed },
         ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
       return;
     }

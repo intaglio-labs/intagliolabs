@@ -10,9 +10,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { start, openDb } from '../server/hermes.mjs';
+import { produceOweBatch } from '../server/relationship/owe.mjs';
+import { produceBatch } from '../server/relationship/producer.mjs';
 
 const TOKEN = 'e'.repeat(64);
 const CAP = { max: 5, windowMs: 86_400_000 };
+const DAY = 86_400_000;
 
 const STUB_CARDS = [{
   personKey: 'name:lapsed colleague', name: 'Lapsed Colleague', kind: 'reconnect',
@@ -386,5 +389,289 @@ test('/stats.lint is null, not a crash, against a pre-lint-migration database', 
     assert.equal(res.status, 200);
     const stats = await res.json();
     assert.equal(stats.lint, null);
+  });
+});
+
+// ---------------------------------------------------------------------
+// Owe wired into the card route (L5 follow-on step 8): the eligibility
+// producer config, both producers sharing rel.cards/rel.batch, per-kind
+// alternation via daily.mjs. Fixtures write people/person_event_links/claim
+// rows directly on server.db, same discipline as relationship-producer.test.mjs
+// and relationship-owe.test.mjs.
+
+async function withEligibilityServer(fn, opts = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-routes-owe-'));
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
+    relationshipCap: CAP,
+    relationshipProducerConfig: { producer: 'eligibility', mode: 'any' },
+    peopleProjectionAutoRebuild: false,
+    ...opts,
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const call = (method, path, body) => fetch(base + path, {
+    method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  try { await fn({ call, db: server.db }); } finally { await server.close(); }
+}
+
+function insertPersonRow(db, { key, name, role = 'friend', subRoles = [], sent, received, met = 0 }, now) {
+  db.prepare(
+    `INSERT INTO people(person_key, display_name, first_seen, last_seen, last_from_them, last_from_owner,
+       sent, received, met_in_person, room_messages, direct_messages, meeting_notes, role, roles_by_year,
+       linkedin, built_at, sub_roles)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).run(key, name, now - 400 * DAY, now - 10 * DAY, now - 10 * DAY, now - 10 * DAY,
+    sent, received, met, 0, sent + received, 0, role, '{}', null, now, JSON.stringify(subRoles));
+}
+function insertActiveDayRow(db, key, activeDay) {
+  db.prepare('INSERT OR IGNORE INTO person_active_days(person_key, day) VALUES (?, ?)').run(key, activeDay);
+}
+function isoDay(now, offsetDays) { return new Date(now - offsetDays * DAY).toISOString().slice(0, 10); }
+
+function insertMessage(db, key, { ts, text = 'hi', authored = 0, ownerAuthored = 0, room = 0 } = {}) {
+  const ctxId = Number(db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', ?, '{}')"
+  ).run(ts, text).lastInsertRowid);
+  db.prepare(
+    `INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+     VALUES (?, ?, 'imessage', 'counterparty', ?, ?, ?, 1, 'conv')`
+  ).run(key, ctxId, authored ? 1 : 0, ownerAuthored ? 1 : 0, room ? 1 : 0);
+  return ctxId;
+}
+
+// Seeds a reconnect-eligible person (producer.mjs's own gates: two-way
+// history, authored, quiet >= 180 days) so a reconnect candidate is always
+// available alongside whatever Owe fixture a test adds.
+function seedReconnectCandidate(db, key, name, now) {
+  insertPersonRow(db, { key, name, sent: 20, received: 20 }, now);
+  insertMessage(db, key, { ts: now - 200 * DAY, authored: 1 });
+  insertActiveDayRow(db, key, isoDay(now, 200));
+}
+
+// Seeds an owe:open-loop-eligible person: an authored, direct-message
+// question 12 days ago, never answered.
+function seedOweOpenLoopCandidate(db, key, name, now, text = 'can you send that over?') {
+  insertPersonRow(db, { key, name, sent: 10, received: 10 }, now);
+  insertMessage(db, key, { ts: now - 12 * DAY, text, authored: 1 });
+}
+
+function insertDistillRun(db, now) {
+  return Number(db.prepare(
+    `INSERT INTO distill_run(model, prompt_path, prompt_sha, params, episode_context,
+       rows_in, claims_out, status, started_at, ended_at)
+     VALUES ('test-model', 'test/prompt.md', 'sha', '{}', 'on', 1, 1, 'complete', ?, ?)`
+  ).run(now, now).lastInsertRowid);
+}
+function insertOwnerCommitmentClaim(db, { runId, text = 'I will send the deck', observedAt, validTo }) {
+  return Number(db.prepare(
+    `INSERT INTO claim(run_id, subject, subject_person_key, kind, text, observed_at, valid_to, p_claim, created_at)
+     VALUES (?, 'owner', NULL, 'commitment', ?, ?, ?, NULL, ?)`
+  ).run(runId, text, observedAt, validTo, observedAt).lastInsertRowid);
+}
+function acceptClaim(db, claimId, now) {
+  db.prepare("INSERT INTO claim_decision(claim_id, action, actor, reason, created_at) VALUES (?, 'accept', 'owner', NULL, ?)").run(claimId, now);
+}
+function rejectClaim(db, claimId, now) {
+  db.prepare("INSERT INTO claim_decision(claim_id, action, actor, reason, created_at) VALUES (?, 'reject', 'owner', NULL, ?)").run(claimId, now);
+}
+function insertClaimSource(db, { claimId, contextId, quote = 'quote' }) {
+  db.prepare(
+    "INSERT INTO claim_source(claim_id, context_id, source, entity_id, content_hash, quote) VALUES (?, ?, 'imessage', NULL, NULL, ?)"
+  ).run(claimId, contextId, quote);
+}
+
+// Seeds an owe:expired-commitment (B1) candidate: an accepted owner
+// commitment claim whose valid_to is already past, sourced off a direct
+// message with this person.
+function seedOweCommitmentCandidate(db, key, name, now, { text = 'I will follow up' } = {}) {
+  insertPersonRow(db, { key, name, sent: 10, received: 10 }, now);
+  const runId = insertDistillRun(db, now);
+  const observedAt = now - 100 * DAY;
+  const validTo = now - 20 * DAY;
+  const claimId = insertOwnerCommitmentClaim(db, { runId, text, observedAt, validTo });
+  acceptClaim(db, claimId, observedAt);
+  const ctx = insertMessage(db, key, { ts: observedAt, text: 'sounds good', ownerAuthored: 1 });
+  insertClaimSource(db, { claimId, contextId: ctx, quote: 'sounds good' });
+  return { claimId };
+}
+
+// A built page item (person_page_item), accepted, in one section -- same
+// shape pages.mjs's own storePage writes, built directly here rather than
+// through the engine.
+function insertPageItem(db, { personKey, section, text, now }) {
+  const runId = insertDistillRun(db, now);
+  const claimId = Number(db.prepare(
+    `INSERT INTO claim(run_id, subject, subject_person_key, kind, text, observed_at, valid_to, p_claim, created_at)
+     VALUES (?, 'person', ?, 'fact', ?, NULL, NULL, NULL, ?)`
+  ).run(runId, personKey, text, now).lastInsertRowid);
+  acceptClaim(db, claimId, now);
+  db.prepare('INSERT INTO person_page_item(claim_id, section, built_at) VALUES (?, ?, ?)').run(claimId, section, now);
+  return claimId;
+}
+
+test('the route serves an Owe card with no page, and records shown under kind=owe', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedOweOpenLoopCandidate(db, 'name:owe route one', 'Owe Route One', now);
+
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.ok(out.card, 'an owe card is served even with no page built');
+    assert.equal(out.card.kind, 'owe');
+    assert.equal(out.card.page.sections.who, null);
+
+    const shown = db.prepare("SELECT kind FROM rm_card_event WHERE event = 'shown'").get();
+    assert.equal(shown.kind, 'owe');
+  });
+});
+
+test('accepting an Owe card records kind=owe, rule_version=owe-v1', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedOweOpenLoopCandidate(db, 'name:owe route accept', 'Owe Route Accept', now);
+
+    const { card } = await (await call('GET', '/admin/relationship/card')).json();
+    await call('POST', '/admin/relationship/event', {
+      snapshot_id: card.snapshot_id, person_key: card.personKey, event: 'accepted',
+    });
+    const accepted = db.prepare("SELECT kind, rule_version FROM rm_card_event WHERE event = 'accepted'").get();
+    assert.equal(accepted.kind, 'owe');
+    assert.equal(accepted.rule_version, 'owe-v1');
+  });
+});
+
+test("not-this-kind on an Owe card writes rm_mute person+kind='owe'; reconnect keeps serving", async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedOweOpenLoopCandidate(db, 'name:owe route kind', 'Owe Route Kind', now);
+    seedReconnectCandidate(db, 'name:reconnect route kind', 'Reconnect Route Kind', now);
+
+    const first = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(first.card.kind, 'owe', 'owe goes first (control, and never shown yet)');
+    await call('POST', '/admin/relationship/event', {
+      snapshot_id: first.card.snapshot_id, person_key: first.card.personKey,
+      event: 'dismissed', reason: 'not-this-kind',
+    });
+    const mute = db.prepare('SELECT person_key, kind FROM rm_mute').get();
+    assert.equal(mute.person_key, 'name:owe route kind');
+    assert.equal(mute.kind, 'owe');
+
+    const second = await (await call('GET', '/admin/relationship/card')).json();
+    assert.ok(second.card, 'reconnect still serves after an owe not-this-kind dismissal');
+    assert.equal(second.card.kind, 'reconnect');
+  });
+});
+
+test('an Owe card\'s sentence stays the template even when the person has a how_left page item', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    const key = 'name:owe route sentence';
+    seedOweOpenLoopCandidate(db, key, 'Owe Route Sentence', now);
+    insertPageItem(db, { personKey: key, section: 'how_left', text: 'Ended the call on good terms.', now });
+
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(out.card.kind, 'owe');
+    assert.ok(out.card.sentence.includes('They asked you something'), 'the owe template sentence, unchanged');
+    assert.ok(!out.card.sentence.includes('Ended the call'), 'the page how_left text never substitutes on an owe card');
+  });
+});
+
+test('a restart hydrates BOTH kinds, and recovers rel.mode from the reconnect batch even when Owe is the newer one', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-routes-owe-hydrate-'));
+  const dbPath = join(dir, 'context.db');
+  const opts = {
+    port: 0, dbPath, llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN, relationshipCap: CAP,
+    relationshipProducerConfig: { producer: 'eligibility', mode: 'any' },
+    peopleProjectionAutoRebuild: false,
+  };
+  const now = Date.now();
+
+  const first = await start(opts);
+  try {
+    const db = first.db;
+    // Tagged 'investor' so mode='investor' below actually finds them --
+    // eligiblePool's own mode gate, not incidental to what this test checks.
+    insertPersonRow(db, { key: 'name:hydrate reconnect', name: 'Hydrate Reconnect', subRoles: ['investor'], sent: 20, received: 20 }, now);
+    insertMessage(db, 'name:hydrate reconnect', { ts: now - 200 * DAY, authored: 1 });
+    insertActiveDayRow(db, 'name:hydrate reconnect', isoDay(now, 200));
+    seedOweOpenLoopCandidate(db, 'name:hydrate owe', 'Hydrate Owe', now);
+
+    // Reconnect's batch is produced FIRST, under mode='investor'; Owe's batch
+    // is produced SECOND (chronologically newer). rel.mode must still
+    // recover 'investor' -- from the reconnect batch specifically, never
+    // from whichever batch happens to be newest.
+    const reconnectResult = produceBatch(db, { mode: 'investor', now });
+    assert.equal(reconnectResult.cards.length, 1);
+    produceOweBatch(db, { now: now + 1000 });
+
+    // A SECOND investor-tagged person, added only AFTER batch #1 was
+    // produced: absent from both batches above, so it is untouched by the
+    // "already shown" cooldown the first candidate picks up once served
+    // below, and is exactly who the post-restart refresh (further down)
+    // should find if -- and only if -- it correctly re-derives mode='investor'.
+    insertPersonRow(db, { key: 'name:hydrate reconnect fresh', name: 'Hydrate Reconnect Fresh', subRoles: ['investor'], sent: 20, received: 20 }, now);
+    insertMessage(db, 'name:hydrate reconnect fresh', { ts: now - 200 * DAY, authored: 1 });
+    insertActiveDayRow(db, 'name:hydrate reconnect fresh', isoDay(now, 200));
+  } finally {
+    await first.close();
+  }
+
+  const second = await start(opts);
+  try {
+    const base = `http://127.0.0.1:${second.port}`;
+    const call = (method, path, body) => fetch(base + path, {
+      method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+
+    // Neither kind has ever been shown: pickProducer's tie resolves to
+    // CARD_PRODUCERS[0] ('owe'), and the hydrated owe card serves with no
+    // new production.
+    const firstCard = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(firstCard.card.kind, 'owe');
+    assert.equal(firstCard.card.personKey, 'name:hydrate owe');
+    await call('POST', '/admin/relationship/event', {
+      snapshot_id: firstCard.card.snapshot_id, person_key: firstCard.card.personKey, event: 'dismissed',
+    });
+
+    // Owe was just shown; reconnect (never shown) goes next -- the hydrated
+    // reconnect card serves, proving it survived the restart too.
+    const secondCard = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(secondCard.card.kind, 'reconnect');
+    assert.equal(secondCard.card.personKey, 'name:hydrate reconnect');
+
+    // Mode recovery: an explicit refresh with no mode in the body falls back
+    // to rel.mode ?? producerConfig.mode. producerConfig.mode here is 'any';
+    // the new reconnect batch's evidence.mode must read 'investor' (the
+    // reconnect batch's own mode), not 'any' (the config default a failed
+    // recovery would fall back to).
+    await call('POST', '/admin/relationship/refresh', {});
+    const newest = second.db.prepare(
+      "SELECT person_key, evidence FROM rm_candidate_snapshot WHERE kind = 'reconnect' ORDER BY id DESC LIMIT 1"
+    ).get();
+    assert.equal(newest.person_key, 'name:hydrate reconnect fresh',
+      'the new refresh found the fresh investor candidate -- proof mode=investor was actually used');
+    assert.equal(JSON.parse(newest.evidence).mode, 'investor');
+  } finally {
+    await second.close();
+  }
+});
+
+test('an expired-commitment card whose claim is rejected between produce and serve is dropped', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    const key = 'name:owe route rejected claim';
+    const { claimId } = seedOweCommitmentCandidate(db, key, 'Owe Route Rejected Claim', now);
+
+    // Produce the batch directly (simulating an earlier request/cycle that
+    // already ran the producer), THEN reject the claim -- the race this test
+    // targets. The very first card-route call after this hydrates rel.cards
+    // from what was already produced and must drop the card at serve time.
+    produceOweBatch(db, { now });
+    rejectClaim(db, claimId, now);
+
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(out.card, null, 'the rejected-between-produce-and-serve card is dropped, not shown');
   });
 });

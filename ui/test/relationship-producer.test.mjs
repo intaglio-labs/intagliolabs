@@ -641,7 +641,12 @@ test('an exhausted pool does not write a batch per poll', async () => {
       assert.equal(ev.status, 200);
     }
 
-    // Five polls against the now-exhausted pool.
+    // Five polls against the now-exhausted pool. The reconnect pool has
+    // nothing left, so the FIRST poll's alternation (daily.mjs) also gives
+    // Owe a turn -- its own pool is empty too (no owe fixture data here),
+    // so it writes its own empty batch row exactly once, same as reconnect
+    // does. Two producers, two new rows on that first poll; still not one
+    // per poll thereafter -- that is the property this test protects.
     const results = [];
     for (let i = 0; i < 5; i++) {
       results.push(await (await call('GET', '/admin/relationship/card')).json());
@@ -649,13 +654,14 @@ test('an exhausted pool does not write a batch per poll', async () => {
     for (const r of results) assert.equal(r.card, null, 'the pool really is exhausted -- no card to serve');
 
     const batchesAfterPolling = Number(db.prepare('SELECT COUNT(*) AS n FROM rm_candidate_batch').get().n);
-    assert.equal(batchesAfterPolling, batchesAfterRefresh + 1,
-      'exactly one new (empty) batch row across all five polls, not one per poll');
+    assert.equal(batchesAfterPolling, batchesAfterRefresh + 2,
+      'exactly one new empty batch row per producer (owe, reconnect) across all five polls, not one per poll');
 
-    // The first poll is the one that actually ran produceBatch and
-    // discovered the pool empty; the later four are throttled and never
-    // called produceBatch at all -- that is what the batch-row count above
-    // proves, and this asserts the throttled response shape too.
+    // The first poll is the one that actually ran both producers and
+    // discovered both pools empty; the later four are throttled (for BOTH
+    // kinds) and never called either producer again -- that is what the
+    // batch-row count above proves, and this asserts the throttled response
+    // shape too.
     for (const r of results.slice(1)) {
       assert.equal(r.reason, 'pool-exhausted');
       assert.ok(Number.isFinite(r.retryAfterMs) && r.retryAfterMs > 0);
