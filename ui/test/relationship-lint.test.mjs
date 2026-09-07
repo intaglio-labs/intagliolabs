@@ -74,6 +74,29 @@ function insertPersonWithLinkedin(db, { key, name, linkedin = null, subRoles = [
   );
 }
 
+// Mirrors relationship-lookup.test.mjs's own insertActiveDay/insertAuthored/
+// day helpers -- pageAnchorFindings' anchored/tier fields come straight out
+// of lookupScope, so a person meant to land in the 'eligible' tier here must
+// clear eligiblePool's own gates (producer.mjs) the same way that test
+// file's own eligible fixture does: depth >= MIN_DEPTH_MESSAGES (already
+// true of insertPersonWithLinkedin's sent:10/received:10), authored, quiet
+// >= 180 days, business relationship (also already true), no future meeting.
+function insertActiveDay(db, key, activeDay) {
+  db.prepare('INSERT OR IGNORE INTO person_active_days(person_key, day) VALUES (?, ?)').run(key, activeDay);
+}
+
+function insertAuthored(db, key, { now = NOW } = {}) {
+  const ctxId = Number(db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', 'hi', '{}')"
+  ).run(now - 200 * DAY).lastInsertRowid);
+  db.prepare(
+    `INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+     VALUES (?, ?, 'imessage', 'counterparty', 1, 0, 0, 1, 'conv')`
+  ).run(key, ctxId);
+}
+
+const day = (offsetDays) => new Date(NOW - offsetDays * DAY).toISOString().slice(0, 10);
+
 function insertBatch(db, { now = NOW } = {}) {
   return Number(
     db.prepare('INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, ?, ?, ?)')
@@ -193,18 +216,24 @@ test('roleConflicts recomputes from the LinkedIn export, not people.sub_roles --
 // (3) C3 anchored_no_page / C4 page_no_anchors
 // ---------------------------------------------------------------------------
 
-test('pageAnchorFindings: C3 honours LINT_PAGE_TIERS and the rejected-page-item exclusion; C4 fires for a built page with only one anchor', () => {
+test('pageAnchorFindings: C3 honours LINT_PAGE_TIERS (eligible only) and the rejected-page-item exclusion; C4 fires for a built page with only one anchor', () => {
   const db = openDb(':memory:');
   const distillRunId = insertDistillRun(db);
 
-  // P1: anchored (name + firm), tagged tier (founder), no page at all.
+  // P1: anchored (name + firm), ELIGIBLE tier -- clears every eligiblePool
+  // gate (depth, authored, quiet >= 180 days, business, no future meeting)
+  // -- no page at all.
   const p1 = 'name:c3 anchored no page';
   insertPersonWithLinkedin(db, { key: p1, name: 'Anchored No Page', linkedin: { company: 'Acme Capital' }, subRoles: ['founder'] });
+  insertAuthored(db, p1);
+  insertActiveDay(db, p1, day(200));
 
-  // P2: anchored, tagged tier, but its only person_page_item sits on a
+  // P2: anchored, ELIGIBLE tier, but its only person_page_item sits on a
   // REJECTED claim -- still counts as "no page".
   const p2 = 'name:c3 rejected page';
   insertPersonWithLinkedin(db, { key: p2, name: 'Rejected Page', linkedin: { company: 'Acme Capital' }, subRoles: ['founder'] });
+  insertAuthored(db, p2);
+  insertActiveDay(db, p2, day(200));
   const rejectedClaim = insertClaim(db, { runId: distillRunId, personKey: p2, text: 'who line' });
   decide(db, rejectedClaim, 'reject');
   db.prepare('INSERT INTO person_page_item(claim_id, section, built_at) VALUES (?, ?, ?)').run(rejectedClaim, 'who', NOW);
@@ -215,18 +244,27 @@ test('pageAnchorFindings: C3 honours LINT_PAGE_TIERS and the rejected-page-item 
   const pageClaim = insertClaim(db, { runId: distillRunId, personKey: p3, text: 'who line' });
   db.prepare('INSERT INTO person_page_item(claim_id, section, built_at) VALUES (?, ?, ?)').run(pageClaim, 'who', NOW);
 
-  // P4: anchored, but tier 'other' (no tags, not eligible) -- must NOT fire
-  // C3 despite having no page: LINT_PAGE_TIERS excludes 'other'.
+  // P4: anchored, but tier 'other' (no tags at all, not in eligiblePool) --
+  // must NOT fire C3 despite having no page.
   const p4 = 'name:c3 other tier';
   insertPersonWithLinkedin(db, { key: p4, name: 'Other Tier', linkedin: { company: 'Acme Capital' } });
+
+  // P5: anchored, TAGGED tier (a founder sub-role, but never authored and no
+  // active-day history, so it falls short of eligiblePool's own gates), no
+  // page at all -- must NOT fire C3 now that LINT_PAGE_TIERS is
+  // eligible-only: a tagged person without a page is the ordinary case
+  // until they become eligible.
+  const p5 = 'name:c3 tagged no page';
+  insertPersonWithLinkedin(db, { key: p5, name: 'Tagged No Page', linkedin: { company: 'Acme Capital' }, subRoles: ['founder'] });
 
   const result = pageAnchorFindings(db, { now: NOW });
   const anchoredKeys = result.anchored_no_page.findings.map((f) => f.personKey);
   const pageKeys = result.page_no_anchors.findings.map((f) => f.personKey);
 
-  assert.ok(anchoredKeys.includes(p1), 'anchored, tagged, no page at all -> fires');
+  assert.ok(anchoredKeys.includes(p1), 'anchored, eligible, no page at all -> fires');
   assert.ok(anchoredKeys.includes(p2), 'a rejected-only page item still counts as no page -> fires');
   assert.ok(!anchoredKeys.includes(p4), "tier 'other' is excluded by LINT_PAGE_TIERS");
+  assert.ok(!anchoredKeys.includes(p5), "tier 'tagged' is excluded by LINT_PAGE_TIERS -- eligible only");
   assert.ok(pageKeys.includes(p3), 'a built (non-rejected) page for a one-anchor (unanchored) person -> fires C4');
   assert.equal(result.anchored_no_page.truncated, false);
   assert.equal(result.page_no_anchors.truncated, false);

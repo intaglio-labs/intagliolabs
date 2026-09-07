@@ -65,10 +65,12 @@ export const LINT_MAX_PER_CHECK = 500;
 
 // The lookup tiers (lookupScope's own 'eligible'/'tagged'/'other', see
 // lookup.mjs) that count as "would get a page built for them" for C3's own
-// purposes -- 'other' is excluded on purpose: someone in the broad,
-// unremarkable tail of the corpus not having a page is not a finding, it is
-// the ordinary case.
-export const LINT_PAGE_TIERS = Object.freeze(['eligible', 'tagged']);
+// purposes. A tagged person without a page is the ordinary case until they
+// become eligible -- the card queue and the sweep both build pages for
+// eligible people, so "eligible and anchored but no page" is the gap that
+// actually matters here; 'tagged' and 'other' are both excluded for the same
+// reason, not yet having a page is not a finding.
+export const LINT_PAGE_TIERS = Object.freeze(['eligible']);
 
 // The four resolutions an owner may write (never 'gone', which only a pass
 // itself may set -- see resolveLintFinding). Kept private to this file;
