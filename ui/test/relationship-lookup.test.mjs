@@ -462,6 +462,62 @@ test('lookupScope orders eligible before tagged before other', () => {
   assert.deepEqual(scope.map((c) => c.tier), ['eligible', 'tagged', 'other']);
 });
 
+// 16b: lookupScope over a large population computes eligiblePool's own query
+// (producer.mjs's poolSql, fingerprinted below by its `future_meetings` CTE,
+// which appears nowhere else) ONCE for the whole scan -- not once per person
+// -- and completes well under the multi-minute hang this replaces. This is
+// the regression test for the live-machine incident: POST
+// /admin/relationship/lookup pinned the process at ~91% CPU for over ten
+// minutes over 7,359 people because lookupTierFor (via lookupScope's old
+// per-row loop) recomputed the entire eligible pool -- a multi-CTE query
+// over people + calendar + links -- once per person.
+test('lookupScope computes eligiblePool exactly once and stays fast over 1500 people', () => {
+  const db = openDb(':memory:');
+
+  for (let i = 0; i < 1500; i++) {
+    const key = `name:person ${i}`;
+    if (i % 10 === 0) {
+      // A handful of genuinely eligible people (clears every eligiblePool
+      // gate), so the pool query has real rows to filter, not an empty table.
+      insertPerson(db, { key, name: `Person ${i}`, role: 'business', sent: 20, received: 15 });
+      insertAuthored(db, key);
+      insertActiveDay(db, key, day(200));
+    } else if (i % 7 === 0) {
+      // A handful tagged founder/investor, below eligiblePool's own gates --
+      // exercises the 'tagged' branch of lookupTierFor.
+      insertPerson(db, { key, name: `Person ${i}`, subRoles: ['founder'] });
+    } else {
+      insertPerson(db, { key, name: `Person ${i}` });
+    }
+  }
+
+  let poolQueryPrepareCount = 0;
+  const originalPrepare = db.prepare.bind(db);
+  db.prepare = (sql) => {
+    if (typeof sql === 'string' && sql.includes('future_meetings')) poolQueryPrepareCount += 1;
+    return originalPrepare(sql);
+  };
+
+  let scope;
+  const startedAt = Date.now();
+  try {
+    scope = lookupScope(db, { now: NOW });
+  } finally {
+    db.prepare = originalPrepare;
+  }
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(scope.length, 1500);
+  assert.equal(
+    poolQueryPrepareCount, 1,
+    `eligiblePool's own query should be prepared exactly once for the whole scan, not once per person (saw ${poolQueryPrepareCount})`
+  );
+  assert.ok(
+    elapsedMs < 3000,
+    `lookupScope over 1500 people should complete in well under 3s (took ${elapsedMs}ms)`
+  );
+});
+
 // --- runLookupPass ---------------------------------------------------------------
 
 // 17: once a due candidate has been looked up and its next_due_at pushed

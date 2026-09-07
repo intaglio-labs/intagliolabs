@@ -426,13 +426,40 @@ function anchorsHash(anchors) {
   }), 'utf8').digest('hex');
 }
 
-// anchorsFor(db, personKey): the ONLY place that reads corpus/projection
+// anchorsStmtsFor(db): the four prepared statements anchorsFor needs, built
+// ONCE by a caller that invokes anchorsFor in a loop (lookupScope) so a
+// multi-thousand-row scan does not re-prepare the same four statements once
+// per person. anchorsFor still prepares them itself (once, not per row) when
+// called standalone (lookupPerson, tests) and no bundle is passed in.
+function anchorsStmtsFor(db) {
+  return {
+    person: db.prepare('SELECT display_name AS name, linkedin FROM people WHERE person_key = ?'),
+    proposedFirm: db.prepare(
+      `SELECT psp.value AS value FROM person_sweep_proposal psp JOIN claim c ON c.id = psp.claim_id
+       WHERE c.subject = 'person' AND c.subject_person_key = ? AND psp.kind = 'firm'
+         AND (SELECT d.action FROM claim_decision d WHERE d.claim_id = psp.claim_id ORDER BY d.id DESC LIMIT 1) = 'accept'
+       ORDER BY psp.claim_id DESC LIMIT 1`
+    ),
+    hasTwitterChannel: db.prepare('SELECT 1 FROM person_channels WHERE person_key = ? AND source = ?'),
+    identifiers: db.prepare('SELECT identifier FROM person_identifiers WHERE person_key = ?'),
+  };
+}
+
+// anchorsFor(db, personKey, stmts?): the ONLY place that reads corpus/projection
 // state to build the {name,firm,handle,profileUrl} object buildLookupQuery's
 // input gate accepts. Field by field, BY NAME -- never a spread of
 // people.linkedin, which also carries an email address (conflict (c) in the
 // design this file follows): only .company and .url are read off it.
-export function anchorsFor(db, personKey) {
-  const person = db.prepare('SELECT display_name AS name, linkedin FROM people WHERE person_key = ?').get(personKey);
+//
+// `stmts`, when given (lookupScope's own anchorsStmtsFor bundle, prepared
+// once for the whole scan), is used instead of preparing these four
+// statements again for this call -- the fix for a per-person re-prepare that
+// used to run once per row across the whole `people` table. Omitted (the
+// default), anchorsFor prepares its own bundle, same behavior as before this
+// existed.
+export function anchorsFor(db, personKey, stmts = null) {
+  const s = stmts ?? anchorsStmtsFor(db);
+  const person = s.person.get(personKey);
   if (!person) return { name: null, firm: null, handle: null, profileUrl: null };
 
   const name = typeof person.name === 'string' && person.name.trim().length > 0 ? person.name : null;
@@ -450,12 +477,7 @@ export function anchorsFor(db, personKey) {
     ? linkedin.company
     : null;
   if (firm === null) {
-    const proposed = db.prepare(
-      `SELECT psp.value AS value FROM person_sweep_proposal psp JOIN claim c ON c.id = psp.claim_id
-       WHERE c.subject = 'person' AND c.subject_person_key = ? AND psp.kind = 'firm'
-         AND (SELECT d.action FROM claim_decision d WHERE d.claim_id = psp.claim_id ORDER BY d.id DESC LIMIT 1) = 'accept'
-       ORDER BY psp.claim_id DESC LIMIT 1`
-    ).get(personKey);
+    const proposed = s.proposedFirm.get(personKey);
     if (proposed && typeof proposed.value === 'string' && proposed.value.trim().length > 0) firm = proposed.value;
   }
 
@@ -464,12 +486,10 @@ export function anchorsFor(db, personKey) {
   // is the evidence that THIS identifier came through that channel rather
   // than merely happening to match the shape.
   let handle = null;
-  const hasTwitterChannel = db
-    .prepare('SELECT 1 FROM person_channels WHERE person_key = ? AND source = ?')
-    .get(personKey, 'twitter');
+  const hasTwitterChannel = s.hasTwitterChannel.get(personKey, 'twitter');
   if (hasTwitterChannel) {
     const HANDLE_SHAPE = /^@?[A-Za-z0-9_]{2,15}$/u;
-    const ids = db.prepare('SELECT identifier FROM person_identifiers WHERE person_key = ?').all(personKey);
+    const ids = s.identifiers.all(personKey);
     const match = ids.find((r) => HANDLE_SHAPE.test(r.identifier));
     if (match) handle = match.identifier;
   }
@@ -481,14 +501,28 @@ export function anchorsFor(db, personKey) {
   return { name, firm, handle, profileUrl };
 }
 
-// lookupTierFor(db, personKey, {now}): 'eligible' (producer.mjs's own
-// reconnect pool -- the broadest, most-likely-to-benefit-from-a-refresh
-// set), else 'tagged' (a founder/investor sub-role, without yet meeting
-// eligiblePool's quiet-days/history gates), else 'other'.
-export function lookupTierFor(db, personKey, { now = Date.now() } = {}) {
-  const inEligiblePool = eligiblePool(db, { mode: 'any', now }).some((p) => p.personKey === personKey);
+// lookupTierFor(db, personKey, {now, eligibleKeys?, subRolesStmt?}): 'eligible'
+// (producer.mjs's own reconnect pool -- the broadest, most-likely-to-benefit-
+// from-a-refresh set), else 'tagged' (a founder/investor sub-role, without
+// yet meeting eligiblePool's quiet-days/history gates), else 'other'.
+//
+// `eligibleKeys`, when given, is a Set of every eligiblePool member's
+// personKey computed ONCE by the caller (lookupScope, over its whole scan)
+// -- membership is then a Set lookup instead of recomputing the entire
+// eligible pool (a multi-CTE query over people + calendar + links) again for
+// this one person. Omitted (the default, and every standalone caller such as
+// hermes.mjs's /lookup/person route), this falls back to computing the pool
+// itself, same behavior as before eligibleKeys existed. `subRolesStmt`
+// likewise lets a looping caller pass one prepared statement instead of this
+// function preparing its own on every call.
+export function lookupTierFor(db, personKey, { now = Date.now(), eligibleKeys = null, subRolesStmt = null } = {}) {
+  const inEligiblePool = eligibleKeys
+    ? eligibleKeys.has(personKey)
+    : eligiblePool(db, { mode: 'any', now }).some((p) => p.personKey === personKey);
   if (inEligiblePool) return 'eligible';
-  const row = db.prepare('SELECT sub_roles FROM people WHERE person_key = ?').get(personKey);
+  const row = subRolesStmt
+    ? subRolesStmt.get(personKey)
+    : db.prepare('SELECT sub_roles FROM people WHERE person_key = ?').get(personKey);
   const subRoles = parseSubRoles(row?.sub_roles);
   if (subRoles.some((r) => r === 'founder' || r === 'investor')) return 'tagged';
   return 'other';
@@ -529,17 +563,26 @@ export function lookupScope(db, { now = Date.now(), personKey = null } = {}) {
     `SELECT anchors_hash AS anchorsHash, last_looked_at AS lastLookedAt, next_due_at AS nextDueAt
      FROM person_lookup_state WHERE person_key = ?`
   );
+  // Computed ONCE for the whole scan, not once per person: eligiblePool
+  // itself is a multi-CTE query over people + calendar + links, and this
+  // function used to call it (via lookupTierFor) for every row -- the
+  // 91%-CPU-for-ten-minutes bug over 7,359 people. anchorStmts and
+  // subRolesStmt are the same fix applied to anchorsFor's and
+  // lookupTierFor's own per-call db.prepare()s.
+  const eligibleKeys = new Set(eligiblePool(db, { mode: 'any', now }).map((p) => p.personKey));
+  const anchorStmts = anchorsStmtsFor(db);
+  const subRolesStmt = db.prepare('SELECT sub_roles FROM people WHERE person_key = ?');
 
   const out = [];
   for (const row of rows) {
     if (isAnonymousContact({ name: row.name, key: row.personKey })) continue;
-    const anchors = anchorsFor(db, row.personKey);
+    const anchors = anchorsFor(db, row.personKey, anchorStmts);
     const built = buildLookupQuery(anchors);
     const state = stateStmt.get(row.personKey);
     out.push({
       personKey: row.personKey,
       name: row.name,
-      tier: lookupTierFor(db, row.personKey, { now }),
+      tier: lookupTierFor(db, row.personKey, { now, eligibleKeys, subRolesStmt }),
       anchored: built !== null,
       anchorsHash: anchorsHash(anchors),
       storedAnchorsHash: state ? state.anchorsHash : null,
