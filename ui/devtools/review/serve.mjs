@@ -179,7 +179,7 @@ const server = createServer(async (req, res) => {
           const seen = new Set();
           const events = [];
           for (const e of eventStmt.all(row.id)) {
-            const k = `${e.event} ${e.reason ?? ''}`;
+            const k = `${e.event}|${e.reason ?? ''}`;
             if (seen.has(k)) continue;
             seen.add(k);
             events.push(e);
@@ -262,7 +262,10 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/page') {
       const personKey = url.searchParams.get('personKey') ?? '';
       const out = await hermes('/admin/relationship/page?personKey=' + encodeURIComponent(personKey));
-      return send(res, out.status, out.text);
+      // hermes answers { page: {...} }; the tab reads the page itself.
+      let text = out.text;
+      try { const parsed = JSON.parse(out.text); if (parsed && parsed.page !== undefined) text = JSON.stringify(parsed.page ?? { sections: {} }); } catch {}
+      return send(res, out.status, text);
     }
 
     if (req.method === 'POST' && url.pathname === '/api/pages/build') {
