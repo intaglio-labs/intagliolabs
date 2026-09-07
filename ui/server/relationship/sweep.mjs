@@ -582,75 +582,87 @@ export async function runSweepPass(db, engine, policy, {
     });
   }
 
-  const promptText = readFileSync(SWEEP_PROMPT_PATH, 'utf8');
-  const sha = promptSha(promptText);
-  const distillRunId = Number(
-    db.prepare(
-      `INSERT INTO distill_run(model, prompt_path, prompt_sha, params, episode_context, rows_in, claims_out, status, started_at, ended_at)
-       VALUES (?, ?, ?, '{}', 'on', ?, 0, 'running', ?, NULL)`
-    ).run(`${engineName}:${engine?.model ?? 'unknown'}`, SWEEP_PROMPT_PATH, sha, candidates.length, now).lastInsertRowid
-  );
-  const sweepRunId = Number(
-    db.prepare(
-      `INSERT INTO person_sweep_run(distill_run_id, started_at, ended_at, power_mode, engine, budget, scope_size,
-         candidates, swept, model_calls, proposed, dropped, tokens_est, skip_reason, status)
-       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, NULL, 'running')`
-    ).run(distillRunId, now, powerMode, engineName, effectiveBudget, scope.length, candidates.length).lastInsertRowid
-  );
+  // rel.sweepActive is owned by THIS pass from here on, set only now that
+  // sweepGate's own busy-model read of the same flag has already passed --
+  // setting it any earlier (e.g. in the HTTP route, before calling this
+  // function) would make sweepGate see its own pass as "already running" and
+  // skip itself on every call. Cleared in the finally below no matter how
+  // the pass ends, so a thrown error never wedges the flag on.
+  const rel = relFlags(policy);
+  rel.sweepActive = true;
+  try {
+    const promptText = readFileSync(SWEEP_PROMPT_PATH, 'utf8');
+    const sha = promptSha(promptText);
+    const distillRunId = Number(
+      db.prepare(
+        `INSERT INTO distill_run(model, prompt_path, prompt_sha, params, episode_context, rows_in, claims_out, status, started_at, ended_at)
+         VALUES (?, ?, ?, '{}', 'on', ?, 0, 'running', ?, NULL)`
+      ).run(`${engineName}:${engine?.model ?? 'unknown'}`, SWEEP_PROMPT_PATH, sha, candidates.length, now).lastInsertRowid
+    );
+    const sweepRunId = Number(
+      db.prepare(
+        `INSERT INTO person_sweep_run(distill_run_id, started_at, ended_at, power_mode, engine, budget, scope_size,
+           candidates, swept, model_calls, proposed, dropped, tokens_est, skip_reason, status)
+         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, NULL, 'running')`
+      ).run(distillRunId, now, powerMode, engineName, effectiveBudget, scope.length, candidates.length).lastInsertRowid
+    );
 
-  const upsertCursor = db.prepare(
-    `INSERT INTO person_sweep_cursor(person_key, swept_through_context_id, last_swept_at, last_status, proposals)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(person_key) DO UPDATE SET swept_through_context_id = excluded.swept_through_context_id,
-       last_swept_at = excluded.last_swept_at, last_status = excluded.last_status,
-       proposals = person_sweep_cursor.proposals + excluded.proposals`
-  );
-  const holdCursor = db.prepare(
-    `INSERT INTO person_sweep_cursor(person_key, swept_through_context_id, last_swept_at, last_status, proposals)
-     VALUES (?, ?, ?, ?, 0)
-     ON CONFLICT(person_key) DO UPDATE SET last_swept_at = excluded.last_swept_at, last_status = excluded.last_status`
-  );
+    const upsertCursor = db.prepare(
+      `INSERT INTO person_sweep_cursor(person_key, swept_through_context_id, last_swept_at, last_status, proposals)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(person_key) DO UPDATE SET swept_through_context_id = excluded.swept_through_context_id,
+         last_swept_at = excluded.last_swept_at, last_status = excluded.last_status,
+         proposals = person_sweep_cursor.proposals + excluded.proposals`
+    );
+    const holdCursor = db.prepare(
+      `INSERT INTO person_sweep_cursor(person_key, swept_through_context_id, last_swept_at, last_status, proposals)
+       VALUES (?, ?, ?, ?, 0)
+       ON CONFLICT(person_key) DO UPDATE SET last_swept_at = excluded.last_swept_at, last_status = excluded.last_status`
+    );
 
-  let swept = 0;
-  let modelCalls = 0;
-  let proposed = 0;
-  let dropped = 0;
-  let tokensEst = 0;
+    let swept = 0;
+    let modelCalls = 0;
+    let proposed = 0;
+    let dropped = 0;
+    let tokensEst = 0;
 
-  for (let i = 0; i < candidates.length; i++) {
-    const candidate = candidates[i];
-    const result = await sweepPerson(db, engine, candidate, { sweepRunId, distillRunId, now });
-    modelCalls += result.calls;
-    proposed += result.proposed;
-    dropped += result.dropped;
-    tokensEst += result.tokensEst;
-    swept += 1;
+    for (let i = 0; i < candidates.length; i++) {
+      const candidate = candidates[i];
+      const result = await sweepPerson(db, engine, candidate, { sweepRunId, distillRunId, now });
+      modelCalls += result.calls;
+      proposed += result.proposed;
+      dropped += result.dropped;
+      tokensEst += result.tokensEst;
+      swept += 1;
 
-    // proposed/empty/ungrounded ALL advance: the model read those rows, and
-    // re-asking costs the same and answers the same (section 5). Only a
-    // failure to get a usable answer at all (engine-error/parse-error) holds
-    // the cursor, so the same rows are offered again next pass.
-    const advance = result.status === 'proposed' || result.status === 'empty' || result.status === 'ungrounded';
-    db.exec('BEGIN');
-    try {
-      if (advance) {
-        upsertCursor.run(candidate.personKey, result.maxContextId, now, result.status, result.proposed);
-      } else {
-        holdCursor.run(candidate.personKey, candidate.cursor, now, result.status);
+      // proposed/empty/ungrounded ALL advance: the model read those rows, and
+      // re-asking costs the same and answers the same (section 5). Only a
+      // failure to get a usable answer at all (engine-error/parse-error) holds
+      // the cursor, so the same rows are offered again next pass.
+      const advance = result.status === 'proposed' || result.status === 'empty' || result.status === 'ungrounded';
+      db.exec('BEGIN');
+      try {
+        if (advance) {
+          upsertCursor.run(candidate.personKey, result.maxContextId, now, result.status, result.proposed);
+        } else {
+          holdCursor.run(candidate.personKey, candidate.cursor, now, result.status);
+        }
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
       }
-      db.exec('COMMIT');
-    } catch (err) {
-      db.exec('ROLLBACK');
-      throw err;
+      if (i < candidates.length - 1) await sleep(SWEEP_PAUSE_MS);
     }
-    if (i < candidates.length - 1) await sleep(SWEEP_PAUSE_MS);
+
+    db.prepare(
+      `UPDATE person_sweep_run SET ended_at = ?, swept = ?, model_calls = ?, proposed = ?, dropped = ?, tokens_est = ?, status = 'complete' WHERE id = ?`
+    ).run(Date.now(), swept, modelCalls, proposed, dropped, tokensEst, sweepRunId);
+    db.prepare("UPDATE distill_run SET claims_out = ?, status = 'complete', ended_at = ? WHERE id = ?")
+      .run(proposed, Date.now(), distillRunId);
+
+    return db.prepare('SELECT * FROM person_sweep_run WHERE id = ?').get(sweepRunId);
+  } finally {
+    rel.sweepActive = false;
   }
-
-  db.prepare(
-    `UPDATE person_sweep_run SET ended_at = ?, swept = ?, model_calls = ?, proposed = ?, dropped = ?, tokens_est = ?, status = 'complete' WHERE id = ?`
-  ).run(Date.now(), swept, modelCalls, proposed, dropped, tokensEst, sweepRunId);
-  db.prepare("UPDATE distill_run SET claims_out = ?, status = 'complete', ended_at = ? WHERE id = ?")
-    .run(proposed, Date.now(), distillRunId);
-
-  return db.prepare('SELECT * FROM person_sweep_run WHERE id = ?').get(sweepRunId);
 }

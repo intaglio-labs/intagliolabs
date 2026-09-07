@@ -75,6 +75,7 @@ import { openTallyStore } from './people/tallyStore.mjs';
 import { createRelationshipMemory } from './relationship/service.mjs';
 import { buildMatchedCards, MATCH_RULES_VERSION } from './relationship/matcher.mjs';
 import { buildPersonPage, readPersonPage } from './relationship/pages.mjs';
+import { runSweepPass } from './relationship/sweep.mjs';
 import { createEngine } from './relationship/engines.mjs';
 import { eligiblePool, produceBatch } from './relationship/producer.mjs';
 import {
@@ -1896,6 +1897,11 @@ const RELATIONSHIP_POOL_PARAMS = Object.freeze(['mode', 'includeOffered', 'minDe
 const RELATIONSHIP_MODES = Object.freeze(['investor', 'founder', 'any']);
 const RELATIONSHIP_PAGE_BUILD_FIELDS = Object.freeze(['personKey', 'engine']);
 const RELATIONSHIP_PAGE_PARAMS = Object.freeze(['personKey']);
+// 'budget' and 'limit' are accepted as synonyms: sweep-once.mjs's own CLI
+// flag is --limit (matching build-person-pages.mjs's naming), but the route
+// itself thinks of the same number as the pass's budget (SWEEP_BUDGET).
+const RELATIONSHIP_SWEEP_FIELDS = Object.freeze(['power', 'budget', 'battery', 'onAc', 'thermal', 'engine', 'limit']);
+const SWEEP_THERMAL_VALUES = Object.freeze(['nominal', 'fair', 'serious', 'critical']);
 const DECISION_ACTIONS = Object.freeze(['accept', 'reject', 'retract']);
 // The review page is the v1 product surface and it has to show the receipt, so
 // this cap is about one sitting's reading, not about safety.
@@ -2993,6 +2999,66 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // by a body field it did not anticipate.
     const engine = relationshipMemoryEngine(policy, body.engine);
     const result = await buildPersonPage(db, engine, body.personKey, { now: Date.now() });
+    send(res, 200, { ...result, cost_usd: engine.counters?.totalCostUsd ?? null }, cors);
+    return;
+  }
+
+  // Discovery sweep (L5 step 5): one pass over sweepScope's own candidates,
+  // spawned by the Distiller's timer (Swift-side, sweep-once.mjs) or by hand
+  // from the desk. Bearer-only, same reasoning as
+  // /admin/relationship/pages/build -- this spends the owner's own model
+  // subscription and writes PENDING claims about real people.
+  //
+  // Unlike startPageBuilds (a background pass a request kicks off and
+  // returns from immediately), the sweep's own caller (sweep-once.mjs) wants
+  // the pass's own counts back in the response, so this route awaits
+  // runSweepPass directly rather than firing it and returning early.
+  //
+  // rel.sweepActive itself is set and cleared by runSweepPass, NOT by this
+  // route: sweepGate's own busy-model check reads that exact flag, and
+  // setting it here BEFORE calling runSweepPass would make that check see
+  // this very call as "already running" and skip itself on every request.
+  // The read below is only a cheap early exit for the obvious case (skip a
+  // full scope query when a pass is plainly already in flight) -- the
+  // authoritative check is still sweepGate's, inside runSweepPass.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/sweep') {
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_SWEEP_FIELDS);
+    if (body.power !== undefined && body.power !== 'full' && body.power !== 'trickle') {
+      throw badRequest('"power" must be "full" or "trickle"');
+    }
+    if (body.engine !== undefined && body.engine !== 'claude-cli' && body.engine !== 'llama') {
+      throw badRequest('"engine" must be "claude-cli" or "llama"');
+    }
+    const budget = body.budget ?? body.limit;
+    if (budget !== undefined && budget !== null && (!Number.isInteger(budget) || budget < 1)) {
+      throw badRequest('"budget"/"limit" must be a positive integer');
+    }
+    if (body.battery !== undefined && body.battery !== null
+        && (typeof body.battery !== 'number' || !Number.isFinite(body.battery) || body.battery < 0 || body.battery > 100)) {
+      throw badRequest('"battery" must be a number from 0 through 100');
+    }
+    if (body.onAc !== undefined && body.onAc !== null && typeof body.onAc !== 'boolean') {
+      throw badRequest('"onAc" must be a boolean');
+    }
+    if (body.thermal !== undefined && body.thermal !== null && !SWEEP_THERMAL_VALUES.includes(body.thermal)) {
+      throw badRequest(`"thermal" must be one of: ${SWEEP_THERMAL_VALUES.join(', ')}`);
+    }
+
+    const rel = relationshipState(db, policy);
+    if (rel.sweepActive) {
+      send(res, 200, { started: false, reason: 'already running' }, cors);
+      return;
+    }
+    const engine = relationshipMemoryEngine(policy, body.engine);
+    const result = await runSweepPass(db, engine, policy, {
+      powerMode: body.power ?? 'trickle',
+      budget: budget ?? undefined,
+      battery: body.battery ?? null,
+      onAc: body.onAc ?? null,
+      thermal: body.thermal ?? null,
+      now: Date.now(),
+    });
     send(res, 200, { ...result, cost_usd: engine.counters?.totalCostUsd ?? null }, cors);
     return;
   }
