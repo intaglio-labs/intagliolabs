@@ -562,6 +562,79 @@ test('an engine error holds next_due_at; an ambiguous verdict advances it', asyn
   assert.equal(Number(ambState.next_due_at), NOW + LOOKUP_REFRESH_DAYS.other * DAY);
 });
 
+// Regression test for the live-machine incident this fix answers: the first
+// real pass (budget 1, thousands unanchored) spent its single slot on an
+// unanchored person -- 'no-anchors', 0 model calls, done in a second -- and
+// with thousands of unanchored people ranked in the same tier order, the
+// pass would take weeks of no-op passes before reaching anyone it could
+// actually look up. Unanchored due people must never consume the budget: they
+// are bulk-logged and their next_due_at advanced with no budget accounting at
+// all, and the budget applies only to the anchored due list.
+test('unanchored people never consume the lookup budget', async () => {
+  const db = openDb(':memory:');
+  for (let i = 0; i < 5; i++) {
+    insertPerson(db, { key: `name:unanchored ${i}`, name: `Unanchored ${i}` }); // no linkedin/firm/handle
+  }
+  insertPerson(db, { key: 'name:anchored', name: 'Anchored Anna', linkedin: { company: 'Acme Corp' } });
+
+  let calls = 0;
+  const engine = fakeEngine('fake', async () => {
+    calls += 1;
+    return fakeRawResult({ identity_confidence: 'match', changes: [] });
+  });
+
+  const result = await runLookupPass(db, engine, {}, { budget: 1, now: NOW });
+  assert.equal(result.status, 'complete');
+  assert.equal(calls, 1, 'the engine was called exactly once, for the one anchored candidate');
+  assert.equal(Number(result.model_calls), 1);
+  assert.equal(Number(result.candidates), 1, 'candidates counts only the anchored candidate considered this pass');
+  assert.equal(result.unanchored_logged, 5, 'the bulk no-anchors count is reported on the response, not stored');
+
+  const anchoredLog = db.prepare("SELECT * FROM lookup_log WHERE person_key = 'name:anchored'").get();
+  assert.ok(anchoredLog);
+  assert.notEqual(anchoredLog.status, 'no-anchors');
+
+  const noAnchorRows = db.prepare("SELECT * FROM lookup_log WHERE status = 'no-anchors'").all();
+  assert.equal(noAnchorRows.length, 5);
+  const loggedKeys = new Set(noAnchorRows.map((r) => r.person_key));
+  for (let i = 0; i < 5; i++) assert.ok(loggedKeys.has(`name:unanchored ${i}`));
+
+  for (let i = 0; i < 5; i++) {
+    const state = db.prepare('SELECT * FROM person_lookup_state WHERE person_key = ?').get(`name:unanchored ${i}`);
+    assert.ok(state, `state row for unanchored ${i}`);
+    assert.equal(state.last_status, 'no-anchors');
+    assert.ok(Number(state.next_due_at) > NOW, 'next_due_at advanced past now');
+  }
+});
+
+// A no-anchors person, once bulk-logged, is not re-logged on the next pass --
+// next_due_at was advanced by its tier's own refresh interval, so it is
+// recorded once per due cycle, not every pass.
+test('a no-anchors person is not re-logged on the next pass', async () => {
+  const db = openDb(':memory:');
+  insertPerson(db, { key: 'name:unanchored', name: 'Unanchored Uma' });
+
+  let calls = 0;
+  const engine = fakeEngine('fake', async () => {
+    calls += 1;
+    return fakeRawResult({ identity_confidence: 'match', changes: [] });
+  });
+
+  const first = await runLookupPass(db, engine, {}, { budget: 1, now: NOW });
+  assert.equal(first.status, 'complete');
+  assert.equal(first.unanchored_logged, 1);
+  assert.equal(calls, 0, 'no engine call for an unanchored person');
+  const firstRows = db.prepare("SELECT * FROM lookup_log WHERE status = 'no-anchors'").all();
+  assert.equal(firstRows.length, 1);
+
+  const second = await runLookupPass(db, engine, {}, { budget: 1, now: NOW });
+  assert.equal(second.status, 'skipped');
+  assert.equal(second.skip_reason, 'no-due');
+  assert.equal(calls, 0, 'the engine was never called');
+  const secondRows = db.prepare("SELECT * FROM lookup_log WHERE status = 'no-anchors'").all();
+  assert.equal(secondRows.length, 1, 'no new no-anchors row was written on the second pass');
+});
+
 // --- lookupGate ---------------------------------------------------------------
 
 // 19: lookupGate skips on battery<40 off AC, serious thermal, 90% of the

@@ -922,9 +922,20 @@ export async function runLookupPass(db, engine, policy, {
   // own comment. An empty scope (nobody addressable) already failed the
   // gate above as 'no-scope'; a non-empty scope with nobody DUE right now is
   // this file's analogue of sweep's 'no-new-rows'.
+  //
+  // Unanchored due people (buildLookupQuery can't build a query for them --
+  // no second anchor) must never consume the model budget: with thousands of
+  // them ranked in the same tier order as the handful who ARE anchored, a
+  // budget spent on one no-op unanchored person the same way it is spent on
+  // a real lookup starves the pass for weeks. So the due set splits here --
+  // `anchoredDue` is budgeted exactly as before; `unanchoredDue` is bulk-
+  // logged and advanced below with NO budget accounting at all, however many
+  // thousand there are.
   const dueCandidates = scope.filter((c) => isLookupDue(c, now));
-  const candidates = dueCandidates.slice(0, effectiveBudget);
-  if (candidates.length === 0) {
+  const anchoredDue = dueCandidates.filter((c) => c.anchored);
+  const unanchoredDue = dueCandidates.filter((c) => !c.anchored);
+  const candidates = anchoredDue.slice(0, effectiveBudget);
+  if (candidates.length === 0 && unanchoredDue.length === 0) {
     return insertSkippedLookupRun(db, {
       now, powerMode, engineName, budget: effectiveBudget, scopeSize: scope.length, reason: 'no-due',
     });
@@ -966,6 +977,38 @@ export async function runLookupPass(db, engine, policy, {
        ON CONFLICT(person_key) DO UPDATE SET last_looked_at = excluded.last_looked_at, last_status = excluded.last_status,
          lookups = person_lookup_state.lookups + 1`
     );
+
+    // Bulk no-anchors stamping for every unanchored DUE person, ahead of the
+    // budgeted anchored loop below: one prepared log-row statement, reusing
+    // the SAME upsertState statement the anchored 'advance' path uses below
+    // (candidate.anchorsHash is already known from lookupScope's scan, so no
+    // per-person anchorsFor() re-read is needed), one BEGIN/COMMIT for the
+    // whole batch, no sleep between rows and no budget accounting -- this
+    // runs over potentially thousands of rows, so it must stay cheap. Each
+    // row's next_due_at advances by its tier's own refresh interval, so a
+    // no-anchors person is recorded once per due cycle, not every pass (the
+    // isLookupDue check on the NEXT pass then finds them not due yet).
+    const insUnanchoredLog = db.prepare(
+      `INSERT INTO lookup_log(person_key, run_id, at, engine, query, query_hash, fields_used, searches, urls_seen,
+         identity_confidence, changes_proposed, changes_dropped, cost_usd, status)
+       VALUES (?, ?, ?, ?, '', '', '[]', 0, 0, NULL, 0, 0, NULL, 'no-anchors')`
+    );
+    let unanchoredLogged = 0;
+    if (unanchoredDue.length > 0) {
+      db.exec('BEGIN');
+      try {
+        for (const candidate of unanchoredDue) {
+          insUnanchoredLog.run(candidate.personKey, runId, now, engineName);
+          const nextDueAt = now + (LOOKUP_REFRESH_DAYS[candidate.tier] ?? LOOKUP_REFRESH_DAYS.other) * DAY;
+          upsertState.run(candidate.personKey, candidate.tier, candidate.anchorsHash, now, nextDueAt, 'no-anchors', 0);
+          unanchoredLogged += 1;
+        }
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+    }
 
     let lookedUp = 0;
     let modelCalls = 0;
@@ -1016,7 +1059,12 @@ export async function runLookupPass(db, engine, policy, {
     db.prepare("UPDATE distill_run SET claims_out = ?, status = 'complete', ended_at = ? WHERE id = ?")
       .run(proposed, Date.now(), distillRunId);
 
-    return db.prepare('SELECT * FROM person_lookup_run WHERE id = ?').get(runId);
+    // unanchored_logged is reported, not stored -- person_lookup_run's own
+    // columns count only the budgeted anchored candidates (see `candidates`
+    // above); this lets the CLI status line show the bulk no-anchors work
+    // too without adding a schema column for it.
+    const runRow = db.prepare('SELECT * FROM person_lookup_run WHERE id = ?').get(runId);
+    return { ...runRow, unanchored_logged: unanchoredLogged };
   } finally {
     rel.lookupActive = false;
   }
