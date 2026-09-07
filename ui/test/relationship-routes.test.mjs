@@ -164,6 +164,45 @@ test('mute records the event and quiets the person', async () => {
   });
 });
 
+test('a repeated accepted for the same snapshot inserts once and reports duplicate', async () => {
+  await withServer(async ({ call, db }) => {
+    await call('POST', '/admin/relationship/refresh'); await settle();
+    const { card } = await (await call('GET', '/admin/relationship/card')).json();
+    const first = await (await call('POST', '/admin/relationship/event', { snapshot_id: card.snapshot_id,
+      person_key: card.personKey, event: 'accepted' })).json();
+    assert.equal(first.ok, true);
+    assert.equal(first.duplicate, undefined, 'the first verdict is not a duplicate');
+    const second = await (await call('POST', '/admin/relationship/event', { snapshot_id: card.snapshot_id,
+      person_key: card.personKey, event: 'accepted' })).json();
+    assert.equal(second.ok, true);
+    assert.equal(second.duplicate, true, 'the repeat (e.g. a triple-click) is reported, not silently accepted');
+    assert.equal(second.existing.event, 'accepted');
+    const n = Number(db.prepare(
+      "SELECT COUNT(*) AS n FROM rm_card_event WHERE snapshot_id = ? AND event = 'accepted'"
+    ).get(card.snapshot_id).n);
+    assert.equal(n, 1, 'exactly one accepted row landed for this snapshot, no matter how many posts arrived');
+  });
+});
+
+test('a dismissed after an accepted for the same snapshot also does not insert', async () => {
+  await withServer(async ({ call, db }) => {
+    await call('POST', '/admin/relationship/refresh'); await settle();
+    const { card } = await (await call('GET', '/admin/relationship/card')).json();
+    await call('POST', '/admin/relationship/event', { snapshot_id: card.snapshot_id,
+      person_key: card.personKey, event: 'accepted' });
+    const res = await (await call('POST', '/admin/relationship/event', { snapshot_id: card.snapshot_id,
+      person_key: card.personKey, event: 'dismissed', reason: 'not-useful' })).json();
+    assert.equal(res.duplicate, true, 'a snapshot already judged accepted refuses a later dismissed too');
+    const rows = db.prepare(
+      'SELECT event FROM rm_card_event WHERE snapshot_id = ? ORDER BY id'
+    ).all(card.snapshot_id).map((r) => r.event);
+    assert.deepEqual(rows.filter((e) => e === 'accepted' || e === 'dismissed'), ['accepted'],
+      'no dismissed row was written once an accepted already existed');
+    assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM rm_suppression').get().n), 0,
+      'the refused dismissed carried no suppression side effect either, even with reason never-this-person-adjacent');
+  });
+});
+
 test('bearerless requests bounce', async () => {
   await withServer(async ({ call }) => {
     const res = await fetch(`http://127.0.0.1:1`, { method: 'GET' }).catch(() => null);

@@ -138,5 +138,18 @@ export function createControls(db, { canonicalOf = (k) => k } = {}) {
       if (!this.underGlobalCap({ ...cap, now })) return { allowed: false, reason: 'global-cap' };
       return { allowed: true };
     },
+
+    // A snapshot that already carries a verdict must not carry a second one:
+    // rm_card_event is append-only (no update, no delete), so a double-submit
+    // -- a slow click, a retried request, a triple-click on the desk -- has
+    // to be caught HERE, before the insert, or it lands as extra rows forever.
+    // Returns the first accepted/dismissed row for the snapshot, or null.
+    alreadyJudged({ snapshotId }) {
+      if (!Number.isInteger(snapshotId)) return null;
+      const row = db.prepare(
+        "SELECT event, reason, created_at FROM rm_card_event WHERE snapshot_id = ? AND event IN ('accepted','dismissed') ORDER BY created_at LIMIT 1"
+      ).get(snapshotId);
+      return row ?? null;
+    },
   };
 }

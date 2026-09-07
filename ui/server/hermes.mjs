@@ -2678,6 +2678,18 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     if (typeof person_key !== 'string' || person_key.length === 0) throw badRequest('"person_key" required');
     if (!['shown', 'opened', 'accepted', 'dismissed', 'muted'].includes(event)) throw badRequest('unknown "event"');
     const snapId = Number.isInteger(snapshot_id) ? snapshot_id : null;
+    // A verdict is terminal: once a snapshot has an accepted or dismissed row,
+    // a second one (a slow retry, a repeated click, the desk's triple-click)
+    // must not insert -- rm_card_event is append-only, so a duplicate here
+    // would be a duplicate forever. Caught before any write, including the
+    // suppression side effect a 'never-this-person' dismissal carries.
+    if ((event === 'accepted' || event === 'dismissed') && snapId !== null) {
+      const existing = rel.service.controls.alreadyJudged({ snapshotId: snapId });
+      if (existing) {
+        send(res, 200, { ok: true, duplicate: true, existing }, cors);
+        return;
+      }
+    }
     if (event === 'muted') {
       const days = Number.isFinite(mute_days) && mute_days > 0 ? mute_days : null;
       if (days === null) throw badRequest('"mute_days" required for a mute');

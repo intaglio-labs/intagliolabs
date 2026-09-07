@@ -170,7 +170,21 @@ const server = createServer(async (req, res) => {
           const quote = quoteRow === undefined ? '(quote row missing)' : String(quoteRow.text).slice(0, 300);
           const person = nameStmt.get(row.person_key);
           const name = person?.display_name ?? row.person_key;
-          const events = eventStmt.all(row.id);
+          // Deduped by (event, reason): a snapshot judged twice (a slow
+          // retry, the desk's triple-click) still writes one row per attempt
+          // in the append-only table upstream of hermes's own guard, and
+          // showing each of those as a separate badge is what made three
+          // "accepted" tags look like three verdicts instead of one retried
+          // click. One badge per distinct (event, reason) pair, earliest wins.
+          const seen = new Set();
+          const events = [];
+          for (const e of eventStmt.all(row.id)) {
+            const k = `${e.event} ${e.reason ?? ''}`;
+            if (seen.has(k)) continue;
+            seen.add(k);
+            events.push(e);
+          }
+          const judged = events.some((e) => e.event === 'accepted' || e.event === 'dismissed');
           const alsoIn = (batchesByPerson.get(row.person_key) ?? []).filter((id) => id !== batch.id);
           return {
             id: row.id,
@@ -181,6 +195,7 @@ const server = createServer(async (req, res) => {
             quote,
             producer_version: row.producer_version,
             events,
+            judged,
             also_in_batches: alsoIn,
           };
         });

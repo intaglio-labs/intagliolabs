@@ -381,10 +381,19 @@ function eventTag(e) {
   return el('span', 'tag', label);
 }
 
+// judged is server-computed (dedup'd against accepted/dismissed rows) but
+// falls back to a client-side check for rows built from an optimistic local
+// update (cardVerdict appends to row.events without a round trip).
+function isJudged(row) {
+  if (row.judged) return true;
+  return (row.events ?? []).some((e) => e.event === 'accepted' || e.event === 'dismissed');
+}
+
 function cardNode(row) {
   const node = el('div', 'card5');
   node.dataset.id = String(row.id);
   const ev = row.evidence ?? {};
+  const judged = isJudged(row);
 
   node.append(el('div', 'c-trigger', cardTrigger(ev)));
 
@@ -401,9 +410,9 @@ function cardNode(row) {
   node.append(el('blockquote', 'c-quote', row.quote));
 
   if (row.events && row.events.length) {
-    const judged = el('div', 'c-judged');
-    judged.append(...row.events.map(eventTag));
-    node.append(judged);
+    const judgedRow = el('div', 'c-judged');
+    judgedRow.append(...row.events.map(eventTag));
+    node.append(judgedRow);
   }
 
   // Same person_key showing up in another pass -- visible so a repeat isn't
@@ -425,6 +434,10 @@ function cardNode(row) {
   ];
   for (const v of verdicts) {
     const btn = el('button', v.cls, v.label);
+    // A card already carrying a verdict (from the server on load, or from an
+    // optimistic click this session) keeps its buttons disabled -- one verdict
+    // per snapshot, enforced in the UI as well as at hermes's write-time guard.
+    if (judged) btn.disabled = true;
     btn.addEventListener('click', () => cardVerdict(row, v, node));
     acts.append(btn);
   }
@@ -458,6 +471,10 @@ function renderCards() {
 }
 
 async function cardVerdict(row, v, node) {
+  // Optimistic: disable the four buttons the instant a verdict is clicked, so
+  // a triple-click (the bug this guards against) fires at most one request --
+  // the second and third clicks land on already-disabled buttons.
+  for (const btn of node.querySelectorAll('.c-acts button')) btn.disabled = true;
   node.classList.add('gone');
   try {
     const res = await fetch('/api/cards/event', {
@@ -469,11 +486,21 @@ async function cardVerdict(row, v, node) {
       }),
     });
     if (!res.ok) throw new Error(await res.text());
-    row.events = [...(row.events ?? []), { event: v.event, reason: v.reason ?? null, created_at: Date.now() }];
+    const data = await res.json();
+    // duplicate:true means hermes found this snapshot already judged and
+    // inserted nothing -- render the EXISTING verdict, not this click's, so
+    // the badge always matches what actually landed in rm_card_event.
+    if (data.duplicate && data.existing) {
+      row.events = [...(row.events ?? []), data.existing];
+    } else {
+      row.events = [...(row.events ?? []), { event: v.event, reason: v.reason ?? null, created_at: Date.now() }];
+    }
+    row.judged = true;
     node.classList.remove('gone');
     node.replaceWith(cardNode(row));
   } catch (err) {
     node.classList.remove('gone');
+    for (const btn of node.querySelectorAll('.c-acts button')) btn.disabled = false;
     document.getElementById('cardsList').append(el('p', 'err', 'could not save: ' + err.message));
   }
 }
