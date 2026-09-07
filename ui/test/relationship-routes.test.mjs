@@ -494,9 +494,15 @@ function seedReconnectCandidate(db, key, name, now) {
 }
 
 // Seeds an owe:open-loop-eligible person: an authored, direct-message
-// question 12 days ago, never answered.
+// question 12 days ago, never answered. Also seeds two owner-authored
+// messages well before the ask -- OWE_MIN_OWNER_MESSAGES requires the owner
+// to have actually written to this person more than once, and placing them
+// this early keeps the open loop itself intact (last-owner ts stays earlier
+// than last-them ts).
 function seedOweOpenLoopCandidate(db, key, name, now, text = 'can you send that over?') {
   insertPersonRow(db, { key, name, sent: 10, received: 10 }, now);
+  insertMessage(db, key, { ts: now - 300 * DAY, text: 'hey', ownerAuthored: 1 });
+  insertMessage(db, key, { ts: now - 299 * DAY, text: 'checking in', ownerAuthored: 1 });
   insertMessage(db, key, { ts: now - 12 * DAY, text, authored: 1 });
 }
 

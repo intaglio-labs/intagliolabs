@@ -288,6 +288,37 @@ test('a name that merely contains an address is still a name', () => {
   assert.equal(isAnonymousContact({ name: 'Sam Lee sam@x.com' }), false);
 });
 
+test('a bare phone number as a display name is anonymous', () => {
+  // The bulk-sender fixture: display_name is the number itself, no name in
+  // any address book -- an automated ticketing/SMS service, not a person.
+  assert.equal(isAnonymousContact({ name: '+18447640222' }), true);
+  assert.equal(isAnonymousContact({ name: '(844) 764-0222' }), true, 'formatted with parens/dashes/spaces');
+  assert.equal(isAnonymousContact({ name: '844.764.0222' }), true, 'dot-separated');
+  assert.equal(isAnonymousContact({ name: '555-123' }), false, 'under 7 digits is not a phone number');
+  assert.equal(isAnonymousContact({ name: 'Sam Lee' }), false, 'a real name is not caught by the phone check');
+});
+
+test('a name equal to the key with its "id:" prefix stripped is anonymous', () => {
+  // LinkedIn- and phone-keyed contacts render this way when the projection
+  // falls back to the key: the key carries the prefix, the displayed name
+  // does not, but it is still just the key underneath.
+  assert.equal(
+    isAnonymousContact({ name: 'liname:jane-doe-123', key: 'id:liname:jane-doe-123' }),
+    true,
+    'name equals the key stripped of its id: prefix'
+  );
+  assert.equal(
+    isAnonymousContact({ name: 'jane-doe-123', key: 'id:liname:jane-doe-123' }),
+    false,
+    'the name must equal the WHOLE stripped key, not a substring of it'
+  );
+  assert.equal(
+    isAnonymousContact({ name: 'Sam Lee', key: 'id:sam-lee-1' }),
+    false,
+    'a real name does not collide with an unrelated id: key'
+  );
+});
+
 test('the filter keeps the people the list exists for', () => {
   // The rule is nameless AND no messages AND no room messages. Each clause has to
   // be load-bearing, or it removes somebody it should not: a colleague seen

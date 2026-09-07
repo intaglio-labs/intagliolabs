@@ -452,6 +452,20 @@ export function buildAvatars(contextDb, stateDb, { keys, now = Date.now(), owner
   return out;
 }
 
+// A bare phone number as a display name: optional leading +, then digits,
+// spaces, dashes, parens, dots, with at least 7 digits total. This is the
+// shape an automated ticketing/SMS service's contact card renders as (no
+// name in any address book, just the number itself) -- distinct from the
+// email check below, and from "name equals the key", because the number can
+// be formatted differently than however it appears in the key.
+const PHONE_LIKE_RE = /^\+?[0-9 ()\-.]+$/u;
+
+function isBarePhoneNumber(name) {
+  if (!PHONE_LIKE_RE.test(name)) return false;
+  const digitCount = (name.match(/[0-9]/gu) ?? []).length;
+  return digitCount >= 7;
+}
+
 /**
  * Does this person have a name, or only an address?
  *
@@ -462,12 +476,19 @@ export function buildAvatars(contextDb, stateDb, { keys, now = Date.now(), owner
  *
  * A key used as a name counts as anonymous: the projection falls back to the key
  * when it has nothing better, so `id:someone@example.com` renders as an address
- * just as surely as a bare one does.
+ * just as surely as a bare one does. The same fallback also happens with the
+ * `id:` prefix stripped (LinkedIn- and phone-keyed contacts render that way), so
+ * a name equal to either form of the key is anonymous too.
  */
 export function isAnonymousContact(person) {
   const name = String(person?.name ?? '').trim();
   if (!name) return true;
-  if (person?.key !== undefined && name === person.key) return true;
+  if (person?.key !== undefined) {
+    const key = String(person.key);
+    if (name === key) return true;
+    if (key.startsWith('id:') && name === key.slice('id:'.length)) return true;
+  }
+  if (isBarePhoneNumber(name)) return true;
   // Deliberately not a strict email regex: the question is "does this render as
   // an address to somebody reading the list", and anything with an @ and no
   // spaces does.

@@ -41,6 +41,16 @@ function insertMsg(db, key, { ts = NOW - 200 * DAY, text = 'hi', authored = 0, o
   return ctxId;
 }
 
+// OWE_MIN_OWNER_MESSAGES requires >= 2 owner-authored, room=0 rows for the
+// person. Placed well before `before` (default: long before any ask in these
+// fixtures) so it never trips a B2 "no owner reply after the ask" exclusion
+// and, for open-loop fixtures, stays earlier than the "them" ask so the loop
+// itself is not closed by it (open-loop requires last-owner ts < last-them ts).
+function insertOwnerParticipation(db, key, { before = NOW - 300 * DAY } = {}) {
+  insertMsg(db, key, { ts: before, text: 'checking in', ownerAuthored: 1 });
+  insertMsg(db, key, { ts: before - 1 * DAY, text: 'hey', ownerAuthored: 1 });
+}
+
 function insertDistillRun(db, now = NOW) {
   return Number(db.prepare(
     `INSERT INTO distill_run(model, prompt_path, prompt_sha, params, episode_context,
@@ -109,6 +119,7 @@ test('owe:open-loop is present at 12 days, absent at 1 and 90', () => {
   const db = openDb(':memory:');
   insertPerson(db, { key: 'name:asked twelve', name: 'Asked Twelve', sent: 10, received: 10 });
   insertMsg(db, 'name:asked twelve', { ts: NOW - 12 * DAY, text: 'can you send that over?', authored: 1 });
+  insertOwnerParticipation(db, 'name:asked twelve');
 
   insertPerson(db, { key: 'name:asked one', name: 'Asked One', sent: 10, received: 10 });
   insertMsg(db, 'name:asked one', { ts: NOW - 1 * DAY, text: 'can you send that over?', authored: 1 });
@@ -162,6 +173,9 @@ test('an expired owner commitment produces a candidate keyed to the counterparty
   insertClaimSource(db, { claimId, contextId: sourceCtx, quote: 'ok, will do' });
   // Their own earlier message, before observedAt -- the quote the candidate resolves.
   const theirMsgCtx = insertMsg(db, 'name:commitment counterparty', { ts: observedAt - 1 * DAY, text: 'please send the deck', authored: 1 });
+  // The commitment's own source counts as one owner-authored row; a second,
+  // unrelated one clears OWE_MIN_OWNER_MESSAGES.
+  insertMsg(db, 'name:commitment counterparty', { ts: observedAt - 50 * DAY, text: 'hey', ownerAuthored: 1 });
 
   const pool = owePool(db, { now: NOW });
   const cand = pool.find((c) => c.personKey === 'name:commitment counterparty');
@@ -195,6 +209,7 @@ test('a 20-day-unanswered page ask produces a candidate; a later owner reply or 
   const claimId = insertAskClaim(db, { runId, personKey: 'name:unanswered ask' });
   insertClaimSource(db, { claimId, contextId: askCtx, quote: 'can you make an intro?' });
   insertPageItem(db, { claimId, section: 'ask' });
+  insertOwnerParticipation(db, 'name:unanswered ask', { before: NOW - 40 * DAY });
 
   const pool = owePool(db, { now: NOW });
   const cand = pool.find((c) => c.personKey === 'name:unanswered ask');
@@ -231,6 +246,7 @@ test('suppression, an owe-scoped mute, and an anonymous contact all exclude; a r
   const mk = (key, name) => {
     insertPerson(db, { key, name, sent: 10, received: 10 });
     insertMsg(db, key, { ts: NOW - 12 * DAY, text: 'can you help with this?', authored: 1 });
+    insertOwnerParticipation(db, key);
   };
 
   mk('name:owe suppressed', 'Owe Suppressed');
@@ -260,6 +276,7 @@ test('a reconnect-kind dismissal still reaches Owe; a shown card of ANY kind coo
   const mk = (key, name) => {
     insertPerson(db, { key, name, sent: 10, received: 10 });
     insertMsg(db, key, { ts: NOW - 12 * DAY, text: 'can you help with this?', authored: 1 });
+    insertOwnerParticipation(db, key);
   };
 
   mk('name:judged reconnect', 'Judged Reconnect');
@@ -284,6 +301,7 @@ test('a thin 4-message relationship still reaches the owe pool (no MIN_DEPTH flo
   const db = openDb(':memory:');
   insertPerson(db, { key: 'name:thin owe', name: 'Thin Owe', sent: 2, received: 2 });
   insertMsg(db, 'name:thin owe', { ts: NOW - 12 * DAY, text: 'can you help with this?', authored: 1 });
+  insertOwnerParticipation(db, 'name:thin owe');
 
   assert.ok(keysOf(owePool(db, { now: NOW })).includes('name:thin owe'));
 });
@@ -297,19 +315,23 @@ test('ranking: overdueDays desc, expired-commitment before open-loop, depth desc
   // Expired-commitment must sort first.
   insertPerson(db, { key: 'name:rank openloop20', name: 'Rank OpenLoop20', sent: 10, received: 10 });
   insertMsg(db, 'name:rank openloop20', { ts: NOW - 20 * DAY, text: 'can you help with this?', authored: 1 });
+  insertOwnerParticipation(db, 'name:rank openloop20');
 
   insertPerson(db, { key: 'name:rank commit20', name: 'Rank Commit20', sent: 10, received: 10 });
   const c20 = insertOwnerCommitmentClaim(db, { runId, observedAt: NOW - 100 * DAY, validTo: NOW - 20 * DAY });
   acceptClaim(db, c20, NOW - 100 * DAY);
   const ctx20 = insertMsg(db, 'name:rank commit20', { ts: NOW - 100 * DAY, text: 'ok', ownerAuthored: 1 });
   insertClaimSource(db, { claimId: c20, contextId: ctx20, quote: 'ok' });
+  insertMsg(db, 'name:rank commit20', { ts: NOW - 150 * DAY, text: 'hey', ownerAuthored: 1 });
 
   // Two open-loop candidates tied at overdueDays=30, differing depth: higher
   // depth (more messages) ranks first.
   insertPerson(db, { key: 'name:rank depth high', name: 'Rank Depth High', sent: 40, received: 40 });
   insertMsg(db, 'name:rank depth high', { ts: NOW - 30 * DAY, text: 'can you help with this?', authored: 1 });
+  insertOwnerParticipation(db, 'name:rank depth high');
   insertPerson(db, { key: 'name:rank depth low', name: 'Rank Depth Low', sent: 5, received: 5 });
   insertMsg(db, 'name:rank depth low', { ts: NOW - 30 * DAY, text: 'can you help with this?', authored: 1 });
+  insertOwnerParticipation(db, 'name:rank depth low');
 
   const pool = owePool(db, { now: NOW });
   const keys = keysOf(pool);
@@ -327,6 +349,7 @@ test('produceOweBatch writes kind "owe", producer_version "owe-v1", evidence.owe
   insertPerson(db, { key: 'name:batch open loop', name: 'Batch Open Loop', sent: 10, received: 10 });
   const askText = 'can you send the secret file over?';
   insertMsg(db, 'name:batch open loop', { ts: NOW - 12 * DAY, text: askText, authored: 1 });
+  insertOwnerParticipation(db, 'name:batch open loop');
 
   const { batchId, cards } = produceOweBatch(db, { now: NOW });
   assert.equal(cards.length, 1);
@@ -343,4 +366,74 @@ test('produceOweBatch writes kind "owe", producer_version "owe-v1", evidence.owe
   assert.equal(row.producer_version, OWE_PRODUCER_VERSION);
   const batch = db.prepare('SELECT candidate_count FROM rm_candidate_batch WHERE id = ?').get(batchId);
   assert.equal(batch.candidate_count, 1);
+});
+
+// ---- 12: the bulk-sender fixture, excluded three independent ways --------
+// The live junk this task exists to remove: id:+18447640222, display_name
+// '+18447640222' (a bare phone number, and the key's own id: prefix
+// stripped), role friend, sent 1 / received 236, an unanswered page 'ask'
+// 1,173 days old -- an automated ticketing SMS service. Each of the three
+// new gates (isAnonymousContact's phone-number rule, COMMITMENT_MAX_STALE_DAYS
+// now applied to B2, and OWE_MIN_OWNER_MESSAGES) excludes it on its own;
+// toggle the other two to "pass" in each variant to prove that gate is
+// independently sufficient.
+test('the bulk-sender fixture is excluded for three independent reasons', () => {
+  const db = openDb(':memory:');
+  const runId = insertDistillRun(db);
+
+  function makeAsk(personKey, { name, askDaysAgo, ownerMessages }) {
+    insertPerson(db, { key: personKey, name, sent: 1, received: 236 });
+    const askCtx = insertContext(db, { ts: NOW - askDaysAgo * DAY, text: 'can you help with this?' });
+    const claimId = insertAskClaim(db, { runId, personKey });
+    insertClaimSource(db, { claimId, contextId: askCtx, quote: 'can you help with this?' });
+    insertPageItem(db, { claimId, section: 'ask' });
+    // Well before the ask, so these never trip the "no owner reply after
+    // the ask" exclusion.
+    for (let i = 0; i < ownerMessages; i += 1) {
+      insertMsg(db, personKey, { ts: NOW - (askDaysAgo + 50 + i) * DAY, text: 'hey', ownerAuthored: 1 });
+    }
+  }
+
+  // Staleness alone: a real name and 2 owner messages, but the ask is 1,173
+  // days old -- past the 180-day COMMITMENT_MAX_STALE_DAYS bound.
+  makeAsk('id:stale only', { name: 'Stale Only', askDaysAgo: 1173, ownerMessages: 2 });
+
+  // Owner-participation alone: a real name and a 20-day-old ask (inside the
+  // window), but only 1 owner-authored message ever.
+  makeAsk('id:thin only', { name: 'Thin Only', askDaysAgo: 20, ownerMessages: 1 });
+
+  // Anonymous-contact alone: a bare-phone-number name, a 20-day-old ask, 2
+  // owner messages.
+  makeAsk('id:+18447640222 solo', { name: '+18447640222', askDaysAgo: 20, ownerMessages: 2 });
+
+  // The real fixture: all three at once.
+  makeAsk('id:+18447640222', { name: '+18447640222', askDaysAgo: 1173, ownerMessages: 1 });
+
+  const keys = keysOf(owePool(db, { now: NOW }));
+  assert.ok(!keys.includes('id:stale only'), 'staleness alone excludes it');
+  assert.ok(!keys.includes('id:thin only'), 'thin owner participation alone excludes it');
+  assert.ok(!keys.includes('id:+18447640222 solo'), 'a bare-phone-number name alone excludes it');
+  assert.ok(!keys.includes('id:+18447640222'), 'the real fixture, excluded three times over');
+});
+
+// ---- 13: a LinkedIn-keyed contact never written to is not an open loop ---
+test('a LinkedIn-keyed contact with zero owner messages is not an open loop, even with a real name and a "?" line', () => {
+  const db = openDb(':memory:');
+  insertPerson(db, { key: 'id:liname:jane-doe-123', name: 'Jane Doe', sent: 0, received: 6 });
+  insertMsg(db, 'id:liname:jane-doe-123', { ts: NOW - 12 * DAY, text: 'are you free to catch up sometime?', authored: 1 });
+  // No owner-authored message at all: the owner has never written to her.
+
+  const keys = keysOf(owePool(db, { now: NOW }));
+  assert.ok(!keys.includes('id:liname:jane-doe-123'), 'zero owner-authored messages: not owed');
+});
+
+// ---- 14: a thin real exchange still counts as owed ------------------------
+test('a person with 2 owner messages and an unanswered "?" 12 days ago is still an open loop', () => {
+  const db = openDb(':memory:');
+  insertPerson(db, { key: 'name:thin real exchange', name: 'Thin Real Exchange', sent: 2, received: 1 });
+  insertOwnerParticipation(db, 'name:thin real exchange');
+  insertMsg(db, 'name:thin real exchange', { ts: NOW - 12 * DAY, text: 'can you help with this?', authored: 1 });
+
+  const keys = keysOf(owePool(db, { now: NOW }));
+  assert.ok(keys.includes('name:thin real exchange'), 'exactly 2 owner messages clears OWE_MIN_OWNER_MESSAGES');
 });

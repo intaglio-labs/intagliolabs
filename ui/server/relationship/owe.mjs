@@ -104,7 +104,10 @@ const B1_SQL = `
 `;
 
 // B2: a page "ask" item (person_page_item.section='ask') the owner has not
-// answered -- the ask's own context is at least PAGE_ASK_MIN_DAYS old, its
+// answered -- the ask's own context is at least PAGE_ASK_MIN_DAYS old but not
+// older than COMMITMENT_MAX_STALE_DAYS (the same staleness bound B1 applies
+// to an expired owner commitment now applies here too: a page ask that old
+// is the reconnect producer's "gone quiet" case, not an owed answer), its
 // claim's latest decision (if any) is not a reject, and there is no
 // owner-authored direct-message row for this person after the ask.
 const B2_SQL = `
@@ -115,6 +118,7 @@ const B2_SQL = `
   JOIN context c ON c.id = cs.context_id
   WHERE cl.subject = 'person'
     AND c.ts <= ?
+    AND c.ts > ?
     AND (
       SELECT d.action FROM claim_decision d WHERE d.claim_id = cl.id ORDER BY d.created_at DESC, d.id DESC LIMIT 1
     ) IS NOT 'reject'
@@ -123,6 +127,23 @@ const B2_SQL = `
       JOIN context c2 ON c2.id = pel2.context_id
       WHERE pel2.person_key = cl.subject_person_key AND pel2.owner_authored = 1 AND pel2.room = 0 AND c2.ts > c.ts
     )
+`;
+
+// Has the OWNER actually written to this person more than once? Applied to
+// both open-loop and expired-commitment candidates (see the "deliberate
+// divergences" comment on owePool below for why this is not the same as a
+// depth floor): a thin real exchange -- two owner messages and an unanswered
+// question -- is still owed. What this excludes is the case with NO
+// exchange at all in that direction: a LinkedIn-derived contact the owner
+// has never written to, or written to exactly once, is not someone the
+// owner "owes" anything to in the ordinary sense of the word, no matter how
+// many messages arrived in the other direction (an automated ticketing
+// service can send hundreds).
+export const OWE_MIN_OWNER_MESSAGES = 2;
+
+const OWNER_MESSAGE_COUNT_SQL = `
+  SELECT COUNT(*) AS n FROM person_event_links
+  WHERE person_key = ? AND owner_authored = 1 AND room = 0
 `;
 
 // Exclusions shared by every owe candidate, evaluated once per pool build:
@@ -166,18 +187,32 @@ function buildExclusionChecker(db, { now, includeOffered }) {
 // MIN_DEPTH floor (an outstanding ask or commitment matters regardless of how
 // thin the relationship otherwise is), no future-meeting veto (an upcoming
 // meeting is not a reason to stop owing an answer), and romantic/family are
-// still excluded so the two producers stay comparable.
+// still excluded so the two producers stay comparable. In place of the depth
+// floor there is a narrower, direction-specific one: OWE_MIN_OWNER_MESSAGES
+// requires a two-way relationship the OWNER has actually participated in
+// (at least two owner-authored, room=0 rows to this person), not a message
+// count in either direction. That is deliberately a much lower bar than a
+// depth floor -- "you have written to this person before, more than once" --
+// so a thin real exchange with an unanswered question still clears it; what
+// it excludes is a bulk sender the owner never wrote to (236 received
+// messages, 1 sent, an old automated page ask) and a LinkedIn-derived contact
+// the owner has at most written to once.
 export function owePool(db, { now = Date.now(), includeOffered = false, includeAnonymous = false } = {}) {
   const excluded = buildExclusionChecker(db, { now, includeOffered });
   const peopleStmt = db.prepare(
     'SELECT display_name AS name, role AS role, sent AS sent, received AS received, met_in_person AS meetings FROM people WHERE person_key = ?'
   );
   const contextTextStmt = db.prepare('SELECT text FROM context WHERE id = ?');
+  const ownerMessageCountStmt = db.prepare(OWNER_MESSAGE_COUNT_SQL);
 
   const out = [];
 
   function personRow(personKey) {
     return peopleStmt.get(personKey);
+  }
+
+  function hasOwnerParticipated(personKey) {
+    return ownerMessageCountStmt.get(personKey).n >= OWE_MIN_OWNER_MESSAGES;
   }
 
   // --- A: owe:open-loop --------------------------------------------------
@@ -192,6 +227,7 @@ export function owePool(db, { now = Date.now(), includeOffered = false, includeA
     if (!person) continue;
     if (!includeAnonymous && isAnonymousContact({ name: person.name, key: row.personKey })) continue;
     if (person.role === 'romantic' || person.role === 'family') continue;
+    if (!hasOwnerParticipated(row.personKey)) continue;
 
     const overdueDays = Math.floor((now - row.askedAt) / DAY);
     out.push({
@@ -228,7 +264,7 @@ export function owePool(db, { now = Date.now(), includeOffered = false, includeA
     });
   }
 
-  const b2Rows = db.prepare(B2_SQL).all(now - PAGE_ASK_MIN_DAYS * DAY);
+  const b2Rows = db.prepare(B2_SQL).all(now - PAGE_ASK_MIN_DAYS * DAY, now - COMMITMENT_MAX_STALE_DAYS * DAY);
   for (const row of b2Rows) {
     const overdueDays = Math.floor((now - row.askedAt) / DAY);
     considerB(row.personKey, overdueDays, {
@@ -243,6 +279,7 @@ export function owePool(db, { now = Date.now(), includeOffered = false, includeA
     if (!person) continue;
     if (!includeAnonymous && isAnonymousContact({ name: person.name, key: personKey })) continue;
     if (person.role === 'romantic' || person.role === 'family') continue;
+    if (!hasOwnerParticipated(personKey)) continue;
 
     out.push({
       personKey, name: person.name, role: person.role,
