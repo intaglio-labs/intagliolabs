@@ -19,8 +19,8 @@
 // NEVER AUTO-FIXED. The only automatic transition a finding ever makes is
 // 'gone': the condition that produced it is no longer true, so the row
 // closes itself the next time a pass looks and does not see it. Every other
-// resolution (dismiss, and the three role_conflict choices) is the owner's
-// own click, through resolveLintFinding (a later commit), never runLintPass.
+// resolution (dismiss, and the three role_conflict choices) is written by
+// resolveLintFinding, on the owner's own click, never by runLintPass.
 //
 // A finding is a DERIVED INDEX over the corpus, not evidence about it -- so
 // it is upserted by key, not appended. See lint_finding's own DDL comment in
@@ -29,6 +29,7 @@
 // in the desk).
 
 import { subRolesFor } from '../people/subRoles.mjs';
+import { markPersonSubRoles } from '../people/owner.mjs';
 import { lookupScope } from './lookup.mjs';
 
 // A version tag for this pass, mirroring SWEEP_VERSION/LOOKUP_VERSION's own
@@ -69,9 +70,14 @@ export const LINT_MAX_PER_CHECK = 500;
 // the ordinary case.
 export const LINT_PAGE_TIERS = Object.freeze(['eligible', 'tagged']);
 
-// The four resolutions an owner may write, and resolveLintFinding itself,
-// land in a later commit alongside the role_conflict resolution tests -- see
-// this file's header commit list.
+// The four resolutions an owner may write (never 'gone', which only a pass
+// itself may set -- see resolveLintFinding). Kept private to this file;
+// hermes.mjs's route validates the same closed set (and the
+// role-choices-only-on-role_conflict rule) before ever calling
+// resolveLintFinding, the same "route validates shape, module validates and
+// applies" split every other admin route in this system uses.
+const LINT_RESOLUTIONS = Object.freeze(['dismiss', 'keep-export', 'keep-derived', 'both']);
+const ROLE_CHOICE_RESOLUTIONS = new Set(['keep-export', 'keep-derived', 'both']);
 
 // policy carries the same per-process relationship holder every other
 // relationship route reads -- see sweep.mjs's/lookup.mjs's identical
@@ -435,9 +441,92 @@ export function lintFindings(db, { check = null, open = null, limit = 200 } = {}
   return rows.map((r) => ({ ...r, detail: safeParseJson(r.detail) }));
 }
 
-// resolveLintFinding (the owner's dismiss/keep-export/keep-derived/both
-// write) lands in a later commit, alongside the role_conflict resolution
-// tests -- see this file's header commit list.
+// The owner's resolution for one finding: 'dismiss' works on any check;
+// 'keep-export'/'keep-derived'/'both' are role_conflict's own three choices
+// (see this file's header and the design's own comment on why each writes
+// what it writes) and are refused (a no-op, applied:false) on any other
+// check_name -- the route already refuses the request with a 400 before
+// this is ever called for that case, but this stays defensive since it is
+// also called directly (tests, and any future caller).
+//
+// Owner resolution written ONCE (WHERE resolved_at IS NULL): a finding
+// already resolved -- by an earlier owner click, OR by a pass's own 'gone'
+// that a later pass has not yet reopened -- is left alone. Re-resolving a
+// 'gone' row would be silently overriding a state the owner never chose;
+// the correct path for that is to wait for the pass that reopens it, or (the
+// desk does not offer this) delete the row entirely, which nothing here does.
+//
+// role_conflict resolutions all call markPersonSubRoles, which REPLACES
+// people.sub_roles wholesale -- so each branch below passes the FULL
+// intended list, never a delta -- and all three therefore set rebuildNeeded:
+// true. people.linkedin is never written by any of them: the export itself
+// is not being corrected, only which of its derived roles/its accepted tag
+// wins is being decided.
+//
+// DEVIATION: keep-export's "retract the sweep claim" is written directly as
+// a claim_decision row here rather than by calling hermes.mjs's own
+// decideClaim -- decideClaim is exported from the very file that will import
+// this one (hermes.mjs), and importing it back would be the same circular
+// import applySweepDecision's own comment (sweep.mjs) already ruled out for
+// rebuildPeopleCore. The insert below is decideClaim's own insert, verbatim
+// (action='retract', actor='owner'): the two can never drift because there
+// is nothing decideClaim does beyond this one INSERT that a retract needs.
+export function resolveLintFinding(db, { findingKey, resolution, configPath } = {}) {
+  if (typeof findingKey !== 'string' || findingKey.length === 0) {
+    return { applied: false, findingKey: findingKey ?? null, resolution: resolution ?? null, rebuildNeeded: false };
+  }
+  if (!LINT_RESOLUTIONS.includes(resolution)) {
+    return { applied: false, findingKey, resolution: resolution ?? null, rebuildNeeded: false };
+  }
+
+  const row = db.prepare(
+    'SELECT check_name AS checkName, person_key AS personKey, claim_id AS claimId, detail, resolved_at AS resolvedAt ' +
+      'FROM lint_finding WHERE finding_key = ?'
+  ).get(findingKey);
+  if (!row) return { applied: false, findingKey, resolution, rebuildNeeded: false };
+  if (row.resolvedAt !== null && row.resolvedAt !== undefined) {
+    return { applied: false, findingKey, resolution, rebuildNeeded: false };
+  }
+
+  const isRoleChoice = ROLE_CHOICE_RESOLUTIONS.has(resolution);
+  if (isRoleChoice && row.checkName !== 'role_conflict') {
+    return { applied: false, findingKey, resolution, rebuildNeeded: false };
+  }
+
+  let rebuildNeeded = false;
+  if (isRoleChoice) {
+    const detail = safeParseJson(row.detail);
+    const tag = detail.tag;
+    const exportRoles = Array.isArray(detail.exportRoles) ? detail.exportRoles : [];
+
+    let subRoles;
+    if (resolution === 'keep-export') {
+      subRoles = exportRoles;
+    } else if (resolution === 'keep-derived') {
+      subRoles = [tag];
+    } else {
+      subRoles = [...new Set([...exportRoles, tag])].sort();
+    }
+    markPersonSubRoles({ key: row.personKey, subRoles, ...(configPath ? { configPath } : {}) });
+    rebuildNeeded = true;
+
+    if (resolution === 'keep-export' && Number.isInteger(row.claimId)) {
+      db.prepare(
+        'INSERT INTO claim_decision(claim_id, action, actor, reason, created_at) VALUES (?, ?, ?, ?, ?)'
+      ).run(
+        row.claimId, 'retract', 'owner',
+        'lint: role_conflict resolved keep-export (the LinkedIn export overrides an accepted sweep tag)',
+        Date.now()
+      );
+    }
+  }
+
+  db.prepare(
+    'UPDATE lint_finding SET resolved_at = ?, resolution = ? WHERE finding_key = ? AND resolved_at IS NULL'
+  ).run(Date.now(), resolution, findingKey);
+
+  return { applied: true, findingKey, resolution, rebuildNeeded };
+}
 
 // For /stats' `lint` key (hermes.mjs) and the desk's status line. Every
 // number here is a plain aggregate over lint_run/lint_finding -- NO

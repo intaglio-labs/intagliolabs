@@ -5,11 +5,15 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { openDb } from '../server/hermes.mjs';
+import { ownerConfigPath } from '../server/people/owner.mjs';
 import {
   expiredClaims, roleConflicts, pageAnchorFindings, orphanCardQuotes, runLintPass,
-  LINT_MAX_PER_CHECK,
+  resolveLintFinding, lintGate, LINT_MAX_PER_CHECK,
 } from '../server/relationship/lint.mjs';
 
 const NOW = Date.parse('2026-09-01T12:00:00Z');
@@ -397,4 +401,112 @@ test('a check that hits its cap sets truncated and skips its own auto-close swee
   staleRow = db.prepare('SELECT * FROM lint_finding WHERE finding_key = ?').get(staleFindingKey);
   assert.equal(staleRow.resolved_at, null,
     "a truncated check skips its own auto-close, even for a finding whose condition is now gone");
+});
+
+// ---------------------------------------------------------------------------
+// (9) resolveLintFinding's three role_conflict resolutions.
+// ---------------------------------------------------------------------------
+
+// Stores a role_conflict finding exactly as runLintPass would have (via
+// roleConflicts + the upsert), so resolveLintFinding reads its detail (tag,
+// exportRoles) the same way a real pass would have written it.
+function seedRoleConflictFinding(db, { key, tag, linkedin }) {
+  const claimId = acceptedSweepProposal(db, { key, tag, linkedin });
+  const { findings } = roleConflicts(db, {});
+  const finding = findings.find((f) => f.claimId === claimId);
+  assert.ok(finding, 'sanity: roleConflicts actually detected this conflict');
+  db.prepare(
+    `INSERT INTO lint_finding(finding_key, check_name, person_key, claim_id, detail, first_seen_at, last_seen_at)
+     VALUES (?, 'role_conflict', ?, ?, ?, ?, ?)`
+  ).run(finding.findingKey, finding.personKey, finding.claimId, finding.detail, NOW, NOW);
+  return { claimId, findingKey: finding.findingKey };
+}
+
+test('resolveLintFinding keep-export writes the export roles and retracts the accepted sweep claim', () => {
+  const db = openDb(':memory:');
+  const key = 'name:resolve keep export';
+  const { claimId, findingKey } = seedRoleConflictFinding(db, {
+    key, tag: 'investor', linkedin: { position: 'Chief Operating Officer', company: 'Acme Manufacturing' },
+  });
+  const configPath = ownerConfigPath(mkdtempSync(join(tmpdir(), 'lint-config-')));
+
+  const result = resolveLintFinding(db, { findingKey, resolution: 'keep-export', configPath });
+  assert.equal(result.applied, true);
+  assert.equal(result.rebuildNeeded, true);
+
+  const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+  assert.deepEqual(raw.personSubRoles[key], ['operator']);
+
+  const decisions = db.prepare('SELECT action FROM claim_decision WHERE claim_id = ? ORDER BY id').all(claimId)
+    .map((d) => d.action);
+  assert.deepEqual(decisions, ['accept', 'retract'], 'keep-export appends a retract onto the accepted sweep claim');
+
+  const row = db.prepare('SELECT resolved_at, resolution FROM lint_finding WHERE finding_key = ?').get(findingKey);
+  assert.equal(row.resolution, 'keep-export');
+  assert.ok(row.resolved_at !== null);
+
+  // A second resolve of the same, now-resolved finding is a no-op.
+  const again = resolveLintFinding(db, { findingKey, resolution: 'dismiss', configPath });
+  assert.equal(again.applied, false);
+});
+
+test('resolveLintFinding keep-derived writes only the accepted tag, with no retract', () => {
+  const db = openDb(':memory:');
+  const key = 'name:resolve keep derived';
+  const { claimId, findingKey } = seedRoleConflictFinding(db, {
+    key, tag: 'investor', linkedin: { position: 'Chief Operating Officer', company: 'Acme Manufacturing' },
+  });
+  const configPath = ownerConfigPath(mkdtempSync(join(tmpdir(), 'lint-config-')));
+
+  const result = resolveLintFinding(db, { findingKey, resolution: 'keep-derived', configPath });
+  assert.equal(result.applied, true);
+  assert.equal(result.rebuildNeeded, true);
+  const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+  assert.deepEqual(raw.personSubRoles[key], ['investor']);
+
+  const decisions = db.prepare('SELECT action FROM claim_decision WHERE claim_id = ?').all(claimId)
+    .map((d) => d.action);
+  assert.deepEqual(decisions, ['accept'], 'keep-derived writes no retract');
+});
+
+test('resolveLintFinding both writes the sorted union of the export roles and the accepted tag', () => {
+  const db = openDb(':memory:');
+  const key = 'name:resolve both';
+  const { findingKey } = seedRoleConflictFinding(db, {
+    key, tag: 'investor', linkedin: { position: 'Chief Operating Officer', company: 'Acme Manufacturing' },
+  });
+  const configPath = ownerConfigPath(mkdtempSync(join(tmpdir(), 'lint-config-')));
+
+  const result = resolveLintFinding(db, { findingKey, resolution: 'both', configPath });
+  assert.equal(result.applied, true);
+  assert.equal(result.rebuildNeeded, true);
+  const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+  assert.deepEqual(raw.personSubRoles[key], ['investor', 'operator']);
+});
+
+test('resolveLintFinding refuses a role choice on any check other than role_conflict', () => {
+  const db = openDb(':memory:');
+  const runId = insertDistillRun(db);
+  const claimId = insertClaim(db, { runId, personKey: 'name:not a role conflict', validTo: NOW - DAY });
+  decide(db, claimId, 'accept');
+  runLintPass(db, {}, { now: NOW, checks: ['expired_claim'] });
+  const findingKey = `expired_claim:${claimId}`;
+
+  const result = resolveLintFinding(db, { findingKey, resolution: 'keep-export' });
+  assert.equal(result.applied, false);
+  const row = db.prepare('SELECT resolved_at FROM lint_finding WHERE finding_key = ?').get(findingKey);
+  assert.equal(row.resolved_at, null, 'the finding is untouched, not silently dismissed instead');
+});
+
+// ---------------------------------------------------------------------------
+// (10) lintGate.
+// ---------------------------------------------------------------------------
+
+test('lintGate refuses busy-model when a page build, sweep, lookup, or lint pass is already active', () => {
+  const db = openDb(':memory:');
+  assert.equal(lintGate(db, {}).ok, true);
+  assert.equal(lintGate(db, { sweepActive: true }).reason, 'busy-model');
+  assert.equal(lintGate(db, { lookupActive: true }).reason, 'busy-model');
+  assert.equal(lintGate(db, { pagesBuildingActive: true }).reason, 'busy-model');
+  assert.equal(lintGate(db, { lintActive: true }).reason, 'busy-model');
 });
