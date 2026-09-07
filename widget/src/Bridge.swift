@@ -36,6 +36,9 @@ protocol BridgeDelegate: AnyObject {
   func openPeople()
   func openMonths()
   func openReconnect()
+  // Poked whenever a judgment or a panel close may have left the widget
+  // orb showing a stale reconnect card -- see relCardChanged in main.swift.
+  func relCardChanged()
   // Takes a path and a query since the login window can hand off to
   // /bridge?p=<platform>. Both sides are load-bearing and picking either alone
   // fails to compile — at a CALL SITE rather than here, which is the slow way to
@@ -1346,6 +1349,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
 
     case "relEvent":
+      // A judgment changes what the orb should show right now -- poke the
+      // widget rather than let it wait out the poll interval.
+      delegate?.relCardChanged()
       var evt: [String: Any] = [:]
       // "note" is the owner's free-text why -- the field the whole feedback
       // loop exists to capture; the audit found this allowlist silently

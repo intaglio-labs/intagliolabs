@@ -856,11 +856,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     if reconnectPanel == nil {
       reconnectPanel = makePanel(page: "reconnect", size: capped(Self.scaled(Self.reconnectBase, Bridge.scale)))
       reconnectPanel!.hasShadow = false
+      // Closing this panel, by any route, may leave the orb showing a card
+      // the owner already judged -- chained onto makePanel's own hook (set
+      // there; see openOnboarding for the same pattern), not replacing it.
+      let reportPanel = reconnectPanel!.willOrderOut
+      reconnectPanel!.willOrderOut = { [weak self] in
+        reportPanel?()
+        self?.relCardChanged()
+      }
     } else {
       (reconnectPanel?.contentView as? WKWebView)?
         .evaluateJavaScript("window.__hzReconnectShow && window.__hzReconnectShow()")
     }
     present(reconnectPanel!)
+  }
+
+  // Native pokes the WIDGET webview (not the reconnect popup itself) so the
+  // orb re-lights or goes dark immediately after a judgment or a panel
+  // close, instead of waiting out refreshRelCard's poll.
+  func relCardChanged() {
+    eval(widgetWeb, "window.__hzRelCardChanged && window.__hzRelCardChanged()")
   }
 
   // The People popup — the door into the who's-who / person-index feature.

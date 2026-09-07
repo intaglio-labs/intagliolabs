@@ -397,12 +397,20 @@ orbBtn.addEventListener('pointerleave', () => {
   // hover has no timer, so it folds away immediately.
   if (dreamKind === 'work' && !teaseTimer) hideTease();
 });
+// Names the person and the trigger instead of the generic tease, so the
+// title (which doubles as the hover tease -- there is no separate bubble for
+// the notify face) tells the owner who and why before they even tap.
+function cardTeaseText(card) {
+  if (!card?.name) return 'someone to reconnect with';
+  const days = card.evidence?.dormancyDays;
+  return days ? `${card.name} · quiet ${days} days` : card.name;
+}
 function paintOrbState() {
   const processing = voiceOrbState === 'idle' && !!workLabel;
   if (voiceOrbState === 'idle' && cardPending) {
     setOrbState('notify');
     orbEl.classList.toggle('processing', false);
-    orbBtn.title = 'someone to reconnect with';
+    orbBtn.title = cardTeaseText(cardPending);
     return;
   }
   setOrbState(voiceOrbState !== 'idle' ? voiceOrbState : (processing ? 'listening' : 'idle'));
@@ -473,8 +481,11 @@ async function refreshRelCard() {
   }
   paintOrbState();
 }
-setTimeout(refreshRelCard, 15_000);
+setTimeout(refreshRelCard, 5_000);
 setInterval(refreshRelCard, 600_000);
+// Native pokes this straight after a judgment or a panel close, so the orb
+// never sits dark on stale news for up to ten minutes waiting on the poll.
+window.__hzRelCardChanged = () => refreshRelCard();
 
 // A refresh rebuilds candidates through the local model -- minutes of
 // inference -- so it runs at most once a day, kicked fire-and-forget on
@@ -491,7 +502,10 @@ try {
 // Time of day lives in bridge.js so the onboarding orb reads the same bands.
 // A wake from sleep is when the clock is most likely to have moved a long way
 // since the last check — native already pokes this hook.
-window.__hzWake = hzApplyTimeOfDay(orbEl);
+// Wrapped rather than replaced: a wake from sleep is also when a card judged
+// or a panel closed while the mac slept is most likely to be stale.
+const hzApplyTod = hzApplyTimeOfDay(orbEl);
+window.__hzWake = () => { hzApplyTod(); refreshRelCard(); };
 winput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitFromWidget();
 });
