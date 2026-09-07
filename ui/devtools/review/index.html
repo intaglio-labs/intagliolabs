@@ -137,6 +137,50 @@
   .c-acts .not-useful:hover,
   .c-acts .wrong-person:hover,
   .c-acts .never-this-person:hover { border-color:var(--bad); color:var(--bad); }
+
+  /* ---- Pages view: a pool list left, the selected person's page right ---- */
+  .pages-wrap { display:grid; grid-template-columns:18rem 1fr; gap:1rem; align-items:start; max-width:none; }
+  .pages-left { display:flex; flex-direction:column; gap:.5rem; }
+  .pages-list {
+    background:var(--surface); border:1px solid var(--line); border-radius:5px;
+    max-height:70vh; overflow-y:auto;
+  }
+  .pages-row {
+    display:flex; justify-content:space-between; gap:.4rem; align-items:center;
+    padding:.5rem .7rem; border-bottom:1px solid var(--line); cursor:pointer; font-size:.85rem;
+  }
+  .pages-row:last-child { border-bottom:none; }
+  .pages-row:hover { background:var(--surface-2); }
+  .pages-row[aria-current="true"] { background:var(--surface-2); font-weight:600; }
+  .pages-row .has-page {
+    font-size:.62rem; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+    color:var(--ok); background:var(--ok-soft); padding:.1rem .35rem; border-radius:3px;
+  }
+  .pages-right {
+    background:var(--surface); border:1px solid var(--line); border-radius:5px;
+    padding:1rem 1.1rem; display:flex; flex-direction:column; gap:.9rem; min-height:8rem;
+  }
+  .pages-right-head { display:flex; justify-content:space-between; align-items:center; gap:.6rem; flex-wrap:wrap; }
+  .pages-right-head h2 { font-size:1rem; margin:0; }
+  .pg-section { display:flex; flex-direction:column; gap:.5rem; }
+  .pg-section-title {
+    font-size:.68rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--fg-3);
+  }
+  .pg-item {
+    border:1px solid var(--line); border-radius:5px; padding:.7rem .8rem; display:grid; gap:.5rem;
+  }
+  .pg-item-text { font-size:.95rem; line-height:1.4; }
+  .pg-item .c-quote { margin:0; }
+  .pg-item-acts { display:flex; gap:.4rem; align-items:center; }
+  .pg-item-acts button { padding:.28rem .7rem; }
+  .pg-item-acts .keep:hover { border-color:var(--ok); color:var(--ok); }
+  .pg-item-acts .drop:hover { border-color:var(--bad); color:var(--bad); }
+  .pg-decided {
+    font-size:.72rem; font-weight:600; letter-spacing:.04em; text-transform:uppercase;
+  }
+  .pg-decided.accept { color:var(--ok); }
+  .pg-decided.reject { color:var(--bad); }
+  .pages-built { font-size:.74rem; color:var(--fg-3); }
 </style>
 </head>
 <body>
@@ -167,6 +211,18 @@
   <div id="poolList"></div>
 </main>
 
+<main id="pagesView" hidden>
+  <div class="poolbar" id="pagesBar"></div>
+  <div class="pages-wrap">
+    <div class="pages-left">
+      <div class="pages-list" id="pagesList"></div>
+    </div>
+    <div class="pages-right" id="pagesRight">
+      <p class="empty">pick someone on the left</p>
+    </div>
+  </div>
+</main>
+
 <script>
 const BANDS = ['unsupported', 'weak', 'supported', 'all'];
 let band = 'unsupported';   // the interesting one first: no content word shared with its source
@@ -176,7 +232,7 @@ let cursor = 0;
 const el = (t, c, txt) => { const n = document.createElement(t); if (c) n.className = c; if (txt !== undefined) n.textContent = txt; return n; };
 
 // ---- tabs: claims (existing) / cards (new) --------------------------------
-const VIEWS = ['claims', 'cards', 'pool'];
+const VIEWS = ['claims', 'cards', 'pool', 'pages'];
 let view = 'cards';
 let cardsLoaded = false;
 
@@ -196,11 +252,13 @@ function selectView(v) {
   document.getElementById('claimsView').hidden = v !== 'claims';
   document.getElementById('cardsView').hidden = v !== 'cards';
   document.getElementById('poolView').hidden = v !== 'pool';
+  document.getElementById('pagesView').hidden = v !== 'pages';
   document.getElementById('filters').hidden = v !== 'claims';
   document.getElementById('counts').hidden = v !== 'claims';
   document.getElementById('health').hidden = v !== 'cards';
   if (v === 'cards' && !cardsLoaded) { cardsLoaded = true; loadCards(); loadHealth(); }
   if (v === 'pool') { renderPoolBar(); loadPool(); }
+  if (v === 'pages') { renderPagesBar(); loadPagesList(); }
 }
 
 // ---- pool: the producer's ranked eligible set, per mode -------------------
@@ -642,6 +700,185 @@ async function loadHealth() {
   } catch {
     box.textContent = '';
   }
+}
+
+// ---- Pages view: per-person model-built summaries --------------------
+// Left: the same ranked pool the Pool tab shows (reuse /api/pool). Right:
+// the selected person's page, sections in a fixed order, each item's own
+// accept/reject going through /api/decide -- the exact route and payload
+// shape the Claims tab already uses, so a decision made here lands in the
+// same claim_decision table regardless of which tab it came from.
+//
+// /api/page and /api/pages/build are being built in parallel by another
+// worker and may not exist on the running hermes yet; a 404 from either is
+// rendered as an honest "no page yet", never as an error.
+const PAGE_SECTIONS = [
+  { key: 'who', label: 'who', kind: 'single' },
+  { key: 'asks', label: 'asked you for', kind: 'list' },
+  { key: 'objection', label: 'objection', kind: 'single' },
+  { key: 'how_left', label: 'how it was left', kind: 'single' },
+  { key: 'notable', label: 'notable', kind: 'list' },
+];
+let pagesMode = 'investor';
+let pagesRows = [];
+let pagesPersonKey = null;
+let pagesPersonName = null;
+
+function renderPagesBar() {
+  const box = document.getElementById('pagesBar');
+  box.replaceChildren(...MODES.map((m) => {
+    const btn = el('button', null, m);
+    btn.setAttribute('aria-pressed', String(m === pagesMode));
+    btn.addEventListener('click', () => { pagesMode = m; renderPagesBar(); loadPagesList(); });
+    return btn;
+  }));
+}
+
+async function loadPagesList() {
+  const list = document.getElementById('pagesList');
+  list.replaceChildren(el('p', 'health', 'loading…'));
+  try {
+    const res = await fetchPool(pagesMode, true);
+    const data = await res.json();
+    pagesRows = data.rows ?? [];
+    renderPagesList();
+  } catch (err) {
+    list.replaceChildren(el('p', 'err', 'could not load: ' + err.message));
+  }
+}
+
+function renderPagesList() {
+  const list = document.getElementById('pagesList');
+  if (pagesRows.length === 0) {
+    list.replaceChildren(el('p', 'empty', 'nobody eligible in this mode.'));
+    return;
+  }
+  list.replaceChildren(...pagesRows.map((r) => {
+    const row = el('div', 'pages-row');
+    row.setAttribute('aria-current', String(r.personKey === pagesPersonKey));
+    row.append(el('span', null, r.name ?? r.personKey));
+    // hasPage is optional -- the pool route may not carry it yet, and this
+    // view never fetches a page per row just to find out (one fetch per
+    // person on every render); the marker is a convenience, not something
+    // the tab depends on.
+    if (r.hasPage) row.append(el('span', 'has-page', 'has page'));
+    row.addEventListener('click', () => selectPagePerson(r.personKey, r.name ?? r.personKey));
+    return row;
+  }));
+}
+
+function selectPagePerson(personKey, name) {
+  pagesPersonKey = personKey;
+  pagesPersonName = name;
+  renderPagesList();
+  loadPersonPage();
+}
+
+async function loadPersonPage() {
+  const box = document.getElementById('pagesRight');
+  box.replaceChildren(el('p', 'empty', 'loading…'));
+  try {
+    const res = await fetch('/api/page?personKey=' + encodeURIComponent(pagesPersonKey));
+    if (res.status === 404) { renderPageMissing(); return; }
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    renderPersonPage(data);
+  } catch (err) {
+    box.replaceChildren(el('p', 'err', 'could not load: ' + err.message));
+  }
+}
+
+function pageHead(label) {
+  const head = el('div', 'pages-right-head');
+  head.append(el('h2', null, pagesPersonName ?? pagesPersonKey));
+  const build = el('button', null, label);
+  build.addEventListener('click', () => buildPage(build));
+  head.append(build);
+  return head;
+}
+
+function renderPageMissing() {
+  const box = document.getElementById('pagesRight');
+  box.replaceChildren(pageHead('build page'), el('p', 'empty', 'no page yet'));
+}
+
+async function buildPage(btn) {
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/pages/build', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ personKey: pagesPersonKey }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    await loadPersonPage();
+  } catch (err) {
+    btn.disabled = false;
+    document.getElementById('pagesRight').append(el('p', 'err', 'could not build: ' + err.message));
+  }
+}
+
+function pageItemNode(item) {
+  const node = el('div', 'pg-item');
+  node.append(el('div', 'pg-item-text', item.text ?? ''));
+  if (item.quote) node.append(el('blockquote', 'c-quote', item.quote));
+  const decided = item.decision && item.decision !== 'pending';
+  if (decided) {
+    node.append(el('div', 'pg-decided ' + item.decision, item.decision));
+  } else {
+    const acts = el('div', 'pg-item-acts');
+    const keep = el('button', 'keep', 'Accept');
+    const drop = el('button', 'drop', 'Reject');
+    keep.addEventListener('click', () => decidePageItem(item, 'accept', node));
+    drop.addEventListener('click', () => decidePageItem(item, 'reject', node));
+    acts.append(keep, drop);
+    node.append(acts);
+  }
+  return node;
+}
+
+async function decidePageItem(item, action, node) {
+  for (const b of node.querySelectorAll('button')) b.disabled = true;
+  try {
+    const res = await fetch('/api/decide', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // Same payload shape as the Claims tab's decide(): claim_id, action,
+      // reason -- one write path, one auditable trail, whichever tab a
+      // decision came from.
+      body: JSON.stringify({ claim_id: item.claimId, action, reason: 'reviewed in the dev review desk' }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    item.decision = action;
+    node.replaceWith(pageItemNode(item));
+  } catch (err) {
+    for (const b of node.querySelectorAll('button')) b.disabled = false;
+    node.append(el('span', 'err', 'could not save: ' + err.message));
+  }
+}
+
+function pageSectionNode(section, value) {
+  const items = section.kind === 'list' ? (value ?? []) : (value ? [value] : []);
+  if (items.length === 0) return null;
+  const box = el('div', 'pg-section');
+  box.append(el('div', 'pg-section-title', section.label));
+  box.append(...items.map(pageItemNode));
+  return box;
+}
+
+function renderPersonPage(data) {
+  const box = document.getElementById('pagesRight');
+  const nodes = [pageHead('rebuild page')];
+  if (data.builtAt) nodes.push(el('p', 'pages-built', 'built ' + new Date(data.builtAt).toLocaleString()));
+
+  const sections = data.sections ?? {};
+  let any = false;
+  for (const section of PAGE_SECTIONS) {
+    const node = pageSectionNode(section, sections[section.key]);
+    if (node) { nodes.push(node); any = true; }
+  }
+  if (!any) nodes.push(el('p', 'empty', 'page has no sections yet'));
+  box.replaceChildren(...nodes);
 }
 
 renderTabs();

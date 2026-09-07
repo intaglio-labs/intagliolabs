@@ -65,12 +65,37 @@ function render(c) {
   el('rcTrigger').textContent = trigger;
   el('rcTrigger').hidden = !trigger;
   el('rcName').textContent = c.name ?? c.personKey;
+
+  // Five-slot order stays trigger / who / tie / last contact / actions.
+  // Person-subject pages add two things to that: `who` (a plain string,
+  // shown right under the name, replacing the role fact below) and, when a
+  // page exists, a short "asked you for" list drawn from its asks section.
+  // `sentence` (the tie) already carries the page's how_left text when a
+  // page is behind the card -- the server decides that, this only styles it.
+  const hasPage = Boolean(c.page);
+  el('rcWho').textContent = c.who ?? '';
+  el('rcWho').hidden = !c.who;
+
   el('rcWhy').textContent = c.sentence ?? '';
+  el('rcWhy').classList.toggle('rc-why-emphasis', hasPage);
+
   el('rcQuote').textContent = c.quote ? `“${c.quote}”` : '';
   el('rcQuote').hidden = !c.quote;
-  const role = [c.role, c.label ? `labeled ${c.label}` : null].filter(Boolean).join(' · ');
+
+  const asks = (c.page?.sections?.asks ?? []).slice(0, 2).map((a) => a.text).filter(Boolean);
+  el('rcAsksList').replaceChildren(...asks.map((text) => {
+    const li = document.createElement('li');
+    li.textContent = text;
+    return li;
+  }));
+  el('rcAsksRow').hidden = asks.length === 0;
+
+  // `who` replaces the role fact when present -- the two say the same kind
+  // of thing (who this person is), and showing both duplicates it.
+  const role = c.who ? '' : [c.role, c.label ? `labeled ${c.label}` : null].filter(Boolean).join(' · ');
   el('rcRole').textContent = role;
   el('rcRoleRow').hidden = !role;
+
   el('rcLeft').textContent = c.left ?? '';
   el('rcLeftRow').hidden = !c.left;
   el('rcLeft').classList.toggle('rc-warn', c.leftTone === 'bad');

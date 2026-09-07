@@ -254,6 +254,24 @@ const server = createServer(async (req, res) => {
       return send(res, out.status, out.text);
     }
 
+    // PAGES VIEW. Forwarded verbatim to hermes's own routes, same shape as
+    // every other proxy here. These two routes are being built in parallel
+    // by another worker and may not exist on the running hermes yet -- the
+    // page's own fetch guards a 404 into an honest "no page yet" rather than
+    // treating it as an error.
+    if (req.method === 'GET' && url.pathname === '/api/page') {
+      const personKey = url.searchParams.get('personKey') ?? '';
+      const out = await hermes('/admin/relationship/page?personKey=' + encodeURIComponent(personKey));
+      return send(res, out.status, out.text);
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/pages/build') {
+      let raw = '';
+      for await (const chunk of req) raw += chunk;
+      const out = await hermes('/admin/relationship/pages/build', { method: 'POST', body: raw });
+      return send(res, out.status, out.text);
+    }
+
     send(res, 404, JSON.stringify({ error: 'not found' }));
   } catch (err) {
     send(res, 500, JSON.stringify({ error: String(err?.message ?? err) }));
