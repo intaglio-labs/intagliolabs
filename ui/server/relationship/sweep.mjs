@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { buildEpisodes, isQuotable } from '../memory/episodes.mjs';
 import { SUB_ROLES } from '../people/subRoles.mjs';
 import { isAnonymousContact } from '../people/map.mjs';
-import { SECTION_KIND } from './pages.mjs';
+import { SECTION_KIND, alreadyStored } from './pages.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -289,4 +289,87 @@ export function groundSweep(proposal, gathered) {
   }
 
   return { kept, dropped };
+}
+
+// Rule 7 (dedupe) for a sub_role or firm proposal: skip if a
+// person_sweep_proposal with the same (subject_person_key, kind, value)
+// already exists and is either undecided or accepted -- a rejected or
+// retracted one does NOT block a fresh proposal, so a tag the owner turned
+// down once is not permanently unreachable if the person's own words support
+// it again later. "Latest decision wins", same rule readPersonPage uses.
+function alreadyProposed(db, personKey, kind, value) {
+  const rows = db
+    .prepare(
+      `SELECT (SELECT d.action FROM claim_decision d WHERE d.claim_id = psp.claim_id ORDER BY d.id DESC LIMIT 1) AS decision
+       FROM person_sweep_proposal psp
+       JOIN claim c ON c.id = psp.claim_id
+       WHERE c.subject = 'person' AND c.subject_person_key = ? AND psp.kind = ? AND psp.value = ?`
+    )
+    .all(personKey, kind, value);
+  return rows.some((r) => r.decision === null || r.decision === undefined || r.decision === 'accept');
+}
+
+// gather -> ground happen upstream (newRowsFor + groundSweep); this is the
+// trusted apply path, mirroring storePage (pages.mjs): EVERY grounding rule
+// is re-checked here against the LIVE context row, not the in-memory
+// gathered snapshot, because the row can change between gather and store --
+// a client (groundSweep) is not a boundary. `engineName`/`model` are accepted
+// for signature symmetry with storePage; unlike storePage this function does
+// not create the distill_run row itself (conflict #7: the sweep writes ONE
+// distill_run row per PASS, not per person -- see runSweepPass), so they are
+// otherwise unused here.
+export function storeSweep(db, { personKey, engineName, model, kept, sweepRunId, distillRunId, now = Date.now() }) {
+  void engineName;
+  void model;
+  const insClaim = db.prepare(
+    `INSERT INTO claim(run_id, subject, subject_person_key, kind, text, observed_at, valid_to, p_claim, created_at)
+     VALUES (?, 'person', ?, ?, ?, ?, NULL, NULL, ?)`
+  );
+  const insSource = db.prepare(
+    `INSERT INTO claim_source(claim_id, context_id, source, entity_id, content_hash, quote)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  );
+  const insProposal = db.prepare(
+    `INSERT INTO person_sweep_proposal(claim_id, run_id, kind, value, applied_at) VALUES (?, ?, ?, ?, NULL)`
+  );
+  const insItem = db.prepare(`INSERT INTO person_page_item(claim_id, section, built_at) VALUES (?, ?, ?)`);
+  const getRow = db.prepare('SELECT id, ts, source, entity_id, content_hash, text FROM context WHERE id = ?');
+
+  let stored = 0;
+  let skipped = 0;
+  let rejected = 0;
+
+  for (const item of kept) {
+    if (item.kind === 'page_line') {
+      if (alreadyStored(db, personKey, item.section, item.text)) {
+        skipped += 1;
+        continue;
+      }
+    } else if (alreadyProposed(db, personKey, item.kind, item.value)) {
+      skipped += 1;
+      continue;
+    }
+
+    const row = getRow.get(item.contextId);
+    // Re-checked against the LIVE row: the row could have been edited or
+    // deleted between gather and store -- same authoritative-server-check
+    // discipline as applyMemoryBatch and storePage. This alone also covers a
+    // firm name that vanished from the live row: if the quote is gone, so is
+    // whatever substring of it used to be the firm name.
+    if (row === undefined || !String(row.text).includes(item.quote)) {
+      rejected += 1;
+      continue;
+    }
+
+    const kind = item.kind === 'page_line' ? SECTION_KIND[item.section] : 'fact';
+    const claimId = Number(
+      insClaim.run(distillRunId, personKey, kind, item.text, row.ts ?? null, now).lastInsertRowid
+    );
+    insSource.run(claimId, Number(row.id), String(row.source), row.entity_id ?? null, row.content_hash ?? null, item.quote);
+    insProposal.run(claimId, sweepRunId, item.kind, item.kind === 'page_line' ? null : item.value);
+    if (item.kind === 'page_line') insItem.run(claimId, item.section, now);
+    stored += 1;
+  }
+
+  return { stored, skipped, rejected };
 }

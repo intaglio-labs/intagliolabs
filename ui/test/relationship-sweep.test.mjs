@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { openDb } from '../server/hermes.mjs';
 import { eligiblePool } from '../server/relationship/producer.mjs';
 import {
-  groundSweep, newRowsFor, sweepScope, SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, tokensEstFor,
+  groundSweep, newRowsFor, sweepScope, storeSweep, SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, tokensEstFor,
 } from '../server/relationship/sweep.mjs';
 
 const NOW = Date.parse('2026-09-01T12:00:00Z');
@@ -231,4 +231,114 @@ test('sweepScope excludes a suppressed person and an anonymous contact', () => {
   const keys = scope.map((c) => c.personKey);
   assert.ok(!keys.includes(suppressedKey), 'a suppressed person is excluded');
   assert.ok(!keys.includes(anonKey), 'an anonymous (bare-address) contact is excluded');
+});
+
+// ---------------------------------------------------------------------------
+// (10, 13) storeSweep: the trusted apply path, re-checked against the LIVE
+// row. storeSweep itself does not create the distill_run/person_sweep_run
+// rows (conflict #7 -- one distill_run per PASS, written by runSweepPass, a
+// later commit) so these tests create them by hand first, exactly as
+// runSweepPass will.
+// ---------------------------------------------------------------------------
+
+function insertSweepRun(db, { now = NOW } = {}) {
+  const distillRunId = Number(db.prepare(
+    `INSERT INTO distill_run(model, prompt_path, prompt_sha, params, episode_context, rows_in, claims_out, status, started_at, ended_at)
+     VALUES ('fake:fake-model', '/prompts/sweep.md', ?, '{}', 'on', 1, 0, 'running', ?, NULL)`
+  ).run('f'.repeat(64), now).lastInsertRowid);
+  const sweepRunId = Number(db.prepare(
+    `INSERT INTO person_sweep_run(distill_run_id, started_at, ended_at, power_mode, engine, budget, scope_size,
+       candidates, swept, model_calls, proposed, dropped, tokens_est, skip_reason, status)
+     VALUES (?, ?, NULL, 'trickle', 'fake', 3, 1, 1, 0, 0, 0, 0, 0, NULL, 'running')`
+  ).run(distillRunId, now).lastInsertRowid);
+  return { distillRunId, sweepRunId };
+}
+
+test('storeSweep stores grounded proposals as pending person claims with receipts', () => {
+  const db = openDb(':memory:');
+  const key = 'name:jane investor';
+  insertPerson(db, { key, name: 'Jane Investor', role: 'business', sent: 30, received: 30 });
+  const { themId } = insertThread(db, key, {
+    ts: NOW - 1 * DAY,
+    them: 'I am now raising a fund at Acme Capital, closing next quarter',
+    me: 'exciting!',
+  });
+
+  const gathered = newRowsFor(db, key, 0);
+  const proposal = {
+    tags: [{ tag: 'investor', text: 'Jane is raising a fund.', quote: 'raising a fund' }],
+    firm: { name: 'Acme Capital', text: 'Jane is at Acme Capital.', quote: 'raising a fund at Acme Capital' },
+    page_lines: [{ section: 'who', text: 'Jane is raising a fund at Acme Capital.', quote: 'raising a fund at Acme Capital' }],
+  };
+  const { kept } = groundSweep(proposal, gathered);
+  assert.equal(kept.length, 3);
+
+  const { distillRunId, sweepRunId } = insertSweepRun(db);
+  const result = storeSweep(db, {
+    personKey: key, engineName: 'fake', model: 'fake-model', kept, sweepRunId, distillRunId, now: NOW,
+  });
+  assert.equal(result.stored, 3);
+  assert.equal(result.skipped, 0);
+  assert.equal(result.rejected, 0);
+
+  const claims = db.prepare(
+    `SELECT c.id, c.subject, c.subject_person_key, c.kind, c.p_claim FROM claim c WHERE c.subject_person_key = ?`
+  ).all(key);
+  assert.equal(claims.length, 3);
+  for (const c of claims) {
+    assert.equal(c.subject, 'person');
+    assert.equal(c.p_claim, null);
+  }
+
+  const sources = db.prepare(
+    `SELECT context_id FROM claim_source WHERE claim_id IN (${claims.map(() => '?').join(',')})`
+  ).all(...claims.map((c) => c.id));
+  for (const s of sources) assert.equal(s.context_id, themId);
+
+  const proposals = db.prepare('SELECT kind, value, applied_at FROM person_sweep_proposal').all();
+  assert.equal(proposals.length, 3);
+  assert.ok(proposals.every((p) => p.applied_at === null), 'nothing is applied at store time -- the owner decides');
+  const byKind = Object.fromEntries(proposals.map((p) => [p.kind, p.value]));
+  assert.equal(byKind.sub_role, 'investor');
+  assert.equal(byKind.firm, 'Acme Capital');
+  assert.equal(byKind.page_line, null);
+
+  const decisions = db.prepare('SELECT COUNT(*) AS n FROM claim_decision').get();
+  assert.equal(decisions.n, 0);
+
+  const pageItems = db.prepare('SELECT section FROM person_page_item').all();
+  assert.equal(pageItems.length, 1);
+  assert.equal(pageItems[0].section, 'who');
+});
+
+test('storeSweep rejects a firm whose name vanished from the live row between gather and store', () => {
+  const db = openDb(':memory:');
+  const key = 'name:vanishing firm';
+  insertPerson(db, { key, name: 'Vanishing Firm', role: 'business', sent: 30, received: 30 });
+  const { themId } = insertThread(db, key, {
+    ts: NOW - 1 * DAY,
+    them: 'I lead investing at Acme Capital these days',
+    me: 'got it',
+  });
+
+  const gathered = newRowsFor(db, key, 0);
+  const proposal = {
+    tags: [], page_lines: [],
+    firm: { name: 'Acme Capital', text: 'They lead investing at Acme Capital.', quote: 'lead investing at Acme Capital' },
+  };
+  const { kept } = groundSweep(proposal, gathered);
+  assert.equal(kept.length, 1);
+
+  // The row is edited between gather and store -- the firm name (and the
+  // whole quote) is no longer present in the LIVE row.
+  db.prepare('UPDATE context SET text = ? WHERE id = ?').run('redacted', themId);
+
+  const { distillRunId, sweepRunId } = insertSweepRun(db);
+  const result = storeSweep(db, {
+    personKey: key, engineName: 'fake', model: 'fake-model', kept, sweepRunId, distillRunId, now: NOW,
+  });
+  assert.equal(result.stored, 0);
+  assert.equal(result.rejected, 1);
+  const n = db.prepare('SELECT COUNT(*) AS n FROM claim WHERE subject_person_key = ?').get(key);
+  assert.equal(n.n, 0);
 });
