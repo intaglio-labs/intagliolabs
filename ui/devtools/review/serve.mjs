@@ -155,6 +155,51 @@ const server = createServer(async (req, res) => {
       const eventStmt = corpus.prepare(
         'SELECT event, reason, created_at FROM rm_card_event WHERE snapshot_id = ? ORDER BY created_at'
       );
+      // Public lookup's `changed` signal (L5 step 6), read-only, same
+      // reasoning and same handle as sweepProposal in /api/pending above:
+      // this is display context for the desk, not a second writer. Mirrors
+      // newestWebChange (relationship/lookup.mjs) exactly, but wrapped in a
+      // try/catch around the PREPARE itself -- a corpus file this desk opens
+      // before hermes has ever run SCHEMA_VERSION 13's migration has no
+      // person_lookup_change table yet, and that must not take the whole
+      // Cards tab down.
+      let changedFor = () => null;
+      try {
+        const changedClaimStmt = corpus.prepare(
+          `SELECT plc.claim_id AS claimId, plc.kind AS kind, plc.url AS url, plc.change_date AS date,
+                  ll.at AS at, c.text AS text,
+                  (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) AS decision
+           FROM person_lookup_change plc
+           JOIN claim c ON c.id = plc.claim_id
+           JOIN lookup_log ll ON ll.id = plc.log_id
+           WHERE c.subject = 'person' AND c.subject_person_key = ?
+             AND COALESCE(
+               (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1),
+               'pending'
+             ) NOT IN ('reject', 'retract')
+           ORDER BY plc.claim_id DESC LIMIT 1`
+        );
+        const changedSourceStmt = corpus.prepare(
+          `SELECT context_id AS contextId, quote FROM claim_source WHERE claim_id = ? AND source = 'web' LIMIT 1`
+        );
+        const changedCtxStmt = corpus.prepare('SELECT id FROM context WHERE id = ?');
+        changedFor = (personKey) => {
+          try {
+            const row = changedClaimStmt.get(personKey);
+            if (!row) return null;
+            const source = changedSourceStmt.get(row.claimId);
+            if (!source) return null;
+            const ctx = changedCtxStmt.get(source.contextId);
+            if (!ctx) return null; // the receipt is gone, so the change is gone
+            return { text: row.text, url: row.url, kind: row.kind, quote: source.quote,
+              date: row.date ?? null, at: row.at, decision: row.decision ?? null };
+          } catch {
+            return null;
+          }
+        };
+      } catch {
+        // pre-migration schema: no person_lookup_change table yet
+      }
 
       // First pass: which batches does each person_key appear in, so a card
       // can point at its OTHER appearances ("also in batch N") without a
@@ -207,6 +252,7 @@ const server = createServer(async (req, res) => {
             events,
             judged,
             also_in_batches: alsoIn,
+            changed: changedFor(row.person_key),
           };
         });
         totalCards += cards.length;
@@ -282,6 +328,25 @@ const server = createServer(async (req, res) => {
       let raw = '';
       for await (const chunk of req) raw += chunk;
       const out = await hermes('/admin/relationship/pages/build', { method: 'POST', body: raw });
+      return send(res, out.status, out.text);
+    }
+
+    // PUBLIC LOOKUP (L5 step 6). Forwarded verbatim to hermes's own routes,
+    // same shape as every proxy above: the desk's "look up now" button is a
+    // write (spends the owner's model subscription and real search quota,
+    // and writes pending claims about a real person) and goes through hermes,
+    // never touching the corpus directly; the log listing is read-only and
+    // is hermes's own receipt, not reconstructed here.
+    if (req.method === 'POST' && url.pathname === '/api/lookup/person') {
+      let raw = '';
+      for await (const chunk of req) raw += chunk;
+      const out = await hermes('/admin/relationship/lookup/person', { method: 'POST', body: raw });
+      return send(res, out.status, out.text);
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/lookups') {
+      const personKey = url.searchParams.get('personKey') ?? '';
+      const out = await hermes('/admin/relationship/lookups?personKey=' + encodeURIComponent(personKey));
       return send(res, out.status, out.text);
     }
 

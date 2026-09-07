@@ -125,6 +125,9 @@
     padding:.14rem .38rem; border-radius:3px; background:var(--surface-2); color:var(--fg-2);
   }
   .c-also { font-size:.72rem; color:var(--fg-3); font-style:italic; }
+  .c-changed { font-size:.78rem; color:var(--fg-2); display:flex; gap:.4rem; flex-wrap:wrap; }
+  .c-changed a { color:var(--accent); }
+  .c-changed.dim { color:var(--fg-3); font-style:italic; }
   .batch-head {
     display:flex; gap:.7rem; align-items:baseline; margin:1.1rem 0 .3rem;
     font-size:.72rem; color:var(--fg-3); text-transform:uppercase; letter-spacing:.05em;
@@ -181,6 +184,16 @@
   .pg-decided.accept { color:var(--ok); }
   .pg-decided.reject { color:var(--bad); }
   .pages-built { font-size:.74rem; color:var(--fg-3); }
+  .pages-right-head-buttons { display:flex; gap:.4rem; }
+  .lookup-row {
+    border:1px solid var(--line); border-radius:5px; padding:.6rem .7rem; display:grid; gap:.4rem;
+  }
+  .lookup-meta { font-size:.74rem; color:var(--fg-3); }
+  .lookup-query {
+    font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:.8rem;
+    background:var(--surface-2); border:1px solid var(--line); border-radius:4px;
+    padding:.4rem .55rem; color:var(--fg-2); white-space:pre-wrap; word-break:break-word;
+  }
 </style>
 </head>
 <body>
@@ -214,6 +227,7 @@
 <main id="pagesView" hidden>
   <div class="poolbar" id="pagesBar"></div>
   <p class="health" id="sweepStatus"></p>
+  <p class="health" id="lookupStatus"></p>
   <div class="pages-wrap">
     <div class="pages-left">
       <div class="pages-list" id="pagesList"></div>
@@ -259,7 +273,7 @@ function selectView(v) {
   document.getElementById('health').hidden = v !== 'cards';
   if (v === 'cards' && !cardsLoaded) { cardsLoaded = true; loadCards(); loadHealth(); }
   if (v === 'pool') { renderPoolBar(); loadPool(); }
-  if (v === 'pages') { renderPagesBar(); loadPagesList(); loadSweepStatus(); }
+  if (v === 'pages') { renderPagesBar(); loadPagesList(); loadSweepStatus(); loadLookupStatus(); }
 }
 
 // ---- pool: the producer's ranked eligible set, per mode -------------------
@@ -600,6 +614,26 @@ function cardNode(row) {
     node.append(el('div', 'c-also', label));
   }
 
+  // Public lookup's `changed` signal (L5 step 6): the newest public-web
+  // change about this person, or an honest "no public update" -- never
+  // fabricated, and never confused with row.summary/row.quote above, which
+  // come from the reconnect producer's own evidence.
+  if (row.changed) {
+    const box = el('div', 'c-changed');
+    box.append(document.createTextNode(row.changed.text ?? ''));
+    if (row.changed.url) {
+      const a = document.createElement('a');
+      a.href = row.changed.url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.textContent = row.changed.url;
+      box.append(a);
+    }
+    node.append(box);
+  } else {
+    node.append(el('div', 'c-changed dim', 'no public update'));
+  }
+
   const acts = el('div', 'c-acts');
   const verdicts = [
     { cls: 'fine', label: 'Fine', event: 'accepted', note: 'baseline: fine' },
@@ -732,6 +766,10 @@ let pagesMode = 'investor';
 let pagesRows = [];
 let pagesPersonKey = null;
 let pagesPersonName = null;
+// Public lookup's own log for whichever person is selected -- "what was
+// sent", see lookupLogSection() below. Reset on every person switch so a
+// slow-to-load previous person's rows can never bleed into the next.
+let lookupRows = [];
 
 // One line from /stats' sweep key (proxied verbatim by /api/health, which
 // already forwards the whole /stats body -- no serve.mjs change needed for
@@ -769,6 +807,30 @@ async function loadSweepStatus() {
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     box.textContent = sweepLine(data.sweep);
+  } catch {
+    box.textContent = '';
+  }
+}
+
+// Same /api/health body's `lookup` key (lookupStatus, relationship/lookup.mjs
+// -- proxied verbatim by /api/health, same as sweep's, no serve.mjs change
+// needed). "never run" is the whole line when there is no pass yet
+// (lastPassAt null).
+function lookupLine(l) {
+  if (!l || l.lastPassAt == null) return 'lookup · never run';
+  const cost30 = (l.costUsd30d ?? 0).toFixed(2);
+  return `lookup · ${l.anchored ?? 0} anchored · ${l.due ?? 0} due · ${l.pending ?? 0} pending · `
+    + `last pass ${relTime(l.lastPassAt)} · ${l.calls24h ?? 0}/${l.callCap ?? 0} calls · $${cost30} /30d`;
+}
+
+async function loadLookupStatus() {
+  const box = document.getElementById('lookupStatus');
+  if (!box) return;
+  try {
+    const res = await fetch('/api/health');
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    box.textContent = lookupLine(data.lookup);
   } catch {
     box.textContent = '';
   }
@@ -820,8 +882,10 @@ function renderPagesList() {
 function selectPagePerson(personKey, name) {
   pagesPersonKey = personKey;
   pagesPersonName = name;
+  lookupRows = [];
   renderPagesList();
   loadPersonPage();
+  loadLookupLog();
 }
 
 async function loadPersonPage() {
@@ -841,15 +905,19 @@ async function loadPersonPage() {
 function pageHead(label) {
   const head = el('div', 'pages-right-head');
   head.append(el('h2', null, pagesPersonName ?? pagesPersonKey));
+  const buttons = el('div', 'pages-right-head-buttons');
+  const lookup = el('button', null, 'look up now');
+  lookup.addEventListener('click', () => lookupNow(lookup));
   const build = el('button', null, label);
   build.addEventListener('click', () => buildPage(build));
-  head.append(build);
+  buttons.append(lookup, build);
+  head.append(buttons);
   return head;
 }
 
 function renderPageMissing() {
   const box = document.getElementById('pagesRight');
-  box.replaceChildren(pageHead('build page'), el('p', 'empty', 'no page yet'));
+  box.replaceChildren(pageHead('build page'), el('p', 'empty', 'no page yet'), lookupLogSection());
 }
 
 async function buildPage(btn) {
@@ -928,7 +996,78 @@ function renderPersonPage(data) {
     if (node) { nodes.push(node); any = true; }
   }
   if (!any) nodes.push(el('p', 'empty', 'page has no sections yet'));
+  nodes.push(lookupLogSection());
   box.replaceChildren(...nodes);
+}
+
+// ---- "What was sent": public lookup's own receipt (L5 step 6) ------------
+// One row per lookup_log entry for the selected person, newest first
+// (/api/lookups, proxying hermes's own /admin/relationship/lookups
+// verbatim -- read-only, hermes's receipt, not reconstructed here). The
+// assembled query string is correct to show in full: buildLookupQuery's own
+// input gate means it can only ever hold allowlisted public identifiers.
+function lookupLogRow(row) {
+  const node = el('div', 'lookup-row');
+  const at = new Date(row.at).toLocaleString();
+  const fields = (row.fieldsUsed ?? []).join(', ');
+  const hash = (row.queryHash ?? '').slice(0, 12);
+  const cost = row.costUsd == null ? '—' : `$${Number(row.costUsd).toFixed(4)}`;
+  node.append(el('div', 'lookup-meta',
+    `${at} · ${fields || '—'} · ${hash} · ${row.status} · ${row.searches ?? 0} searches · ${cost}`));
+  node.append(el('div', 'lookup-query', row.query ?? ''));
+  return node;
+}
+
+function lookupLogSection() {
+  const box = el('div', 'pg-section');
+  box.id = 'lookupLog';
+  box.append(el('div', 'pg-section-title', 'what was sent'));
+  if (lookupRows.length === 0) {
+    box.append(el('p', 'empty', 'no lookups yet'));
+  } else {
+    box.append(...lookupRows.map(lookupLogRow));
+  }
+  return box;
+}
+
+async function loadLookupLog() {
+  const personKey = pagesPersonKey;
+  try {
+    const res = await fetch('/api/lookups?personKey=' + encodeURIComponent(personKey));
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    // A slow response for a person the owner has since clicked away from
+    // must not overwrite the rows for whoever is selected now.
+    if (personKey !== pagesPersonKey) return;
+    lookupRows = data.lookups ?? [];
+  } catch {
+    if (personKey !== pagesPersonKey) return;
+    lookupRows = [];
+  }
+  const box = document.getElementById('lookupLog');
+  if (box) box.replaceWith(lookupLogSection());
+}
+
+// "Look up now" -- POSTs hermes's own /admin/relationship/lookup/person
+// through serve.mjs's proxy (writes go through hermes, like every other
+// desk action). Still gated and capped hermes-side; a click here cannot
+// bypass either.
+async function lookupNow(btn) {
+  btn.disabled = true;
+  const personKey = pagesPersonKey;
+  try {
+    const res = await fetch('/api/lookup/person', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ personKey }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    await loadLookupLog();
+  } catch (err) {
+    document.getElementById('pagesRight').append(el('p', 'err', 'could not look up: ' + err.message));
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 renderTabs();
