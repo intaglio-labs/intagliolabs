@@ -142,6 +142,13 @@ export const EXCLUDED_SOURCES = Object.freeze({
   // is a cheaper failure mode than a name coming back free.
   hazlie_digest: 'model output must never be evidence for itself (reserved; never written)',
   seed: 'fixtures are not memory',
+  // Public lookup (L5 step 6): third-party web text about a person, read by
+  // the lookup engine itself under its own prompt (prompts/public_lookup.md)
+  // and grounded by code (groundLookup) before anything is stored -- never
+  // by the household distiller. Same mail/linkedin/whatsapp reasoning: a web
+  // page is attacker-adjacent text nobody but its own narrow, versioned
+  // prompt should read.
+  web: 'third-party web text, read only by public lookup\'s own prompt, never by the household distiller',
 });
 
 export const DEFAULT_FROM_DAYS = 30;

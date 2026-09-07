@@ -64,6 +64,54 @@ test('Hermes creates dedicated people projection tables and revisions participan
   assert.equal(Number(projectionState(db).source_revision), 1);
 });
 
+// INFLATION CHECKPOINT (L5 step 6, public lookup). A source='web' row is
+// third-party text about a person that public lookup's own storeLookup
+// writes directly into context -- it must never be mistaken for a new
+// participant signal the way an imessage/mail/calendar row is. If it were,
+// every accepted public-lookup change would inflate that person's message
+// counts, mint a person_activity row for a channel they never actually used,
+// and (worse) count as an active day toward the reconnect clock -- a person
+// the owner has not spoken to in a year would read as freshly active purely
+// because a web search ran. PERSON_SOURCE_POLICY's 'web' entry is
+// deliberately NOT 'participant', so RELATIONSHIP_SOURCES (and therefore
+// every people_context_a* trigger, all keyed on it) excludes it by
+// construction -- this test is the proof, not the mechanism.
+test('a web context row fires no projection trigger and creates no active day', () => {
+  const db = openDb(':memory:');
+  insertRows(db, {
+    ts: NOW, source: 'imessage', entity_id: 'i:1', text: 'hi',
+    meta: { chat_handle: '+15550100', is_from_me: false },
+  });
+  assert.equal(Number(projectionState(db).source_revision), 1);
+  const dirtyBefore = Number(db.prepare('SELECT count(*) AS n FROM people_projection_dirty').get().n);
+
+  insertRows(db, { ts: NOW, source: 'web', entity_id: 'web:1', text: 'Jane Doe raised a seed round' });
+
+  assert.equal(Number(projectionState(db).source_revision), 1, 'a web row must not dirty the graph');
+  assert.equal(
+    Number(db.prepare('SELECT count(*) AS n FROM people_projection_dirty').get().n),
+    dirtyBefore,
+    'a web row must not mark any person dirty for re-derivation'
+  );
+
+  const spine = stateDb([{ id: '+15550100', name: 'Sam Lee', kind: 'phone', ref: 'card-sam' }]);
+  const { graph } = refreshPeopleProjection(db, spine, { now: NOW, owner: owner() });
+  assert.equal(graph.length, 1, 'the web row mints no second person');
+  const sam = graph.find((p) => p.name === 'Sam Lee');
+  assert.ok(sam, 'the real imessage contact is still there');
+  assert.ok(!sam.channels.includes('web'), 'web never becomes a channel');
+  assert.equal(
+    Number(db.prepare('SELECT count(*) AS n FROM person_activity WHERE source = ?').get('web').n),
+    0,
+    'web never gets a person_activity row'
+  );
+  assert.equal(
+    Number(db.prepare('SELECT count(*) AS n FROM person_event_links WHERE source = ?').get('web').n),
+    0,
+    'web never gets a person_event_links row, so it can never mark an active day'
+  );
+});
+
 test('a refresh materializes people, all card identifiers, evidence, and source activity', () => {
   const db = openDb(':memory:');
   const spine = stateDb([

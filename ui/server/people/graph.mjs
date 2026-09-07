@@ -56,6 +56,20 @@ export const PERSON_SOURCE_POLICY = Object.freeze({
   photos: 'non-person',
   hazlie_digest: 'non-person',
   seed: 'non-person',
+  // Public lookup (L5 step 6): a search result about a person the owner
+  // already knows, never a new participant identity in its own right -- the
+  // person a lookup row is about is resolved by the lookup pass itself
+  // (anchorsFor picks name/firm/handle/url off the ALREADY-canonical
+  // person_key), not derived from this row. 'non-person' would be wrong too
+  // (a web row's text is squarely about a person, just never a MINTING
+  // signal for one), so this is its own value rather than a third
+  // participant/content-only/non-person option growing a meaning it does
+  // not have. The only consumer that reads this map's values (
+  // RELATIONSHIP_SOURCES below) filters on the literal 'participant', so
+  // 'web' stays out of it -- and therefore out of person_activity,
+  // person_channels and every people_context_a* projection trigger --
+  // without needing a fourth branch anywhere that reads the policy.
+  web: 'third-party-public',
 });
 
 export const RELATIONSHIP_SOURCES = Object.freeze(

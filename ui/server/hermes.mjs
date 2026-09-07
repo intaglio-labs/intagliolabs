@@ -1768,6 +1768,13 @@ export const KNOWN_SOURCES = Object.freeze([
   'slack',
   'hazlie_digest',
   'seed',
+  // Public lookup (L5 step 6, relationship/lookup.mjs): a search result's
+  // quoted text, stored so a PENDING person claim built from it has the same
+  // source-receipt/deletion story as every other row. NOT a participant
+  // source -- see PERSON_SOURCE_POLICY (people/graph.mjs) and
+  // EXCLUDED_SOURCES (memory/select.mjs), which both admit it deliberately
+  // narrowly in the same commit this source name lands in.
+  'web',
 ]);
 
 // `files` and `notion` were once missing while both already had corpus rows --
