@@ -694,6 +694,76 @@ CREATE TABLE IF NOT EXISTS person_lookup_change(
 );
 CREATE INDEX IF NOT EXISTS person_lookup_change_log ON person_lookup_change(log_id);
 
+/* Lint (step 5½, relationship/lint.mjs): a scheduled pass over states no
+   other pass names -- an accepted claim past its own valid_to, a sweep-
+   accepted sub-role tag that now disagrees with the LinkedIn export that
+   produced it, a person who could be looked up but has no page (or the
+   reverse), a card snapshot whose cited quote row is gone with nobody having
+   judged the card. NO MODEL CALL: every check is SQL or SQL plus a pure JS
+   recomputation, so there is no distill_run row and no cost to gate on.
+   NEVER AUTO-FIXED -- 'gone' (the condition itself disappeared) is the only
+   resolution a pass ever writes; every other resolution is the owner's own
+   click, through resolveLintFinding. No version bump: IF NOT EXISTS on new
+   tables needs none, same as rm_suppression and energy_rating above.
+
+   lint_run -- one row per PASS (not per finding), including a pass that
+   skipped: a skip is a measurement, same reasoning as person_sweep_run and
+   person_lookup_run. checks_run is the JSON array of check names this pass
+   actually ran; counts is a JSON object keyed by check name (found/new/
+   closed/truncated per check) -- the per-check detail /stats.lint's own
+   'truncated' list is read back out of. skip_reason is closed to the ONE
+   reason lint ever skips (another model-spending pass already running) --
+   see lintGate's own comment for why there is no battery/thermal/quota
+   reason here the way sweep/lookup have.
+
+   lint_finding -- one row per DISTINCT finding_key, upserted (never
+   appended): a finding is a derived index over the corpus, not evidence
+   about it, and append-only would write tens of thousands of rows for a
+   condition a pass re-observes every run. claim_id carries NO foreign key
+   deliberately (see the column comment below) -- a claim can be deleted out
+   from under an open finding, and the finding must survive that as a dead
+   pointer rather than vanish or corrupt the delete. detail is canonical
+   JSON: ids, counts, and (role_conflict only) a person's public LinkedIn
+   title/company -- NEVER a quote or context line, the same rule
+   claim_source/person_page_item already enforce for what a page or a card
+   may surface. resolution is CHECK'd to five values but 'gone' is written
+   ONLY by a pass (see lint.mjs's runLintPass); resolveLintFinding refuses to
+   write it -- an owner may dismiss a finding or, for role_conflict only,
+   choose keep-export/keep-derived/both, but may never manually declare a
+   condition gone that a pass has not itself failed to find. The paired CHECK
+   (resolved_at IS NULL) = (resolution IS NULL) mirrors claim_decision's own
+   discipline: a resolution without a timestamp, or a timestamp without a
+   reason, is not a state this table can hold. */
+CREATE TABLE IF NOT EXISTS lint_run(
+  id              INTEGER PRIMARY KEY,
+  started_at      INTEGER NOT NULL, ended_at INTEGER,
+  checks_run      TEXT NOT NULL,
+  counts          TEXT NOT NULL,
+  findings_open   INTEGER NOT NULL DEFAULT 0,
+  findings_new    INTEGER NOT NULL DEFAULT 0,
+  findings_closed INTEGER NOT NULL DEFAULT 0,
+  skip_reason     TEXT CHECK (skip_reason IS NULL OR skip_reason IN ('disabled', 'busy-model')),
+  status          TEXT NOT NULL CHECK (status IN ('running', 'complete', 'skipped', 'failed'))
+);
+CREATE INDEX IF NOT EXISTS lint_run_started ON lint_run(started_at);
+CREATE TABLE IF NOT EXISTS lint_finding(
+  finding_key   TEXT PRIMARY KEY,
+  check_name    TEXT NOT NULL,
+  person_key    TEXT,
+  claim_id      INTEGER /* NO FK: ON DELETE CASCADE would erase the owner's own dismissal the moment
+                           the cited claim is deleted (a retract, a purge); ON DELETE NO ACTION would
+                           break deleteClaimsByIds's own bulk delete. A dead claim_id after a delete is
+                           inert, same posture as person_sweep_cursor/person_lookup_state's own
+                           deliberately-FK-less person_key. */,
+  detail        TEXT NOT NULL /* canonical JSON: ids, counts, public title/company only -- NEVER a quote or context text */,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at  INTEGER NOT NULL,
+  resolved_at   INTEGER,
+  resolution    TEXT CHECK (resolution IS NULL OR resolution IN ('gone', 'dismiss', 'keep-export', 'keep-derived', 'both')),
+  CHECK ((resolved_at IS NULL) = (resolution IS NULL))
+);
+CREATE INDEX IF NOT EXISTS lint_finding_open ON lint_finding(check_name, resolved_at, last_seen_at);
+
 /* The porter stemmer, because this index is queried with the owner's own
    English: it unifies morning/mornings, allergy/allergies, take/takes.
    MEASURED LIMIT, so nobody assumes more of it than it does: porter does NOT
