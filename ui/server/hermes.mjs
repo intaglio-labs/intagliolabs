@@ -87,6 +87,7 @@ import { createEngine, createLookupEngine } from './relationship/engines.mjs';
 import { eligiblePool, produceBatch } from './relationship/producer.mjs';
 import { produceOweBatch } from './relationship/owe.mjs';
 import { CARD_PRODUCERS, REFILL_RETRY_MS, produceDailyBatch } from './relationship/daily.mjs';
+import { cardStats } from './relationship/controls.mjs';
 import {
   clearPeopleSearchCacheStorage,
   openPeopleSearchCache,
@@ -4873,8 +4874,17 @@ async function handle(db, req, res, cors, url, policy) {
     } catch {
       lint = null;
     }
+    // cardStats is a plain aggregate over rm_card_event, same defensive wrap
+    // as sweep/lookup/lint above -- a missing/pre-migration rm_card_event
+    // table must never take /stats down.
+    let cards = null;
+    try {
+      cards = cardStats(db, { now: Date.now() });
+    } catch {
+      cards = null;
+    }
     send(res, 200,
-      { rows: Number(n), memory: memoryProgress(db), peopleProjection: peopleProjectionStatus(db, policy), sweep, lookup, lint },
+      { rows: Number(n), memory: memoryProgress(db), peopleProjection: peopleProjectionStatus(db, policy), sweep, lookup, lint, cards },
       cors);
     return;
   }

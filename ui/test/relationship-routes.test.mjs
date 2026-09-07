@@ -392,6 +392,49 @@ test('/stats.lint is null, not a crash, against a pre-lint-migration database', 
   });
 });
 
+test('/stats carries a cards key with the expected per-kind shape', async () => {
+  await withServer(async ({ call, db }) => {
+    await call('POST', '/admin/relationship/refresh'); await settle();
+    const { card } = await (await call('GET', '/admin/relationship/card')).json();
+    await call('POST', '/admin/relationship/event', {
+      snapshot_id: card.snapshot_id, person_key: card.personKey, event: 'accepted',
+    });
+
+    const stats = await (await call('GET', '/stats')).json();
+    assert.ok(stats.cards, '/stats carries a cards key');
+    assert.equal(typeof stats.cards.windowDays, 'number');
+    assert.equal(typeof stats.cards.since, 'number');
+    for (const scope of [stats.cards.perKind, stats.cards.allTime]) {
+      for (const kind of ['owe', 'reconnect']) {
+        const k = scope[kind];
+        assert.ok(k, `${kind} present`);
+        for (const field of ['shown', 'opened', 'accepted', 'dismissed', 'muted', 'suppressed', 'daysServed']) {
+          assert.equal(typeof k[field], 'number');
+        }
+        assert.ok(k.dismissReasons && typeof k.dismissReasons === 'object');
+        assert.equal(k.verdict, undefined, 'no verdict field');
+      }
+    }
+    // The stub matcher's cards all carry kind='reconnect' (see STUB_CARDS
+    // above); this test's own accept lands there, not under 'owe'.
+    assert.equal(stats.cards.allTime.reconnect.shown, 1);
+    assert.equal(stats.cards.allTime.reconnect.accepted, 1);
+    assert.equal(stats.cards.allTime.reconnect.acceptRate, 1);
+    assert.equal(stats.cards.allTime.owe.shown, 0);
+    assert.equal(stats.cards.allTime.owe.acceptRate, null);
+  });
+});
+
+test('/stats.cards is null, not a crash, against a pre-migration database', async () => {
+  await withServer(async ({ call, db }) => {
+    db.exec('DROP TABLE rm_card_event');
+    const res = await call('GET', '/stats');
+    assert.equal(res.status, 200);
+    const stats = await res.json();
+    assert.equal(stats.cards, null);
+  });
+});
+
 // ---------------------------------------------------------------------
 // Owe wired into the card route (L5 follow-on step 8): the eligibility
 // producer config, both producers sharing rel.cards/rel.batch, per-kind

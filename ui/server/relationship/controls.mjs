@@ -167,3 +167,79 @@ export function createControls(db, { canonicalOf = (k) => k } = {}) {
     },
   };
 }
+
+// The two kinds cardStats reports on. Hardcoded rather than imported from
+// daily.mjs's CARD_PRODUCERS: this file has no dependency on any producer
+// today, and a stats aggregate is not the place to start one.
+const CARD_STAT_KINDS = Object.freeze(['owe', 'reconnect']);
+
+// A single kind's numbers over rm_card_event, either windowed (sinceTs is a
+// timestamp) or all-time (sinceTs is null). Counted facts only, straight off
+// the append-only event log -- no verdict, no threshold, nothing this
+// function decides is "good": that is the sealed Phase 0 artifact's job, not
+// a stats aggregate's (rule 1's fabrication ban extends to inventing a
+// pass/fail line here as much as to a metric itself).
+function kindStats(db, kind, sinceTs) {
+  const clause = sinceTs === null ? '' : ' AND created_at >= ?';
+  const args = (event) => (sinceTs === null ? [kind, event] : [kind, event, sinceTs]);
+  const countEvent = (event) => Number(db.prepare(
+    `SELECT COUNT(*) AS n FROM rm_card_event WHERE kind = ? AND event = ?${clause}`
+  ).get(...args(event)).n);
+
+  const shown = countEvent('shown');
+  const opened = countEvent('opened');
+  const accepted = countEvent('accepted');
+  const dismissed = countEvent('dismissed');
+  const muted = countEvent('muted');
+  const suppressed = countEvent('suppressed');
+
+  // Distinct LOCAL calendar dates a card of this kind was shown -- the
+  // machine's own clock zone, same local-time discipline timeBand uses
+  // above, via SQLite's own 'localtime' modifier.
+  const daysServed = Number(db.prepare(
+    `SELECT COUNT(DISTINCT date(created_at / 1000, 'unixepoch', 'localtime')) AS n
+     FROM rm_card_event WHERE kind = ? AND event = 'shown'${clause}`
+  ).get(...(sinceTs === null ? [kind] : [kind, sinceTs])).n);
+
+  const dismissReasons = {
+    'wrong-person': 0, 'wrong-time': 0, 'never-this-person': 0, 'not-this-kind': 0, 'not-useful': 0, none: 0,
+  };
+  const reasonRows = db.prepare(
+    `SELECT reason, COUNT(*) AS n FROM rm_card_event WHERE kind = ? AND event = 'dismissed'${clause} GROUP BY reason`
+  ).all(...(sinceTs === null ? [kind] : [kind, sinceTs]));
+  for (const row of reasonRows) {
+    const key = row.reason === null ? 'none' : row.reason;
+    if (key in dismissReasons) dismissReasons[key] = Number(row.n);
+  }
+
+  return {
+    shown, opened, accepted, dismissed, muted, suppressed, daysServed,
+    // null (never a bare 0) when there was nothing to compute a rate over --
+    // a 0% acceptance rate and "we haven't shown this kind yet" are different
+    // facts, and collapsing them would misread as "shown, but never accepted".
+    acceptRate: shown > 0 ? accepted / shown : null,
+    openRate: shown > 0 ? opened / shown : null,
+    dismissReasons,
+    // Shares of DISMISSALS specifically (not of shown), null on zero
+    // dismissed for the same reason acceptRate is null on zero shown.
+    neverThisPersonShare: dismissed > 0 ? dismissReasons['never-this-person'] / dismissed : null,
+    notUsefulShare: dismissed > 0 ? dismissReasons['not-useful'] / dismissed : null,
+  };
+}
+
+// /stats.cards (L5 follow-on step 8): per-kind card outcomes, windowed and
+// all-time, straight off rm_card_event -- the same append-only log the plan
+// already calls "labeled input for a reviewed, versioned threshold change",
+// never something this function retunes itself from. No verdict field:
+// reading these numbers as a pass/fail is a human decision made elsewhere
+// (the sealed Phase 0 gates artifact), not a computed field here.
+export function cardStats(db, { now = Date.now(), windowDays = 56 } = {}) {
+  const since = now - windowDays * DAY;
+  const perKind = {};
+  const allTime = {};
+  for (const kind of CARD_STAT_KINDS) {
+    perKind[kind] = kindStats(db, kind, since);
+    allTime[kind] = kindStats(db, kind, null);
+  }
+  return { windowDays, since, perKind, allTime };
+}
