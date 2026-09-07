@@ -147,6 +147,21 @@ test('subRolesFor: "Venture Lead" needs a fund-side company to resolve, and gets
   assert.deepEqual(subRolesFor(atAngelPlatform), ['investor']);
 });
 
+test('subRolesFor: "Venture Lead" resolves to investor at an investing-platform company like AngelList', () => {
+  const person = { key: 'p:venture-lead-platform', linkedin: { position: 'Venture Lead', company: 'AngelList' } };
+  assert.deepEqual(subRolesFor(person), ['investor']);
+});
+
+test('subRolesFor: an investing-platform company name alone does not make someone an investor', () => {
+  const person = { key: 'p:pm-platform', linkedin: { position: 'Product Manager', company: 'AngelList' } };
+  assert.deepEqual(subRolesFor(person), []);
+});
+
+test('subRolesFor: "Venture Lead" at an unrelated company whose name merely contains "Angeles" is not an investor', () => {
+  const person = { key: 'p:venture-lead-la', linkedin: { position: 'Venture Lead', company: 'Los Angeles Housing Department' } };
+  assert.deepEqual(subRolesFor(person), []);
+});
+
 test('subRolesFor: "Partner" at a company named "... Venture Partners" resolves to investor', () => {
   const person = { key: 'p:venture-partners', linkedin: { position: 'Partner', company: 'Example Venture Partners' } };
   assert.deepEqual(subRolesFor(person), ['investor']);

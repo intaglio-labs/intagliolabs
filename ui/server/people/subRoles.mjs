@@ -63,6 +63,15 @@ const FUND_SIDE_WORDS = /\b(?:capital|ventures?|venture\s+partners|vc|funds?|fun
 // happens to contain "Capital" doesn't register as a fund.
 const BANK_LIKE_CAPITAL = /\bcapital\s+(?:one|bank|markets|group)\b|\b(?:one|bank|markets|group)\s+capital\b/giu;
 
+// Investing-platform brand names: staff at these companies are investor-side,
+// but the brand names are compounds that defeat FUND_SIDE_WORDS' own word
+// boundaries -- "AngelList" contains "angel" but not as a separate token, so
+// \bangels?\b never matches it. The fix is not to loosen "angel" to a bare
+// prefix match (that would also catch "Los Angeles"); instead this is a
+// small, closed, explicitly-named list. Keep it closed: add a platform only
+// after confirming its name isn't a substring of an unrelated common word.
+const INVESTING_PLATFORMS = /\b(?:angellist|wefunder|seedinvest|republic\.co|stonks)\b/iu;
+
 // "Founding Engineer" and similar "founding <role>" phrases never match here:
 // the word is "founding", not "founder", and the two are different tokens
 // under a word boundary. "Founder"/"co-founder" are unconditional founder
@@ -88,7 +97,7 @@ const OPERATOR_WORDS = /\b(?:head\s+of|vp|vice\s+president|director|chief\s+(?:\
 
 function isFundSideText(text) {
   const stripped = String(text ?? '').replace(BANK_LIKE_CAPITAL, ' ');
-  return FUND_SIDE_WORDS.test(stripped);
+  return FUND_SIDE_WORDS.test(stripped) || INVESTING_PLATFORMS.test(stripped);
 }
 
 function isInvestor(title, company) {
