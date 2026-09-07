@@ -255,7 +255,7 @@ export function createEngine(config = {}) {
 // Public lookup (L5 step 6): the installed `claude` binary driven headless a
 // SECOND, differently-shaped way. Verified against a real run of the
 // installed CLI (2026-09-07; the captured transcript is
-// ui/test/fixtures/lookup-stream.jsonl, used by parseLookupStream's tests) --
+// ui/test/fixtures/lookup-stream.txt, used by parseLookupStream's tests) --
 // the flags below are that exact invocation, not a guess at one:
 //
 //   claude -p --output-format stream-json --verbose \

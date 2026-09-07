@@ -15,20 +15,25 @@
 // prompts/public_lookup.md and buildLookupQuery's input gate below for where
 // that boundary actually lives in code.
 //
-// This file is built in two commits: this one is the PURE half (no DB, no
-// clock beyond what a caller passes in) -- buildLookupQuery,
-// parseLookupStream, groundLookup, and the constants both halves share. The
-// DB half (anchorsFor, lookupScope, lookupGate, storeLookup, lookupPerson,
-// runLookupPass, lookupStatus, lookupLogFor, newestWebChange) lands in the
-// next commit, mirroring the gather/ground vs. store split sweep.mjs and
-// pages.mjs already use: a client (this file's pure half) is not a boundary,
-// so storeLookup re-checks every rule below against what it actually writes.
+// This file has two halves. Above is the PURE half (no DB, no clock beyond
+// what a caller passes in): buildLookupQuery, parseLookupStream,
+// groundLookup, and the constants both halves share. Below is the DB half:
+// anchorsFor, lookupTierFor, lookupScope, lookupGate, storeLookup,
+// lookupPerson, runLookupPass, lookupStatus, lookupLogFor, newestWebChange --
+// mirroring the gather/ground vs. store split sweep.mjs and pages.mjs already
+// use: a client (groundLookup, the pure half above) is not a boundary, so
+// storeLookup re-checks every rule again against what it actually writes.
 
+import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { canonicalHash } from '../contentHash.mjs';
+import { isAnonymousContact } from '../people/map.mjs';
+import { eligiblePool } from './producer.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
+const DAY = 86_400_000;
 
 export const LOOKUP_VERSION = 'lookup-v1';
 export const LOOKUP_PROMPT_PATH = join(here, '..', '..', '..', 'prompts', 'public_lookup.md');
@@ -398,4 +403,668 @@ export function groundLookup(envelope, observed) {
   }
 
   return { kept, dropped };
+}
+
+// --- DB half ------------------------------------------------------------
+
+function parseSubRoles(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function anchorsHash(anchors) {
+  return createHash('sha256').update(JSON.stringify({
+    name: anchors?.name ?? null,
+    firm: anchors?.firm ?? null,
+    handle: anchors?.handle ?? null,
+    profileUrl: anchors?.profileUrl ?? null,
+  }), 'utf8').digest('hex');
+}
+
+// anchorsFor(db, personKey): the ONLY place that reads corpus/projection
+// state to build the {name,firm,handle,profileUrl} object buildLookupQuery's
+// input gate accepts. Field by field, BY NAME -- never a spread of
+// people.linkedin, which also carries an email address (conflict (c) in the
+// design this file follows): only .company and .url are read off it.
+export function anchorsFor(db, personKey) {
+  const person = db.prepare('SELECT display_name AS name, linkedin FROM people WHERE person_key = ?').get(personKey);
+  if (!person) return { name: null, firm: null, handle: null, profileUrl: null };
+
+  const name = typeof person.name === 'string' && person.name.trim().length > 0 ? person.name : null;
+
+  let linkedin = null;
+  if (typeof person.linkedin === 'string' && person.linkedin.length > 0) {
+    try { linkedin = JSON.parse(person.linkedin); } catch { linkedin = null; }
+  }
+
+  // firm: the LinkedIn export's own company field, when present; else the
+  // owner's most recent ACCEPTED sweep-proposed firm (sweep.mjs) -- a
+  // PENDING proposal is not yet the person's word, so it is not read here.
+  // "Latest decision wins", the same rule sweep.mjs's alreadyProposed uses.
+  let firm = linkedin && typeof linkedin.company === 'string' && linkedin.company.trim().length > 0
+    ? linkedin.company
+    : null;
+  if (firm === null) {
+    const proposed = db.prepare(
+      `SELECT psp.value AS value FROM person_sweep_proposal psp JOIN claim c ON c.id = psp.claim_id
+       WHERE c.subject = 'person' AND c.subject_person_key = ? AND psp.kind = 'firm'
+         AND (SELECT d.action FROM claim_decision d WHERE d.claim_id = psp.claim_id ORDER BY d.id DESC LIMIT 1) = 'accept'
+       ORDER BY psp.claim_id DESC LIMIT 1`
+    ).get(personKey);
+    if (proposed && typeof proposed.value === 'string' && proposed.value.trim().length > 0) firm = proposed.value;
+  }
+
+  // handle: a person_identifiers entry that both (a) looks like a handle and
+  // (b) belongs to a person who actually has a twitter channel -- person_channels
+  // is the evidence that THIS identifier came through that channel rather
+  // than merely happening to match the shape.
+  let handle = null;
+  const hasTwitterChannel = db
+    .prepare('SELECT 1 FROM person_channels WHERE person_key = ? AND source = ?')
+    .get(personKey, 'twitter');
+  if (hasTwitterChannel) {
+    const HANDLE_SHAPE = /^@?[A-Za-z0-9_]{2,15}$/u;
+    const ids = db.prepare('SELECT identifier FROM person_identifiers WHERE person_key = ?').all(personKey);
+    const match = ids.find((r) => HANDLE_SHAPE.test(r.identifier));
+    if (match) handle = match.identifier;
+  }
+
+  const profileUrl = linkedin && typeof linkedin.url === 'string' && linkedin.url.trim().length > 0
+    ? linkedin.url
+    : null;
+
+  return { name, firm, handle, profileUrl };
+}
+
+// lookupTierFor(db, personKey, {now}): 'eligible' (producer.mjs's own
+// reconnect pool -- the broadest, most-likely-to-benefit-from-a-refresh
+// set), else 'tagged' (a founder/investor sub-role, without yet meeting
+// eligiblePool's quiet-days/history gates), else 'other'.
+export function lookupTierFor(db, personKey, { now = Date.now() } = {}) {
+  const inEligiblePool = eligiblePool(db, { mode: 'any', now }).some((p) => p.personKey === personKey);
+  if (inEligiblePool) return 'eligible';
+  const row = db.prepare('SELECT sub_roles FROM people WHERE person_key = ?').get(personKey);
+  const subRoles = parseSubRoles(row?.sub_roles);
+  if (subRoles.some((r) => r === 'founder' || r === 'investor')) return 'tagged';
+  return 'other';
+}
+
+// lookupScope(db, {now}): every named (not isAnonymousContact), not
+// rm_suppression'd person -- the BROAD population, deliberately not filtered
+// by due-ness or by whether buildLookupQuery can build a query for them.
+// Both of those are exposed per-candidate instead (anchored, anchorsHash,
+// storedAnchorsHash, nextDueAt) so two different callers can apply two
+// different narrower filters without a second query: lookupGate treats an
+// EMPTY scope as 'no-scope' (nobody addressable at all), while runLookupPass
+// separately filters this same scope down to who is actually DUE right now
+// and treats an empty result THERE as 'no-due' (mirrors sweepScope/
+// runSweepPass's own split between an empty scope and "no new rows").
+// ORDER BY tier (eligible, tagged, other), then least-recently-looked-up
+// first.
+export function lookupScope(db, { now = Date.now() } = {}) {
+  const rows = db.prepare(
+    `SELECT p.person_key AS personKey, p.display_name AS name
+     FROM people p
+     WHERE p.person_key NOT IN (SELECT person_key FROM rm_suppression)`
+  ).all();
+
+  const stateStmt = db.prepare(
+    `SELECT anchors_hash AS anchorsHash, last_looked_at AS lastLookedAt, next_due_at AS nextDueAt
+     FROM person_lookup_state WHERE person_key = ?`
+  );
+
+  const out = [];
+  for (const row of rows) {
+    if (isAnonymousContact({ name: row.name, key: row.personKey })) continue;
+    const anchors = anchorsFor(db, row.personKey);
+    const built = buildLookupQuery(anchors);
+    const state = stateStmt.get(row.personKey);
+    out.push({
+      personKey: row.personKey,
+      name: row.name,
+      tier: lookupTierFor(db, row.personKey, { now }),
+      anchored: built !== null,
+      anchorsHash: anchorsHash(anchors),
+      storedAnchorsHash: state ? state.anchorsHash : null,
+      lastLookedAt: state && state.lastLookedAt !== null && state.lastLookedAt !== undefined
+        ? Number(state.lastLookedAt) : null,
+      nextDueAt: state && state.nextDueAt !== null && state.nextDueAt !== undefined
+        ? Number(state.nextDueAt) : null,
+    });
+  }
+
+  const TIER_ORDER = { eligible: 0, tagged: 1, other: 2 };
+  out.sort((a, b) => TIER_ORDER[a.tier] - TIER_ORDER[b.tier] || (a.lastLookedAt ?? 0) - (b.lastLookedAt ?? 0));
+  return out;
+}
+
+// A candidate is DUE when it has never been looked up, its schedule has
+// come around, or its anchors changed since the last lookup (a new firm, a
+// LinkedIn URL that finally resolved) -- the same "something changed" signal
+// next_due_at alone cannot capture.
+function isLookupDue(candidate, now) {
+  return candidate.nextDueAt === null
+    || candidate.nextDueAt <= now
+    || candidate.storedAnchorsHash !== candidate.anchorsHash;
+}
+
+// policy carries the same per-process relationship holder every other
+// relationship route reads -- see sweep.mjs's identical relFlags, duplicated
+// here rather than imported (it is not exported from sweep.mjs, and
+// importing a private helper across files is not a boundary worth crossing
+// for four lines).
+function relFlags(policy) {
+  const holder = policy?.relationshipHolder ?? policy ?? {};
+  return holder.__relationship ?? holder;
+}
+
+// Skip order, each writing a person_lookup_run row status='skipped', never a
+// silent return -- same discipline as sweepGate/runSweepPass. An ABSENT
+// power field is unknown, not a skip.
+export function lookupGate(db, policy, { powerMode = 'trickle', battery = null, onAc = null, thermal = null, engine } = {}) {
+  void powerMode;
+  if (onAc === false && typeof battery === 'number' && battery < 40) {
+    return { ok: false, reason: 'battery' };
+  }
+  if (thermal === 'serious' || thermal === 'critical') {
+    return { ok: false, reason: 'thermal' };
+  }
+  const rel = relFlags(policy);
+  if (rel?.pagesBuildingActive || rel?.sweepActive || rel?.lookupActive) {
+    return { ok: false, reason: 'busy-model' };
+  }
+  // NO llama fallback for lookup (see engines.mjs createLookupEngine): a
+  // null engine here means neither an override nor a resolvable claude
+  // binary, and there is nothing else safe to run this against.
+  if (!engine) {
+    return { ok: false, reason: 'no-engine' };
+  }
+  // LOCAL cap: rate limits, not dollars, are the ceiling (see
+  // LOOKUP_DAILY_CALL_CAP_DEFAULT's own comment).
+  const cap = Number(policy?.relationshipMemory?.lookupDailyCallCap ?? LOOKUP_DAILY_CALL_CAP_DEFAULT);
+  const since = Date.now() - DAY;
+  const used = Number(
+    db.prepare('SELECT COALESCE(SUM(model_calls), 0) AS n FROM person_lookup_run WHERE started_at >= ?')
+      .get(since).n
+  );
+  if (used >= 0.9 * cap) return { ok: false, reason: 'quota' };
+  const scope = lookupScope(db, { now: Date.now() });
+  if (scope.length === 0) return { ok: false, reason: 'no-scope' };
+  return { ok: true, reason: null };
+}
+
+function insertLookupLog(db, {
+  personKey, runId, at, engine, query, queryHash, fieldsUsed, searches, urlsSeen,
+  identityConfidence, changesProposed, changesDropped, costUsd, status,
+}) {
+  return Number(
+    db.prepare(
+      `INSERT INTO lookup_log(person_key, run_id, at, engine, query, query_hash, fields_used, searches, urls_seen,
+         identity_confidence, changes_proposed, changes_dropped, cost_usd, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      personKey, runId ?? null, at, engine, query, queryHash, JSON.stringify(fieldsUsed ?? []),
+      searches ?? 0, urlsSeen ?? 0, identityConfidence ?? null, changesProposed ?? 0, changesDropped ?? 0,
+      costUsd ?? null, status
+    ).lastInsertRowid
+  );
+}
+
+function extractJsonObject(text) {
+  const fenced = String(text ?? '').match(/```(?:json)?\s*([\s\S]*?)```/u);
+  const body = (fenced ? fenced[1] : String(text ?? '')).trim();
+  const start = body.indexOf('{');
+  const end = body.lastIndexOf('}');
+  if (start === -1 || end <= start) throw new Error('no JSON object in output');
+  return body.slice(start, end + 1);
+}
+
+// storeLookup(db, {personKey, kept, logId, distillRunId, now}): the trusted
+// apply path, mirroring storeSweep/storePage. EVERY grounding rule
+// groundLookup already checked is re-checked here against what is about to
+// be written, because a client (groundLookup) is not a boundary. One
+// BEGIN..COMMIT for the whole batch of kept changes.
+//
+// Row mapping per kept change: a NEW context row (source='web', so it
+// carries the same source-receipt and deletion story as every other row;
+// entity_id derived from sha256(url + quote) so the SAME (url, quote) pair
+// is idempotent across repeated lookups rather than duplicating -- checked
+// via (source, entity_id) first, exactly like insertRows' own upsert
+// check); a claim (subject='person', kind='fact', PENDING by construction --
+// no claim_decision is ever written here); a claim_source snapshot (the
+// receipt: which context row, which exact quote); and a person_lookup_change
+// row recording which kind of change this is and the url it cites. No
+// person_page_item row -- its `section` CHECK is closed to the five page
+// sections and a lookup change is not one of them.
+export function storeLookup(db, { personKey, kept, logId, distillRunId, now = Date.now() } = {}) {
+  if (!Array.isArray(kept) || kept.length === 0) return { stored: 0, skipped: 0 };
+
+  const logRow = db.prepare('SELECT query_hash AS queryHash FROM lookup_log WHERE id = ?').get(logId);
+  const queryHash = logRow?.queryHash ?? null;
+
+  const selCtx = db.prepare('SELECT id FROM context WHERE source = ? AND entity_id = ?');
+  const insCtx = db.prepare(
+    `INSERT INTO context(ts, source, speaker, text, meta, entity_id, content_hash, store_changed_at)
+     VALUES (?, 'web', NULL, ?, ?, ?, ?, ?)`
+  );
+  const insClaim = db.prepare(
+    `INSERT INTO claim(run_id, subject, subject_person_key, kind, text, observed_at, valid_to, p_claim, created_at)
+     VALUES (?, 'person', ?, 'fact', ?, ?, NULL, NULL, ?)`
+  );
+  const insSource = db.prepare(
+    `INSERT INTO claim_source(claim_id, context_id, source, entity_id, content_hash, quote)
+     VALUES (?, ?, 'web', ?, ?, ?)`
+  );
+  const insChange = db.prepare(
+    `INSERT INTO person_lookup_change(claim_id, log_id, kind, url, change_date, applied_at)
+     VALUES (?, ?, ?, ?, ?, NULL)`
+  );
+  const maxChangedAt = db.prepare('SELECT MAX(store_changed_at) AS m FROM context').get();
+
+  let stored = 0;
+  let skipped = 0;
+  let nextChangedAt = Math.max(now, Number(maxChangedAt?.m ?? 0) + 1);
+
+  db.exec('BEGIN');
+  try {
+    for (const item of kept) {
+      if (
+        item === null || typeof item !== 'object'
+        || !LOOKUP_CHANGE_KINDS.includes(item.kind)
+        || typeof item.text !== 'string' || item.text.trim().length === 0 || item.text.length > 200
+        || typeof item.quote !== 'string' || item.quote.length === 0
+        || typeof item.url !== 'string' || item.url.length === 0
+      ) {
+        skipped += 1;
+        continue;
+      }
+      let parsedUrl;
+      try {
+        parsedUrl = new URL(item.url);
+      } catch {
+        skipped += 1;
+        continue;
+      }
+      if (parsedUrl.protocol !== 'https:' || isLookupUrlDenied(parsedUrl)) {
+        skipped += 1;
+        continue;
+      }
+
+      const entityId = `web:${createHash('sha256').update(`${item.url}\0${item.quote}`, 'utf8').digest('hex').slice(0, 32)}`;
+      const meta = { url: item.url, provider: 'claude-cli-lookup', query_hash: queryHash, fetched_at: now, person_key: personKey };
+      const metaJson = JSON.stringify(meta);
+      const contentHash = canonicalHash({ ts: now, speaker: null, text: item.quote, meta });
+
+      let contextId;
+      const existing = selCtx.get('web', entityId);
+      if (existing !== undefined) {
+        contextId = Number(existing.id);
+      } else {
+        contextId = Number(insCtx.run(now, item.quote, metaJson, entityId, contentHash, nextChangedAt).lastInsertRowid);
+        nextChangedAt += 1;
+      }
+
+      const claimId = Number(insClaim.run(distillRunId, personKey, item.text, now, now).lastInsertRowid);
+      insSource.run(claimId, contextId, entityId, contentHash, item.quote);
+      insChange.run(claimId, logId, item.kind, item.url, item.date ?? null);
+      stored += 1;
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  return { stored, skipped };
+}
+
+// gather (anchorsFor+buildLookupQuery) -> prompt -> engine -> parse
+// (parseLookupStream) -> ground (groundLookup) -> store (storeLookup), one
+// person. Status is one of lookup_log.status's seven values -- see the
+// CHECK constraint in hermes.mjs's SCHEMA, and the comment above each branch
+// below for what distinguishes it.
+export async function lookupPerson(db, engine, candidate, { runId, distillRunId, now = Date.now() } = {}) {
+  const anchors = anchorsFor(db, candidate.personKey);
+  const built = buildLookupQuery(anchors);
+  const hash = anchorsHash(anchors);
+
+  // No second anchor: logged WITHOUT a model call, same "ask nothing, spend
+  // nothing" posture as sweepPerson's own zero-THEM-lines short circuit.
+  if (built === null) {
+    const logId = insertLookupLog(db, {
+      personKey: candidate.personKey, runId, at: now, engine: engine?.name ?? 'none',
+      query: '', queryHash: '', fieldsUsed: [], status: 'no-anchors',
+    });
+    return {
+      personKey: candidate.personKey, calls: 0, searches: 0, proposed: 0, dropped: 0, costUsd: 0,
+      status: 'no-anchors', anchorsHash: hash, logId,
+    };
+  }
+
+  let raw;
+  try {
+    raw = await engine.complete({ system: readFileSync(LOOKUP_PROMPT_PATH, 'utf8'), user: built.query, maxTokens: 1024 });
+  } catch {
+    const logId = insertLookupLog(db, {
+      personKey: candidate.personKey, runId, at: now, engine: engine?.name ?? 'unknown',
+      query: built.query, queryHash: built.queryHash, fieldsUsed: built.fieldsUsed, status: 'engine-error',
+    });
+    return {
+      personKey: candidate.personKey, calls: 1, searches: 0, proposed: 0, dropped: 0, costUsd: 0,
+      status: 'engine-error', anchorsHash: hash, logId,
+    };
+  }
+
+  const observed = parseLookupStream(raw);
+  let envelope = null;
+  try {
+    envelope = JSON.parse(extractJsonObject(observed.envelopeText));
+  } catch {
+    envelope = null;
+  }
+
+  if (envelope === null || typeof envelope !== 'object') {
+    const logId = insertLookupLog(db, {
+      personKey: candidate.personKey, runId, at: now, engine: engine.name,
+      query: built.query, queryHash: built.queryHash, fieldsUsed: built.fieldsUsed,
+      searches: observed.searches, urlsSeen: observed.urls.size, costUsd: observed.costUsd, status: 'parse-error',
+    });
+    return {
+      personKey: candidate.personKey, calls: 1, searches: observed.searches, proposed: 0, dropped: 0,
+      costUsd: observed.costUsd ?? 0, status: 'parse-error', anchorsHash: hash, logId,
+    };
+  }
+
+  const { kept, dropped } = groundLookup(envelope, observed);
+  // DISAMBIGUATION CHECKPOINT: an "ambiguous" verdict is its own visible
+  // status regardless of whether the model correctly emptied `changes` --
+  // never silently folded into "empty", because "we could not tell who this
+  // was" and "we asked and found nothing new" are different facts an owner
+  // reading /admin/relationship/lookups should be able to tell apart.
+  const status = kept.length > 0
+    ? 'proposed'
+    : envelope.identity_confidence === 'ambiguous'
+      ? 'ambiguous'
+      : dropped.length > 0
+        ? 'ungrounded'
+        : 'empty';
+
+  const identityConfidence = ['match', 'ambiguous', 'no_match'].includes(envelope.identity_confidence)
+    ? envelope.identity_confidence
+    : null;
+
+  const logId = insertLookupLog(db, {
+    personKey: candidate.personKey, runId, at: now, engine: engine.name,
+    query: built.query, queryHash: built.queryHash, fieldsUsed: built.fieldsUsed,
+    searches: observed.searches, urlsSeen: observed.urls.size, identityConfidence,
+    changesProposed: kept.length, changesDropped: dropped.length, costUsd: observed.costUsd, status,
+  });
+
+  let stored = 0;
+  if (kept.length > 0) {
+    stored = storeLookup(db, { personKey: candidate.personKey, kept, logId, distillRunId, now }).stored;
+  }
+
+  return {
+    personKey: candidate.personKey, calls: 1, searches: observed.searches, proposed: stored, dropped: dropped.length,
+    costUsd: observed.costUsd ?? 0, status, anchorsHash: hash, logId,
+  };
+}
+
+function insertSkippedLookupRun(db, { now, powerMode, engineName, budget, scopeSize, reason }) {
+  const id = Number(
+    db.prepare(
+      `INSERT INTO person_lookup_run(distill_run_id, started_at, ended_at, power_mode, engine, budget, scope_size,
+         candidates, looked_up, model_calls, searches, proposed, dropped, cost_usd, skip_reason, status)
+       VALUES (NULL, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, ?, 'skipped')`
+    ).run(now, now, powerMode, engineName, budget, scopeSize, reason).lastInsertRowid
+  );
+  return db.prepare('SELECT * FROM person_lookup_run WHERE id = ?').get(id);
+}
+
+// Matches SWEEP_PAUSE_MS's own reasoning (sweep.mjs): do not hammer the one
+// model (or, here, the one installed client's own rate limit) between
+// people. Not imported (sweep.mjs's is private); duplicated as a constant.
+const LOOKUP_PAUSE_MS = 1000;
+
+function sleep(ms) {
+  return new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
+}
+
+// One pass: gate -> scope -> (skip, or) one distill_run row for the WHOLE
+// pass (same "one per pass, not per person" posture as sweep.mjs's
+// runSweepPass) -> lookupPerson in sequence, one BEGIN..COMMIT
+// person_lookup_state write per person (advance next_due_at on
+// proposed/empty/ambiguous/ungrounded/no-anchors -- every one of those
+// either produced a real answer or correctly asked-and-found-nothing/had-
+// nothing-to-ask; hold on engine-error/parse-error, which asked and got
+// nothing usable back), paused LOOKUP_PAUSE_MS between people.
+export async function runLookupPass(db, engine, policy, {
+  powerMode = 'trickle', battery = null, onAc = null, thermal = null, budget, now = Date.now(),
+} = {}) {
+  const effectiveBudget = Number.isInteger(budget) ? budget : (LOOKUP_BUDGET[powerMode] ?? LOOKUP_BUDGET.trickle);
+  const engineName = engine?.name ?? 'none';
+
+  const gate = lookupGate(db, policy, { powerMode, battery, onAc, thermal, engine });
+  const scope = lookupScope(db, { now });
+  if (!gate.ok) {
+    return insertSkippedLookupRun(db, {
+      now, powerMode, engineName, budget: effectiveBudget, scopeSize: scope.length, reason: gate.reason,
+    });
+  }
+
+  // Due-filter applied HERE, not baked into lookupScope -- see lookupScope's
+  // own comment. An empty scope (nobody addressable) already failed the
+  // gate above as 'no-scope'; a non-empty scope with nobody DUE right now is
+  // this file's analogue of sweep's 'no-new-rows'.
+  const dueCandidates = scope.filter((c) => isLookupDue(c, now));
+  const candidates = dueCandidates.slice(0, effectiveBudget);
+  if (candidates.length === 0) {
+    return insertSkippedLookupRun(db, {
+      now, powerMode, engineName, budget: effectiveBudget, scopeSize: scope.length, reason: 'no-due',
+    });
+  }
+
+  // rel.lookupActive is owned by THIS pass, set only now that lookupGate's
+  // own busy-model read of the same flag has already passed -- see
+  // sweep.mjs's identical reasoning for rel.sweepActive. Cleared in the
+  // finally below no matter how the pass ends.
+  const rel = relFlags(policy);
+  rel.lookupActive = true;
+  try {
+    const promptText = readFileSync(LOOKUP_PROMPT_PATH, 'utf8');
+    const sha = createHash('sha256').update(promptText, 'utf8').digest('hex');
+    const distillRunId = Number(
+      db.prepare(
+        `INSERT INTO distill_run(model, prompt_path, prompt_sha, params, episode_context, rows_in, claims_out, status, started_at, ended_at)
+         VALUES (?, ?, ?, '{}', 'off', ?, 0, 'running', ?, NULL)`
+      ).run(`${engineName}:${engine?.model ?? 'unknown'}`, LOOKUP_PROMPT_PATH, sha, candidates.length, now).lastInsertRowid
+    );
+    const runId = Number(
+      db.prepare(
+        `INSERT INTO person_lookup_run(distill_run_id, started_at, ended_at, power_mode, engine, budget, scope_size,
+           candidates, looked_up, model_calls, searches, proposed, dropped, cost_usd, skip_reason, status)
+         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, NULL, 'running')`
+      ).run(distillRunId, now, powerMode, engineName, effectiveBudget, scope.length, candidates.length).lastInsertRowid
+    );
+
+    const upsertState = db.prepare(
+      `INSERT INTO person_lookup_state(person_key, tier, anchors_hash, last_looked_at, next_due_at, last_status, lookups, proposals)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+       ON CONFLICT(person_key) DO UPDATE SET tier = excluded.tier, anchors_hash = excluded.anchors_hash,
+         last_looked_at = excluded.last_looked_at, next_due_at = excluded.next_due_at, last_status = excluded.last_status,
+         lookups = person_lookup_state.lookups + 1, proposals = person_lookup_state.proposals + excluded.proposals`
+    );
+    const holdState = db.prepare(
+      `INSERT INTO person_lookup_state(person_key, tier, anchors_hash, last_looked_at, next_due_at, last_status, lookups, proposals)
+       VALUES (?, ?, ?, ?, ?, ?, 1, 0)
+       ON CONFLICT(person_key) DO UPDATE SET last_looked_at = excluded.last_looked_at, last_status = excluded.last_status,
+         lookups = person_lookup_state.lookups + 1`
+    );
+
+    let lookedUp = 0;
+    let modelCalls = 0;
+    let searchesTotal = 0;
+    let proposed = 0;
+    let dropped = 0;
+    let costUsdTotal = 0;
+
+    for (let i = 0; i < candidates.length; i++) {
+      const candidate = candidates[i];
+      const result = await lookupPerson(db, engine, candidate, { runId, distillRunId, now });
+      lookedUp += 1;
+      modelCalls += result.calls;
+      searchesTotal += result.searches;
+      proposed += result.proposed;
+      dropped += result.dropped;
+      costUsdTotal += result.costUsd ?? 0;
+
+      const advance = result.status === 'proposed' || result.status === 'empty'
+        || result.status === 'ambiguous' || result.status === 'ungrounded' || result.status === 'no-anchors';
+
+      db.exec('BEGIN');
+      try {
+        if (advance) {
+          const nextDueAt = now + (LOOKUP_REFRESH_DAYS[candidate.tier] ?? LOOKUP_REFRESH_DAYS.other) * DAY;
+          upsertState.run(candidate.personKey, candidate.tier, result.anchorsHash, now, nextDueAt, result.status, result.proposed);
+        } else {
+          // HOLD: next_due_at is whatever it already was (or `now`, for a
+          // brand-new candidate with no prior state row) -- a failure to get
+          // a usable answer must re-offer the same person next pass, same
+          // reasoning as sweep.mjs's holdCursor.
+          const heldNextDueAt = candidate.nextDueAt ?? now;
+          holdState.run(candidate.personKey, candidate.tier, candidate.storedAnchorsHash ?? result.anchorsHash,
+            now, heldNextDueAt, result.status);
+        }
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+      if (i < candidates.length - 1) await sleep(LOOKUP_PAUSE_MS);
+    }
+
+    db.prepare(
+      `UPDATE person_lookup_run SET ended_at = ?, looked_up = ?, model_calls = ?, searches = ?, proposed = ?,
+         dropped = ?, cost_usd = ?, status = 'complete' WHERE id = ?`
+    ).run(Date.now(), lookedUp, modelCalls, searchesTotal, proposed, dropped, costUsdTotal, runId);
+    db.prepare("UPDATE distill_run SET claims_out = ?, status = 'complete', ended_at = ? WHERE id = ?")
+      .run(proposed, Date.now(), distillRunId);
+
+    return db.prepare('SELECT * FROM person_lookup_run WHERE id = ?').get(runId);
+  } finally {
+    rel.lookupActive = false;
+  }
+}
+
+// For /stats' `lookup` key (hermes.mjs, a later commit) and the desk's
+// status line. Cost is the REAL total_cost_usd summed from lookup_log --
+// never mixed with a token estimate, unlike sweep's tokensEst (a lookup's
+// engine reports real dollar cost; there is no reason to estimate it).
+export function lookupStatus(db) {
+  const now = Date.now();
+  const scope = lookupScope(db, { now });
+  const anchored = scope.filter((c) => c.anchored).length;
+  const due = scope.filter((c) => isLookupDue(c, now)).length;
+  const tier = { eligible: 0, tagged: 0, other: 0 };
+  for (const c of scope) tier[c.tier] = (tier[c.tier] ?? 0) + 1;
+
+  const pending = Number(
+    db.prepare(
+      `SELECT COUNT(*) AS n FROM person_lookup_change plc
+       JOIN claim c ON c.id = plc.claim_id
+       WHERE NOT EXISTS (SELECT 1 FROM claim_decision d WHERE d.claim_id = c.id)`
+    ).get().n
+  );
+
+  const last = db.prepare('SELECT * FROM person_lookup_run ORDER BY id DESC LIMIT 1').get();
+  const since24h = now - DAY;
+  const since30d = now - 30 * DAY;
+  const agg24h = db.prepare(
+    'SELECT COALESCE(SUM(model_calls), 0) AS calls, COALESCE(SUM(searches), 0) AS searches ' +
+      'FROM person_lookup_run WHERE started_at >= ?'
+  ).get(since24h);
+  const cost24h = Number(db.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS c FROM lookup_log WHERE at >= ?').get(since24h).c);
+  const cost30d = Number(db.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS c FROM lookup_log WHERE at >= ?').get(since30d).c);
+
+  return {
+    scope: scope.length,
+    anchored,
+    unanchored: scope.length - anchored,
+    due,
+    tier,
+    pending,
+    lastPassAt: last?.started_at ?? null,
+    lastPassStatus: last?.status ?? null,
+    lastSkipReason: last?.skip_reason ?? null,
+    budget: last?.budget ?? null,
+    powerMode: last?.power_mode ?? null,
+    engine: last?.engine ?? null,
+    calls24h: Number(agg24h.calls),
+    searches24h: Number(agg24h.searches),
+    costUsd24h: cost24h,
+    costUsd30d: cost30d,
+    callCap: LOOKUP_DAILY_CALL_CAP_DEFAULT,
+  };
+}
+
+// The desk's "What was sent" list for one person -- every field a receipt
+// needs (see lookup_log's own comment in hermes.mjs's SCHEMA), newest first.
+export function lookupLogFor(db, personKey, { limit = 20 } = {}) {
+  const rows = db.prepare(
+    `SELECT id, person_key AS personKey, run_id AS runId, at, engine, query, query_hash AS queryHash,
+            fields_used AS fieldsUsedJson, searches, urls_seen AS urlsSeen,
+            identity_confidence AS identityConfidence, changes_proposed AS changesProposed,
+            changes_dropped AS changesDropped, cost_usd AS costUsd, status
+     FROM lookup_log WHERE person_key = ? ORDER BY at DESC LIMIT ?`
+  ).all(personKey, Number.isInteger(limit) && limit > 0 ? limit : 20);
+
+  return rows.map((row) => {
+    let fieldsUsed = [];
+    try { fieldsUsed = JSON.parse(row.fieldsUsedJson); } catch { fieldsUsed = []; }
+    const { fieldsUsedJson, ...rest } = row;
+    return { ...rest, fieldsUsed };
+  });
+}
+
+// newestWebChange(db, personKey): the card's `changed` field (a later
+// commit). The single newest person_lookup_change that is not rejected or
+// retracted (pending or accepted both count -- an owner may not have judged
+// it yet, and the card should still surface it), resolved through its LIVE
+// context row: if that row is gone, this returns null rather than serving a
+// quote nobody can verify any more -- the same deletion-cascade-honored-at-
+// serve-time discipline the card route already applies to its own quote.
+export function newestWebChange(db, personKey) {
+  const row = db.prepare(
+    `SELECT plc.claim_id AS claimId, plc.kind AS kind, plc.url AS url, plc.change_date AS date,
+            ll.at AS at, c.text AS text,
+            (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) AS decision
+     FROM person_lookup_change plc
+     JOIN claim c ON c.id = plc.claim_id
+     JOIN lookup_log ll ON ll.id = plc.log_id
+     WHERE c.subject = 'person' AND c.subject_person_key = ?
+       AND COALESCE(
+         (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1),
+         'pending'
+       ) NOT IN ('reject', 'retract')
+     ORDER BY plc.claim_id DESC LIMIT 1`
+  ).get(personKey);
+  if (!row) return null;
+
+  const source = db.prepare(
+    `SELECT context_id AS contextId, quote FROM claim_source WHERE claim_id = ? AND source = 'web' LIMIT 1`
+  ).get(row.claimId);
+  if (!source) return null;
+
+  const ctx = db.prepare('SELECT id FROM context WHERE id = ?').get(source.contextId);
+  if (!ctx) return null; // the receipt is gone, so the change is gone
+
+  return {
+    text: row.text, url: row.url, kind: row.kind, quote: source.quote,
+    date: row.date ?? null, at: row.at, decision: row.decision ?? null,
+  };
 }
