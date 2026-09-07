@@ -49,6 +49,8 @@
   button[aria-pressed="true"] { background:var(--fg); color:var(--surface); border-color:var(--fg); }
   button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
   main { max-width:56rem; margin:0 auto; padding:1.25rem; display:flex; flex-direction:column; gap:.7rem; }
+  /* display:flex on main/filters beat the UA's [hidden]{display:none}; every tab was visible at once. */
+  [hidden] { display:none !important; }
   .claim {
     background:var(--surface); border:1px solid var(--line); border-radius:5px;
     padding:.9rem 1rem; display:grid; gap:.55rem;
