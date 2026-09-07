@@ -15,7 +15,9 @@ import { buildPersonEventLinkBatch, buildPersonEventLinks } from './evidence.mjs
 import { resolutionFingerprint } from './resolve.mjs';
 
 const DAY = 86_400_000;
-const PROJECTION_VERSION = 7; // 7: sub-role rules changed (investing platforms are fund-side); rows must be re-derived
+const PROJECTION_VERSION = 8; // 8: LinkedIn signal now carries the profile url (people/graph.mjs personSignalsForRow,
+// case 'linkedin'); people.linkedin rows built before this need to be re-derived to gain it.
+// 7: sub-role rules changed (investing platforms are fund-side); rows must be re-derived
 const sourceSql = RELATIONSHIP_SOURCES.map((source) => `'${source.replaceAll("'", "''")}'`).join(',');
 
 export const PEOPLE_PROJECTION_SCHEMA = `

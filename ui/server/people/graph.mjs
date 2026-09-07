@@ -418,6 +418,12 @@ export function personSignalsForRow(row, meta, owner) {
                     connected_on: meta.connected_on,
                     email: meta.email,
                     industry: meta.industry,
+                    // The public profile URL (connectors/lib/linkedinRows.mjs
+                    // writes it as meta.url from Connections.csv's own URL
+                    // column). Public lookup (L5 step 6) needs it as an
+                    // anchor and it had nowhere to live until now -- see
+                    // PROJECTION_VERSION's bump below.
+                    url: meta.url,
                   } }];
       }
       if (meta.kind === 'message') {
