@@ -5,11 +5,15 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, existsSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { openDb } from '../server/hermes.mjs';
 import { eligiblePool } from '../server/relationship/producer.mjs';
+import { ownerConfigPath } from '../server/people/owner.mjs';
 import {
-  groundSweep, newRowsFor, sweepScope, storeSweep, sweepGate, runSweepPass,
+  groundSweep, newRowsFor, sweepScope, storeSweep, sweepGate, runSweepPass, applySweepDecision,
   SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, tokensEstFor,
 } from '../server/relationship/sweep.mjs';
 
@@ -454,4 +458,99 @@ test('sweepGate skips at 90% of the daily call cap, never for llama', () => {
 
   const llama = sweepGate(db, {}, { engine: 'llama' });
   assert.equal(llama.ok, true, 'llama is exempt from the local call cap');
+});
+
+// ---------------------------------------------------------------------------
+// (17-19) applySweepDecision.
+// ---------------------------------------------------------------------------
+
+function storedProposalClaimId(db, personKey, kind) {
+  const row = db.prepare(
+    `SELECT psp.claim_id AS claimId FROM person_sweep_proposal psp
+     JOIN claim c ON c.id = psp.claim_id
+     WHERE c.subject_person_key = ? AND psp.kind = ?`
+  ).get(personKey, kind);
+  return row.claimId;
+}
+
+test('accepting a sub_role proposal unions the tag via markPersonSubRoles; a second accept is a no-op', () => {
+  const db = openDb(':memory:');
+  const key = 'name:union test';
+  insertPerson(db, { key, name: 'Union Test', role: 'business', subRoles: ['founder'] });
+  insertThread(db, key, { ts: NOW - 1 * DAY, them: 'I am raising a fund now', me: 'nice' });
+
+  const gathered = newRowsFor(db, key, 0);
+  const proposal = { tags: [{ tag: 'investor', text: 'raising a fund', quote: 'raising a fund' }], firm: null, page_lines: [] };
+  const { kept } = groundSweep(proposal, gathered);
+  const { distillRunId, sweepRunId } = insertSweepRun(db);
+  storeSweep(db, { personKey: key, engineName: 'fake', model: 'fake-model', kept, sweepRunId, distillRunId, now: NOW });
+  const claimId = storedProposalClaimId(db, key, 'sub_role');
+
+  const home = mkdtempSync(join(tmpdir(), 'sweep-config-'));
+  const configPath = ownerConfigPath(home);
+
+  const result = applySweepDecision(db, {}, { claimId, action: 'accept', configPath });
+  assert.equal(result.applied, true);
+  assert.equal(result.kind, 'sub_role');
+  assert.equal(result.rebuildNeeded, true);
+
+  const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+  assert.deepEqual(raw.personSubRoles[key], ['founder', 'investor'], "the LinkedIn-derived 'founder' tag survives the union");
+
+  const proposalRow = db.prepare('SELECT applied_at FROM person_sweep_proposal WHERE claim_id = ?').get(claimId);
+  assert.ok(proposalRow.applied_at !== null);
+
+  const second = applySweepDecision(db, {}, { claimId, action: 'accept', configPath });
+  assert.equal(second.applied, false, 'a second accept of the same proposal is a no-op');
+  const rawAfter = JSON.parse(readFileSync(configPath, 'utf8'));
+  assert.deepEqual(rawAfter.personSubRoles[key], ['founder', 'investor']);
+});
+
+test('rejecting a sub_role proposal writes no override', () => {
+  const db = openDb(':memory:');
+  const key = 'name:reject test';
+  insertPerson(db, { key, name: 'Reject Test', role: 'business' });
+  insertThread(db, key, { ts: NOW - 1 * DAY, them: 'I am raising a fund now', me: 'nice' });
+
+  const gathered = newRowsFor(db, key, 0);
+  const proposal = { tags: [{ tag: 'investor', text: 'raising a fund', quote: 'raising a fund' }], firm: null, page_lines: [] };
+  const { kept } = groundSweep(proposal, gathered);
+  const { distillRunId, sweepRunId } = insertSweepRun(db);
+  storeSweep(db, { personKey: key, engineName: 'fake', model: 'fake-model', kept, sweepRunId, distillRunId, now: NOW });
+  const claimId = storedProposalClaimId(db, key, 'sub_role');
+
+  const home = mkdtempSync(join(tmpdir(), 'sweep-config-reject-'));
+  const configPath = ownerConfigPath(home);
+
+  const result = applySweepDecision(db, {}, { claimId, action: 'reject', configPath });
+  assert.equal(result.applied, false);
+  assert.equal(result.rebuildNeeded, false);
+  assert.ok(!existsSync(configPath), 'a reject never writes an owner-config override');
+});
+
+test('accepting a firm proposal stamps applied_at with no projection write', () => {
+  const db = openDb(':memory:');
+  const key = 'name:firm accept test';
+  insertPerson(db, { key, name: 'Firm Accept Test', role: 'business' });
+  insertThread(db, key, { ts: NOW - 1 * DAY, them: 'I lead investing at Acme Capital', me: 'cool' });
+
+  const gathered = newRowsFor(db, key, 0);
+  const proposal = { tags: [], page_lines: [], firm: { name: 'Acme Capital', text: 'at Acme Capital', quote: 'lead investing at Acme Capital' } };
+  const { kept } = groundSweep(proposal, gathered);
+  const { distillRunId, sweepRunId } = insertSweepRun(db);
+  storeSweep(db, { personKey: key, engineName: 'fake', model: 'fake-model', kept, sweepRunId, distillRunId, now: NOW });
+  const claimId = storedProposalClaimId(db, key, 'firm');
+
+  const before = db.prepare('SELECT sub_roles FROM people WHERE person_key = ?').get(key);
+
+  const result = applySweepDecision(db, {}, { claimId, action: 'accept' });
+  assert.equal(result.applied, true);
+  assert.equal(result.kind, 'firm');
+  assert.equal(result.rebuildNeeded, false, 'a firm accept never touches the sub-roles projection');
+
+  const proposalRow = db.prepare('SELECT applied_at FROM person_sweep_proposal WHERE claim_id = ?').get(claimId);
+  assert.ok(proposalRow.applied_at !== null);
+
+  const after = db.prepare('SELECT sub_roles FROM people WHERE person_key = ?').get(key);
+  assert.deepEqual(after, before);
 });

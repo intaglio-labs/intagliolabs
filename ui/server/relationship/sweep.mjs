@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { buildEpisodes, isQuotable } from '../memory/episodes.mjs';
 import { SUB_ROLES } from '../people/subRoles.mjs';
 import { isAnonymousContact } from '../people/map.mjs';
+import { markPersonSubRoles } from '../people/owner.mjs';
 import { SECTION_KIND, alreadyStored } from './pages.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -665,4 +666,79 @@ export async function runSweepPass(db, engine, policy, {
   } finally {
     rel.sweepActive = false;
   }
+}
+
+// Called from the ROUTE (/admin/memory/decide), NOT from inside decideClaim
+// itself -- decideClaim's signature is pinned by its own tests, and
+// decideClaim runs first regardless, so a projection failure here can never
+// lose the owner's decision (already recorded in claim_decision by the time
+// this runs).
+//
+// A claim_id that is not a sweep proposal at all (an ordinary distilled
+// claim, a page item) is the common case and a cheap no-op: one indexed
+// lookup, nothing more.
+//
+// reject/retract: claim_decision alone (already written) is the whole
+// story -- nothing here overrides a person or a firm on a reject.
+//
+// accept, kind 'sub_role': unions the tag into the CURRENT people.sub_roles
+// (a live read, not a re-derivation) and writes it as an owner override via
+// markPersonSubRoles -- union, not replace, so accepting a sweep-proposed
+// tag can never drop a tag the LinkedIn importer or an earlier owner
+// correction already set. Guarded by applied_at rather than re-checking the
+// union's effect: accepting the same proposal twice is a no-op, not a
+// second write, whether or not a projection rebuild happened in between.
+//
+// accept, kind 'firm': stamps applied_at only. firmOf() (people/firms.mjs)
+// derives a person's firm at READ time; a persisted override map for a
+// sweep-proposed firm name is its own future step, not built here.
+//
+// accept, kind 'page_line': nothing extra -- the claim's own acceptance
+// (already written by decideClaim) is the whole effect; it renders through
+// the existing person_page_item / readPersonPage machinery unchanged.
+//
+// DEVIATION: the design has this function call `rebuildPeopleCore(db)`
+// directly after markPersonSubRoles. rebuildPeopleCore is private to
+// hermes.mjs (never exported), and importing it here would mean sweep.mjs
+// importing back from the very file that imports sweep.mjs -- a circular
+// import that would work today only by accident of call timing. Instead
+// this function returns `rebuildNeeded: true` exactly when a sub_role
+// union actually happened, and the /admin/memory/decide route (which
+// already has rebuildPeopleCore in scope, the same way its /people/role and
+// /people/sub-roles routes do) performs the rebuild itself when that flag
+// comes back true.
+export function applySweepDecision(db, policy, { claimId, action, configPath } = {}) {
+  void policy;
+  if (!Number.isInteger(claimId)) return { applied: false, kind: null, rebuildNeeded: false };
+
+  const proposal = db
+    .prepare(
+      `SELECT psp.kind AS kind, psp.value AS value, psp.applied_at AS appliedAt, c.subject_person_key AS personKey
+       FROM person_sweep_proposal psp JOIN claim c ON c.id = psp.claim_id
+       WHERE psp.claim_id = ?`
+    )
+    .get(claimId);
+  if (!proposal) return { applied: false, kind: null, rebuildNeeded: false };
+
+  if (action !== 'accept') {
+    return { applied: false, kind: proposal.kind, rebuildNeeded: false };
+  }
+  if (proposal.appliedAt !== null && proposal.appliedAt !== undefined) {
+    return { applied: false, kind: proposal.kind, rebuildNeeded: false };
+  }
+
+  let rebuildNeeded = false;
+  if (proposal.kind === 'sub_role' && SUB_ROLES.includes(proposal.value)) {
+    const row = db.prepare('SELECT sub_roles FROM people WHERE person_key = ?').get(proposal.personKey);
+    const current = parseSubRoles(row?.sub_roles);
+    const unioned = [...new Set([...current, proposal.value])].sort();
+    markPersonSubRoles({
+      key: proposal.personKey, subRoles: unioned,
+      ...(configPath ? { configPath } : {}),
+    });
+    rebuildNeeded = true;
+  }
+
+  db.prepare('UPDATE person_sweep_proposal SET applied_at = ? WHERE claim_id = ?').run(Date.now(), claimId);
+  return { applied: true, kind: proposal.kind, rebuildNeeded };
 }

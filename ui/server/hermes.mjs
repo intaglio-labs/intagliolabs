@@ -75,7 +75,7 @@ import { openTallyStore } from './people/tallyStore.mjs';
 import { createRelationshipMemory } from './relationship/service.mjs';
 import { buildMatchedCards, MATCH_RULES_VERSION } from './relationship/matcher.mjs';
 import { buildPersonPage, readPersonPage } from './relationship/pages.mjs';
-import { runSweepPass } from './relationship/sweep.mjs';
+import { runSweepPass, applySweepDecision } from './relationship/sweep.mjs';
 import { createEngine } from './relationship/engines.mjs';
 import { eligiblePool, produceBatch } from './relationship/producer.mjs';
 import {
@@ -3344,7 +3344,17 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
 
     if (url.pathname === '/admin/memory/decide') {
       const body = await readJson(req);
-      send(res, 200, decideClaim(db, body), cors);
+      // decideClaim FIRST, unconditionally: it is the owner's actual
+      // decision, and nothing downstream may risk losing it. applySweepDecision
+      // (relationship/sweep.mjs) is a no-op for every claim that is not a
+      // sweep proposal -- one indexed lookup -- so this costs nothing on the
+      // common path. rebuildPeopleCore only runs when applySweepDecision
+      // reports it actually unioned a sub-role tag (see that function's own
+      // comment on why the rebuild call lives here rather than inside it).
+      const out = decideClaim(db, body);
+      const applied = applySweepDecision(db, policy, { claimId: body.claim_id, action: body.action });
+      if (applied?.rebuildNeeded) rebuildPeopleCore(db);
+      send(res, 200, out, cors);
       return;
     }
 
