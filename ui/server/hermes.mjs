@@ -80,6 +80,9 @@ import { runSweepPass, applySweepDecision, sweepStatus } from './relationship/sw
 import {
   runLookupPass, lookupGate, lookupTierFor, lookupStatus, lookupLogFor, newestWebChange,
 } from './relationship/lookup.mjs';
+import {
+  runLintPass, lintFindings, resolveLintFinding, lintStatus,
+} from './relationship/lint.mjs';
 import { createEngine, createLookupEngine } from './relationship/engines.mjs';
 import { eligiblePool, produceBatch } from './relationship/producer.mjs';
 import {
@@ -2065,6 +2068,31 @@ const SWEEP_THERMAL_VALUES = Object.freeze(['nominal', 'fair', 'serious', 'criti
 const RELATIONSHIP_LOOKUP_FIELDS = Object.freeze(['power', 'budget', 'battery', 'onAc', 'thermal', 'limit']);
 const RELATIONSHIP_LOOKUP_PERSON_FIELDS = Object.freeze(['personKey']);
 const RELATIONSHIP_LOOKUPS_PARAMS = Object.freeze(['personKey']);
+
+// Lint (step 5½): no power/battery/thermal/budget fields at all -- there is
+// no model call, so none of the sweep/lookup routes' power-mode plumbing
+// applies here. `checks`, when given, narrows which of LINT_CHECKS run this
+// pass; omitted, every check runs.
+const RELATIONSHIP_LINT_FIELDS = Object.freeze(['checks']);
+const RELATIONSHIP_LINT_FINDINGS_PARAMS = Object.freeze(['check', 'open', 'limit']);
+const RELATIONSHIP_LINT_RESOLVE_FIELDS = Object.freeze(['findingKey', 'resolution']);
+// The four an owner may write. 'gone' is deliberately absent -- only a pass
+// itself may declare a condition gone (see lint.mjs's own comment on
+// resolveLintFinding) -- so it 400s here exactly like any other unrecognized
+// value, never reaching resolveLintFinding to be silently no-op'd.
+const LINT_RESOLUTIONS = Object.freeze(['dismiss', 'keep-export', 'keep-derived', 'both']);
+
+// lint_run.checks_run/counts are stored as canonical JSON text (see the
+// SCHEMA comment); the route decodes both before sending so a caller gets
+// real arrays/objects rather than an embedded JSON string.
+function lintRunForResponse(row) {
+  if (!row) return row;
+  let checksRun = [];
+  try { checksRun = JSON.parse(row.checks_run); } catch { checksRun = []; }
+  let counts = {};
+  try { counts = JSON.parse(row.counts); } catch { counts = {}; }
+  return { ...row, checks_run: checksRun, counts };
+}
 const DECISION_ACTIONS = Object.freeze(['accept', 'reject', 'retract']);
 // The review page is the v1 product surface and it has to show the receipt, so
 // this cap is about one sitting's reading, not about safety.
@@ -3410,6 +3438,79 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     return;
   }
 
+  // Lint (step 5½): a scheduled pass over states no other pass names --
+  // relationship/lint.mjs's own header explains what it checks and why NO
+  // MODEL CALL is involved anywhere here. Still bearer-only, same posture as
+  // /admin/relationship/sweep and /admin/relationship/lookup, even though
+  // this route spends no model subscription: it writes lint_run/lint_finding
+  // rows about real people, which a browser has no business triggering.
+  //
+  // rel.lintActive is set and cleared by runLintPass itself (mirrors
+  // sweepActive/lookupActive's own reasoning) -- the read below is only a
+  // cheap early exit; the authoritative check is lintGate's, inside
+  // runLintPass.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/lint') {
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_LINT_FIELDS);
+    if (body.checks !== undefined) {
+      if (!Array.isArray(body.checks) || body.checks.length === 0 || !body.checks.every((c) => typeof c === 'string')) {
+        throw badRequest('"checks" must be a non-empty array of strings');
+      }
+    }
+    const rel = relationshipState(db, policy);
+    if (rel.lintActive) {
+      send(res, 200, { started: false, reason: 'already running' }, cors);
+      return;
+    }
+    const result = runLintPass(db, policy, { now: Date.now(), checks: body.checks });
+    send(res, 200, lintRunForResponse(result), cors);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/admin/relationship/lint/findings') {
+    for (const key of url.searchParams.keys()) {
+      if (!RELATIONSHIP_LINT_FINDINGS_PARAMS.includes(key)) {
+        throw badRequest(`unknown query parameter ${JSON.stringify(key)}`);
+      }
+    }
+    const check = url.searchParams.get('check');
+    const openRaw = url.searchParams.get('open');
+    const open = openRaw === '1' ? true : openRaw === '0' ? false : null;
+    const limitRaw = url.searchParams.get('limit');
+    const limit = limitRaw === null ? undefined : Number(limitRaw);
+    if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+      throw badRequest('"limit" must be a positive integer');
+    }
+    send(res, 200, { findings: lintFindings(db, { check, open, limit }) }, cors);
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/lint/resolve') {
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_LINT_RESOLVE_FIELDS);
+    if (typeof body.findingKey !== 'string' || body.findingKey.length === 0) {
+      throw badRequest('"findingKey" is required');
+    }
+    if (!LINT_RESOLUTIONS.includes(body.resolution)) {
+      throw badRequest(`"resolution" must be one of: ${LINT_RESOLUTIONS.join(', ')}`);
+    }
+    // Role choices are valid only on a role_conflict finding -- checked here,
+    // against the finding's own check_name, before ever calling
+    // resolveLintFinding (which stays defensive about the same rule for a
+    // caller that is not this route).
+    if (body.resolution !== 'dismiss') {
+      const row = db.prepare('SELECT check_name AS checkName FROM lint_finding WHERE finding_key = ?').get(body.findingKey);
+      if (!row) throw badRequest(`no lint finding ${JSON.stringify(body.findingKey)}`);
+      if (row.checkName !== 'role_conflict') {
+        throw badRequest('"resolution" of "keep-export"/"keep-derived"/"both" is valid only for role_conflict findings');
+      }
+    }
+    const result = resolveLintFinding(db, { findingKey: body.findingKey, resolution: body.resolution });
+    if (result.rebuildNeeded) rebuildPeopleCore(db);
+    send(res, 200, result, cors);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/admin/relationship/page') {
     for (const key of url.searchParams.keys()) {
       if (!RELATIONSHIP_PAGE_PARAMS.includes(key)) {
@@ -4690,8 +4791,17 @@ async function handle(db, req, res, cors, url, policy) {
     } catch {
       lookup = null;
     }
+    // lintStatus is a plain aggregate over brand-new tables, same defensive
+    // wrap as sweep/lookup above -- a missing/pre-migration lint schema must
+    // never take /stats down.
+    let lint = null;
+    try {
+      lint = lintStatus(db);
+    } catch {
+      lint = null;
+    }
     send(res, 200,
-      { rows: Number(n), memory: memoryProgress(db), peopleProjection: peopleProjectionStatus(db, policy), sweep, lookup },
+      { rows: Number(n), memory: memoryProgress(db), peopleProjection: peopleProjectionStatus(db, policy), sweep, lookup, lint },
       cors);
     return;
   }

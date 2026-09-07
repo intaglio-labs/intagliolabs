@@ -271,3 +271,66 @@ test('a restart hydrates cards from the last committed batch, without a refresh'
     assert.equal(card.evidence.meetings, 3);
   } finally { await server.close(); }
 });
+
+// ---------------------------------------------------------------------------
+// Lint routes (step 5½): closed-field/param rejections, /stats.lint's shape,
+// and the pre-migration null guard -- the checks and the pass itself are
+// covered directly against lint.mjs in relationship-lint.test.mjs.
+// ---------------------------------------------------------------------------
+
+test('lint routes reject unknown fields/params, and "gone"/an unrecognized resolution 400s', async () => {
+  await withServer(async ({ call }) => {
+    assert.equal((await call('POST', '/admin/relationship/lint', { bogus: true })).status, 400);
+    assert.equal((await call('GET', '/admin/relationship/lint/findings?bogus=1')).status, 400);
+    assert.equal(
+      (await call('POST', '/admin/relationship/lint/resolve', { findingKey: 'x', resolution: 'dismiss', bogus: true })).status,
+      400
+    );
+    assert.equal((await call('POST', '/admin/relationship/lint/resolve', { findingKey: 'x', resolution: 'gone' })).status, 400);
+    assert.equal((await call('POST', '/admin/relationship/lint/resolve', { findingKey: 'x', resolution: 'nonsense' })).status, 400);
+
+    // A dismiss on a finding that does not exist is a no-op, not a 400 --
+    // 'dismiss' is check-agnostic, so there is no check_name to look up first.
+    const missingDismiss = await call('POST', '/admin/relationship/lint/resolve', { findingKey: 'no-such-key', resolution: 'dismiss' });
+    assert.equal(missingDismiss.status, 200);
+    assert.equal((await missingDismiss.json()).applied, false);
+
+    // A role choice needs a real role_conflict finding to validate the
+    // check_name against, so a missing key 400s instead.
+    assert.equal(
+      (await call('POST', '/admin/relationship/lint/resolve', { findingKey: 'no-such-key', resolution: 'keep-export' })).status,
+      400
+    );
+  });
+});
+
+test('/stats carries a lint key with the expected shape after a pass', async () => {
+  await withServer(async ({ call }) => {
+    const result = await (await call('POST', '/admin/relationship/lint', {})).json();
+    assert.equal(result.status, 'complete');
+    assert.ok(Array.isArray(result.checks_run));
+    assert.ok(result.counts && typeof result.counts === 'object');
+
+    const stats = await (await call('GET', '/stats')).json();
+    assert.ok(stats.lint, '/stats carries a lint key');
+    assert.equal(stats.lint.lastPassStatus, 'complete');
+    assert.equal(typeof stats.lint.open, 'number');
+    assert.ok(stats.lint.openByCheck && typeof stats.lint.openByCheck === 'object');
+    assert.equal(typeof stats.lint.dismissed, 'number');
+    assert.equal(typeof stats.lint.newLastPass, 'number');
+    assert.equal(typeof stats.lint.closedLastPass, 'number');
+    assert.ok(Array.isArray(stats.lint.truncated));
+    assert.ok(Array.isArray(stats.lint.checks));
+  });
+});
+
+test('/stats.lint is null, not a crash, against a pre-lint-migration database', async () => {
+  await withServer(async ({ call, db }) => {
+    db.exec('DROP TABLE lint_finding');
+    db.exec('DROP TABLE lint_run');
+    const res = await call('GET', '/stats');
+    assert.equal(res.status, 200);
+    const stats = await res.json();
+    assert.equal(stats.lint, null);
+  });
+});
