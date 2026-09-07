@@ -84,8 +84,8 @@ import {
   runLintPass, lintFindings, resolveLintFinding, lintStatus,
 } from './relationship/lint.mjs';
 import { createEngine, createLookupEngine } from './relationship/engines.mjs';
-import { eligiblePool, produceBatch } from './relationship/producer.mjs';
-import { produceOweBatch } from './relationship/owe.mjs';
+import { eligiblePool, produceBatch, PRODUCER_VERSION } from './relationship/producer.mjs';
+import { produceOweBatch, OWE_PRODUCER_VERSION } from './relationship/owe.mjs';
 import { CARD_PRODUCERS, REFILL_RETRY_MS, produceDailyBatch } from './relationship/daily.mjs';
 import { cardStats } from './relationship/controls.mjs';
 import {
@@ -2656,6 +2656,17 @@ export function applyMemoryBatch(db, body) {
 // refresh route stores and the card route/widget expect: see the INSERT INTO
 // rm_candidate_snapshot call below for the encoding this decodes.
 //
+// Current producer_version for each CARD_PRODUCERS kind. A producer version
+// is a promise about how a card was chosen; when the promise changes (a new
+// OWE_PRODUCER_VERSION/PRODUCER_VERSION constant), the unjudged queue the OLD
+// version produced is void -- hydrateCards below and daily.mjs's
+// hasUnjudgedOfKind both check a snapshot's producer_version against this
+// map and treat a mismatch as not-in-queue. This does NOT touch the judged
+// gate (rm_card_event by person_key/kind, in owe.mjs's owePool and
+// producer.mjs's poolSql): a person judged under an old version stays
+// excluded from the pool exactly as before.
+const CURRENT_PRODUCER_VERSION = { owe: OWE_PRODUCER_VERSION, reconnect: PRODUCER_VERSION };
+
 // BOTH-KIND, restored independently per CARD_PRODUCERS entry: the latest
 // batch that actually wrote a snapshot of that kind (MAX(batch_id) FROM
 // rm_candidate_snapshot WHERE kind = ?), not merely the latest
@@ -2667,11 +2678,22 @@ export function applyMemoryBatch(db, body) {
 // latest RECONNECT batch only -- Owe cards always carry evidence.mode: null,
 // so asking Owe's batch for a mode would only ever erase the owner's last
 // picker choice.
-function hydrateCards(db) {
+function hydrateCards(db, policy) {
   const empty = () => ({ cards: [], batch: { owe: null, reconnect: null }, mode: null });
   try {
     let nameStmt = null;
     try { nameStmt = db.prepare('SELECT display_name FROM people WHERE person_key = ?'); } catch {}
+
+    // Version-staleness filtering applies unconditionally to Owe -- 'owe' is
+    // written by exactly one producer, produceOweBatch -- but only to
+    // 'reconnect' when the eligibility producer is the one configured. The
+    // older matcher path (relationshipProducerConfig(...).producer ===
+    // 'matcher', still the default) stamps its own snapshots'
+    // producer_version as `${model}@${promptSha}` (see the /refresh route's
+    // matcher branch), a versioning scheme PRODUCER_VERSION knows nothing
+    // about -- treating those as "stale" against a constant they were never
+    // measured against would wrongly void a perfectly current matcher queue.
+    const eligibilityReconnect = relationshipProducerConfig(policy ?? {}).producer === 'eligibility';
 
     const cards = [];
     const batch = { owe: null, reconnect: null };
@@ -2682,11 +2704,20 @@ function hydrateCards(db) {
       ).get(kind);
       const batchId = latest?.batchId != null ? Number(latest.batchId) : null;
       if (batchId === null) continue;
-      batch[kind] = batchId;
       const rows = db.prepare(
         'SELECT id, person_key, kind, summary, evidence, producer_version FROM rm_candidate_snapshot ' +
         'WHERE batch_id = ? ORDER BY id'
       ).all(batchId);
+      // A batch produced under rules this producer no longer runs (its
+      // stored producer_version differs from CURRENT_PRODUCER_VERSION[kind])
+      // is stale: skip it entirely rather than serving or hydrating it, so
+      // the card route sees no unjudged cards for this kind and refills on
+      // its own throttle instead. Only the row(s) actually of `kind` decide
+      // this -- batchId is itself derived from a kind-scoped MAX(batch_id).
+      const versionGated = kind === 'owe' || eligibilityReconnect;
+      const kindRow = rows.find((row) => row.kind === kind);
+      if (versionGated && kindRow && kindRow.producer_version !== CURRENT_PRODUCER_VERSION[kind]) continue;
+      batch[kind] = batchId;
       for (const row of rows) {
         const evidence = JSON.parse(row.evidence);
         const { quote_context_id, role, focus, label, left, leftTone, ...cardEvidence } = evidence;
@@ -2758,7 +2789,7 @@ function relationshipState(db, policy) {
       const body = await upstream.json();
       return body?.choices?.[0]?.message?.content?.trim() ?? null;
     };
-    const hydrated = hydrateCards(db);
+    const hydrated = hydrateCards(db, policy);
     holder.__relationship = { service, llamaCall, cards: hydrated.cards, batch: hydrated.batch,
       mode: hydrated.mode, refreshing: false, lastError: null,
       // Per-kind refill throttle (see daily.mjs's REFILL_RETRY_MS):
@@ -3129,6 +3160,12 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
           // they asked for, not quietly widen back to 'any'.
           reconnect: (dailyDb, { now: at }) => produceBatch(dailyDb, { mode: rel.mode ?? producerConfig.mode, now: at }),
         },
+        // A card carried in rel.cards under a producer_version this producer
+        // no longer runs (see CURRENT_PRODUCER_VERSION / hydrateCards above)
+        // must not count as "already unjudged" here either -- otherwise a
+        // rules change that tightened a producer's gates would still starve
+        // its refill behind a queue chosen under the rules just rejected.
+        currentVersions: CURRENT_PRODUCER_VERSION,
         refillRetryMs: REFILL_RETRY_MS,
         onBatchProduced: (kind, batchId, cards) => {
           if (cards.length > 0) startPageBuilds(db, policy, rel, batchId, cards);

@@ -40,10 +40,24 @@ export function pickProducer(db, { now = Date.now() } = {}) {
   return best;
 }
 
-function hasUnjudgedOfKind(db, cards, kind) {
-  return (cards ?? []).some((card) => card.kind === kind && !db.prepare(
-    "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event IN ('accepted','dismissed') LIMIT 1"
-  ).get(card.snapshot_id));
+// `currentVersions` (optional: {kind: producer_version}) is the same
+// promise-versioning hermes.mjs's hydrateCards checks: a producer version is
+// a promise about how a card was chosen, and when the promise changes, the
+// unjudged queue the OLD version produced is void. A card whose
+// producer_version does not match currentVersions[kind] is treated as
+// not-in-queue here -- not counted as unjudged, so produceDailyBatch below
+// falls through to producing a fresh batch for that kind instead of waiting
+// behind cards chosen under rules already rejected. Kept optional (and a
+// no-op when omitted, as this module's own tests do -- they stub producers
+// that don't carry real producer_version values) so this file stays
+// generic-alternation-only when no versioned policy is supplied.
+function hasUnjudgedOfKind(db, cards, kind, currentVersions) {
+  const requiredVersion = currentVersions?.[kind];
+  return (cards ?? []).some((card) => card.kind === kind
+    && (requiredVersion === undefined || card.producer_version === requiredVersion)
+    && !db.prepare(
+      "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event IN ('accepted','dismissed') LIMIT 1"
+    ).get(card.snapshot_id));
 }
 
 // Decide which kind should be served (and produce for it, subject to that
@@ -94,11 +108,11 @@ export function produceDailyBatch(db, policy, rel, { now = Date.now() } = {}) {
     return { throttled: false, produced: cards.length };
   }
 
-  if (hasUnjudgedOfKind(db, rel.cards, P)) return { servingKind: P };
+  if (hasUnjudgedOfKind(db, rel.cards, P, policy.currentVersions)) return { servingKind: P };
   const producedP = tryProduce(P);
   if (producedP.produced > 0) return { servingKind: P };
 
-  if (hasUnjudgedOfKind(db, rel.cards, Q)) return { servingKind: Q };
+  if (hasUnjudgedOfKind(db, rel.cards, Q, policy.currentVersions)) return { servingKind: Q };
   const producedQ = tryProduce(Q);
   if (producedQ.produced > 0) return { servingKind: Q };
 

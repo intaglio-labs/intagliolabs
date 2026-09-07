@@ -109,6 +109,37 @@ test('an empty Owe pool falls through to reconnect in the same request', () => {
   assert.equal(rel.cards[0].kind, 'reconnect');
 });
 
+// ---- 15b: policy.currentVersions voids a stale Owe card, leaves reconnect alone
+// (hermes.mjs wires policy.currentVersions to {owe: OWE_PRODUCER_VERSION,
+// reconnect: PRODUCER_VERSION}; here it's a plain stub so this file stays
+// generic-alternation-only, per its own header comment.) A card already in
+// rel.cards whose producer_version does not match currentVersions[kind] must
+// not count as "already unjudged" -- but a kind whose version has not
+// changed keeps behaving exactly as before.
+test('a stale-version Owe card in the queue is not counted as unjudged; a fresh-version reconnect card still is', () => {
+  const db = openDb(':memory:');
+  // reconnect was shown recently so owe (never shown) goes first: P='owe', Q='reconnect'.
+  insertShown(db, { kind: 'reconnect', createdAt: NOW - 1 * DAY });
+
+  const staleOwe = card(db, 'owe', { producer_version: 'owe-v1' });
+  const freshReconnect = card(db, 'reconnect', { producer_version: 'reconnect-current' });
+  const rel = { cards: [staleOwe, freshReconnect], batch: { owe: null, reconnect: null }, refill: null };
+
+  const oweProducer = stubProducer([]); // this round's pool happens to be empty too
+  const reconnectProducer = stubProducer([card(db, 'reconnect')]);
+  const policy = {
+    producers: { owe: oweProducer, reconnect: reconnectProducer },
+    currentVersions: { owe: 'owe-v2', reconnect: 'reconnect-current' },
+  };
+
+  const out = produceDailyBatch(db, policy, rel, { now: NOW });
+  assert.equal(oweProducer.callCount(), 1,
+    'the stale-version owe card did not satisfy hasUnjudgedOfKind -- a refill was attempted');
+  assert.equal(reconnectProducer.callCount(), 0,
+    'the fresh-version reconnect card DID satisfy hasUnjudgedOfKind -- no refill needed, unaffected by owe\'s version bump');
+  assert.equal(out.servingKind, 'reconnect', 'owe produced nothing, so the request falls through to reconnect\'s unjudged card');
+});
+
 // ---- 15: per-kind throttle isolation + shared pool-exhausted -------------
 test('an empty Owe refill does not throttle reconnect; once both are empty, pool-exhausted with no further batches', () => {
   const db = openDb(':memory:');

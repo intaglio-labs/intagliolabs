@@ -22,7 +22,13 @@
 import { latestAuthoredContextId } from './producer.mjs';
 import { isAnonymousContact } from '../people/map.mjs';
 
-export const OWE_PRODUCER_VERSION = 'owe-v1';
+// v2 (c509f3f): anonymous phone-number names excluded from the pool, the B2
+// staleness bound on expired commitments, and the owner-participation gate.
+// A producer version is a promise about how a card was chosen; when the
+// promise changes, the unjudged queue the old version produced is void --
+// see hermes.mjs's hydrateCards and daily.mjs's hasUnjudgedOfKind, both of
+// which treat a snapshot's producer_version against this constant.
+export const OWE_PRODUCER_VERSION = 'owe-v2';
 export const OWE_RANK_STRATEGY = 'owe-overdue-days';
 export const OWE_KINDS = Object.freeze(['owe:expired-commitment', 'owe:open-loop']);
 

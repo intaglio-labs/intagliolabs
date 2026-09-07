@@ -31,6 +31,7 @@ import { join } from 'node:path';
 
 import { start, openDb } from '../server/hermes.mjs';
 import { eligiblePool, produceBatch, PRODUCER_VERSION, RANK_STRATEGY } from '../server/relationship/producer.mjs';
+import { OWE_PRODUCER_VERSION } from '../server/relationship/owe.mjs';
 
 const NOW = Date.parse('2026-06-01T12:00:00Z');
 const DAY = 86_400_000;
@@ -350,6 +351,60 @@ test('produceBatch writes a batch + snapshot in the shape hydrateCards reads', a
     assert.equal(cardOut.card.name, 'Frank Founder');
     assert.ok(cardOut.card.sentence.includes('founder'));
     assert.equal(cardOut.card.producer_version, PRODUCER_VERSION);
+  } finally {
+    await server.close();
+  }
+});
+
+// Regression for the c509f3f Owe gate tightening: a batch written under an
+// OLD producer_version (simulating a pre-reinstall DB still holding the
+// junk card the tightened gates were meant to stop serving) must not be
+// hydrated or served, and must not count as "already unjudged" either --
+// the card route should refill Owe instead of waiting behind it forever.
+test('hydrate skips a stale-version Owe batch and the next /card refills for owe', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-owe-stale-'));
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: 'e'.repeat(64),
+    relationshipCap: { max: 10, windowMs: 86_400_000 },
+    relationshipProducerConfig: { producer: 'eligibility', mode: 'any' },
+    peopleProjectionAutoRebuild: false,
+  });
+  try {
+    const db = server.db;
+    // Seed exactly what hydrateCards would find on a restart against an
+    // un-migrated-forward DB: one Owe batch, one snapshot, producer_version
+    // a version this producer no longer runs, and no rm_card_event at all
+    // (unjudged) -- the "junk card" from the bug report.
+    const staleBatchId = Number(db.prepare(
+      'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, 1, ?, NULL)'
+    ).run(NOW, 'open').lastInsertRowid);
+    db.prepare(
+      'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) ' +
+      "VALUES (?, 'name:stale owe', 'owe', 'stale summary', '{}', 'owe-v1', 'owe-overdue-days', ?)"
+    ).run(staleBatchId, NOW);
+    assert.notEqual('owe-v1', OWE_PRODUCER_VERSION, 'the seeded version really is stale relative to the live constant');
+
+    const base = `http://127.0.0.1:${server.port}`;
+    const call = (method, path, body) => fetch(base + path, {
+      method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${'e'.repeat(64)}` },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+
+    const cardOut = await (await call('GET', '/admin/relationship/card')).json();
+    assert.notEqual(cardOut.card?.personKey, 'name:stale owe',
+      'the stale-version card is never served, no matter how the pool comes out');
+    // Neither producer has any real fixture data, so both refills legitimately
+    // find nothing -- the point here is that a refill was ATTEMPTED for owe
+    // rather than the stale unjudged snapshot silently satisfying the queue
+    // forever. Both eligibility-family producers write a batch row even on
+    // zero candidates (see owe.mjs/producer.mjs), so a fresh batch per kind
+    // proves the refill ran.
+    assert.equal(cardOut.card, null);
+    assert.equal(cardOut.reason, 'pool-exhausted');
+    assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM rm_candidate_batch').get().n), 3,
+      'the stale seed batch, plus one fresh (empty) refill attempt each for owe and reconnect');
+    assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM rm_candidate_snapshot').get().n), 1,
+      'the fresh refills found no candidates, so only the stale seeded snapshot still exists');
   } finally {
     await server.close();
   }

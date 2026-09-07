@@ -296,6 +296,43 @@ test('a reconnect-kind dismissal still reaches Owe; a shown card of ANY kind coo
   assert.ok(!keys.includes('name:shown reconnect recent'), 'shown 2 days ago, any kind, cools every producer down for 7 days');
 });
 
+// ---- 8b: a stale-version judged card still excludes its person ----------
+// The judged gate (rm_card_event by person_key + kind) has never keyed on
+// producer_version -- it can't, the event row doesn't carry one. This test
+// pins that: a snapshot written under an OLD OWE_PRODUCER_VERSION, then
+// judged, must keep excluding its person from a POOL BUILT UNDER THE NEW
+// VERSION, exactly as it would if the snapshot were current. The version
+// bump in owe.mjs (c509f3f: anonymous-name/B2/owner-participation gates)
+// voids the unjudged QUEUE a stale version produced; it must not un-void an
+// owner's actual judgment.
+test('a stale-version (owe-v1) judged snapshot still excludes its person from the current (owe-v2) pool', () => {
+  const db = openDb(':memory:');
+  insertPerson(db, { key: 'name:stale judged', name: 'Stale Judged', sent: 10, received: 10 });
+  insertMsg(db, 'name:stale judged', { ts: NOW - 12 * DAY, text: 'can you help with this?', authored: 1 });
+  insertOwnerParticipation(db, 'name:stale judged');
+
+  assert.ok(keysOf(owePool(db, { now: NOW })).includes('name:stale judged'),
+    'sanity: with no judgment yet, this person is a live Owe candidate');
+
+  const batchId = Number(db.prepare(
+    'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, 1, ?, NULL)'
+  ).run(NOW - 5 * DAY, 'open').lastInsertRowid);
+  const snapshotId = Number(db.prepare(
+    'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) ' +
+    "VALUES (?, 'name:stale judged', 'owe', 'old summary', '{}', 'owe-v1', 'owe-overdue-days', ?)"
+  ).run(batchId, NOW - 5 * DAY).lastInsertRowid);
+  assert.notEqual('owe-v1', OWE_PRODUCER_VERSION, 'the seeded version really is stale relative to the live constant');
+
+  db.prepare(
+    'INSERT INTO rm_card_event(person_key, kind, snapshot_id, event, reason, note, rule_version, time_band, created_at) ' +
+    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run('name:stale judged', 'owe', snapshotId, 'dismissed', 'not-useful', null, 'owe-v1', 'morning', NOW - 4 * DAY);
+
+  const keys = keysOf(owePool(db, { now: NOW }));
+  assert.ok(!keys.includes('name:stale judged'),
+    'dismissed under the old version still bars them from today\'s (owe-v2) pool');
+});
+
 // ---- 9: no MIN_DEPTH floor ----------------------------------------------
 test('a thin 4-message relationship still reaches the owe pool (no MIN_DEPTH floor)', () => {
   const db = openDb(':memory:');

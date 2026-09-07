@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { start, openDb } from '../server/hermes.mjs';
-import { produceOweBatch } from '../server/relationship/owe.mjs';
+import { produceOweBatch, OWE_PRODUCER_VERSION } from '../server/relationship/owe.mjs';
 import { produceBatch } from '../server/relationship/producer.mjs';
 
 const TOKEN = 'e'.repeat(64);
@@ -312,6 +312,14 @@ test('a restart hydrates cards from the last committed batch, without a refresh'
 
   const server = await start({
     port: 0, dbPath, llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN, relationshipCap: CAP,
+    // Pinned rather than left to read the owner's real ~/.hazlie config: this
+    // test's seeded snapshots carry the matcher path's own producer_version
+    // scheme ('rm-match-v13', a model+promptSha stamp -- see the top-of-file
+    // STUB_CARDS), and hydrateCards only applies eligibility's
+    // PRODUCER_VERSION staleness check to reconnect when this config says
+    // 'eligibility'. Leaving it unset made this test's outcome depend on
+    // whatever producer the machine running it happens to have configured.
+    relationshipProducerConfig: { producer: 'matcher', mode: 'any' },
   });
   try {
     const res = await fetch(`http://127.0.0.1:${server.port}/admin/relationship/card`, {
@@ -575,7 +583,7 @@ test('the route serves an Owe card with no page, and records shown under kind=ow
   });
 });
 
-test('accepting an Owe card records kind=owe, rule_version=owe-v1', async () => {
+test(`accepting an Owe card records kind=owe, rule_version=${OWE_PRODUCER_VERSION}`, async () => {
   await withEligibilityServer(async ({ call, db }) => {
     const now = Date.now();
     seedOweOpenLoopCandidate(db, 'name:owe route accept', 'Owe Route Accept', now);
@@ -586,7 +594,7 @@ test('accepting an Owe card records kind=owe, rule_version=owe-v1', async () => 
     });
     const accepted = db.prepare("SELECT kind, rule_version FROM rm_card_event WHERE event = 'accepted'").get();
     assert.equal(accepted.kind, 'owe');
-    assert.equal(accepted.rule_version, 'owe-v1');
+    assert.equal(accepted.rule_version, OWE_PRODUCER_VERSION);
   });
 });
 
