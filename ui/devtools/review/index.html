@@ -90,10 +90,15 @@
   }
   .tabs button[aria-pressed="true"] { background:var(--fg); color:var(--surface); border-color:var(--fg); }
   .health { font-size:.74rem; color:var(--fg-3); }
-  .poolbar { display:flex; gap:.4rem; margin:.5rem 0; }
+  .poolbar { display:flex; gap:.4rem; align-items:center; margin:.5rem 0; flex-wrap:wrap; }
+  .pool-offered { display:flex; align-items:center; gap:.3rem; font-size:.78rem; color:var(--fg-2); margin-left:.5rem; }
   table.pool { border-collapse:collapse; width:100%; font-size:.85rem; }
   table.pool th, table.pool td { text-align:left; padding:.35rem .5rem; border-bottom:1px solid var(--line, #333); }
   table.pool td.n { text-align:right; font-variant-numeric:tabular-nums; }
+  table.pool tr.gone { opacity:.4; }
+  .pool-acts { display:flex; gap:.3rem; flex-wrap:wrap; white-space:nowrap; align-items:center; }
+  .pool-acts button { padding:.2rem .5rem; font-size:.72rem; }
+  .pool-done { font-size:.78rem; color:var(--fg-3); font-style:italic; }
   .health b { color:var(--fg); font-variant-numeric:tabular-nums; }
   .health.stale { color:var(--weak); }
   .card5 {
@@ -201,6 +206,27 @@ function selectView(v) {
 // ---- pool: the producer's ranked eligible set, per mode -------------------
 const MODES = ['investor', 'founder', 'any'];
 let poolMode = 'investor';
+let includeOffered = false;
+
+// "fine" is a display-only verdict on the RANKING, not an event about a card
+// (owner: the ranking did its job, there is nothing for hermes to record) --
+// so it lives in localStorage, keyed per mode+person, and never touches the
+// network.
+const POOL_FINE_KEY = 'hzPoolFine';
+function loadFineMarks() {
+  try { return JSON.parse(localStorage.getItem(POOL_FINE_KEY) || '{}'); } catch { return {}; }
+}
+function markFine(personKey, mode) {
+  try {
+    const marks = loadFineMarks();
+    marks[mode + ' ' + personKey] = { personKey, mode, at: Date.now() };
+    localStorage.setItem(POOL_FINE_KEY, JSON.stringify(marks));
+  } catch {}
+}
+function isFine(personKey, mode) {
+  return Boolean(loadFineMarks()[mode + ' ' + personKey]);
+}
+
 function renderPoolBar() {
   const box = document.getElementById('poolbar');
   box.replaceChildren(...MODES.map((m) => {
@@ -209,20 +235,101 @@ function renderPoolBar() {
     btn.addEventListener('click', () => { poolMode = m; renderPoolBar(); loadPool(); });
     return btn;
   }));
+  const label = el('label', 'pool-offered');
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = includeOffered;
+  cb.addEventListener('change', () => { includeOffered = cb.checked; loadPool(); });
+  label.append(cb, document.createTextNode('show already-offered people'));
+  box.appendChild(label);
 }
+
+// The pool route is gaining ?includeOffered=1; if the running hermes predates
+// it, the request 400s -- fall back to the plain call rather than surfacing an
+// error for a param this page knows to be optional.
+async function fetchPool(mode, offered) {
+  const qs = 'mode=' + encodeURIComponent(mode) + (offered ? '&includeOffered=1' : '');
+  const res = await fetch('/api/pool?' + qs);
+  if (res.ok) return res;
+  if (offered && res.status === 400) return fetchPool(mode, false);
+  throw new Error(await res.text());
+}
+
+// The one write path per action here -- forwarded verbatim to hermes's own
+// route via serve.mjs, same shape as every other write on this page. Disables
+// every button in the cell first, so a doubled click cannot fire twice.
+async function poolPost(td, path, body) {
+  for (const b of td.querySelectorAll('button')) b.disabled = true;
+  try {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return true;
+  } catch (err) {
+    for (const b of td.querySelectorAll('button')) b.disabled = false;
+    td.appendChild(el('span', 'err', 'could not save: ' + err.message));
+    return false;
+  }
+}
+
+function poolActionsCell(r, tr) {
+  const td = el('td', 'pool-acts');
+  const setDone = (text) => {
+    tr.classList.add('gone');
+    td.replaceChildren(el('span', 'pool-done', text));
+  };
+
+  // Hidden in "any" mode: there is no per-mode tag on the row to remove.
+  if (poolMode !== 'any') {
+    const wrong = el('button', 'pool-wrong', 'wrong tag');
+    wrong.addEventListener('click', async () => {
+      const subRoles = (r.subRoles ?? []).filter((t) => t !== poolMode);
+      if (await poolPost(td, '/api/pool/subroles', { personKey: r.personKey, subRoles })) {
+        setDone('override saved');
+      }
+    });
+    td.appendChild(wrong);
+  }
+
+  const never = el('button', 'pool-never', 'never');
+  never.addEventListener('click', async () => {
+    if (await poolPost(td, '/api/pool/never', {
+      person_key: r.personKey, event: 'dismissed', reason: 'never-this-person',
+      note: 'pool review', snapshot_id: null,
+    })) {
+      setDone('suppressed');
+    }
+  });
+  td.appendChild(never);
+
+  const alreadyFine = isFine(r.personKey, poolMode);
+  const fine = el('button', 'pool-fine', alreadyFine ? '✓ fine' : 'fine');
+  fine.disabled = alreadyFine;
+  fine.addEventListener('click', () => {
+    markFine(r.personKey, poolMode);
+    fine.textContent = '✓ fine';
+    fine.disabled = true;
+  });
+  td.appendChild(fine);
+
+  return td;
+}
+
 async function loadPool() {
   const list = document.getElementById('poolList');
   const note = document.getElementById('poolNote');
   list.replaceChildren(el('p', 'health', 'loading…'));
   try {
-    const res = await fetch('/api/pool?mode=' + encodeURIComponent(poolMode));
-    if (!res.ok) throw new Error(await res.text());
+    const res = await fetchPool(poolMode, includeOffered);
     const data = await res.json();
     const rows = data.rows ?? [];
     note.textContent = poolMode + ' · ' + rows.length + ' eligible · ranked by depth, then change, then quiet. Eligible = two-way or met, quiet ≥180d on the DM clock, nothing scheduled, they wrote to you at least once, not muted/suppressed/never.';
     const table = el('table', 'pool');
     const head = el('tr');
-    for (const h of ['#', 'name', 'tags', 'role', 'depth', 'msgs', 'met', 'quiet d', 'they wrote last']) head.appendChild(el('th', null, h));
+    for (const h of ['#', 'name', 'tags', 'role', 'depth', 'msgs', 'met', 'quiet d', 'they wrote last', 'actions']) head.appendChild(el('th', null, h));
     table.appendChild(head);
     rows.forEach((r, i) => {
       const tr = el('tr');
@@ -235,6 +342,7 @@ async function loadPool() {
       tr.appendChild(el('td', 'n', String(r.meetings ?? '')));
       tr.appendChild(el('td', 'n', String(r.quietDays ?? '')));
       tr.appendChild(el('td', null, r.theyWroteLast ? 'yes' : ''));
+      tr.appendChild(poolActionsCell(r, tr));
       table.appendChild(tr);
     });
     list.replaceChildren(table);

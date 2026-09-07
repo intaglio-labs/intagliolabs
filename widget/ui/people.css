@@ -133,6 +133,20 @@ body.people .p-specs {
 }
 body.people .p-specs:hover { color: var(--hazelnut); }
 
+body.people .p-reconnect {
+  align-self: center;
+  margin-top: 2px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--secondary);
+  background: none;
+  border: 0;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+body.people .p-reconnect:hover { color: var(--hazelnut); }
+
 body.people .p-select {
   min-width: 0;
   font-family: inherit;

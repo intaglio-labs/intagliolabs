@@ -230,6 +230,10 @@ document.getElementById('pspecs').addEventListener('click', (e) => {
   e.preventDefault();
   openSearchDetails();
 });
+// The only other door to the reconnect card besides tapping the notify orb.
+document.getElementById('preconnect').addEventListener('click', () => {
+  hzPost('openReconnect').catch(() => {});
+});
 // ---------------- review mode: ask, don't guess ----------------
 // After "initialize search", the code has built the people-map and handed back
 // the pairs it could not confidently merge. We show them ONE at a time — same /

@@ -109,6 +109,16 @@ el('rcNo').addEventListener('click', () => verdict('dismissed', { reason: 'not-u
 el('rcMute').addEventListener('click', () => verdict('muted', { mute_days: 30 }));
 el('rcNever').addEventListener('click', () => verdict('dismissed', { reason: 'never-this-person' }));
 el('rcClose').addEventListener('click', () => hzPost('close').catch(() => {}));
+// The empty state ("nothing to review") left the panel with nothing useful to
+// do -- the mode picker above still works, but there was no way to ask for a
+// fresh batch under the picked mode without leaving and reopening the panel.
+el('rcRefresh').addEventListener('click', () => {
+  const btn = el('rcRefresh');
+  btn.disabled = true;
+  hzPost('relRefresh', { mode: currentMode })
+    .then(pull, () => {})
+    .finally(() => { btn.disabled = false; });
+});
 
 function selectMode(mode) {
   if (!MODES.includes(mode) || mode === currentMode) return;

@@ -41,7 +41,10 @@
       </div>
       <input id="rcFeedback" type="text" placeholder="why? (optional — this trains it)" autocomplete="off" spellcheck="false">
     </div>
-    <div class="rc-empty" id="rcEmpty" hidden>nothing to review — the orb will light up when there is.</div>
+    <div class="rc-empty" id="rcEmpty" hidden>
+      <p class="rc-empty-msg">nothing to review — the orb will light up when there is.</p>
+      <button class="rc-refresh" id="rcRefresh">refresh</button>
+    </div>
   </div>
   <script src="bridge.js"></script>
   <script src="reconnect.js"></script>

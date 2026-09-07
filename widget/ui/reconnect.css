@@ -47,4 +47,11 @@ body.reconnect { margin: 0; -webkit-user-select: none; user-select: none; }
   border: 1px solid var(--edge, #333); border-radius: 6px; color: inherit;
   padding: 5px 8px; font: 12px -apple-system, sans-serif;
 }
-.rc-empty { opacity: 0.6; padding: 18px 4px; }
+.rc-empty { opacity: 0.6; padding: 18px 4px; text-align: center; }
+.rc-empty-msg { margin: 0 0 10px; }
+.rc-refresh {
+  border: 1px solid var(--edge, #444); background: rgba(127, 127, 127, 0.12);
+  color: inherit; border-radius: 7px; padding: 5px 11px; font-size: 12.5px; cursor: pointer;
+  opacity: 1;
+}
+.rc-refresh:hover { background: rgba(127, 127, 127, 0.25); }

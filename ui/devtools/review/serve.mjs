@@ -222,7 +222,30 @@ const server = createServer(async (req, res) => {
     // Read-only; mode is validated by hermes, not here.
     if (req.method === 'GET' && url.pathname === '/api/pool') {
       const mode = url.searchParams.get('mode') ?? 'any';
-      const out = await hermes('/admin/relationship/pool?mode=' + encodeURIComponent(mode));
+      let path = '/admin/relationship/pool?mode=' + encodeURIComponent(mode);
+      // Optional and passed through only when the page asks for it: the pool
+      // route is only just gaining this param, and the page itself falls back
+      // to omitting it if the running hermes 400s on an unrecognized one.
+      const includeOffered = url.searchParams.get('includeOffered');
+      if (includeOffered) path += '&includeOffered=' + encodeURIComponent(includeOffered);
+      const out = await hermes(path);
+      return send(res, out.status, out.text);
+    }
+
+    // Pool-row overrides. Both forward the request body VERBATIM to hermes's
+    // own route, same as every other write in this file -- this page never
+    // decides what a tag or a suppression means, only that the click happened.
+    if (req.method === 'POST' && url.pathname === '/api/pool/subroles') {
+      let raw = '';
+      for await (const chunk of req) raw += chunk;
+      const out = await hermes('/people/sub-roles', { method: 'POST', body: raw });
+      return send(res, out.status, out.text);
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/pool/never') {
+      let raw = '';
+      for await (const chunk of req) raw += chunk;
+      const out = await hermes('/admin/relationship/event', { method: 'POST', body: raw });
       return send(res, out.status, out.text);
     }
 
