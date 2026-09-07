@@ -23,7 +23,8 @@ test('subRolesFromPosition covers each derivation rule and each exclusion', () =
     ['General Partner', ['investor']],
     ['Managing Partner', ['investor']],
     ['GP', ['investor']],
-    ['Principal', ['investor']],
+    // Bare "Principal" is ambiguous without fund-side words, same as "Partner"
+    ['Principal', []],
     ['Investor', ['investor']],
     ['Venture Partner', ['investor']],
     ['Angel Investor', ['investor']],
@@ -39,7 +40,28 @@ test('subRolesFromPosition covers each derivation rule and each exclusion', () =
     // Bare "Partner" is ambiguous without firm-side words
     ['Partner', []],
     ['Partner, Example Law LLP', []],
+    // "principal"/"partner" are weak on their own -- excluded engineering/
+    // science titles, and a bare partner+principal combo with no fund-side
+    // word anywhere in the title, are not investors
+    ['Principal Scientist', []],
+    ['Principal Software Engineer', []],
+    ['Principal Data Scientist', []],
+    ['Principal Consultant', []],
+    ['Partner / Principal', []],
+    // "investor relations" is a comms function, not an investor, even though
+    // it contains the otherwise-unconditional word "investor"
+    ['Investor Relations Consultant', []],
+    // incubator/accelerator/university staff use founder/venture vocabulary
+    // without being check-writers; the exclusion fires off the title itself
+    ['Director, Founder and Venture Incubation', ['founder']],
+    // A founder whose title is an excluded engineering/science "principal
+    // <role>" keeps the founder tag; the investor read is still excluded
+    ['Founder & Principal Engineer', ['founder']],
+    // Bare "venture" needs a fund-side company or a strong title word; with
+    // neither available position-only, it does not resolve to investor
+    ['Venture Lead', []],
     // Founder
+
     ['Founder', ['founder']],
     ['Co-Founder & CEO', ['founder']],
     ['Cofounder', ['founder']],
@@ -48,6 +70,12 @@ test('subRolesFromPosition covers each derivation rule and each exclusion', () =
     // Founding <role> is not a founder
     ['Founding Engineer', []],
     ['Founding Designer', []],
+    // "owner" never counts as a founder word when it's really a delivery
+    // title ("Product Owner" and its variants), regardless of company
+    ['Product Owner', []],
+    ['Technical Product Owner', []],
+    ['Business Owner', []],
+    ['Process Owner', []],
     // Operator (only when neither founder nor investor matched)
     ['Head of Product', ['operator']],
     ['VP Engineering', ['operator']],
@@ -80,6 +108,142 @@ test('subRolesFor also resolves the ambiguous "Partner" title against the compan
 
   const vcPartner = { key: 'p:2', linkedin: { position: 'Partner', company: 'Example Capital' } };
   assert.deepEqual(subRolesFor(vcPartner), ['investor']);
+});
+
+test('subRolesFor: bare "Principal" resolves off fund-side company words, same as "Partner"', () => {
+  for (const company of ['Example Capital', 'Example Ventures', 'Example Fund']) {
+    const person = { key: 'p:principal', linkedin: { position: 'Principal', company } };
+    assert.deepEqual(subRolesFor(person), ['investor'], `company: ${company}`);
+  }
+});
+
+test('subRolesFor: "Capital" next to a bank-like word is not fund-side', () => {
+  // "Capital One", "Capital Markets" and "Capital Bank" are real banks, not
+  // funds; a bare "Principal" or "Partner" there should not resolve to
+  // investor purely off the word "Capital" in the company name.
+  for (const company of ['Example Capital One', 'Example Capital Markets', 'Example Capital Bank', 'Example Bank Capital']) {
+    const principal = { key: 'p:bank-principal', linkedin: { position: 'Principal', company } };
+    assert.deepEqual(subRolesFor(principal), [], `principal at: ${company}`);
+  }
+
+  // The exclusion still wins regardless -- an engineering "principal <role>"
+  // at a bank whose name contains "Capital" was never investor-eligible.
+  const bankEngineer = { key: 'p:bank-eng', linkedin: { position: 'Principal Software Engineer', company: 'Example Capital Bank' } };
+  assert.deepEqual(subRolesFor(bankEngineer), []);
+
+  // A genuine fund word alongside a bank-like "Capital" phrase still counts.
+  const fundAndBank = { key: 'p:fund-and-bank', linkedin: { position: 'Principal', company: 'Example Capital One Ventures' } };
+  assert.deepEqual(subRolesFor(fundAndBank), ['investor']);
+});
+
+test('subRolesFor: "Venture Lead" needs a fund-side company to resolve, and gets one from "Ventures" or an angel platform', () => {
+  const noCompany = { key: 'p:venture-lead-1', linkedin: { position: 'Venture Lead', company: 'Example Inc' } };
+  assert.deepEqual(subRolesFor(noCompany), []);
+
+  const atVentures = { key: 'p:venture-lead-2', linkedin: { position: 'Venture Lead', company: 'Example Ventures' } };
+  assert.deepEqual(subRolesFor(atVentures), ['investor']);
+
+  const atAngelPlatform = { key: 'p:venture-lead-3', linkedin: { position: 'Venture Lead', company: 'Example Angels' } };
+  assert.deepEqual(subRolesFor(atAngelPlatform), ['investor']);
+});
+
+test('subRolesFor: "Partner" at a company named "... Venture Partners" resolves to investor', () => {
+  const person = { key: 'p:venture-partners', linkedin: { position: 'Partner', company: 'Example Venture Partners' } };
+  assert.deepEqual(subRolesFor(person), ['investor']);
+});
+
+test('subRolesFor: "Partner / Principal" at a strategy-consulting firm is not an investor', () => {
+  const person = { key: 'p:consulting', linkedin: { position: 'Partner / Principal', company: 'Example Strategy Consulting' } };
+  assert.deepEqual(subRolesFor(person), []);
+});
+
+test('subRolesFor: "Investor Relations" is excluded regardless of company', () => {
+  const person = { key: 'p:ir', linkedin: { position: 'Investor Relations Consultant', company: 'Example Capital' } };
+  assert.deepEqual(subRolesFor(person), []);
+});
+
+test('subRolesFor: incubator/accelerator/university staff are not investors, even with venture/founder vocabulary', () => {
+  const person = {
+    key: 'p:incubator',
+    linkedin: { position: 'Director, Founder and Venture Incubation', company: 'Example University Innovation Lab' },
+  };
+  assert.deepEqual(subRolesFor(person), ['founder']);
+
+  // The exclusion also fires off the company field alone, for a title that
+  // doesn't itself say "incubation".
+  const staffer = { key: 'p:incubator-2', linkedin: { position: 'Venture Partner', company: 'Example Accelerator' } };
+  assert.deepEqual(subRolesFor(staffer), []);
+});
+
+test('subRolesFor: a founder who is also a general/managing partner gets both tags regardless of company', () => {
+  const person = {
+    key: 'p:founder-gp',
+    linkedin: { position: 'Co-Founder and Managing Partner', company: 'Example Seed Fund' },
+  };
+  assert.deepEqual(subRolesFor(person), ['founder', 'investor']);
+});
+
+test('subRolesFor: a founder whose title is an engineering "principal <role>" keeps founder but not investor', () => {
+  const person = { key: 'p:founder-eng', linkedin: { position: 'Founder & Principal Engineer', company: 'Example Startup' } };
+  assert.deepEqual(subRolesFor(person), ['founder']);
+});
+
+test('subRolesFor: bare "Investor" is unconditional, regardless of company', () => {
+  const person = { key: 'p:investor', linkedin: { position: 'Investor', company: 'Example Inc' } };
+  assert.deepEqual(subRolesFor(person), ['investor']);
+});
+
+test('subRolesFor: "Product Owner" and its variants are never founder, regardless of company', () => {
+  for (const position of ['Product Owner', 'Technical Product Owner', 'Business Owner', 'Process Owner']) {
+    const person = { key: 'p:product-owner', linkedin: { position, company: 'Example Enterprises LLC' } };
+    assert.deepEqual(subRolesFor(person), [], `position: ${position}`);
+  }
+});
+
+test('subRolesFor: a bare "Owner" is founder unless the company is a service-provider firm', () => {
+  const signStudio = { key: 'p:owner-1', linkedin: { position: 'Owner', company: 'Example Sign Studio' } };
+  assert.deepEqual(subRolesFor(signStudio), ['founder']);
+
+  const enterprises = { key: 'p:owner-2', linkedin: { position: 'Owner', company: 'Example Enterprises LLC' } };
+  assert.deepEqual(subRolesFor(enterprises), ['founder']);
+
+  const consulting = { key: 'p:owner-3', linkedin: { position: 'Owner', company: 'Example Consulting, LLC' } };
+  assert.deepEqual(subRolesFor(consulting), []);
+
+  const realty = { key: 'p:owner-4', linkedin: { position: 'Owner', company: 'Example Realty Group' } };
+  assert.deepEqual(subRolesFor(realty), []);
+});
+
+test('subRolesFor: a founder-shaped title at a staffing/consulting/recruiting/agency/realty firm is not a founder', () => {
+  const consultant = { key: 'p:svc-1', linkedin: { position: 'Founder, Lead Consultant', company: 'Example Consulting, LLC' } };
+  assert.deepEqual(subRolesFor(consultant), []);
+
+  const staffing = { key: 'p:svc-2', linkedin: { position: 'Founder & CEO', company: 'Example Talent/Staffing Group' } };
+  assert.deepEqual(subRolesFor(staffing), []);
+
+  const recruiting = { key: 'p:svc-3', linkedin: { position: 'Co-Founder', company: 'Example Recruiting Partners' } };
+  assert.deepEqual(subRolesFor(recruiting), []);
+
+  const advisory = { key: 'p:svc-4', linkedin: { position: 'Founder', company: 'Example Advisory Services' } };
+  assert.deepEqual(subRolesFor(advisory), []);
+});
+
+test('subRolesFor: a bare "CEO" at a fund-side company is investor, not founder', () => {
+  const ceoAtFund = { key: 'p:ceo-fund', linkedin: { position: 'CEO', company: 'Example Capital' } };
+  assert.deepEqual(subRolesFor(ceoAtFund), ['investor']);
+
+  const chiefExecAtFund = { key: 'p:chief-exec-fund', linkedin: { position: 'Chief Executive Officer', company: 'Example Ventures' } };
+  assert.deepEqual(subRolesFor(chiefExecAtFund), ['investor']);
+
+  // A regular (non-fund) company keeps the founder read exactly as before.
+  const ceoAtStartup = { key: 'p:ceo-startup', linkedin: { position: 'CEO', company: 'Example Startup Inc' } };
+  assert.deepEqual(subRolesFor(ceoAtStartup), ['founder']);
+
+  // An explicit "Founder" word alongside "CEO" keeps founder even at a
+  // fund-named company -- the redirect only applies to a *bare* ceo/chief
+  // executive officer with no founder word of its own.
+  const founderCeoAtFund = { key: 'p:founder-ceo-fund', linkedin: { position: 'Founder & CEO', company: 'Example Capital' } };
+  assert.deepEqual(subRolesFor(founderCeoAtFund), ['founder']);
 });
 
 test('subRolesFor: an owner override replaces the derived set entirely', () => {
