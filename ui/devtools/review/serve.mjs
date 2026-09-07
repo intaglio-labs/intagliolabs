@@ -100,6 +100,13 @@ const server = createServer(async (req, res) => {
       if (out.status !== 200) return send(res, out.status, out.text);
       const data = JSON.parse(out.text);
       const row = corpus.prepare('SELECT text FROM context WHERE id = ?');
+      // Whether a pending claim is a discovery-sweep sub_role proposal, and
+      // which tag it carries -- NOT present on hermes's /admin/memory/pending
+      // response (that route's own `kind` column is the claim's kind, e.g.
+      // 'fact', not person_sweep_proposal's kind). Read read-only, same
+      // handle and same reasoning as source_text above: this is display
+      // context for the desk, not a second writer.
+      const sweepProposal = corpus.prepare('SELECT kind, value FROM person_sweep_proposal WHERE claim_id = ?');
       data.claims = (data.claims ?? []).map((c) => {
         const source = c.context_id == null ? null : (row.get(c.context_id)?.text ?? null);
         // SCORE IT HERE IF HERMES DID NOT. The running hermes is whatever version
@@ -107,11 +114,14 @@ const server = createServer(async (req, res) => {
         // -- as it did the first time this ran. A dev tool that only works
         // against an unreleased build is a dev tool nobody uses.
         const support = c.support ?? supportOf(c.text, source ?? '', c.quote ?? '');
+        const sweep = sweepProposal.get(c.id);
         return {
           ...c,
           source_text: source,
           support,
           support_band: c.support_band ?? supportBand(support),
+          sweep_kind: sweep?.kind ?? null,
+          sweep_value: sweep?.value ?? null,
         };
       });
       return send(res, 200, JSON.stringify(data));

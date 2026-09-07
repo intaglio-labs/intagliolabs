@@ -213,6 +213,7 @@
 
 <main id="pagesView" hidden>
   <div class="poolbar" id="pagesBar"></div>
+  <p class="health" id="sweepStatus"></p>
   <div class="pages-wrap">
     <div class="pages-left">
       <div class="pages-list" id="pagesList"></div>
@@ -258,7 +259,7 @@ function selectView(v) {
   document.getElementById('health').hidden = v !== 'cards';
   if (v === 'cards' && !cardsLoaded) { cardsLoaded = true; loadCards(); loadHealth(); }
   if (v === 'pool') { renderPoolBar(); loadPool(); }
-  if (v === 'pages') { renderPagesBar(); loadPagesList(); }
+  if (v === 'pages') { renderPagesBar(); loadPagesList(); loadSweepStatus(); }
 }
 
 // ---- pool: the producer's ranked eligible set, per mode -------------------
@@ -455,6 +456,14 @@ function card(row, i) {
   node.append(meta);
 
   node.append(evidence(row));
+
+  // A discovery-sweep sub_role proposal: accepting this claim also unions the
+  // tag into the person's sub_roles (applySweepDecision, server-side), which
+  // changes who the reconnect producer offers -- worth saying before the
+  // click, not after.
+  if (row.sweep_kind === 'sub_role' && row.sweep_value) {
+    node.append(el('div', 'health', `accepting also tags this person ${row.sweep_value}`));
+  }
 
   const acts = el('div', 'acts');
   const keep = el('button', 'keep', 'Keep');
@@ -723,6 +732,47 @@ let pagesMode = 'investor';
 let pagesRows = [];
 let pagesPersonKey = null;
 let pagesPersonName = null;
+
+// One line from /stats' sweep key (proxied verbatim by /api/health, which
+// already forwards the whole /stats body -- no serve.mjs change needed for
+// this part). "never run" is the whole line when there is no run yet
+// (lastPassAt null); otherwise scope/swept/pending, the last pass (or its
+// skip reason), tokens and the local call cap.
+function relTime(ms) {
+  if (ms == null) return 'never';
+  const diff = Math.max(0, Date.now() - ms);
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
+function sweepLine(s) {
+  if (!s || s.lastPassAt == null) return 'sweep · never run';
+  const powerLabel = s.powerMode === 'trickle' ? 'less power' : 'full speed';
+  const passDesc = s.lastPassStatus === 'skipped'
+    ? `last pass skipped: ${s.lastSkipReason ?? 'unknown'}`
+    : `last pass ${relTime(s.lastPassAt)} (${powerLabel}, ${s.budget ?? '—'}/pass)`;
+  const tokK = Math.round((s.tokensEst24h ?? 0) / 1000);
+  return `sweep · ${s.scope ?? 0} in scope · ${s.swept ?? 0} swept · ${s.pending ?? 0} pending · `
+    + `${passDesc} · ${tokK}k tok/24h · ${s.calls24h ?? 0}/${s.callCap ?? 0} calls`;
+}
+
+async function loadSweepStatus() {
+  const box = document.getElementById('sweepStatus');
+  if (!box) return;
+  try {
+    const res = await fetch('/api/health');
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    box.textContent = sweepLine(data.sweep);
+  } catch {
+    box.textContent = '';
+  }
+}
 
 function renderPagesBar() {
   const box = document.getElementById('pagesBar');
