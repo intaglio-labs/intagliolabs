@@ -74,6 +74,24 @@ Do not re-add these; their absence is a decision, not an oversight.
    in tracked source. That is a tripwire, not a document. If you add a network
    call, declare it there with a real justification, or the build stops.
 
+   Public lookup is the one path that sends anything outward, and what it
+   sends is a search string built only from allowlisted public identifiers:
+   display name, firm/company, a public handle already in the corpus, and a
+   public LinkedIn profile URL — assembled by buildLookupQuery, whose input
+   gate refuses any object carrying any other field, and never fired at all
+   without two anchors.
+
+   Never leaves the box, under any lookup: message or transcript text,
+   anything from claim, email addresses, phone numbers, calendar contents,
+   owner-side data of any kind, the person's person_key, and the fact that a
+   lookup is for a reconnect — the prompt is told nothing about why it is
+   being asked.
+
+   The search itself runs on Anthropic's side (api.anthropic.com, kind
+   public-lookup in ops/EGRESS.json); this repo opens no other socket, stores
+   no fetched page, and records every query in lookup_log — field names, the
+   assembled string, and its hash — on the person's own page.
+
 4. **Logs never carry row content.** The logger refuses fields named like message
    content. Counts, timings, IDs and error types only. This holds for probes too.
 

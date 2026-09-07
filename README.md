@@ -36,7 +36,10 @@ see in the review box is the privacy boundary.
 That does not mean that nothing ever leaves your Mac: connected services,
 software distribution, and other network access have their own explicit paths.
 [`ops/EGRESS.json`](ops/EGRESS.json) is the source of truth for declared egress
-and is enforced by `connectors/test/egress.test.mjs`.
+and is enforced by `connectors/test/egress.test.mjs`. One of those paths, public
+lookup, searches the public web for a person using only identifiers already in
+your corpus; a claim it proposes is an unverified public assertion about a real
+person, stored locally, pending your own review.
 
 ## Run Intaglio
 

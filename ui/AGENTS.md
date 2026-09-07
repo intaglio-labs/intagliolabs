@@ -159,6 +159,15 @@ written down anywhere else. For what is reachable *today*, read the ledger.
    step on every deployed Mac Mini. Google also closed the cheaper door — basic-auth
    CalDAV ended 2025-03-14, so a Gmail app password cannot reach Calendar and OAuth
    is the only remaining mechanism.
+6. **Public lookup's model-side web search** (`api.anthropic.com`, kind
+   `public-lookup` in `ops/EGRESS.json`, added 2026-09-07): a capped
+   `claude -p --allowedTools WebSearch` call, one person at a time, built only
+   from allowlisted public identifiers already in the corpus — display name,
+   firm, a public handle, a public LinkedIn URL — by `buildLookupQuery`, whose
+   own input gate refuses any object carrying any other field. The search
+   executes on Anthropic's side; this repo opens no other socket, stores no
+   fetched page, and every query is logged verbatim — field names, the
+   assembled string, and its hash — in `lookup_log`, on the person's own page.
 
 Recorded rejections: **Sendblue** (would relay message content through a third
 party's Mac farm from a number that isn't the owner's — fails the claim above three
