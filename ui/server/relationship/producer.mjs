@@ -157,7 +157,13 @@ function poolSql(db, { includeOffered = false } = {}) {
       )
       ${includeOffered ? '' : `
       AND p.person_key NOT IN (
-        SELECT person_key FROM rm_card_event WHERE event IN ('accepted', 'dismissed')
+        -- Kind-scoped on purpose (added alongside owe.mjs): a person judged
+        -- under a DIFFERENT producer's kind (e.g. dismissed on an Owe card)
+        -- must still reach the reconnect pool -- each producer's own judged
+        -- history is its own gate. The shown-cooldown just below stays
+        -- kind-agnostic: a card of any kind just shown is a real interruption
+        -- either producer should let cool down before offering another.
+        SELECT person_key FROM rm_card_event WHERE kind = 'reconnect' AND event IN ('accepted', 'dismissed')
       )
       AND p.person_key NOT IN (
         SELECT person_key FROM rm_card_event WHERE event = 'shown' AND created_at > ?

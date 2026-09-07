@@ -224,6 +224,44 @@ test('the 7-day cooldown keys off a shown card, not a bare snapshot', () => {
     'a shown event 30 days ago is outside the 7-day window and does not exclude');
 });
 
+// Kind-scoping (added alongside owe.mjs, the second producer): the judged
+// gate must key on THIS producer's own kind, same as the mute gate already
+// did. Mutation check: reverting either gate back to kind-agnostic turns one
+// of the two assertions below into a failure.
+test('the judged gate and the mute gate are both kind-scoped to reconnect', () => {
+  const db = buildFixture();
+
+  const dismissedOnOwe = 'name:dismissed on owe';
+  insertPerson(db, { key: dismissedOnOwe, name: 'Dismissed On Owe', sent: 20, received: 20 });
+  insertAuthored(db, dismissedOnOwe);
+  insertActiveDay(db, dismissedOnOwe, day(200));
+  db.prepare(
+    'INSERT INTO rm_card_event(person_key, kind, snapshot_id, event, reason, note, rule_version, time_band, created_at) ' +
+    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(dismissedOnOwe, 'owe', null, 'dismissed', 'not-useful', null, 'owe-v1', 'morning', NOW - 1 * DAY);
+
+  const dismissedOnReconnect = 'name:dismissed on reconnect';
+  insertPerson(db, { key: dismissedOnReconnect, name: 'Dismissed On Reconnect', sent: 20, received: 20 });
+  insertAuthored(db, dismissedOnReconnect);
+  insertActiveDay(db, dismissedOnReconnect, day(200));
+  db.prepare(
+    'INSERT INTO rm_card_event(person_key, kind, snapshot_id, event, reason, note, rule_version, time_band, created_at) ' +
+    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(dismissedOnReconnect, 'reconnect', null, 'dismissed', 'not-useful', null, PRODUCER_VERSION, 'morning', NOW - 1 * DAY);
+
+  const oweMuted = 'name:owe muted for reconnect check';
+  insertPerson(db, { key: oweMuted, name: 'Owe Muted', sent: 20, received: 20 });
+  insertAuthored(db, oweMuted);
+  insertActiveDay(db, oweMuted, day(200));
+  db.prepare('INSERT INTO rm_mute(person_key, kind, until_at, created_at) VALUES (?, ?, ?, ?)')
+    .run(oweMuted, 'owe', NOW + 10 * DAY, NOW);
+
+  const keys = keysOf(eligiblePool(db, { mode: 'any', now: NOW }));
+  assert.ok(keys.includes(dismissedOnOwe), 'dismissed under kind=owe still reaches the reconnect pool');
+  assert.ok(!keys.includes(dismissedOnReconnect), 'dismissed under kind=reconnect is excluded, as before');
+  assert.ok(keys.includes(oweMuted), 'a mute scoped to kind=owe does not touch the reconnect pool');
+});
+
 test('mode=investor requires the investor sub_role; mode=founder requires founder', () => {
   const db = buildFixture();
   const investors = keysOf(eligiblePool(db, { mode: 'investor', now: NOW }));
