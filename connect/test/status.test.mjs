@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { discordImportState, readStatus } from '../lib/status.mjs';
@@ -165,6 +165,23 @@ test('shared connector disable markers apply to account and platform rows', (t) 
     assert.equal(platform.connected, false);
     assert.equal(platform.detail, 'turned off');
   }
+});
+
+test('LinkedIn reports the persisted archive import time independently of live login', (t) => {
+  const dir = home(t, {});
+  const before = readStatus({ home: dir }).find((row) => row.id === 'linkedin');
+  assert.equal(before.archiveImportedAt, null);
+
+  const imports = join(dir, '.hazlie', 'imports', 'linkedin');
+  mkdirSync(imports, { recursive: true, mode: 0o700 });
+  const messages = join(imports, 'messages.csv');
+  writeFileSync(messages, 'archive fixture', { mode: 0o600 });
+  const importedAt = new Date('2026-09-02T21:09:06.000Z');
+  utimesSync(messages, importedAt, importedAt);
+
+  const after = readStatus({ home: dir }).find((row) => row.id === 'linkedin');
+  assert.equal(after.archiveImportedAt, importedAt.getTime());
+  assert.equal(after.connected, false, 'archive presence must not pretend live sync is connected');
 });
 
 function seedDiscord(homeDir, { portals = 1, messages = 0, readStateVersion = 1 } = {}) {

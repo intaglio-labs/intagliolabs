@@ -247,9 +247,7 @@ const HZ_HINTS = {
   // in-app walkthrough — open granola.ai, create a key, paste it right here.
   granola: { app: 'com.granola.app', url: 'https://granola.ai', link: 'Granola',
              walkthrough: true }, // the DESKTOP app first — the key lives in its settings
-  // ~~linkedin: how to request an export and where to unzip it.~~ Gone with
-  // the export itself (owner, 2026-08-25): LinkedIn is a bridge now, so its
-  // tile renders the ordinary cookie-login flow like Messenger's.
+  linkedin: { text: 'Import history once, then keep the live connection for new messages.' },
   // OAuth2 since Oura retired personal access tokens in Dec 2025: the PAT
   // page this used to link is a dead end, and there is no settings page to
   // send anyone to instead, so this one is text-only — the connect page
@@ -340,6 +338,53 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
     return tip;
   }
 
+  const appendLinkedInArchive = (target) => {
+    if (HZ_KIND(src.id) === 'linkedin') {
+      const history = document.createElement('span');
+      history.className = 'setup';
+      history.textContent = '1 · import your past messages once';
+      const request = document.createElement('button');
+      request.className = 'hold-ok';
+      request.textContent = 'request archive ↗';
+      request.addEventListener('click', (e) => {
+        e.stopPropagation();
+        hzPost('openExternal', { url: 'https://www.linkedin.com/mypreferences/d/download-my-data' });
+      });
+      const upload = document.createElement('button');
+      upload.className = 'hold-ok';
+      upload.textContent = 'choose downloaded archive ⧉';
+      const importState = document.createElement('span');
+      importState.className = 'setup';
+      const importedAt = Number(src.archiveImportedAt);
+      importState.textContent = Number.isFinite(importedAt) && importedAt > 0
+        ? `archive stored locally · last imported ${new Date(importedAt).toLocaleString([], {
+          month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
+        })}`
+        : 'no archive imported yet';
+      upload.addEventListener('click', (e) => {
+        e.stopPropagation();
+        upload.disabled = true;
+        upload.textContent = 'importing…';
+        hzPost('importLinkedInArchive')
+          .then((result) => {
+            upload.disabled = false;
+            upload.textContent = 'choose downloaded archive ⧉';
+            if (result && result.state === 'ok') importState.textContent = 'archive stored locally · imported just now';
+            else if (result && result.state !== 'cancelled') importState.textContent = result.error || 'could not import that archive';
+          })
+          .catch(() => {
+            upload.disabled = false;
+            upload.textContent = 'choose downloaded archive ⧉';
+            importState.textContent = 'could not open the archive';
+          });
+      });
+      const live = document.createElement('span');
+      live.className = 'setup';
+      live.textContent = '2 · keep LinkedIn connected for new messages';
+      target.append(history, request, upload, importState, live);
+    }
+  };
+
   // Non-bridge (and connected) connectors: why it matters, its status, the how.
   const renderTip = () => {
     tip.replaceChildren();
@@ -352,6 +397,7 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
     stay.className = 'stay';
     stay.textContent = HZ_STAY;
     tip.appendChild(stay);
+    appendLinkedInArchive(tip);
     if (src.disabled && src.action !== 'enable') {
       // TURNED OFF BY HAND, and not re-enablable from here: the marker belongs
       // to run.mjs --disable and the native action is deliberately not
@@ -459,6 +505,9 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
     stay.className = 'stay';
     stay.textContent = HZ_STAY;
     tip.appendChild(stay);
+    // LinkedIn is deliberately both things: archive-backed history and a
+    // bridge-backed live tail. Its status card must expose both actions.
+    appendLinkedInArchive(tip);
 
     // Keep a transient loopback-status miss from becoming a sticky false
     // diagnosis. The settings surface has the same bounded re-poll below; the
@@ -786,7 +835,7 @@ function hzConnectorHint(src, host, { refresh = () => {}, onClose = null, onBusy
   // press goes straight to the login now and the tile spins; see the block at
   // the bottom of this function.
 
-  if (HZ_IS_BRIDGE(src) && !src.connected) {
+  if (HZ_IS_BRIDGE(src) && !src.connected && HZ_KIND(src.id) !== 'linkedin') {
     // NO CARD WHILE THE LOGIN OPENS.
     //
     // Pressing a bridge tile started the login AND put up a card saying

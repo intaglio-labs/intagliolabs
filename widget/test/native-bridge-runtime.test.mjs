@@ -113,6 +113,16 @@ test('the native configs satisfy the hardening checkBridgeHardening demands', ()
   assert.match(nativeSh, /max_catchup_messages = 2147483647/u);
   assert.match(nativeSh, /logging\.min_level = \\"info\\"/u, 'logs must not record message bodies');
   assert.match(nativeSh, /forward_limits\.missed\.dm = -1/u, 'legacy bridge limits too');
+  assert.match(
+    nativeSh,
+    /\.network\.sync\.create_limit = 20/u,
+    'LinkedIn live discovery must stay bounded',
+  );
+  assert.match(
+    nativeSh,
+    /if \[ "\$name" = "linkedin" \][\s\S]*?\.backfill\.max_initial_messages = 0/u,
+    'LinkedIn history comes from the archive, not remote backfill',
+  );
 });
 
 test('native appservices bind loopback, which the container path could not', () => {

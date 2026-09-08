@@ -30,6 +30,17 @@ npm run eval:people
 npm run eval:people:private
 ```
 
+When llama-server has more than one model, select the model explicitly:
+
+```sh
+npm run eval:people -- --model Qwen3-8B-Q4_K_M
+npm run eval:people:private -- --model Qwen3-8B-Q4_K_M
+```
+
+`PEOPLE_EVAL_LLAMA_MODEL` provides the same selector for automation. A
+command-line `--model` takes precedence when both are present. Single-model
+servers can continue to omit the selector.
+
 `--debug` is allowed only for synthetic diagnostics. Private output is passed through an aggregate-field allowlist before it can be printed.
 
 ## Release gate

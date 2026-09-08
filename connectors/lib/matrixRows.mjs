@@ -35,6 +35,8 @@ export const GHOST_SOURCE = Object.freeze({
   linkedin: 'linkedin',
 });
 
+import { linkedinMessageEntityId } from './linkedinRows.mjs';
+
 const OWNER = '@you:hazlie.local';
 
 /** `@facebook_123:hazlie.local` → { source: 'messenger', handle: 'facebook_123' } */
@@ -81,19 +83,32 @@ export function eventToRow(event, { roomId, names = new Map(), selfName = 'me' }
   // the platform — the room does. `partner` is the ghost this room belongs to,
   // resolved by the caller from the room's members.
   const partner = event.__partner ?? null;
-  const source = who.kind === 'ghost' ? who.source : partner?.source;
+  // Bridgev2 keeps double puppeting off, so the owner's remote account can
+  // speak through a platform ghost instead of @you. The room's
+  // io.element.functional_members state identifies that self ghost without
+  // guessing from a display name. It belongs to the owner side of the DM, not
+  // to the set of conversation partners.
+  const functionalMembers = event.__functionalMembers instanceof Set
+    ? event.__functionalMembers
+    : new Set();
+  const isFunctionalSelf = who.kind === 'ghost' && functionalMembers.has(event.sender);
+  const fromMe = who.kind === 'owner' || isFunctionalSelf;
+  const source = fromMe ? partner?.source : who.source;
   if (!source) return null; // an owner message in a room with no ghost: not a DM
 
-  const fromMe = who.kind === 'owner';
-  const handle = who.kind === 'ghost' ? who.handle : partner?.handle;
+  const handle = !fromMe && who.kind === 'ghost' ? who.handle : partner?.handle;
+  const partnerName = partner ? names.get(partner.mxid) : null;
   const speaker = fromMe
     ? selfName
     : (names.get(event.sender) || handle || null);
+  const peer = fromMe ? (partnerName || handle) : speaker;
 
   return {
     ts,
     source,
-    entity_id: `${source}:${eventId}`,
+    entity_id: source === 'linkedin'
+      ? linkedinMessageEntityId({ ts, text, fromMe, peer })
+      : `${source}:${eventId}`,
     speaker,
     text,
     meta: {
@@ -110,7 +125,7 @@ export function eventToRow(event, { roomId, names = new Map(), selfName = 'me' }
       ...(Boolean(event.__isGroup) && !fromMe && handle
         ? { sender_handle: handle }
         : {}),
-      ...(partner && names.get(partner.mxid) ? { chat_name: names.get(partner.mxid) } : {}),
+      ...(partnerName ? { chat_name: partnerName } : {}),
     },
   };
 }

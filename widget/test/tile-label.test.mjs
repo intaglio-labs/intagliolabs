@@ -81,10 +81,12 @@ test('both the tile and its card carry the source id', () => {
 // "becomes a spinner in place — the owner's ask, instead of opening the hint
 // panel to a transitional 'opening login…'". The People ring never got it. This
 // keeps them together.
-test('a bridge press starts the login without a card', () => {
+test('a bridge press starts login without a card, except LinkedIn hybrid setup', () => {
   const tileSrc = readFileSync(join(WIDGET, 'ui/connector-tile.js'), 'utf8');
-  const block = /if \(HZ_IS_BRIDGE\(src\) && !src\.connected\) \{([\s\S]*?)\n {2}\}/u.exec(tileSrc)?.[1];
+  const block = /if \(HZ_IS_BRIDGE\(src\) && !src\.connected && HZ_KIND\(src\.id\) !== 'linkedin'\) \{([\s\S]*?)\n {2}\}/u.exec(tileSrc)?.[1];
   assert.ok(block, 'the un-connected bridge path must be its own branch');
+  assert.match(tileSrc, /HZ_KIND\(src\.id\) === 'linkedin'[\s\S]*?importLinkedInArchive/u,
+    'LinkedIn opens its archive-plus-live setup card first');
   assert.match(block, /hzPost\('bridgeWebLogin'/u, 'it goes straight to the login');
   assert.match(block, /hzSetBridgeWaiting\(src\.id, true, onBusy\)/u,
     'the TILE carries a source-level wait that survives repainting');

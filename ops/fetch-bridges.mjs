@@ -13,20 +13,16 @@
 // configuration, and Synapse is a separate leg (it has a macOS arm64 wheel, so
 // it is a venv rather than a container -- but that is not this file).
 //
-// FETCHED, NOT BUNDLED, and that is deliberate. It is the same posture
-// `docker pull` already has: upstream artifacts land on the owner's machine from
-// upstream, and this repo conveys none of them. The bridges are AGPL-3.0; a DMG
-// that carried them would owe every recipient the Corresponding Source, and
-// upstream's own LICENSE.exceptions -- which names Beeper and Element -- is good
-// evidence they read embedding as needing permission. Bundling may still be the
-// right call one day for an offline first run. It is a licence conversation
-// first, and nothing here forecloses it.
+// FETCHED, NOT BUNDLED, and that is deliberate. Upstream executables land on the
+// owner's machine from upstream. LinkedIn is the narrow exception: this repo
+// carries a binary delta that turns the exact upstream executable into the
+// audited realtime-only build. The corresponding source is the upstream tag
+// plus the textual patch beside that delta; see bridges/patches/README.md.
 //
-// EVERY BYTE IS CHECKED. The manifest pins a sha256 per asset, taken from
-// upstream's own sha256sums.txt. A download that does not match is deleted, not
-// quarantined and not warned about: a bridge binary holds live session cookies
-// for someone's Facebook account, and "probably fine" is not a posture that
-// survives contact with that.
+// EVERY BYTE IS CHECKED. Ordinary assets use upstream's published sha256.
+// Patched assets separately pin the upstream input, patch, and final executable.
+// Any mismatch is deleted, not quarantined and not warned about: a bridge binary
+// holds live session cookies, and "probably fine" is not an acceptable posture.
 //
 // LOG POLICY (connectors/AGENTS.md): paths, names and counts. No cookie, no
 // token, no account. Nothing here ever sees one.
@@ -34,7 +30,7 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 
@@ -55,6 +51,19 @@ export function loadManifest(path = MANIFEST) {
     if (!b.id || !b.repo || !b.release || !b.asset) {
       throw new Error(`bridge "${b.id ?? '?'}" is missing a required field`);
     }
+    if (b.patch !== undefined) {
+      if (!/^[0-9a-f]{64}$/u.test(String(b.sourceSha256 ?? ''))) {
+        throw new Error(`bridge "${b.id}" patch has no valid sourceSha256`);
+      }
+      if (!b.patch || typeof b.patch.path !== 'string'
+          || b.patch.path.length === 0 || b.patch.path.startsWith('/')
+          || b.patch.path.split('/').includes('..')) {
+        throw new Error(`bridge "${b.id}" patch has no safe relative path`);
+      }
+      if (!/^[0-9a-f]{64}$/u.test(String(b.patch.sha256 ?? ''))) {
+        throw new Error(`bridge "${b.id}" patch has no valid sha256`);
+      }
+    }
   }
   return raw;
 }
@@ -69,6 +78,42 @@ export function binDir(home = homedir()) {
 
 export function sha256File(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+export function applyBridgePatch({ source, output, manifestPath, bridge }) {
+  rmSync(output, { force: true });
+  const sourceDigest = sha256File(source);
+  if (sourceDigest !== bridge.sourceSha256) {
+    throw new Error(
+      `source sha256 mismatch: expected ${bridge.sourceSha256}, got ${sourceDigest}`
+    );
+  }
+  const manifestDir = resolve(dirname(manifestPath));
+  const patchPath = resolve(manifestDir, bridge.patch.path);
+  if (!patchPath.startsWith(`${manifestDir}${sep}`)) {
+    throw new Error(`bridge "${bridge.id}" patch escapes the manifest directory`);
+  }
+  const patchDigest = sha256File(patchPath);
+  if (patchDigest !== bridge.patch.sha256) {
+    throw new Error(
+      `patch sha256 mismatch: expected ${bridge.patch.sha256}, got ${patchDigest}`
+    );
+  }
+  const result = spawnSync('/usr/bin/bspatch', [source, output, patchPath], {
+    encoding: 'utf8',
+  });
+  if (result.status !== 0) {
+    rmSync(output, { force: true });
+    const detail = String(result.stderr ?? '').trim();
+    throw new Error(`bspatch failed${detail ? `: ${detail}` : ''}`);
+  }
+  const outputDigest = sha256File(output);
+  if (outputDigest !== bridge.sha256) {
+    rmSync(output, { force: true });
+    throw new Error(
+      `patched sha256 mismatch: expected ${bridge.sha256}, got ${outputDigest}`
+    );
+  }
 }
 
 // Which dylibs a Mach-O needs, and which of those cannot be resolved.
@@ -186,18 +231,28 @@ export async function fetchBridges({
         continue;
       }
       const tmp = `${dest}.part`;
+      const patched = `${dest}.patched`;
       try {
         bytes = await download(assetUrl(manifest, bridge), tmp);
         const got = sha256File(tmp);
-        if (got !== bridge.sha256) {
+        const expectedDownload = bridge.patch ? bridge.sourceSha256 : bridge.sha256;
+        if (got !== expectedDownload) {
           rmSync(tmp, { force: true });
-          throw new Error(`sha256 mismatch: expected ${bridge.sha256}, got ${got}`);
+          throw new Error(`sha256 mismatch: expected ${expectedDownload}, got ${got}`);
         }
-        renameSync(tmp, dest);
+        if (bridge.patch) {
+          applyBridgePatch({ source: tmp, output: patched, manifestPath, bridge });
+          rmSync(tmp, { force: true });
+          renameSync(patched, dest);
+        } else {
+          renameSync(tmp, dest);
+        }
         chmodSync(dest, 0o700);
+        bytes = statSync(dest).size;
         state = 'fetched';
       } catch (error) {
         rmSync(tmp, { force: true });
+        rmSync(patched, { force: true });
         results.push({ id: bridge.id, state: 'failed', ok: false, error: String(error?.message ?? error) });
         log(`${bridge.id}: FAILED — ${String(error?.message ?? error)}`);
         continue;

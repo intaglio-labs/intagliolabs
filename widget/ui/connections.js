@@ -710,9 +710,7 @@ const HINTS = {
     step2: 'create an app, then copy its api_id and api_hash',
     paste: 'paste api_id:api_hash',
   },
-  // ~~linkedin: how to request an export and where to unzip it.~~ Gone with
-  // the export itself (owner, 2026-08-25): LinkedIn is a bridge now, so its
-  // tile renders the ordinary cookie-login flow like Messenger's.
+  linkedin: { text: 'Import history once, then keep the live connection for new messages.' },
   // OAuth2 since Oura retired personal access tokens in Dec 2025: the PAT
   // page this used to link is a dead end, and there is no settings page to
   // send anyone to instead, so this one is text-only — the connect page
@@ -1158,6 +1156,53 @@ function card(src, keep) {
   tip.append(open, step2, paste, send, said);
   };
 
+  const appendLinkedInArchive = (target) => {
+    if (kindOf(src.id) === 'linkedin') {
+      const history = document.createElement('span');
+      history.className = 'setup';
+      history.textContent = '1 · import your past messages once';
+      const request = document.createElement('button');
+      request.className = 'hold-ok';
+      request.textContent = 'request archive ↗';
+      request.addEventListener('click', (e) => {
+        e.stopPropagation();
+        hzPost('openExternal', { url: 'https://www.linkedin.com/mypreferences/d/download-my-data' });
+      });
+      const upload = document.createElement('button');
+      upload.className = 'hold-ok';
+      upload.textContent = 'choose downloaded archive ⧉';
+      const importState = document.createElement('span');
+      importState.className = 'setup';
+      const importedAt = Number(src.archiveImportedAt);
+      importState.textContent = Number.isFinite(importedAt) && importedAt > 0
+        ? `archive stored locally · last imported ${new Date(importedAt).toLocaleString([], {
+          month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
+        })}`
+        : 'no archive imported yet';
+      upload.addEventListener('click', (e) => {
+        e.stopPropagation();
+        upload.disabled = true;
+        upload.textContent = 'importing…';
+        hzPost('importLinkedInArchive')
+          .then((result) => {
+            upload.disabled = false;
+            upload.textContent = 'choose downloaded archive ⧉';
+            if (result && result.state === 'ok') importState.textContent = 'archive stored locally · imported just now';
+            else if (result && result.state !== 'cancelled') importState.textContent = result.error || 'could not import that archive';
+          })
+          .catch(() => {
+            upload.disabled = false;
+            upload.textContent = 'choose downloaded archive ⧉';
+            importState.textContent = 'could not open the archive';
+          });
+      });
+      const live = document.createElement('span');
+      live.className = 'setup';
+      live.textContent = '2 · keep LinkedIn connected for new messages';
+      target.append(history, request, upload, importState, live);
+    }
+  };
+
   const renderTip = () => {
     tip.replaceChildren();
     tip.classList.add('hold');
@@ -1171,6 +1216,7 @@ function card(src, keep) {
     stay.className = 'stay';
     stay.textContent = STAY;
     tip.appendChild(stay);
+    appendLinkedInArchive(tip);
     // A broken source states the problem BEFORE the WHY and the how-to. It is
     // the only thing on this panel the owner has to act on, and burying it
     // under an explanation of what Granola is would be the wrong order.
@@ -1386,6 +1432,9 @@ function card(src, keep) {
     stay.className = 'stay';
     stay.textContent = STAY;
     tip.appendChild(stay);
+    // LinkedIn is deliberately both things: archive-backed history and a
+    // bridge-backed live tail. Its status card must expose both actions.
+    appendLinkedInArchive(tip);
 
     // The connect service can be alive while its first status request loses a
     // short race with launch or Docker waking up. A one-shot `down` result was
@@ -2266,7 +2315,8 @@ function showTileNotice(row, src, text) {
       // window degraded to this card; restoring Slack's made the wrong path
       // reachable for the first time.
       const flow = BRIDGE_FLOW[kindOf(src.id)] || 'cookie';
-      if (isBridge(src) && !src.connected && (flow === 'cookie' || kindOf(src.id) === 'discord')) {
+      if (isBridge(src) && !src.connected && kindOf(src.id) !== 'linkedin'
+          && (flow === 'cookie' || kindOf(src.id) === 'discord')) {
         // bridgeWebLogin is the single entry point. Native checks the same GET
         // response for a genuinely current passcode question before it opens
         // anything, so X resumes safely without a preliminary status request

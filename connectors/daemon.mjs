@@ -83,6 +83,8 @@ export const CONNECTOR_NAMES = Object.freeze([
   'notion',
   'files',
   'whatsapp',
+  // One-time official archive import. Matrix remains the live-message lane.
+  'linkedin',
   // The social bridges' DMs, read out of the local Matrix bus. One connector
   // for seven platforms: the row's `source` comes from which bridge's ghost
   // sent it (lib/matrixRows.mjs), so messenger and slack land as themselves.
@@ -175,6 +177,7 @@ export const CONNECTOR_HERMES_SOURCE = Object.freeze({
   notion: 'notion',
   files: 'files',
   whatsapp: 'whatsapp',
+  linkedin: 'linkedin',
   // Unlike contacts, Matrix DOES write corpus — one source for every bridge.
   // Keep the full set here because run.mjs --purge uses this mapping too: a
   // null sentinel means "no corpus" and previously made a Matrix purge report
@@ -203,7 +206,7 @@ export const RETENTION_SOURCES = Object.freeze([
   'notes',
   'notion',
   'files',
-  // Still written — by the matrix connector now, not an import.
+  // Written by both the one-time archive import and the live Matrix bridge.
   'linkedin',
   'whatsapp',
   // Written by the matrix connector, one source per bridged platform.
@@ -385,10 +388,8 @@ const TOP_KEYS = Object.freeze([
   'notion',
   'files',
   'matrix',
-  // Accepted and ignored for upgrade compatibility. LinkedIn used to be a
-  // standalone export connector with an empty config section; removing the
-  // key from this closed schema made every existing config carrying
-  // `"linkedin": {}` fail before ANY connector could start.
+  // The archive importer has no settings yet, but the empty section remains
+  // valid for existing installs.
   'linkedin',
   'retention',
   // The Relationship Memory cap. hermes gates the whole reconnect card on
@@ -426,8 +427,7 @@ const GRANOLA_KEYS = Object.freeze(['includeTranscripts']);
 const OURA_KEYS = Object.freeze(['backfillDays']);
 const PHOTOS_KEYS = Object.freeze(['backfillDays']);
 const NOTION_KEYS = Object.freeze([]);
-// Retired but still validated for upgrade compatibility. The export connector
-// took no config, so only the empty object old installs already carry is valid.
+// The archive connector takes no config, so only an empty object is valid.
 const LINKEDIN_KEYS = Object.freeze([]);
 // `roots` overrides the discovered cloud folders; `materializeDataless` is the
 // opt-in that lets the walk OPEN online-only files. It defaults false and the
@@ -521,9 +521,7 @@ export function validateConfig(raw) {
     }
   }
   if (raw.intervals !== undefined) {
-    // `intervals.linkedin` belonged to the retired export poller. Accept it as
-    // a no-op so an upgrade keeps booting; Matrix has its own interval now.
-    assertClosedKeys(raw.intervals, [...CONNECTOR_NAMES, 'linkedin'], '"intervals"');
+    assertClosedKeys(raw.intervals, CONNECTOR_NAMES, '"intervals"');
     for (const [name, seconds] of Object.entries(raw.intervals)) {
       assertPositiveInt(seconds, `intervals.${name} (seconds)`, { min: MIN_INTERVAL_S, max: 86_400 });
     }

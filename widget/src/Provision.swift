@@ -248,10 +248,14 @@ enum Provision {
         let existingRuntime = matrixRoot.appendingPathComponent("owner-credentials.json")
         let historyMigration = matrixRoot.appendingPathComponent(".full-history-reset-v1")
         let historyMigrationPending = matrixRoot.appendingPathComponent(".full-history-reset-v1.pending")
+        let linkedinHybridMigration = matrixRoot.appendingPathComponent(".linkedin-hybrid-v1")
+        let existingNeedsMigration = fm.fileExists(atPath: existingRuntime.path) && (
+          !fm.fileExists(atPath: historyMigration.path)
+            || !fm.fileExists(atPath: linkedinHybridMigration.path)
+        )
         if p.terminationStatus == 0,
            fm.fileExists(atPath: historyMigrationPending.path)
-             || (fm.fileExists(atPath: existingRuntime.path)
-                 && !fm.fileExists(atPath: historyMigration.path)) {
+             || existingNeedsMigration {
           ensureBridgeRuntime { _ in }
         }
       } catch {

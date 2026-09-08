@@ -41,6 +41,7 @@ import { resolutionState } from '../../server/people/resolve.mjs';
 import { openPeopleSearchCache } from '../../server/people/searchCache.mjs';
 import { recallClaims } from '../../server/memory/retrieve.mjs';
 import { assertAggregatePrivateMetrics } from './privacy.mjs';
+import { selectEvalModel } from './config.mjs';
 
 const DAY = 86_400_000;
 const NOW = Date.UTC(2026, 7, 29, 12);
@@ -89,7 +90,8 @@ function llamaConfig() {
   const keyPath = process.env.PEOPLE_EVAL_LLAMA_KEY_PATH ?? DEFAULT_LLAMA_API_KEY_PATH;
   const key = readFileSync(keyPath, 'utf8').trim();
   if (key.length < 32) throw new Error('people eval llama key is missing or malformed');
-  return { baseUrl, apiKey: () => key };
+  const model = selectEvalModel();
+  return { baseUrl, apiKey: () => key, ...(model ? { model } : {}) };
 }
 
 function plan(overrides = {}) {

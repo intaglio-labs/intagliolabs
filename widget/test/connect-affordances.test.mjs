@@ -109,6 +109,7 @@ test('busy labels are drawn from a small fixed set', () => {
     'connecting…',
     'sending…',
     'starting…',
+    'importing…', // a selected archive is being copied and parsed locally
     'checking the local connection…',
   ]);
   for (const [file, text] of Object.entries(src)) {
