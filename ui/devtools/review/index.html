@@ -183,6 +183,7 @@
   }
   .pg-decided.accept { color:var(--ok); }
   .pg-decided.reject { color:var(--bad); }
+  .pg-contradiction { font-size:.78rem; color:var(--bad); font-style:italic; }
   .pages-built { font-size:.74rem; color:var(--fg-3); }
   .pages-right-head-buttons { display:flex; gap:.4rem; }
   .lookup-msg { font-size:.8rem; color:var(--fg-2); margin:.3rem 0 0; }
@@ -1186,6 +1187,11 @@ function changeItemNode(row) {
   }
   node.append(head);
   if (row.quote) node.append(el('blockquote', 'c-quote', row.quote));
+  // A contradiction (person_lookup_change.contradicts_anchor /
+  // contradicts_anchor_unknown -- see lookup.mjs's "anchor is evidence too")
+  // is withheld from the Cards tab while pending, but the owner still needs
+  // to see it HERE to judge it, so it is captioned rather than hidden.
+  if (row.contradictsCaption) node.append(el('div', 'pg-contradiction', row.contradictsCaption));
   const decided = row.decision && row.decision !== 'pending';
   if (decided) {
     node.append(el('div', 'pg-decided ' + row.decision, row.decision));

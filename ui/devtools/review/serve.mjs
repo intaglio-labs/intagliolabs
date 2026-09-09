@@ -34,6 +34,11 @@ import { fileURLToPath } from 'node:url';
 // app bundle, and this scoring function exists for the dev desk only.
 import { supportOf, supportBand } from './support.mjs';
 import { createDeskGuard, CSRF_HEADER } from './guard.mjs';
+// Read-only: the same anchor-firm resolution the server uses to decide what
+// counts as a contradiction (contradictsAnchorFirm's other half). Reused
+// here only to CAPTION a contradiction row for the owner, never to gate --
+// the gate is newestWebChange's, already mirrored above.
+import { anchorsFor } from '../../server/relationship/lookup.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.HZ_REVIEW_PORT ?? 7311);
@@ -185,8 +190,15 @@ const server = createServer(async (req, res) => {
       // Cards tab down.
       let changedFor = () => null;
       try {
+        // Mirrors newestWebChange (ui/server/relationship/lookup.mjs) EXACTLY,
+        // contradiction gate included: that function is the source of truth
+        // for which lookup change is fit to show, and this desk duplicating
+        // the query without also duplicating the gate is what let a rejected
+        // contradiction show up on a card as if it were an ordinary change.
         const changedClaimStmt = corpus.prepare(
           `SELECT plc.claim_id AS claimId, plc.kind AS kind, plc.url AS url, plc.change_date AS date,
+                  plc.contradicts_anchor AS contradictsAnchor,
+                  plc.contradicts_anchor_unknown AS contradictsAnchorUnknown,
                   ll.at AS at, c.text AS text,
                   (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) AS decision
            FROM person_lookup_change plc
@@ -197,6 +209,10 @@ const server = createServer(async (req, res) => {
                (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1),
                'pending'
              ) NOT IN ('reject', 'retract')
+             AND (
+               (COALESCE(plc.contradicts_anchor, 1) = 0 AND COALESCE(plc.contradicts_anchor_unknown, 1) = 0)
+               OR (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) = 'accept'
+             )
            ORDER BY plc.claim_id DESC LIMIT 1`
         );
         const changedSourceStmt = corpus.prepare(
@@ -212,7 +228,9 @@ const server = createServer(async (req, res) => {
             const ctx = changedCtxStmt.get(source.contextId);
             if (!ctx) return null; // the receipt is gone, so the change is gone
             return { text: row.text, url: row.url, kind: row.kind, quote: source.quote,
-              date: row.date ?? null, at: row.at, decision: row.decision ?? null };
+              date: row.date ?? null, at: row.at, decision: row.decision ?? null,
+              contradictsAnchor: Number(row.contradictsAnchor ?? 0) === 1,
+              contradictsAnchorUnknown: Number(row.contradictsAnchorUnknown ?? 0) === 1 };
           } catch {
             return null;
           }
@@ -384,6 +402,8 @@ const server = createServer(async (req, res) => {
       try {
         const rows = corpus.prepare(
           `SELECT plc.claim_id AS claimId, plc.kind AS kind, plc.url AS url, plc.change_date AS date,
+                  plc.contradicts_anchor AS contradictsAnchor,
+                  plc.contradicts_anchor_unknown AS contradictsAnchorUnknown,
                   c.text AS text,
                   (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) AS decision
            FROM person_lookup_change plc
@@ -395,6 +415,13 @@ const server = createServer(async (req, res) => {
           `SELECT context_id AS contextId, quote FROM claim_source WHERE claim_id = ? AND source = 'web' LIMIT 1`
         );
         const ctxStmt = corpus.prepare('SELECT id FROM context WHERE id = ?');
+        // Same anchor the server checked this row against (anchorsFor is the
+        // live firm -- LinkedIn export, or the latest accepted sweep firm --
+        // not a snapshot), used only to CAPTION a contradiction row so the
+        // owner sees why it is withheld from the card; never to recompute
+        // the flag itself.
+        let anchorFirm = null;
+        try { anchorFirm = anchorsFor(corpus, personKey).firm ?? null; } catch { anchorFirm = null; }
         data.changes = rows.map((row) => {
           let quote = null;
           try {
@@ -404,8 +431,14 @@ const server = createServer(async (req, res) => {
               if (ctx) quote = source.quote; // the receipt is gone, so the quote is gone
             }
           } catch { /* leave quote null */ }
+          const contradictsAnchor = Number(row.contradictsAnchor ?? 0) === 1;
+          const contradictsAnchorUnknown = Number(row.contradictsAnchorUnknown ?? 0) === 1;
           return { claimId: row.claimId, kind: row.kind, url: row.url, date: row.date ?? null,
-            text: row.text, decision: row.decision ?? null, quote };
+            text: row.text, decision: row.decision ?? null, quote,
+            contradictsAnchor, contradictsAnchorUnknown,
+            contradictsCaption: (contradictsAnchor || contradictsAnchorUnknown)
+              ? (anchorFirm ? `contradicts your export: ${anchorFirm}` : 'contradicts your export')
+              : null };
         });
       } catch {
         // pre-migration schema: no person_lookup_change table yet
