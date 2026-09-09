@@ -13,6 +13,25 @@
 // between the owner and a real person; ui/AGENTS.md's discipline for the
 // distiller scripts ("it never logs source text... counts, ids and reasons
 // only") applies here without exception.
+//
+// THE CLI ENGINE IS OPT-IN, AND THAT IS A PRIVACY GUARANTEE, NOT A DEFAULT.
+// `createEngine` and `createLookupEngine` select the installed `claude`
+// client ONLY when the owner's config says so outright --
+// relationshipMemory.engine === 'claude-cli' (pages, sweep, drafts) or
+// relationshipMemory.lookupEngine === 'claude-cli' (public lookup). With the
+// key ABSENT, createEngine falls back to the loopback llama engine (nothing
+// leaves the Mac) and createLookupEngine returns null (lookup declines to
+// run at all; lookupGate reads that as 'no-engine').
+//
+// It used to be the other way round: whichever engine was selected, the CLI
+// won whenever its binary happened to resolve on PATH. That made a page
+// build after an ordinary refill send message excerpts to a model off this
+// machine with no explicit act of consent anywhere -- and the privacy page
+// now states that any feature sending message excerpts to a model outside
+// the Mac is OFF until the owner turns it on. A default that depends on
+// whether a binary is installed is not "off"; it is "on, if you happen to
+// have the client". Resolvability decides only whether an OPTED-IN engine
+// can actually run, never whether it is chosen.
 
 import { spawn } from 'node:child_process';
 import { accessSync, constants as fsConstants, existsSync } from 'node:fs';
@@ -239,17 +258,17 @@ function createLlamaEngine(config = {}) {
   return { name: 'llama', model, counters, complete };
 }
 
-// Engine selection: config.relationshipMemory.engine in {'claude-cli','llama'},
-// default 'claude-cli' when the binary is resolvable, else 'llama'. A caller
-// that already knows which engine it wants (tests; a route reading the
-// owner's config) still goes through this so selection logic lives in one
-// place.
+// Engine selection: config.relationshipMemory.engine in
+// {'claude-cli','llama'}, DEFAULTING TO 'llama' -- the loopback model, which
+// keeps every excerpt on this machine. 'claude-cli' is chosen only when the
+// config asks for it by name; see the opt-in note in this file's header for
+// why an absent key must not resolve to the off-box client just because its
+// binary is installed. A caller that already knows which engine it wants
+// (tests; a route reading the owner's config) still goes through this so
+// selection logic lives in one place.
 export function createEngine(config = {}) {
   const requested = config?.relationshipMemory?.engine;
-  const engine = requested === 'claude-cli' || requested === 'llama'
-    ? requested
-    : (resolveClaudeBinary({ env: process.env }) ? 'claude-cli' : 'llama');
-  return engine === 'llama' ? createLlamaEngine(config) : createClaudeCliEngine(config);
+  return requested === 'claude-cli' ? createClaudeCliEngine(config) : createLlamaEngine(config);
 }
 
 // Public lookup (L5 step 6): the installed `claude` binary driven headless a
@@ -294,11 +313,38 @@ export function createEngine(config = {}) {
 // (lookup.mjs) for what those extra lines are read for.
 const LOOKUP_TIMEOUT_MS = 300_000;
 
-export function claudeLookupArgs({ system, model }) {
+// THE TURN BOUND, and it is a real flag after all.
+//
+// lookupPerson's own comment said "the installed CLI has no --max-turns flag
+// to cap turns with (checked 2026-09-08 against `claude --help`)", and that
+// was half right: --max-turns is ABSENT FROM --help and PRESENT IN THE CLI.
+// Verified against the installed client (2.1.265, 2026-09-09): `claude
+// --max-turns 1 --tools WebSearch -p '...'` stops after one assistant turn
+// with stop_reason 'tool_use' and web_search_requests 0 -- the search never
+// ran. An unknown flag, by contrast, errors loudly (`error: unknown option`)
+// rather than being ignored, so this is not a silent no-op either way.
+//
+// THE ARITHMETIC: one assistant turn per search, plus one turn to answer in.
+// So LOOKUP_MAX_SEARCHES + 1. Not more: a model that spends a fifth search
+// has nothing left to answer with, and its answer would be discarded by the
+// search-count check regardless (lookup.mjs), so the extra turn would buy a
+// wasted search. Not less: without the answering turn every lookup ends
+// 'parse-error'.
+//
+// THE CODE COUNT IS STILL THE ENFORCEMENT. This flag is a belt -- it stops a
+// runaway loop BEFORE it spends the searches, where the count in lookup.mjs
+// can only discard the answer afterwards. The number is deliberately NOT
+// imported from lookup.mjs (this file is the leaf; it imports nothing from
+// relationship/), so ui/test/relationship-lookup.test.mjs pins the
+// relationship LOOKUP_MAX_TURNS === LOOKUP_MAX_SEARCHES + 1 instead.
+export const LOOKUP_MAX_TURNS = 5;
+
+export function claudeLookupArgs({ system, model, maxTurns = LOOKUP_MAX_TURNS }) {
   return [
     '-p',
     '--output-format', 'stream-json',
     '--verbose',
+    '--max-turns', String(maxTurns),
     '--tools', 'WebSearch',
     '--allowedTools', 'WebSearch',
     '--disallowedTools', 'WebFetch,Bash,Read,Write,Edit,Glob,Grep,Agent',
@@ -432,17 +478,19 @@ function createClaudeCliLookupEngine(config = {}) {
 // in {'claude-cli','none'} -- deliberately NOT {'claude-cli','llama'} like
 // createEngine above. There is no llama fallback for lookup: llama has no web
 // search tool, so a loopback model asked to "look this person up" can only
-// fabricate an answer that looks exactly as grounded as a real one. Absent an
-// override, 'claude-cli' is picked when the binary resolves; when it does
-// not, this returns null rather than silently falling back to a model that
-// would invent search results -- callers (lookupGate, in a later commit)
-// read a null engine as {ok:false, reason:'no-engine'}.
+// fabricate an answer that looks exactly as grounded as a real one.
+//
+// DEFAULT 'none', which means null, which means no lookup runs -- callers
+// (lookupGate) read a null engine as {ok:false, reason:'no-engine'} and log
+// a skipped pass. That is the opt-in rule from this file's header applied to
+// the one path that also spends real web searches: an absent config key is
+// "the owner has not turned this on", not "use the client if it is
+// installed". A resolvable binary is still required for an opted-in lookup
+// to run, and its absence still returns null rather than falling back to a
+// model that would invent search results.
 export function createLookupEngine(config = {}) {
   const requested = config?.relationshipMemory?.lookupEngine;
-  const engine = requested === 'claude-cli' || requested === 'none'
-    ? requested
-    : (resolveClaudeBinary({ env: process.env }) ? 'claude-cli' : 'none');
-  return engine === 'none' ? null : createClaudeCliLookupEngine(config);
+  return requested === 'claude-cli' ? createClaudeCliLookupEngine(config) : null;
 }
 
 export { EngineError };
