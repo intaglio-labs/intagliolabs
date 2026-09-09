@@ -255,6 +255,42 @@ test('readPersonPage omits a rejected item but keeps the still-pending ones', as
   assert.equal(after.sections.notable.length, 1);
 });
 
+// ---- review finding 16: one receipt per page item -----------------------
+// The claim_source join used to fan out. A page claim that later gains a
+// SECOND receipt -- the same sentence quoted from another conversation, which
+// a re-build against a widened corpus produces -- returned two rows, and the
+// asks/notable sections rendered the same line twice.
+test('a page item with two receipts renders once, quoting the earliest source', async () => {
+  const db = openDb(':memory:');
+  insertPerson(db, { key: 'name:two receipts', name: 'Two Receipts', sent: 25, received: 25 });
+  insertThread(db, 'name:two receipts', { them: 'can you send the invoice when you get a chance' });
+
+  const page = {
+    who: null,
+    asks: [{ text: 'They want the invoice.', quote: 'send the invoice' }],
+    objection: null, how_left: null, notable: [],
+  };
+  await buildPersonPage(db, fakeEngine(JSON.stringify(page)), 'name:two receipts', { now: NOW });
+
+  const before = readPersonPage(db, 'name:two receipts');
+  assert.equal(before.sections.asks.length, 1);
+  const claimId = before.sections.asks[0].claimId;
+  const firstContextId = before.sections.asks[0].contextId;
+
+  // A second receipt for the same claim, in a later context row.
+  const laterContextId = Number(db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', 'still need that invoice', '{}')"
+  ).run(NOW + 1000).lastInsertRowid);
+  db.prepare(
+    "INSERT INTO claim_source(claim_id, context_id, source, entity_id, content_hash, quote) VALUES (?, ?, 'imessage', NULL, NULL, ?)"
+  ).run(claimId, laterContextId, 'still need that invoice');
+
+  const after = readPersonPage(db, 'name:two receipts');
+  assert.equal(after.sections.asks.length, 1, 'a second receipt is not a second ask');
+  assert.equal(after.sections.asks[0].contextId, firstContextId,
+    'the receipt shown is the earliest one, deterministically');
+});
+
 // ---------------------------------------------------------------------------
 // (d) card route attaches the page and prefers how_left over the template.
 // ---------------------------------------------------------------------------
@@ -395,15 +431,21 @@ test('a refill builds pages in the background, and the card route prefers a lowe
     assert.equal(refreshOut.started, true);
 
     // Poll until the background pass over both candidates finishes.
+    // `pagesBuilding` is now CLEARED when the queue drains (review finding
+    // 12: it used to ride every later response forever, so the desk showed a
+    // build in progress that had finished hours before), so the pass is
+    // watched while it runs and its ABSENCE is what says it is done.
     let last = null;
-    for (let i = 0; i < 30; i++) {
+    let progress = null;
+    for (let i = 0; i < 40; i++) {
       last = await (await call('GET', '/admin/relationship/card')).json();
-      if (last.pagesBuilding && last.pagesBuilding.done >= last.pagesBuilding.total && last.pagesBuilding.total > 0) break;
+      if (last.pagesBuilding) progress = last.pagesBuilding;
+      if (engine.counters.calls === 2 && !last.pagesBuilding) break;
       await sleep(200);
     }
-    assert.ok(last.pagesBuilding, 'progress is exposed on the card route response');
-    assert.equal(last.pagesBuilding.total, 2, 'both new candidates lacked a page and were queued');
-    assert.equal(last.pagesBuilding.done, 2, 'the background pass finished');
+    assert.ok(progress, 'progress is exposed on the card route response while a pass runs');
+    assert.equal(progress.total, 2, 'both new candidates lacked a page and were queued');
+    assert.equal(last.pagesBuilding, undefined, 'and it stops being reported once the pass drains');
     assert.equal(engine.counters.calls, 2, 'both candidates were attempted, sequentially');
 
     const final = await (await call('GET', '/admin/relationship/card')).json();
@@ -417,7 +459,7 @@ test('a refill builds pages in the background, and the card route prefers a lowe
   }
 });
 
-test('a second refill while a build is running does not start a second builder', async () => {
+test('a second refill while a build is running does not start a second builder -- it QUEUES behind it', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rel-pages-guard-'));
   const engine = {
     name: 'fake', model: 'fake-model', counters: { calls: 0, totalCostUsd: 0, totalDurationMs: 0 },
@@ -469,11 +511,15 @@ test('a second refill while a build is running does not start a second builder',
     await sleep(150);
     assert.equal(engine.counters.calls, 1, 'the in-flight build was not joined by a second, concurrent one');
 
-    // Even after A's pass has had time to finish, Guard B was never queued:
-    // the second refill's startPageBuilds call was a no-op under the guard,
-    // and nothing later re-triggers a build for that batch.
-    await sleep(500);
-    assert.equal(engine.counters.calls, 1, 'Guard B was never built -- its own refill\'s builder call was suppressed');
+    // ~~"Guard B was never built -- its own refill's builder call was
+    // suppressed"~~ (review finding 12). That was this test pinning the
+    // defect: the guard exists so two builders never run AT ONCE, and
+    // dropping the second batch's work entirely was the cost, not the point.
+    // Guard B's names never got pages at all, and since the card route
+    // PREFERS a candidate that has one, they sorted last forever. The second
+    // batch is now queued behind the first and built when it drains.
+    for (let i = 0; i < 20 && engine.counters.calls < 2; i++) await sleep(100);
+    assert.equal(engine.counters.calls, 2, 'Guard B was built after A drained -- queued, not dropped');
   } finally {
     await server.close();
   }

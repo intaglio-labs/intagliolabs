@@ -78,7 +78,8 @@ import { buildMatchedCards, MATCH_RULES_VERSION } from './relationship/matcher.m
 import { buildPersonPage, readPersonPage } from './relationship/pages.mjs';
 import { runSweepPass, applySweepDecision, sweepStatus } from './relationship/sweep.mjs';
 import {
-  runLookupPass, lookupGate, lookupTierFor, lookupStatus, lookupLogFor, newestWebChange,
+  runLookupPass, lookupGate, lookupTierFor, lookupStatus, lookupLogFor, lookupEvidenceFor,
+  newestWebChange,
 } from './relationship/lookup.mjs';
 import {
   runLintPass, lintFindings, resolveLintFinding, lintStatus,
@@ -87,7 +88,7 @@ import { createEngine, createLookupEngine } from './relationship/engines.mjs';
 import { eligiblePool, produceBatch, PRODUCER_VERSION } from './relationship/producer.mjs';
 import { produceOweBatch, OWE_PRODUCER_VERSION } from './relationship/owe.mjs';
 import { createDraft, existingDrafts } from './relationship/draft.mjs';
-import { CARD_PRODUCERS, REFILL_RETRY_MS, produceDailyBatch } from './relationship/daily.mjs';
+import { CARD_PRODUCERS, REFILL_RETRY_MS, produceDailyBatch, isSnapshotConsumed } from './relationship/daily.mjs';
 import { cardStats } from './relationship/controls.mjs';
 import {
   clearPeopleSearchCacheStorage,
@@ -638,6 +639,31 @@ CREATE INDEX IF NOT EXISTS person_sweep_proposal_run ON person_sweep_proposal(ru
    can see exactly what left the house and why the pass reached the verdict
    it did (status).
 
+   lookup_evidence -- WHAT CAME BACK, per lookup, written once and never
+   updated. lookup_log above is the receipt for what was SENT; until this
+   table existed the other half was never stored at all, only counted
+   (searches, urls_seen), and lookup_log 4520's false positive could not be
+   audited after the fact -- the claim's quote WAS verbatim in the search
+   results and the URL WAS one the search returned, and neither statement
+   could be checked, because the results were gone. urls is the canonical
+   JSON array of the {title, url} entries the provider's own Links: list
+   carried (a title matters on its own -- see person_lookup_change.
+   evidence_kind below); result_text is the tool_result article verbatim.
+
+   CONTENT: public search-result text about a public person, kept on this
+   box. Nothing private can reach it by construction -- a lookup's only tool
+   is WebSearch, and buildLookupQuery's input gate decides what it may ask --
+   and nothing here leaves the box; it exists so the desk can show "what came
+   back" beside "what was sent". A separate table rather than two more
+   columns on lookup_log, deliberately: result_text is kilobytes per lookup
+   while lookup_log is scanned by lookupStatus's aggregates and rendered on
+   every desk person page; most lookup_log rows (no-anchors, engine-error)
+   have no evidence at all, so columns there would have to be nullable; and
+   this text has its own retention story -- a future purge may want to drop
+   third-party page text while keeping the record of what the house sent out.
+   ON DELETE CASCADE from lookup_log so a purged log row cannot leave its
+   evidence orphaned.
+
    person_lookup_change -- which KIND of change a stored claim is, and the
    url/date it cites. Mirrors person_sweep_proposal's role (a claim carries
    no section/kind of its own -- this table is what lets a lookup-derived
@@ -645,7 +671,23 @@ CREATE INDEX IF NOT EXISTS person_sweep_proposal_run ON person_sweep_proposal(ru
    lookup change's shape (url NOT NULL, change_date, no value column) does
    not match a sweep proposal's. claim_id is the primary key and references
    claim(id) ON DELETE CASCADE, same append-then-cascade discipline as
-   person_page_item. */
+   person_page_item.
+
+   evidence_kind and contradicts_anchor are the two columns lookup_log 4520
+   taught us to keep; relationship/lookup.mjs's own evidence-strength section
+   carries the whole incident. Short version: a quote that only matches a
+   search-result TITLE ('title') is weaker evidence than one taken from the
+   provider's synthesized prose ('snippet') -- a title is a search index's
+   snapshot of a page's <title>, routinely stale or showing a past position,
+   and 4520 turned one ("Nikzad Khani - Software Engineer - Verily") into a
+   present-tense "now at Verily, not Klaviyo". contradicts_anchor=1 means the
+   change names a company that is NOT the firm anchor the lookup itself sent
+   (that firm came off the owner's own LinkedIn export, so it is evidence
+   too): such a row is stored so the owner can judge the disagreement, filed
+   as kind 'company' whatever the model called it, and refused to the card by
+   newestWebChange for as long as it stays pending. A NULL evidence_kind is a
+   row written before these columns existed, or stored without the stream in
+   hand. */
 CREATE TABLE IF NOT EXISTS person_lookup_state(
   person_key     TEXT PRIMARY KEY,
   tier           TEXT NOT NULL CHECK (tier IN ('eligible','tagged','other')),
@@ -687,17 +729,34 @@ CREATE TABLE IF NOT EXISTS lookup_log(
   changes_proposed    INTEGER NOT NULL DEFAULT 0,
   changes_dropped     INTEGER NOT NULL DEFAULT 0,
   cost_usd            REAL,
+  /* NO 'over-budget' literal here, deliberately, though lookupPerson now
+     enforces LOOKUP_MAX_SEARCHES: a CHECK cannot be ALTERed in SQLite, so a
+     new literal would need lookup_log -- the one table that records what left
+     the box, with person_lookup_change and lookup_evidence referencing its
+     ids -- rebuilt, and every already-deployed install would REJECT the
+     insert until it was. An over-budget lookup is logged 'ungrounded' (its
+     changes really were all thrown away) with the real search count in
+     searches, which is where the fact lives and is queryable:
+     searches > LOOKUP_MAX_SEARCHES. */
   status              TEXT NOT NULL CHECK (status IN
                         ('proposed','empty','ambiguous','ungrounded','engine-error','parse-error','no-anchors'))
 );
 CREATE INDEX IF NOT EXISTS lookup_log_person ON lookup_log(person_key, at DESC);
+CREATE TABLE IF NOT EXISTS lookup_evidence(
+  log_id      INTEGER PRIMARY KEY REFERENCES lookup_log(id) ON DELETE CASCADE,
+  urls        TEXT NOT NULL, /* canonical JSON array of {title, url} */
+  result_text TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS person_lookup_change(
   claim_id    INTEGER PRIMARY KEY REFERENCES claim(id) ON DELETE CASCADE,
   log_id      INTEGER NOT NULL REFERENCES lookup_log(id),
   kind        TEXT NOT NULL CHECK (kind IN ('role','company','raise','launch','move','other')),
   url         TEXT NOT NULL,
   change_date TEXT,
-  applied_at  INTEGER
+  applied_at  INTEGER,
+  evidence_kind      TEXT CHECK (evidence_kind IS NULL OR evidence_kind IN ('title','snippet')),
+  contradicts_anchor INTEGER NOT NULL DEFAULT 0 CHECK (contradicts_anchor IN (0,1))
 );
 CREATE INDEX IF NOT EXISTS person_lookup_change_log ON person_lookup_change(log_id);
 
@@ -726,7 +785,16 @@ CREATE INDEX IF NOT EXISTS person_lookup_change_log ON person_lookup_change(log_
    lint_finding -- one row per DISTINCT finding_key, upserted (never
    appended): a finding is a derived index over the corpus, not evidence
    about it, and append-only would write tens of thousands of rows for a
-   condition a pass re-observes every run. claim_id carries NO foreign key
+   condition a pass re-observes every run. THE KEY MUST IDENTIFY THE
+   CONDITION, not just the row the condition is about -- an owner resolution
+   is sticky, so anything the key does not distinguish inherits the
+   resolution of whatever shared its key. role_conflict was keyed on the
+   accepted claim alone ('role_conflict:<claimId>'), so a later, DIFFERENT
+   conflicting LinkedIn export overwrote detail under the old key and, if
+   the owner had dismissed the earlier conflict, arrived pre-dismissed and
+   was never shown; it now carries the tag and the export-derived set too
+   ('role_conflict:<claimId>:<tag>:<exportRoles joined by +>'), so a changed
+   export mints a new open finding while the old one closes itself 'gone'. claim_id carries NO foreign key
    deliberately (see the column comment below) -- a claim can be deleted out
    from under an open finding, and the finding must survive that as a dead
    pointer rather than vanish or corrupt the delete. detail is canonical
@@ -1157,7 +1225,16 @@ END;
 //      (L5 step 6, public lookup). All four are brand-new tables created by
 //      SCHEMA's own IF NOT EXISTS, so nothing here ALTERs anything; the
 //      version < 13 branch below only (re-)asserts their indexes.
-const SCHEMA_VERSION = 13;
+//  14  lookup_evidence (new table, so IF NOT EXISTS covers it), plus TWO NEW
+//      COLUMNS on person_lookup_change -- evidence_kind and
+//      contradicts_anchor -- which a v13 install really does lack, so this
+//      is the first lookup branch that ALTERs anything. Both are added under
+//      the same pragma_table_info guard every other ALTER here uses; both
+//      carry a CHECK, which ALTER TABLE ADD COLUMN accepts because each
+//      column's default (NULL / 0) satisfies its own CHECK. See
+//      person_lookup_change's schema comment for what the two columns mean
+//      and which false positive (lookup_log 4520) put them there.
+const SCHEMA_VERSION = 14;
 
 // The PRAGMAs that decide whether "deleted" means deleted, and whether the
 // memory tables' declared references mean anything. Applied to every
@@ -1416,6 +1493,31 @@ function migrate(db) {
     db.exec('CREATE INDEX IF NOT EXISTS lookup_log_person ON lookup_log(person_key, at DESC)');
     db.exec('CREATE INDEX IF NOT EXISTS person_lookup_change_log ON person_lookup_change(log_id)');
     version = 13;
+  }
+  if (version < 14) {
+    // lookup_evidence itself came from SCHEMA above (new table, IF NOT
+    // EXISTS). These two columns did NOT: person_lookup_change already
+    // exists on every v13 install, and CREATE TABLE IF NOT EXISTS is a
+    // no-op there, so without these ALTERs storeLookup's INSERT would fail
+    // on the reference box while passing in tests. Keyed on what
+    // table_info actually reports rather than on version arithmetic, same
+    // as every other ALTER in this function.
+    const cols = new Set(
+      db.prepare("SELECT name FROM pragma_table_info('person_lookup_change')").all().map((c) => c.name)
+    );
+    if (!cols.has('evidence_kind')) {
+      db.exec(
+        'ALTER TABLE person_lookup_change ADD COLUMN evidence_kind TEXT ' +
+        "CHECK (evidence_kind IS NULL OR evidence_kind IN ('title','snippet'))"
+      );
+    }
+    if (!cols.has('contradicts_anchor')) {
+      db.exec(
+        'ALTER TABLE person_lookup_change ADD COLUMN contradicts_anchor INTEGER NOT NULL DEFAULT 0 ' +
+        'CHECK (contradicts_anchor IN (0,1))'
+      );
+    }
+    version = 14;
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
@@ -2086,6 +2188,13 @@ const RELATIONSHIP_MODES = Object.freeze(['investor', 'founder', 'any']);
 const RELATIONSHIP_MODE_FIELDS = Object.freeze(['mode']);
 const RELATIONSHIP_PAGE_BUILD_FIELDS = Object.freeze(['personKey', 'engine']);
 const RELATIONSHIP_DRAFT_FIELDS = Object.freeze(['snapshot_id']);
+// The card's own outcome post. Closed like every other admin body (review
+// finding 18): this route reaches suppression and mute, and an unrecognized
+// field here used to pass silently -- a typo'd "reason" landed a dismissal
+// with no reason at all and no complaint.
+const RELATIONSHIP_EVENT_FIELDS = Object.freeze([
+  'snapshot_id', 'person_key', 'event', 'reason', 'note', 'mute_days',
+]);
 const RELATIONSHIP_PAGE_PARAMS = Object.freeze(['personKey']);
 // 'budget' and 'limit' are accepted as synonyms: sweep-once.mjs's own CLI
 // flag is --limit (matching build-person-pages.mjs's naming), but the route
@@ -2097,8 +2206,18 @@ const SWEEP_THERMAL_VALUES = Object.freeze(['nominal', 'fair', 'serious', 'criti
 // override -- llama is never a valid lookup engine (see engines.mjs
 // createLookupEngine), so there is nothing safe for that field to select.
 const RELATIONSHIP_LOOKUP_FIELDS = Object.freeze(['power', 'budget', 'battery', 'onAc', 'thermal', 'limit']);
-const RELATIONSHIP_LOOKUP_PERSON_FIELDS = Object.freeze(['personKey']);
+// The desk's "look this person up now" button carries the SAME power fields
+// the scheduled pass route does. It used to carry only personKey, which made
+// its own comment ("still gated ... through the SAME lookupGate check")
+// false in the one way that matters: lookupGate treats an ABSENT power field
+// as unknown rather than as a skip, so a desk click could spend a web search
+// on a thermally-throttled machine at 8% battery. The button is
+// owner-initiated, but the battery and thermal gates exist to protect the
+// hardware, not to second-guess the owner's intent, and the desk is the one
+// caller that knows the machine's real state.
+const RELATIONSHIP_LOOKUP_PERSON_FIELDS = Object.freeze(['personKey', 'battery', 'onAc', 'thermal']);
 const RELATIONSHIP_LOOKUPS_PARAMS = Object.freeze(['personKey']);
+const RELATIONSHIP_LOOKUP_EVIDENCE_PARAMS = Object.freeze(['logId']);
 
 // Lint (step 5½): no power/battery/thermal/budget fields at all -- there is
 // no model call, so none of the sweep/lookup routes' power-mode plumbing
@@ -3006,17 +3125,78 @@ async function runPageBuilds(db, engine, rel, batchId, personKeys) {
 // produceBatch in both the eligibility /refresh branch and the card route's
 // synchronous refill. Guarded on `rel.pagesBuildingActive` so two refills in
 // quick succession (a real one racing the desk's, or the same batch getting
-// re-offered before the first pass finishes) never run two builders at once;
-// the guard clears when the pass ends, successfully or not, so the NEXT
-// refill's own batch gets its own pass.
+// re-offered before the first pass finishes) never run two builders at once.
+//
+// QUEUED, NOT DROPPED (review finding 12). The guard used to `return` when a
+// pass was already running, which silently threw the new batch's page builds
+// away: the second refill's names never got pages at all, and since the card
+// route PREFERS a candidate that has a page, they sorted last forever. One
+// pending slot, latest-wins (an older batch's names are the ones already
+// offered), and `rel.pagesBuilding` is CLEARED when the queue drains -- it
+// used to stay on the state forever, so every later response carried a stale
+// {batchId, done:N, total:N} and the desk showed a build in progress that had
+// finished hours before, including for total:0 passes that build nothing.
 function startPageBuilds(db, policy, rel, batchId, cards) {
-  if (rel.pagesBuildingActive) return;
+  const personKeys = cards.map((c) => c.personKey);
+  if (rel.pagesBuildingActive) {
+    rel.pagesPending = { batchId, personKeys };
+    return;
+  }
   rel.pagesBuildingActive = true;
   const engine = relationshipMemoryEngine(policy);
-  const personKeys = cards.map((c) => c.personKey);
-  runPageBuilds(db, engine, rel, batchId, personKeys)
+  const drain = (id, keys) => runPageBuilds(db, engine, rel, id, keys)
     .catch((e) => { rel.pagesBuilding = { ...(rel.pagesBuilding ?? {}), lastError: String(e?.message ?? e) }; })
-    .finally(() => { rel.pagesBuildingActive = false; });
+    .then(() => {
+      const next = rel.pagesPending ?? null;
+      rel.pagesPending = null;
+      if (next) return drain(next.batchId, next.personKeys);
+      rel.pagesBuildingActive = false;
+      // Nothing is building any more, so nothing should say it is. A
+      // recorded lastError survives as the last pass's outcome.
+      rel.pagesBuilding = rel.pagesBuilding?.lastError
+        ? { ...rel.pagesBuilding, building: false }
+        : null;
+      return undefined;
+    });
+  drain(batchId, personKeys);
+}
+
+// WHY A QUEUED CARD CANNOT BE SERVED RIGHT NOW, or null when it can be --
+// the `servable` half of daily.mjs's CONSUMED model (see the block comment
+// there). Derived on every request and never stored: nothing here is
+// something the owner did, and a block that lifts (a mute expiring, a
+// rejected claim re-accepted) must make the card servable again.
+//
+// The global cap is deliberately NOT checked here: the cap refuses a
+// REQUEST, it does not take a card out of the queue, and folding it in would
+// make a capped-out day look like an exhausted pool to the producers.
+function cardBlockReason(db, rel, card) {
+  const gate = rel.service.controls.allowCard({
+    personKey: card.personKey, kind: card.kind,
+    // Cap deliberately wide open here -- see above.
+    cap: { max: Number.MAX_SAFE_INTEGER, windowMs: 1 },
+  });
+  if (!gate.allowed) return gate.reason; // 'suppressed' | 'muted'
+  // The quote is a REFERENCE resolved against the live row: row gone means
+  // the receipt is gone, so the card is gone (the deletion cascade honored
+  // at serve time rather than violated at store time).
+  if (Number.isInteger(card.quoteContextId)) {
+    if (db.prepare('SELECT 1 FROM context WHERE id = ?').get(card.quoteContextId) === undefined) {
+      return 'quote-gone';
+    }
+  }
+  // owe:expired-commitment carries a live claim reference, same discipline:
+  // a claim whose source was deleted, or which was rejected between produce
+  // and serve, drops the card rather than showing retracted evidence.
+  const commitmentClaimId = card.evidence?.commitment_claim_id;
+  if (Number.isInteger(commitmentClaimId)) {
+    if (!db.prepare('SELECT 1 FROM claim WHERE id = ?').get(commitmentClaimId)) return 'claim-gone';
+    const decision = db.prepare(
+      'SELECT action FROM claim_decision WHERE claim_id = ? ORDER BY created_at DESC, id DESC LIMIT 1'
+    ).get(commitmentClaimId);
+    if (decision?.action === 'reject') return 'claim-rejected';
+  }
+  return null;
 }
 
 async function handleAdmin(db, req, res, cors, url, channel, policy) {
@@ -3219,6 +3399,18 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // it ran with), and re-filtering by a mode the caller now prefers is a
     // ranking decision, not a serve-time one. Re-refresh with the mode you
     // want instead.
+    //
+    // ?peek=1 -- A PEEK, NOT A SERVE (review finding 4, and daily.mjs's
+    // model comment). The widget's 10-minute background poll asks "is there
+    // a card, and what would it tease"; it must not record 'shown', must not
+    // spend a cap slot, must not start this person's 7-day pool cooldown,
+    // and must not flip the producers' turn (pickProducer reads 'shown').
+    // Before the split the poll did all four for cards no human ever saw.
+    // A peek still refills and still applies the cap and the servability
+    // gate, so the orb never lights for a card that cannot be shown, and it
+    // answers a TEASE (name/kind/counters) rather than the whole card --
+    // the panel's own pull is what serves the receipt.
+    const peek = url.searchParams.get('peek') === '1';
     const rel = relationshipState(db, policy);
     const cap = relationshipCap(policy);
     if (!cap) { send(res, 200, { card: null, reason: 'no-cap-configured' }, cors); return; }
@@ -3259,6 +3451,13 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         // its refill behind a queue chosen under the rules just rejected.
         currentVersions: CURRENT_PRODUCER_VERSION,
         refillRetryMs: REFILL_RETRY_MS,
+        // A queued card that cannot be served does not hold its kind's turn
+        // (review findings 1 and 2): the muted/suppressed person, the card
+        // whose quote row was deleted, the commitment claim that was
+        // rejected between produce and serve. Without this the producer sat
+        // on a card the serve loop below skips and the route answered
+        // {card:null} on every poll -- for the full 30 days of a mute.
+        servable: (card) => cardBlockReason(db, rel, card) === null,
         // Modes are queues (L5 mode-picker follow-on): reconnect's
         // unjudged-check and refill throttle are scoped to the owner's
         // current mode pick, so a mode with its own unjudged card serves it
@@ -3318,15 +3517,27 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // no candidate has a page yet. Owe cards do not require a page to serve;
     // this ordering just happens to also work for them, since an Owe card
     // with no page falls into `withoutPage` and still serves in rank order.
-    const unjudgedCards = servingQueue.filter((card) => !db.prepare(
-      "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event IN ('accepted','dismissed') LIMIT 1"
-    ).get(card.snapshot_id));
+    //
+    // "Live" is daily.mjs's CONSUMED model, the same predicate the refill
+    // decision above used: not consumed (accepted/dismissed/muted/
+    // suppressed) AND servable right now. The old filter here counted only
+    // accepted/dismissed, so a muted or unresolvable card was walked past
+    // on every request while still holding its producer's turn.
+    const liveCards = [];
+    const blockedReasons = [];
+    for (const card of servingQueue) {
+      if (isSnapshotConsumed(db, card.snapshot_id)) continue;
+      const block = cardBlockReason(db, rel, card);
+      if (block !== null) { blockedReasons.push(block); continue; }
+      liveCards.push(card);
+    }
     const withPage = [];
     const withoutPage = [];
-    for (const card of unjudgedCards) {
+    for (const card of liveCards) {
       (hasBuiltPage(readPersonPage(db, card.personKey)) ? withPage : withoutPage).push(card);
     }
     const orderedCards = [...withPage, ...withoutPage];
+    let capBlocked = false;
 
     for (const card of orderedCards) {
       // 'shown' is recorded HERE, once per snapshot, when the card is first
@@ -3339,14 +3550,30 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event = 'shown' LIMIT 1"
       ).get(card.snapshot_id);
       if (!alreadyShown) {
-        const gate = rel.service.controls.allowCard({ personKey: card.personKey, kind: card.kind, cap });
-        if (!gate.allowed) { if (gate.reason === 'global-cap') break; continue; }
-        rel.service.controls.recordEvent({ personKey: card.personKey, kind: card.kind,
-          event: 'shown', ruleVersion: card.producer_version, snapshotId: card.snapshot_id });
-      } else {
-        const gate = rel.service.controls.allowCard({ personKey: card.personKey, kind: card.kind,
-          cap: { max: Number.MAX_SAFE_INTEGER, windowMs: 1 } });
-        if (!gate.allowed) continue; // suppression/mute still bind a shown card
+        // Suppression and mute were already settled by cardBlockReason
+        // above; what is left for the cap-bearing gate to say is whether
+        // this window has an interruption left. A PEEK checks it (an orb
+        // that lights for a card the cap will refuse is a lie) but never
+        // spends it, and records no 'shown'.
+        if (!rel.service.controls.underGlobalCap({ ...cap })) { capBlocked = true; break; }
+        if (!peek) {
+          rel.service.controls.recordEvent({ personKey: card.personKey, kind: card.kind,
+            event: 'shown', ruleVersion: card.producer_version, snapshotId: card.snapshot_id });
+        }
+      }
+      if (peek) {
+        // The tease only: who and why-in-numbers, never the receipt. The
+        // widget renders name plus quiet/overdue days on the orb's title.
+        send(res, 200, { peek: true, card: {
+          personKey: card.personKey, name: card.name, kind: card.kind,
+          snapshot_id: card.snapshot_id,
+          evidence: {
+            dormancyDays: card.evidence?.dormancyDays ?? null,
+            overdueDays: card.evidence?.overdueDays ?? null,
+            owe_kind: card.evidence?.owe_kind ?? null,
+          },
+        } }, cors);
+        return;
       }
       // Resolve the quote from the LIVE row. Row gone or edited: the receipt
       // is gone, so the card is gone -- the deletion cascade, honored at
@@ -3418,10 +3645,19 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         drafts = [];
       }
       send(res, 200, { card: { ...card, quote, sentence, left, leftTone, who: page.sections.who?.text ?? null, page, changed, drafts },
+        servedMode: card.kind === 'reconnect' ? (card.evidence?.mode ?? rel.mode ?? null) : null,
+        mode: rel.mode ?? null,
         ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
       return;
     }
-    send(res, 200, { card: null, ...(rel.refreshing ? { refreshing: true } : {}),
+    // WHY THERE IS NOTHING (review finding 15): the widget used to render
+    // "nothing to review" for a spent cap and for a queue full of muted
+    // people alike. 'cap' means come back tomorrow; a block reason means the
+    // queue holds cards the owner's own controls (or a deleted source) are
+    // refusing.
+    const reason = capBlocked ? 'cap' : (blockedReasons[0] ?? 'queue-empty');
+    send(res, 200, { card: null, reason, mode: rel.mode ?? null,
+      ...(rel.refreshing ? { refreshing: true } : {}),
       ...(rel.lastError ? { lastError: rel.lastError } : {}),
       ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
     return;
@@ -3430,9 +3666,9 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
   if (req.method === 'POST' && url.pathname === '/admin/relationship/event') {
     const rel = relationshipState(db, policy);
     const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_EVENT_FIELDS);
     const { snapshot_id, person_key, event, reason, note, mute_days } = body ?? {};
     const ownerNote = typeof note === 'string' && note.trim().length > 0 ? note.trim() : null;
-    if (typeof person_key !== 'string' || person_key.length === 0) throw badRequest('"person_key" required');
     if (!['shown', 'opened', 'accepted', 'dismissed', 'muted'].includes(event)) throw badRequest('unknown "event"');
     const snapId = Number.isInteger(snapshot_id) ? snapshot_id : null;
     // A verdict is terminal: once a snapshot has an accepted or dismissed row,
@@ -3455,25 +3691,46 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // snapshot (a review-only event, or a bad id) keeps today's behavior for
     // exactly that case, not for a named card.
     const snap = snapId !== null
-      ? db.prepare('SELECT kind, producer_version FROM rm_candidate_snapshot WHERE id = ?').get(snapId)
+      ? db.prepare('SELECT person_key, kind, producer_version FROM rm_candidate_snapshot WHERE id = ?').get(snapId)
       : undefined;
     const kind = snap?.kind ?? 'reconnect';
     const ruleVersion = snap?.producer_version ?? MATCH_RULES_VERSION;
+    // THE SNAPSHOT NAMES THE PERSON (review finding 18). The kind and rule
+    // version already came from the snapshot rather than the body; the
+    // person key did not, so a body naming snapshot A and person B recorded
+    // B's verdict -- and a 'never-this-person' dismissal SUPPRESSED B, a
+    // person no card had offered. When a snapshot is named it is the
+    // authority; a review-only event with no snapshot still has to say who
+    // it is about.
+    const personKey = snap?.person_key
+      ?? (typeof person_key === 'string' && person_key.length > 0 ? person_key : null);
+    if (personKey === null) throw badRequest('"person_key" required');
+    // 'opened' ONCE PER SNAPSHOT (review finding 10): the card page posts it
+    // on every pull, and a re-show of the same pending card posted another
+    // -- openRate (opened/shown) climbed past 1 on a card opened twice.
+    // Deduped here rather than in the page, for the same reason 'shown' is
+    // recorded here: a relaunch must not be able to double-count.
+    if (event === 'opened' && snapId !== null) {
+      const already = db.prepare(
+        "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event = 'opened' LIMIT 1"
+      ).get(snapId);
+      if (already) { send(res, 200, { ok: true, duplicate: true }, cors); return; }
+    }
     if (event === 'muted') {
       const days = Number.isFinite(mute_days) && mute_days > 0 ? mute_days : null;
       if (days === null) throw badRequest('"mute_days" required for a mute');
-      rel.service.controls.mute({ personKey: person_key, kind, untilAt: Date.now() + days * 86_400_000 });
-      rel.service.controls.recordEvent({ personKey: person_key, kind, event: 'muted',
+      rel.service.controls.mute({ personKey, kind, untilAt: Date.now() + days * 86_400_000 });
+      rel.service.controls.recordEvent({ personKey, kind, event: 'muted',
         ruleVersion, snapshotId: snapId });
     } else if (event === 'dismissed') {
       // snapshotId rides along or the card comes BACK: the acted-check keys
       // on it, and a NULL here made every plain dismissal a no-op (audit,
       // reproduced live).
-      rel.service.controls.dismiss({ personKey: person_key, kind,
+      rel.service.controls.dismiss({ personKey, kind,
         reason: typeof reason === 'string' && reason.length > 0 ? reason : null,
         note: ownerNote, ruleVersion, snapshotId: snapId });
     } else {
-      rel.service.controls.recordEvent({ personKey: person_key, kind, event,
+      rel.service.controls.recordEvent({ personKey, kind, event,
         note: ownerNote, ruleVersion, snapshotId: snapId });
     }
     send(res, 200, { ok: true }, cors);
@@ -3527,9 +3784,16 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     const engine = relationshipMemoryEngine(policy);
     if (!engine) throw badRequest('no engine configured for relationship drafting');
     const result = await createDraft(db, engine, { snapshotId, now: Date.now() });
+    // SAY WHY IT FAILED (review finding 9). createDraft already returns a
+    // `reason` on every failure path -- engine error, unparseable output, no
+    // usable drafts -- and this route dropped it, answering 200 with an
+    // empty list. The page then showed nothing at all, because it only
+    // treats ok===false as a failure. Both now cross.
     send(res, 200, {
+      ok: result.drafts.length > 0,
       drafts: result.drafts.map((d) => ({ id: d.id, text: d.text })),
       cached: result.cached,
+      ...(result.reason ? { reason: result.reason } : {}),
       cost_usd: engine.counters?.totalCostUsd ?? null,
     }, cors);
     return;
@@ -3657,6 +3921,18 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     if (typeof body.personKey !== 'string' || body.personKey.length === 0) {
       throw badRequest('"personKey" is required');
     }
+    // Same validation, and the same forwarding, as the pass route above --
+    // see RELATIONSHIP_LOOKUP_PERSON_FIELDS for why this route grew them.
+    if (body.battery !== undefined && body.battery !== null
+        && (typeof body.battery !== 'number' || !Number.isFinite(body.battery) || body.battery < 0 || body.battery > 100)) {
+      throw badRequest('"battery" must be a number from 0 through 100');
+    }
+    if (body.onAc !== undefined && body.onAc !== null && typeof body.onAc !== 'boolean') {
+      throw badRequest('"onAc" must be a boolean');
+    }
+    if (body.thermal !== undefined && body.thermal !== null && !SWEEP_THERMAL_VALUES.includes(body.thermal)) {
+      throw badRequest(`"thermal" must be one of: ${SWEEP_THERMAL_VALUES.join(', ')}`);
+    }
 
     const rel = relationshipState(db, policy);
     if (rel.lookupActive) {
@@ -3664,7 +3940,12 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       return;
     }
     const engine = relationshipLookupEngine(policy);
-    const gate = lookupGate(db, policy, { engine });
+    const power = {
+      battery: body.battery ?? null,
+      onAc: body.onAc ?? null,
+      thermal: body.thermal ?? null,
+    };
+    const gate = lookupGate(db, policy, { engine, ...power });
     if (!gate.ok) {
       send(res, 200, { log: null, changes: [], reason: gate.reason }, cors);
       return;
@@ -3677,7 +3958,9 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
        ON CONFLICT(person_key) DO UPDATE SET next_due_at = 0`
     ).run(body.personKey, tier);
 
-    await runLookupPass(db, engine, policy, { budget: 1, now: Date.now(), onlyPersonKey: body.personKey });
+    await runLookupPass(db, engine, policy, {
+      budget: 1, now: Date.now(), onlyPersonKey: body.personKey, ...power,
+    });
 
     const log = lookupLogFor(db, body.personKey, { limit: 1 })[0] ?? null;
     const changes = log
@@ -3697,7 +3980,31 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     if (typeof personKey !== 'string' || personKey.length === 0) {
       throw badRequest('"personKey" query parameter is required');
     }
+    // Each row now carries `evidence: {urls, resultTextChars}` -- WHAT CAME
+    // BACK, not only what was sent. lookup_log 4520 stored a claim whose
+    // quote was a search-result TITLE, and nothing on the box could show
+    // that after the fact because only the counts were kept. The titles and
+    // URLs are inline (small, and the thing a title-only quote came from);
+    // the article itself is a separate read below, being kilobytes per row.
     send(res, 200, { lookups: lookupLogFor(db, personKey) }, cors);
+    return;
+  }
+
+  // The observed article for ONE lookup, read-only -- the "what came back"
+  // pane. Its own route rather than a field on the list above so a desk
+  // person page with twenty lookups does not drag twenty articles with it.
+  if (req.method === 'GET' && url.pathname === '/admin/relationship/lookups/evidence') {
+    for (const key of url.searchParams.keys()) {
+      if (!RELATIONSHIP_LOOKUP_EVIDENCE_PARAMS.includes(key)) {
+        throw badRequest(`unknown query parameter ${JSON.stringify(key)}`);
+      }
+    }
+    const raw = url.searchParams.get('logId');
+    const logId = Number(raw);
+    if (raw === null || raw.length === 0 || !Number.isInteger(logId) || logId < 1) {
+      throw badRequest('"logId" query parameter must be a positive integer');
+    }
+    send(res, 200, { evidence: lookupEvidenceFor(db, logId) }, cors);
     return;
   }
 
@@ -5041,7 +5348,11 @@ async function handle(db, req, res, cors, url, policy) {
     // partial/pre-migration database is handled elsewhere in this route.
     let sweep = null;
     try {
-      sweep = sweepStatus(db);
+      // `policy` so the reported cap is the one actually in force: this used
+      // to print SWEEP_DAILY_CALL_CAP_DEFAULT unconditionally, so a config
+      // override was invisible here and the number shown was never the
+      // number sweepGate refuses at.
+      sweep = sweepStatus(db, policy);
     } catch {
       sweep = null;
     }
@@ -5050,7 +5361,7 @@ async function handle(db, req, res, cors, url, policy) {
     // schema must never take /stats down.
     let lookup = null;
     try {
-      lookup = lookupStatus(db);
+      lookup = lookupStatus(db, policy);
     } catch {
       lookup = null;
     }
