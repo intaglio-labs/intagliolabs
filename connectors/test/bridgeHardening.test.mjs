@@ -6,10 +6,8 @@
 // hopeful into checked, so a probe that silently passed would be worse than
 // none: it would look like coverage. Every case below is a negative.
 //
-// Owner decision, Austin 2026-08-22: "all connections should pull bulk
-// messages". So backfill ON is what these assert. The first version of this
-// file asserted the opposite -- it enforced bridges/README.md's hardening,
-// which the owner had not agreed to.
+// Most bridges pull history. LinkedIn is deliberately different: its official
+// archive supplies history, while the live bridge is bounded to recent traffic.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -48,6 +46,22 @@ logging:
     min_level: info
 `;
 
+const LINKEDIN_REALTIME = `network:
+    sync:
+        update_limit: 20
+        create_limit: 20
+backfill:
+    enabled: true
+    max_initial_messages: 0
+    max_catchup_messages: 50
+    threads:
+        max_initial_messages: 0
+double_puppet:
+    secrets: {}
+logging:
+    min_level: info
+`;
+
 const homes = [];
 const withHome = (configs) => {
   const h = fakeHome(configs);
@@ -80,6 +94,22 @@ test('an enabled bridge with the old 10k cap still fails maximum-history policy'
   assert.equal(r.status, 'FAIL');
   assert.match(r.detail, /history is capped/u);
   assert.match(r.detail, /initial=10000/u);
+});
+
+test('linkedin passes only with archive-plus-bounded-live policy', () => {
+  const r = checkBridgeHardening(withHome({ linkedin: LINKEDIN_REALTIME }));
+  assert.equal(r.status, 'PASS');
+});
+
+test('linkedin unlimited discovery and history is rejected as an account-risk regression', () => {
+  const r = checkBridgeHardening(withHome({ linkedin: `network:
+    sync:
+        update_limit: 0
+        create_limit: 0
+${CONFIGURED}` }));
+  assert.equal(r.status, 'FAIL');
+  assert.match(r.detail, /linkedin/u);
+  assert.match(r.detail, /live bridge is not bounded/u);
 });
 
 test('a MISSING backfill key is reported, not assumed either way', () => {

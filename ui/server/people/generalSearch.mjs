@@ -408,6 +408,10 @@ async function localJson(
   }
   observe(onEvent, { stage: cacheStage, event: 'cache_miss' });
   const startedAt = Date.now();
+  const requestBody = {
+    ...body,
+    ...(llama.model ? { model: llama.model } : {}),
+  };
   let res;
   try {
     res = await fetchFn(`${llama.baseUrl}/v1/chat/completions`, {
@@ -416,7 +420,7 @@ async function localJson(
         'Content-Type': 'application/json',
         Authorization: `Bearer ${llama.apiKey()}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(requestBody),
       signal: signal ?? AbortSignal.timeout(55_000),
       redirect: 'error',
     });

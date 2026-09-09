@@ -158,15 +158,28 @@ database while Discord re-discovers every private channel, creates the portals
 the old five-chat cap omitted, and repopulates existing portals through the
 missed-message fetch-all lane.
 
+LinkedIn is the exception to the maximum-history rule. Its history comes from a
+one-time official data archive selected in the widget. The live bridge only
+syncs the recent conversation page, creates or updates at most 20 portals, does
+no initial room backfill, and catches up at most 50 messages after downtime.
+`connectors/doctor.mjs` rejects a LinkedIn config that drifts back to unlimited.
+
+The bridge release is hash-pinned in `bridges/native.json`. The installer first
+verifies the upstream binary, then applies the separately pinned BSDIFF and
+verifies the final executable. Its corresponding source and build notes live in
+`bridges/patches/README.md`. Before upgrading the upstream pin, rebuild and test
+the textual realtime-only patch (or use an equivalent upstream fix). Never
+carry the earlier full-history patch forward.
+
 - **`double_puppet.secrets: {}`** — the bridge acts as a separate ghost, never
   as *you*, so it can never mark your DMs "seen" on Meta's side.
 - **`homeserver.presence: false`** + defaulted `send_presence_on_typing: false`
   — never broadcasts that you're online/typing.
 - ~~**`backfill.enabled: false`** — no bulk history pull (which would mark many
   chats read).~~ **THIS WAS FALSE, and it cost four bridges their history.**
-  Backfill is ON everywhere now (owner decision, 2026-08-22: "all
-  connections should pull bulk messages"), and the claim it rested on does not
-  survive contact with the logs.
+  Backfill remains ON for the other bridges (owner decision, 2026-08-22: "all
+  connections should pull bulk messages"). LinkedIn is now the explicit
+  exception because its official archive provides history without crawling.
 
   The claim was that pulling history marks conversations read on the real
   account. Checked 2026-08-22 against the meta bridge's log, which
@@ -268,4 +281,5 @@ bulk-automation Meta actually hunts — but sessions get invalidated periodicall
 
 The `matrix` connector is live for Messenger, Instagram, LinkedIn, X, Telegram,
 Discord and Slack. It maps each portal event back to the platform-specific
-Hermes source and walks history through the shared newest-year-first barrier.
+Hermes source. LinkedIn history arrives separately through the archive importer;
+the shared entity key merges any overlap with live messages.

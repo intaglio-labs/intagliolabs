@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   loadManifest, assetUrl, binDir, sha256File, signatureState, missingLibraries, fetchBridges,
-  isMainModule,
+  applyBridgePatch, isMainModule,
 } from '../../ops/fetch-bridges.mjs';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -46,6 +46,16 @@ test('the roster covers every platform the container stack ran', () => {
   for (const id of ['meta', 'instagram', 'twitter', 'telegram', 'discord', 'linkedin', 'slack']) {
     assert.ok(ids.has(id), `no native replacement declared for ${id}`);
   }
+});
+
+test('LinkedIn ships a pinned local patch instead of trusting the history-crawling binary', () => {
+  const m = loadManifest(MANIFEST);
+  const linkedin = m.bridges.find((bridge) => bridge.id === 'linkedin');
+  assert.match(linkedin.sourceSha256, /^[0-9a-f]{64}$/u);
+  assert.match(linkedin.patch?.sha256, /^[0-9a-f]{64}$/u);
+  assert.equal(linkedin.patch?.path, 'patches/linkedin-v0.2608.0-realtime-only.bsdiff');
+  assert.notEqual(linkedin.sha256, linkedin.sourceSha256,
+    'the accepted executable hash must be the patched output, not upstream');
 });
 
 test('a manifest with an unpinned entry is refused, not tolerated', (t) => {
@@ -108,6 +118,42 @@ test('sha256File is the real digest', (t) => {
   writeFileSync(f, 'abc');
   // Known SHA-256 of "abc".
   assert.equal(sha256File(f), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+});
+
+test('the binary patch accepts only its pinned source, patch, and final output', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'bridge-patch-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const manifestPath = join(dir, 'native.json');
+  const patches = join(dir, 'patches');
+  const source = join(dir, 'source');
+  const output = join(dir, 'output');
+  mkdirSync(patches);
+  writeFileSync(source, 'old');
+  const patchBytes = Buffer.from(
+    'QlNESUZGNDAnAAAAAAAAAA4AAAAAAAAACwAAAAAAAABCWmg5MUFZJlNZDfem7AAAAEAARAggACCoBmMo3F3JFOFCQDfem7BCWmg5F3JFOFCQAAAAAEJaaDkxQVkmU1kqfYTaAAACEYAAAgoBhIAgACIaY1CGAEVATO8XckU4UJAqfYTa',
+    'base64',
+  );
+  writeFileSync(join(patches, 'tiny.bsdiff'), patchBytes);
+  writeFileSync(manifestPath, '{}');
+  const bridge = {
+    id: 'fixture',
+    sourceSha256: 'cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4',
+    sha256: '42b8cc383b0a1ea4fc9b5ff967d743af7274a52ddfe07cac62487e30f00fa505',
+    patch: {
+      path: 'patches/tiny.bsdiff',
+      sha256: 'd621111c0dc8a26caac044968daf066d5d535cdc1d8e55b626e7a47491214eed',
+    },
+  };
+
+  applyBridgePatch({ source, output, manifestPath, bridge });
+  assert.equal(readFileSync(output, 'utf8'), 'new-content');
+
+  writeFileSync(source, 'tampered');
+  assert.throws(
+    () => applyBridgePatch({ source, output, manifestPath, bridge }),
+    /source sha256 mismatch/u,
+  );
+  assert.equal(existsSync(output), false, 'a rejected patch must not leave a stale output');
 });
 
 // ---- the Mach-O checks ----

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { selectEvalModel } from '../evals/people-search/config.mjs';
 import { assertAggregatePrivateMetrics } from '../evals/people-search/privacy.mjs';
 
 function aggregateMetrics() {
@@ -50,4 +51,25 @@ test('private shadow reports accept aggregate counts only', () => {
     () => assertAggregatePrivateMetrics({ ...aggregateMetrics(), answered: ['identity'] }),
     /non-negative integers/u
   );
+});
+
+test('people eval selects an explicit model without accepting malformed selectors', () => {
+  assert.equal(
+    selectEvalModel(['--model', 'Qwen3-8B-Q4_K_M'], {}),
+    'Qwen3-8B-Q4_K_M'
+  );
+  assert.equal(
+    selectEvalModel([], { PEOPLE_EVAL_LLAMA_MODEL: 'Qwen3-4B-Instruct-2507-Q4_K_M' }),
+    'Qwen3-4B-Instruct-2507-Q4_K_M'
+  );
+  assert.equal(
+    selectEvalModel(['--model=Qwen3-8B-Q4_K_M'], {
+      PEOPLE_EVAL_LLAMA_MODEL: 'Qwen3-4B-Instruct-2507-Q4_K_M',
+    }),
+    'Qwen3-8B-Q4_K_M',
+    'the command-line selector must override the environment'
+  );
+  assert.equal(selectEvalModel([], {}), null, 'single-model servers need no selector');
+  assert.throws(() => selectEvalModel(['--model'], {}), /requires a model name/u);
+  assert.throws(() => selectEvalModel(['--model', '../not-a-model'], {}), /invalid model name/u);
 });

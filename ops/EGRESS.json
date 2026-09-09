@@ -510,7 +510,7 @@
       "direction": "inbound-fetch",
       "purpose": "download the prebuilt mautrix bridge binaries named in bridges/native.json, replacing the container images pulled from dock.mau.dev. Separately and unchanged, the upstream project links the marketing site hands to a visitor's browser.",
       "credential": "none -- unauthenticated public release assets",
-      "decision": "Replaces a `docker pull` with an equivalent fetch of the same upstream software, so the posture is unchanged: upstream artifacts reach the owner's machine from upstream, and this repo conveys none of them. Every asset is pinned by sha256 from the release's own sha256sums.txt, and a mismatch is deleted rather than used. Was kind=website while only the marketing site linked here; the product fetches now, so the stronger kind wins.",
+      "decision": "Replaces a `docker pull` with a verified fetch from the same upstream release. Ordinary assets use the release's published sha256. LinkedIn separately pins the upstream input, the bundled realtime-only binary delta, and the final executable; any mismatch is deleted rather than used. The upstream tag plus the adjacent textual patch provide its corresponding source. Was kind=website while only the marketing site linked here; the product fetches now, so the stronger kind wins.",
       "evidence": "site/notices/index.html:321,329 (moonshine and silero-vad repository links) and site/index.html:241,405,427,589 (the download buttons, which point at this project's own releases \u2014 header and try-now, once per board) and site/index.html:399,584 (the \"open sourced OS\" link under the prompts headline, once per board)"
     },
     {

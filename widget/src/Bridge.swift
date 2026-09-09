@@ -96,6 +96,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "reconnect": ["relCard", "relEvent", "close", "fitContent"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "bridgeDiscordServer",
+                    "importLinkedInArchive",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
                     "status", "setConnectorEnabled", "setMotion", "setScale", "setSounds",
                     "setPerformance", "setKeepAwake",
@@ -121,6 +122,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "people": ["close", "initSearch", "peopleDecide", "peopleReview", "status",
                "bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                "bridgeDiscordServer",
+               "importLinkedInArchive",
                "connectorsIntroSeen", "openExternal", "setConnectorEnabled", "connectSecret", "openApp",
                "openFullDiskAccess", "googleAuth"],
     // peopleFind: search across every year, server-ranked. peopleMap: the
@@ -537,6 +539,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "https://granola.ai",
     "https://cloud.ouraring.com/oauth/applications",
     "https://www.notion.so/my-integrations",
+    "https://www.linkedin.com/mypreferences/d/download-my-data",
     // Telegram's app registration — each install gets its own api_id/api_hash.
     //
     // RESTORED IN THE MERGE (2026-08-26). This entry and the walkthrough that
@@ -1437,6 +1440,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       Connectors.shared.start()
       Distiller.shared.start()
       reply(webView, id, ["state": ok ? "ok" : "error"])
+
+    case "importLinkedInArchive":
+      LinkedInArchiveImport.present { [weak self, weak webView] result in
+        guard let self, let webView else { return }
+        if result["state"] as? String == "ok" {
+          _ = self.writeConnectorsConfigIfMissing()
+          Connectors.shared.restart()
+        }
+        self.reply(webView, id, result)
+      }
 
     case "permissionState":
       Permissions.writeDiagnostic()

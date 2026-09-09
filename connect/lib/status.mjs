@@ -317,6 +317,9 @@ function whatsappRow(home) {
 function bridgeRows({ home = homedir() } = {}) {
   return Object.values(PLATFORMS).map((p) => {
     const st = bridgeStatus(p.id, { home });
+    const archiveImportedAt = p.id === 'linkedin'
+      ? linkedinArchiveImportedAt({ home })
+      : undefined;
     const discordImport = p.id === 'discord' && st.connected
       ? discordImportState({ home })
       : null;
@@ -340,12 +343,36 @@ function bridgeRows({ home = homedir() } = {}) {
         : `link your ${p.label} DMs`,
       action: st.connected ? null : 'bridge',
       caveat: st.connected ? null : 'reads your own DMs through a local bridge on this Mac — the bridge stays signed in to the platform to do it.',
+      ...(p.id === 'linkedin' ? { archiveImportedAt } : {}),
       ...(discordImport?.verified ? {
         importedMessages: discordImport.messageCount,
         discoveredConversations: discordImport.portalCount,
       } : {}),
     };
   });
+}
+
+// The archive timestamp is durable UI state derived from the source of truth,
+// not a second marker that can drift. Either official CSV is enough to record
+// an import; the connector independently reports whether its parse succeeded.
+export function linkedinArchiveImportedAt({ home = homedir() } = {}) {
+  const dir = join(home, '.hazlie', 'imports', 'linkedin');
+  let latest = null;
+  for (const name of ['Connections.csv', 'messages.csv']) {
+    const path = join(dir, name);
+    if (!existsSync(path)) continue;
+    try {
+      const stat = lstatSync(path);
+      if (!stat.isFile() || stat.isSymbolicLink()) continue;
+      const mtime = Number(stat.mtimeMs);
+      if (Number.isFinite(mtime) && (latest === null || mtime > latest)) latest = mtime;
+    } catch (error) {
+      // The importer replaces files atomically, so a status read may race the
+      // rename. Treat that single refresh as no import; the next poll recovers.
+      void error;
+    }
+  }
+  return latest;
 }
 
 // Verify Discord DATA, not merely its login row. Exact aggregate counts are

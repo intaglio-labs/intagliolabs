@@ -41,6 +41,10 @@ const HISTORY_DONE_KEY = 'matrix:history-done';
 // survives an app restart between the first joined portal and the last.
 const HISTORY_DISCOVERY_DIRTY_KEY = 'matrix:history-discovery-dirty';
 const HISTORY_BOOTSTRAP_KEY = 'matrix:history-bootstrap-v1';
+// Added when Bridgev2 functional-member state became part of direction and
+// group mapping. Existing room cursors contain only member events, so one
+// full-state refresh is required to learn the owner's remote self ghost.
+const ROOM_STATE_FUNCTIONAL_KEY = 'matrix:room-state-functional-v1';
 const PENDING_INVITES_KEY = 'matrix:pending-portal-invites';
 const INVITE_RECOVERY_KEY = 'matrix:invite-recovery-v1';
 // Portal joins are local Synapse requests, not upstream platform fetches. A
@@ -102,21 +106,40 @@ function clearHistoryDone(state) {
 }
 
 function decodeRoomMembers(value) {
-  if (!value) return new Map();
+  if (!value) return { members: new Map(), functionalMembers: new Set() };
   try {
     const entries = JSON.parse(value);
-    if (!Array.isArray(entries)) return new Map();
-    return new Map(entries.filter(
+    // Older cursors were the member-pair array directly. Keep reading them;
+    // the next successful sync rewrites the versioned object below.
+    const memberEntries = Array.isArray(entries) ? entries : entries?.members;
+    const functionalEntries = Array.isArray(entries?.functional_members)
+      ? entries.functional_members
+      : [];
+    if (!Array.isArray(memberEntries)) {
+      return { members: new Map(), functionalMembers: new Set() };
+    }
+    const members = new Map(memberEntries.filter(
       (entry) => Array.isArray(entry) && entry.length === 2
         && typeof entry[0] === 'string' && typeof entry[1] === 'string'
     ));
-  } catch {
-    return new Map();
+    const functionalMembers = new Set(functionalEntries.filter(
+      (mxid) => typeof mxid === 'string' && mxid.length > 0
+    ));
+    return { members, functionalMembers };
+  } catch (error) {
+    return { members: new Map(), functionalMembers: new Set() };
   }
 }
 
-function encodeRoomMembers(members) {
-  return JSON.stringify([...members.entries()]);
+function encodeRoomMembers(roomState) {
+  const members = roomState instanceof Map ? roomState : roomState?.members;
+  const functionalMembers = roomState instanceof Map
+    ? new Set()
+    : roomState?.functionalMembers;
+  return JSON.stringify({
+    members: [...(members ?? new Map()).entries()],
+    functional_members: [...(functionalMembers ?? new Set())],
+  });
 }
 
 // The one bridge state root. There was briefly a second (~/.hazlie/matrix-docker)
@@ -154,9 +177,24 @@ export function readCredentials(home) {
  * the room (a room with no ghost is a bridge management room — login
  * transcripts, never ingested) and supplies the names rows carry.
  */
-export function readRoomMembers(state, previousMembers = new Map()) {
+export function readRoomMembers(state, previousState = new Map()) {
+  const previousMembers = previousState instanceof Map
+    ? previousState
+    : previousState?.members;
   const members = new Map(previousMembers);
+  let functionalMembers = new Set(
+    previousState instanceof Map ? [] : previousState?.functionalMembers
+  );
   for (const ev of state ?? []) {
+    if (ev?.type === 'io.element.functional_members') {
+      const serviceMembers = ev.content?.service_members;
+      if (Array.isArray(serviceMembers)) {
+        functionalMembers = new Set(serviceMembers.filter(
+          (mxid) => typeof mxid === 'string' && mxid.length > 0
+        ));
+      }
+      continue;
+    }
     if (ev?.type !== 'm.room.member' || typeof ev.state_key !== 'string') continue;
     const membership = ev.content?.membership;
     if (membership !== undefined && membership !== 'join') {
@@ -176,14 +214,14 @@ export function readRoomMembers(state, previousMembers = new Map()) {
   for (const [mxid, display] of members) {
     if (display) names.set(mxid, display);
     const who = classifySender(mxid);
-    if (who?.kind === 'ghost') {
+    if (who?.kind === 'ghost' && !functionalMembers.has(mxid)) {
       ghosts += 1;
       // First ghost wins as "the partner"; a group's rows carry is_group and
       // the graph treats them accordingly.
       if (!partner) partner = { mxid, source: who.source, handle: who.handle };
     }
   }
-  return { names, partner, isGroup: ghosts > 1, members };
+  return { names, partner, isGroup: ghosts > 1, members, functionalMembers };
 }
 
 /**
@@ -226,14 +264,19 @@ export function syncToRows(body, { selfName = 'me', roomState = new Map() } = {}
       [...(room?.state?.events ?? []), ...events],
       roomState.get(roomId)
     );
-    roomState.set(roomId, resolved.members);
+    roomState.set(roomId, resolved);
     if (events.length === 0) continue;
     const { names, partner, isGroup } = resolved;
     if (!partner) continue; // management room, or a room with no bridged human
     rooms += 1;
     for (const ev of events) {
       const row = eventToRow(
-        { ...ev, __partner: partner, __isGroup: isGroup },
+        {
+          ...ev,
+          __partner: partner,
+          __isGroup: isGroup,
+          __functionalMembers: resolved.functionalMembers,
+        },
         { roomId, names, selfName }
       );
       if (row) rows.push(row);
@@ -344,14 +387,19 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
           );
         }
 
-        const members = decodeRoomMembers(ctx.state.getCursor(roomCursorKey(roomId)));
-        const resolved = readRoomMembers([], members);
+        const roomState = decodeRoomMembers(ctx.state.getCursor(roomCursorKey(roomId)));
+        const resolved = readRoomMembers([], roomState);
         const events = Array.isArray(page?.chunk) ? page.chunk : [];
         const rows = [];
         if (resolved.partner) {
           for (const ev of events) {
             const row = eventToRow(
-              { ...ev, __partner: resolved.partner, __isGroup: resolved.isGroup },
+              {
+                ...ev,
+                __partner: resolved.partner,
+                __isGroup: resolved.isGroup,
+                __functionalMembers: resolved.functionalMembers,
+              },
               { roomId, names: resolved.names, selfName: ctx.config?.selfName ?? 'me' }
             );
             if (
@@ -425,7 +473,13 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
       // token moves, so the hole cannot reopen, and no pass after the first
       // pays for a full-state sync.
       const needsInviteRecovery = !ctx.state.getCursor(INVITE_RECOVERY_KEY);
-      const since = (ctx.backfill || needsHistoryBootstrap || needsInviteRecovery)
+      const needsFunctionalRoomState = !ctx.state.getCursor(ROOM_STATE_FUNCTIONAL_KEY);
+      const since = (
+        ctx.backfill
+        || needsHistoryBootstrap
+        || needsFunctionalRoomState
+        || needsInviteRecovery
+      )
         ? null
         : ctx.state.getCursor(CURSOR_KEY);
       const url = new URL(`${creds.base}/_matrix/client/v3/sync`);
@@ -558,8 +612,8 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
       // Every cursor advances only after all ingestion and initial paging
       // succeeds. A partial failure therefore retries idempotent entity IDs
       // instead of forgetting either history or room attribution state.
-      for (const [roomId, members] of mapped.roomState) {
-        ctx.state.setCursor(roomCursorKey(roomId), encodeRoomMembers(members));
+      for (const [roomId, roomState] of mapped.roomState) {
+        ctx.state.setCursor(roomCursorKey(roomId), encodeRoomMembers(roomState));
       }
       // A since-less response gives every joined portal a token just before
       // its visible tail. Queue those continuations; the daemon consumes them
@@ -603,6 +657,7 @@ export function createMatrixSource({ home, fetchImpl = fetch } = {}) {
       if (historyReopened) ctx.state.deleteCursor?.(HISTORY_DISCOVERY_DIRTY_KEY);
       if (needsHistoryBootstrap) ctx.state.setCursor(HISTORY_BOOTSTRAP_KEY, '1');
       if (needsInviteRecovery) ctx.state.setCursor(INVITE_RECOVERY_KEY, '1');
+      if (needsFunctionalRoomState) ctx.state.setCursor(ROOM_STATE_FUNCTIONAL_KEY, '1');
       if (mapped.next) ctx.state.setCursor(CURSOR_KEY, mapped.next);
       return {
         ...totals,

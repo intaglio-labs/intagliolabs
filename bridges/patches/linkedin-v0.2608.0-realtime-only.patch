@@ -1,0 +1,169 @@
+diff --git a/pkg/connector/backfill.go b/pkg/connector/backfill.go
+index e1bda7f..14dbd7c 100644
+--- a/pkg/connector/backfill.go
++++ b/pkg/connector/backfill.go
+@@ -31,6 +31,37 @@ var (
+ 	_ bridgev2.BackfillingNetworkAPI = (*LinkedInClient)(nil)
+ )
+ 
++const (
++	maxLinkedInMessagePageSize     = 50
++	minLinkedInMessageFetchSpacing = 500 * time.Millisecond
++)
++
++func linkedInMessagePageSize(requested int) int {
++	if requested < 1 || requested > maxLinkedInMessagePageSize {
++		return maxLinkedInMessagePageSize
++	}
++	return requested
++}
++
++func (l *LinkedInClient) beginLinkedInMessageFetch(ctx context.Context) (func(), error) {
++	l.messageFetchMu.Lock()
++	remaining := minLinkedInMessageFetchSpacing - time.Since(l.lastMessageFetch)
++	if remaining > 0 {
++		timer := time.NewTimer(remaining)
++		select {
++		case <-ctx.Done():
++			timer.Stop()
++			l.messageFetchMu.Unlock()
++			return nil, ctx.Err()
++		case <-timer.C:
++		}
++	}
++	return func() {
++		l.lastMessageFetch = time.Now()
++		l.messageFetchMu.Unlock()
++	}, nil
++}
++
+ func (l *LinkedInClient) FetchMessages(ctx context.Context, fetchParams bridgev2.FetchMessagesParams) (*bridgev2.FetchMessagesResponse, error) {
+ 	log := zerolog.Ctx(ctx).With().Str("method", "fetch_messages").Logger()
+ 	ctx = log.WithContext(ctx)
+@@ -39,6 +70,11 @@ func (l *LinkedInClient) FetchMessages(ctx context.Context, fetchParams bridgev2
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	finishFetch, err := l.beginLinkedInMessageFetch(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finishFetch()
+ 
+ 	resp := bridgev2.FetchMessagesResponse{
+ 		Forward:  fetchParams.Forward,
+@@ -46,9 +82,10 @@ func (l *LinkedInClient) FetchMessages(ctx context.Context, fetchParams bridgev2
+ 	}
+ 
+ 	convURN := linkedingo.NewURN(fetchParams.Portal.ID)
++	pageSize := linkedInMessagePageSize(fetchParams.Count)
+ 	var messages []linkedingo.Message
+ 	if fetchParams.Cursor != "" {
+-		msgs, err := l.client.GetMessagesWithPrevCursor(ctx, convURN, string(fetchParams.Cursor), fetchParams.Count)
++		msgs, err := l.client.GetMessagesWithPrevCursor(ctx, convURN, string(fetchParams.Cursor), pageSize)
+ 		if err != nil {
+ 			return nil, err
+ 		} else if len(msgs.Elements) == 0 {
+@@ -57,7 +94,7 @@ func (l *LinkedInClient) FetchMessages(ctx context.Context, fetchParams bridgev2
+ 		messages = msgs.Elements
+ 		resp.Cursor = networkid.PaginationCursor(msgs.Metadata.PrevCursor)
+ 	} else {
+-		msgs, err := l.client.GetMessagesBefore(ctx, linkedingo.NewURN(fetchParams.Portal.ID), time.Now(), fetchParams.Count)
++		msgs, err := l.client.GetMessagesBefore(ctx, linkedingo.NewURN(fetchParams.Portal.ID), time.Now(), pageSize)
+ 		if err != nil {
+ 			return nil, err
+ 		} else if len(msgs.Elements) == 0 {
+diff --git a/pkg/connector/chatsync.go b/pkg/connector/chatsync.go
+index fb86efb..f34d51d 100644
+--- a/pkg/connector/chatsync.go
++++ b/pkg/connector/chatsync.go
+@@ -114,7 +114,7 @@ func (l *LinkedInClient) handleConversations(ctx context.Context, convs []linked
+ 				return c.Str("update", "sync")
+ 			},
+ 			PortalKey:    portalKey,
+-			CreatePortal: l.main.Config.Sync.CreateLimit == 0 || created <= l.main.Config.Sync.CreateLimit,
++			CreatePortal: l.main.Config.Sync.CreateLimit == 0 || created < l.main.Config.Sync.CreateLimit,
+ 		}
+ 
+ 		if portal == nil || portal.MXID == "" {
+@@ -161,13 +161,20 @@ func (l *LinkedInClient) handleConversations(ctx context.Context, convs []linked
+ 	}
+ }
+ 
++const maxLinkedInConversationPages = 1
++
++func shouldFetchLinkedInConversationPage(pagesFetched int) bool {
++	return pagesFetched < maxLinkedInConversationPages
++}
++
+ func (l *LinkedInClient) syncConversations(ctx context.Context) {
+ 	log := zerolog.Ctx(ctx).With().Str("action", "sync_conversations").Logger()
+ 	log.Info().Msg("starting conversation sync")
+ 
+ 	lastUsedUpdatedBefore := time.Time{}
+ 	updatedBefore := time.Now()
+-	for {
++	pagesFetched := 0
++	for shouldFetchLinkedInConversationPage(pagesFetched) {
+ 		if ctx.Err() != nil {
+ 			log.Info().Msg("sync canceled")
+ 			return
+@@ -195,8 +202,10 @@ func (l *LinkedInClient) syncConversations(ctx context.Context) {
+ 			return
+ 		}
+ 
++		pagesFetched++
+ 		l.handleConversations(ctx, conversations.Elements)
+ 	}
++	log.Info().Int("pages", pagesFetched).Msg("recent conversation window synced")
+ }
+ func (l *LinkedInClient) getConversationsBySyncToken(ctx context.Context) {
+ 	convs, err := l.client.GetConversationsBySyncToken(ctx)
+diff --git a/pkg/connector/client.go b/pkg/connector/client.go
+index 80a769a..2bc80ac 100644
+--- a/pkg/connector/client.go
++++ b/pkg/connector/client.go
+@@ -19,6 +19,8 @@ package connector
+ import (
+ 	"context"
+ 	"fmt"
++	"sync"
++	"time"
+ 
+ 	"github.com/google/uuid"
+ 	"github.com/rs/zerolog"
+@@ -47,6 +49,8 @@ type LinkedInClient struct {
+ 	sessID                uuid.UUID
+ 	conversationLastRead  map[linkedingo.URN]jsontime.UnixMilli
+ 	conversationReadState map[linkedingo.URN]ConversationReadState
++	messageFetchMu        sync.Mutex
++	lastMessageFetch      time.Time
+ 
+ 	linkedinFmtParams linkedinfmt.FormatParams
+ 	matrixParser      *matrixfmt.HTMLParser
+diff --git a/pkg/connector/realtime_test.go b/pkg/connector/realtime_test.go
+new file mode 100644
+index 0000000..97a062d
+--- /dev/null
++++ b/pkg/connector/realtime_test.go
+@@ -0,0 +1,20 @@
++package connector
++
++import "testing"
++
++func TestConversationSyncStopsAfterOnePage(t *testing.T) {
++	if !shouldFetchLinkedInConversationPage(0) {
++		t.Fatal("the first recent-conversation page must be fetched")
++	}
++	if shouldFetchLinkedInConversationPage(1) {
++		t.Fatal("a second conversation page would turn live sync into history crawling")
++	}
++}
++
++func TestLinkedInMessagePageSizeIsBounded(t *testing.T) {
++	for _, requested := range []int{-1, 0, 2_147_483_647} {
++		if got := linkedInMessagePageSize(requested); got != 50 {
++			t.Fatalf("unsafe request %d became page size %d, want 50", requested, got)
++		}
++	}
++}

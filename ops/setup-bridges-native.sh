@@ -143,6 +143,15 @@ mark_history_uncapped() {
   ( umask 077; : > "$FULL_HISTORY_MARKER" )
 }
 
+# Versioned policy migration: LinkedIn history moved to the official archive,
+# and the live bridge became a bounded recent-message listener. Provision.swift
+# reruns this script on existing installs until this marker appears.
+LINKEDIN_HYBRID_MARKER="$M/.linkedin-hybrid-v1"
+mark_linkedin_hybrid() {
+  [ -f "$LINKEDIN_HYBRID_MARKER" ] && return 0
+  ( umask 077; : > "$LINKEDIN_HYBRID_MARKER" )
+}
+
 # name  port   dbfile             binary
 bridge_rows() {
 cat <<'ROWS'
@@ -604,6 +613,20 @@ bridge_rows | while read -r name port dbfile binary; do
       .double_puppet.secrets = {} |
       .logging.min_level = \"info\"
     " "$cfg"
+    if [ "$name" = "linkedin" ]; then
+      # LinkedIn history comes from the owner's official archive. The live
+      # bridge only creates/updates a small recent window, imports no initial
+      # room history, and catches up at most one page after downtime.
+      "$YQ" -i '
+        .network.sync.update_limit = 20 |
+        .network.sync.create_limit = 20 |
+        .backfill.enabled = true |
+        .backfill.max_initial_messages = 0 |
+        .backfill.max_catchup_messages = 50 |
+        .backfill.threads.max_initial_messages = 0 |
+        del(.network.sync.history_since)
+      ' "$cfg"
+    fi
   fi
 
   if [ ! -f "$reg" ]; then
@@ -612,6 +635,11 @@ bridge_rows | while read -r name port dbfile binary; do
     echo "$name: registration written"
   fi
 done
+
+# Every config and registration has been written successfully. Record the
+# migration before an optional provision-only exit; a normal run restarts the
+# supervisor below so the bounded settings take effect immediately.
+mark_linkedin_hybrid
 
 [ "$MODE" = "provision" ] && { echo "provisioned (not started)"; exit 0; }
 

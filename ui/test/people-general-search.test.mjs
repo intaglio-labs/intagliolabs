@@ -103,6 +103,31 @@ test('general people detection is broad, while the local planner may reject worl
   assert.doesNotMatch(request.messages[1].content, /PERSON p1|EVIDENCE/u, 'planning sees the question, not corpus rows');
 });
 
+test('the selected llama model reaches the people planner request', async () => {
+  let request;
+  const fetchFn = async (_url, options) => {
+    request = JSON.parse(options.body);
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        kind: 'not_people_search', interpretation: '', facets: [], scope: [],
+        attribution: 'participant', from: '', to: '', minimum_evidence: 1,
+        prefer_repeated: false, require_reachable: false, ranking: 'relevance',
+      }) } }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  await planGeneralPeopleQuestion('Who is interested in painting?', {
+    now: NOW,
+    owner: owner(),
+    llama: {
+      baseUrl: 'http://127.0.0.1:51780',
+      apiKey: () => 'a'.repeat(64),
+      model: 'Qwen3-8B-Q4_K_M',
+    },
+    fetchFn,
+  });
+  assert.equal(request.model, 'Qwen3-8B-Q4_K_M');
+});
+
 test('invalid open-ended plans are rejected before touching retrieval', () => {
   assert.equal(validateGeneralPeoplePlan({ kind: 'people_search', terms: ['hiking'] }), null);
   assert.equal(validateGeneralPeoplePlan({

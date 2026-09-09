@@ -141,3 +141,15 @@ test('a native install is marked as needing no history migration', () => {
     'the public policy must disclose the full-history product behavior');
   assert.doesNotMatch(privacy, /<strong>Mail \(Gmail\)<\/strong>[\s\S]{0,300}<td>30 days<\/td>/u);
 });
+
+test('existing installs apply the LinkedIn archive-plus-live migration once', () => {
+  assert.match(setupBridges, /LINKEDIN_HYBRID_MARKER="\$M\/\.linkedin-hybrid-v1"/u);
+  assert.match(setupBridges, /mark_linkedin_hybrid/u,
+    'successful setup must record that the bounded policy was applied');
+  assert.match(provision, /matrixRoot\.appendingPathComponent\("\.linkedin-hybrid-v1"\)/u);
+  assert.match(
+    provision,
+    /fm\.fileExists\(atPath: existingRuntime\.path\)[\s\S]*?!fm\.fileExists\(atPath: linkedinHybridMigration\.path\)/u,
+    'an existing runtime without the marker must run setup automatically',
+  );
+});

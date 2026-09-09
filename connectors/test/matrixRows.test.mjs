@@ -95,6 +95,44 @@ test('a portal room yields rows on both sides, named and attributed', () => {
   assert.equal(mine.meta.chat_name, 'Dana');
 });
 
+test('a LinkedIn functional self ghost is outgoing and does not turn a DM into a group', () => {
+  // Bridgev2 keeps double puppeting off, so the remote account appears as a
+  // separate LinkedIn ghost. The functional-members state identifies that
+  // ghost (and the bot) without guessing from a private display name.
+  const body = {
+    rooms: { join: { '!linkedin-dm:hazlie.local': {
+      state: { events: [
+        { type: 'io.element.functional_members', state_key: '', content: {
+          service_members: [
+            '@linkedinbot:hazlie.local',
+            '@linkedin_self:hazlie.local',
+          ],
+        } },
+        { type: 'm.room.member', state_key: '@linkedin_self:hazlie.local',
+          content: { membership: 'join', displayname: 'Owner' } },
+        { type: 'm.room.member', state_key: '@linkedin_42:hazlie.local',
+          content: { membership: 'join', displayname: 'Riley' } },
+        { type: 'm.room.member', state_key: '@you:hazlie.local',
+          content: { membership: 'join', displayname: 'me' } },
+      ] },
+      timeline: { events: [
+        msg('@linkedin_42:hazlie.local', 'hello', '$li-in'),
+        msg('@linkedin_self:hazlie.local', 'hello back', '$li-out'),
+      ] },
+    } } },
+  };
+
+  const { rows } = syncToRows(body, { selfName: 'owner' });
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].meta.is_from_me, false);
+  assert.equal(rows[0].meta.is_group, false);
+  assert.equal(rows[0].meta.chat_handle, 'linkedin_42');
+  assert.equal(rows[1].meta.is_from_me, true);
+  assert.equal(rows[1].meta.is_group, false);
+  assert.equal(rows[1].meta.chat_handle, 'linkedin_42');
+  assert.equal(rows[1].speaker, 'owner');
+});
+
 test('a group row keeps the room partner but credits the actual sender', () => {
   const body = {
     rooms: { join: { '!group:hazlie.local': {
@@ -426,4 +464,48 @@ test('a one-time recovery forces a since-less sync for stranded invites', () => 
     /needsInviteRecovery\s*\)\s*\n?\s*\?\s*null/u,
     'recovery must drop the since token so already-delivered invites reappear'
   );
+});
+
+test('a one-time full-state refresh discovers functional self ghosts on existing installs', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'matrix-functional-state-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const credentialsDir = join(dir, '.hazlie', 'matrix');
+  mkdirSync(credentialsDir, { recursive: true });
+  writeFileSync(join(credentialsDir, 'owner-credentials.json'), JSON.stringify({
+    homeserver: 'http://127.0.0.1:8008',
+    access_token: 'private-test-token',
+    user_id: '@you:hazlie.local',
+  }));
+
+  const urls = [];
+  const fetchImpl = async (input) => {
+    const url = new URL(String(input));
+    urls.push(url);
+    return jsonResponse({ next_batch: `s-${urls.length}`, rooms: {} });
+  };
+  const cursors = new Map([
+    ['matrix:since', 's-old'],
+    ['matrix:history-bootstrap-v1', '1'],
+    ['matrix:invite-recovery-v1', '1'],
+  ]);
+  const source = createMatrixSource({ home: dir, fetchImpl });
+  const ctx = {
+    state: {
+      getCursor: (key) => cursors.get(key) ?? null,
+      setCursor: (key, value) => cursors.set(key, value),
+      deleteCursor: (key) => cursors.delete(key),
+    },
+    ingest: async () => ({ inserted: 0, updated: 0, unchanged: 0 }),
+    config: { selfName: 'owner' },
+    backfill: false,
+  };
+
+  await source.run(ctx);
+  assert.equal(urls[0].searchParams.has('since'), false);
+  assert.equal(urls[0].searchParams.get('full_state'), 'true');
+  assert.equal(cursors.get('matrix:room-state-functional-v1'), '1');
+
+  await source.run(ctx);
+  assert.equal(urls[1].searchParams.get('since'), 's-1');
+  assert.equal(urls[1].searchParams.has('full_state'), false);
 });

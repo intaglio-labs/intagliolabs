@@ -987,15 +987,16 @@ function backfillState(text) {
 
 // [topKey, childKey, wanted, severity].
 //
-// BACKFILL IS WANTED **ON**. Owner decision, 2026-08-22, explicitly:
+// BACKFILL IS WANTED **ON** for every bridge except LinkedIn. Owner decision,
+// 2026-08-22, explicitly:
 // "all connections should pull bulk messages". This reverses what
 // bridges/README.md § "Privacy hardening" set, and the reasoning it overrode is
 // kept here rather than deleted, because it is the kind of thing a future
 // reader will otherwise re-derive and re-apply: backfill was disabled to keep
 // the bridge invisible on the remote account, since a bulk history pull marks
 // many conversations READ on the real Meta/X/Slack account. That cost was
-// accepted knowingly in exchange for Intaglio Labs having message history to reason
-// over -- a bridge that starts empty is a memory that starts empty.
+// accepted knowingly for those services. LinkedIn now gets its history from
+// the official archive instead, so its live bridge is intentionally bounded.
 //
 // So this probe now FAILS on backfill being off, which is the exact inverse of
 // what it asserted when it was written an hour earlier. Recorded because the
@@ -1042,6 +1043,27 @@ function safeLoggingState(text) {
   };
 }
 
+function linkedinRealtimeState(text) {
+  const rawUpdate = yamlPathValue(text, ['network', 'sync', 'update_limit']);
+  const rawCreate = yamlPathValue(text, ['network', 'sync', 'create_limit']);
+  const update = Number(String(rawUpdate ?? '').replace(/^['"]|['"]$/gu, ''));
+  const create = Number(String(rawCreate ?? '').replace(/^['"]|['"]$/gu, ''));
+  const enabled = yamlPathValue(text, ['backfill', 'enabled']);
+  const initial = Number(yamlPathValue(text, ['backfill', 'max_initial_messages']));
+  const catchup = Number(yamlPathValue(text, ['backfill', 'max_catchup_messages']));
+  const threads = Number(yamlPathValue(text, ['backfill', 'threads', 'max_initial_messages']));
+  return {
+    found: `update_limit=${rawUpdate ?? 'unset'}, create_limit=${rawCreate ?? 'unset'}, `
+      + `initial=${initial}, catchup=${catchup}, threads=${threads}`,
+    safe: enabled === 'true'
+      && update >= 1 && update <= 20
+      && create >= 1 && create <= 20
+      && initial === 0
+      && threads === 0
+      && catchup >= 0 && catchup <= 50,
+  };
+}
+
 // Exported so the suite can prove it FIRES, not just that it passes on a clean
 // machine — a guard nobody has watched fail is a guard nobody knows works.
 export function checkBridgeHardening(home) {
@@ -1072,13 +1094,21 @@ export function checkBridgeHardening(home) {
       continue; // a bridge dir without a config is not yet configured
     }
     checked += 1;
-    const backfill = backfillState(text);
-    if (!backfill.on) {
-      problems.push(`${dir}: ${backfill.where} is ${backfill.found ?? 'unset'} — history is NOT being pulled`);
-      worst = FAIL;
-    } else if (!backfill.full) {
-      problems.push(`${dir}: ${backfill.where} is ${backfill.found ?? 'unset'} — history is capped`);
-      worst = FAIL;
+    if (dir === 'linkedin') {
+      const realtime = linkedinRealtimeState(text);
+      if (!realtime.safe) {
+        problems.push(`${dir}: ${realtime.found} — live bridge is not bounded`);
+        worst = FAIL;
+      }
+    } else {
+      const backfill = backfillState(text);
+      if (!backfill.on) {
+        problems.push(`${dir}: ${backfill.where} is ${backfill.found ?? 'unset'} — history is NOT being pulled`);
+        worst = FAIL;
+      } else if (!backfill.full) {
+        problems.push(`${dir}: ${backfill.where} is ${backfill.found ?? 'unset'} — history is capped`);
+        worst = FAIL;
+      }
     }
     const dp = doublePuppetState(text);
     if (!dp.off) {
@@ -1099,16 +1129,17 @@ export function checkBridgeHardening(home) {
     return result(
       name,
       PASS,
-      `${checked} bridge config(s) match owner intent: maximum history backfill, double puppeting off, content-safe logging`
+      `${checked} bridge config(s) match owner intent: archive-safe LinkedIn, maximum history elsewhere, double puppeting off, content-safe logging`
     );
   }
   return result(
     name,
     worst,
     problems.join('; '),
-    'set the named keys in ~/.hazlie/matrix/<bridge>/config.yaml, then restart that bridge: ' +
-      'run ops/setup-bridges-native.sh to restore the maximum per-bridge history limits; ' +
-      'full backfill is the owner decision (all connections pull maximum available history); ' +
+      'set the named keys in ~/.hazlie/matrix/<bridge>/config.yaml, then restart that bridge: ' +
+      'run ops/setup-bridges-native.sh to restore the intended per-bridge history limits; ' +
+      'LinkedIn history comes from the archive and its live bridge stays bounded; ' +
+      'other bridges keep their maximum-history policy; ' +
       'double_puppet stays off so the bridge never acts as you on the remote account; ' +
       'logging.min_level stays at info so bridge logs do not record message request bodies.'
   );
