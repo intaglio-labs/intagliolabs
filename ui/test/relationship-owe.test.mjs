@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 
 import { openDb } from '../server/hermes.mjs';
 import {
-  isAskText, owePool, produceOweBatch,
+  isAskText, owePool, produceOweBatch, mailParticipantAddresses, soleDirectCounterparty,
   OWE_PRODUCER_VERSION, OWE_RANK_STRATEGY,
 } from '../server/relationship/owe.mjs';
 
@@ -796,4 +796,65 @@ test('liveFilter narrows the cross-kind exclusion to the queue the route would s
     ['name:held offmode'],
     'narrowed to the mode the route serves, the off-mode card holds nothing'
   );
+});
+
+// ---------------------------------------------------------------------------
+// Review G finding 8: THE COMMA SPLIT THAT BROKE ON THE HEADER IT WAS FOR.
+// mailParticipantAddresses split each field on commas and then looked for
+// `<...>`, so `"Nayak, Rishab" <r@x.com>` became two entries -- the first
+// with no brackets, contributing the address `"nayak` -- and a genuine 1:1
+// mail read as two non-owner participants. soleDirectCounterparty returned
+// null and the card was dropped. Brackets come out first now.
+// ---------------------------------------------------------------------------
+
+test('a display name containing a comma is one participant, not two', () => {
+  const addresses = mailParticipantAddresses({ from: '"Nayak, Rishab" <r@x.com>' });
+  assert.deepEqual([...addresses], ['r@x.com'],
+    'the quoted display name is a name; the bracketed address is the participant');
+});
+
+test('an unquoted Last, First display name is also one participant', () => {
+  // RFC 5322 says quote it. Real headers do not always, and the old split
+  // could not tell the difference either way.
+  const addresses = mailParticipantAddresses({ from: 'Nayak, Rishab <r@x.com>' });
+  assert.deepEqual([...addresses], ['r@x.com']);
+});
+
+test('a header list of several people still yields every one of them', () => {
+  const addresses = mailParticipantAddresses({
+    from: '"Nayak, Rishab" <r@x.com>',
+    to: 'owner@x.com, Bob Smith <bob@y.com>',
+    cc: '"Doe, Jane" <jane@z.com>',
+  });
+  assert.deepEqual([...addresses].sort(), ['bob@y.com', 'jane@z.com', 'owner@x.com', 'r@x.com'],
+    'a bare address beside a bracketed one keeps both; display names contribute none');
+});
+
+test('the normalized array form connectors write is unchanged', () => {
+  const addresses = mailParticipantAddresses({
+    from: ['r@x.com'], to: ['owner@x.com', 'Ada <ada@x.com>'], cc: [], bcc: ['b@x.com'],
+  });
+  assert.deepEqual([...addresses].sort(), ['ada@x.com', 'b@x.com', 'owner@x.com', 'r@x.com']);
+});
+
+test('a 1:1 mail whose from is a Last, First header string keeps its counterparty', () => {
+  const db = openDb(':memory:');
+  insertPerson(db, { key: 'name:rishab nayak', name: 'Rishab Nayak', sent: 10, received: 10 });
+  const ctxId = Number(db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'mail', 'can you send that over?', ?)"
+  ).run(NOW - 10 * DAY, JSON.stringify({
+    from: '"Nayak, Rishab" <r@x.com>',
+    to: 'owner@x.com',
+  })).lastInsertRowid);
+  db.prepare(
+    `INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+     VALUES ('name:rishab nayak', ?, 'mail', 'counterparty', 1, 0, 0, 1, 'thread')`
+  ).run(ctxId);
+
+  assert.equal(
+    soleDirectCounterparty(db, ctxId, { ownerAddresses: new Set(['owner@x.com']) }),
+    'name:rishab nayak',
+    'one non-owner address, one counterparty -- the whole point of reading the header'
+  );
+  db.close();
 });

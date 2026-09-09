@@ -214,18 +214,53 @@ export function pickCommitmentSource(db, rows, observedAt, { ownerAddresses = nu
 // that invents a counterparty.
 const MAIL_PARTICIPANT_FIELDS = Object.freeze(['from', 'to', 'cc', 'bcc']);
 
+// ~~`entry.split(',')` then extract the brackets~~ THE OTHER ORDER, fixed
+// 2026-09 (review G finding 8). Splitting first breaks on the single most
+// common raw-header shape there is: `"Nayak, Rishab" <r@x.com>` became two
+// entries, the first with no brackets at all, so a genuine 1:1 mail counted
+// the address `"nayak` plus the real one, read as two non-owner participants,
+// and soleDirectCounterparty returned null. The fix that was written for raw
+// header strings failed on the header it was written for. (Direction was
+// safe -- it dropped cards rather than inventing a counterparty -- but the
+// stated purpose was unmet.)
+//
+// So the bracketed addresses come out FIRST, and only what is left over is
+// comma-split. A display name's commas cannot survive that, quoted or not:
+// once `<...>` and every quoted run are gone, a leftover piece is kept only
+// if it looks like an address at all (an `@`, no whitespace), which is what
+// lets a MIXED list -- `a@x.com, Bob <b@x.com>` -- keep both.
+function headerAddresses(raw) {
+  const out = [];
+  for (const m of raw.matchAll(/<([^<>]*)>/gu)) out.push(m[1]);
+  const rest = raw.replace(/<[^<>]*>/gu, ',').replace(/"[^"]*"/gu, ',');
+  for (const piece of rest.split(',')) {
+    const trimmed = piece.trim();
+    if (trimmed.includes('@') && !/\s/u.test(trimmed)) out.push(trimmed);
+  }
+  return out;
+}
+
 export function mailParticipantAddresses(meta) {
   const addresses = new Set();
+  const add = (value) => {
+    const address = String(value).trim().toLowerCase();
+    if (address.length > 0) addresses.add(address);
+  };
   for (const field of MAIL_PARTICIPANT_FIELDS) {
     const value = meta?.[field];
-    const list = Array.isArray(value) ? value : (typeof value === 'string' ? value.split(',') : []);
-    for (const entry of list) {
-      if (typeof entry !== 'string') continue;
-      // A header string may carry a display name ("Ada <ada@x.com>"); the
-      // address is what identifies a participant.
-      const bracketed = entry.match(/<([^>]+)>/u);
-      const address = (bracketed ? bracketed[1] : entry).trim().toLowerCase();
-      if (address.length > 0) addresses.add(address);
+    if (Array.isArray(value)) {
+      // What connectors' own mailRows.mjs writes: already-normalized
+      // entries, one address each. Kept deliberately permissive -- an entry
+      // is taken whole when it has no brackets, with no @-shaped test -- so
+      // this path behaves exactly as it did.
+      for (const entry of value) {
+        if (typeof entry !== 'string') continue;
+        const bracketed = entry.match(/<([^<>]+)>/u);
+        add(bracketed ? bracketed[1] : entry);
+      }
+    } else if (typeof value === 'string') {
+      // A raw header string: an unnormalized import, or a future adapter.
+      for (const address of headerAddresses(value)) add(address);
     }
   }
   return addresses;

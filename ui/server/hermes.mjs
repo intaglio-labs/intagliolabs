@@ -3597,6 +3597,15 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       // process from the same local config people/graph.mjs takes its
       // identity from -- owe.mjs holds none of its own, deliberately.
       if (rel.ownerAddresses === undefined) {
+        // No configPath, and there is no other call in this file that passes
+        // one to compare against: `grep -n 'loadOwner(' ui/server/hermes.mjs`
+        // returns eleven bare calls and nothing else, and hermes has no
+        // ownerConfigPath seam at all (review G finding 8's second half,
+        // checked rather than assumed). If a HOME-relocated install is ever
+        // supported, every one of these eleven has to learn about it
+        // together -- adding it here alone would make the card route read a
+        // different owner from the people projection, which is worse than
+        // reading the same default everywhere.
         try { rel.ownerAddresses = loadOwner().addresses ?? null; } catch { rel.ownerAddresses = null; }
       }
       const reconnectMode = rel.mode ?? producerConfig.mode;
