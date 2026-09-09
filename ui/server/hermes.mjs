@@ -2057,6 +2057,7 @@ const PENDING_PARAMS = Object.freeze(['limit']);
 const RECALL_PARAMS = Object.freeze(['q', 'limit']);
 const RELATIONSHIP_POOL_PARAMS = Object.freeze(['mode', 'includeOffered', 'minDepth', 'includeAnonymous']);
 const RELATIONSHIP_MODES = Object.freeze(['investor', 'founder', 'any']);
+const RELATIONSHIP_MODE_FIELDS = Object.freeze(['mode']);
 const RELATIONSHIP_PAGE_BUILD_FIELDS = Object.freeze(['personKey', 'engine']);
 const RELATIONSHIP_PAGE_PARAMS = Object.freeze(['personKey']);
 // 'budget' and 'limit' are accepted as synonyms: sweep-once.mjs's own CLI
@@ -2667,6 +2668,13 @@ export function applyMemoryBatch(db, body) {
 // excluded from the pool exactly as before.
 const CURRENT_PRODUCER_VERSION = { owe: OWE_PRODUCER_VERSION, reconnect: PRODUCER_VERSION };
 
+// The rel.refill key reconnect's own (kind, mode) queue keeps its throttle
+// state under -- see daily.mjs's produceDailyBatch `refillKey` contract.
+// Owe has no modes, so it keeps the plain 'owe' key untouched.
+function reconnectRefillKey(mode) {
+  return `reconnect:${mode}`;
+}
+
 // BOTH-KIND, restored independently per CARD_PRODUCERS entry: the latest
 // batch that actually wrote a snapshot of that kind (MAX(batch_id) FROM
 // rm_candidate_snapshot WHERE kind = ?), not merely the latest
@@ -2698,28 +2706,29 @@ function hydrateCards(db, policy) {
     const cards = [];
     const batch = { owe: null, reconnect: null };
     let mode = null;
-    for (const kind of CARD_PRODUCERS) {
-      const latest = db.prepare(
-        'SELECT MAX(batch_id) AS batchId FROM rm_candidate_snapshot WHERE kind = ?'
-      ).get(kind);
-      const batchId = latest?.batchId != null ? Number(latest.batchId) : null;
-      if (batchId === null) continue;
+    let modeBatchId = null; // tracks which mode's batch is the most recent, for `mode` recovery below
+
+    // Loads ONE kind's snapshot rows from ONE batch into `cards`/`batch`,
+    // applying the same version-staleness gate every batch already went
+    // through. `modeFilter`, when given, additionally drops any row whose
+    // evidence.mode does not match -- used below to load reconnect's THREE
+    // per-mode batches independently rather than only ever the single
+    // overall-latest one, which used to silently drop an unjudged OTHER-mode
+    // batch's cards on every restart.
+    function loadBatch(kind, batchId, modeFilter) {
+      if (batchId === null) return;
       const rows = db.prepare(
         'SELECT id, person_key, kind, summary, evidence, producer_version FROM rm_candidate_snapshot ' +
         'WHERE batch_id = ? ORDER BY id'
       ).all(batchId);
-      // A batch produced under rules this producer no longer runs (its
-      // stored producer_version differs from CURRENT_PRODUCER_VERSION[kind])
-      // is stale: skip it entirely rather than serving or hydrating it, so
-      // the card route sees no unjudged cards for this kind and refills on
-      // its own throttle instead. Only the row(s) actually of `kind` decide
-      // this -- batchId is itself derived from a kind-scoped MAX(batch_id).
       const versionGated = kind === 'owe' || eligibilityReconnect;
       const kindRow = rows.find((row) => row.kind === kind);
-      if (versionGated && kindRow && kindRow.producer_version !== CURRENT_PRODUCER_VERSION[kind]) continue;
-      batch[kind] = batchId;
+      if (versionGated && kindRow && kindRow.producer_version !== CURRENT_PRODUCER_VERSION[kind]) return;
+      if (batch[kind] === null || batchId > batch[kind]) batch[kind] = batchId;
       for (const row of rows) {
+        if (row.kind !== kind) continue;
         const evidence = JSON.parse(row.evidence);
+        if (modeFilter !== undefined && evidence.mode !== modeFilter) continue;
         const { quote_context_id, role, focus, label, left, leftTone, ...cardEvidence } = evidence;
         let name = row.person_key;
         try {
@@ -2734,16 +2743,46 @@ function hydrateCards(db, policy) {
           snapshot_id: Number(row.id),
         });
       }
-      if (kind === 'reconnect') {
-        // The mode the latest reconnect batch was produced in (every
-        // snapshot in a batch carries the same one) is the owner's last pick
-        // from the widget's mode picker -- recovered here so a restart does
-        // not silently fall back to the config default the next time the
-        // card route refills reconnect.
-        const lastMode = rows.length ? JSON.parse(rows[0].evidence)?.mode : null;
-        mode = RELATIONSHIP_MODES.includes(lastMode) ? lastMode : null;
+      if (kind === 'reconnect' && rows.length > 0 && (modeBatchId === null || batchId > modeBatchId)) {
+        // The mode the MOST RECENT reconnect batch (across all three modes)
+        // was produced in is the owner's last pick from the widget's mode
+        // picker -- recovered here so a restart does not silently fall back
+        // to the config default the next time the card route refills.
+        modeBatchId = batchId;
+        const lastMode = JSON.parse(rows[0].evidence)?.mode;
+        mode = RELATIONSHIP_MODES.includes(lastMode) ? lastMode : mode;
       }
     }
+
+    const oweLatest = db.prepare(
+      "SELECT MAX(batch_id) AS batchId FROM rm_candidate_snapshot WHERE kind = 'owe'"
+    ).get();
+    loadBatch('owe', oweLatest?.batchId != null ? Number(oweLatest.batchId) : null);
+
+    if (eligibilityReconnect) {
+      // Reconnect: modes are queues (L5 mode-picker follow-on) -- restore the
+      // latest non-empty, current-version batch PER MODE, independently, so
+      // an unjudged batch in a mode the owner is not currently on survives a
+      // restart instead of being dropped in favor of whichever mode's batch
+      // happened to be produced most recently.
+      for (const m of RELATIONSHIP_MODES) {
+        const latest = db.prepare(
+          "SELECT MAX(batch_id) AS batchId FROM rm_candidate_snapshot " +
+          "WHERE kind = 'reconnect' AND json_extract(evidence, '$.mode') = ?"
+        ).get(m);
+        loadBatch('reconnect', latest?.batchId != null ? Number(latest.batchId) : null, m);
+      }
+    } else {
+      // The matcher path predates modes entirely -- its snapshots carry no
+      // evidence.mode at all, so the per-mode split above would never match
+      // any of them. Keep its original behavior: the single overall-latest
+      // reconnect batch, unfiltered.
+      const latest = db.prepare(
+        "SELECT MAX(batch_id) AS batchId FROM rm_candidate_snapshot WHERE kind = 'reconnect'"
+      ).get();
+      loadBatch('reconnect', latest?.batchId != null ? Number(latest.batchId) : null);
+    }
+
     return { cards, batch, mode };
   } catch {
     // A missing rm_candidate_batch/snapshot table (fresh DB, or a schema this
@@ -3043,6 +3082,29 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     return;
   }
 
+  // Modes are queues, not refreshes (L5 mode-picker follow-on): switching the
+  // widget's mode picker used to POST /refresh, which unconditionally minted
+  // a NEW batch (and recorded a 'shown' on a fresh person) on every click --
+  // burning the 7-day cooldown on people never actually looked at, and the
+  // card only visibly changed on the SECOND click because the first click's
+  // response landed after the GET /card that followed it. This route only
+  // ever sets rel.mode; it produces nothing and records no event. The next
+  // GET /card serves whatever unjudged reconnect card already exists in that
+  // mode (see the card route's mode filter below) or refills exactly once,
+  // through the same synchronous eligibility-producer path any other refill
+  // uses.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/mode') {
+    const rel = relationshipState(db, policy);
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_MODE_FIELDS);
+    if (!RELATIONSHIP_MODES.includes(body?.mode)) {
+      throw badRequest(`"mode" must be one of: ${RELATIONSHIP_MODES.join(', ')}`);
+    }
+    rel.mode = body.mode;
+    send(res, 200, { mode: rel.mode }, cors);
+    return;
+  }
+
   // --- Relationship Memory (L5 step 10): the orb's card surface. ---------
   // Bearer-only like every admin route. The card pipeline runs entirely on
   // this box; refresh is minutes of loopback-llama time, so the widget fires
@@ -3066,15 +3128,18 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         const { batchId, cards } = produceBatch(db, { mode, now });
         rel.mode = mode;
         rel.batch.reconnect = batchId;
-        // Replace only reconnect's OWN slice of the shared queue -- an
-        // explicit reconnect refresh must never drop Owe's unjudged cards.
-        rel.cards = [...rel.cards.filter((c) => c.kind !== 'reconnect'), ...cards];
+        // Replace only reconnect cards of THIS SAME MODE -- modes are queues
+        // (L5 mode-picker follow-on): an unjudged batch in a DIFFERENT mode
+        // must survive an explicit refresh of this one, same as it survives
+        // the card route's own mode-switch refill. Owe is untouched either
+        // way (it was never in the 'reconnect' filter to begin with).
+        rel.cards = [...rel.cards.filter((c) => !(c.kind === 'reconnect' && c.evidence?.mode === mode)), ...cards];
         rel.refreshing = false;
         // An explicit refresh is a refill too (just never throttled -- the
-        // owner asked for it directly): keep the card route's own per-kind
-        // throttle bookkeeping current so a poll right after this doesn't
-        // act on a stale rel.refill.reconnect from before the owner's ask.
-        rel.refill.reconnect = { at: now, empty: cards.length === 0 };
+        // owner asked for it directly): keep the card route's own
+        // per-(kind,mode) throttle bookkeeping current so a poll right after
+        // this doesn't act on a stale throttle from before the owner's ask.
+        rel.refill[reconnectRefillKey(mode)] = { at: now, empty: cards.length === 0 };
         if (cards.length > 0) startPageBuilds(db, policy, rel, batchId, cards);
       } catch (e) {
         rel.refreshing = false;
@@ -3167,6 +3232,15 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         // its refill behind a queue chosen under the rules just rejected.
         currentVersions: CURRENT_PRODUCER_VERSION,
         refillRetryMs: REFILL_RETRY_MS,
+        // Modes are queues (L5 mode-picker follow-on): reconnect's
+        // unjudged-check and refill throttle are scoped to the owner's
+        // current mode pick, so a mode with its own unjudged card serves it
+        // without producing, and a mode's own empty-refill throttle never
+        // blocks a DIFFERENT mode the owner switches to next. Owe has no
+        // modes -- modeFor/refillKey return undefined/'owe' for it, the same
+        // plain per-kind behavior as before this follow-on.
+        modeFor: (kind) => (kind === 'reconnect' ? (rel.mode ?? producerConfig.mode) : undefined),
+        refillKey: (kind) => (kind === 'reconnect' ? reconnectRefillKey(rel.mode ?? producerConfig.mode) : kind),
         onBatchProduced: (kind, batchId, cards) => {
           if (cards.length > 0) startPageBuilds(db, policy, rel, batchId, cards);
         },
@@ -3177,7 +3251,10 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
           refillThrottled = true;
           // Both kinds are exhausted (or throttled from a previous request):
           // retry after whichever kind was most recently attempted cools down.
-          const at = Math.max(rel.refill.owe.at ?? 0, rel.refill.reconnect.at ?? 0);
+          const at = Math.max(
+            rel.refill.owe.at ?? 0,
+            rel.refill[reconnectRefillKey(rel.mode ?? producerConfig.mode)]?.at ?? 0
+          );
           retryAfterMs = Math.max(0, REFILL_RETRY_MS - (now - at));
         } else {
           servingKind = decision.servingKind;
@@ -3195,8 +3272,14 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // The serving set: the single kind daily.mjs picked (eligibility path),
     // or the whole queue (matcher path, or an eligibility-path exception
     // above -- serve whatever is already there rather than answering nothing
-    // on a transient error).
-    const servingQueue = servingKind === null ? rel.cards : rel.cards.filter((c) => c.kind === servingKind);
+    // on a transient error). Reconnect is additionally filtered to the
+    // owner's current mode -- modes are queues, so a reconnect card produced
+    // under a DIFFERENT mode must sit unserved rather than leaking into
+    // whichever mode is live right now. Owe carries no mode (evidence.mode
+    // is always absent on an Owe card) and is unaffected; the matcher path
+    // never sets rel.mode, so its cards are unaffected too.
+    const servingQueue = (servingKind === null ? rel.cards : rel.cards.filter((c) => c.kind === servingKind))
+      .filter((c) => c.kind !== 'reconnect' || rel.mode == null || c.evidence?.mode === rel.mode);
 
     // PAGE-FIRST: among the unjudged candidates, serve whichever already has
     // a built page (accepted or pending items -- readPersonPage already omits

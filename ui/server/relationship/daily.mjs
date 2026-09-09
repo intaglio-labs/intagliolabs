@@ -51,10 +51,17 @@ export function pickProducer(db, { now = Date.now() } = {}) {
 // no-op when omitted, as this module's own tests do -- they stub producers
 // that don't carry real producer_version values) so this file stays
 // generic-alternation-only when no versioned policy is supplied.
-function hasUnjudgedOfKind(db, cards, kind, currentVersions) {
+// `modeFilter` (optional) narrows the check to cards whose evidence.mode
+// matches -- modes-as-queues (L5 mode-picker follow-on): whether "this kind
+// already has an unjudged card" must mean "in THIS mode" for reconnect, not
+// "in any mode ever produced". Undefined (what every existing caller still
+// passes) means no mode filter at all, so this file stays
+// generic-alternation-only per its own header comment.
+function hasUnjudgedOfKind(db, cards, kind, currentVersions, modeFilter) {
   const requiredVersion = currentVersions?.[kind];
   return (cards ?? []).some((card) => card.kind === kind
     && (requiredVersion === undefined || card.producer_version === requiredVersion)
+    && (modeFilter === undefined || card.evidence?.mode === modeFilter)
     && !db.prepare(
       "SELECT 1 FROM rm_card_event WHERE snapshot_id = ? AND event IN ('accepted','dismissed') LIMIT 1"
     ).get(card.snapshot_id));
@@ -78,11 +85,20 @@ function hasUnjudgedOfKind(db, cards, kind, currentVersions) {
 // (db, {now}) => {batchId, cards}; `onBatchProduced(kind, batchId, cards)`
 // is called after a non-empty produce (the card route's startPageBuilds
 // call lives there -- Owe batches get it too, same as reconnect);
-// `refillRetryMs` defaults to REFILL_RETRY_MS.
+// `refillRetryMs` defaults to REFILL_RETRY_MS. `modeFor(kind)` (optional)
+// returns the mode a kind's unjudged-check and produce should be scoped to
+// (undefined for no scoping -- the plain per-kind behavior every existing
+// caller still gets); `refillKey(kind)` (optional) returns the key under
+// which that kind's refill-throttle state lives in rel.refill, so a
+// mode-scoped kind (hermes.mjs passes `reconnect:${mode}`) gets its own
+// throttle instead of sharing one throttle across every mode -- "a mode with
+// an empty queue refills once and is throttled after" must not also throttle
+// a DIFFERENT mode the owner switches to next.
 //
 // `rel` is the same per-process holder the card route already keeps:
 // rel.cards (the combined queue, both kinds), rel.batch ({owe, reconnect}
-// batch ids), rel.refill ({owe:{at,empty}, reconnect:{at,empty}}).
+// batch ids), rel.refill (keyed by refillKey(kind), defaulting to kind
+// itself: {owe:{at,empty}, reconnect:{at,empty}, ...any mode-scoped keys}).
 export function produceDailyBatch(db, policy, rel, { now = Date.now() } = {}) {
   const refillRetryMs = policy.refillRetryMs ?? REFILL_RETRY_MS;
   rel.refill ??= { owe: { at: null, empty: false }, reconnect: { at: null, empty: false } };
@@ -92,8 +108,13 @@ export function produceDailyBatch(db, policy, rel, { now = Date.now() } = {}) {
   const P = pickProducer(db, { now });
   const Q = CARD_PRODUCERS.find((k) => k !== P);
 
+  const refillKeyFor = (kind) => (policy.refillKey ? policy.refillKey(kind) : kind);
+  const modeFor = (kind) => (policy.modeFor ? policy.modeFor(kind) : undefined);
+
   function tryProduce(kind) {
-    const state = rel.refill[kind];
+    const key = refillKeyFor(kind);
+    rel.refill[key] ??= { at: null, empty: false };
+    const state = rel.refill[key];
     if (state.empty && state.at != null && now - state.at < refillRetryMs) {
       return { throttled: true, produced: 0 };
     }
@@ -108,11 +129,11 @@ export function produceDailyBatch(db, policy, rel, { now = Date.now() } = {}) {
     return { throttled: false, produced: cards.length };
   }
 
-  if (hasUnjudgedOfKind(db, rel.cards, P, policy.currentVersions)) return { servingKind: P };
+  if (hasUnjudgedOfKind(db, rel.cards, P, policy.currentVersions, modeFor(P))) return { servingKind: P };
   const producedP = tryProduce(P);
   if (producedP.produced > 0) return { servingKind: P };
 
-  if (hasUnjudgedOfKind(db, rel.cards, Q, policy.currentVersions)) return { servingKind: Q };
+  if (hasUnjudgedOfKind(db, rel.cards, Q, policy.currentVersions, modeFor(Q))) return { servingKind: Q };
   const producedQ = tryProduce(Q);
   if (producedQ.produced > 0) return { servingKind: Q };
 

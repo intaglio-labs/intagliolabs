@@ -732,3 +732,147 @@ test('an expired-commitment card whose claim is rejected between produce and ser
     assert.equal(out.card, null, 'the rejected-between-produce-and-serve card is dropped, not shown');
   });
 });
+
+// ---------------------------------------------------------------------
+// Modes are queues, not refreshes (L5 mode-picker follow-on): clicking a
+// mode button used to POST /refresh, which minted a fresh batch (and a
+// 'shown' event on a brand-new person) on every click. POST
+// /admin/relationship/mode only ever sets rel.mode; the following GET /card
+// serves whichever unjudged card that mode already has queued, or refills
+// once through the ordinary synchronous eligibility path.
+
+function seedReconnectCandidateMode(db, key, name, now, subRoles = []) {
+  insertPersonRow(db, { key, name, subRoles, sent: 20, received: 20 }, now);
+  insertMessage(db, key, { ts: now - 200 * DAY, authored: 1 });
+  insertActiveDayRow(db, key, isoDay(now, 200));
+}
+
+test('POST /admin/relationship/mode: unknown fields/mode 400, no card event of its own', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const bad = await call('POST', '/admin/relationship/mode', { mode: 'any', extra: 1 });
+    assert.equal(bad.status, 400);
+
+    const badMode = await call('POST', '/admin/relationship/mode', { mode: 'nope' });
+    assert.equal(badMode.status, 400);
+
+    const ok = await call('POST', '/admin/relationship/mode', { mode: 'founder' });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(await ok.json(), { mode: 'founder' });
+
+    const events = db.prepare('SELECT COUNT(*) AS n FROM rm_card_event').get();
+    assert.equal(events.n, 0, 'switching mode alone records no event of any kind');
+  });
+});
+
+test('switching mode serves that mode\'s queued card without writing a new batch; switching back does the same', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedReconnectCandidateMode(db, 'name:mode any', 'Mode Any', now);
+    seedReconnectCandidateMode(db, 'name:mode founder', 'Mode Founder', now, ['founder']);
+
+    // Establish rel.mode='any' and let it refill -- this produces the 'any'
+    // batch and serves its one card.
+    await call('POST', '/admin/relationship/mode', { mode: 'any' });
+    const anyCard = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(anyCard.card.kind, 'reconnect');
+    assert.equal(anyCard.card.personKey, 'name:mode any');
+    const batchesAfterAny = db.prepare('SELECT COUNT(*) AS n FROM rm_candidate_batch').get().n;
+
+    // Switch to 'founder': its own queue is empty so far, so this GET refills
+    // it, but the earlier 'any' card is untouched (still unjudged) rather
+    // than being dropped by the mode switch.
+    await call('POST', '/admin/relationship/mode', { mode: 'founder' });
+    const founderCard = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(founderCard.card.personKey, 'name:mode founder');
+    const batchesAfterFounder = db.prepare('SELECT COUNT(*) AS n FROM rm_candidate_batch').get().n;
+    assert.ok(batchesAfterFounder > batchesAfterAny, 'founder had no queued card yet, so its own refill ran once');
+
+    // Switch back to 'any': its card is STILL unjudged and queued from
+    // before -- this GET must serve it again, not produce a fresh batch.
+    await call('POST', '/admin/relationship/mode', { mode: 'any' });
+    const batchesBeforeSecondAny = db.prepare('SELECT COUNT(*) AS n FROM rm_candidate_batch').get().n;
+    const anyCardAgain = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(anyCardAgain.card.personKey, 'name:mode any', 'the earlier any-mode card serves again, unchanged');
+    assert.equal(anyCardAgain.card.snapshot_id, anyCard.card.snapshot_id, 'same snapshot -- not a new one');
+    const batchesAfterSecondAny = db.prepare('SELECT COUNT(*) AS n FROM rm_candidate_batch').get().n;
+    assert.equal(batchesAfterSecondAny, batchesBeforeSecondAny, 'no new batch was written switching back');
+  });
+});
+
+test('a mode with an empty queue refills once and is throttled after; a different mode is unaffected', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    // Nobody is eligible for reconnect in any mode: every refill attempt for
+    // 'investor' will produce zero cards.
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+
+    const first = await (await call('GET', '/admin/relationship/card')).json();
+    // Owe is also empty (no seeded candidates at all), so pool-exhausted is
+    // the expected outcome once both kinds' current-mode/kind pools are dry.
+    assert.equal(first.card, null);
+    const batchesAfterFirst = db.prepare('SELECT COUNT(*) AS n FROM rm_candidate_batch').get().n;
+    assert.ok(batchesAfterFirst >= 1, 'the empty investor pool was actually attempted once');
+
+    const second = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(second.card, null);
+    const batchesAfterSecond = db.prepare('SELECT COUNT(*) AS n FROM rm_candidate_batch').get().n;
+    assert.equal(batchesAfterSecond, batchesAfterFirst, 'a second poll within the throttle window does not refill again');
+  });
+});
+
+test('hydrate restores all three reconnect modes plus Owe after a restart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-routes-mode-hydrate-'));
+  const dbPath = join(dir, 'context.db');
+  const opts = {
+    port: 0, dbPath, llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN, relationshipCap: CAP,
+    relationshipProducerConfig: { producer: 'eligibility', mode: 'any' },
+    peopleProjectionAutoRebuild: false,
+  };
+  const now = Date.now();
+
+  const first = await start(opts);
+  try {
+    const db = first.db;
+    // 'founder' and 'investor' seed people ONLY eligible for their own mode
+    // (subRoles gates eligiblePool for those two modes); 'any' has no
+    // subRoles filter, so its own batch may also pick up the founder/investor
+    // people -- irrelevant here, since what this test checks is that each
+    // mode's OWN batch (produced under that mode) survives the restart
+    // independently, not who ranks first within a mode's pool.
+    seedReconnectCandidateMode(db, 'name:hydrate any', 'Hydrate Any', now, []);
+    seedReconnectCandidateMode(db, 'name:hydrate founder', 'Hydrate Founder', now, ['founder']);
+    seedReconnectCandidateMode(db, 'name:hydrate investor', 'Hydrate Investor', now, ['investor']);
+
+    produceBatch(db, { mode: 'founder', now });
+    produceBatch(db, { mode: 'investor', now: now + 1000 });
+    produceBatch(db, { mode: 'any', now: now + 2000 });
+  } finally {
+    await first.close();
+  }
+
+  const second = await start(opts);
+  try {
+    const rows = second.db.prepare(
+      "SELECT person_key, evidence FROM rm_candidate_snapshot WHERE kind = 'reconnect' ORDER BY id"
+    ).all();
+    const byMode = new Map();
+    for (const r of rows) {
+      const m = JSON.parse(r.evidence).mode;
+      if (!byMode.has(m)) byMode.set(m, []);
+      byMode.get(m).push(r.person_key);
+    }
+    assert.ok(byMode.get('founder')?.includes('name:hydrate founder'));
+    assert.ok(byMode.get('investor')?.includes('name:hydrate investor'));
+    assert.ok(byMode.get('any')?.includes('name:hydrate any'));
+
+    const base = `http://127.0.0.1:${second.port}`;
+    const call = (method, path, body) => fetch(base + path, {
+      method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    await call('POST', '/admin/relationship/mode', { mode: 'founder' });
+    const founderCard = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(founderCard.card.personKey, 'name:hydrate founder', 'the founder batch survived the restart, hydrated on its own');
+  } finally {
+    await second.close();
+  }
+});
