@@ -7,7 +7,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { openDb } from '../server/hermes.mjs';
-import { CARD_PRODUCERS, REFILL_RETRY_MS, pickProducer, produceDailyBatch } from '../server/relationship/daily.mjs';
+import {
+  CARD_PRODUCERS, CONSUMING_EVENTS, REFILL_RETRY_MS,
+  isSnapshotConsumed, liveQueuePersonKeys, pickProducer, produceDailyBatch,
+} from '../server/relationship/daily.mjs';
 
 const NOW = Date.parse('2026-06-01T12:00:00Z');
 const DAY = 86_400_000;
@@ -184,4 +187,97 @@ test('an empty Owe refill does not throttle reconnect; once both are empty, pool
   assert.equal(out3.reason, 'pool-exhausted');
   assert.equal(oweProducer.callCount(), 1, 'still not called again');
   assert.equal(reconnectProducer.callCount(), 2, 'still not called again -- both kinds are throttled independently');
+});
+
+
+// ---- review findings 1/2: the CONSUMED model ------------------------------
+// The queue's idea of "still owed to the owner" used to be "no accepted or
+// dismissed row", which disagreed with the serve loop in two directions: a
+// snapshot the owner MUTED stayed in the queue forever (the card's own "mute
+// 30d" writes only a 'muted' row), and a card that cannot be served at all
+// held its producer's turn. See the model comment in daily.mjs.
+
+function insertEvent(db, snapshotId, event, createdAt = NOW) {
+  db.prepare(
+    'INSERT INTO rm_card_event(person_key, kind, snapshot_id, event, reason, note, rule_version, time_band, created_at) ' +
+    "VALUES ('name:whoever', 'x', ?, ?, NULL, NULL, 'v1', 'morning', ?)"
+  ).run(snapshotId, event, createdAt);
+}
+
+test('a muted or suppressed snapshot is consumed; a shown or opened one is not', () => {
+  assert.deepEqual([...CONSUMING_EVENTS], ['accepted', 'dismissed', 'muted', 'suppressed']);
+  const db = openDb(':memory:');
+  const live = card(db, 'owe');
+  const shown = card(db, 'owe');
+  const muted = card(db, 'owe');
+  const suppressed = card(db, 'owe');
+  insertEvent(db, shown.snapshot_id, 'shown');
+  insertEvent(db, shown.snapshot_id, 'opened');
+  insertEvent(db, muted.snapshot_id, 'muted');
+  insertEvent(db, suppressed.snapshot_id, 'suppressed');
+
+  assert.equal(isSnapshotConsumed(db, live.snapshot_id), false);
+  assert.equal(isSnapshotConsumed(db, shown.snapshot_id), false,
+    'showing a card is not the owner answering it');
+  assert.equal(isSnapshotConsumed(db, muted.snapshot_id), true);
+  assert.equal(isSnapshotConsumed(db, suppressed.snapshot_id), true);
+});
+
+test('a muted card no longer holds its kind\'s turn, and an unservable one does not either', () => {
+  const db = openDb(':memory:');
+  const mutedCard = card(db, 'owe');
+  insertEvent(db, mutedCard.snapshot_id, 'muted');
+  const deadCard = card(db, 'owe');
+
+  const oweProducer = stubProducer([]);
+  const policy = { producers: { owe: oweProducer, reconnect: stubProducer([]) } };
+  const rel = { cards: [mutedCard, deadCard], batch: { owe: null, reconnect: null } };
+
+  // Only the muted card is consumed; the other is refused by the caller's
+  // own servability gate (its quote row is gone, say).
+  const out = produceDailyBatch(db, policy, rel, { now: NOW });
+  assert.equal(out.servingKind, 'owe',
+    'with no servability gate supplied, the unconsumed dead card still counts as live');
+  assert.equal(oweProducer.callCount(), 0, 'and it holds owe\'s turn: nothing was produced');
+
+  const rel2 = { cards: [mutedCard, deadCard], batch: { owe: null, reconnect: null } };
+  const policy2 = {
+    producers: { owe: stubProducer([card(db, 'owe')]), reconnect: stubProducer([]) },
+    servable: (c) => c.snapshot_id !== deadCard.snapshot_id,
+  };
+  const out2 = produceDailyBatch(db, policy2, rel2, { now: NOW });
+  assert.equal(out2.servingKind, 'owe',
+    'with the gate supplied, owe produced past both the muted and the unservable card');
+  assert.equal(policy2.producers.owe.callCount(), 1);
+});
+
+test('liveQueuePersonKeys: the newest batch per mode, minus consumed, inside the window', () => {
+  const db = openDb(':memory:');
+  const batch = (createdAt, rows) => {
+    const batchId = Number(db.prepare(
+      'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, ?, ?, NULL)'
+    ).run(createdAt, rows.length, 'open').lastInsertRowid);
+    return rows.map(([personKey, mode]) => Number(db.prepare(
+      'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) ' +
+      "VALUES (?, ?, 'reconnect', 'summary', ?, 'v1', 'test', ?)"
+    ).run(batchId, personKey, JSON.stringify({ mode }), createdAt).lastInsertRowid));
+  };
+
+  // Batches are inserted in time order, the way a running system writes
+  // them (batch ids and created_at both increase).
+  //
+  // A batch older than the window comes first: the window is what stops a
+  // permanently stale batch from wedging a person out of the other kind
+  // forever.
+  batch(NOW - 40 * DAY, [['name:ancient', 'any']]);
+  // Then an 'any' batch and a NEWER 'investor' one: modes are queues, so the
+  // investor batch must not hide the still-live 'any' one.
+  const [anyLive, anyJudged] = batch(NOW - 2 * DAY, [['name:any live', 'any'], ['name:any judged', 'any']]);
+  const [investorLive] = batch(NOW - 1 * DAY, [['name:investor live', 'investor']]);
+  insertEvent(db, anyJudged, 'dismissed', NOW - 1 * DAY);
+
+  const keys = liveQueuePersonKeys(db, 'reconnect', { now: NOW });
+  assert.deepEqual([...keys].sort(), ['name:any live', 'name:investor live']);
+  assert.ok(Number.isInteger(anyLive) && Number.isInteger(investorLive));
+  assert.equal(liveQueuePersonKeys(db, 'owe', { now: NOW }).size, 0, 'kind-scoped');
 });
