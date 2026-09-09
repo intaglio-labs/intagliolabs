@@ -15,10 +15,12 @@ import { dirname, join } from 'node:path';
 
 import { openDb, start } from '../server/hermes.mjs';
 import {
-  buildLookupQuery, parseLookupStream, groundLookup,
-  anchorsFor, lookupScope, lookupGate, storeLookup, lookupPerson, runLookupPass,
+  buildLookupQuery, parseLookupStream, groundLookup, evidenceKindFor,
+  anchorsFor, lookupScope, lookupGate, lookupStatus, storeLookup, lookupPerson, runLookupPass,
+  lookupEvidenceFor, newestWebChange,
   LOOKUP_REFRESH_DAYS,
 } from '../server/relationship/lookup.mjs';
+import { claudeLookupArgs } from '../server/relationship/engines.mjs';
 
 const TOKEN = 'b'.repeat(64);
 
@@ -366,7 +368,7 @@ test('storeLookup writes a web context row, a pending claim, a receipt, and a pe
     url: 'https://acme.example/news', quote: 'promoted to VP of Engineering', date: '2026-03',
   }];
   const result = storeLookup(db, { personKey: 'name:jane', kept, logId, distillRunId, now: NOW });
-  assert.deepEqual(result, { stored: 1, skipped: 0 });
+  assert.deepEqual(result, { stored: 1, skipped: 0, duplicates: 0 });
 
   const ctx = db.prepare("SELECT * FROM context WHERE source = 'web'").get();
   assert.ok(ctx, 'a web context row was written');
@@ -833,5 +835,654 @@ test('/stats carries lookup with real cost; the card carries `changed`, null onc
     assert.equal(after.card.changed, null, '`changed` is null once the web row is gone');
   } finally {
     await server.close();
+  }
+});
+
+// --- The lookup_log 4520 false positive ----------------------------------
+//
+// What happened: person `name:nikzad khani` was sent name + firm "Klaviyo"
+// (off the LinkedIn export) + profile URL. The model answered
+// identity_confidence "match" and proposed a kind 'move' change reading
+// "Nikzad Khani is now a Software Engineer at Verily, not Klaviyo as
+// previously recorded.", quoting "Nikzad Khani - Software Engineer -
+// Verily" and citing https://www.linkedin.com/in/nikzadkhani/. The owner is
+// at Klaviyo. Grounding HELD -- the quote really was verbatim in the
+// tool_result text and the URL really was one the search returned -- because
+// the quote was a `Links:` TITLE and titles live in that same text.
+//
+// Every stream below is built in the SHAPE of the real captured transcript
+// (ui/test/fixtures/lookup-stream.txt): a tool_result whose content is
+// `Web search results for query: "..."`, then `Links: [{title,url},...]`,
+// then the provider's synthesized prose, then a `REMINDER:` tail.
+
+const KHANI_TITLE = 'Nikzad Khani - Software Engineer - Verily';
+const KHANI_URL = 'https://www.linkedin.com/in/nikzadkhani/';
+
+function searchResultText({ query, links, prose }) {
+  return `Web search results for query: "${query}"\n\n`
+    + `Links: ${JSON.stringify(links)}\n\n`
+    + `${prose}\n\n`
+    + 'REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.';
+}
+
+function lookupStream({ query, links, prose, envelope }) {
+  return [
+    JSON.stringify({ type: 'assistant', message: { content: [
+      { type: 'tool_use', id: 't1', name: 'WebSearch', input: { query } },
+    ] } }),
+    JSON.stringify({ type: 'user', message: { content: [
+      { type: 'tool_result', tool_use_id: 't1', content: searchResultText({ query, links, prose }) },
+    ] } }),
+    JSON.stringify({ type: 'result', total_cost_usd: 0.03, is_error: false, result: JSON.stringify(envelope) }),
+  ].join('\n');
+}
+
+function newDistillRun(db, at = NOW) {
+  return Number(db.prepare(
+    `INSERT INTO distill_run(model, prompt_path, prompt_sha, params, episode_context, rows_in, claims_out, status, started_at, ended_at)
+     VALUES ('fake', 'x', 'x', '{}', 'off', 1, 0, 'running', ?, NULL)`
+  ).run(at).lastInsertRowid);
+}
+
+// The 4520 stream, reconstructed: the ONLY place "Verily" appears is a
+// Links title. The prose confirms nothing about an employer.
+function khaniStream(envelope) {
+  return lookupStream({
+    query: '"Nikzad Khani" "Klaviyo" https://www.linkedin.com/in/nikzadkhani/',
+    links: [
+      { title: KHANI_TITLE, url: KHANI_URL },
+      { title: 'Nikzad Khani | LinkedIn', url: 'https://www.linkedin.com/in/nikzad-khani/' },
+    ],
+    prose: 'Nikzad Khani has a public LinkedIn profile. No employment dates were listed in the results.',
+    envelope,
+  });
+}
+
+const KHANI_MOVE_ENVELOPE = {
+  identity_confidence: 'match',
+  changes: [{
+    kind: 'move',
+    text: 'Nikzad Khani is now a Software Engineer at Verily, not Klaviyo as previously recorded.',
+    url: KHANI_URL,
+    quote: KHANI_TITLE,
+  }],
+};
+
+test('parseLookupStream separates Links titles from the synthesized prose', () => {
+  const observed = parseLookupStream(khaniStream(KHANI_MOVE_ENVELOPE));
+
+  // The title IS in resultText -- which is exactly why the old
+  // resultText.includes(quote) check called this grounded evidence.
+  assert.ok(observed.resultText.includes(KHANI_TITLE), 'a title is verbatim inside the raw tool_result text');
+  // ... and is NOT in snippetText, which is what grounding reads now.
+  assert.equal(observed.snippetText.includes(KHANI_TITLE), false, 'a title is not part of the synthesized prose');
+  // Nor is the header, which echoes our own anchors back at us.
+  assert.equal(observed.snippetText.includes('Klaviyo'), false, 'the query header is not evidence about anybody');
+  assert.equal(observed.snippetText.includes('REMINDER'), false, 'the provider reminder is not evidence either');
+  assert.ok(observed.snippetText.includes('No employment dates were listed'), 'the prose survives');
+
+  assert.deepEqual(
+    observed.links.map((l) => l.url).sort(),
+    ['https://www.linkedin.com/in/nikzad-khani/', KHANI_URL]
+  );
+  assert.equal(observed.links.find((l) => l.url === KHANI_URL).title, KHANI_TITLE);
+});
+
+test('evidenceKindFor calls a title a title and prose a snippet', () => {
+  const observed = parseLookupStream(khaniStream(KHANI_MOVE_ENVELOPE));
+  assert.equal(evidenceKindFor(KHANI_TITLE, observed), 'title');
+  // A substring of a title is still only a title.
+  assert.equal(evidenceKindFor('Software Engineer - Verily', observed), 'title');
+  assert.equal(evidenceKindFor('No employment dates were listed in the results.', observed), 'snippet');
+  assert.equal(evidenceKindFor('a sentence nobody published', observed), null);
+});
+
+// THE CASE. Before this commit: kept === [that change], kind 'move',
+// identity_confidence 'match', and the card served it as fact.
+test('a title that disagrees with the firm anchor is stored as contradicts_anchor, never as a move', () => {
+  const observed = parseLookupStream(khaniStream(KHANI_MOVE_ENVELOPE));
+  const envelope = JSON.parse(observed.envelopeText);
+  const { kept, dropped } = groundLookup(envelope, observed, { firm: 'Klaviyo' });
+
+  assert.equal(kept.length, 1, 'the change is KEPT -- the owner must get to see the disagreement');
+  assert.equal(kept[0].contradictsAnchor, true);
+  assert.equal(kept[0].evidenceKind, 'title');
+  assert.equal(kept[0].kind, 'company', "refiled as 'company': it is a competing claim about which firm, not a move");
+  assert.deepEqual(dropped, []);
+
+  // The anchor firm is evidence in BOTH directions: 4520's own sentence
+  // names two companies ("at Verily, not Klaviyo"), so it contradicts
+  // whichever of the two it was not sent -- anchor Verily and Klaviyo is
+  // the odd one out. That is the rule working, not an accident.
+  const inverted = groundLookup(envelope, observed, { firm: 'Verily' });
+  assert.equal(inverted.kept.length, 1);
+  assert.equal(inverted.kept[0].contradictsAnchor, true);
+
+  // With nothing to contradict at all -- the same title-only evidence, a
+  // sentence naming ONLY the firm we sent -- the present-tense rule is what
+  // applies, and the change is dropped outright rather than stored.
+  const agreeingEnvelope = {
+    identity_confidence: 'match',
+    changes: [{
+      kind: 'move',
+      text: 'Nikzad Khani is now a Software Engineer at Verily.',
+      url: KHANI_URL,
+      quote: KHANI_TITLE,
+    }],
+  };
+  const agreeing = groundLookup(agreeingEnvelope, observed, { firm: 'Verily' });
+  assert.deepEqual(agreeing.kept, [], 'a title cannot say what is true today');
+  assert.equal(agreeing.dropped.length, 1);
+  assert.match(agreeing.dropped[0].reason, /title-only .* may not be phrased as current/);
+
+  // ... and the SAME sentence, grounded in PROSE instead of a title, is
+  // kept -- which is what makes the drop above about the evidence rather
+  // than about the words.
+  const prosedEnvelope = {
+    identity_confidence: 'match',
+    changes: [{
+      kind: 'move',
+      text: 'Nikzad Khani is now a Software Engineer at Verily.',
+      url: KHANI_URL,
+      quote: 'Nikzad Khani is now a Software Engineer at Verily.',
+    }],
+  };
+  const prosed = parseLookupStream(lookupStream({
+    query: '"Nikzad Khani" "Verily"',
+    links: [{ title: KHANI_TITLE, url: KHANI_URL }],
+    prose: 'Nikzad Khani is now a Software Engineer at Verily.',
+    envelope: prosedEnvelope,
+  }));
+  const fromProse = groundLookup(prosedEnvelope, prosed, { firm: 'Verily' });
+  assert.equal(fromProse.kept.length, 1);
+  assert.equal(fromProse.kept[0].evidenceKind, 'snippet');
+  assert.equal(fromProse.kept[0].kind, 'move');
+});
+
+test('a snippet-grounded dated move is stored normally, with no anchor flag', () => {
+  const stream = lookupStream({
+    query: '"Dana Reyes" "Acme Corp"',
+    links: [{ title: 'Acme Corp announces new hires', url: 'https://acme.example/news/hires' }],
+    prose: 'Acme Corp said in March 2026 that Dana Reyes had joined Acme Corp as Head of Platform.',
+    envelope: {
+      identity_confidence: 'match',
+      changes: [{
+        kind: 'move', date: '2026-03',
+        text: 'Dana Reyes joined Acme Corp as Head of Platform in March 2026.',
+        url: 'https://acme.example/news/hires',
+        quote: 'Dana Reyes had joined Acme Corp as Head of Platform',
+      }],
+    },
+  });
+  const observed = parseLookupStream(stream);
+  const { kept, dropped } = groundLookup(JSON.parse(observed.envelopeText), observed, { firm: 'Acme Corp' });
+
+  assert.deepEqual(dropped, []);
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].kind, 'move', 'kind is untouched');
+  assert.equal(kept[0].evidenceKind, 'snippet');
+  assert.equal(kept[0].contradictsAnchor, false);
+  assert.equal(kept[0].date, '2026-03');
+});
+
+// A change about something OTHER than employment must not be dragged into
+// the anchor rule just because it happens to name a venue after "at".
+test('a launch naming a conference after "at" is not a firm contradiction', () => {
+  const stream = lookupStream({
+    query: '"Dana Reyes" "Acme Corp"',
+    links: [{ title: 'Web Summit 2026 speakers', url: 'https://websummit.example/speakers' }],
+    prose: 'Dana Reyes spoke at Web Summit about the platform launch.',
+    envelope: {
+      identity_confidence: 'match',
+      changes: [{
+        kind: 'launch',
+        text: 'Dana Reyes spoke at Web Summit about the platform launch.',
+        url: 'https://websummit.example/speakers',
+        quote: 'Dana Reyes spoke at Web Summit about the platform launch.',
+      }],
+    },
+  });
+  const observed = parseLookupStream(stream);
+  const { kept } = groundLookup(JSON.parse(observed.envelopeText), observed, { firm: 'Acme Corp' });
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].kind, 'launch', 'not refiled');
+  assert.equal(kept[0].contradictsAnchor, false);
+});
+
+// End to end through the DB half: the log's own verdict, the stored row's
+// two new columns, and the card's refusal to consume it.
+test('a title-only anchor contradiction downgrades the log to ambiguous and is withheld from the card', async () => {
+  const db = openDb(':memory:');
+  const key = 'name:nikzad khani';
+  insertPersonRow(db, key, 'Nikzad Khani', {
+    linkedin: { company: 'Klaviyo', url: 'https://www.linkedin.com/in/nikzadkhani/' },
+  });
+  const engine = {
+    name: 'fake-lookup', model: 'fake', counters: { calls: 0, totalCostUsd: 0, totalDurationMs: 0, errors: 0 },
+    async complete() {
+      engine.counters.calls += 1;
+      return khaniStream(KHANI_MOVE_ENVELOPE);
+    },
+  };
+  const result = await lookupPerson(db, engine, { personKey: key },
+    { runId: null, distillRunId: newDistillRun(db), now: NOW });
+
+  assert.equal(result.status, 'ambiguous', 'the log verdict is downgraded, not left at proposed');
+  assert.equal(result.proposed, 1, 'the change is still stored for the owner to judge');
+
+  const log = db.prepare('SELECT * FROM lookup_log WHERE id = ?').get(result.logId);
+  assert.equal(log.identity_confidence, 'ambiguous', "the model claimed 'match'; the code does not repeat it");
+  assert.equal(log.status, 'ambiguous');
+
+  const change = db.prepare('SELECT * FROM person_lookup_change WHERE log_id = ?').get(result.logId);
+  assert.equal(change.kind, 'company');
+  assert.equal(change.evidence_kind, 'title');
+  assert.equal(change.contradicts_anchor, 1);
+  assert.equal(change.url, KHANI_URL);
+
+  // The claim is PENDING, and a pending anchor contradiction is a review
+  // item, never card content.
+  assert.equal(newestWebChange(db, key), null, 'the card refuses a pending contradicts_anchor change');
+
+  // Once the owner ACCEPTS it, it is his word and the card may carry it.
+  db.prepare("INSERT INTO claim_decision(claim_id, action, actor, created_at) VALUES (?, 'accept', 'owner', ?)")
+    .run(change.claim_id, NOW);
+  const accepted = newestWebChange(db, key);
+  assert.ok(accepted, 'an accepted contradiction is allowed through');
+  assert.equal(accepted.contradictsAnchor, true, 'and it says so');
+  assert.equal(accepted.evidenceKind, 'title');
+});
+
+// --- lookup_evidence: what came back, not only what was sent -------------
+
+test('lookup_evidence records the observed article, readable through the routes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-lookup-evidence-'));
+  const key = 'name:nikzad khani';
+  const engine = {
+    name: 'fake-lookup', model: 'fake', counters: { calls: 0, totalCostUsd: 0, totalDurationMs: 0, errors: 0 },
+    async complete() {
+      engine.counters.calls += 1;
+      return khaniStream(KHANI_MOVE_ENVELOPE);
+    },
+  };
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
+    relationshipLookupEngine: engine, peopleProjectionAutoRebuild: false,
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const call = (method, path, body) => fetch(base + path, {
+    method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  try {
+    insertPersonRow(server.db, key, 'Nikzad Khani', {
+      linkedin: { company: 'Klaviyo', url: 'https://www.linkedin.com/in/nikzadkhani/' },
+    });
+    const ran = await (await call('POST', '/admin/relationship/lookup/person', { personKey: key })).json();
+    assert.equal(engine.counters.calls, 1);
+    const logId = ran.log.id;
+
+    // The list route now shows WHAT CAME BACK per row -- the titles and
+    // URLs inline, the article by size.
+    const list = await (await call('GET', `/admin/relationship/lookups?personKey=${encodeURIComponent(key)}`)).json();
+    const row = list.lookups.find((l) => l.id === logId);
+    assert.ok(row.evidence, 'each log row carries evidence');
+    assert.deepEqual(
+      row.evidence.urls.map((u) => u.url).sort(),
+      ['https://www.linkedin.com/in/nikzad-khani/', KHANI_URL]
+    );
+    assert.equal(row.evidence.urls.find((u) => u.url === KHANI_URL).title, KHANI_TITLE);
+    assert.ok(row.evidence.resultTextChars > 100, 'the article size is reported, not the article');
+    assert.equal(row.evidence.resultText, undefined, 'the list route never carries the article body');
+
+    // ... and the article itself is one read away, which is the thing 4520
+    // could not be audited without.
+    const ev = await (await call('GET', `/admin/relationship/lookups/evidence?logId=${logId}`)).json();
+    assert.equal(ev.evidence.logId, logId);
+    assert.ok(ev.evidence.resultText.includes(KHANI_TITLE), 'the title the claim was built from is on the box');
+    assert.ok(ev.evidence.resultText.includes('Web search results for query'));
+    assert.equal(ev.evidence.urls.length, 2);
+
+    const missing = await (await call('GET', '/admin/relationship/lookups/evidence?logId=999999')).json();
+    assert.equal(missing.evidence, null);
+    assert.equal((await call('GET', '/admin/relationship/lookups/evidence?logId=abc')).status, 400);
+    assert.equal((await call('GET', `/admin/relationship/lookups/evidence?logId=${logId}&nope=1`)).status, 400);
+  } finally {
+    await server.close();
+  }
+});
+
+test('lookup_evidence is written even when the envelope will not parse', async () => {
+  const db = openDb(':memory:');
+  const key = 'name:unparseable';
+  insertPersonRow(db, key, 'Unparse Able', { linkedin: { company: 'Acme Corp' } });
+  const engine = {
+    name: 'fake-lookup', model: 'fake', counters: { calls: 0, totalCostUsd: 0, totalDurationMs: 0, errors: 0 },
+    async complete() {
+      return [
+        JSON.stringify({ type: 'user', message: { content: [
+          { type: 'tool_result', tool_use_id: 't1', content: searchResultText({
+            query: '"Unparse Able" "Acme Corp"',
+            links: [{ title: 'Acme Corp team', url: 'https://acme.example/team' }],
+            prose: 'Acme Corp lists a team page.',
+          }) },
+        ] } }),
+        JSON.stringify({ type: 'result', total_cost_usd: 0.01, is_error: false, result: 'sorry, no JSON here' }),
+      ].join('\n');
+    },
+  };
+  const result = await lookupPerson(db, engine, { personKey: key }, { runId: null, distillRunId: null, now: NOW });
+  assert.equal(result.status, 'parse-error');
+  const ev = lookupEvidenceFor(db, result.logId);
+  assert.ok(ev, 'the unusable path is exactly where seeing what came back matters most');
+  assert.ok(ev.resultText.includes('Acme Corp lists a team page.'));
+  assert.deepEqual(ev.urls, [{ title: 'Acme Corp team', url: 'https://acme.example/team' }]);
+});
+
+// --- storeLookup: the two rules its own header used to claim -------------
+
+test('storeLookup re-checks the url and the quote against the observed stream', () => {
+  const db = openDb(':memory:');
+  insertPersonRow(db, 'name:jane', 'Jane Doe');
+  const logId = Number(db.prepare(
+    `INSERT INTO lookup_log(person_key, run_id, at, engine, query, query_hash, fields_used, searches, urls_seen,
+       identity_confidence, changes_proposed, changes_dropped, cost_usd, status)
+     VALUES ('name:jane', NULL, ?, 'fake', 'q', 'h', '["name"]', 1, 1, 'match', 1, 0, 0.01, 'proposed')`
+  ).run(NOW).lastInsertRowid);
+  const distillRunId = newDistillRun(db);
+
+  const observed = {
+    urls: new Set(['https://acme.example/news']),
+    links: [{ title: 'Acme news', url: 'https://acme.example/news' }],
+    snippetText: 'Jane Doe was promoted to VP of Engineering.',
+    resultText: 'Jane Doe was promoted to VP of Engineering.',
+  };
+
+  // A URL the search never returned -- groundLookup would have caught this,
+  // and a caller who skipped groundLookup used to get it stored anyway.
+  const fabricatedUrl = storeLookup(db, {
+    personKey: 'name:jane', observed, logId, distillRunId, now: NOW,
+    kept: [{
+      kind: 'role', text: 'Promoted.', url: 'https://acme.example/invented',
+      quote: 'Jane Doe was promoted to VP of Engineering.', date: null,
+    }],
+  });
+  assert.deepEqual(fabricatedUrl, { stored: 0, skipped: 1, duplicates: 0 });
+
+  // A quote no result carried.
+  const fabricatedQuote = storeLookup(db, {
+    personKey: 'name:jane', observed, logId, distillRunId, now: NOW,
+    kept: [{ kind: 'role', text: 'Promoted.', url: 'https://acme.example/news', quote: 'never said', date: null }],
+  });
+  assert.deepEqual(fabricatedQuote, { stored: 0, skipped: 1, duplicates: 0 });
+
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM claim').get().n), 0, 'nothing was written');
+
+  // The honest one lands, and records where its quote came from.
+  const good = storeLookup(db, {
+    personKey: 'name:jane', observed, logId, distillRunId, now: NOW,
+    kept: [{
+      kind: 'role', text: 'Promoted to VP of Engineering.', url: 'https://acme.example/news',
+      quote: 'Jane Doe was promoted to VP of Engineering.', date: null,
+    }],
+  });
+  assert.deepEqual(good, { stored: 1, skipped: 0, duplicates: 0 });
+  const change = db.prepare('SELECT * FROM person_lookup_change').get();
+  assert.equal(change.evidence_kind, 'snippet');
+  assert.equal(change.contradicts_anchor, 0);
+});
+
+test('storeLookup recomputes contradicts_anchor rather than trusting the caller', () => {
+  const db = openDb(':memory:');
+  insertPersonRow(db, 'name:nk', 'Nikzad Khani');
+  const logId = Number(db.prepare(
+    `INSERT INTO lookup_log(person_key, run_id, at, engine, query, query_hash, fields_used, searches, urls_seen,
+       identity_confidence, changes_proposed, changes_dropped, cost_usd, status)
+     VALUES ('name:nk', NULL, ?, 'fake', 'q', 'h', '["name"]', 1, 1, 'match', 1, 0, 0.01, 'proposed')`
+  ).run(NOW).lastInsertRowid);
+  const distillRunId = newDistillRun(db);
+
+  // A client asserting contradictsAnchor:false on a change that plainly
+  // names another company. The flag decides whether a card may consume the
+  // row, so it is computed here, not accepted.
+  storeLookup(db, {
+    personKey: 'name:nk', firm: 'Klaviyo', logId, distillRunId, now: NOW,
+    kept: [{
+      kind: 'move', text: 'Nikzad Khani is now a Software Engineer at Verily, not Klaviyo as previously recorded.',
+      url: KHANI_URL, quote: KHANI_TITLE, date: null,
+      evidenceKind: 'snippet', contradictsAnchor: false,
+    }],
+  });
+  const change = db.prepare('SELECT * FROM person_lookup_change').get();
+  assert.equal(change.contradicts_anchor, 1);
+  assert.equal(change.kind, 'company');
+});
+
+test('storeLookup does not propose the same (url, quote) twice while one is undecided', () => {
+  const db = openDb(':memory:');
+  insertPersonRow(db, 'name:jane', 'Jane Doe');
+  const logId = Number(db.prepare(
+    `INSERT INTO lookup_log(person_key, run_id, at, engine, query, query_hash, fields_used, searches, urls_seen,
+       identity_confidence, changes_proposed, changes_dropped, cost_usd, status)
+     VALUES ('name:jane', NULL, ?, 'fake', 'q', 'h', '["name"]', 1, 1, 'match', 1, 0, 0.01, 'proposed')`
+  ).run(NOW).lastInsertRowid);
+  const distillRunId = newDistillRun(db);
+  const kept = [{
+    kind: 'role', text: 'Promoted to VP of Engineering.', url: 'https://acme.example/news',
+    quote: 'Jane Doe was promoted', date: null,
+  }];
+
+  assert.deepEqual(
+    storeLookup(db, { personKey: 'name:jane', kept, logId, distillRunId, now: NOW }),
+    { stored: 1, skipped: 0, duplicates: 0 }
+  );
+  // Next month's lookup finds the same page again.
+  assert.deepEqual(
+    storeLookup(db, { personKey: 'name:jane', kept, logId, distillRunId, now: NOW + DAY * 30 }),
+    { stored: 0, skipped: 0, duplicates: 1 }
+  );
+  assert.equal(
+    Number(db.prepare('SELECT COUNT(*) AS n FROM claim').get().n), 1,
+    'duplicate pending claims read as corroboration -- the 2026-08-19 incident'
+  );
+
+  // A REJECTED claim does not block a later lookup from asking again.
+  const claimId = Number(db.prepare('SELECT id FROM claim').get().id);
+  db.prepare("INSERT INTO claim_decision(claim_id, action, actor, created_at) VALUES (?, 'reject', 'owner', ?)").run(claimId, NOW);
+  assert.deepEqual(
+    storeLookup(db, { personKey: 'name:jane', kept, logId, distillRunId, now: NOW + DAY * 60 }),
+    { stored: 1, skipped: 0, duplicates: 0 }
+  );
+});
+
+// --- the folded review items --------------------------------------------
+
+test('the lookup engine spawns with --tools WebSearch, the EXCLUSIVE tool set', () => {
+  const args = claudeLookupArgs({ system: 'SYS', model: 'sonnet' });
+  const at = (flag) => args[args.indexOf(flag) + 1];
+
+  // --tools is the available-tool set; --allowedTools is only the
+  // auto-approve list, so shipping the latter alone left every built-in tool
+  // absent from --disallowedTools both available AND auto-approved under
+  // --permission-mode dontAsk.
+  assert.ok(args.includes('--tools'), '--tools is passed');
+  assert.equal(at('--tools'), 'WebSearch');
+  assert.equal(at('--allowedTools'), 'WebSearch');
+  assert.equal(at('--permission-mode'), 'dontAsk');
+  for (const closed of ['WebFetch', 'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Agent']) {
+    assert.ok(at('--disallowedTools').split(',').includes(closed), `${closed} is named closed`);
+  }
+  assert.equal(at('--setting-sources'), '');
+  assert.equal(at('--mcp-config'), '{"mcpServers":{}}');
+});
+
+test('a phone number and a Slack id are never a handle anchor', () => {
+  const db = openDb(':memory:');
+  const key = 'name:phone anchor';
+  insertPersonRow(db, key, 'Phone Anchor');
+  db.prepare("INSERT INTO person_channels(person_key, source) VALUES (?, 'twitter')").run(key);
+  for (const [identifier, source] of [
+    ['+15551234567', 'imessage'],
+    ['U024BE7LH', 'slack'],
+    ['184927733', 'telegram'],
+  ]) {
+    db.prepare('INSERT INTO person_identifiers(identifier, person_key) VALUES (?, ?)').run(identifier, key);
+    db.prepare(
+      `INSERT INTO identity_evidence(person_key, identifier, evidence_type, source, confidence)
+       VALUES (?, ?, 'source_observed', ?, 1)`
+    ).run(key, identifier, source);
+  }
+
+  const anchors = anchorsFor(db, key);
+  assert.equal(anchors.handle, null, 'no identifier here came through twitter, and none is handle-shaped anyway');
+  // Name alone is not two anchors, so no lookup may run at all.
+  assert.equal(buildLookupQuery(anchors), null);
+
+  // buildLookupQuery must refuse a phone number handed straight in, too:
+  // SAFE_CHARS_RE strips '+', so the shape test has to run BEFORE stripping.
+  assert.equal(buildLookupQuery({ name: 'Phone Anchor', handle: '+15551234567' }), null);
+  assert.equal(buildLookupQuery({ name: 'Phone Anchor', handle: '15551234567' }), null);
+  // A real twitter handle, with twitter evidence, does anchor.
+  db.prepare('INSERT INTO person_identifiers(identifier, person_key) VALUES (?, ?)').run('@phanchor', key);
+  db.prepare(
+    `INSERT INTO identity_evidence(person_key, identifier, evidence_type, source, confidence)
+     VALUES (?, '@phanchor', 'source_observed', 'twitter', 1)`
+  ).run(key);
+  assert.equal(anchorsFor(db, key).handle, '@phanchor');
+});
+
+test('an email-shaped firm makes one person unanchored, not every lookup route 500', () => {
+  const db = openDb(':memory:');
+  insertPersonRow(db, 'name:ok person', 'Ok Person', { linkedin: { company: 'Acme Corp' } });
+  const bad = 'name:bad firm';
+  insertPersonRow(db, bad, 'Bad Firm Person');
+  // The shape storeSweep really can ground: "I work at foo@bar.com" yields a
+  // firm value that is a verbatim substring of its own quote.
+  const claimId = Number(db.prepare(
+    `INSERT INTO claim(run_id, subject, subject_person_key, kind, text, observed_at, created_at)
+     VALUES (?, 'person', ?, 'fact', 'works at foo@bar.com', ?, ?)`
+  ).run(newDistillRun(db), bad, NOW, NOW).lastInsertRowid);
+  db.prepare("INSERT INTO claim_decision(claim_id, action, actor, created_at) VALUES (?, 'accept', 'owner', ?)").run(claimId, NOW);
+  const sweepRunId = Number(db.prepare(
+    `INSERT INTO person_sweep_run(distill_run_id, started_at, ended_at, power_mode, engine, budget, scope_size,
+       candidates, swept, model_calls, proposed, dropped, tokens_est, skip_reason, status)
+     VALUES (NULL, ?, ?, 'trickle', 'fake', 1, 1, 1, 1, 1, 1, 0, 0, NULL, 'complete')`
+  ).run(NOW, NOW).lastInsertRowid);
+  db.prepare(
+    `INSERT INTO person_sweep_proposal(run_id, claim_id, kind, value, applied_at)
+     VALUES (?, ?, 'firm', 'foo@bar.com', NULL)`
+  ).run(sweepRunId, claimId);
+
+  // anchorsFor refuses it up front, so nothing even throws...
+  assert.equal(anchorsFor(db, bad).firm, null, 'an email-shaped firm is not a firm anchor');
+
+  // ... and lookupScope returns for EVERYBODY rather than dying on this row.
+  const scope = lookupScope(db, { now: NOW });
+  const rows = new Map(scope.map((c) => [c.personKey, c]));
+  assert.equal(rows.get('name:ok person').anchored, true);
+  assert.equal(rows.get(bad).anchored, false, 'this person is unanchored, which lookupScope already models');
+
+  // And lookupStatus, which /stats swallows exceptions from, still answers.
+  const status = lookupStatus(db);
+  assert.equal(typeof status.scope, 'number');
+  assert.equal(status.anchorErrors, 0, 'nothing threw, because anchorsFor refused the value first');
+});
+
+test('an over-budget search count throws the whole answer away', async () => {
+  const db = openDb(':memory:');
+  const key = 'name:greedy';
+  insertPersonRow(db, key, 'Greedy Searcher', { linkedin: { company: 'Acme Corp' } });
+  // Five WebSearch tool_use blocks against a budget of two. LOOKUP_MAX_SEARCHES
+  // was dead code before this -- nothing compared observed.searches to it,
+  // and the installed CLI has no --max-turns to cap turns with.
+  const lines = [];
+  for (let i = 0; i < 5; i++) {
+    lines.push(JSON.stringify({ type: 'assistant', message: { content: [
+      { type: 'tool_use', id: `t${i}`, name: 'WebSearch', input: { query: 'q' } },
+    ] } }));
+    lines.push(JSON.stringify({ type: 'user', message: { content: [
+      { type: 'tool_result', tool_use_id: `t${i}`, content: searchResultText({
+        query: 'q',
+        links: [{ title: 'Acme news', url: 'https://acme.example/news' }],
+        prose: 'Greedy Searcher was promoted to VP of Engineering at Acme Corp.',
+      }) },
+    ] } }));
+  }
+  lines.push(JSON.stringify({
+    type: 'result', total_cost_usd: 0.4, is_error: false,
+    result: JSON.stringify({
+      identity_confidence: 'match',
+      changes: [{
+        kind: 'role', text: 'Promoted to VP of Engineering at Acme Corp.',
+        url: 'https://acme.example/news',
+        quote: 'Greedy Searcher was promoted to VP of Engineering at Acme Corp.',
+      }],
+    }),
+  }));
+  const engine = {
+    name: 'fake-lookup', model: 'fake', counters: { calls: 0, totalCostUsd: 0, totalDurationMs: 0, errors: 0 },
+    async complete() { return lines.join('\n'); },
+  };
+
+  const result = await lookupPerson(db, engine, { personKey: key }, { runId: null, distillRunId: null, now: NOW });
+  assert.equal(result.status, 'ungrounded');
+  assert.equal(result.proposed, 0, 'a perfectly groundable change is still thrown away');
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM person_lookup_change').get().n), 0);
+
+  const log = db.prepare('SELECT * FROM lookup_log WHERE id = ?').get(result.logId);
+  assert.equal(log.searches, 5, 'the real count is recorded, which is what makes this queryable');
+  assert.equal(lookupStatus(db).overBudget, 1);
+});
+
+test('a non-numeric daily call cap falls back to the default instead of disabling the gate', () => {
+  const db = openDb(':memory:');
+  insertPersonRow(db, 'name:someone', 'Some One', { linkedin: { company: 'Acme Corp' } });
+  const engine = { name: 'fake-lookup', model: 'fake', complete: async () => '' };
+  // 18 model calls in the last 24h: at the default cap of 20 the ceiling is
+  // 0.9 * 20 = 18, so this must gate.
+  db.prepare(
+    `INSERT INTO person_lookup_run(distill_run_id, started_at, ended_at, power_mode, engine, budget, scope_size,
+       candidates, looked_up, model_calls, searches, proposed, dropped, cost_usd, skip_reason, status)
+     VALUES (NULL, ?, ?, 'trickle', 'fake', 1, 1, 1, 1, 18, 0, 0, 0, 0, NULL, 'complete')`
+  ).run(Date.now(), Date.now());
+
+  // `Number("many")` is NaN, and `used >= 0.9 * NaN` is false -- a config
+  // typo used to buy unlimited web searches.
+  for (const bad of ['many', null, 0, -5, Number.NaN, {}]) {
+    const gate = lookupGate(db, { relationshipMemory: { lookupDailyCallCap: bad } }, { engine });
+    assert.deepEqual(gate, { ok: false, reason: 'quota' }, `cap ${JSON.stringify(bad)} still gates`);
+  }
+  // A real override is honoured, and /stats reports the number the gate uses.
+  const raised = lookupGate(db, { relationshipMemory: { lookupDailyCallCap: 100 } }, { engine });
+  assert.equal(raised.ok, true);
+  const status = lookupStatus(db, { relationshipMemory: { lookupDailyCallCap: 100 } });
+  assert.equal(status.callCap, 100);
+  assert.equal(status.callCeiling, 90, 'the reported ceiling is the enforced one, not the bare cap');
+});
+
+test('an IP-literal citation is refused in every encoding', () => {
+  const observed = {
+    urls: new Set(),
+    links: [],
+    snippetText: 'Jane Doe was promoted.',
+    resultText: 'Jane Doe was promoted.',
+  };
+  // Every host below is 127.0.0.1, a link-local metadata endpoint, or a bare
+  // label with no TLD. `new URL('https://[::1]/x').hostname` is the six
+  // characters "[::1]" -- brackets included -- so an `=== '::1'` test never
+  // fired on a real URL.
+  const hosts = [
+    'https://[::1]/p', 'https://[::ffff:127.0.0.1]/p', 'https://[fe80::1]/p', 'https://[fd00::1]/p',
+    'https://2130706433/p', 'https://0x7f000001/p', 'https://127.0.0.1/p', 'https://0.0.0.0/p',
+    'https://169.254.169.254/latest/meta-data', 'https://intranet/p', 'https://10.0.0.5/p',
+  ];
+  for (const url of hosts) {
+    observed.urls.add(url);
+    const { kept, dropped } = groundLookup({
+      identity_confidence: 'match',
+      changes: [{ kind: 'role', text: 'Promoted.', url, quote: 'Jane Doe was promoted.' }],
+    }, observed);
+    assert.deepEqual(kept, [], `${url} is not a public citation`);
+    assert.equal(dropped.length, 1);
   }
 });
