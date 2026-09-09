@@ -15,7 +15,7 @@ import { ownerConfigPath, markPersonSubRoles } from '../server/people/owner.mjs'
 import {
   groundSweep, newRowsFor, sweepScope, storeSweep, sweepGate, runSweepPass, applySweepDecision,
   sweepCallCap, sweepStatus, SWEEP_DAILY_CALL_CAP_DEFAULT,
-  SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, SWEEP_MIN_ROW_CHARS, tokensEstFor,
+  SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, tokensEstFor,
 } from '../server/relationship/sweep.mjs';
 
 // A context row from a non-message source (e.g. an imported LinkedIn
@@ -211,16 +211,38 @@ function seedBudgetOverflowPerson(db, key, name) {
   return { themId, maxAuthored };
 }
 
-test('a person whose new rows exceed the char budget still advances the cursor to their newest authored row', () => {
+// ~~"a person whose new rows exceed the char budget still advances the
+// cursor to their newest authored row"~~ REVERSED 2026-09 (review G finding
+// 6), and the old title was the bug written down as a requirement. Reaching
+// the newest authored row out of a budget that could not hold everything
+// before it is only possible if the cursor jumps over rows -- either unshown
+// (review F finding 11) or shown as 120-char stubs no quote can ground
+// (review G finding 6). The cursor is a contiguous high-water mark; the
+// guarantee it can actually keep is the one asserted here.
+test('a budget overflow stops the cursor at the newest row shown, and every row it declines is newer', () => {
   const db = openDb(':memory:');
   const key = 'name:budget overflow';
   const { themId, maxAuthored } = seedBudgetOverflowPerson(db, key, 'Budget Overflow');
   assert.equal(maxAuthored, themId, 'sanity: the final episode holds the true newest authored row');
 
   const gathered = newRowsFor(db, key, 0);
-  assert.equal(gathered.maxContextId, maxAuthored, 'maxContextId reaches the newest authored row despite budget overflow');
-  const contextIds = gathered.excerpts.map((e) => e.contextId);
-  assert.ok(contextIds.includes(themId), 'the newest authored row is included, not starved out by an older, longer episode');
+  const shown = new Set(gathered.excerpts.filter((e) => e.speaker === 'THEM').map((e) => e.contextId));
+  const allThem = db
+    .prepare('SELECT context_id AS id FROM person_event_links WHERE person_key = ? AND authored = 1 AND room = 0')
+    .all(key)
+    .map((r) => Number(r.id));
+  const unshown = allThem.filter((id) => !shown.has(id));
+
+  assert.ok(unshown.length > 0, 'sanity: this fixture really does overflow, so some rows must be declined');
+  for (const id of unshown) {
+    assert.ok(id > gathered.maxContextId,
+      `row ${id} was not shown, so the cursor at ${gathered.maxContextId} must still be behind it`);
+  }
+  assert.ok(shown.size > 0, 'and the pass is not empty: the oldest unswept rows were shown whole');
+  assert.ok(!shown.has(themId), 'the newest authored row waits for the pass whose budget can hold it');
+
+  const total = gathered.excerpts.reduce((n, e) => n + e.text.length, 0);
+  assert.ok(total <= SWEEP_MAX_CHARS, 'SWEEP_MAX_CHARS is a hard cap again, not a target');
 });
 
 test('newRowsFor returns only episodes containing an authored row past the cursor', () => {
@@ -251,7 +273,12 @@ test('newRowsFor returns only episodes containing an authored row past the curso
   assert.ok(fresh.meId > fresh.themId, 'sanity: the ME reply really is the newer row here');
 });
 
-test('newRowsFor takes at most 8 episodes, most recent first, under the char budget', () => {
+// ~~"most recent first"~~ OLDEST first, changed 2026-09 with the row
+// admission order (review G finding 6). The episode cap had the identical
+// defect at a coarser grain: with eleven qualifying episodes and a cap of
+// eight, the three oldest were never shown and the cursor moved to a row in
+// the newest, so those three stopped qualifying and were never read.
+test('newRowsFor takes at most 8 episodes, oldest-from-the-cursor first, under the char budget', () => {
   const db = openDb(':memory:');
   const key = 'name:many episodes';
   insertPerson(db, { key, name: 'Many Episodes' });
@@ -269,12 +296,17 @@ test('newRowsFor takes at most 8 episodes, most recent first, under the char bud
   const gathered = newRowsFor(db, key, 0);
   assert.ok(gathered.episodeCount <= SWEEP_MAX_EPISODES, 'never more than SWEEP_MAX_EPISODES episodes');
   assert.equal(gathered.episodeCount, SWEEP_MAX_EPISODES);
-  // The two OLDEST episodes (index 0 and 1) were dropped in favor of the 8
-  // most recent.
+  // The two NEWEST episodes (index 8 and 9) are the ones deferred, and the
+  // cursor stays behind both of them so the next pass picks them up.
   const contextIds = new Set(gathered.excerpts.map((e) => e.contextId));
-  assert.ok(!contextIds.has(ids[0]));
-  assert.ok(!contextIds.has(ids[1]));
-  assert.ok(contextIds.has(ids[9]));
+  assert.ok(contextIds.has(ids[0]), 'the oldest unswept episode is where the pass starts');
+  assert.ok(!contextIds.has(ids[8]));
+  assert.ok(!contextIds.has(ids[9]));
+  assert.equal(gathered.maxContextId, ids[7], 'the cursor lands on the newest row shown, not past ids[8]');
+
+  const second = newRowsFor(db, key, gathered.maxContextId);
+  const secondIds = second.excerpts.filter((e) => e.speaker === 'THEM').map((e) => e.contextId);
+  assert.deepEqual(secondIds, [ids[8], ids[9]], 'the deferred episodes arrive on the next pass');
 
   const totalChars = gathered.excerpts.reduce((n, e) => n + e.text.length, 0);
   assert.ok(totalChars <= SWEEP_MAX_CHARS, 'stays under the char budget');
@@ -487,7 +519,13 @@ test('a second runSweepPass makes zero model calls once nothing is new -- THE CH
   assert.equal(engine.counters.calls, 1, 'no new model call was made on the second pass');
 });
 
-test('the second pass after a budget-truncated first pass makes zero model calls', async () => {
+// ~~"the second pass after a budget-truncated first pass makes zero model
+// calls"~~ REVERSED 2026-09 (review G finding 6). Zero calls was only
+// achievable by declaring rows read that no model could quote from; the
+// backlog now drains over passes, and what must hold is that it drains
+// MONOTONICALLY and terminates -- each pass strictly newer than the last,
+// every row shown once, and no pass over the same rows twice.
+test('a budget-overflowing person drains over successive passes and then goes quiet', async () => {
   const db = openDb(':memory:');
   const key = 'name:budget overflow sweep';
   const { themId, maxAuthored } = seedBudgetOverflowPerson(db, key, 'Budget Overflow Sweep');
@@ -495,17 +533,26 @@ test('the second pass after a budget-truncated first pass makes zero model calls
 
   const engine = fakeSweepEngine(() => JSON.stringify({ tags: [], firm: null, page_lines: [] }));
 
-  const first = await runSweepPass(db, engine, {}, { powerMode: 'trickle', now: NOW });
-  assert.equal(first.status, 'complete');
-  assert.equal(engine.counters.calls, 1);
+  const cursors = [];
+  let passes = 0;
+  for (let i = 0; i < 10; i++) {
+    const pass = await runSweepPass(db, engine, {}, { powerMode: 'trickle', now: NOW + i * 1000 });
+    if (pass.status === 'skipped') {
+      assert.equal(pass.skip_reason, 'no-new-rows');
+      break;
+    }
+    passes += 1;
+    cursors.push(Number(
+      db.prepare('SELECT swept_through_context_id AS c FROM person_sweep_cursor WHERE person_key = ?').get(key).c
+    ));
+  }
 
-  const cursor = db.prepare('SELECT * FROM person_sweep_cursor WHERE person_key = ?').get(key);
-  assert.equal(Number(cursor.swept_through_context_id), maxAuthored, 'the cursor lands on the newest authored row despite the overflow');
-
-  const second = await runSweepPass(db, engine, {}, { powerMode: 'trickle', now: NOW + 1000 });
-  assert.equal(second.status, 'skipped');
-  assert.equal(second.skip_reason, 'no-new-rows');
-  assert.equal(engine.counters.calls, 1, 'no new model call was made on the second pass -- the budget-truncated first pass still advanced the cursor to the newest authored row');
+  assert.ok(passes >= 2, 'a budget the first pass could not hold means there was a second pass to make');
+  for (let i = 1; i < cursors.length; i++) {
+    assert.ok(cursors[i] > cursors[i - 1], 'every pass moves the cursor strictly forward');
+  }
+  assert.equal(cursors.at(-1), maxAuthored, 'the last pass reaches the newest authored row');
+  assert.equal(engine.counters.calls, passes, 'one model call per pass, and no pass repeats itself');
 });
 
 test('an engine error keeps the cursor and a grounded-empty answer advances it', async () => {
@@ -1161,10 +1208,17 @@ test('storeSweep leaves no receiptless claim behind when a later insert fails', 
 // ---------------------------------------------------------------------------
 // Review F finding 11: THE ROWS BEHIND THE OVERSIZED ONE. The THEM loop
 // `break`d on the first row that did not fit the remaining budget. Because
-// admission is newest-first, everything it broke past was OLDER -- and
+// admission was newest-first, everything it broke past was OLDER -- and
 // maxContextId had already moved to the oversized row that WAS shown, so
 // those older rows ended up below the cursor: never offered again, never
 // read by a model, gone.
+//
+// Review G finding 6: the per-row-share fix for the above traded one silent
+// loss for another (rows shown as 120-char stubs, no quote groundable,
+// 'ungrounded' advancing the cursor anyway). Admission is now oldest-first
+// from the cursor and the rows that do not fit are the NEWEST ones -- which
+// the cursor has not reached, so nothing is stranded. The tests below are
+// the same fixtures re-pinned to that contract.
 // ---------------------------------------------------------------------------
 
 // Several THEM rows in ONE episode (one chat_guid, minutes apart), with one
@@ -1197,26 +1251,33 @@ function seedThemRun(db, key, name, themChars) {
   return ids;
 }
 
-test('older, smaller THEM rows behind an oversized newest one are still shown, not stranded below the cursor', () => {
+test('an oversized newest row is deferred, not shrunk, and the two rows before it are shown whole', () => {
   const db = openDb(':memory:');
   const key = 'name:rows behind';
   // Oldest first: two small lines, then a newest line bigger than the whole
-  // budget. Newest-first admission reaches the big one first, and the old
-  // loop stopped there -- with the cursor already past all three.
+  // budget.
   const [oldest, middle, newest] = seedThemRun(db, key, 'Rows Behind', [500, 700, SWEEP_MAX_CHARS + 3000]);
 
   const gathered = newRowsFor(db, key, 0);
   const themIds = gathered.excerpts.filter((e) => e.speaker === 'THEM').map((e) => e.contextId).sort((a, b) => a - b);
-  assert.deepEqual(themIds, [oldest, middle, newest],
-    'every THEM row the cursor is about to move past was actually shown');
-  assert.equal(gathered.maxContextId, newest);
+  assert.deepEqual(themIds, [oldest, middle],
+    'the two that fit are shown, and the one that does not is newer than both');
+  assert.equal(gathered.maxContextId, middle, 'so the cursor stops behind the deferred row');
 
-  // Each row is truncated to its fair share, so the oversized one no longer
-  // eats the rows behind it.
+  // Neither shown row is truncated: this is what the per-row share cost, and
+  // what a groundable quote needs back.
   const byId = new Map(gathered.excerpts.map((e) => [e.contextId, e]));
-  assert.equal(byId.get(newest).text.length, Math.floor(SWEEP_MAX_CHARS / 3));
-  assert.equal(byId.get(oldest).text.length, 500, 'a row that fits its share is untouched');
+  assert.equal(byId.get(oldest).text.length, 500);
   assert.equal(byId.get(middle).text.length, 700);
+
+  // Next pass: the oversized row is now the OLDEST unswept one and nothing
+  // else is admitted before it, so it is truncated in rather than left to
+  // block the person forever.
+  const second = newRowsFor(db, key, gathered.maxContextId);
+  const secondThem = second.excerpts.filter((e) => e.speaker === 'THEM');
+  assert.deepEqual(secondThem.map((e) => e.contextId), [newest]);
+  assert.equal(secondThem[0].text.length, SWEEP_MAX_CHARS, 'truncated to the whole budget, not to a share of it');
+  assert.equal(second.maxContextId, newest, 'and the cursor may pass it, because it WAS shown');
 });
 
 test('a quote from an oversized row\'s discarded tail still cannot ground', () => {
@@ -1246,19 +1307,36 @@ test('a quote from an oversized row\'s discarded tail still cannot ground', () =
   assert.ok(gathered.findQuoteContextId('head') !== null, 'what it WAS shown still grounds');
 });
 
-test('many THEM rows shrink to the per-row floor rather than dropping any of them', () => {
+// The measurement in review G finding 6, turned into a test: 200 THEM rows
+// of 300 chars. Under the per-row floor this produced 200 excerpts of 120
+// chars, 24,000 chars total against a documented 6,000 -- and 120 chars is
+// below the length of most of the sentences a model would want to quote, so
+// the answer came back ungrounded and 'ungrounded' advanced the cursor over
+// all 200. Now: 20 rows shown whole, cap respected, cursor at row 20, and
+// the remaining 180 drain 20 at a time.
+test('a 200-row THEM backlog is admitted oldest-first, whole, under the cap, and drains over passes', () => {
   const db = openDb(':memory:');
   const key = 'name:many them rows';
-  const ids = seedThemRun(db, key, 'Many Them Rows', Array.from({ length: 60 }, () => 400));
+  const ids = seedThemRun(db, key, 'Many Them Rows', Array.from({ length: 200 }, () => 300));
 
   const gathered = newRowsFor(db, key, 0);
   const them = gathered.excerpts.filter((e) => e.speaker === 'THEM');
-  assert.equal(them.length, ids.length, 'sixty rows, sixty excerpts: none skipped');
+  assert.equal(them.length, 20, 'SWEEP_MAX_CHARS / 300 = 20 rows, and not one more');
+  assert.deepEqual(them.map((e) => e.contextId), ids.slice(0, 20),
+    'the oldest twenty, contiguous from the cursor -- so nothing unshown is behind the cursor');
   for (const e of them) {
-    assert.equal(e.text.length, SWEEP_MIN_ROW_CHARS,
-      'the share is below the floor, so the floor is what each row gets');
+    assert.equal(e.text.length, 300, 'shown whole: a stub is not evidence a quote can be checked against');
   }
-  assert.equal(gathered.maxContextId, Math.max(...ids));
+  const total = gathered.excerpts.reduce((n, e) => n + e.text.length, 0);
+  assert.ok(total <= SWEEP_MAX_CHARS, `total ${total} must respect SWEEP_MAX_CHARS as a hard cap`);
+  assert.equal(gathered.maxContextId, ids[19]);
+
+  const second = newRowsFor(db, key, gathered.maxContextId);
+  assert.deepEqual(
+    second.excerpts.filter((e) => e.speaker === 'THEM').map((e) => e.contextId),
+    ids.slice(20, 40),
+    'the next pass resumes exactly where the last one stopped'
+  );
 });
 
 // ---------------------------------------------------------------------------

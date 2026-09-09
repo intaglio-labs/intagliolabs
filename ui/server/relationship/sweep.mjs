@@ -66,14 +66,18 @@ export const SWEEP_PROMPT_PATH = join(here, '..', '..', '..', 'prompts', 'sweep.
 // billing number.
 export const SWEEP_MAX_CHARS = 6_000;
 export const SWEEP_MAX_EPISODES = 8;
-// The smallest a single THEM row may be truncated to. Every THEM row in the
-// chosen episodes is shown (see newRowsFor's own comment on why none may be
-// skipped), so the per-row share shrinks as the row count grows; this floor
-// is where it stops shrinking, because an excerpt too short to carry a
-// sentence is not evidence a model can read. It is also what makes
-// SWEEP_MAX_CHARS a target rather than a hard cap: past roughly fifty THEM
-// rows in one pass the floor wins and the total goes over.
-export const SWEEP_MIN_ROW_CHARS = 120;
+// ~~SWEEP_MIN_ROW_CHARS = 120~~ REMOVED 2026-09 (review G finding 6). It was
+// a per-row floor under max(floor, maxChars / <THEM row count>), introduced
+// so that no THEM row was ever skipped for size. Two measured costs: it made
+// SWEEP_MAX_CHARS a target rather than a cap (500 THEM rows in one pass =
+// ~60k chars, 10x the ~1.5k tokens documented above, and the user prompt
+// goes down child.stdin so nothing else rejects it), and -- the real damage
+// -- at 120 chars most sentence-length quotes are no longer verbatim spans
+// of any shown excerpt, so findQuoteContextId returns null, the answer is
+// 'ungrounded', and 'ungrounded' ADVANCES the cursor. The floor was written
+// to stop rows being marked read unshown and instead marked them read
+// unbelievable. SWEEP_MAX_CHARS is a hard cap again; see newRowsFor for how
+// the backlog drains without it.
 export const SWEEP_BUDGET = Object.freeze({ full: 12, trickle: 3 });
 
 // A LOCAL rolling call cap over the sweep's own run log (conflict #4: PCC
@@ -218,10 +222,10 @@ function isReceiptItem(v) {
 // contain at least one authored (THEM) row past `cursor` -- an episode
 // entirely before the cursor has nothing new to sweep, even if the owner's
 // own reply (never authored, never THEM) landed inside it after the cursor.
-// The 8 most recent qualifying episodes, budgeted to maxChars. THEM ROWS
-// ARE ADMITTED FIRST, newest-first, and only the budget they leave behind is
+// The 8 OLDEST qualifying episodes from the cursor, budgeted to maxChars.
+// THEM ROWS ARE ADMITTED FIRST, and only the budget they leave behind is
 // offered to ME rows for tone. That split is the correction, not a
-// refinement: the previous version pooled BOTH polarities into one
+// refinement: an earlier version pooled BOTH polarities into one
 // newest-first queue, so an owner reply newer than the person's own newest
 // line took the budget in front of it (audit, 2026-09: one episode, ctx 500
 // = a 5,500-char THEM line, ctx 501 = a 1,000-char ME reply, cursor 0 --
@@ -231,33 +235,46 @@ function isReceiptItem(v) {
 // could never be shown again).
 //
 // So, in order:
-//   1. EVERY THEM row, newest context id first, each truncated to its fair
-//      share of the budget -- see the per-row share below.
+//   1. THEM rows past the cursor, OLDEST first, whole (never truncated to a
+//      share), until maxChars is gone.
 //   2. ME rows into whatever budget is left, newest first. Tone only: a ME
 //      row can never move the cursor (see maxContextId below), so losing one
 //      to the budget costs nothing that a later pass cannot recover.
 //
-// NOTHING IS SKIPPED FOR SIZE ANY MORE (review F finding 11). This loop used
-// to `break` on the first THEM row that did not fit: one oversized row set
-// the budget to zero and every OLDER, SMALLER THEM row behind it was
-// dropped -- while maxContextId had already moved past them, because it is
-// the max over shown rows and the oversized row was shown. Those rows were
-// then permanently unswept: below the cursor, so never offered again, and
-// never read by a model. `continue` alone does not fix that (the older rows
-// still sit below a cursor that moved), and holding the cursor at the oldest
-// skipped row cannot work either while admission is newest-first -- the
-// newest rows would be re-shown on every pass and the backlog would never
-// drain. So every THEM row is admitted, truncated to
-// max(SWEEP_MIN_ROW_CHARS, floor(maxChars / <THEM row count>)): with one row
-// that is the whole budget (unchanged), with four it is 1,500 chars each,
-// and only past ~50 rows does the floor let the total exceed
-// SWEEP_MAX_CHARS -- which makes that constant a target rather than a hard
-// cap, and is the price of the guarantee that a row no model was shown is
-// never marked as read. findQuoteContextId matches against the truncated
-// text, so a quote from a discarded tail still cannot ground.
+// WHY OLDEST-FIRST, which is the part that is easy to get wrong and has now
+// been got wrong twice. The rule that must hold is "the cursor never moves
+// past a THEM row no model was shown", and the cursor is ONE INTEGER: a
+// swept-through high-water mark, where every row below it is considered
+// done. A high-water mark can only describe a CONTIGUOUS shown set. Under
+// newest-first admission the rows a budget declines to show are the OLDEST
+// ones, which is exactly the set the cursor is about to declare done -- so
+// newest-first and a single cursor are incompatible, and all three
+// resolutions that keep newest-first fail:
+//   - `break` on the first row that does not fit (the original): the older
+//     rows behind it end up below a cursor that moved to the oversized row.
+//     That was review F finding 11, and it was real.
+//   - hold the cursor at (oldest unadmitted id - 1): the newest rows are
+//     then re-shown on every pass and the backlog never drains.
+//   - admit every row truncated to a per-row share (review F's fix, review
+//     G finding 6): nothing is skipped, but past ~50 rows each excerpt is
+//     too short to contain a sentence, the model's quote is no longer a
+//     verbatim span of anything shown, findQuoteContextId returns null, and
+//     'ungrounded' advances the cursor anyway. Marked read unbelievable
+//     instead of marked read unshown.
+// Admitting oldest-first from the cursor makes the shown set contiguous by
+// construction: the unadmitted rows are all NEWER than every admitted one,
+// so the cursor advances to the max shown id and next pass resumes exactly
+// there. The budget bounds one pass; the backlog drains over passes, and the
+// newest rows arrive a pass or two later than they used to. Episode
+// selection is oldest-first for the same reason -- see the sort below.
 //
-// maxContextId is the max over SHOWN THEM ROWS ONLY -- unchanged as a rule,
-// and now trivially sound: every THEM row in the chosen episodes IS shown.
+// The single exception, and it is a progress guarantee rather than a
+// concession: if the OLDEST unswept row alone exceeds the whole budget it is
+// truncated in, because a pass that shows nothing cannot move the cursor and
+// one oversized row would otherwise block every row behind it forever.
+//
+// maxContextId is the max over SHOWN THEM ROWS ONLY, and with contiguous
+// admission that is now a sound high-water mark rather than a hope.
 // Admitted rows are re-sorted chronologically afterward for display, same as
 // gatherPersonContext.
 export function newRowsFor(db, personKey, cursor, { maxEpisodes = SWEEP_MAX_EPISODES, maxChars = SWEEP_MAX_CHARS } = {}) {
@@ -295,9 +312,18 @@ export function newRowsFor(db, personKey, cursor, { maxEpisodes = SWEEP_MAX_EPIS
       .map((r) => Number(r.context_id))
   );
 
+  // OLDEST qualifying conversation first, not most recent. The sort used to
+  // be `b.started_at - a.started_at` with the comment "most recent
+  // conversation first", and that is incompatible with the cursor for the
+  // same reason newest-first ROW admission is (see the header): with eleven
+  // qualifying episodes and a cap of eight, the three oldest were never
+  // shown while maxContextId moved to a row in the newest -- so those three
+  // episodes' rows fell below the cursor and stopped qualifying, unread
+  // forever. Selecting from the cursor forward instead keeps the shown set a
+  // contiguous range, which is the only shape a high-water mark can record.
   const episodes = buildEpisodes(rows, { now: Date.now() })
     .slice()
-    .sort((a, b) => b.started_at - a.started_at); // most recent conversation first
+    .sort((a, b) => a.started_at - b.started_at);
 
   const cursorId = Number.isFinite(cursor) ? Number(cursor) : 0;
   const newEpisodes = episodes.filter((ep) =>
@@ -305,10 +331,10 @@ export function newRowsFor(db, personKey, cursor, { maxEpisodes = SWEEP_MAX_EPIS
   );
   const chosen = newEpisodes.slice(0, maxEpisodes);
 
-  // Pool every candidate row from the chosen episodes, then sort newest-first
-  // by context id (monotonic on insert) so budget admission below always
-  // reaches a heavy person's newest rows first, regardless of which episode
-  // they landed in.
+  // Pool every candidate row from the chosen episodes. Sorted newest-first
+  // here only because the ME pass below still admits newest-first (tone, and
+  // a lost ME row costs nothing); the THEM pass re-sorts ascending for
+  // itself.
   const candidates = [];
   for (const ep of chosen) {
     for (const member of ep.members) {
@@ -332,26 +358,42 @@ export function newRowsFor(db, personKey, cursor, { maxEpisodes = SWEEP_MAX_EPIS
   let charBudget = maxChars;
   let maxContextId = cursorId;
 
-  // (1) THEM first, and ALL of them: this is the evidence, and the cursor is
-  // only ever allowed to advance over a THEM row that was actually shown --
-  // so a row this pass declines to show is a row the cursor can never get
-  // past without losing it. Each row is truncated to its fair share of the
-  // budget rather than dropped; see the header comment for why skipping and
-  // holding the cursor are both worse.
-  const themRows = candidates.filter((c) => c.speaker === 'THEM');
-  const perRowChars = themRows.length === 0
-    ? maxChars
-    : Math.max(SWEEP_MIN_ROW_CHARS, Math.floor(maxChars / themRows.length));
+  // (1) THEM first: this is the evidence, and the cursor is only ever
+  // allowed to advance over a THEM row that was actually shown. Admitted
+  // OLDEST-first from the cursor, untruncated, until the budget is gone --
+  // so what a pass shows is a CONTIGUOUS range of THEM rows starting just
+  // past the cursor, and every row it declines to show is NEWER than every
+  // row it showed. maxContextId can then be the max shown id with no rows
+  // stranded behind it, and the rest arrive on the next pass.
+  //
+  // Already-swept THEM rows (id <= cursorId) in an episode that straddles
+  // the cursor are not re-shown: this file's job is the NEW lines, and
+  // spending the budget on lines a model has already read is what would push
+  // the fresh ones out of it -- in the limit admitting none of them, leaving
+  // maxContextId at the cursor, and re-offering the identical pass forever.
+  const themRows = candidates
+    .filter((c) => c.speaker === 'THEM' && c.contextId > cursorId)
+    .sort((a, b) => a.contextId - b.contextId);
   for (const c of themRows) {
-    const text = c.text.length > perRowChars ? c.text.slice(0, perRowChars) : c.text;
-    charBudget -= text.length;
-    excerpts.push({ contextId: c.contextId, speaker: c.speaker, text, ts: c.ts });
+    if (c.text.length > charBudget) {
+      // Anything after the first row that does not fit is newer still; stop,
+      // and let the cursor record only what was shown.
+      if (maxContextId > cursorId || charBudget === 0) break;
+      // Nothing admitted yet and the oldest unswept row alone is bigger than
+      // the whole budget. Truncate it IN rather than admit nothing: a pass
+      // that shows no row cannot move the cursor, so this person's backlog
+      // would never drain and the oversized row would block every row behind
+      // it permanently. findQuoteContextId matches the truncated text, so a
+      // quote from the discarded tail still cannot ground.
+      excerpts.push({ contextId: c.contextId, speaker: c.speaker, text: c.text.slice(0, charBudget), ts: c.ts });
+      maxContextId = Math.max(maxContextId, c.contextId);
+      charBudget = 0;
+      continue;
+    }
+    charBudget -= c.text.length;
+    excerpts.push({ contextId: c.contextId, speaker: c.speaker, text: c.text, ts: c.ts });
     maxContextId = Math.max(maxContextId, c.contextId);
   }
-  // The ME rows below get what is LEFT, and a heavy person may have left
-  // nothing (or less than nothing -- the per-row floor can overshoot). Tone
-  // is the first thing to give.
-  charBudget = Math.max(0, charBudget);
 
   // (2) ME rows into the remainder, newest first, and NEVER into
   // maxContextId: the owner's own words are tone for the model, not evidence
@@ -363,9 +405,9 @@ export function newRowsFor(db, personKey, cursor, { maxEpisodes = SWEEP_MAX_EPIS
     excerpts.push({ contextId: c.contextId, speaker: c.speaker, text: c.text, ts: c.ts });
   }
   // Oldest-first for display, same reasoning as gatherPersonContext: a
-  // reader sees each conversation in the order it happened even though the
-  // admission order above (newest-first) is what decided which rows made it
-  // into the budget.
+  // reader sees each conversation in the order it happened. THEM admission
+  // is already in this order; the ME pass above is not, so the sort still
+  // does work.
   excerpts.sort((a, b) => a.ts - b.ts);
 
   const meetingTitles = [];
