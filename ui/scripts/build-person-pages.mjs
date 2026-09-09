@@ -29,8 +29,8 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from 'node:fs';
 
 function fail(message) {
   process.stderr.write(`${message}\n`);
@@ -81,6 +81,24 @@ function readHermesToken() {
 // `wx` so two concurrent runs cannot each write a different salt: the loser
 // of that race reads the winner's file rather than overwriting it, which
 // matters because a changed salt silently renames every person in the output.
+//
+// ~~write a temp file, then renameSync it into place, and treat the loser's
+// EEXIST as "re-read the winner"~~ REVERTED 2026-09 (review G finding 2).
+// renameSync on POSIX SILENTLY REPLACES the destination; EEXIST from rename
+// is a Windows/non-empty-directory behaviour, so `if (error?.code !==
+// 'EEXIST') throw` could never fire on macOS or Linux and the loser of the
+// race overwrote the winner's salt -- the exact outcome the `wx` it replaced
+// existed to prevent, with a guard that reads as protection and cannot
+// trigger. `open(path, 'wx')` is O_EXCL: claiming the NAME is the atomic
+// step, and it is the only one that can be.
+//
+// What tmp+rename was buying, and what replaces it: rename made the CONTENT
+// appear all at once, so a crash mid-write could not leave a short file for
+// the next run to read as a bad salt. Under O_EXCL that window is back, and
+// it is closed on both sides instead -- the writer unlinks its own partial
+// file if write or fsync throws, and the loser's retry loop treats a
+// too-short read as "the winner has not finished writing yet" and waits for
+// it rather than failing on it.
 function sleepSync(ms) {
   // Atomics.wait needs a SharedArrayBuffer-backed view; this is a short,
   // synchronous retry loop for a race that resolves in well under a second.
@@ -103,11 +121,30 @@ function readSaltFile(path) {
   return { salt: text };
 }
 
+// Re-reads while the answer is "nothing usable yet". A file that is present
+// but too short is EITHER truncated for good OR a concurrent creator caught
+// between its open and its close, and nothing here can tell those apart -- so
+// wait the millisecond a live writer needs before reporting the permanent
+// fault. Under tmp+rename this could not happen and there was no wait; under
+// O_EXCL the name appears before the content does, which is the cost of
+// having the race guard actually work.
+function awaitSaltFile(path, attempts) {
+  let found = readSaltFile(path);
+  for (let attempt = 0; attempt < attempts && (found === null || found.short === true); attempt += 1) {
+    sleepSync(20);
+    found = readSaltFile(path);
+  }
+  return found;
+}
+
 function readPseudonymSalt() {
   const path = process.env.HAZLIE_PSEUDONYM_SALT_FILE
     ?? join(homedir(), '.hazlie', 'secrets', 'pseudonym-salt.txt');
 
-  const initial = readSaltFile(path);
+  // No retry on a plain absence: that is the ordinary first run, and the
+  // create path below is what answers it.
+  let initial = readSaltFile(path);
+  if (initial !== null && initial.short) initial = awaitSaltFile(path, 5);
   if (initial !== null) {
     if (initial.short) {
       fail(`salt file too short at ${path}; delete it to regenerate`);
@@ -117,42 +154,65 @@ function readPseudonymSalt() {
   }
 
   // Two concurrent runs can both find no file and both try to create one.
-  // Write to a temp file in the same directory (so renameSync is atomic on
-  // the same filesystem) then rename into place; the loser's rename fails
-  // with EEXIST, and re-reads the winner's file rather than overwriting it
-  // or reading it mid-write.
+  // O_EXCL decides it: exactly one open() succeeds, the loser gets EEXIST and
+  // reads the winner's file instead of writing its own.
   const salt = randomBytes(32).toString('hex');
-  const tmpPath = `${path}.tmp-${process.pid}`;
   const previousUmask = process.umask(0o077);
   try {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    writeFileSync(tmpPath, `${salt}\n`, { encoding: 'utf8', mode: 0o600 });
+    sweepStaleTemps(path);
+    let fd;
     try {
-      renameSync(tmpPath, path);
-      return salt;
+      fd = openSync(path, 'wx', 0o600);
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
-      try { unlinkSync(tmpPath); } catch { /* best effort */ }
-      for (let attempt = 0; attempt < 5; attempt += 1) {
-        sleepSync(20);
-        const found = readSaltFile(path);
-        if (found !== null) {
-          if (found.short) {
-            fail(`salt file too short at ${path}; delete it to regenerate`);
-            return null;
-          }
-          return found.salt;
-        }
-      }
-      fail(`could not read the pseudonym salt at ${path} after losing the create race`);
+      // We lost the race, so the winner's file is the salt -- never ours.
+      const found = awaitSaltFile(path, 5);
+      if (found !== null && !found.short) return found.salt;
+      fail(`could not read the pseudonym salt at ${path} after losing the create race; if it is short, empty or unreadable, delete it to regenerate`);
       return null;
     }
+    // We hold the name. fsync before close so the salt every subsequent run
+    // will read is on disk: a machine that loses power here would otherwise
+    // leave a present-but-empty file, and the next build would rename every
+    // person against a salt this one never durably recorded.
+    try {
+      writeSync(fd, `${salt}\n`, null, 'utf8');
+      fsyncSync(fd);
+    } catch (error) {
+      // Our own partial file, and nobody else's: remove it so the next run
+      // creates a whole one rather than reading this as a bad salt.
+      try { closeSync(fd); } catch { /* already closing on the error path */ }
+      try { unlinkSync(path); } catch { /* best effort */ }
+      throw error;
+    }
+    closeSync(fd);
+    return salt;
   } catch (error) {
     fail(`could not create the pseudonym salt at ${path}: ${error?.message ?? error}`);
     return null;
   } finally {
     process.umask(previousUmask);
   }
+}
+
+// The tmp+rename version left `${path}.tmp-<pid>` behind on any crash between
+// its write and its rename, and on a non-EEXIST rename error the throw
+// skipped its own unlink. Nothing ever swept them, and each one is a valid
+// 64-hex salt at 0600 sitting in the secrets directory. This file no longer
+// creates them; it clears whatever the old version left. Best effort by
+// design -- an unreadable directory or an undeletable file must not stop a
+// build over housekeeping.
+function sweepStaleTemps(path) {
+  const dir = dirname(path);
+  const prefix = `${basename(path)}.tmp-`;
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!name.startsWith(prefix)) continue;
+      if (!/^\d+$/u.test(name.slice(prefix.length))) continue;
+      try { unlinkSync(join(dir, name)); } catch { /* best effort */ }
+    }
+  } catch { /* best effort */ }
 }
 
 const PSEUDONYM_SALT = readPseudonymSalt();

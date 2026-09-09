@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -232,4 +232,87 @@ test('the printed code tells the three real failures apart', async () => {
       server.close();
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// Review G finding 2: THE ATOMIC WRITE THAT SILENTLY REPLACED THE WINNER.
+// The create path wrote a temp file and renameSync'd it into place, treating
+// EEXIST from the rename as "someone else won, re-read theirs". renameSync on
+// POSIX does not raise EEXIST -- it silently REPLACES the destination -- so
+// that branch could never run on macOS or Linux and the loser overwrote the
+// winner's salt. A changed salt renames every person in the output relative
+// to already-built pages, which is the one thing this file's header warns
+// about. The `wx` open that tmp+rename replaced was the guard, and it is
+// back.
+// ---------------------------------------------------------------------------
+
+// The loser's exact state, deterministically: a salt file that EXISTS but
+// that this process cannot read. readSaltFile's initial read fails, so the
+// script takes the create path exactly as the loser of a real race does, and
+// the create then meets a file already holding the name. rename does not need
+// to read its destination to replace it, which is why the old code destroyed
+// this file and the new one leaves it alone.
+test('a run that cannot read an existing salt file must never overwrite it', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'pseudonym-'));
+  const tokenFile = join(dir, 'token.txt');
+  writeFileSync(tokenFile, `${'a'.repeat(64)}\n`, { mode: 0o600 });
+  const { server, port } = await stubHermes();
+  t.after(() => server.close());
+
+  const saltPath = join(dir, 'salt-held.txt');
+  const winner = `${'7'.repeat(64)}\n`;
+  writeFileSync(saltPath, winner, { mode: 0o600 });
+  chmodSync(saltPath, 0o000);
+  t.after(() => { try { chmodSync(saltPath, 0o600); } catch { /* cleanup only */ } });
+
+  // It cannot produce a pseudonym without a readable salt, and refusing is
+  // right. What must not happen is the refusal costing the winner's salt.
+  await assert.rejects(runRaw(saltPath, { port, tokenFile }));
+
+  chmodSync(saltPath, 0o600);
+  assert.equal(readFileSync(saltPath, 'utf8'), winner,
+    "the winner's salt must be byte-identical: a loser that clobbers it renames every person already built");
+});
+
+test('concurrent first runs agree on one salt rather than racing to overwrite it', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'pseudonym-'));
+  const tokenFile = join(dir, 'token.txt');
+  writeFileSync(tokenFile, `${'a'.repeat(64)}\n`, { mode: 0o600 });
+  const { server, port } = await stubHermes();
+  t.after(() => server.close());
+
+  // No salt file at all, so every one of these takes the create path.
+  const saltPath = join(dir, 'salt-race.txt');
+  const keys = await Promise.all(
+    Array.from({ length: 5 }, () => run(saltPath, { port, tokenFile }))
+  );
+
+  assert.equal(new Set(keys).size, 1,
+    'one salt on the box means one pseudonym per person, whoever created the file');
+  const salt = readFileSync(saltPath, 'utf8').trim();
+  assert.ok(salt.length >= 32);
+  const expected = createHash('sha256').update(`${salt} ${PERSON}`, 'utf8').digest('hex').slice(0, 8);
+  assert.equal(keys[0], expected, 'and the salt left on disk is the one every run actually used');
+});
+
+test('a leftover tmp file from the old rename-based write is swept out of the secrets directory', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'pseudonym-'));
+  const tokenFile = join(dir, 'token.txt');
+  writeFileSync(tokenFile, `${'a'.repeat(64)}\n`, { mode: 0o600 });
+  const { server, port } = await stubHermes();
+  t.after(() => server.close());
+
+  // What a crash between the old write and its rename left behind: a valid
+  // 64-hex salt at 0600 that nothing ever swept.
+  const saltPath = join(dir, 'salt-sweep.txt');
+  const stale = `${saltPath}.tmp-4242`;
+  writeFileSync(stale, `${'3'.repeat(64)}\n`, { mode: 0o600 });
+  const keep = `${saltPath}.tmp-notapid`;
+  writeFileSync(keep, 'unrelated\n', { mode: 0o600 });
+
+  await run(saltPath, { port, tokenFile });
+
+  assert.throws(() => statSync(stale), 'a stale <salt>.tmp-<pid> is a secret nobody is going to notice');
+  assert.ok(statSync(keep), 'and only that exact shape: this is housekeeping, not a directory sweep');
+  assert.ok(readFileSync(saltPath, 'utf8').trim().length >= 32, 'the salt itself is still created');
 });
