@@ -79,7 +79,7 @@ import { buildPersonPage, readPersonPage } from './relationship/pages.mjs';
 import { runSweepPass, applySweepDecision, sweepStatus } from './relationship/sweep.mjs';
 import {
   runLookupPass, lookupGate, lookupTierFor, lookupStatus, lookupLogFor, lookupEvidenceFor,
-  newestWebChange,
+  newestWebChange, parseLookupSources,
 } from './relationship/lookup.mjs';
 import {
   runLintPass, lintFindings, resolveLintFinding, lintStatus,
@@ -804,7 +804,34 @@ CREATE TABLE IF NOT EXISTS person_lookup_change(
      marked 1 here, and newestWebChange withholds them from the card until
      the owner decides, the same way it withholds a real contradiction.
      Every row written since is 0, because storeLookup computes the flag. */
-  contradicts_anchor_unknown INTEGER NOT NULL DEFAULT 0 CHECK (contradicts_anchor_unknown IN (0,1))
+  contradicts_anchor_unknown INTEGER NOT NULL DEFAULT 0 CHECK (contradicts_anchor_unknown IN (0,1)),
+  /* EVERY SOURCE THIS CHANGE RESTS ON, not just the primary one the url and
+     the claim_source receipt hold: a canonical JSON array of
+     {url, quote, evidenceKind}, 1 to 4 entries, each grounded exactly as the
+     single citation always was (the quote verbatim in what came back, the
+     url among the URLs the search returned). relationship/lookup.mjs's
+     corroboration section carries the whole design and the owner's own
+     reason for it ("seems fragile if we rely on one source"). The url and
+     change_date columns above STAY PRIMARY -- they are the first surviving
+     source, and every existing reader and every already-stored row uses
+     them; this is additive beside them.
+
+     corroboration is how many DISTINCT REGISTRABLE DOMAINS (eTLD+1) among
+     those sources actually COUNT, where a source counts when its quote came
+     from the provider's prose ('snippet') or its url is the anchored
+     LinkedIn profile URL the lookup itself sent. Two links on one domain are
+     one domain -- lookup_log 4520's own evidence was two LinkedIn links --
+     and a title-kind quote from a domain we did not anchor counts for
+     nothing, which is 4520's shape exactly.
+
+     BOTH ARE NULLABLE, and NULL is not 0. NULL means nobody computed it: a
+     row from before these columns, or one stored without the stream in hand.
+     newestWebChange refuses to serve either on a card while it is pending --
+     the same posture contradicts_anchor_unknown takes, for the same reason
+     (nothing may claim a check that never ran) -- while the desk still shows
+     it and an owner accept still serves it. */
+  sources       TEXT,
+  corroboration INTEGER
 );
 CREATE INDEX IF NOT EXISTS person_lookup_change_log ON person_lookup_change(log_id);
 
@@ -1293,6 +1320,16 @@ END;
 //      doctrine rebuildClaimTableForV10's incident note already argues for,
 //      and every one of them is additive with a default that satisfies its
 //      own CHECK.
+//
+//      CORROBORATION then added two more the same way, and the stamp still
+//      stays 14: person_lookup_change.sources (canonical JSON, every source
+//      a change rests on rather than only the primary) and
+//      .corroboration (how many distinct registrable domains among them
+//      actually count). Both NULLABLE WITH NO DEFAULT and no back-fill, so
+//      an existing row reads NULL rather than being asserted uncorroborated
+//      or corroborated -- see the table's own comment, and
+//      relationship/lookup.mjs's corroboration section for why one search
+//      result stopped being enough.
 const SCHEMA_VERSION = 14;
 
 // The PRAGMAs that decide whether "deleted" means deleted, and whether the
@@ -1631,6 +1668,19 @@ function healLookupColumns(db) {
       // computed its anchor verdict, so "unknown" is the only honest value.
       // A fresh database reaches this with zero rows.
       db.exec('UPDATE person_lookup_change SET contradicts_anchor_unknown = 1 WHERE evidence_kind IS NULL');
+    }
+    // NO BACK-FILL for these two, and that is the point: both are NULLABLE
+    // with NO DEFAULT, so every existing row reads NULL -- "nobody counted
+    // the sources for this row" -- which newestWebChange refuses to serve on
+    // a card while pending. A DEFAULT 0 would say "counted, and it was
+    // zero", which is a claim nobody made; a DEFAULT 1 would say a row from
+    // the 4520 era was corroborated, which is the opposite of true. See
+    // person_lookup_change's schema comment above.
+    if (!cols.has('sources')) {
+      db.exec('ALTER TABLE person_lookup_change ADD COLUMN sources TEXT');
+    }
+    if (!cols.has('corroboration')) {
+      db.exec('ALTER TABLE person_lookup_change ADD COLUMN corroboration INTEGER');
     }
   }
 
@@ -3890,8 +3940,13 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         : card.sentence;
       // `changed`: public lookup's own signal (L5 step 6), separate from
       // `sentence` and never displacing it -- the newest non-rejected
-      // public-web change about this person, resolved through its live
-      // context row (row gone -> null). Wrapped the same defensively as
+      // public-web change about this person that CLEARS THE CORROBORATION
+      // BAR (two independent registrable domains, or the anchored LinkedIn
+      // profile with a date; see relationship/lookup.mjs's corroboration
+      // section), resolved through its live context row (row gone -> null).
+      // It carries `corroboration` and `sources` so a renderer can say "2
+      // sources" rather than showing one url as though it were the only
+      // thing that could be said. Wrapped the same defensively as
       // sweepStatus below: a missing/pre-migration lookup table must not
       // take the card route down.
       let changed = null;
@@ -4241,9 +4296,19 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       budget: 1, now: Date.now(), onlyPersonKey: body.personKey, ...power,
     });
 
+    // `log.changes` already carries the parsed shape (sources as a list,
+    // corroboration as a number or null) -- see lookupLogFor. The raw rows
+    // are kept beside it for back-compat with anything reading the columns
+    // directly, with `sources` decoded from its canonical JSON so a caller
+    // never has to parse a column to count domains.
     const log = lookupLogFor(db, body.personKey, { limit: 1 })[0] ?? null;
     const changes = log
-      ? db.prepare('SELECT * FROM person_lookup_change WHERE log_id = ?').all(log.id)
+      ? db.prepare('SELECT * FROM person_lookup_change WHERE log_id = ?').all(log.id).map((row) => ({
+        ...row,
+        sources: parseLookupSources(row.sources),
+        corroboration: row.corroboration === null || row.corroboration === undefined
+          ? null : Number(row.corroboration),
+      }))
       : [];
     send(res, 200, { log, changes }, cors);
     return;
@@ -4259,7 +4324,12 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     if (typeof personKey !== 'string' || personKey.length === 0) {
       throw badRequest('"personKey" query parameter is required');
     }
-    // Each row now carries `evidence: {urls, resultTextChars}` -- WHAT CAME
+    // Each row now carries `changes` -- every person_lookup_change this
+    // lookup proposed, each with its `sources` list and its `corroboration`
+    // count, so the desk can render "2 sources" and say why an
+    // uncorroborated pending row is not on a card (see
+    // relationship/lookup.mjs's corroboration section) -- and
+    // `evidence: {urls, resultTextChars}` -- WHAT CAME
     // BACK, not only what was sent. lookup_log 4520 stored a claim whose
     // quote was a search-result TITLE, and nothing on the box could show
     // that after the fact because only the counts were kept. The titles and

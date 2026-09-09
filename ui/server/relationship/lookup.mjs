@@ -65,8 +65,30 @@ export const LOOKUP_REFRESH_DAYS = Object.freeze({ eligible: 30, tagged: 30, oth
 // Enforced by CODE (lookupPerson counts real WebSearch tool_use blocks via
 // parseLookupStream), not merely asked of the prompt -- see
 // prompts/public_lookup.md's own budget section, which exists so the model
-// need not guess why the number matters, not as the enforcement itself.
-export const LOOKUP_MAX_SEARCHES = 2;
+// need not guess why the number matters, not as the enforcement itself. The
+// CLI also carries a matching TURN bound now (engines.mjs
+// LOOKUP_MAX_TURNS = LOOKUP_MAX_SEARCHES + 1: one turn per search plus one
+// to answer in), which stops a runaway loop before it spends the searches
+// rather than only discarding its answer afterwards. The count below is
+// still the enforcement; the flag is a belt.
+//
+// RAISED FROM 2 TO 4 for corroboration (see the corroboration section
+// below). Two searches can establish a fact and never test it; the search
+// plan prompts/public_lookup.md v4 asks for is name+firm, then the profile
+// URL, then the strongest candidate fact once more -- three searches for an
+// ordinary lookup, a fourth when the first pass came back ambiguous.
+//
+// COST, said plainly: a lookup now averages 3-4 searches where it averaged
+// 1-2, so roughly TWICE the per-lookup search cost. The model call itself is
+// one either way; searches are what spend the account-wide rate limit the
+// owner's whole subscription shares. THE DAILY CAP IS UNCHANGED at 20
+// (LOOKUP_DAILY_CALL_CAP_DEFAULT) and it counts CALLS, not searches -- so
+// the honest reading is that a full day of lookups costs about double what
+// it did, for the same number of people. That is the price of not serving a
+// job move off one stale search result, and lookupStatus reports searches24h
+// beside calls24h so the number to revisit this with is measured rather than
+// guessed.
+export const LOOKUP_MAX_SEARCHES = 4;
 
 // The hard ceiling on how much third-party article text ONE lookup may store
 // in lookup_evidence, and on how much of it the evidence route will hand
@@ -825,46 +847,451 @@ const PRESENT_TENSE_RE = /\b(?:now|currently|presently|no longer|these days|as o
 
 // evidenceKindFor(quote, observed): 'title' when the quote is (or is inside)
 // one of the returned `Links:` titles, 'snippet' when it is a verbatim span
-// of the provider's synthesized prose and no title carries it, null when it
-// is neither -- which is a grounding failure, not a weak change.
+// of the provider's synthesized prose that says MORE than the title does,
+// null when it is neither -- which is a grounding failure, not a weak
+// change.
 //
-// ~~TITLE IS CHECKED FIRST, and that ordering is review finding 13.~~
-// REVERSED 2026-09 (review G finding 12), and the reasoning it replaced is
-// worth keeping because half of it was right. It said: a provider routinely
-// echoes a page's title inside its own summary prose, so a quote that is a
-// title AND appears in prose answered 'snippet' -- the strong-evidence
-// answer -- and bypassed every title-only rule (the present-tense drop, the
-// 'ambiguous' downgrade) for the exact quote shape that caused lookup_log
-// 4520. "A title does not become a published statement about somebody by
-// being repeated" is true.
+// THREE ROUNDS OF THIS, and the third is the one that holds. The history is
+// kept because each round was right about something:
 //
-// What it got wrong is which text it was reasoning about. Checking title
-// first made the WEAKER label win whenever both applied, so a sentence the
-// provider actually wrote in its own prose -- real synthesized evidence --
-// was labelled 'title' and then dropped by the present-tense rule for
-// happening to be a substring of some link's title. The label now describes
-// what the quote IS: found verbatim in the prose snippet, it is a snippet;
-// absent from the prose, and carried only by a title, it is a title.
+//   1. Snippet first. A provider echoes a page's title inside its own
+//      summary prose all the time, so a quote that was a title AND appeared
+//      in prose answered 'snippet' -- the strong answer -- and bypassed
+//      every title-only rule for the exact quote shape that caused
+//      lookup_log 4520.
+//   2. Title first (review C finding 13). That made the WEAKER label win
+//      whenever both applied, so a sentence the provider genuinely wrote was
+//      labelled 'title' and dropped by the present-tense rule for happening
+//      to be a substring of some link's title (review G finding 12).
+//   3. NEITHER ORDER IS THE ANSWER, because the question is not which text
+//      the quote appears in -- it is whether the PROSE ADDS ANYTHING. "The
+//      top result reads: <title>." is a title with eight characters of
+//      packaging; "<title>, and he joined the team in April according to the
+//      company blog" is a published sentence. Round 2 called both 'title';
+//      round 1 called both 'snippet'.
 //
-// AND THE CASE THE REORDER WAS ACTUALLY FOR IS STILL COVERED. Without a
-// separate `snippetText`, the fallback is `resultText`, which still CONTAINS
-// the `Links:` block -- so a title-only quote would match it and read as
-// prose it never appeared in. Prose therefore only wins when the prose is
-// genuinely separable; on the fallback the title is checked first, which is
-// precisely the 4520 shape. Legacy callers with neither field keep reading
-// as 'snippet', exactly the behaviour this file had before the split.
+// THE RULE, and it is deliberately mechanical rather than clever: a quote
+// that equals, or is a substring of, a returned title is 'title' UNLESS the
+// prose SENTENCE CONTAINING IT is longer than that title by at least
+// EVIDENCE_SENTENCE_MARGIN characters, in which case it is 'snippet'. The
+// title compared against is the LONGEST title that carries the quote, so the
+// margin has to be cleared against the most generous reading of "this is
+// just a title".
+//
+// Why a length test and not a semantic one: there is no model call available
+// here (this is the pure half) and a regex for "adds information" is a
+// fiction. Length is a proxy that is wrong in a KNOWABLE direction -- a long
+// sentence of pure padding around a title reads as a snippet -- and 20
+// characters is about the length of the packaging a provider actually puts
+// around an echoed title ("The top result reads: ", "According to LinkedIn,
+// "). Being wrong the OTHER way is what round 2 did, and that cost real
+// prose-grounded evidence.
+//
+// AND THE FALLBACK IS UNCHANGED. Without a separable `snippetText`, the
+// prose stand-in is `resultText`, which still CONTAINS the `Links:` block --
+// so a title-only quote matches it and would read as prose it never appeared
+// in. There the title still wins outright, no sentence test, because there
+// is no sentence: the "containing sentence" of a quote inside a JSON array
+// is not a published statement. Legacy callers with neither field keep
+// reading as 'snippet', exactly the behaviour this file had before the
+// split.
+export const EVIDENCE_SENTENCE_MARGIN = 20;
+
+// The sentence of `prose` that contains `quote`, trimmed -- bounded left and
+// right by a sentence terminator or a newline. Returns '' when the quote is
+// not in the prose at all. Not a sentence tokenizer: an abbreviation ends a
+// "sentence" here, which SHORTENS the containing sentence and therefore
+// makes the margin harder to clear, which is the safe direction.
+const SENTENCE_TERMINATOR_RE = /[.!?\n\r]/u;
+
+function containingSentence(prose, quote) {
+  const s = String(prose ?? '');
+  const q = String(quote ?? '');
+  if (q.length === 0) return '';
+  const at = s.indexOf(q);
+  if (at === -1) return '';
+  let from = 0;
+  for (let i = at - 1; i >= 0; i--) {
+    if (SENTENCE_TERMINATOR_RE.test(s[i])) { from = i + 1; break; }
+  }
+  let to = s.length;
+  for (let i = at + q.length; i < s.length; i++) {
+    if (SENTENCE_TERMINATOR_RE.test(s[i])) { to = i + 1; break; }
+  }
+  return s.slice(from, to).trim();
+}
+
 export function evidenceKindFor(quote, observed) {
   const q = String(quote ?? '');
   if (q.length === 0) return null;
   const links = Array.isArray(observed?.links) ? observed.links : [];
-  const inTitle = links.some((link) =>
-    typeof link?.title === 'string' && link.title.length > 0 && link.title.includes(q));
+  // The LONGEST title that carries the quote -- the most generous reading of
+  // "this quote is just a title", which is what the margin must beat.
+  let longestTitle = null;
+  for (const link of links) {
+    if (typeof link?.title !== 'string' || link.title.length === 0) continue;
+    if (!link.title.includes(q)) continue;
+    if (longestTitle === null || link.title.length > longestTitle.length) longestTitle = link.title;
+  }
   const proseSeparated = typeof observed?.snippetText === 'string';
   const prose = proseSeparated ? observed.snippetText : String(observed?.resultText ?? '');
-  if (proseSeparated && prose.includes(q)) return 'snippet';
-  if (inTitle) return 'title';
-  if (prose.includes(q)) return 'snippet';
-  return null;
+  if (longestTitle === null) {
+    // Not carried by any title: the provider's prose, or nothing at all.
+    return prose.includes(q) ? 'snippet' : null;
+  }
+  if (proseSeparated && prose.includes(q)) {
+    const sentence = containingSentence(prose, q);
+    if (sentence.length >= longestTitle.length + EVIDENCE_SENTENCE_MARGIN) return 'snippet';
+  }
+  return 'title';
+}
+
+// --- Corroboration: one search result is not evidence --------------------
+//
+// WHY THIS SECTION EXISTS, in the owner's own words: "seems fragile if we
+// rely on one source... doesn't seem very frontier intelligence-y." Two real
+// lookups, one each way -- one (Jeremy) came back right off a single
+// profile; one (Nikzad, lookup_log 4520) came back with a WRONG job move
+// read off a stale LinkedIn title. Every rule above this line is about
+// making a single result harder to misread. None of them can tell a stale
+// result from a current one, because staleness is not a property of the
+// result. It is a property of whether anything ELSE says the same thing.
+//
+// THE DESIGN, seven parts:
+//
+// 1. EVIDENCE PER CHANGE IS A LIST. A change carries
+//    `sources: [{url, quote, evidenceKind}]`, 1 to LOOKUP_SOURCE_CAP (4)
+//    entries, and EVERY entry is grounded exactly as the single (url, quote)
+//    pair always was: the quote verbatim in the observed text
+//    (evidenceKindFor), the url among the URLs this lookup's own search
+//    actually returned. A source that fails grounding is dropped from the
+//    list, not fatal to the change; a change whose every source fails is
+//    dropped exactly as a single ungrounded change always was, with the same
+//    drop reason, so nothing about the one-source path changed shape.
+//    Stored as canonical JSON in person_lookup_change.sources (nullable, and
+//    healed onto an existing database on open like the other lookup
+//    columns). THE SINGLE url/quote COLUMNS STAY, and stay primary: they are
+//    the first surviving source, they are what claim_source and the context
+//    row are built from, they are what every existing reader and every
+//    already-stored row already use, and `sources` is additive beside them.
+//
+// 2. corroboration = THE NUMBER OF DISTINCT REGISTRABLE DOMAINS (eTLD+1)
+//    among the sources that COUNT, and a source counts when its quote is
+//    snippet-kind (the provider's own prose said it) or its url is the
+//    ANCHORED PROFILE URL we ourselves sent. Two sources on one domain are
+//    one domain: a site quoting itself twice is not two publishers agreeing,
+//    and 4520's own evidence was two LinkedIn links. A title-kind quote from
+//    a domain we did not anchor counts for NOTHING -- that is the 4520 shape
+//    exactly. Stored as person_lookup_change.corroboration (INTEGER,
+//    nullable: NULL means nobody computed it, the same honesty
+//    evidence_kind's NULL already carries).
+//
+// 3. SERVABILITY ON THE CARD is a higher bar than storage, and the two are
+//    deliberately different. newestWebChange serves a change only when
+//    corroboration >= 2, OR corroboration == 1 where the one counting source
+//    is the anchored LinkedIn profile URL AND the change carries a YYYY-MM
+//    date AND no contradiction flag is set. The one-source exception exists
+//    because the anchored profile is the one URL we did not learn from a
+//    search -- the owner's own export named it, so "this person's own
+//    profile, dated" is a different object from "a search result said so".
+//    EVERYTHING ELSE IS STILL STORED, pending, and still shows on the desk
+//    with its sources: the owner should see an uncorroborated finding and
+//    judge it. It just never reaches a card as fact. An ACCEPTED change
+//    serves regardless, the same escape hatch the anchor flag has always
+//    had: once the owner has said yes, it is his word and not our count.
+//
+// 4. FOUR SEARCHES, not two (LOOKUP_MAX_SEARCHES above), with the CLI given
+//    the matching turn bound, and prompts/public_lookup.md v4 given the
+//    search plan: name+firm, then the profile URL, then the strongest
+//    candidate fact once more to corroborate it. The prompt reports every
+//    supporting source per change, is told never to rely on a single result,
+//    and states identity_confidence from AGREEMENT ACROSS SOURCES rather
+//    than from how confident one page made it feel.
+//
+// 5. THE TITLE-ECHO HOLE IS CLOSED (see evidenceKindFor directly above).
+//    A title echoed into prose used to read as prose-strength evidence,
+//    which would have let a title corroborate itself.
+//
+// 6. THE DESK GETS BOTH NUMBERS. /lookups and the change rows carry
+//    `sources` and `corroboration`, so "2 sources" is renderable and an
+//    uncorroborated pending row can say why it is not on a card.
+//
+// 7. COST is stated at LOOKUP_MAX_SEARCHES above: about 2x per lookup, daily
+//    cap unchanged at 20 calls.
+//
+// WHAT THIS DOES NOT CLAIM. Two domains agreeing is not truth -- both can
+// syndicate one wire story, and a company blog plus an aggregator of that
+// blog is one publisher wearing two hats. This rule cannot see that. What it
+// can do is refuse the shape that actually burned us: one stale index entry,
+// read as the present tense, with nothing else in the world saying so.
+export const LOOKUP_SOURCE_CAP = 4;
+
+// parseLookupSources(json): person_lookup_change.sources back out, as the
+// list every reader wants -- the card, the desk's own two queries, and
+// webChangeServable. Fails to an EMPTY LIST rather than throwing and rather
+// than guessing: an unreadable or absent `sources` column means no source
+// counts, which means corroboration cannot be claimed, which means the
+// change is withheld from the card. Entries are filtered to the shape the
+// rest of this file relies on, so a hand-edited database cannot put a
+// non-string url into isAnchoredProfileUrl.
+export function parseLookupSources(json) {
+  if (json === null || json === undefined) return [];
+  let parsed;
+  try {
+    parsed = typeof json === 'string' ? JSON.parse(json) : json;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out = [];
+  for (const entry of parsed) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    if (typeof entry.url !== 'string' || typeof entry.quote !== 'string') continue;
+    out.push({
+      url: entry.url,
+      quote: entry.quote,
+      evidenceKind: entry.evidenceKind === 'snippet' || entry.evidenceKind === 'title'
+        ? entry.evidenceKind : null,
+    });
+    if (out.length >= LOOKUP_SOURCE_CAP) break;
+  }
+  return out;
+}
+
+// registrableDomain(url): eTLD+1, conservatively, with NO dependency.
+//
+// The conservative direction here is MERGING: treating two distinct
+// registrable domains as one lowers the corroboration count, which withholds
+// a change from the card. Treating one registrable domain as two INFLATES
+// the count, which serves an uncorroborated change as though two publishers
+// agreed. So the default is the merging one -- the last two labels -- and
+// the exception list below exists only so that two genuinely different
+// publications under a ccTLD's second level (bbc.co.uk and guardian.co.uk)
+// can still corroborate each other instead of both collapsing to "co.uk".
+//
+// So: three labels when the TLD is a two-letter ccTLD and the label before
+// it is one of the well-known second-level registries; two otherwise. A
+// public-suffix list would be more accurate and is a dependency; this is
+// wrong only for exotic suffixes, and for nearly all of them it is wrong in
+// the merging direction.
+//
+// Returns null for anything that is not a public domain name at all -- an IP
+// literal in any encoding, a bare label, an unparseable URL (PUBLIC_DOMAIN_RE
+// is the same shape test isLookupUrlDenied uses). A null never counts toward
+// corroboration.
+const CCTLD_SECOND_LEVEL = Object.freeze(new Set([
+  'co', 'com', 'net', 'org', 'ac', 'gov', 'edu', 'or', 'ne', 'go', 'gob',
+  'govt', 'nom', 'mil', 'sch', 'res', 'ltd', 'plc', 'me', 'in', 'id',
+]));
+
+export function registrableDomain(url) {
+  let host;
+  try {
+    host = new URL(String(url ?? '')).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (!PUBLIC_DOMAIN_RE.test(host)) return null;
+  const labels = host.split('.').filter((l) => l.length > 0);
+  if (labels.length < 2) return null;
+  const tld = labels[labels.length - 1];
+  const sld = labels[labels.length - 2];
+  if (labels.length >= 3 && tld.length === 2 && CCTLD_SECOND_LEVEL.has(sld)) {
+    return labels.slice(-3).join('.');
+  }
+  return labels.slice(-2).join('.');
+}
+
+// isAnchoredProfileUrl(url, profileUrl): is this citation the very LinkedIn
+// profile URL the lookup itself was built from?
+//
+// Deliberately narrow: same host ignoring a leading `www.`, same path
+// ignoring a trailing slash and case. NOT a general same-site test -- any
+// other linkedin.com page is a search result like any other, and the whole
+// point of the anchor exception is that this ONE url did not come from a
+// search at all, it came from the owner's own export.
+//
+// The CITATION must be https (every stored citation already is --
+// groundLookup refuses anything else); the ANCHOR side accepts http too,
+// because it is our own record rather than evidence, and an export holding
+// an http profile URL should not silently disable the exception forever.
+function normalizeProfileUrl(value, { requireHttps }) {
+  try {
+    const u = new URL(String(value ?? ''));
+    const okProtocol = requireHttps
+      ? u.protocol === 'https:'
+      : (u.protocol === 'https:' || u.protocol === 'http:');
+    if (!okProtocol) return null;
+    const host = u.hostname.toLowerCase().replace(/^www\./u, '');
+    if (host.length === 0) return null;
+    const path = u.pathname.replace(/\/+$/u, '').toLowerCase();
+    return `${host}${path}`;
+  } catch {
+    return null;
+  }
+}
+
+export function isAnchoredProfileUrl(url, profileUrl) {
+  const anchor = normalizeProfileUrl(profileUrl, { requireHttps: false });
+  if (anchor === null) return false;
+  const cited = normalizeProfileUrl(url, { requireHttps: true });
+  return cited !== null && cited === anchor;
+}
+
+// corroborationOf(sources, {profileUrl}): design point 2, as one function.
+// A source that does not count contributes nothing; one that counts
+// contributes its registrable domain, and the answer is how many DISTINCT
+// domains those are.
+export function corroborationOf(sources, { profileUrl = null } = {}) {
+  const domains = new Set();
+  for (const source of Array.isArray(sources) ? sources : []) {
+    const counts = source?.evidenceKind === 'snippet' || isAnchoredProfileUrl(source?.url, profileUrl);
+    if (!counts) continue;
+    const domain = registrableDomain(source?.url);
+    if (domain !== null) domains.add(domain);
+  }
+  return domains.size;
+}
+
+// webChangeServable(row, {profileUrl}): design point 3, as one function --
+// the ONE place the card's bar lives, so newestWebChange (this file) and the
+// dev desk's own mirror of that query (ui/devtools/review/serve.mjs) cannot
+// drift apart the way they did before the desk imported this.
+//
+// `row` is the stored row's own fields: {corroboration, sources, date,
+// contradictsAnchor, contradictsAnchorUnknown, decision}. A NULL
+// corroboration (a row from before this column, or one stored without the
+// stream in hand) reads as 0 and is refused -- the same posture
+// contradicts_anchor_unknown takes, and for the same reason: nobody counted
+// it, so nobody may claim it was corroborated.
+//
+// THE ANCHOR IS RE-TESTED AT SERVE TIME against the CURRENT profile URL,
+// while `corroboration` is the number computed at STORE time. If the owner's
+// export has since changed its profile URL, the exception stops applying and
+// the change is withheld -- which is the conservative direction, and the
+// only one available: the count cannot be recomputed here without the
+// original stream.
+export function webChangeServable(row, { profileUrl = null } = {}) {
+  // The owner's own accept overrides every automatic gate here, exactly as
+  // it overrides the anchor flag. Once he has said yes it is his word.
+  if (row?.decision === 'accept') return true;
+  if (Number(row?.contradictsAnchor ?? 0) === 1) return false;
+  if (Number(row?.contradictsAnchorUnknown ?? 0) === 1) return false;
+  const corroboration = Number(row?.corroboration ?? 0);
+  if (!Number.isFinite(corroboration) || corroboration < 1) return false;
+  if (corroboration >= 2) return true;
+  // corroboration === 1: the ONE exception, and all three of its conditions.
+  const sources = Array.isArray(row?.sources) ? row.sources : [];
+  const anchored = sources.some((s) => isAnchoredProfileUrl(s?.url, profileUrl));
+  if (!anchored) return false;
+  // "the single source IS the anchored profile" -- so nothing else may be
+  // what counted. A snippet on some other domain sharing the count means the
+  // one domain is not the anchor's, and this is not the exception.
+  const countingElsewhere = sources.some((s) =>
+    s?.evidenceKind === 'snippet' && !isAnchoredProfileUrl(s?.url, profileUrl));
+  if (countingElsewhere) return false;
+  if (!/^\d{4}-\d{2}$/u.test(String(row?.date ?? ''))) return false;
+  return true;
+}
+
+// candidateSourcesFor(item): the (url, quote) pairs a model's change offers,
+// PRIMARY FIRST and deduplicated, capped at LOOKUP_SOURCE_CAP.
+//
+// The primary is the change's own top-level `url`/`quote` -- the v3 shape,
+// which every already-stored row and every legacy reader uses -- and it is
+// listed first so that when it grounds it stays the primary source (the
+// url/quote columns, the context row's text, the claim_source receipt, and
+// the entity_id that makes a repeated lookup idempotent rather than
+// duplicating). `sources` follows it.
+//
+// The primary is only synthesized when the change actually offers one, or
+// offers no `sources` array at all: a v4-shaped change carrying only
+// `sources` must not be dropped with "quote is missing" (the reason a
+// phantom empty primary would produce) when its real sources failed for a
+// real reason.
+function candidateSourcesFor(item) {
+  const out = [];
+  const seen = new Set();
+  const push = (url, quote) => {
+    const key = `${String(url ?? '')} ${String(quote ?? '')}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (out.length < LOOKUP_SOURCE_CAP) out.push({ url, quote });
+  };
+  const list = Array.isArray(item?.sources) ? item.sources : null;
+  const hasPrimary = (typeof item?.url === 'string' && item.url.length > 0)
+    || (typeof item?.quote === 'string' && item.quote.length > 0);
+  if (hasPrimary || list === null || list.length === 0) push(item?.url, item?.quote);
+  for (const source of list ?? []) {
+    if (source === null || typeof source !== 'object' || Array.isArray(source)) continue;
+    push(source.url, source.quote);
+  }
+  return out;
+}
+
+// groundOneSource(candidate, observed): every check a single citation has
+// always faced, unchanged and in the same order, so the drop reason a
+// one-source change produces is character-for-character what it was.
+// Returns {ok: true, source} or {ok: false, reason}.
+//
+// `observed === null` is the caller-with-no-stream seam (storeLookup called
+// without it): the shape checks still run, the two checks that need the
+// stream cannot, and evidenceKind is null -- which makes the source count
+// for nothing in corroborationOf, so a stream-less store can never claim
+// corroboration it did not observe.
+function groundOneSource({ url, quote }, observed) {
+  if (typeof quote !== 'string' || quote.length === 0) {
+    return { ok: false, reason: LOOKUP_DROP_REASONS.badQuote };
+  }
+  let evidenceKind = null;
+  if (observed !== null && observed !== undefined) {
+    evidenceKind = evidenceKindFor(quote, observed);
+    if (evidenceKind === null) return { ok: false, reason: LOOKUP_DROP_REASONS.ungroundedQuote };
+  }
+  if (typeof url !== 'string' || url.length === 0) {
+    return { ok: false, reason: LOOKUP_DROP_REASONS.missingUrl };
+  }
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { ok: false, reason: LOOKUP_DROP_REASONS.unparseableUrl };
+  }
+  if (parsed.protocol !== 'https:') return { ok: false, reason: LOOKUP_DROP_REASONS.notHttps };
+  if (isLookupUrlDenied(parsed)) return { ok: false, reason: LOOKUP_DROP_REASONS.deniedHost };
+  if (observed !== null && observed !== undefined) {
+    const urlSet = observed.urls instanceof Set
+      ? observed.urls
+      : new Set(Array.isArray(observed.urls) ? observed.urls : []);
+    if (!urlSet.has(url)) return { ok: false, reason: LOOKUP_DROP_REASONS.urlNotReturned };
+  }
+  return { ok: true, source: { url, quote, evidenceKind } };
+}
+
+// groundSourcesFor(item, observed): the whole list, and the reason to report
+// if none of it survives -- the FIRST candidate's own failure, which for a
+// one-source change is exactly the reason that change always got.
+function groundSourcesFor(item, observed) {
+  const sources = [];
+  let firstReason = null;
+  for (const candidate of candidateSourcesFor(item)) {
+    const result = groundOneSource(candidate, observed);
+    if (result.ok) sources.push(result.source);
+    else if (firstReason === null) firstReason = result.reason;
+  }
+  return { sources, reason: sources.length > 0 ? null : (firstReason ?? LOOKUP_DROP_REASONS.badQuote) };
+}
+
+// The change's own evidence kind: the STRONGEST any of its sources carries.
+// With one source this is identical to what evidenceKindFor answered before
+// sources existed. With several, one genuine prose sentence makes the change
+// snippet-strength however many titles are stacked beside it -- the same
+// judgement corroborationOf makes about which sources count.
+function strongestEvidenceKind(sources) {
+  for (const source of sources) {
+    if (source.evidenceKind === 'snippet') return 'snippet';
+  }
+  return sources.some((s) => s.evidenceKind === 'title') ? 'title' : null;
 }
 
 // groundLookup(envelope, observed) -- PURE, no DB. Mirrors groundSweep's
@@ -924,7 +1351,7 @@ export const LOOKUP_DROP_REASONS = Object.freeze({
   missingDate: 'a move/company change without a YYYY-MM date is not reportable',
 });
 
-export function groundLookup(envelope, observed, { firm = null } = {}) {
+export function groundLookup(envelope, observed, { firm = null, profileUrl = null } = {}) {
   const kept = [];
   const dropped = [];
   const noteDrop = (reason) => dropped.push({ reason });
@@ -960,29 +1387,23 @@ export function groundLookup(envelope, observed, { firm = null } = {}) {
       noteDrop(LOOKUP_DROP_REASONS.badText);
       continue;
     }
-    if (typeof item.quote !== 'string' || item.quote.length === 0) {
-      noteDrop(LOOKUP_DROP_REASONS.badQuote);
+    // EVERY SOURCE THIS CHANGE OFFERS, each grounded exactly as the single
+    // (url, quote) pair always was (see groundSourcesFor / groundOneSource
+    // in the corroboration section). A change with one source behaves
+    // identically to before, drop reason included; a change with several
+    // keeps the ones that ground and loses the ones that do not.
+    const { sources, reason } = groundSourcesFor(item, observed);
+    if (sources.length === 0) {
+      noteDrop(reason);
       continue;
     }
-    const evidenceKind = evidenceKindFor(item.quote, observed);
-    if (evidenceKind === null) {
-      noteDrop(LOOKUP_DROP_REASONS.ungroundedQuote);
-      continue;
-    }
-    if (typeof item.url !== 'string' || item.url.length === 0) {
-      noteDrop(LOOKUP_DROP_REASONS.missingUrl);
-      continue;
-    }
-    let parsedUrl;
-    try {
-      parsedUrl = new URL(item.url);
-    } catch {
-      noteDrop(LOOKUP_DROP_REASONS.unparseableUrl);
-      continue;
-    }
-    if (parsedUrl.protocol !== 'https:') { noteDrop(LOOKUP_DROP_REASONS.notHttps); continue; }
-    if (isLookupUrlDenied(parsedUrl)) { noteDrop(LOOKUP_DROP_REASONS.deniedHost); continue; }
-    if (!observed.urls.has(item.url)) { noteDrop(LOOKUP_DROP_REASONS.urlNotReturned); continue; }
+    // The PRIMARY source -- the first that survived, which is the change's
+    // own top-level url/quote whenever those grounded. The url/quote
+    // columns, the context row's text, the claim_source receipt and the
+    // idempotence key are all built from this one.
+    const primary = sources[0];
+    const evidenceKind = strongestEvidenceKind(sources);
+    const corroboration = corroborationOf(sources, { profileUrl });
     const date = typeof item.date === 'string' && /^\d{4}-\d{2}$/u.test(item.date) ? item.date : null;
     const text = item.text.trim();
 
@@ -993,10 +1414,10 @@ export function groundLookup(envelope, observed, { firm = null } = {}) {
     // 'company' because that is what it actually is -- a competing claim
     // about which company this person is at -- whatever the model filed it
     // as ('move', for 4520).
-    if (contradictsAnchorFirm({ kind: item.kind, text, quote: item.quote }, firm, { titles })) {
+    if (contradictsAnchorFirm({ kind: item.kind, text, quote: primary.quote }, firm, { titles })) {
       kept.push({
-        kind: 'company', text, url: item.url, quote: item.quote, date,
-        evidenceKind, contradictsAnchor: true,
+        kind: 'company', text, url: primary.url, quote: primary.quote, date,
+        evidenceKind, contradictsAnchor: true, sources, corroboration,
       });
       continue;
     }
@@ -1027,8 +1448,8 @@ export function groundLookup(envelope, observed, { firm = null } = {}) {
     }
 
     kept.push({
-      kind: item.kind, text, url: item.url, quote: item.quote, date,
-      evidenceKind, contradictsAnchor: false,
+      kind: item.kind, text, url: primary.url, quote: primary.quote, date,
+      evidenceKind, contradictsAnchor: false, sources, corroboration,
     });
   }
 
@@ -1381,21 +1802,26 @@ function extractJsonObject(text) {
   return body.slice(start, end + 1);
 }
 
-// storeLookup(db, {personKey, kept, observed, firm, logId, distillRunId, now}):
+// storeLookup(db, {personKey, kept, observed, firm, profileUrl, logId, distillRunId, now}):
 // the trusted apply path, mirroring storeSweep/storePage. EVERY grounding rule
 // groundLookup already checked is re-checked here against what is about to
 // be written, because a client (groundLookup) is not a boundary. One
 // BEGIN..COMMIT for the whole batch of kept changes.
 //
-// `observed` and `firm` are what make that claim TRUE rather than aspirational.
+// `observed`, `firm` and `profileUrl` are what make that claim TRUE rather
+// than aspirational.
 // This function used to re-check kind/text/quote-nonempty/https/denylist and
 // silently skip the only two rules that carry the grounding -- "this URL is
 // one the search returned" and "this quote is a verbatim span of what came
 // back" -- so a caller that skipped groundLookup entirely could store a
-// fabricated citation. Both are re-run below, and evidence_kind /
-// contradicts_anchor are RECOMPUTED here rather than taken from the caller's
-// object. Omitting `observed` re-checks everything it can and records
-// evidence_kind NULL; a caller with the stream in hand should always pass it.
+// fabricated citation. Both are re-run below -- for EVERY source, not only
+// the primary -- and evidence_kind, contradicts_anchor, `sources` and
+// `corroboration` are all RECOMPUTED here rather than taken from the
+// caller's object: the caller's `sources` array is read as an INPUT (which
+// pairs to consider) and never as a result. Omitting `observed` re-checks
+// everything it can and records evidence_kind NULL and corroboration NULL; a
+// caller with the stream in hand should always pass it, and `profileUrl`
+// with it, or no source can count toward corroboration.
 //
 // Idempotence: the (source, entity_id) check dedupes the CONTEXT row, which
 // was never enough on its own -- a monthly lookup finding the same (url,
@@ -1451,7 +1877,7 @@ function beginUnlessNested(db) {
 }
 
 export function storeLookup(db, {
-  personKey, kept, observed = null, firm = null, logId, distillRunId, now = Date.now(),
+  personKey, kept, observed = null, firm = null, profileUrl = null, logId, distillRunId, now = Date.now(),
 } = {}) {
   if (!Array.isArray(kept) || kept.length === 0) return { stored: 0, skipped: 0, duplicates: 0 };
 
@@ -1473,8 +1899,8 @@ export function storeLookup(db, {
   );
   const insChange = db.prepare(
     `INSERT INTO person_lookup_change(claim_id, log_id, kind, url, change_date, applied_at,
-       evidence_kind, contradicts_anchor, contradicts_anchor_unknown)
-     VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)`
+       evidence_kind, contradicts_anchor, contradicts_anchor_unknown, sources, corroboration)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`
   );
   // The alreadyProposed analogue -- see this function's header. Keyed on
   // (person, url, quote) -- which is what a receipt IS here -- plus the
@@ -1512,7 +1938,8 @@ export function storeLookup(db, {
   const selDup = db.prepare(
     `SELECT c.id AS id, plc.evidence_kind AS evidenceKind,
             COALESCE(plc.contradicts_anchor, 0) AS contradictsAnchor,
-            COALESCE(plc.contradicts_anchor_unknown, 0) AS contradictsAnchorUnknown
+            COALESCE(plc.contradicts_anchor_unknown, 0) AS contradictsAnchorUnknown,
+            plc.sources AS sourcesJson, plc.corroboration AS corroboration
        FROM claim c
        JOIN person_lookup_change plc ON plc.claim_id = c.id
        JOIN claim_source cs ON cs.claim_id = c.id AND cs.source = 'web'
@@ -1526,9 +1953,17 @@ export function storeLookup(db, {
   );
   // The heal. Only the three verdict columns, and only when one of them
   // actually differs, so a re-lookup that agrees writes nothing at all.
+  // `sources` and `corroboration` are healed alongside the three verdict
+  // columns, and for the same reason: they are this system's JUDGEMENT about
+  // the assertion, not the assertion itself. A re-lookup that finds the same
+  // sentence on a second domain has learned that the claim is corroborated,
+  // and the row the owner has not yet judged should say so rather than
+  // keeping the weaker count it was first stored with. Nothing append-only
+  // is touched: no claim text, no claim_source, no claim_decision.
   const healChange = db.prepare(
     `UPDATE person_lookup_change
-        SET evidence_kind = ?, contradicts_anchor = ?, contradicts_anchor_unknown = ?
+        SET evidence_kind = ?, contradicts_anchor = ?, contradicts_anchor_unknown = ?,
+            sources = ?, corroboration = ?
       WHERE claim_id = ?`
   );
   const maxChangedAt = db.prepare('SELECT MAX(store_changed_at) AS m FROM context').get();
@@ -1579,39 +2014,31 @@ export function storeLookup(db, {
         item === null || typeof item !== 'object'
         || !LOOKUP_CHANGE_KINDS.includes(item.kind)
         || typeof item.text !== 'string' || item.text.trim().length === 0 || item.text.length > 200
-        || typeof item.quote !== 'string' || item.quote.length === 0
-        || typeof item.url !== 'string' || item.url.length === 0
       ) {
         skipped += 1;
         continue;
       }
-      let parsedUrl;
-      try {
-        parsedUrl = new URL(item.url);
-      } catch {
+      // EVERY SOURCE, RE-GROUNDED HERE -- the same groundSourcesFor
+      // groundLookup used, run again against what is about to be written,
+      // because a client is not a boundary. The caller's own `sources` array
+      // is an INPUT to this, never trusted output: candidateSourcesFor reads
+      // it, and each entry then faces the same url/quote checks the single
+      // citation always faced. A change whose every source fails is skipped
+      // exactly as a single failing citation always was.
+      const { sources } = groundSourcesFor(item, observed);
+      if (sources.length === 0) {
         skipped += 1;
         continue;
       }
-      if (parsedUrl.protocol !== 'https:' || isLookupUrlDenied(parsedUrl)) {
-        skipped += 1;
-        continue;
-      }
-      // The two rules the header used to claim and not run.
-      let evidenceKind = null;
-      if (observed !== null) {
-        const urlSet = observed.urls instanceof Set
-          ? observed.urls
-          : new Set(Array.isArray(observed.urls) ? observed.urls : []);
-        if (!urlSet.has(item.url)) {
-          skipped += 1;
-          continue;
-        }
-        evidenceKind = evidenceKindFor(item.quote, observed);
-        if (evidenceKind === null) {
-          skipped += 1;
-          continue;
-        }
-      }
+      const primary = sources[0];
+      const evidenceKind = strongestEvidenceKind(sources);
+      // Recomputed here too, never taken from the caller. NULL rather than 0
+      // when there was no stream to observe: "nobody counted" and "counted,
+      // and it was zero" are different facts, and webChangeServable refuses
+      // both -- but only one of them is a claim.
+      const corroboration = observed === null ? null : corroborationOf(sources, { profileUrl });
+      const sourcesJson = JSON.stringify(canonicalize(sources));
+
       // Recomputed, never trusted from the caller: the flag decides whether
       // a card may consume this row, so a client cannot hand it in as false.
       // A caller's own `true` is honoured as a FLOOR, because recomputation
@@ -1619,7 +2046,7 @@ export function storeLookup(db, {
       // titles in hand and this call may not) -- so the recomputation adds
       // the flag and can never clear one.
       const contradictsAnchor = contradictsAnchorFirm(
-        { kind: item.kind, text: item.text.trim(), quote: item.quote }, firm, { titles }
+        { kind: item.kind, text: item.text.trim(), quote: primary.quote }, firm, { titles }
       ) || item.contradictsAnchor === true;
       const kind = contradictsAnchor ? 'company' : item.kind;
       // The date requirement, re-checked against the row about to be written
@@ -1632,41 +2059,51 @@ export function storeLookup(db, {
         continue;
       }
       const anchorUnknown = !contradictsAnchor && anchorCheckIncomplete;
-      const dup = selDup.get(personKey, item.url, item.quote, item.text.trim());
+      // Keyed on the PRIMARY source, which is what the url/quote columns and
+      // the claim_source receipt hold -- see candidateSourcesFor for why the
+      // change's own top-level pair stays first, and therefore why a
+      // repeated lookup finding the same page still dedupes rather than
+      // inserting a second claim beside it.
+      const dup = selDup.get(personKey, primary.url, primary.quote, item.text.trim());
       if (dup !== undefined) {
         // Same receipt, same assertion: no second claim. Heal the verdict
         // columns if this lookup knows better than the stored row did --
         // which is how a back-filled unknown gets cleared, since nothing
         // else in this file ever writes that column.
+        const storedCorroboration = dup.corroboration === null || dup.corroboration === undefined
+          ? null : Number(dup.corroboration);
         if (
           (dup.evidenceKind ?? null) !== evidenceKind
           || Number(dup.contradictsAnchor) !== (contradictsAnchor ? 1 : 0)
           || Number(dup.contradictsAnchorUnknown) !== (anchorUnknown ? 1 : 0)
+          || (dup.sourcesJson ?? null) !== sourcesJson
+          || storedCorroboration !== corroboration
         ) {
-          healChange.run(evidenceKind, contradictsAnchor ? 1 : 0, anchorUnknown ? 1 : 0, Number(dup.id));
+          healChange.run(evidenceKind, contradictsAnchor ? 1 : 0, anchorUnknown ? 1 : 0,
+            sourcesJson, corroboration, Number(dup.id));
         }
         duplicates += 1;
         continue;
       }
 
-      const entityId = `web:${createHash('sha256').update(`${item.url}\0${item.quote}`, 'utf8').digest('hex').slice(0, 32)}`;
-      const meta = { url: item.url, provider: 'claude-cli-lookup', query_hash: queryHash, fetched_at: now, person_key: personKey };
+      const entityId = `web:${createHash('sha256').update(`${primary.url}\0${primary.quote}`, 'utf8').digest('hex').slice(0, 32)}`;
+      const meta = { url: primary.url, provider: 'claude-cli-lookup', query_hash: queryHash, fetched_at: now, person_key: personKey };
       const metaJson = JSON.stringify(meta);
-      const contentHash = canonicalHash({ ts: now, speaker: null, text: item.quote, meta });
+      const contentHash = canonicalHash({ ts: now, speaker: null, text: primary.quote, meta });
 
       let contextId;
       const existing = selCtx.get('web', entityId);
       if (existing !== undefined) {
         contextId = Number(existing.id);
       } else {
-        contextId = Number(insCtx.run(now, item.quote, metaJson, entityId, contentHash, nextChangedAt).lastInsertRowid);
+        contextId = Number(insCtx.run(now, primary.quote, metaJson, entityId, contentHash, nextChangedAt).lastInsertRowid);
         nextChangedAt += 1;
       }
 
       const claimId = Number(insClaim.run(distillRunId, personKey, item.text, now, now).lastInsertRowid);
-      insSource.run(claimId, contextId, entityId, contentHash, item.quote);
-      insChange.run(claimId, logId, kind, item.url, date, evidenceKind,
-        contradictsAnchor ? 1 : 0, anchorUnknown ? 1 : 0);
+      insSource.run(claimId, contextId, entityId, contentHash, primary.quote);
+      insChange.run(claimId, logId, kind, primary.url, date, evidenceKind,
+        contradictsAnchor ? 1 : 0, anchorUnknown ? 1 : 0, sourcesJson, corroboration);
       stored += 1;
     }
     if (ownTransaction) db.exec('COMMIT');
@@ -1867,12 +2304,18 @@ export async function lookupPerson(db, engine, candidate, { runId, distillRunId,
   }
 
   // LOOKUP_MAX_SEARCHES used to be a constant whose own comment claimed code
-  // enforcement it never had: nothing compared observed.searches to it, and
-  // the installed CLI has no --max-turns flag to cap turns with (checked
-  // 2026-09-08 against `claude --help`), so the only place the cap can live
-  // is here, after the fact. A model that spent more searches than it was
-  // budgeted has burned account-wide rate limit the owner shares; its
+  // enforcement it never had: nothing compared observed.searches to it, so
+  // the cap lives here, after the fact. A model that spent more searches than
+  // it was budgeted has burned account-wide rate limit the owner shares; its
   // changes are dropped wholesale rather than stored as if the budget held.
+  //
+  // The CLI now ALSO carries `--max-turns LOOKUP_MAX_TURNS` (engines.mjs) --
+  // the flag is absent from `claude --help` but present in the client, and
+  // verified to stop the run before the next search fires. That is a belt in
+  // front of this check, not a replacement for it: the turn bound is the
+  // CLIENT's accounting of turns, and this is OUR count of the searches that
+  // actually happened, read off the stream. A CLI that ever stops honouring
+  // the flag degrades to exactly the behaviour below.
   //
   // Logged as 'ungrounded' rather than a new 'over-budget' status literal --
   // see lookup_log's own CHECK comment in hermes.mjs for why a new literal
@@ -2406,6 +2849,12 @@ export function lookupStatus(db, policy = null) {
 // rather than the article, which lookupEvidenceFor serves on its own route.
 // null for a log row written before this table existed, or one that never
 // had a stream (no-anchors, engine-error).
+//
+// `changes` is the third part of the receipt and the newest: the
+// person_lookup_change rows this lookup actually proposed, each with its
+// `sources` list and its `corroboration` count, so the desk can render "2
+// sources" and say why an uncorroborated pending row is not on a card. Empty
+// for a lookup that proposed nothing.
 export function lookupLogFor(db, personKey, { limit = 20 } = {}) {
   const rows = db.prepare(
     `SELECT ll.id AS id, ll.person_key AS personKey, ll.run_id AS runId, ll.at AS at, ll.engine AS engine,
@@ -2419,6 +2868,52 @@ export function lookupLogFor(db, personKey, { limit = 20 } = {}) {
      LEFT JOIN lookup_evidence le ON le.log_id = ll.id
      WHERE ll.person_key = ? ORDER BY ll.at DESC LIMIT ?`
   ).all(personKey, Number.isInteger(limit) && limit > 0 ? limit : 20);
+
+  // WHAT WAS PROPOSED, per log row, with its sources and its corroboration
+  // count -- design point 6 of the corroboration section. Until this, a log
+  // row carried only changes_proposed/changes_dropped COUNTS, so the desk
+  // could see that a lookup proposed something and not what, and certainly
+  // not how many independent domains backed it. "2 sources" is the one thing
+  // an owner needs to tell a corroborated finding from a lone search result,
+  // and it belongs beside the receipt for what was sent.
+  //
+  // ONE query for the whole page of log rows, not one per row: the ids are
+  // already in hand, so this is an IN() over at most `limit` of them.
+  const changesByLog = new Map();
+  if (rows.length > 0) {
+    const placeholders = rows.map(() => '?').join(',');
+    const changeRows = db.prepare(
+      `SELECT plc.claim_id AS claimId, plc.log_id AS logId, plc.kind AS kind, plc.url AS url,
+              plc.change_date AS date, plc.evidence_kind AS evidenceKind,
+              plc.contradicts_anchor AS contradictsAnchor,
+              plc.contradicts_anchor_unknown AS contradictsAnchorUnknown,
+              plc.sources AS sourcesJson, plc.corroboration AS corroboration,
+              c.text AS text,
+              (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) AS decision
+       FROM person_lookup_change plc
+       JOIN claim c ON c.id = plc.claim_id
+       WHERE plc.log_id IN (${placeholders})
+       ORDER BY plc.claim_id DESC`
+    ).all(...rows.map((r) => r.id));
+    for (const change of changeRows) {
+      const list = changesByLog.get(change.logId) ?? [];
+      list.push({
+        claimId: change.claimId,
+        kind: change.kind,
+        url: change.url,
+        date: change.date ?? null,
+        text: change.text,
+        decision: change.decision ?? null,
+        evidenceKind: change.evidenceKind ?? null,
+        contradictsAnchor: Number(change.contradictsAnchor ?? 0) === 1,
+        contradictsAnchorUnknown: Number(change.contradictsAnchorUnknown ?? 0) === 1,
+        sources: parseLookupSources(change.sourcesJson),
+        corroboration: change.corroboration === null || change.corroboration === undefined
+          ? null : Number(change.corroboration),
+      });
+      changesByLog.set(change.logId, list);
+    }
+  }
 
   return rows.map((row) => {
     let fieldsUsed = [];
@@ -2442,7 +2937,7 @@ export function lookupLogFor(db, personKey, { limit = 20 } = {}) {
       fieldsUsedJson, evidenceUrlsJson, evidenceResultTextChars,
       evidenceTruncated, evidenceLinksParseFailed, ...rest
     } = row;
-    return { ...rest, fieldsUsed, evidence };
+    return { ...rest, fieldsUsed, evidence, changes: changesByLog.get(row.id) ?? [] };
   });
 }
 
@@ -2493,38 +2988,83 @@ export function lookupEvidenceFor(db, { logId, personKey } = {}) {
   };
 }
 
-// newestWebChange(db, personKey): the card's `changed` field (a later
-// commit). The single newest person_lookup_change that is not rejected or
-// retracted (pending or accepted both count -- an owner may not have judged
-// it yet, and the card should still surface it), resolved through its LIVE
-// context row: if that row is gone, this returns null rather than serving a
-// quote nobody can verify any more -- the same deletion-cascade-honored-at-
-// serve-time discipline the card route already applies to its own quote.
+// The anchored profile URL, and ONLY that field, for one person.
 //
-// THREE STATES, not two, since review finding 5: 0 (does not contradict the
-// anchor), 1 (does), and contradicts_anchor_unknown = 1 -- a row stored
-// BEFORE the anchor columns existed, which the v14 ALTER silently defaulted
-// to 0 and which this query therefore kept serving on the card as though it
-// had been checked. It had not been checked at all; it is from exactly the
-// era of the 4520 false positive. An unknown row is treated like a
-// contradiction -- withheld while pending, allowed once the owner accepts it
-// -- and a NULL in either column (a hand-altered database) is refused too,
-// which is what the COALESCE defaults to 1 are for.
+// anchorsFor would answer this too, and is the canonical anchor reader --
+// but it also runs the accepted-sweep-firm join and two identifier reads,
+// three queries this call has no use for, on every card serve. Only
+// people.linkedin.url is needed here, and it is read BY NAME off the parsed
+// JSON exactly the way anchorsFor reads it (people.linkedin also carries an
+// email address; nothing but .url is touched).
+function anchoredProfileUrlFor(db, personKey) {
+  let row;
+  try {
+    row = db.prepare('SELECT linkedin FROM people WHERE person_key = ?').get(personKey);
+  } catch {
+    return null;
+  }
+  if (!row || typeof row.linkedin !== 'string' || row.linkedin.length === 0) return null;
+  let linkedin = null;
+  try { linkedin = JSON.parse(row.linkedin); } catch { return null; }
+  const url = linkedin && typeof linkedin.url === 'string' ? linkedin.url.trim() : '';
+  return url.length > 0 ? url : null;
+}
+
+// newestWebChange(db, personKey): the card's `changed` field. The newest
+// person_lookup_change that is not rejected or retracted, is not a pending
+// anchor contradiction, PASSES THE CORROBORATION BAR (webChangeServable, in
+// the corroboration section above), and still resolves through a LIVE
+// context row -- if that row is gone this skips it rather than serving a
+// quote nobody can verify any more, the same deletion-cascade-honoured-at-
+// serve-time discipline the card route applies to its own quote.
+//
+// IT WALKS, rather than taking the single newest row and giving up. That is
+// new with corroboration and it is not a detail: an uncorroborated finding
+// is now a normal, expected outcome, and one arriving today must not hide a
+// corroborated change from last month. The walk is bounded
+// (NEWEST_WEB_CHANGE_SCAN rows) so a person with a long lookup history
+// cannot turn one card serve into an unbounded scan.
+//
+// THE BAR (design point 3, stated in full there): corroboration >= 2, or
+// corroboration == 1 where the one counting source is the anchored LinkedIn
+// profile URL, the change carries a YYYY-MM date, and no contradiction flag
+// is set. Everything else stays STORED and PENDING -- visible on the desk,
+// with its sources and its count -- and simply never reaches a card as
+// fact. A change the owner has ACCEPTED serves regardless: that is his word,
+// not our count, and it is the same escape hatch the anchor flag has.
+//
+// A pre-corroboration row has corroboration NULL and is therefore withheld
+// while pending. That is the same posture contradicts_anchor_unknown took
+// for the pre-anchor-flag rows, and it is deliberate rather than incidental:
+// nobody counted those sources, so nothing may claim they were corroborated.
+// The desk still shows them; an accept still serves them.
+//
+// THREE STATES ON THE ANCHOR, not two, since review finding 5: 0 (does not
+// contradict the anchor), 1 (does), and contradicts_anchor_unknown = 1 -- a
+// row stored BEFORE the anchor columns existed, which the v14 ALTER silently
+// defaulted to 0 and which this query therefore kept serving on the card as
+// though it had been checked. It had not been checked at all; it is from
+// exactly the era of the 4520 false positive. An unknown row is treated like
+// a contradiction -- withheld while pending, allowed once the owner accepts
+// it -- and a NULL in either column (a hand-altered database) is refused
+// too, which is what the COALESCE defaults to 1 are for.
 //
 // A contradicts_anchor change is EXCLUDED while it is pending, and this is
 // the fix for what lookup_log 4520 actually did wrong to the owner: a claim
 // that disagrees with his own LinkedIn export ("now at Verily, not Klaviyo")
 // was rendered on the card as fact, with `decision: null`, before he had
 // judged it. A disagreement with our own anchor is a REVIEW ITEM, not card
-// content. Once he ACCEPTS one it is his word and the card may carry it; a
-// pending one may not. (The card route -- hermes.mjs -- consumes this
-// function and nothing else; draft.mjs reads no lookup state at all, so the
-// gate lives here rather than in either caller.)
+// content. (The card route -- hermes.mjs -- consumes this function and
+// nothing else; draft.mjs reads no lookup state at all, so the gate lives
+// here rather than in either caller.)
+const NEWEST_WEB_CHANGE_SCAN = 20;
+
 export function newestWebChange(db, personKey) {
-  const row = db.prepare(
+  const rows = db.prepare(
     `SELECT plc.claim_id AS claimId, plc.kind AS kind, plc.url AS url, plc.change_date AS date,
             plc.evidence_kind AS evidenceKind, plc.contradicts_anchor AS contradictsAnchor,
             plc.contradicts_anchor_unknown AS contradictsAnchorUnknown,
+            plc.sources AS sourcesJson, plc.corroboration AS corroboration,
             ll.at AS at, c.text AS text,
             (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) AS decision
      FROM person_lookup_change plc
@@ -2539,23 +3079,46 @@ export function newestWebChange(db, personKey) {
          (COALESCE(plc.contradicts_anchor, 1) = 0 AND COALESCE(plc.contradicts_anchor_unknown, 1) = 0)
          OR (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) = 'accept'
        )
-     ORDER BY plc.claim_id DESC LIMIT 1`
-  ).get(personKey);
-  if (!row) return null;
+     ORDER BY plc.claim_id DESC LIMIT ?`
+  ).all(personKey, NEWEST_WEB_CHANGE_SCAN);
+  if (rows.length === 0) return null;
 
-  const source = db.prepare(
+  // Read once for the whole walk, not once per candidate row.
+  const profileUrl = anchoredProfileUrlFor(db, personKey);
+  const sourceStmt = db.prepare(
     `SELECT context_id AS contextId, quote FROM claim_source WHERE claim_id = ? AND source = 'web' LIMIT 1`
-  ).get(row.claimId);
-  if (!source) return null;
+  );
+  const ctxStmt = db.prepare('SELECT id FROM context WHERE id = ?');
 
-  const ctx = db.prepare('SELECT id FROM context WHERE id = ?').get(source.contextId);
-  if (!ctx) return null; // the receipt is gone, so the change is gone
+  for (const row of rows) {
+    const sources = parseLookupSources(row.sourcesJson);
+    if (!webChangeServable({
+      corroboration: row.corroboration,
+      sources,
+      date: row.date,
+      contradictsAnchor: row.contradictsAnchor,
+      contradictsAnchorUnknown: row.contradictsAnchorUnknown,
+      decision: row.decision ?? null,
+    }, { profileUrl })) {
+      continue;
+    }
+    const source = sourceStmt.get(row.claimId);
+    if (!source) continue;
+    const ctx = ctxStmt.get(source.contextId);
+    if (!ctx) continue; // the receipt is gone, so the change is gone
 
-  return {
-    text: row.text, url: row.url, kind: row.kind, quote: source.quote,
-    date: row.date ?? null, at: row.at, decision: row.decision ?? null,
-    evidenceKind: row.evidenceKind ?? null,
-    contradictsAnchor: Number(row.contradictsAnchor ?? 0) === 1,
-    contradictsAnchorUnknown: Number(row.contradictsAnchorUnknown ?? 0) === 1,
-  };
+    return {
+      text: row.text, url: row.url, kind: row.kind, quote: source.quote,
+      date: row.date ?? null, at: row.at, decision: row.decision ?? null,
+      evidenceKind: row.evidenceKind ?? null,
+      contradictsAnchor: Number(row.contradictsAnchor ?? 0) === 1,
+      contradictsAnchorUnknown: Number(row.contradictsAnchorUnknown ?? 0) === 1,
+      // Both numbers travel to the card and the desk: "2 sources" is
+      // renderable, and an uncorroborated row can say why it is not here.
+      sources,
+      corroboration: row.corroboration === null || row.corroboration === undefined
+        ? null : Number(row.corroboration),
+    };
+  }
+  return null;
 }
