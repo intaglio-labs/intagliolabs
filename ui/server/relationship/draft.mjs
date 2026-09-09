@@ -32,6 +32,16 @@ const ME_LINES_LIMIT = 3;
 // discipline the card route uses), and up to 3 of the OWNER's own most
 // recent lines to this person as a tone sample. Returns null when the
 // snapshot no longer exists -- the route 400s on that.
+//
+// OWE CARDS CARRY OWE EVIDENCE (review finding 13). An Owe snapshot has no
+// dormancyDays and no mode -- both were passed as 'unknown' -- and the one
+// thing that card is actually about, the overdue commitment or the
+// unanswered ask, never reached the prompt at all. The result was a generic
+// "it's been a while" draft on a card whose whole point is a specific thing
+// the owner said they would do. The commitment text is resolved from the
+// LIVE claim row, and a claim that is gone or whose latest decision is a
+// reject contributes nothing rather than stale text -- the same serve-time
+// resolution the card route does for `left`.
 export function buildDraftContext(db, snapshotId) {
   const snap = db.prepare(
     'SELECT id, person_key, kind, evidence FROM rm_candidate_snapshot WHERE id = ?'
@@ -62,6 +72,16 @@ export function buildDraftContext(db, snapshotId) {
      ORDER BY c.ts DESC LIMIT ?`
   ).all(snap.person_key, ME_LINES_LIMIT).map((r) => String(r.text));
 
+  let commitment = null;
+  const commitmentClaimId = evidence.commitment_claim_id;
+  if (Number.isInteger(commitmentClaimId)) {
+    const claimRow = db.prepare('SELECT text FROM claim WHERE id = ?').get(commitmentClaimId);
+    const decision = db.prepare(
+      'SELECT action FROM claim_decision WHERE claim_id = ? ORDER BY created_at DESC, id DESC LIMIT 1'
+    ).get(commitmentClaimId);
+    if (claimRow && decision?.action !== 'reject') commitment = String(claimRow.text);
+  }
+
   return {
     snapshotId: Number(snap.id),
     personKey: snap.person_key,
@@ -69,6 +89,9 @@ export function buildDraftContext(db, snapshotId) {
     firstName,
     quietDays: evidence.dormancyDays ?? null,
     mode: evidence.mode ?? null,
+    oweKind: evidence.owe_kind ?? null,
+    overdueDays: Number.isFinite(evidence.overdueDays) ? evidence.overdueDays : null,
+    commitment,
     page,
     lastQuote,
     meLines,
@@ -85,6 +108,14 @@ function renderPrompt(ctx) {
   lines.push(`Quiet days: ${ctx.quietDays ?? 'unknown'}`);
   lines.push(`Mode: ${ctx.mode ?? 'unknown'}`);
   lines.push(`Kind: ${ctx.kind}`);
+  // Owe's own facts, and only when this IS an owe card: a reconnect card
+  // has no overdue thing, and printing 'none' for it would invite the model
+  // to write about the absence.
+  if (ctx.oweKind !== null) {
+    lines.push(`Owe kind: ${ctx.oweKind}`);
+    lines.push(`Days overdue: ${ctx.overdueDays ?? 'unknown'}`);
+    lines.push(`What the owner said they would do: ${ctx.commitment ? JSON.stringify(ctx.commitment) : 'not recorded'}`);
+  }
 
   const who = pageLine(ctx.page.sections.who);
   const objection = pageLine(ctx.page.sections.objection);
