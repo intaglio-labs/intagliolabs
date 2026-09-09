@@ -737,7 +737,25 @@ CREATE TABLE IF NOT EXISTS lookup_log(
      insert until it was. An over-budget lookup is logged 'ungrounded' (its
      changes really were all thrown away) with the real search count in
      searches, which is where the fact lives and is queryable:
-     searches > LOOKUP_MAX_SEARCHES. */
+     searches > LOOKUP_MAX_SEARCHES.
+
+     SO IS A FAILED STORE, for the same reason and with the same honesty
+     problem: nothing was stored, so 'ungrounded' is true as far as it goes,
+     but the WHY is not in this table. Both cases write the honest word to
+     person_lookup_state.last_status instead ('over-budget', 'store-error'),
+     which is free text with no CHECK to rebuild, and both HOLD next_due_at
+     rather than advancing it -- the scheduling decision is made in code
+     (lookupPerson's own hold flag), never inferred from this literal: a
+     lookup that was thrown away taught us nothing about the person and
+     advancing them a full refresh tier loses them for a month.
+
+     status AND changes_proposed ARE WRITTEN FROM WHAT WAS STORED, not from
+     what grounding kept: they are UPDATEd inside the same transaction that
+     writes the claims (see lookupPerson). Before that, a batch whose every
+     change deduped against a claim already on file logged 'proposed' with a
+     positive changes_proposed and no claim to show for it. changes_dropped
+     counts grounding drops plus store-time skips; a duplicate is in neither
+     column, because the change was real and is already on file. */
   status              TEXT NOT NULL CHECK (status IN
                         ('proposed','empty','ambiguous','ungrounded','engine-error','parse-error','no-anchors'))
 );
@@ -745,8 +763,25 @@ CREATE INDEX IF NOT EXISTS lookup_log_person ON lookup_log(person_key, at DESC);
 CREATE TABLE IF NOT EXISTS lookup_evidence(
   log_id      INTEGER PRIMARY KEY REFERENCES lookup_log(id) ON DELETE CASCADE,
   urls        TEXT NOT NULL, /* canonical JSON array of {title, url} */
+  /* VERBATIM UP TO A CAP -- relationship/lookup.mjs's
+     LOOKUP_RESULT_TEXT_CAP, 200k characters. The word "verbatim" alone was
+     a promise nothing kept: the only bound was the engine's 5MB stdout
+     buffer, which truncates mid-line, so one pathological result set could
+     put megabytes of a stranger's web page in this column and the evidence
+     route would then serve all of it in one response. Past the cap the text
+     is cut and truncated is 1, so a clipped article is distinguishable from
+     a complete one instead of being asserted verbatim. */
   result_text TEXT NOT NULL,
-  created_at  INTEGER NOT NULL
+  created_at  INTEGER NOT NULL,
+  truncated          INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0,1)),
+  /* A "Links:" block WAS present in the stream and could not be read as an
+     array (parseLookupStream's own linksParseFailed). Without this the
+     provider's format drifting out from under the reader was
+     indistinguishable from a search that returned no links: every change
+     failed grounding, the lookup logged 'ungrounded', and nothing said why
+     -- the whole title/present-tense/downgrade machinery reverting in
+     silence. */
+  links_parse_failed INTEGER NOT NULL DEFAULT 0 CHECK (links_parse_failed IN (0,1))
 );
 CREATE TABLE IF NOT EXISTS person_lookup_change(
   claim_id    INTEGER PRIMARY KEY REFERENCES claim(id) ON DELETE CASCADE,
@@ -756,7 +791,17 @@ CREATE TABLE IF NOT EXISTS person_lookup_change(
   change_date TEXT,
   applied_at  INTEGER,
   evidence_kind      TEXT CHECK (evidence_kind IS NULL OR evidence_kind IN ('title','snippet')),
-  contradicts_anchor INTEGER NOT NULL DEFAULT 0 CHECK (contradicts_anchor IN (0,1))
+  contradicts_anchor INTEGER NOT NULL DEFAULT 0 CHECK (contradicts_anchor IN (0,1)),
+  /* THE FLAG WAS NEVER COMPUTED FOR THIS ROW. contradicts_anchor's own
+     ALTER (below, healLookupChangeColumns) can only default an existing row
+     to 0, and 0 means "checked, and it does not contradict the anchor" --
+     which is a claim nobody made about a row stored before the column
+     existed, from exactly the era of the lookup_log 4520 false positive.
+     Rows the migration finds already present with no evidence_kind are
+     marked 1 here, and newestWebChange withholds them from the card until
+     the owner decides, the same way it withholds a real contradiction.
+     Every row written since is 0, because storeLookup computes the flag. */
+  contradicts_anchor_unknown INTEGER NOT NULL DEFAULT 0 CHECK (contradicts_anchor_unknown IN (0,1))
 );
 CREATE INDEX IF NOT EXISTS person_lookup_change_log ON person_lookup_change(log_id);
 
@@ -1234,6 +1279,17 @@ END;
 //      column's default (NULL / 0) satisfies its own CHECK. See
 //      person_lookup_change's schema comment for what the two columns mean
 //      and which false positive (lookup_log 4520) put them there.
+//
+//      The lookup review then added three more ALTERed columns under the
+//      same version, and moved all five OUT of the version branch into
+//      healLookupColumns, which runs on every open: person_lookup_change.
+//      contradicts_anchor_unknown (with a one-time back-fill of the rows
+//      that predate the anchor columns) and lookup_evidence.truncated /
+//      .links_parse_failed. The stamp stays 14 deliberately -- the columns
+//      are added by presence check, not by version arithmetic, which is the
+//      doctrine rebuildClaimTableForV10's incident note already argues for,
+//      and every one of them is additive with a default that satisfies its
+//      own CHECK.
 const SCHEMA_VERSION = 14;
 
 // The PRAGMAs that decide whether "deleted" means deleted, and whether the
@@ -1285,6 +1341,13 @@ function migrate(db) {
   // sqlite_master read, and heals a mis-stamped database no matter what the
   // version says.
   rebuildClaimTableForV10(db);
+  // Same doctrine, applied to the lookup tables' ALTERed columns: guarded by
+  // what table_info reports, run on every open, so a database stamped at or
+  // past the version that introduced them still gets them if it somehow
+  // lacks them. This is the one migration step whose absence surfaces as
+  // storeLookup throwing mid-pass, which is exactly the failure the lookup
+  // review found leaving distill_run and person_lookup_run 'running'.
+  healLookupColumns(db);
   if (version >= SCHEMA_VERSION) return;
   if (version < 1) {
     // Rewrites every page under secure_delete. Cheap on a small database and
@@ -1496,15 +1559,52 @@ function migrate(db) {
   }
   if (version < 14) {
     // lookup_evidence itself came from SCHEMA above (new table, IF NOT
-    // EXISTS). These two columns did NOT: person_lookup_change already
-    // exists on every v13 install, and CREATE TABLE IF NOT EXISTS is a
-    // no-op there, so without these ALTERs storeLookup's INSERT would fail
-    // on the reference box while passing in tests. Keyed on what
-    // table_info actually reports rather than on version arithmetic, same
-    // as every other ALTER in this function.
-    const cols = new Set(
-      db.prepare("SELECT name FROM pragma_table_info('person_lookup_change')").all().map((c) => c.name)
-    );
+    // EXISTS). Its columns, and person_lookup_change's three lookup
+    // columns, did NOT: person_lookup_change already exists on every v13
+    // install, and CREATE TABLE IF NOT EXISTS is a no-op there, so without
+    // ALTERs storeLookup's INSERT would fail on the reference box while
+    // passing in tests.
+    //
+    // The ALTERs themselves have MOVED OUT of this branch, to
+    // healLookupColumns, which runs on every open (see the call in
+    // migrate() and the incident note there). They were unreachable on a
+    // database stamped 14 or higher that did not actually have the
+    // columns -- and a mis-stamped database is not hypothetical here: this
+    // file's own rebuildClaimTableForV10 exists because one happened. The
+    // branch stays to record the version.
+    version = 14;
+  }
+  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+}
+
+// The lookup tables' ADDED columns, healed on EVERY open rather than inside
+// a version branch. Two reasons, both from the public-lookup review:
+//
+//   1. A database stamped at or beyond the version that added a column, but
+//      without the column (a development open of a mid-flight branch, the
+//      way the reference install came to be stamped 10 with a v9 claim
+//      table), never ran the branch again -- and the symptom is not a
+//      startup error but storeLookup throwing MID-PASS, which used to leave
+//      distill_run and person_lookup_run 'running' forever.
+//   2. person_lookup_change.contradicts_anchor_unknown needs a BACK-FILL at
+//      the moment it is added, and the back-fill has to see the rows that
+//      predate it. See that column's comment in SCHEMA: an ALTER can only
+//      default an existing row to 0, and 0 asserts a check that was never
+//      run. Rows already present with no evidence_kind are marked unknown,
+//      which newestWebChange treats like a contradiction -- visible to the
+//      owner as a review item, refused to the card until he judges it.
+//
+// Idempotent, one sqlite_master read plus one pragma per table.
+function healLookupColumns(db) {
+  const hasTable = (name) => db
+    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(name) !== undefined;
+  const columnsOf = (name) => new Set(
+    db.prepare('SELECT name FROM pragma_table_info(?)').all(name).map((c) => c.name)
+  );
+
+  if (hasTable('person_lookup_change')) {
+    const cols = columnsOf('person_lookup_change');
     if (!cols.has('evidence_kind')) {
       db.exec(
         'ALTER TABLE person_lookup_change ADD COLUMN evidence_kind TEXT ' +
@@ -1517,9 +1617,35 @@ function migrate(db) {
         'CHECK (contradicts_anchor IN (0,1))'
       );
     }
-    version = 14;
+    if (!cols.has('contradicts_anchor_unknown')) {
+      db.exec(
+        'ALTER TABLE person_lookup_change ADD COLUMN contradicts_anchor_unknown INTEGER NOT NULL DEFAULT 0 ' +
+        'CHECK (contradicts_anchor_unknown IN (0,1))'
+      );
+      // THE BACK-FILL, and it runs exactly once -- on the open that adds the
+      // column. A row with no evidence_kind was stored without the stream in
+      // hand or before the columns existed at all; either way nothing
+      // computed its anchor verdict, so "unknown" is the only honest value.
+      // A fresh database reaches this with zero rows.
+      db.exec('UPDATE person_lookup_change SET contradicts_anchor_unknown = 1 WHERE evidence_kind IS NULL');
+    }
   }
-  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+
+  if (hasTable('lookup_evidence')) {
+    const cols = columnsOf('lookup_evidence');
+    if (!cols.has('truncated')) {
+      db.exec(
+        'ALTER TABLE lookup_evidence ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0 ' +
+        'CHECK (truncated IN (0,1))'
+      );
+    }
+    if (!cols.has('links_parse_failed')) {
+      db.exec(
+        'ALTER TABLE lookup_evidence ADD COLUMN links_parse_failed INTEGER NOT NULL DEFAULT 0 ' +
+        'CHECK (links_parse_failed IN (0,1))'
+      );
+    }
+  }
 }
 
 // claim.subject widens from the single literal 'owner' (L5 step 2). A CHECK
@@ -2217,7 +2343,10 @@ const RELATIONSHIP_LOOKUP_FIELDS = Object.freeze(['power', 'budget', 'battery', 
 // caller that knows the machine's real state.
 const RELATIONSHIP_LOOKUP_PERSON_FIELDS = Object.freeze(['personKey', 'battery', 'onAc', 'thermal']);
 const RELATIONSHIP_LOOKUPS_PARAMS = Object.freeze(['personKey']);
-const RELATIONSHIP_LOOKUP_EVIDENCE_PARAMS = Object.freeze(['logId']);
+// personKey is REQUIRED alongside logId, and both are matched (see
+// lookupEvidenceFor): the read used to key on the integer alone, so any
+// logId returned any person's observed article.
+const RELATIONSHIP_LOOKUP_EVIDENCE_PARAMS = Object.freeze(['logId', 'personKey']);
 
 // Lint (step 5½): no power/battery/thermal/budget fields at all -- there is
 // no model call, so none of the sweep/lookup routes' power-mode plumbing
@@ -4004,7 +4133,19 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     if (raw === null || raw.length === 0 || !Number.isInteger(logId) || logId < 1) {
       throw badRequest('"logId" query parameter must be a positive integer');
     }
-    send(res, 200, { evidence: lookupEvidenceFor(db, logId) }, cors);
+    // BOTH keys, and lookupEvidenceFor matches them against lookup_log:
+    // "which person is this about" is the question an evidence read exists
+    // to answer, and a bare integer answered it for whoever happened to own
+    // that log row. A mismatch is null, not somebody else's article.
+    const evidencePersonKey = url.searchParams.get('personKey');
+    if (typeof evidencePersonKey !== 'string' || evidencePersonKey.length === 0) {
+      throw badRequest('"personKey" query parameter is required');
+    }
+    // The response is capped the same way the column is (200k characters,
+    // relationship/lookup.mjs's LOOKUP_RESULT_TEXT_CAP) and says so via
+    // `truncated`: this route returns third-party page text, and "verbatim"
+    // here means verbatim up to that cap.
+    send(res, 200, { evidence: lookupEvidenceFor(db, { logId, personKey: evidencePersonKey }) }, cors);
     return;
   }
 
