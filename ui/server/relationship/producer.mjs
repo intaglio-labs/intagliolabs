@@ -34,13 +34,23 @@
 //    applies, so a dead calendar pipe (no future rows at all) cannot
 //    silently veto anyone -- the veto only ever fires off a row that
 //    genuinely exists.
-//  - authored to you at least once: person_event_links.authored is the
-//    per-row signal graph.mjs actually sets to true only when THIS person
-//    was the sender/speaker, never merely cc'd or an attendee -- unlike
-//    people.last_from_them, which an email's every cc'd recipient shares
-//    the instant anyone else on the thread receives mail, and would not
-//    exclude a cc-only contact. authored=1 is the strongest such signal the
-//    projection persists, so it is the one used here.
+//  - authored to you at least once, DIRECTLY: person_event_links.authored
+//    is the per-row signal graph.mjs actually sets to true only when THIS
+//    person was the sender/speaker, never merely cc'd or an attendee --
+//    unlike people.last_from_them, which an email's every cc'd recipient
+//    shares the instant anyone else on the thread receives mail, and would
+//    not exclude a cc-only contact. authored=1 is the strongest such signal
+//    the projection persists.
+//
+//    `AND room = 0` alongside it (v2, review finding 5): authored=1 is also
+//    set on a GROUP row for its actual speaker, so somebody who has only
+//    ever spoken in a group thread the owner is also in cleared this gate.
+//    Combined with met_in_person > 0 -- which counts a 200-person invite --
+//    that produced a card for a person the owner has never exchanged a word
+//    with: no quote (latestAuthoredContextId is room=0-only, so it returned
+//    null) and a tie sentence reading "0 messages and 1 meetings". owe.mjs's
+//    own gates were already room=0 throughout; this brings the reconnect
+//    producer in line with them.
 //  - not suppressed / muted, checked directly against rm_suppression and
 //    rm_mute. This does not fold alias keys through the resolutions store
 //    the way controls.mjs's isSuppressed/isMuted do (this function only
@@ -58,10 +68,18 @@
 // such, not invented), then quiet days, all descending.
 
 import { RECONNECT_GATES } from './reconnect.mjs';
+import { liveQueuePersonKeys } from './daily.mjs';
 import { CAL_GATES } from './calendarReconnect.mjs';
 import { isAnonymousContact } from '../people/map.mjs';
 
-export const PRODUCER_VERSION = 'eligibility-v1';
+// v2 (review finding 5 + 11): the authored gate is direct-message-only
+// (room = 0), and a person the OTHER producer is currently holding in its
+// live queue is excluded. A producer version is a promise about how a card
+// was chosen; when the promise changes, the unjudged queue the old version
+// produced is void -- see hermes.mjs's hydrateCards and daily.mjs's
+// liveness check, both of which test a snapshot's producer_version against
+// this constant.
+export const PRODUCER_VERSION = 'eligibility-v2';
 export const RANK_STRATEGY = 'depth-change-quiet';
 const DAY = 86_400_000;
 
@@ -131,7 +149,9 @@ function poolSql(db, { includeOffered = false } = {}) {
         AND COALESCE(lower(json_extract(je.value, '$.response')), '') != 'declined'
     ),
     authored AS (
-      SELECT DISTINCT person_key FROM person_event_links WHERE authored = 1
+      -- room = 0: a group-thread speaker is not somebody who has written TO
+      -- the owner. See the gate notes at the top of this file.
+      SELECT DISTINCT person_key FROM person_event_links WHERE authored = 1 AND room = 0
     ),
     quiet AS (
       SELECT person_key, MAX(day) AS last_active_day FROM person_active_days GROUP BY person_key
@@ -176,8 +196,19 @@ export function eligiblePool(db, { mode, now = Date.now(), includeOffered = fals
   if (!includeOffered) params.push(now - RECENTLY_OFFERED_DAYS * DAY);
   const rows = db.prepare(poolSql(db, { includeOffered })).all(...params);
 
+  // CROSS-KIND EXCLUSION (review finding 11): a person the Owe producer is
+  // currently holding in its live queue is not offered a reconnect card too
+  // -- being offered twice for the same silence is the complaint, and
+  // dismissing one kind gates only that kind. In JS rather than in poolSql
+  // because the same set has to gate owe.mjs's own pool, which is not one
+  // statement; the set is small and this loop already filters. Under
+  // includeOffered (the desk's pool view) it is dropped like every other
+  // already-offered gate.
+  const heldByOwe = includeOffered ? new Set() : liveQueuePersonKeys(db, 'owe', { now });
+
   const out = [];
   for (const row of rows) {
+    if (heldByOwe.has(row.personKey)) continue;
     if (row.lastActiveDay === null || row.lastActiveDay === undefined) continue;
     // A bare address (a phone number, an email, a raw `id:` key with no name
     // anywhere in the contacts spine) is not somebody the owner can be asked

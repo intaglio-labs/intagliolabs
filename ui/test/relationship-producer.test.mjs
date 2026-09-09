@@ -178,6 +178,74 @@ test('two-way-plus-authored people clear the pool; cc-only, romantic-in-any, fut
 // gate in producer.mjs's poolSql back to reading rm_candidate_snapshot alone
 // turns the first assertion below into a failure (the snapshot-only person
 // would be excluded).
+// ---- review finding 5: authored means authored TO YOU -------------------
+// person_event_links.authored is also set on a GROUP row for whoever spoke
+// in it, so somebody who has only ever talked in a thread the owner happens
+// to be in used to clear the "has written to you" gate. Paired with
+// met_in_person > 0 -- which counts a 200-attendee invite -- that produced a
+// card for a person the owner has never exchanged a word with, with no
+// quote at all (latestAuthoredContextId is room=0-only) and a tie sentence
+// reading "0 messages and 1 meetings".
+test('a group-thread-only speaker is not "authored to you", even with a meeting on the counter', () => {
+  const db = openDb(':memory:');
+  ensureSubRoles(db);
+
+  // Their ONLY authored row is a room=1 (group) row, and their whole claim
+  // on the pool is one met_in_person -- the big-invite case.
+  insertPerson(db, { key: 'name:room only', name: 'Room Only', sent: 0, received: 0, met: 1 });
+  insertAuthored(db, 'name:room only', { room: 1 });
+  insertActiveDay(db, 'name:room only', day(200));
+
+  // The control: identical, except the authored row is direct.
+  insertPerson(db, { key: 'name:direct one', name: 'Direct One', sent: 0, received: 0, met: 1 });
+  insertAuthored(db, 'name:direct one', { room: 0 });
+  insertActiveDay(db, 'name:direct one', day(200));
+
+  const keys = keysOf(eligiblePool(db, { mode: 'any', now: NOW }));
+  assert.ok(!keys.includes('name:room only'),
+    'speaking in a room the owner is also in is not writing to the owner');
+  assert.ok(keys.includes('name:direct one'), 'the direct-row control still clears the gate');
+});
+
+// ---- review finding 11: cross-kind exclusion ----------------------------
+// A person eligible for BOTH producers used to be offered twice -- an Owe
+// card and a reconnect card, for the same silence -- and dismissing one kind
+// gated only that kind. Whichever producer wrote them into its live queue
+// first now holds them.
+test('a person the Owe producer is holding in its live queue is excluded from the reconnect pool', () => {
+  const db = openDb(':memory:');
+  ensureSubRoles(db);
+  insertPerson(db, { key: 'name:both kinds', name: 'Both Kinds', sent: 20, received: 20 });
+  insertAuthored(db, 'name:both kinds', { room: 0 });
+  insertActiveDay(db, 'name:both kinds', day(200));
+
+  assert.ok(keysOf(eligiblePool(db, { mode: 'any', now: NOW })).includes('name:both kinds'),
+    'sanity: reconnect wants them while nothing else has them');
+
+  // An UNJUDGED owe snapshot in owe's latest batch -- never shown, so the
+  // 7-day shown cooldown does not cover this case at all.
+  const batchId = Number(db.prepare(
+    'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, 1, ?, NULL)'
+  ).run(NOW - 1 * DAY, 'open').lastInsertRowid);
+  db.prepare(
+    'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) ' +
+    "VALUES (?, 'name:both kinds', 'owe', 'summary', '{\"mode\":null}', ?, 'owe-overdue-days', ?)"
+  ).run(batchId, OWE_PRODUCER_VERSION, NOW - 1 * DAY);
+
+  assert.ok(!keysOf(eligiblePool(db, { mode: 'any', now: NOW })).includes('name:both kinds'),
+    'owe is holding them: one card at a time, per person');
+  assert.ok(keysOf(eligiblePool(db, { mode: 'any', now: NOW, includeOffered: true })).includes('name:both kinds'),
+    'the desk\'s pool view still shows them, like every other already-offered gate');
+
+  // Judged: owe is done with them, so reconnect may have them.
+  db.prepare(
+    'INSERT INTO rm_card_event(person_key, kind, snapshot_id, event, reason, note, rule_version, time_band, created_at) ' +
+    "VALUES ('name:both kinds', 'owe', (SELECT MAX(id) FROM rm_candidate_snapshot), 'muted', NULL, NULL, ?, 'morning', ?)"
+  ).run(OWE_PRODUCER_VERSION, NOW - 1 * DAY);
+  assert.ok(keysOf(eligiblePool(db, { mode: 'any', now: NOW })).includes('name:both kinds'),
+    'a consumed owe snapshot releases them');
+});
+
 test('the 7-day cooldown keys off a shown card, not a bare snapshot', () => {
   const db = buildFixture();
   const key = 'name:shown gate person';
