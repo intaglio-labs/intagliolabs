@@ -709,17 +709,37 @@ export function resolveLintFinding(db, { findingKey, resolution, configPath } = 
       };
     }
     const owner = loadOwner(configPath ? { configPath } : {});
-    const current = new Set([
-      ...parseSubRolesJson(peopleRow.sub_roles),
-      ...(owner.subRoles.get(row.personKey) ?? []),
-    ]);
+    // TWO SOURCES, KEPT APART, and the split is the fix (review G finding
+    // 11). `projected` is the people projection's own list, which is
+    // rebuilt FROM the export among other things -- so a role in it that
+    // the export derives says nothing about what the owner wanted.
+    // `ownerSet` is the config override, and every write to it is an owner
+    // action: the sub-roles route, an accepted sweep proposal, or an earlier
+    // resolution of one of these findings.
+    const projected = new Set(parseSubRolesJson(peopleRow.sub_roles));
+    const ownerSet = new Set(owner.subRoles.get(row.personKey) ?? []);
+    const current = new Set([...projected, ...ownerSet]);
     const derived = new Set(exportRoles);
     const accepted = new Set(acceptedSubRoleTags(db, row.personKey));
 
     // KEPT: everything this conflict is not about -- see the set expressions
     // in the comment above.
+    //
+    // The export's derivations come out of KEPT because they are one side of
+    // the conflict and each branch decides for itself whether to pull them
+    // back in -- but NOT when the owner's own override also holds the role.
+    // That subtraction used to be unconditional, so a role the owner had set
+    // by hand and the export happened to also derive was silently dropped on
+    // keep-derived: the same data loss the previous fix here existed to
+    // close, on a role whose provenance is not a guess. An overridden role
+    // is the owner's word and is kept in all three branches, exactly like an
+    // accepted tag the export agrees with.
     const kept = new Set();
-    for (const role of current) if (role !== tag && !derived.has(role)) kept.add(role);
+    for (const role of current) {
+      if (role === tag) continue;
+      if (derived.has(role) && !ownerSet.has(role)) continue;
+      kept.add(role);
+    }
     for (const role of accepted) if (role !== tag) kept.add(role);
 
     let subRoles;
@@ -734,6 +754,15 @@ export function resolveLintFinding(db, { findingKey, resolution, configPath } = 
     // vocabulary, and psp.value is not validated at the point roleConflicts
     // reads it -- so a junk tag drops out here rather than turning the
     // owner's click into a 500.
+    //
+    // The filter also lands on exportRoles, and review G finding 11 asked
+    // whether that could empty a keep-export. Checked: it cannot.
+    // subRolesFor's only outputs are 'founder', 'investor' and 'operator'
+    // (deriveSubRoles adds nothing else, and its override path runs through
+    // canonicalSubRoles, which filters against SUB_ROLE_SET itself), so its
+    // vocabulary is a strict subset of SUB_ROLES. Left as-is rather than
+    // special-cased: if the two vocabularies ever diverge, the closed set
+    // markPersonSubRoles will accept is the one that has to win here.
     subRoles = [...new Set(subRoles)].filter((role) => SUB_ROLES.includes(role)).sort();
     markPersonSubRoles({ key: row.personKey, subRoles, ...(configPath ? { configPath } : {}) });
     rebuildNeeded = true;

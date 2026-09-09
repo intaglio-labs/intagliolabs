@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { openDb } from '../server/hermes.mjs';
-import { ownerConfigPath } from '../server/people/owner.mjs';
+import { ownerConfigPath, markPersonSubRoles } from '../server/people/owner.mjs';
 import {
   expiredClaims, roleConflicts, pageAnchorFindings, orphanCardQuotes, runLintPass,
   resolveLintFinding, lintGate, LINT_MAX_PER_CHECK,
@@ -914,4 +914,63 @@ test("a pass's own 'gone' is never carried forward as if the owner had said it",
     .get(`role_conflict:${claimId}:investor:operator`);
   assert.equal(row.resolution, null, "'gone' is a pass's word: the reopened conflict is open, waiting to be seen");
   assert.equal(row.resolvedAt, null);
+});
+
+// ---------------------------------------------------------------------------
+// Review G finding 11: KEPT SUBTRACTED THE EXPORT'S ROLES UNCONDITIONALLY,
+// so a role the OWNER had set by hand and the export happened to also derive
+// was silently dropped on keep-derived. That is the same data loss the
+// previous fix here existed to close, and unlike the case that fix left
+// alone ("nothing here can tell an owner correction from an old export"),
+// this one's provenance is not a guess: it is in the owner's own config
+// override, and every write to that file is an owner action.
+// ---------------------------------------------------------------------------
+
+test('keep-derived keeps a role the owner set by hand even when the export derives it too', () => {
+  const db = openDb(':memory:');
+  const key = 'name:owner set collides';
+  // founder is the disputed tag; the export derives investor -- and the
+  // owner has ALSO set investor by hand, so investor is not the export's to
+  // take away.
+  const findingKey = conflictFor(db, {
+    key, tag: 'founder',
+    linkedin: { position: 'General Partner', company: 'Acme Capital' },
+    subRoles: ['founder'],
+  });
+
+  const home = mkdtempSync(join(tmpdir(), 'lint-ownerset-'));
+  const configPath = ownerConfigPath(home);
+  markPersonSubRoles({ key, subRoles: ['investor'], configPath });
+
+  const out = resolveLintFinding(db, { findingKey, resolution: 'keep-derived', configPath });
+  assert.equal(out.applied, true);
+
+  assert.deepEqual(
+    JSON.parse(readFileSync(configPath, 'utf8')).personSubRoles[key],
+    ['founder', 'investor'],
+    "the old code wrote ['founder'] and dropped the owner's own investor because the export said investor too"
+  );
+});
+
+test('keep-derived still refuses to pull in an export role the owner never chose', () => {
+  const db = openDb(':memory:');
+  const key = 'name:export only';
+  // The same conflict with NO owner override: investor is the export's alone,
+  // and not pulling it in is the whole point of keep-derived.
+  const findingKey = conflictFor(db, {
+    key, tag: 'founder',
+    linkedin: { position: 'General Partner', company: 'Acme Capital' },
+    subRoles: ['founder'],
+  });
+
+  const home = mkdtempSync(join(tmpdir(), 'lint-exportonly-'));
+  const configPath = ownerConfigPath(home);
+  const out = resolveLintFinding(db, { findingKey, resolution: 'keep-derived', configPath });
+  assert.equal(out.applied, true);
+
+  assert.deepEqual(
+    JSON.parse(readFileSync(configPath, 'utf8')).personSubRoles[key],
+    ['founder'],
+    'keep-derived means the tag wins and the export does not arrive with it'
+  );
 });
