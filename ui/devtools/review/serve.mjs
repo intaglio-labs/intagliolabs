@@ -37,6 +37,10 @@ import { createDeskGuard, CSRF_HEADER } from './guard.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.HZ_REVIEW_PORT ?? 7311);
+if (!Number.isInteger(PORT) || PORT <= 0) {
+  console.error(`HZ_REVIEW_PORT must be a positive integer port number, got ${JSON.stringify(process.env.HZ_REVIEW_PORT)}`);
+  process.exit(1);
+}
 const HERMES = process.env.HZ_HERMES ?? 'http://127.0.0.1:51789';
 
 function token() {

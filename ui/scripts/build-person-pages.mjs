@@ -30,7 +30,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 
 function fail(message) {
   process.stderr.write(`${message}\n`);
@@ -81,29 +81,73 @@ function readHermesToken() {
 // `wx` so two concurrent runs cannot each write a different salt: the loser
 // of that race reads the winner's file rather than overwriting it, which
 // matters because a changed salt silently renames every person in the output.
+function sleepSync(ms) {
+  // Atomics.wait needs a SharedArrayBuffer-backed view; this is a short,
+  // synchronous retry loop for a race that resolves in well under a second.
+  const sab = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(sab, 0, 0, ms);
+}
+
+// Reads the salt file. Returns { salt } on a good read, { short: true } when
+// the file exists but is too short to be real entropy (distinct from "not
+// there yet" so the two failures don't get the same misleading message), or
+// null when the file does not exist.
+function readSaltFile(path) {
+  let text;
+  try {
+    text = readFileSync(path, 'utf8').trim();
+  } catch {
+    return null;
+  }
+  if (text.length < 32) return { short: true };
+  return { salt: text };
+}
+
 function readPseudonymSalt() {
   const path = process.env.HAZLIE_PSEUDONYM_SALT_FILE
     ?? join(homedir(), '.hazlie', 'secrets', 'pseudonym-salt.txt');
-  const existing = () => {
-    try {
-      const text = readFileSync(path, 'utf8').trim();
-      return text.length >= 32 ? text : null;
-    } catch {
+
+  const initial = readSaltFile(path);
+  if (initial !== null) {
+    if (initial.short) {
+      fail(`salt file too short at ${path}; delete it to regenerate`);
       return null;
     }
-  };
-  const found = existing();
-  if (found !== null) return found;
+    return initial.salt;
+  }
 
+  // Two concurrent runs can both find no file and both try to create one.
+  // Write to a temp file in the same directory (so renameSync is atomic on
+  // the same filesystem) then rename into place; the loser's rename fails
+  // with EEXIST, and re-reads the winner's file rather than overwriting it
+  // or reading it mid-write.
   const salt = randomBytes(32).toString('hex');
+  const tmpPath = `${path}.tmp-${process.pid}`;
   const previousUmask = process.umask(0o077);
   try {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    writeFileSync(path, `${salt}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    return salt;
+    writeFileSync(tmpPath, `${salt}\n`, { encoding: 'utf8', mode: 0o600 });
+    try {
+      renameSync(tmpPath, path);
+      return salt;
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      try { unlinkSync(tmpPath); } catch { /* best effort */ }
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        sleepSync(20);
+        const found = readSaltFile(path);
+        if (found !== null) {
+          if (found.short) {
+            fail(`salt file too short at ${path}; delete it to regenerate`);
+            return null;
+          }
+          return found.salt;
+        }
+      }
+      fail(`could not read the pseudonym salt at ${path} after losing the create race`);
+      return null;
+    }
   } catch (error) {
-    const raced = existing();
-    if (raced !== null) return raced;
     fail(`could not create the pseudonym salt at ${path}: ${error?.message ?? error}`);
     return null;
   } finally {
@@ -112,6 +156,7 @@ function readPseudonymSalt() {
 }
 
 const PSEUDONYM_SALT = readPseudonymSalt();
+const SALT_FINGERPRINT = createHash('sha256').update(PSEUDONYM_SALT, 'utf8').digest('hex').slice(0, 8);
 
 function hashPersonKey(personKey) {
   return createHash('sha256').update(`${PSEUDONYM_SALT}\u0000${personKey}`, 'utf8').digest('hex').slice(0, 8);
@@ -160,6 +205,10 @@ async function alreadyBuiltRecently(personKey) {
 }
 
 async function main() {
+  // Printed once per run: a changed or deleted salt file silently renames
+  // every person in the output, and this fingerprint is how that shows up
+  // in a diff of two runs' logs without ever printing the salt itself.
+  process.stdout.write(`${JSON.stringify({ salt: SALT_FINGERPRINT })}\n`);
   const totals = { people: 0, kept: 0, dropped: 0, skipped: 0, rejected: 0, cost_usd: 0, ms: 0 };
   for (const mode of modes) {
     const candidates = await candidatesForMode(mode);

@@ -73,3 +73,41 @@ test('the token is per process and long enough to be unguessable', () => {
   const second = createDeskGuard(PORT);
   assert.ok(second.refuse(req('POST', { host: `127.0.0.1:${PORT}`, [CSRF_HEADER]: a })));
 });
+
+test('a restarted desk mints a new token; the old one 403s until the page refetches', () => {
+  // Simulates what index.html's apiFetch wrapper has to recover from: the
+  // server process behind the page restarted (a new guard instance, a new
+  // token) while the page still held the old one.
+  const before = createDeskGuard(PORT);
+  const host = `127.0.0.1:${PORT}`;
+  const oldToken = before.csrfToken;
+  assert.equal(before.refuse(req('POST', { host, [CSRF_HEADER]: oldToken })), null);
+
+  const after = createDeskGuard(PORT); // stands in for the restarted process
+  const rejected = after.refuse(req('POST', { host, [CSRF_HEADER]: oldToken }));
+  assert.ok(rejected, 'the old token must 403 against the new guard');
+  assert.equal(rejected.status, 403);
+  assert.match(rejected.error, new RegExp(CSRF_HEADER, 'iu'));
+
+  // The page re-fetches /api/csrf against the new process and retries: the
+  // new token must be accepted.
+  assert.equal(after.refuse(req('POST', { host, [CSRF_HEADER]: after.csrfToken })), null);
+});
+
+test('port 80 is accepted with a bare host (browsers omit the default port)', () => {
+  const { refuse } = createDeskGuard(80);
+  assert.equal(refuse(req('GET', { host: '127.0.0.1' })), null);
+  assert.equal(refuse(req('GET', { host: 'localhost' })), null);
+  assert.equal(refuse(req('GET', { host: '127.0.0.1', origin: 'http://localhost' })), null);
+});
+
+test('a non-positive or non-integer port is rejected at startup', () => {
+  for (const bad of [0, -1, 1.5, NaN]) {
+    assert.throws(() => createDeskGuard(bad), /port/iu);
+  }
+});
+
+test('an empty or short csrfToken override is rejected', () => {
+  assert.throws(() => createDeskGuard(PORT, { csrfToken: '' }), /csrfToken/u);
+  assert.throws(() => createDeskGuard(PORT, { csrfToken: 'short' }), /csrfToken/u);
+});

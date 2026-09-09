@@ -40,6 +40,15 @@ function stubHermes() {
 }
 
 function run(saltPath, { port, tokenFile }) {
+  return runRaw(saltPath, { port, tokenFile }).then(({ stdout }) => {
+    const lines = stdout.trim().split('\n').map((l) => JSON.parse(l));
+    const row = lines.find((l) => typeof l.personKey === 'string');
+    if (!row) throw new Error(`no pseudonymised line in output:\n${stdout}`);
+    return row.personKey;
+  });
+}
+
+function runRaw(saltPath, { port, tokenFile }) {
   return new Promise((resolve, reject) => {
     execFile(
       process.execPath,
@@ -54,11 +63,8 @@ function run(saltPath, { port, tokenFile }) {
         timeout: 30_000,
       },
       (err, stdout, stderr) => {
-        if (err) return reject(new Error(`${err.message}\n${stderr}`));
-        const lines = stdout.trim().split('\n').map((l) => JSON.parse(l));
-        const row = lines.find((l) => typeof l.personKey === 'string');
-        if (!row) return reject(new Error(`no pseudonymised line in output:\n${stdout}`));
-        resolve(row.personKey);
+        if (err) return reject(Object.assign(new Error(`${err.message}\n${stderr}`), { stdout, stderr }));
+        resolve({ stdout, stderr });
       }
     );
   });
@@ -93,4 +99,53 @@ test('the person pseudonym is salted from a per-machine secret, created 0600 on 
   const unsalted = createHash('sha256').update(PERSON, 'utf8').digest('hex').slice(0, 8);
   assert.notEqual(first, unsalted, 'the bare hash of the key is a lookup table, not a pseudonym');
   assert.notEqual(elsewhere, unsalted);
+});
+
+test('a short/truncated salt file fails with a distinct, actionable message', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'pseudonym-'));
+  const tokenFile = join(dir, 'token.txt');
+  writeFileSync(tokenFile, `${'a'.repeat(64)}\n`, { mode: 0o600 });
+  const { server, port } = await stubHermes();
+  t.after(() => server.close());
+
+  const saltPath = join(dir, 'salt-short.txt');
+  writeFileSync(saltPath, 'not-enough-entropy\n', { mode: 0o600 });
+
+  await assert.rejects(
+    runRaw(saltPath, { port, tokenFile }),
+    (err) => {
+      assert.match(err.stderr, /salt file too short/u);
+      assert.match(err.stderr, new RegExp(saltPath.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+      assert.match(err.stderr, /delete it to regenerate/u);
+      return true;
+    }
+  );
+});
+
+test('the run header prints the salt fingerprint once, and it tracks the salt file', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'pseudonym-'));
+  const tokenFile = join(dir, 'token.txt');
+  writeFileSync(tokenFile, `${'a'.repeat(64)}\n`, { mode: 0o600 });
+  const { server, port } = await stubHermes();
+  t.after(() => server.close());
+
+  const saltA = join(dir, 'salt-a.txt');
+  const { stdout: outA } = await runRaw(saltA, { port, tokenFile });
+  const linesA = outA.trim().split('\n').map((l) => JSON.parse(l));
+  const fingerprintLinesA = linesA.filter((l) => typeof l.salt === 'string');
+  assert.equal(fingerprintLinesA.length, 1, 'the fingerprint must be printed exactly once per run');
+  const fp = fingerprintLinesA[0].salt;
+  assert.match(fp, /^[0-9a-f]{8}$/u);
+
+  const saltText = readFileSync(saltA, 'utf8').trim();
+  const expected = createHash('sha256').update(saltText, 'utf8').digest('hex').slice(0, 8);
+  assert.equal(fp, expected, 'the fingerprint must be sha256(salt).slice(0, 8), not the salt itself');
+  assert.doesNotMatch(outA, new RegExp(saltText, 'u'), 'the real salt must never reach stdout');
+
+  // A different salt file must fingerprint differently, which is the whole
+  // point: it is how a silently-changed salt shows up in a log diff.
+  const saltB = join(dir, 'salt-b.txt');
+  const { stdout: outB } = await runRaw(saltB, { port, tokenFile });
+  const fpB = outB.trim().split('\n').map((l) => JSON.parse(l)).find((l) => typeof l.salt === 'string').salt;
+  assert.notEqual(fpB, fp);
 });

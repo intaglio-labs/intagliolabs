@@ -54,10 +54,27 @@ function sameSecret(given, expected) {
 // desk has no sessions and no users, and a token that outlives the process
 // would have to be stored somewhere.
 export function createDeskGuard(port, { csrfToken = randomBytes(32).toString('hex') } = {}) {
+  if (!Number.isInteger(port) || port <= 0) {
+    throw new Error(`createDeskGuard: port must be a positive integer, got ${port}`);
+  }
+  if (typeof csrfToken !== 'string' || csrfToken.length < 16) {
+    throw new Error('createDeskGuard: csrfToken override must be a string of at least 16 characters');
+  }
   const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`]);
   const allowedOrigins = new Set([
     `http://127.0.0.1:${port}`, `http://localhost:${port}`, `http://[::1]:${port}`,
   ]);
+  // Browsers omit the port from Host/Origin on the default HTTP port (80), so
+  // a desk running there would refuse every request unless the bare host is
+  // also allowed.
+  if (port === 80) {
+    allowedHosts.add('127.0.0.1');
+    allowedHosts.add('localhost');
+    allowedHosts.add('[::1]');
+    allowedOrigins.add('http://127.0.0.1');
+    allowedOrigins.add('http://localhost');
+    allowedOrigins.add('http://[::1]');
+  }
 
   // Returns null when the request may proceed, else {status, error}.
   function refuse(req) {

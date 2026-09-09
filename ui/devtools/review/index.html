@@ -278,21 +278,85 @@
 // wrapped once here: GET and HEAD pass straight through, everything else
 // waits for the token and adds the header. The token is fetched over an
 // ordinary same-origin GET, whose body a cross-site script cannot read.
+//
+// The token is fetched LAZILY, on the first write, not at page load: an
+// initial GET /api/csrf that fails (desk not up yet, a blip) used to leave
+// csrfToken null forever, 403-ing every write for the rest of the session
+// with no way to recover short of a manual reload. Lazy fetch plus the retry
+// below means the token is asked for again exactly when a write needs it.
+//
+// serve.mjs's own restart mints a NEW token, so a desk that was reloaded
+// once and left open for a while WILL see its writes 403 the moment the
+// server behind it restarts. That 403's body names this header (see
+// guard.mjs), which is how the retry below tells "your token is stale" apart
+// from any other write failure and re-fetches rather than surfacing raw JSON.
 const CSRF_HEADER = 'X-Hazlie-Csrf';
 let csrfToken = null;
-const csrfReady = fetch('/api/csrf')
-  .then((r) => (r.ok ? r.json() : null))
-  .then((j) => { csrfToken = j && typeof j.token === 'string' ? j.token : null; })
-  .catch(() => { csrfToken = null; });
+let csrfFetchInFlight = null;
+
+function refreshCsrfToken() {
+  csrfFetchInFlight = bareFetch('/api/csrf')
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => { csrfToken = j && typeof j.token === 'string' ? j.token : null; })
+    .catch(() => { csrfToken = null; })
+    .finally(() => { csrfFetchInFlight = null; });
+  return csrfFetchInFlight;
+}
+
+function ensureCsrfToken() {
+  if (csrfToken !== null) return Promise.resolve();
+  return csrfFetchInFlight ?? refreshCsrfToken();
+}
+
+// A cross-site script can hand window.fetch a Request object instead of a
+// plain URL + init, and a Request carries its own method -- init.method is
+// simply absent then, and reading opts.method alone would treat the write as
+// a GET and send it tokenless.
+function methodOf(input, init) {
+  if (init && init.method != null) return String(init.method).toUpperCase();
+  if (typeof Request !== 'undefined' && input instanceof Request) return String(input.method ?? 'GET').toUpperCase();
+  return 'GET';
+}
+
+function baseHeaders(input, init) {
+  if (init && init.headers) return init.headers;
+  if (typeof Request !== 'undefined' && input instanceof Request) return input.headers;
+  return undefined;
+}
+
+async function looksLikeCsrfRejection(res) {
+  if (res.status !== 403) return false;
+  try {
+    const text = await res.clone().text();
+    return text.toLowerCase().includes(CSRF_HEADER.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 const bareFetch = window.fetch.bind(window);
 window.fetch = async (input, init) => {
   const opts = init ?? {};
-  const method = String(opts.method ?? 'GET').toUpperCase();
+  const method = methodOf(input, init);
   if (method === 'GET' || method === 'HEAD') return bareFetch(input, opts);
-  await csrfReady;
-  const headers = new Headers(opts.headers ?? {});
+
+  await ensureCsrfToken();
+  const headers = new Headers(baseHeaders(input, init));
   if (csrfToken !== null) headers.set(CSRF_HEADER, csrfToken);
-  return bareFetch(input, { ...opts, headers });
+  let res = await bareFetch(input, { ...opts, headers });
+
+  if (await looksLikeCsrfRejection(res)) {
+    // The desk restarted underneath us and minted a new token. Re-fetch it
+    // and retry the write exactly once rather than 403-ing forever.
+    await refreshCsrfToken();
+    const retryHeaders = new Headers(baseHeaders(input, init));
+    if (csrfToken !== null) retryHeaders.set(CSRF_HEADER, csrfToken);
+    res = await bareFetch(input, { ...opts, headers: retryHeaders });
+    if (!res.ok && res.status === 403) {
+      throw new Error('desk restarted — retrying did not help; reload the desk');
+    }
+  }
+  return res;
 };
 
 const BANDS = ['unsupported', 'weak', 'supported', 'all'];
