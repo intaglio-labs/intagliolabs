@@ -60,6 +60,14 @@ body.reconnect { margin: 0; -webkit-user-select: none; user-select: none; }
 .rc-facts dt { opacity: 0.55; min-width: 92px; flex-shrink: 0; }
 .rc-facts dd { margin: 0; }
 .rc-warn { color: #c96; }
+/* The footer is never clipped by design (see the note above), so everything
+   in it competes for the window's remaining height against popupCeiling --
+   and the drafts block is the one part with unbounded content: two drafts of
+   240 characters each, plus a caption, above five verdict buttons and the
+   feedback input. On a short screen that pushed the feedback field out of
+   reach with nothing able to scroll to it (review finding 17). The drafts
+   LIST gets its own ceiling and its own scroll; the buttons and the input
+   below it stay put. */
 .rc-drafts { margin-bottom: 9px; }
 .rc-drafts #rcDraft {
   border: 1px solid var(--edge, #444); background: rgba(127, 127, 127, 0.12);
@@ -70,7 +78,10 @@ body.reconnect { margin: 0; -webkit-user-select: none; user-select: none; }
 .rc-drafts-caption {
   font-size: 10.5px; letter-spacing: 0.03em; opacity: 0.5; margin: 5px 0 4px;
 }
-.rc-drafts-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.rc-drafts-list {
+  list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px;
+  max-height: 132px; overflow-y: auto;
+}
 .rc-drafts-list li {
   display: flex; align-items: flex-start; gap: 7px;
   border: 1px solid var(--edge, #333); border-radius: 6px;

@@ -95,7 +95,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     "widget": ["drag", "openChat", "openChatWith", "openConnections",
                "openMonths", "openReconnect", "voiceArm", "widgetBounds",
                "chatBarOpen",
-               "workStatus", "relCard", "relEvent", "relRefresh"],
+               "workStatus", "relCardPeek", "relEvent", "relRefresh"],
     "chat": ["ask", "cancel", "chatReady", "close", "decideClaim",
              "frontierSend", "frontierCancel"],
     // The reconnect card popup (L5 step 10): reads the current card, posts
@@ -1337,6 +1337,17 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         self?.reply(webView, id, out)
       }
 
+    // A PEEK, NOT A SERVE. The widget's own 10-minute poll asks only whether
+    // a card is waiting and what it would tease. GET /card records 'shown',
+    // spends a global-cap slot, starts that person's 7-day pool cooldown and
+    // flips the two producers' turn -- all four for a card no human has
+    // looked at, on every poll, forever. ?peek=1 answers the tease and
+    // records nothing; only the reconnect panel's own pull serves.
+    case "relCardPeek":
+      relHermes("GET", "admin/relationship/card?peek=1", json: nil) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
     case "relRefresh":
       // "mode" is the only field the widget's mode picker sends; an absent
       // or unrecognized value falls through to hermes' own config default
@@ -1367,9 +1378,6 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
 
     case "relEvent":
-      // A judgment changes what the orb should show right now -- poke the
-      // widget rather than let it wait out the poll interval.
-      delegate?.relCardChanged()
       var evt: [String: Any] = [:]
       // "note" is the owner's free-text why -- the field the whole feedback
       // loop exists to capture; the audit found this allowlist silently
@@ -1378,6 +1386,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         if let v = payload[k] { evt[k] = v }
       }
       relHermes("POST", "admin/relationship/event", json: evt) { [weak self] out in
+        // A judgment changes what the orb should show right now -- poke the
+        // widget rather than let it wait out the poll interval. AFTER the
+        // reply, not before it: firing this first raced the POST, so the
+        // widget's re-read reached hermes while the verdict was still in
+        // flight, got the same unjudged card back, and left the badge lit
+        // with the person the owner had just judged.
+        self?.delegate?.relCardChanged()
         self?.reply(webView, id, out)
       }
 

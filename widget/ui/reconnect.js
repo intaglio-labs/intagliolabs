@@ -8,12 +8,17 @@
 const el = (id) => document.getElementById(id);
 let card = null;
 
-// The mode picker: 'any' · 'founder' · 'investor', persisted per-viewer in
-// localStorage (this is a display preference, not a fact worth losing on
-// reload, and it never needs to reach hermes -- only the CHOICE, made when
-// the owner taps refresh, does). Failure to read/write storage falls back
-// to 'any' silently; a popup that cannot remember a button press is not a
-// popup that should break.
+// The mode picker: 'any' · 'founder' · 'investor'.
+//
+// THE SERVER OWNS THIS, localStorage only remembers it (review finding 7).
+// The picker used to render from localStorage alone and never reconcile:
+// after a hermes restart rel.mode is null and the eligibility config's
+// default serves, so the popup could show 'investor' lit while 'any' cards
+// were being served -- and tapping 'investor' was a NO-OP, because
+// selectMode early-returned on a match with its own stale idea of the mode.
+// Every card response now carries the server's `mode` (and `servedMode`,
+// the mode the card in hand was produced under); adoptServerMode below
+// reconciles on every pull, and selectMode always posts.
 const MODES = ['any', 'founder', 'investor'];
 function readMode() {
   try {
@@ -24,7 +29,23 @@ function readMode() {
 function writeMode(mode) {
   try { localStorage.setItem('rcMode', mode); } catch {}
 }
+// The stored value is a first-paint guess only: it is overwritten by the
+// server's answer as soon as one arrives.
 let currentMode = readMode();
+
+// Reconcile with the server's own idea of the mode. `servedMode` (the mode
+// the card in hand was produced under) wins over the holder's `mode` when
+// both are present -- what the owner is looking at is the truthful thing to
+// light up. A response that names neither (an Owe card, or an older hermes)
+// leaves the picker exactly as it is.
+function adoptServerMode(out) {
+  const fromServer = MODES.includes(out?.servedMode) ? out.servedMode
+    : MODES.includes(out?.mode) ? out.mode : null;
+  if (fromServer === null || fromServer === currentMode) return;
+  currentMode = fromServer;
+  writeMode(fromServer);
+  renderModes();
+}
 
 function renderModes() {
   el('rcModeAny').classList.toggle('rc-mode-active', currentMode === 'any');
@@ -52,10 +73,31 @@ function fit() {
   });
 }
 
-function renderEmpty() {
+// WHY THERE IS NOTHING, in the owner's words (review finding 15). "nothing
+// to review" was shown for a spent frequency cap, for a queue whose people
+// are all muted, and for a genuinely empty pool alike -- three different
+// facts, one of which ("come back tomorrow") the owner can do nothing about
+// and the others of which they can. The route now names a reason; this maps
+// it. An unrecognized reason falls back to the original line rather than
+// rendering a raw token.
+const EMPTY_REASONS = {
+  cap: "that's all for today — one nudge a day, on purpose.",
+  muted: 'everyone queued up right now is muted. they will come back when the mute expires.',
+  suppressed: 'everyone queued up right now is hidden.',
+  'quote-gone': 'the messages behind the queued cards are gone, so the cards went with them.',
+  'claim-gone': 'the commitment behind the queued card is gone, so the card went with it.',
+  'claim-rejected': 'the commitment behind the queued card was rejected, so the card went with it.',
+  'no-cap-configured': 'no frequency cap is set, so nothing will show. set one first.',
+};
+const EMPTY_DEFAULT = 'nothing to review — the orb will light up when there is.';
+
+function renderEmpty(out) {
   card = null;
   el('rcCard').hidden = true;
   el('rcEmpty').hidden = false;
+  el('rcEmptyMsg').textContent = out?.refreshing
+    ? 'still looking…'
+    : (EMPTY_REASONS[out?.reason] ?? EMPTY_DEFAULT);
   // Reset to the reconnect defaults between cards: the empty state is where
   // the mode picker (reconnect's own) lives while nothing is showing, so it
   // must not stay hidden from a previous Owe card.
@@ -101,13 +143,20 @@ function render(c) {
   el('rcEmpty').hidden = true;
 
   // Owe cards are a different ask ("will you reply to this specific thing")
-  // than reconnect's ("will you reach out at all"), and have no mode --
-  // the mode picker is reconnect's own any/founder/investor split, so it
-  // hides rather than showing three buttons that do nothing for an owe card.
+  // than reconnect's ("will you reach out at all"), and carry no mode of
+  // their own.
+  //
+  // ~~`el('rcModes').hidden = isOwe`~~ (review finding 8). Hiding the picker
+  // on an Owe card left the owner with NO WAY BACK: the two producers
+  // alternate, so tapping a mode can be answered with an Owe card, and the
+  // picker that would let them try again was gone with it. The buttons are
+  // not decoration on an Owe card either -- they set which mode reconnect
+  // serves on its next turn, which is exactly what an owner reaching for
+  // them wants. So it stays visible, always.
   const isOwe = c.kind === 'owe';
   el('rcTitle').textContent = isOwe ? 'owe?' : 'reconnect?';
   el('rcYes').textContent = isOwe ? 'will reply' : 'will text them';
-  el('rcModes').hidden = isOwe;
+  el('rcModes').hidden = false;
 
   const trigger = triggerLine(c);
   el('rcTrigger').textContent = trigger;
@@ -210,8 +259,14 @@ async function copyDraftText(text, node) {
       const sel = window.getSelection();
       sel.removeAllRanges();
       sel.addRange(range);
-      document.execCommand('copy');
+      // CHECK THE BOOLEAN (review finding 14). execCommand reports failure
+      // by RETURNING FALSE, not by throwing, so the catch below never ran
+      // and "couldn't copy" was unreachable -- a failed copy looked exactly
+      // like a successful one, and the owner pasted whatever was already on
+      // the clipboard.
+      const copied = document.execCommand('copy');
       sel.removeAllRanges();
+      if (!copied) throw new Error('execCommand copy refused');
     } catch {
       el('rcDraftsError').textContent = "couldn't copy that — select it and copy by hand";
       el('rcDraftsError').hidden = false;
@@ -227,10 +282,19 @@ el('rcDraft').addEventListener('click', async () => {
   el('rcDraftsError').textContent = '';
   try {
     const out = await hzPost('relDraft', { snapshot_id: card.snapshot_id });
-    if (!out || out.ok === false) throw new Error('draft failed');
-    renderDrafts(Array.isArray(out.drafts) ? out.drafts : []);
-  } catch {
-    el('rcDraftsError').textContent = "couldn't draft that — try again";
+    // A 200 carrying no drafts IS a failure (review finding 9): the route
+    // answers {ok:false, reason} on an engine error, unparseable output or
+    // nothing usable, and this used to treat all three as success and render
+    // an empty list -- silence, with the reason sitting unread on the wire.
+    if (!out || out.ok === false || !Array.isArray(out.drafts) || out.drafts.length === 0) {
+      throw new Error(out?.reason ? String(out.reason) : 'draft failed');
+    }
+    renderDrafts(out.drafts);
+  } catch (err) {
+    const why = String(err?.message ?? '').slice(0, 120);
+    el('rcDraftsError').textContent = why && why !== 'draft failed'
+      ? `couldn't draft that — ${why}`
+      : "couldn't draft that — try again";
     el('rcDraftsError').hidden = false;
   } finally {
     btn.disabled = false;
@@ -241,8 +305,14 @@ el('rcDraft').addEventListener('click', async () => {
 async function pull() {
   try {
     const out = await hzPost('relCard');
-    if (out?.card) { render(out.card); hzPost('relEvent', { snapshot_id: out.card.snapshot_id, person_key: out.card.personKey, event: 'opened' }).catch(() => {}); }
-    else renderEmpty();
+    adoptServerMode(out);
+    if (out?.card) {
+      render(out.card);
+      // 'opened' is deduped per snapshot SERVER-side (a re-show of the same
+      // pending card used to post another, and openRate = opened/shown
+      // climbed past 1), so this can stay unconditional.
+      hzPost('relEvent', { snapshot_id: out.card.snapshot_id, person_key: out.card.personKey, event: 'opened' }).catch(() => {});
+    } else renderEmpty(out);
   } catch { renderEmpty(); }
 }
 
@@ -292,8 +362,13 @@ el('rcRefresh').addEventListener('click', () => {
     .finally(() => { btn.disabled = false; });
 });
 
+// ALWAYS POSTS (review finding 7). The early return on `mode ===
+// currentMode` meant a tap that agreed with the picker's own stale state did
+// nothing at all -- which is exactly the state after a restart, when the
+// picker says 'investor' and the server's rel.mode is null. The server is
+// the one that has to be told; a tap is the telling.
 function selectMode(mode) {
-  if (!MODES.includes(mode) || mode === currentMode) return;
+  if (!MODES.includes(mode)) return;
   currentMode = mode;
   writeMode(mode);
   renderModes();

@@ -408,8 +408,14 @@ orbBtn.addEventListener('pointerleave', () => {
 // the notify face) tells the owner who and why before they even tap.
 function cardTeaseText(card) {
   if (!card?.name) return 'someone to reconnect with';
-  const days = card.evidence?.dormancyDays;
-  return days ? `${card.name} · quiet ${days} days` : card.name;
+  const ev = card.evidence ?? {};
+  // An Owe card has no dormancy at all -- it is about a specific overdue
+  // thing -- so it teased the bare name while a reconnect card got a
+  // number. Its own number is the overdue count.
+  if (card.kind === 'owe') {
+    return ev.overdueDays ? `${card.name} · ${ev.overdueDays}d overdue` : `${card.name} · waiting on you`;
+  }
+  return ev.dormancyDays ? `${card.name} · quiet ${ev.dormancyDays} days` : card.name;
 }
 // The gear-row door mirrors the orb's own notify tease (same badge digit,
 // same title text) rather than having its own opinion about whether a card
@@ -485,9 +491,17 @@ setInterval(refreshWorkState, 1500);
 // hands a card out -- recording it here double-counted every widget relaunch
 // into the global cap and could race the popup out of the last cap slot
 // (audit, reproduced). The page just renders what it is given.
+//
+// A PEEK, NOT A SERVE (review finding 4). This poll used to call the same
+// GET /card the panel does, which RECORDS the serve: a 'shown' row, a
+// global-cap slot, that person's 7-day pool cooldown, and -- because
+// pickProducer reads 'shown' -- the other producer's turn, all spent on a
+// card nobody had looked at, twice an hour, in the background. relCardPeek
+// answers only the tease (name, kind, counters) and records nothing; the
+// panel's own pull is what serves the receipt.
 async function refreshRelCard() {
   try {
-    const out = await hzPost('relCard');
+    const out = await hzPost('relCardPeek');
     cardPending = out?.card ?? null;
     if (cardPending) badge.textContent = '1';
   } catch {
