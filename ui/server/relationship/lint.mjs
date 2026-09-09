@@ -28,7 +28,7 @@
 // (not sticky; every other resolution is, until the owner reopens it by hand
 // in the desk).
 
-import { subRolesFor } from '../people/subRoles.mjs';
+import { SUB_ROLES, subRolesFor } from '../people/subRoles.mjs';
 import { markPersonSubRoles, loadOwner } from '../people/owner.mjs';
 import { lookupScope } from './lookup.mjs';
 
@@ -416,6 +416,52 @@ export function runLintPass(db, policy, { now = Date.now(), checks } = {}) {
        WHERE check_name = ? AND resolved_at IS NULL AND last_seen_at < ?`
     );
 
+    // ONE-TIME KEY CARRY (review F finding 9). role_conflict's finding_key
+    // changed from `role_conflict:<claimId>` to
+    // `role_conflict:<claimId>:<tag>:<exportRoles>`. Nothing migrated the
+    // rows, so on the first pass after that deploy every old-key row stopped
+    // being found, auto-closed itself 'gone', and the SAME conflict re-minted
+    // under the new key as brand new and undismissed: every dismissal and
+    // every role choice the owner had ever made on a role_conflict was
+    // silently discarded by a deploy. A key is an index into the corpus; the
+    // owner's answer belongs to the CONFLICT, which has not changed.
+    //
+    // Two statements, because the damage has two timings:
+    //   * RENAME, if this pass is the first since the deploy: the old row
+    //     becomes the new key and its first_seen_at, resolution and
+    //     resolved_at all travel with it. Guarded on the new key not existing
+    //     yet, which is also what makes it once-only -- afterwards there is
+    //     no old key left to find.
+    //   * CARRY THE RESOLUTION, if a pass already ran and the re-minted row
+    //     is sitting there unresolved: copy the old row's own resolution onto
+    //     it. Never 'gone' (that is a pass's word, not the owner's), never
+    //     over a resolution the new row already has.
+    // Both are no-ops on a database that never held an old-key row, which is
+    // every fresh install.
+    const carryRenameStmt = db.prepare(
+      `UPDATE lint_finding SET finding_key = ?
+        WHERE finding_key = ? AND check_name = 'role_conflict'
+          AND NOT EXISTS (SELECT 1 FROM lint_finding x WHERE x.finding_key = ?)`
+    );
+    const carryResolutionStmt = db.prepare(
+      `UPDATE lint_finding
+          SET resolved_at = (SELECT o.resolved_at FROM lint_finding o WHERE o.finding_key = ?),
+              resolution  = (SELECT o.resolution  FROM lint_finding o WHERE o.finding_key = ?)
+        WHERE finding_key = ? AND check_name = 'role_conflict' AND resolved_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM lint_finding o
+             WHERE o.finding_key = ? AND o.check_name = 'role_conflict'
+               AND o.resolved_at IS NOT NULL AND o.resolution IS NOT NULL AND o.resolution <> 'gone'
+          )`
+    );
+    function carryOldRoleConflictKey(finding) {
+      if (!Number.isInteger(finding.claimId)) return;
+      const oldKey = `role_conflict:${finding.claimId}`;
+      if (oldKey === finding.findingKey) return; // already the old shape: nothing to carry
+      carryRenameStmt.run(finding.findingKey, oldKey, finding.findingKey);
+      carryResolutionStmt.run(oldKey, oldKey, finding.findingKey, oldKey);
+    }
+
     const counts = {};
     let findingsNew = 0;
     let findingsClosed = 0;
@@ -426,6 +472,9 @@ export function runLintPass(db, policy, { now = Date.now(), checks } = {}) {
         const result = perCheck[name];
         let newCount = 0;
         for (const f of result.findings) {
+          // Before the upsert and before this check's own auto-close, so a
+          // carried row is neither counted as new nor closed as gone.
+          if (name === 'role_conflict') carryOldRoleConflictKey(f);
           if (existingStmt.get(f.findingKey) === undefined) newCount += 1;
           upsert.run(f.findingKey, name, f.personKey ?? null, f.claimId ?? null, f.detail, startedAt, startedAt);
         }
@@ -479,6 +528,34 @@ function parseSubRolesJson(raw) {
     const v = JSON.parse(raw);
     return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
   } catch {
+    return [];
+  }
+}
+
+// Every sub-role tag this person carries from an ACCEPTED sweep proposal --
+// the third of the three sets the role_conflict resolutions are expressed
+// over (see resolveLintFinding's comment). Same "latest decision wins" read
+// as roleConflicts' own candidate scan and undoSubRole's otherAccepted
+// check, deliberately including the disputed tag: each branch decides for
+// itself what to do with it, and one of them keeps it.
+const ACCEPTED_SUB_ROLE_TAGS_SQL = `
+  SELECT DISTINCT psp.value AS tag
+  FROM person_sweep_proposal psp
+  JOIN claim c ON c.id = psp.claim_id
+  WHERE c.subject = 'person' AND c.subject_person_key = ? AND psp.kind = 'sub_role'
+    AND (SELECT d.action FROM claim_decision d WHERE d.claim_id = psp.claim_id ORDER BY d.id DESC LIMIT 1) = 'accept'
+`;
+
+function acceptedSubRoleTags(db, personKey) {
+  if (typeof personKey !== 'string' || personKey.length === 0) return [];
+  try {
+    return db.prepare(ACCEPTED_SUB_ROLE_TAGS_SQL).all(personKey)
+      .map((r) => r.tag)
+      .filter((tag) => typeof tag === 'string');
+  } catch {
+    // A missing/pre-migration person_sweep_proposal means "no accepted tags",
+    // which degrades to the previous behaviour rather than refusing the
+    // owner's click.
     return [];
   }
 }
@@ -542,13 +619,49 @@ export function lintFindings(db, { check = null, open = null, limit = 200 } = {}
 // The full list is now built from the person's CURRENT set -- people.sub_roles
 // (the projection) unioned with the owner's own config override (the durable
 // half, which survives a projection rebuild) -- and each resolution is
-// expressed as a change to THAT:
-//   keep-export   -- drop the disputed tag, add every export-derived role,
-//                    keep everything else the person has.
-//   keep-derived  -- keep the disputed tag and everything else; do NOT pull in
-//                    the export's roles, which is the whole point of the
-//                    choice.
-//   both          -- keep everything, plus the export's roles, plus the tag.
+// expressed as a change to THAT.
+//
+// AND TWO OF THE THREE WERE THE SAME WRITE (review F finding 1). `current`
+// unions people.sub_roles, and people.sub_roles IS the export derivation
+// when no override exists (graph.mjs projects subRolesFor(person,
+// owner?.subRoles)) -- so `current` already contained exportRoles, "keep
+// everything, plus the export's roles, plus the tag" was just "keep
+// everything, plus the tag", and `both` and `keep-derived` wrote a
+// byte-identical list. The desk offered the owner three buttons and two of
+// them did the same thing.
+//
+// The fix is to say what each branch means over THREE sets rather than one:
+//
+//   exportRoles   subRolesFor recomputed from the person's own LinkedIn
+//                 export (the finding's own detail.exportRoles).
+//   acceptedTags  every sub-role tag this person carries from an ACCEPTED
+//                 sweep proposal -- the owner said yes to each of these,
+//                 including the disputed one.
+//   tag           the disputed tag: what this one conflict is about.
+//
+//   KEPT = (current − {tag} − exportRoles) ∪ (acceptedTags − {tag})
+//     everything the person has that this conflict is NOT about. The
+//     export's own derivations come out (they are one side of the conflict,
+//     and each branch decides for itself whether to pull them back in) but
+//     an accepted tag goes back in even when the export happens to derive
+//     it too: an accepted tag the export agrees with was never a conflict.
+//
+//   keep-export   = KEPT ∪ exportRoles          the export wins; tag drops
+//   keep-derived  = KEPT ∪ {tag}                the tag wins; the export's
+//                                               roles are NOT pulled in,
+//                                               which is the whole point
+//   both          = KEPT ∪ exportRoles ∪ {tag}
+//
+// Three different lists whenever the export derives anything the owner has
+// not separately accepted -- i.e. whenever there is a real conflict.
+//
+// WHAT KEPT DELIBERATELY DOES NOT DROP: a role sitting in `current` that is
+// neither export-derived now nor separately accepted. It is either an owner
+// correction made through the sub-roles route or a leftover from an older
+// export, and nothing here can tell those apart -- so it stays, in all three
+// branches. Dropping it would be the same data loss this function's previous
+// fix existed to close, taken on a guess about provenance.
+//
 // A missing people row (mid projection rebuild) REFUSES the write rather than
 // resolving off an empty `current`, same reasoning and same
 // 'people-row-missing' reason as applySweepDecision (sweep.mjs).
@@ -600,16 +713,28 @@ export function resolveLintFinding(db, { findingKey, resolution, configPath } = 
       ...parseSubRolesJson(peopleRow.sub_roles),
       ...(owner.subRoles.get(row.personKey) ?? []),
     ]);
+    const derived = new Set(exportRoles);
+    const accepted = new Set(acceptedSubRoleTags(db, row.personKey));
+
+    // KEPT: everything this conflict is not about -- see the set expressions
+    // in the comment above.
+    const kept = new Set();
+    for (const role of current) if (role !== tag && !derived.has(role)) kept.add(role);
+    for (const role of accepted) if (role !== tag) kept.add(role);
 
     let subRoles;
     if (resolution === 'keep-export') {
-      current.delete(tag);
-      subRoles = [...new Set([...current, ...exportRoles])].sort();
+      subRoles = [...kept, ...exportRoles];
     } else if (resolution === 'keep-derived') {
-      subRoles = [...new Set([...current, tag])].sort();
+      subRoles = [...kept, tag];
     } else {
-      subRoles = [...new Set([...current, ...exportRoles, tag])].sort();
+      subRoles = [...kept, ...exportRoles, tag];
     }
+    // markPersonSubRoles refuses anything outside the closed three-value
+    // vocabulary, and psp.value is not validated at the point roleConflicts
+    // reads it -- so a junk tag drops out here rather than turning the
+    // owner's click into a 500.
+    subRoles = [...new Set(subRoles)].filter((role) => SUB_ROLES.includes(role)).sort();
     markPersonSubRoles({ key: row.personKey, subRoles, ...(configPath ? { configPath } : {}) });
     rebuildNeeded = true;
 

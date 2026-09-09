@@ -732,3 +732,186 @@ test('a context row cannot be deleted out from under a page line\'s receipt', ()
   assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM person_page_item').get().n), 0);
   assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM claim_source').get().n), 0);
 });
+
+// ---------------------------------------------------------------------------
+// Review F finding 1: THE THREE RESOLUTIONS WERE TWO WRITES. `current`
+// unions people.sub_roles, and people.sub_roles IS the export derivation when
+// no override exists -- so it already contained exportRoles, and `both`
+// ("plus the export's roles") added nothing that keep-derived did not
+// already have. The desk offered three buttons and two of them wrote a
+// byte-identical list. See resolveLintFinding's set expressions.
+// ---------------------------------------------------------------------------
+
+// One person, TWO accepted sweep sub_role proposals, one LinkedIn export,
+// and a people.sub_roles projection -- the realistic post-accept state
+// (applySweepDecision unions an accepted tag into the export derivation and
+// writes that as the override, which the next rebuild projects back).
+// Returns the finding key for the conflict on `tag`.
+function twoTagConflict(db, { key, tag, otherTag, linkedin, projected }) {
+  const distillRunId = insertDistillRun(db);
+  const sweepRunId = insertSweepRun(db, { distillRunId });
+  insertPersonWithLinkedin(db, { key, name: key, linkedin, subRoles: projected });
+  const claimFor = (value) => {
+    const claimId = insertClaim(db, { runId: distillRunId, personKey: key, text: `tag ${value}` });
+    decide(db, claimId, 'accept');
+    db.prepare('INSERT INTO person_sweep_proposal(claim_id, run_id, kind, value, applied_at) VALUES (?, ?, ?, ?, ?)')
+      .run(claimId, sweepRunId, 'sub_role', value, NOW);
+    return claimId;
+  };
+  claimFor(tag);
+  if (otherTag !== null) claimFor(otherTag);
+
+  const hit = roleConflicts(db, {}).findings.find((f) => f.personKey === key && JSON.parse(f.detail).tag === tag);
+  assert.ok(hit, 'the fixture must actually produce a conflict on the disputed tag');
+  db.prepare(
+    `INSERT INTO lint_finding(finding_key, check_name, person_key, claim_id, detail, first_seen_at, last_seen_at)
+     VALUES (?, 'role_conflict', ?, ?, ?, ?, ?)`
+  ).run(hit.findingKey, hit.personKey, hit.claimId, hit.detail, NOW, NOW);
+  return hit.findingKey;
+}
+
+function resolveInFreshConfig(db, findingKey, resolution) {
+  const configPath = ownerConfigPath(mkdtempSync(join(tmpdir(), 'lint-three-')));
+  const out = resolveLintFinding(db, { findingKey, resolution, configPath });
+  assert.equal(out.applied, true, `${resolution} must apply`);
+  const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+  return raw.personSubRoles[db.prepare('SELECT person_key AS k FROM lint_finding WHERE finding_key = ?').get(findingKey).k];
+}
+
+test('the three role_conflict resolutions write three DIFFERENT lists', () => {
+  // founder is disputed and accepted; operator is a second accepted tag; the
+  // export derives investor; the projection holds all three, which is what a
+  // post-accept rebuild actually leaves behind.
+  const fixture = {
+    tag: 'founder', otherTag: 'operator',
+    linkedin: { position: 'General Partner', company: 'Acme Capital' },
+    projected: ['founder', 'investor', 'operator'],
+  };
+
+  const dbExport = openDb(':memory:');
+  const keyExport = resolveInFreshConfig(
+    dbExport, twoTagConflict(dbExport, { key: 'name:three export', ...fixture }), 'keep-export'
+  );
+  const dbDerived = openDb(':memory:');
+  const keyDerived = resolveInFreshConfig(
+    dbDerived, twoTagConflict(dbDerived, { key: 'name:three derived', ...fixture }), 'keep-derived'
+  );
+  const dbBoth = openDb(':memory:');
+  const keyBoth = resolveInFreshConfig(
+    dbBoth, twoTagConflict(dbBoth, { key: 'name:three both', ...fixture }), 'both'
+  );
+
+  assert.deepEqual(keyExport, ['investor', 'operator'], 'the export wins: founder goes, investor stays');
+  assert.deepEqual(keyDerived, ['founder', 'operator'],
+    "the tag wins and the export's own role is NOT pulled in -- this used to be identical to `both`");
+  assert.deepEqual(keyBoth, ['founder', 'investor', 'operator'], 'both keeps everything');
+
+  const lists = [keyExport, keyDerived, keyBoth].map((l) => l.join(','));
+  assert.equal(new Set(lists).size, 3, 'three buttons, three outcomes');
+});
+
+test('keep-derived keeps an accepted tag the export happens to derive too', () => {
+  const db = openDb(':memory:');
+  // investor is BOTH export-derived and separately accepted by the owner --
+  // which is not a conflict, so keep-derived must not drop it along with the
+  // export's other derivations.
+  const findingKey = twoTagConflict(db, {
+    key: 'name:accepted and derived', tag: 'founder', otherTag: 'investor',
+    linkedin: { position: 'General Partner', company: 'Acme Capital' },
+    projected: ['founder', 'investor'],
+  });
+  assert.deepEqual(resolveInFreshConfig(db, findingKey, 'keep-derived'), ['founder', 'investor'],
+    'an accepted tag the export agrees with was never in dispute');
+});
+
+test('keep-derived keeps a role it cannot attribute rather than guessing it away', () => {
+  const db = openDb(':memory:');
+  // operator is in the projection but is neither export-derived nor an
+  // accepted sweep tag: an owner correction made through the sub-roles route,
+  // or a leftover from an older export, and nothing can tell those apart.
+  const findingKey = twoTagConflict(db, {
+    key: 'name:unattributable role', tag: 'founder', otherTag: null,
+    linkedin: { position: 'General Partner', company: 'Acme Capital' },
+    projected: ['founder', 'investor', 'operator'],
+  });
+  assert.deepEqual(resolveInFreshConfig(db, findingKey, 'keep-derived'), ['founder', 'operator'],
+    'dropping it would be the same data loss on a guess about provenance');
+});
+
+// ---------------------------------------------------------------------------
+// Review F finding 9: THE DEPLOY THAT ATE EVERY DISMISSAL. role_conflict's
+// key changed shape, nothing migrated the rows, so the first pass after the
+// deploy auto-closed every old-key row 'gone' and re-minted the same
+// conflict under the new key as brand new and undismissed.
+// ---------------------------------------------------------------------------
+
+function insertOldKeyFinding(db, { claimId, personKey, resolution, now = NOW - 10 * DAY }) {
+  db.prepare(
+    `INSERT INTO lint_finding(finding_key, check_name, person_key, claim_id, detail, first_seen_at, last_seen_at,
+       resolved_at, resolution)
+     VALUES (?, 'role_conflict', ?, ?, '{}', ?, ?, ?, ?)`
+  ).run(`role_conflict:${claimId}`, personKey, claimId, now, now,
+    resolution === null ? null : now, resolution);
+}
+
+test("an old-key role_conflict row's dismissal is carried onto the new key, not closed and re-minted", () => {
+  const db = openDb(':memory:');
+  const key = 'name:old key dismissed';
+  const claimId = acceptedSweepProposal(db, {
+    key, tag: 'investor', linkedin: { position: 'Chief Operating Officer', company: 'Acme Manufacturing' },
+  });
+  insertOldKeyFinding(db, { claimId, personKey: key, resolution: 'dismiss' });
+
+  const run = runLintPass(db, {}, { now: NOW, checks: ['role_conflict'] });
+  const rows = db.prepare(
+    "SELECT finding_key AS k, resolution, first_seen_at AS firstSeen FROM lint_finding WHERE check_name = 'role_conflict'"
+  ).all();
+  assert.equal(rows.length, 1, 'one conflict, one row: the old key was renamed, not closed alongside a new twin');
+  assert.equal(rows[0].k, `role_conflict:${claimId}:investor:operator`);
+  assert.equal(rows[0].resolution, 'dismiss', "the owner's answer belongs to the conflict, not to the key shape");
+  assert.equal(Number(rows[0].firstSeen), NOW - 10 * DAY, 'and it is not a new finding');
+  assert.equal(JSON.parse(run.counts).role_conflict.new, 0);
+  assert.equal(JSON.parse(run.counts).role_conflict.closed, 0);
+});
+
+test('a resolution is carried even when a pass has already re-minted the new key', () => {
+  const db = openDb(':memory:');
+  const key = 'name:already reminted';
+  const claimId = acceptedSweepProposal(db, {
+    key, tag: 'investor', linkedin: { position: 'Chief Operating Officer', company: 'Acme Manufacturing' },
+  });
+  insertOldKeyFinding(db, { claimId, personKey: key, resolution: 'dismiss' });
+  // The damage as it actually lands: a pass ran, closed the old row 'gone'
+  // and wrote the same conflict fresh under the new key.
+  db.prepare("UPDATE lint_finding SET resolution = 'gone', resolved_at = ? WHERE finding_key = ?")
+    .run(NOW - DAY, `role_conflict:${claimId}`);
+  db.prepare(
+    `INSERT INTO lint_finding(finding_key, check_name, person_key, claim_id, detail, first_seen_at, last_seen_at)
+     VALUES (?, 'role_conflict', ?, ?, '{}', ?, ?)`
+  ).run(`role_conflict:${claimId}:investor:operator`, key, claimId, NOW - DAY, NOW - DAY);
+  // ... and the owner's dismissal is still on the old row, which is where
+  // the carry has to find it.
+  db.prepare("UPDATE lint_finding SET resolution = 'dismiss' WHERE finding_key = ?")
+    .run(`role_conflict:${claimId}`);
+
+  runLintPass(db, {}, { now: NOW, checks: ['role_conflict'] });
+  const fresh = db.prepare('SELECT resolution, resolved_at AS resolvedAt FROM lint_finding WHERE finding_key = ?')
+    .get(`role_conflict:${claimId}:investor:operator`);
+  assert.equal(fresh.resolution, 'dismiss', 'the re-minted row inherits the answer it should never have lost');
+  assert.ok(fresh.resolvedAt !== null);
+});
+
+test("a pass's own 'gone' is never carried forward as if the owner had said it", () => {
+  const db = openDb(':memory:');
+  const key = 'name:old key gone';
+  const claimId = acceptedSweepProposal(db, {
+    key, tag: 'investor', linkedin: { position: 'Chief Operating Officer', company: 'Acme Manufacturing' },
+  });
+  insertOldKeyFinding(db, { claimId, personKey: key, resolution: 'gone' });
+
+  runLintPass(db, {}, { now: NOW, checks: ['role_conflict'] });
+  const row = db.prepare('SELECT resolution, resolved_at AS resolvedAt FROM lint_finding WHERE finding_key = ?')
+    .get(`role_conflict:${claimId}:investor:operator`);
+  assert.equal(row.resolution, null, "'gone' is a pass's word: the reopened conflict is open, waiting to be seen");
+  assert.equal(row.resolvedAt, null);
+});
