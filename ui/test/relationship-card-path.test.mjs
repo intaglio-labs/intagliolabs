@@ -447,3 +447,145 @@ test('the draft route answers ok:false with the reason instead of 200-and-nothin
     assert.match(out.reason, /JSON/u, `the parse failure crosses the wire (got ${out.reason})`);
   }, { relationshipMemoryEngine: engine });
 });
+
+// ---------------------------------------------------------------------------
+// Review F (2026-09-09), findings 4, 8 and 13 -- the card path's half of
+// daily.mjs's one LIVE model. Each fixture is a case where the old route and
+// the new one disagree.
+// ---------------------------------------------------------------------------
+
+// A built page for one person, straight into the tables readPersonPage reads
+// -- no engine, since page building is not what these tests are about.
+function givePage(db, personKey, now, text = 'they are between roles') {
+  const runId = Number(db.prepare(
+    `INSERT INTO distill_run(model, prompt_path, prompt_sha, params, episode_context, rows_in, claims_out, status, started_at, ended_at)
+     VALUES ('fake:fake', '/prompts/none.md', ?, '{}', 'off', 0, 0, 'complete', ?, ?)`
+  ).run('f'.repeat(64), now, now).lastInsertRowid);
+  const claimId = Number(db.prepare(
+    `INSERT INTO claim(run_id, subject, subject_person_key, kind, text, observed_at, valid_to, p_claim, created_at)
+     VALUES (?, 'person', ?, 'fact', ?, ?, NULL, NULL, ?)`
+  ).run(runId, personKey, text, now, now).lastInsertRowid);
+  db.prepare('INSERT INTO person_page_item(claim_id, section, built_at) VALUES (?, ?, ?)')
+    .run(claimId, 'who', now);
+  return claimId;
+}
+
+// ---- 4: a week-old batch is not the queue any more ------------------------
+test('a batch produced eight days ago is not restored: the route refills instead of serving it', async () => {
+  await withCardServer(async ({ get, db }) => {
+    const now = Date.now();
+    seedOwe(db, 'name:stale batch', 'Stale Batch', now, { askedDaysAgo: 30 });
+    // A batch written eight days ago and never shown -- a producer_version
+    // bump nothing re-produced past, or a pool that went empty. The
+    // cross-kind exclusion's window had already let this person go, so
+    // holding their card was holding the queue shut against both producers.
+    const stale = produceOweBatch(db, { now: now - 8 * DAY });
+    assert.equal(stale.cards.length, 1);
+
+    const out = await get('/admin/relationship/card');
+    assert.ok(out.card, `something was served (reason: ${out.reason})`);
+    assert.equal(out.card.personKey, 'name:stale batch');
+    assert.notEqual(out.card.snapshot_id, stale.cards[0].snapshot_id,
+      'the eight-day-old snapshot was dropped and a fresh one produced, not re-served');
+  });
+});
+
+// ---- 8: an off-mode reconnect card holds nobody out of Owe ----------------
+test('a reconnect card in a mode the owner is not on does not block that person\'s Owe card', async () => {
+  await withCardServer(async ({ get, db }) => {
+    const now = Date.now();
+    seedOwe(db, 'name:offmode hold', 'Offmode Hold', now, { askedDaysAgo: 30 });
+    // Reconnect is holding this person, in 'investor' while rel.mode is
+    // 'any': that card can never be served as things stand, so it must not
+    // stop Owe either. The cross-kind exclusion used to count it, which left
+    // the person offered by NEITHER kind.
+    const batchId = Number(db.prepare(
+      'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, 1, ?, NULL)'
+    ).run(now - DAY, 'open').lastInsertRowid);
+    db.prepare(
+      'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) ' +
+      "VALUES (?, 'name:offmode hold', 'reconnect', 'quiet a while', ?, ?, 'test', ?)"
+    ).run(batchId, JSON.stringify({ mode: 'investor' }), 'eligibility-v6', now - DAY);
+
+    const out = await get('/admin/relationship/card');
+    assert.ok(out.card, `Owe offered the card (reason: ${out.reason})`);
+    assert.equal(out.card.kind, 'owe');
+    assert.equal(out.card.personKey, 'name:offmode hold');
+  });
+});
+
+// ---- 13: a peek promises a card, and the serve keeps the promise ----------
+test('a page finishing between the peek and the pull does not change which card is served', async () => {
+  await withCardServer(async ({ get, db }) => {
+    const now = Date.now();
+    seedOwe(db, 'name:peek first', 'Peek First', now, { askedDaysAgo: 30 });
+    seedOwe(db, 'name:peek second', 'Peek Second', now, { askedDaysAgo: 20 });
+
+    const peek = await get('/admin/relationship/card?peek=1');
+    assert.equal(peek.peek, true);
+    assert.equal(peek.card.personKey, 'name:peek first');
+    assert.ok(Number.isInteger(peek.card.snapshot_id), 'a peek says WHICH snapshot it would serve');
+
+    // The background page build for the OTHER card lands. Page-first was
+    // recomputed on every request, so this used to move the second card to
+    // the front and the panel handed over a different person than the orb
+    // had just teased.
+    givePage(db, 'name:peek second', now);
+
+    const served = await get('/admin/relationship/card');
+    assert.equal(served.card.personKey, 'name:peek first',
+      'the order was frozen when the card was first offered');
+    assert.equal(served.card.snapshot_id, peek.card.snapshot_id);
+  });
+});
+
+test('?expect= serves exactly the snapshot the peek named, and an unknown one is ignored', async () => {
+  await withCardServer(async ({ get, db }) => {
+    const now = Date.now();
+    seedOwe(db, 'name:expect plain', 'Expect Plain', now, { askedDaysAgo: 30 });
+    seedOwe(db, 'name:expect paged', 'Expect Paged', now, { askedDaysAgo: 20 });
+    // The second card has a page before anything is ordered, so page-first
+    // puts it at the head of the queue -- and the peek says so.
+    givePage(db, 'name:expect paged', now);
+
+    const peek = await get('/admin/relationship/card?peek=1');
+    assert.equal(peek.card.personKey, 'name:expect paged', 'page-first, as ever');
+
+    const other = rowFor(db, 'name:expect plain');
+    const served = await get(`/admin/relationship/card?expect=${other}`);
+    assert.equal(served.card.snapshot_id, other, 'the request named a live card and got exactly it');
+    assert.equal(served.card.personKey, 'name:expect plain');
+
+    // An unknown snapshot id is not an error: the card it named was judged or
+    // expired between the two requests, which is ordinary.
+    const ignored = await get('/admin/relationship/card?expect=999999');
+    assert.ok(ignored.card, `still served something (reason: ${ignored.reason})`);
+    assert.equal(ignored.card.personKey, 'name:expect paged', 'and fell straight through to the ordinary order');
+  });
+});
+
+// The snapshot id of the newest card for one person -- what a peek would
+// hand back as ?expect=.
+function rowFor(db, personKey) {
+  return Number(db.prepare(
+    'SELECT id FROM rm_candidate_snapshot WHERE person_key = ? ORDER BY id DESC LIMIT 1'
+  ).get(personKey).id);
+}
+
+test('?expect= spends one cap slot and records one \'shown\', same as any serve', async () => {
+  await withCardServer(async ({ get, db }) => {
+    const now = Date.now();
+    seedOwe(db, 'name:expect accounting', 'Expect Accounting', now, { askedDaysAgo: 30 });
+
+    const peek = await get('/admin/relationship/card?peek=1');
+    assert.equal(eventCount(db, 'shown'), 0, 'a peek carrying no expect records nothing');
+    const withExpect = await get(`/admin/relationship/card?peek=1&expect=${peek.card.snapshot_id}`);
+    assert.equal(withExpect.card.snapshot_id, peek.card.snapshot_id);
+    assert.equal(eventCount(db, 'shown'), 0, 'and neither does one carrying it');
+
+    await get(`/admin/relationship/card?expect=${peek.card.snapshot_id}`);
+    assert.equal(eventCount(db, 'shown'), 1, 'the serve spends the slot, exactly once');
+    await get(`/admin/relationship/card?expect=${peek.card.snapshot_id}`);
+    assert.equal(eventCount(db, 'shown'), 1, 'and re-serving the same snapshot does not spend another');
+  });
+});
