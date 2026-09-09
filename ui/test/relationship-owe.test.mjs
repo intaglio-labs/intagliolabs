@@ -474,3 +474,112 @@ test('a person with 2 owner messages and an unanswered "?" 12 days ago is still 
   const keys = keysOf(owePool(db, { now: NOW }));
   assert.ok(keys.includes('name:thin real exchange'), 'exactly 2 owner messages clears OWE_MIN_OWNER_MESSAGES');
 });
+
+// ---- 15: mail thread attribution (review finding 3) -----------------------
+// threadKind() answers DIRECT for source='mail' (an email is not a room), so
+// the projection writes a room=0 link for EVERY non-owner address on the
+// message. B1's old `JOIN person_event_links ... room = 0` therefore turned
+// one owner commitment into one overdue card per recipient of the thread. The
+// counterparty must be the source row's SOLE non-owner participant.
+
+// One mail context row plus a room=0 recipient link per person named in
+// `recipientKeys` -- exactly the shape graph.mjs's mail branch writes.
+function insertMailThread(db, { ts, recipientKeys, meta }) {
+  const ctxId = Number(db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'mail', ?, ?)"
+  ).run(ts, '"re: the deck"\n\nwill send it over', JSON.stringify(meta)).lastInsertRowid);
+  for (const key of recipientKeys) {
+    db.prepare(
+      `INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+       VALUES (?, ?, 'mail', 'recipient', 0, 1, 0, 1, 'thread')`
+    ).run(key, ctxId);
+  }
+  return ctxId;
+}
+
+function seedMailCommitment(db, { recipientKeys, meta }) {
+  const observedAt = NOW - 100 * DAY;
+  const runId = insertDistillRun(db);
+  const claimId = insertOwnerCommitmentClaim(db, {
+    runId, text: 'I will send the deck', observedAt, validTo: NOW - 20 * DAY,
+  });
+  acceptClaim(db, claimId, observedAt);
+  const ctxId = insertMailThread(db, { ts: observedAt, recipientKeys, meta });
+  insertClaimSource(db, { claimId, contextId: ctxId, source: 'mail', quote: 'will send it over' });
+  return { claimId, ctxId };
+}
+
+test('one commitment on a three-recipient email produces NO candidate; the same commitment on a two-party email produces exactly one', () => {
+  const db = openDb(':memory:');
+  for (const [key, name] of [['name:mail a', 'Mail A'], ['name:mail b', 'Mail B'], ['name:mail c', 'Mail C']]) {
+    insertPerson(db, { key, name, sent: 10, received: 10 });
+    insertOwnerParticipation(db, key);
+  }
+  seedMailCommitment(db, {
+    recipientKeys: ['name:mail a', 'name:mail b', 'name:mail c'],
+    meta: { from: ['owner@example.com'], to: ['a@example.com', 'b@example.com', 'c@example.com'], cc: [] },
+  });
+
+  const keys = keysOf(owePool(db, { now: NOW }));
+  for (const key of ['name:mail a', 'name:mail b', 'name:mail c']) {
+    assert.ok(!keys.includes(key),
+      `${key} is not owed a card for a commitment made to a whole thread (was: one card each)`);
+  }
+
+  // The same fixture with a single counterparty still attributes -- the gate
+  // must narrow the fan-out, not close the path.
+  const solo = openDb(':memory:');
+  insertPerson(solo, { key: 'name:mail solo', name: 'Mail Solo', sent: 10, received: 10 });
+  insertOwnerParticipation(solo, 'name:mail solo');
+  seedMailCommitment(solo, {
+    recipientKeys: ['name:mail solo'],
+    meta: { from: ['owner@example.com'], to: ['solo@example.com'], cc: [] },
+  });
+  const soloCandidate = owePool(solo, { now: NOW }).find((c) => c.personKey === 'name:mail solo');
+  assert.ok(soloCandidate, 'a two-party email still attributes the commitment');
+  assert.equal(soloCandidate.oweKind, 'owe:expired-commitment');
+});
+
+test('a second recipient the projection never resolved into a person still blocks attribution', () => {
+  const db = openDb(':memory:');
+  insertPerson(db, { key: 'name:mail known', name: 'Mail Known', sent: 10, received: 10 });
+  insertOwnerParticipation(db, 'name:mail known');
+  // ONE room=0 link (the only address that resolved) but THREE addresses on
+  // the message: the link count alone would call this a private conversation.
+  seedMailCommitment(db, {
+    recipientKeys: ['name:mail known'],
+    meta: {
+      from: ['owner@example.com'],
+      to: ['known@example.com'],
+      cc: ['stranger@example.com'],
+    },
+  });
+
+  const keys = keysOf(owePool(db, { now: NOW }));
+  assert.ok(!keys.includes('name:mail known'),
+    'a cc the contacts spine never resolved still makes this a group thread');
+});
+
+test('a commitment with two receipts is attributed once, off the earliest source row', () => {
+  const db = openDb(':memory:');
+  insertPerson(db, { key: 'name:receipt first', name: 'Receipt First', sent: 10, received: 10 });
+  insertOwnerParticipation(db, 'name:receipt first');
+  insertPerson(db, { key: 'name:receipt second', name: 'Receipt Second', sent: 10, received: 10 });
+  insertOwnerParticipation(db, 'name:receipt second');
+
+  const { claimId } = seedMailCommitment(db, {
+    recipientKeys: ['name:receipt first'],
+    meta: { from: ['owner@example.com'], to: ['first@example.com'], cc: [] },
+  });
+  // A SECOND receipt of the same sentence, in a different conversation. One
+  // thing the owner said once must not become two people's overdue cards.
+  const secondCtx = insertMailThread(db, {
+    ts: NOW - 99 * DAY,
+    recipientKeys: ['name:receipt second'],
+    meta: { from: ['owner@example.com'], to: ['second@example.com'], cc: [] },
+  });
+  insertClaimSource(db, { claimId, contextId: secondCtx, source: 'mail', quote: 'will send it over' });
+
+  const keys = keysOf(owePool(db, { now: NOW }));
+  assert.deepEqual(keys, ['name:receipt first'], 'one commitment, one candidate: the earliest receipt');
+});

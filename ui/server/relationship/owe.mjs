@@ -20,15 +20,20 @@
 // daily.mjs for the alternation between this producer and producer.mjs's.
 
 import { latestAuthoredContextId } from './producer.mjs';
+import { liveQueuePersonKeys } from './daily.mjs';
 import { isAnonymousContact } from '../people/map.mjs';
 
 // v2 (c509f3f): anonymous phone-number names excluded from the pool, the B2
 // staleness bound on expired commitments, and the owner-participation gate.
+// v3 (review findings 3 + 11): a B1 commitment is attributed only when its
+// source row has a SOLE non-owner participant, one claim_source row per
+// claim, and a person the reconnect producer is currently holding in its
+// live queue is excluded.
 // A producer version is a promise about how a card was chosen; when the
 // promise changes, the unjudged queue the old version produced is void --
-// see hermes.mjs's hydrateCards and daily.mjs's hasUnjudgedOfKind, both of
-// which treat a snapshot's producer_version against this constant.
-export const OWE_PRODUCER_VERSION = 'owe-v2';
+// see hermes.mjs's hydrateCards and daily.mjs's liveness check, both of
+// which test a snapshot's producer_version against this constant.
+export const OWE_PRODUCER_VERSION = 'owe-v3';
 export const OWE_RANK_STRATEGY = 'owe-overdue-days';
 export const OWE_KINDS = Object.freeze(['owe:expired-commitment', 'owe:open-loop']);
 
@@ -95,19 +100,73 @@ const OPEN_LOOP_SQL = `
 `;
 
 // B1: the owner's own expired commitment claim (subject='owner', kind
-// 'commitment'), keyed to whichever person the claim's source context
-// involves through a direct (room=0) link -- a commitment made IN a room
-// (a group thread) has no single counterparty to owe it to, so it produces
-// no candidate.
+// 'commitment'), keyed to the person its source context is a conversation
+// WITH -- see soleDirectCounterparty below. A commitment made IN a room (a
+// group thread) has no single counterparty to owe it to, so it produces no
+// candidate.
+//
+// ONE SOURCE ROW PER CLAIM (v3, review finding 3). This used to join every
+// claim_source row, and a claim with two receipts produced the same
+// candidate twice -- harmless where the two receipts name the same person,
+// wrong where they do not (two people each get their own overdue card for
+// ONE thing the owner said once). claim_source has no surrogate key (its PK
+// is (claim_id, context_id)), so the one receipt kept is MIN(context_id):
+// the earliest-ingested source row, which is where the owner actually said
+// it. A later receipt of the same sentence is a duplicate of that fact, not
+// a second commitment.
 const B1_SQL = `
   SELECT cl.id AS claimId, cl.valid_to AS validTo, cl.observed_at AS observedAt,
-         pel.person_key AS personKey
+         cs.context_id AS contextId
   FROM v_claim_accepted cl
   JOIN claim_source cs ON cs.claim_id = cl.id
-  JOIN person_event_links pel ON pel.context_id = cs.context_id AND pel.room = 0
   WHERE cl.kind = 'commitment' AND cl.subject = 'owner'
     AND cl.valid_to IS NOT NULL AND cl.valid_to < ? AND cl.valid_to > ?
+    AND cs.context_id = (SELECT MIN(context_id) FROM claim_source WHERE claim_id = cl.id)
 `;
+
+// WHO A SOURCE ROW IS A CONVERSATION WITH, or null when it is not a
+// conversation with exactly one person (review finding 3).
+//
+// threadKind() answers DIRECT for source='mail' -- correct, an email is not
+// a room -- so graph.mjs writes a room=0 person_event_links row for EVERY
+// non-owner address on the message, up to twelve of them. B1's old
+// `JOIN person_event_links ... room = 0` therefore fanned one commitment
+// out into one overdue card per recipient of a group email: "you said you
+// would, and that came due 30 days ago", to five people, for a sentence the
+// owner wrote once to a thread.
+//
+// Two counts, because either alone lies:
+//   - exactly one room=0 link on the row. Catches every source whose
+//     participants the projection resolved into people.
+//   - for mail specifically, at most two distinct addresses across
+//     from/to/cc (the owner plus one). Catches the recipients the projection
+//     did NOT resolve -- an unknown address still makes the thread a group
+//     conversation even when it never became a person row. Deliberately
+//     counts the owner's own address in that two rather than trying to
+//     identify it: this module holds no owner identity, and "two
+//     participants total" is the same statement as "one counterparty" for
+//     any message the owner is on.
+export function soleDirectCounterparty(db, contextId) {
+  const keys = db.prepare(
+    'SELECT DISTINCT person_key AS personKey FROM person_event_links WHERE context_id = ? AND room = 0'
+  ).all(contextId).map((r) => r.personKey);
+  if (keys.length !== 1) return null;
+  const row = db.prepare('SELECT source, meta FROM context WHERE id = ?').get(contextId);
+  if (row?.source === 'mail') {
+    let meta = null;
+    try { meta = JSON.parse(row.meta ?? '{}'); } catch { return null; }
+    const addresses = new Set();
+    for (const field of ['from', 'to', 'cc']) {
+      const value = meta?.[field];
+      if (!Array.isArray(value)) continue;
+      for (const address of value) {
+        if (typeof address === 'string' && address.length > 0) addresses.add(address.toLowerCase());
+      }
+    }
+    if (addresses.size > 2) return null;
+  }
+  return keys[0];
+}
 
 // B2: a page "ask" item (person_page_item.section='ask') the owner has not
 // answered -- the ask's own context is at least PAGE_ASK_MIN_DAYS old but not
@@ -171,7 +230,14 @@ function buildExclusionChecker(db, { now, includeOffered }) {
   );
   let judged = new Set();
   let shownRecently = new Set();
+  // CROSS-KIND EXCLUSION (review finding 11): a person the reconnect
+  // producer is currently holding in its live queue is not also offered an
+  // Owe card. Being offered twice at once is the complaint; dismissing one
+  // kind gates only that kind, so without this the second card arrives
+  // regardless of what the owner said about the first.
+  let heldByReconnect = new Set();
   if (!includeOffered) {
+    heldByReconnect = liveQueuePersonKeys(db, 'reconnect', { now });
     judged = new Set(
       db.prepare(
         "SELECT DISTINCT person_key FROM rm_card_event WHERE kind = 'owe' AND event IN ('accepted','dismissed')"
@@ -184,7 +250,7 @@ function buildExclusionChecker(db, { now, includeOffered }) {
   }
   return (personKey) =>
     suppressed.has(personKey) || globalOweMute || mutedPersons.has(personKey) ||
-    judged.has(personKey) || shownRecently.has(personKey);
+    judged.has(personKey) || shownRecently.has(personKey) || heldByReconnect.has(personKey);
 }
 
 // The pool: A (open-loop) and B (expired-commitment, B1+B2 unioned with one
@@ -254,6 +320,10 @@ export function owePool(db, { now = Date.now(), includeOffered = false, includeA
 
   const b1Rows = db.prepare(B1_SQL).all(now, now - COMMITMENT_MAX_STALE_DAYS * DAY);
   for (const row of b1Rows) {
+    // The counterparty is the source row's SOLE non-owner participant or
+    // nobody at all -- see soleDirectCounterparty above.
+    const personKey = soleDirectCounterparty(db, row.contextId);
+    if (personKey === null) continue;
     const overdueDays = Math.floor((now - row.validTo) / DAY);
     let quoteContextId = null;
     if (row.observedAt !== null && row.observedAt !== undefined) {
@@ -261,10 +331,10 @@ export function owePool(db, { now = Date.now(), includeOffered = false, includeA
         `SELECT c.id AS id FROM person_event_links pel JOIN context c ON c.id = pel.context_id
          WHERE pel.person_key = ? AND pel.authored = 1 AND pel.room = 0 AND c.ts <= ?
          ORDER BY c.ts DESC LIMIT 1`
-      ).get(row.personKey, row.observedAt);
+      ).get(personKey, row.observedAt);
       quoteContextId = q ? Number(q.id) : null;
     }
-    considerB(row.personKey, overdueDays, {
+    considerB(personKey, overdueDays, {
       askedAt: row.validTo, quoteContextId,
       commitmentClaimId: Number(row.claimId), commitmentValidTo: Number(row.validTo),
     });
