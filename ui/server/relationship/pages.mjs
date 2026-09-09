@@ -376,6 +376,15 @@ export async function buildPersonPage(db, engine, personKey, { now = Date.now() 
 // Read back the built page: accepted or pending items render, rejected are
 // omitted. "Latest wins" for claim_decision, same rule the rest of the review
 // surface uses.
+//
+// ONE RECEIPT PER ITEM (review finding 16). The claim_source join used to
+// fan out: a page claim that later gains a second receipt -- the same
+// sentence quoted from another conversation -- returned two rows, and the
+// asks/notable sections would render the same line twice (and `who`/
+// `how_left` would silently keep whichever came first). claim_source has no
+// surrogate key (its PK is (claim_id, context_id)), so the one kept is
+// MIN(context_id): the earliest-ingested receipt, deterministic, and the
+// same choice owe.mjs's B1 makes for the same reason.
 export function readPersonPage(db, personKey) {
   const rows = db
     .prepare(
@@ -385,6 +394,7 @@ export function readPersonPage(db, personKey) {
        FROM claim c
        JOIN person_page_item ppi ON ppi.claim_id = c.id
        LEFT JOIN claim_source cs ON cs.claim_id = c.id
+         AND cs.context_id = (SELECT MIN(context_id) FROM claim_source WHERE claim_id = c.id)
        WHERE c.subject = 'person' AND c.subject_person_key = ?
        ORDER BY c.created_at DESC`
     )
