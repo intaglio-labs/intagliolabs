@@ -515,7 +515,7 @@ test('a reconnect card in a mode the owner is not on does not block that person\
 });
 
 // ---- 13: a peek promises a card, and the serve keeps the promise ----------
-test('a page finishing between the peek and the pull does not change which card is served', async () => {
+test('a page finishing in the background still promotes its card -- and ?expect= keeps the peek\'s promise anyway', async () => {
   await withCardServer(async ({ get, db }) => {
     const now = Date.now();
     seedOwe(db, 'name:peek first', 'Peek First', now, { askedDaysAgo: 30 });
@@ -523,29 +523,69 @@ test('a page finishing between the peek and the pull does not change which card 
 
     const peek = await get('/admin/relationship/card?peek=1');
     assert.equal(peek.peek, true);
-    assert.equal(peek.card.personKey, 'name:peek first');
+    assert.equal(peek.card.personKey, 'name:peek first', 'rank order, nobody has a page yet');
     assert.ok(Number.isInteger(peek.card.snapshot_id), 'a peek says WHICH snapshot it would serve');
 
-    // The background page build for the OTHER card lands. Page-first was
-    // recomputed on every request, so this used to move the second card to
-    // the front and the panel handed over a different person than the orb
-    // had just teased.
+    // The background page build for the OTHER card lands. Page-first is LIVE
+    // by design (relationship-pages.test.mjs's rank-one/rank-two fixture is
+    // the same promise): what is ready now goes first, so the head of the
+    // queue really does move here.
     givePage(db, 'name:peek second', now);
+    const moved = await get('/admin/relationship/card?peek=1');
+    assert.equal(moved.card.personKey, 'name:peek second',
+      'a finished page promotes its candidate -- freezing the order would retire page-first');
 
-    const served = await get('/admin/relationship/card');
-    assert.equal(served.card.personKey, 'name:peek first',
-      'the order was frozen when the card was first offered');
+    // Which is exactly why the peek hands its snapshot_id back: the panel
+    // showing the owner "Peek First" still gets Peek First.
+    const served = await get(`/admin/relationship/card?expect=${peek.card.snapshot_id}`);
     assert.equal(served.card.snapshot_id, peek.card.snapshot_id);
+    assert.equal(served.card.personKey, 'name:peek first');
+    assert.equal(served.reason, undefined, 'the promise was kept, so there is nothing to report');
   });
 });
 
-test('?expect= serves exactly the snapshot the peek named, and an unknown one is ignored', async () => {
+test('an expect the queue can no longer honour serves the current head and says so', async () => {
+  await withCardServer(async ({ call, get, db }) => {
+    const now = Date.now();
+    seedOwe(db, 'name:superseded', 'Superseded', now, { askedDaysAgo: 30 });
+    seedOwe(db, 'name:next in line', 'Next In Line', now, { askedDaysAgo: 20 });
+
+    const peek = await get('/admin/relationship/card?peek=1');
+    assert.equal(peek.card.personKey, 'name:superseded');
+
+    // The owner mutes it from another surface between the peek and the pull.
+    await call('POST', '/admin/relationship/event', {
+      snapshot_id: peek.card.snapshot_id, person_key: peek.card.personKey,
+      event: 'muted', mute_days: 30,
+    });
+
+    const served = await get(`/admin/relationship/card?expect=${peek.card.snapshot_id}`);
+    assert.ok(served.card, 'a superseded expect is not a refusal');
+    assert.equal(served.card.personKey, 'name:next in line', 'the current head is served instead');
+    assert.equal(served.reason, 'expect-superseded',
+      'and the wire says why the card is not the one that was asked for');
+  });
+});
+
+test('?expect= for a snapshot that never existed also reports itself superseded', async () => {
+  await withCardServer(async ({ get, db }) => {
+    const now = Date.now();
+    seedOwe(db, 'name:expect unknown', 'Expect Unknown', now, { askedDaysAgo: 30 });
+
+    const out = await get('/admin/relationship/card?expect=999999');
+    assert.ok(out.card, `still served something (reason: ${out.reason})`);
+    assert.equal(out.card.personKey, 'name:expect unknown');
+    assert.equal(out.reason, 'expect-superseded');
+  });
+});
+
+test('?expect= serves exactly the snapshot named even when page-first would prefer another', async () => {
   await withCardServer(async ({ get, db }) => {
     const now = Date.now();
     seedOwe(db, 'name:expect plain', 'Expect Plain', now, { askedDaysAgo: 30 });
     seedOwe(db, 'name:expect paged', 'Expect Paged', now, { askedDaysAgo: 20 });
-    // The second card has a page before anything is ordered, so page-first
-    // puts it at the head of the queue -- and the peek says so.
+    // The lower-ranked card has a page, so page-first puts it at the head --
+    // and the peek says so.
     givePage(db, 'name:expect paged', now);
 
     const peek = await get('/admin/relationship/card?peek=1');
@@ -555,12 +595,7 @@ test('?expect= serves exactly the snapshot the peek named, and an unknown one is
     const served = await get(`/admin/relationship/card?expect=${other}`);
     assert.equal(served.card.snapshot_id, other, 'the request named a live card and got exactly it');
     assert.equal(served.card.personKey, 'name:expect plain');
-
-    // An unknown snapshot id is not an error: the card it named was judged or
-    // expired between the two requests, which is ordinary.
-    const ignored = await get('/admin/relationship/card?expect=999999');
-    assert.ok(ignored.card, `still served something (reason: ${ignored.reason})`);
-    assert.equal(ignored.card.personKey, 'name:expect paged', 'and fell straight through to the ordinary order');
+    assert.equal(served.reason, undefined);
   });
 });
 

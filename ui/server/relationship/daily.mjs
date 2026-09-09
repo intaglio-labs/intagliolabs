@@ -151,17 +151,26 @@ export function pickProducer(db, { now = Date.now() } = {}) {
 // more, so it can only ever offer a card the route then refuses -- the
 // failure it cannot produce is the wedged queue this finding is about.
 //
-// STABLE ORDER, AND WHAT A PEEK PROMISES (finding 13). A peek that teases
-// one card and a serve that hands over a different one is a lie the owner
-// can see. Two things make it not happen: the serving order is total and
-// stable -- page-first is FROZEN the first time a card is ordered (a page
-// finishing its background build between the peek and the serve must not
-// re-order the queue) and ties break on snapshot_id, which is monotonic
-// within a batch -- and the peek RETURNS the snapshot_id it would serve,
-// which the panel hands back as ?expect=<id>. A serve with `expect` serves
-// exactly that snapshot when it is still live, and otherwise ignores it and
-// falls through to the ordinary order. `expect` is not a capability: it can
-// only name a card the queue already holds and would already serve.
+// WHAT A PEEK PROMISES, AND WHO KEEPS THE PROMISE (finding 13). A peek that
+// teases one card and a serve that hands over a different one is a lie the
+// owner can see. The fix is NOT a frozen order: page-first is deliberately
+// LIVE, re-derived per request, because a page finishing its background
+// build is exactly the event that should promote its candidate -- preferring
+// what is ready now is the whole point of page-first, and pinning the
+// decision at first sight silently retires it. What the order owes is
+// TOTALITY WITHIN A REQUEST: page-first, then the producers' own rank
+// (rel.cards order), then snapshot_id, monotonic within a batch -- so no
+// step of it depends on where an array spread happened to leave the queue.
+//
+// Consistency ACROSS requests is one explicit contract instead: a peek
+// RETURNS the snapshot_id it would serve right now, and the panel hands it
+// back as ?expect=<id>. A serve with `expect` serves exactly that snapshot
+// while it is still live and servable; when it is not -- judged, muted,
+// expired -- the serve hands over the current head and SAYS so
+// (reason:'expect-superseded' beside a non-null card) rather than failing or
+// pretending nothing moved. `expect` is not a capability: it can only name a
+// card the queue already holds and this request would already be allowed to
+// serve.
 //
 // `currentVersions` (optional: {kind: producer_version}) is the same
 // promise-versioning hermes.mjs's hydrateCards checks: a producer version is
