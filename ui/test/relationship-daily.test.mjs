@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { openDb } from '../server/hermes.mjs';
 import {
   CARD_PRODUCERS, CONSUMING_EVENTS, REFILL_RETRY_MS,
-  isSnapshotConsumed, liveQueuePersonKeys, pickProducer, produceDailyBatch,
+  isSnapshotConsumed, isSnapshotFresh, isSnapshotLive, liveQueuePersonKeys, pickProducer, produceDailyBatch,
 } from '../server/relationship/daily.mjs';
 
 const NOW = Date.parse('2026-06-01T12:00:00Z');
@@ -280,4 +280,187 @@ test('liveQueuePersonKeys: the newest batch per mode, minus consumed, inside the
   assert.deepEqual([...keys].sort(), ['name:any live', 'name:investor live']);
   assert.ok(Number.isInteger(anyLive) && Number.isInteger(investorLive));
   assert.equal(liveQueuePersonKeys(db, 'owe', { now: NOW }).size, 0, 'kind-scoped');
+});
+
+// ---- review F findings 4 + 8: ONE definition of live -----------------------
+// Every test below is a fixture where the old behaviour and the new one
+// disagree. See daily.mjs's LIVE model block.
+
+// A snapshot of `kind` whose row was written `ageDays` ago -- what a batch
+// nothing has re-produced past looks like after a producer_version bump or an
+// exhausted pool.
+function agedCard(db, kind, ageDays, { mode = null, evidence = {} } = {}) {
+  cardSeq += 1;
+  const createdAt = NOW - ageDays * DAY;
+  const personKey = `name:aged-${kind}-${cardSeq}`;
+  const batchId = Number(db.prepare(
+    'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, 1, ?, NULL)'
+  ).run(createdAt, 'open').lastInsertRowid);
+  const snapshotId = Number(db.prepare(
+    'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) ' +
+    "VALUES (?, ?, ?, 'summary', ?, 'test-v1', 'test', ?)"
+  ).run(batchId, personKey, kind, JSON.stringify({ mode, ...evidence }), createdAt).lastInsertRowid);
+  return { personKey, name: 'X', kind, snapshot_id: snapshotId, evidence: { mode, ...evidence } };
+}
+
+// Several snapshots in ONE batch -- the shape liveQueuePersonKeys' QUEUED
+// clause reads (newest batch per (kind, mode)), so a fixture testing the
+// other four clauses is not silently reduced to its last row.
+function agedBatch(db, kind, ageDays, specs) {
+  const createdAt = NOW - ageDays * DAY;
+  const batchId = Number(db.prepare(
+    'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, ?, ?, NULL)'
+  ).run(createdAt, specs.length, 'open').lastInsertRowid);
+  return specs.map(({ mode = null, evidence = {} }) => {
+    cardSeq += 1;
+    const personKey = `name:aged-${kind}-${cardSeq}`;
+    const snapshotId = Number(db.prepare(
+      'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) ' +
+      "VALUES (?, ?, ?, 'summary', ?, 'test-v1', 'test', ?)"
+    ).run(batchId, personKey, kind, JSON.stringify({ mode, ...evidence }), createdAt).lastInsertRowid);
+    return { personKey, name: 'X', kind, snapshot_id: snapshotId, evidence: { mode, ...evidence } };
+  });
+}
+
+test('an 8-day-old unconsumed card no longer holds its kind\'s turn, and leaves rel.cards', () => {
+  const db = openDb(':memory:');
+  // owe goes first (nothing shown). Its only queued card is older than the
+  // live window: the exclusion set had already let that person go, so if the
+  // turn check still counted it, owe would sit on a card nobody can be
+  // offered -- while Owe's own pool was free to produce.
+  const stale = agedCard(db, 'owe', 8);
+  const rel = { cards: [stale], batch: { owe: null, reconnect: null }, refill: null };
+  const oweProducer = stubProducer([card(db, 'owe')]);
+  const policy = { producers: { owe: oweProducer, reconnect: stubProducer([]) } };
+
+  const out = produceDailyBatch(db, policy, rel, { now: NOW });
+  assert.equal(out.servingKind, 'owe');
+  assert.equal(oweProducer.callCount(), 1, 'the stale card did not hold owe\'s turn: a refill ran');
+  assert.ok(!rel.cards.some((c) => c.snapshot_id === stale.snapshot_id),
+    'and the stale card was pruned out of the in-process queue rather than served');
+});
+
+test('a card just inside the window still holds its turn (the window is the only thing that changed)', () => {
+  const db = openDb(':memory:');
+  const fresh = agedCard(db, 'owe', 6);
+  const rel = { cards: [fresh], batch: { owe: null, reconnect: null }, refill: null };
+  const oweProducer = stubProducer([card(db, 'owe')]);
+  const policy = { producers: { owe: oweProducer, reconnect: stubProducer([]) } };
+
+  const out = produceDailyBatch(db, policy, rel, { now: NOW });
+  assert.equal(out.servingKind, 'owe');
+  assert.equal(oweProducer.callCount(), 0, 'a fresh unconsumed card still holds the turn');
+  assert.equal(rel.cards.length, 1, 'and is not pruned');
+});
+
+test('isSnapshotFresh / isSnapshotLive: the age half of the model', () => {
+  const db = openDb(':memory:');
+  const stale = agedCard(db, 'owe', 8);
+  const fresh = agedCard(db, 'owe', 1);
+  assert.equal(isSnapshotFresh(db, stale.snapshot_id, { now: NOW }), false);
+  assert.equal(isSnapshotFresh(db, fresh.snapshot_id, { now: NOW }), true);
+  assert.equal(isSnapshotLive(db, stale.snapshot_id, { now: NOW }), false,
+    'unconsumed but stale is not live');
+  assert.equal(isSnapshotLive(db, fresh.snapshot_id, { now: NOW }), true);
+  insertEvent(db, fresh.snapshot_id, 'muted');
+  assert.equal(isSnapshotLive(db, fresh.snapshot_id, { now: NOW }), false, 'fresh but consumed is not live either');
+  assert.equal(isSnapshotFresh(db, null, { now: NOW }), true, 'an unknown snapshot id is never called stale');
+});
+
+test('liveQueuePersonKeys: the mode filter (finding 8) -- an off-mode card does not hold the other kind out', () => {
+  const db = openDb(':memory:');
+  const anyCard = agedCard(db, 'reconnect', 1, { mode: 'any' });
+  const investorCard = agedCard(db, 'reconnect', 0, { mode: 'investor' });
+
+  // No mode: both modes' newest batches count, which is what the cross-kind
+  // exclusion used to do unconditionally.
+  assert.deepEqual(
+    [...liveQueuePersonKeys(db, 'reconnect', { now: NOW })].sort(),
+    [anyCard.personKey, investorCard.personKey].sort()
+  );
+  // Scoped to the mode the route would actually serve from: the investor
+  // card cannot be shown while rel.mode is 'any', so it must not block Owe.
+  assert.deepEqual(
+    [...liveQueuePersonKeys(db, 'reconnect', { now: NOW, mode: 'any' })],
+    [anyCard.personKey]
+  );
+  assert.deepEqual(
+    [...liveQueuePersonKeys(db, 'reconnect', { now: NOW, mode: 'investor' })],
+    [investorCard.personKey]
+  );
+});
+
+test('liveQueuePersonKeys: servability in SQL (finding 8) -- suppressed, muted, quote gone, claim rejected', () => {
+  const db = openDb(':memory:');
+  const ctx = (text) => Number(db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', ?, '{}')"
+  ).run(NOW - DAY, text).lastInsertRowid);
+  const goodCtx = ctx('still here');
+  const doomedCtx = ctx('about to go');
+  const runId = Number(db.prepare(
+    "INSERT INTO distill_run(model, prompt_path, prompt_sha, params, episode_context, rows_in, claims_out, status, started_at, ended_at) " +
+    "VALUES ('m', 'p', 's', '{}', 'on', 1, 1, 'complete', ?, ?)"
+  ).run(NOW - DAY, NOW - DAY).lastInsertRowid);
+  const claim = (text) => Number(db.prepare(
+    "INSERT INTO claim(run_id, subject, subject_person_key, kind, text, observed_at, created_at) " +
+    "VALUES (?, 'owner', NULL, 'commitment', ?, ?, ?)"
+  ).run(runId, text, NOW - DAY, NOW - DAY).lastInsertRowid);
+  const liveClaim = claim('I will send it');
+  const rejectedClaim = claim('I will send the other thing');
+  db.prepare("INSERT INTO claim_decision(claim_id, action, actor, reason, created_at) VALUES (?, 'reject', 'owner', NULL, ?)")
+    .run(rejectedClaim, NOW - DAY);
+
+  const [ok, quoteGone, claimRejected, claimGone, suppressed, muted] = agedBatch(db, 'reconnect', 1, [
+    { mode: 'any', evidence: { quote_context_id: goodCtx, commitment_claim_id: liveClaim } },
+    { mode: 'any', evidence: { quote_context_id: doomedCtx } },
+    { mode: 'any', evidence: { commitment_claim_id: rejectedClaim } },
+    { mode: 'any', evidence: { commitment_claim_id: 999_999 } },
+    { mode: 'any' },
+    { mode: 'any' },
+  ]);
+  db.prepare('DELETE FROM context WHERE id = ?').run(doomedCtx);
+  db.prepare('INSERT INTO rm_suppression(person_key, created_at) VALUES (?, ?)').run(suppressed.personKey, NOW);
+  db.prepare('INSERT INTO rm_mute(person_key, kind, until_at, created_at) VALUES (?, NULL, ?, ?)')
+    .run(muted.personKey, NOW + 30 * DAY, NOW);
+
+  const keys = liveQueuePersonKeys(db, 'reconnect', { now: NOW, mode: 'any' });
+  assert.deepEqual([...keys], [ok.personKey],
+    'a card that cannot be served does not hold a person out of the other kind');
+  assert.ok(!keys.has(quoteGone.personKey), 'the quote row is gone: nothing to show');
+  assert.ok(!keys.has(claimRejected.personKey), 'the commitment was rejected between produce and now');
+  assert.ok(!keys.has(claimGone.personKey), 'the commitment claim itself is gone');
+  assert.ok(!keys.has(suppressed.personKey));
+  assert.ok(!keys.has(muted.personKey));
+});
+
+test('liveQueuePersonKeys: an expired mute lifts, and a kind-scoped mute stays scoped', () => {
+  const db = openDb(':memory:');
+  const [expired, otherKind] = agedBatch(db, 'reconnect', 1, [{ mode: 'any' }, { mode: 'any' }]);
+  db.prepare('INSERT INTO rm_mute(person_key, kind, until_at, created_at) VALUES (?, NULL, ?, ?)')
+    .run(expired.personKey, NOW - DAY, NOW - 10 * DAY);
+  db.prepare('INSERT INTO rm_mute(person_key, kind, until_at, created_at) VALUES (?, ?, ?, ?)')
+    .run(otherKind.personKey, 'owe', NOW + 30 * DAY, NOW);
+
+  const keys = liveQueuePersonKeys(db, 'reconnect', { now: NOW, mode: 'any' });
+  assert.deepEqual([...keys].sort(), [expired.personKey, otherKind.personKey].sort(),
+    'a lapsed mute is not a block, and an owe-scoped mute says nothing about a reconnect card');
+});
+
+test('liveQueuePersonKeys: producerVersion and the caller\'s own servable gate', () => {
+  const db = openDb(':memory:');
+  const one = agedCard(db, 'reconnect', 1, { mode: 'any' });
+  assert.equal(liveQueuePersonKeys(db, 'reconnect', { now: NOW, producerVersion: 'test-v1' }).size, 1);
+  assert.equal(liveQueuePersonKeys(db, 'reconnect', { now: NOW, producerVersion: 'test-v2' }).size, 0,
+    'a batch produced under rules already rejected is not a live queue');
+  assert.equal(
+    liveQueuePersonKeys(db, 'reconnect', { now: NOW, servable: (c) => c.personKey !== one.personKey }).size,
+    0,
+    'the caller\'s alias-folding gate refuses it too'
+  );
+  const seen = [];
+  liveQueuePersonKeys(db, 'reconnect', { now: NOW, servable: (c) => { seen.push(c); return true; } });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].snapshot_id, one.snapshot_id);
+  assert.equal(seen[0].kind, 'reconnect');
+  assert.equal(seen[0].quoteContextId, null, 'decoded the same way hydrateCards decodes evidence');
 });

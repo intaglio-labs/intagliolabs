@@ -93,6 +93,76 @@ export function pickProducer(db, { now = Date.now() } = {}) {
 // apply the cap and the servability gate, so the orb never lights for a card
 // that cannot be shown.
 //
+// ---------------------------------------------------------------------------
+// WHAT "LIVE" MEANS -- ONE DEFINITION, FOUR CALL SITES (2026-09-09,
+// contrarian review F findings 4, 8 and 13). The CONSUMED model above was
+// only half of it, and the missing half let the same snapshot be live for
+// one reader and dead for another. Four places ask "is this card still in
+// the queue" and they used to answer differently:
+//
+//   hydrateCards (hermes.mjs)   restored the newest batch per (kind, mode)
+//                               with NO age bound
+//   hasLiveOfKind (below)       unconsumed + caller's servable(), no age
+//                               bound, and nothing ever pruned rel.cards
+//   liveQueuePersonKeys (below) newest batch per mode + a 7-day age bound,
+//                               but no mode filter and no servability at all
+//   the card route's serve loop  unconsumed + servable, no age bound
+//
+// So an 8-day-old unshown reconnect card held reconnect's turn forever (the
+// turn check saw it; the exclusion set's window did not) and the same person
+// was offered an Owe card as well -- the double offer the cross-kind
+// exclusion exists to prevent. And an investor-mode card while rel.mode is
+// 'any', or a card whose quote row was deleted, blocked Owe for a full seven
+// days while never being servable to anyone.
+//
+// A snapshot is LIVE when all five hold. Each is a fact about the world, all
+// five are re-derived on every request, and none of them is stored:
+//
+//   1. QUEUED    -- it belongs to the newest batch for its (kind, mode). The
+//                   DB's own view of the queue, which is what survives a
+//                   restart. Set-wise only: liveQueuePersonKeys' MAX(batch_id)
+//                   GROUP BY mode, and hydrateCards' per-mode restore.
+//   2. FRESH     -- created_at is within LIVE_WINDOW_MS. A batch nothing has
+//                   re-produced past (a producer_version bump, a pool that
+//                   went empty) must not wedge a person out of the OTHER kind
+//                   forever, and must not hold its own kind's turn either.
+//                   isSnapshotFresh, and produceDailyBatch PRUNES rel.cards
+//                   by it, so a stale batch leaves the in-process queue and
+//                   the next request refills instead of serving nothing.
+//   3. UNCONSUMED -- the CONSUMED model above.
+//   4. IN MODE   -- reconnect only, and only where a mode is in play: modes
+//                   are queues, so a card in a mode the owner is not on is
+//                   not servable now. Applied by the turn check (modeFor),
+//                   the exclusion set (`mode`) and the route's filter alike.
+//   5. SERVABLE  -- the UNSERVABLE list above: person suppressed or muted,
+//                   quote's context row gone, commitment claim gone or since
+//                   rejected.
+//
+// TWO IMPLEMENTATIONS OF (5), DELIBERATELY, AND WHERE THEY DIFFER. The route
+// asks per card, in JS, through hermes' cardBlockReason (which reaches
+// rel.service.controls and therefore folds alias keys through the
+// resolutions store). The exclusion set asks set-wise, in SQL, because it is
+// answering about a whole batch inside a producer's pool build. The SQL is
+// the same five clauses over EXACT person keys, and callers that hold a
+// service may pass `servable` to get the canonicalising version instead --
+// which hermes' card route does. The residual difference is alias folding:
+// SQL alone will not know that a suppressed alias key is this person. That
+// makes the SQL-only default EXCLUDE FEWER people than the JS gate, never
+// more, so it can only ever offer a card the route then refuses -- the
+// failure it cannot produce is the wedged queue this finding is about.
+//
+// STABLE ORDER, AND WHAT A PEEK PROMISES (finding 13). A peek that teases
+// one card and a serve that hands over a different one is a lie the owner
+// can see. Two things make it not happen: the serving order is total and
+// stable -- page-first is FROZEN the first time a card is ordered (a page
+// finishing its background build between the peek and the serve must not
+// re-order the queue) and ties break on snapshot_id, which is monotonic
+// within a batch -- and the peek RETURNS the snapshot_id it would serve,
+// which the panel hands back as ?expect=<id>. A serve with `expect` serves
+// exactly that snapshot when it is still live, and otherwise ignores it and
+// falls through to the ordinary order. `expect` is not a capability: it can
+// only name a card the queue already holds and would already serve.
+//
 // `currentVersions` (optional: {kind: producer_version}) is the same
 // promise-versioning hermes.mjs's hydrateCards checks: a producer version is
 // a promise about how a card was chosen, and when the promise changes, the
@@ -113,12 +183,12 @@ export function pickProducer(db, { now = Date.now() } = {}) {
 // `servable` (optional: (card) => boolean) is the caller's unservability
 // gate -- see the CONSUMED model above. Omitted means "every unconsumed card
 // is servable", which is what this module's own producer-stub tests want.
-function hasLiveOfKind(db, cards, kind, currentVersions, modeFilter, servable) {
+function hasLiveOfKind(db, cards, kind, currentVersions, modeFilter, servable, { now, windowMs }) {
   const requiredVersion = currentVersions?.[kind];
   return (cards ?? []).some((card) => card.kind === kind
     && (requiredVersion === undefined || card.producer_version === requiredVersion)
     && (modeFilter === undefined || card.evidence?.mode === modeFilter)
-    && !isSnapshotConsumed(db, card.snapshot_id)
+    && isSnapshotLive(db, card.snapshot_id, { now, windowMs })
     && (servable === undefined || servable(card) === true));
 }
 
@@ -134,32 +204,81 @@ export function isSnapshotConsumed(db, snapshotId) {
   return db.prepare(CONSUMED_SQL).get(snapshotId) !== undefined;
 }
 
+// How long a snapshot stays in the queue at all -- the FRESH half of the
+// LIVE model above, and the same seven days producer.mjs's
+// RECENTLY_OFFERED_DAYS uses. One constant, because the turn check, the
+// exclusion set, the rel.cards prune and hydrateCards must all cut at the
+// same place: any two of them disagreeing is finding 4.
+export const LIVE_WINDOW_MS = 7 * 86_400_000;
+
+// The name owe.mjs and producer.mjs already import for the cross-kind
+// exclusion's own bound. It was always meant to be this same window; it is
+// now literally it, rather than a second copy that could drift.
+export const CROSS_KIND_WINDOW_MS = LIVE_WINDOW_MS;
+
+// FRESH: created within the window. An unknown snapshot id (a stub card in a
+// unit test) or a snapshot row that is somehow not there is NOT called stale
+// -- nothing about the world says it is, and inventing staleness would drop
+// a card the owner can still be shown. Same posture as isSnapshotConsumed's
+// own non-integer return.
+export function isSnapshotFresh(db, snapshotId, { now = Date.now(), windowMs = LIVE_WINDOW_MS } = {}) {
+  if (!Number.isInteger(snapshotId)) return true;
+  const row = db.prepare('SELECT created_at AS createdAt FROM rm_candidate_snapshot WHERE id = ?').get(snapshotId);
+  if (row === undefined || row.createdAt === null || row.createdAt === undefined) return true;
+  return Number(row.createdAt) > now - windowMs;
+}
+
+// The two halves this module can answer on its own: unconsumed AND fresh.
+// Servability is the caller's (`policy.servable` / liveQueuePersonKeys'
+// SQL); mode is the caller's too. See the LIVE model above.
+export function isSnapshotLive(db, snapshotId, { now = Date.now(), windowMs = LIVE_WINDOW_MS } = {}) {
+  return !isSnapshotConsumed(db, snapshotId) && isSnapshotFresh(db, snapshotId, { now, windowMs });
+}
+
 // CROSS-KIND EXCLUSION (review finding 11): the person keys one kind is
 // currently holding in its live queue, so the OTHER producer can leave them
 // alone. Without this a person eligible for both shows up as two cards --
 // offered twice, and dismissing one kind gates neither.
 //
-// "Live queue" here is the DB's own view of it, not the process's: the
-// newest batch per (kind, mode) -- the same MAX(batch_id) notion
-// hydrateCards restores from, grouped by evidence.mode so a reconnect mode
-// the owner is not currently on still counts -- minus every consumed
-// snapshot. Bounded by `windowMs` (7 days by default, matching
-// producer.mjs's RECENTLY_OFFERED_DAYS) so a batch that goes permanently
-// stale -- a producer_version bump nothing has re-produced past yet -- can
-// never wedge a person out of the other kind forever. Version is
-// deliberately NOT checked here: importing each producer's version constant
-// into the other would make owe.mjs and producer.mjs mutually circular, and
-// a stale batch self-heals on the next turn (its own cards do not count as
-// live above, so its kind produces immediately).
-export const CROSS_KIND_WINDOW_MS = 7 * 86_400_000;
-
-export function liveQueuePersonKeys(db, kind, { now = Date.now(), windowMs = CROSS_KIND_WINDOW_MS } = {}) {
+// "Live queue" here is the DB's own view of it, not the process's, and it is
+// the SET-WISE form of the LIVE model above -- all five clauses, so that
+// this and the turn check and the route cannot disagree (finding 8: it used
+// to apply neither the mode filter nor servability, so an investor-mode card
+// while rel.mode='any', or a card whose quote row was deleted, blocked the
+// other kind for a full week while never serving to anyone):
+//
+//   QUEUED     the newest batch per (kind, mode), the same MAX(batch_id)
+//              notion hydrateCards restores from
+//   FRESH      `windowMs`, defaulting to the one LIVE_WINDOW_MS
+//   UNCONSUMED the four consuming events
+//   IN MODE    `mode`, when the caller has one (reconnect does; owe's
+//              evidence.mode is always null, so passing a mode for 'owe'
+//              would correctly match nothing -- don't)
+//   SERVABLE   suppression, mute, the quote's context row, the commitment
+//              claim and its latest decision -- in SQL, over exact person
+//              keys. A caller holding a service may pass `servable` for the
+//              alias-folding version as well; see the LIVE model on why the
+//              SQL-only default can only under-exclude.
+//
+// `producerVersion` (optional) is the promise-versioning check. It is NOT
+// defaulted from the producers' own constants: importing each producer's
+// version into the other would make owe.mjs and producer.mjs mutually
+// circular, so the caller that knows both (hermes.mjs's card route) supplies
+// it, and a caller that does not gets the old self-healing behaviour -- a
+// stale batch's cards do not count as live for their own kind, so that kind
+// produces immediately and MAX(batch_id) moves past them.
+export function liveQueuePersonKeys(db, kind, {
+  now = Date.now(), windowMs = LIVE_WINDOW_MS,
+  mode = undefined, producerVersion = undefined, servable = undefined,
+} = {}) {
   try {
     const rows = db.prepare(
-      `SELECT DISTINCT s.person_key AS personKey
+      `SELECT s.id AS id, s.person_key AS personKey, s.kind AS kind, s.evidence AS evidence
          FROM rm_candidate_snapshot s
         WHERE s.kind = ?
           AND s.created_at > ?
+          AND (? IS NULL OR json_extract(s.evidence, '$.mode') = ?)
+          AND (? IS NULL OR s.producer_version = ?)
           AND s.batch_id IN (
             SELECT MAX(batch_id) FROM rm_candidate_snapshot
              WHERE kind = ? GROUP BY json_extract(evidence, '$.mode')
@@ -168,9 +287,54 @@ export function liveQueuePersonKeys(db, kind, { now = Date.now(), windowMs = CRO
             SELECT 1 FROM rm_card_event e
              WHERE e.snapshot_id = s.id
                AND e.event IN ('accepted','dismissed','muted','suppressed')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM rm_suppression sup WHERE sup.person_key = s.person_key
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM rm_mute m
+             WHERE m.until_at > ?
+               AND (m.person_key IS NULL OR m.person_key = s.person_key)
+               AND (m.kind IS NULL OR m.kind = s.kind)
+          )
+          AND (
+            json_extract(s.evidence, '$.quote_context_id') IS NULL
+            OR EXISTS (SELECT 1 FROM context c WHERE c.id = json_extract(s.evidence, '$.quote_context_id'))
+          )
+          AND (
+            json_extract(s.evidence, '$.commitment_claim_id') IS NULL
+            OR (
+              EXISTS (SELECT 1 FROM claim cl WHERE cl.id = json_extract(s.evidence, '$.commitment_claim_id'))
+              AND COALESCE((
+                SELECT d.action FROM claim_decision d
+                 WHERE d.claim_id = json_extract(s.evidence, '$.commitment_claim_id')
+                 ORDER BY d.created_at DESC, d.id DESC LIMIT 1
+              ), 'pending') <> 'reject'
+            )
           )`
-    ).all(kind, now - windowMs, kind);
-    return new Set(rows.map((r) => r.personKey));
+    ).all(
+      kind, now - windowMs,
+      mode ?? null, mode ?? null,
+      producerVersion ?? null, producerVersion ?? null,
+      kind, now
+    );
+    const keys = new Set();
+    for (const row of rows) {
+      if (servable !== undefined) {
+        // The caller's own gate wants a card, not a row: the same four
+        // fields hermes' cardBlockReason reads, decoded from the snapshot
+        // exactly as hydrateCards decodes them.
+        let evidence = {};
+        try { evidence = JSON.parse(row.evidence) ?? {}; } catch { evidence = {}; }
+        const asCard = {
+          snapshot_id: Number(row.id), personKey: row.personKey, kind: row.kind,
+          quoteContextId: evidence.quote_context_id ?? null, evidence,
+        };
+        if (servable(asCard) !== true) continue;
+      }
+      keys.add(row.personKey);
+    }
+    return keys;
   } catch {
     // A missing/pre-migration rm_candidate_snapshot means "no live queue",
     // not a producer failure -- same posture as hydrateCards' own wrap.
@@ -216,9 +380,19 @@ export function liveQueuePersonKeys(db, kind, { now = Date.now(), windowMs = CRO
 // itself: {owe:{at,empty}, reconnect:{at,empty}, ...any mode-scoped keys}).
 export function produceDailyBatch(db, policy, rel, { now = Date.now() } = {}) {
   const refillRetryMs = policy.refillRetryMs ?? REFILL_RETRY_MS;
+  const windowMs = policy.liveWindowMs ?? LIVE_WINDOW_MS;
   rel.refill ??= { owe: { at: null, empty: false }, reconnect: { at: null, empty: false } };
   rel.cards ??= [];
   rel.batch ??= { owe: null, reconnect: null };
+
+  // A STALE BATCH LEAVES THE QUEUE (finding 4). Nothing used to prune
+  // rel.cards, and hydrateCards restored the newest batch per (kind, mode)
+  // with no age bound at all -- so an 8-day-old unshown card held its kind's
+  // turn indefinitely while the exclusion set's own window had already let
+  // that person go, which is the double offer from two directions at once.
+  // Dropping it here, in the one place both the turn check and the route's
+  // serving queue read from, means the next request refills instead.
+  rel.cards = rel.cards.filter((card) => isSnapshotFresh(db, card.snapshot_id, { now, windowMs }));
 
   const P = pickProducer(db, { now });
   const Q = CARD_PRODUCERS.find((k) => k !== P);
@@ -245,11 +419,12 @@ export function produceDailyBatch(db, policy, rel, { now = Date.now() } = {}) {
   }
 
   const servable = policy.servable;
-  if (hasLiveOfKind(db, rel.cards, P, policy.currentVersions, modeFor(P), servable)) return { servingKind: P };
+  const age = { now, windowMs };
+  if (hasLiveOfKind(db, rel.cards, P, policy.currentVersions, modeFor(P), servable, age)) return { servingKind: P };
   const producedP = tryProduce(P);
   if (producedP.produced > 0) return { servingKind: P };
 
-  if (hasLiveOfKind(db, rel.cards, Q, policy.currentVersions, modeFor(Q), servable)) return { servingKind: Q };
+  if (hasLiveOfKind(db, rel.cards, Q, policy.currentVersions, modeFor(Q), servable, age)) return { servingKind: Q };
   const producedQ = tryProduce(Q);
   if (producedQ.produced > 0) return { servingKind: Q };
 
