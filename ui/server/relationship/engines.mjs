@@ -259,7 +259,7 @@ export function createEngine(config = {}) {
 // the flags below are that exact invocation, not a guess at one:
 //
 //   claude -p --output-format stream-json --verbose \
-//     --allowedTools WebSearch \
+//     --tools WebSearch --allowedTools WebSearch \
 //     --disallowedTools WebFetch,Bash,Read,Write,Edit,Glob,Grep,Agent \
 //     --permission-mode dontAsk --strict-mcp-config \
 //     --mcp-config '{"mcpServers":{}}' --settings '{}' --setting-sources '' \
@@ -269,20 +269,37 @@ export function createEngine(config = {}) {
 // EVERY isolation flag createClaudeCliEngine above already uses is kept
 // (empty MCP config, empty settings sources, no slash commands, no session
 // persistence, no browser, dontAsk permission mode) -- only `--tools ''`
-// (an empty tool set) is replaced with the allow/disallow pair that grants
-// exactly one tool, WebSearch, and names everything else closed by name
-// rather than leaving it to whatever the CLI's own default happens to be.
+// (an empty tool set) is widened, to `--tools WebSearch`: exactly one tool,
+// expressed with the same KIND of flag as the empty set it replaces.
+//
+// `--tools` IS THE EXCLUSIVE SET; `--allowedTools` IS NOT -- and this engine
+// shipped with only the latter. From the installed CLI's own `--help`
+// (checked 2026-09-08): "--tools <tools...>  Specify the list of available
+// tools from the built-in set. Use \"\" to disable all tools, \"default\" to
+// use all tools, or specify tool names". --allowedTools is the AUTO-APPROVE
+// list: it says which of the AVAILABLE tools need no permission prompt, not
+// which tools exist. So under `--permission-mode dontAsk`, every built-in
+// tool absent from --disallowedTools was both available and auto-approved --
+// NotebookRead, LS, TodoWrite, SlashCommand, KillShell, BashOutput among
+// them. A model that can read local files AND web-search in one turn is an
+// exfiltration path, and ops/EGRESS.json's decision for this invocation
+// rests on the words "exactly one enabled tool"; --tools is what makes that
+// sentence true. --allowedTools and --disallowedTools stay as belt: the
+// first keeps the one available tool from prompting, the second names the
+// dangerous ones closed even if a future CLI reads --tools differently.
+// ui/test/relationship-lookup.test.mjs pins this argv.
 // `--output-format stream-json --verbose` replaces `--output-format json`
 // because a single JSON envelope has no per-tool-call structure to read the
 // search's own URLs and result count off of -- see parseLookupStream
 // (lookup.mjs) for what those extra lines are read for.
 const LOOKUP_TIMEOUT_MS = 300_000;
 
-function claudeLookupArgs({ system, model }) {
+export function claudeLookupArgs({ system, model }) {
   return [
     '-p',
     '--output-format', 'stream-json',
     '--verbose',
+    '--tools', 'WebSearch',
     '--allowedTools', 'WebSearch',
     '--disallowedTools', 'WebFetch,Bash,Read,Write,Edit,Glob,Grep,Agent',
     '--permission-mode', 'dontAsk',
