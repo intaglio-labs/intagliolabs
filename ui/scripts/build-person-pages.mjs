@@ -12,16 +12,25 @@
 // touching the file directly. eligiblePool is read the same way, over the
 // existing GET /admin/relationship/pool route.
 //
-// NEVER LOGS PAGE TEXT. Each line of output is one JSON object with a HASHED
-// person key (sha256, first 8 hex chars -- never the real key, which is
-// frequently a legible "name:jane doe" string) plus counts and timing. The
-// real key stays in the request body sent to hermes; it never reaches this
-// process's stdout/stderr.
+// NEVER LOGS PAGE TEXT. Each line of output is one JSON object with a
+// PSEUDONYMISED person key plus counts and timing. The real key stays in the
+// request body sent to hermes; it never reaches this process's stdout/stderr.
+//
+// THE HASH IS SALTED, and it has to be. ~~sha256(personKey).slice(0, 8),
+// "never the real key".~~ An unsalted digest over a key space that IS the
+// people table is not a pseudonym, it is an index into it: the key space is
+// a few thousand legible strings ("name:jane doe"), so anyone holding the
+// output and a name list recovers every row by hashing the list. Corrected
+// 2026-09 with a per-machine secret from ~/.hazlie/secrets (0600, created on
+// first use), which is exactly the boundary that makes the digest useless
+// without the box it was produced on -- the same posture as every other
+// secret this system keeps there. A truncated hash is still a pseudonym for
+// grouping lines, not an anonymiser, and this output is a dev log either way.
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 
 function fail(message) {
   process.stderr.write(`${message}\n`);
@@ -68,8 +77,44 @@ function readHermesToken() {
   return null;
 }
 
+// The per-machine pseudonym secret, read once and created on first use.
+// `wx` so two concurrent runs cannot each write a different salt: the loser
+// of that race reads the winner's file rather than overwriting it, which
+// matters because a changed salt silently renames every person in the output.
+function readPseudonymSalt() {
+  const path = process.env.HAZLIE_PSEUDONYM_SALT_FILE
+    ?? join(homedir(), '.hazlie', 'secrets', 'pseudonym-salt.txt');
+  const existing = () => {
+    try {
+      const text = readFileSync(path, 'utf8').trim();
+      return text.length >= 32 ? text : null;
+    } catch {
+      return null;
+    }
+  };
+  const found = existing();
+  if (found !== null) return found;
+
+  const salt = randomBytes(32).toString('hex');
+  const previousUmask = process.umask(0o077);
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, `${salt}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    return salt;
+  } catch (error) {
+    const raced = existing();
+    if (raced !== null) return raced;
+    fail(`could not create the pseudonym salt at ${path}: ${error?.message ?? error}`);
+    return null;
+  } finally {
+    process.umask(previousUmask);
+  }
+}
+
+const PSEUDONYM_SALT = readPseudonymSalt();
+
 function hashPersonKey(personKey) {
-  return createHash('sha256').update(personKey, 'utf8').digest('hex').slice(0, 8);
+  return createHash('sha256').update(`${PSEUDONYM_SALT}\u0000${personKey}`, 'utf8').digest('hex').slice(0, 8);
 }
 
 const hermesBase = process.env.HAZLIE_HERMES_URL ?? 'http://127.0.0.1:51789';

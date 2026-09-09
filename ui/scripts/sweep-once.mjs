@@ -153,13 +153,19 @@ async function main() {
   try {
     json = JSON.parse(text);
   } catch {
-    process.stdout.write(`${JSON.stringify({ error: res.status, message: 'non-JSON response' })}\n`);
+    process.stdout.write(`${JSON.stringify({ status: res.status, error: 'non-JSON response' })}\n`);
     process.exit(1);
     return;
   }
 
   if (!res.ok) {
-    process.stdout.write(`${JSON.stringify({ error: res.status, ...json })}\n`);
+    // `status` on its own key, and hermes' body under `body` rather than
+    // spread over the top level. Spreading it meant hermes' own `error`
+    // string overwrote the HTTP status this line exists to report, so a 401
+    // (no token), a 404 (an old build with no such route) and a 500 all
+    // printed the same shape with the status gone -- and the one number that
+    // tells those three apart is the one that was lost.
+    process.stdout.write(`${JSON.stringify({ status: res.status, error: json?.error ?? null, body: json })}\n`);
     process.exit(1);
     return;
   }
