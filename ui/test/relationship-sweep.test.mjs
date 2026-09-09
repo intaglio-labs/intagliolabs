@@ -15,7 +15,7 @@ import { ownerConfigPath, markPersonSubRoles } from '../server/people/owner.mjs'
 import {
   groundSweep, newRowsFor, sweepScope, storeSweep, sweepGate, runSweepPass, applySweepDecision,
   sweepCallCap, sweepStatus, SWEEP_DAILY_CALL_CAP_DEFAULT,
-  SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, tokensEstFor,
+  SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, SWEEP_MIN_ROW_CHARS, tokensEstFor,
 } from '../server/relationship/sweep.mjs';
 
 // A context row from a non-message source (e.g. an imported LinkedIn
@@ -1156,4 +1156,136 @@ test('storeSweep leaves no receiptless claim behind when a later insert fails', 
   );
   assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM claim_source').get().n), 0);
   assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM person_sweep_proposal').get().n), 0);
+});
+
+// ---------------------------------------------------------------------------
+// Review F finding 11: THE ROWS BEHIND THE OVERSIZED ONE. The THEM loop
+// `break`d on the first row that did not fit the remaining budget. Because
+// admission is newest-first, everything it broke past was OLDER -- and
+// maxContextId had already moved to the oversized row that WAS shown, so
+// those older rows ended up below the cursor: never offered again, never
+// read by a model, gone.
+// ---------------------------------------------------------------------------
+
+// Several THEM rows in ONE episode (one chat_guid, minutes apart), with one
+// owner line so buildEpisodes keeps the run. `themChars` is read oldest-first.
+function seedThemRun(db, key, name, themChars) {
+  insertPerson(db, { key, name });
+  const chatGuid = 'chat:them-run';
+  const base = NOW - 2 * DAY;
+  db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', 'go on', ?)"
+  ).run(base, JSON.stringify({ chat_guid: chatGuid, is_from_me: true }));
+  const meId = Number(db.prepare('SELECT last_insert_rowid() AS id').get().id);
+  db.prepare(
+    `INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+     VALUES (?, ?, 'imessage', 'counterparty', 0, 1, 0, 1, ?)`
+  ).run(key, meId, chatGuid);
+
+  const ids = [];
+  themChars.forEach((chars, i) => {
+    const id = Number(db.prepare(
+      "INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', ?, ?)"
+    ).run(base + (i + 1) * 60_000, `line ${i} `.padEnd(chars, 'x'),
+      JSON.stringify({ chat_guid: chatGuid, is_from_me: false })).lastInsertRowid);
+    db.prepare(
+      `INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+       VALUES (?, ?, 'imessage', 'counterparty', 1, 0, 0, 1, ?)`
+    ).run(key, id, chatGuid);
+    ids.push(id);
+  });
+  return ids;
+}
+
+test('older, smaller THEM rows behind an oversized newest one are still shown, not stranded below the cursor', () => {
+  const db = openDb(':memory:');
+  const key = 'name:rows behind';
+  // Oldest first: two small lines, then a newest line bigger than the whole
+  // budget. Newest-first admission reaches the big one first, and the old
+  // loop stopped there -- with the cursor already past all three.
+  const [oldest, middle, newest] = seedThemRun(db, key, 'Rows Behind', [500, 700, SWEEP_MAX_CHARS + 3000]);
+
+  const gathered = newRowsFor(db, key, 0);
+  const themIds = gathered.excerpts.filter((e) => e.speaker === 'THEM').map((e) => e.contextId).sort((a, b) => a - b);
+  assert.deepEqual(themIds, [oldest, middle, newest],
+    'every THEM row the cursor is about to move past was actually shown');
+  assert.equal(gathered.maxContextId, newest);
+
+  // Each row is truncated to its fair share, so the oversized one no longer
+  // eats the rows behind it.
+  const byId = new Map(gathered.excerpts.map((e) => [e.contextId, e]));
+  assert.equal(byId.get(newest).text.length, Math.floor(SWEEP_MAX_CHARS / 3));
+  assert.equal(byId.get(oldest).text.length, 500, 'a row that fits its share is untouched');
+  assert.equal(byId.get(middle).text.length, 700);
+});
+
+test('a quote from an oversized row\'s discarded tail still cannot ground', () => {
+  const db = openDb(':memory:');
+  const key = 'name:tail quote';
+  const chatGuid = 'chat:tail';
+  insertPerson(db, { key, name: 'Tail Quote' });
+  db.prepare("INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', 'go on', ?)")
+    .run(NOW - 2 * DAY, JSON.stringify({ chat_guid: chatGuid, is_from_me: true }));
+  const meId = Number(db.prepare('SELECT last_insert_rowid() AS id').get().id);
+  db.prepare(
+    `INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+     VALUES (?, ?, 'imessage', 'counterparty', 0, 1, 0, 1, ?)`
+  ).run(key, meId, chatGuid);
+  const text = `${'head '.padEnd(4000, 'x')}TAIL-ONLY-PHRASE`;
+  const themId = Number(db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', ?, ?)"
+  ).run(NOW - 2 * DAY + 60_000, text, JSON.stringify({ chat_guid: chatGuid, is_from_me: false })).lastInsertRowid);
+  db.prepare(
+    `INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+     VALUES (?, ?, 'imessage', 'counterparty', 1, 0, 0, 1, ?)`
+  ).run(key, themId, chatGuid);
+
+  const gathered = newRowsFor(db, key, 0, { maxChars: 1000 });
+  assert.equal(gathered.findQuoteContextId('TAIL-ONLY-PHRASE'), null,
+    'the model was never shown the tail, so nothing in it can be a receipt');
+  assert.ok(gathered.findQuoteContextId('head') !== null, 'what it WAS shown still grounds');
+});
+
+test('many THEM rows shrink to the per-row floor rather than dropping any of them', () => {
+  const db = openDb(':memory:');
+  const key = 'name:many them rows';
+  const ids = seedThemRun(db, key, 'Many Them Rows', Array.from({ length: 60 }, () => 400));
+
+  const gathered = newRowsFor(db, key, 0);
+  const them = gathered.excerpts.filter((e) => e.speaker === 'THEM');
+  assert.equal(them.length, ids.length, 'sixty rows, sixty excerpts: none skipped');
+  for (const e of them) {
+    assert.equal(e.text.length, SWEEP_MIN_ROW_CHARS,
+      'the share is below the floor, so the floor is what each row gets');
+  }
+  assert.equal(gathered.maxContextId, Math.max(...ids));
+});
+
+// ---------------------------------------------------------------------------
+// Review F finding 6: A SPENT MODEL CALL IS SPENT. bumpRun sat inside the
+// per-person transaction, so the catch path's ROLLBACK discarded the call
+// count -- and sweepGate's daily cap SUMS model_calls, so the cap
+// under-counted in exactly the case the incremental bump exists for.
+// ---------------------------------------------------------------------------
+
+test('a model call already made is counted even when the cursor write fails', async () => {
+  const db = openDb(':memory:');
+  const key = 'name:cursor write fails';
+  insertPerson(db, { key, name: 'Cursor Write Fails', role: 'business', sent: 10, received: 10 });
+  insertThread(db, key, { ts: NOW - 1 * DAY, them: 'something new to sweep', me: 'ok' });
+  // Reads still work (sweepScope), writes abort: the cursor upsert throws
+  // AFTER the engine has already answered and been paid for.
+  db.exec(`CREATE TRIGGER no_cursor_writes BEFORE INSERT ON person_sweep_cursor
+           BEGIN SELECT RAISE(ABORT, 'cursor write refused'); END;`);
+
+  const engine = fakeSweepEngine(() => JSON.stringify({ tags: [], firm: null, page_lines: [] }));
+  await assert.rejects(() => runSweepPass(db, engine, {}, { powerMode: 'trickle', now: NOW }));
+  assert.equal(engine.counters.calls, 1, 'the call really was made');
+
+  const run = db.prepare('SELECT * FROM person_sweep_run ORDER BY id DESC LIMIT 1').get();
+  assert.equal(Number(run.model_calls), 1,
+    'the daily cap sums this column: a call the rollback forgot is a call the cap cannot see');
+  assert.equal(Number(run.swept), 1);
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM person_sweep_cursor').get().n), 0,
+    'and the cursor did NOT move -- those rows are offered again next pass');
 });

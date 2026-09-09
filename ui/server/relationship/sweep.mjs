@@ -24,10 +24,9 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildEpisodes, isQuotable } from '../memory/episodes.mjs';
-import { SUB_ROLES } from '../people/subRoles.mjs';
+import { SUB_ROLES, subRolesFor } from '../people/subRoles.mjs';
 import { isAnonymousContact } from '../people/map.mjs';
 import { markPersonSubRoles, loadOwner } from '../people/owner.mjs';
-import { subRolesFor } from '../people/subRoles.mjs';
 import { PERSON_SOURCE_POLICY } from '../people/graph.mjs';
 import { SECTION_KIND, alreadyStored } from './pages.mjs';
 
@@ -67,6 +66,14 @@ export const SWEEP_PROMPT_PATH = join(here, '..', '..', '..', 'prompts', 'sweep.
 // billing number.
 export const SWEEP_MAX_CHARS = 6_000;
 export const SWEEP_MAX_EPISODES = 8;
+// The smallest a single THEM row may be truncated to. Every THEM row in the
+// chosen episodes is shown (see newRowsFor's own comment on why none may be
+// skipped), so the per-row share shrinks as the row count grows; this floor
+// is where it stops shrinking, because an excerpt too short to carry a
+// sentence is not evidence a model can read. It is also what makes
+// SWEEP_MAX_CHARS a target rather than a hard cap: past roughly fifty THEM
+// rows in one pass the floor wins and the total goes over.
+export const SWEEP_MIN_ROW_CHARS = 120;
 export const SWEEP_BUDGET = Object.freeze({ full: 12, trickle: 3 });
 
 // A LOCAL rolling call cap over the sweep's own run log (conflict #4: PCC
@@ -224,20 +231,34 @@ function isReceiptItem(v) {
 // could never be shown again).
 //
 // So, in order:
-//   1. THEM rows, newest context id first, while they fit. If the NEWEST one
-//      alone overflows the whole budget it is TRUNCATED in rather than
-//      skipped -- the evidence has to be shown for the cursor to be allowed
-//      past it.
+//   1. EVERY THEM row, newest context id first, each truncated to its fair
+//      share of the budget -- see the per-row share below.
 //   2. ME rows into whatever budget is left, newest first. Tone only: a ME
 //      row can never move the cursor (see maxContextId below), so losing one
 //      to the budget costs nothing that a later pass cannot recover.
 //
-// maxContextId is the max over SHOWN THEM ROWS ONLY. The backlog of a heavy
-// person is still bounded by the budget BY DESIGN -- older THEM rows beyond
-// the budget are skipped, not replayed, and they sit BELOW the newest shown
-// row, which is what makes advancing to it sound. What is no longer possible
-// is advancing past a THEM row NEWER than everything shown. Admitted rows
-// are re-sorted chronologically afterward for display, same as
+// NOTHING IS SKIPPED FOR SIZE ANY MORE (review F finding 11). This loop used
+// to `break` on the first THEM row that did not fit: one oversized row set
+// the budget to zero and every OLDER, SMALLER THEM row behind it was
+// dropped -- while maxContextId had already moved past them, because it is
+// the max over shown rows and the oversized row was shown. Those rows were
+// then permanently unswept: below the cursor, so never offered again, and
+// never read by a model. `continue` alone does not fix that (the older rows
+// still sit below a cursor that moved), and holding the cursor at the oldest
+// skipped row cannot work either while admission is newest-first -- the
+// newest rows would be re-shown on every pass and the backlog would never
+// drain. So every THEM row is admitted, truncated to
+// max(SWEEP_MIN_ROW_CHARS, floor(maxChars / <THEM row count>)): with one row
+// that is the whole budget (unchanged), with four it is 1,500 chars each,
+// and only past ~50 rows does the floor let the total exceed
+// SWEEP_MAX_CHARS -- which makes that constant a target rather than a hard
+// cap, and is the price of the guarantee that a row no model was shown is
+// never marked as read. findQuoteContextId matches against the truncated
+// text, so a quote from a discarded tail still cannot ground.
+//
+// maxContextId is the max over SHOWN THEM ROWS ONLY -- unchanged as a rule,
+// and now trivially sound: every THEM row in the chosen episodes IS shown.
+// Admitted rows are re-sorted chronologically afterward for display, same as
 // gatherPersonContext.
 export function newRowsFor(db, personKey, cursor, { maxEpisodes = SWEEP_MAX_EPISODES, maxChars = SWEEP_MAX_CHARS } = {}) {
   // Joined against context and filtered to SWEEP_SOURCES, same as
@@ -311,28 +332,26 @@ export function newRowsFor(db, personKey, cursor, { maxEpisodes = SWEEP_MAX_EPIS
   let charBudget = maxChars;
   let maxContextId = cursorId;
 
-  // (1) THEM first: this is the evidence, and the cursor is only ever allowed
-  // to advance over a THEM row that was actually shown.
-  for (const c of candidates) {
-    if (c.speaker !== 'THEM') continue;
-    if (c.text.length > charBudget) {
-      // The NEWEST THEM row alone overflows the whole budget: truncate it in
-      // rather than skip it. Skipping it would either strand this person as a
-      // permanent candidate or (worse) advance the cursor past a row no model
-      // ever saw. A truncated excerpt is still a real excerpt -- and because
-      // findQuoteContextId below matches against the truncated text, a quote
-      // from the discarded tail cannot ground either.
-      if (excerpts.length === 0 && charBudget > 0) {
-        excerpts.push({ contextId: c.contextId, speaker: c.speaker, text: c.text.slice(0, charBudget), ts: c.ts });
-        maxContextId = Math.max(maxContextId, c.contextId);
-        charBudget = 0;
-      }
-      break;
-    }
-    charBudget -= c.text.length;
-    excerpts.push({ contextId: c.contextId, speaker: c.speaker, text: c.text, ts: c.ts });
+  // (1) THEM first, and ALL of them: this is the evidence, and the cursor is
+  // only ever allowed to advance over a THEM row that was actually shown --
+  // so a row this pass declines to show is a row the cursor can never get
+  // past without losing it. Each row is truncated to its fair share of the
+  // budget rather than dropped; see the header comment for why skipping and
+  // holding the cursor are both worse.
+  const themRows = candidates.filter((c) => c.speaker === 'THEM');
+  const perRowChars = themRows.length === 0
+    ? maxChars
+    : Math.max(SWEEP_MIN_ROW_CHARS, Math.floor(maxChars / themRows.length));
+  for (const c of themRows) {
+    const text = c.text.length > perRowChars ? c.text.slice(0, perRowChars) : c.text;
+    charBudget -= text.length;
+    excerpts.push({ contextId: c.contextId, speaker: c.speaker, text, ts: c.ts });
     maxContextId = Math.max(maxContextId, c.contextId);
   }
+  // The ME rows below get what is LEFT, and a heavy person may have left
+  // nothing (or less than nothing -- the per-row floor can overshoot). Tone
+  // is the first thing to give.
+  charBudget = Math.max(0, charBudget);
 
   // (2) ME rows into the remainder, newest first, and NEVER into
   // maxContextId: the owner's own words are tone for the model, not evidence
@@ -804,12 +823,24 @@ export async function runSweepPass(db, engine, policy, {
     );
 
     // The pass's counters are written to person_sweep_run AS THEY HAPPEN,
-    // inside the same transaction as that person's cursor write, not only by
-    // the terminal UPDATE below. sweepGate's daily call cap SUMS model_calls
-    // over this table, so a pass that dies mid-loop (a thrown engine, a
-    // killed process, a machine that slept) used to leave model_calls = 0 and
-    // every call it made was invisible to the next pass's cap -- the cap
-    // undercounted exactly when it mattered most.
+    // not only by the terminal UPDATE below. sweepGate's daily call cap SUMS
+    // model_calls over this table, so a pass that dies mid-loop (a thrown
+    // engine, a killed process, a machine that slept) used to leave
+    // model_calls = 0 and every call it made was invisible to the next
+    // pass's cap -- the cap undercounted exactly when it mattered most.
+    //
+    // BEFORE the per-person transaction, not inside it (review F finding 6,
+    // and the same order lookup.mjs's own bumpRunCalls already uses). The
+    // comment here used to claim the write was durable while sitting inside
+    // a BEGIN whose catch path ROLLBACKs -- so the one failure mode this
+    // exists for, a cursor write that throws, discarded the call count as
+    // well and the cap under-counted again. A call the engine has already
+    // answered is spent whatever happens to the cursor afterwards, so it is
+    // recorded first and separately. The cost of that order is the opposite,
+    // survivable error: a process killed between the bump and the COMMIT
+    // leaves a counted call whose cursor did not move, so the next pass
+    // re-offers those rows -- an over-count of the cap, which only ever
+    // makes the machine do less.
     const bumpRun = db.prepare(
       `UPDATE person_sweep_run
          SET swept = swept + ?, model_calls = model_calls + ?, proposed = proposed + ?,
@@ -832,6 +863,7 @@ export async function runSweepPass(db, engine, policy, {
       // failure to get a usable answer at all (engine-error/parse-error) holds
       // the cursor, so the same rows are offered again next pass.
       const advance = result.status === 'proposed' || result.status === 'empty' || result.status === 'ungrounded';
+      bumpRun.run(1, result.calls, result.proposed, result.dropped, result.tokensEst, sweepRunId);
       db.exec('BEGIN');
       try {
         if (advance) {
@@ -839,7 +871,6 @@ export async function runSweepPass(db, engine, policy, {
         } else {
           holdCursor.run(candidate.personKey, candidate.cursor, now, result.status);
         }
-        bumpRun.run(1, result.calls, result.proposed, result.dropped, result.tokensEst, sweepRunId);
         db.exec('COMMIT');
       } catch (err) {
         db.exec('ROLLBACK');
