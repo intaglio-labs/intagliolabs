@@ -676,6 +676,16 @@
       "credential": "none of ours -- the owner is signing in to Meta in a window whose cookies are harvested for the bridge; nothing is sent to this host that Meta did not put in the page",
       "decision": "SUBFRAME ONLY, and that distinction is the whole point: fbsbx.com is deliberately absent from allowedHosts, so the window can never NAVIGATE here \u2014 the main frame is where a password is typed. Measured 2026-08-30 as \"blocked-subframe Messenger www.fbsbx.com\", after which the 2FA page sat with a 2.5MB DOM rendering nothing; five theories were spent on that blank page, including a wrong conclusion that Meta refuses embedded webviews outright, before the fence itself was instrumented.",
       "evidence": "connect/lib/bridge.mjs webLogin.allowedFrameHosts for messenger and instagram; ~/.hazlie/logs/bridge-login.log blocked-subframe"
+    },
+    {
+      "host": "developers.google.com",
+      "kind": "user-browser-link",
+      "component": "site/privacy/index.html",
+      "direction": "none",
+      "purpose": "Link target on the public privacy page: the Google API Services User Data Policy the page commits to (Limited Use). A hyperlink for the reader, never a request the software makes.",
+      "credential": "none -- this process opens no socket here",
+      "decision": "2026-09-09 owner: the privacy page must cite the policy Google's verification requires; the link is followed only by a person in their own browser.",
+      "evidence": "widget/src/Bridge.swift allowedExternal https://myaccount.google.com/apppasswords"
     }
   ],
   "_loopback": [
