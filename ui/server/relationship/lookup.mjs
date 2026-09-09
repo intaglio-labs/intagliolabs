@@ -828,28 +828,42 @@ const PRESENT_TENSE_RE = /\b(?:now|currently|presently|no longer|these days|as o
 // of the provider's synthesized prose and no title carries it, null when it
 // is neither -- which is a grounding failure, not a weak change.
 //
-// TITLE IS CHECKED FIRST, and that ordering is review finding 13. A provider
-// routinely echoes a page's title inside its own summary prose, so a quote
-// that is a title AND appears in prose used to answer 'snippet' -- which is
-// exactly the strong-evidence answer, and it bypassed every title-only rule
-// (the present-tense drop, the 'ambiguous' downgrade) for the one quote
-// shape that caused lookup_log 4520. A title does not become a published
-// statement about somebody by being repeated.
+// ~~TITLE IS CHECKED FIRST, and that ordering is review finding 13.~~
+// REVERSED 2026-09 (review G finding 12), and the reasoning it replaced is
+// worth keeping because half of it was right. It said: a provider routinely
+// echoes a page's title inside its own summary prose, so a quote that is a
+// title AND appears in prose answered 'snippet' -- the strong-evidence
+// answer -- and bypassed every title-only rule (the present-tense drop, the
+// 'ambiguous' downgrade) for the exact quote shape that caused lookup_log
+// 4520. "A title does not become a published statement about somebody by
+// being repeated" is true.
 //
-// The `snippetText ?? resultText` fallback keeps every hand-built `observed`
-// fixture (and any caller predating the split) working: without the split,
-// everything reads as 'snippet', exactly the behaviour this file had before.
+// What it got wrong is which text it was reasoning about. Checking title
+// first made the WEAKER label win whenever both applied, so a sentence the
+// provider actually wrote in its own prose -- real synthesized evidence --
+// was labelled 'title' and then dropped by the present-tense rule for
+// happening to be a substring of some link's title. The label now describes
+// what the quote IS: found verbatim in the prose snippet, it is a snippet;
+// absent from the prose, and carried only by a title, it is a title.
+//
+// AND THE CASE THE REORDER WAS ACTUALLY FOR IS STILL COVERED. Without a
+// separate `snippetText`, the fallback is `resultText`, which still CONTAINS
+// the `Links:` block -- so a title-only quote would match it and read as
+// prose it never appeared in. Prose therefore only wins when the prose is
+// genuinely separable; on the fallback the title is checked first, which is
+// precisely the 4520 shape. Legacy callers with neither field keep reading
+// as 'snippet', exactly the behaviour this file had before the split.
 export function evidenceKindFor(quote, observed) {
   const q = String(quote ?? '');
   if (q.length === 0) return null;
   const links = Array.isArray(observed?.links) ? observed.links : [];
-  for (const link of links) {
-    if (typeof link?.title === 'string' && link.title.length > 0 && link.title.includes(q)) return 'title';
-  }
-  const snippetText = typeof observed?.snippetText === 'string'
-    ? observed.snippetText
-    : String(observed?.resultText ?? '');
-  if (snippetText.includes(q)) return 'snippet';
+  const inTitle = links.some((link) =>
+    typeof link?.title === 'string' && link.title.length > 0 && link.title.includes(q));
+  const proseSeparated = typeof observed?.snippetText === 'string';
+  const prose = proseSeparated ? observed.snippetText : String(observed?.resultText ?? '');
+  if (proseSeparated && prose.includes(q)) return 'snippet';
+  if (inTitle) return 'title';
+  if (prose.includes(q)) return 'snippet';
   return null;
 }
 
@@ -1428,32 +1442,62 @@ export function storeLookup(db, {
   const insChange = db.prepare(
     `INSERT INTO person_lookup_change(claim_id, log_id, kind, url, change_date, applied_at,
        evidence_kind, contradicts_anchor, contradicts_anchor_unknown)
-     VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0)`
+     VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)`
   );
   // The alreadyProposed analogue -- see this function's header. Keyed on
-  // (person, url, quote), which is what a receipt IS here...
+  // (person, url, quote) -- which is what a receipt IS here -- plus the
+  // claim's own TEXT.
   //
-  // ... and, since review finding 5, on the ANCHOR FLAG as well. It used to
-  // be blind to it, and that blindness had a specific victim: a row written
-  // before the anchor columns existed (contradicts_anchor stamped 0 by the
-  // v14 ALTER's default, or marked unknown by the back-fill) permanently
-  // blocked a re-lookup from storing a correctly-flagged version of the same
-  // (url, quote). The dedupe now blocks only a row whose flag AGREES with
-  // what we are about to write and is not itself unknown, so a re-lookup can
-  // supersede a stale or unknown verdict exactly once, and the ordinary
-  // monthly "same page again" case still dedupes as before.
+  // ~~"and, since review finding 5, on the ANCHOR FLAG as well ... so a
+  // re-lookup can supersede a stale or unknown verdict exactly once"~~
+  // REVERTED 2026-09 (review G finding 4). Requiring
+  // `contradicts_anchor_unknown = 0` meant an unknown row could never match
+  // the dedupe at all -- and healLookupColumns' back-fill marks EVERY row
+  // with no evidence_kind unknown, so every pre-columns row was permanently
+  // undedupable: each monthly re-lookup returning the same page inserted
+  // another pending claim beside it, forever. Nothing clears the column
+  // (no UPDATE anywhere touched it), so the honest-unknown row stayed
+  // withheld and dead while its duplicates accumulated. Matching on
+  // `contradicts_anchor = ?` had the milder version of the same defect: a
+  // stale 0 and a fresh 1 for one receipt could coexist as two claims.
+  //
+  // Supersession is done by HEALING the matched row's flags in place instead
+  // (see the dedupe branch below), which is what "a re-lookup can supersede
+  // a stale verdict" should have meant. The flag columns describe a verdict
+  // about an assertion, not the assertion itself, so re-computing them is
+  // not a rewrite of anything the owner may have judged -- and nothing
+  // append-only is touched: no claim text, no claim_source, no
+  // claim_decision.
+  //
+  // WHY THE TEXT IS IN THE KEY, which the finding did not ask for and
+  // soundness does. Two different assertions can cite one (url, quote) --
+  // "was listed as a Software Engineer" and "is now at Verily, not Klaviyo"
+  // both quote the same title -- and healing flags computed for one onto the
+  // other would label a claim with a verdict about a different sentence.
+  // Differing text is therefore a different claim and still inserts. The
+  // duplicate the finding is about is the same page saying the same thing
+  // again, and that is what this now collapses.
   const selDup = db.prepare(
-    `SELECT c.id AS id FROM claim c
+    `SELECT c.id AS id, plc.evidence_kind AS evidenceKind,
+            COALESCE(plc.contradicts_anchor, 0) AS contradictsAnchor,
+            COALESCE(plc.contradicts_anchor_unknown, 0) AS contradictsAnchorUnknown
+       FROM claim c
        JOIN person_lookup_change plc ON plc.claim_id = c.id
        JOIN claim_source cs ON cs.claim_id = c.id AND cs.source = 'web'
      WHERE c.subject = 'person' AND c.subject_person_key = ? AND plc.url = ? AND cs.quote = ?
-       AND COALESCE(plc.contradicts_anchor, 0) = ?
-       AND COALESCE(plc.contradicts_anchor_unknown, 0) = 0
+       AND c.text = ?
        AND COALESCE(
          (SELECT d.action FROM claim_decision d WHERE d.claim_id = c.id ORDER BY d.id DESC LIMIT 1),
          'pending'
        ) NOT IN ('reject', 'retract')
      LIMIT 1`
+  );
+  // The heal. Only the three verdict columns, and only when one of them
+  // actually differs, so a re-lookup that agrees writes nothing at all.
+  const healChange = db.prepare(
+    `UPDATE person_lookup_change
+        SET evidence_kind = ?, contradicts_anchor = ?, contradicts_anchor_unknown = ?
+      WHERE claim_id = ?`
   );
   const maxChangedAt = db.prepare('SELECT MAX(store_changed_at) AS m FROM context').get();
 
@@ -1469,6 +1513,26 @@ export function storeLookup(db, {
   // direction, and the reason the caller's own `contradictsAnchor` is
   // honoured below as a FLOOR.
   const titles = titleCompanies(observed);
+  // THE ANCHOR CHECK COULD NOT BE RUN. `titles` is the corroboration set for
+  // contradictsAnchorFirm's second rule, and it is empty precisely when
+  // parseLookupStream could not read the `Links:` block -- at which point
+  // that rule cannot fire and a `false` from the check means "not detected",
+  // not "checked and clean". insChange used to write a literal 0 into
+  // contradicts_anchor_unknown regardless, so a lookup that demonstrably
+  // could not check the anchor recorded "checked, no contradiction" (review
+  // G finding 5): linksParseFailed was persisted on lookup_evidence and
+  // counted in lookupStatus while having no effect on the one flag it was
+  // introduced to justify.
+  //
+  // A DETECTED contradiction is still KNOWN: rule 1 (departure from the
+  // anchor named in the text itself) needs no titles, so a `true` here is a
+  // verdict, not a guess. Only a negative is downgraded.
+  //
+  // `observed === null` is deliberately NOT unknown. That is the caller with
+  // no stream in hand -- a test seam, and the path where the caller's own
+  // contradictsAnchor is honoured as a floor -- rather than a lookup whose
+  // evidence came back unreadable.
+  const anchorCheckIncomplete = observed !== null && observed?.linksParseFailed === true;
 
   // ONE transaction for the whole batch -- unless the caller already opened
   // one, in which case this joins it rather than nesting (SQLite has no
@@ -1536,7 +1600,20 @@ export function storeLookup(db, {
         skipped += 1;
         continue;
       }
-      if (selDup.get(personKey, item.url, item.quote, contradictsAnchor ? 1 : 0) !== undefined) {
+      const anchorUnknown = !contradictsAnchor && anchorCheckIncomplete;
+      const dup = selDup.get(personKey, item.url, item.quote, item.text.trim());
+      if (dup !== undefined) {
+        // Same receipt, same assertion: no second claim. Heal the verdict
+        // columns if this lookup knows better than the stored row did --
+        // which is how a back-filled unknown gets cleared, since nothing
+        // else in this file ever writes that column.
+        if (
+          (dup.evidenceKind ?? null) !== evidenceKind
+          || Number(dup.contradictsAnchor) !== (contradictsAnchor ? 1 : 0)
+          || Number(dup.contradictsAnchorUnknown) !== (anchorUnknown ? 1 : 0)
+        ) {
+          healChange.run(evidenceKind, contradictsAnchor ? 1 : 0, anchorUnknown ? 1 : 0, Number(dup.id));
+        }
         duplicates += 1;
         continue;
       }
@@ -1557,7 +1634,8 @@ export function storeLookup(db, {
 
       const claimId = Number(insClaim.run(distillRunId, personKey, item.text, now, now).lastInsertRowid);
       insSource.run(claimId, contextId, entityId, contentHash, item.quote);
-      insChange.run(claimId, logId, kind, item.url, date, evidenceKind, contradictsAnchor ? 1 : 0);
+      insChange.run(claimId, logId, kind, item.url, date, evidenceKind,
+        contradictsAnchor ? 1 : 0, anchorUnknown ? 1 : 0);
       stored += 1;
     }
     if (ownTransaction) db.exec('COMMIT');

@@ -1775,21 +1775,55 @@ test('an unreadable Links block is recorded, never silently degraded to zero lin
   assert.equal(row.evidence.linksParseFailed, true);
 });
 
-// (13) A title echoed in the provider's prose is still a title.
-test('a quote that is both a returned title and prose is classified as a title', () => {
+// ~~(13) A title echoed in the provider's prose is still a title.~~
+// REVERSED 2026-09 (review G finding 12). Checking the title first made the
+// WEAKER label win whenever both applied, so a sentence the provider really
+// did write in its own prose was labelled 'title' and dropped for happening
+// to be a substring of some link's title. What the reorder was actually
+// reaching for is the FALLBACK case below, where prose and titles are not
+// separable at all -- and that is the half it never fixed.
+test('a quote verbatim in the provider prose is a snippet, even when a title carries it too', () => {
   const observed = parseLookupStream(lookupStream({
     query: '"Nikzad Khani" "Klaviyo"',
     links: [{ title: KHANI_TITLE, url: KHANI_URL }],
-    // The provider repeats the title inside its own summary, which is
-    // ordinary behaviour and used to promote the quote to 'snippet'.
     prose: `The top result reads: ${KHANI_TITLE}. No dates were given.`,
     envelope: { identity_confidence: 'match', changes: [] },
   }));
   assert.ok(observed.snippetText.includes(KHANI_TITLE), 'the title really is inside the prose here');
-  assert.equal(evidenceKindFor(KHANI_TITLE, observed), 'title', 'a repeated title is not a published statement');
+  assert.equal(evidenceKindFor(KHANI_TITLE, observed), 'snippet',
+    'the prose is separable and the quote is verbatim in it, so that is what the quote IS');
 
-  // ... which is what keeps the present-tense rule from being bypassed by a
-  // provider that quotes its own index.
+  // The present-tense rule follows the label, and that is the cost of this
+  // reversal written down: a provider that echoes a title into its own prose
+  // does turn that title into snippet-strength evidence here.
+  const envelope = {
+    identity_confidence: 'match',
+    changes: [{
+      kind: 'move', date: '2026-04',
+      text: 'Nikzad Khani is now a Software Engineer at Verily.',
+      url: KHANI_URL, quote: KHANI_TITLE,
+    }],
+  };
+  const { kept } = groundLookup(envelope, observed, { firm: 'Verily' });
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].evidenceKind, 'snippet');
+});
+
+test('with no separable prose, a title is still a title -- the Links block is not prose', () => {
+  // The fallback the finding names: no `snippetText` at all, so `resultText`
+  // stands in for the prose -- and resultText still CONTAINS the `Links:`
+  // block, so every title in it would read as prose it never appeared in.
+  // This is the 4520 shape, and it is the one the title-first check has to
+  // keep.
+  const observed = {
+    urls: new Set([KHANI_URL]),
+    links: [{ title: KHANI_TITLE, url: KHANI_URL }],
+    resultText: `Links:\n- [${KHANI_TITLE}](${KHANI_URL})\n`,
+  };
+  assert.ok(observed.resultText.includes(KHANI_TITLE), 'the title is in resultText because the Links block is');
+  assert.equal(evidenceKindFor(KHANI_TITLE, observed), 'title',
+    'a title does not become a published statement by being listed in the links block');
+
   const envelope = {
     identity_confidence: 'match',
     changes: [{
@@ -2112,5 +2146,155 @@ test('a pre-anchor-flag change is healed to "unknown" and withheld from the card
   db.prepare("INSERT INTO claim_decision(claim_id, action, actor, created_at) VALUES (5031, 'accept', 'owner', ?)").run(NOW);
   const newest = newestWebChange(db, key);
   assert.ok(newest);
+  db.close();
+});
+
+// ---------------------------------------------------------------------------
+// Review G findings 4 and 5: THE UNKNOWN FLAG NOTHING SET AND NOTHING CLEARED.
+//
+// 4  selDup required `contradicts_anchor_unknown = 0`, and
+//    healLookupColumns' back-fill marks EVERY row with no evidence_kind
+//    unknown -- so a back-filled row could never match the dedupe, and each
+//    monthly re-lookup returning the same page inserted another pending
+//    claim beside it. No UPDATE anywhere touched the column, so the honest
+//    unknown row stayed withheld and dead while its duplicates piled up.
+//
+// 5  insChange wrote a literal 0 into that column on the LIVE path, so a
+//    lookup whose `Links:` block could not be read -- which is exactly when
+//    contradictsAnchorFirm's corroboration rule cannot fire, and its `false`
+//    means "not detected" rather than "checked" -- recorded "checked, no
+//    contradiction".
+// ---------------------------------------------------------------------------
+
+function oneLookupLog(db, key) {
+  return Number(db.prepare(
+    `INSERT INTO lookup_log(person_key, run_id, at, engine, query, query_hash, fields_used, searches, urls_seen,
+       identity_confidence, changes_proposed, changes_dropped, cost_usd, status)
+     VALUES (?, NULL, ?, 'fake', 'q', 'h', '["name"]', 1, 1, 'match', 1, 0, 0.01, 'proposed')`
+  ).run(key, NOW).lastInsertRowid);
+}
+
+test('an unreadable Links block records the anchor verdict as UNKNOWN, not as "no contradiction"', () => {
+  const db = openDb(':memory:');
+  insertPersonRow(db, 'name:jane', 'Jane Doe');
+  const logId = oneLookupLog(db, 'name:jane');
+  const distillRunId = newDistillRun(db);
+  const kept = [{
+    kind: 'role', text: 'Promoted to VP of Engineering.', url: 'https://acme.example/news',
+    quote: 'Jane Doe was promoted', date: null,
+  }];
+  // The stream came back with a Links: block that could not be read, so
+  // there are no titles to corroborate against and rule 2 of the anchor
+  // check cannot run at all.
+  const observed = {
+    urls: new Set(['https://acme.example/news']),
+    links: [],
+    snippetText: 'Jane Doe was promoted to VP of Engineering.',
+    resultText: 'Jane Doe was promoted to VP of Engineering.',
+    linksParseFailed: true,
+  };
+
+  assert.deepEqual(
+    storeLookup(db, { personKey: 'name:jane', kept, observed, firm: 'Acme', logId, distillRunId, now: NOW }),
+    { stored: 1, skipped: 0, duplicates: 0 }
+  );
+  const change = db.prepare('SELECT * FROM person_lookup_change').get();
+  assert.equal(Number(change.contradicts_anchor), 0, 'nothing was detected...');
+  assert.equal(Number(change.contradicts_anchor_unknown), 1,
+    '...but the check could not be completed, and those are different answers');
+  // And an unknown verdict is withheld from the card, which is the whole
+  // point of the column.
+  assert.equal(newestWebChange(db, 'name:jane'), null);
+  db.close();
+});
+
+test('a readable Links block still records a completed, negative anchor check', () => {
+  const db = openDb(':memory:');
+  insertPersonRow(db, 'name:jane', 'Jane Doe');
+  const logId = oneLookupLog(db, 'name:jane');
+  const distillRunId = newDistillRun(db);
+  const observed = {
+    urls: new Set(['https://acme.example/news']),
+    links: [{ title: 'Jane Doe - VP of Engineering - Acme', url: 'https://acme.example/news' }],
+    snippetText: 'Jane Doe was promoted to VP of Engineering.',
+    resultText: 'Jane Doe was promoted to VP of Engineering.',
+    linksParseFailed: false,
+  };
+  storeLookup(db, {
+    personKey: 'name:jane', firm: 'Acme', logId, distillRunId, now: NOW, observed,
+    kept: [{
+      kind: 'role', text: 'Promoted to VP of Engineering.', url: 'https://acme.example/news',
+      quote: 'Jane Doe was promoted', date: null,
+    }],
+  });
+  const change = db.prepare('SELECT * FROM person_lookup_change').get();
+  assert.equal(Number(change.contradicts_anchor_unknown), 0, 'the check ran, so the answer is known');
+  assert.ok(newestWebChange(db, 'name:jane'), 'and a checked, clean change may reach the card');
+  db.close();
+});
+
+test('a re-lookup HEALS a back-filled unknown row instead of inserting a duplicate beside it', () => {
+  const db = openDb(':memory:');
+  insertPersonRow(db, 'name:jane', 'Jane Doe');
+  const logId = oneLookupLog(db, 'name:jane');
+  const distillRunId = newDistillRun(db);
+  const kept = [{
+    kind: 'role', text: 'Promoted to VP of Engineering.', url: 'https://acme.example/news',
+    quote: 'Jane Doe was promoted', date: null,
+  }];
+  const observed = {
+    urls: new Set(['https://acme.example/news']),
+    links: [{ title: 'Jane Doe - VP of Engineering - Acme', url: 'https://acme.example/news' }],
+    snippetText: 'Jane Doe was promoted',
+    resultText: 'Jane Doe was promoted',
+    linksParseFailed: false,
+  };
+
+  storeLookup(db, { personKey: 'name:jane', kept, logId, distillRunId, now: NOW });
+  const claimId = Number(db.prepare('SELECT claim_id AS id FROM person_lookup_change').get().id);
+  // healLookupColumns' own back-fill, verbatim: a row with no evidence_kind
+  // was never anchor-checked, so "unknown" is the only honest value.
+  db.exec('UPDATE person_lookup_change SET contradicts_anchor_unknown = 1 WHERE evidence_kind IS NULL');
+  assert.equal(newestWebChange(db, 'name:jane'), null, 'and it is withheld while unknown');
+
+  // Next month, the same page, the same sentence -- this time with a stream
+  // in hand, so the anchor check really can run.
+  assert.deepEqual(
+    storeLookup(db, { personKey: 'name:jane', kept, observed, firm: 'Acme', logId, distillRunId, now: NOW + DAY * 30 }),
+    { stored: 0, skipped: 0, duplicates: 1 },
+    'the unknown row must not be undedupable -- that is what made it duplicate forever'
+  );
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM claim').get().n), 1, 'still one claim');
+
+  const change = db.prepare('SELECT * FROM person_lookup_change').get();
+  assert.equal(Number(change.claim_id), claimId, 'the same row, healed in place');
+  assert.equal(Number(change.contradicts_anchor_unknown), 0, 'the verdict is known now, so the flag is cleared');
+  assert.equal(change.evidence_kind, 'snippet', 'and the evidence it was checked against is recorded');
+  assert.ok(newestWebChange(db, 'name:jane'), 'a healed row is no longer withheld and dead');
+  db.close();
+});
+
+test('a different assertion citing the same (url, quote) is its own claim, not a heal of the first', () => {
+  const db = openDb(':memory:');
+  insertPersonRow(db, 'name:jane', 'Jane Doe');
+  const logId = oneLookupLog(db, 'name:jane');
+  const distillRunId = newDistillRun(db);
+  const url = 'https://acme.example/news';
+  const quote = 'Jane Doe was promoted';
+
+  storeLookup(db, {
+    personKey: 'name:jane', logId, distillRunId, now: NOW,
+    kept: [{ kind: 'role', text: 'Promoted to VP of Engineering.', url, quote, date: null }],
+  });
+  // Same receipt, DIFFERENT sentence. Healing the first row's verdict from
+  // this lookup would label one claim with a verdict about another.
+  assert.deepEqual(
+    storeLookup(db, {
+      personKey: 'name:jane', logId, distillRunId, now: NOW + DAY,
+      kept: [{ kind: 'role', text: 'Left Acme for Verily.', url, quote, date: null }],
+    }),
+    { stored: 1, skipped: 0, duplicates: 0 }
+  );
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM claim').get().n), 2);
   db.close();
 });
