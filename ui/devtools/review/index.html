@@ -291,6 +291,12 @@
 // server behind it restarts. That 403's body names this header (see
 // guard.mjs), which is how the retry below tells "your token is stale" apart
 // from any other write failure and re-fetches rather than surfacing raw JSON.
+// ---- BEGIN CSRF FETCH WRAPPER ----
+// Everything down to END CSRF FETCH WRAPPER is sliced out of this file
+// verbatim and evaluated by ui/test/desk-csrf.test.mjs. The page is one
+// inline classic script on purpose (one file, no module graph, no extra
+// request), so the markers are how the wrapper gets held to a test at all
+// rather than being the one piece of desk logic nothing runs.
 const CSRF_HEADER = 'X-Hazlie-Csrf';
 let csrfToken = null;
 let csrfFetchInFlight = null;
@@ -335,6 +341,21 @@ async function looksLikeCsrfRejection(res) {
   }
 }
 
+// A 403 the caller can HANDLE, not a rejection it has to have anticipated.
+// This used to `throw new Error(...)`, which turned an answer window.fetch
+// had already received into a rejection from window.fetch itself: every
+// write site here does `if (!res.ok) throw new Error(await res.text())`
+// inside its own try/catch and renders the message as a banner, so a
+// Response with that text lands in the same place -- and a write site
+// without a catch gets an error banner instead of an unhandled rejection
+// (review G finding 10).
+function deskRestartedResponse() {
+  return new Response(
+    JSON.stringify({ error: 'desk restarted — retrying did not help; reload the desk' }),
+    { status: 403, statusText: 'Forbidden', headers: { 'Content-Type': 'application/json' } }
+  );
+}
+
 const bareFetch = window.fetch.bind(window);
 window.fetch = async (input, init) => {
   const opts = init ?? {};
@@ -342,23 +363,43 @@ window.fetch = async (input, init) => {
   if (method === 'GET' || method === 'HEAD') return bareFetch(input, opts);
 
   await ensureCsrfToken();
-  const headers = new Headers(baseHeaders(input, init));
+  const initialHeaders = baseHeaders(input, init);
+  const headers = new Headers(initialHeaders);
   if (csrfToken !== null) headers.set(CSRF_HEADER, csrfToken);
+
+  // CLONED BEFORE THE ATTEMPT, WHICH IS THE ONLY MOMENT IT CAN BE (review G
+  // finding 10). methodOf/baseHeaders exist because a caller may hand
+  // window.fetch a Request rather than a URL plus init -- and a Request's
+  // body is a single-use stream. The first attempt disturbs it, so the retry
+  // below used to hand the SAME Request back to fetch and get a TypeError
+  // instead of a retry. A clone taken now is a whole, unread body; if the
+  // platform refuses to clone one (no Request, an already-used body), the
+  // retry is declined outright rather than attempted with a body that is
+  // gone.
+  let retryInput = input;
+  if (typeof Request !== 'undefined' && input instanceof Request) {
+    try {
+      retryInput = input.clone();
+    } catch {
+      retryInput = null;
+    }
+  }
+
   let res = await bareFetch(input, { ...opts, headers });
 
   if (await looksLikeCsrfRejection(res)) {
+    if (retryInput === null) return res;
     // The desk restarted underneath us and minted a new token. Re-fetch it
     // and retry the write exactly once rather than 403-ing forever.
     await refreshCsrfToken();
-    const retryHeaders = new Headers(baseHeaders(input, init));
+    const retryHeaders = new Headers(initialHeaders);
     if (csrfToken !== null) retryHeaders.set(CSRF_HEADER, csrfToken);
-    res = await bareFetch(input, { ...opts, headers: retryHeaders });
-    if (!res.ok && res.status === 403) {
-      throw new Error('desk restarted — retrying did not help; reload the desk');
-    }
+    res = await bareFetch(retryInput, { ...opts, headers: retryHeaders });
+    if (!res.ok && res.status === 403) return deskRestartedResponse();
   }
   return res;
 };
+// ---- END CSRF FETCH WRAPPER ----
 
 const BANDS = ['unsupported', 'weak', 'supported', 'all'];
 let band = 'unsupported';   // the interesting one first: no content word shared with its source
