@@ -173,3 +173,38 @@ test('mail.historyPagesPerPass is a recognised key, bounded, and inheritable per
   assert.throws(() => validateConfig({ mail: { historyPagesPerPass: 0 } }), /historyPagesPerPass/u);
   assert.throws(() => validateConfig({ mail: { historyPagesPerPass: 51 } }), /historyPagesPerPass/u);
 });
+
+test('per-account mail overrides are range-checked, not merely allowlisted', () => {
+  // MAIL_ACCOUNT_KEYS admitted historyPagesPerPass and maxBodyBytes and then
+  // nothing checked the VALUE, while accountSettings prefers the per-account
+  // entry over the top-level one -- so a per-account override could ask for a
+  // million pages (a pass that never ends) or be a non-number (page < NaN is
+  // false, so that account's history silently stops advancing forever), on a
+  // config the daemon accepted at boot. A bounded top-level key whose
+  // per-account twin is unbounded is not a bounded key.
+  const okAccounts = {
+    mail: { accounts: [{ user: 'a@example.com', historyPagesPerPass: 3, maxBodyBytes: 65_536 }] },
+  };
+  assert.deepEqual(validateConfig(okAccounts), okAccounts);
+
+  assert.throws(
+    () => validateConfig({ mail: { accounts: [{ user: 'a@example.com', historyPagesPerPass: 1_000_000 }] } }),
+    /accounts\[0\]\.historyPagesPerPass/u
+  );
+  assert.throws(
+    () => validateConfig({ mail: { accounts: [{ user: 'a@example.com', historyPagesPerPass: 0 }] } }),
+    /accounts\[0\]\.historyPagesPerPass/u
+  );
+  assert.throws(
+    () => validateConfig({ mail: { accounts: [{ user: 'a@example.com', historyPagesPerPass: {} }] } }),
+    /accounts\[0\]\.historyPagesPerPass/u
+  );
+  assert.throws(
+    () => validateConfig({ mail: { accounts: [{ user: 'a@example.com', maxBodyBytes: 12 }] } }),
+    /accounts\[0\]\.maxBodyBytes/u
+  );
+  assert.throws(
+    () => validateConfig({ mail: { accounts: [{ user: 'a@example.com', maxBodyBytes: '65536' }] } }),
+    /accounts\[0\]\.maxBodyBytes/u
+  );
+});

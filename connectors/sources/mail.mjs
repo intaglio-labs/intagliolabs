@@ -23,6 +23,20 @@
 //    stored ahead of every message means nothing is ever fetched again, so the
 //    cursor advances only from rows that actually ingested.
 //
+//    ~~"ADVANCED ONLY FROM ROWS THAT LANDED" IS NOT THE WHOLE INVARIANT.~~
+//    Corrected 2026-09. It is true, and it names the wrong thing. Gmail lists
+//    NEWEST-FIRST, so when MAX_MESSAGES_PER_ACCOUNT cut a window short the
+//    rows that landed were the NEWEST ones, and moving the cursor to the
+//    newest landed row declared every older message the cap cut off as
+//    handled. Nothing errored; that window was simply never queried again.
+//    What a newest-first scan needs is a record of the OLDEST unfetched
+//    boundary, not the newest landed one -- so a truncated window now leaves
+//    behind an explicit backfill gap ([gap-from, gap-until), two more durable
+//    cursors) that later passes drain from the top down with whatever budget
+//    the fresh window leaves. The forward cursor still advances to the newest
+//    landed row, because everything above the gap ceiling really is drained;
+//    it is the part BELOW it that used to disappear. See runForward below.
+//
 // 2. SEVERAL MAILBOXES, still, and now the reason is cleaner. One OAuth grant
 //    authorizes one account, so several mailboxes means several grants — see
 //    connectors/lib/googleAccounts.mjs. An account that fails must not abort
@@ -89,6 +103,12 @@ function classifyMailError(error) {
 }
 
 const cursorKey = (email) => `mail:${String(email).toLowerCase()}:internalDate`;
+// The backfill gap left behind when the per-account cap cuts a newest-first
+// forward window: messages with internalDate in [from, until) have NOT been
+// fetched, and `until` is at or below the forward cursor. Both keys are
+// present or both are absent; either one alone is treated as no gap.
+const gapFromKey = (email) => `mail:${String(email).toLowerCase()}:forward-gap-from`;
+const gapUntilKey = (email) => `mail:${String(email).toLowerCase()}:forward-gap-until`;
 const historyPageKey = (email, year) =>
   `mail:${String(email).toLowerCase()}:history-year:${year}:page`;
 const historyDoneKey = (email, year) =>
@@ -190,6 +210,11 @@ export function createMailSource({
 
     async run(ctx) {
       const { state, ingest, config, log, now, home } = ctx;
+      // The daemon's history time budget (HISTORY_BUDGET_MS), when it hands
+      // one over. Absent => no deadline, which is what every forward pass and
+      // every older daemon does.
+      const deadline = Number.isFinite(ctx.deadline) ? Number(ctx.deadline) : null;
+      const outOfTime = () => deadline !== null && now() >= deadline;
       const accounts = accountsForScope(GMAIL_SCOPE, home ? { home } : {});
 
       let inserted = 0;
@@ -253,6 +278,15 @@ export function createMailSource({
             // below); this just lets the loop run longer per invocation
             // rather than the daemon invoking the source more often.
             for (let page = 0; page < historyPagesPerPass; page += 1) {
+              // BUDGET CHECKED BETWEEN PAGES, not only between passes. The
+              // daemon's 20s history budget was measured around source.run(),
+              // so once a pass drained several pages the budget was exceeded
+              // by one to two orders of magnitude and the daemon had no way
+              // to notice until the call returned. Checked before the page's
+              // first API call so the pass stops cleanly on a page boundary,
+              // with this year's durable token already persisted (below) --
+              // the next pass picks up exactly where this one stopped.
+              if (page > 0 && outOfTime()) break;
               await pace();
               const list = await client.listMessages({ q, pageToken, maxResults: PAGE_SIZE });
               historyProgressed = true;
@@ -317,51 +351,129 @@ export function createMailSource({
 
             if (!yearDone) historyDone = false;
           } else {
-            let pageToken;
-            page: do {
-              await pace();
-              const list = await client.listMessages({ q, pageToken, maxResults: PAGE_SIZE });
-              pagesFetched += 1;
-              pageToken = list.nextPageToken;
-              for (const [stubIndex, stub] of (list.messages ?? []).entries()) {
-                if (seen >= MAX_MESSAGES_PER_ACCOUNT) break page;
-                if (stubIndex > 0) await sleepImpl(spacingMs);
-                seen += 1;
-                const full = await client.getMessage(stub.id);
-                const internal = Number(full?.internalDate);
-                if (Number.isFinite(internal) && internal <= floor && stored > 0) continue;
-                const parsed = gmailMessageToParsed(full);
-                const row = messageToRow(parsed, {
-                  account: account.email,
-                  folder: 'INBOX',
-                  uid: stub.id,
-                  uidValidity: 'gmail',
-                  maxBodyBytes,
-                });
-                if (row !== null) {
-                  rows.push(row);
-                  if (Number.isFinite(internal) && internal > highest) highest = internal;
+            // ONE newest-first window, ingested as it goes, bounded exactly
+            // in JS because Gmail's `after:`/`before:` are whole seconds and
+            // inclusive to the day on some paths. Returns the highest and
+            // LOWEST internalDate that actually landed plus whether the
+            // per-account cap cut the window short -- `lowest` is the part
+            // the old code never recorded, and it is the only thing that
+            // says where an unfetched hole begins.
+            const scanWindow = async ({ q: query, minTs, maxTs }) => {
+              const windowRows = [];
+              let pageToken;
+              let highestIn = 0;
+              let lowestIn = Number.POSITIVE_INFINITY;
+              let capHit = false;
+              page: do {
+                await pace();
+                const list = await client.listMessages({ q: query, pageToken, maxResults: PAGE_SIZE });
+                pagesFetched += 1;
+                pageToken = list.nextPageToken;
+                for (const [stubIndex, stub] of (list.messages ?? []).entries()) {
+                  if (seen >= MAX_MESSAGES_PER_ACCOUNT) {
+                    capHit = true;
+                    break page;
+                  }
+                  if (stubIndex > 0) await sleepImpl(spacingMs);
+                  seen += 1;
+                  const full = await client.getMessage(stub.id);
+                  const internal = Number(full?.internalDate);
+                  if (minTs !== null && Number.isFinite(internal) && internal <= minTs) continue;
+                  if (maxTs !== null && (!Number.isFinite(internal) || internal >= maxTs)) continue;
+                  const parsed = gmailMessageToParsed(full);
+                  const row = messageToRow(parsed, {
+                    account: account.email,
+                    folder: 'INBOX',
+                    uid: stub.id,
+                    uidValidity: 'gmail',
+                    maxBodyBytes,
+                  });
+                  if (row !== null) {
+                    windowRows.push(row);
+                    if (Number.isFinite(internal)) {
+                      if (internal > highestIn) highestIn = internal;
+                      if (internal < lowestIn) lowestIn = internal;
+                    }
+                  }
                 }
-              }
-            } while (pageToken && seen < MAX_MESSAGES_PER_ACCOUNT);
+              } while (pageToken && seen < MAX_MESSAGES_PER_ACCOUNT);
+              // A token still in hand with the budget gone is the same
+              // truncation as the inner break: there is more, and this pass
+              // is not going to read it.
+              if (pageToken && seen >= MAX_MESSAGES_PER_ACCOUNT) capHit = true;
 
-            if (rows.length > 0) {
-              const totals = await ingest(rows);
-              inserted += totals?.inserted ?? 0;
-              updated += totals?.updated ?? 0;
-              unchanged += totals?.unchanged ?? 0;
-              // ADVANCED ONLY FROM ROWS THAT LANDED. A cursor moved past
-              // messages that were fetched but never ingested is the failure
-              // the old UIDVALIDITY comment warned about, wearing different
-              // clothes: nothing errors, and that window is never fetched
-              // again.
-              if (highest > 0) state.setCursor(cursorKey(account.email), String(highest));
+              if (windowRows.length > 0) {
+                const totals = await ingest(windowRows);
+                inserted += totals?.inserted ?? 0;
+                updated += totals?.updated ?? 0;
+                unchanged += totals?.unchanged ?? 0;
+                rows.push(...windowRows);
+              }
+              return {
+                highest: highestIn,
+                lowest: Number.isFinite(lowestIn) ? lowestIn : 0,
+                capHit,
+                landed: windowRows.length,
+              };
+            };
+
+            const gapFromRaw = Number(state.getCursor(gapFromKey(account.email)));
+            const gapUntilRaw = Number(state.getCursor(gapUntilKey(account.email)));
+            const gap = Number.isFinite(gapFromRaw) && Number.isFinite(gapUntilRaw)
+              && gapFromRaw > 0 && gapUntilRaw > gapFromRaw
+              ? { from: gapFromRaw, until: gapUntilRaw }
+              : null;
+
+            // (a) THE FRESH WINDOW, first and always: new mail matters more
+            // than an old hole, and after the first pass this window is a
+            // handful of messages.
+            const fresh = await scanWindow({ q, minTs: stored > 0 ? floor : null, maxTs: null });
+
+            if (fresh.landed > 0 && fresh.highest > 0) {
+              // Advanced only from rows that landed -- AND, when the cap cut
+              // this window, only over the part above the hole recorded next.
+              state.setCursor(cursorKey(account.email), String(fresh.highest));
+            }
+
+            if (fresh.capHit && fresh.lowest > 0) {
+              // Truncated: [floor, fresh.lowest) was never listed. Record it.
+              // An existing gap is merged by keeping its (older) floor and
+              // raising the ceiling to this window's lowest landed row --
+              // which can re-cover a stretch already fetched between the old
+              // ceiling and the old cursor. That costs a dedupe on the next
+              // drain and loses nothing; representing two disjoint holes
+              // would need a list, and a list is a schema this connector does
+              // not have a migration for.
+              state.setCursor(gapFromKey(account.email), String(gap ? Math.min(gap.from, floor) : floor));
+              state.setCursor(gapUntilKey(account.email), String(fresh.lowest));
+            } else if (gap && seen < MAX_MESSAGES_PER_ACCOUNT) {
+              // (b) DRAIN THE GAP with whatever budget the fresh window left,
+              // newest-first from the ceiling down. Each truncated drain
+              // lowers the ceiling; a drain that finishes without hitting the
+              // cap has read the whole remaining hole, so both keys go.
+              const drain = await scanWindow({
+                q: `after:${Math.floor(gap.from / 1000) - 1} before:${Math.ceil(gap.until / 1000)}`,
+                minTs: gap.from - 1,
+                maxTs: gap.until,
+              });
+              if (drain.capHit && drain.lowest > 0) {
+                state.setCursor(gapUntilKey(account.email), String(drain.lowest));
+              } else if (!drain.capHit) {
+                state.deleteCursor(gapFromKey(account.email));
+                state.deleteCursor(gapUntilKey(account.email));
+              }
             }
           }
 
+          // accountIndex, NEVER account.email. This file's own LOG POLICY
+          // header says "No addresses", connectors/lib/log.mjs writes every
+          // line to a persistent ~/.hazlie/logs/connectors.log, and
+          // FORBIDDEN_FIELDS there is a blocklist of content field NAMES that
+          // cannot see a value that happens to be personal data. The failure
+          // path below always did this correctly; the success path did not.
           log.info('mail_account_scan', {
             connector: 'mail',
-            account: account.email,
+            accountIndex,
             fetched: seen,
             rows: rows.length,
             pages: pagesFetched,

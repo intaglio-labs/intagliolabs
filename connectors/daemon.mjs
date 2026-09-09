@@ -620,6 +620,21 @@ export function validateConfig(raw) {
         if (account.getsPerMinute !== undefined) {
           assertPositiveInt(account.getsPerMinute, `mail.accounts[${i}].getsPerMinute`, { max: 100 });
         }
+        // RANGE-CHECKED, same bounds as their top-level twins above. These
+        // two were in MAIL_ACCOUNT_KEYS -- so assertClosedKeys accepted them
+        // -- and then nothing looked at the VALUE: accountSettings reads the
+        // per-account entry in preference to the top-level one, so
+        // `historyPagesPerPass: 1000000` booted fine and asked mail.mjs's
+        // history loop for a million pages, and `{}` (or a string) made
+        // `page < NaN` false on the first comparison, which silently stopped
+        // that one account's history from ever advancing again. An allowlist
+        // that admits a key it does not bound is not a validator for it.
+        if (account.maxBodyBytes !== undefined) {
+          assertPositiveInt(account.maxBodyBytes, `mail.accounts[${i}].maxBodyBytes`, { min: 1024 });
+        }
+        if (account.historyPagesPerPass !== undefined) {
+          assertPositiveInt(account.historyPagesPerPass, `mail.accounts[${i}].historyPagesPerPass`, { max: 50 });
+        }
         if (account.folders !== undefined) {
           if (
             !Array.isArray(account.folders) ||
@@ -1098,7 +1113,7 @@ function matrixHistoryRooms(value) {
   }
 }
 
-const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
+const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}) => ({
     state,
     ingest: (rows) => ingest(rows, ingestOpts),
     admin,
@@ -1110,6 +1125,15 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
     history,
     historyComplete: yearlyBackfill.snapshot().complete,
     ...(historyWindow ? { historyWindow } : {}),
+    // The history time budget, handed TO the source rather than only checked
+    // between its invocations. HISTORY_BUDGET_MS was enforced by the
+    // while-loop below, which can only notice the budget is spent once
+    // source.run() has returned -- and a source that drains several API pages
+    // per invocation now runs for minutes inside one call (mail at the
+    // default 5 pages x 100 messages x ~667ms pacing is ~5.6 minutes per
+    // account, 17x the 20s budget). A source that walks pages is expected to
+    // check this between them; one that ignores it behaves exactly as before.
+    ...(deadline === null ? {} : { deadline }),
   });
 
   async function runSource(source) {
@@ -1213,7 +1237,7 @@ const makeCtx = ({ history = false, historyWindow = null } = {}) => ({
         let gained = 0;
         try {
           while (now() < deadline) {
-            const rawBack = (await source.run(makeCtx({ history: true, historyWindow }))) ?? {};
+            const rawBack = (await source.run(makeCtx({ history: true, historyWindow, deadline }))) ?? {};
             const back = runCounts(rawBack);
             slices += 1;
             // `ingested`, not `inserted`: runCounts NORMALISES a source's
