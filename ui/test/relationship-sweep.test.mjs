@@ -11,9 +11,10 @@ import { join } from 'node:path';
 
 import { start, openDb } from '../server/hermes.mjs';
 import { eligiblePool } from '../server/relationship/producer.mjs';
-import { ownerConfigPath } from '../server/people/owner.mjs';
+import { ownerConfigPath, markPersonSubRoles } from '../server/people/owner.mjs';
 import {
   groundSweep, newRowsFor, sweepScope, storeSweep, sweepGate, runSweepPass, applySweepDecision,
+  sweepCallCap, sweepStatus, SWEEP_DAILY_CALL_CAP_DEFAULT,
   SWEEP_MAX_CHARS, SWEEP_MAX_EPISODES, tokensEstFor,
 } from '../server/relationship/sweep.mjs';
 
@@ -237,10 +238,17 @@ test('newRowsFor returns only episodes containing an authored row past the curso
   assert.ok(contextIds.includes(fresh.themId), 'the new episode is included');
   assert.ok(!contextIds.includes(old.themId), 'the old, already-swept episode is excluded');
   assert.equal(gathered.episodeCount, 1);
-  // maxContextId is the max over every row actually SHOWN (post-budget),
-  // including the owner's own ME reply inside the same new episode -- never
-  // just the THEM row.
-  assert.equal(gathered.maxContextId, fresh.meId);
+  // ~~"maxContextId is the max over every row actually SHOWN, including the
+  // owner's own ME reply -- never just the THEM row."~~ CHANGED 2026-09, and
+  // this assertion was the old contract written down. Letting a ME row move
+  // the cursor is what allowed an owner reply to carry the cursor past the
+  // person's own unshown lines (see the ME-eats-the-budget test below).
+  // maxContextId is now the max over SHOWN **THEM** ROWS ONLY: the cursor
+  // records what the person said that a model has actually been given, and
+  // the owner's own replies are tone, not evidence to mark as read on the
+  // person's behalf.
+  assert.equal(gathered.maxContextId, fresh.themId);
+  assert.ok(fresh.meId > fresh.themId, 'sanity: the ME reply really is the newer row here');
 });
 
 test('newRowsFor takes at most 8 episodes, most recent first, under the char budget', () => {
@@ -764,4 +772,388 @@ test('/stats carries a sweep key and /health is still exactly {"ok":true}, and a
   } finally {
     await server.close();
   }
+});
+
+// ---------------------------------------------------------------------------
+// THE ME ROW THAT ATE THE BUDGET. newRowsFor pooled THEM and ME rows into one
+// newest-first queue, so an owner reply newer than the person's own newest
+// line took the char budget in front of it. The person's line then did not
+// fit, the excerpt list held zero THEM rows, sweepPerson returned 'empty'
+// WITHOUT CALLING A MODEL, and the cursor was written past the row anyway --
+// unshown, unrecoverable, and it was the evidence.
+//
+// The fixture is the audit's own: one episode, ctx 500 = a 5,500-char THEM
+// line, ctx 501 = a 1,000-char ME reply, cursor 0, against SWEEP_MAX_CHARS.
+// ---------------------------------------------------------------------------
+
+// One episode where the person's long line comes FIRST and the owner's reply
+// is the newer row. Returns both ids so a test can name them.
+function seedMeReplyAfterLongThemLine(db, key, name, { themChars, meChars }) {
+  insertPerson(db, { key, name });
+  const chatGuid = 'chat:me-eats-budget';
+  const themId = Number(db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', ?, ?)"
+  ).run(NOW - 1 * DAY, 'so anyway '.padEnd(themChars, 'x'),
+    JSON.stringify({ chat_guid: chatGuid, is_from_me: false })).lastInsertRowid);
+  db.prepare(
+    `INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+     VALUES (?, ?, 'imessage', 'counterparty', 1, 0, 0, 1, ?)`
+  ).run(key, themId, chatGuid);
+
+  const meId = Number(db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', ?, ?)"
+  ).run(NOW - 1 * DAY + 60_000, 'right, '.padEnd(meChars, 'y'),
+    JSON.stringify({ chat_guid: chatGuid, is_from_me: true })).lastInsertRowid);
+  db.prepare(
+    `INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+     VALUES (?, ?, 'imessage', 'counterparty', 0, 1, 0, 1, ?)`
+  ).run(key, meId, chatGuid);
+
+  return { themId, meId };
+}
+
+test("an owner reply never takes the budget in front of the person's own line", () => {
+  const db = openDb(':memory:');
+  const key = 'name:me eats budget';
+  // 5,500 + 1,000 > SWEEP_MAX_CHARS (6,000): exactly one of the two fits
+  // alongside the other, and which one it is decides whether a model is ever
+  // shown this person's words.
+  const { themId, meId } = seedMeReplyAfterLongThemLine(db, key, 'Me Eats Budget', {
+    themChars: 5500, meChars: 1000,
+  });
+  assert.ok(5500 + 1000 > SWEEP_MAX_CHARS, 'the fixture must actually overflow the budget');
+  assert.ok(meId > themId, 'the ME reply is the newer row, which is what triggered the bug');
+
+  const gathered = newRowsFor(db, key, 0);
+  const shown = gathered.excerpts.map((e) => ({ id: e.contextId, who: e.speaker }));
+
+  assert.deepEqual(
+    shown.filter((s) => s.who === 'THEM').map((s) => s.id),
+    [themId],
+    "the person's own line must be shown -- it is the evidence, and the ME row is tone"
+  );
+  assert.ok(
+    !shown.some((s) => s.id === meId),
+    'the ME reply does not fit alongside it and is dropped, which costs nothing'
+  );
+
+  // The cursor reaches 501 only because 500 was shown. Under the old
+  // admission order the cursor also reached 501 -- with 500 never shown.
+  assert.equal(gathered.maxContextId, themId, 'the cursor stops at the newest SHOWN THEM row');
+  assert.ok(gathered.maxContextId >= themId, 'and never sits behind the row a model just read');
+});
+
+test('a single THEM row larger than the whole budget is truncated in, not skipped', () => {
+  const db = openDb(':memory:');
+  const key = 'name:oversized them';
+  const { themId } = seedMeReplyAfterLongThemLine(db, key, 'Oversized Them', {
+    themChars: SWEEP_MAX_CHARS + 2000, meChars: 50,
+  });
+
+  const gathered = newRowsFor(db, key, 0);
+  const them = gathered.excerpts.filter((e) => e.speaker === 'THEM');
+  assert.equal(them.length, 1, 'the oversized row is shown rather than skipped');
+  assert.equal(them[0].contextId, themId);
+  assert.equal(them[0].text.length, SWEEP_MAX_CHARS, 'truncated to the budget');
+  assert.equal(gathered.maxContextId, themId, 'and the cursor may pass it, because it WAS shown');
+});
+
+test('a pass over the ME-eats-budget fixture calls the model instead of reporting empty', async () => {
+  const db = openDb(':memory:');
+  const key = 'name:me eats budget pass';
+  seedMeReplyAfterLongThemLine(db, key, 'Me Eats Budget Pass', { themChars: 5500, meChars: 1000 });
+  insertActiveDay(db, key, day(1));
+
+  const asked = [];
+  const engine = fakeSweepEngine(({ user }) => {
+    asked.push(user);
+    return JSON.stringify({ tags: [], firm: null, page_lines: [] });
+  });
+
+  const run = await runSweepPass(db, engine, {}, { powerMode: 'full', now: NOW });
+  assert.equal(run.status, 'complete');
+  // THE POINT: one real model call. The old order produced zero THEM excerpts
+  // for this person, so sweepPerson short-circuited to 'empty' with calls: 0
+  // and wrote the cursor past the row regardless.
+  assert.equal(run.model_calls, 1, 'the person must actually be asked about');
+  assert.match(asked[0] ?? '', /THEM:/u, "and the prompt must carry the person's own line");
+});
+
+// ---------------------------------------------------------------------------
+// THE CALL CAP, which failed open in two independent ways.
+// ---------------------------------------------------------------------------
+
+test('a non-numeric sweepDailyCallCap falls back to the default rather than disabling the cap', () => {
+  const db = openDb(':memory:');
+  const key = 'name:nan cap';
+  insertPerson(db, { key, name: 'Nan Cap', role: 'business' });
+  insertThread(db, key, { ts: NOW - 1 * DAY, them: 'hello', me: 'hi' });
+
+  const used = Math.ceil(SWEEP_DAILY_CALL_CAP_DEFAULT * 0.9);
+  db.prepare(
+    `INSERT INTO person_sweep_run(distill_run_id, started_at, ended_at, power_mode, engine, budget, scope_size,
+       candidates, swept, model_calls, proposed, dropped, tokens_est, skip_reason, status)
+     VALUES (NULL, ?, ?, 'trickle', 'fake', 3, 1, 1, 1, ?, 0, 0, 0, NULL, 'complete')`
+  ).run(Date.now(), Date.now(), used);
+
+  // `Number('lots')`, `Number(null)`, `Number({})` -- the old cast made `cap`
+  // NaN, and `used >= 0.9 * NaN` is false for every `used`, so the gate that
+  // rations the owner's subscription passed unconditionally.
+  for (const bad of ['lots', {}, [], true, -5, 0, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const gate = sweepGate(db, { relationshipMemory: { sweepDailyCallCap: bad } }, { engine: 'claude-cli' });
+    assert.equal(gate.ok, false, `cap ${JSON.stringify(bad)} must not disable the gate`);
+    assert.equal(gate.reason, 'quota');
+  }
+
+  // A real, larger cap still raises the ceiling -- the fallback is a fallback,
+  // not a hard-coded constant.
+  const raised = sweepGate(db, { relationshipMemory: { sweepDailyCallCap: 10_000 } }, { engine: 'claude-cli' });
+  assert.equal(raised.ok, true);
+});
+
+test('sweepCallCap resolves the configured cap, and sweepStatus reports what is enforced', () => {
+  const db = openDb(':memory:');
+  assert.equal(sweepCallCap({}), SWEEP_DAILY_CALL_CAP_DEFAULT);
+  assert.equal(sweepCallCap({ relationshipMemory: { sweepDailyCallCap: 50 } }), 50);
+  assert.equal(sweepCallCap({ relationshipMemory: { sweepDailyCallCap: 'nope' } }), SWEEP_DAILY_CALL_CAP_DEFAULT);
+
+  // /stats printed SWEEP_DAILY_CALL_CAP_DEFAULT unconditionally: a config
+  // override was invisible, and even at the default the number shown (200)
+  // was never the number enforced (0.9 * 200).
+  const withConfig = sweepStatus(db, { relationshipMemory: { sweepDailyCallCap: 50 } });
+  assert.equal(withConfig.callCap, 50, 'the config override must reach the dashboard');
+  assert.equal(withConfig.callCapEnforced, 45, 'and the threshold the gate actually refuses at');
+
+  const plain = sweepStatus(db);
+  assert.equal(plain.callCap, SWEEP_DAILY_CALL_CAP_DEFAULT);
+  assert.equal(plain.callCapEnforced, Math.floor(0.9 * SWEEP_DAILY_CALL_CAP_DEFAULT));
+});
+
+test('a pass killed mid-loop still counts the calls it made against the cap', async () => {
+  const db = openDb(':memory:');
+  for (const n of [1, 2, 3]) {
+    const key = `name:interrupted ${n}`;
+    insertPerson(db, { key, name: `Interrupted ${n}`, role: 'business' });
+    insertThread(db, key, { ts: NOW - n * DAY, them: `hello ${n}`, me: 'hi' });
+    insertActiveDay(db, key, day(n));
+  }
+
+  // A killed process, a machine that slept, a SIGTERM: whatever is COMMITTED
+  // at that instant is all the next pass's cap can ever see. So the property
+  // to pin is that the counters are live mid-pass, which is read here from
+  // inside the engine -- exactly the vantage point a kill would have.
+  // model_calls used to be written ONLY by the terminal UPDATE, so this
+  // snapshot was 0 on every call and an interrupted pass's calls were free.
+  const snapshots = [];
+  let answered = 0;
+  const engine = fakeSweepEngine(() => {
+    // Read the run row as it stands right now -- before this call's own
+    // person has been committed, so it reflects the people already done.
+    snapshots.push(Number(
+      db.prepare('SELECT COALESCE(SUM(model_calls), 0) AS n FROM person_sweep_run WHERE started_at >= ?')
+        .get(0).n
+    ));
+    answered += 1;
+    return JSON.stringify({ tags: [], firm: null, page_lines: [] });
+  });
+
+  const run = await runSweepPass(db, engine, {}, { powerMode: 'full', budget: 3, now: NOW });
+  assert.equal(answered, 3, 'sanity: all three people were asked about');
+
+  // What a kill after person N would have left behind, per N.
+  assert.deepEqual(
+    snapshots,
+    [0, 1, 2],
+    'the cap must be able to see each committed call as it happens, not only at the end'
+  );
+  assert.equal(run.model_calls, 3, 'and the finished row still holds the whole pass');
+  assert.equal(run.swept, 3);
+});
+
+// ---------------------------------------------------------------------------
+// applySweepDecision and the people PROJECTION. people.sub_roles is derived
+// state -- rebuildPeopleCore and clearPeopleProjection both DELETE FROM people
+// and rebuild -- so a read that lands mid-rebuild sees no row, `current` was
+// [], and the union degenerated to [value]: one accepted tag, every other tag
+// on that person wiped out of the owner's own config.
+// ---------------------------------------------------------------------------
+
+function seedAcceptableTag(db, key, name, { subRoles = [], linkedin = null } = {}) {
+  insertPerson(db, { key, name, role: 'business', subRoles });
+  if (linkedin !== null) {
+    db.prepare('UPDATE people SET linkedin = ? WHERE person_key = ?').run(JSON.stringify(linkedin), key);
+  }
+  insertThread(db, key, { ts: NOW - 1 * DAY, them: 'I am raising a fund now', me: 'nice' });
+  const gathered = newRowsFor(db, key, 0);
+  const { kept } = groundSweep(
+    { tags: [{ tag: 'investor', text: 'raising a fund', quote: 'raising a fund' }], firm: null, page_lines: [] },
+    gathered
+  );
+  const { distillRunId, sweepRunId } = insertSweepRun(db);
+  storeSweep(db, { personKey: key, engineName: 'fake', model: 'fake-model', kept, sweepRunId, distillRunId, now: NOW });
+  return storedProposalClaimId(db, key, 'sub_role');
+}
+
+test('accepting a tag while the people projection is missing refuses instead of wiping the override', () => {
+  const db = openDb(':memory:');
+  const key = 'name:mid rebuild';
+  const claimId = seedAcceptableTag(db, key, 'Mid Rebuild', { subRoles: ['founder', 'operator'] });
+
+  const home = mkdtempSync(join(tmpdir(), 'sweep-midrebuild-'));
+  const configPath = ownerConfigPath(home);
+  // An override the owner already has, which is the thing that used to be
+  // destroyed. Written through the same function the accept path uses.
+  markPersonSubRoles({ key, subRoles: ['founder', 'operator'], configPath });
+
+  // The projection rebuild's own first statement.
+  db.prepare('DELETE FROM people').run();
+
+  const result = applySweepDecision(db, {}, { claimId, action: 'accept', configPath });
+  assert.equal(result.applied, false, 'a decision that cannot be applied safely must not claim it was');
+  assert.equal(result.rebuildNeeded, false, 'and must not ask for a rebuild it did not earn');
+  assert.equal(result.reason, 'people-row-missing', 'the caller is told to retry, not left guessing');
+
+  assert.deepEqual(
+    JSON.parse(readFileSync(configPath, 'utf8')).personSubRoles[key],
+    ['founder', 'operator'],
+    "the owner's existing tags survive -- the old code left exactly ['investor'] here"
+  );
+  const proposalRow = db.prepare('SELECT applied_at FROM person_sweep_proposal WHERE claim_id = ?').get(claimId);
+  assert.equal(proposalRow.applied_at, null, 'and the proposal is still applicable once the projection is back');
+});
+
+test('an accept unions the config override too, not only the projection', () => {
+  const db = openDb(':memory:');
+  const key = 'name:override union';
+  const claimId = seedAcceptableTag(db, key, 'Override Union', { subRoles: [] });
+
+  const home = mkdtempSync(join(tmpdir(), 'sweep-override-'));
+  const configPath = ownerConfigPath(home);
+  // The durable half is ahead of the projection here: the config says
+  // 'operator' and people.sub_roles has not caught up. Reading only the
+  // projection would drop it.
+  markPersonSubRoles({ key, subRoles: ['operator'], configPath });
+
+  const result = applySweepDecision(db, {}, { claimId, action: 'accept', configPath });
+  assert.equal(result.applied, true);
+  assert.deepEqual(
+    JSON.parse(readFileSync(configPath, 'utf8')).personSubRoles[key],
+    ['investor', 'operator']
+  );
+});
+
+test('rejecting an accepted tag takes it back out of the override and re-arms the proposal', () => {
+  const db = openDb(':memory:');
+  const key = 'name:accept then reject';
+  const claimId = seedAcceptableTag(db, key, 'Accept Then Reject', { subRoles: ['founder'] });
+
+  const home = mkdtempSync(join(tmpdir(), 'sweep-unaccept-'));
+  const configPath = ownerConfigPath(home);
+
+  applySweepDecision(db, {}, { claimId, action: 'accept', configPath });
+  assert.deepEqual(
+    JSON.parse(readFileSync(configPath, 'utf8')).personSubRoles[key],
+    ['founder', 'investor']
+  );
+
+  // Before this, a reject was a no-op: the tag stayed in the config forever
+  // AND applied_at stayed stamped, so a later accept was blocked too. The
+  // owner's rejection had no effect on the person's tags in either direction.
+  const undo = applySweepDecision(db, {}, { claimId, action: 'reject', configPath });
+  assert.equal(undo.applied, true);
+  assert.equal(undo.rebuildNeeded, true);
+  assert.equal(undo.reason, 'tag-removed');
+  assert.deepEqual(
+    JSON.parse(readFileSync(configPath, 'utf8')).personSubRoles[key],
+    ['founder'],
+    'only the rejected tag goes; the LinkedIn-derived one is not this decision to remove'
+  );
+  const proposalRow = db.prepare('SELECT applied_at FROM person_sweep_proposal WHERE claim_id = ?').get(claimId);
+  assert.equal(proposalRow.applied_at, null, 'the owner may change their mind again');
+});
+
+test('a reject leaves a tag the LinkedIn export derives on its own', () => {
+  const db = openDb(':memory:');
+  const key = 'name:export derived';
+  // A title subRolesFor reads as 'investor' by itself, so the tag's
+  // provenance is not this proposal.
+  const claimId = seedAcceptableTag(db, key, 'Export Derived', {
+    subRoles: [],
+    linkedin: { position: 'General Partner', company: 'Example Capital' },
+  });
+
+  const home = mkdtempSync(join(tmpdir(), 'sweep-exportderived-'));
+  const configPath = ownerConfigPath(home);
+  applySweepDecision(db, {}, { claimId, action: 'accept', configPath });
+  assert.deepEqual(JSON.parse(readFileSync(configPath, 'utf8')).personSubRoles[key], ['investor']);
+
+  const undo = applySweepDecision(db, {}, { claimId, action: 'reject', configPath });
+  assert.equal(undo.applied, false);
+  assert.equal(undo.reason, 'tag-is-export-derived');
+  assert.deepEqual(
+    JSON.parse(readFileSync(configPath, 'utf8')).personSubRoles[key],
+    ['investor'],
+    'removing it would be overriding the export, which this decision never spoke to'
+  );
+});
+
+test('sweepScope is ordered least-recently-swept first, and deterministically', () => {
+  const db = openDb(':memory:');
+  const keys = ['name:cccc', 'name:aaaa', 'name:bbbb'];
+  for (const key of keys) {
+    insertPerson(db, { key, name: key.slice(5).toUpperCase(), role: 'business' });
+    insertThread(db, key, { ts: NOW - 1 * DAY, them: 'hello', me: 'hi' });
+  }
+  // aaaa was swept most recently, bbbb before that, cccc never.
+  db.prepare(
+    `INSERT INTO person_sweep_cursor(person_key, swept_through_context_id, last_swept_at, last_status, proposals)
+     VALUES (?, 0, ?, 'empty', 0)`
+  ).run('name:aaaa', NOW);
+  db.prepare(
+    `INSERT INTO person_sweep_cursor(person_key, swept_through_context_id, last_swept_at, last_status, proposals)
+     VALUES (?, 0, ?, 'empty', 0)`
+  ).run('name:bbbb', NOW - 5 * DAY);
+
+  const scope = sweepScope(db, { now: NOW });
+  assert.deepEqual(
+    scope.map((c) => c.personKey),
+    ['name:cccc', 'name:bbbb', 'name:aaaa'],
+    'never-swept first, then oldest -- runSweepPass slices the budget off the front of this list'
+  );
+  // Deterministic, because the budget slice has to be reproducible across a
+  // projection rebuild: without an ORDER BY the order came back however
+  // SQLite felt like returning it.
+  assert.deepEqual(sweepScope(db, { now: NOW }).map((c) => c.personKey), scope.map((c) => c.personKey));
+});
+
+test('storeSweep leaves no receiptless claim behind when a later insert fails', () => {
+  const db = openDb(':memory:');
+  const key = 'name:atomic store';
+  insertPerson(db, { key, name: 'Atomic Store', role: 'business' });
+  insertThread(db, key, { ts: NOW - 1 * DAY, them: 'I am raising a fund now', me: 'nice' });
+  const gathered = newRowsFor(db, key, 0);
+  const contextId = gathered.findQuoteContextId('raising a fund');
+  const { distillRunId, sweepRunId } = insertSweepRun(db);
+
+  const claimsBefore = Number(db.prepare('SELECT COUNT(*) AS n FROM claim').get().n);
+
+  // A claim, its claim_source receipt and its person_sweep_proposal row are
+  // ONE fact in three tables. Untransacted, a failure between them left a
+  // claim in the owner's pending queue with no receipt, rendering
+  // `quote: null` -- an evidence-free claim, which every grounding rule in
+  // sweep.mjs exists to make impossible. 'bogus' violates
+  // person_sweep_proposal.kind's CHECK, so the third insert is the one that
+  // throws; the first two must go with it.
+  assert.throws(() => storeSweep(db, {
+    personKey: key, engineName: 'fake', model: 'fake-model', sweepRunId, distillRunId, now: NOW,
+    kept: [{ kind: 'bogus', value: 'investor', text: 'raising a fund', quote: 'raising a fund', contextId }],
+  }));
+
+  assert.equal(
+    Number(db.prepare('SELECT COUNT(*) AS n FROM claim').get().n),
+    claimsBefore,
+    'the claim row must not survive its own proposal insert failing'
+  );
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM claim_source').get().n), 0);
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM person_sweep_proposal').get().n), 0);
 });

@@ -26,7 +26,8 @@ import { fileURLToPath } from 'node:url';
 import { buildEpisodes, isQuotable } from '../memory/episodes.mjs';
 import { SUB_ROLES } from '../people/subRoles.mjs';
 import { isAnonymousContact } from '../people/map.mjs';
-import { markPersonSubRoles } from '../people/owner.mjs';
+import { markPersonSubRoles, loadOwner } from '../people/owner.mjs';
+import { subRolesFor } from '../people/subRoles.mjs';
 import { PERSON_SOURCE_POLICY } from '../people/graph.mjs';
 import { SECTION_KIND, alreadyStored } from './pages.mjs';
 
@@ -74,6 +75,25 @@ export const SWEEP_BUDGET = Object.freeze({ full: 12, trickle: 3 });
 // config.relationshipMemory.sweepDailyCallCap.
 export const SWEEP_DAILY_CALL_CAP_DEFAULT = 200;
 
+// The fraction of the cap at which the gate stops a pass. Named rather than
+// inlined because sweepStatus reports it: the real ceiling is 0.9 * cap (180
+// at the default), and /stats used to print the bare 200 while the gate
+// refused at 180, so the dashboard and the gate disagreed by 20 calls with
+// nothing saying so.
+export const SWEEP_CALL_CAP_HEADROOM = 0.9;
+
+// The cap actually in force, resolved once so the gate and the status
+// dashboard can never read it differently. A config value that is not a
+// finite positive number falls back to the DEFAULT rather than becoming NaN:
+// `used >= 0.9 * NaN` is false for every `used`, so the old Number() cast
+// turned a typo'd config value ("200", null, {}) into no cap at all -- a gate
+// that fails OPEN, on the one path in this file that spends the owner's
+// subscription.
+export function sweepCallCap(policy) {
+  const configured = Number(policy?.relationshipMemory?.sweepDailyCallCap);
+  return Number.isFinite(configured) && configured > 0 ? configured : SWEEP_DAILY_CALL_CAP_DEFAULT;
+}
+
 // Matches hermes.mjs's own PAGE_BUILD_PAUSE_MS -- the same "do not hammer
 // the one local model" pause between people, applied here to sweeping
 // instead of page-building. Not imported (PAGE_BUILD_PAUSE_MS is private to
@@ -113,17 +133,30 @@ function parseSubRoles(raw) {
 // meeting), NOT suppressed. No quiet gate, no future-meeting veto, and
 // (unlike eligiblePool) no romantic/family exclusion is needed because the
 // business/met_in_person gate already narrows past them.
+//
+// ORDERED least-recently-swept first, and person_key breaks the tie. Two
+// reasons, and the second is the one that bit: runSweepPass slices the FIRST
+// `budget` candidates off this list, so without an ORDER BY the budget went
+// to whatever order SQLite happened to return -- no fairness (a person at
+// the back of the scan could starve indefinitely behind a stable prefix),
+// and the order itself changed on every projection rebuild, which makes a
+// pass's own candidate set unreproducible. COALESCE(last_swept_at, 0) puts
+// never-swept people first, which is also what a first pass should do.
 export function sweepScope(db, { now = Date.now() } = {}) {
   const rows = db
     .prepare(
-      `SELECT p.person_key AS personKey, p.display_name AS name, p.role AS role, COALESCE(p.sub_roles, '[]') AS subRolesJson
+      `SELECT p.person_key AS personKey, p.display_name AS name, p.role AS role,
+              COALESCE(p.sub_roles, '[]') AS subRolesJson,
+              psc.swept_through_context_id AS cursor
        FROM people p
+       LEFT JOIN person_sweep_cursor psc ON psc.person_key = p.person_key
        WHERE (p.role = 'business' OR p.met_in_person > 0)
          AND EXISTS (
            SELECT 1 FROM person_event_links pel
            WHERE pel.person_key = p.person_key AND pel.authored = 1 AND pel.room = 0
          )
-         AND p.person_key NOT IN (SELECT person_key FROM rm_suppression)`
+         AND p.person_key NOT IN (SELECT person_key FROM rm_suppression)
+       ORDER BY COALESCE(psc.last_swept_at, 0) ASC, p.person_key ASC`
     )
     .all();
 
@@ -140,9 +173,6 @@ export function sweepScope(db, { now = Date.now() } = {}) {
      WHERE pel.person_key = ? AND pel.authored = 1 AND pel.room = 0
        AND c.source IN (${sourcePlaceholders})`
   );
-  const cursorStmt = db.prepare(
-    `SELECT swept_through_context_id FROM person_sweep_cursor WHERE person_key = ?`
-  );
 
   const out = [];
   for (const row of rows) {
@@ -158,14 +188,13 @@ export function sweepScope(db, { now = Date.now() } = {}) {
     // and is skipped here rather than becoming a permanent zero-call
     // candidate.
     if (maxRow?.maxId === null || maxRow?.maxId === undefined) continue;
-    const cursorRow = cursorStmt.get(row.personKey);
     out.push({
       personKey: row.personKey,
       name: row.name,
       role: row.role,
       subRoles: parseSubRoles(row.subRolesJson),
       maxAuthoredContextId: Number(maxRow.maxId),
-      cursor: cursorRow ? Number(cursorRow.swept_through_context_id) : 0,
+      cursor: row.cursor === null || row.cursor === undefined ? 0 : Number(row.cursor),
     });
   }
   return out;
@@ -182,19 +211,33 @@ function isReceiptItem(v) {
 // contain at least one authored (THEM) row past `cursor` -- an episode
 // entirely before the cursor has nothing new to sweep, even if the owner's
 // own reply (never authored, never THEM) landed inside it after the cursor.
-// The 8 most recent qualifying episodes, budgeted to maxChars, filled
-// NEWEST-ROW-FIRST across all of them (not most-recent-episode-first): every
-// candidate row from the chosen episodes is pooled and sorted by context id
-// (monotonic on insert) before the budget is applied, so a person whose new
-// history overflows the budget always has their newest authored rows
-// admitted rather than starved by an old, long-running thread that happens
-// to sort first. The backlog of a heavy person is bounded by the budget BY
-// DESIGN -- it is never the whole history; older rows beyond the budget are
-// skipped, not replayed. Because maxContextId (below) is computed over shown
-// rows only, and newest-first admission means the shown rows' max is now
-// also the person's newest authored row among the chosen episodes, the
-// cursor lands on it and a second pass finds nothing new to sweep. Admitted
-// rows are re-sorted chronologically afterward for display, same as
+// The 8 most recent qualifying episodes, budgeted to maxChars. THEM ROWS
+// ARE ADMITTED FIRST, newest-first, and only the budget they leave behind is
+// offered to ME rows for tone. That split is the correction, not a
+// refinement: the previous version pooled BOTH polarities into one
+// newest-first queue, so an owner reply newer than the person's own newest
+// line took the budget in front of it (audit, 2026-09: one episode, ctx 500
+// = a 5,500-char THEM line, ctx 501 = a 1,000-char ME reply, cursor 0 --
+// the ME row was admitted, the THEM row no longer fit, the excerpt list held
+// zero THEM lines, sweepPerson returned 'empty' without ever calling a
+// model, and the cursor was written past 500. That row was the evidence; it
+// could never be shown again).
+//
+// So, in order:
+//   1. THEM rows, newest context id first, while they fit. If the NEWEST one
+//      alone overflows the whole budget it is TRUNCATED in rather than
+//      skipped -- the evidence has to be shown for the cursor to be allowed
+//      past it.
+//   2. ME rows into whatever budget is left, newest first. Tone only: a ME
+//      row can never move the cursor (see maxContextId below), so losing one
+//      to the budget costs nothing that a later pass cannot recover.
+//
+// maxContextId is the max over SHOWN THEM ROWS ONLY. The backlog of a heavy
+// person is still bounded by the budget BY DESIGN -- older THEM rows beyond
+// the budget are skipped, not replayed, and they sit BELOW the newest shown
+// row, which is what makes advancing to it sound. What is no longer possible
+// is advancing past a THEM row NEWER than everything shown. Admitted rows
+// are re-sorted chronologically afterward for display, same as
 // gatherPersonContext.
 export function newRowsFor(db, personKey, cursor, { maxEpisodes = SWEEP_MAX_EPISODES, maxChars = SWEEP_MAX_CHARS } = {}) {
   // Joined against context and filtered to SWEEP_SOURCES, same as
@@ -267,20 +310,38 @@ export function newRowsFor(db, personKey, cursor, { maxEpisodes = SWEEP_MAX_EPIS
   const excerpts = [];
   let charBudget = maxChars;
   let maxContextId = cursorId;
+
+  // (1) THEM first: this is the evidence, and the cursor is only ever allowed
+  // to advance over a THEM row that was actually shown.
   for (const c of candidates) {
+    if (c.speaker !== 'THEM') continue;
     if (c.text.length > charBudget) {
-      // Guarantee at least one excerpt even if the single newest row alone
-      // overflows the whole budget, same guard the previous per-episode
-      // loop had.
-      if (excerpts.length === 0) {
+      // The NEWEST THEM row alone overflows the whole budget: truncate it in
+      // rather than skip it. Skipping it would either strand this person as a
+      // permanent candidate or (worse) advance the cursor past a row no model
+      // ever saw. A truncated excerpt is still a real excerpt -- and because
+      // findQuoteContextId below matches against the truncated text, a quote
+      // from the discarded tail cannot ground either.
+      if (excerpts.length === 0 && charBudget > 0) {
         excerpts.push({ contextId: c.contextId, speaker: c.speaker, text: c.text.slice(0, charBudget), ts: c.ts });
         maxContextId = Math.max(maxContextId, c.contextId);
+        charBudget = 0;
       }
       break;
     }
     charBudget -= c.text.length;
     excerpts.push({ contextId: c.contextId, speaker: c.speaker, text: c.text, ts: c.ts });
     maxContextId = Math.max(maxContextId, c.contextId);
+  }
+
+  // (2) ME rows into the remainder, newest first, and NEVER into
+  // maxContextId: the owner's own words are tone for the model, not evidence
+  // the sweep is allowed to mark as read on the person's behalf.
+  for (const c of candidates) {
+    if (c.speaker !== 'ME') continue;
+    if (c.text.length > charBudget) break;
+    charBudget -= c.text.length;
+    excerpts.push({ contextId: c.contextId, speaker: c.speaker, text: c.text, ts: c.ts });
   }
   // Oldest-first for display, same reasoning as gatherPersonContext: a
   // reader sees each conversation in the order it happened even though the
@@ -418,6 +479,14 @@ function alreadyProposed(db, personKey, kind, value) {
 // not create the distill_run row itself (conflict #7: the sweep writes ONE
 // distill_run row per PASS, not per person -- see runSweepPass), so they are
 // otherwise unused here.
+//
+// ONE BEGIN..COMMIT over the whole batch, matching storeLookup rather than
+// storePage (which is untransacted and has the same latent bug). A claim, its
+// claim_source receipt and its person_sweep_proposal row are one fact in three
+// tables: a failure between the first two inserts leaves a receiptless claim
+// sitting in the owner's pending queue rendering `quote: null`, which is
+// exactly the "evidence-free claim" state every grounding rule in this file
+// exists to make impossible.
 export function storeSweep(db, { personKey, engineName, model, kept, sweepRunId, distillRunId, now = Date.now() }) {
   void engineName;
   void model;
@@ -439,6 +508,8 @@ export function storeSweep(db, { personKey, engineName, model, kept, sweepRunId,
   let skipped = 0;
   let rejected = 0;
 
+  db.exec('BEGIN');
+  try {
   for (const item of kept) {
     if (item.kind === 'page_line') {
       if (alreadyStored(db, personKey, item.section, item.text)) {
@@ -469,6 +540,11 @@ export function storeSweep(db, { personKey, engineName, model, kept, sweepRunId,
     insProposal.run(claimId, sweepRunId, item.kind, item.kind === 'page_line' ? null : item.value);
     if (item.kind === 'page_line') insItem.run(claimId, item.section, now);
     stored += 1;
+  }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
   }
 
   return { stored, skipped, rejected };
@@ -630,13 +706,18 @@ export function sweepGate(db, policy, { powerMode = 'trickle', battery = null, o
   // LOCAL cap (conflict #4), llama exempt: a loopback model has no external
   // quota to approach.
   if (engine !== 'llama') {
-    const cap = Number(policy?.relationshipMemory?.sweepDailyCallCap ?? SWEEP_DAILY_CALL_CAP_DEFAULT);
+    const cap = sweepCallCap(policy);
     const since = Date.now() - DAY;
+    // model_calls is incremented per person INSIDE the pass (see
+    // runSweepPass), not only by the terminal UPDATE, so a pass killed
+    // mid-loop still counts every call it actually made against this window.
+    // Before that, an interrupted pass left model_calls = 0 and its calls
+    // were invisible to the next pass's cap check.
     const used = Number(
       db.prepare('SELECT COALESCE(SUM(model_calls), 0) AS n FROM person_sweep_run WHERE started_at >= ?')
         .get(since).n
     );
-    if (used >= 0.9 * cap) return { ok: false, reason: 'quota' };
+    if (used >= SWEEP_CALL_CAP_HEADROOM * cap) return { ok: false, reason: 'quota' };
   }
   const scope = sweepScope(db, { now: Date.now() });
   if (scope.length === 0) return { ok: false, reason: 'no-scope' };
@@ -722,20 +803,29 @@ export async function runSweepPass(db, engine, policy, {
        ON CONFLICT(person_key) DO UPDATE SET last_swept_at = excluded.last_swept_at, last_status = excluded.last_status`
     );
 
-    let swept = 0;
-    let modelCalls = 0;
+    // The pass's counters are written to person_sweep_run AS THEY HAPPEN,
+    // inside the same transaction as that person's cursor write, not only by
+    // the terminal UPDATE below. sweepGate's daily call cap SUMS model_calls
+    // over this table, so a pass that dies mid-loop (a thrown engine, a
+    // killed process, a machine that slept) used to leave model_calls = 0 and
+    // every call it made was invisible to the next pass's cap -- the cap
+    // undercounted exactly when it mattered most.
+    const bumpRun = db.prepare(
+      `UPDATE person_sweep_run
+         SET swept = swept + ?, model_calls = model_calls + ?, proposed = proposed + ?,
+             dropped = dropped + ?, tokens_est = tokens_est + ?
+       WHERE id = ?`
+    );
+
+    // `proposed` is still accumulated in memory because distill_run.claims_out
+    // is written once, at the end, from the whole pass -- every other counter
+    // now lives in the row itself.
     let proposed = 0;
-    let dropped = 0;
-    let tokensEst = 0;
 
     for (let i = 0; i < candidates.length; i++) {
       const candidate = candidates[i];
       const result = await sweepPerson(db, engine, candidate, { sweepRunId, distillRunId, now });
-      modelCalls += result.calls;
       proposed += result.proposed;
-      dropped += result.dropped;
-      tokensEst += result.tokensEst;
-      swept += 1;
 
       // proposed/empty/ungrounded ALL advance: the model read those rows, and
       // re-asking costs the same and answers the same (section 5). Only a
@@ -749,6 +839,7 @@ export async function runSweepPass(db, engine, policy, {
         } else {
           holdCursor.run(candidate.personKey, candidate.cursor, now, result.status);
         }
+        bumpRun.run(1, result.calls, result.proposed, result.dropped, result.tokensEst, sweepRunId);
         db.exec('COMMIT');
       } catch (err) {
         db.exec('ROLLBACK');
@@ -757,9 +848,12 @@ export async function runSweepPass(db, engine, policy, {
       if (i < candidates.length - 1) await sleep(SWEEP_PAUSE_MS);
     }
 
+    // Counters are already in the row (bumpRun, above); this only closes the
+    // pass out. Re-writing them here from the in-memory accumulators would
+    // undo an increment committed by a person whose cursor write succeeded.
     db.prepare(
-      `UPDATE person_sweep_run SET ended_at = ?, swept = ?, model_calls = ?, proposed = ?, dropped = ?, tokens_est = ?, status = 'complete' WHERE id = ?`
-    ).run(Date.now(), swept, modelCalls, proposed, dropped, tokensEst, sweepRunId);
+      `UPDATE person_sweep_run SET ended_at = ?, status = 'complete' WHERE id = ?`
+    ).run(Date.now(), sweepRunId);
     db.prepare("UPDATE distill_run SET claims_out = ?, status = 'complete', ended_at = ? WHERE id = ?")
       .run(proposed, Date.now(), distillRunId);
 
@@ -782,13 +876,37 @@ export async function runSweepPass(db, engine, policy, {
 // reject/retract: claim_decision alone (already written) is the whole
 // story -- nothing here overrides a person or a firm on a reject.
 //
-// accept, kind 'sub_role': unions the tag into the CURRENT people.sub_roles
-// (a live read, not a re-derivation) and writes it as an owner override via
-// markPersonSubRoles -- union, not replace, so accepting a sweep-proposed
-// tag can never drop a tag the LinkedIn importer or an earlier owner
-// correction already set. Guarded by applied_at rather than re-checking the
-// union's effect: accepting the same proposal twice is a no-op, not a
-// second write, whether or not a projection rebuild happened in between.
+// accept, kind 'sub_role': unions the tag into the FULL current set and
+// writes that as an owner override via markPersonSubRoles -- union, not
+// replace, so accepting a sweep-proposed tag can never drop a tag the
+// LinkedIn importer or an earlier owner correction already set. Guarded by
+// applied_at rather than re-checking the union's effect: accepting the same
+// proposal twice is a no-op, not a second write, whether or not a projection
+// rebuild happened in between.
+//
+// "THE FULL CURRENT SET" IS TWO READS, NOT ONE, and the second one is the
+// correction. people.sub_roles is a PROJECTION -- rebuildPeopleCore
+// (hermes.mjs) does DELETE FROM people and rebuilds, and people/projection's
+// clearPeopleProjection does the same -- so a read that lands mid-rebuild
+// sees no row at all, `current` was [], and the union degenerated to
+// [value]: one accepted tag, every other tag on that person silently
+// dropped from the owner's own config. So:
+//   * the owner override in config (loadOwner().subRoles) is read TOO. It is
+//     the durable half; the projection is derived from it, so unioning both
+//     is correct whichever one is stale.
+//   * a MISSING people row REFUSES the write outright -- applied_at is not
+//     stamped, no override is written, and { applied: false, rebuildNeeded:
+//     false, reason: 'people-row-missing' } comes back so the caller can
+//     retry once the projection is there. Refusing is recoverable; wiping is
+//     not.
+//
+// reject/retract of a sub_role proposal THIS FUNCTION ALREADY APPLIED: the
+// tag is removed from the override, but only when the tag's provenance is
+// this proposal and nothing else -- no OTHER accepted sweep proposal for the
+// same tag, and the tag is not derivable from the person's own LinkedIn
+// export. Before this, an accept followed by a reject left the tag in the
+// config forever AND left applied_at stamped, so the reject had no effect and
+// a later accept could not re-apply it either.
 //
 // accept, kind 'firm': stamps applied_at only. firmOf() (people/firms.mjs)
 // derives a person's firm at READ time; a persisted override map for a
@@ -808,9 +926,33 @@ export async function runSweepPass(db, engine, policy, {
 // already has rebuildPeopleCore in scope, the same way its /people/role and
 // /people/sub-roles routes do) performs the rebuild itself when that flag
 // comes back true.
+// The owner's own sub-role override for one person, straight out of the
+// local config -- the DURABLE half of "the current set", the half that
+// survives a people-projection rebuild. Absent key => [].
+function ownerSubRoleOverride(personKey, configPath) {
+  const owner = loadOwner(configPath ? { configPath } : {});
+  return owner.subRoles.get(personKey) ?? [];
+}
+
+// The sub-roles the person's OWN LinkedIn export derives, recomputed rather
+// than read back out of the projection (subRolesFor with no overrides, the
+// same call lint.mjs's roleConflicts makes). Used only as provenance on a
+// reject: a tag the export produces was never this proposal's to remove.
+function exportDerivedSubRoles(db, personKey) {
+  const row = db.prepare('SELECT linkedin FROM people WHERE person_key = ?').get(personKey);
+  if (row === undefined) return null; // projection missing: provenance unknowable
+  let linkedin = null;
+  if (typeof row.linkedin === 'string' && row.linkedin.length > 0) {
+    try { linkedin = JSON.parse(row.linkedin); } catch { linkedin = null; }
+  }
+  return subRolesFor({ linkedin }, {});
+}
+
 export function applySweepDecision(db, policy, { claimId, action, configPath } = {}) {
   void policy;
-  if (!Number.isInteger(claimId)) return { applied: false, kind: null, rebuildNeeded: false };
+  if (!Number.isInteger(claimId)) {
+    return { applied: false, kind: null, rebuildNeeded: false, reason: 'not-a-claim-id' };
+  }
 
   const proposal = db
     .prepare(
@@ -819,20 +961,32 @@ export function applySweepDecision(db, policy, { claimId, action, configPath } =
        WHERE psp.claim_id = ?`
     )
     .get(claimId);
-  if (!proposal) return { applied: false, kind: null, rebuildNeeded: false };
+  if (!proposal) return { applied: false, kind: null, rebuildNeeded: false, reason: 'not-a-sweep-proposal' };
 
-  if (action !== 'accept') {
-    return { applied: false, kind: proposal.kind, rebuildNeeded: false };
+  const wasApplied = proposal.appliedAt !== null && proposal.appliedAt !== undefined;
+
+  if (action === 'reject' || action === 'retract') {
+    return undoSubRole(db, proposal, { claimId, configPath, wasApplied });
   }
-  if (proposal.appliedAt !== null && proposal.appliedAt !== undefined) {
-    return { applied: false, kind: proposal.kind, rebuildNeeded: false };
+  if (action !== 'accept') {
+    return { applied: false, kind: proposal.kind, rebuildNeeded: false, reason: 'not-a-decision-this-applies' };
+  }
+  if (wasApplied) {
+    return { applied: false, kind: proposal.kind, rebuildNeeded: false, reason: 'already-applied' };
   }
 
   let rebuildNeeded = false;
   if (proposal.kind === 'sub_role' && SUB_ROLES.includes(proposal.value)) {
     const row = db.prepare('SELECT sub_roles FROM people WHERE person_key = ?').get(proposal.personKey);
-    const current = parseSubRoles(row?.sub_roles);
-    const unioned = [...new Set([...current, proposal.value])].sort();
+    if (row === undefined) {
+      // The projection is mid-rebuild (or this key is gone). Writing now
+      // would replace the owner's whole override with this one tag. Refuse,
+      // leave applied_at NULL, and let the caller try again.
+      return { applied: false, kind: proposal.kind, rebuildNeeded: false, reason: 'people-row-missing' };
+    }
+    const current = parseSubRoles(row.sub_roles);
+    const override = ownerSubRoleOverride(proposal.personKey, configPath);
+    const unioned = [...new Set([...current, ...override, proposal.value])].sort();
     markPersonSubRoles({
       key: proposal.personKey, subRoles: unioned,
       ...(configPath ? { configPath } : {}),
@@ -841,13 +995,71 @@ export function applySweepDecision(db, policy, { claimId, action, configPath } =
   }
 
   db.prepare('UPDATE person_sweep_proposal SET applied_at = ? WHERE claim_id = ?').run(Date.now(), claimId);
-  return { applied: true, kind: proposal.kind, rebuildNeeded };
+  return { applied: true, kind: proposal.kind, rebuildNeeded, reason: null };
+}
+
+// A reject/retract of a sub_role proposal that WAS applied: take the tag back
+// out of the owner override, and clear applied_at so the owner can change
+// their mind again later (the applied_at guard above would otherwise make a
+// re-accept a permanent no-op).
+//
+// ONLY IF THE TAG CAME FROM THIS PROPOSAL. Two other things can put the same
+// tag on the same person, and neither is this decision's to undo:
+//   * another sweep proposal for the same tag that the owner also accepted,
+//   * the person's own LinkedIn export, which subRolesFor derives the tag
+//     from whether or not any proposal exists.
+// In either case the tag stays and only applied_at is cleared.
+function undoSubRole(db, proposal, { claimId, configPath, wasApplied }) {
+  const nothing = (reason) => ({ applied: false, kind: proposal.kind, rebuildNeeded: false, reason });
+  if (proposal.kind !== 'sub_role' || !wasApplied) return nothing('nothing-to-undo');
+
+  const exportRoles = exportDerivedSubRoles(db, proposal.personKey);
+  if (exportRoles === null) {
+    // Same refusal as the accept path, for the same reason: without the
+    // people row the tag's provenance cannot be established, and guessing
+    // means either wiping a derived tag or stranding one of ours.
+    return nothing('people-row-missing');
+  }
+  if (exportRoles.includes(proposal.value)) {
+    db.prepare('UPDATE person_sweep_proposal SET applied_at = NULL WHERE claim_id = ?').run(claimId);
+    return nothing('tag-is-export-derived');
+  }
+
+  const otherAccepted = db
+    .prepare(
+      `SELECT 1 AS ok FROM person_sweep_proposal psp
+         JOIN claim c ON c.id = psp.claim_id
+       WHERE c.subject = 'person' AND c.subject_person_key = ? AND psp.kind = 'sub_role'
+         AND psp.value = ? AND psp.claim_id <> ?
+         AND (SELECT d.action FROM claim_decision d WHERE d.claim_id = psp.claim_id ORDER BY d.id DESC LIMIT 1) = 'accept'
+       LIMIT 1`
+    )
+    .get(proposal.personKey, proposal.value, claimId);
+  if (otherAccepted) {
+    db.prepare('UPDATE person_sweep_proposal SET applied_at = NULL WHERE claim_id = ?').run(claimId);
+    return nothing('tag-accepted-elsewhere');
+  }
+
+  const override = ownerSubRoleOverride(proposal.personKey, configPath);
+  const remaining = override.filter((tag) => tag !== proposal.value);
+  db.prepare('UPDATE person_sweep_proposal SET applied_at = NULL WHERE claim_id = ?').run(claimId);
+  if (remaining.length === override.length) return nothing('tag-not-in-override');
+
+  // An empty array is a REAL override ("none of these"), not the absence of
+  // one -- see markPersonSubRoles' own comment. Writing [] is correct here:
+  // the owner accepted the tag, which pinned an override, and has now taken
+  // it back.
+  markPersonSubRoles({
+    key: proposal.personKey, subRoles: remaining,
+    ...(configPath ? { configPath } : {}),
+  });
+  return { applied: true, kind: proposal.kind, rebuildNeeded: true, reason: 'tag-removed' };
 }
 
 // For /stats' `sweep` key (hermes.mjs) and the desk's one-line status. Every
 // number here is a plain aggregate over person_sweep_cursor/_run and
 // person_sweep_proposal -- no engine call, no scope-widening side effect.
-export function sweepStatus(db) {
+export function sweepStatus(db, policy = null) {
   const scope = sweepScope(db, { now: Date.now() }).length;
   const swept = Number(db.prepare('SELECT COUNT(*) AS n FROM person_sweep_cursor').get().n);
   const pending = Number(
@@ -880,6 +1092,12 @@ export function sweepStatus(db) {
     engine: last?.engine ?? null,
     tokensEst24h: Number(agg.tok),
     calls24h: Number(agg.calls),
-    callCap: SWEEP_DAILY_CALL_CAP_DEFAULT,
+    // The cap ACTUALLY IN FORCE, config override included, plus the threshold
+    // the gate refuses at. This used to print SWEEP_DAILY_CALL_CAP_DEFAULT
+    // unconditionally -- so a config that raised or lowered the cap was
+    // invisible here, and the number shown (200) was never the number
+    // enforced (180 = 0.9 * 200) even at the default.
+    callCap: sweepCallCap(policy),
+    callCapEnforced: Math.floor(SWEEP_CALL_CAP_HEADROOM * sweepCallCap(policy)),
   };
 }
