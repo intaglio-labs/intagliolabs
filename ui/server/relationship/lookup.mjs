@@ -17,9 +17,11 @@
 //
 // This file has two halves. Above is the PURE half (no DB, no clock beyond
 // what a caller passes in): buildLookupQuery, parseLookupStream,
-// groundLookup, and the constants both halves share. Below is the DB half:
-// anchorsFor, lookupTierFor, lookupScope, lookupGate, storeLookup,
-// lookupPerson, runLookupPass, lookupStatus, lookupLogFor, newestWebChange --
+// groundLookup, the evidence-strength helpers (evidenceKindFor, sameFirm,
+// companiesNamed, contradictsAnchorFirm), and the constants both halves
+// share. Below is the DB half: anchorsFor, lookupTierFor, lookupScope,
+// lookupGate, storeLookup, storeLookupEvidence, lookupPerson, runLookupPass,
+// lookupStatus, lookupLogFor, lookupEvidenceFor, newestWebChange --
 // mirroring the gather/ground vs. store split sweep.mjs and pages.mjs already
 // use: a client (groundLookup, the pure half above) is not a boundary, so
 // storeLookup re-checks every rule again against what it actually writes.
@@ -28,7 +30,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { canonicalHash } from '../contentHash.mjs';
+import { canonicalHash, canonicalize } from '../contentHash.mjs';
 import { isAnonymousContact } from '../people/map.mjs';
 import { eligiblePool } from './producer.mjs';
 
@@ -87,6 +89,15 @@ const LOOKUP_QUERY_PARAM_DENYLIST = /\b(?:token|key|sig)\b/iu;
 function isLoopbackOrPrivateHost(host) {
   const h = host.toLowerCase();
   if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h.startsWith('127.')) return true;
+  // `new URL('https://[::1]/x').hostname` is the SIX characters "[::1]" --
+  // the brackets are part of it, so the `=== '::1'` test above never fires
+  // on a real URL and every bracketed literal has to be named here too.
+  if (h === '[::1]' || h === '[::]' || h === '0.0.0.0') return true;
+  // Link-local: 169.254.169.254 is how a cloud instance reaches its own
+  // metadata endpoint, and fe80::/10 is IPv6's own link-local block.
+  if (h.startsWith('169.254.') || h.startsWith('[fe80:')) return true;
+  // IPv6 unique-local, fc00::/7.
+  if (h.startsWith('[fc') || h.startsWith('[fd')) return true;
   // RFC1918: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16.
   if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/u.test(h)) return true;
   if (/^192\.168\.\d{1,3}\.\d{1,3}$/u.test(h)) return true;
@@ -94,6 +105,20 @@ function isLoopbackOrPrivateHost(host) {
   if (rfc1918_172 && Number(rfc1918_172[1]) >= 16 && Number(rfc1918_172[1]) <= 31) return true;
   return false;
 }
+
+// The shape a REGISTRABLE PUBLIC DOMAIN has, and the rule that turns the
+// range list above into a statement of intent rather than the whole
+// defence. Enumerating private address space one CIDR at a time loses to
+// encodings: 2130706433, 0x7f000001 and 0177.0.0.1 are all 127.0.0.1,
+// ::ffff:127.0.0.1 is too, and there is no end to that list. Requiring the
+// shape instead closes every encoding at once -- at least one dot, labels of
+// letters/digits/hyphens, and a final label of two or more letters. Every IP
+// literal in every encoding fails it, as does a bare label with no TLD
+// ("intranet"). A punycode IDN passes, since URL has already normalized it
+// to xn--. The cost is that a numeric-host citation is refused, which is
+// correct: a search result about a person is served from a domain, and a
+// bare-IP citation is not evidence about anybody.
+const PUBLIC_DOMAIN_RE = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/u;
 
 // Everything groundLookup checks about a single citation URL, beyond
 // "returned by this search" (observed.urls.has(url), checked by the caller):
@@ -104,6 +129,7 @@ function isLoopbackOrPrivateHost(host) {
 function isLookupUrlDenied(u) {
   const host = u.hostname.toLowerCase();
   if (isLoopbackOrPrivateHost(host)) return true;
+  if (!PUBLIC_DOMAIN_RE.test(host)) return true;
   if (LOOKUP_HOST_DENYLIST.suffixes.some((suf) => host.endsWith(suf))) return true;
   if (LOOKUP_HOST_DENYLIST.exactHosts.includes(host)) return true;
   if ((host === 'linkedin.com' || host.endsWith('.linkedin.com')) && u.pathname.startsWith('/messaging')) {
@@ -133,6 +159,26 @@ const SAFE_CHARS_RE = /[^\p{L}\p{N} .,'&@/:_-]/gu;
 // no way to know a caller did not accidentally pass an email into `name`.
 const EMAIL_SHAPE_RE = /@[^\s@]*\.[a-z]{2,}/iu;
 const HANDLE_SHAPE_RE = /^@?[A-Za-z0-9_]{2,15}$/u;
+
+// isPublicHandle(raw): the handle test, run on the RAW value BEFORE
+// SAFE_CHARS_RE strips anything, and that ordering is the whole point.
+// SAFE_CHARS_RE does not keep '+', so a phone number "+15551234567" became
+// "15551234567" -- eleven characters of [0-9], which HANDLE_SHAPE_RE accepts
+// -- and went out in a real search query as though it were a public social
+// handle, while also SATISFYING THE TWO-ANCHOR RULE and so authorizing a
+// lookup that would otherwise have been refused. ops/EGRESS.json's own
+// decision for this path says "no email or phone number".
+//
+// Two rules, then: the shape must hold before stripping (so '+' disqualifies
+// rather than vanishing), and an all-digit value is never a handle -- a bare
+// numeric id is a phone number or a Telegram user id, not something you
+// search the public web for.
+function isPublicHandle(raw) {
+  if (typeof raw !== 'string') return false;
+  const v = raw.trim();
+  if (!HANDLE_SHAPE_RE.test(v)) return false;
+  return !/^\d+$/u.test(v.replace(/^@/u, ''));
+}
 
 function lookupQueryError(field) {
   return new Error(`buildLookupQuery: field ${JSON.stringify(field)} is not an allowlisted public identifier`);
@@ -179,21 +225,33 @@ export function buildLookupQuery(anchors) {
   }
 
   const clean = {};
+  // The pre-strip value per field, kept because two checks below MUST see
+  // what the caller actually passed rather than what SAFE_CHARS_RE left of
+  // it -- see isPublicHandle for the phone-number-becomes-handle case, and
+  // the email check for why a stripped value cannot be trusted either.
+  const raws = {};
   for (const field of LOOKUP_ANCHOR_FIELDS) {
     const raw = descriptors[field] ? descriptors[field].value : undefined;
     if (raw === undefined || raw === null) {
       clean[field] = null;
+      raws[field] = null;
       continue;
     }
     if (typeof raw !== 'string') {
       throw lookupQueryError(field);
     }
-    let v = raw.trim().slice(0, ANCHOR_CAPS[field]).replace(SAFE_CHARS_RE, '');
+    const trimmed = raw.trim().slice(0, ANCHOR_CAPS[field]);
+    raws[field] = trimmed;
+    let v = trimmed.replace(SAFE_CHARS_RE, '');
     if (v.length === 0) {
       clean[field] = null;
       continue;
     }
-    if (EMAIL_SHAPE_RE.test(v)) {
+    // Checked on the RAW value as well as the stripped one: SAFE_CHARS_RE
+    // keeps '@' and '.', so this fires either way today, but a future
+    // widening of the strip set must not be able to launder an address
+    // through it.
+    if (EMAIL_SHAPE_RE.test(v) || EMAIL_SHAPE_RE.test(trimmed)) {
       throw lookupQueryError(field);
     }
     clean[field] = v;
@@ -203,7 +261,7 @@ export function buildLookupQuery(anchors) {
   // look like a handle, or a profile URL that is not an https linkedin.com
   // link, simply stops counting as an anchor -- the two-anchor rule below
   // is what decides whether the lookup can run at all.
-  if (clean.handle !== null && !HANDLE_SHAPE_RE.test(clean.handle)) {
+  if (clean.handle !== null && !isPublicHandle(raws.handle)) {
     clean.handle = null;
   }
   if (clean.profileUrl !== null) {
@@ -251,8 +309,21 @@ export function buildLookupQuery(anchors) {
 //   urls          the UNION of every `Links: [...]` array parsed out of
 //                 every WebSearch tool_result across the whole transcript --
 //                 the observed-URL allowlist a change's `url` must appear in.
-//   resultText    every WebSearch tool_result's own text, concatenated -- the
-//                 corpus a change's `quote` must be a verbatim substring of.
+//   links         the same Links entries as {title, url} pairs, deduplicated
+//                 by url, first title seen winning -- see the evidence-kind
+//                 section below for why a TITLE is tracked separately from
+//                 the prose around it.
+//   resultText    every WebSearch tool_result's own text, concatenated,
+//                 VERBATIM -- what lookup_evidence stores so a false positive
+//                 can be audited after the fact.
+//   snippetText   resultText with the parts that are NOT the search engine's
+//                 synthesized prose removed: the `Web search results for
+//                 query: "..."` header (which echoes OUR OWN anchors back --
+//                 a model quoting that would be "grounding" a claim in the
+//                 query we sent), the `Links: [...]` JSON blob, and the
+//                 trailing `REMINDER:` tail the provider appends. This, not
+//                 resultText, is the corpus a `quote` counts as a SNIPPET
+//                 against.
 //   searches      a REAL count: assistant `tool_use` blocks named WebSearch,
 //                 counted by code, never taken from anything the model says
 //                 about itself.
@@ -267,9 +338,34 @@ export function buildLookupQuery(anchors) {
 // 'ungrounded', visible on /stats. This is the intended failure mode for an
 // undocumented, provider-shaped stream format: degrade to zero, visibly,
 // never guess.
+// The three shapes a provider wraps around its own synthesized prose in a
+// WebSearch tool_result (see ui/test/fixtures/lookup-stream.txt for the real
+// captured article). None is evidence about a person:
+//   - the header echoes the query WE sent (name + firm + profile URL), so a
+//     quote of it is a claim grounded in its own premise;
+//   - the Links array is an index of titles and URLs, and a search-result
+//     title is a stale snapshot of a page's <title>, not a statement anybody
+//     published about a person's CURRENT role (this is exactly how lookup_log
+//     4520 turned "Nikzad Khani - Software Engineer - Verily" into a
+//     present-tense "now at Verily, not Klaviyo");
+//   - the REMINDER tail is an instruction to the model, not content.
+const SEARCH_HEADER_RE = /^Web search results for query:[^\n]*\n+/u;
+const SEARCH_LINKS_RE = /Links:\s*(\[[\s\S]*?\])\n\n/u;
+const SEARCH_REMINDER_RE = /\n+REMINDER:[\s\S]*$/u;
+
+function snippetOnly(text) {
+  return text
+    .replace(SEARCH_HEADER_RE, '')
+    .replace(SEARCH_LINKS_RE, '')
+    .replace(SEARCH_REMINDER_RE, '')
+    .trim();
+}
+
 export function parseLookupStream(stdoutText) {
   const urls = new Set();
+  const linkByUrl = new Map();
   let resultText = '';
+  let snippetText = '';
   let searches = 0;
   let costUsd = null;
   let envelopeText = null;
@@ -307,13 +403,22 @@ export function parseLookupStream(stdoutText) {
               : '';
           if (text.length === 0) continue;
           resultText += (resultText.length > 0 ? '\n' : '') + text;
-          const m = text.match(/Links:\s*(\[[\s\S]*?\])\n\n/u);
+          const snippet = snippetOnly(text);
+          if (snippet.length > 0) snippetText += (snippetText.length > 0 ? '\n' : '') + snippet;
+          const m = text.match(SEARCH_LINKS_RE);
           if (!m) continue; // no parseable Links array in this tool_result -- contributes zero URLs
           try {
             const links = JSON.parse(m[1]);
             if (Array.isArray(links)) {
               for (const link of links) {
-                if (typeof link?.url === 'string' && link.url.length > 0) urls.add(link.url);
+                if (typeof link?.url !== 'string' || link.url.length === 0) continue;
+                urls.add(link.url);
+                if (!linkByUrl.has(link.url)) {
+                  linkByUrl.set(link.url, {
+                    title: typeof link.title === 'string' ? link.title : '',
+                    url: link.url,
+                  });
+                }
               }
             }
           } catch {
@@ -328,11 +433,183 @@ export function parseLookupStream(stdoutText) {
     }
   }
 
-  return { envelopeText, urls, resultText, searches, costUsd, ...(error ? { error } : {}) };
+  return {
+    envelopeText, urls, links: [...linkByUrl.values()], resultText, snippetText, searches, costUsd,
+    ...(error ? { error } : {}),
+  };
 }
 
 const LOOKUP_CHANGE_KINDS = Object.freeze(['role', 'company', 'raise', 'launch', 'move', 'other']);
 const LOOKUP_CHANGE_CAP = 3;
+
+// --- Evidence strength, and the anchor a lookup contradicts ---------------
+//
+// WHY ANY OF THIS EXISTS: lookup_log 4520 (person `name:nikzad khani`) sent
+// name + firm "Klaviyo" (straight off the LinkedIn export) + profile URL,
+// came back identity_confidence "match", and stored claim 5031 -- kind
+// 'move', text "Nikzad Khani is now a Software Engineer at Verily, not
+// Klaviyo as previously recorded.", quote "Nikzad Khani - Software Engineer
+// - Verily". The owner is at Klaviyo; the claim was rejected.
+//
+// Grounding HELD: the quote really was a verbatim span of the tool_result
+// text, and the URL really was one the search returned. The failure was
+// EVIDENTIARY, not a grounding hole -- the quote was a `Links:` entry's
+// TITLE (a search index's stale snapshot of a LinkedIn page title, or a past
+// position rendered as one), and a title was turned into a present-tense
+// assertion that contradicted the very anchor we supplied. Two rules follow,
+// and both are code, not prompt text:
+//
+//   1. EVIDENCE KIND. A quote found in the provider's synthesized prose
+//      ('snippet') is stronger than one that only matches a returned title
+//      ('title'). Recorded per change on person_lookup_change.evidence_kind.
+//   2. THE ANCHOR IS EVIDENCE TOO. The firm we sent came from the owner's
+//      own LinkedIn export. A change naming a DIFFERENT company is not a
+//      discovery, it is a disagreement with our own input -- and when the
+//      only thing backing it is a title, a stale index and a namesake are at
+//      least as likely as a real move. Such a change is stored (the owner
+//      should get to see and judge the disagreement) but marked
+//      contradicts_anchor=1, filed as kind 'company', withheld from the card
+//      while it is pending (newestWebChange), and -- when title-only -- the
+//      whole log's verdict is downgraded to 'ambiguous', because "we cannot
+//      tell whether this is your person" is the honest reading.
+
+// Tokens that are corporate boilerplate rather than identity: "Klaviyo" and
+// "Klaviyo, Inc." are the same employer, and a rule that treats them as
+// different companies would flag every lookup as contradicting its anchor.
+const FIRM_NOISE_TOKENS = new Set([
+  'inc', 'llc', 'llp', 'ltd', 'limited', 'corp', 'corporation', 'co', 'company',
+  'plc', 'gmbh', 'ag', 'sa', 'bv', 'nv', 'pbc', 'the',
+]);
+
+function firmTokens(value) {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[‘’ʼ']/gu, '')
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((t) => t.length > 0 && !FIRM_NOISE_TOKENS.has(t));
+}
+
+// Same employer, for the purpose of "does this change disagree with the firm
+// we sent". Deliberately generous in the direction of SAME: one token list
+// being a contiguous run inside the other counts ("Google" vs "Google
+// Cloud", "Klaviyo" vs "Klaviyo Inc"). Being wrong in this direction under-
+// flags a real move, which the owner can still see on the claim itself;
+// being wrong the other way flags every ordinary lookup.
+export function sameFirm(a, b) {
+  const x = firmTokens(a);
+  const y = firmTokens(b);
+  if (x.length === 0 || y.length === 0) return false;
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+  for (let i = 0; i + short.length <= long.length; i++) {
+    if (short.every((t, j) => t === long[i + j])) return true;
+  }
+  return false;
+}
+
+// A capitalized run of up to four words -- the shape a company name takes
+// inside an English sentence or a LinkedIn page title. Not an NER model and
+// not trying to be: every pattern below anchors on a word that says
+// "employer follows", so the capture only has to stop in a sensible place.
+const CAP_WORD = "[A-Z][\\p{L}\\p{N}&.'\\u2019-]*";
+const CAP_PHRASE = `${CAP_WORD}(?:[ ](?:of |and |the |for |de )?${CAP_WORD}){0,3}`;
+
+// Employment-bearing phrasings, safe to read on a change of ANY kind: each
+// one states a relationship between a person and a company outright.
+const EMPLOYER_PATTERNS = [
+  `\\bnot\\s+(${CAP_PHRASE})`,
+  `\\bno longer\\s+(?:at|with|works at|working at)\\s+(${CAP_PHRASE})`,
+  `\\b(?:joins|joined|is joining|has joined)\\s+(${CAP_PHRASE})`,
+  `\\b(?:moved|moves|has moved|relocated)\\s+to\\s+(${CAP_PHRASE})`,
+  `\\bnow\\s+(?:at|with)\\s+(${CAP_PHRASE})`,
+  `\\b(?:left|departed)\\s+(${CAP_PHRASE})`,
+  `\\bhired by\\s+(${CAP_PHRASE})`,
+].map((p) => new RegExp(p, 'gu'));
+
+// A bare "at X" only names an employer when the change itself claims to be
+// about a role, a company or a move -- otherwise "spoke at Web Summit" would
+// read as an employer. Same reasoning for the LinkedIn-title shape.
+const AT_PATTERN = new RegExp(`\\bat\\s+(${CAP_PHRASE})`, 'gu');
+const FIRM_BEARING_KINDS = new Set(['role', 'company', 'move']);
+
+// The venues whose titles we are reading, trimmed off a title's tail so
+// "Name - Role - Company | LinkedIn" yields Company rather than LinkedIn.
+const TITLE_VENUES = new Set([
+  'linkedin', 'twitter', 'x', 'facebook', 'github', 'crunchbase', 'medium',
+  'substack', 'bloomberg', 'wellfound', 'angellist',
+]);
+
+// "Nikzad Khani - Software Engineer - Verily | LinkedIn" -> "Verily". Needs
+// at least three segments after the venue tail is trimmed: a two-segment
+// title ("Jane Doe | LinkedIn") names no company at all.
+function companyFromTitleShape(text) {
+  const segments = String(text ?? '').split(/\s+[-–—|]\s+/u).map((s) => s.trim()).filter(Boolean);
+  while (segments.length > 0 && TITLE_VENUES.has(segments[segments.length - 1].toLowerCase())) {
+    segments.pop();
+  }
+  return segments.length >= 3 ? segments[segments.length - 1] : null;
+}
+
+function collect(re, text, into) {
+  re.lastIndex = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const v = String(m[1] ?? '').replace(/[\s.,;:'’-]+$/u, '').trim();
+    if (v.length > 0) into.add(v);
+    if (m.index === re.lastIndex) re.lastIndex += 1;
+  }
+}
+
+// companiesNamed(text, kind): every company name this change's own words
+// point at. `kind` widens the reading to bare "at X" and the LinkedIn-title
+// shape for the three kinds that claim to be about employment.
+export function companiesNamed(text, kind) {
+  const s = String(text ?? '');
+  const out = new Set();
+  for (const re of EMPLOYER_PATTERNS) collect(re, s, out);
+  if (FIRM_BEARING_KINDS.has(kind)) {
+    collect(AT_PATTERN, s, out);
+    const titled = companyFromTitleShape(s);
+    if (titled) out.add(titled);
+  }
+  return [...out];
+}
+
+// contradictsAnchorFirm(change, firm): does this change name a company that
+// is not the firm anchor we sent? Reads BOTH text and quote -- 4520's text
+// named Verily in prose and its quote named Verily in a title, and either
+// alone is enough.
+export function contradictsAnchorFirm({ kind, text, quote }, firm) {
+  if (typeof firm !== 'string' || firmTokens(firm).length === 0) return false;
+  const named = [...companiesNamed(text, kind), ...companiesNamed(quote, kind)];
+  return named.some((c) => !sameFirm(c, firm));
+}
+
+// Words that assert a state holds RIGHT NOW. A title cannot support one:
+// prompts/public_lookup.md v2 forbids them outright without a stated date,
+// and this is the code that does not take the prompt's word for it.
+const PRESENT_TENSE_RE = /\b(?:now|currently|presently|no longer|these days|as of today)\b/iu;
+
+// evidenceKindFor(quote, observed): 'snippet' when the quote is a verbatim
+// span of the provider's synthesized prose, 'title' when it only matches one
+// of the returned `Links:` titles, null when it is neither -- which is a
+// grounding failure, not a weak change.
+//
+// The `snippetText ?? resultText` fallback keeps every hand-built `observed`
+// fixture (and any caller predating the split) working: without the split,
+// everything reads as 'snippet', exactly the behaviour this file had before.
+export function evidenceKindFor(quote, observed) {
+  const q = String(quote ?? '');
+  if (q.length === 0) return null;
+  const snippetText = typeof observed?.snippetText === 'string'
+    ? observed.snippetText
+    : String(observed?.resultText ?? '');
+  if (snippetText.includes(q)) return 'snippet';
+  const links = Array.isArray(observed?.links) ? observed.links : [];
+  for (const link of links) {
+    if (typeof link?.title === 'string' && link.title.length > 0 && link.title.includes(q)) return 'title';
+  }
+  return null;
+}
 
 // groundLookup(envelope, observed) -- PURE, no DB. Mirrors groundSweep's
 // shape (sweep.mjs) over public_lookup.md's output instead of sweep.md's:
@@ -349,7 +626,17 @@ const LOOKUP_CHANGE_CAP = 3;
 // receipt is the (url, quote) pair itself: the owner can open the URL and
 // judge for themselves, the same way every other claim's receipt in this
 // system is a pointer plus a verbatim quote, never a verified fact.
-export function groundLookup(envelope, observed) {
+//
+// `anchors.firm` is the third input, and it is not optional decoration: the
+// firm we SENT is evidence, and a change disagreeing with it is a different
+// kind of object than a change adding to it. See the evidence-strength
+// section above for the incident that made that distinction load-bearing.
+// Each kept change therefore carries two extra fields:
+//   evidenceKind       'snippet' | 'title'
+//   contradictsAnchor  true when the change names a company that is not the
+//                      firm anchor -- kept, refiled as kind 'company', and
+//                      withheld from the card while pending.
+export function groundLookup(envelope, observed, { firm = null } = {}) {
   const kept = [];
   const dropped = [];
   const noteDrop = (reason) => dropped.push({ reason });
@@ -380,7 +667,8 @@ export function groundLookup(envelope, observed) {
       noteDrop('quote is missing or empty');
       continue;
     }
-    if (!observed.resultText.includes(item.quote)) {
+    const evidenceKind = evidenceKindFor(item.quote, observed);
+    if (evidenceKind === null) {
       noteDrop('quote is not a verbatim substring of a search result');
       continue;
     }
@@ -399,7 +687,40 @@ export function groundLookup(envelope, observed) {
     if (isLookupUrlDenied(parsedUrl)) { noteDrop('url host is denylisted'); continue; }
     if (!observed.urls.has(item.url)) { noteDrop('url was never returned by this lookup\'s own search'); continue; }
     const date = typeof item.date === 'string' && /^\d{4}-\d{2}$/u.test(item.date) ? item.date : null;
-    kept.push({ kind: item.kind, text: item.text.trim(), url: item.url, quote: item.quote, date });
+    const text = item.text.trim();
+
+    // THE ANCHOR CHECK, ahead of the present-tense check on purpose: a
+    // change that disagrees with the firm we sent is the one thing the owner
+    // most needs to SEE (4520 was rejected in one click once he saw it), so
+    // it is kept and flagged rather than dropped. Its kind is rewritten to
+    // 'company' because that is what it actually is -- a competing claim
+    // about which company this person is at -- whatever the model filed it
+    // as ('move', for 4520).
+    if (contradictsAnchorFirm({ kind: item.kind, text, quote: item.quote }, firm)) {
+      kept.push({
+        kind: 'company', text, url: item.url, quote: item.quote, date,
+        evidenceKind, contradictsAnchor: true,
+      });
+      continue;
+    }
+
+    // A title is a search index's snapshot of a page's <title>, not a dated
+    // statement that somebody currently holds a role. So a role/company/move
+    // change resting on nothing but a title may not be phrased as current.
+    // Rewriting the model's sentence for it is not an option -- that would
+    // be composing a claim the search results never made -- so the change is
+    // dropped, visibly, as 'ungrounded'. A `date` does NOT buy an exemption:
+    // a page title states no date, so a date beside a title-only quote is
+    // the model's inference, which is the thing being ruled out.
+    if (evidenceKind === 'title' && FIRM_BEARING_KINDS.has(item.kind) && PRESENT_TENSE_RE.test(text)) {
+      noteDrop('a title-only role/company/move change may not be phrased as current');
+      continue;
+    }
+
+    kept.push({
+      kind: item.kind, text, url: item.url, quote: item.quote, date,
+      evidenceKind, contradictsAnchor: false,
+    });
   }
 
   return { kept, dropped };
@@ -441,7 +762,27 @@ function anchorsStmtsFor(db) {
        ORDER BY psp.claim_id DESC LIMIT 1`
     ),
     hasTwitterChannel: db.prepare('SELECT 1 FROM person_channels WHERE person_key = ? AND source = ?'),
-    identifiers: db.prepare('SELECT identifier FROM person_identifiers WHERE person_key = ?'),
+    // PER-IDENTIFIER source, via identity_evidence -- the fix for a claim
+    // this file used to make and not keep. person_identifiers is
+    // (identifier, person_key) and carries NO source column, so the old
+    // `SELECT identifier FROM person_identifiers WHERE person_key = ?`
+    // returned EVERY identifier this person has ever been seen under, on any
+    // channel: a Slack member id (U024BE7LH), a bare-numeric Telegram id, a
+    // phone number. person_channels only established that the person has *a*
+    // twitter channel somewhere, which is not evidence about any particular
+    // identifier -- the comment below claiming otherwise was simply false.
+    // identity_evidence(person_key, identifier, source) is the table that
+    // does know, so the join is against that. ORDER BY makes the pick
+    // deterministic: without it the chosen handle flipped across projection
+    // rebuilds, which changed anchors_hash, which re-dued the person, which
+    // burned the daily cap.
+    identifiers: db.prepare(
+      `SELECT DISTINCT pi.identifier AS identifier
+       FROM person_identifiers pi
+       JOIN identity_evidence ie ON ie.person_key = pi.person_key AND ie.identifier = pi.identifier
+       WHERE pi.person_key = ? AND ie.source = ?
+       ORDER BY pi.identifier`
+    ),
   };
 }
 
@@ -480,17 +821,31 @@ export function anchorsFor(db, personKey, stmts = null) {
     const proposed = s.proposedFirm.get(personKey);
     if (proposed && typeof proposed.value === 'string' && proposed.value.trim().length > 0) firm = proposed.value;
   }
+  // An email-shaped firm makes buildLookupQuery THROW, and that throw used
+  // to travel: lookupScope calls buildLookupQuery unguarded once per person,
+  // so ONE accepted sweep firm proposal of the form "foo@bar.com" -- which
+  // storeSweep will happily ground, since it only requires the value to be a
+  // verbatim substring of its own quote -- 500'd /admin/relationship/lookup,
+  // /lookup/person and /admin/relationship/lint, and silently nulled
+  // /stats.lookup and /stats.lint, permanently, with nothing logged to say
+  // which row did it. Refused here instead, before it can reach the gate:
+  // the person simply loses their firm anchor. Same for a display_name
+  // carrying an address ("Jane Doe (jane@acme.com)"), which isAnonymousContact
+  // does not catch because it only matches a whole-string address -- and
+  // which is not a name worth searching the public web for anyway.
+  if (firm !== null && EMAIL_SHAPE_RE.test(firm)) firm = null;
+  const safeName = name !== null && !EMAIL_SHAPE_RE.test(name) ? name : null;
 
-  // handle: a person_identifiers entry that both (a) looks like a handle and
-  // (b) belongs to a person who actually has a twitter channel -- person_channels
-  // is the evidence that THIS identifier came through that channel rather
-  // than merely happening to match the shape.
+  // handle: an identifier that both (a) looks like a public handle (see
+  // isPublicHandle -- shape tested before stripping, never all-digit) and
+  // (b) has identity_evidence saying it came through the twitter channel.
+  // The person_channels read stays as a belt: it establishes the person has
+  // that channel at all, which is cheap and lets the join be skipped.
   let handle = null;
   const hasTwitterChannel = s.hasTwitterChannel.get(personKey, 'twitter');
   if (hasTwitterChannel) {
-    const HANDLE_SHAPE = /^@?[A-Za-z0-9_]{2,15}$/u;
-    const ids = s.identifiers.all(personKey);
-    const match = ids.find((r) => HANDLE_SHAPE.test(r.identifier));
+    const ids = s.identifiers.all(personKey, 'twitter');
+    const match = ids.find((r) => isPublicHandle(r.identifier));
     if (match) handle = match.identifier;
   }
 
@@ -498,7 +853,7 @@ export function anchorsFor(db, personKey, stmts = null) {
     ? linkedin.url
     : null;
 
-  return { name, firm, handle, profileUrl };
+  return { name: safeName, firm, handle, profileUrl };
 }
 
 // lookupTierFor(db, personKey, {now, eligibleKeys?, subRolesStmt?}): 'eligible'
@@ -577,13 +932,31 @@ export function lookupScope(db, { now = Date.now(), personKey = null } = {}) {
   for (const row of rows) {
     if (isAnonymousContact({ name: row.name, key: row.personKey })) continue;
     const anchors = anchorsFor(db, row.personKey, anchorStmts);
-    const built = buildLookupQuery(anchors);
+    // GUARDED, and not merely defensively: buildLookupQuery throws on a
+    // structural violation of its own allowlist, and this loop runs over
+    // every person in the house. One malformed anchor set used to take down
+    // /admin/relationship/lookup, /lookup/person and /admin/relationship/lint
+    // together and null /stats.lookup forever (see anchorsFor's own email
+    // note). A person whose anchors cannot be assembled is UNANCHORED --
+    // which is a state this function already models, already reports, and
+    // already excludes from the budget. anchorError records that it happened
+    // WITHOUT recording the value that caused it: the value is the reason
+    // this is a problem, so it must not be copied anywhere new.
+    let built = null;
+    let anchorError = false;
+    try {
+      built = buildLookupQuery(anchors);
+    } catch {
+      built = null;
+      anchorError = true;
+    }
     const state = stateStmt.get(row.personKey);
     out.push({
       personKey: row.personKey,
       name: row.name,
       tier: lookupTierFor(db, row.personKey, { now, eligibleKeys, subRolesStmt }),
       anchored: built !== null,
+      anchorError,
       anchorsHash: anchorsHash(anchors),
       storedAnchorsHash: state ? state.anchorsHash : null,
       lastLookedAt: state && state.lastLookedAt !== null && state.lastLookedAt !== undefined
@@ -641,16 +1014,36 @@ export function lookupGate(db, policy, { powerMode = 'trickle', battery = null, 
   }
   // LOCAL cap: rate limits, not dollars, are the ceiling (see
   // LOOKUP_DAILY_CALL_CAP_DEFAULT's own comment).
-  const cap = Number(policy?.relationshipMemory?.lookupDailyCallCap ?? LOOKUP_DAILY_CALL_CAP_DEFAULT);
+  const cap = lookupCallCap(policy);
   const since = Date.now() - DAY;
   const used = Number(
     db.prepare('SELECT COALESCE(SUM(model_calls), 0) AS n FROM person_lookup_run WHERE started_at >= ?')
       .get(since).n
   );
-  if (used >= 0.9 * cap) return { ok: false, reason: 'quota' };
+  if (used >= lookupCallCeiling(cap)) return { ok: false, reason: 'quota' };
   const scope = lookupScope(db, { now: Date.now() });
   if (scope.length === 0) return { ok: false, reason: 'no-scope' };
   return { ok: true, reason: null };
+}
+
+// lookupCallCap(policy) / lookupCallCeiling(cap): the daily call cap, and
+// the number the gate actually compares against.
+//
+// A config value that is not a finite number used to make the whole gate
+// FAIL OPEN: `Number("many")` is NaN, `used >= 0.9 * NaN` is false, and the
+// cap silently stopped existing -- a config typo bought unlimited web
+// searches. Non-finite and non-positive values fall back to the default
+// instead. And the ceiling is 90% of the cap, which lookupStatus used to
+// hide by reporting the bare DEFAULT constant: an owner who set the cap to
+// 40 read "20" on /stats and the gate actually stopped at 36. Both numbers
+// come from here now, so the reported ceiling is the enforced one.
+export function lookupCallCap(policy) {
+  const raw = Number(policy?.relationshipMemory?.lookupDailyCallCap);
+  return Number.isFinite(raw) && raw > 0 ? raw : LOOKUP_DAILY_CALL_CAP_DEFAULT;
+}
+
+export function lookupCallCeiling(cap) {
+  return 0.9 * cap;
 }
 
 function insertLookupLog(db, {
@@ -679,11 +1072,31 @@ function extractJsonObject(text) {
   return body.slice(start, end + 1);
 }
 
-// storeLookup(db, {personKey, kept, logId, distillRunId, now}): the trusted
-// apply path, mirroring storeSweep/storePage. EVERY grounding rule
+// storeLookup(db, {personKey, kept, observed, firm, logId, distillRunId, now}):
+// the trusted apply path, mirroring storeSweep/storePage. EVERY grounding rule
 // groundLookup already checked is re-checked here against what is about to
 // be written, because a client (groundLookup) is not a boundary. One
 // BEGIN..COMMIT for the whole batch of kept changes.
+//
+// `observed` and `firm` are what make that claim TRUE rather than aspirational.
+// This function used to re-check kind/text/quote-nonempty/https/denylist and
+// silently skip the only two rules that carry the grounding -- "this URL is
+// one the search returned" and "this quote is a verbatim span of what came
+// back" -- so a caller that skipped groundLookup entirely could store a
+// fabricated citation. Both are re-run below, and evidence_kind /
+// contradicts_anchor are RECOMPUTED here rather than taken from the caller's
+// object. Omitting `observed` re-checks everything it can and records
+// evidence_kind NULL; a caller with the stream in hand should always pass it.
+//
+// Idempotence: the (source, entity_id) check dedupes the CONTEXT row, which
+// was never enough on its own -- a monthly lookup finding the same (url,
+// quote) again used to insert a second identical PENDING claim against the
+// one context row, and duplicate pending claims reading as corroboration is
+// the documented 2026-08-19 incident. `selDup` below is the missing
+// alreadyProposed analogue: an undecided-or-accepted claim already citing
+// this (personKey, url, quote) blocks a second one. A REJECTED one does not
+// -- the owner said no to that claim, and a later lookup finding the same
+// thing is entitled to ask again.
 //
 // Row mapping per kept change: a NEW context row (source='web', so it
 // carries the same source-receipt and deletion story as every other row;
@@ -696,8 +1109,10 @@ function extractJsonObject(text) {
 // row recording which kind of change this is and the url it cites. No
 // person_page_item row -- its `section` CHECK is closed to the five page
 // sections and a lookup change is not one of them.
-export function storeLookup(db, { personKey, kept, logId, distillRunId, now = Date.now() } = {}) {
-  if (!Array.isArray(kept) || kept.length === 0) return { stored: 0, skipped: 0 };
+export function storeLookup(db, {
+  personKey, kept, observed = null, firm = null, logId, distillRunId, now = Date.now(),
+} = {}) {
+  if (!Array.isArray(kept) || kept.length === 0) return { stored: 0, skipped: 0, duplicates: 0 };
 
   const logRow = db.prepare('SELECT query_hash AS queryHash FROM lookup_log WHERE id = ?').get(logId);
   const queryHash = logRow?.queryHash ?? null;
@@ -716,13 +1131,29 @@ export function storeLookup(db, { personKey, kept, logId, distillRunId, now = Da
      VALUES (?, ?, 'web', ?, ?, ?)`
   );
   const insChange = db.prepare(
-    `INSERT INTO person_lookup_change(claim_id, log_id, kind, url, change_date, applied_at)
-     VALUES (?, ?, ?, ?, ?, NULL)`
+    `INSERT INTO person_lookup_change(claim_id, log_id, kind, url, change_date, applied_at,
+       evidence_kind, contradicts_anchor)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`
+  );
+  // The alreadyProposed analogue -- see this function's header. Keyed on
+  // (person, url, quote), which is what a receipt IS here, and blind to
+  // which lookup or which kind produced it.
+  const selDup = db.prepare(
+    `SELECT c.id AS id FROM claim c
+       JOIN person_lookup_change plc ON plc.claim_id = c.id
+       JOIN claim_source cs ON cs.claim_id = c.id AND cs.source = 'web'
+     WHERE c.subject = 'person' AND c.subject_person_key = ? AND plc.url = ? AND cs.quote = ?
+       AND COALESCE(
+         (SELECT d.action FROM claim_decision d WHERE d.claim_id = c.id ORDER BY d.id DESC LIMIT 1),
+         'pending'
+       ) NOT IN ('reject', 'retract')
+     LIMIT 1`
   );
   const maxChangedAt = db.prepare('SELECT MAX(store_changed_at) AS m FROM context').get();
 
   let stored = 0;
   let skipped = 0;
+  let duplicates = 0;
   let nextChangedAt = Math.max(now, Number(maxChangedAt?.m ?? 0) + 1);
 
   db.exec('BEGIN');
@@ -749,6 +1180,32 @@ export function storeLookup(db, { personKey, kept, logId, distillRunId, now = Da
         skipped += 1;
         continue;
       }
+      // The two rules the header used to claim and not run.
+      let evidenceKind = null;
+      if (observed !== null) {
+        const urlSet = observed.urls instanceof Set
+          ? observed.urls
+          : new Set(Array.isArray(observed.urls) ? observed.urls : []);
+        if (!urlSet.has(item.url)) {
+          skipped += 1;
+          continue;
+        }
+        evidenceKind = evidenceKindFor(item.quote, observed);
+        if (evidenceKind === null) {
+          skipped += 1;
+          continue;
+        }
+      }
+      // Recomputed, never trusted from the caller: the flag decides whether
+      // a card may consume this row, so a client cannot hand it in as false.
+      const contradictsAnchor = contradictsAnchorFirm(
+        { kind: item.kind, text: item.text.trim(), quote: item.quote }, firm
+      );
+      const kind = contradictsAnchor ? 'company' : item.kind;
+      if (selDup.get(personKey, item.url, item.quote) !== undefined) {
+        duplicates += 1;
+        continue;
+      }
 
       const entityId = `web:${createHash('sha256').update(`${item.url}\0${item.quote}`, 'utf8').digest('hex').slice(0, 32)}`;
       const meta = { url: item.url, provider: 'claude-cli-lookup', query_hash: queryHash, fetched_at: now, person_key: personKey };
@@ -766,7 +1223,7 @@ export function storeLookup(db, { personKey, kept, logId, distillRunId, now = Da
 
       const claimId = Number(insClaim.run(distillRunId, personKey, item.text, now, now).lastInsertRowid);
       insSource.run(claimId, contextId, entityId, contentHash, item.quote);
-      insChange.run(claimId, logId, item.kind, item.url, item.date ?? null);
+      insChange.run(claimId, logId, kind, item.url, item.date ?? null, evidenceKind, contradictsAnchor ? 1 : 0);
       stored += 1;
     }
     db.exec('COMMIT');
@@ -774,7 +1231,32 @@ export function storeLookup(db, { personKey, kept, logId, distillRunId, now = Da
     db.exec('ROLLBACK');
     throw err;
   }
-  return { stored, skipped };
+  return { stored, skipped, duplicates };
+}
+
+// storeLookupEvidence(db, {logId, links, resultText, now}): the raw article
+// this lookup actually saw, one row per lookup_log row, written once and
+// never updated. This is what lookup_log 4520 could not be audited from --
+// the counts were stored and the text was not, so "the quote was verbatim in
+// the results" was unfalsifiable after the fact.
+//
+// Content: PUBLIC search-result text about a public person, kept on the box.
+// Nothing private is in it by construction (a lookup's only tool is
+// WebSearch, and buildLookupQuery's input gate decides what it may ask), and
+// nothing here leaves the box -- it exists so the desk can show "what came
+// back" beside "what was sent".
+export function storeLookupEvidence(db, { logId, links = [], resultText = '', now = Date.now() } = {}) {
+  if (!Number.isInteger(Number(logId))) return { stored: 0 };
+  const urls = canonicalize(
+    (Array.isArray(links) ? links : [])
+      .filter((l) => l !== null && typeof l === 'object' && typeof l.url === 'string')
+      .map((l) => ({ title: typeof l.title === 'string' ? l.title : '', url: l.url }))
+  );
+  const n = db.prepare(
+    `INSERT INTO lookup_evidence(log_id, urls, result_text, created_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(log_id) DO NOTHING`
+  ).run(Number(logId), JSON.stringify(urls), String(resultText ?? ''), now).changes;
+  return { stored: Number(n) };
 }
 
 // gather (anchorsFor+buildLookupQuery) -> prompt -> engine -> parse
@@ -828,29 +1310,78 @@ export async function lookupPerson(db, engine, candidate, { runId, distillRunId,
       query: built.query, queryHash: built.queryHash, fieldsUsed: built.fieldsUsed,
       searches: observed.searches, urlsSeen: observed.urls.size, costUsd: observed.costUsd, status: 'parse-error',
     });
+    // Evidence is stored on the UNUSABLE paths too, and especially there:
+    // "the model said something we could not parse" is the case where seeing
+    // what came back matters most.
+    storeLookupEvidence(db, { logId, links: observed.links, resultText: observed.resultText, now });
     return {
       personKey: candidate.personKey, calls: 1, searches: observed.searches, proposed: 0, dropped: 0,
       costUsd: observed.costUsd ?? 0, status: 'parse-error', anchorsHash: hash, logId,
     };
   }
 
-  const { kept, dropped } = groundLookup(envelope, observed);
+  // LOOKUP_MAX_SEARCHES used to be a constant whose own comment claimed code
+  // enforcement it never had: nothing compared observed.searches to it, and
+  // the installed CLI has no --max-turns flag to cap turns with (checked
+  // 2026-09-08 against `claude --help`), so the only place the cap can live
+  // is here, after the fact. A model that spent more searches than it was
+  // budgeted has burned account-wide rate limit the owner shares; its
+  // changes are dropped wholesale rather than stored as if the budget held.
+  //
+  // Logged as 'ungrounded' rather than a new 'over-budget' status literal --
+  // see lookup_log's own CHECK comment in hermes.mjs for why a new literal
+  // would break every deployed install. The fact is not lost: `searches`
+  // carries the real count, so an over-budget lookup is exactly
+  // `status='ungrounded' AND searches > LOOKUP_MAX_SEARCHES`.
+  if (observed.searches > LOOKUP_MAX_SEARCHES) {
+    const logId = insertLookupLog(db, {
+      personKey: candidate.personKey, runId, at: now, engine: engine.name,
+      query: built.query, queryHash: built.queryHash, fieldsUsed: built.fieldsUsed,
+      searches: observed.searches, urlsSeen: observed.urls.size,
+      identityConfidence: ['match', 'ambiguous', 'no_match'].includes(envelope.identity_confidence)
+        ? envelope.identity_confidence : null,
+      changesProposed: 0,
+      changesDropped: Array.isArray(envelope.changes) ? envelope.changes.length : 0,
+      costUsd: observed.costUsd, status: 'ungrounded',
+    });
+    storeLookupEvidence(db, { logId, links: observed.links, resultText: observed.resultText, now });
+    return {
+      personKey: candidate.personKey, calls: 1, searches: observed.searches, proposed: 0,
+      dropped: Array.isArray(envelope.changes) ? envelope.changes.length : 0,
+      costUsd: observed.costUsd ?? 0, status: 'ungrounded', anchorsHash: hash, logId,
+    };
+  }
+
+  const { kept, dropped } = groundLookup(envelope, observed, { firm: anchors.firm });
   // DISAMBIGUATION CHECKPOINT: an "ambiguous" verdict is its own visible
   // status regardless of whether the model correctly emptied `changes` --
   // never silently folded into "empty", because "we could not tell who this
   // was" and "we asked and found nothing new" are different facts an owner
   // reading /admin/relationship/lookups should be able to tell apart.
-  const status = kept.length > 0
-    ? 'proposed'
-    : envelope.identity_confidence === 'ambiguous'
-      ? 'ambiguous'
-      : dropped.length > 0
-        ? 'ungrounded'
-        : 'empty';
+  // THE DOWNGRADE. A change that disagrees with the firm we sent, backed by
+  // nothing but a search-result title, is not a "match" -- a stale index
+  // entry and a namesake are at least as likely as a real move, and the
+  // model has just told us it is confident about a person whose one
+  // confirming anchor it contradicted. So the log's own verdict becomes
+  // 'ambiguous' on both fields, which is what the desk reads. The change is
+  // still stored (flagged, and withheld from the card by newestWebChange) --
+  // downgrading the verdict is not the same as hiding the disagreement.
+  const titleOnlyContradiction = kept.some((k) => k.contradictsAnchor && k.evidenceKind === 'title');
 
-  const identityConfidence = ['match', 'ambiguous', 'no_match'].includes(envelope.identity_confidence)
+  const status = titleOnlyContradiction
+    ? 'ambiguous'
+    : kept.length > 0
+      ? 'proposed'
+      : envelope.identity_confidence === 'ambiguous'
+        ? 'ambiguous'
+        : dropped.length > 0
+          ? 'ungrounded'
+          : 'empty';
+
+  const claimed = ['match', 'ambiguous', 'no_match'].includes(envelope.identity_confidence)
     ? envelope.identity_confidence
     : null;
+  const identityConfidence = titleOnlyContradiction ? 'ambiguous' : claimed;
 
   const logId = insertLookupLog(db, {
     personKey: candidate.personKey, runId, at: now, engine: engine.name,
@@ -858,10 +1389,13 @@ export async function lookupPerson(db, engine, candidate, { runId, distillRunId,
     searches: observed.searches, urlsSeen: observed.urls.size, identityConfidence,
     changesProposed: kept.length, changesDropped: dropped.length, costUsd: observed.costUsd, status,
   });
+  storeLookupEvidence(db, { logId, links: observed.links, resultText: observed.resultText, now });
 
   let stored = 0;
   if (kept.length > 0) {
-    stored = storeLookup(db, { personKey: candidate.personKey, kept, logId, distillRunId, now }).stored;
+    stored = storeLookup(db, {
+      personKey: candidate.personKey, kept, observed, firm: anchors.firm, logId, distillRunId, now,
+    }).stored;
   }
 
   return {
@@ -1017,6 +1551,18 @@ export async function runLookupPass(db, engine, policy, {
     let dropped = 0;
     let costUsdTotal = 0;
 
+    // The cap's own accounting statement. person_lookup_run.model_calls used
+    // to be written ONLY by the terminal UPDATE at the end of this function,
+    // so a pass killed mid-loop (the machine sleeps, the daemon restarts,
+    // the process is signalled) left model_calls = 0 -- and every call it
+    // had actually spent was invisible to the next pass's lookupGate, which
+    // sums exactly this column. Written after each person instead: the cap
+    // can only under-count by the one call in flight.
+    const bumpRunCalls = db.prepare(
+      `UPDATE person_lookup_run SET looked_up = ?, model_calls = ?, searches = ?, proposed = ?,
+         dropped = ?, cost_usd = ? WHERE id = ?`
+    );
+
     for (let i = 0; i < candidates.length; i++) {
       const candidate = candidates[i];
       const result = await lookupPerson(db, engine, candidate, { runId, distillRunId, now });
@@ -1026,6 +1572,7 @@ export async function runLookupPass(db, engine, policy, {
       proposed += result.proposed;
       dropped += result.dropped;
       costUsdTotal += result.costUsd ?? 0;
+      bumpRunCalls.run(lookedUp, modelCalls, searchesTotal, proposed, dropped, costUsdTotal, runId);
 
       const advance = result.status === 'proposed' || result.status === 'empty'
         || result.status === 'ambiguous' || result.status === 'ungrounded' || result.status === 'no-anchors';
@@ -1074,10 +1621,11 @@ export async function runLookupPass(db, engine, policy, {
 // status line. Cost is the REAL total_cost_usd summed from lookup_log --
 // never mixed with a token estimate, unlike sweep's tokensEst (a lookup's
 // engine reports real dollar cost; there is no reason to estimate it).
-export function lookupStatus(db) {
+export function lookupStatus(db, policy = null) {
   const now = Date.now();
   const scope = lookupScope(db, { now });
   const anchored = scope.filter((c) => c.anchored).length;
+  const anchorErrors = scope.filter((c) => c.anchorError).length;
   const due = scope.filter((c) => isLookupDue(c, now)).length;
   const tier = { eligible: 0, tagged: 0, other: 0 };
   for (const c of scope) tier[c.tier] = (tier[c.tier] ?? 0) + 1;
@@ -1100,13 +1648,25 @@ export function lookupStatus(db) {
   const cost24h = Number(db.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS c FROM lookup_log WHERE at >= ?').get(since24h).c);
   const cost30d = Number(db.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS c FROM lookup_log WHERE at >= ?').get(since30d).c);
 
+  // An over-budget lookup has no status literal of its own (see lookup_log's
+  // CHECK comment in hermes.mjs); it is exactly this query, and it is
+  // reported so a model that ignores its search budget is visible rather
+  // than merely absorbed.
+  const overBudget = Number(
+    db.prepare("SELECT COUNT(*) AS n FROM lookup_log WHERE status = 'ungrounded' AND searches > ?")
+      .get(LOOKUP_MAX_SEARCHES).n
+  );
+  const cap = lookupCallCap(policy);
+
   return {
     scope: scope.length,
     anchored,
     unanchored: scope.length - anchored,
+    anchorErrors,
     due,
     tier,
     pending,
+    overBudget,
     lastPassAt: last?.started_at ?? null,
     lastPassStatus: last?.status ?? null,
     lastSkipReason: last?.skip_reason ?? null,
@@ -1117,27 +1677,70 @@ export function lookupStatus(db) {
     searches24h: Number(agg24h.searches),
     costUsd24h: cost24h,
     costUsd30d: cost30d,
-    callCap: LOOKUP_DAILY_CALL_CAP_DEFAULT,
+    // The CONFIGURED cap and the number the gate actually compares against
+    // -- reporting only the bare default while honouring an override, at 90%
+    // of it, meant /stats disagreed with the gate in two directions at once.
+    callCap: cap,
+    callCeiling: lookupCallCeiling(cap),
   };
 }
 
 // The desk's "What was sent" list for one person -- every field a receipt
 // needs (see lookup_log's own comment in hermes.mjs's SCHEMA), newest first.
+// `evidence` is the other half of the receipt, and the half 4520 did not
+// have: {urls, resultTextChars} per row, so the desk can show WHAT CAME BACK
+// beside what was sent -- the titles and URLs inline (they are small and
+// they are the thing a title-only quote came from), the article's size
+// rather than the article, which lookupEvidenceFor serves on its own route.
+// null for a log row written before this table existed, or one that never
+// had a stream (no-anchors, engine-error).
 export function lookupLogFor(db, personKey, { limit = 20 } = {}) {
   const rows = db.prepare(
-    `SELECT id, person_key AS personKey, run_id AS runId, at, engine, query, query_hash AS queryHash,
-            fields_used AS fieldsUsedJson, searches, urls_seen AS urlsSeen,
-            identity_confidence AS identityConfidence, changes_proposed AS changesProposed,
-            changes_dropped AS changesDropped, cost_usd AS costUsd, status
-     FROM lookup_log WHERE person_key = ? ORDER BY at DESC LIMIT ?`
+    `SELECT ll.id AS id, ll.person_key AS personKey, ll.run_id AS runId, ll.at AS at, ll.engine AS engine,
+            ll.query AS query, ll.query_hash AS queryHash,
+            ll.fields_used AS fieldsUsedJson, ll.searches AS searches, ll.urls_seen AS urlsSeen,
+            ll.identity_confidence AS identityConfidence, ll.changes_proposed AS changesProposed,
+            ll.changes_dropped AS changesDropped, ll.cost_usd AS costUsd, ll.status AS status,
+            le.urls AS evidenceUrlsJson, LENGTH(le.result_text) AS evidenceResultTextChars
+     FROM lookup_log ll
+     LEFT JOIN lookup_evidence le ON le.log_id = ll.id
+     WHERE ll.person_key = ? ORDER BY ll.at DESC LIMIT ?`
   ).all(personKey, Number.isInteger(limit) && limit > 0 ? limit : 20);
 
   return rows.map((row) => {
     let fieldsUsed = [];
     try { fieldsUsed = JSON.parse(row.fieldsUsedJson); } catch { fieldsUsed = []; }
-    const { fieldsUsedJson, ...rest } = row;
-    return { ...rest, fieldsUsed };
+    let evidence = null;
+    if (row.evidenceUrlsJson !== null && row.evidenceUrlsJson !== undefined) {
+      let urls = [];
+      try { urls = JSON.parse(row.evidenceUrlsJson); } catch { urls = []; }
+      evidence = { urls: Array.isArray(urls) ? urls : [], resultTextChars: Number(row.evidenceResultTextChars ?? 0) };
+    }
+    const { fieldsUsedJson, evidenceUrlsJson, evidenceResultTextChars, ...rest } = row;
+    return { ...rest, fieldsUsed, evidence };
   });
+}
+
+// The full observed article for ONE lookup -- its own read, because it is
+// kilobytes of third-party page text and the list above is rendered on every
+// desk person page. Read-only; nothing writes here but storeLookupEvidence.
+export function lookupEvidenceFor(db, logId) {
+  const id = Number(logId);
+  if (!Number.isInteger(id)) return null;
+  const row = db.prepare(
+    `SELECT log_id AS logId, urls AS urlsJson, result_text AS resultText, created_at AS createdAt
+     FROM lookup_evidence WHERE log_id = ?`
+  ).get(id);
+  if (!row) return null;
+  let urls = [];
+  try { urls = JSON.parse(row.urlsJson); } catch { urls = []; }
+  return {
+    logId: row.logId,
+    urls: Array.isArray(urls) ? urls : [],
+    resultText: row.resultText,
+    resultTextChars: String(row.resultText ?? '').length,
+    createdAt: row.createdAt,
+  };
 }
 
 // newestWebChange(db, personKey): the card's `changed` field (a later
@@ -1147,9 +1750,20 @@ export function lookupLogFor(db, personKey, { limit = 20 } = {}) {
 // context row: if that row is gone, this returns null rather than serving a
 // quote nobody can verify any more -- the same deletion-cascade-honored-at-
 // serve-time discipline the card route already applies to its own quote.
+//
+// A contradicts_anchor change is EXCLUDED while it is pending, and this is
+// the fix for what lookup_log 4520 actually did wrong to the owner: a claim
+// that disagrees with his own LinkedIn export ("now at Verily, not Klaviyo")
+// was rendered on the card as fact, with `decision: null`, before he had
+// judged it. A disagreement with our own anchor is a REVIEW ITEM, not card
+// content. Once he ACCEPTS one it is his word and the card may carry it; a
+// pending one may not. (The card route -- hermes.mjs -- consumes this
+// function and nothing else; draft.mjs reads no lookup state at all, so the
+// gate lives here rather than in either caller.)
 export function newestWebChange(db, personKey) {
   const row = db.prepare(
     `SELECT plc.claim_id AS claimId, plc.kind AS kind, plc.url AS url, plc.change_date AS date,
+            plc.evidence_kind AS evidenceKind, plc.contradicts_anchor AS contradictsAnchor,
             ll.at AS at, c.text AS text,
             (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) AS decision
      FROM person_lookup_change plc
@@ -1160,6 +1774,10 @@ export function newestWebChange(db, personKey) {
          (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1),
          'pending'
        ) NOT IN ('reject', 'retract')
+       AND (
+         plc.contradicts_anchor = 0
+         OR (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) = 'accept'
+       )
      ORDER BY plc.claim_id DESC LIMIT 1`
   ).get(personKey);
   if (!row) return null;
@@ -1175,5 +1793,7 @@ export function newestWebChange(db, personKey) {
   return {
     text: row.text, url: row.url, kind: row.kind, quote: source.quote,
     date: row.date ?? null, at: row.at, decision: row.decision ?? null,
+    evidenceKind: row.evidenceKind ?? null,
+    contradictsAnchor: Number(row.contradictsAnchor ?? 0) === 1,
   };
 }
