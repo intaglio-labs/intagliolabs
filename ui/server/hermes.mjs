@@ -86,6 +86,7 @@ import {
 import { createEngine, createLookupEngine } from './relationship/engines.mjs';
 import { eligiblePool, produceBatch, PRODUCER_VERSION } from './relationship/producer.mjs';
 import { produceOweBatch, OWE_PRODUCER_VERSION } from './relationship/owe.mjs';
+import { createDraft, existingDrafts } from './relationship/draft.mjs';
 import { CARD_PRODUCERS, REFILL_RETRY_MS, produceDailyBatch } from './relationship/daily.mjs';
 import { cardStats } from './relationship/controls.mjs';
 import {
@@ -1081,6 +1082,31 @@ CREATE TRIGGER IF NOT EXISTS rm_candidate_snapshot_no_delete
 BEFORE DELETE ON rm_candidate_snapshot BEGIN
   SELECT RAISE(ABORT, 'a snapshot that can be deleted afterwards is not a snapshot');
 END;
+
+/* DRAFTED MESSAGES (L5 mode-picker follow-on, part 2) -- model-suggested
+   opening lines for one candidate snapshot, cached rather than regenerated:
+   POST /admin/relationship/draft returns existing rows newer than 24h
+   without another engine call. No version bump: IF NOT EXISTS on a new
+   table, same as rm_suppression/rm_mute/rm_card_event before it. Append-only,
+   same reasoning as rm_card_event -- a drafted suggestion the owner saw is a
+   fact about what the system offered, not a value to overwrite in place. */
+CREATE TABLE IF NOT EXISTS rm_card_draft(
+  id          INTEGER PRIMARY KEY,
+  snapshot_id INTEGER NOT NULL REFERENCES rm_candidate_snapshot(id),
+  engine      TEXT NOT NULL,
+  model       TEXT,
+  text        TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS rm_card_draft_snapshot ON rm_card_draft(snapshot_id);
+CREATE TRIGGER IF NOT EXISTS rm_card_draft_no_update
+BEFORE UPDATE ON rm_card_draft BEGIN
+  SELECT RAISE(ABORT, 'a drafted suggestion is append-only: what the model offered is not editable afterwards');
+END;
+CREATE TRIGGER IF NOT EXISTS rm_card_draft_no_delete
+BEFORE DELETE ON rm_card_draft BEGIN
+  SELECT RAISE(ABORT, 'a drafted suggestion is append-only: deleting it is how the 24h cache would lie');
+END;
 `;
 
 // Bumped only when a migration must run at open. Version history:
@@ -2059,6 +2085,7 @@ const RELATIONSHIP_POOL_PARAMS = Object.freeze(['mode', 'includeOffered', 'minDe
 const RELATIONSHIP_MODES = Object.freeze(['investor', 'founder', 'any']);
 const RELATIONSHIP_MODE_FIELDS = Object.freeze(['mode']);
 const RELATIONSHIP_PAGE_BUILD_FIELDS = Object.freeze(['personKey', 'engine']);
+const RELATIONSHIP_DRAFT_FIELDS = Object.freeze(['snapshot_id']);
 const RELATIONSHIP_PAGE_PARAMS = Object.freeze(['personKey']);
 // 'budget' and 'limit' are accepted as synonyms: sweep-once.mjs's own CLI
 // flag is --limit (matching build-person-pages.mjs's naming), but the route
@@ -3378,7 +3405,19 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       } catch {
         changed = null;
       }
-      send(res, 200, { card: { ...card, quote, sentence, left, leftTone, who: page.sections.who?.text ?? null, page, changed },
+      // Existing drafted messages for this snapshot (may be empty -- nobody
+      // has asked for one yet), attached so the widget can show a cached
+      // draft immediately rather than waiting on a POST /draft round trip.
+      // Never builds one here: a draft is built only on explicit ask (see
+      // POST /admin/relationship/draft above), never spent on a card the
+      // owner never opens.
+      let drafts = [];
+      try {
+        drafts = existingDrafts(db, card.snapshot_id);
+      } catch {
+        drafts = [];
+      }
+      send(res, 200, { card: { ...card, quote, sentence, left, leftTone, who: page.sections.who?.text ?? null, page, changed, drafts },
         ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
       return;
     }
@@ -3463,6 +3502,36 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     const engine = relationshipMemoryEngine(policy, body.engine);
     const result = await buildPersonPage(db, engine, body.personKey, { now: Date.now() });
     send(res, 200, { ...result, cost_usd: engine.counters?.totalCostUsd ?? null }, cors);
+    return;
+  }
+
+  // A drafted message, on demand (L5 mode-picker follow-on, part 2): the
+  // card's own "suggested opening line", built only when the owner asks for
+  // it (never on every serve, which would spend the owner's own model
+  // subscription on cards that are never opened) and cached against the
+  // snapshot for 24h -- a second ask within that window costs nothing.
+  // Bearer-only, same reasoning as /admin/relationship/pages/build: this
+  // spends the owner's own model subscription.
+  if (req.method === 'POST' && url.pathname === '/admin/relationship/draft') {
+    const body = await readJson(req);
+    assertClosedFields(body, RELATIONSHIP_DRAFT_FIELDS);
+    const snapshotId = body?.snapshot_id;
+    if (!Number.isInteger(snapshotId)) throw badRequest('"snapshot_id" must be an integer');
+    const snap = db.prepare('SELECT id FROM rm_candidate_snapshot WHERE id = ?').get(snapshotId);
+    if (!snap) throw badRequest(`no snapshot with id ${snapshotId}`);
+    // No per-call engine override here (unlike pages/build's `engine` body
+    // field): drafting is specified against claude-cli specifically, and the
+    // only seam is the same test-seam override every other engine getter
+    // honors -- an explicit `null` (policy.relationshipMemoryEngine) is how
+    // a test asks for "no engine configured".
+    const engine = relationshipMemoryEngine(policy);
+    if (!engine) throw badRequest('no engine configured for relationship drafting');
+    const result = await createDraft(db, engine, { snapshotId, now: Date.now() });
+    send(res, 200, {
+      drafts: result.drafts.map((d) => ({ id: d.id, text: d.text })),
+      cached: result.cached,
+      cost_usd: engine.counters?.totalCostUsd ?? null,
+    }, cors);
     return;
   }
 

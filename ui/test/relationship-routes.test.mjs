@@ -876,3 +876,122 @@ test('hydrate restores all three reconnect modes plus Owe after a restart', asyn
     await second.close();
   }
 });
+
+// ---------------------------------------------------------------------
+// A drafted message, on demand (L5 mode-picker follow-on, part 2):
+// POST /admin/relationship/draft, its 24h cache, its grounding of the
+// model's own output, and the card route's `drafts` field.
+
+function fakeDraftEngine(resultTextOrFn) {
+  const counters = { calls: 0, totalCostUsd: 0.02, totalDurationMs: 5 };
+  const capturedUsers = [];
+  return {
+    name: 'fake-draft', model: 'fake-model', counters, capturedUsers,
+    async complete({ user }) {
+      counters.calls += 1;
+      capturedUsers.push(user);
+      return typeof resultTextOrFn === 'function' ? resultTextOrFn(counters.calls) : resultTextOrFn;
+    },
+  };
+}
+
+test('POST /admin/relationship/draft: unknown fields 400, unknown snapshot 400, no engine 400', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedReconnectCandidate(db, 'name:draft badreq', 'Draft Badreq', now);
+    await call('POST', '/admin/relationship/refresh');
+    const { card } = await (await call('GET', '/admin/relationship/card')).json();
+
+    const badFields = await call('POST', '/admin/relationship/draft', { snapshot_id: card.snapshot_id, extra: 1 });
+    assert.equal(badFields.status, 400);
+
+    const badSnapshot = await call('POST', '/admin/relationship/draft', { snapshot_id: 999999 });
+    assert.equal(badSnapshot.status, 400);
+  });
+  // no-engine case, separately: policy.relationshipMemoryEngine explicitly
+  // null is the same test-seam every other engine getter honors.
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedReconnectCandidate(db, 'name:draft noengine', 'Draft Noengine', now);
+    await call('POST', '/admin/relationship/refresh');
+    const { card } = await (await call('GET', '/admin/relationship/card')).json();
+    const res = await call('POST', '/admin/relationship/draft', { snapshot_id: card.snapshot_id });
+    assert.equal(res.status, 400);
+  }, { relationshipMemoryEngine: null });
+});
+
+test('creates two rows; a second call within 24h is cached with zero engine calls', async () => {
+  const engine = fakeDraftEngine(JSON.stringify({
+    drafts: [{ text: 'Hey! Realized it has been a while -- hope things are good.' },
+      { text: 'Hi! Been meaning to reach out -- how have you been?' }],
+  }));
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedReconnectCandidate(db, 'name:draft cache', 'Draft Cache', now);
+    await call('POST', '/admin/relationship/refresh');
+    const { card } = await (await call('GET', '/admin/relationship/card')).json();
+
+    const first = await (await call('POST', '/admin/relationship/draft', { snapshot_id: card.snapshot_id })).json();
+    assert.equal(first.cached, false);
+    assert.equal(first.drafts.length, 2);
+    assert.equal(engine.counters.calls, 1);
+    const rows = db.prepare('SELECT COUNT(*) AS n FROM rm_card_draft WHERE snapshot_id = ?').get(card.snapshot_id);
+    assert.equal(rows.n, 2);
+
+    const second = await (await call('POST', '/admin/relationship/draft', { snapshot_id: card.snapshot_id })).json();
+    assert.equal(second.cached, true);
+    assert.equal(second.drafts.length, 2);
+    assert.equal(engine.counters.calls, 1, 'the second ask within 24h made no engine call');
+
+    // GET /card carries the same drafted rows for this snapshot.
+    const served = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(served.card.drafts.length, 2);
+  }, { relationshipMemoryEngine: engine });
+});
+
+test('oversize and empty drafts are dropped; only the survivors are stored', async () => {
+  const engine = fakeDraftEngine(JSON.stringify({
+    drafts: [
+      { text: '' },
+      { text: 'x'.repeat(241) },
+      { text: 'A short, valid opener that fits comfortably under the limit.' },
+    ],
+  }));
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedReconnectCandidate(db, 'name:draft ground', 'Draft Ground', now);
+    await call('POST', '/admin/relationship/refresh');
+    const { card } = await (await call('GET', '/admin/relationship/card')).json();
+
+    const out = await (await call('POST', '/admin/relationship/draft', { snapshot_id: card.snapshot_id })).json();
+    assert.equal(out.drafts.length, 1);
+    assert.equal(out.drafts[0].text, 'A short, valid opener that fits comfortably under the limit.');
+  }, { relationshipMemoryEngine: engine });
+});
+
+test('the owner\'s ME lines reach the prompt as a tone sample but never the stored draft text', async () => {
+  const meText = 'ME-ONLY-TONE-SAMPLE-TEXT-SHOULD-NEVER-BE-STORED';
+  const engine = fakeDraftEngine(JSON.stringify({
+    drafts: [{ text: 'Hey! It has been a while -- hope you are doing well.' },
+      { text: 'Hi there! Curious how things have been going lately.' }],
+  }));
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    const key = 'name:draft meline';
+    seedReconnectCandidate(db, key, 'Draft Meline', now);
+    // An owner-authored, direct-message line -- the tone sample source.
+    insertMessage(db, key, { ts: now - 1 * DAY, text: meText, ownerAuthored: 1 });
+
+    await call('POST', '/admin/relationship/refresh');
+    const { card } = await (await call('GET', '/admin/relationship/card')).json();
+
+    const out = await (await call('POST', '/admin/relationship/draft', { snapshot_id: card.snapshot_id })).json();
+    assert.ok(engine.capturedUsers[0].includes(meText), 'the ME line reached the prompt as a tone sample');
+    assert.ok(engine.capturedUsers[0].includes('ME:'), 'labeled ME:, per spec');
+    for (const d of out.drafts) {
+      assert.ok(!d.text.includes(meText), 'the stored draft text never contains the raw ME line');
+    }
+    const stored = db.prepare('SELECT text FROM rm_card_draft WHERE snapshot_id = ?').all(card.snapshot_id);
+    for (const row of stored) assert.ok(!row.text.includes(meText));
+  }, { relationshipMemoryEngine: engine });
+});
