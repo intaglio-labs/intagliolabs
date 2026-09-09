@@ -109,20 +109,65 @@ const OPEN_LOOP_SQL = `
 // claim_source row, and a claim with two receipts produced the same
 // candidate twice -- harmless where the two receipts name the same person,
 // wrong where they do not (two people each get their own overdue card for
-// ONE thing the owner said once). claim_source has no surrogate key (its PK
-// is (claim_id, context_id)), so the one receipt kept is MIN(context_id):
-// the earliest-ingested source row, which is where the owner actually said
-// it. A later receipt of the same sentence is a duplicate of that fact, not
-// a second commitment.
+// ONE thing the owner said once).
+//
+// WHICH receipt, though -- v4 (review F finding 7). claim_source has no
+// surrogate key (its PK is (claim_id, context_id)), so the row kept used to
+// be MIN(context_id): the earliest-INGESTED source, which is not the
+// earliest conversation and carries no information about the commitment at
+// all. Two ways that was wrong, both of them losing real cards:
+//   * if the earliest-ingested receipt happened to be a group email, the
+//     whole claim was dropped -- even when another receipt was a two-party
+//     DM naming exactly who is owed.
+//   * with two 1:1 receipts naming different people, whichever was scanned
+//     first won, and ingestion order is the connectors' backfill order.
+// So the SQL now returns EVERY receipt (joined to context, so a receipt
+// whose row is gone drops out by construction) and pickCommitmentSource
+// below chooses among them.
 const B1_SQL = `
   SELECT cl.id AS claimId, cl.valid_to AS validTo, cl.observed_at AS observedAt,
-         cs.context_id AS contextId
+         cs.context_id AS contextId, sc.ts AS sourceTs
   FROM v_claim_accepted cl
   JOIN claim_source cs ON cs.claim_id = cl.id
+  JOIN context sc ON sc.id = cs.context_id
   WHERE cl.kind = 'commitment' AND cl.subject = 'owner'
     AND cl.valid_to IS NOT NULL AND cl.valid_to < ? AND cl.valid_to > ?
-    AND cs.context_id = (SELECT MIN(context_id) FROM claim_source WHERE claim_id = cl.id)
+  ORDER BY cl.id, cs.context_id
 `;
+
+// The receipt a commitment is attributed through, or null when none of them
+// is a conversation with exactly one person. Order among the qualifying
+// receipts, in full:
+//   1. at or before the claim's observed_at first -- that is the
+//      conversation the claim was read out of; anything after it is a later
+//      re-mention of the same sentence;
+//   2. within that group, the LATEST, as the closest receipt to when the
+//      claim was actually observed;
+//   3. within the "after" group (used only when nothing is at or before),
+//      the EARLIEST, for the same reason;
+//   4. context id as the final tie-break, so two receipts sharing a
+//      timestamp still resolve deterministically.
+// A null observed_at (a claim distilled without one) leaves every receipt in
+// the second group, which reduces to "the earliest conversation" -- the old
+// behaviour's intent, now stated in conversation order rather than in
+// ingestion order.
+export function pickCommitmentSource(db, rows, observedAt, { ownerAddresses = null } = {}) {
+  const qualifying = [];
+  for (const row of rows) {
+    const personKey = soleDirectCounterparty(db, row.contextId, { ownerAddresses });
+    if (personKey === null) continue;
+    qualifying.push({ personKey, contextId: Number(row.contextId), ts: Number(row.sourceTs) });
+  }
+  if (qualifying.length === 0) return null;
+  const atOrBefore = observedAt === null || observedAt === undefined
+    ? []
+    : qualifying.filter((r) => r.ts <= Number(observedAt));
+  if (atOrBefore.length > 0) {
+    atOrBefore.sort((a, b) => b.ts - a.ts || a.contextId - b.contextId);
+    return atOrBefore[0];
+  }
+  return [...qualifying].sort((a, b) => a.ts - b.ts || a.contextId - b.contextId)[0];
+}
 
 // WHO A SOURCE ROW IS A CONVERSATION WITH, or null when it is not a
 // conversation with exactly one person (review finding 3).
@@ -138,15 +183,55 @@ const B1_SQL = `
 // Two counts, because either alone lies:
 //   - exactly one room=0 link on the row. Catches every source whose
 //     participants the projection resolved into people.
-//   - for mail specifically, at most two distinct addresses across
-//     from/to/cc (the owner plus one). Catches the recipients the projection
-//     did NOT resolve -- an unknown address still makes the thread a group
-//     conversation even when it never became a person row. Deliberately
-//     counts the owner's own address in that two rather than trying to
-//     identify it: this module holds no owner identity, and "two
-//     participants total" is the same statement as "one counterparty" for
-//     any message the owner is on.
-export function soleDirectCounterparty(db, contextId) {
+//   - for mail specifically, the addresses on the message itself. Catches
+//     the recipients the projection did NOT resolve -- an unknown address
+//     still makes the thread a group conversation even when it never became
+//     a person row.
+//
+// THE ADDRESS READ WAS TWO BUGS, BOTH SILENT (review F finding 12).
+//
+// It required Array.isArray and `continue`d otherwise. connectors' own
+// mailRows.mjs always writes from/to/cc as normalized arrays, so that read
+// is right for every row THAT connector wrote -- but a row whose meta
+// carries the raw header string ("a@x.com, b@x.com", which is what an
+// unnormalized import or a future adapter produces) left `addresses` EMPTY,
+// size 0 passed the "at most two" test, and a whole group thread was
+// attributed to whichever single person the projection had resolved. Header
+// strings are now split on commas and folded in like everything else, and
+// bcc is read as well: on the owner's own sent mail a bcc recipient is as
+// much a participant as a cc.
+//
+// And the count was of ALL addresses, owner included, on the theory that
+// "two participants total" says the same thing as "one counterparty". It
+// does not, whenever the owner appears twice under two of their own
+// addresses -- an alias in cc, a forward, a list that rewrites the sender.
+// Three addresses, one real counterparty, and the card was dropped. So the
+// count is of DISTINCT NON-OWNER addresses when the caller supplies the
+// owner's own (hermes' card route reads them from loadOwner(), the same
+// source people/graph.mjs takes its identity from -- this module still
+// holds none of its own). With no owner addresses supplied the old
+// all-addresses count stands: over-strict, but never wrong in the direction
+// that invents a counterparty.
+const MAIL_PARTICIPANT_FIELDS = Object.freeze(['from', 'to', 'cc', 'bcc']);
+
+export function mailParticipantAddresses(meta) {
+  const addresses = new Set();
+  for (const field of MAIL_PARTICIPANT_FIELDS) {
+    const value = meta?.[field];
+    const list = Array.isArray(value) ? value : (typeof value === 'string' ? value.split(',') : []);
+    for (const entry of list) {
+      if (typeof entry !== 'string') continue;
+      // A header string may carry a display name ("Ada <ada@x.com>"); the
+      // address is what identifies a participant.
+      const bracketed = entry.match(/<([^>]+)>/u);
+      const address = (bracketed ? bracketed[1] : entry).trim().toLowerCase();
+      if (address.length > 0) addresses.add(address);
+    }
+  }
+  return addresses;
+}
+
+export function soleDirectCounterparty(db, contextId, { ownerAddresses = null } = {}) {
   const keys = db.prepare(
     'SELECT DISTINCT person_key AS personKey FROM person_event_links WHERE context_id = ? AND room = 0'
   ).all(contextId).map((r) => r.personKey);
@@ -155,15 +240,17 @@ export function soleDirectCounterparty(db, contextId) {
   if (row?.source === 'mail') {
     let meta = null;
     try { meta = JSON.parse(row.meta ?? '{}'); } catch { return null; }
-    const addresses = new Set();
-    for (const field of ['from', 'to', 'cc']) {
-      const value = meta?.[field];
-      if (!Array.isArray(value)) continue;
-      for (const address of value) {
-        if (typeof address === 'string' && address.length > 0) addresses.add(address.toLowerCase());
-      }
+    const addresses = mailParticipantAddresses(meta);
+    const owner = ownerAddresses instanceof Set
+      ? ownerAddresses
+      : new Set((Array.isArray(ownerAddresses) ? ownerAddresses : []).map((a) => String(a).toLowerCase()));
+    if (owner.size > 0) {
+      let nonOwner = 0;
+      for (const address of addresses) if (!owner.has(address)) nonOwner += 1;
+      if (nonOwner > 1) return null;
+    } else if (addresses.size > 2) {
+      return null;
     }
-    if (addresses.size > 2) return null;
   }
   return keys[0];
 }
@@ -219,7 +306,7 @@ const OWNER_MESSAGE_COUNT_SQL = `
 // kind='owe' (indefinite) or shown any card at all within the last
 // SHOWN_COOLDOWN_DAYS (kind-agnostic on purpose: a person who was just shown
 // a reconnect card should not immediately also be shown an Owe card).
-function buildExclusionChecker(db, { now, includeOffered }) {
+function buildExclusionChecker(db, { now, includeOffered, liveFilter = {} }) {
   const suppressed = new Set(
     db.prepare('SELECT person_key FROM rm_suppression').all().map((r) => r.person_key)
   );
@@ -235,9 +322,16 @@ function buildExclusionChecker(db, { now, includeOffered }) {
   // Owe card. Being offered twice at once is the complaint; dismissing one
   // kind gates only that kind, so without this the second card arrives
   // regardless of what the owner said about the first.
+  //
+  // "HOLDING IN ITS LIVE QUEUE" IS daily.mjs's DEFINITION, not a second one
+  // (review F finding 8): `liveFilter` is how the caller narrows it to the
+  // set the card route would actually serve from -- the mode the owner is
+  // on, reconnect's current producer_version, and its own servability gate.
+  // Absent (every direct caller, and both pool-inspection routes) it stays
+  // the SQL-only default, which can only ever exclude FEWER people.
   let heldByReconnect = new Set();
   if (!includeOffered) {
-    heldByReconnect = liveQueuePersonKeys(db, 'reconnect', { now });
+    heldByReconnect = liveQueuePersonKeys(db, 'reconnect', { now, ...liveFilter });
     judged = new Set(
       db.prepare(
         "SELECT DISTINCT person_key FROM rm_card_event WHERE kind = 'owe' AND event IN ('accepted','dismissed')"
@@ -269,8 +363,11 @@ function buildExclusionChecker(db, { now, includeOffered }) {
 // it excludes is a bulk sender the owner never wrote to (236 received
 // messages, 1 sent, an old automated page ask) and a LinkedIn-derived contact
 // the owner has at most written to once.
-export function owePool(db, { now = Date.now(), includeOffered = false, includeAnonymous = false } = {}) {
-  const excluded = buildExclusionChecker(db, { now, includeOffered });
+export function owePool(db, {
+  now = Date.now(), includeOffered = false, includeAnonymous = false,
+  liveFilter = {}, ownerAddresses = null,
+} = {}) {
+  const excluded = buildExclusionChecker(db, { now, includeOffered, liveFilter });
   const peopleStmt = db.prepare(
     'SELECT display_name AS name, role AS role, sent AS sent, received AS received, met_in_person AS meetings FROM people WHERE person_key = ?'
   );
@@ -318,12 +415,21 @@ export function owePool(db, { now = Date.now(), includeOffered = false, includeA
     if (!existing || overdueDays > existing.overdueDays) byPerson.set(personKey, { overdueDays, ...rest });
   }
 
-  const b1Rows = db.prepare(B1_SQL).all(now, now - COMMITMENT_MAX_STALE_DAYS * DAY);
-  for (const row of b1Rows) {
-    // The counterparty is the source row's SOLE non-owner participant or
-    // nobody at all -- see soleDirectCounterparty above.
-    const personKey = soleDirectCounterparty(db, row.contextId);
-    if (personKey === null) continue;
+  // Every receipt of every expired commitment, grouped back into one entry
+  // per claim: the choice of WHICH receipt attributes it is
+  // pickCommitmentSource's (see B1_SQL above), not the scan order's.
+  const b1ByClaim = new Map();
+  for (const row of db.prepare(B1_SQL).all(now, now - COMMITMENT_MAX_STALE_DAYS * DAY)) {
+    const claimId = Number(row.claimId);
+    if (!b1ByClaim.has(claimId)) b1ByClaim.set(claimId, { claim: row, sources: [] });
+    b1ByClaim.get(claimId).sources.push(row);
+  }
+  for (const { claim: row, sources } of b1ByClaim.values()) {
+    // The counterparty is the chosen receipt's SOLE non-owner participant,
+    // or nobody at all -- see soleDirectCounterparty above.
+    const chosen = pickCommitmentSource(db, sources, row.observedAt, { ownerAddresses });
+    if (chosen === null) continue;
+    const personKey = chosen.personKey;
     const overdueDays = Math.floor((now - row.validTo) / DAY);
     let quoteContextId = null;
     if (row.observedAt !== null && row.observedAt !== undefined) {
@@ -386,8 +492,10 @@ function tieSentence(candidate) {
 // hydrateCards reads (kind='owe' -- the finer owe_kind rides in evidence
 // only), mirroring producer.mjs's produceBatch. Zero-candidate passes are
 // still written: a pass that finds nothing is a measurement, not a skip.
-export function produceOweBatch(db, { now = Date.now(), limit = 5 } = {}) {
-  const pool = owePool(db, { now });
+export function produceOweBatch(db, {
+  now = Date.now(), limit = 5, liveFilter = {}, ownerAddresses = null,
+} = {}) {
+  const pool = owePool(db, { now, liveFilter, ownerAddresses });
   const chosen = pool.slice(0, limit);
 
   const batchId = Number(db.prepare(

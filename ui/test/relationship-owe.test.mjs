@@ -560,7 +560,7 @@ test('a second recipient the projection never resolved into a person still block
     'a cc the contacts spine never resolved still makes this a group thread');
 });
 
-test('a commitment with two receipts is attributed once, off the earliest source row', () => {
+test('a commitment with two receipts is attributed once, through the receipt the claim was read from', () => {
   const db = openDb(':memory:');
   insertPerson(db, { key: 'name:receipt first', name: 'Receipt First', sent: 10, received: 10 });
   insertOwnerParticipation(db, 'name:receipt first');
@@ -573,6 +573,11 @@ test('a commitment with two receipts is attributed once, off the earliest source
   });
   // A SECOND receipt of the same sentence, in a different conversation. One
   // thing the owner said once must not become two people's overdue cards.
+  // The first receipt still wins here, but under review F finding 7's rule
+  // it wins because it is the latest receipt at or before the claim's own
+  // observed_at (this one is a day AFTER it -- a later re-mention), not
+  // because it was ingested first. See the two fixtures at the end of this
+  // file where those two rules disagree.
   const secondCtx = insertMailThread(db, {
     ts: NOW - 99 * DAY,
     recipientKeys: ['name:receipt second'],
@@ -581,5 +586,214 @@ test('a commitment with two receipts is attributed once, off the earliest source
   insertClaimSource(db, { claimId, contextId: secondCtx, source: 'mail', quote: 'will send it over' });
 
   const keys = keysOf(owePool(db, { now: NOW }));
-  assert.deepEqual(keys, ['name:receipt first'], 'one commitment, one candidate: the earliest receipt');
+  assert.deepEqual(keys, ['name:receipt first'], 'one commitment, one candidate');
+});
+
+// ---------------------------------------------------------------------------
+// Review F finding 7: WHICH RECEIPT ATTRIBUTES A COMMITMENT. It used to be
+// MIN(context_id) -- the earliest-INGESTED source row, i.e. the connectors'
+// backfill order, which says nothing about the commitment. Both fixtures
+// below are cases where ingestion order and conversation order disagree, and
+// the old rule lost a real card in each.
+// ---------------------------------------------------------------------------
+
+// One accepted, expired owner commitment with NO receipts yet -- the caller
+// attaches whichever receipts the fixture is about, in whatever order it
+// wants them ingested.
+function seedBareCommitment(db, { observedAt, validTo = NOW - 20 * DAY }) {
+  const runId = insertDistillRun(db);
+  const claimId = insertOwnerCommitmentClaim(db, { runId, text: 'I will send the deck', observedAt, validTo });
+  acceptClaim(db, claimId, observedAt);
+  return claimId;
+}
+
+test('a commitment whose earliest-ingested receipt is a group email still attributes, through the 1:1 receipt', () => {
+  const db = openDb(':memory:');
+  for (const [key, name] of [['name:group a', 'Group A'], ['name:group b', 'Group B'], ['name:dm one', 'DM One']]) {
+    insertPerson(db, { key, name, sent: 10, received: 10 });
+    insertOwnerParticipation(db, key);
+  }
+  const observedAt = NOW - 100 * DAY;
+  const claimId = seedBareCommitment(db, { observedAt });
+
+  // INGESTED FIRST (lowest context id): the group thread the old MIN()
+  // picked, which has no single counterparty -- so the whole card was lost.
+  const groupCtx = insertMailThread(db, {
+    ts: observedAt - 2 * DAY,
+    recipientKeys: ['name:group a', 'name:group b'],
+    meta: { from: ['owner@example.com'], to: ['a@example.com', 'b@example.com'], cc: [] },
+  });
+  insertClaimSource(db, { claimId, contextId: groupCtx, source: 'mail', quote: 'will send it over' });
+  // INGESTED SECOND: a two-party DM, at or before observed_at, which names
+  // exactly who is owed.
+  const dmCtx = insertMailThread(db, {
+    ts: observedAt - 1 * DAY,
+    recipientKeys: ['name:dm one'],
+    meta: { from: ['owner@example.com'], to: ['one@example.com'], cc: [] },
+  });
+  insertClaimSource(db, { claimId, contextId: dmCtx, source: 'mail', quote: 'will send it over' });
+
+  const keys = keysOf(owePool(db, { now: NOW }));
+  assert.deepEqual(keys, ['name:dm one'],
+    'one card, attributed through the receipt that actually names a counterparty');
+});
+
+test('among two 1:1 receipts the one nearest the claim wins, not the one ingested first', () => {
+  const db = openDb(':memory:');
+  for (const [key, name] of [['name:older talk', 'Older Talk'], ['name:nearer talk', 'Nearer Talk']]) {
+    insertPerson(db, { key, name, sent: 10, received: 10 });
+    insertOwnerParticipation(db, key);
+  }
+  const observedAt = NOW - 100 * DAY;
+  const claimId = seedBareCommitment(db, { observedAt });
+
+  // Ingested FIRST but the OLDER conversation: MIN(context_id) chose this
+  // one purely because the backfill reached it first.
+  const olderCtx = insertMailThread(db, {
+    ts: observedAt - 40 * DAY,
+    recipientKeys: ['name:older talk'],
+    meta: { from: ['owner@example.com'], to: ['older@example.com'], cc: [] },
+  });
+  insertClaimSource(db, { claimId, contextId: olderCtx, source: 'mail', quote: 'will send it over' });
+  // Ingested SECOND, and the conversation the claim was read out of: the
+  // latest receipt at or before observed_at.
+  const nearerCtx = insertMailThread(db, {
+    ts: observedAt - 1 * DAY,
+    recipientKeys: ['name:nearer talk'],
+    meta: { from: ['owner@example.com'], to: ['nearer@example.com'], cc: [] },
+  });
+  insertClaimSource(db, { claimId, contextId: nearerCtx, source: 'mail', quote: 'will send it over' });
+
+  const keys = keysOf(owePool(db, { now: NOW }));
+  assert.deepEqual(keys, ['name:nearer talk'], 'conversation order decides, not ingestion order');
+});
+
+test('a receipt AFTER observed_at is a later re-mention: only used when nothing precedes the claim', () => {
+  const db = openDb(':memory:');
+  insertPerson(db, { key: 'name:after only', name: 'After Only', sent: 10, received: 10 });
+  insertOwnerParticipation(db, 'name:after only');
+  const observedAt = NOW - 100 * DAY;
+  const claimId = seedBareCommitment(db, { observedAt });
+  const ctx = insertMailThread(db, {
+    ts: observedAt + 5 * DAY,
+    recipientKeys: ['name:after only'],
+    meta: { from: ['owner@example.com'], to: ['after@example.com'], cc: [] },
+  });
+  insertClaimSource(db, { claimId, contextId: ctx, source: 'mail', quote: 'will send it over' });
+
+  assert.deepEqual(keysOf(owePool(db, { now: NOW })), ['name:after only'],
+    'a claim is dropped only when NO receipt qualifies, never merely because none precedes it');
+});
+
+// ---------------------------------------------------------------------------
+// Review F finding 12: the mail participant guard.
+// ---------------------------------------------------------------------------
+
+test('mail meta carrying raw header strings is counted, not silently skipped', () => {
+  const db = openDb(':memory:');
+  insertPerson(db, { key: 'name:header string', name: 'Header String', sent: 10, received: 10 });
+  insertOwnerParticipation(db, 'name:header string');
+  // Three addresses on the message, written as the header string an
+  // unnormalized import produces. The old Array.isArray read left the
+  // address set EMPTY, so size 0 passed the "at most two" test and a whole
+  // group thread was attributed to the one person the projection resolved.
+  seedMailCommitment(db, {
+    recipientKeys: ['name:header string'],
+    meta: {
+      from: 'Owner <owner@example.com>',
+      to: 'Known <known@example.com>, Stranger <stranger@example.com>',
+      cc: '',
+    },
+  });
+
+  assert.deepEqual(keysOf(owePool(db, { now: NOW })), [],
+    'a group thread is a group thread however its addresses were written down');
+});
+
+test('a bcc recipient makes the thread a group conversation too', () => {
+  const db = openDb(':memory:');
+  insertPerson(db, { key: 'name:bcc known', name: 'Bcc Known', sent: 10, received: 10 });
+  insertOwnerParticipation(db, 'name:bcc known');
+  seedMailCommitment(db, {
+    recipientKeys: ['name:bcc known'],
+    meta: {
+      from: ['owner@example.com'], to: ['known@example.com'], cc: [],
+      bcc: ['silent@example.com'],
+    },
+  });
+
+  assert.deepEqual(keysOf(owePool(db, { now: NOW })), [],
+    'a bcc recipient read the message; they are a participant');
+});
+
+test('the owner under two of their own addresses is still one counterparty, given the owner addresses', () => {
+  const db = openDb(':memory:');
+  insertPerson(db, { key: 'name:owner alias', name: 'Owner Alias', sent: 10, received: 10 });
+  insertOwnerParticipation(db, 'name:owner alias');
+  // Three addresses, but two of them are the owner's: an alias in cc, which
+  // is what a forward or a list rewrite leaves behind. One real counterparty.
+  seedMailCommitment(db, {
+    recipientKeys: ['name:owner alias'],
+    meta: {
+      from: ['owner@example.com'], to: ['them@example.com'],
+      cc: ['owner+alias@example.com'],
+    },
+  });
+
+  assert.deepEqual(keysOf(owePool(db, { now: NOW })), [],
+    'with no owner identity supplied the all-addresses count stands: over-strict, never wrong');
+  assert.deepEqual(
+    keysOf(owePool(db, {
+      now: NOW,
+      ownerAddresses: new Set(['owner@example.com', 'owner+alias@example.com']),
+    })),
+    ['name:owner alias'],
+    'counting DISTINCT NON-OWNER addresses recovers the card'
+  );
+  // And the owner's own addresses do not turn a real group thread into a
+  // private one.
+  const group = openDb(':memory:');
+  insertPerson(group, { key: 'name:owner alias group', name: 'Owner Alias Group', sent: 10, received: 10 });
+  insertOwnerParticipation(group, 'name:owner alias group');
+  seedMailCommitment(group, {
+    recipientKeys: ['name:owner alias group'],
+    meta: {
+      from: ['owner@example.com'], to: ['them@example.com', 'stranger@example.com'],
+      cc: ['owner+alias@example.com'],
+    },
+  });
+  assert.deepEqual(
+    keysOf(owePool(group, {
+      now: NOW,
+      ownerAddresses: new Set(['owner@example.com', 'owner+alias@example.com']),
+    })),
+    [],
+    'two non-owner addresses is still a group thread'
+  );
+});
+
+test('liveFilter narrows the cross-kind exclusion to the queue the route would serve', () => {
+  const db = openDb(':memory:');
+  insertPerson(db, { key: 'name:held offmode', name: 'Held Offmode', sent: 10, received: 10 });
+  insertOwnerParticipation(db, 'name:held offmode');
+  insertMsg(db, 'name:held offmode', { ts: NOW - 12 * DAY, text: 'can you send that over?', authored: 1 });
+
+  // Reconnect is holding this person -- but in a mode the owner is not on,
+  // so that card can never be served and must not block the Owe card
+  // either (review F finding 8, from owe.mjs's side of it).
+  const batchId = Number(db.prepare(
+    'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, 1, ?, NULL)'
+  ).run(NOW - DAY, 'open').lastInsertRowid);
+  db.prepare(
+    'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) ' +
+    "VALUES (?, 'name:held offmode', 'reconnect', 'summary', ?, 'v1', 'test', ?)"
+  ).run(batchId, JSON.stringify({ mode: 'investor' }), NOW - DAY);
+
+  assert.deepEqual(keysOf(owePool(db, { now: NOW })), [],
+    'unnarrowed, any live reconnect card in any mode holds the person');
+  assert.deepEqual(
+    keysOf(owePool(db, { now: NOW, liveFilter: { mode: 'any' } })),
+    ['name:held offmode'],
+    'narrowed to the mode the route serves, the off-mode card holds nothing'
+  );
 });
