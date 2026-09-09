@@ -347,7 +347,50 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/lookups') {
       const personKey = url.searchParams.get('personKey') ?? '';
       const out = await hermes('/admin/relationship/lookups?personKey=' + encodeURIComponent(personKey));
-      return send(res, out.status, out.text);
+      if (out.status !== 200) return send(res, out.status, out.text);
+      let data;
+      try { data = JSON.parse(out.text); } catch { return send(res, out.status, out.text); }
+      // The desk's "changed since (public)" section needs person_lookup_change
+      // rows for this person; hermes's /admin/relationship/lookups doesn't
+      // carry them, so they're read here off the same read-only corpus
+      // handle /api/cards' changedFor uses above, same join and same
+      // try/catch reasoning: a corpus without SCHEMA_VERSION 13's
+      // person_lookup_change table must not take this route down, just omit
+      // `changes`. Unlike changedFor (newest, undecided-only, for a card
+      // badge), this returns EVERY change row for the person, decided or not,
+      // so the person view can render an Accept/Reject pair or a decided
+      // badge per row, the same as page items do.
+      data.changes = [];
+      try {
+        const rows = corpus.prepare(
+          `SELECT plc.claim_id AS claimId, plc.kind AS kind, plc.url AS url, plc.change_date AS date,
+                  c.text AS text,
+                  (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) AS decision
+           FROM person_lookup_change plc
+           JOIN claim c ON c.id = plc.claim_id
+           WHERE c.subject = 'person' AND c.subject_person_key = ?
+           ORDER BY plc.claim_id DESC`
+        ).all(personKey);
+        const sourceStmt = corpus.prepare(
+          `SELECT context_id AS contextId, quote FROM claim_source WHERE claim_id = ? AND source = 'web' LIMIT 1`
+        );
+        const ctxStmt = corpus.prepare('SELECT id FROM context WHERE id = ?');
+        data.changes = rows.map((row) => {
+          let quote = null;
+          try {
+            const source = sourceStmt.get(row.claimId);
+            if (source) {
+              const ctx = ctxStmt.get(source.contextId);
+              if (ctx) quote = source.quote; // the receipt is gone, so the quote is gone
+            }
+          } catch { /* leave quote null */ }
+          return { claimId: row.claimId, kind: row.kind, url: row.url, date: row.date ?? null,
+            text: row.text, decision: row.decision ?? null, quote };
+        });
+      } catch {
+        // pre-migration schema: no person_lookup_change table yet
+      }
+      return send(res, 200, JSON.stringify(data));
     }
 
     // LINT (step 5½). /api/lint and /api/lint/resolve are verbatim hermes

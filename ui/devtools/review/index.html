@@ -185,6 +185,7 @@
   .pg-decided.reject { color:var(--bad); }
   .pages-built { font-size:.74rem; color:var(--fg-3); }
   .pages-right-head-buttons { display:flex; gap:.4rem; }
+  .lookup-msg { font-size:.8rem; color:var(--fg-2); margin:.3rem 0 0; }
   .lookup-row {
     border:1px solid var(--line); border-radius:5px; padding:.6rem .7rem; display:grid; gap:.4rem;
   }
@@ -805,6 +806,14 @@ let pagesPersonName = null;
 // sent", see lookupLogSection() below. Reset on every person switch so a
 // slow-to-load previous person's rows can never bleed into the next.
 let lookupRows = [];
+// person_lookup_change rows for whichever person is selected -- "changed
+// since (public)", see personChangesNode() below. Reset on every person
+// switch, same reasoning as lookupRows.
+let personChanges = [];
+// Inline status of the last "look up now" click for the selected person --
+// null once nothing has been said yet (a fresh selection, or a message
+// already reflected in the rendered log). Reset on every person switch.
+let lookupMessage = null;
 
 // One line from /stats' sweep key (proxied verbatim by /api/health, which
 // already forwards the whole /stats body -- no serve.mjs change needed for
@@ -949,6 +958,8 @@ function selectPagePerson(personKey, name) {
   pagesPersonKey = personKey;
   pagesPersonName = name;
   lookupRows = [];
+  personChanges = [];
+  lookupMessage = null;
   renderPagesList();
   loadPersonPage();
   loadLookupLog();
@@ -978,12 +989,13 @@ function pageHead(label) {
   build.addEventListener('click', () => buildPage(build));
   buttons.append(lookup, build);
   head.append(buttons);
+  if (lookupMessage) head.append(el('p', 'lookup-msg', lookupMessage));
   return head;
 }
 
 function renderPageMissing() {
   const box = document.getElementById('pagesRight');
-  box.replaceChildren(pageHead('build page'), el('p', 'empty', 'no page yet'), lookupLogSection());
+  box.replaceChildren(pageHead('build page'), personChangesNode(), el('p', 'empty', 'no page yet'), lookupLogSection());
 }
 
 async function buildPage(btn) {
@@ -1052,7 +1064,7 @@ function pageSectionNode(section, value) {
 
 function renderPersonPage(data) {
   const box = document.getElementById('pagesRight');
-  const nodes = [pageHead('rebuild page')];
+  const nodes = [pageHead('rebuild page'), personChangesNode()];
   if (data.builtAt) nodes.push(el('p', 'pages-built', 'built ' + new Date(data.builtAt).toLocaleString()));
 
   const sections = data.sections ?? {};
@@ -1064,6 +1076,68 @@ function renderPersonPage(data) {
   if (!any) nodes.push(el('p', 'empty', 'page has no sections yet'));
   nodes.push(lookupLogSection());
   box.replaceChildren(...nodes);
+}
+
+// ---- "Changed since (public)": pending/decided person_lookup_change rows -
+// One row per person_lookup_change for the selected person (/api/lookups'
+// own `changes` field, added server-side in serve.mjs since hermes's
+// /admin/relationship/lookups doesn't carry them -- see that comment).
+// Accept/Reject go through the exact same /api/decide route and payload as
+// pageItemNode's do above: a proposed web change is an ordinary pending
+// claim once stored, not a special kind of decision.
+function changeItemNode(row) {
+  const node = el('div', 'pg-item');
+  const head = el('div', 'pg-item-text');
+  head.append(document.createTextNode(`${row.text ?? ''} · ${row.kind ?? ''} · `));
+  if (row.url) {
+    const a = document.createElement('a');
+    a.href = row.url;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = row.url;
+    head.append(a);
+  }
+  node.append(head);
+  if (row.quote) node.append(el('blockquote', 'c-quote', row.quote));
+  const decided = row.decision && row.decision !== 'pending';
+  if (decided) {
+    node.append(el('div', 'pg-decided ' + row.decision, row.decision));
+  } else {
+    const acts = el('div', 'pg-item-acts');
+    const keep = el('button', 'keep', 'Accept');
+    const drop = el('button', 'drop', 'Reject');
+    keep.addEventListener('click', () => decideChangeItem(row, 'accept', node));
+    drop.addEventListener('click', () => decideChangeItem(row, 'reject', node));
+    acts.append(keep, drop);
+    node.append(acts);
+  }
+  return node;
+}
+
+async function decideChangeItem(row, action, node) {
+  for (const b of node.querySelectorAll('button')) b.disabled = true;
+  try {
+    const res = await fetch('/api/decide', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ claim_id: row.claimId, action, reason: 'reviewed in the dev review desk' }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    row.decision = action;
+    node.replaceWith(changeItemNode(row));
+  } catch (err) {
+    for (const b of node.querySelectorAll('button')) b.disabled = false;
+    node.append(el('span', 'err', 'could not save: ' + err.message));
+  }
+}
+
+function personChangesNode() {
+  const box = el('div', 'pg-section');
+  box.id = 'personChanges';
+  if (personChanges.length === 0) return box; // nothing to show; id kept so a later lookup can fill it in
+  box.append(el('div', 'pg-section-title', 'changed since (public)'));
+  box.append(...personChanges.map(changeItemNode));
+  return box;
 }
 
 // ---- "What was sent": public lookup's own receipt (L5 step 6) ------------
@@ -1106,20 +1180,54 @@ async function loadLookupLog() {
     // must not overwrite the rows for whoever is selected now.
     if (personKey !== pagesPersonKey) return;
     lookupRows = data.lookups ?? [];
+    personChanges = data.changes ?? [];
   } catch {
     if (personKey !== pagesPersonKey) return;
     lookupRows = [];
+    personChanges = [];
   }
   const box = document.getElementById('lookupLog');
   if (box) box.replaceWith(lookupLogSection());
+  const changesBox = document.getElementById('personChanges');
+  if (changesBox) changesBox.replaceWith(personChangesNode());
+}
+
+// Turns /api/lookup/person's response body into the one-line status shown
+// next to the button -- the gate reasons (lookupGate, relationship/lookup.mjs)
+// and the log statuses (lookupPerson, same file) are a small fixed set, not
+// display strings on their own.
+function describeLookupResult(data) {
+  if (!data) return null;
+  if (!data.log) {
+    const reason = data.reason ?? 'unknown';
+    return reason === 'no-engine' ? 'no engine' : `gated: ${reason}`;
+  }
+  switch (data.log.status) {
+    case 'no-anchors': return 'no second anchor (needs firm, handle or LinkedIn URL)';
+    case 'ambiguous': return 'ambiguous match';
+    case 'no_match': return 'no match';
+    case 'empty': return 'no changes found';
+    case 'ungrounded': return 'no groundable changes found';
+    case 'engine-error': return 'engine error';
+    case 'parse-error': return 'parse error';
+    case 'proposed': {
+      const n = data.log.changesProposed ?? 0;
+      return `${n} change${n === 1 ? '' : 's'} proposed`;
+    }
+    default: return data.log.status ?? null;
+  }
 }
 
 // "Look up now" -- POSTs hermes's own /admin/relationship/lookup/person
 // through serve.mjs's proxy (writes go through hermes, like every other
 // desk action). Still gated and capped hermes-side; a click here cannot
-// bypass either.
+// bypass either. Shows a disabled "looking up…" state for the click's whole
+// round trip, then re-renders the person view (page + "what was sent" +
+// "changed since") so a 'proposed' result's new change row shows up without
+// a manual reload.
 async function lookupNow(btn) {
   btn.disabled = true;
+  btn.textContent = 'looking up…';
   const personKey = pagesPersonKey;
   try {
     const res = await fetch('/api/lookup/person', {
@@ -1127,12 +1235,19 @@ async function lookupNow(btn) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ personKey }),
     });
-    if (!res.ok) throw new Error(await res.text());
+    const text = await res.text();
+    if (!res.ok) throw new Error(text);
+    let data = null;
+    try { data = JSON.parse(text); } catch { data = null; }
+    if (personKey !== pagesPersonKey) return; // switched away mid-flight
+    lookupMessage = describeLookupResult(data);
+    await loadPersonPage();
     await loadLookupLog();
   } catch (err) {
     document.getElementById('pagesRight').append(el('p', 'err', 'could not look up: ' + err.message));
   } finally {
     btn.disabled = false;
+    btn.textContent = 'look up now';
   }
 }
 
