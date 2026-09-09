@@ -48,6 +48,28 @@ function readHermesToken() {
 const hermesBase = process.env.HAZLIE_HERMES_URL ?? 'http://127.0.0.1:51789';
 const token = readHermesToken();
 
+// The closed set of codes this script will print for a failed request.
+// Static strings, keyed on the HTTP status and nothing else: no part of
+// hermes' response text ever reaches stdout (see the !res.ok branch below).
+const ERROR_CODES = new Map([
+  [400, 'bad-request'],
+  [401, 'unauthorized'],
+  [403, 'bearer-only'],
+  [404, 'no-such-route'],
+  [405, 'method-not-allowed'],
+  [409, 'conflict'],
+  [413, 'payload-too-large'],
+  [415, 'unsupported-media-type'],
+  [429, 'rate-limited'],
+]);
+
+function errorCode(status) {
+  const known = ERROR_CODES.get(status);
+  if (known !== undefined) return known;
+  if (status >= 500) return 'server-error';
+  return 'unexpected-status';
+}
+
 async function main() {
   let res;
   try {
@@ -69,19 +91,26 @@ async function main() {
   try {
     json = JSON.parse(text);
   } catch {
-    process.stdout.write(`${JSON.stringify({ status: res.status, error: 'non-JSON response' })}\n`);
+    process.stdout.write(`${JSON.stringify({ status: res.status, code: 'non-json-response' })}\n`);
     process.exit(1);
     return;
   }
 
   if (!res.ok) {
-    // `status` on its own key, and hermes' body under `body` rather than
-    // spread over the top level. Spreading it meant hermes' own `error`
-    // string overwrote the HTTP status this line exists to report, so a 401
-    // (no token), a 404 (an old build with no such route) and a 500 all
-    // printed the same shape with the status gone -- and the one number that
-    // tells those three apart is the one that was lost.
-    process.stdout.write(`${JSON.stringify({ status: res.status, error: json?.error ?? null, body: json })}\n`);
+    // `status` on its own key -- spreading hermes' body over the top level
+    // meant its own `error` string overwrote the HTTP status this line
+    // exists to report, so a 401 (no token), a 404 (an old build with no
+    // such route) and a 500 all printed the same shape with the status gone.
+    //
+    // AND NOTHING FROM THE BODY. This used to print hermes' whole body under
+    // `body`. Those messages are written for a human reading the desk and
+    // they quote the request back: a findingKey, a person key, a rejected
+    // field's value, whatever a 500 got as far as. This line goes to the
+    // Distiller's log, which this file has no policy over -- so the shape is
+    // the status plus one of OUR OWN static codes, chosen from the status
+    // alone. `code` is what a log can be grepped for; the message stays
+    // where it was written for.
+    process.stdout.write(`${JSON.stringify({ status: res.status, code: errorCode(res.status) })}\n`);
     process.exit(1);
     return;
   }

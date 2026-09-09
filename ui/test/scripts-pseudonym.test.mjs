@@ -149,3 +149,87 @@ test('the run header prints the salt fingerprint once, and it tracks the salt fi
   const fpB = outB.trim().split('\n').map((l) => JSON.parse(l)).find((l) => typeof l.salt === 'string').salt;
   assert.notEqual(fpB, fp);
 });
+
+// ---------------------------------------------------------------------------
+// Review F finding 16: THE ERROR BODY THE SCRIPTS ECHOED. sweep-once,
+// lint-once and lookup-once printed hermes' entire error body under `body`.
+// Hermes writes those messages for a human reading the desk and they quote
+// the request back -- a findingKey, a person key, a rejected field's value.
+// This stdout is the Distiller's log, which these scripts have no policy
+// over, so a failed request now prints the status and one of the scripts'
+// own static codes and nothing else.
+// ---------------------------------------------------------------------------
+
+const ONCE_SCRIPTS = [
+  ['sweep-once.mjs', '/admin/relationship/sweep'],
+  ['lint-once.mjs', '/admin/relationship/lint'],
+  ['lookup-once.mjs', '/admin/relationship/lookup'],
+];
+
+// A hermes that refuses, with a body shaped exactly like badRequest's --
+// carrying text no log should hold.
+const LEAKY_ERROR = 'no lint finding "role_conflict:441:founder" for name:jane doe';
+
+function refusingHermes(status, body) {
+  const server = createServer((req, res) => {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(body));
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }));
+  });
+}
+
+function runOnce(script, { port, tokenFile }) {
+  return new Promise((resolve) => {
+    execFile(
+      process.execPath,
+      [join(dirname(SCRIPT), script)],
+      {
+        env: { ...process.env, HERMES_TOKEN_FILE: tokenFile, HAZLIE_HERMES_URL: `http://127.0.0.1:${port}` },
+        timeout: 30_000,
+      },
+      (err, stdout, stderr) => resolve({ stdout, stderr, code: err?.code ?? 0 })
+    );
+  });
+}
+
+function tokenFileFor() {
+  const dir = mkdtempSync(join(tmpdir(), 'once-token-'));
+  const path = join(dir, 'hermes-token.txt');
+  writeFileSync(path, 'a'.repeat(64), { mode: 0o600 });
+  return path;
+}
+
+for (const [script] of ONCE_SCRIPTS) {
+  test(`${script} prints a status and a static code, never hermes' error text`, async () => {
+    const { server, port } = await refusingHermes(400, { error: LEAKY_ERROR });
+    const tokenFile = tokenFileFor();
+    try {
+      const { stdout, code } = await runOnce(script, { port, tokenFile });
+      assert.equal(code, 1, 'a refused request is still a failed run');
+      assert.ok(!stdout.includes('role_conflict:441'), `the finding key reached the log:\n${stdout}`);
+      assert.ok(!stdout.includes('name:jane doe'), `a person key reached the log:\n${stdout}`);
+      assert.ok(!stdout.includes('no lint finding'), `hermes' message reached the log:\n${stdout}`);
+      const printed = JSON.parse(stdout.trim().split('\n').pop());
+      assert.deepEqual(printed, { status: 400, code: 'bad-request' });
+    } finally {
+      server.close();
+    }
+  });
+}
+
+test('the printed code tells the three real failures apart', async () => {
+  const tokenFile = tokenFileFor();
+  for (const [status, expected] of [[401, 'unauthorized'], [404, 'no-such-route'], [500, 'server-error'],
+    [418, 'unexpected-status']]) {
+    const { server, port } = await refusingHermes(status, { error: LEAKY_ERROR });
+    try {
+      const { stdout } = await runOnce('lint-once.mjs', { port, tokenFile });
+      const printed = JSON.parse(stdout.trim().split('\n').pop());
+      assert.deepEqual(printed, { status, code: expected });
+    } finally {
+      server.close();
+    }
+  }
+});
