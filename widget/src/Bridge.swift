@@ -102,7 +102,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // the owner's verdict, sizes itself, and (the mode picker) asks for a
     // fresh batch under a different mode. Nothing else -- the card page
     // holds no token and can open no other surface.
-    "reconnect": ["relCard", "relEvent", "relRefresh", "close", "fitContent"],
+    "reconnect": ["relCard", "relEvent", "relRefresh", "relMode", "relDraft", "close", "fitContent"],
     "connections": ["bridgeBegin", "bridgeCookies", "bridgeStatus", "bridgeWebLogin",
                     "bridgeDiscordServer",
                     "close", "connectorsIntroSeen", "openConnectLink", "openExternal",
@@ -1345,6 +1345,24 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       var refreshBody: [String: Any] = [:]
       if let mode = payload["mode"] { refreshBody["mode"] = mode }
       relHermes("POST", "admin/relationship/refresh", json: refreshBody) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
+    case "relMode":
+      var modeBody: [String: Any] = [:]
+      for k in ["mode"] {
+        if let v = payload[k] { modeBody[k] = v }
+      }
+      relHermes("POST", "admin/relationship/mode", json: modeBody) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
+    case "relDraft":
+      var draftBody: [String: Any] = [:]
+      for k in ["snapshot_id"] {
+        if let v = payload[k] { draftBody[k] = v }
+      }
+      relHermes("POST", "admin/relationship/draft", json: draftBody) { [weak self] out in
         self?.reply(webView, id, out)
       }
 

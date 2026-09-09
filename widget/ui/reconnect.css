@@ -60,7 +60,33 @@ body.reconnect { margin: 0; -webkit-user-select: none; user-select: none; }
 .rc-facts dt { opacity: 0.55; min-width: 92px; flex-shrink: 0; }
 .rc-facts dd { margin: 0; }
 .rc-warn { color: #c96; }
+.rc-drafts { margin-bottom: 9px; }
+.rc-drafts #rcDraft {
+  border: 1px solid var(--edge, #444); background: rgba(127, 127, 127, 0.12);
+  color: inherit; border-radius: 7px; padding: 5px 11px; font-size: 12.5px; cursor: pointer;
+}
+.rc-drafts #rcDraft:hover { background: rgba(127, 127, 127, 0.25); }
+.rc-drafts #rcDraft:disabled { opacity: 0.5; cursor: default; }
+.rc-drafts-caption {
+  font-size: 10.5px; letter-spacing: 0.03em; opacity: 0.5; margin: 5px 0 4px;
+}
+.rc-drafts-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.rc-drafts-list li {
+  display: flex; align-items: flex-start; gap: 7px;
+  border: 1px solid var(--edge, #333); border-radius: 6px;
+  background: rgba(127, 127, 127, 0.08); padding: 6px 8px;
+}
+.rc-draft-text { flex: 1 1 auto; font-size: 12.5px; line-height: 1.4; }
+.rc-draft-copy {
+  flex: 0 0 auto; border: 1px solid var(--edge, #444); background: rgba(127, 127, 127, 0.12);
+  color: inherit; border-radius: 6px; padding: 3px 8px; font-size: 11.5px; cursor: pointer;
+}
+.rc-draft-copy:hover { background: rgba(127, 127, 127, 0.25); }
+.rc-drafts-error, .rc-actions-error {
+  color: #c96; font-size: 11.5px; margin: 2px 0 8px;
+}
 .rc-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 9px; }
+.rc-actions button:disabled { opacity: 0.5; cursor: default; }
 .rc-actions button {
   border: 1px solid var(--edge, #444); background: rgba(127, 127, 127, 0.12);
   color: inherit; border-radius: 7px; padding: 5px 11px; font-size: 12.5px; cursor: pointer;

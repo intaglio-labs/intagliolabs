@@ -44,6 +44,12 @@
            the verdict buttons stay reachable even when a page's who/tie/quote/
            asks push the card past the panel's height. -->
       <div class="rc-footer">
+        <div class="rc-drafts" id="rcDrafts">
+          <button id="rcDraft">draft a text</button>
+          <div class="rc-drafts-caption" id="rcDraftsCaption" hidden>drafted by your Claude · edit before sending</div>
+          <ul class="rc-drafts-list" id="rcDraftsList"></ul>
+          <div class="rc-drafts-error" id="rcDraftsError" hidden></div>
+        </div>
         <div class="rc-actions">
           <button id="rcYes">will text them</button>
           <button id="rcNo">not relevant</button>
@@ -51,6 +57,7 @@
           <button id="rcNever">never this person</button>
           <button id="rcNotThisKind">not this kind</button>
         </div>
+        <div class="rc-actions-error" id="rcActionsError" hidden></div>
         <input id="rcFeedback" type="text" placeholder="why? (optional — this trains it)" autocomplete="off" spellcheck="false">
       </div>
     </div>

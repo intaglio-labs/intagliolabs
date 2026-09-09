@@ -62,6 +62,9 @@ function renderEmpty() {
   el('rcTitle').textContent = 'reconnect?';
   el('rcYes').textContent = 'will text them';
   el('rcModes').hidden = false;
+  el('rcActionsError').hidden = true;
+  el('rcActionsError').textContent = '';
+  setVerdictButtonsDisabled(false);
   fit();
 }
 
@@ -118,8 +121,9 @@ function render(c) {
   // `sentence` (the tie) already carries the page's how_left text when a
   // page is behind the card -- the server decides that, this only styles it.
   const hasPage = Boolean(c.page);
-  el('rcWho').textContent = c.who ?? '';
-  el('rcWho').hidden = !c.who;
+  const who = (c.who ?? '').trim();
+  el('rcWho').textContent = who;
+  el('rcWho').hidden = !who;
 
   el('rcWhy').textContent = c.sentence ?? '';
   el('rcWhy').classList.toggle('rc-why-emphasis', hasPage);
@@ -137,12 +141,13 @@ function render(c) {
 
   // `who` replaces the role fact when present -- the two say the same kind
   // of thing (who this person is), and showing both duplicates it.
-  const role = c.who ? '' : [c.role, c.label ? `labeled ${c.label}` : null].filter(Boolean).join(' · ');
+  const role = (who ? '' : [c.role, c.label ? `labeled ${c.label}` : null].filter(Boolean).join(' · ')).trim();
   el('rcRole').textContent = role;
   el('rcRoleRow').hidden = !role;
 
-  el('rcLeft').textContent = c.left ?? '';
-  el('rcLeftRow').hidden = !c.left;
+  const left = (c.left ?? '').trim();
+  el('rcLeft').textContent = left;
+  el('rcLeftRow').hidden = !left;
   el('rcLeft').classList.toggle('rc-warn', c.leftTone === 'bad');
   const ev = c.evidence ?? {};
   const bits = [];
@@ -151,8 +156,87 @@ function render(c) {
   if (ev.meetings) bits.push(`met ${ev.meetings}×`);
   el('rcHistory').textContent = bits.join(' · ');
   el('rcFeedback').value = '';
+  el('rcActionsError').hidden = true;
+  el('rcActionsError').textContent = '';
+  setVerdictButtonsDisabled(false);
+  renderDrafts(Array.isArray(c.drafts) ? c.drafts : []);
   fit();
 }
+
+// Drafts (footer, above the actions): a suggested text the owner can copy
+// and send by hand. The card may already arrive with drafts (fast path --
+// the button becomes "redraft"); otherwise the owner asks for them on
+// demand, one draft round trip per click.
+function renderDraftRows(drafts) {
+  el('rcDraftsList').replaceChildren(...drafts.map((d) => {
+    const li = document.createElement('li');
+    const text = document.createElement('div');
+    text.className = 'rc-draft-text';
+    text.textContent = d.text ?? '';
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'rc-draft-copy';
+    copyBtn.type = 'button';
+    copyBtn.textContent = 'copy';
+    copyBtn.addEventListener('click', () => copyDraftText(d.text ?? '', text, copyBtn));
+    li.append(text, copyBtn);
+    return li;
+  }));
+  el('rcDraftsCaption').hidden = drafts.length === 0;
+}
+
+function renderDrafts(drafts) {
+  renderDraftRows(drafts);
+  el('rcDraft').textContent = drafts.length ? 'redraft' : 'draft a text';
+  el('rcDraftsError').hidden = true;
+  el('rcDraftsError').textContent = '';
+}
+
+// WKWebView (the widget's actual host) does not reliably expose
+// navigator.clipboard.writeText from a page loaded over file:// with this
+// CSP -- tested here: the Clipboard API path silently no-ops in that host,
+// while select() + document.execCommand('copy') on the draft's own text
+// node works, so that's the fallback this uses, not just a decoration.
+async function copyDraftText(text, node) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    throw new Error('no clipboard API');
+  } catch {
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.execCommand('copy');
+      sel.removeAllRanges();
+    } catch {
+      el('rcDraftsError').textContent = "couldn't copy that — select it and copy by hand";
+      el('rcDraftsError').hidden = false;
+    }
+  }
+}
+
+el('rcDraft').addEventListener('click', async () => {
+  if (!card) return;
+  const btn = el('rcDraft');
+  btn.disabled = true;
+  el('rcDraftsError').hidden = true;
+  el('rcDraftsError').textContent = '';
+  try {
+    const out = await hzPost('relDraft', { snapshot_id: card.snapshot_id });
+    if (!out || out.ok === false) throw new Error('draft failed');
+    renderDrafts(Array.isArray(out.drafts) ? out.drafts : []);
+  } catch {
+    el('rcDraftsError').textContent = "couldn't draft that — try again";
+    el('rcDraftsError').hidden = false;
+  } finally {
+    btn.disabled = false;
+    fit();
+  }
+});
 
 async function pull() {
   try {
@@ -162,16 +246,30 @@ async function pull() {
   } catch { renderEmpty(); }
 }
 
-function verdict(event, extra = {}) {
-  if (!card) return;
+const VERDICT_BUTTON_IDS = ['rcYes', 'rcNo', 'rcMute', 'rcNever', 'rcNotThisKind'];
+
+function setVerdictButtonsDisabled(disabled) {
+  for (const id of VERDICT_BUTTON_IDS) el(id).disabled = disabled;
+}
+
+async function verdict(event, extra = {}) {
+  if (!card) { console.log('verdict: no card, ignoring click'); return; }
   const note = el('rcFeedback').value.trim();
-  hzPost('relEvent', {
-    snapshot_id: card.snapshot_id, person_key: card.personKey, event,
-    ...(note ? { note } : {}),
-    ...(event === 'dismissed' ? { reason: extra.reason ?? 'not-useful' } : {}),
-    ...(extra.mute_days ? { mute_days: extra.mute_days } : {}),
-  }).catch(() => {});
-  pull(); // next card, or the empty state
+  setVerdictButtonsDisabled(true);
+  try {
+    const out = await hzPost('relEvent', {
+      snapshot_id: card.snapshot_id, person_key: card.personKey, event,
+      ...(note ? { note } : {}),
+      ...(event === 'dismissed' ? { reason: extra.reason ?? 'not-useful' } : {}),
+      ...(extra.mute_days ? { mute_days: extra.mute_days } : {}),
+    });
+    if (!out || out.ok === false) throw new Error('relEvent rejected');
+    await pull(); // next card, or the empty state -- clears the error on success
+  } catch {
+    setVerdictButtonsDisabled(false);
+    el('rcActionsError').textContent = "couldn't save that — try again";
+    el('rcActionsError').hidden = false;
+  }
 }
 
 el('rcYes').addEventListener('click', () => verdict('accepted'));
@@ -199,7 +297,7 @@ function selectMode(mode) {
   currentMode = mode;
   writeMode(mode);
   renderModes();
-  hzPost('relRefresh', { mode }).then(pull, () => {});
+  hzPost('relMode', { mode }).then(pull, () => {});
 }
 el('rcModeAny').addEventListener('click', () => selectMode('any'));
 el('rcModeFounder').addEventListener('click', () => selectMode('founder'));
