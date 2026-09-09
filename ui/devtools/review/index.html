@@ -272,6 +272,29 @@
 </main>
 
 <script>
+// EVERY WRITE CARRIES THE DESK'S CSRF TOKEN. serve.mjs mints one per process
+// and refuses any non-GET without it (see its own comment on why loopback
+// binding is not enough). Rather than touch two dozen call sites, fetch is
+// wrapped once here: GET and HEAD pass straight through, everything else
+// waits for the token and adds the header. The token is fetched over an
+// ordinary same-origin GET, whose body a cross-site script cannot read.
+const CSRF_HEADER = 'X-Hazlie-Csrf';
+let csrfToken = null;
+const csrfReady = fetch('/api/csrf')
+  .then((r) => (r.ok ? r.json() : null))
+  .then((j) => { csrfToken = j && typeof j.token === 'string' ? j.token : null; })
+  .catch(() => { csrfToken = null; });
+const bareFetch = window.fetch.bind(window);
+window.fetch = async (input, init) => {
+  const opts = init ?? {};
+  const method = String(opts.method ?? 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD') return bareFetch(input, opts);
+  await csrfReady;
+  const headers = new Headers(opts.headers ?? {});
+  if (csrfToken !== null) headers.set(CSRF_HEADER, csrfToken);
+  return bareFetch(input, { ...opts, headers });
+};
+
 const BANDS = ['unsupported', 'weak', 'supported', 'all'];
 let band = 'unsupported';   // the interesting one first: no content word shared with its source
 let claims = [];

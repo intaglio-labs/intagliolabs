@@ -33,6 +33,7 @@ import { fileURLToPath } from 'node:url';
 // Lives beside serve.mjs, not under ui/server: that directory ships in the
 // app bundle, and this scoring function exists for the dev desk only.
 import { supportOf, supportBand } from './support.mjs';
+import { createDeskGuard, CSRF_HEADER } from './guard.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.HZ_REVIEW_PORT ?? 7311);
@@ -47,6 +48,11 @@ function token() {
   }
 }
 const TOKEN = token();
+
+// The desk's request guard: Host, Origin and a per-process CSRF token. See
+// guard.mjs, which carries the reasoning and is separated out so it can be
+// tested without importing this file's import-time side effects.
+const { csrfToken: CSRF_TOKEN, refuse } = createDeskGuard(PORT);
 
 // READ-ONLY, and only ever for the source text the review page has to show.
 // hermes is the sole writer of this database; opening it read-write from a
@@ -81,6 +87,16 @@ const send = (res, status, body, type = 'application/json') => {
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
+
+    const refused = refuse(req);
+    if (refused !== null) return send(res, refused.status, JSON.stringify({ error: refused.error }));
+
+    // The page fetches this once and sends it back on every write. Readable
+    // only same-origin: a cross-site script can issue the GET but cannot see
+    // the response body, so it never obtains the token.
+    if (req.method === 'GET' && url.pathname === '/api/csrf') {
+      return send(res, 200, JSON.stringify({ token: CSRF_TOKEN, header: CSRF_HEADER }));
+    }
 
     if (req.method === 'GET' && url.pathname === '/') {
       return send(res, 200, readFileSync(join(HERE, 'index.html')), 'text/html; charset=utf-8');
