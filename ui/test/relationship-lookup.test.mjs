@@ -2298,3 +2298,70 @@ test('a different assertion citing the same (url, quote) is its own claim, not a
   assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM claim').get().n), 2);
   db.close();
 });
+
+// ---------------------------------------------------------------------------
+// Review G finding 9: isTransaction IS VERSION-GATED. It landed in Node 23.3
+// / 22.13; on anything older it is `undefined`, `!undefined` is true, and
+// storeLookup opened a BEGIN inside lookupPerson's own -- "cannot start a
+// transaction within a transaction", on the happy path, on every lookup.
+//
+// A handle with the property hidden is the only way to test that from a Node
+// that has it. `prepare`/`exec` forward to the real database, so what runs
+// is the real SQL against the real schema.
+// ---------------------------------------------------------------------------
+
+const withoutIsTransaction = (db) => ({
+  prepare: (sql) => db.prepare(sql),
+  exec: (sql) => db.exec(sql),
+});
+
+test('storeLookup joins a caller transaction on a Node without db.isTransaction', () => {
+  const db = openDb(':memory:');
+  insertPersonRow(db, 'name:jane', 'Jane Doe');
+  const logId = Number(db.prepare(
+    `INSERT INTO lookup_log(person_key, run_id, at, engine, query, query_hash, fields_used, searches, urls_seen,
+       identity_confidence, changes_proposed, changes_dropped, cost_usd, status)
+     VALUES ('name:jane', NULL, ?, 'fake', 'q', 'h', '["name"]', 1, 1, 'match', 1, 0, 0.01, 'proposed')`
+  ).run(NOW).lastInsertRowid);
+  const distillRunId = newDistillRun(db);
+  const kept = [{
+    kind: 'role', text: 'Promoted to VP of Engineering.', url: 'https://acme.example/news',
+    quote: 'Jane Doe was promoted', date: null,
+  }];
+
+  // lookupPerson's own transaction: storeLookup must JOIN it, not nest a
+  // second BEGIN inside it.
+  db.exec('BEGIN');
+  const result = storeLookup(withoutIsTransaction(db), {
+    personKey: 'name:jane', kept, logId, distillRunId, now: NOW,
+  });
+  assert.deepEqual(result, { stored: 1, skipped: 0, duplicates: 0 },
+    'the happy path is the happy path whatever Node exposes');
+  // Still the caller's transaction, so the caller's rollback still owns it.
+  db.exec('ROLLBACK');
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM claim').get().n), 0,
+    "a joined transaction is the caller's to unwind: storeLookup must not have committed it out from under them");
+  db.close();
+});
+
+test('storeLookup opens its own transaction when there is none, with isTransaction hidden', () => {
+  const db = openDb(':memory:');
+  insertPersonRow(db, 'name:jane', 'Jane Doe');
+  const logId = Number(db.prepare(
+    `INSERT INTO lookup_log(person_key, run_id, at, engine, query, query_hash, fields_used, searches, urls_seen,
+       identity_confidence, changes_proposed, changes_dropped, cost_usd, status)
+     VALUES ('name:jane', NULL, ?, 'fake', 'q', 'h', '["name"]', 1, 1, 'match', 1, 0, 0.01, 'proposed')`
+  ).run(NOW).lastInsertRowid);
+  const distillRunId = newDistillRun(db);
+
+  storeLookup(withoutIsTransaction(db), {
+    personKey: 'name:jane', logId, distillRunId, now: NOW,
+    kept: [{
+      kind: 'role', text: 'Promoted to VP of Engineering.', url: 'https://acme.example/news',
+      quote: 'Jane Doe was promoted', date: null,
+    }],
+  });
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM claim').get().n), 1,
+    'no caller transaction means storeLookup owns and commits its own');
+  db.close();
+});

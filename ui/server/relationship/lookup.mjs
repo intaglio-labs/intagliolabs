@@ -1418,6 +1418,38 @@ function extractJsonObject(text) {
 // row recording which kind of change this is and the url it cites. No
 // person_page_item row -- its `section` CHECK is closed to the five page
 // sections and a lookup change is not one of them.
+// BEGIN unless the caller already has one open, answering "did I open it?"
+// so only the owner commits or rolls back.
+//
+// `DatabaseSync.prototype.isTransaction` landed in Node 23.3 / 22.13 (review
+// G finding 9). On anything older it is `undefined`, `!undefined` is true,
+// and this function opened a BEGIN inside lookupPerson's own -- which throws
+// "cannot start a transaction within a transaction" and turned the happy
+// path into stateStatus:'store-error' on EVERY lookup, for a reason no log
+// line would have connected to a Node version.
+//
+// The fallback ASKS SQLITE instead of asking the Node version, because a
+// nested BEGIN is precisely the error being avoided: provoking it is the
+// check, and it is exactly as authoritative as the property would have been.
+// Preferred over a thrown "upgrade Node" because it works, and over a
+// package.json `engines` assertion alone because that is advisory -- the
+// field is declared as well, so a stranger's install says the requirement
+// out loud, but it is not what makes this correct.
+function beginUnlessNested(db) {
+  if (typeof db.isTransaction === 'boolean') {
+    if (db.isTransaction) return false;
+    db.exec('BEGIN');
+    return true;
+  }
+  try {
+    db.exec('BEGIN');
+    return true;
+  } catch (err) {
+    if (/within a transaction/iu.test(String(err?.message ?? err))) return false;
+    throw err;
+  }
+}
+
 export function storeLookup(db, {
   personKey, kept, observed = null, firm = null, logId, distillRunId, now = Date.now(),
 } = {}) {
@@ -1540,8 +1572,7 @@ export function storeLookup(db, {
   // and these claims to commit or roll back together: review finding 1's
   // three separate autocommits are what left a 'proposed' log row with zero
   // claims behind it).
-  const ownTransaction = !db.isTransaction;
-  if (ownTransaction) db.exec('BEGIN');
+  const ownTransaction = beginUnlessNested(db);
   try {
     for (const item of kept) {
       if (

@@ -2,6 +2,9 @@
   "name": "hazlie-ui-server",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=22.13"
+  },
   "description": "Hermes — the context store and its /ingest + /admin routes — plus the energy-audit digest computed over it. The Expo app that also lives under ui/ on the frontend branch is deliberately not part of this branch; nothing here imports it.",
   "scripts": {
     "test": "node --test 'test/*.test.mjs'",
