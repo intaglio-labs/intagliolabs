@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createMailSource } from '../sources/mail.mjs';
+import { messageToRow } from '../lib/mailRows.mjs';
 
 function memoryState() {
   const values = new Map();
@@ -801,4 +802,77 @@ test('a drain that reaches its floor deletes BOTH gap keys, including when the c
   assert.equal(state.getCursor(GAP_FROM_KEY), null, 'a drained hole leaves no keys behind');
   assert.equal(state.getCursor(GAP_UNTIL_KEY), null);
   assert.equal(ids.size, 2021);
+});
+
+// ---------------------------------------------------------------------------
+// Review G finding 3: A PAGE THAT LANDED NOTHING IS NOT PROGRESS. The
+// per-page `onPage` writes dropped the window-level `landed > 0` check the
+// old single write had, and the boundaries moved before messageToRow rather
+// than only for rows that survived it. A page whose every in-window message
+// yielded no row therefore moved the cursor past all of them -- and on a
+// window that was NOT truncated, no gap was recorded either, so nothing ever
+// looked there again.
+//
+// That state is not reachable through today's messageToRow (see the `toRow`
+// seam's own comment in sources/mail.mjs: every in-window message with a
+// finite internalDate produces a row), which is exactly why the branch
+// needed a seam to be tested at all rather than being left as unrun code
+// guarding the one thing in this connector that cannot be recovered.
+// ---------------------------------------------------------------------------
+
+const nullRowSource = (box, dropIds) => createMailSource({
+  accountsForScope: () => [{ email: 'owner@example.test' }],
+  makeClient: () => box.client,
+  sleep: async () => {},
+  toRow: (parsed, opts) => (dropIds.has(String(opts.uid)) ? null : messageToRow(parsed, opts)),
+});
+
+test('a single untruncated page whose every message yields no row records a gap instead of jumping it', async () => {
+  const NOW = Date.UTC(2026, 5, 1);
+  // Five messages, one page, no page token, nothing below the floor: the
+  // window finishes rather than truncating, so a truncation gap is not what
+  // saves these.
+  const stamps = Array.from({ length: 5 }, (_, i) => NOW - (i + 1) * 60_000);
+  const box = mailboxOf(stamps);
+  const state = memoryState();
+  const ingested = [];
+
+  const source = nullRowSource(box, new Set(['m0', 'm1', 'm2', 'm3', 'm4']));
+  await source.run(forwardCtx(state, ingested, { now: NOW }));
+
+  assert.equal(ingested.length, 0, 'sanity: the whole page yielded no row');
+  assert.equal(
+    state.getCursor(CURSOR_KEY),
+    String(stamps[0]),
+    'the cursor still advances -- holding it would livelock the account on the same gets every cycle'
+  );
+  assert.equal(
+    state.getCursor(GAP_UNTIL_KEY),
+    String(stamps[0]),
+    "but the page's own ceiling is recorded, so the messages it passed over stay reachable"
+  );
+  assert.equal(state.getCursor(GAP_FROM_KEY), String(stamps[4]), 'down to its own floor');
+
+  // And the hole is drainable: same account, next cycle, rows landing again.
+  const source2 = forwardSource(mailboxOf(stamps));
+  await source2.run(forwardCtx(state, ingested, { now: NOW }));
+  assert.equal(distinctIds(ingested).size, 5, 'every message the null page skipped is read on the next pass');
+  assert.equal(state.getCursor(GAP_FROM_KEY), null, 'and the hole closes rather than being re-read forever');
+  assert.equal(state.getCursor(GAP_UNTIL_KEY), null);
+});
+
+test('a page of nothing but deletions is not recorded as a hole', async () => {
+  const NOW = Date.UTC(2026, 5, 1);
+  const stamps = Array.from({ length: 3 }, (_, i) => NOW - (i + 1) * 60_000);
+  // Every get 404s: the messages are gone, they were never placed inside the
+  // window, and a gap naming them would be a hole nothing could ever fill.
+  const box = mailboxOf(stamps, { onGet: () => { throw httpError(404); } });
+  const state = memoryState();
+  const ingested = [];
+
+  await forwardSource(box).run(forwardCtx(state, ingested, { now: NOW }));
+
+  assert.equal(ingested.length, 0);
+  assert.equal(state.getCursor(GAP_FROM_KEY), null, 'no hole for messages that no longer exist');
+  assert.equal(state.getCursor(GAP_UNTIL_KEY), null);
 });

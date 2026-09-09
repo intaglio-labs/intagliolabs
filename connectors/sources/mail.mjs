@@ -202,6 +202,19 @@ export function createMailSource({
   accountsForScope = accountsWithScope,
   makeClient = createGmailClient,
   sleep: sleepImpl = sleep,
+  // A SEAM FOR ONE OTHERWISE-UNTESTABLE BRANCH, and worth saying why rather
+  // than leaving a reader to wonder. Both scan loops below have a `row !==
+  // null` branch, and the cursor's soundness depends on what happens when it
+  // is taken -- but through the real messageToRow that branch is currently
+  // UNREACHABLE from here: mailEntityId always has account/folder/uid to fall
+  // back on, and a message with a finite internalDate always has a finite
+  // parsed.date, so any in-window message this file counts toward its
+  // boundaries also produces a row. (A message with neither internalDate nor
+  // a usable Date header does drop, but it moves no boundary and so cannot
+  // move the cursor either.) The guard is kept because it is the invariant
+  // the cursor rests on rather than a coincidence of today's mailRows, and
+  // this seam is how it is held to a test instead of being unrun code.
+  toRow = messageToRow,
 } = {}) {
   return {
     name: 'mail',
@@ -337,7 +350,7 @@ export function createMailSource({
                 // The exact bound the query could only approximate.
                 if (!Number.isFinite(internal) || internal < yearly.fromTs || internal >= yearly.toTs) continue;
                 const parsed = gmailMessageToParsed(full);
-                const row = messageToRow(parsed, {
+                const row = toRow(parsed, {
                   account: account.email,
                   folder: 'INBOX',
                   uid: stub.id,
@@ -435,6 +448,20 @@ export function createMailSource({
             // identical no-op pass repeats every cycle at 2,000 gets
             // (finding 3).
             //
+            // AMENDED 2026-09 (review G finding 3), because "has to count"
+            // was doing two jobs and only one of them held. Advancing over
+            // fetched-and-dropped messages is right — otherwise, livelock —
+            // but advancing over them WITHOUT RECORDING ANYTHING was not: a
+            // page whose every in-window message yielded null, on a window
+            // that was not truncated, moved the cursor past all of them with
+            // no hole written, and nothing ever looked there again. The rule
+            // is now: the cursor never advances over a page that landed
+            // nothing unless the page was empty (or held only deletions and
+            // out-of-window stubs, which is the same thing) — and when it
+            // does advance over one, that page's own [lowest, highest] goes
+            // in as a gap first, under the same gap-then-cursor order as
+            // everything else here.
+            //
             // QUERY WIDTH. Gmail's `after:`/`before:` take whole seconds, so
             // every query is widened by a second on each side and the exact
             // bound is enforced in JS against internalDate. Wider costs a
@@ -531,6 +558,17 @@ export function createMailSource({
                 pagesFetched += 1;
                 pageToken = list.nextPageToken;
                 const pageRows = [];
+                // PER-PAGE bounds, alongside the window-cumulative ones: the
+                // cursor is written per page, so whether THIS page justifies
+                // the advance has to be answerable per page (finding 3).
+                // Only messages that were fetched and placed inside the
+                // window move these -- a 404, a stub above maxTs, and a
+                // message with no usable internalDate all leave them alone,
+                // which is what keeps a page of nothing but deletions from
+                // being recorded as a hole.
+                let pageHighest = 0;
+                let pageLowest = Number.POSITIVE_INFINITY;
+                let pageInWindow = 0;
                 for (const [stubIndex, stub] of (list.messages ?? []).entries()) {
                   if (seen >= MAX_MESSAGES_PER_ACCOUNT) {
                     capHit = true;
@@ -561,9 +599,12 @@ export function createMailSource({
                     // OVER" above.
                     if (internal > highestIn) highestIn = internal;
                     if (internal < lowestIn) lowestIn = internal;
+                    if (internal > pageHighest) pageHighest = internal;
+                    if (internal < pageLowest) pageLowest = internal;
+                    pageInWindow += 1;
                   }
                   const parsed = gmailMessageToParsed(full);
-                  const row = messageToRow(parsed, {
+                  const row = toRow(parsed, {
                     account: account.email,
                     folder: 'INBOX',
                     uid: stub.id,
@@ -587,6 +628,13 @@ export function createMailSource({
                   lowest: Number.isFinite(lowestIn) ? lowestIn : 0,
                   landed,
                   truncated,
+                  // A page whose every in-window message yielded no row: its
+                  // own bounds, so the caller can record the hole it is about
+                  // to advance over. Zero when the page landed something, or
+                  // had nothing in-window to land.
+                  nullPage: pageInWindow > 0 && pageRows.length === 0
+                    ? { from: pageLowest, until: pageHighest }
+                    : null,
                 });
               } while (!capHit && !belowFloor && pageToken && seen < MAX_MESSAGES_PER_ACCOUNT);
 
@@ -594,6 +642,16 @@ export function createMailSource({
             };
 
             const priorGap = readGap();
+            // Set when the fresh window records a hole for a page it just
+            // fetched (see nullPage below). It suppresses THIS pass's drain,
+            // because re-reading, in the same pass, the exact page whose gets
+            // have just been spent is pure waste -- and because the drain
+            // clears a hole it reads to the bottom whether or not anything
+            // landed, which would wipe the record before it ever survived a
+            // cycle. Next cycle's drain gets a genuine second attempt, and if
+            // that one lands nothing either the hole is released rather than
+            // re-read forever.
+            let nullPageSeen = false;
 
             // (a) THE FRESH WINDOW, first and always: new mail matters more
             // than an old hole, and after the first pass this window is a
@@ -602,16 +660,44 @@ export function createMailSource({
               q,
               minTs: floor,
               maxTs: null,
-              onPage: ({ highest, lowest, truncated }) => {
+              onPage: ({ highest, lowest, truncated, nullPage }) => {
                 // The truthful state if the pass ended on this page. While
                 // anything remains below, that is a hole from the window's
                 // floor up to the lowest row read; the page that proves the
                 // window reached the bottom puts back whatever gap was there
                 // before (which the fresh window never covers, since its
                 // ceiling is at or below this window's floor).
-                writeGap(truncated && lowest > 0
-                  ? { from: Math.min(priorGap?.from ?? floor, floor), until: lowest }
-                  : priorGap);
+                //
+                // A PAGE THAT LANDED NOTHING IS A HOLE, NOT PROGRESS
+                // (finding 3). The cursor still advances -- holding it would
+                // livelock the account on the same 2,000 gets every cycle,
+                // which is what "fetched-and-dropped has to count" above was
+                // protecting against -- but the page's own [lowest, highest]
+                // is recorded as a gap first, so the messages it skipped over
+                // stay reachable instead of falling silently below the
+                // cursor. The `!truncated` single-page case is the one the
+                // old code lost outright: nothing remained below, so no hole
+                // was recorded, and the cursor jumped the whole page.
+                //
+                // The DRAIN deliberately does NOT do this. It has already
+                // re-read those messages once by the time it sees them, and a
+                // hole nothing can ever fill (mailRows drops them
+                // deterministically) has to be released or the connector
+                // re-reads it every cycle forever.
+                const holes = [];
+                if (priorGap) holes.push(priorGap);
+                if (truncated && lowest > 0) holes.push({ from: floor, until: lowest });
+                if (nullPage !== null) {
+                  holes.push(nullPage);
+                  nullPageSeen = true;
+                }
+                writeGap(holes.length === 0 ? null : {
+                  // Two keys, one interval: same union rule as a fresh
+                  // truncation over an already-open gap, and the same cost --
+                  // the next drain re-reads the stretch between them.
+                  from: Math.min(...holes.map((h) => h.from)),
+                  until: Math.max(...holes.map((h) => h.until)),
+                });
                 if (highest > 0) state.setCursor(cursorKey(account.email), String(highest));
               },
             });
@@ -620,7 +706,7 @@ export function createMailSource({
             // newest-first from the ceiling down. Re-read rather than trusted
             // from `priorGap`: the fresh window's own per-page writes are the
             // authority on what is still missing.
-            const gap = fresh.truncated ? null : readGap();
+            const gap = fresh.truncated || nullPageSeen ? null : readGap();
             if (gap !== null && seen < MAX_MESSAGES_PER_ACCOUNT) {
               await scanWindow({
                 // `floor(until/1000) + 1` covers every tie inside `until`'s own
