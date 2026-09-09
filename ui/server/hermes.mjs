@@ -89,7 +89,8 @@ import { eligiblePool, produceBatch, PRODUCER_VERSION } from './relationship/pro
 import { produceOweBatch, OWE_PRODUCER_VERSION } from './relationship/owe.mjs';
 import { createDraft, existingDrafts } from './relationship/draft.mjs';
 import {
-  CARD_PRODUCERS, REFILL_RETRY_MS, LIVE_WINDOW_MS, produceDailyBatch, isSnapshotLive,
+  CARD_PRODUCERS, REFILL_RETRY_MS, LIVE_WINDOW_MS, produceDailyBatch,
+  isSnapshotConsumed, isSnapshotFresh,
 } from './relationship/daily.mjs';
 import { cardStats } from './relationship/controls.mjs';
 import {
@@ -3700,10 +3701,34 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // here counted only accepted/dismissed, so a muted or unresolvable card
     // was walked past on every request while still holding its producer's
     // turn.
+    //
+    // THE AGE BOUND IS GATED THE SAME WAY hydrateCards GATES IT (review G
+    // finding 1), and that asymmetry is deliberate on both sides. This loop
+    // used to call isSnapshotLive -- consumed AND fresh -- on every card
+    // unconditionally, which wedged the matcher path permanently: it is the
+    // DEFAULT producer config, produceDailyBatch never runs on it (the
+    // refill above gates on producer === 'eligibility'), so nothing prunes
+    // and nothing refills. A matcher queue whose newest batch turned seven
+    // days old therefore had every card skipped, answered 'queue-empty'
+    // forever, and the orb went dark with no path back except an explicit
+    // POST /refresh the owner has no reason to make.
+    //
+    // hydrateCards already had the rule right and says why: for the
+    // eligibility family, dropping a stale batch IS the refill, because the
+    // next request produces a new one synchronously. For the matcher path
+    // there is nothing to refill from, so an old batch is all there is.
+    // Owe is eligibility-only and is age-bounded whatever the reconnect
+    // config says -- the same `kind === 'owe' || eligibilityReconnect`
+    // condition hydrateCards' own version gate uses.
+    const eligibilityReconnect = producerConfig.producer === 'eligibility';
     const liveCards = [];
     const blockedReasons = [];
+    const nowForLive = Date.now();
+    const snapshotLive = (card) => !isSnapshotConsumed(db, card.snapshot_id)
+      && ((card.kind !== 'owe' && !eligibilityReconnect)
+        || isSnapshotFresh(db, card.snapshot_id, { now: nowForLive }));
     for (const card of servingQueue) {
-      if (!isSnapshotLive(db, card.snapshot_id, { now: Date.now() })) continue;
+      if (!snapshotLive(card)) continue;
       const block = cardBlockReason(db, rel, card);
       if (block !== null) { blockedReasons.push(block); continue; }
       liveCards.push(card);
@@ -3732,37 +3757,43 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       || a.snapshot_id - b.snapshot_id
     );
 
-    // `expect` IS THE PROMISE. A peek answers with the snapshot_id it would
-    // serve right now; the panel hands that straight back here, and if the
-    // snapshot is still live and servable it is the one served, whatever the
-    // ordering has done in between. Looked up in this request's own serving
-    // queue first; failing that, in the whole in-process queue re-gated by
-    // hand, because the turn can have flipped between the peek and the pull
-    // (a serve on another surface writes 'shown', which is what pickProducer
-    // reads) and the card the owner was actually teased is the card they
-    // asked for. Every gate the ordinary path applies is applied here too:
-    // live, servable, in the owner's mode.
+    // `expect` IS THE PROMISE, AND IT IS SCOPED TO THIS REQUEST'S QUEUE. A
+    // peek answers with the snapshot_id it would serve right now; the panel
+    // hands that straight back here, and if that snapshot is still live,
+    // servable, in the owner's mode AND of the kind this request is serving,
+    // it is the one served whatever the ordering has done in between.
+    //
+    // ~~"failing that, in the whole in-process queue re-gated by hand,
+    // because the turn can have flipped between the peek and the pull ... and
+    // the card the owner was actually teased is the card they asked for"~~
+    // REMOVED 2026-09 (review G finding 7). That fallback searched all of
+    // rel.cards, so `expect` served a card of the kind produceDailyBatch had
+    // just decided NOT to serve -- and then spent underGlobalCap and recorded
+    // 'shown' for that kind, which is exactly what pickProducer reads to
+    // alternate. State: a peek returns an Owe snapshot, the turn flips to
+    // reconnect, the panel pulls with `expect`, and the same person is
+    // offered under both kinds inside one window. That is the double-offer
+    // liveQueuePersonKeys exists to prevent, and honouring a stale tease is
+    // not worth defeating the cross-kind exclusion for. A flipped turn is
+    // now simply a superseded expect.
     //
     // A SUPERSEDED expect IS NEITHER AN ERROR NOR A REFUSAL. The card it
-    // named was judged, muted or expired between the two requests, which is
-    // ordinary: the current head is served and the response SAYS SO
-    // (`reason: 'expect-superseded'` beside a non-null card), so the panel
-    // can tell "here is the one you asked for" from "that one is gone, here
-    // is the next". Nothing else changes -- the cap is still spent, 'shown'
-    // is still recorded once per snapshot, and a peek carrying `expect`
-    // still records nothing.
+    // named was judged, muted, expired, or belongs to the kind whose turn
+    // this is not -- all ordinary. The current head of THIS queue is served
+    // and the response SAYS SO (`expectSuperseded: true`, plus
+    // `reason: 'expect-superseded'` on the branches whose `reason` is not
+    // already carrying something the panel needs more), so the panel can
+    // tell "here is the one you asked for" from "that one is gone, here is
+    // the next". Nothing else changes -- the cap is still spent, 'shown' is
+    // still recorded once per snapshot, and a peek carrying `expect` still
+    // records nothing.
     let expectSuperseded = false;
     if (expect !== null) {
       const promised = orderedCards.findIndex((c) => c.snapshot_id === expect);
       if (promised > 0) {
         orderedCards.unshift(...orderedCards.splice(promised, 1));
       } else if (promised === -1) {
-        const teased = rel.cards.find((c) => c.snapshot_id === expect
-          && (c.kind !== 'reconnect' || rel.mode == null || c.evidence?.mode === rel.mode)
-          && isSnapshotLive(db, c.snapshot_id, { now: Date.now() })
-          && cardBlockReason(db, rel, c) === null);
-        if (teased) orderedCards.unshift(teased);
-        else expectSuperseded = true;
+        expectSuperseded = true;
       }
     }
     let capBlocked = false;
@@ -3800,7 +3831,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
             overdueDays: card.evidence?.overdueDays ?? null,
             owe_kind: card.evidence?.owe_kind ?? null,
           },
-        }, ...(expectSuperseded ? { reason: 'expect-superseded' } : {}) }, cors);
+        }, ...(expectSuperseded ? { expectSuperseded: true, reason: 'expect-superseded' } : {}) }, cors);
         return;
       }
       // Resolve the quote from the LIVE row. Row gone or edited: the receipt
@@ -3877,7 +3908,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         mode: rel.mode ?? null,
         // The card asked for is gone; this is the next one. A reason BESIDE a
         // non-null card, which no other branch of this route produces.
-        ...(expectSuperseded ? { reason: 'expect-superseded' } : {}),
+        ...(expectSuperseded ? { expectSuperseded: true, reason: 'expect-superseded' } : {}),
         ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
       return;
     }
@@ -3887,7 +3918,15 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // queue holds cards the owner's own controls (or a deleted source) are
     // refusing.
     const reason = capBlocked ? 'cap' : (blockedReasons[0] ?? 'queue-empty');
+    // expectSuperseded RIDES THIS BRANCH TOO (review G finding 7): it was
+    // computed above and then thrown away here, so a panel that asked for a
+    // specific card and got nothing could not tell "your card is gone AND
+    // the queue is empty" from "the queue was always empty". As a boolean
+    // rather than as `reason`, because on THIS branch `reason` is already
+    // carrying cap/blocked/queue-empty, which the panel needs more. The flag
+    // is on every branch so there is one field to test regardless.
     send(res, 200, { card: null, reason, mode: rel.mode ?? null,
+      ...(expectSuperseded ? { expectSuperseded: true } : {}),
       ...(rel.refreshing ? { refreshing: true } : {}),
       ...(rel.lastError ? { lastError: rel.lastError } : {}),
       ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);

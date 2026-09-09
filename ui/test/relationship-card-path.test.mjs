@@ -624,3 +624,128 @@ test('?expect= spends one cap slot and records one \'shown\', same as any serve'
     assert.equal(eventCount(db, 'shown'), 1, 'and re-serving the same snapshot does not spend another');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review G finding 1: THE FRESHNESS GATE THAT WEDGED THE DEFAULT CONFIG.
+// hydrateCards omits the age bound for matcher-path reconnect batches on
+// purpose -- "dropping an old matcher batch would put the orb out with
+// nothing able to relight it" -- but the serve loop applied isSnapshotLive,
+// age bound included, to every card unconditionally. 'matcher' is the DEFAULT
+// producer config and produceDailyBatch never runs on it, so nothing prunes
+// and nothing refills: a matcher queue whose newest batch turned seven days
+// old answered 'queue-empty' on every request, forever.
+// ---------------------------------------------------------------------------
+
+function insertReconnectSnapshot(db, { key, createdAt, mode, version = 'model@abc123' }) {
+  const batchId = Number(db.prepare(
+    'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, 1, ?, NULL)'
+  ).run(createdAt, 'open').lastInsertRowid);
+  return Number(db.prepare(
+    'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) ' +
+    "VALUES (?, ?, 'reconnect', 'quiet a while', ?, ?, 'test', ?)"
+  ).run(batchId, key, JSON.stringify(mode === undefined ? {} : { mode }), version, createdAt).lastInsertRowid);
+}
+
+test('the matcher path still serves its one batch after the live window, because nothing can refill it', async () => {
+  await withCardServer(async ({ get, db }) => {
+    const now = Date.now();
+    insertPersonRow(db, { key: 'name:matcher stale', name: 'Matcher Stale', sent: 10, received: 10 }, now);
+    // A matcher batch from a month ago, unjudged. There is no
+    // produceDailyBatch on this path and no /refresh in this test: this
+    // batch is the entire queue, and it either serves or the orb is dark.
+    const snapshotId = insertReconnectSnapshot(db, {
+      key: 'name:matcher stale', createdAt: now - 30 * DAY,
+    });
+
+    const out = await get('/admin/relationship/card');
+    assert.ok(out.card, `the matcher queue still serves (reason: ${out.reason})`);
+    assert.equal(out.card.snapshot_id, snapshotId);
+    assert.equal(out.card.personKey, 'name:matcher stale');
+  }, { relationshipProducerConfig: { producer: 'matcher', mode: 'any' } });
+});
+
+test('the eligibility path still drops a reconnect batch past the live window, because dropping IS its refill', async () => {
+  await withCardServer(async ({ get, db }) => {
+    const now = Date.now();
+    insertPersonRow(db, { key: 'name:elig stale', name: 'Elig Stale', sent: 10, received: 10 }, now);
+    // Same shape, opposite path: an eligibility-produced reconnect batch that
+    // aged out. The cross-kind exclusion has already let this person go, so
+    // holding the card holds the queue shut against both producers -- and the
+    // next request can produce a fresh batch synchronously.
+    const snapshotId = insertReconnectSnapshot(db, {
+      key: 'name:elig stale', createdAt: now - 8 * DAY, mode: 'any', version: 'eligibility-v6',
+    });
+
+    const out = await get('/admin/relationship/card');
+    assert.notEqual(out.card?.snapshot_id, snapshotId,
+      'the aged-out eligibility snapshot is not served');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review G finding 7: expect SERVED ACROSS THE TURN. The promised === -1
+// fallback searched all of rel.cards rather than this request's serving
+// queue, so ?expect= served a card of the kind produceDailyBatch had just
+// decided NOT to serve -- spending a cap slot and recording 'shown' for that
+// kind, which is what pickProducer reads to alternate. The same person could
+// then be offered under both kinds inside one window, which is the exact
+// double-offer liveQueuePersonKeys exists to prevent.
+// ---------------------------------------------------------------------------
+
+test('an expect naming the other kind is superseded, not served across the turn', async () => {
+  await withCardServer(async ({ get, db }) => {
+    const now = Date.now();
+    // Two different people so the cross-kind exclusion does not remove
+    // either card: what is under test is the KIND filter, not the exclusion.
+    seedOwe(db, 'name:owe turn', 'Owe Turn', now, { askedDaysAgo: 30 });
+    insertPersonRow(db, { key: 'name:reconnect other', name: 'Reconnect Other', sent: 10, received: 10 }, now);
+    const otherKind = insertReconnectSnapshot(db, {
+      key: 'name:reconnect other', createdAt: now - DAY, mode: 'any', version: 'eligibility-v6',
+    });
+
+    const out = await get(`/admin/relationship/card?expect=${otherKind}`);
+    assert.ok(out.card, `something was served (reason: ${out.reason})`);
+    assert.notEqual(out.card.snapshot_id, otherKind,
+      'the card named belongs to the kind this request is not serving');
+    assert.equal(out.card.kind, 'owe', 'the turn decided owe, and the turn holds');
+    assert.equal(out.reason, 'expect-superseded');
+    assert.equal(out.expectSuperseded, true);
+
+    // And nothing was spent on the other kind's behalf -- 'shown' is what
+    // pickProducer alternates on, so a stray row here moves the next turn.
+    const shownKinds = db.prepare(
+      "SELECT DISTINCT kind FROM rm_card_event WHERE event = 'shown'"
+    ).all().map((r) => r.kind);
+    assert.deepEqual(shownKinds, ['owe'],
+      "no 'shown' was recorded for the kind whose turn this was not");
+  });
+});
+
+// On the matcher path, so that a queue with nothing left to serve answers
+// from the loop below rather than from the eligibility refill's
+// 'pool-exhausted' early return -- that branch answers before `expect` has
+// been resolved at all, and deliberately: it is "come back in a moment", not
+// a statement about the card the panel asked for.
+test('a superseded expect that leaves nothing to serve still says the expect was superseded', async () => {
+  await withCardServer(async ({ call, get, db }) => {
+    const now = Date.now();
+    insertPersonRow(db, { key: 'name:only card', name: 'Only Card', sent: 10, received: 10 }, now);
+    const only = insertReconnectSnapshot(db, { key: 'name:only card', createdAt: now - DAY });
+
+    const peek = await get('/admin/relationship/card?peek=1');
+    assert.equal(peek.card.snapshot_id, only);
+
+    // The one card in the queue is muted between the peek and the pull, so
+    // there is no current head to fall back to.
+    await call('POST', '/admin/relationship/event', {
+      snapshot_id: only, person_key: 'name:only card', event: 'muted', mute_days: 30,
+    });
+
+    const out = await get(`/admin/relationship/card?expect=${only}`);
+    assert.equal(out.card, null);
+    assert.equal(out.expectSuperseded, true,
+      'the panel asked for a specific card: "yours is gone" and "there was never anything" are different answers');
+    assert.equal(out.reason, 'queue-empty',
+      "and reason keeps its own job: a muted snapshot is CONSUMED, so it is gone from the queue rather than blocked in it");
+  }, { relationshipProducerConfig: { producer: 'matcher', mode: 'any' } });
+});
