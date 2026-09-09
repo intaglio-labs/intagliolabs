@@ -38,7 +38,13 @@ import { createDeskGuard, CSRF_HEADER } from './guard.mjs';
 // counts as a contradiction (contradictsAnchorFirm's other half). Reused
 // here only to CAPTION a contradiction row for the owner, never to gate --
 // the gate is newestWebChange's, already mirrored above.
-import { anchorsFor } from '../../server/relationship/lookup.mjs';
+// webChangeServable is imported rather than mirrored ON PURPOSE. The query
+// below is still a duplicate (this desk reads the corpus directly), but the
+// BAR a change has to clear to reach a card is not something two files may
+// each have an opinion about -- the anchor gate was duplicated once and
+// drifted, and corroboration is a harder rule than that one was.
+// parseLookupSources reads the sources column the same way the server does.
+import { anchorsFor, webChangeServable, parseLookupSources } from '../../server/relationship/lookup.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.HZ_REVIEW_PORT ?? 7311);
@@ -199,6 +205,7 @@ const server = createServer(async (req, res) => {
           `SELECT plc.claim_id AS claimId, plc.kind AS kind, plc.url AS url, plc.change_date AS date,
                   plc.contradicts_anchor AS contradictsAnchor,
                   plc.contradicts_anchor_unknown AS contradictsAnchorUnknown,
+                  plc.sources AS sourcesJson, plc.corroboration AS corroboration,
                   ll.at AS at, c.text AS text,
                   (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) AS decision
            FROM person_lookup_change plc
@@ -213,24 +220,51 @@ const server = createServer(async (req, res) => {
                (COALESCE(plc.contradicts_anchor, 1) = 0 AND COALESCE(plc.contradicts_anchor_unknown, 1) = 0)
                OR (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) = 'accept'
              )
-           ORDER BY plc.claim_id DESC LIMIT 1`
+           ORDER BY plc.claim_id DESC LIMIT 20`
         );
         const changedSourceStmt = corpus.prepare(
           `SELECT context_id AS contextId, quote FROM claim_source WHERE claim_id = ? AND source = 'web' LIMIT 1`
         );
         const changedCtxStmt = corpus.prepare('SELECT id FROM context WHERE id = ?');
+        const changedProfileStmt = corpus.prepare('SELECT linkedin FROM people WHERE person_key = ?');
+        // WALKS, like newestWebChange does now: an uncorroborated finding
+        // arriving today must not hide a corroborated change from last month.
         changedFor = (personKey) => {
           try {
-            const row = changedClaimStmt.get(personKey);
-            if (!row) return null;
-            const source = changedSourceStmt.get(row.claimId);
-            if (!source) return null;
-            const ctx = changedCtxStmt.get(source.contextId);
-            if (!ctx) return null; // the receipt is gone, so the change is gone
-            return { text: row.text, url: row.url, kind: row.kind, quote: source.quote,
-              date: row.date ?? null, at: row.at, decision: row.decision ?? null,
-              contradictsAnchor: Number(row.contradictsAnchor ?? 0) === 1,
-              contradictsAnchorUnknown: Number(row.contradictsAnchorUnknown ?? 0) === 1 };
+            const rows = changedClaimStmt.all(personKey);
+            if (rows.length === 0) return null;
+            // The anchored profile URL, for the one-source exception. Read
+            // by name off people.linkedin, .url only -- that column also
+            // carries an email address.
+            let profileUrl = null;
+            try {
+              const person = changedProfileStmt.get(personKey);
+              const linkedin = person && typeof person.linkedin === 'string' ? JSON.parse(person.linkedin) : null;
+              if (linkedin && typeof linkedin.url === 'string' && linkedin.url.trim().length > 0) {
+                profileUrl = linkedin.url.trim();
+              }
+            } catch { profileUrl = null; }
+            for (const row of rows) {
+              const sources = parseLookupSources(row.sourcesJson);
+              const corroboration = row.corroboration === null || row.corroboration === undefined
+                ? null : Number(row.corroboration);
+              if (!webChangeServable({
+                corroboration, sources, date: row.date,
+                contradictsAnchor: row.contradictsAnchor,
+                contradictsAnchorUnknown: row.contradictsAnchorUnknown,
+                decision: row.decision ?? null,
+              }, { profileUrl })) continue;
+              const source = changedSourceStmt.get(row.claimId);
+              if (!source) continue;
+              const ctx = changedCtxStmt.get(source.contextId);
+              if (!ctx) continue; // the receipt is gone, so the change is gone
+              return { text: row.text, url: row.url, kind: row.kind, quote: source.quote,
+                date: row.date ?? null, at: row.at, decision: row.decision ?? null,
+                contradictsAnchor: Number(row.contradictsAnchor ?? 0) === 1,
+                contradictsAnchorUnknown: Number(row.contradictsAnchorUnknown ?? 0) === 1,
+                sources, corroboration };
+            }
+            return null;
           } catch {
             return null;
           }
@@ -404,6 +438,7 @@ const server = createServer(async (req, res) => {
           `SELECT plc.claim_id AS claimId, plc.kind AS kind, plc.url AS url, plc.change_date AS date,
                   plc.contradicts_anchor AS contradictsAnchor,
                   plc.contradicts_anchor_unknown AS contradictsAnchorUnknown,
+                  plc.sources AS sourcesJson, plc.corroboration AS corroboration,
                   c.text AS text,
                   (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) AS decision
            FROM person_lookup_change plc
@@ -433,9 +468,19 @@ const server = createServer(async (req, res) => {
           } catch { /* leave quote null */ }
           const contradictsAnchor = Number(row.contradictsAnchor ?? 0) === 1;
           const contradictsAnchorUnknown = Number(row.contradictsAnchorUnknown ?? 0) === 1;
+          const sources = parseLookupSources(row.sourcesJson);
+          const corroboration = row.corroboration === null || row.corroboration === undefined
+            ? null : Number(row.corroboration);
           return { claimId: row.claimId, kind: row.kind, url: row.url, date: row.date ?? null,
             text: row.text, decision: row.decision ?? null, quote,
             contradictsAnchor, contradictsAnchorUnknown,
+            // Both numbers, so the person view can render "2 sources" beside
+            // the change and a one-source row can say plainly that it is not
+            // on a card for want of corroboration.
+            sources, corroboration,
+            corroborationCaption: corroboration === null
+              ? 'sources not counted'
+              : `${corroboration} ${corroboration === 1 ? 'source' : 'sources'}`,
             contradictsCaption: (contradictsAnchor || contradictsAnchorUnknown)
               ? (anchorFirm ? `contradicts your export: ${anchorFirm}` : 'contradicts your export')
               : null };

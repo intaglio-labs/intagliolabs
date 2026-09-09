@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -20,9 +20,13 @@ import {
   buildLookupQuery, parseLookupStream, groundLookup, evidenceKindFor, sameFirm,
   anchorsFor, lookupScope, lookupGate, lookupStatus, storeLookup, storeLookupEvidence,
   lookupPerson, runLookupPass, lookupLogFor, lookupEvidenceFor, newestWebChange,
-  LOOKUP_REFRESH_DAYS, LOOKUP_DROP_REASONS, LOOKUP_RESULT_TEXT_CAP,
+  registrableDomain, corroborationOf, webChangeServable, isAnchoredProfileUrl, parseLookupSources,
+  LOOKUP_REFRESH_DAYS, LOOKUP_DROP_REASONS, LOOKUP_RESULT_TEXT_CAP, LOOKUP_MAX_SEARCHES,
+  LOOKUP_SOURCE_CAP, EVIDENCE_SENTENCE_MARGIN,
 } from '../server/relationship/lookup.mjs';
-import { claudeLookupArgs } from '../server/relationship/engines.mjs';
+import {
+  claudeLookupArgs, createEngine, createLookupEngine, resolveClaudeBinary, LOOKUP_MAX_TURNS,
+} from '../server/relationship/engines.mjs';
 
 const TOKEN = 'b'.repeat(64);
 
@@ -798,11 +802,33 @@ test('/stats carries lookup with real cost; the card carries `changed`, null onc
        VALUES (?, ?, ?, 'fake', '"Web Change Person" "Acme"', 'abc123', '["name"]', 1, 1, 'match', 1, 0, 0.0345, 'proposed')`
     ).run(personKey, runId, Date.now()).lastInsertRowid);
 
+    // TWO INDEPENDENT DOMAINS, because one is no longer enough to reach a
+    // card (relationship/lookup.mjs's corroboration section). This was a
+    // single (url, quote) pair with no stream at all when the bar was
+    // "grounded and not contradicting the anchor"; it is now the shape a
+    // servable change actually has, stored through the real store path with
+    // the observed stream in hand.
+    const observed = {
+      urls: new Set(['https://acme.example/news', 'https://techpress.example/acme']),
+      links: [
+        { title: 'Acme announces leadership', url: 'https://acme.example/news' },
+        { title: 'Acme names new VP', url: 'https://techpress.example/acme' },
+      ],
+      snippetText: 'Web Change Person was named VP of Engineering in May 2026.\n'
+        + 'Acme confirmed Web Change Person as VP of Engineering.',
+      resultText: 'Web Change Person was named VP of Engineering in May 2026.',
+      linksParseFailed: false,
+    };
     const kept = [{
-      kind: 'company', text: 'Now VP of Engineering at Acme.',
-      url: 'https://acme.example/news', quote: 'now VP of Engineering', date: '2026-05',
+      kind: 'company', text: 'Named VP of Engineering at Acme in May 2026.',
+      url: 'https://acme.example/news', quote: 'Web Change Person was named VP of Engineering in May 2026.',
+      date: '2026-05',
+      sources: [
+        { url: 'https://acme.example/news', quote: 'Web Change Person was named VP of Engineering in May 2026.' },
+        { url: 'https://techpress.example/acme', quote: 'Acme confirmed Web Change Person as VP of Engineering.' },
+      ],
     }];
-    storeLookup(db, { personKey, kept, logId, distillRunId, now: Date.now() });
+    storeLookup(db, { personKey, kept, observed, logId, distillRunId, now: Date.now() });
 
     const stats = await (await call('GET', '/stats')).json();
     assert.ok(stats.lookup, '/stats carries a lookup key');
@@ -817,8 +843,15 @@ test('/stats carries lookup with real cost; the card carries `changed`, null onc
     assert.ok(before.card.changed, 'the card carries `changed`');
     assert.equal(before.card.changed.url, 'https://acme.example/news');
     assert.equal(before.card.changed.kind, 'company');
-    assert.equal(before.card.changed.quote, 'now VP of Engineering');
+    assert.equal(before.card.changed.quote, 'Web Change Person was named VP of Engineering in May 2026.');
     assert.equal(before.card.changed.date, '2026-05');
+    // The two numbers the card needs to say "2 sources" rather than showing
+    // one url as though it were all there was.
+    assert.equal(before.card.changed.corroboration, 2);
+    assert.deepEqual(
+      before.card.changed.sources.map((source) => source.url).sort(),
+      ['https://acme.example/news', 'https://techpress.example/acme']
+    );
     assert.notEqual(before.card.sentence, undefined, '`changed` never displaces `sentence`');
 
     // Delete the web row -- the receipt is gone, so `changed` must be gone.
@@ -2229,7 +2262,39 @@ test('a readable Links block still records a completed, negative anchor check', 
   });
   const change = db.prepare('SELECT * FROM person_lookup_change').get();
   assert.equal(Number(change.contradicts_anchor_unknown), 0, 'the check ran, so the answer is known');
-  assert.ok(newestWebChange(db, 'name:jane'), 'and a checked, clean change may reach the card');
+  // A CLEAN ANCHOR CHECK IS NO LONGER SUFFICIENT ON ITS OWN. This change has
+  // one source on one domain, so corroboration is 1 and the card bar is not
+  // met -- the row is stored and pending for the desk, which is what the
+  // corroboration section calls the normal outcome.
+  assert.equal(Number(change.corroboration), 1);
+  assert.equal(newestWebChange(db, 'name:jane'), null, 'clean, but uncorroborated');
+  // Corroborate it from a second domain and the same clean change serves,
+  // which is what makes the withholding above about the count rather than
+  // about the anchor.
+  const corroborated = {
+    urls: new Set(['https://acme.example/news', 'https://techpress.example/jane']),
+    links: [
+      { title: 'Jane Doe - VP of Engineering - Acme', url: 'https://acme.example/news' },
+      { title: 'Acme promotes Jane Doe', url: 'https://techpress.example/jane' },
+    ],
+    snippetText: 'Jane Doe was promoted to VP of Engineering.\nAcme promoted Jane Doe to VP.',
+    resultText: 'Jane Doe was promoted to VP of Engineering.',
+    linksParseFailed: false,
+  };
+  storeLookup(db, {
+    personKey: 'name:jane', firm: 'Acme', logId, distillRunId, now: NOW + DAY, observed: corroborated,
+    kept: [{
+      kind: 'role', text: 'Promoted to VP of Engineering.', url: 'https://acme.example/news',
+      quote: 'Jane Doe was promoted', date: null,
+      sources: [
+        { url: 'https://acme.example/news', quote: 'Jane Doe was promoted' },
+        { url: 'https://techpress.example/jane', quote: 'Acme promoted Jane Doe to VP.' },
+      ],
+    }],
+  });
+  const healed = db.prepare('SELECT * FROM person_lookup_change').get();
+  assert.equal(Number(healed.corroboration), 2, 'the count is healed in place, not duplicated');
+  assert.ok(newestWebChange(db, 'name:jane'), 'two domains clear the bar');
   db.close();
 });
 
@@ -2270,7 +2335,12 @@ test('a re-lookup HEALS a back-filled unknown row instead of inserting a duplica
   assert.equal(Number(change.claim_id), claimId, 'the same row, healed in place');
   assert.equal(Number(change.contradicts_anchor_unknown), 0, 'the verdict is known now, so the flag is cleared');
   assert.equal(change.evidence_kind, 'snippet', 'and the evidence it was checked against is recorded');
-  assert.ok(newestWebChange(db, 'name:jane'), 'a healed row is no longer withheld and dead');
+  assert.equal(Number(change.corroboration), 1, 'the count is healed onto the row too');
+  // NOT servable, and that is the corroboration bar rather than the unknown
+  // flag: one snippet on one domain. The row is alive on the desk -- healed,
+  // decidable, no longer duplicating -- which is what this finding was
+  // about; reaching a card is a separate, higher bar.
+  assert.equal(newestWebChange(db, 'name:jane'), null, 'healed and decidable, but backed by one domain');
   db.close();
 });
 
@@ -2364,4 +2434,521 @@ test('storeLookup opens its own transaction when there is none, with isTransacti
   assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM claim').get().n), 1,
     'no caller transaction means storeLookup owns and commits its own');
   db.close();
+});
+
+// ---------------------------------------------------------------------------
+// CORROBORATION. "seems fragile if we rely on one source... doesn't seem very
+// frontier intelligence-y" -- the owner, after one real lookup (Jeremy) came
+// back right off a single profile and one (Nikzad, lookup_log 4520) came back
+// with a wrong job move read off a stale LinkedIn title.
+//
+// The bar these tests pin (relationship/lookup.mjs's corroboration section):
+// a change reaches a CARD only when two DISTINCT REGISTRABLE DOMAINS back it,
+// or when the single backing source is the anchored LinkedIn profile URL and
+// the change carries a YYYY-MM date. Everything else is still STORED, still
+// pending, still on the desk -- it just is not shown as fact.
+// ---------------------------------------------------------------------------
+
+const CORROB_PROFILE = 'https://www.linkedin.com/in/danareyes/';
+
+// A stream carrying several search results in the real captured shape, so
+// `sources` can be grounded against genuinely different domains.
+function multiResultStream({ query, results, envelope }) {
+  const lines = [];
+  results.forEach((result, i) => {
+    lines.push(JSON.stringify({ type: 'assistant', message: { content: [
+      { type: 'tool_use', id: `t${i}`, name: 'WebSearch', input: { query } },
+    ] } }));
+    lines.push(JSON.stringify({ type: 'user', message: { content: [
+      { type: 'tool_result', tool_use_id: `t${i}`, content: searchResultText({
+        query, links: result.links, prose: result.prose,
+      }) },
+    ] } }));
+  });
+  lines.push(JSON.stringify({ type: 'result', total_cost_usd: 0.06, is_error: false, result: JSON.stringify(envelope) }));
+  return lines.join('\n');
+}
+
+// One helper for the whole family below: store a change whose `sources` are
+// exactly what a test wants, through the REAL grounding path (parse -> ground
+// -> store), and report what the card would serve.
+function storeChangeWithSources(db, { personKey, sources, kind = 'role', date = null, text, linkedin }) {
+  insertPersonRow(db, personKey, 'Dana Reyes', { linkedin });
+  const logId = oneLookupLog(db, personKey);
+  const distillRunId = newDistillRun(db);
+  const results = sources.map((s) => ({
+    links: [{ title: s.title ?? 'A page about Dana Reyes', url: s.url }],
+    prose: s.prose,
+  }));
+  const change = {
+    kind, text, date,
+    url: sources[0].url, quote: sources[0].quote,
+    sources: sources.map((s) => ({ url: s.url, quote: s.quote })),
+  };
+  const envelope = { identity_confidence: 'match', changes: [change] };
+  const observed = parseLookupStream(multiResultStream({ query: '"Dana Reyes"', results, envelope }));
+  const anchors = anchorsFor(db, personKey);
+  const { kept, dropped } = groundLookup(JSON.parse(observed.envelopeText), observed, {
+    firm: anchors.firm, profileUrl: anchors.profileUrl,
+  });
+  const stored = storeLookup(db, {
+    personKey, kept, observed, firm: anchors.firm, profileUrl: anchors.profileUrl,
+    logId, distillRunId, now: NOW,
+  });
+  return { kept, dropped, stored, logId, observed };
+}
+
+test('two sources on two different registrable domains reach the card', () => {
+  const db = openDb(':memory:');
+  const key = 'name:dana two domains';
+  const { kept, stored } = storeChangeWithSources(db, {
+    personKey: key,
+    text: 'Dana Reyes was named Head of Platform.',
+    sources: [
+      { url: 'https://acme.example/news/hires',
+        quote: 'Dana Reyes was named Head of Platform',
+        prose: 'Dana Reyes was named Head of Platform in a note to staff.' },
+      { url: 'https://techpress.example/2026/dana-reyes',
+        quote: 'Dana Reyes joins as Head of Platform',
+        prose: 'Dana Reyes joins as Head of Platform, the company confirmed.' },
+    ],
+  });
+
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].sources.length, 2, 'both sources ground');
+  assert.equal(kept[0].corroboration, 2, 'two distinct registrable domains');
+  assert.deepEqual(stored, { stored: 1, skipped: 0, duplicates: 0 });
+
+  const row = db.prepare('SELECT * FROM person_lookup_change').get();
+  assert.equal(Number(row.corroboration), 2, 'the count is stored, not recomputed on read');
+  assert.equal(JSON.parse(row.sources).length, 2);
+  assert.equal(row.url, 'https://acme.example/news/hires', 'the primary source stays the url column');
+
+  const changed = newestWebChange(db, key);
+  assert.ok(changed, 'two independent domains clear the bar');
+  assert.equal(changed.corroboration, 2);
+  assert.equal(changed.sources.length, 2, 'the card can render "2 sources"');
+  db.close();
+});
+
+test('two sources on the SAME registrable domain are one source and do not reach the card', () => {
+  const db = openDb(':memory:');
+  const key = 'name:dana one domain';
+  // Two real, separately-grounded pages -- a subdomain and the bare host --
+  // saying the same thing. A site quoting itself twice is not two publishers
+  // agreeing, and 4520's own evidence was two linkedin.com links.
+  const { kept, stored } = storeChangeWithSources(db, {
+    personKey: key,
+    text: 'Dana Reyes was named Head of Platform.',
+    sources: [
+      { url: 'https://acme.example/news/hires',
+        quote: 'Dana Reyes was named Head of Platform',
+        prose: 'Dana Reyes was named Head of Platform in a note to staff.' },
+      { url: 'https://blog.acme.example/dana',
+        quote: 'Dana Reyes will lead Platform',
+        prose: 'Dana Reyes will lead Platform from next month.' },
+    ],
+  });
+
+  // THE DISCRIMINATING ASSERTION FIRST: before corroboration existed this
+  // change was stored, clean, and served on the card as fact.
+  assert.equal(newestWebChange(db, key), null, 'one domain twice is not corroboration');
+  // STORED AND PENDING all the same, on the desk, with its count.
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM person_lookup_change').get().n), 1);
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].sources.length, 2, 'both sources ground -- this is not a grounding failure');
+  assert.equal(kept[0].corroboration, 1, 'acme.example and blog.acme.example are one registrable domain');
+  assert.deepEqual(stored, { stored: 1, skipped: 0, duplicates: 0 });
+  db.close();
+});
+
+test('one source is enough when it is the anchored profile AND the change is dated', () => {
+  const db = openDb(':memory:');
+  const key = 'name:dana anchored dated';
+  const { kept } = storeChangeWithSources(db, {
+    personKey: key,
+    kind: 'role', date: '2026-04',
+    text: 'Dana Reyes was listed as Head of Platform in April 2026.',
+    linkedin: { url: CORROB_PROFILE },
+    sources: [
+      { url: CORROB_PROFILE,
+        quote: 'Dana Reyes was listed as Head of Platform in April 2026',
+        prose: 'Dana Reyes was listed as Head of Platform in April 2026 on this profile.' },
+    ],
+  });
+
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].corroboration, 1);
+  const changed = newestWebChange(db, key);
+  assert.ok(changed, 'the anchored profile is the one URL we did not learn from a search');
+  assert.equal(changed.corroboration, 1);
+  assert.equal(changed.date, '2026-04');
+  db.close();
+});
+
+test('the anchored profile alone is NOT enough without a date', () => {
+  const db = openDb(':memory:');
+  const key = 'name:dana anchored undated';
+  const { kept } = storeChangeWithSources(db, {
+    personKey: key,
+    kind: 'role', date: null,
+    text: 'Dana Reyes was listed as Head of Platform.',
+    linkedin: { url: CORROB_PROFILE },
+    sources: [
+      { url: CORROB_PROFILE,
+        quote: 'Dana Reyes was listed as Head of Platform',
+        prose: 'Dana Reyes was listed as Head of Platform on this profile.' },
+    ],
+  });
+
+  // THE DISCRIMINATING ASSERTION FIRST, same reasoning as above.
+  assert.equal(newestWebChange(db, key), null, 'an undated profile line is a review item, not a card');
+  assert.equal(kept.length, 1, 'still stored -- the desk gets it');
+  assert.equal(kept[0].corroboration, 1);
+  assert.equal(kept[0].date, null);
+
+  // ... and a profile URL that is NOT the anchor never buys the exception,
+  // dated or not: any other page is a search result like any other.
+  const other = openDb(':memory:');
+  const otherKey = 'name:dana other profile';
+  storeChangeWithSources(other, {
+    personKey: otherKey,
+    kind: 'role', date: '2026-04',
+    text: 'Dana Reyes was listed as Head of Platform in April 2026.',
+    linkedin: { url: 'https://www.linkedin.com/in/someone-else/' },
+    sources: [
+      { url: CORROB_PROFILE,
+        quote: 'Dana Reyes was listed as Head of Platform in April 2026',
+        prose: 'Dana Reyes was listed as Head of Platform in April 2026 on this profile.' },
+    ],
+  });
+  assert.equal(newestWebChange(other, otherKey), null, 'a different profile is not our anchor');
+  other.close();
+  db.close();
+});
+
+test('a pre-corroboration row is withheld while pending and served once accepted', () => {
+  const db = openDb(':memory:');
+  insertPersonRow(db, 'name:legacy', 'Legacy Row');
+  const logId = oneLookupLog(db, 'name:legacy');
+  const distillRunId = newDistillRun(db);
+  // No `observed`: the caller-with-no-stream seam, which is exactly the shape
+  // of every row stored before the sources column existed.
+  storeLookup(db, {
+    personKey: 'name:legacy', logId, distillRunId, now: NOW,
+    kept: [{
+      kind: 'role', text: 'Promoted to VP.', url: 'https://acme.example/news',
+      quote: 'was promoted to VP', date: '2026-03',
+    }],
+  });
+  const row = db.prepare('SELECT * FROM person_lookup_change').get();
+  assert.equal(row.corroboration, null, 'nobody counted -- and NULL is not 0');
+  assert.equal(newestWebChange(db, 'name:legacy'), null,
+    'nothing may claim a corroboration check that never ran');
+
+  db.prepare("INSERT INTO claim_decision(claim_id, action, actor, created_at) VALUES (?, 'accept', 'owner', ?)")
+    .run(Number(row.claim_id), NOW);
+  assert.ok(newestWebChange(db, 'name:legacy'), 'once he has said yes it is his word, not our count');
+  db.close();
+});
+
+test('an uncorroborated change today does not hide a corroborated one from last month', () => {
+  const db = openDb(':memory:');
+  const key = 'name:dana walk';
+  // The corroborated change first (lower claim_id), then an uncorroborated
+  // one. Before the walk, newestWebChange took the single newest row and
+  // returned null when it failed the gate.
+  storeChangeWithSources(db, {
+    personKey: key,
+    text: 'Dana Reyes was named Head of Platform.',
+    sources: [
+      { url: 'https://acme.example/news/hires', quote: 'Dana Reyes was named Head of Platform',
+        prose: 'Dana Reyes was named Head of Platform in a note to staff.' },
+      { url: 'https://techpress.example/2026/dana-reyes', quote: 'Dana Reyes joins as Head of Platform',
+        prose: 'Dana Reyes joins as Head of Platform, the company confirmed.' },
+    ],
+  });
+  const logId = oneLookupLog(db, key);
+  const distillRunId = newDistillRun(db);
+  const observed = {
+    urls: new Set(['https://rumor.example/x']),
+    links: [{ title: 'Dana Reyes rumour', url: 'https://rumor.example/x' }],
+    snippetText: 'Dana Reyes may be leaving.',
+    resultText: 'Dana Reyes may be leaving.',
+    linksParseFailed: false,
+  };
+  storeLookup(db, {
+    personKey: key, observed, logId, distillRunId, now: NOW + DAY,
+    kept: [{
+      kind: 'other', text: 'Dana Reyes may be leaving.', url: 'https://rumor.example/x',
+      quote: 'Dana Reyes may be leaving.', date: null,
+    }],
+  });
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM person_lookup_change').get().n), 2);
+
+  const changed = newestWebChange(db, key);
+  assert.ok(changed, 'the walk finds the corroborated row underneath');
+  assert.equal(changed.corroboration, 2);
+  assert.equal(changed.url, 'https://acme.example/news/hires');
+  db.close();
+});
+
+test('registrableDomain merges subdomains, keeps ccTLD second levels, and refuses non-domains', () => {
+  assert.equal(registrableDomain('https://acme.example/x'), 'acme.example');
+  assert.equal(registrableDomain('https://blog.acme.example/x'), 'acme.example');
+  assert.equal(registrableDomain('https://a.b.c.acme.example/x'), 'acme.example');
+  assert.equal(registrableDomain('https://www.linkedin.com/in/x/'), 'linkedin.com');
+  // Two British publications are two domains, not both "co.uk".
+  assert.equal(registrableDomain('https://www.bbc.co.uk/news'), 'bbc.co.uk');
+  assert.notEqual(registrableDomain('https://www.bbc.co.uk/news'), registrableDomain('https://guardian.co.uk/x'));
+  // Not a public domain at all: no encoding of an IP literal counts, and a
+  // null never contributes to the corroboration set.
+  for (const bad of ['https://127.0.0.1/x', 'https://2130706433/x', 'https://[::1]/x', 'https://intranet/x', 'not a url']) {
+    assert.equal(registrableDomain(bad), null, `${bad} is not a registrable domain`);
+  }
+  assert.equal(corroborationOf([
+    { url: 'https://127.0.0.1/x', quote: 'q', evidenceKind: 'snippet' },
+  ]), 0, 'a source with no registrable domain corroborates nothing');
+});
+
+test('a title-kind source corroborates nothing unless it is the anchored profile', () => {
+  // Two DIFFERENT domains, both title-only. Two titles are not two sources.
+  const observed = {
+    urls: new Set(['https://a.example/x', 'https://b.example/y']),
+    links: [
+      { title: 'Dana Reyes - Head of Platform - Acme', url: 'https://a.example/x' },
+      { title: 'Dana Reyes - Head of Platform - Acme (mirror)', url: 'https://b.example/y' },
+    ],
+    snippetText: 'Nothing useful was returned.',
+    resultText: 'Nothing useful was returned.',
+    linksParseFailed: false,
+  };
+  const sources = [
+    { url: 'https://a.example/x', quote: 'Dana Reyes - Head of Platform - Acme', evidenceKind: evidenceKindFor('Dana Reyes - Head of Platform - Acme', observed) },
+    { url: 'https://b.example/y', quote: 'Dana Reyes - Head of Platform - Acme (mirror)', evidenceKind: evidenceKindFor('Dana Reyes - Head of Platform - Acme (mirror)', observed) },
+  ];
+  assert.deepEqual(sources.map((s) => s.evidenceKind), ['title', 'title']);
+  assert.equal(corroborationOf(sources), 0, 'two stale index entries are not two publishers');
+  // The SAME title, on the anchored profile URL, does count -- that URL came
+  // from the owner's own export rather than from a search.
+  assert.equal(
+    corroborationOf([{ url: CORROB_PROFILE, quote: 'x', evidenceKind: 'title' }], { profileUrl: CORROB_PROFILE }),
+    1
+  );
+  assert.equal(
+    corroborationOf([{ url: CORROB_PROFILE, quote: 'x', evidenceKind: 'title' }], { profileUrl: null }),
+    0,
+    'with no anchor there is nothing for it to be the anchor of'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Review G finding 12, closed: A TITLE ECHOED INTO PROSE IS STILL A TITLE.
+// Neither ordering answered this -- the question is whether the containing
+// sentence ADDS anything past the title, and the test is mechanical
+// (EVIDENCE_SENTENCE_MARGIN characters).
+// ---------------------------------------------------------------------------
+
+test('a title echoed verbatim into a short prose sentence stays a title', () => {
+  const observed = parseLookupStream(lookupStream({
+    query: '"Nikzad Khani" "Klaviyo"',
+    links: [{ title: KHANI_TITLE, url: KHANI_URL }],
+    // Eight characters of packaging around the title -- under the margin.
+    prose: `Result: ${KHANI_TITLE}.`,
+    envelope: { identity_confidence: 'match', changes: [] },
+  }));
+  assert.ok(observed.snippetText.includes(KHANI_TITLE), 'the title really is inside the prose here');
+  assert.equal(evidenceKindFor(KHANI_TITLE, observed), 'title',
+    'a title does not become a published statement by being repeated with a label on it');
+
+  // And the present-tense rule therefore still applies to it, which is the
+  // whole reason the label matters: this is the 4520 shape, echoed.
+  const envelope = {
+    identity_confidence: 'match',
+    changes: [{
+      kind: 'move', date: '2026-04',
+      text: 'Nikzad Khani is now a Software Engineer at Verily.',
+      url: KHANI_URL, quote: KHANI_TITLE,
+    }],
+  };
+  const { kept, dropped } = groundLookup(envelope, observed, { firm: 'Verily' });
+  assert.deepEqual(kept, []);
+  assert.match(dropped[0].reason, /title-only .* may not be phrased as current/);
+});
+
+test('a prose sentence that adds facts around a title is a snippet', () => {
+  const sentence = `${KHANI_TITLE} — he joined the Verily team in April 2026 according to the company blog.`;
+  const observed = parseLookupStream(lookupStream({
+    query: '"Nikzad Khani" "Verily"',
+    links: [{ title: KHANI_TITLE, url: KHANI_URL }],
+    prose: sentence,
+    envelope: { identity_confidence: 'match', changes: [] },
+  }));
+  assert.equal(evidenceKindFor(KHANI_TITLE, observed), 'snippet',
+    'the containing sentence says materially more than the title does');
+  assert.ok(sentence.length >= KHANI_TITLE.length + EVIDENCE_SENTENCE_MARGIN);
+  // The quote that is the WHOLE sentence is a snippet too, obviously.
+  assert.equal(evidenceKindFor(sentence, observed), 'snippet');
+});
+
+// ---------------------------------------------------------------------------
+// The raised search budget, and the turn bound that matches it.
+// ---------------------------------------------------------------------------
+
+test('four WebSearch tool_uses parse to searches=4 and are within budget; five is not', async () => {
+  const fourSearches = (n) => {
+    const lines = [];
+    for (let i = 0; i < n; i++) {
+      lines.push(JSON.stringify({ type: 'assistant', message: { content: [
+        { type: 'tool_use', id: `t${i}`, name: 'WebSearch', input: { query: 'q' } },
+      ] } }));
+      lines.push(JSON.stringify({ type: 'user', message: { content: [
+        { type: 'tool_result', tool_use_id: `t${i}`, content: searchResultText({
+          query: 'q',
+          links: [{ title: 'Acme news', url: 'https://acme.example/news' }],
+          prose: 'Budget Searcher was promoted to VP of Engineering at Acme Corp.',
+        }) },
+      ] } }));
+    }
+    lines.push(JSON.stringify({
+      type: 'result', total_cost_usd: 0.2, is_error: false,
+      result: JSON.stringify({
+        identity_confidence: 'match',
+        changes: [{
+          kind: 'role', text: 'Promoted to VP of Engineering at Acme Corp.',
+          url: 'https://acme.example/news',
+          quote: 'Budget Searcher was promoted to VP of Engineering at Acme Corp.',
+        }],
+      }),
+    }));
+    return lines.join('\n');
+  };
+
+  assert.equal(parseLookupStream(fourSearches(4)).searches, 4);
+  assert.equal(parseLookupStream(fourSearches(5)).searches, 5);
+
+  // FOUR: within budget, so the answer is used and the change is stored.
+  const db = openDb(':memory:');
+  insertPersonRow(db, 'name:budget four', 'Budget Searcher', { linkedin: { company: 'Acme Corp' } });
+  const withinBudget = await lookupPerson(
+    db,
+    { name: 'fake-lookup', model: 'fake', async complete() { return fourSearches(4); } },
+    { personKey: 'name:budget four' },
+    { runId: null, distillRunId: newDistillRun(db), now: NOW }
+  );
+  assert.equal(withinBudget.searches, 4);
+  assert.equal(withinBudget.status, 'proposed', 'four searches is the budget, not over it');
+  assert.equal(withinBudget.proposed, 1);
+  assert.equal(lookupStatus(db).overBudget, 0);
+  db.close();
+
+  // FIVE: thrown away in full, held, and queryable as
+  // status='ungrounded' AND searches > LOOKUP_MAX_SEARCHES.
+  const db5 = openDb(':memory:');
+  insertPersonRow(db5, 'name:budget five', 'Budget Searcher', { linkedin: { company: 'Acme Corp' } });
+  const overBudget = await lookupPerson(
+    db5,
+    { name: 'fake-lookup', model: 'fake', async complete() { return fourSearches(5); } },
+    { personKey: 'name:budget five' },
+    { runId: null, distillRunId: null, now: NOW }
+  );
+  assert.equal(overBudget.searches, 5);
+  assert.equal(overBudget.status, 'ungrounded');
+  assert.equal(overBudget.proposed, 0);
+  assert.equal(overBudget.stateStatus, 'over-budget');
+  assert.equal(Number(db5.prepare('SELECT COUNT(*) AS n FROM person_lookup_change').get().n), 0);
+  assert.equal(lookupStatus(db5).overBudget, 1);
+  db5.close();
+});
+
+test('the lookup CLI carries a turn bound matching the search budget', () => {
+  const args = claudeLookupArgs({ system: 'SYS', model: 'sonnet' });
+  const at = (flag) => args[args.indexOf(flag) + 1];
+  assert.ok(args.includes('--max-turns'), '--max-turns is passed');
+  // One assistant turn per search plus one to answer in. Pinned as a
+  // RELATIONSHIP rather than a number, because engines.mjs deliberately does
+  // not import lookup.mjs (it is the leaf module).
+  assert.equal(LOOKUP_MAX_TURNS, LOOKUP_MAX_SEARCHES + 1);
+  assert.equal(at('--max-turns'), String(LOOKUP_MAX_SEARCHES + 1));
+  assert.equal(LOOKUP_MAX_SEARCHES, 4, 'the corroborating third search is inside the budget');
+});
+
+// ---------------------------------------------------------------------------
+// The engines are OPT-IN. The privacy page says any feature sending message
+// excerpts to a model outside the Mac is OFF until the owner turns it on; a
+// default that depends on whether a binary happens to be installed is not
+// "off".
+// ---------------------------------------------------------------------------
+
+test('an empty config never selects the off-box CLI engine, even with the binary on PATH', () => {
+  // The binary really does resolve here -- that is the point of the test.
+  const binDir = mkdtempSync(join(tmpdir(), 'fake-claude-bin-'));
+  writeFileSync(join(binDir, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const priorPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${priorPath}`;
+  try {
+    assert.equal(resolveClaudeBinary({ env: process.env }), join(binDir, 'claude'),
+      'the binary is resolvable, so the old default would have picked claude-cli');
+
+    // Pages/sweep/drafts: falls back to the loopback model, which keeps every
+    // excerpt on this machine.
+    assert.equal(createEngine({}).name, 'llama');
+    assert.equal(createEngine({ relationshipMemory: {} }).name, 'llama');
+    assert.equal(createEngine({ relationshipMemory: { engine: undefined } }).name, 'llama');
+    // Public lookup: declines to run at all rather than falling back --
+    // lookupGate reads a null engine as 'no-engine'.
+    assert.equal(createLookupEngine({}), null);
+    assert.equal(createLookupEngine({ relationshipMemory: {} }), null);
+    // Opting in, by name, still works -- that is the owner turning it on.
+    assert.equal(createEngine({ relationshipMemory: { engine: 'claude-cli' } }).name, 'claude-cli');
+    assert.equal(createLookupEngine({ relationshipMemory: { lookupEngine: 'claude-cli' } }).name, 'claude-cli-lookup');
+
+    const db = openDb(':memory:');
+    insertPersonRow(db, 'name:someone', 'Some One', { linkedin: { company: 'Acme Corp' } });
+    assert.deepEqual(
+      lookupGate(db, {}, { engine: createLookupEngine({}) }),
+      { ok: false, reason: 'no-engine' },
+      'an un-opted-in lookup is a logged skip, not a silent web search'
+    );
+    db.close();
+  } finally {
+    process.env.PATH = priorPath;
+  }
+});
+
+test('/lookups and the change rows carry sources and corroboration', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-lookup-sources-'));
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
+    peopleProjectionAutoRebuild: false,
+  });
+  const key = 'name:dana routes';
+  try {
+    const { logId } = storeChangeWithSources(server.db, {
+      personKey: key,
+      text: 'Dana Reyes was named Head of Platform.',
+      sources: [
+        { url: 'https://acme.example/news/hires', quote: 'Dana Reyes was named Head of Platform',
+          prose: 'Dana Reyes was named Head of Platform in a note to staff.' },
+        { url: 'https://techpress.example/2026/dana-reyes', quote: 'Dana Reyes joins as Head of Platform',
+          prose: 'Dana Reyes joins as Head of Platform, the company confirmed.' },
+      ],
+    });
+    const res = await fetch(
+      `http://127.0.0.1:${server.port}/admin/relationship/lookups?personKey=${encodeURIComponent(key)}`,
+      { headers: { Authorization: `Bearer ${TOKEN}` } }
+    );
+    const body = await res.json();
+    const log = body.lookups.find((l) => l.id === logId);
+    assert.ok(log, 'the log row is there');
+    assert.equal(log.changes.length, 1, 'the receipt now carries what was proposed');
+    assert.equal(log.changes[0].corroboration, 2);
+    assert.deepEqual(
+      log.changes[0].sources.map((s) => s.url).sort(),
+      ['https://acme.example/news/hires', 'https://techpress.example/2026/dana-reyes']
+    );
+    assert.equal(log.changes[0].sources[0].evidenceKind, 'snippet');
+  } finally {
+    await server.close();
+  }
 });
