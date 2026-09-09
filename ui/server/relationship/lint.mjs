@@ -29,7 +29,7 @@
 // in the desk).
 
 import { subRolesFor } from '../people/subRoles.mjs';
-import { markPersonSubRoles } from '../people/owner.mjs';
+import { markPersonSubRoles, loadOwner } from '../people/owner.mjs';
 import { lookupScope } from './lookup.mjs';
 
 // A version tag for this pass, mirroring SWEEP_VERSION/LOOKUP_VERSION's own
@@ -54,13 +54,20 @@ export const LINT_CHECKS = Object.freeze([
   'orphan_card_quote',
 ]);
 
-// Per-check cap on how many CANDIDATE rows a single pass examines (the raw
-// SQL/scan population, not the count of findings that survive filtering) --
-// bounding a pass over a corpus that can hold tens of thousands of accepted
-// claims or people. A check that hits this cap sets `truncated` on its own
-// result, which runLintPass records on lint_run AND skips that check's own
-// auto-close sweep for: a pass that did not look at everything cannot
-// conclude that what it didn't see is gone.
+// Per-check cap on how many rows a single pass reports. A check that hits
+// this cap sets `truncated` on its own result, which runLintPass records on
+// lint_run AND skips that check's own auto-close sweep for: a pass that did
+// not look at everything cannot conclude that what it didn't see is gone.
+//
+// WHAT IT CAPS IS NOT THE SAME FOR EVERY CHECK, and the comment here used to
+// claim otherwise ("candidate rows examined"). For the SQL-only checks (C1,
+// C5, C6) it really is the candidate population -- the query is LIMIT cap+1,
+// so the database stops looking. For C2 the SQL is likewise LIMIT cap+1 over
+// its candidate scan. For C3/C4 it caps OUTPUT ONLY: pageAnchorFindings
+// slices the findings AFTER lookupScope(db) has already scanned the whole
+// corpus, and lookupScope takes no limit. So this constant bounds what a
+// pass writes, never what C3/C4 costs to run -- that cost is the full scan
+// every time, which is also why lintStatus refuses to call lookupScope.
 export const LINT_MAX_PER_CHECK = 500;
 
 // The lookup tiers (lookupScope's own 'eligible'/'tagged'/'other', see
@@ -164,7 +171,18 @@ export function roleConflicts(db, { cap = LINT_MAX_PER_CHECK } = {}) {
     const exportRoles = subRolesFor({ linkedin }, {});
     if (exportRoles.length > 0 && !exportRoles.includes(row.tag)) {
       findings.push({
-        findingKey: `role_conflict:${row.claim_id}`,
+        // KEYED ON THE CONFLICT, not on the claim alone. `role_conflict:<id>`
+        // named the accepted claim, so a LATER, DIFFERENT export for the same
+        // person overwrote `detail` under the earlier finding's row -- and if
+        // the owner had dismissed that row, the new conflict arrived
+        // pre-dismissed and was never shown. The tag plus the export-derived
+        // set IS the conflict, and both come from the closed three-value
+        // sub-role vocabulary, so the key stays short and readable. A changed
+        // export now mints a NEW key (shown, undismissed) while the old key
+        // stops being found and closes itself 'gone' on the next pass; an
+        // identical conflict re-observed keeps the owner's dismissal, which
+        // is the sticky behaviour that IS wanted.
+        findingKey: `role_conflict:${row.claim_id}:${row.tag}:${exportRoles.join('+')}`,
         personKey: row.person_key,
         claimId: Number(row.claim_id),
         detail: JSON.stringify({
@@ -247,12 +265,20 @@ export function pageAnchorFindings(db, { now = Date.now(), cap = LINT_MAX_PER_CH
 // context row (quote_context_id) that is now gone (deleted, or its source
 // retained/purged out), where nobody has ever judged the card (no accepted
 // or dismissed rm_card_event for this snapshot). rm_candidate_snapshot has
-// no-update/no-delete triggers -- a snapshot is immutable by design -- so
-// this finding can ONLY ever be closed by an owner dismiss; it is never
-// 'gone' on its own, because the condition it names (the quote is missing)
-// cannot un-happen. A snapshot the owner already judged is excluded on
-// purpose: the judged card's own verdict is the outcome that matters, not
-// whether its quote later disappeared.
+// no-update/no-delete triggers -- a snapshot is immutable by design.
+//
+// ~~"so this finding can ONLY ever be closed by an owner dismiss; it is never
+// 'gone' on its own, because the condition it names cannot un-happen."~~ That
+// was wrong, and the mechanism that makes it wrong is in this same file. The
+// missing quote cannot come back, but the OTHER half of the WHERE clause can
+// change: the moment an rm_card_event judges the card (accepted/dismissed),
+// this query stops returning the row, and runLintPass's generic auto-close
+// sweep marks it 'gone' like any other unseen finding. So an owner who
+// judges the card closes the finding as a side effect, without ever seeing
+// it. That is arguably the right outcome -- a judged card's verdict is the
+// outcome that matters -- but it is 'gone' doing it, not a dismiss, and the
+// comment claiming otherwise is what would have made a reader trust the
+// dismissal count.
 export function orphanCardQuotes(db, { cap = LINT_MAX_PER_CHECK } = {}) {
   const rows = db.prepare(
     `SELECT 'orphan_card_quote:'||s.id AS finding_key, NULL AS person_key, NULL AS claim_id,
@@ -269,6 +295,33 @@ export function orphanCardQuotes(db, { cap = LINT_MAX_PER_CHECK } = {}) {
   ).all(cap + 1);
   return capRows(rows, cap);
 }
+
+// THERE IS NO orphan_page_line CHECK, and this is where to read why before
+// adding one (raised in review 2026-09 as the missing mirror of C5, since
+// readPersonPage LEFT JOINs claim_source and renders `quote` straight out of
+// it -- so a page line still displaying a verbatim quote whose corpus row is
+// gone would be a real finding).
+//
+// IT CANNOT HAPPEN. claim_source.context_id is `INTEGER NOT NULL REFERENCES
+// context(id)` with no on-delete action, i.e. NO ACTION, and hermes opens the
+// database with PRAGMA foreign_keys = ON. SQLite therefore refuses to delete a
+// context row any claim_source still cites, and all three delete paths
+// (/admin/retain, /purge, /delete-entities) sweep the claims FIRST through
+// deleteClaimsForContextWhere -- ON DELETE CASCADE then takes claim_source and
+// person_page_item with the claim. hermes.mjs's own comment on the purge path
+// says the same thing from the other side ("Before the rows, not after:
+// claim_source REFERENCES context(id) and foreign_keys is on, so the other
+// order is a constraint failure -- which is the design working"). A page line
+// and its receipt are deleted together or not at all.
+//
+// C5 is not this shape, which is exactly why C5 exists: it reads
+// rm_candidate_snapshot.evidence's quote_context_id out of a JSON blob, which
+// carries no foreign key at all and therefore really does dangle.
+//
+// If this ever becomes reachable -- a migration that drops the FK, a delete
+// path that turns foreign_keys off, a second writer -- the check is a dozen
+// lines and belongs right here. Until then it would be a check for an
+// impossible state, which reads as coverage and is not.
 
 // Skip order: the ONLY reason a lint pass ever skips is another model-
 // spending pass already running (a page build, a sweep, a lookup, or lint
@@ -417,6 +470,19 @@ function safeParseJson(text) {
   }
 }
 
+// people.sub_roles is a JSON array column; same tolerant read sweep.mjs's own
+// parseSubRoles does (a fresh or partial projection can hold NULL, and a
+// non-array must not become a one-element list).
+function parseSubRolesJson(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 // The desk's findings list: `check` narrows to one check_name, `open` (a
 // tri-state: true/false/omitted) narrows to unresolved/resolved/either,
 // `limit` bounds the read. Newest-seen-within-its-check first.
@@ -458,12 +524,34 @@ export function lintFindings(db, { check = null, open = null, limit = 200 } = {}
 // the correct path for that is to wait for the pass that reopens it, or (the
 // desk does not offer this) delete the row entirely, which nothing here does.
 //
-// role_conflict resolutions all call markPersonSubRoles, which REPLACES
-// people.sub_roles wholesale -- so each branch below passes the FULL
-// intended list, never a delta -- and all three therefore set rebuildNeeded:
-// true. people.linkedin is never written by any of them: the export itself
-// is not being corrected, only which of its derived roles/its accepted tag
-// wins is being decided.
+// role_conflict resolutions all call markPersonSubRoles, which REPLACES the
+// config override wholesale -- so each branch below passes the FULL intended
+// list, never a delta -- and all three therefore set rebuildNeeded: true.
+// people.linkedin is never written by any of them: the export itself is not
+// being corrected, only which of its derived roles/its accepted tag wins is
+// being decided.
+//
+// "THE FULL INTENDED LIST" USED TO BE A LIE, and it destroyed data. The three
+// branches wrote `exportRoles`, `[tag]` and `exportRoles + tag` -- each of
+// them the full list for THIS ONE CONFLICT and nothing else. A person with an
+// accepted `founder`, an accepted `operator` and an export-derived `investor`,
+// whose founder conflict was resolved keep-derived, came out of it holding
+// exactly `['founder']`: the other two tags were not part of the finding, so
+// they were not part of the list, so they were gone.
+//
+// The full list is now built from the person's CURRENT set -- people.sub_roles
+// (the projection) unioned with the owner's own config override (the durable
+// half, which survives a projection rebuild) -- and each resolution is
+// expressed as a change to THAT:
+//   keep-export   -- drop the disputed tag, add every export-derived role,
+//                    keep everything else the person has.
+//   keep-derived  -- keep the disputed tag and everything else; do NOT pull in
+//                    the export's roles, which is the whole point of the
+//                    choice.
+//   both          -- keep everything, plus the export's roles, plus the tag.
+// A missing people row (mid projection rebuild) REFUSES the write rather than
+// resolving off an empty `current`, same reasoning and same
+// 'people-row-missing' reason as applySweepDecision (sweep.mjs).
 //
 // DEVIATION: keep-export's "retract the sweep claim" is written directly as
 // a claim_decision row here rather than by calling hermes.mjs's own
@@ -501,13 +589,26 @@ export function resolveLintFinding(db, { findingKey, resolution, configPath } = 
     const tag = detail.tag;
     const exportRoles = Array.isArray(detail.exportRoles) ? detail.exportRoles : [];
 
+    const peopleRow = db.prepare('SELECT sub_roles FROM people WHERE person_key = ?').get(row.personKey);
+    if (peopleRow === undefined) {
+      return {
+        applied: false, findingKey, resolution, rebuildNeeded: false, reason: 'people-row-missing',
+      };
+    }
+    const owner = loadOwner(configPath ? { configPath } : {});
+    const current = new Set([
+      ...parseSubRolesJson(peopleRow.sub_roles),
+      ...(owner.subRoles.get(row.personKey) ?? []),
+    ]);
+
     let subRoles;
     if (resolution === 'keep-export') {
-      subRoles = exportRoles;
+      current.delete(tag);
+      subRoles = [...new Set([...current, ...exportRoles])].sort();
     } else if (resolution === 'keep-derived') {
-      subRoles = [tag];
+      subRoles = [...new Set([...current, tag])].sort();
     } else {
-      subRoles = [...new Set([...exportRoles, tag])].sort();
+      subRoles = [...new Set([...current, ...exportRoles, tag])].sort();
     }
     markPersonSubRoles({ key: row.personKey, subRoles, ...(configPath ? { configPath } : {}) });
     rebuildNeeded = true;
@@ -527,7 +628,7 @@ export function resolveLintFinding(db, { findingKey, resolution, configPath } = 
     'UPDATE lint_finding SET resolved_at = ?, resolution = ? WHERE finding_key = ? AND resolved_at IS NULL'
   ).run(Date.now(), resolution, findingKey);
 
-  return { applied: true, findingKey, resolution, rebuildNeeded };
+  return { applied: true, findingKey, resolution, rebuildNeeded, reason: null };
 }
 
 // For /stats' `lint` key (hermes.mjs) and the desk's status line. Every

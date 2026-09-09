@@ -146,10 +146,10 @@ test('expiredClaims finds an accepted claim past its own valid_to, ignores a pen
 // (2) C2 role_conflict
 // ---------------------------------------------------------------------------
 
-function acceptedSweepProposal(db, { key, tag, linkedin }) {
+function acceptedSweepProposal(db, { key, tag, linkedin, subRoles = [] }) {
   const distillRunId = insertDistillRun(db);
   const sweepRunId = insertSweepRun(db, { distillRunId });
-  insertPersonWithLinkedin(db, { key, name: key, linkedin });
+  insertPersonWithLinkedin(db, { key, name: key, linkedin, subRoles });
   const claimId = insertClaim(db, { runId: distillRunId, personKey: key, text: 'tag' });
   decide(db, claimId, 'accept');
   db.prepare('INSERT INTO person_sweep_proposal(claim_id, run_id, kind, value, applied_at) VALUES (?, ?, ?, ?, NULL)')
@@ -167,7 +167,11 @@ test('roleConflicts fires for an export-derived operator vs. an accepted investo
   const { findings, truncated } = roleConflicts(db, {});
   assert.equal(truncated, false);
   assert.equal(findings.length, 1);
-  assert.equal(findings[0].findingKey, `role_conflict:${claimId}`);
+  // KEYED ON THE CONFLICT, not the claim alone: `role_conflict:<claimId>`
+  // meant a later, DIFFERENT conflicting export overwrote this row's detail
+  // -- silently inheriting an owner dismissal of the old conflict. See the
+  // changed-export test below.
+  assert.equal(findings[0].findingKey, `role_conflict:${claimId}:investor:operator`);
   assert.equal(findings[0].personKey, key);
   const detail = JSON.parse(findings[0].detail);
   assert.equal(detail.tag, 'investor');
@@ -209,7 +213,7 @@ test('roleConflicts recomputes from the LinkedIn export, not people.sub_roles --
 
   const { findings } = roleConflicts(db, {});
   assert.equal(findings.length, 1, 'the conflict still fires -- people.sub_roles is never read');
-  assert.equal(findings[0].findingKey, `role_conflict:${claimId}`);
+  assert.equal(findings[0].findingKey, `role_conflict:${claimId}:investor:operator`);
 });
 
 // ---------------------------------------------------------------------------
@@ -547,4 +551,184 @@ test('lintGate refuses busy-model when a page build, sweep, lookup, or lint pass
   assert.equal(lintGate(db, { lookupActive: true }).reason, 'busy-model');
   assert.equal(lintGate(db, { pagesBuildingActive: true }).reason, 'busy-model');
   assert.equal(lintGate(db, { lintActive: true }).reason, 'busy-model');
+});
+
+// ---------------------------------------------------------------------------
+// C2's KEY, and the dismissal it used to hand a later, unrelated conflict.
+// ---------------------------------------------------------------------------
+
+test('a changed export mints a new role_conflict finding rather than inheriting the old dismissal', () => {
+  const db = openDb(':memory:');
+  const key = 'name:c2 changed export';
+  acceptedSweepProposal(db, {
+    key, tag: 'investor', linkedin: { position: 'Chief Operating Officer', company: 'Acme Manufacturing' },
+  });
+
+  const first = runLintPass(db, {}, { now: NOW, checks: ['role_conflict'] });
+  assert.equal(first.status, 'complete');
+  const opened = db.prepare("SELECT finding_key AS k, detail FROM lint_finding WHERE check_name = 'role_conflict'").all();
+  assert.equal(opened.length, 1);
+  const firstKey = opened[0].k;
+
+  // The owner looks at THAT conflict (accepted investor vs an export that
+  // says operator) and dismisses it.
+  const dismissed = resolveLintFinding(db, { findingKey: firstKey, resolution: 'dismiss' });
+  assert.equal(dismissed.applied, true);
+
+  // A LinkedIn re-import later says something else entirely. This is a
+  // DIFFERENT disagreement about the same claim -- and under the old
+  // `role_conflict:<claimId>` key the upsert overwrote `detail` on the row
+  // the owner had dismissed, so the new conflict arrived pre-dismissed and
+  // was never shown to anybody.
+  db.prepare('UPDATE people SET linkedin = ? WHERE person_key = ?')
+    .run(JSON.stringify({ position: 'General Partner', company: 'Acme Capital' }), key);
+  // ('General Partner at Acme Capital' derives 'investor', which AGREES with
+  //  the tag, so use a third shape that disagrees differently.)
+  db.prepare('UPDATE people SET linkedin = ? WHERE person_key = ?')
+    .run(JSON.stringify({ position: 'Founder', company: 'Acme Manufacturing' }), key);
+
+  runLintPass(db, {}, { now: NOW + DAY, checks: ['role_conflict'] });
+
+  const rows = db.prepare(
+    "SELECT finding_key AS k, resolution FROM lint_finding WHERE check_name = 'role_conflict' ORDER BY finding_key"
+  ).all();
+  assert.equal(rows.length, 2, 'the new conflict is its own finding, not an overwrite of the dismissed one');
+  const stillDismissed = rows.find((r) => r.k === firstKey);
+  assert.equal(stillDismissed.resolution, 'dismiss', "the owner's dismissal of the OLD conflict stands");
+  const fresh = rows.find((r) => r.k !== firstKey);
+  assert.equal(fresh.resolution, null, 'and the new conflict is open, waiting to be seen');
+  assert.match(fresh.k, /^role_conflict:\d+:investor:founder$/u);
+});
+
+// ---------------------------------------------------------------------------
+// resolveLintFinding and the tags that were not part of the finding. The
+// audit's fixture: accepted founder + accepted operator + export-derived
+// investor; resolving the FOUNDER conflict as keep-derived left ['founder']
+// alone, because each branch wrote the full list for that one conflict and
+// nothing else.
+// ---------------------------------------------------------------------------
+
+function conflictFor(db, { key, tag, linkedin, subRoles }) {
+  acceptedSweepProposal(db, { key, tag, linkedin, subRoles });
+  const { findings } = roleConflicts(db, {});
+  const hit = findings.find((f) => f.personKey === key);
+  assert.ok(hit, 'the fixture must actually produce a conflict');
+  db.prepare(
+    `INSERT INTO lint_finding(finding_key, check_name, person_key, claim_id, detail, first_seen_at, last_seen_at)
+     VALUES (?, 'role_conflict', ?, ?, ?, ?, ?)`
+  ).run(hit.findingKey, hit.personKey, hit.claimId, hit.detail, NOW, NOW);
+  return hit.findingKey;
+}
+
+test('keep-derived keeps the disputed tag AND every unrelated tag the person already had', () => {
+  const db = openDb(':memory:');
+  const key = 'name:keep derived union';
+  // founder is the disputed tag; operator is an unrelated accepted tag; the
+  // export derives investor.
+  const findingKey = conflictFor(db, {
+    key, tag: 'founder',
+    linkedin: { position: 'General Partner', company: 'Acme Capital' },
+    subRoles: ['founder', 'operator'],
+  });
+
+  const home = mkdtempSync(join(tmpdir(), 'lint-keepderived-'));
+  const configPath = ownerConfigPath(home);
+  const out = resolveLintFinding(db, { findingKey, resolution: 'keep-derived', configPath });
+  assert.equal(out.applied, true);
+  assert.equal(out.rebuildNeeded, true);
+
+  assert.deepEqual(
+    JSON.parse(readFileSync(configPath, 'utf8')).personSubRoles[key],
+    ['founder', 'operator'],
+    "the old code wrote ['founder'] and lost operator, which the finding never spoke to"
+  );
+});
+
+test('keep-export drops only the disputed tag, keeps the rest, and adds the export roles', () => {
+  const db = openDb(':memory:');
+  const key = 'name:keep export union';
+  const findingKey = conflictFor(db, {
+    key, tag: 'founder',
+    linkedin: { position: 'General Partner', company: 'Acme Capital' },
+    subRoles: ['founder', 'operator'],
+  });
+
+  const home = mkdtempSync(join(tmpdir(), 'lint-keepexport-'));
+  const configPath = ownerConfigPath(home);
+  const out = resolveLintFinding(db, { findingKey, resolution: 'keep-export', configPath });
+  assert.equal(out.applied, true);
+
+  assert.deepEqual(
+    JSON.parse(readFileSync(configPath, 'utf8')).personSubRoles[key],
+    ['investor', 'operator'],
+    "the export wins for THIS tag: founder goes, investor arrives, operator was never in dispute"
+  );
+});
+
+test('a role resolution refuses rather than resolving off an empty projection', () => {
+  const db = openDb(':memory:');
+  const key = 'name:lint mid rebuild';
+  const findingKey = conflictFor(db, {
+    key, tag: 'founder',
+    linkedin: { position: 'General Partner', company: 'Acme Capital' },
+    subRoles: ['founder', 'operator'],
+  });
+
+  const home = mkdtempSync(join(tmpdir(), 'lint-midrebuild-'));
+  const configPath = ownerConfigPath(home);
+
+  // rebuildPeopleCore / clearPeopleProjection's own first statement.
+  db.prepare('DELETE FROM people').run();
+
+  const out = resolveLintFinding(db, { findingKey, resolution: 'keep-derived', configPath });
+  assert.equal(out.applied, false);
+  assert.equal(out.rebuildNeeded, false);
+  assert.equal(out.reason, 'people-row-missing');
+  const row = db.prepare('SELECT resolved_at, resolution FROM lint_finding WHERE finding_key = ?').get(findingKey);
+  assert.equal(row.resolved_at, null, 'the finding stays open so the owner can resolve it once the projection is back');
+  assert.equal(row.resolution, null);
+});
+
+// ---------------------------------------------------------------------------
+// NO C6. Review 2026-09 raised a missing orphan check for person_page_item --
+// the mirror of C5, since readPersonPage renders claim_source.quote directly.
+// It is unreachable: claim_source.context_id is a real NO ACTION foreign key
+// and hermes runs with foreign_keys = ON, so a context row cannot be deleted
+// while a receipt cites it and all three delete paths sweep the claims first.
+// This test asserts the mechanism rather than the missing check, so the day
+// the guarantee is weakened the suite says so instead of the corpus quietly
+// growing quotes with no rows behind them. See lint.mjs's own note.
+// ---------------------------------------------------------------------------
+
+test('a context row cannot be deleted out from under a page line\'s receipt', () => {
+  const db = openDb(':memory:');
+  const key = 'name:page fk';
+  insertPersonWithLinkedin(db, { key, name: key });
+  const distillRunId = insertDistillRun(db);
+  const claimId = insertClaim(db, { runId: distillRunId, personKey: key, kind: 'fact', text: 'a page line' });
+  const ctxId = Number(db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', 'the quoted line', '{}')"
+  ).run(NOW - DAY).lastInsertRowid);
+  db.prepare(
+    `INSERT INTO claim_source(claim_id, context_id, source, entity_id, content_hash, quote)
+     VALUES (?, ?, 'imessage', NULL, NULL, 'the quoted line')`
+  ).run(claimId, ctxId);
+  db.prepare('INSERT INTO person_page_item(claim_id, section, built_at) VALUES (?, ?, ?)')
+    .run(claimId, 'who', NOW);
+
+  // The state a page-line orphan check would exist to find, attempted
+  // directly. If this stops throwing, claim_source's foreign key or
+  // PRAGMA foreign_keys has changed and lint needs the check after all.
+  assert.throws(
+    () => db.prepare('DELETE FROM context WHERE id = ?').run(ctxId),
+    /FOREIGN KEY/u,
+    'a receipt whose corpus row can vanish is exactly what C5 exists for, and C6 would need to'
+  );
+
+  // And the supported order takes the page item with it, leaving nothing for
+  // readPersonPage to render a quote from.
+  db.prepare('DELETE FROM claim WHERE id = ?').run(claimId);
+  db.prepare('DELETE FROM context WHERE id = ?').run(ctxId);
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM person_page_item').get().n), 0);
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM claim_source').get().n), 0);
 });
