@@ -296,15 +296,33 @@ const CURSOR_KEY = 'mail:owner@example.test:internalDate';
 const GAP_FROM_KEY = 'mail:owner@example.test:forward-gap-from';
 const GAP_UNTIL_KEY = 'mail:owner@example.test:forward-gap-until';
 
-// A whole mailbox, newest-first, that answers `after:`/`before:` in seconds
-// the way Gmail does and pages 100 at a time. Every stub it hands out is a
-// real message this stub can also `getMessage`, so the source's own exact
-// bound check has something true to test against.
-function mailbox({ count, newestTs, stepMs = 60_000, pageSize = 100 }) {
-  const all = Array.from({ length: count }, (_, i) => ({
-    id: `m${i}`,
-    ts: newestTs - i * stepMs, // index 0 is the newest
-  }));
+const fullMessage = (id, ts) => ({
+  id,
+  internalDate: String(ts),
+  payload: {
+    mimeType: 'text/plain',
+    headers: [
+      { name: 'Message-ID', value: `<${id}@example.test>` },
+      { name: 'From', value: 'friend@example.test' },
+      { name: 'To', value: 'owner@example.test' },
+      { name: 'Subject', value: `message ${id}` },
+    ],
+    body: { data: Buffer.from(`body ${id}`).toString('base64url') },
+  },
+});
+
+// A whole mailbox with the timestamps given EXPLICITLY, index 0 newest, ties
+// allowed. Ties are the point: Gmail orders equal internalDates arbitrarily,
+// modelled here as "arbitrary but stable" — the array's own order — so a cap
+// that cuts through a run of identical timestamps cuts it in the same place
+// every time and a test can name the messages it left behind.
+//
+// It answers `after:`/`before:` in whole seconds the way Gmail does, pages 100
+// at a time, and every stub it hands out is a real message it can also
+// `getMessage` — so the source's exact JS bound has something true to test
+// against. `onGet(id, nth)` may throw to model a provider failure.
+function mailboxOf(stamps, { pageSize = 100, onGet = null } = {}) {
+  const all = stamps.map((ts, i) => ({ id: `m${i}`, ts }));
   const byId = new Map(all.map((m) => [m.id, m]));
   const listCalls = [];
   const fetched = [];
@@ -315,8 +333,8 @@ function mailbox({ count, newestTs, stepMs = 60_000, pageSize = 100 }) {
     client: {
       listMessages: async ({ q, pageToken, maxResults = pageSize }) => {
         listCalls.push(q);
-        const after = /after:(\d+)/u.exec(q);
-        const before = /before:(\d+)/u.exec(q);
+        const after = /after:(-?\d+)/u.exec(q);
+        const before = /before:(-?\d+)/u.exec(q);
         const lo = after ? Number(after[1]) * 1000 : Number.NEGATIVE_INFINITY;
         const hi = before ? Number(before[1]) * 1000 : Number.POSITIVE_INFINITY;
         const window = all.filter((m) => m.ts >= lo && m.ts <= hi);
@@ -327,25 +345,30 @@ function mailbox({ count, newestTs, stepMs = 60_000, pageSize = 100 }) {
       },
       getMessage: async (id) => {
         fetched.push(id);
-        const m = byId.get(id);
-        return {
-          id,
-          internalDate: String(m.ts),
-          payload: {
-            mimeType: 'text/plain',
-            headers: [
-              { name: 'Message-ID', value: `<${id}@example.test>` },
-              { name: 'From', value: 'friend@example.test' },
-              { name: 'To', value: 'owner@example.test' },
-              { name: 'Subject', value: `message ${id}` },
-            ],
-            body: { data: Buffer.from(`body ${id}`).toString('base64url') },
-          },
-        };
+        if (onGet) await onGet(id, fetched.length);
+        return fullMessage(id, byId.get(id).ts);
       },
     },
   };
 }
+
+function mailbox({ count, newestTs, stepMs = 60_000, pageSize = 100 }) {
+  return mailboxOf(Array.from({ length: count }, (_, i) => newestTs - i * stepMs), { pageSize });
+}
+
+// The provider's own shape for a status failure: gmailClient.mjs attaches
+// `status` to the Error it throws, and the source's 404 handling reads it.
+function httpError(status) {
+  const error = new Error(`Gmail messages.get failed: HTTP ${status}`);
+  error.status = status;
+  return error;
+}
+
+// MAX_MESSAGES_PER_ACCOUNT in sources/mail.mjs. Not exported, and the fixtures
+// below have to straddle it, so it is named here rather than spelled 2000 in
+// six places.
+const MAX_PER_ACCOUNT = 2000;
+const distinctIds = (rows) => new Set(rows.map((r) => r.entity_id));
 
 function forwardCtx(state, ingested, { now }) {
   return {
@@ -411,11 +434,19 @@ test('the next pass drains the recorded gap and clears it, so nothing behind the
   const secondIngested = [];
   await source.run(forwardCtx(state, secondIngested, { now: NOW }));
 
-  // The fresh window (after: the cursor) has nothing new; the whole pass goes
+  // The fresh window (from the cursor up) has nothing new; the whole pass goes
   // to the hole, which is 500 messages and fits inside one cap.
+  //
+  // 502, not 500, and the two extra are the design rather than slop: both
+  // boundaries are INCLUSIVE so that a message sharing a boundary
+  // internalDate cannot fall between two windows (see the forward-scan
+  // comment on ties), which re-reads the row AT the cursor and the row AT the
+  // gap ceiling. hermes dedupes them on (source, entity_id); an exclusive
+  // bound would save these two reads and lose their same-millisecond twins
+  // forever.
   const ids = new Set(secondIngested.map((r) => r.entity_id ?? r.uid ?? r.id));
-  assert.equal(secondIngested.length, 500, 'the second pass reads exactly the 500 the cap cut off');
-  assert.ok(ids.size > 0);
+  assert.equal(secondIngested.length, 502, 'the 500 the cap cut off, plus the two inclusive boundary rows');
+  assert.equal(ids.size, 502);
   assert.equal(state.getCursor(GAP_FROM_KEY), null, 'a fully drained hole leaves no gap cursors behind');
   assert.equal(state.getCursor(GAP_UNTIL_KEY), null);
 
@@ -521,4 +552,253 @@ test('no deadline in ctx keeps the full pages-per-pass budget, as an older daemo
     log: { info() {}, warn() {} },
   });
   assert.equal(listCalls.length, 3);
+});
+
+// ---------------------------------------------------------------------------
+// TIES, DELETIONS, AND WHAT A KILLED PASS LOSES.
+//
+// The tests above space their fixtures a minute apart, which is exactly the
+// assumption the forward scan cannot make: internalDate is milliseconds,
+// Gmail orders equal ones arbitrarily, and the per-account cap can cut a run
+// of identical timestamps in half. These six fixtures are the ones that tell
+// the boundary rules apart -- each fails against the pre-2026-09-09 scan.
+// ---------------------------------------------------------------------------
+
+const forwardSource = (box) => createMailSource({
+  accountsForScope: () => [{ email: 'owner@example.test' }],
+  makeClient: () => box.client,
+  sleep: async () => {},
+});
+
+test('messages sharing one internalDate across the cap boundary all land, over as many passes as it takes', async () => {
+  const NOW = Date.UTC(2026, 5, 1);
+  const NEWEST = NOW - 60_000;
+  // 2,105 messages a minute apart EXCEPT for ten that share one internalDate
+  // and straddle the 2,000 cap: indices 1995-1999 are read by the first pass,
+  // 2000-2004 are not, and no timestamp can tell the two halves apart. An
+  // exclusive ceiling writes the tie as "read" and drops the five it never
+  // fetched from every future window -- the fresh one rejects <= cursor, the
+  // drain rejects >= until, and nothing else ever looks there.
+  const TIE = NEWEST - 1995 * 60_000;
+  const stamps = Array.from({ length: 2105 }, (_, i) => {
+    if (i < 1995) return NEWEST - i * 60_000;
+    if (i <= 2004) return TIE;
+    return TIE - (i - 2004) * 60_000;
+  });
+  const box = mailboxOf(stamps);
+  const source = forwardSource(box);
+  const state = memoryState();
+  const ingested = [];
+
+  await source.run(forwardCtx(state, ingested, { now: NOW }));
+  assert.equal(box.fetched.length, MAX_PER_ACCOUNT, 'the cap still bounds one pass');
+  assert.equal(
+    state.getCursor(GAP_UNTIL_KEY),
+    String(TIE),
+    'the ceiling is the shared timestamp itself, and it is inclusive'
+  );
+
+  // Bounded, so a hole that stops shrinking fails the test instead of hanging.
+  for (let pass = 0; pass < 4 && state.getCursor(GAP_FROM_KEY) !== null; pass += 1) {
+    await source.run(forwardCtx(state, ingested, { now: NOW }));
+  }
+  assert.equal(state.getCursor(GAP_FROM_KEY), null, 'the hole drains');
+  assert.equal(state.getCursor(GAP_UNTIL_KEY), null);
+
+  const ids = distinctIds(ingested);
+  for (const i of [1995, 1999, 2000, 2004]) {
+    assert.ok(ids.has(`mail:m${i}@example.test`), `m${i} shares the boundary timestamp and must still land`);
+  }
+  assert.equal(ids.size, 2105, 'every message in the mailbox eventually lands');
+});
+
+test('a 404 from messages.get is a deleted message: the page still lands, the cursor still advances', async () => {
+  const NOW = Date.UTC(2026, 5, 1);
+  const stamps = Array.from({ length: 5 }, (_, i) => NOW - (i + 1) * 60_000);
+  const box = mailboxOf(stamps, {
+    onGet: (id) => {
+      // Deleted between messages.list and messages.get -- the one provider
+      // answer that means "there is nothing here", ever.
+      if (id === 'm2') throw httpError(404);
+    },
+  });
+  const source = forwardSource(box);
+  const state = memoryState();
+  const ingested = [];
+  const events = [];
+
+  await source.run({
+    ...forwardCtx(state, ingested, { now: NOW }),
+    log: { info: (event, fields) => events.push({ event, fields }), warn: (event, fields) => events.push({ event, fields }) },
+  });
+
+  const ids = distinctIds(ingested);
+  assert.equal(ids.size, 4, 'the other four messages on the page are ingested');
+  assert.ok(!ids.has('mail:m2@example.test'));
+  assert.equal(state.getCursor(CURSOR_KEY), String(stamps[0]), 'and the pass advances past the deleted message');
+  const scan = events.find((e) => e.event === 'mail_account_scan');
+  assert.equal(scan.fields.skipped, 1, 'counted, so a rising count is visible');
+  assert.equal(scan.fields.rows, 4);
+  assert.doesNotMatch(JSON.stringify(scan), /m2@|owner@example\.test/u, 'a count, never an id or an address');
+});
+
+test('a 5xx part way through a window keeps every page already ingested, and the next pass drains the rest', async () => {
+  const NOW = Date.UTC(2026, 5, 1);
+  const NEWEST = NOW - 60_000;
+  const stamps = Array.from({ length: 250 }, (_, i) => NEWEST - i * 60_000);
+  // Fails on the 150th get: page 1 (100 messages) is complete, page 2 is not.
+  let box = mailboxOf(stamps, { onGet: (id, nth) => { if (nth === 150) throw httpError(503); } });
+  const source = createMailSource({
+    accountsForScope: () => [{ email: 'owner@example.test' }],
+    makeClient: () => box.client,
+    sleep: async () => {},
+  });
+  const state = memoryState();
+  const ingested = [];
+
+  await assert.rejects(
+    source.run(forwardCtx(state, ingested, { now: NOW })),
+    /^Error: all 1 mail account\(s\) failed$/u,
+    'a 5xx is not a deletion: it still fails the account'
+  );
+
+  assert.equal(ingested.length, 100, 'page 1 was ingested before page 2 failed, not held to the end of the window');
+  assert.equal(state.getCursor(CURSOR_KEY), String(NEWEST), 'and page 1 progress is durable');
+  assert.equal(
+    state.getCursor(GAP_UNTIL_KEY),
+    String(stamps[99]),
+    'the hole recorded starts at the bottom of the page that landed'
+  );
+  assert.ok(Number(state.getCursor(GAP_FROM_KEY)) > 0, 'with a floor, so the next pass can drain it');
+
+  // The same account, next cycle, provider healthy.
+  box = mailboxOf(stamps);
+  await source.run(forwardCtx(state, ingested, { now: NOW }));
+  assert.equal(distinctIds(ingested).size, 250, 'the failed pass cost a page, not the mailbox');
+  assert.equal(state.getCursor(GAP_FROM_KEY), null);
+  assert.equal(state.getCursor(GAP_UNTIL_KEY), null);
+});
+
+test('a window whose messages all sit at or below the cursor stops at the floor instead of spending the cap', async () => {
+  const NOW = Date.UTC(2026, 5, 1);
+  const C = NOW - 60_000 + 999; // 999ms into its own second, which the query rounds
+  // Five messages sit exactly ON the cursor -- an exclusive bound calls them
+  // handled and never reads them -- and 2,100 more sit in the same second just
+  // BELOW it, three to a millisecond. That is enough to spend the whole
+  // per-account cap on messages no bound can accept, land nothing, record
+  // nothing, and repeat the identical pass every cycle.
+  const stamps = [
+    C, C, C, C, C,
+    ...Array.from({ length: 2100 }, (_, i) => C - 1 - Math.floor(i / 3)),
+  ];
+  const box = mailboxOf(stamps);
+  const source = forwardSource(box);
+  const state = memoryState();
+  const ingested = [];
+  state.setCursor(CURSOR_KEY, String(C));
+
+  await source.run(forwardCtx(state, ingested, { now: NOW }));
+
+  assert.equal(distinctIds(ingested).size, 5, 'the ties AT the cursor are inside the window, not behind it');
+  assert.ok(box.fetched.length < 20, `the scan stops below the floor, it does not spend the cap: ${box.fetched.length} gets`);
+  // No gap, and that is the honest answer rather than a fall-through: a gap
+  // records a hole ABOVE the floor, and everything unread here is below it,
+  // where the yearly history walk lives.
+  assert.equal(state.getCursor(GAP_FROM_KEY), null);
+  assert.equal(state.getCursor(GAP_UNTIL_KEY), null);
+  assert.equal(state.getCursor(CURSOR_KEY), String(C));
+
+  const afterFirst = box.fetched.length;
+  await source.run(forwardCtx(state, ingested, { now: NOW }));
+  assert.equal(box.fetched.length, afterFirst * 2, 'and the next pass is the same cheap pass, not a 2,000-get no-op');
+});
+
+test('two truncations in a row walk the ceiling DOWN, page by page, and never widen it back', async () => {
+  const NOW = Date.UTC(2026, 5, 1);
+  const state = memoryState();
+  // Sampled from inside the second pass: the stored ceiling as the drain is
+  // still running. A window that persists its progress only when it returns
+  // leaves every one of these equal to where the pass started, which is the
+  // difference between losing a page to a kill and losing 2,000 messages.
+  let watching = false;
+  const midPass = [];
+  const box = mailboxOf(Array.from({ length: 4500 }, (_, i) => NOW - 60_000 - i * 60_000), {
+    onGet: (_id, nth) => {
+      if (watching && nth % 500 === 0) midPass.push(state.getCursor(GAP_UNTIL_KEY));
+    },
+  });
+  const source = forwardSource(box);
+  const ingested = [];
+
+  await source.run(forwardCtx(state, ingested, { now: NOW }));
+  const floorAfterFirst = state.getCursor(GAP_FROM_KEY);
+  const ceilingAfterFirst = Number(state.getCursor(GAP_UNTIL_KEY));
+
+  // Pass 2's drain is itself cut by the cap: the second truncation.
+  watching = true;
+  await source.run(forwardCtx(state, ingested, { now: NOW }));
+  watching = false;
+  assert.ok(midPass.length >= 2, 'the second pass must be long enough to sample');
+  assert.ok(
+    midPass.some((v) => Number(v) < ceilingAfterFirst),
+    `the drain lowers the stored ceiling as it goes, not once at the end: saw ${JSON.stringify(midPass)}`
+  );
+  const ceilingAfterSecond = Number(state.getCursor(GAP_UNTIL_KEY));
+  assert.ok(
+    ceilingAfterSecond < ceilingAfterFirst,
+    `a truncated drain must lower the ceiling: ${ceilingAfterSecond} vs ${ceilingAfterFirst}`
+  );
+  assert.equal(state.getCursor(GAP_FROM_KEY), floorAfterFirst, 'and never move the floor');
+
+  await source.run(forwardCtx(state, ingested, { now: NOW }));
+  assert.equal(state.getCursor(GAP_FROM_KEY), null, 'the third pass finishes the hole');
+  assert.equal(state.getCursor(GAP_UNTIL_KEY), null);
+  assert.equal(distinctIds(ingested).size, 4500, 'and all 4,500 messages landed');
+  // Inclusive boundaries re-read a boundary row per window; nothing re-reads a
+  // whole stretch already ingested.
+  assert.ok(
+    box.fetched.length - 4500 <= 100,
+    `overlap across three passes must stay under one page, saw ${box.fetched.length - 4500}`
+  );
+});
+
+test('a drain that reaches its floor deletes BOTH gap keys, including when the ceiling has come down to meet it', async () => {
+  const NOW = Date.UTC(2026, 5, 1);
+  const NEWEST = NOW - 60_000;
+  const U = NEWEST - 3_600_000;   // the stored ceiling: an hour of drained mail above it
+  const F = U - 1990 * 60_000;    // the stored floor, with 30 messages sitting ON it
+  const stamps = [
+    NEWEST,
+    ...Array.from({ length: 1990 }, (_, i) => U - i * 60_000),
+    ...Array.from({ length: 30 }, () => F),
+  ];
+  const box = mailboxOf(stamps);
+  const source = forwardSource(box);
+  const state = memoryState();
+  const ingested = [];
+  // The state a previous truncated pass left behind.
+  state.setCursor(CURSOR_KEY, String(NEWEST));
+  state.setCursor(GAP_FROM_KEY, String(F));
+  state.setCursor(GAP_UNTIL_KEY, String(U));
+
+  // Pass A: the drain is cut by the cap inside the run of ties at the floor,
+  // so its lowest row IS the floor and the ceiling comes down to meet it.
+  await source.run(forwardCtx(state, ingested, { now: NOW }));
+  assert.equal(state.getCursor(GAP_FROM_KEY), String(F));
+  assert.equal(
+    state.getCursor(GAP_UNTIL_KEY),
+    String(F),
+    'until === from is a real one-millisecond hole: the cap cut the run of ties at the floor'
+  );
+
+  // Pass B: that hole must still be drained -- until === from is not absence --
+  // and finishing it must remove both keys rather than leave them behind.
+  await source.run(forwardCtx(state, ingested, { now: NOW }));
+  const ids = distinctIds(ingested);
+  for (let i = 1991; i <= 2020; i += 1) {
+    assert.ok(ids.has(`mail:m${i}@example.test`), `m${i} sits on the gap floor and must land`);
+  }
+  assert.equal(state.getCursor(GAP_FROM_KEY), null, 'a drained hole leaves no keys behind');
+  assert.equal(state.getCursor(GAP_UNTIL_KEY), null);
+  assert.equal(ids.size, 2021);
 });

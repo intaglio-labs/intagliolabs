@@ -31,11 +31,18 @@
 //    handled. Nothing errored; that window was simply never queried again.
 //    What a newest-first scan needs is a record of the OLDEST unfetched
 //    boundary, not the newest landed one -- so a truncated window now leaves
-//    behind an explicit backfill gap ([gap-from, gap-until), two more durable
+//    behind an explicit backfill gap ([gap-from, gap-until], two more durable
 //    cursors) that later passes drain from the top down with whatever budget
 //    the fresh window leaves. The forward cursor still advances to the newest
-//    landed row, because everything above the gap ceiling really is drained;
-//    it is the part BELOW it that used to disappear. See runForward below.
+//    row the pass READ, because everything above the gap ceiling really is
+//    drained; it is the part BELOW it that used to disappear.
+//
+//    The exact semantics of those three values — which side of each bound is
+//    inclusive and why, how ties on internalDate are handled, and what a
+//    killed pass may lose — are stated once, in the comment block over the
+//    forward scan below. Read that before changing a bound here: "advanced
+//    only from rows that landed" is refined there (READ, not landed), and
+//    the refinement is load-bearing.
 //
 // 2. SEVERAL MAILBOXES, still, and now the reason is cleaner. One OAuth grant
 //    authorizes one account, so several mailboxes means several grants — see
@@ -104,9 +111,12 @@ function classifyMailError(error) {
 
 const cursorKey = (email) => `mail:${String(email).toLowerCase()}:internalDate`;
 // The backfill gap left behind when the per-account cap cuts a newest-first
-// forward window: messages with internalDate in [from, until) have NOT been
-// fetched, and `until` is at or below the forward cursor. Both keys are
-// present or both are absent; either one alone is treated as no gap.
+// forward window: messages with internalDate in [from, until] — INCLUSIVE on
+// both ends, see the forward-scan comment on ties — have NOT been read, and
+// `until` is at or below the forward cursor. Both keys are present or both are
+// absent; either one alone is treated as no gap, and so is `until < from`
+// (a drained gap whose keys outlived it). `until === from` is a real hole:
+// the cap can cut a run of same-millisecond messages in half.
 const gapFromKey = (email) => `mail:${String(email).toLowerCase()}:forward-gap-from`;
 const gapUntilKey = (email) => `mail:${String(email).toLowerCase()}:forward-gap-until`;
 const historyPageKey = (email, year) =>
@@ -258,16 +268,37 @@ export function createMailSource({
         // some paths, so the query is deliberately a little wider than the
         // cursor and the exact bound is enforced below. Fetching a handful of
         // already-seen messages costs a dedupe; missing one costs it forever.
+        // The fresh window is widened by the SAME second the yearly and drain
+        // queries are (`- 1`), which it was not: its JS bound is inclusive at
+        // the cursor, so a query that starts exactly at floor(cursor/1000) can
+        // land inside the second the bound still accepts and drop the ties
+        // there. Wider costs a dedupe; narrower costs the message forever.
         const q = yearly
           ? `after:${Math.floor(yearly.fromTs / 1000) - 1} before:${Math.ceil(yearly.toTs / 1000)}`
-          : `after:${Math.floor(floor / 1000)}`;
+          : `after:${Math.floor(floor / 1000) - 1}`;
         const client = makeClient({ email: account.email, ...(home ? { home } : {}) });
 
         try {
           let seen = 0;
-          let highest = Number.isFinite(stored) ? stored : 0;
+          let skipped = 0;
           const rows = [];
           let pagesFetched = 0;
+
+          // A message listed and then gone by the time we ask for it has been
+          // DELETED between the two calls: Gmail answers 404 and there is
+          // nothing to ingest, ever. Skipped and counted rather than thrown —
+          // one deleted message must not fail an entire account's pass, and
+          // before per-page ingest it discarded every message fetched before
+          // it too. Every other status still throws: a 401, a quota 403 or a
+          // 5xx is a condition the caller has to see.
+          const getMessageOrNull = async (id) => {
+            try {
+              return await client.getMessage(id);
+            } catch (error) {
+              if (Number(error?.status) === 404) return null;
+              throw error;
+            }
+          };
 
           if (yearly) {
             let pageToken = state.getCursor(historyPageKey(account.email, yearly.year)) ?? undefined;
@@ -297,7 +328,11 @@ export function createMailSource({
               for (const [stubIndex, stub] of stubs.entries()) {
                 if (stubIndex > 0) await sleepImpl(spacingMs);
                 seen += 1;
-                const full = await client.getMessage(stub.id);
+                const full = await getMessageOrNull(stub.id);
+                if (full === null) {
+                  skipped += 1;
+                  continue;
+                }
                 const internal = Number(full?.internalDate);
                 // The exact bound the query could only approximate.
                 if (!Number.isFinite(internal) || internal < yearly.fromTs || internal >= yearly.toTs) continue;
@@ -309,10 +344,11 @@ export function createMailSource({
                   uidValidity: 'gmail',
                   maxBodyBytes,
                 });
-                if (row !== null) {
-                  pageRows.push(row);
-                  if (Number.isFinite(internal) && internal > highest) highest = internal;
-                }
+                // No `highest` here: the yearly walk's progress is its durable
+                // page token, and the forward cursor belongs to the forward
+                // window alone. The variable this used to feed was written by
+                // this branch and read by nobody.
+                if (row !== null) pageRows.push(row);
               }
 
               // Ingest and persist THIS PAGE's token before moving on, so a
@@ -351,35 +387,181 @@ export function createMailSource({
 
             if (!yearDone) historyDone = false;
           } else {
-            // ONE newest-first window, ingested as it goes, bounded exactly
-            // in JS because Gmail's `after:`/`before:` are whole seconds and
-            // inclusive to the day on some paths. Returns the highest and
-            // LOWEST internalDate that actually landed plus whether the
-            // per-account cap cut the window short -- `lowest` is the part
-            // the old code never recorded, and it is the only thing that
-            // says where an unfetched hole begins.
-            const scanWindow = async ({ q: query, minTs, maxTs }) => {
-              const windowRows = [];
+            // ===================================================================
+            // THE FORWARD SCAN — CURSOR SEMANTICS AND FAILURE MODEL
+            //
+            // Gmail lists NEWEST-FIRST and one pass is capped, so the durable
+            // state has to describe a PARTIALLY read range rather than a
+            // single high-water mark. Three values per account:
+            //
+            //   cursor    mail:<a>:internalDate      every message with
+            //             internalDate >= cursor has been read by some pass,
+            //             EXCEPT what the gap carves out.
+            //   gap.from  mail:<a>:forward-gap-from  INCLUSIVE floor of the
+            //             hole: accept internalDate >= from.
+            //   gap.until mail:<a>:forward-gap-until INCLUSIVE ceiling of the
+            //             hole: accept internalDate <= until. until <= cursor
+            //             always. Both keys exist or neither does.
+            //
+            // TIES ON internalDate, which is the whole reason each bound is
+            // inclusive on the side it is. internalDate is milliseconds and
+            // Gmail orders equal timestamps ARBITRARILY, so a boundary read
+            // off one message says nothing about its twins: the cap can cut a
+            // run of same-millisecond messages in half, and which half is
+            // luck. So every boundary here is inclusive on the side that
+            // would otherwise exclude them — the fresh window accepts
+            // internalDate >= cursor, a drain accepts from <= internalDate <=
+            // until — and the resulting re-read is absorbed downstream, where
+            // hermes dedupes on (source, entity_id). Exclusive bounds are
+            // cheaper by at most one page and drop those twins from EVERY
+            // future window: the fresh one rejects <= cursor, the drain
+            // rejects >= until, and nothing else ever looks there. That was
+            // the bug (2026-09 review, finding 1); the old tests spaced their
+            // fixtures 60s apart and could not see it.
+            //
+            // `until === from` is therefore a real one-millisecond hole (ties
+            // at the floor, cut by the cap) and is drained like any other;
+            // only `until < from` means "no gap", and it is written by
+            // nothing — a drained gap has both keys DELETED, so a stored
+            // until === from is not misread as absence (finding 7).
+            //
+            // WHAT THE CURSOR MAY ADVANCE OVER. ~~"rows that actually
+            // ingested"~~ (this file's header): messages this pass FETCHED
+            // and found inside the window — ingested, or deliberately dropped
+            // by mailRows for want of a usable date. NOT messages the cap
+            // never listed; those are exactly what the gap is for.
+            // Fetched-and-dropped has to count, or a truncated window whose
+            // 2,000 gets all produced no row moves nothing at all and the
+            // identical no-op pass repeats every cycle at 2,000 gets
+            // (finding 3).
+            //
+            // QUERY WIDTH. Gmail's `after:`/`before:` take whole seconds, so
+            // every query is widened by a second on each side and the exact
+            // bound is enforced in JS against internalDate. Wider costs a
+            // dedupe; narrower costs the message forever.
+            //
+            // FAILURE MODEL: A KILLED OR FAILED PASS LOSES AT MOST ONE PAGE.
+            // Each page is ingested and then has its progress persisted
+            // before the next list call, so the durable state after any page
+            // is TRUE rather than optimistic: the fresh window writes the
+            // hole it WOULD leave if the pass ended right here (gap = old gap
+            // ∪ [floor, lowest read]) and retracts it only on the page that
+            // proves the window ran to the bottom. A throw from messages.get
+            // therefore costs the page in flight, never the up-to-2,000
+            // messages fetched before it, and a deterministically failing get
+            // cannot livelock the account because every pass gets further
+            // (finding 2). A 404 from messages.get is a message deleted
+            // between list and get: skipped, counted, never thrown.
+            //
+            // WRITE ORDER: GAP FIRST, CURSOR SECOND — because they CANNOT
+            // share a transaction. The state API a source is handed is
+            // getCursor/setCursor/deleteCursor, three single statements;
+            // openStateDb keeps BEGIN/COMMIT for its own multi-row writes and
+            // exposes no transaction to callers, and the daemon hands sources
+            // no db handle. So the writes are ordered so that a kill between
+            // them UNDER-claims coverage: widening the gap (which takes
+            // coverage AWAY) precedes raising the cursor (which claims it).
+            // Every interleaving leaves state that re-reads something already
+            // read; none leaves state claiming a message was read when it was
+            // not (finding 6).
+            //
+            // A SECOND TRUNCATION CANNOT NARROW THE HOLE. A drain only ever
+            // lowers its own ceiling (min with what is stored), so
+            // consecutive truncated drains walk downward and overlap by at
+            // most the tie-inclusive boundary page. The one widening left is
+            // deliberate: a FRESH window truncating while a gap is already
+            // open leaves two disjoint holes, two keys hold one interval, so
+            // they hold the union [old from, new lowest] and the next drain
+            // re-reads the stretch between the old ceiling and the old cursor
+            // (finding 5). The alternatives are worse — a list is a schema
+            // this connector has no migration for, and not advancing the
+            // cursor livelocks forever on the newest 2,000.
+            // ===================================================================
+
+            const gapFromName = gapFromKey(account.email);
+            const gapUntilName = gapUntilKey(account.email);
+
+            const readGap = () => {
+              const from = Number(state.getCursor(gapFromName));
+              const until = Number(state.getCursor(gapUntilName));
+              if (!Number.isFinite(from) || !Number.isFinite(until) || from <= 0) return null;
+              return until >= from ? { from, until } : null;
+            };
+            // Gap first, cursor second — and the deletes are both-or-neither,
+            // so a half-present gap can never be read back as a hole with an
+            // invented bound.
+            const writeGap = (next) => {
+              if (next === null || !(next.until >= next.from)) {
+                state.deleteCursor(gapFromName);
+                state.deleteCursor(gapUntilName);
+                return;
+              }
+              state.setCursor(gapFromName, String(next.from));
+              state.setCursor(gapUntilName, String(next.until));
+            };
+
+            // ONE newest-first window, INGESTED AND PERSISTED PER PAGE.
+            // `onPage` is handed the window's cumulative highest and lowest
+            // in-window internalDate, how many rows have landed so far, and
+            // whether anything is known to remain BELOW what has been read
+            // (the cap cut a page, or a page token is still in hand). It runs
+            // after that page's ingest resolves and before the next list
+            // call, which is what bounds a killed pass to one page.
+            const scanWindow = async ({ q: query, minTs, maxTs, onPage }) => {
               let pageToken;
               let highestIn = 0;
               let lowestIn = Number.POSITIVE_INFINITY;
+              let landed = 0;
               let capHit = false;
-              page: do {
+              // Set when a fetched message lands BELOW this window's floor.
+              // The listing is newest-first, so from there on every remaining
+              // stub is older still: the window has been read to the bottom
+              // and nothing above the floor is missing. It is the difference
+              // between a truncation and a finish -- without it, a query whose
+              // widened second happens to hold thousands of below-floor
+              // messages spends the entire per-account cap on messages it then
+              // discards, records nothing (there is no hole ABOVE the floor to
+              // record), and repeats the identical pass every cycle
+              // (finding 3). A `continue` cannot know it is safe to stop; the
+              // ordering can.
+              let belowFloor = false;
+              do {
                 await pace();
                 const list = await client.listMessages({ q: query, pageToken, maxResults: PAGE_SIZE });
                 pagesFetched += 1;
                 pageToken = list.nextPageToken;
+                const pageRows = [];
                 for (const [stubIndex, stub] of (list.messages ?? []).entries()) {
                   if (seen >= MAX_MESSAGES_PER_ACCOUNT) {
                     capHit = true;
-                    break page;
+                    break;
                   }
                   if (stubIndex > 0) await sleepImpl(spacingMs);
                   seen += 1;
-                  const full = await client.getMessage(stub.id);
+                  const full = await getMessageOrNull(stub.id);
+                  if (full === null) {
+                    skipped += 1;
+                    continue;
+                  }
                   const internal = Number(full?.internalDate);
-                  if (minTs !== null && Number.isFinite(internal) && internal <= minTs) continue;
-                  if (maxTs !== null && (!Number.isFinite(internal) || internal >= maxTs)) continue;
+                  // The exact bounds the whole-second query only approximated,
+                  // inclusive on both ends. A message with NO usable
+                  // internalDate cannot be placed either side of a bound, so
+                  // it is not judged by one: mailRows keeps it if its Date
+                  // header is usable and drops it otherwise, and either way it
+                  // contributes nothing to the boundaries below.
+                  if (Number.isFinite(internal)) {
+                    if (minTs !== null && internal < minTs) {
+                      belowFloor = true;
+                      break;
+                    }
+                    if (maxTs !== null && internal > maxTs) continue;
+                    // Tracked over messages FETCHED in-window, not only over
+                    // rows that landed: see "WHAT THE CURSOR MAY ADVANCE
+                    // OVER" above.
+                    if (internal > highestIn) highestIn = internal;
+                    if (internal < lowestIn) lowestIn = internal;
+                  }
                   const parsed = gmailMessageToParsed(full);
                   const row = messageToRow(parsed, {
                     account: account.email,
@@ -388,80 +570,80 @@ export function createMailSource({
                     uidValidity: 'gmail',
                     maxBodyBytes,
                   });
-                  if (row !== null) {
-                    windowRows.push(row);
-                    if (Number.isFinite(internal)) {
-                      if (internal > highestIn) highestIn = internal;
-                      if (internal < lowestIn) lowestIn = internal;
-                    }
-                  }
+                  if (row !== null) pageRows.push(row);
                 }
-              } while (pageToken && seen < MAX_MESSAGES_PER_ACCOUNT);
-              // A token still in hand with the budget gone is the same
-              // truncation as the inner break: there is more, and this pass
-              // is not going to read it.
-              if (pageToken && seen >= MAX_MESSAGES_PER_ACCOUNT) capHit = true;
 
-              if (windowRows.length > 0) {
-                const totals = await ingest(windowRows);
-                inserted += totals?.inserted ?? 0;
-                updated += totals?.updated ?? 0;
-                unchanged += totals?.unchanged ?? 0;
-                rows.push(...windowRows);
-              }
-              return {
-                highest: highestIn,
-                lowest: Number.isFinite(lowestIn) ? lowestIn : 0,
-                capHit,
-                landed: windowRows.length,
-              };
+                if (pageRows.length > 0) {
+                  const totals = await ingest(pageRows);
+                  inserted += totals?.inserted ?? 0;
+                  updated += totals?.updated ?? 0;
+                  unchanged += totals?.unchanged ?? 0;
+                  rows.push(...pageRows);
+                  landed += pageRows.length;
+                }
+                const truncated = capHit || (!belowFloor && Boolean(pageToken));
+                onPage({
+                  highest: highestIn,
+                  lowest: Number.isFinite(lowestIn) ? lowestIn : 0,
+                  landed,
+                  truncated,
+                });
+              } while (!capHit && !belowFloor && pageToken && seen < MAX_MESSAGES_PER_ACCOUNT);
+
+              return { landed, truncated: capHit || (!belowFloor && Boolean(pageToken)) };
             };
 
-            const gapFromRaw = Number(state.getCursor(gapFromKey(account.email)));
-            const gapUntilRaw = Number(state.getCursor(gapUntilKey(account.email)));
-            const gap = Number.isFinite(gapFromRaw) && Number.isFinite(gapUntilRaw)
-              && gapFromRaw > 0 && gapUntilRaw > gapFromRaw
-              ? { from: gapFromRaw, until: gapUntilRaw }
-              : null;
+            const priorGap = readGap();
 
             // (a) THE FRESH WINDOW, first and always: new mail matters more
             // than an old hole, and after the first pass this window is a
             // handful of messages.
-            const fresh = await scanWindow({ q, minTs: stored > 0 ? floor : null, maxTs: null });
+            const fresh = await scanWindow({
+              q,
+              minTs: floor,
+              maxTs: null,
+              onPage: ({ highest, lowest, truncated }) => {
+                // The truthful state if the pass ended on this page. While
+                // anything remains below, that is a hole from the window's
+                // floor up to the lowest row read; the page that proves the
+                // window reached the bottom puts back whatever gap was there
+                // before (which the fresh window never covers, since its
+                // ceiling is at or below this window's floor).
+                writeGap(truncated && lowest > 0
+                  ? { from: Math.min(priorGap?.from ?? floor, floor), until: lowest }
+                  : priorGap);
+                if (highest > 0) state.setCursor(cursorKey(account.email), String(highest));
+              },
+            });
 
-            if (fresh.landed > 0 && fresh.highest > 0) {
-              // Advanced only from rows that landed -- AND, when the cap cut
-              // this window, only over the part above the hole recorded next.
-              state.setCursor(cursorKey(account.email), String(fresh.highest));
-            }
-
-            if (fresh.capHit && fresh.lowest > 0) {
-              // Truncated: [floor, fresh.lowest) was never listed. Record it.
-              // An existing gap is merged by keeping its (older) floor and
-              // raising the ceiling to this window's lowest landed row --
-              // which can re-cover a stretch already fetched between the old
-              // ceiling and the old cursor. That costs a dedupe on the next
-              // drain and loses nothing; representing two disjoint holes
-              // would need a list, and a list is a schema this connector does
-              // not have a migration for.
-              state.setCursor(gapFromKey(account.email), String(gap ? Math.min(gap.from, floor) : floor));
-              state.setCursor(gapUntilKey(account.email), String(fresh.lowest));
-            } else if (gap && seen < MAX_MESSAGES_PER_ACCOUNT) {
-              // (b) DRAIN THE GAP with whatever budget the fresh window left,
-              // newest-first from the ceiling down. Each truncated drain
-              // lowers the ceiling; a drain that finishes without hitting the
-              // cap has read the whole remaining hole, so both keys go.
-              const drain = await scanWindow({
-                q: `after:${Math.floor(gap.from / 1000) - 1} before:${Math.ceil(gap.until / 1000)}`,
-                minTs: gap.from - 1,
+            // (b) DRAIN THE GAP with whatever budget the fresh window left,
+            // newest-first from the ceiling down. Re-read rather than trusted
+            // from `priorGap`: the fresh window's own per-page writes are the
+            // authority on what is still missing.
+            const gap = fresh.truncated ? null : readGap();
+            if (gap !== null && seen < MAX_MESSAGES_PER_ACCOUNT) {
+              await scanWindow({
+                // `floor(until/1000) + 1` covers every tie inside `until`'s own
+                // second without widening a second further than that: above
+                // the ceiling there is no early exit to bound the waste (a
+                // message above `until` says nothing about the hole), so this
+                // side is kept as tight as the tie rule allows.
+                q: `after:${Math.floor(gap.from / 1000) - 1} before:${Math.floor(gap.until / 1000) + 1}`,
+                minTs: gap.from,
                 maxTs: gap.until,
+                onPage: ({ lowest, truncated }) => {
+                  // A drain that read to the bottom has read the whole
+                  // remaining hole: BOTH keys go, including the case where its
+                  // lowest row sits exactly on gap.from. Otherwise the ceiling
+                  // only ever comes DOWN. The cursor is never touched here —
+                  // the gap lives entirely below it.
+                  if (!truncated) {
+                    writeGap(null);
+                    return;
+                  }
+                  if (lowest > 0) writeGap({ from: gap.from, until: Math.min(gap.until, lowest) });
+                },
               });
-              if (drain.capHit && drain.lowest > 0) {
-                state.setCursor(gapUntilKey(account.email), String(drain.lowest));
-              } else if (!drain.capHit) {
-                state.deleteCursor(gapFromKey(account.email));
-                state.deleteCursor(gapUntilKey(account.email));
-              }
             }
           }
 
@@ -477,6 +659,10 @@ export function createMailSource({
             fetched: seen,
             rows: rows.length,
             pages: pagesFetched,
+            // Messages Gmail listed and then 404'd: deleted between the two
+            // calls. A count, never an id — and worth having, because a
+            // rising one means something else is deleting mail.
+            skipped,
             ...(yearly ? { historyYear: yearly.year } : {}),
           });
         } catch (error) {
