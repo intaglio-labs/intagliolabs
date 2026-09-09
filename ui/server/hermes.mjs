@@ -88,7 +88,9 @@ import { createEngine, createLookupEngine } from './relationship/engines.mjs';
 import { eligiblePool, produceBatch, PRODUCER_VERSION } from './relationship/producer.mjs';
 import { produceOweBatch, OWE_PRODUCER_VERSION } from './relationship/owe.mjs';
 import { createDraft, existingDrafts } from './relationship/draft.mjs';
-import { CARD_PRODUCERS, REFILL_RETRY_MS, produceDailyBatch, isSnapshotConsumed } from './relationship/daily.mjs';
+import {
+  CARD_PRODUCERS, REFILL_RETRY_MS, LIVE_WINDOW_MS, produceDailyBatch, isSnapshotLive,
+} from './relationship/daily.mjs';
 import { cardStats } from './relationship/controls.mjs';
 import {
   clearPeopleSearchCacheStorage,
@@ -3029,9 +3031,20 @@ function hydrateCards(db, policy) {
       }
     }
 
+    // THE AGE BOUND, AND WHY ONLY HERE (review F finding 4, and daily.mjs's
+    // LIVE model). A restored batch older than LIVE_WINDOW_MS is not a queue
+    // any more: the cross-kind exclusion had already let its people go, so
+    // restoring it made the turn check hold a card nobody could be offered
+    // while the other producer was free to offer them. It is applied to
+    // exactly the kinds the version-staleness gate covers, for the same
+    // reason: the matcher path's queue can only be refilled by an explicit
+    // /refresh, so dropping an old matcher batch would put the orb out with
+    // nothing able to relight it. The eligibility-family producers refill
+    // synchronously on the next request, so for them dropping IS the refill.
+    const freshSince = Date.now() - LIVE_WINDOW_MS;
     const oweLatest = db.prepare(
-      "SELECT MAX(batch_id) AS batchId FROM rm_candidate_snapshot WHERE kind = 'owe'"
-    ).get();
+      "SELECT MAX(batch_id) AS batchId FROM rm_candidate_snapshot WHERE kind = 'owe' AND created_at > ?"
+    ).get(freshSince);
     loadBatch('owe', oweLatest?.batchId != null ? Number(oweLatest.batchId) : null);
 
     if (eligibilityReconnect) {
@@ -3043,8 +3056,8 @@ function hydrateCards(db, policy) {
       for (const m of RELATIONSHIP_MODES) {
         const latest = db.prepare(
           "SELECT MAX(batch_id) AS batchId FROM rm_candidate_snapshot " +
-          "WHERE kind = 'reconnect' AND json_extract(evidence, '$.mode') = ?"
-        ).get(m);
+          "WHERE kind = 'reconnect' AND created_at > ? AND json_extract(evidence, '$.mode') = ?"
+        ).get(freshSince, m);
         loadBatch('reconnect', latest?.batchId != null ? Number(latest.batchId) : null, m);
       }
     } else {
@@ -3540,6 +3553,18 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // answers a TEASE (name/kind/counters) rather than the whole card --
     // the panel's own pull is what serves the receipt.
     const peek = url.searchParams.get('peek') === '1';
+    // ?expect=<snapshot_id> -- WHAT A PEEK PROMISED (review F finding 13, and
+    // daily.mjs's LIVE model). A peek answers with the snapshot_id it would
+    // serve; the panel's own pull hands it back here, and if that snapshot is
+    // still live and servable it is the one served, whatever has happened to
+    // the ordering since. It is not a capability: it can only name a card
+    // already in this process's queue that this request would already be
+    // allowed to serve, and it does not bypass the cap, the mode filter or
+    // the servability gate. A stale or unknown value is IGNORED (not an
+    // error): the card it named was judged, muted or expired between the two
+    // requests, which is the ordinary case and not something to fail on.
+    const expectRaw = url.searchParams.get('expect');
+    const expect = expectRaw !== null && /^\d+$/u.test(expectRaw) ? Number(expectRaw) : null;
     const rel = relationshipState(db, policy);
     const cap = relationshipCap(policy);
     if (!cap) { send(res, 200, { card: null, reason: 'no-cap-configured' }, cors); return; }
@@ -3565,13 +3590,35 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     let servingKind = null;
     if (producerConfig.producer === 'eligibility' && !rel.refreshing) {
       const now = Date.now();
+      // The owner's own addresses, for owe.mjs's mail participant guard
+      // (review F finding 12): a message the owner is on twice under two of
+      // their own addresses has one counterparty, not two. Read once per
+      // process from the same local config people/graph.mjs takes its
+      // identity from -- owe.mjs holds none of its own, deliberately.
+      if (rel.ownerAddresses === undefined) {
+        try { rel.ownerAddresses = loadOwner().addresses ?? null; } catch { rel.ownerAddresses = null; }
+      }
+      const reconnectMode = rel.mode ?? producerConfig.mode;
+      // The cross-kind exclusion, narrowed to the queue THIS route would
+      // serve from -- daily.mjs's one LIVE definition, same five clauses as
+      // the turn check and the serve loop below (review F findings 4 and 8).
+      // Without the mode an off-mode reconnect card held its person out of
+      // Owe for a week while never being servable; without `servable` a card
+      // whose quote row was deleted did the same.
+      const reconnectLiveFilter = {
+        mode: reconnectMode,
+        ...(producerConfig.producer === 'eligibility' ? { producerVersion: PRODUCER_VERSION } : {}),
+        servable: (card) => cardBlockReason(db, rel, card) === null,
+      };
       const dailyPolicy = {
         producers: {
-          owe: (dailyDb, { now: at }) => produceOweBatch(dailyDb, { now: at }),
+          owe: (dailyDb, { now: at }) => produceOweBatch(dailyDb, {
+            now: at, liveFilter: reconnectLiveFilter, ownerAddresses: rel.ownerAddresses,
+          }),
           // The owner's last pick from the mode picker wins over the config
           // default: a refill on an empty queue must keep serving the mode
           // they asked for, not quietly widen back to 'any'.
-          reconnect: (dailyDb, { now: at }) => produceBatch(dailyDb, { mode: rel.mode ?? producerConfig.mode, now: at }),
+          reconnect: (dailyDb, { now: at }) => produceBatch(dailyDb, { mode: reconnectMode, now: at }),
         },
         // A card carried in rel.cards under a producer_version this producer
         // no longer runs (see CURRENT_PRODUCER_VERSION / hydrateCards above)
@@ -3594,8 +3641,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         // blocks a DIFFERENT mode the owner switches to next. Owe has no
         // modes -- modeFor/refillKey return undefined/'owe' for it, the same
         // plain per-kind behavior as before this follow-on.
-        modeFor: (kind) => (kind === 'reconnect' ? (rel.mode ?? producerConfig.mode) : undefined),
-        refillKey: (kind) => (kind === 'reconnect' ? reconnectRefillKey(rel.mode ?? producerConfig.mode) : kind),
+        modeFor: (kind) => (kind === 'reconnect' ? reconnectMode : undefined),
+        refillKey: (kind) => (kind === 'reconnect' ? reconnectRefillKey(reconnectMode) : kind),
         onBatchProduced: (kind, batchId, cards) => {
           if (cards.length > 0) startPageBuilds(db, policy, rel, batchId, cards);
         },
@@ -3647,25 +3694,77 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // this ordering just happens to also work for them, since an Owe card
     // with no page falls into `withoutPage` and still serves in rank order.
     //
-    // "Live" is daily.mjs's CONSUMED model, the same predicate the refill
+    // "Live" is daily.mjs's LIVE model, the same predicate the refill
     // decision above used: not consumed (accepted/dismissed/muted/
-    // suppressed) AND servable right now. The old filter here counted only
-    // accepted/dismissed, so a muted or unresolvable card was walked past
-    // on every request while still holding its producer's turn.
+    // suppressed), inside the window, AND servable right now. The old filter
+    // here counted only accepted/dismissed, so a muted or unresolvable card
+    // was walked past on every request while still holding its producer's
+    // turn.
     const liveCards = [];
     const blockedReasons = [];
     for (const card of servingQueue) {
-      if (isSnapshotConsumed(db, card.snapshot_id)) continue;
+      if (!isSnapshotLive(db, card.snapshot_id, { now: Date.now() })) continue;
       const block = cardBlockReason(db, rel, card);
       if (block !== null) { blockedReasons.push(block); continue; }
       liveCards.push(card);
     }
-    const withPage = [];
-    const withoutPage = [];
-    for (const card of liveCards) {
-      (hasBuiltPage(readPersonPage(db, card.personKey)) ? withPage : withoutPage).push(card);
+
+    // THE ORDER IS LIVE, AND TOTAL WITHIN A REQUEST (review F finding 13).
+    // Page-first is RE-DERIVED on every request, deliberately: a page
+    // finishing in the background is precisely the event that should promote
+    // its candidate, which is the whole point of preferring what is ready now
+    // (relationship-pages.test.mjs's rank-one/rank-two fixture is that
+    // promise written down -- pinning the decision at first sight breaks it).
+    // What was actually wrong was that the order was not TOTAL: inside a page
+    // group it fell back to wherever a spread had left rel.cards. So the sort
+    // is explicit and complete now -- page-first, then rank (rel.cards order,
+    // which is the producers' own ranking), then snapshot_id, monotonic
+    // within a batch -- and peek/serve consistency comes from the `expect`
+    // contract below rather than from freezing an order that has a legitimate
+    // reason to move.
+    const rankOf = new Map(rel.cards.map((c, i) => [c.snapshot_id, i]));
+    const pageFirst = new Map(
+      liveCards.map((c) => [c.snapshot_id, hasBuiltPage(readPersonPage(db, c.personKey)) ? 0 : 1])
+    );
+    const orderedCards = [...liveCards].sort((a, b) =>
+      pageFirst.get(a.snapshot_id) - pageFirst.get(b.snapshot_id)
+      || (rankOf.get(a.snapshot_id) ?? 0) - (rankOf.get(b.snapshot_id) ?? 0)
+      || a.snapshot_id - b.snapshot_id
+    );
+
+    // `expect` IS THE PROMISE. A peek answers with the snapshot_id it would
+    // serve right now; the panel hands that straight back here, and if the
+    // snapshot is still live and servable it is the one served, whatever the
+    // ordering has done in between. Looked up in this request's own serving
+    // queue first; failing that, in the whole in-process queue re-gated by
+    // hand, because the turn can have flipped between the peek and the pull
+    // (a serve on another surface writes 'shown', which is what pickProducer
+    // reads) and the card the owner was actually teased is the card they
+    // asked for. Every gate the ordinary path applies is applied here too:
+    // live, servable, in the owner's mode.
+    //
+    // A SUPERSEDED expect IS NEITHER AN ERROR NOR A REFUSAL. The card it
+    // named was judged, muted or expired between the two requests, which is
+    // ordinary: the current head is served and the response SAYS SO
+    // (`reason: 'expect-superseded'` beside a non-null card), so the panel
+    // can tell "here is the one you asked for" from "that one is gone, here
+    // is the next". Nothing else changes -- the cap is still spent, 'shown'
+    // is still recorded once per snapshot, and a peek carrying `expect`
+    // still records nothing.
+    let expectSuperseded = false;
+    if (expect !== null) {
+      const promised = orderedCards.findIndex((c) => c.snapshot_id === expect);
+      if (promised > 0) {
+        orderedCards.unshift(...orderedCards.splice(promised, 1));
+      } else if (promised === -1) {
+        const teased = rel.cards.find((c) => c.snapshot_id === expect
+          && (c.kind !== 'reconnect' || rel.mode == null || c.evidence?.mode === rel.mode)
+          && isSnapshotLive(db, c.snapshot_id, { now: Date.now() })
+          && cardBlockReason(db, rel, c) === null);
+        if (teased) orderedCards.unshift(teased);
+        else expectSuperseded = true;
+      }
     }
-    const orderedCards = [...withPage, ...withoutPage];
     let capBlocked = false;
 
     for (const card of orderedCards) {
@@ -3701,7 +3800,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
             overdueDays: card.evidence?.overdueDays ?? null,
             owe_kind: card.evidence?.owe_kind ?? null,
           },
-        } }, cors);
+        }, ...(expectSuperseded ? { reason: 'expect-superseded' } : {}) }, cors);
         return;
       }
       // Resolve the quote from the LIVE row. Row gone or edited: the receipt
@@ -3776,6 +3875,9 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       send(res, 200, { card: { ...card, quote, sentence, left, leftTone, who: page.sections.who?.text ?? null, page, changed, drafts },
         servedMode: card.kind === 'reconnect' ? (card.evidence?.mode ?? rel.mode ?? null) : null,
         mode: rel.mode ?? null,
+        // The card asked for is gone; this is the next one. A reason BESIDE a
+        // non-null card, which no other branch of this route produces.
+        ...(expectSuperseded ? { reason: 'expect-superseded' } : {}),
         ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
       return;
     }
