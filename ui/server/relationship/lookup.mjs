@@ -68,6 +68,18 @@ export const LOOKUP_REFRESH_DAYS = Object.freeze({ eligible: 30, tagged: 30, oth
 // need not guess why the number matters, not as the enforcement itself.
 export const LOOKUP_MAX_SEARCHES = 2;
 
+// The hard ceiling on how much third-party article text ONE lookup may store
+// in lookup_evidence, and on how much of it the evidence route will hand
+// back. The column's own comment used to call it "verbatim" with no bound at
+// all: the only limit was the engine's 5MB stdout buffer (engines.mjs), which
+// truncates mid-line -- so a pathological result set could put multiple
+// megabytes of somebody else's web page into the database per lookup and
+// then serve all of it over HTTP in one response. VERBATIM NOW MEANS
+// VERBATIM UP TO THIS CAP: past it the text is cut and
+// lookup_evidence.truncated is set to 1, so a reader can tell a complete
+// article from a clipped one instead of trusting the word "verbatim".
+export const LOOKUP_RESULT_TEXT_CAP = 200_000;
+
 // Hosts and host patterns a lookup's own citations may never resolve to,
 // regardless of what the model claims found them. Two different failure
 // modes, both closed here: a host that could only ever be internal
@@ -328,6 +340,12 @@ export function buildLookupQuery(anchors) {
 //                 counted by code, never taken from anything the model says
 //                 about itself.
 //   costUsd       the terminal result line's total_cost_usd, or null.
+//   linksParseFailed  true when a `Links:` block WAS present in some
+//                 tool_result and could not be read as an array. Recorded on
+//                 lookup_evidence (links_parse_failed) rather than merely
+//                 degrading to zero URLs, because "the provider's format
+//                 drifted" and "the search returned no links" must not be
+//                 the same observation -- see findLinksBlock.
 //
 // FAILS CLOSED BY CONSTRUCTION: a line that is not JSON is skipped, not
 // thrown on; a tool_result whose text has no parseable `Links: [...]` array
@@ -350,15 +368,99 @@ export function buildLookupQuery(anchors) {
 //     present-tense "now at Verily, not Klaviyo");
 //   - the REMINDER tail is an instruction to the model, not content.
 const SEARCH_HEADER_RE = /^Web search results for query:[^\n]*\n+/u;
-const SEARCH_LINKS_RE = /Links:\s*(\[[\s\S]*?\])\n\n/u;
+const SEARCH_LINKS_LABEL_RE = /Links:\s*\[/u;
 const SEARCH_REMINDER_RE = /\n+REMINDER:[\s\S]*$/u;
 
+// findLinksBlock(text): the `Links:` label and the BALANCED JSON array after
+// it, located by scanning brackets rather than by matching a terminator.
+//
+// The old reader was `/Links:\s*(\[[\s\S]*?\])\n\n/` -- lazy up to the first
+// `]` FOLLOWED BY A BLANK LINE. Two silent failures lived in that: an entry
+// whose own title contains `]` ended the array early (the JSON.parse then
+// failed and the whole tool_result contributed zero URLs), and a provider
+// that stops emitting exactly two newlines after the array -- one newline, a
+// CRLF, or the array at the very end of the text -- matched nothing at all,
+// which left the entire `Links:` blob INSIDE snippetText. That second case
+// is the dangerous one: every title then reads as the provider's synthesized
+// prose, so evidenceKindFor answers 'snippet' for a title, and the whole
+// title-only machinery (the present-tense drop, the 'ambiguous' downgrade)
+// reverts with nothing logged to say it did. Both are closed by scanning:
+// depth counting with string/escape awareness finds the real end of the
+// array wherever it is, and the label's own position is what snippetOnly
+// cuts from, so no trailing-newline convention is load-bearing any more.
+//
+// Returns {labelStart, start, end, json} or null. `parsed` is left to the
+// caller: a block that is found but does not parse is a DIFFERENT fact from
+// a block that is not there (see linksParseFailed in parseLookupStream).
+function findLinksBlock(text, fromIndex = 0) {
+  const s = String(text ?? '');
+  const rest = s.slice(fromIndex);
+  const label = rest.search(SEARCH_LINKS_LABEL_RE);
+  if (label === -1) return null;
+  const labelStart = fromIndex + label;
+  const open = s.indexOf('[', labelStart);
+  if (open === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = open; i < s.length; i++) {
+    const ch = s[i];
+    if (inString) {
+      if (escaped) { escaped = false; continue; }
+      if (ch === '\\') { escaped = true; continue; }
+      if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '[') depth += 1;
+    else if (ch === ']') {
+      depth -= 1;
+      if (depth === 0) return { labelStart, start: open, end: i + 1, json: s.slice(open, i + 1) };
+    }
+  }
+  // Unterminated: the array really does run off the end of this text (a
+  // truncated tool_result). Report the label so snippetOnly still cuts it.
+  return { labelStart, start: open, end: s.length, json: s.slice(open) };
+}
+
+// parseLinksBlock(json): JSON.parse, with an incremental end search as the
+// fallback for a block whose balance was right but whose text still will not
+// parse (a truncated array, a trailing comma). Bounded: at most the first 64
+// `]` positions are tried, newest-shortest first, so a pathological blob
+// cannot turn one tool_result into a scan of the whole article.
+function parseLinksBlock(json) {
+  const s = String(json ?? '');
+  try {
+    const v = JSON.parse(s);
+    if (Array.isArray(v)) return v;
+  } catch {
+    // fall through to the incremental search
+  }
+  let tried = 0;
+  for (let i = s.length - 1; i >= 0 && tried < 64; i--) {
+    if (s[i] !== ']') continue;
+    tried += 1;
+    try {
+      const v = JSON.parse(s.slice(0, i + 1));
+      if (Array.isArray(v)) return v;
+    } catch {
+      // keep walking backward
+    }
+  }
+  return null;
+}
+
 function snippetOnly(text) {
-  return text
-    .replace(SEARCH_HEADER_RE, '')
-    .replace(SEARCH_LINKS_RE, '')
-    .replace(SEARCH_REMINDER_RE, '')
-    .trim();
+  let s = String(text ?? '').replace(SEARCH_HEADER_RE, '');
+  // Every Links block, not just the first: one tool_result can carry more
+  // than one search's results, and a block left behind is a title that
+  // grounding would read as prose.
+  for (let guard = 0; guard < 8; guard++) {
+    const block = findLinksBlock(s);
+    if (!block) break;
+    s = s.slice(0, block.labelStart) + s.slice(block.end);
+  }
+  return s.replace(SEARCH_REMINDER_RE, '').trim();
 }
 
 export function parseLookupStream(stdoutText) {
@@ -370,6 +472,13 @@ export function parseLookupStream(stdoutText) {
   let costUsd = null;
   let envelopeText = null;
   let error = null;
+  // A `Links:` block was PRESENT and could not be read as an array of
+  // entries. Distinct from "no Links block at all": the second is a
+  // tool_result shape we understand contributing nothing, the first is the
+  // provider's format having drifted out from under this reader, and it must
+  // never be indistinguishable from "the search returned no links" -- see
+  // findLinksBlock's own note on the silent reversion that hid here.
+  let linksParseFailed = false;
 
   const lines = String(stdoutText ?? '').split('\n');
   for (const raw of lines) {
@@ -405,24 +514,30 @@ export function parseLookupStream(stdoutText) {
           resultText += (resultText.length > 0 ? '\n' : '') + text;
           const snippet = snippetOnly(text);
           if (snippet.length > 0) snippetText += (snippetText.length > 0 ? '\n' : '') + snippet;
-          const m = text.match(SEARCH_LINKS_RE);
-          if (!m) continue; // no parseable Links array in this tool_result -- contributes zero URLs
-          try {
-            const links = JSON.parse(m[1]);
-            if (Array.isArray(links)) {
-              for (const link of links) {
-                if (typeof link?.url !== 'string' || link.url.length === 0) continue;
-                urls.add(link.url);
-                if (!linkByUrl.has(link.url)) {
-                  linkByUrl.set(link.url, {
-                    title: typeof link.title === 'string' ? link.title : '',
-                    url: link.url,
-                  });
-                }
+          // Every Links block in this tool_result, located by the bracket
+          // scanner rather than by a trailing-newline convention.
+          let from = 0;
+          for (let guard = 0; guard < 8; guard++) {
+            const block = findLinksBlock(text, from);
+            if (!block) break;
+            from = block.end;
+            const links = parseLinksBlock(block.json);
+            if (links === null) {
+              // Present but unreadable -- fail closed (zero URLs, so every
+              // change fails grounding) AND record that it happened.
+              linksParseFailed = true;
+              continue;
+            }
+            for (const link of links) {
+              if (typeof link?.url !== 'string' || link.url.length === 0) continue;
+              urls.add(link.url);
+              if (!linkByUrl.has(link.url)) {
+                linkByUrl.set(link.url, {
+                  title: typeof link.title === 'string' ? link.title : '',
+                  url: link.url,
+                });
               }
             }
-          } catch {
-            // malformed Links array -- fail closed, contribute zero URLs
           }
         }
       }
@@ -435,12 +550,17 @@ export function parseLookupStream(stdoutText) {
 
   return {
     envelopeText, urls, links: [...linkByUrl.values()], resultText, snippetText, searches, costUsd,
+    linksParseFailed,
     ...(error ? { error } : {}),
   };
 }
 
 const LOOKUP_CHANGE_KINDS = Object.freeze(['role', 'company', 'raise', 'launch', 'move', 'other']);
 const LOOKUP_CHANGE_CAP = 3;
+// The two kinds prompts/public_lookup.md marks `date` REQUIRED for: a change
+// of EMPLOYER. Both groundLookup and storeLookup refuse an undated one -- see
+// groundLookup's own note (review finding 8) for the one exemption.
+const DATED_LOOKUP_KINDS = new Set(['move', 'company']);
 
 // --- Evidence strength, and the anchor a lookup contradicts ---------------
 //
@@ -481,9 +601,16 @@ const FIRM_NOISE_TOKENS = new Set([
   'plc', 'gmbh', 'ag', 'sa', 'bv', 'nv', 'pbc', 'the',
 ]);
 
+// POSSESSIVES ARE NORMALISED BEFORE ANYTHING ELSE, and the order matters:
+// stripping the apostrophe first turned "Klaviyo's" into the token
+// "klaviyos", which is not "klaviyo", so every sentence phrased "Klaviyo's
+// engineering team" read as naming a company we had never heard of -- a
+// false contradiction of the anchor, on the owner's own firm. The `'s` goes
+// first, THEN the remaining apostrophes.
 function firmTokens(value) {
   return String(value ?? '')
     .toLowerCase()
+    .replace(/[‘’ʼ']s\b/gu, '')
     .replace(/[‘’ʼ']/gu, '')
     .split(/[^\p{L}\p{N}]+/u)
     .filter((t) => t.length > 0 && !FIRM_NOISE_TOKENS.has(t));
@@ -513,18 +640,35 @@ export function sameFirm(a, b) {
 const CAP_WORD = "[A-Z][\\p{L}\\p{N}&.'\\u2019-]*";
 const CAP_PHRASE = `${CAP_WORD}(?:[ ](?:of |and |the |for |de )?${CAP_WORD}){0,3}`;
 
-// Employment-bearing phrasings, safe to read on a change of ANY kind: each
-// one states a relationship between a person and a company outright.
-const EMPLOYER_PATTERNS = [
+// DEPARTURE phrasings. These are read on a change of ANY kind, and they are
+// the ONE family whose captured name is useful even when nothing corroborates
+// it -- because what matters about a departure is whether the company being
+// left is the anchor we sent. "left Klaviyo" with anchor Klaviyo is a
+// contradiction of the anchor whether or not a second company is named
+// anywhere (review finding 9: such a change used to be stored as an ordinary
+// 'move' and served on the card while pending). A departure naming some other
+// company is simply ignored, which is why a sloppy capture here cannot
+// produce a false positive.
+const DEPARTURE_PATTERNS = [
   `\\bnot\\s+(${CAP_PHRASE})`,
-  `\\bno longer\\s+(?:at|with|works at|working at)\\s+(${CAP_PHRASE})`,
-  `\\b(?:joins|joined|is joining|has joined)\\s+(${CAP_PHRASE})`,
-  `\\b(?:moved|moves|has moved|relocated)\\s+to\\s+(${CAP_PHRASE})`,
-  `\\bnow\\s+(?:at|with)\\s+(${CAP_PHRASE})`,
-  `\\b(?:left|departed)\\s+(${CAP_PHRASE})`,
-  `\\bhired by\\s+(${CAP_PHRASE})`,
+  `\\bno longer\\s+(?:at|with|works at|working at|employed by)\\s+(${CAP_PHRASE})`,
+  `\\b(?:left|departed|has left|is leaving|departing)\\s+(${CAP_PHRASE})`,
 ].map((p) => new RegExp(p, 'gu'));
 
+// EMPLOYER-NAMING shapes, deliberately narrowed to the two that search
+// results actually carry -- `Role at Company` and `Name - Role - Company` --
+// after review finding 2 caught the wider set inventing employers:
+//
+//   - `moved/relocated to X` matched "moved to San Francisco", so a CITY
+//     became a company that disagreed with the anchor. Removed outright: a
+//     lookup change of kind 'move' is about a change of employer in this
+//     schema, and "moved to" in English is more often about a place.
+//   - `joins/joined/hired by X` stated employment honestly enough, but named
+//     companies that nothing in the returned results corroborated. Dropped
+//     with the same reasoning as the corroboration rule below: a company
+//     that exists only inside the model's own sentence is not an observation.
+//   - `now at/with X` is covered by the bare `at X` reading below.
+//
 // A bare "at X" only names an employer when the change itself claims to be
 // about a role, a company or a move -- otherwise "spoke at Web Summit" would
 // read as an employer. Same reasoning for the LinkedIn-title shape.
@@ -538,15 +682,53 @@ const TITLE_VENUES = new Set([
   'substack', 'bloomberg', 'wellfound', 'angellist',
 ]);
 
-// "Nikzad Khani - Software Engineer - Verily | LinkedIn" -> "Verily". Needs
-// at least three segments after the venue tail is trimmed: a two-segment
-// title ("Jane Doe | LinkedIn") names no company at all.
+// Corporate-form tokens that mark a segment as an ORGANISATION even though
+// it carries a comma ("Klaviyo, Inc."), so the location rule below cannot
+// eat a company whose own name is comma-shaped.
+const CORPORATE_FORM_RE = /\b(?:inc|llc|llp|ltd|limited|corp|corporation|co|company|plc|gmbh|ag|sa|bv|nv|pbc)\b/iu;
+// A LinkedIn page title's own tail is a PLACE: "Nikzad Khani - Klaviyo -
+// Boston, Massachusetts | LinkedIn". Read as a company (which it was before
+// review finding 2), the owner's own firm anchor "disagreed" with a city and
+// every LinkedIn-titled lookup flagged itself.
+const LOCATION_HINT_RE = /\b(?:area|region|metro|metropolitan|greater)\b/iu;
+const US_STATE_NAMES = new Set([
+  'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado', 'connecticut', 'delaware',
+  'florida', 'georgia', 'hawaii', 'idaho', 'illinois', 'indiana', 'iowa', 'kansas', 'kentucky',
+  'louisiana', 'maine', 'maryland', 'massachusetts', 'michigan', 'minnesota', 'mississippi',
+  'missouri', 'montana', 'nebraska', 'nevada', 'new hampshire', 'new jersey', 'new mexico',
+  'new york', 'north carolina', 'north dakota', 'ohio', 'oklahoma', 'oregon', 'pennsylvania',
+  'rhode island', 'south carolina', 'south dakota', 'tennessee', 'texas', 'utah', 'vermont',
+  'virginia', 'washington', 'west virginia', 'wisconsin', 'wyoming',
+  'district of columbia', 'united states', 'united kingdom', 'england', 'canada', 'ireland',
+]);
+
+function looksLikeLocation(segment) {
+  const s = String(segment ?? '').trim();
+  if (s.length === 0) return false;
+  if (CORPORATE_FORM_RE.test(s)) return false;
+  if (s.includes(',')) return true;
+  if (LOCATION_HINT_RE.test(s)) return true;
+  return US_STATE_NAMES.has(s.toLowerCase());
+}
+
+// "Nikzad Khani - Software Engineer - Verily | LinkedIn" -> "Verily";
+// "Nikzad Khani - Klaviyo - Boston, Massachusetts | LinkedIn" -> "Klaviyo",
+// never the city. Needs at least three segments once the venue tail is
+// trimmed -- a two-segment title ("Jane Doe | LinkedIn") names no company at
+// all -- but only two once a LOCATION tail has been trimmed as well, because
+// that is the `Name - Company - Place` shape LinkedIn actually emits.
 function companyFromTitleShape(text) {
   const segments = String(text ?? '').split(/\s+[-–—|]\s+/u).map((s) => s.trim()).filter(Boolean);
   while (segments.length > 0 && TITLE_VENUES.has(segments[segments.length - 1].toLowerCase())) {
     segments.pop();
   }
-  return segments.length >= 3 ? segments[segments.length - 1] : null;
+  let droppedLocation = false;
+  while (segments.length > 0 && looksLikeLocation(segments[segments.length - 1])) {
+    segments.pop();
+    droppedLocation = true;
+  }
+  const minimum = droppedLocation ? 2 : 3;
+  return segments.length >= minimum ? segments[segments.length - 1] : null;
 }
 
 function collect(re, text, into) {
@@ -560,12 +742,13 @@ function collect(re, text, into) {
 }
 
 // companiesNamed(text, kind): every company name this change's own words
-// point at. `kind` widens the reading to bare "at X" and the LinkedIn-title
-// shape for the three kinds that claim to be about employment.
+// point at, via the two employer-naming shapes above -- bare "at X" and the
+// LinkedIn-title shape -- and only for the three kinds that claim to be
+// about employment. A change of any other kind names no employer here, which
+// is why "spoke at Web Summit" on a 'launch' is not read as a job.
 export function companiesNamed(text, kind) {
   const s = String(text ?? '');
   const out = new Set();
-  for (const re of EMPLOYER_PATTERNS) collect(re, s, out);
   if (FIRM_BEARING_KINDS.has(kind)) {
     collect(AT_PATTERN, s, out);
     const titled = companyFromTitleShape(s);
@@ -574,14 +757,65 @@ export function companiesNamed(text, kind) {
   return [...out];
 }
 
-// contradictsAnchorFirm(change, firm): does this change name a company that
-// is not the firm anchor we sent? Reads BOTH text and quote -- 4520's text
-// named Verily in prose and its quote named Verily in a title, and either
-// alone is enough.
-export function contradictsAnchorFirm({ kind, text, quote }, firm) {
+// departuresNamed(text): the companies this text says the person has LEFT.
+// Read on every kind -- a departure is a statement about employment whatever
+// the model filed the change as.
+export function departuresNamed(text) {
+  const s = String(text ?? '');
+  const out = new Set();
+  for (const re of DEPARTURE_PATTERNS) collect(re, s, out);
+  return [...out];
+}
+
+// titleCompanies(observed): the companies extractable from the titles this
+// lookup's own search RETURNED. This is the corroboration set -- see
+// contradictsAnchorFirm.
+export function titleCompanies(observed) {
+  const links = Array.isArray(observed?.links) ? observed.links : [];
+  const out = new Set();
+  for (const link of links) {
+    const company = companyFromTitleShape(link?.title);
+    if (company) out.add(company);
+  }
+  return [...out];
+}
+
+// contradictsAnchorFirm(change, firm, {titles}): does this change disagree
+// with the firm anchor we sent?
+//
+// TWO WAYS, and only two:
+//
+//  1. DEPARTURE FROM THE ANCHOR. The change says the person left, or is no
+//     longer at, or is "not", the very firm we sent. No second company is
+//     needed and none is looked for: "left Klaviyo" with anchor Klaviyo is a
+//     competing claim about where this person works, and review finding 9
+//     caught it being stored as an ordinary 'move' and shown on the card.
+//
+//  2. A CORROBORATED OTHER COMPANY. The change names a company that is not
+//     the anchor AND that company also appears as the company position of a
+//     title the search actually returned. The corroboration requirement is
+//     the fix for review finding 2: without it, any capitalized phrase the
+//     model happened to put after "at" -- a conference, a city, a product --
+//     rewrote the change's kind to 'company', withheld it from the card and
+//     downgraded the whole log to 'ambiguous'. With it, the disagreement has
+//     to be visible in what came back, not only in what the model wrote.
+//
+// `titles` defaults to empty, which leaves rule 1 in force and rule 2 unable
+// to fire -- the conservative direction for a caller with no stream in hand
+// (storeLookup called without `observed`).
+//
+// lookup_log 4520 still trips BOTH rules: its text "at Verily, not Klaviyo
+// as previously recorded" is a departure from the anchor Klaviyo, and its
+// quote is the returned title whose own company position is Verily.
+export function contradictsAnchorFirm({ kind, text, quote }, firm, { titles = [] } = {}) {
   if (typeof firm !== 'string' || firmTokens(firm).length === 0) return false;
+  for (const left of [...departuresNamed(text), ...departuresNamed(quote)]) {
+    if (sameFirm(left, firm)) return true;
+  }
+  const corroborated = Array.isArray(titles) ? titles : [];
+  if (corroborated.length === 0) return false;
   const named = [...companiesNamed(text, kind), ...companiesNamed(quote, kind)];
-  return named.some((c) => !sameFirm(c, firm));
+  return named.some((c) => !sameFirm(c, firm) && corroborated.some((t) => sameFirm(c, t)));
 }
 
 // Words that assert a state holds RIGHT NOW. A title cannot support one:
@@ -589,10 +823,18 @@ export function contradictsAnchorFirm({ kind, text, quote }, firm) {
 // and this is the code that does not take the prompt's word for it.
 const PRESENT_TENSE_RE = /\b(?:now|currently|presently|no longer|these days|as of today)\b/iu;
 
-// evidenceKindFor(quote, observed): 'snippet' when the quote is a verbatim
-// span of the provider's synthesized prose, 'title' when it only matches one
-// of the returned `Links:` titles, null when it is neither -- which is a
-// grounding failure, not a weak change.
+// evidenceKindFor(quote, observed): 'title' when the quote is (or is inside)
+// one of the returned `Links:` titles, 'snippet' when it is a verbatim span
+// of the provider's synthesized prose and no title carries it, null when it
+// is neither -- which is a grounding failure, not a weak change.
+//
+// TITLE IS CHECKED FIRST, and that ordering is review finding 13. A provider
+// routinely echoes a page's title inside its own summary prose, so a quote
+// that is a title AND appears in prose used to answer 'snippet' -- which is
+// exactly the strong-evidence answer, and it bypassed every title-only rule
+// (the present-tense drop, the 'ambiguous' downgrade) for the one quote
+// shape that caused lookup_log 4520. A title does not become a published
+// statement about somebody by being repeated.
 //
 // The `snippetText ?? resultText` fallback keeps every hand-built `observed`
 // fixture (and any caller predating the split) working: without the split,
@@ -600,14 +842,14 @@ const PRESENT_TENSE_RE = /\b(?:now|currently|presently|no longer|these days|as o
 export function evidenceKindFor(quote, observed) {
   const q = String(quote ?? '');
   if (q.length === 0) return null;
-  const snippetText = typeof observed?.snippetText === 'string'
-    ? observed.snippetText
-    : String(observed?.resultText ?? '');
-  if (snippetText.includes(q)) return 'snippet';
   const links = Array.isArray(observed?.links) ? observed.links : [];
   for (const link of links) {
     if (typeof link?.title === 'string' && link.title.length > 0 && link.title.includes(q)) return 'title';
   }
+  const snippetText = typeof observed?.snippetText === 'string'
+    ? observed.snippetText
+    : String(observed?.resultText ?? '');
+  if (snippetText.includes(q)) return 'snippet';
   return null;
 }
 
@@ -636,56 +878,97 @@ export function evidenceKindFor(quote, observed) {
 //   contradictsAnchor  true when the change names a company that is not the
 //                      firm anchor -- kept, refiled as kind 'company', and
 //                      withheld from the card while pending.
+//
+// A move/company change with no YYYY-MM date is DROPPED here, which
+// prompts/public_lookup.md has asked of the model since v2 ("`date` is
+// REQUIRED for kind move and company") and nothing enforced (review finding
+// 8). The one exemption is an anchor contradiction: that row is a review
+// item about WHICH firm this person is at, deliberately stored so the owner
+// can judge the disagreement, and dropping it for want of a date would put
+// us back to silently discarding exactly the 4520 shape.
+//
+// Every reason a change can be dropped, as a FIXED CODE. Nothing
+// model-controlled is ever interpolated into one (review finding 14): these
+// strings are counted, logged and read on the desk, and a drop reason that
+// can carry arbitrary model text is a log-injection seam for no benefit --
+// the model's own claims are already recorded, validated, in their own
+// columns.
+export const LOOKUP_DROP_REASONS = Object.freeze({
+  noEnvelope: 'no envelope',
+  notMatch: 'identity_confidence is not "match"',
+  notAnObject: 'change is not an object',
+  badKind: 'kind is not one of the six',
+  badText: 'text is missing, empty, or over 200 characters',
+  badQuote: 'quote is missing or empty',
+  ungroundedQuote: 'quote is not a verbatim substring of a search result',
+  missingUrl: 'url is missing',
+  unparseableUrl: 'url does not parse',
+  notHttps: 'url is not https',
+  deniedHost: 'url host is denylisted',
+  urlNotReturned: "url was never returned by this lookup's own search",
+  presentTenseTitle: 'a title-only role/company/move change may not be phrased as current',
+  missingDate: 'a move/company change without a YYYY-MM date is not reportable',
+});
+
 export function groundLookup(envelope, observed, { firm = null } = {}) {
   const kept = [];
   const dropped = [];
   const noteDrop = (reason) => dropped.push({ reason });
 
   if (envelope === null || typeof envelope !== 'object') {
-    return { kept: [], dropped: [{ reason: 'no envelope' }] };
+    return { kept: [], dropped: [{ reason: LOOKUP_DROP_REASONS.noEnvelope }] };
   }
   if (envelope.identity_confidence !== 'match') {
     // On ambiguous/no_match, changes MUST already be empty per
     // prompts/public_lookup.md -- but this is enforced here too, not merely
     // asked of the prompt: a model that ignores its own instructions and
     // proposes changes anyway must still see them dropped.
+    //
+    // The reason is a FIXED CODE, never the model's own string interpolated
+    // into it (review finding 14): identity_confidence is model-controlled
+    // text, and a drop reason is written to logs and read on the desk. The
+    // value itself is already recorded, validated against three literals, in
+    // lookup_log.identity_confidence.
     const n = Array.isArray(envelope.changes) ? envelope.changes.length : 0;
-    if (n > 0) noteDrop(`identity_confidence is "${envelope.identity_confidence}", not "match"`);
+    if (n > 0) noteDrop(LOOKUP_DROP_REASONS.notMatch);
     return { kept: [], dropped };
   }
 
+  // The corroboration set for the anchor rule: companies named by titles the
+  // search actually returned. Computed once for the whole batch.
+  const titles = titleCompanies(observed);
   const changes = Array.isArray(envelope.changes) ? envelope.changes.slice(0, LOOKUP_CHANGE_CAP * 4) : [];
   for (const item of changes) {
     if (kept.length >= LOOKUP_CHANGE_CAP) break;
-    if (item === null || typeof item !== 'object') { noteDrop('change is not an object'); continue; }
-    if (!LOOKUP_CHANGE_KINDS.includes(item.kind)) { noteDrop('kind is not one of the six'); continue; }
+    if (item === null || typeof item !== 'object') { noteDrop(LOOKUP_DROP_REASONS.notAnObject); continue; }
+    if (!LOOKUP_CHANGE_KINDS.includes(item.kind)) { noteDrop(LOOKUP_DROP_REASONS.badKind); continue; }
     if (typeof item.text !== 'string' || item.text.trim().length === 0 || item.text.length > 200) {
-      noteDrop('text is missing, empty, or over 200 characters');
+      noteDrop(LOOKUP_DROP_REASONS.badText);
       continue;
     }
     if (typeof item.quote !== 'string' || item.quote.length === 0) {
-      noteDrop('quote is missing or empty');
+      noteDrop(LOOKUP_DROP_REASONS.badQuote);
       continue;
     }
     const evidenceKind = evidenceKindFor(item.quote, observed);
     if (evidenceKind === null) {
-      noteDrop('quote is not a verbatim substring of a search result');
+      noteDrop(LOOKUP_DROP_REASONS.ungroundedQuote);
       continue;
     }
     if (typeof item.url !== 'string' || item.url.length === 0) {
-      noteDrop('url is missing');
+      noteDrop(LOOKUP_DROP_REASONS.missingUrl);
       continue;
     }
     let parsedUrl;
     try {
       parsedUrl = new URL(item.url);
     } catch {
-      noteDrop('url does not parse');
+      noteDrop(LOOKUP_DROP_REASONS.unparseableUrl);
       continue;
     }
-    if (parsedUrl.protocol !== 'https:') { noteDrop('url is not https'); continue; }
-    if (isLookupUrlDenied(parsedUrl)) { noteDrop('url host is denylisted'); continue; }
-    if (!observed.urls.has(item.url)) { noteDrop('url was never returned by this lookup\'s own search'); continue; }
+    if (parsedUrl.protocol !== 'https:') { noteDrop(LOOKUP_DROP_REASONS.notHttps); continue; }
+    if (isLookupUrlDenied(parsedUrl)) { noteDrop(LOOKUP_DROP_REASONS.deniedHost); continue; }
+    if (!observed.urls.has(item.url)) { noteDrop(LOOKUP_DROP_REASONS.urlNotReturned); continue; }
     const date = typeof item.date === 'string' && /^\d{4}-\d{2}$/u.test(item.date) ? item.date : null;
     const text = item.text.trim();
 
@@ -696,7 +979,7 @@ export function groundLookup(envelope, observed, { firm = null } = {}) {
     // 'company' because that is what it actually is -- a competing claim
     // about which company this person is at -- whatever the model filed it
     // as ('move', for 4520).
-    if (contradictsAnchorFirm({ kind: item.kind, text, quote: item.quote }, firm)) {
+    if (contradictsAnchorFirm({ kind: item.kind, text, quote: item.quote }, firm, { titles })) {
       kept.push({
         kind: 'company', text, url: item.url, quote: item.quote, date,
         evidenceKind, contradictsAnchor: true,
@@ -713,7 +996,19 @@ export function groundLookup(envelope, observed, { firm = null } = {}) {
     // a page title states no date, so a date beside a title-only quote is
     // the model's inference, which is the thing being ruled out.
     if (evidenceKind === 'title' && FIRM_BEARING_KINDS.has(item.kind) && PRESENT_TENSE_RE.test(text)) {
-      noteDrop('a title-only role/company/move change may not be phrased as current');
+      noteDrop(LOOKUP_DROP_REASONS.presentTenseTitle);
+      continue;
+    }
+
+    // THE DATE REQUIREMENT, enforced rather than asked (review finding 8).
+    // prompts/public_lookup.md has said since v2 that `date` is REQUIRED for
+    // move and company -- "a change of employer without a date is not
+    // reportable here" -- and no code checked it, so an undated change of
+    // employer was stored, shown on the card and dated by the day we
+    // happened to run the lookup. Kinds role/raise/launch/other are
+    // deliberately unaffected: for those the prompt calls a date optional.
+    if (DATED_LOOKUP_KINDS.has(item.kind) && date === null) {
+      noteDrop(LOOKUP_DROP_REASONS.missingDate);
       continue;
     }
 
@@ -1132,17 +1427,28 @@ export function storeLookup(db, {
   );
   const insChange = db.prepare(
     `INSERT INTO person_lookup_change(claim_id, log_id, kind, url, change_date, applied_at,
-       evidence_kind, contradicts_anchor)
-     VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`
+       evidence_kind, contradicts_anchor, contradicts_anchor_unknown)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0)`
   );
   // The alreadyProposed analogue -- see this function's header. Keyed on
-  // (person, url, quote), which is what a receipt IS here, and blind to
-  // which lookup or which kind produced it.
+  // (person, url, quote), which is what a receipt IS here...
+  //
+  // ... and, since review finding 5, on the ANCHOR FLAG as well. It used to
+  // be blind to it, and that blindness had a specific victim: a row written
+  // before the anchor columns existed (contradicts_anchor stamped 0 by the
+  // v14 ALTER's default, or marked unknown by the back-fill) permanently
+  // blocked a re-lookup from storing a correctly-flagged version of the same
+  // (url, quote). The dedupe now blocks only a row whose flag AGREES with
+  // what we are about to write and is not itself unknown, so a re-lookup can
+  // supersede a stale or unknown verdict exactly once, and the ordinary
+  // monthly "same page again" case still dedupes as before.
   const selDup = db.prepare(
     `SELECT c.id AS id FROM claim c
        JOIN person_lookup_change plc ON plc.claim_id = c.id
        JOIN claim_source cs ON cs.claim_id = c.id AND cs.source = 'web'
      WHERE c.subject = 'person' AND c.subject_person_key = ? AND plc.url = ? AND cs.quote = ?
+       AND COALESCE(plc.contradicts_anchor, 0) = ?
+       AND COALESCE(plc.contradicts_anchor_unknown, 0) = 0
        AND COALESCE(
          (SELECT d.action FROM claim_decision d WHERE d.claim_id = c.id ORDER BY d.id DESC LIMIT 1),
          'pending'
@@ -1156,7 +1462,22 @@ export function storeLookup(db, {
   let duplicates = 0;
   let nextChangedAt = Math.max(now, Number(maxChangedAt?.m ?? 0) + 1);
 
-  db.exec('BEGIN');
+  // The corroboration set for the anchor rule, recomputed here from the same
+  // stream groundLookup read (see contradictsAnchorFirm). Absent `observed`
+  // this is empty, which leaves the departure rule in force and the
+  // corroborated-other-company rule unable to fire -- the conservative
+  // direction, and the reason the caller's own `contradictsAnchor` is
+  // honoured below as a FLOOR.
+  const titles = titleCompanies(observed);
+
+  // ONE transaction for the whole batch -- unless the caller already opened
+  // one, in which case this joins it rather than nesting (SQLite has no
+  // nested BEGIN, and lookupPerson now needs the log row, the evidence row
+  // and these claims to commit or roll back together: review finding 1's
+  // three separate autocommits are what left a 'proposed' log row with zero
+  // claims behind it).
+  const ownTransaction = !db.isTransaction;
+  if (ownTransaction) db.exec('BEGIN');
   try {
     for (const item of kept) {
       if (
@@ -1198,11 +1519,24 @@ export function storeLookup(db, {
       }
       // Recomputed, never trusted from the caller: the flag decides whether
       // a card may consume this row, so a client cannot hand it in as false.
+      // A caller's own `true` is honoured as a FLOOR, because recomputation
+      // here can only be WEAKER than groundLookup's (which had the returned
+      // titles in hand and this call may not) -- so the recomputation adds
+      // the flag and can never clear one.
       const contradictsAnchor = contradictsAnchorFirm(
-        { kind: item.kind, text: item.text.trim(), quote: item.quote }, firm
-      );
+        { kind: item.kind, text: item.text.trim(), quote: item.quote }, firm, { titles }
+      ) || item.contradictsAnchor === true;
       const kind = contradictsAnchor ? 'company' : item.kind;
-      if (selDup.get(personKey, item.url, item.quote) !== undefined) {
+      // The date requirement, re-checked against the row about to be written
+      // (review finding 8). Judged on the kind the MODEL filed -- an anchor
+      // contradiction is refiled 'company' by the line above and is exempt,
+      // for the reason groundLookup's own note gives.
+      const date = typeof item.date === 'string' && /^\d{4}-\d{2}$/u.test(item.date) ? item.date : null;
+      if (!contradictsAnchor && DATED_LOOKUP_KINDS.has(item.kind) && date === null) {
+        skipped += 1;
+        continue;
+      }
+      if (selDup.get(personKey, item.url, item.quote, contradictsAnchor ? 1 : 0) !== undefined) {
         duplicates += 1;
         continue;
       }
@@ -1223,12 +1557,16 @@ export function storeLookup(db, {
 
       const claimId = Number(insClaim.run(distillRunId, personKey, item.text, now, now).lastInsertRowid);
       insSource.run(claimId, contextId, entityId, contentHash, item.quote);
-      insChange.run(claimId, logId, kind, item.url, item.date ?? null, evidenceKind, contradictsAnchor ? 1 : 0);
+      insChange.run(claimId, logId, kind, item.url, date, evidenceKind, contradictsAnchor ? 1 : 0);
       stored += 1;
     }
-    db.exec('COMMIT');
+    if (ownTransaction) db.exec('COMMIT');
   } catch (err) {
-    db.exec('ROLLBACK');
+    // Only the transaction's OWNER rolls back: unwinding a caller's
+    // transaction from inside would silently discard writes this function
+    // never made. A joined transaction just rethrows and lets the owner
+    // (lookupPerson) roll the whole unit back.
+    if (ownTransaction) db.exec('ROLLBACK');
     throw err;
   }
   return { stored, skipped, duplicates };
@@ -1245,25 +1583,95 @@ export function storeLookup(db, {
 // WebSearch, and buildLookupQuery's input gate decides what it may ask), and
 // nothing here leaves the box -- it exists so the desk can show "what came
 // back" beside "what was sent".
-export function storeLookupEvidence(db, { logId, links = [], resultText = '', now = Date.now() } = {}) {
+//
+// TWO FLAGS travel with it, and both exist so a degraded lookup cannot look
+// like a clean one: `truncated` when the article was longer than
+// LOOKUP_RESULT_TEXT_CAP and was cut (see that constant -- "verbatim" means
+// verbatim up to the cap), and `links_parse_failed` when a `Links:` block was
+// present in the stream and could not be read (parseLookupStream's own
+// linksParseFailed). The second is what makes review finding 3 loud rather
+// than silent: with the links unreadable every change fails grounding, the
+// lookup logs 'ungrounded', and this row says WHY.
+export function storeLookupEvidence(db, {
+  logId, links = [], resultText = '', linksParseFailed = false, now = Date.now(),
+} = {}) {
   if (!Number.isInteger(Number(logId))) return { stored: 0 };
   const urls = canonicalize(
     (Array.isArray(links) ? links : [])
       .filter((l) => l !== null && typeof l === 'object' && typeof l.url === 'string')
       .map((l) => ({ title: typeof l.title === 'string' ? l.title : '', url: l.url }))
   );
+  const full = String(resultText ?? '');
+  const truncated = full.length > LOOKUP_RESULT_TEXT_CAP;
+  const text = truncated ? full.slice(0, LOOKUP_RESULT_TEXT_CAP) : full;
   const n = db.prepare(
-    `INSERT INTO lookup_evidence(log_id, urls, result_text, created_at) VALUES (?, ?, ?, ?)
+    `INSERT INTO lookup_evidence(log_id, urls, result_text, created_at, truncated, links_parse_failed)
+     VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(log_id) DO NOTHING`
-  ).run(Number(logId), JSON.stringify(urls), String(resultText ?? ''), now).changes;
-  return { stored: Number(n) };
+  ).run(
+    Number(logId), JSON.stringify(urls), text, now,
+    truncated ? 1 : 0, linksParseFailed === true ? 1 : 0
+  ).changes;
+  return { stored: Number(n), truncated, linksParseFailed: linksParseFailed === true };
 }
 
 // gather (anchorsFor+buildLookupQuery) -> prompt -> engine -> parse
 // (parseLookupStream) -> ground (groundLookup) -> store (storeLookup), one
-// person. Status is one of lookup_log.status's seven values -- see the
-// CHECK constraint in hermes.mjs's SCHEMA, and the comment above each branch
-// below for what distinguishes it.
+// person.
+//
+// THREE FIELDS carry the outcome, and after review findings 1, 6 and 7 they
+// are deliberately not the same string:
+//
+//   status        what the RECEIPT says: one of lookup_log.status's seven
+//                 literals (its CHECK cannot be ALTERed in SQLite, and two
+//                 other tables reference lookup_log's ids -- see its schema
+//                 comment in hermes.mjs). Written from what was actually
+//                 STORED, never from what grounding merely kept.
+//   stateStatus   what person_lookup_state.last_status records. That column
+//                 is free text, so it is where an honest word lives for a
+//                 case lookup_log has no literal for: 'over-budget' when the
+//                 model outspent LOOKUP_MAX_SEARCHES and its answer was
+//                 discarded, 'store-error' when the write failed.
+//   hold          whether next_due_at may advance. Decided per case here
+//                 rather than inferred from the log literal: 'ungrounded' is
+//                 an ADVANCE for a lookup whose changes genuinely failed
+//                 grounding, and a HOLD for one that was thrown away over
+//                 budget or lost to a failed write. Reading it off the
+//                 literal pushed a discarded lookup a full refresh tier into
+//                 the future and re-spent the daily cap on nobody.
+//
+// AND IT DOES NOT THROW past the store boundary. Review finding 1: a throw
+// from storeLookup or storeLookupEvidence used to escape into runLookupPass's
+// unguarded `await`, which left distill_run and person_lookup_run 'running'
+// forever, skipped bumpRunCalls (so the daily cap under-counted the call
+// that had already been spent), never wrote person_lookup_state (so the same
+// person was re-spent next pass), and -- because the log row, the evidence
+// row and the claims were three separate autocommits -- left a committed
+// 'proposed' log row with zero claims behind it. The log row, the evidence
+// row and the claims now commit or roll back TOGETHER, and a failure is
+// returned as a result (failed: true, hold: true) rather than thrown.
+function lookupLogStatusFor({ stored, notStored, titleOnlyContradiction, claimedAmbiguous }) {
+  // THE DOWNGRADE first: a change that disagrees with the firm we sent,
+  // backed by nothing but a search-result title, is not a "match" -- a stale
+  // index entry and a namesake are at least as likely as a real move, and
+  // the model has just told us it is confident about a person whose one
+  // confirming anchor it contradicted. That is true whether or not the row
+  // deduped against one we already had.
+  if (titleOnlyContradiction) return 'ambiguous';
+  // 'proposed' means CLAIMS EXIST, which is why it reads `stored` and not
+  // `kept.length` (review finding 6: an all-duplicate batch used to log
+  // 'proposed' with N changes_proposed and zero claims to show for it).
+  if (stored > 0) return 'proposed';
+  // DISAMBIGUATION CHECKPOINT: an "ambiguous" verdict is its own visible
+  // status regardless of whether the model correctly emptied `changes` --
+  // never silently folded into "empty", because "we could not tell who this
+  // was" and "we asked and found nothing new" are different facts an owner
+  // reading /admin/relationship/lookups should be able to tell apart.
+  if (claimedAmbiguous) return 'ambiguous';
+  if (notStored > 0) return 'ungrounded';
+  return 'empty';
+}
+
 export async function lookupPerson(db, engine, candidate, { runId, distillRunId, now = Date.now() } = {}) {
   const anchors = anchorsFor(db, candidate.personKey);
   const built = buildLookupQuery(anchors);
@@ -1278,7 +1686,8 @@ export async function lookupPerson(db, engine, candidate, { runId, distillRunId,
     });
     return {
       personKey: candidate.personKey, calls: 0, searches: 0, proposed: 0, dropped: 0, costUsd: 0,
-      status: 'no-anchors', anchorsHash: hash, logId,
+      status: 'no-anchors', stateStatus: 'no-anchors', hold: false, failed: false,
+      anchorsHash: hash, logId,
     };
   }
 
@@ -1292,7 +1701,8 @@ export async function lookupPerson(db, engine, candidate, { runId, distillRunId,
     });
     return {
       personKey: candidate.personKey, calls: 1, searches: 0, proposed: 0, dropped: 0, costUsd: 0,
-      status: 'engine-error', anchorsHash: hash, logId,
+      status: 'engine-error', stateStatus: 'engine-error', hold: true, failed: false,
+      anchorsHash: hash, logId,
     };
   }
 
@@ -1304,19 +1714,46 @@ export async function lookupPerson(db, engine, candidate, { runId, distillRunId,
     envelope = null;
   }
 
+  // The log row and its evidence row, together. lookup_evidence.log_id
+  // references lookup_log(id), so the log row is written first WITHIN the
+  // transaction rather than in an autocommit ahead of it.
+  const writeLogAndEvidence = (fields) => {
+    db.exec('BEGIN');
+    try {
+      const logId = insertLookupLog(db, fields);
+      storeLookupEvidence(db, {
+        logId, links: observed.links, resultText: observed.resultText,
+        linksParseFailed: observed.linksParseFailed, now,
+      });
+      db.exec('COMMIT');
+      return logId;
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+  };
+
   if (envelope === null || typeof envelope !== 'object') {
-    const logId = insertLookupLog(db, {
-      personKey: candidate.personKey, runId, at: now, engine: engine.name,
-      query: built.query, queryHash: built.queryHash, fieldsUsed: built.fieldsUsed,
-      searches: observed.searches, urlsSeen: observed.urls.size, costUsd: observed.costUsd, status: 'parse-error',
-    });
     // Evidence is stored on the UNUSABLE paths too, and especially there:
     // "the model said something we could not parse" is the case where seeing
     // what came back matters most.
-    storeLookupEvidence(db, { logId, links: observed.links, resultText: observed.resultText, now });
+    let logId = null;
+    let failed = false;
+    try {
+      logId = writeLogAndEvidence({
+        personKey: candidate.personKey, runId, at: now, engine: engine.name,
+        query: built.query, queryHash: built.queryHash, fieldsUsed: built.fieldsUsed,
+        searches: observed.searches, urlsSeen: observed.urls.size, costUsd: observed.costUsd,
+        status: 'parse-error',
+      });
+    } catch {
+      failed = true;
+    }
     return {
       personKey: candidate.personKey, calls: 1, searches: observed.searches, proposed: 0, dropped: 0,
-      costUsd: observed.costUsd ?? 0, status: 'parse-error', anchorsHash: hash, logId,
+      costUsd: observed.costUsd ?? 0, status: 'parse-error',
+      stateStatus: failed ? 'store-error' : 'parse-error', hold: true, failed,
+      anchorsHash: hash, logId,
     };
   }
 
@@ -1333,74 +1770,129 @@ export async function lookupPerson(db, engine, candidate, { runId, distillRunId,
   // would break every deployed install. The fact is not lost: `searches`
   // carries the real count, so an over-budget lookup is exactly
   // `status='ungrounded' AND searches > LOOKUP_MAX_SEARCHES`.
+  //
+  // What DID change (review finding 7): this is a HOLD, not an advance. The
+  // answer was discarded, so nothing was learned about this person, and
+  // advancing next_due_at by a full refresh tier for a lookup we threw away
+  // is not scheduling -- it is losing the person for a month. The honest
+  // word goes in person_lookup_state.last_status, which has no CHECK to
+  // fight, and lookupStatus reports the count.
   if (observed.searches > LOOKUP_MAX_SEARCHES) {
-    const logId = insertLookupLog(db, {
-      personKey: candidate.personKey, runId, at: now, engine: engine.name,
-      query: built.query, queryHash: built.queryHash, fieldsUsed: built.fieldsUsed,
-      searches: observed.searches, urlsSeen: observed.urls.size,
-      identityConfidence: ['match', 'ambiguous', 'no_match'].includes(envelope.identity_confidence)
-        ? envelope.identity_confidence : null,
-      changesProposed: 0,
-      changesDropped: Array.isArray(envelope.changes) ? envelope.changes.length : 0,
-      costUsd: observed.costUsd, status: 'ungrounded',
-    });
-    storeLookupEvidence(db, { logId, links: observed.links, resultText: observed.resultText, now });
+    const changesDropped = Array.isArray(envelope.changes) ? envelope.changes.length : 0;
+    let logId = null;
+    let failed = false;
+    try {
+      logId = writeLogAndEvidence({
+        personKey: candidate.personKey, runId, at: now, engine: engine.name,
+        query: built.query, queryHash: built.queryHash, fieldsUsed: built.fieldsUsed,
+        searches: observed.searches, urlsSeen: observed.urls.size,
+        identityConfidence: ['match', 'ambiguous', 'no_match'].includes(envelope.identity_confidence)
+          ? envelope.identity_confidence : null,
+        changesProposed: 0,
+        changesDropped,
+        costUsd: observed.costUsd, status: 'ungrounded',
+      });
+    } catch {
+      failed = true;
+    }
     return {
       personKey: candidate.personKey, calls: 1, searches: observed.searches, proposed: 0,
-      dropped: Array.isArray(envelope.changes) ? envelope.changes.length : 0,
-      costUsd: observed.costUsd ?? 0, status: 'ungrounded', anchorsHash: hash, logId,
+      dropped: changesDropped,
+      costUsd: observed.costUsd ?? 0, status: 'ungrounded',
+      stateStatus: failed ? 'store-error' : 'over-budget', hold: true, failed,
+      anchorsHash: hash, logId,
     };
   }
 
   const { kept, dropped } = groundLookup(envelope, observed, { firm: anchors.firm });
-  // DISAMBIGUATION CHECKPOINT: an "ambiguous" verdict is its own visible
-  // status regardless of whether the model correctly emptied `changes` --
-  // never silently folded into "empty", because "we could not tell who this
-  // was" and "we asked and found nothing new" are different facts an owner
-  // reading /admin/relationship/lookups should be able to tell apart.
-  // THE DOWNGRADE. A change that disagrees with the firm we sent, backed by
-  // nothing but a search-result title, is not a "match" -- a stale index
-  // entry and a namesake are at least as likely as a real move, and the
-  // model has just told us it is confident about a person whose one
-  // confirming anchor it contradicted. So the log's own verdict becomes
-  // 'ambiguous' on both fields, which is what the desk reads. The change is
-  // still stored (flagged, and withheld from the card by newestWebChange) --
-  // downgrading the verdict is not the same as hiding the disagreement.
+  // A change that disagrees with the firm we sent, backed by nothing but a
+  // search-result title. The change is still stored (flagged, and withheld
+  // from the card by newestWebChange) -- downgrading the verdict is not the
+  // same as hiding the disagreement.
   const titleOnlyContradiction = kept.some((k) => k.contradictsAnchor && k.evidenceKind === 'title');
-
-  const status = titleOnlyContradiction
-    ? 'ambiguous'
-    : kept.length > 0
-      ? 'proposed'
-      : envelope.identity_confidence === 'ambiguous'
-        ? 'ambiguous'
-        : dropped.length > 0
-          ? 'ungrounded'
-          : 'empty';
-
   const claimed = ['match', 'ambiguous', 'no_match'].includes(envelope.identity_confidence)
     ? envelope.identity_confidence
     : null;
   const identityConfidence = titleOnlyContradiction ? 'ambiguous' : claimed;
 
-  const logId = insertLookupLog(db, {
-    personKey: candidate.personKey, runId, at: now, engine: engine.name,
-    query: built.query, queryHash: built.queryHash, fieldsUsed: built.fieldsUsed,
-    searches: observed.searches, urlsSeen: observed.urls.size, identityConfidence,
-    changesProposed: kept.length, changesDropped: dropped.length, costUsd: observed.costUsd, status,
-  });
-  storeLookupEvidence(db, { logId, links: observed.links, resultText: observed.resultText, now });
-
-  let stored = 0;
-  if (kept.length > 0) {
-    stored = storeLookup(db, {
-      personKey: candidate.personKey, kept, observed, firm: anchors.firm, logId, distillRunId, now,
-    }).stored;
+  // ONE TRANSACTION for everything that has to agree: the log row (written
+  // first, because the other two reference its id), the evidence row, the
+  // claims, and finally the log row's own status and counts -- UPDATEd in
+  // place once `stored` is known, so no reader ever sees the provisional
+  // value and no committed log row can disagree with the claims under it.
+  let logId = null;
+  let store = { stored: 0, skipped: 0, duplicates: 0 };
+  let status = null;
+  try {
+    db.exec('BEGIN');
+    try {
+      logId = insertLookupLog(db, {
+        personKey: candidate.personKey, runId, at: now, engine: engine.name,
+        query: built.query, queryHash: built.queryHash, fieldsUsed: built.fieldsUsed,
+        searches: observed.searches, urlsSeen: observed.urls.size, identityConfidence,
+        changesProposed: 0, changesDropped: dropped.length, costUsd: observed.costUsd,
+        status: 'ungrounded',
+      });
+      storeLookupEvidence(db, {
+        logId, links: observed.links, resultText: observed.resultText,
+        linksParseFailed: observed.linksParseFailed, now,
+      });
+      if (kept.length > 0) {
+        store = storeLookup(db, {
+          personKey: candidate.personKey, kept, observed, firm: anchors.firm, logId, distillRunId, now,
+        });
+      }
+      status = lookupLogStatusFor({
+        stored: store.stored,
+        notStored: dropped.length + store.skipped,
+        titleOnlyContradiction,
+        claimedAmbiguous: claimed === 'ambiguous',
+      });
+      // changes_dropped counts what was PROPOSED AND NOT STORED for a
+      // reason: grounding drops plus store-time skips. A duplicate is in
+      // neither column -- the change was real and is already on file, so
+      // counting it as dropped would read as a grounding failure and
+      // counting it as proposed is the bug finding 6 names.
+      db.prepare(
+        'UPDATE lookup_log SET status = ?, changes_proposed = ?, changes_dropped = ? WHERE id = ?'
+      ).run(status, store.stored, dropped.length + store.skipped, logId);
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+  } catch {
+    // The whole unit rolled back: there is no log row, no evidence row and
+    // no claim. A receipt is still owed for a query that DID leave the box,
+    // so one is written on its own -- and if even that fails (the disk is
+    // full, a column is missing), the failure still travels back as a
+    // result rather than as a throw, because the caller's job is to hold
+    // this person, count the call and move on.
+    let failLogId = null;
+    try {
+      failLogId = insertLookupLog(db, {
+        personKey: candidate.personKey, runId, at: now, engine: engine.name,
+        query: built.query, queryHash: built.queryHash, fieldsUsed: built.fieldsUsed,
+        searches: observed.searches, urlsSeen: observed.urls.size, identityConfidence,
+        changesProposed: 0, changesDropped: kept.length + dropped.length,
+        costUsd: observed.costUsd, status: 'ungrounded',
+      });
+    } catch {
+      failLogId = null;
+    }
+    return {
+      personKey: candidate.personKey, calls: 1, searches: observed.searches, proposed: 0,
+      dropped: kept.length + dropped.length, costUsd: observed.costUsd ?? 0,
+      status: 'ungrounded', stateStatus: 'store-error', hold: true, failed: true,
+      anchorsHash: hash, logId: failLogId,
+    };
   }
 
   return {
-    personKey: candidate.personKey, calls: 1, searches: observed.searches, proposed: stored, dropped: dropped.length,
-    costUsd: observed.costUsd ?? 0, status, anchorsHash: hash, logId,
+    personKey: candidate.personKey, calls: 1, searches: observed.searches, proposed: store.stored,
+    dropped: dropped.length + store.skipped, duplicates: store.duplicates,
+    costUsd: observed.costUsd ?? 0, status, stateStatus: status, hold: false, failed: false,
+    anchorsHash: hash, logId,
   };
 }
 
@@ -1415,6 +1907,15 @@ function insertSkippedLookupRun(db, { now, powerMode, engineName, budget, scopeS
   return db.prepare('SELECT * FROM person_lookup_run WHERE id = ?').get(id);
 }
 
+// The lookup_log statuses that ADVANCE next_due_at: each one either produced
+// a real answer or correctly asked-and-found-nothing / had-nothing-to-ask.
+// engine-error and parse-error are absent (they asked and got nothing usable
+// back) -- and membership here is necessary but no longer sufficient, because
+// lookupPerson's own `hold` can veto an advance for a status that normally
+// earns one: an over-budget or failed-store lookup logs 'ungrounded' and must
+// still hold (review findings 1 and 7).
+const ADVANCING_LOOKUP_STATUSES = new Set(['proposed', 'empty', 'ambiguous', 'ungrounded', 'no-anchors']);
+
 // Matches SWEEP_PAUSE_MS's own reasoning (sweep.mjs): do not hammer the one
 // model (or, here, the one installed client's own rate limit) between
 // people. Not imported (sweep.mjs's is private); duplicated as a constant.
@@ -1428,10 +1929,12 @@ function sleep(ms) {
 // pass (same "one per pass, not per person" posture as sweep.mjs's
 // runSweepPass) -> lookupPerson in sequence, one BEGIN..COMMIT
 // person_lookup_state write per person (advance next_due_at on
-// proposed/empty/ambiguous/ungrounded/no-anchors -- every one of those
-// either produced a real answer or correctly asked-and-found-nothing/had-
-// nothing-to-ask; hold on engine-error/parse-error, which asked and got
-// nothing usable back), paused LOOKUP_PAUSE_MS between people.
+// ADVANCING_LOOKUP_STATUSES unless lookupPerson vetoes it with `hold` --
+// see that constant and lookupPerson's own header; hold on
+// engine-error/parse-error, on an over-budget answer that was thrown away,
+// and on a store failure, all of which asked and got nothing usable back),
+// paused LOOKUP_PAUSE_MS between people. A person whose own work throws is
+// counted, held and skipped rather than ending the pass.
 // `onlyPersonKey`, when given, narrows lookupScope to that one person --
 // the /admin/relationship/lookup/person route's "look this person up now"
 // (jumps the ordinary tier/recency queue for exactly one already-known
@@ -1481,16 +1984,21 @@ export async function runLookupPass(db, engine, policy, {
   // finally below no matter how the pass ends.
   const rel = relFlags(policy);
   rel.lookupActive = true;
+  // Declared OUT here, not inside the try: the catch below stamps both rows
+  // 'failed' so neither can be left 'running', and a const scoped to the try
+  // block would be unreachable from exactly the handler that needs it.
+  let distillRunId = null;
+  let runId = null;
   try {
     const promptText = readFileSync(LOOKUP_PROMPT_PATH, 'utf8');
     const sha = createHash('sha256').update(promptText, 'utf8').digest('hex');
-    const distillRunId = Number(
+    distillRunId = Number(
       db.prepare(
         `INSERT INTO distill_run(model, prompt_path, prompt_sha, params, episode_context, rows_in, claims_out, status, started_at, ended_at)
          VALUES (?, ?, ?, '{}', 'off', ?, 0, 'running', ?, NULL)`
       ).run(`${engineName}:${engine?.model ?? 'unknown'}`, LOOKUP_PROMPT_PATH, sha, candidates.length, now).lastInsertRowid
     );
-    const runId = Number(
+    runId = Number(
       db.prepare(
         `INSERT INTO person_lookup_run(distill_run_id, started_at, ended_at, power_mode, engine, budget, scope_size,
            candidates, looked_up, model_calls, searches, proposed, dropped, cost_usd, skip_reason, status)
@@ -1563,55 +2071,132 @@ export async function runLookupPass(db, engine, policy, {
          dropped = ?, cost_usd = ? WHERE id = ?`
     );
 
+    // PER-PERSON FAILURE CONTAINMENT (review finding 1). lookupPerson no
+    // longer throws past its own store boundary, but this loop must survive
+    // a throw from anywhere else in one person's work too -- anchorsFor on a
+    // row that breaks, a missing prompt file, the state write below hitting
+    // a locked database. One person is not the pass: the failure is counted,
+    // the call it may already have spent is charged to the cap, the person
+    // is HELD (never advanced, so the next pass re-offers them), and the
+    // loop moves on. A pass with any failure ends 'failed' rather than
+    // 'complete', which is what makes it visible on /stats instead of
+    // looking like a clean pass that found nothing.
+    let failures = 0;
+    const failedKeys = [];
+
     for (let i = 0; i < candidates.length; i++) {
       const candidate = candidates[i];
-      const result = await lookupPerson(db, engine, candidate, { runId, distillRunId, now });
+      let result = null;
+      try {
+        result = await lookupPerson(db, engine, candidate, { runId, distillRunId, now });
+      } catch {
+        result = null;
+      }
+      if (result === null) {
+        // The call is charged even though we cannot prove it was spent: the
+        // daily cap must fail CLOSED, and over-counting by one costs a
+        // lookup while under-counting spends the owner's shared rate limit
+        // on nothing.
+        result = {
+          personKey: candidate.personKey, calls: 1, searches: 0, proposed: 0, dropped: 0, costUsd: 0,
+          status: 'engine-error', stateStatus: 'lookup-error', hold: true, failed: true,
+          anchorsHash: candidate.anchorsHash, logId: null,
+        };
+      }
       lookedUp += 1;
       modelCalls += result.calls;
       searchesTotal += result.searches;
       proposed += result.proposed;
       dropped += result.dropped;
       costUsdTotal += result.costUsd ?? 0;
-      bumpRunCalls.run(lookedUp, modelCalls, searchesTotal, proposed, dropped, costUsdTotal, runId);
-
-      const advance = result.status === 'proposed' || result.status === 'empty'
-        || result.status === 'ambiguous' || result.status === 'ungrounded' || result.status === 'no-anchors';
-
-      db.exec('BEGIN');
+      if (result.failed) {
+        failures += 1;
+        failedKeys.push(candidate.personKey);
+      }
+      // BEFORE the state write, and outside its transaction: a call already
+      // spent has to reach person_lookup_run.model_calls even if everything
+      // after it fails.
       try {
-        if (advance) {
-          const nextDueAt = now + (LOOKUP_REFRESH_DAYS[candidate.tier] ?? LOOKUP_REFRESH_DAYS.other) * DAY;
-          upsertState.run(candidate.personKey, candidate.tier, result.anchorsHash, now, nextDueAt, result.status, result.proposed);
-        } else {
-          // HOLD: next_due_at is whatever it already was (or `now`, for a
-          // brand-new candidate with no prior state row) -- a failure to get
-          // a usable answer must re-offer the same person next pass, same
-          // reasoning as sweep.mjs's holdCursor.
-          const heldNextDueAt = candidate.nextDueAt ?? now;
-          holdState.run(candidate.personKey, candidate.tier, candidate.storedAnchorsHash ?? result.anchorsHash,
-            now, heldNextDueAt, result.status);
+        bumpRunCalls.run(lookedUp, modelCalls, searchesTotal, proposed, dropped, costUsdTotal, runId);
+      } catch {
+        // The cap under-counts by this person's call rather than the pass
+        // dying with a person_lookup_state row unwritten.
+      }
+
+      // `hold` is lookupPerson's own verdict on whether anything was learned
+      // (see its header): an over-budget or failed-store lookup holds even
+      // though its log row reads 'ungrounded'. The status whitelist stays as
+      // a belt -- an unrecognised status holds rather than advancing.
+      const advance = result.hold !== true && ADVANCING_LOOKUP_STATUSES.has(result.status);
+      const stateStatus = result.stateStatus ?? result.status;
+
+      try {
+        db.exec('BEGIN');
+        try {
+          if (advance) {
+            const nextDueAt = now + (LOOKUP_REFRESH_DAYS[candidate.tier] ?? LOOKUP_REFRESH_DAYS.other) * DAY;
+            upsertState.run(candidate.personKey, candidate.tier, result.anchorsHash, now, nextDueAt, stateStatus, result.proposed);
+          } else {
+            // HOLD: next_due_at is whatever it already was (or `now`, for a
+            // brand-new candidate with no prior state row) -- a failure to get
+            // a usable answer must re-offer the same person next pass, same
+            // reasoning as sweep.mjs's holdCursor.
+            const heldNextDueAt = candidate.nextDueAt ?? now;
+            holdState.run(candidate.personKey, candidate.tier, candidate.storedAnchorsHash ?? result.anchorsHash,
+              now, heldNextDueAt, stateStatus);
+          }
+          db.exec('COMMIT');
+        } catch (err) {
+          db.exec('ROLLBACK');
+          throw err;
         }
-        db.exec('COMMIT');
-      } catch (err) {
-        db.exec('ROLLBACK');
-        throw err;
+      } catch {
+        // Even the watermark write failed. Counted, held by default (there
+        // is no advanced next_due_at to undo, because nothing was written),
+        // and the pass carries on to the next person.
+        if (!result.failed) {
+          failures += 1;
+          failedKeys.push(candidate.personKey);
+        }
       }
       if (i < candidates.length - 1) await sleep(LOOKUP_PAUSE_MS);
     }
 
+    const passStatus = failures > 0 ? 'failed' : 'complete';
     db.prepare(
       `UPDATE person_lookup_run SET ended_at = ?, looked_up = ?, model_calls = ?, searches = ?, proposed = ?,
-         dropped = ?, cost_usd = ?, status = 'complete' WHERE id = ?`
-    ).run(Date.now(), lookedUp, modelCalls, searchesTotal, proposed, dropped, costUsdTotal, runId);
-    db.prepare("UPDATE distill_run SET claims_out = ?, status = 'complete', ended_at = ? WHERE id = ?")
-      .run(proposed, Date.now(), distillRunId);
+         dropped = ?, cost_usd = ?, status = ? WHERE id = ?`
+    ).run(Date.now(), lookedUp, modelCalls, searchesTotal, proposed, dropped, costUsdTotal, passStatus, runId);
+    db.prepare('UPDATE distill_run SET claims_out = ?, status = ?, ended_at = ? WHERE id = ?')
+      .run(proposed, failures > 0 ? 'failed' : 'complete', Date.now(), distillRunId);
 
     // unanchored_logged is reported, not stored -- person_lookup_run's own
     // columns count only the budgeted anchored candidates (see `candidates`
     // above); this lets the CLI status line show the bulk no-anchors work
-    // too without adding a schema column for it.
+    // too without adding a schema column for it. `failures` rides along the
+    // same way: the COUNT is on the run row's own status, the per-person
+    // detail is in each person_lookup_state.last_status.
     const runRow = db.prepare('SELECT * FROM person_lookup_run WHERE id = ?').get(runId);
-    return { ...runRow, unanchored_logged: unanchoredLogged };
+    return { ...runRow, unanchored_logged: unanchoredLogged, failures, failed_keys: failedKeys };
+  } catch (err) {
+    // NOTHING IS LEFT 'running'. Both rows are stamped 'failed' before the
+    // throw travels on: a person_lookup_run stuck at 'running' reads as a
+    // pass still in flight forever (and a distill_run stuck there is a
+    // permanently open run in the distiller's own accounting), which is
+    // review finding 1's most visible symptom.
+    if (runId !== null) {
+      try {
+        db.prepare("UPDATE person_lookup_run SET ended_at = ?, status = 'failed' WHERE id = ? AND status = 'running'")
+          .run(Date.now(), runId);
+      } catch {}
+    }
+    if (distillRunId !== null) {
+      try {
+        db.prepare("UPDATE distill_run SET status = 'failed', ended_at = ? WHERE id = ? AND status = 'running'")
+          .run(Date.now(), distillRunId);
+      } catch {}
+    }
+    throw err;
   } finally {
     rel.lookupActive = false;
   }
@@ -1656,6 +2241,21 @@ export function lookupStatus(db, policy = null) {
     db.prepare("SELECT COUNT(*) AS n FROM lookup_log WHERE status = 'ungrounded' AND searches > ?")
       .get(LOOKUP_MAX_SEARCHES).n
   );
+  // The two degraded outcomes that have no lookup_log literal of their own
+  // either, reported for the same reason: absorbed silently, a store failure
+  // looks exactly like a lookup that found nothing, and an unreadable
+  // `Links:` block looks exactly like a search that returned no links.
+  // person_lookup_state.last_status has no CHECK to fight, which is why the
+  // honest word lives there (see lookupPerson's header).
+  const storeErrors = Number(
+    db.prepare("SELECT COUNT(*) AS n FROM person_lookup_state WHERE last_status IN ('store-error', 'lookup-error')").get().n
+  );
+  const linksParseFailures = Number(
+    db.prepare('SELECT COUNT(*) AS n FROM lookup_evidence WHERE links_parse_failed = 1').get().n
+  );
+  const truncatedEvidence = Number(
+    db.prepare('SELECT COUNT(*) AS n FROM lookup_evidence WHERE truncated = 1').get().n
+  );
   const cap = lookupCallCap(policy);
 
   return {
@@ -1667,6 +2267,9 @@ export function lookupStatus(db, policy = null) {
     tier,
     pending,
     overBudget,
+    storeErrors,
+    linksParseFailures,
+    truncatedEvidence,
     lastPassAt: last?.started_at ?? null,
     lastPassStatus: last?.status ?? null,
     lastSkipReason: last?.skip_reason ?? null,
@@ -1701,7 +2304,8 @@ export function lookupLogFor(db, personKey, { limit = 20 } = {}) {
             ll.fields_used AS fieldsUsedJson, ll.searches AS searches, ll.urls_seen AS urlsSeen,
             ll.identity_confidence AS identityConfidence, ll.changes_proposed AS changesProposed,
             ll.changes_dropped AS changesDropped, ll.cost_usd AS costUsd, ll.status AS status,
-            le.urls AS evidenceUrlsJson, LENGTH(le.result_text) AS evidenceResultTextChars
+            le.urls AS evidenceUrlsJson, LENGTH(le.result_text) AS evidenceResultTextChars,
+            le.truncated AS evidenceTruncated, le.links_parse_failed AS evidenceLinksParseFailed
      FROM lookup_log ll
      LEFT JOIN lookup_evidence le ON le.log_id = ll.id
      WHERE ll.person_key = ? ORDER BY ll.at DESC LIMIT ?`
@@ -1714,9 +2318,21 @@ export function lookupLogFor(db, personKey, { limit = 20 } = {}) {
     if (row.evidenceUrlsJson !== null && row.evidenceUrlsJson !== undefined) {
       let urls = [];
       try { urls = JSON.parse(row.evidenceUrlsJson); } catch { urls = []; }
-      evidence = { urls: Array.isArray(urls) ? urls : [], resultTextChars: Number(row.evidenceResultTextChars ?? 0) };
+      evidence = {
+        urls: Array.isArray(urls) ? urls : [],
+        resultTextChars: Number(row.evidenceResultTextChars ?? 0),
+        // "verbatim up to the cap" -- see LOOKUP_RESULT_TEXT_CAP.
+        truncated: Number(row.evidenceTruncated ?? 0) === 1,
+        // A `Links:` block the reader could not parse. Loud on purpose: with
+        // it set, every change failed grounding for a reason that has
+        // nothing to do with the person (review finding 3).
+        linksParseFailed: Number(row.evidenceLinksParseFailed ?? 0) === 1,
+      };
     }
-    const { fieldsUsedJson, evidenceUrlsJson, evidenceResultTextChars, ...rest } = row;
+    const {
+      fieldsUsedJson, evidenceUrlsJson, evidenceResultTextChars,
+      evidenceTruncated, evidenceLinksParseFailed, ...rest
+    } = row;
     return { ...rest, fieldsUsed, evidence };
   });
 }
@@ -1724,21 +2340,46 @@ export function lookupLogFor(db, personKey, { limit = 20 } = {}) {
 // The full observed article for ONE lookup -- its own read, because it is
 // kilobytes of third-party page text and the list above is rendered on every
 // desk person page. Read-only; nothing writes here but storeLookupEvidence.
-export function lookupEvidenceFor(db, logId) {
+//
+// BOTH KEYS ARE REQUIRED, and both are matched (review finding 11). This
+// used to take a bare logId and nothing else, so any integer returned any
+// person's evidence: the route is admin-token gated, but "which person is
+// this about" is the one question an evidence read has to answer, and a
+// caller that passes the wrong person should get null rather than somebody
+// else's search results. The join onto lookup_log is what makes the person
+// authoritative -- lookup_evidence itself has no person_key.
+//
+// resultText is CAPPED at LOOKUP_RESULT_TEXT_CAP on the way out as well as
+// on the way in (review finding 4): storeLookupEvidence has cut new rows
+// since that cap existed, but a row written before it can still be
+// megabytes, and this is the read that would put all of them in one HTTP
+// response. `truncated` is true when either end cut it, and resultTextChars
+// is the STORED length, so a reader can see that what they have is short.
+export function lookupEvidenceFor(db, { logId, personKey } = {}) {
   const id = Number(logId);
   if (!Number.isInteger(id)) return null;
+  if (typeof personKey !== 'string' || personKey.length === 0) return null;
   const row = db.prepare(
-    `SELECT log_id AS logId, urls AS urlsJson, result_text AS resultText, created_at AS createdAt
-     FROM lookup_evidence WHERE log_id = ?`
-  ).get(id);
+    `SELECT le.log_id AS logId, le.urls AS urlsJson, le.result_text AS resultText,
+            le.created_at AS createdAt, le.truncated AS truncated,
+            le.links_parse_failed AS linksParseFailed
+     FROM lookup_evidence le
+     JOIN lookup_log ll ON ll.id = le.log_id
+     WHERE le.log_id = ? AND ll.person_key = ?`
+  ).get(id, personKey);
   if (!row) return null;
   let urls = [];
   try { urls = JSON.parse(row.urlsJson); } catch { urls = []; }
+  const stored = String(row.resultText ?? '');
+  const clipped = stored.length > LOOKUP_RESULT_TEXT_CAP;
   return {
     logId: row.logId,
+    personKey,
     urls: Array.isArray(urls) ? urls : [],
-    resultText: row.resultText,
-    resultTextChars: String(row.resultText ?? '').length,
+    resultText: clipped ? stored.slice(0, LOOKUP_RESULT_TEXT_CAP) : stored,
+    resultTextChars: stored.length,
+    truncated: clipped || Number(row.truncated ?? 0) === 1,
+    linksParseFailed: Number(row.linksParseFailed ?? 0) === 1,
     createdAt: row.createdAt,
   };
 }
@@ -1750,6 +2391,16 @@ export function lookupEvidenceFor(db, logId) {
 // context row: if that row is gone, this returns null rather than serving a
 // quote nobody can verify any more -- the same deletion-cascade-honored-at-
 // serve-time discipline the card route already applies to its own quote.
+//
+// THREE STATES, not two, since review finding 5: 0 (does not contradict the
+// anchor), 1 (does), and contradicts_anchor_unknown = 1 -- a row stored
+// BEFORE the anchor columns existed, which the v14 ALTER silently defaulted
+// to 0 and which this query therefore kept serving on the card as though it
+// had been checked. It had not been checked at all; it is from exactly the
+// era of the 4520 false positive. An unknown row is treated like a
+// contradiction -- withheld while pending, allowed once the owner accepts it
+// -- and a NULL in either column (a hand-altered database) is refused too,
+// which is what the COALESCE defaults to 1 are for.
 //
 // A contradicts_anchor change is EXCLUDED while it is pending, and this is
 // the fix for what lookup_log 4520 actually did wrong to the owner: a claim
@@ -1764,6 +2415,7 @@ export function newestWebChange(db, personKey) {
   const row = db.prepare(
     `SELECT plc.claim_id AS claimId, plc.kind AS kind, plc.url AS url, plc.change_date AS date,
             plc.evidence_kind AS evidenceKind, plc.contradicts_anchor AS contradictsAnchor,
+            plc.contradicts_anchor_unknown AS contradictsAnchorUnknown,
             ll.at AS at, c.text AS text,
             (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) AS decision
      FROM person_lookup_change plc
@@ -1775,7 +2427,7 @@ export function newestWebChange(db, personKey) {
          'pending'
        ) NOT IN ('reject', 'retract')
        AND (
-         plc.contradicts_anchor = 0
+         (COALESCE(plc.contradicts_anchor, 1) = 0 AND COALESCE(plc.contradicts_anchor_unknown, 1) = 0)
          OR (SELECT d.action FROM claim_decision d WHERE d.claim_id = plc.claim_id ORDER BY d.id DESC LIMIT 1) = 'accept'
        )
      ORDER BY plc.claim_id DESC LIMIT 1`
@@ -1795,5 +2447,6 @@ export function newestWebChange(db, personKey) {
     date: row.date ?? null, at: row.at, decision: row.decision ?? null,
     evidenceKind: row.evidenceKind ?? null,
     contradictsAnchor: Number(row.contradictsAnchor ?? 0) === 1,
+    contradictsAnchorUnknown: Number(row.contradictsAnchorUnknown ?? 0) === 1,
   };
 }
