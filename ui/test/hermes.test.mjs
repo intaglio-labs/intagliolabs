@@ -296,6 +296,25 @@ test('/stats echoes the effective feature set', async () => {
   assert.equal(body.features.connectors.imessage, true);
   assert.equal(body.features.connectors.whatsapp, 'optional');
   assert.equal(body.features.connectors.photos, false);
+
+  // WHOSE VIEW IT IS, on the wire. hermes re-reads the registry on a TTL; the
+  // app caches it for its process lifetime and the daemon at module load, so a
+  // flag flipped since they started is one nothing else is acting on yet. A
+  // retest reading this endpoint from outside the box cannot see that from the
+  // flags alone, and used to be left to assume it.
+  assert.equal(typeof body.features.readAt, 'number', 'the feature set must say when it was read');
+  assert.ok(body.features.readAt <= Date.now());
+  assert.match(body.features.note, /app and daemon apply flags at their next restart/u);
+  // And the note must not claim a read discipline hermes does not have.
+  assert.match(body.features.note, /TTL/u);
+  assert.equal(body.features.computedAt, undefined, 'readAt is the one name for that clock');
+
+  // And the registry comes from the same short-TTL cache as the heavy blocks,
+  // so a polled /stats does not re-read two files from disk every time. Equal
+  // readAt across two calls is the whole claim; a per-request read would move
+  // it.
+  const again = await (await authedGet('/stats')).json();
+  assert.equal(again.features.readAt, body.features.readAt, 'the registry was re-read inside the TTL');
 });
 
 test('an Origin-less request with a wrong bearer token is rejected', async () => {
@@ -1616,4 +1635,142 @@ test('force rebuilds even when the corpus has not moved', async () => {
   await adminPost('/admin/episodes/rebuild', {});
   const forced = await (await adminPost('/admin/episodes/rebuild', { force: true })).json();
   assert.equal(forced.skipped, undefined);
+});
+
+// --- GET /stats' memoised status blocks ---------------------------------------
+//
+// The incident these encode: four consecutive GET /stats on the live machine
+// took 15.9s, 9.1s, 6.1s and 1.0s while hermes was at 98% CPU warming the
+// people core after an install, and the connectors daemon -- whose startup
+// probe gave /stats 4s and treats a FAIL as fatal -- exited and stopped all
+// ingestion. sweepStatus (795ms) and lookupStatus (637ms) were the cost; both
+// walk every person in the house, on every request, on a route that is polled.
+//
+// The probes below stand in for those two walks. They BLOCK, using Atomics.wait
+// rather than a promise, because that is what the real ones are: synchronous
+// node:sqlite reads on the one thread this process has. A test that awaited a
+// timer instead would pass against an implementation that still recomputed per
+// request.
+const blockFor = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+const statsServer = async (opts) => {
+  const statsDir = mkdtempSync(join(tmpdir(), 'hermes-stats-'));
+  const srv = await start({
+    port: 0,
+    dbPath: join(statsDir, 'context.db'),
+    llamaApiKey: TEST_LLAMA_KEY,
+    bearerToken: TEST_BEARER_TOKEN,
+    ...opts,
+  });
+  const read = async () => {
+    const started = Date.now();
+    const body = await (await fetch(`http://127.0.0.1:${srv.port}/stats`, {
+      headers: { Authorization: `Bearer ${TEST_BEARER_TOKEN}` },
+    })).json();
+    return { body, ms: Date.now() - started };
+  };
+  const close = async () => {
+    await srv.close();
+    rmSync(statsDir, { recursive: true, force: true });
+  };
+  return { read, close };
+};
+
+test('/stats serves the expensive blocks from cache inside the TTL', async () => {
+  const SLOW_MS = 2000;
+  let sweepCalls = 0;
+  let lookupCalls = 0;
+  const s = await statsServer({
+    statusProbes: {
+      sweep: () => { sweepCalls += 1; blockFor(SLOW_MS); return { scope: 7 }; },
+      lookup: () => { lookupCalls += 1; return { scope: 9 }; },
+    },
+  });
+  try {
+    const first = await s.read();
+    const second = await s.read();
+
+    assert.equal(sweepCalls, 1, 'the second /stats recomputed the sweep walk');
+    assert.equal(lookupCalls, 1, 'the second /stats recomputed the lookup walk');
+    assert.ok(
+      first.ms >= SLOW_MS - 100,
+      `the first /stats must actually pay the walk; it took ${first.ms}ms`
+    );
+    assert.ok(
+      second.ms < 50,
+      `the second /stats took ${second.ms}ms — the cache is not being served`
+    );
+
+    assert.equal(first.body.sweep.scope, 7);
+    assert.equal(second.body.sweep.scope, 7);
+    assert.equal(second.body.lookup.scope, 9);
+    assert.equal(typeof first.body.sweep.computedAt, 'number', 'each cached block carries computedAt');
+    assert.equal(
+      second.body.sweep.computedAt, first.body.sweep.computedAt,
+      'computedAt moved, so the block was recomputed'
+    );
+    assert.equal(second.body.sweep.staleMs, undefined, 'a block inside its TTL is not stale');
+
+    // The live blocks stay live: they are counts and state reads, and features
+    // is read per request on purpose.
+    assert.equal(typeof second.body.rows, 'number');
+    assert.ok(second.body.features, 'the effective feature set is still echoed live');
+  } finally {
+    await s.close();
+  }
+});
+
+test('/stats past the TTL answers from the stale block and refreshes behind it', async () => {
+  const SLOW_MS = 300;
+  let sweepCalls = 0;
+  const s = await statsServer({
+    statsCacheTtlMs: 50,
+    statusProbes: {
+      sweep: () => { sweepCalls += 1; blockFor(SLOW_MS); return { scope: sweepCalls }; },
+    },
+  });
+  try {
+    const first = await s.read();
+    await new Promise((r) => setTimeout(r, 80));
+    const stale = await s.read();
+
+    assert.ok(
+      stale.ms < 50,
+      `an expired block must not be recomputed in the request; it took ${stale.ms}ms`
+    );
+    assert.equal(stale.body.sweep.scope, 1, 'the last value is what gets served');
+    assert.equal(stale.body.sweep.computedAt, first.body.sweep.computedAt);
+    assert.ok(stale.body.sweep.staleMs >= 50, 'and it says how old it is');
+
+    // The refresh it scheduled lands on its own, behind the answered request.
+    const deadline = Date.now() + 5000;
+    while (sweepCalls < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(sweepCalls, 2, 'the expired block was never refreshed');
+
+    const fresh = await s.read();
+    assert.equal(fresh.body.sweep.scope, 2);
+    assert.ok(fresh.body.sweep.computedAt > first.body.sweep.computedAt);
+    assert.equal(fresh.body.sweep.staleMs, undefined);
+  } finally {
+    await s.close();
+  }
+});
+
+test('a status block that throws nulls itself and is not retried every request', async () => {
+  let calls = 0;
+  const s = await statsServer({
+    statusProbes: {
+      sweep: () => { calls += 1; throw new Error('no such table: person_sweep_cursor'); },
+    },
+  });
+  try {
+    const first = await s.read();
+    const second = await s.read();
+    assert.equal(first.body.sweep, null, 'a pre-migration table must never take /stats down');
+    assert.equal(second.body.sweep, null);
+    assert.equal(calls, 1, 'a throwing status must not be re-thrown on every request');
+    assert.equal(typeof second.body.rows, 'number', 'and the rest of /stats still answers');
+  } finally {
+    await s.close();
+  }
 });

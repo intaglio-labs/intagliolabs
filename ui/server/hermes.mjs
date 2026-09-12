@@ -5673,6 +5673,118 @@ async function handleVaultAsk(db, req, res, cors, policy) {
   }
 }
 
+// --- /stats' memoised status blocks -------------------------------------------
+//
+// WHY THIS EXISTS. On the live machine (2026-09-12) four consecutive
+// GET /stats took 15.9s, 9.1s, 6.1s and 1.0s while hermes sat at 98% CPU
+// warming the people core after an install. Timed against a read-only copy of
+// that database the cost is entirely two blocks: sweepStatus 795ms and
+// lookupStatus 637ms, against lintStatus 2ms and cardStats 1ms. The call-site
+// comments below call all four "plain aggregates"; for these two that is
+// wrong and the wrongness is the bug. sweepStatus walks sweepScope, which runs
+// one MAX(pel.context_id) query per person in the house; lookupStatus walks
+// lookupScope, which runs anchorsFor + buildLookupQuery per person. Both are
+// O(people), and /stats is polled.
+//
+// It was not merely slow, it was load-bearing: the connectors daemon's startup
+// probe gave /stats 4s and every non-`fda-*` FAIL is fatal in daemon.mjs'
+// partitionChecks, so a busy hermes stopped ALL ingestion until somebody
+// restarted the daemon by hand. The daemon half of that is fixed in
+// connectors/lib/checks.mjs (a /stats timeout is now a WARN); this half is the
+// guarantee that /stats stops being the expensive route in the first place.
+//
+// THE SHAPE, and the one honest limit in it. The first request after boot has
+// nothing to serve, so that request does pay the walk. After that the block is
+// served from the cache for TTL; the first request past the TTL schedules ONE
+// refresh and answers immediately from the last value with `staleMs`. The
+// refresh still blocks this single-threaded process when it runs -- there is no
+// worker here and these are synchronous node:sqlite reads -- but it blocks
+// BETWEEN requests, once per TTL, instead of inside every request. A caller
+// therefore never waits on the walk again, which is the property the daemon
+// probe needs.
+//
+// Deliberately NOT cached: rows, peopleProjection, lint and cards are counts
+// or state reads (lint 2ms, cards 1ms on the live database), and features is
+// read per request on purpose -- see its own comment, a stale echo of the
+// effective feature set is worse than useless.
+//
+// memory is uncached too, and that one is a JUDGEMENT AND NOT A MEASUREMENT:
+// it was not timed during the incident. Do not read its presence here as
+// evidence that it is cheap. memoryProgress's `pending` is
+// selectRows({fromDays: 3650, limit: 100000}).length -- it materialises up to
+// a hundred thousand corpus rows to take their length -- so on a large corpus
+// it is the obvious next offender on this route, and the fix there is a
+// COUNT(*) in memory/select.mjs rather than another cache. Time it before
+// widening this cache to cover it.
+//
+// The holder is created per server in start() and arrives on `policy` rather
+// than living at module scope: two servers in one process (the test suite runs
+// two) must not share a cache.
+export const STATS_CACHE_TTL_MS = 30_000;
+
+// How long after answering a stale request the refresh behind it starts.
+// MEASURED, not guessed: at 0ms (and worse, on setImmediate) the refresh lands
+// on top of the flush of the very response that scheduled it -- a 300ms probe
+// delayed that response's delivery by 308ms in ui/test/hermes.test.mjs. A small
+// real delay puts the answer on the wire first, which is the whole point of
+// refreshing in the background. It costs nothing: the block being refreshed is
+// already older than its TTL, and one more 50ms is not a number anybody reads
+// off /stats.
+const STATS_REFRESH_DELAY_MS = 50;
+
+// Shipped on /stats.features beside `readAt`. The three processes that read
+// ops/features.json do not read it at the same times: the app (Features.swift)
+// caches for its process lifetime and the connectors daemon caches at module
+// load, while hermes re-reads on a TTL. So the flags on /stats are hermes'
+// view, and a flag flipped since the app and the daemon started is a flag
+// nothing else is acting on yet. That is a sentence on the wire rather than
+// folklore because /stats is what a retest asks from outside the box, and it
+// is the exact question a retest gets wrong.
+//
+// The first clause says "on a short TTL" and not "per request", which is what
+// this note was first drafted as, because putting the cache in and shipping a
+// sentence saying there is no cache is how a wire contract starts lying. The
+// clause that matters is the second one, and it is unchanged.
+const FEATURES_READ_NOTE =
+  `hermes re-reads the registry on a ${STATS_CACHE_TTL_MS / 1000}s TTL (see readAt); `
+  + 'the app and daemon apply flags at their next restart';
+
+function cachedStatus(holder, key, compute, { ttlMs = STATS_CACHE_TTL_MS, now = Date.now() } = {}) {
+  const entry = (holder[key] ??= { value: null, computedAt: null, refreshing: false });
+  const run = () => {
+    try {
+      entry.value = compute();
+    } catch {
+      // The same contract as the try/catch that used to sit at each call site:
+      // a missing or pre-migration table nulls ONE block and never takes
+      // /stats down. computedAt is stamped even on the failure, so a status
+      // that throws is not re-thrown on every request for the next TTL.
+      entry.value = null;
+    }
+    entry.computedAt = Date.now();
+  };
+  if (entry.computedAt === null) run();
+  else if (!entry.refreshing && now - entry.computedAt >= ttlMs) {
+    entry.refreshing = true;
+    // A real timer, not setImmediate and not 0ms -- see STATS_REFRESH_DELAY_MS
+    // for the measurement. unref'd because a warm cache is never a reason to
+    // hold the process (or a test's server.close()) open.
+    setTimeout(() => {
+      try {
+        run();
+      } finally {
+        entry.refreshing = false;
+      }
+    }, STATS_REFRESH_DELAY_MS).unref?.();
+  }
+  if (entry.value === null) return null;
+  const out = { ...entry.value, computedAt: entry.computedAt };
+  // Only while a refresh is actually in flight: a block with no staleMs is one
+  // whose numbers are inside the TTL, and the distinction is the point.
+  if (entry.refreshing) out.staleMs = now - entry.computedAt;
+  return out;
+}
+
 async function handle(db, req, res, cors, url, policy) {
   // Deliberately the one unauthenticated route: it is the liveness probe for a
   // process that is meant to run for months, and a probe that needs a
@@ -5709,40 +5821,43 @@ async function handle(db, req, res, cors, url, policy) {
 
   if (req.method === 'GET' && url.pathname === '/stats') {
     const { n } = db.prepare('SELECT count(*) AS n FROM context').get();
-    // sweepStatus is a plain aggregate over brand-new tables and should
-    // never be able to take /stats down; wrapped the same defensive way a
-    // partial/pre-migration database is handled elsewhere in this route.
-    let sweep = null;
-    try {
-      // `policy` so the reported cap is the one actually in force: this used
-      // to print SWEEP_DAILY_CALL_CAP_DEFAULT unconditionally, so a config
-      // override was invisible here and the number shown was never the
-      // number sweepGate refuses at.
-      sweep = sweepStatus(db, policy);
-    } catch {
-      sweep = null;
-    }
-    // lookupStatus is a plain aggregate over brand-new tables, same
-    // defensive wrap as sweep above -- a missing/pre-migration lookup
+    // sweep and lookup are THE two expensive blocks on this route, and they
+    // are memoised rather than recomputed per request -- see cachedStatus
+    // above for the measurements and for what the cache does and does not
+    // promise. cachedStatus keeps the old defensive contract: a status that
+    // throws nulls its own block and never takes /stats down.
+    const statusCache = policy.statsCacheHolder ?? policy;
+    const statusOpts = {
+      ttlMs: policy.statsCacheTtlMs ?? STATS_CACHE_TTL_MS,
+      now: Date.now(),
+    };
+    // Test seam only, same discipline as relationshipMatcher and the other
+    // start() seams: production leaves statusProbes undefined and these are
+    // the real functions.
+    const probes = policy.statusProbes ?? {};
+    // `policy` so the reported cap is the one actually in force: this used
+    // to print SWEEP_DAILY_CALL_CAP_DEFAULT unconditionally, so a config
+    // override was invisible here and the number shown was never the
+    // number sweepGate refuses at.
+    const sweep = cachedStatus(
+      statusCache, 'sweep', () => (probes.sweep ?? sweepStatus)(db, policy), statusOpts
+    );
+    const lookup = cachedStatus(
+      statusCache, 'lookup', () => (probes.lookup ?? lookupStatus)(db, policy), statusOpts
+    );
+    // lintStatus really is a plain aggregate over brand-new tables -- 2ms on
+    // the live database, so it stays live and keeps the inline wrap that
+    // cachedStatus took over for sweep/lookup: a missing/pre-migration lint
     // schema must never take /stats down.
-    let lookup = null;
-    try {
-      lookup = lookupStatus(db, policy);
-    } catch {
-      lookup = null;
-    }
-    // lintStatus is a plain aggregate over brand-new tables, same defensive
-    // wrap as sweep/lookup above -- a missing/pre-migration lint schema must
-    // never take /stats down.
     let lint = null;
     try {
       lint = lintStatus(db);
     } catch {
       lint = null;
     }
-    // cardStats is a plain aggregate over rm_card_event, same defensive wrap
-    // as sweep/lookup/lint above -- a missing/pre-migration rm_card_event
-    // table must never take /stats down.
+    // cardStats is a plain aggregate over rm_card_event (1ms), live for the
+    // same reason as lint and wrapped the same way -- a missing/pre-migration
+    // rm_card_event table must never take /stats down.
     let cards = null;
     try {
       cards = cardStats(db, { now: Date.now() });
@@ -5756,17 +5871,34 @@ async function handle(db, req, res, cors, url, policy) {
     // is where "what is actually on, on THIS install" lives, which is the
     // question the retest has to ask from outside.
     //
-    // Read per request rather than cached at boot, unlike the daemon's start-up
-    // read: this endpoint is asked rarely, and a stale echo would be worse than
-    // useless here — it is read precisely to find out whether an override
-    // landed. Wrapped like every other aggregate above: an unreadable registry
-    // must never take /stats down, and readFeatures already answers ALL_OFF
-    // rather than throwing.
+    // WHOSE VIEW THIS IS, which the block used to leave for the reader to
+    // assume. This paragraph replaces one saying the registry is read per
+    // request rather than cached at boot, because a stale echo would be worse
+    // than useless when the question is whether an override landed. That
+    // reasoning still holds against a BOOT read and it is why the answer is not
+    // one; it did not hold against the per-request read it was defending,
+    // because hermes was never the process the flag has to reach. The app
+    // (Features.swift) caches the registry for its process lifetime and the
+    // connectors daemon caches it at module load, so /stats could report a flag
+    // that nothing else on the machine was acting on yet, and say nothing about
+    // the gap. It now says both things: `readAt` is when hermes last read the
+    // file, and `note` is who has and has not picked the value up.
+    //
+    // Behind the same short TTL as sweep/lookup, which changes the resolution
+    // of that answer from "this instant" to "within STATS_CACHE_TTL_MS" and
+    // does not change what it means -- an override still becomes visible
+    // without a restart, which is the property the old comment was protecting,
+    // and readAt makes the age legible rather than implicit. Wrapped like every
+    // other block: an unreadable registry must never take /stats down, and
+    // readFeatures already answers ALL_OFF rather than throwing.
+    const registry = cachedStatus(statusCache, 'features', () => readFeatures(), statusOpts);
     let features = null;
-    try {
-      features = readFeatures();
-    } catch {
-      features = null;
+    if (registry !== null) {
+      // computedAt is renamed rather than carried alongside: two field names
+      // for one number invites a reader to believe they are different clocks.
+      // staleMs survives under its own name, as on every other cached block.
+      const { computedAt, ...flags } = registry;
+      features = { ...flags, readAt: computedAt, note: FEATURES_READ_NOTE };
     }
     send(res, 200,
       {
@@ -6178,6 +6310,12 @@ export async function start({
   // schedulePeopleRebuild); a test asserting synchronous post-clear/purge
   // emptiness opts out rather than the production default changing for it.
   peopleProjectionAutoRebuild = true,
+  // Test seams for GET /stats' memoised status blocks (see cachedStatus):
+  // a shorter TTL, and stand-in sweep/lookup computers so a test can prove
+  // the cache without a corpus big enough to make the real walk slow.
+  // Production passes neither.
+  statsCacheTtlMs,
+  statusProbes,
   llamaModel = process.env.HAZLIE_MAIN_MODEL,
 } = {}) {
   const allowedOriginSet = parseAllowedOrigins(allowedOrigins);
@@ -6220,6 +6358,10 @@ export async function start({
   // lastRebuildError must survive across the requests that trigger and poll
   // it (schedulePeopleRebuild, and GET /stats).
   const peopleProjectionHolder = {};
+  // Same reasoning again, for GET /stats' memoised sweep/lookup blocks: the
+  // cache must live for the process and must NOT be shared between two servers
+  // in one process, so it is a per-start() holder rather than module state.
+  const statsCacheHolder = {};
   const configuredDbPath = dbPath ?? process.env.HERMES_DB;
   const resolvedDbPath = configuredDbPath ?? DEFAULT_DB_PATH;
   // Summary generation was retired. Remove its private derived database and
@@ -6271,6 +6413,9 @@ export async function start({
         relationshipHolder,
         peopleProjectionHolder,
         peopleProjectionAutoRebuild,
+        statsCacheHolder,
+        statsCacheTtlMs,
+        statusProbes,
       });
     } catch (e) {
       send(res, e.status ?? 500, { error: e.message ?? String(e) }, cors);
