@@ -28,7 +28,7 @@ const {
 // daemon.mjs themselves, so a static import here would evaluate it — registry
 // and all — before the line above ran.
 const { msUntilIdleWindow } = await import('../retain.mjs');
-const { parseArgs, purgeHermesSources } = await import('../run.mjs');
+const { holdDaemonLockForPurge, parseArgs, purgeHermesSources } = await import('../run.mjs');
 
 test('an empty config is valid — every section is optional until its source lands', () => {
   assert.deepEqual(validateConfig({}), {});
@@ -184,6 +184,32 @@ test('a Contacts purge clears Hermes derived People state despite having no corp
   });
   assert.equal(cleared, 1);
   assert.deepEqual(result, { deleted: 0, maintained: false });
+});
+
+// A PURGE THAT RACES THE SCHEDULER LOOKS LIKE A PURGE THAT WORKED. On
+// 2026-09-12 the mail purge emptied hermes and the cursors went with it; what
+// came back pointed past a corpus that was gone. Whether the daemon rewrote
+// them or they were never deleted, the same interlock answers both: a live
+// daemon's lock refuses the run, and holding it for the duration stops one
+// starting halfway through.
+test('a purge refuses to run while the daemon owns the cursor database', () => {
+  assert.throws(
+    () => holdDaemonLockForPurge({ acquire: () => null, lockPath: () => '/tmp/daemon.lock' }),
+    (error) => {
+      assert.match(error.message, /\/tmp\/daemon\.lock/u, 'say which lock, so it can be looked at');
+      assert.match(error.message, /stop it before purging/u, 'and what to do about it');
+      return true;
+    }
+  );
+});
+
+test('and holds that lock itself for the length of the purge', () => {
+  let released = 0;
+  const release = holdDaemonLockForPurge({ acquire: () => () => { released += 1; } });
+  assert.equal(typeof release, 'function',
+    'the caller must be handed the release, or the lock outlives the run');
+  release();
+  assert.equal(released, 1);
 });
 
 test('msUntilIdleWindow lands on the next local occurrence, always in the future', () => {

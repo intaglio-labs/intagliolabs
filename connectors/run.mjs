@@ -7,7 +7,9 @@
 //   node run.mjs <source> --purge      /admin/purge the hermes source, then
 //                                      wipe the connector's LOCAL artifacts
 //                                      (cursors, cache, quarantine) so the
-//                                      next run re-observes from scratch
+//                                      next run re-observes from scratch.
+//                                      REQUIRES THE DAEMON TO BE STOPPED, and
+//                                      says so rather than racing it
 //   node run.mjs <source> --disable    write the disable marker; the daemon
 //                                      skips the source from its next tick
 //                                      (remove the marker file to re-enable)
@@ -21,7 +23,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   CONNECTOR_NAMES,
   CONNECTOR_HERMES_SOURCE,
+  acquireDaemonLock,
   defaultCacheDir,
+  defaultDaemonLockPath,
   disableMarkerPath,
   loadConfig,
   loadSources,
@@ -63,6 +67,31 @@ export function parseArgs(argv) {
   return { name, flag: [...flags][0] ?? null };
 }
 
+/**
+ * Take the daemon's own lock for the duration of a purge, or refuse.
+ *
+ * THE DAEMON HAS TO BE STOPPED, and this enforces it rather than leaving the
+ * header to imply it. A purge racing the scheduler is not a partial purge, it
+ * is a purge that appears to work: /admin/purge empties the source,
+ * wipeLocalArtifacts deletes the cursors, and the pass already in flight writes
+ * its own back a second later -- pointing past a corpus that is gone. Taking
+ * the lock is both halves of the answer: it refuses while a live daemon holds
+ * it, and holds it ourselves so one cannot start midway.
+ */
+export function holdDaemonLockForPurge({
+  acquire = acquireDaemonLock,
+  lockPath = defaultDaemonLockPath,
+} = {}) {
+  const release = acquire();
+  if (!release) {
+    throw new Error(
+      `the connectors daemon holds ${lockPath()} — stop it before purging; `
+        + 'a purge that races the scheduler deletes cursors the next pass immediately rewrites'
+    );
+  }
+  return release;
+}
+
 /** Purge every Hermes source owned by one connector, returning one total. */
 export async function purgeHermesSources(
   hermesSource,
@@ -91,6 +120,7 @@ const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv
 if (isMain) {
   let state;
   let log;
+  let releasePurgeLock = null;
   try {
     const { name, flag } = parseArgs(process.argv.slice(2));
     log = createLogger();
@@ -127,6 +157,9 @@ if (isMain) {
       log.info('source_disabled_marker', { connector: name });
       console.log(JSON.stringify({ disabled: name, marker, reenable: `rm ${marker}` }));
     } else if (flag === '--purge') {
+      // Taken BEFORE the hermes request, because refusing after 81,725 rows
+      // are already gone is not refusing.
+      releasePurgeLock = holdDaemonLockForPurge();
       // Hermes first, local second: if the /admin/purge fails, the cursors
       // survive and nothing is forgotten locally about data hermes still
       // holds. Contacts maps to no corpus source, but the helper still asks
@@ -136,6 +169,12 @@ if (isMain) {
       // forgetting any local cursor; if one request fails, the catch below
       // preserves local state and a retry safely re-deletes the earlier ones.
       const purged = await purgeHermesSources(hermesSource, ingestOpts);
+      // `cursorsDeleted` counts the connector's own namespace AND its rows
+      // under the scheduler's `yearly-backfill:connector:<name>:` prefix, which
+      // is the class that survived the 2026-09-12 mail purge and quietly kept
+      // three finished years marked finished. It is printed because the only
+      // way an operator can tell a complete purge from the old half of one is
+      // to see the number.
       const local = wipeLocalArtifacts(name, { state, cacheDir, log });
       console.log(JSON.stringify({ connector: name, hermesSource, ...purged, ...local }));
     } else {
@@ -191,6 +230,7 @@ if (isMain) {
     process.exitCode = 1;
   } finally {
     state?.close();
+    releasePurgeLock?.();
     log?.close();
   }
 }

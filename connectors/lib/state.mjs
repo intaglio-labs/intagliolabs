@@ -162,7 +162,25 @@ export function openStateDb(path = defaultStateDbPath()) {
       'ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_ts = excluded.updated_ts'
   );
   const deleteCursorStmt = db.prepare('DELETE FROM cursor WHERE name = ?');
-  const deleteCursorsStmt = db.prepare("DELETE FROM cursor WHERE name = ? OR name LIKE ? ESCAPE '\\'");
+  // WHAT A PURGE HAS TO FORGET, WHICH IS MORE THAN ONE NAMESPACE.
+  //
+  // Observed on the live machine 2026-09-12: `node run.mjs mail --purge`
+  // deleted 81,725 mail rows from hermes and left every
+  // `yearly-backfill:connector:mail:done:<year>` behind, because those keys
+  // live under the SCHEDULER's prefix rather than the connector's. The re-pull
+  // then fetched a few days forward and one unfinished history year; 2024, 2025
+  // and 2026 were still marked done and would never have been fetched again. A
+  // cursor asserting "this year is finished" about a corpus that no longer
+  // exists is the worst kind of survivor: it is silent, and it is believed.
+  //
+  // THE ONE KEY THAT STAYS is `<connector>:history-slices-per-pass` — a rolling
+  // measurement of how many slices the last pass got through, which the
+  // activity panel turns into an ETA. It describes the machine, not the rows,
+  // so a purge has nothing to say about it.
+  const deleteCursorsStmt = db.prepare(
+    "DELETE FROM cursor WHERE (name = ? OR name LIKE ? ESCAPE '\\' "
+      + "OR name = ? OR name LIKE ? ESCAPE '\\') AND name <> ?"
+  );
   const recordRunStmt = db.prepare(
     'INSERT INTO run_log(connector, started_ts, finished_ts, ok, ingested, updated, unchanged, deleted, error) ' +
       'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
@@ -257,7 +275,16 @@ export function openStateDb(path = defaultStateDbPath()) {
         throw new Error('deleteCursors requires a connector name');
       }
       const escaped = connector.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
-      return Number(deleteCursorsStmt.run(connector, `${escaped}:%`).changes);
+      const yearly = `yearly-backfill:connector:${connector}`;
+      return Number(
+        deleteCursorsStmt.run(
+          connector,
+          `${escaped}:%`,
+          yearly,
+          `yearly-backfill:connector:${escaped}:%`,
+          `${connector}:history-slices-per-pass`
+        ).changes
+      );
     },
 
     recordRun({

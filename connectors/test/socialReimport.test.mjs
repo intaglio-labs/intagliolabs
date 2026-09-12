@@ -30,7 +30,12 @@ function fixture(t) {
 test('a pending social reimport purges every platform before wiping Matrix cursors', async (t) => {
   const paths = fixture(t);
   const calls = [];
+  // wipeLocalArtifacts does its database half in ONE transaction, so the stub
+  // has to be a database rather than a bag of methods -- and while it is here,
+  // it is worth asserting the transaction actually brackets the delete.
+  const sql = [];
   const state = {
+    db: { exec: (statement) => sql.push(statement) },
     deleteCursors(name) {
       assert.equal(name, 'matrix');
       calls.push('local:matrix');
@@ -56,6 +61,8 @@ test('a pending social reimport purges every platform before wiping Matrix curso
   assert.equal(existsSync(paths.pendingPath), false);
   assert.equal(existsSync(paths.completedPath), true);
   assert.equal(existsSync(join(paths.cacheDir, 'matrix')), false);
+  assert.deepEqual(sql, ['BEGIN IMMEDIATE', 'COMMIT'],
+    'the local wipe must commit as one statement about one connector');
 });
 
 test('an interrupted social purge keeps the pending marker and Matrix cursors for retry', async (t) => {

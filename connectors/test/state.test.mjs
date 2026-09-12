@@ -88,6 +88,80 @@ test('deleteCursors wipes a connector namespace and nothing adjacent', (t) => {
   assert.equal(state.getCursor('mailx'), 'must survive');
 });
 
+// THE 2026-09-12 MAIL PURGE. `node run.mjs mail --purge` deleted 81,725 rows
+// from hermes and left every scheduler-side key behind, because
+// `yearly-backfill:connector:mail:done:<year>` is not in the `mail:` namespace.
+// The re-pull fetched a few days forward and one unfinished history year; 2024,
+// 2025 and 2026 were still marked done and would never have been fetched again.
+// So this seeds two connectors and purges one: a key that survives here is a
+// year that silently never comes back.
+test('a purge forgets the scheduler’s progress too, and only this connector’s', (t) => {
+  const state = openStateDb(join(sandbox(t), 'state.db'));
+  t.after(() => state.close());
+
+  // The exact shapes observed on the machine.
+  state.setCursor('mail:someone@example.com:internalDate', '1757000000000');
+  state.setCursor('mail:someone@example.com:history-year:2024:done', '1');
+  state.setCursor('mail:someone@example.com:history-year:2024:has-older', '0');
+  state.setCursor('mail:someone@example.com:history-year:2026:page', 'token');
+  state.setCursor('yearly-backfill:connector:mail:done:2024', '1');
+  state.setCursor('yearly-backfill:connector:mail:done:2025', '1');
+  state.setCursor('yearly-backfill:connector:mail:done:2026', '1');
+  state.setCursor('yearly-backfill:connector:mail:exhausted', '0');
+  // A rolling ETA measurement, not progress: it describes the machine and
+  // survives on purpose.
+  state.setCursor('mail:history-slices-per-pass', '14');
+  // Another connector, and the scheduler's own shared keys. Neither is this
+  // purge's business.
+  state.setCursor('imessage:history-year:2024:ceiling', '17');
+  state.setCursor('yearly-backfill:connector:imessage:done:2024', '1');
+  state.setCursor('yearly-backfill:year', '2024');
+  state.setCursor('yearly-backfill:complete', '0');
+  state.setCursor('yearly-backfill:barrier:people:done:2024', '1');
+
+  assert.equal(state.deleteCursors('mail'), 8);
+
+  for (const gone of [
+    'mail:someone@example.com:internalDate',
+    'mail:someone@example.com:history-year:2024:done',
+    'mail:someone@example.com:history-year:2024:has-older',
+    'mail:someone@example.com:history-year:2026:page',
+    'yearly-backfill:connector:mail:done:2024',
+    'yearly-backfill:connector:mail:done:2025',
+    'yearly-backfill:connector:mail:done:2026',
+    'yearly-backfill:connector:mail:exhausted',
+  ]) {
+    assert.equal(state.getCursor(gone), null, `${gone} must not survive a purge`);
+  }
+  assert.equal(state.getCursor('mail:history-slices-per-pass'), '14',
+    'the rolling slice measurement is about the machine, not the rows');
+  for (const [kept, value] of [
+    ['imessage:history-year:2024:ceiling', '17'],
+    ['yearly-backfill:connector:imessage:done:2024', '1'],
+    ['yearly-backfill:year', '2024'],
+    ['yearly-backfill:complete', '0'],
+    ['yearly-backfill:barrier:people:done:2024', '1'],
+  ]) {
+    assert.equal(state.getCursor(kept), value, `${kept} belongs to somebody else`);
+  }
+});
+
+test('and the same is true through the helper --purge actually calls', (t) => {
+  const dir = sandbox(t);
+  const state = openStateDb(join(dir, 'state.db'));
+  t.after(() => state.close());
+  state.setCursor('mail:someone@example.com:internalDate', '1757000000000');
+  state.setCursor('yearly-backfill:connector:mail:done:2025', '1');
+  state.setCursor('yearly-backfill:connector:imessage:done:2025', '1');
+
+  const { cursorsDeleted } = wipeLocalArtifacts('mail', { state, cacheDir: join(dir, 'cache') });
+  // Printed by run.mjs: the only way an operator tells a complete purge from
+  // the old half of one is to see the number.
+  assert.equal(cursorsDeleted, 2);
+  assert.equal(state.getCursor('yearly-backfill:connector:mail:done:2025'), null);
+  assert.equal(state.getCursor('yearly-backfill:connector:imessage:done:2025'), '1');
+});
+
 test('recordRun lands a complete row, and counts default to zero', (t) => {
   const state = openStateDb(join(sandbox(t), 'state.db'));
   t.after(() => state.close());

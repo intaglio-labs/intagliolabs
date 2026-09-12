@@ -128,12 +128,27 @@ export async function maintainPass({ log, ingestOpts }) {
 // — the next run re-observes from scratch and re-ingests only what the
 // owner still wants held.
 export function wipeLocalArtifacts(connector, { state, cacheDir, log }) {
-  const cursorsDeleted = state.deleteCursors(connector);
-  if (connector === 'imessage') state.db.exec('DELETE FROM imessage_undecoded');
-  if (connector === 'contacts') {
-    // Contact thumbnails are household-private state too. Leaving them behind
-    // made an explicit contacts purge remove the names but retain every face.
-    state.db.exec('DELETE FROM contact_avatars; DELETE FROM contact_ids');
+  // ONE TRANSACTION over the database half. These deletes are one statement
+  // about one connector -- the cursors that say where it got to and the tables
+  // only it writes -- and a partial application of that statement is a state
+  // no pass knows how to interpret: names gone but faces kept, or cursors gone
+  // and the undecoded queue still pointing at rows hermes no longer holds. The
+  // cache directory is outside it because a filesystem removal cannot join a
+  // SQLite transaction; it is idempotent and re-derivable, so it goes last.
+  let cursorsDeleted = 0;
+  state.db.exec('BEGIN IMMEDIATE');
+  try {
+    cursorsDeleted = state.deleteCursors(connector);
+    if (connector === 'imessage') state.db.exec('DELETE FROM imessage_undecoded');
+    if (connector === 'contacts') {
+      // Contact thumbnails are household-private state too. Leaving them behind
+      // made an explicit contacts purge remove the names but retain every face.
+      state.db.exec('DELETE FROM contact_avatars; DELETE FROM contact_ids');
+    }
+    state.db.exec('COMMIT');
+  } catch (error) {
+    try { state.db.exec('ROLLBACK'); } catch {}
+    throw error;
   }
   rmSync(join(cacheDir, connector), { recursive: true, force: true });
   log?.info('local_artifacts_wiped', { connector, cursorsDeleted });
