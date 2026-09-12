@@ -11,6 +11,7 @@
 // client. No webview or database gets a provider credential.
 import AppKit
 import WebKit
+import UniformTypeIdentifiers
 
 /// Which page under the connect token the app may open. An ENUM, never a string
 /// from JS: connectLink() validates the base (http, loopback, re-read each time
@@ -976,6 +977,28 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           self.reply(webView, id, d)
         }
       }
+    case "importLinkedIn":
+      // LINKEDIN WILL NOT LET ANYTHING READ YOUR CONNECTIONS, so the owner
+      // asks LinkedIn for a copy and hands the file over. This is the whole
+      // import: a file picker, a check, a copy.
+      //
+      // THE CHECK HAPPENS BEFORE THE COPY, and that ordering is the feature.
+      // csvObjects parses these files by SCANNING for a header row containing
+      // a known anchor column; with no anchor it yields nothing, the connector
+      // records rows: 0 and ok: true, and the first-load screen then shows
+      // linkedin at zero with nothing anywhere saying the file was unreadable.
+      // A French export (Prénom/Nom) does exactly that. So the anchor is
+      // checked here, on the picked file, and a file that fails is not copied
+      // and is named back with its own first column quoted.
+      //
+      // "Is the anchor present anywhere in the first 4 KB", not "is it line
+      // one": LinkedIn puts a Notes: paragraph above the real header and
+      // csvObjects handles that fine, so a line-one check would reject files
+      // that parse perfectly.
+      importLinkedIn { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
     case "googleProbe":
       // Whether the grant actually buys a READ, not whether a token file
       // exists. See connect/server.mjs — consent can complete and
@@ -2322,6 +2345,188 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         }
       }
     }
+  }
+
+  // MARK: the LinkedIn export
+
+  /// The two header columns that identify LinkedIn's two files, and the
+  /// canonical names the connector looks for.
+  ///
+  /// CLASSIFIED BY ANCHOR, NOT BY FILENAME. The owner may have renamed the
+  /// file, and a downloaded copy is frequently `Connections (1).csv`. The
+  /// anchor is what the parser actually keys on
+  /// (connectors/lib/linkedinRows.mjs), so it is also what decides which file
+  /// this is — and checking it is checking the parse.
+  private static let linkedInKinds: [(anchor: String, name: String)] = [
+    ("First Name", "Connections.csv"),
+    ("CONVERSATION ID", "messages.csv"),
+  ]
+
+  private var linkedInDirectory: URL {
+    FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".hazlie/imports/linkedin", isDirectory: true)
+  }
+
+  private func importLinkedIn(_ done: @escaping ([String: Any]) -> Void) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      let panel = NSOpenPanel()
+      panel.allowsMultipleSelection = true
+      panel.canChooseDirectories = false
+      panel.canChooseFiles = true
+      panel.message = "choose Connections.csv from your LinkedIn export"
+      panel.prompt = "import"
+      // .zip is offered so the file the owner just downloaded is SELECTABLE
+      // rather than greyed out with no explanation. It is refused below with a
+      // sentence rather than extracted: unzipping would mean a subprocess, and
+      // every check in this flow runs in this process.
+      var types: [UTType] = [.commaSeparatedText]
+      if let zip = UTType("public.zip-archive") { types.append(zip) }
+      panel.allowedContentTypes = types
+      // The onboarding scrim is a full-screen floating window; an ordinary
+      // panel opens underneath it. Same reason requestPermission yields.
+      self.delegate?.yieldForPrompt(true)
+      panel.begin { response in
+        self.delegate?.yieldForPrompt(false)
+        guard response == .OK, !panel.urls.isEmpty else {
+          done(["state": "cancelled"])
+          return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+          done(self.acceptLinkedInFiles(panel.urls))
+        }
+      }
+    }
+  }
+
+  /// Check every picked file, copy only the ones that parse, and answer with
+  /// the count this app counted itself.
+  private func acceptLinkedInFiles(_ urls: [URL]) -> [String: Any] {
+    let fm = FileManager.default
+    if let zip = urls.first(where: { $0.pathExtension.lowercased() == "zip" }) {
+      return [
+        "state": "error", "reason": "zip",
+        "file": zip.lastPathComponent,
+      ]
+    }
+    var copied: [String] = []
+    var connections = 0
+    for url in urls {
+      // 4 KB is well past LinkedIn's Notes: preamble and its header, and a
+      // bounded read means a file the owner picked by mistake -- a 2 GB
+      // video renamed .csv -- costs one page, not a stall.
+      guard let head = Bridge.readHead(of: url, bytes: 4096) else {
+        return ["state": "error", "reason": "unreadable", "file": url.lastPathComponent]
+      }
+      guard let kind = Bridge.linkedInKinds.first(where: { head.contains($0.anchor) }) else {
+        // NAME THE COLUMN BACK. "I cannot read this" is an accusation with no
+        // remedy in it; "the first one is Prénom" tells the owner exactly what
+        // happened and that an English export is the fix.
+        return [
+          "state": "error", "reason": "columns",
+          "file": url.lastPathComponent,
+          "firstColumn": Bridge.firstColumn(of: head),
+        ]
+      }
+      let destination = linkedInDirectory.appendingPathComponent(kind.name)
+      // DO NOT REPLACE A NEWER FILE WITH AN OLDER ONE. Onboarding can be
+      // replayed from the gear on a machine that already has an export, and
+      // the owner reaching for "the LinkedIn file" in Downloads may well find
+      // last year's. Compared by modification time, and refused out loud.
+      if let existing = try? destination.resourceValues(forKeys: [.contentModificationDateKey])
+          .contentModificationDate,
+         let picked = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+          .contentModificationDate,
+         existing > picked {
+        return [
+          "state": "error", "reason": "newer",
+          "file": kind.name,
+        ]
+      }
+      do {
+        try fm.createDirectory(at: linkedInDirectory, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+        try fm.setAttributes([.posixPermissions: 0o700],
+                             ofItemAtPath: linkedInDirectory.path)
+        if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
+        try fm.copyItem(at: url, to: destination)
+        // The owner's professional graph, in a directory only they can open.
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+      } catch {
+        return ["state": "error", "reason": "copy", "file": kind.name]
+      }
+      copied.append(kind.name)
+      if kind.anchor == "First Name" {
+        connections = Bridge.countRows(inCsvAt: destination, anchor: kind.anchor)
+      }
+    }
+    // The reader only picks a source up when it runs, and the owner is
+    // watching this screen now.
+    Connectors.shared.start()
+    return ["state": "ok", "files": copied, "connections": connections]
+  }
+
+  private static func readHead(of url: URL, bytes: Int) -> String? {
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    defer { try? handle.close() }
+    guard let data = try? handle.read(upToCount: bytes) else { return nil }
+    // A LinkedIn export is UTF-8; a Latin-1 fallback is what lets a French
+    // export reach the "your columns are Prénom" message instead of the
+    // "unreadable" one, which would be a worse answer to the same file.
+    return String(data: data, encoding: .utf8)
+      ?? String(data: data, encoding: .isoLatin1)
+  }
+
+  /// The first field of the first non-empty line, for the failure message.
+  /// Bounded and stripped: this is file content on its way to a screen.
+  private static func firstColumn(of head: String) -> String {
+    let line = head.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).first ?? ""
+    let field = line.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+    let cleaned = String(field)
+      .trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
+      .filter { !$0.isNewline && !($0.unicodeScalars.first.map(CharacterSet.controlCharacters.contains) ?? false) }
+    return String(cleaned.prefix(60))
+  }
+
+  /// How many records the file holds, counted rather than guessed.
+  ///
+  /// QUOTE-AWARE, because a LinkedIn position or company can contain a comma
+  /// AND a newline inside a quoted field, and counting "\n" would then report
+  /// more connections than the owner has. Rows are counted from the line after
+  /// the anchor's header, which is also how csvObjects slices them.
+  private static func countRows(inCsvAt url: URL, anchor: String) -> Int {
+    let data = (try? Data(contentsOf: url)) ?? Data()
+    guard let text = String(data: data, encoding: .utf8)
+      ?? String(data: data, encoding: .isoLatin1) else { return 0 }
+    var inQuotes = false
+    var lines: [String] = []
+    var current = ""
+    var iterator = text.makeIterator()
+    var pending: Character?
+    while let c = pending ?? iterator.next() {
+      pending = nil
+      if c == "\"" {
+        // A doubled quote inside a quoted field is an escaped quote, not the
+        // end of it.
+        if inQuotes, let next = iterator.next() {
+          if next == "\"" { current.append("\"\""); continue }
+          inQuotes = false
+          pending = next
+          continue
+        }
+        inQuotes.toggle()
+        continue
+      }
+      if !inQuotes, c == "\n" || c == "\r" {
+        if !current.isEmpty { lines.append(current) }
+        current = ""
+        continue
+      }
+      current.append(c)
+    }
+    if !current.isEmpty { lines.append(current) }
+    guard let headerIndex = lines.firstIndex(where: { $0.contains(anchor) }) else { return 0 }
+    return lines.count - headerIndex - 1
   }
 
   private func bridgeCall(
