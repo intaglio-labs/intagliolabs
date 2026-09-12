@@ -105,7 +105,10 @@ private func freshFrontierWorkingDirectory() throws -> URL {
   return work
 }
 
-private func executable(named name: String) -> URL? {
+// Internal, not file-private: EngineProbe.swift resolves the same `claude`
+// binary in the same four places, and a probe that looked somewhere else would
+// answer about a different install than the one the app would actually run.
+func executable(named name: String) -> URL? {
   let home = FileManager.default.homeDirectoryForCurrentUser
   var candidates: [URL] = []
   if name == "codex" {
@@ -187,7 +190,11 @@ private func frontierFailureText(_ error: Any?) -> String {
   return code + " " + message
 }
 
-private func providerFailure(_ text: String) -> [String: Any] {
+// Internal for the same reason as executable(named:) above: the engine probe
+// classifies its failure with THIS function rather than a second substring
+// list, so "installed but not signed in" cannot come to mean one thing on the
+// handoff lane and another on the setup screen.
+func providerFailure(_ text: String) -> [String: Any] {
   let lower = text.lowercased()
   if lower.contains("not logged in") || lower.contains("unauthorized") ||
      lower.contains("authentication") || lower.contains("login required") {
