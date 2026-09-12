@@ -61,7 +61,7 @@ const fakeState = (cursors = {}) => {
 // source would drain its whole year inside a single tick and say nothing about
 // how soon the next tick comes, which is the change under test.
 function walker(name, { openSlices = 100, sliceMs = 40, clock = null } = {}) {
-  const calls = { forward: 0, history: 0, deadlines: [] };
+  const calls = { forward: 0, history: 0, deadlines: [], years: [] };
   let remaining = openSlices;
   return {
     calls,
@@ -76,6 +76,7 @@ function walker(name, { openSlices = 100, sliceMs = 40, clock = null } = {}) {
         }
         calls.history += 1;
         calls.deadlines.push(ctx.deadline);
+        calls.years.push(ctx.historyWindow.year);
         await sleep(sliceMs);
         if (clock) clock.now += sliceMs;
         if (remaining > 0) {
@@ -297,4 +298,170 @@ test('the sprint re-arm travels through the one place that replaces a timer', ()
   // And it can never exceed the interval.
   assert.equal(daemon.sourceRetryDelay({ sprintDelayMs: 900_000 }, 600_000), 600_000);
   assert.equal(daemon.sourceRetryDelay({}, 600_000), 600_000);
+});
+
+// ---------------------------------------------------------------------------
+// (d) and the barrier the sprint kept running into
+// ---------------------------------------------------------------------------
+
+// LIVE ON RUN THREE (22:09 UTC). The sprint fired and worked: iMessage took
+// 24,105 rows of 2026 in 64 seconds, against 5.8k in a whole fifteen-minute tick
+// before it. Then the walk stopped dead. The year is SHARED, so iMessage could
+// not start 2025 until mail had also finished 2026 -- eight months of history at
+// ninety API calls a minute, on the one source that must never sprint. The
+// activity file showed backfill ['mail'] at 2026 and iMessage queued 803 seconds
+// out, and 2025 is exactly where the card's 180-day threshold lives.
+//
+// So during a sprint the year advances on the sprint roster alone, and the
+// sources left above it trail: they hold nobody, keep their own receipts, and
+// walk the years they missed on their own afterwards.
+function neverFinishes(name) {
+  const calls = { years: [] };
+  return {
+    calls,
+    source: {
+      name,
+      walksHistory: true,
+      needs: async () => [],
+      run: async (ctx) => {
+        if (ctx.history !== true) return {};
+        calls.years.push(ctx.historyWindow.year);
+        await sleep(30);
+        // Progress, and never an end: the shape of a mailbox with months to go.
+        return { ingested: 1, historyProgressed: true };
+      },
+    },
+  };
+}
+
+test('a network source that cannot finish the year does not hold the sprint', async (t) => {
+  const chat = walker('imessage', { openSlices: 1 });
+  const mail = neverFinishes('mail');
+  const currentYear = new Date().getFullYear();
+  // imessage first, so its tick lands inside the window; mail is probed at
+  // startup and classified, which is all it has to do to hold the barrier.
+  const { instance, state } = build(t, [chat.source, mail.source]);
+
+  instance.start();
+  await sleep(2_400);
+
+  assert.equal(
+    state.getCursor(`yearly-backfill:connector:imessage:done:${currentYear}`),
+    '1',
+    'the sprint finished the current year for the local source'
+  );
+  assert.ok(
+    Number(state.getCursor('yearly-backfill:year')) <= currentYear - 1,
+    'the walk never got past the current year, which is where it stalled live'
+  );
+  assert.ok(
+    chat.calls.years.includes(currentYear - 1),
+    `imessage never reached last year (walked ${chat.calls.years.join()}), `
+      + "which is where the card's 180-day threshold lives"
+  );
+  assert.deepEqual(
+    JSON.parse(state.getCursor('yearly-backfill:trailing') ?? '[]'),
+    ['mail'],
+    'the source that was left above the walk is recorded as behind by design'
+  );
+  assert.equal(
+    state.getCursor(`yearly-backfill:connector:mail:done:${currentYear}`),
+    null,
+    'and it keeps its own receipts: it has not been credited with a year it never walked'
+  );
+});
+
+// AND IT MUST NOT REWIND. A trailing source is missing exactly the years the
+// sprint took the walk past. Read as a re-activation, missedYears drags the
+// whole walk back to fetch them -- the sprint undone on mail's very next tick.
+test('a trailing source keeps walking its own years without rewinding anybody', async (t) => {
+  const currentYear = new Date().getFullYear();
+  // The state a sprint leaves behind: the walk at last year, mail trailing and
+  // still owing the current one.
+  const after = fakeState({
+    'yearly-backfill:year': String(currentYear - 1),
+    'yearly-backfill:trailing': JSON.stringify(['mail']),
+    [`yearly-backfill:connector:imessage:done:${currentYear}`]: '1',
+    // An hour-old sprint: the phase is over, which is the point of this test.
+    [daemon.SPRINT_STARTED_KEY]: String(Date.now() - 60 * 60_000),
+  });
+  const mail = neverFinishes('mail');
+  const chat = walker('imessage', { openSlices: 50 });
+  const { instance, state } = build(t, [mail.source, chat.source], { state: after });
+
+  instance.start();
+  await sleep(2_400);
+
+  assert.equal(
+    Number(state.getCursor('yearly-backfill:year')),
+    currentYear - 1,
+    'the walk kept its place; a trailing source is behind by design, not late'
+  );
+  assert.ok(mail.calls.years.length > 0, 'mail actually ran its history pass');
+  assert.deepEqual(
+    [...new Set(mail.calls.years)],
+    [currentYear],
+    'and it walks the year it still owes, not the one everybody else is on'
+  );
+});
+
+// THE BARRIER WIDENS BACK OUT. Outside a sprint, a source that is simply slow
+// holds the year exactly as it always did -- the narrowing is the phase, not a
+// new rule about network sources.
+test('with no sprint, a slow source still holds the year', async (t) => {
+  const currentYear = new Date().getFullYear();
+  const spent = fakeState({
+    // An hour-old sprint: the phase is over.
+    [daemon.SPRINT_STARTED_KEY]: String(Date.now() - 60 * 60_000),
+  });
+  const chat = walker('imessage', { openSlices: 1 });
+  const mail = neverFinishes('mail');
+  const { instance, state } = build(t, [chat.source, mail.source], { state: spent });
+
+  instance.start();
+  await sleep(2_400);
+
+  // Absent means "never advanced": savedYear falls back to the current year, and
+  // the cursor is only written when the walk actually moves.
+  const saved = state.getCursor('yearly-backfill:year');
+  assert.ok(
+    saved === null || Number(saved) === currentYear,
+    `nobody may be let past without a sprint; the walk reached ${saved}`
+  );
+  assert.deepEqual([...new Set(chat.calls.years)], [currentYear],
+    'and the local source walked the current year only, held by the slow one');
+  assert.equal(state.getCursor('yearly-backfill:trailing'), null,
+    'and nothing was marked behind by design');
+});
+
+// THE STALL THAT LOOKED EMPTIEST FROM INSIDE THE LOOP. A sprint source that
+// finished its year and is waiting for the barrier has no history window at all
+// this tick, so a re-arm keyed off "did this pass read anything" saw zero and
+// went back to sleep for the full interval. Waiting on a barrier the sprint is
+// clearing is the state that most needs to come back soon.
+test('a sprint source parked on a barrier comes back on the sprint cadence', async (t) => {
+  const currentYear = new Date().getFullYear();
+  // imessage is already done for the current year, and the People barrier is not
+  // crossed -- so task() answers null and the history block never runs.
+  const parked = fakeState({
+    [`yearly-backfill:connector:imessage:done:${currentYear}`]: '1',
+  });
+  const chat = walker('imessage', { openSlices: 50 });
+  const { instance } = build(t, [chat.source], {
+    state: parked,
+    daemon: {
+      ingestOpts: { tokenFile: '/synthetic/hermes-token' },
+      // Never answers, so the barrier stays uncrossed for the whole window.
+      completePeopleYear: async () => ({ complete: false, retryAfterMs: 60_000 }),
+    },
+  });
+
+  instance.start();
+  await sleep(2_200);
+
+  assert.ok(
+    chat.calls.forward >= 3,
+    `a source waiting on a barrier ticked ${chat.calls.forward} times; it used to sleep out the interval`
+  );
+  assert.equal(chat.calls.history, 0, 'and it genuinely had no history window to walk');
 });

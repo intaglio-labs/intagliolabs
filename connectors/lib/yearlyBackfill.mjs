@@ -16,6 +16,28 @@ const COMPLETE_KEY = `${PREFIX}:complete`;
 const connectorKey = (connector) => `${PREFIX}:connector:${connector}`;
 const doneKey = (year, connector) => `${connectorKey(connector)}:done:${year}`;
 const exhaustedKey = (connector) => `${connectorKey(connector)}:exhausted`;
+// CONNECTORS THE WALK WENT PAST ON PURPOSE.
+//
+// The shared year is how this system delivers value in order: everybody
+// finishes 2026 before anybody starts 2025. That is right for the steady state
+// and wrong for the first half hour, because the barrier is only as fast as its
+// SLOWEST member. Live on 2026-09-12 run three: the sprint took iMessage through
+// 24,105 rows of 2026 in 64 seconds, and then the walk sat still, because mail
+// -- eight months of history at ninety API calls a minute -- also had to finish
+// 2026 before anyone could start 2025. The sprint's own sources went idle
+// waiting on the one source that must never sprint, and 2025 is exactly where
+// the card's 180-day threshold lives.
+//
+// So during a sprint the year advances on the sprint roster alone, and the
+// sources left above it are marked TRAILING: they hold nobody, they keep their
+// own per-year receipts, and they walk the years they missed newest-first on
+// their own until they catch the shared year up and rejoin the barrier.
+//
+// DURABLE, and deliberately not cleared when the sprint ends. A trailing source
+// is behind BY DESIGN -- clearing the mark would make it "late" again, and
+// missedYears would rewind the entire walk to the year it is missing, undoing
+// the sprint on that source's very next tick.
+const TRAILING_KEY = `${PREFIX}:trailing`;
 const barrierKey = (year, barrier) => `${PREFIX}:barrier:${barrier}:done:${year}`;
 
 export function localYearBounds(year) {
@@ -65,7 +87,19 @@ export function yearlyBackfillCoverage({ state, connectors, now = Date.now } = {
   };
 }
 
-export function createYearlyBackfill({ state, connectors, barriers = [], now = Date.now } = {}) {
+export function createYearlyBackfill({
+  state,
+  connectors,
+  barriers = [],
+  now = Date.now,
+  // WHO MAY HOLD THE YEAR RIGHT NOW, or null when everybody does.
+  //
+  // The daemon owns the sprint; this module owns the barrier. Asking rather than
+  // being told keeps the two facts in one place each: a stale "sprinting" flag
+  // pushed in here would keep the barrier narrow after the phase ended, and the
+  // walk would quietly stop waiting for sources that are not behind at all.
+  sprintingRoster = () => null,
+} = {}) {
   const roster = [...new Set((connectors ?? []).filter((name) => typeof name === 'string' && name))];
   const barrierRoster = [...new Set((barriers ?? []).filter((name) => typeof name === 'string' && name))];
   const classified = new Set();
@@ -83,6 +117,21 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
   // unprovisioned source has, and the same standing it would have if it were
   // scheduled and found its marker.
   const withdrawn = new Set();
+  const readTrailing = () => {
+    try {
+      const parsed = JSON.parse(state.getCursor(TRAILING_KEY) ?? '[]');
+      return new Set(
+        Array.isArray(parsed) ? parsed.filter((name) => roster.includes(name)) : []
+      );
+    } catch {
+      return new Set();
+    }
+  };
+  const trailing = readTrailing();
+  const writeTrailing = () => {
+    if (trailing.size === 0) state.deleteCursor(TRAILING_KEY);
+    else state.setCursor(TRAILING_KEY, JSON.stringify([...trailing].sort()));
+  };
   // CLASSIFIED, BUT ON A GUESS.
   //
   // A needs() that THROWS is not an answer. The daemon's startup probe still has
@@ -131,7 +180,26 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
   //
   // A connector marked exhausted is done for every year by definition, so
   // `done()` rather than a raw cursor read.
+  // THE CONNECTORS THE YEAR IS WAITING ON. Everybody, minus the ones walking
+  // their own backlog -- and during a sprint, only the sprint's own roster.
+  //
+  // A sprint with no eligible source active is not a sprint: it would advance
+  // the year on an empty gate, past every source at once, with nobody walking
+  // the years it skipped. Fall back to the whole roster there.
+  const gatingConnectors = () => {
+    const held = [...active].filter((connector) => !trailing.has(connector));
+    const sprint = sprintingRoster();
+    if (sprint === null) return held;
+    const narrowed = held.filter((connector) => sprint.includes(connector));
+    return narrowed.length === 0 ? held : narrowed;
+  };
+
   const missedYears = (connector) => {
+    // BEHIND BY DESIGN IS NOT LATE. A trailing connector is missing exactly the
+    // years the sprint took the walk past, and reading that as a re-activation
+    // would rewind everybody to fetch them again -- which is the sprint undone,
+    // on that source's next tick.
+    if (trailing.has(connector)) return false;
     const from = year();
     const currentYear = new Date(now()).getFullYear();
     for (let value = currentYear; value > from; value -= 1) {
@@ -198,8 +266,32 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
 
   function task(connector) {
     if (!roster.includes(connector) || !active.has(connector)) return null;
-    if (state.getCursor(COMPLETE_KEY) === '1' || done(connector)) return null;
+    if (state.getCursor(COMPLETE_KEY) === '1') return null;
+    if (trailing.has(connector)) {
+      // ITS OWN POSITION, newest-first, down to where everybody else is. The
+      // shared year is the floor rather than the target: below it this connector
+      // is no longer behind, so it stops trailing and rejoins the barrier.
+      const shared = year();
+      const currentYear = new Date(now()).getFullYear();
+      for (let value = currentYear; value > shared; value -= 1) {
+        if (!done(connector, value)) return localYearBounds(value);
+      }
+      trailing.delete(connector);
+      writeTrailing();
+    }
+    if (done(connector)) return null;
     return localYearBounds(year());
+  }
+
+  /// Is there any history left for this connector at all? Not "right now" -- a
+  /// barrier it is waiting behind still counts as work outstanding. The daemon's
+  /// sprint re-arm asks, because a source parked on a barrier that is about to
+  /// lift must come back on the sprint's cadence rather than in a quarter of an
+  /// hour, and a source that is genuinely finished must not come back at all.
+  function outstanding(connector) {
+    if (!roster.includes(connector) || !active.has(connector)) return false;
+    if (state.getCursor(COMPLETE_KEY) === '1') return false;
+    return !exhausted(connector);
   }
 
   /// This connector is out of the barrier for the rest of this process: it is
@@ -236,8 +328,12 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
     return true;
   }
 
-  function record(connector, result = {}) {
-    const value = year();
+  // THE YEAR IT ACTUALLY WALKED, passed in rather than read from the shared
+  // cursor. A trailing connector is walking a year ABOVE the shared one, and
+  // writing its receipt against year() would credit it with a year it has not
+  // touched while leaving the one it just finished open forever.
+  function record(connector, result = {}, walked = year()) {
+    const value = walked;
     if (result.historyHasOlder === true) state.deleteCursor(exhaustedKey(connector));
     if (result.historyDone !== true) return false;
     state.setCursor(doneKey(value, connector), '1');
@@ -293,8 +389,23 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
       return true;
     }
     const value = year();
-    if (![...active].every((connector) => done(connector, value))) return false;
+    // THE GATE IS THE GATING SET; COMPLETION IS STILL THE WHOLE ROSTER. Only the
+    // DECREMENT may run on a narrowed set -- writing COMPLETE off one sprinting
+    // source would declare a walk finished over a mail account with eight months
+    // unread, which is the durable lie round-5 finding 1 was about.
+    const gating = gatingConnectors();
+    if (!gating.every((connector) => done(connector, value))) return false;
     if (!barrierRoster.every((barrier) => barrierDone(barrier, value))) return false;
+
+    // ANYBODY THE GATE LEFT OUT AND WHO IS NOT DONE HERE IS NOW TRAILING. This
+    // loop marks nothing outside a sprint: without one the gating set is every
+    // active connector, so a source that is not done is IN it and has already
+    // blocked above.
+    for (const connector of active) {
+      if (gating.includes(connector) || done(connector, value)) continue;
+      trailing.add(connector);
+    }
+    writeTrailing();
 
     const timelines = [...active].filter((connector) => connector !== 'calendar');
     if (timelines.length === 0 || timelines.every(exhausted) || value <= 1900) {
@@ -346,7 +457,7 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
         if (advance()) advanced += 1;
         break;
       }
-      if (before.pending.length > 0) break;
+      if (before.blocking.length > 0) break;
       const previousYear = before.year;
       if (!advance()) break;
       advanced += 1;
@@ -358,13 +469,25 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
 
   function snapshot() {
     const value = year();
+    // TWO LISTS, because they answer different questions.
+    //
+    // `pending` is for the panel: every active connector with history left to
+    // do, trailing ones included -- mail walking 2026 on its own is still
+    // backfilling, and dropping it would make Activity go quiet about the
+    // slowest job on the machine.
+    //
+    // `blocking` is for the barrier and the People gate: only the connectors the
+    // YEAR is waiting on. Gating the People year on a trailing source would
+    // reintroduce the stall one level down -- advance() waits on the People
+    // barrier, and the People barrier would be waiting on mail.
     const sourcePending = [...active].filter((connector) => !done(connector, value));
+    const blockingSources = gatingConnectors().filter((connector) => !done(connector, value));
     // Product work begins only after connector data for the year is complete.
     // Hiding the later barrier until then makes Activity a real sequence, not
     // a pile of simultaneous claims about work that has not started.
     const barrierPending = unclassified().length === 0
       && active.size > 0
-      && sourcePending.length === 0
+      && blockingSources.length === 0
       ? barrierRoster.filter((barrier) => !barrierDone(barrier, value))
       : [];
     return {
@@ -375,9 +498,15 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
       // Classified on a guess rather than an answer, so the daemon can run the
       // restart reconciliation again once the last guess becomes an answer.
       provisional: [...provisional],
+      // Walking their own backlog above the shared year; they hold nobody.
+      trailing: [...trailing],
       pending: [...sourcePending, ...barrierPending],
+      blocking: [...blockingSources, ...barrierPending],
     };
   }
 
-  return { classify, withdraw, reopen, task, record, recordBarrier, advance, reconcile, snapshot };
+  return {
+    classify, withdraw, reopen, task, outstanding, record, recordBarrier,
+    advance, reconcile, snapshot,
+  };
 }

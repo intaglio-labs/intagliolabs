@@ -1078,60 +1078,6 @@ export function createDaemon({
       .filter((source) => !DEFAULT_DISABLED_CONNECTORS.includes(source.name))
       .map((source) => [source.name, source])
   );
-  // Install the product-level barrier once. Existing connector year receipts
-  // remain useful, so an upgrade rewinds to the current year without re-fetching
-  // it: only People profiles run before the older connector walk
-  // resumes. Years and booleans only—no corpus state enters the cursor store.
-  const peopleBarrierVersionKey = 'yearly-backfill:people-barrier-version';
-  if (peopleBarrierEnabled && state.getCursor(peopleBarrierVersionKey) !== '1') {
-    const currentYear = new Date(now()).getFullYear();
-    state.deleteCursor('yearly-backfill:complete');
-    state.deleteCursor(`yearly-backfill:barrier:people:done:${currentYear}`);
-    state.setCursor('yearly-backfill:year', String(currentYear));
-    state.setCursor(peopleBarrierVersionKey, '1');
-  }
-  const yearlyBackfill = createYearlyBackfill({
-    state,
-    connectors: historyRoster,
-    barriers: peopleBarrierEnabled ? ['people'] : [],
-    now,
-  });
-  let peopleGateTimer = null;
-  let peopleGateRunning = false;
-
-  // The settings queue is derived from the scheduler itself, not guessed from
-  // a polling interval in the UI. Keep every queued source in chronological
-  // order so the compact activity line can expand into the next real tasks.
-  const scheduledQueue = () => [...nextRuns.entries()]
-    // A source whose prerequisites are missing is scheduled but cannot work, and
-    // listing it as pending told the owner they had work queued for accounts they
-    // had never connected. matrix was already filtered this way through
-    // connectedSocialPlatforms() below; this applies the same test one level up,
-    // where it was missing.
-    .filter(([connector]) => !notReady.has(connector))
-    .flatMap(([connector, nextTs]) => {
-      if (connector !== 'matrix') return [{ connector, nextTs }];
-      return connectedSocialPlatforms().map((platform) => ({
-        connector,
-        platform: platform.id,
-        label: platform.label,
-        nextTs,
-      }));
-    })
-    .sort((a, b) => a.nextTs - b.nextTs);
-  // WHAT IS CONNECTED-BUT-NOT-YET-READABLE, in the file the app already reads.
-  //
-  // These are deliberately NOT in `queue`. scheduledQueue() filters them out
-  // because listing them as pending work is what put granola in the owner's
-  // Activity menu for an account they had never connected, and that filter is
-  // still right: a source that cannot work is not work. But "not pending" is
-  // not the same as "say nothing", and saying nothing is how a sign-in that has
-  // landed and a sign-in that never happened became indistinguishable from
-  // outside this process. So they get their own key: a name, when the re-probe
-  // is due, and HOW MANY prerequisites are missing.
-  //
-  // COUNT, NEVER THE STRINGS, for the same reason source_not_ready logs a
-  // count: needs() messages embed absolute local paths.
   // THE SPRINT: is this machine still inside its first-load half hour, and is
   // there still a reason for one?
   //
@@ -1183,6 +1129,64 @@ export function createDaemon({
     if (started === null || !sprinting()) return null;
     return { since: started, until: started + sprintMaxMs, sources: sprintRoster() };
   };
+  // Install the product-level barrier once. Existing connector year receipts
+  // remain useful, so an upgrade rewinds to the current year without re-fetching
+  // it: only People profiles run before the older connector walk
+  // resumes. Years and booleans only—no corpus state enters the cursor store.
+  const peopleBarrierVersionKey = 'yearly-backfill:people-barrier-version';
+  if (peopleBarrierEnabled && state.getCursor(peopleBarrierVersionKey) !== '1') {
+    const currentYear = new Date(now()).getFullYear();
+    state.deleteCursor('yearly-backfill:complete');
+    state.deleteCursor(`yearly-backfill:barrier:people:done:${currentYear}`);
+    state.setCursor('yearly-backfill:year', String(currentYear));
+    state.setCursor(peopleBarrierVersionKey, '1');
+  }
+  const yearlyBackfill = createYearlyBackfill({
+    state,
+    connectors: historyRoster,
+    barriers: peopleBarrierEnabled ? ['people'] : [],
+    now,
+    // WHO MAY HOLD THE YEAR DURING THE SPRINT. Asked per call rather than set
+    // once, so the barrier widens back out the moment the phase ends without
+    // anything having to remember to say so.
+    sprintingRoster: () => (sprinting() ? sprintRoster() : null),
+  });
+  let peopleGateTimer = null;
+  let peopleGateRunning = false;
+
+  // The settings queue is derived from the scheduler itself, not guessed from
+  // a polling interval in the UI. Keep every queued source in chronological
+  // order so the compact activity line can expand into the next real tasks.
+  const scheduledQueue = () => [...nextRuns.entries()]
+    // A source whose prerequisites are missing is scheduled but cannot work, and
+    // listing it as pending told the owner they had work queued for accounts they
+    // had never connected. matrix was already filtered this way through
+    // connectedSocialPlatforms() below; this applies the same test one level up,
+    // where it was missing.
+    .filter(([connector]) => !notReady.has(connector))
+    .flatMap(([connector, nextTs]) => {
+      if (connector !== 'matrix') return [{ connector, nextTs }];
+      return connectedSocialPlatforms().map((platform) => ({
+        connector,
+        platform: platform.id,
+        label: platform.label,
+        nextTs,
+      }));
+    })
+    .sort((a, b) => a.nextTs - b.nextTs);
+  // WHAT IS CONNECTED-BUT-NOT-YET-READABLE, in the file the app already reads.
+  //
+  // These are deliberately NOT in `queue`. scheduledQueue() filters them out
+  // because listing them as pending work is what put granola in the owner's
+  // Activity menu for an account they had never connected, and that filter is
+  // still right: a source that cannot work is not work. But "not pending" is
+  // not the same as "say nothing", and saying nothing is how a sign-in that has
+  // landed and a sign-in that never happened became indistinguishable from
+  // outside this process. So they get their own key: a name, when the re-probe
+  // is due, and HOW MANY prerequisites are missing.
+  //
+  // COUNT, NEVER THE STRINGS, for the same reason source_not_ready logs a
+  // count: needs() messages embed absolute local paths.
   const waitingQueue = () => [...notReady.entries()]
     .map(([connector, missing]) => ({
       connector,
@@ -1338,11 +1342,15 @@ export function createDaemon({
     if (next) publishActivity({ phase: 'waiting', ...next });
   };
 
+  // `blocking`, not `pending`: a trailing source is walking its own backlog above
+  // the shared year and holds nobody. Gating the People year on it would put the
+  // sprint's stall back one level down -- advance() waits on the People barrier,
+  // and the People barrier would be waiting on mail.
   const peopleGateReady = () => {
     const snapshot = yearlyBackfill.snapshot();
     return !snapshot.complete
-      && snapshot.pending.length === 1
-      && snapshot.pending[0] === 'people';
+      && snapshot.blocking.length === 1
+      && snapshot.blocking[0] === 'people';
   };
 
   function schedulePeopleGate(delayMs = 0) {
@@ -1599,6 +1607,17 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     // just changed because this very pass finished the year.
     const sprintingNow = sprinting();
     let sprintDelayMs = null;
+    // THE ONE STOP THAT MUST NOT COME STRAIGHT BACK. A pass that read nothing is
+    // a source with nothing to give, and asking it again in ten seconds is a
+    // busy-loop. Every other ending is work in progress.
+    //
+    // DECLARED OUT HERE because the case that stalled the live run never entered
+    // the history block at all: iMessage finished 2026, task() answered null
+    // while the barrier had not advanced yet, and a re-arm keyed off `slices > 0`
+    // saw zero and went back to sleep for nine hundred seconds. Waiting on a
+    // barrier the sprint is actively clearing is the state that most needs to
+    // come back soon, and it is the one that looks emptiest from inside the loop.
+    let stoppedOnNothing = false;
     try {
       // The forward pass first, always: what arrived since last time is more
       // urgent than what happened in 2019, and history must never delay it.
@@ -1659,14 +1678,6 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
         const deadline = now() + (inSprint ? sprintHistoryBudgetMs : HISTORY_BUDGET_MS);
         let slices = 0;
         let gained = 0;
-        // THE ONE STOP THAT MUST NOT COME STRAIGHT BACK. A pass that read nothing
-        // is a source with nothing to give, and asking it again in ten seconds is
-        // a busy-loop. Every other ending -- the clock ran out mid-year, or the
-        // year finished and the next one is waiting -- is work in progress, and
-        // during a sprint the next tick belongs seconds later. Finishing 2026 and
-        // then waiting a quarter of an hour to begin 2025 is exactly the pacing
-        // the sprint exists to replace.
-        let stoppedOnNothing = false;
         try {
           while (now() < deadline) {
             const rawBack = (await source.run(makeCtx({ history: true, historyWindow, deadline }))) ?? {};
@@ -1681,7 +1692,9 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
             // Nothing read means the walk reached the beginning of the store.
             // The source records that itself; stop asking.
             if (rawBack.historyDone === true) {
-              yearlyBackfill.record(source.name, rawBack);
+              // The year this pass was HANDED, which for a trailing connector is
+              // above the shared one. See yearlyBackfill.record.
+              yearlyBackfill.record(source.name, rawBack, historyWindow.year);
               yearlyBackfill.advance();
               schedulePeopleGate();
               break;
@@ -1698,17 +1711,6 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
               break;
             }
           }
-          // COME STRAIGHT BACK. The whole point of the phase: the year is still
-          // open and the clock is what stopped this pass, so the next one is
-          // seconds away rather than a polling interval. Recomputed rather than
-          // reusing `inSprint`, because a pass that just recorded last year as
-          // done has ENDED the sprint and must not be the thing that extends it.
-          if (
-            slices > 0 && !stoppedOnNothing
-            && sprinting() && SPRINT_CONNECTORS.includes(source.name)
-          ) {
-            sprintDelayMs = sprintRearmMs;
-          }
           if (slices > 0) {
             // A short rolling measurement is enough for the activity panel to
             // turn a known number of remaining history slices into elapsed
@@ -1719,7 +1721,6 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
               year: historyWindow.year,
               slices,
               gained,
-              ...(sprintDelayMs === null ? {} : { sprintRearmMs: sprintDelayMs }),
             });
           }
         } catch (error) {
@@ -1729,6 +1730,25 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
             error: safeErrorFingerprint(error),
           });
         }
+      }
+      // COME STRAIGHT BACK. The whole point of the phase, and it is asked OUTSIDE
+      // the history block on purpose: the three states worth returning for are a
+      // pass the clock cut short, a pass that finished a year with more below it,
+      // and a tick that found no window because a barrier has not lifted yet.
+      // Only the first two are visible from inside the loop, and the live stall
+      // was the third.
+      //
+      // `sprinting()` is re-asked rather than reusing `sprintingNow`, because a
+      // pass that just recorded last year has ENDED the phase and must not be
+      // the thing that extends it. `outstanding` is what keeps this from
+      // becoming a busy-loop on a source that is genuinely finished.
+      if (
+        !stoppedOnNothing
+        && sprinting()
+        && SPRINT_CONNECTORS.includes(source.name)
+        && yearlyBackfill.outstanding(source.name)
+      ) {
+        sprintDelayMs = sprintRearmMs;
       }
       state.recordRun({
         connector: source.name,
@@ -1741,6 +1761,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
         connector: source.name,
         durationMs: now() - startedTs,
         ...counts,
+        ...(sprintDelayMs === null ? {} : { sprintRearmMs: sprintDelayMs }),
       });
     } catch (error) {
       // One source failing must never take the others down: the error is

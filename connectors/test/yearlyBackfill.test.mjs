@@ -534,3 +534,127 @@ test('a classification made on a guess does not move the walk', () => {
   assert.equal(backfill.advance(), true);
   assert.equal(Number(state.getCursor('yearly-backfill:year')), 2025);
 });
+
+// ------------------------------------------------- the sprint's narrowed barrier
+
+// THE BARRIER IS ONLY AS FAST AS ITS SLOWEST MEMBER, which is right for the
+// steady state and wrong for the first half hour. Live on 2026-09-12 run three:
+// iMessage took 24,105 rows of the current year in 64 seconds and then the walk
+// sat still, because mail -- eight months of history at ninety API calls a
+// minute -- also had to finish that year before anybody could start the one the
+// card's 180-day threshold actually lives in.
+test('a sprint advances the year on its own roster and leaves the rest trailing', () => {
+  const state = memoryState();
+  const now = () => NOW; // 2026
+  const backfill = createYearlyBackfill({
+    state,
+    connectors: ['imessage', 'mail'],
+    barriers: [],
+    now,
+    sprintingRoster: () => ['imessage'],
+  });
+  backfill.classify('imessage', true);
+  backfill.classify('mail', true);
+
+  // Only the sprinting source finishes the year.
+  backfill.record('imessage', { historyDone: true, historyHasOlder: true }, 2026);
+  assert.equal(backfill.advance(), true, 'mail must not hold the sprint');
+  assert.equal(Number(state.getCursor('yearly-backfill:year')), 2025);
+  assert.deepEqual(backfill.snapshot().trailing, ['mail']);
+  assert.deepEqual(JSON.parse(state.getCursor('yearly-backfill:trailing')), ['mail'],
+    'and it is durable, or a restart reads the source as late rather than behind');
+});
+
+test('without a sprint the slow source holds the year exactly as before', () => {
+  const state = memoryState();
+  const now = () => NOW;
+  const backfill = createYearlyBackfill({
+    state, connectors: ['imessage', 'mail'], barriers: [], now,
+  });
+  backfill.classify('imessage', true);
+  backfill.classify('mail', true);
+  backfill.record('imessage', { historyDone: true, historyHasOlder: true }, 2026);
+
+  assert.equal(backfill.advance(), false, 'the narrowing is the phase, not a new rule');
+  assert.equal(state.getCursor('yearly-backfill:year'), null);
+  assert.equal(state.getCursor('yearly-backfill:trailing'), null);
+});
+
+// A TRAILING SOURCE WALKS ITS OWN BACKLOG, newest-first, down to where everybody
+// else is -- and then rejoins.
+test('a trailing source is handed the year it still owes, not the shared one', () => {
+  const state = memoryState();
+  const now = () => NOW;
+  state.setCursor('yearly-backfill:year', '2024');
+  state.setCursor('yearly-backfill:trailing', JSON.stringify(['mail']));
+  // The state a sprint leaves: the sprinter has receipts for the years the walk
+  // came through, and the trailing source has none for any of them. Without the
+  // sprinter's receipts IT would read as the one that is late, which is a
+  // different test (and the rewind is right there).
+  state.setCursor('yearly-backfill:connector:imessage:done:2026', '1');
+  state.setCursor('yearly-backfill:connector:imessage:done:2025', '1');
+  const backfill = createYearlyBackfill({
+    state, connectors: ['imessage', 'mail'], barriers: [], now,
+  });
+  backfill.classify('imessage', true);
+  backfill.classify('mail', true);
+
+  assert.equal(backfill.task('mail').year, 2026, 'the oldest year it is missing above the walk');
+  assert.equal(backfill.task('imessage').year, 2024, 'and everybody else is where they were');
+
+  // It finishes 2026; 2025 is still above the shared year, so it takes that next.
+  backfill.record('mail', { historyDone: true, historyHasOlder: true }, 2026);
+  assert.equal(backfill.task('mail').year, 2025);
+
+  // Caught up: it stops trailing and rejoins the barrier at the shared year.
+  backfill.record('mail', { historyDone: true, historyHasOlder: true }, 2025);
+  assert.equal(backfill.task('mail').year, 2024);
+  assert.deepEqual(backfill.snapshot().trailing, []);
+  assert.equal(state.getCursor('yearly-backfill:trailing'), null);
+});
+
+// AND IT MUST NOT REWIND. This is the round-5 finding 1 machinery meeting a
+// source that is missing years ON PURPOSE: read as a re-activation, missedYears
+// drags the whole walk back to fetch them and the sprint is undone.
+test('a trailing source does not rewind the walk when it classifies', () => {
+  const state = memoryState();
+  const now = () => NOW;
+  state.setCursor('yearly-backfill:year', '2024');
+  state.setCursor('yearly-backfill:trailing', JSON.stringify(['mail']));
+  state.setCursor('yearly-backfill:connector:imessage:done:2026', '1');
+  state.setCursor('yearly-backfill:connector:imessage:done:2025', '1');
+  const backfill = createYearlyBackfill({
+    state, connectors: ['imessage', 'mail'], barriers: [], now,
+  });
+  backfill.classify('mail', true);
+  backfill.classify('imessage', true);
+
+  assert.equal(Number(state.getCursor('yearly-backfill:year')), 2024,
+    'a source that is behind by design is not a source that just came back');
+  assert.equal(state.getCursor('yearly-backfill:complete'), null);
+});
+
+// AND THE COMPLETION MARK IS STILL THE WHOLE ROSTER'S. Writing COMPLETE off the
+// sprinting source alone would declare a walk finished over a mailbox with
+// months unread -- the durable lie round-5 finding 1 was about, arriving through
+// the new gate.
+test('a narrowed gate never narrows the completion mark', () => {
+  const state = memoryState();
+  const now = () => NOW;
+  const backfill = createYearlyBackfill({
+    state,
+    connectors: ['imessage', 'mail'],
+    barriers: [],
+    now,
+    sprintingRoster: () => ['imessage'],
+  });
+  backfill.classify('imessage', true);
+  backfill.classify('mail', true);
+  // imessage reaches the beginning of its store in the current year.
+  backfill.record('imessage', { historyDone: true, historyHasOlder: false }, 2026);
+
+  assert.equal(backfill.advance(), true);
+  assert.equal(state.getCursor('yearly-backfill:complete'), null,
+    'mail has years left; the walk is not finished because the sprinter is');
+  assert.equal(Number(state.getCursor('yearly-backfill:year')), 2025);
+});
