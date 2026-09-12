@@ -164,3 +164,16 @@ test('the mode row still promises the choice is kept', () => {
   assert.match(swift, /relHermes\("POST", "admin\/relationship\/mode"/u,
     'the mode row must still reach hermes, which is what writes it down');
 });
+
+test('leaving screen 2 and entering screen 6 both start the reader, grants or no grants', () => {
+  // On the second clean-machine run (2026-09-12) every grant was already in
+  // place, so no permission ever turned green on screen 2, startedSources()
+  // never fired, and the daily card's settings stayed unwritten until the
+  // LinkedIn import happened to call it. The two screens that bracket the
+  // reading now ask for it unconditionally; native makes the call idempotent.
+  const js = readFileSync(join(WIDGET, 'ui', 'onboarding.js'), 'utf8');
+  assert.match(js, /permNext\.addEventListener\('click', \(\) => \{\s*startedSources\(\);\s*nextScreen\(\);\s*\}\)/u,
+    "screen 2's next starts the reader before moving on");
+  assert.match(js, /function enterLoad\(\) \{[\s\S]{0,400}startedSources\(\);[\s\S]{0,80}startLoadPolling\(\)/u,
+    'entering the first-load screen starts the reader before polling for rows');
+});

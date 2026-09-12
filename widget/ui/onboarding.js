@@ -517,7 +517,14 @@ document.getElementById('permSkip').addEventListener('click', () => {
   skipped.add('calendar');
   nextScreen();
 });
-permNext.addEventListener('click', () => nextScreen());
+// LEAVING THIS SCREEN STARTS THE READER, whether or not a grant changed hands
+// here. startedSources() used to fire only on a permission turning green, so a
+// Mac that already had every grant (any reinstall; the second clean-machine
+// run, 2026-09-12) walked past this screen with nothing started and the daily
+// card's settings unwritten until the LinkedIn import or screen 6's button
+// happened to call it. Starting twice is harmless: native guards a running
+// daemon and the card-defaults write is only-when-absent.
+permNext.addEventListener('click', () => { startedSources(); nextScreen(); });
 
 // ---------------- 3: your mail and calendar ----------------
 const googleStatus = document.getElementById('googleStatus');
@@ -1258,6 +1265,11 @@ function startLoadPolling({ peekNow = true } = {}) {
 function enterLoad() {
   loadSince = Date.now();
   loadFinish.hidden = true;
+  // The screen that waits for rows makes sure something is producing them.
+  // Same idempotent call as screen 2's next; a resume straight into this
+  // screen otherwise depends on a permission having changed on some earlier
+  // visit.
+  startedSources();
   startLoadPolling();
 }
 
