@@ -515,3 +515,116 @@ test('the startup probe says why a source was unavailable before any tick', asyn
   // NAMES AND COUNTS, like every other line this logger carries.
   assert.equal(typeof failure[1].error, 'string');
 });
+
+// ---------------------------------------------------------------------------
+// (e) and the LAST mailbox's gap drain is a turn, not a leftover
+// ---------------------------------------------------------------------------
+
+// Three mailboxes where the first two overrun the whole run budget on their
+// own exempt first page — the shape a purge or a cursor loss produces — and
+// the third has a small fresh window and an open hole below its cursor.
+//
+// The hole is the thing at stake. An equal slice of what is LEFT is zero by
+// the time the third mailbox is reached, so its drain was gated on a deadline
+// that had already passed and was skipped on every pass, forever: the mailbox
+// looked busy (its fresh page ran) while `forward-gap-from` never moved.
+function starvedDrain() {
+  const BASE = new Date(2026, 5, 1, 12, 0, 0).getTime();
+  let clock = BASE;
+  const queries = [];
+  const map = new Map();
+  const state = {
+    getCursor: (k) => map.get(k) ?? null,
+    setCursor: (k, v) => map.set(k, String(v)),
+    deleteCursor: (k) => map.delete(k),
+  };
+  // The third mailbox is caught up to yesterday and carries a hole from a
+  // truncated pass some time before that.
+  const GAP_FROM = BASE - 40 * 86_400_000;
+  const GAP_UNTIL = BASE - 30 * 86_400_000;
+  state.setCursor('mail:three@example.test:internalDate', String(BASE - 86_400_000));
+  state.setCursor('mail:three@example.test:forward-gap-from', String(GAP_FROM));
+  state.setCursor('mail:three@example.test:forward-gap-until', String(GAP_UNTIL));
+
+  let issued = 0;
+  const source = createMailSource({
+    accountsForScope: () => [
+      { email: 'one@example.test' },
+      { email: 'two@example.test' },
+      { email: 'three@example.test' },
+    ],
+    sleep: async (ms) => { clock += ms; },
+    makeClient: ({ email }) => ({
+      listMessages: async ({ q, pageToken }) => {
+        queries.push({ email, q });
+        if (q.startsWith('before:')) return { messages: [] };
+        // The two cold mailboxes page forever: every page is full and hands
+        // back another token, so each one spends its whole turn on page one.
+        if (email !== 'three@example.test') {
+          const page = Number(pageToken ?? 0);
+          return {
+            messages: Array.from({ length: 100 }, (_, i) => ({ id: `${email}-p${page}-${i}` })),
+            nextPageToken: String(page + 1),
+          };
+        }
+        // The caught-up mailbox: one short page and the window is finished,
+        // which is what makes its gap eligible to be drained this pass.
+        return { messages: [{ id: `three-${queries.length}` }] };
+      },
+      getMessage: async (id) => {
+        issued += 1;
+        // A drain query carries a `before:` bound; place its one message
+        // inside the hole so the drain is seen to have read it.
+        const inGap = String(id).startsWith('three-') && issued > 1;
+        return {
+          id,
+          internalDate: String(inGap ? GAP_UNTIL - 1_000 : BASE - issued * 60_000),
+          payload: {
+            mimeType: 'text/plain',
+            headers: [
+              { name: 'Message-ID', value: `<${id}@example.test>` },
+              { name: 'From', value: 'friend@example.test' },
+              { name: 'To', value: 'owner@example.test' },
+              { name: 'Subject', value: String(id) },
+            ],
+            body: { data: Buffer.from(String(id)).toString('base64url') },
+          },
+        };
+      },
+    }),
+  });
+  const ctx = {
+    state,
+    config: { mail: { backfillDays: 1400 } },
+    home: '/tmp/mail-starve-test-home',
+    now: () => clock,
+    history: false,
+    ingest: async (rows) => ({ inserted: rows.length, updated: 0, unchanged: 0 }),
+    log: { info() {}, warn() {} },
+    // The daemon's real forward budget, and the first two mailboxes each blow
+    // it on one page (100 gets at 90 a minute is ~66s).
+    deadline: BASE + 120_000,
+  };
+  return { source, ctx, state, queries, GAP_FROM, GAP_UNTIL };
+}
+
+test('the last mailbox drains its gap even when the budget is already spent', async () => {
+  const { source, ctx, state, queries, GAP_FROM, GAP_UNTIL } = starvedDrain();
+  await source.run(ctx);
+
+  const drains = queries.filter(
+    (entry) => entry.email === 'three@example.test'
+      && entry.q.includes(`before:${Math.floor(GAP_UNTIL / 1000) + 1}`)
+  );
+  assert.equal(drains.length, 1,
+    'the third mailbox got a turn at its own hole, not the remainder of a spent budget');
+  // ...and only after its fresh window, which is still the first thing it does.
+  const three = queries.filter((entry) => entry.email === 'three@example.test');
+  assert.ok(three[0].q.startsWith('after:') && !three[0].q.includes('before:'),
+    'the fresh window goes first; new mail outranks an old hole');
+  // The drain read the hole to the bottom, so both keys go. Before the fix
+  // these were still sitting there, pass after pass.
+  assert.equal(state.getCursor('mail:three@example.test:forward-gap-from'), null);
+  assert.equal(state.getCursor('mail:three@example.test:forward-gap-until'), null);
+  assert.ok(GAP_FROM < GAP_UNTIL);
+});

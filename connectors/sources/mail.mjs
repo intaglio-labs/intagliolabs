@@ -73,6 +73,10 @@ const DEFAULT_BACKFILL_DAYS = 30;
 // pages instead of running the daemon more often.
 const MAX_MESSAGES_PER_ACCOUNT = 2000;
 const PAGE_SIZE = 100;
+// The smallest turn a mailbox may be handed when the run's forward budget is
+// already spent. See the slice arithmetic in run(): an equal share of what is
+// LEFT is zero for the last mailbox on every pass, and zero is not a turn.
+const MIN_ACCOUNT_SLICE_MS = 10_000;
 const DEFAULT_HISTORY_PAGES_PER_PASS = 5;
 
 // Pacing between Gmail API calls. A 52k-message backfill answered with
@@ -286,10 +290,21 @@ export function createMailSource({
         // rather than only the first — and it is why the pass may exceed the
         // run's budget by at most one page per account. A page is bounded work
         // (PAGE_SIZE gets at the pacer's rate); an unbounded pass was the bug.
+        //
+        // AND THE SLICE HAS A FLOOR, because ~~an equal slice of whatever is
+        // LEFT~~ is zero once the budget is gone. A page is exempt from the
+        // slice but not from arithmetic: with three mailboxes at defaults a
+        // full page is ~66s against a 40s share, so accounts 0 and 1 overran
+        // the whole 120s and account 2 was handed `now()` on every pass,
+        // forever — a deadline already in the past is not a turn, it is a
+        // mailbox that can do nothing but its one exempt page. The floor makes
+        // the last mailbox's turn real; the cost is that a pass may exceed the
+        // run's budget by (accounts - 1) × this floor, which is bounded and
+        // still an order of magnitude inside the polling interval.
         const remaining = accounts.length - accountIndex;
         const accountDeadline = deadline === null || yearly
           ? deadline
-          : now() + Math.max(0, Math.floor((deadline - now()) / remaining));
+          : now() + Math.max(MIN_ACCOUNT_SLICE_MS, Math.floor((deadline - now()) / remaining));
         const accountOutOfTime = () => accountDeadline !== null && now() >= accountDeadline;
         const { backfillDays, maxBodyBytes, getsPerMinute, historyPagesPerPass } = accountSettings(config, account.email);
         const spacingMs = 60_000 / getsPerMinute;
@@ -753,7 +768,17 @@ export function createMailSource({
             // from `priorGap`: the fresh window's own per-page writes are the
             // authority on what is still missing.
             const gap = fresh.truncated || nullPageSeen ? null : readGap();
-            if (gap !== null && seen < MAX_MESSAGES_PER_ACCOUNT && !accountOutOfTime()) {
+            // NO TIME PRE-CHECK, for the same reason the fresh window has
+            // none. A gate that asks "is the budget spent" before the drain's
+            // first page hands the drain nothing at all whenever the fresh
+            // window's own exempt page overran the slice — which is every pass
+            // for a later mailbox, so `forward-gap-from` never moved and the
+            // hole below that cursor was permanent. The drain's do-while stops
+            // on the NEXT page boundary exactly like the fresh window's, so an
+            // out-of-time account spends one bounded page here and returns. One
+            // page per window per pass is the guarantee that makes both walks
+            // monotone for every mailbox.
+            if (gap !== null && seen < MAX_MESSAGES_PER_ACCOUNT) {
               await scanWindow({
                 // `floor(until/1000) + 1` covers every tie inside `until`'s own
                 // second without widening a second further than that: above
