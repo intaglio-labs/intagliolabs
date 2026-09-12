@@ -70,6 +70,21 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
   const barrierRoster = [...new Set((barriers ?? []).filter((name) => typeof name === 'string' && name))];
   const classified = new Set();
   const active = new Set();
+  // A roster member that this process will never hear about again.
+  //
+  // The roster is built from the sources the daemon SCHEDULES, and classify()
+  // is only ever called from a scheduled source's path — so a member that is
+  // never scheduled is a member that is never classified, and advance() waits
+  // for it forever: the year never decrements and the backfill stops at the
+  // current year for every other source too. That is not hypothetical; it is
+  // what `matrix` did the day the bridges feature turned off, because the
+  // roster was built from every history source while the schedule was not.
+  // Withdrawing one is "classified, and inactive" — the same standing an
+  // unprovisioned source has, and the same standing it would have if it were
+  // scheduled and found its marker.
+  const withdrawn = new Set();
+  const unclassified = () =>
+    roster.filter((connector) => !classified.has(connector) && !withdrawn.has(connector));
 
   const year = () => savedYear(state, now);
   const exhausted = (connector) => state.getCursor(exhaustedKey(connector)) === '1';
@@ -83,6 +98,9 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
 
   function classify(connector, available) {
     if (!roster.includes(connector)) return;
+    // A withdrawal is not permanent: a source re-enabled while the process runs
+    // classifies itself again on its next tick and rejoins the barrier.
+    withdrawn.delete(connector);
     const wasInactive = classified.has(connector) && !active.has(connector);
     const currentYear = new Date(now()).getFullYear();
     const hasCurrentCheckpoint = state.getCursor(doneKey(currentYear, connector)) === '1';
@@ -115,6 +133,16 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
     if (!roster.includes(connector) || !active.has(connector)) return null;
     if (state.getCursor(COMPLETE_KEY) === '1' || done(connector)) return null;
     return localYearBounds(year());
+  }
+
+  /// This connector is out of the barrier for the rest of this process: it is
+  /// not scheduled, so nothing will ever classify it. Idempotent, and a no-op
+  /// for a name that is not on the roster.
+  function withdraw(connector) {
+    if (!roster.includes(connector)) return false;
+    withdrawn.add(connector);
+    active.delete(connector);
+    return true;
   }
 
   function reopen(connector) {
@@ -154,7 +182,7 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
     // Wait for every source to have had its prerequisite check this process.
     // Otherwise the first fast source could advance before later staggered
     // sources have even been classified.
-    if (classified.size < roster.length || active.size === 0) return false;
+    if (unclassified().length > 0 || active.size === 0) return false;
     const value = year();
     if (![...active].every((connector) => done(connector, value))) return false;
     if (!barrierRoster.every((barrier) => barrierDone(barrier, value))) return false;
@@ -201,7 +229,7 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
     // Product work begins only after connector data for the year is complete.
     // Hiding the later barrier until then makes Activity a real sequence, not
     // a pile of simultaneous claims about work that has not started.
-    const barrierPending = classified.size === roster.length
+    const barrierPending = unclassified().length === 0
       && active.size > 0
       && sourcePending.length === 0
       ? barrierRoster.filter((barrier) => !barrierDone(barrier, value))
@@ -209,11 +237,11 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
     return {
       year: value,
       complete: state.getCursor(COMPLETE_KEY) === '1',
-      classified: classified.size === roster.length,
+      classified: unclassified().length === 0,
       active: [...active],
       pending: [...sourcePending, ...barrierPending],
     };
   }
 
-  return { classify, reopen, task, record, recordBarrier, advance, reconcile, snapshot };
+  return { classify, withdraw, reopen, task, record, recordBarrier, advance, reconcile, snapshot };
 }

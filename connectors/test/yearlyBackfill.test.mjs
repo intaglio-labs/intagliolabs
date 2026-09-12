@@ -192,3 +192,47 @@ test('a newly discovered stream reopens every completed year for only that conne
   assert.equal(q.task('imessage'), null, 'unrelated completion remains intact');
   assert.equal(state.getCursor('yearly-backfill:connector:matrix:done:2025'), null);
 });
+
+// A ROSTER MEMBER NOBODY WILL EVER CLASSIFY IS A DEADLOCK, NOT A WAIT.
+//
+// advance() holds the year until every roster member has been classified once,
+// which is right for a source that is merely slow to start. It is fatal for one
+// that is not scheduled at all: nothing will call classify() for it, ever, so
+// the year never decrements, `complete` is never set, and every OTHER source's
+// history stops at the current year. That is exactly what a registry-disabled
+// history source did while the roster was still built from the full catalogue.
+test('a roster member that is never scheduled cannot stall the barrier', () => {
+  const state = memoryState();
+  state.setCursor('yearly-backfill:connector:imessage:done:2026', '1');
+  const q = createYearlyBackfill({
+    state,
+    connectors: ['imessage', 'matrix'],
+    now: () => NOW,
+  });
+  q.classify('imessage', true);
+
+  assert.equal(q.advance(), false, 'an unclassified roster member still holds the year');
+  assert.equal(q.snapshot().year, 2026);
+
+  assert.equal(q.withdraw('matrix'), true);
+  assert.equal(q.snapshot().classified, true,
+    'a withdrawn member counts as classified — it is inactive, not pending');
+  assert.equal(q.advance(), true);
+  assert.equal(q.snapshot().year, 2025, 'the barrier moves for the sources that DO run');
+  assert.deepEqual(q.snapshot().active, ['imessage']);
+  assert.equal(q.withdraw('granola'), false, 'a name off the roster is not a member to withdraw');
+});
+
+test('a withdrawn source that comes back rejoins the barrier', () => {
+  const state = memoryState();
+  const q = createYearlyBackfill({ state, connectors: ['imessage', 'matrix'], now: () => NOW });
+  q.classify('imessage', true);
+  q.withdraw('matrix');
+  assert.equal(q.snapshot().classified, true);
+
+  // Re-enabled mid-process: its next tick classifies it, and the barrier waits
+  // for its 2026 the same as everyone else's.
+  q.classify('matrix', true);
+  assert.deepEqual(q.snapshot().pending.sort(), ['imessage', 'matrix']);
+  assert.equal(q.advance(), false);
+});

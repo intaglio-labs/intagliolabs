@@ -3543,6 +3543,49 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     return;
   }
 
+  // ONBOARDING'S FIRST-LOAD TABLE. Counts, and the state of the thing that
+  // turns counts into people. No row text, no names, no identifiers.
+  //
+  // The screen this feeds says one of four things per source, and it says them
+  // without a wall-clock timer, because "we have waited N minutes" is not a
+  // fact about whether anything was read. The arithmetic lives here rather
+  // than in the page for the same reason the colours are named rather than
+  // computed twice: three of the four verdicts are easy to get wrong, and one
+  // of them was already wrong in the brief this route was built from.
+  //
+  //   reading   the projection has not caught up with the rows ingested, so
+  //             nobody has looked at them yet. Grey. It OUTRANKS green: a
+  //             people count drawn from a projection built before a purge can
+  //             exceed anything real, so a stale projection is never green.
+  //   ok        people > 0, with the projection demonstrably current.
+  //   empty     rows arrived, the projection read every one of them, and
+  //             found nobody. This is the honest amber, and it fires the
+  //             instant that is true rather than after a timeout — it is what
+  //             would have caught the Gmail empty-sender bug on the first pass.
+  //   failing   two or more consecutive failed runs for that connector. This
+  //             outranks everything, including reading: a source that cannot
+  //             be read is not waiting on the projection.
+  //
+  // TWO SOURCES ARE COUNTED DIFFERENTLY AND SAY SO, because the obvious
+  // uniform count is wrong for both:
+  //
+  //   linkedin  a Connections.csv export is entirely role='profile',
+  //             authored=0. Under an authored=1 count it is permanently 0
+  //             people against thousands of rows — permanent amber, on the
+  //             most common input this connector has. Counted on profiles and
+  //             labelled peopleKind:'listed' so the page's header for that
+  //             cell reads "people in your export" rather than claiming they
+  //             wrote to you.
+  //   contacts  writes no `context` rows AT ALL (connectors/sources/
+  //             contacts.mjs upserts into state.db and never ingests), and it
+  //             is absent from PERSON_SOURCE_POLICY. A row fed from `context`
+  //             shows 0/0 forever. Counted from state.db's contact_ids and
+  //             labelled peopleKind:'names'.
+  if (req.method === 'GET' && url.pathname === '/admin/onboarding/progress') {
+    send(res, 200, onboardingProgress(db, policy), cors);
+    return;
+  }
+
   // --- Relationship Memory (L5 step 10): the orb's card surface. ---------
   // Bearer-only like every admin route. The card pipeline runs entirely on
   // this box; refresh is minutes of loopback-llama time, so the widget fires
@@ -5121,6 +5164,176 @@ function peopleProjectionStatus(db, policy) {
   } catch {
     return null;
   }
+}
+
+// How many consecutive failures are worth reporting. Past two it is the same
+// verdict -- "this is not reading" -- and the loop exists to answer that, not
+// to measure how long it has been true.
+const RUN_FAIL_STREAK_CAP = 5;
+// A connector must fail twice before the screen calls it broken. One failure
+// after a success is ordinary: a locked database, a mailbox mid-rotation, a
+// laptop that slept. Saying "not reading" on the first one would make the most
+// common transient look like a fault the owner has to fix.
+const RUN_FAIL_STREAK_RED = 2;
+// run_log.error is written by connectors/lib/state.mjs as a sanitized
+// FINGERPRINT (a code or a short class, never content), and the screen shows it
+// so "messages -- not reading" can say EPERM instead of nothing. Bounded here
+// anyway: this route's contract is counts, and one unbounded string from
+// another process's table is the kind of thing that is true until it is not.
+const RUN_ERROR_LIMIT = 120;
+
+// Per-connector run state from state.db. Returns an empty map when state.db is
+// absent or unreadable -- a fresh Mac has no daemon history, and that is a
+// legitimate answer meaning "nothing has run", not a failure of this route.
+function connectorRunState(state) {
+  const runs = {};
+  let daemonLastRunTs = null;
+  if (!state) return { runs, daemonLastRunTs };
+  try {
+    daemonLastRunTs = state.prepare('SELECT MAX(finished_ts) AS ts FROM run_log').get()?.ts ?? null;
+    if (daemonLastRunTs !== null) daemonLastRunTs = Number(daemonLastRunTs);
+    const connectors = state
+      .prepare('SELECT DISTINCT connector FROM run_log')
+      .all()
+      .map((row) => String(row.connector));
+    const lastOk = state.prepare(
+      'SELECT MAX(finished_ts) AS ts FROM run_log WHERE connector = ? AND ok = 1'
+    );
+    // Newest first, capped. The streak is the run of leading failures; a
+    // success anywhere in that window ends it, which is what makes "one
+    // failure after a success" different from "it stopped working".
+    const recent = state.prepare(
+      'SELECT ok, error FROM run_log WHERE connector = ? ORDER BY id DESC LIMIT ?'
+    );
+    for (const connector of connectors) {
+      const rows = recent.all(connector, RUN_FAIL_STREAK_CAP);
+      let failStreak = 0;
+      for (const row of rows) {
+        if (Number(row.ok) === 1) break;
+        failStreak += 1;
+      }
+      const newest = rows[0];
+      const lastError = failStreak > 0 && typeof newest?.error === 'string'
+        ? newest.error.slice(0, RUN_ERROR_LIMIT)
+        : null;
+      const ts = lastOk.get(connector)?.ts ?? null;
+      runs[connector] = {
+        lastOkTs: ts === null ? null : Number(ts),
+        failStreak,
+        lastError,
+      };
+    }
+  } catch {
+    // Same discipline as memoryProgress: a progress read never breaks the
+    // route it is reported on. An unreadable run_log means "no run history",
+    // which is exactly what the empty map says.
+  }
+  return { runs, daemonLastRunTs };
+}
+
+// The four verdicts, in precedence order. See the route's own comment for why
+// `reading` outranks `ok` -- a stale projection can report more people than
+// exist, so it is never allowed to paint green.
+function sourceStatus({ rows, people, failStreak, projectionCurrent }) {
+  if (failStreak >= RUN_FAIL_STREAK_RED) return 'failing';
+  if (!projectionCurrent) return 'reading';
+  if (people > 0) return 'ok';
+  if (rows > 0) return 'empty';
+  return 'idle';
+}
+
+function onboardingProgress(db, policy) {
+  const projection = peopleProjectionStatus(db, policy);
+  // A missing projection state table is not "caught up"; it is "we cannot say
+  // yet", which is the grey reading state. Fail toward the honest word.
+  const projectionCurrent = projection !== null
+    && projection.rebuilding !== true
+    && projection.projectedRevision >= projection.sourceRevision;
+
+  const rowsBySource = new Map();
+  for (const row of db.prepare('SELECT source, COUNT(*) AS n FROM context GROUP BY source').all()) {
+    rowsBySource.set(String(row.source), Number(row.n));
+  }
+
+  // WHO WROTE TO YOU, per source. authored = 1 and room = 0: a name on a group
+  // thread is not somebody you have a relationship with, and the projection
+  // already records both facts as columns, so this needs no join back to
+  // `context` (person_event_links.source is a column of its own).
+  const peopleBySource = new Map();
+  let linkedinListed = 0;
+  try {
+    for (const row of db.prepare(
+      'SELECT source, COUNT(DISTINCT person_key) AS n FROM person_event_links ' +
+      'WHERE authored = 1 AND room = 0 GROUP BY source'
+    ).all()) {
+      peopleBySource.set(String(row.source), Number(row.n));
+    }
+    linkedinListed = Number(db.prepare(
+      "SELECT COUNT(DISTINCT person_key) AS n FROM person_event_links " +
+      "WHERE source = 'linkedin' AND role = 'profile'"
+    ).get()?.n ?? 0);
+  } catch {
+    // The projection tables are created lazily; before the first rebuild they
+    // are simply absent, and zero people is the truthful answer then.
+  }
+
+  return withPeopleDbs(db, (state) => {
+    const { runs, daemonLastRunTs } = connectorRunState(state);
+    let contactNames = 0;
+    try {
+      contactNames = Number(state?.prepare('SELECT COUNT(*) AS n FROM contact_ids').get()?.n ?? 0);
+    } catch {
+      contactNames = 0;
+    }
+
+    // Every source with corpus rows, every connector with run history, and
+    // contacts -- which has neither and is still connected. The page decides
+    // which of these to draw (a source the owner skipped renders "not
+    // connected"); this route decides what is true about each.
+    const names = new Set([...rowsBySource.keys(), ...Object.keys(runs)]);
+    if (contactNames > 0 || Object.hasOwn(runs, 'contacts')) names.add('contacts');
+
+    const sources = [...names].sort().map((source) => {
+      const failStreak = runs[source]?.failStreak ?? 0;
+      if (source === 'contacts') {
+        // Both cells carry the same number because the address book's rows ARE
+        // names -- there is no second, smaller "and these ones wrote to you"
+        // population to report. peopleKind tells the page to say so.
+        return {
+          source,
+          rows: contactNames,
+          people: contactNames,
+          peopleKind: 'names',
+          status: sourceStatus({
+            rows: contactNames, people: contactNames, failStreak,
+            // Contacts never reaches the people projection at all, so gating
+            // its verdict on a projection revision would leave it grey
+            // forever. Its number comes straight from the connector's own
+            // table and is current the moment the connector writes it.
+            projectionCurrent: true,
+          }),
+        };
+      }
+      const rows = rowsBySource.get(source) ?? 0;
+      const listed = source === 'linkedin';
+      const people = listed ? linkedinListed : (peopleBySource.get(source) ?? 0);
+      return {
+        source,
+        rows,
+        people,
+        peopleKind: listed ? 'listed' : 'authors',
+        status: sourceStatus({ rows, people, failStreak, projectionCurrent }),
+      };
+    });
+
+    return {
+      state: 'ok',
+      sources,
+      projection,
+      runs,
+      daemonLastRunTs,
+    };
+  });
 }
 
 function send(res, status, body, extraHeaders = {}) {

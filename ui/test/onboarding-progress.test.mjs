@@ -79,6 +79,13 @@ async function withServer(home, fn, opts = {}) {
     dbPath: join(dir, 'context.db'),
     llamaApiKey: 'd'.repeat(64),
     bearerToken: TOKEN,
+    // The projection rebuild is what this route REPORTS ON, so it must not
+    // also be what mutates the fixture underneath it: a scheduled rebuild
+    // clears person_event_links and rewrites people_projection_state, which
+    // erased every seeded link between the insert and the GET. Off by default
+    // here; the revision numbers are set by hand instead, which is the only
+    // way to hold the projection deliberately behind.
+    peopleProjectionAutoRebuild: false,
     ...opts,
   });
   const base = `http://127.0.0.1:${server.port}`;
@@ -210,5 +217,273 @@ test('the engine route refuses the browser channel in both of its shapes', async
         'an allowed origin authenticates as a browser and is refused the capability');
     }, serverOpts);
     assert.deepEqual(readConfig(home), { selfName: 'Owner' }, 'neither attempt wrote anything');
+  }, { allowedOrigins: ALLOWED_ORIGIN });
+});
+
+// ----------------------------------------------------------- the live table
+
+// A HETEROGENEOUS FIXTURE, built so the wrong arithmetic and the right one
+// disagree on four of the five sources. A naive
+// `COUNT(DISTINCT person_key) GROUP BY source` over every link returns
+// non-zero for linkedin, non-zero for calendar, and counts the group-thread
+// person for imessage — three wrong answers, each of which paints a colour
+// the owner would act on.
+//
+//   mail      80 rows, no authored links at all. THE GMAIL BUG: the connector
+//             ingested, the sender never resolved, and the old screen said
+//             "connected" about a source that had found nobody. Must be amber.
+//   imessage  40 rows, 6 people who wrote to you direct, plus one person
+//             whose ONLY link is a group thread (room = 1). Must be 6, and
+//             must be green.
+//   linkedin  500 profile rows, zero authored. The most common LinkedIn
+//             input there is — a Connections.csv with no messages.csv. Must
+//             be 500 and 'listed', never 0 and amber.
+//   calendar  rows whose only links are role='attendee', authored = 0. An
+//             invite you were on is not somebody writing to you. Must be 0
+//             and amber.
+//   contacts  no context rows whatsoever; counted from state.db.
+
+function seedPerson(db, key, name) {
+  db.prepare(
+    'INSERT OR IGNORE INTO people(person_key, display_name, sent, received, met_in_person, ' +
+    'room_messages, direct_messages, meeting_notes, role, roles_by_year, built_at) ' +
+    "VALUES(?, ?, 0, 0, 0, 0, 0, 0, 'unknown', '{}', 0)"
+  ).run(key, name);
+}
+
+function seedRows(db, source, count) {
+  const insert = db.prepare(
+    'INSERT INTO context(id, ts, source, speaker, text, meta, store_changed_at) ' +
+    'VALUES(?, ?, ?, ?, ?, ?, ?)'
+  );
+  const ids = [];
+  const base = Number(db.prepare('SELECT COALESCE(MAX(id), 0) AS n FROM context').get().n);
+  for (let i = 1; i <= count; i += 1) {
+    const id = base + i;
+    insert.run(id, 1_700_000_000_000 + id, source, 'x', 'fixture', '{}', id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+function seedLink(db, { key, contextId, source, role, authored, room }) {
+  db.prepare(
+    'INSERT OR REPLACE INTO person_event_links(person_key, context_id, source, role, authored, ' +
+    'owner_authored, room, confidence, conversation_key) VALUES(?, ?, ?, ?, ?, 0, ?, 1.0, ?)'
+  ).run(key, contextId, source, role, authored, room, `${source}:${key}`);
+}
+
+function seedFixture(db) {
+  // The projection schema is created lazily by the server; make sure it is
+  // there before inserting into it.
+  db.exec('SELECT 1');
+  const mail = seedRows(db, 'mail', 80);
+  const imessage = seedRows(db, 'imessage', 40);
+  const linkedin = seedRows(db, 'linkedin', 500);
+  const calendar = seedRows(db, 'calendar', 12);
+
+  // mail: rows, and links that are NOT authored — the sender never resolved.
+  seedPerson(db, 'mail:nobody', 'Nobody');
+  seedLink(db, { key: 'mail:nobody', contextId: mail[0], source: 'mail', role: 'recipient', authored: 0, room: 0 });
+
+  // imessage: six direct correspondents, plus one group-thread-only person.
+  for (let i = 0; i < 6; i += 1) {
+    const key = `imessage:friend${i}`;
+    seedPerson(db, key, `Friend ${i}`);
+    seedLink(db, { key, contextId: imessage[i], source: 'imessage', role: 'counterparty', authored: 1, room: 0 });
+  }
+  seedPerson(db, 'imessage:groupie', 'Groupie');
+  seedLink(db, {
+    key: 'imessage:groupie', contextId: imessage[10], source: 'imessage',
+    role: 'counterparty', authored: 1, room: 1,
+  });
+
+  // linkedin: every row a profile, none authored.
+  for (let i = 0; i < 500; i += 1) {
+    const key = `linkedin:conn${i}`;
+    seedPerson(db, key, `Conn ${i}`);
+    seedLink(db, { key, contextId: linkedin[i], source: 'linkedin', role: 'profile', authored: 0, room: 0 });
+  }
+
+  // calendar: attendees only.
+  for (let i = 0; i < 4; i += 1) {
+    const key = `calendar:attendee${i}`;
+    seedPerson(db, key, `Attendee ${i}`);
+    seedLink(db, { key, contextId: calendar[i], source: 'calendar', role: 'attendee', authored: 0, room: 0 });
+  }
+}
+
+// The projection's own triggers bump source_revision on every context insert,
+// so a freshly seeded database always looks behind. Onboarding's grey
+// "reading" state is exactly that, and every other assertion here needs the
+// caught-up world, so tests say which one they want.
+function markProjection(db, { projected, source, builtAt = Date.now() }) {
+  db.prepare(
+    'UPDATE people_projection_state SET projected_revision = ?, source_revision = ?, built_at = ? WHERE id = 1'
+  ).run(projected, source, builtAt);
+}
+
+function stateDb(home) {
+  const db = new DatabaseSync(join(home, '.hazlie', 'connectors', 'state.db'));
+  db.exec(STATE_SCHEMA);
+  return db;
+}
+
+const byName = (body) => Object.fromEntries(body.sources.map((s) => [s.source, s]));
+
+test('the table counts who wrote to you, and says so differently where that is not the question', async () => {
+  await withHome(async (home) => {
+    const state = stateDb(home);
+    state.prepare(
+      "INSERT INTO contact_ids(identifier, display_name, kind, source, updated_ts) VALUES(?, ?, 'email', 'contacts', 0)"
+    ).run('a@example.test', 'A');
+    state.prepare(
+      "INSERT INTO contact_ids(identifier, display_name, kind, source, updated_ts) VALUES(?, ?, 'phone', 'contacts', 0)"
+    ).run('+15550000000', 'B');
+    state.close();
+
+    await withServer(home, async ({ call, db }) => {
+      seedFixture(db);
+      markProjection(db, { projected: 9, source: 9 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      const rows = byName(body);
+
+      assert.equal(rows.mail.rows, 80);
+      assert.equal(rows.mail.people, 0, 'the sender never resolved — that is the whole bug');
+      assert.equal(rows.mail.status, 'empty', 'rows in, nobody found, projection current: amber');
+
+      assert.equal(rows.imessage.rows, 40);
+      assert.equal(rows.imessage.people, 6, 'a name on a group thread is not a correspondent');
+      assert.equal(rows.imessage.status, 'ok');
+      assert.equal(rows.imessage.peopleKind, 'authors');
+
+      assert.equal(rows.linkedin.rows, 500);
+      assert.equal(rows.linkedin.people, 500, 'profiles, not authors — an export has no authors');
+      assert.equal(rows.linkedin.peopleKind, 'listed',
+        'so the page can head that cell "people in your export"');
+      assert.equal(rows.linkedin.status, 'ok',
+        'the single most likely false amber in this screen');
+
+      assert.equal(rows.calendar.rows, 12);
+      assert.equal(rows.calendar.people, 0, 'an invite you were on is not somebody writing to you');
+      assert.equal(rows.calendar.status, 'empty');
+
+      assert.equal(rows.contacts.people, 2, 'counted from state.db, not from context');
+      assert.equal(rows.contacts.peopleKind, 'names');
+      assert.equal(rows.contacts.status, 'ok');
+      assert.ok(!Object.hasOwn(rowsBySourceOf(db), 'contacts'),
+        'and contacts genuinely writes no corpus rows, so the other path would say 0/0 forever');
+    });
+  });
+});
+
+function rowsBySourceOf(db) {
+  return Object.fromEntries(
+    db.prepare('SELECT source, COUNT(*) AS n FROM context GROUP BY source').all()
+      .map((r) => [r.source, Number(r.n)])
+  );
+}
+
+test('a projection that has not caught up is grey, even where it would be green', async () => {
+  await withHome(async (home) => {
+    await withServer(home, async ({ call, db }) => {
+      seedFixture(db);
+      markProjection(db, { projected: 3, source: 9 });
+      const rows = byName(await (await call('GET', '/admin/onboarding/progress')).json());
+      for (const source of ['mail', 'imessage', 'linkedin', 'calendar']) {
+        assert.equal(rows[source].status, 'reading',
+          `${source} must not be coloured from a projection that has not read the rows`);
+      }
+      // A people count from a projection built before a purge can exceed
+      // anything real, which is why this outranks green rather than only amber.
+      assert.equal(rows.imessage.people, 6, 'the number is still reported; it is just not trusted yet');
+    });
+  });
+});
+
+test('two failed runs in a row is red; one after a success is not', async () => {
+  await withHome(async (home) => {
+    const state = stateDb(home);
+    const log = state.prepare(
+      'INSERT INTO run_log(connector, started_ts, finished_ts, ok, error) VALUES(?, ?, ?, ?, ?)'
+    );
+    log.run('imessage', 1, 2, 1, null);
+    log.run('imessage', 3, 4, 0, 'EPERM');
+    log.run('imessage', 5, 6, 0, 'EPERM');
+    log.run('imessage', 7, 8, 0, 'EPERM');
+    log.run('mail', 1, 2, 0, 'ETIMEDOUT');
+    log.run('mail', 3, 4, 1, null);
+    log.run('mail', 5, 6, 0, 'ETIMEDOUT');
+    state.close();
+
+    await withServer(home, async ({ call, db }) => {
+      seedFixture(db);
+      markProjection(db, { projected: 9, source: 9 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      const rows = byName(body);
+      assert.equal(rows.imessage.status, 'failing',
+        'three consecutive failures outrank a people count from before they started');
+      assert.equal(body.runs.imessage.failStreak, 3);
+      assert.equal(body.runs.imessage.lastError, 'EPERM',
+        'the fingerprint, so the row can say "messages — not reading (EPERM)"');
+      assert.equal(body.runs.imessage.lastOkTs, 2);
+
+      assert.equal(body.runs.mail.failStreak, 1);
+      assert.equal(rows.mail.status, 'empty',
+        'one failure after a success is a locked database, not a broken source');
+      assert.equal(body.daemonLastRunTs, 8, 'the newest finish across every connector');
+    });
+  });
+});
+
+test('no daemon history at all is reported as such, for the banner above the table', async () => {
+  await withHome(async (home) => {
+    await withServer(home, async ({ call, db }) => {
+      seedFixture(db);
+      markProjection(db, { projected: 9, source: 9 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      // Null rather than 0 or absent: the page's banner ("nothing is running,
+      // let me start it") must be able to tell "never ran" from "ran at epoch".
+      // Per-source amber would blame a source for a daemon that is not up.
+      assert.equal(body.daemonLastRunTs, null);
+      assert.deepEqual(body.runs, {});
+    });
+  });
+});
+
+test('the progress route answers counts and state, and no content', async () => {
+  await withHome(async (home) => {
+    await withServer(home, async ({ call, db }) => {
+      seedFixture(db);
+      markProjection(db, { projected: 9, source: 9 });
+      const raw = await (await call('GET', '/admin/onboarding/progress')).text();
+      // The fixture's row text and person names must appear nowhere in the
+      // body. This is a polled route with no owner review in front of it.
+      assert.ok(!raw.includes('fixture'), 'no row text');
+      assert.ok(!raw.includes('Friend'), 'no display names');
+      assert.ok(!raw.includes('imessage:friend0'), 'no person keys');
+      const body = JSON.parse(raw);
+      assert.deepEqual(
+        Object.keys(body).sort(),
+        ['daemonLastRunTs', 'projection', 'runs', 'sources', 'state']
+      );
+      for (const source of body.sources) {
+        assert.deepEqual(
+          Object.keys(source).sort(),
+          ['people', 'peopleKind', 'rows', 'source', 'status']
+        );
+      }
+    });
+  });
+});
+
+test('the progress route is bearer-only', async () => {
+  await withHome(async (home, serverOpts) => {
+    await withServer(home, async ({ base }) => {
+      const res = await fetch(`${base}/admin/onboarding/progress`, {
+        headers: { Authorization: `Bearer ${TOKEN}`, Origin: ALLOWED_ORIGIN },
+      });
+      assert.equal(res.status, 403);
+    }, serverOpts);
   }, { allowedOrigins: ALLOWED_ORIGIN });
 });

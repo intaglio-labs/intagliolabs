@@ -51,7 +51,7 @@ import {
   connectorsDisabledBy,
   enabledFeatureNames,
   optionalConnectors,
-  readFeatures,
+  readFeatureRegistry,
 } from './lib/features.mjs';
 import {
   retentionPass,
@@ -120,9 +120,16 @@ export const CONNECTOR_NAMES = Object.freeze([
 // it is the transport the seven bridges share, so it follows the bridges
 // feature rather than a connector key of its own. Omitting it would leave the
 // daemon polling a Synapse that provisioning no longer installs.
-export const FEATURES = readFeatures({
+const FEATURE_REGISTRY = readFeatureRegistry({
   onProblem: (reason) => process.stderr.write(`connectors: ${reason}\n`),
 });
+export const FEATURES = FEATURE_REGISTRY.features;
+// 'ok' | 'missing' | 'invalid'. The last two mean every connector is off,
+// INCLUDING the card's own, which is a total outage that used to be reported
+// only by the stderr line above — outside the structured log the app reads, and
+// indistinguishable downstream from a deliberately quiet install. start() says
+// it again as an event; connect/lib/status.mjs carries it to the shelf.
+export const FEATURES_REGISTRY_STATE = FEATURE_REGISTRY.registryState;
 export const DEFAULT_DISABLED_CONNECTORS = Object.freeze(
   connectorsDisabledBy(FEATURES, CONNECTOR_NAMES)
 );
@@ -877,7 +884,18 @@ export function createDaemon({
   let stopped = false;
   const peopleBarrierEnabled = typeof completePeopleYear === 'function'
     && typeof ingestOpts?.tokenFile === 'string';
-  const historyRoster = sources.filter((source) => source.walksHistory === true)
+  // THE ROSTER IS THE SCHEDULE, not the catalogue.
+  //
+  // Every member of this roster has to be classified before advance() will move
+  // the year, and classify() is only ever reached from a source the scheduler
+  // actually runs. Built from `sources`, it therefore included history sources
+  // the registry had switched off — `matrix` on every default install, because
+  // bridges are off — and the barrier then waited for a classification that
+  // could never arrive. The yearly backfill deadlocked at the current year for
+  // ALL the others. Filter by the same list start() schedules from.
+  const historyRoster = sources
+    .filter((source) => source.walksHistory === true
+      && !DEFAULT_DISABLED_CONNECTORS.includes(source.name))
     .map((source) => source.name);
   // Install the product-level barrier once. Existing connector year receipts
   // remain useful, so an upgrade rewinds to the current year without re-fetching
@@ -1442,8 +1460,26 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       sources.forEach((source) => {
         if (DEFAULT_DISABLED_CONNECTORS.includes(source.name)) {
           log.info('source_hidden', { connector: source.name });
+          // Belt and braces for the deadlock above: historyRoster is built from
+          // the same filter, so this is a no-op today. It stops being one the
+          // moment the two lists are computed in different places again.
+          yearlyBackfill.withdraw(source.name);
         }
       });
+      // THE OUTAGE SAYS SO, in the log the app reads.
+      //
+      // An unreadable registry is ALL_OFF including imessage, mail, calendar
+      // and contacts — the card's own sources — so this daemon is scheduling
+      // nothing and the connections page is drawing an empty shelf. Counts and
+      // the state name only, which is all a diagnosis needs.
+      if (FEATURES_REGISTRY_STATE !== 'ok') {
+        log.error('features_registry_unreadable', {
+          registryState: FEATURES_REGISTRY_STATE,
+          detail: 'every feature and connector is off until the registry is readable — reinstall',
+          scheduled: scheduledSources.length,
+          hidden: DEFAULT_DISABLED_CONNECTORS.length,
+        });
+      }
       // ASK WHAT CANNOT RUN BEFORE PUBLISHING A QUEUE, not after.
       //
       // notReady is populated inside runSource, so it is EMPTY at startup — and

@@ -1384,6 +1384,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         self?.reply(webView, id, out)
       }
 
+    case "onboardingProgress":
+      // Screen 6's live table. Counts and projection state only -- see the
+      // route. Polled every 3s while the screen is up, which is why it must
+      // stay a read of already-computed numbers and never trigger a rebuild.
+      relHermes("GET", "admin/onboarding/progress", json: nil) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
     case "setEngine":
       // The page sends one of two words and nothing else; hermes checks it
       // against its own closed list and owner.mjs does the write. Anything
