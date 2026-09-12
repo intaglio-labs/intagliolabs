@@ -29,16 +29,59 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const css = readFileSync(join(ROOT, 'widget', 'ui', 'reconnect.css'), 'utf8');
-const html = readFileSync(join(ROOT, 'widget', 'ui', 'reconnect.html'), 'utf8');
-const js = readFileSync(join(ROOT, 'widget', 'ui', 'reconnect.js'), 'utf8');
+const UI = join(ROOT, 'widget', 'ui');
+const html = readFileSync(join(UI, 'reconnect.html'), 'utf8');
+const js = readFileSync(join(UI, 'reconnect.js'), 'utf8');
+
+// EVERY SHEET THE PAGE LOADS, not the one named after it.
+//
+// The cascade does not care which file a rule is written in, and reconnect.html
+// loads palette.css above reconnect.css. A `display` rule on a toggled id in
+// palette.css defeats `el(id).hidden = true` exactly as one in reconnect.css
+// does, and reading only the small file meant the guard passed on the larger
+// half of its own subject.
+const sheetNames = [...html.matchAll(/<link[^>]+rel="stylesheet"[^>]+href="([^"]+)"/gu)]
+  .map((m) => m[1]);
+const sheets = sheetNames.map((name) => ({
+  name,
+  text: readFileSync(join(UI, name), 'utf8').replace(/\/\*[\s\S]*?\*\//gu, ''),
+}));
+const css = sheets.map((s) => s.text).join('\n');
 
 // ---------------------------------------------------------------- the page
 
 /// Every element the page hides or shows by the `hidden` property.
-const toggledIds = [...new Set(
-  [...js.matchAll(/el\('([A-Za-z0-9_]+)'\)\.hidden\s*=/gu)].map((m) => m[1])
-)].sort();
+///
+/// TWO SPELLINGS, because there are two. `el('rcCard').hidden = …` is the one
+/// reconnect.js uses today; a cached reference — `const row = el('rcRoleRow')`
+/// and then `row.hidden = …`, the style onboarding.js uses for loadDormant —
+/// is the same act and was invisible to this guard. The names are resolved
+/// back to ids through their declarations, and a toggle whose id cannot be
+/// resolved FAILS rather than being skipped: a guard that quietly ignores what
+/// it cannot parse is how this page lost its hiding rules the first time.
+const directIds = [...js.matchAll(/el\('([A-Za-z0-9_]+)'\)\.hidden\s*=/gu)].map((m) => m[1]);
+
+const cachedNames = [...js.matchAll(/(?<![.'"\w])([A-Za-z_$][\w$]*)\.hidden\s*=[^=]/gu)]
+  .map((m) => m[1]);
+
+/// `const name = el('id')` / `= document.getElementById('id')`.
+function idForName(name) {
+  const re = new RegExp(
+    `(?:const|let|var)\\s+${name}\\s*=\\s*(?:el|document\\.getElementById)\\(\\s*['"]([A-Za-z0-9_]+)['"]`,
+    'u'
+  );
+  return re.exec(js)?.[1] ?? null;
+}
+
+const unresolved = [];
+const cachedIds = [];
+for (const name of new Set(cachedNames)) {
+  const id = idForName(name);
+  if (id) cachedIds.push(id);
+  else unresolved.push(name);
+}
+
+const toggledIds = [...new Set([...directIds, ...cachedIds])].sort();
 
 /// Tag, own classes and ancestor classes for one id, from the markup. A
 /// deliberately small parser: reconnect.html is a static fragment of plain
@@ -121,21 +164,41 @@ function matches(selector, el, { requireHidden }) {
   return true;
 }
 
-/// Every rule in the sheet, comments stripped, split on selector groups.
+/// Every rule in every sheet, comments stripped, split on selector groups.
 const rules = [];
-for (const m of css.replace(/\/\*[\s\S]*?\*\//gu, '').matchAll(/([^{}]+)\{([^{}]*)\}/gu)) {
-  const body = m[2];
-  const display = /(^|;)\s*display\s*:\s*([^;]+)/u.exec(body)?.[2]?.trim();
-  if (!display) continue;
-  for (const selector of m[1].split(',')) {
-    if (!selector.trim() || selector.includes('@')) continue;
-    rules.push({ selector: selector.trim(), display });
+for (const sheet of sheets) {
+  for (const m of sheet.text.matchAll(/([^{}]+)\{([^{}]*)\}/gu)) {
+    const body = m[2];
+    const display = /(^|;)\s*display\s*:\s*([^;]+)/u.exec(body)?.[2]?.trim();
+    if (!display) continue;
+    for (const selector of m[1].split(',')) {
+      if (!selector.trim() || selector.includes('@')) continue;
+      rules.push({ selector: selector.trim(), display, sheet: sheet.name });
+    }
   }
 }
 
-test('reconnect.js hides things, and reconnect.css lets it', () => {
+test('every stylesheet the page loads is the subject, not just its own', () => {
+  assert.ok(sheetNames.length >= 2, 'reconnect.html loads more than one sheet; read them all');
+  assert.ok(sheetNames.includes('palette.css'),
+    'palette.css is loaded first and its display rules win the same way');
+  assert.ok(sheetNames.includes('reconnect.css'));
+  for (const sheet of sheets) {
+    assert.ok(rules.some((r) => r.sheet === sheet.name),
+      `no display rules parsed out of ${sheet.name} — the parser has stopped seeing it`);
+  }
+});
+
+test('a toggle this guard cannot resolve to an id fails it', () => {
+  // A cached reference the declaration scan cannot follow is not "no toggle",
+  // it is a toggle with no guard on it. Say so rather than passing.
+  assert.deepEqual(unresolved, [],
+    `hidden is set on ${unresolved.join(', ')}, and this guard cannot tell which element that is`);
+});
+
+test('reconnect.js hides things, and the sheets it loads let it', () => {
   assert.ok(toggledIds.length >= 8, 'the .hidden toggles in reconnect.js were not found');
-  assert.ok(rules.length > 0, 'no display rules parsed out of reconnect.css');
+  assert.ok(rules.length > 0, 'no display rules parsed out of the page\'s stylesheets');
 
   const defeated = [];
   for (const id of toggledIds) {
@@ -149,7 +212,9 @@ test('reconnect.js hides things, and reconnect.css lets it', () => {
       const answered = rules.some((other) => other.display === 'none'
         && matches(other.selector, el, { requireHidden: true })
         && higherOrEqual(specificity(other.selector), specificity(rule.selector)));
-      if (!answered) defeated.push(`#${id} stays visible: "${rule.selector}" sets display`);
+      if (!answered) {
+        defeated.push(`#${id} stays visible: "${rule.selector}" sets display (${rule.sheet})`);
+      }
     }
   }
   assert.deepEqual(defeated, [], defeated.join('\n'));
@@ -159,7 +224,7 @@ test('the three companions are the three this file needs', () => {
   // Named as well as derived, because the derivation above would also pass if
   // somebody deleted the rules that set display — and the layout, not the
   // hiding, is what those rules are for.
-  const stripped = css.replace(/\/\*[\s\S]*?\*\//gu, '');
+  const stripped = sheets.find((s) => s.name === 'reconnect.css').text;
   assert.match(stripped, /\.rc-facts div \{[^}]*display:\s*flex/u, 'the fact rows are still flex rows');
   assert.match(stripped, /\.rc-facts div\[hidden\]\s*\{\s*display:\s*none/u,
     'rcRoleRow/rcLeftRow: the live symptom in review finding 1');
