@@ -515,6 +515,22 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     return min(max(v, scaleRange.lowerBound), scaleRange.upperBound)
   }
 
+  // THE INTENT OUTLIVES THE REQUEST THAT CARRIES IT.
+  //
+  // Pressing screen 1's button is the owner accepting one card a day, and
+  // startReadingSources posts that to hermes. hermes on a first launch is
+  // often still warming, and the post was fire-and-forget: one refused
+  // connection and relationshipMemory.capPerDay was never written, which makes
+  // hermes' card route answer no-cap-configured for ever. The press is
+  // recorded HERE first, so a post that cannot land today is retried on the
+  // next launch until it lands once. Cleared by the first reply that says the
+  // settings were taken.
+  static let cardDefaultsPendingKey = "HazlieCardDefaultsPending"
+  static var cardDefaultsPending: Bool {
+    get { UserDefaults.standard.bool(forKey: cardDefaultsPendingKey) }
+    set { UserDefaults.standard.set(newValue, forKey: cardDefaultsPendingKey) }
+  }
+
   // The handoff out of onboarding: after the flow finishes, the widget's
   // gear nudges until settings is opened once, and that first open runs the
   // connectors intro. Reset by every completed flow, so replay hands off
@@ -2151,22 +2167,68 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // app ships is the eligibility producer's, and every judgment behind it was
     // made against that producer. Same rule, same call, written only if absent.
     //
-    // Fire and forget, before the reader starts and never gating it: these
-    // decide whether a card appears tomorrow, and a hermes that is not up yet
-    // is no reason to leave every source unread today.
-    relHermes("POST", "admin/config/card",
-              json: ["capPerDay": 1, "producer": "eligibility"]) { out in
-      let state = out["state"] as? String ?? "unknown"
-      if state != "ok" {
-        NSLog("Intaglio Labs: daily card settings not recorded (\(state))")
-      }
-    }
+    // Recorded before the reader starts and never gating it: these decide
+    // whether a card appears tomorrow, and a hermes that is not up yet is no
+    // reason to leave every source unread today. Asynchronous, retried, and
+    // remembered across launches -- see recordCardDefaults.
+    recordCardDefaults()
     // Started as a CHILD of this app, not bootstrapped into launchd, so the
     // reader inherits this app's permissions instead of needing its own.
     Provision.retireConnectorsAgent()
     Connectors.shared.start()
     Distiller.shared.start()
     return ok
+  }
+
+  /// Roughly two minutes of attempts, front-loaded. hermes' own warm-up window
+  /// is the case this covers, and it is seconds rather than minutes; the long
+  /// tail is for a hermes that is being reinstalled underneath the app.
+  private static let cardDefaultsRetryDelays: [Double] = [2, 4, 8, 12, 16, 16, 16, 16, 16]
+
+  /// WRITE THE INTENT DOWN, THEN TRY TO DELIVER IT.
+  ///
+  /// The owner's press is the decision; the POST is only how it travels. This
+  /// used to be one fire-and-forget request whose failure was an NSLog, so a
+  /// first launch where hermes was still warming -- the ordinary case, since
+  /// the same launch starts it -- left relationshipMemory.capPerDay unwritten
+  /// and hermes answering no-cap-configured for ever, with the reconnect card
+  /// the whole product is about never appearing. The three startedSources call
+  /// sites made that a coin flip rather than a certainty.
+  ///
+  /// The flag is set FIRST and cleared only by a reply that says the settings
+  /// were taken, so a crash, a quit mid-retry or a hermes that is down for the
+  /// rest of the session all end the same way: the next launch tries again.
+  private func recordCardDefaults() {
+    Bridge.cardDefaultsPending = true
+    postCardDefaults(attempt: 0)
+  }
+
+  /// The next launch's half of recordCardDefaults. Called once from
+  /// applicationDidFinishLaunching; a no-op on every machine whose settings
+  /// have already landed, which after the first success is all of them.
+  func resumeCardDefaultsIfPending() {
+    guard Bridge.cardDefaultsPending else { return }
+    postCardDefaults(attempt: 0)
+  }
+
+  private func postCardDefaults(attempt: Int) {
+    relHermes("POST", "admin/config/card",
+              json: ["capPerDay": 1, "producer": "eligibility"]) { [weak self] out in
+      let state = out["state"] as? String ?? "unknown"
+      if state == "ok" {
+        Bridge.cardDefaultsPending = false
+        return
+      }
+      guard let self, attempt < Bridge.cardDefaultsRetryDelays.count else {
+        // Giving up for this launch only. The flag stays set, which is what
+        // makes the next one pick it up.
+        NSLog("Intaglio Labs: daily card settings not recorded (\(state)) — retrying next launch")
+        return
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + Bridge.cardDefaultsRetryDelays[attempt]) {
+        self.postCardDefaults(attempt: attempt + 1)
+      }
+    }
   }
 
   /// The connectors daemon refuses to start without ~/.hazlie/connectors/config.json

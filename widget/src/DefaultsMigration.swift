@@ -54,6 +54,13 @@ enum DefaultsMigration {
     "HazliePerformanceMode",
     "HazlieKeepMacAwake",
     "HazlieHandheld",
+    // An undelivered one-card-a-day choice. It is set when screen 1's button is
+    // pressed and cleared only once hermes has written the settings down, so a
+    // rename that drops it strands an owner whose hermes was down for that
+    // session: nothing retries, capPerDay stays absent, and the reconnect card
+    // never appears. False on a fresh domain, which is the correct reading for
+    // an install that has nothing pending.
+    "HazlieCardDefaultsPending",
     "NSWindow Frame HazlieWidget",
   ]
 

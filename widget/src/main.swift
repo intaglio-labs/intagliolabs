@@ -116,6 +116,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
 
     Provision.ensureConnectorDefaults()
     Provision.ensureBackend()
+    // AND THE PRESS THAT NEVER REACHED HERMES. A previous launch recorded the
+    // owner's one-card-a-day choice and could not deliver it — hermes warming,
+    // or not up at all — so it is carried here and retried until it lands once.
+    // A no-op on every machine whose settings already arrived. See
+    // Bridge.cardDefaultsPending.
+    bridge.resumeCardDefaultsIfPending()
     // Self-gating: with `bridges` off this skips the prefetch AND retires an
     // io.intaglio.bridges agent a previous install left running under launchd.
     Provision.prefetchBridgeRuntime()
