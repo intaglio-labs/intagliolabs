@@ -158,7 +158,7 @@ test('an unreadable registry is told apart from an empty one, everywhere', () =>
   assert.match(statusApi, /featureRegistryStatus\(\{ home \}\)/u);
   // And the daemon's own view beside it: it caches the registry at module scope,
   // so a repair under a running daemon must not read as a recovery.
-  assert.match(connectStatus, /export function daemonRegistryState\(\{ home = homedir\(\) \} = \{\}\)/u);
+  assert.match(connectStatus, /export function daemonRegistryState\(\{ home = homedir\(\), now = Date\.now\(\) \} = \{\}\)/u);
   assert.match(statusApi, /daemonRegistryState: daemonRegistryState\(\{ home \}\)/u);
   assert.match(daemon, /registryState: FEATURES_REGISTRY_STATE, \.\.\./u,
     'published into the activity file the app already reads');

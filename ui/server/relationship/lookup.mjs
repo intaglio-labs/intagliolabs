@@ -1155,7 +1155,7 @@ export function corroborationOf(sources, { profileUrl = null } = {}) {
 
 // webChangeServable(row, {profileUrl}): design point 3, as one function --
 // the ONE place the card's bar lives, so newestWebChange (this file) and the
-// dev desk's own mirror of that query (ui/devtools/review/serve.mjs) cannot
+// dev desk's own mirror of that query (the review desk's serve.mjs) cannot
 // drift apart the way they did before the desk imported this.
 //
 // `row` is the stored row's own fields: {corroboration, sources, date,
