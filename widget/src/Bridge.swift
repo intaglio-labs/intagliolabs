@@ -2930,11 +2930,30 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       //
       // Best effort: a stamp that fails costs one skipped scan (the connector
       // catches up when the next export lands) and never the file.
+      //
+      // BUT ITS FAILURE MUST NOT MAKE THE FILE LOOK NEW. Both dates on a fresh
+      // copy are the moment it landed, so a stamp that throws leaves
+      // installedVintage answering "now" for an export from last year — and
+      // PASS ONE then refuses the owner's own file as "you already have a
+      // newer one", permanently, with no way past it but deleting the file by
+      // hand. One skipped scan is a cost; a flow that cannot be completed is
+      // not. So the fallback puts the export's OWN date back on the
+      // modification date: installedVintage takes the earlier of the two, so
+      // whichever half of the stamp did land, the vintage is honest again.
       var stamped = entry.destination
       var dates = URLResourceValues()
       dates.contentModificationDate = Date()
       if let vintage = entry.vintage { dates.creationDate = vintage }
-      try? stamped.setResourceValues(dates)
+      do {
+        try stamped.setResourceValues(dates)
+      } catch {
+        if let vintage = entry.vintage {
+          var fallback = entry.destination
+          var vintageOnly = URLResourceValues()
+          vintageOnly.contentModificationDate = vintage
+          try? fallback.setResourceValues(vintageOnly)
+        }
+      }
       copied.append(entry.kind.name)
       if entry.kind.name == "Connections.csv" {
         connections = Bridge.countRows(inCsvAt: entry.destination, anchor: entry.kind.anchor)
