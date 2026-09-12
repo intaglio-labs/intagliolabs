@@ -496,6 +496,21 @@ let googleUntil = 0;
 let googleProbes = 0;
 // Set when the owner presses the button this visit; see paintGoogle's last branch.
 let googleAsked = false;
+// WHY THE BUTTON DID NOTHING, WHEN IT DID NOTHING.
+//
+// The sign-in can fail before Google is ever reached: no OAuth client on this
+// Mac, the helper missing from the bundle, connect down, the browser refusing
+// the launch. Every one of those came back as a rejected reply into
+// `.catch(() => {})` and left the owner looking at "opening google in your
+// browser…" with no browser and no explanation (seen live on the clean-machine
+// retest, 2026-09-12).
+//
+// It is kept in a variable rather than only written to the element because the
+// probes that follow would paint over it: googleProbe cannot tell "nothing
+// signed in yet" from "the sign-in could not be started", and the more
+// specific sentence is the one worth keeping. Cleared on entering the screen
+// and on every fresh press, so it never outlives the attempt it describes.
+let googleRefusal = null;
 
 // EVERY PROBE IS A REAL GMAIL READ, per live account
 // (connect/lib/googleProbe.mjs asks messages.list), uncached and unthrottled,
@@ -517,10 +532,14 @@ const GOOGLE_PROBE_CAP = 40;
 function paintGoogle(out) {
   googleStatus.classList.remove('ok', 'warn', 'bad');
   if (!out || out.state !== 'ok') {
+    // The probe itself could not answer. If the owner is looking at a reason
+    // the sign-in never started, that is still the truest thing on screen.
+    if (paintGoogleRefusal()) return;
     googleStatus.textContent = 'not connected';
     return;
   }
   if (out.reading > 0) {
+    googleRefusal = null;
     googleStatus.classList.add('ok');
     const n = out.reading;
     googleStatus.textContent = `mail and calendar — ${n} account${n === 1 ? '' : 's'}, reading`;
@@ -554,12 +573,44 @@ function paintGoogle(out) {
   // finish" -- an accusation about a step nobody had taken (seen live on the
   // first clean-machine run, 2026-09-12). The failure copy belongs to a
   // sign-in the owner started on this visit and came back from empty-handed.
+  if (paintGoogleRefusal()) return;
   if (!googleAsked) {
     googleStatus.textContent = 'not connected';
     return;
   }
   googleStatus.classList.add('bad');
   googleStatus.textContent = 'that sign-in did not finish';
+}
+
+// AMBER, NOT RED, and in connect's own words. This is a prerequisite the owner
+// can act on — install the client, start the service — not a grant they gave
+// that failed. Returns whether it painted, so paintGoogle can hand it the two
+// states it would otherwise describe less accurately.
+function paintGoogleRefusal() {
+  if (!googleRefusal) return false;
+  googleStatus.classList.add('warn');
+  googleStatus.textContent = googleRefusal;
+  return true;
+}
+
+// WHAT THE NATIVE REPLY SAYS ABOUT WHETHER ANYTHING STARTED.
+//
+// `refused` is GoogleLogin's: a URL that is not Google's, or a browser macOS
+// would not launch. `state` is bridgeCall's, stamped on every answer it
+// SYNTHESISES — auth, down, or a non-200 carrying connect's own `error`. The
+// successful reply carries NEITHER, because Bridge.swift answers a launched
+// browser with {ok, opened} straight from GoogleLogin — so an absent `state`
+// is success here, and testing `state !== 'ok'` would paint every working
+// sign-in amber.
+function googleAuthRefusal(out) {
+  if (!out) return 'could not start the google sign-in';
+  if (typeof out.refused === 'string' && out.refused) return out.refused;
+  if (out.state && out.state !== 'ok') {
+    return typeof out.error === 'string' && out.error
+      ? out.error
+      : 'could not start the google sign-in';
+  }
+  return null;
 }
 
 // THE CAP BELONGS TO THE TIMER, AND ONLY TO IT — THE SPENDING AS WELL AS THE
@@ -617,6 +668,7 @@ function enterGoogle() {
   // this screen for an hour.
   googleProbes = 0;
   googleAsked = false;
+  googleRefusal = null;
   probeGoogle();
 }
 
@@ -624,9 +676,28 @@ window.addEventListener('focus', () => { if (currentScreen === '3') probeGoogle(
 
 googleStart.addEventListener('click', () => {
   googleAsked = true;
+  googleRefusal = null;
+  googleStatus.classList.remove('ok', 'warn', 'bad');
   googleStatus.textContent = 'opening google in your browser…';
-  hzPost('googleAuth', { flow: 'google' }).catch(() => {});
-  startGooglePolling();
+  // AND THE POLL ONLY STARTS IF SOMETHING DID. Ten minutes of live Gmail reads
+  // is the cost of waiting for a consent screen; a consent screen that was
+  // never opened is not worth one call, let alone forty.
+  hzPost('googleAuth', { flow: 'google' })
+    .then((out) => {
+      const why = googleAuthRefusal(out);
+      if (why) {
+        googleAsked = false;
+        googleRefusal = why;
+        paintGoogleRefusal();
+        return;
+      }
+      startGooglePolling();
+    })
+    .catch(() => {
+      googleAsked = false;
+      googleRefusal = 'could not start the google sign-in';
+      paintGoogleRefusal();
+    });
 });
 googleNext.addEventListener('click', () => nextScreen());
 document.getElementById('googleSkip').addEventListener('click', () => {

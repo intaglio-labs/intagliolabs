@@ -51,6 +51,14 @@ const code = (text) => text
 
 const source = code(js);
 
+/// The sign-in button's click handler, comments stripped, matched on the `});`
+/// in column zero that closes the addEventListener call.
+function clickHandler() {
+  const m = /googleStart\.addEventListener\('click', \(\) => \{\n([\s\S]*?)\n\}\);/u.exec(js);
+  assert.ok(m, 'the sign-in button has no click handler in onboarding.js');
+  return code(m[1]);
+}
+
 // -------------------------------------------------- 3: the dormant sentence
 
 test('the dormant line does not call a photo library "switched off"', () => {
@@ -105,7 +113,20 @@ test('the probe cap belongs to the timer and to nothing else', () => {
 
   // The two paths the comment above GOOGLE_POLL_MS promises are unconditional.
   assert.match(source, /window\.addEventListener\('focus', \(\) => \{ if \(currentScreen === '3'\) probeGoogle\(\); \}\)/u);
-  assert.match(source, /googleStart\.addEventListener\('click',[\s\S]{0,400}startGooglePolling\(\)/u);
+  // ~~A character-distance match from the click handler to startGooglePolling.~~
+  // The button now reads the reply before it decides — a sign-in that never
+  // opened a browser gets no ten-minute poll — and the handler grew past
+  // whatever number this was pinned at. Reading the handler as a block says
+  // the thing the number was standing in for.
+  const click = clickHandler();
+  assert.match(click, /startGooglePolling\(\)/u, 'the button still starts the poll');
+  // AND ONLY WHEN SOMETHING STARTED. Forty live Gmail reads is the price of
+  // waiting on a consent screen; a consent screen nothing opened is not worth
+  // one. See onboarding-screens.test.mjs for what the owner is told instead.
+  const refusedAt = click.indexOf('googleRefusal = why;');
+  assert.ok(refusedAt > -1, 'the refusal branch is gone');
+  assert.ok(refusedAt < click.indexOf('startGooglePolling()'),
+    'the refusal returns before the poll is reached');
 });
 
 // ------------------------------------------- 7: the peek on every re-show

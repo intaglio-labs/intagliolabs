@@ -201,7 +201,9 @@ test('the google probe is capped for the whole visit, and reachable by hand', ()
   // The two paths that matter still probe at once: coming back from the
   // browser, and pressing the button.
   assert.match(js, /window\.addEventListener\('focus'[\s\S]{0,120}probeGoogle\(\)/u);
-  assert.match(js, /googleStart\.addEventListener\('click'[\s\S]{0,300}startGooglePolling\(\)/u);
+  const click = /googleStart\.addEventListener\('click', \(\) => \{([\s\S]*?)\n\}\);/u.exec(js)?.[1];
+  assert.ok(click, 'the sign-in button has no click handler');
+  assert.match(click, /startGooglePolling\(\)/u, 'pressing the button still starts the poll');
   assert.match(js, /function enterGoogle\(\) \{[\s\S]{0,400}googleProbes = 0;[\s\S]{0,120}probeGoogle\(\)/u,
     'the cap is per visit, not per page load');
 });
@@ -222,6 +224,86 @@ test('a fresh install with nothing signed in reads "not connected", not a failed
     'the button is what sets it');
   assert.match(js, /function enterGoogle\(\) \{[\s\S]{0,400}googleAsked = false;/u,
     'and a new visit starts unasked');
+});
+
+test('a sign-in that never started says so, instead of "opening google…" forever', () => {
+  // Seen live on the clean-machine retest (2026-09-12): with no OAuth client
+  // on the Mac, connect answered 502, the reply landed in `.catch(() => {})`
+  // and the screen sat on "opening google in your browser…" with no browser
+  // and nothing saying why. Every way this can fail before Google is reached —
+  // no client, no helper in the bundle, connect down, a browser macOS refused
+  // — comes back through this one reply.
+  const click = /googleStart\.addEventListener\('click', \(\) => \{([\s\S]*?)\n\}\);/u.exec(js)?.[1];
+  assert.ok(click, 'the sign-in button has no click handler');
+  assert.doesNotMatch(click, /\.catch\(\(\) => \{\}\)/u,
+    'the one reply that can explain the silence may not be swallowed');
+  assert.match(click, /googleAuthRefusal\(out\)/u, 'the reply is read');
+  assert.match(click, /googleRefusal = why;[\s\S]{0,60}paintGoogleRefusal\(\)/u,
+    'and painted');
+  // A rejected bridge call is the same outcome to the owner as a refusal.
+  assert.match(click, /\.catch\(\(\) => \{[\s\S]{0,200}googleRefusal = 'could not start the google sign-in'/u);
+});
+
+test('a refusal is amber and keeps connect\'s own words', () => {
+  // Amber, not red: this is a prerequisite the owner can act on, not a grant
+  // they gave that failed. And connect's `error` is what names the fix — "check
+  // that the Google client credential is installed" is actionable in a way that
+  // "something went wrong" is not.
+  const paint = /function paintGoogleRefusal\(\) \{([\s\S]*?)\n\}/u.exec(js)?.[1];
+  assert.ok(paint, 'paintGoogleRefusal() not found');
+  assert.match(paint, /classList\.add\('warn'\)/u, 'amber');
+  assert.doesNotMatch(paint, /'bad'/u, 'never the alarm colour');
+  assert.match(paint, /googleStatus\.textContent = googleRefusal;/u);
+  const refusal = /function googleAuthRefusal\(out\) \{([\s\S]*?)\n\}/u.exec(js)?.[1];
+  assert.ok(refusal, 'googleAuthRefusal() not found');
+  assert.match(refusal, /out\.error/u, "connect's text, not a generic one");
+  assert.match(refusal, /out\.refused/u, "and GoogleLogin's, when the browser is what refused");
+  assert.match(refusal, /could not start the google sign-in/u, 'with a fallback that is still a sentence');
+});
+
+test('a browser that DID open is not mistaken for a failure', () => {
+  // Bridge.swift answers a launched browser with {ok, opened} straight from
+  // GoogleLogin — no `state` at all; bridgeCall stamps one only on the answers
+  // it synthesises. So `state !== 'ok'` would paint every working sign-in
+  // amber and never poll, which is the same dead screen wearing the other
+  // colour.
+  assert.match(bridge, /case "googleAuth":/u);
+  const swift = /case "googleAuth":([\s\S]*?)\n    case "/u.exec(bridge)?.[1];
+  assert.ok(swift, 'the googleAuth case is gone from Bridge.swift');
+  assert.match(swift, /out: \[String: Any\] = \["ok": ok, "opened": ok\]/u,
+    'the success reply carries no state — this test is the reason the page may not require one');
+  const refusal = /function googleAuthRefusal\(out\) \{([\s\S]*?)\n\}/u.exec(js)?.[1];
+  assert.match(refusal, /if \(out\.state && out\.state !== 'ok'\)/u,
+    'an ABSENT state is success; only a stated non-ok one is a failure');
+});
+
+test('nothing polls Google after a sign-in that never opened', () => {
+  // Ten minutes of live Gmail reads is the price of waiting on a consent
+  // screen. A consent screen that was never opened is not worth one call.
+  const click = /googleStart\.addEventListener\('click', \(\) => \{([\s\S]*?)\n\}\);/u.exec(js)?.[1];
+  const refusedAt = click.indexOf('googleRefusal = why;');
+  const pollAt = click.indexOf('startGooglePolling()');
+  assert.ok(refusedAt > -1 && pollAt > -1);
+  assert.ok(refusedAt < pollAt, 'the refusal branch returns before the poll is reached');
+  assert.match(click, /return;\n\s*\}\n\s*startGooglePolling\(\);/u,
+    'and it returns rather than falling through');
+});
+
+test('a refusal survives the probes that follow, and a real grant clears it', () => {
+  // googleProbe cannot tell "nothing signed in yet" from "the sign-in could
+  // not be started", so a repaint on focus would replace the specific sentence
+  // with a vaguer one. It outranks both empty states and nothing else.
+  const paint = /function paintGoogle\(out\) \{[\s\S]*?\n\}/u.exec(js)?.[0];
+  assert.ok(paint, 'paintGoogle() not found');
+  assert.equal((paint.match(/paintGoogleRefusal\(\)/gu) ?? []).length, 2,
+    'both states that would otherwise say less must consult it');
+  assert.match(paint, /out\.reading > 0\) \{\s*\n\s*googleRefusal = null;/u,
+    'and an account that actually reads clears it');
+  assert.match(js, /function enterGoogle\(\) \{[\s\S]{0,400}googleRefusal = null;/u,
+    'a new visit starts with no stale explanation');
+  const click = /googleStart\.addEventListener\('click', \(\) => \{([\s\S]*?)\n\}\);/u.exec(js)?.[1];
+  assert.match(click, /^\s*googleAsked = true;\s*\n\s*googleRefusal = null;/u,
+    'and so does a fresh press');
 });
 
 test('the permission poll asks for no diagnostic; entering the screen does', () => {
