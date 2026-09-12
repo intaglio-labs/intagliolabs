@@ -533,10 +533,29 @@ function hzFeatures() {
 function hzFeatureOn(set, name) {
   return !!(set && set.features && set.features[name] === true);
 }
-/// true | false | 'optional'. Anything unrecognised reads as false.
+/// true | false | 'optional' — or `undefined` for a connector the registry does
+/// not mention AT ALL, which is not the same answer as false.
+///
+/// This used to map anything unrecognised to false, and the daemon's rule is the
+/// exact opposite by design: connectorsDisabledBy (connectors/lib/features.mjs)
+/// disables a module whose feature is `false` and LEAVES ALONE one with no entry
+/// — "silently switching off a source somebody added is worse than listing it".
+/// So a status row whose kind the registry has never heard of was scheduled,
+/// polled and ingested by the daemon while the shelf drew no tile for it, which
+/// is the one outcome CONNECTOR_ORDER promises cannot happen ("a new connector
+/// appears rather than disappearing"). Two loaders, one rule: unknown is
+/// undefined here and the caller treats it as "leave it alone".
 function hzConnectorFeature(set, name) {
-  const value = set && set.connectors ? set.connectors[name] : false;
-  return value === true || value === 'optional' ? value : false;
+  const table = set && set.connectors;
+  // NO ANSWER AT ALL IS STILL "NOTHING ON". hzFeatures' catch above returns an
+  // EMPTY table when the bridge cannot be asked, and that must keep failing
+  // closed — undefined here would turn "the registry could not be reached" into
+  // "the registry does not mention this one", which draws a full shelf of tiles
+  // that cannot be pressed. An empty table is no answer; a populated one that
+  // omits a name is an answer about a connector the registry does not know.
+  if (!table || Object.keys(table).length === 0) return false;
+  const value = table[name];
+  return value === true || value === false || value === 'optional' ? value : undefined;
 }
 
 function hzApplyPrefs() {
@@ -755,5 +774,8 @@ function hzGlyph(id) {
   // Both the "add a mailbox" row (bare `mail`) and every configured one
   // (`mail:<address>`) are the same Google account, so they wear the same mark.
   if (id === 'mail' || id.startsWith('mail:')) return HZ_GLYPHS.google;
+  // The export tile and the bridge tile are two rows for one platform; they are
+  // the same mark. (Only one of them is ever on screen — see isHiddenSource.)
+  if (id === 'linkedin-export') return HZ_GLYPHS.linkedin;
   return HZ_GLYPHS[id] || HZ_SVG('<circle cx="12" cy="12" r="7.5"/>');
 }

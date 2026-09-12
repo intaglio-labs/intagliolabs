@@ -19,7 +19,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readToken } from './memory.mjs';
-import {  readStatus } from './status.mjs';
+import { featureRegistryState, readStatus } from './status.mjs';
 
 const BEARER_RE = /^Bearer ([0-9a-f]{64})$/u;
 const TOKEN_RE = /^[0-9a-f]{64}$/u;
@@ -59,5 +59,9 @@ export function statusResponse({ origin, authorization, home = homedir() } = {})
     // One response for missing, malformed and wrong — a probe learns nothing.
     return { status: 401, body: { error: 'unauthorized' } };
   }
-  return { status: 200, body: { sources: readStatus({ home }) } };
+  // registryState travels WITH the rows: an unreadable feature registry turns
+  // every connector off, including the card's own, and the shelf would
+  // otherwise draw that total outage as the same empty list it draws for a
+  // machine where nothing has been connected yet. Three fixed words, no paths.
+  return { status: 200, body: { sources: readStatus({ home }), registryState: featureRegistryState() } };
 }

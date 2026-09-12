@@ -19,6 +19,7 @@ import {
   accountsWithScopeIncludingStale,
 } from '../../connectors/lib/googleAccounts.mjs';
 import { listGoogleClients } from '../../connectors/lib/googleClients.mjs';
+import { readFeatureRegistry } from '../../connectors/lib/features.mjs';
 
 const SECRETS = (home) => join(home, '.hazlie', 'secrets');
 
@@ -29,6 +30,11 @@ const SECRETS = (home) => join(home, '.hazlie', 'secrets');
 // Readable is not the same as running.
 function connectorForStatusRow(id) {
   if (id.startsWith('mail:')) return 'mail';
+  // The export row, whose poller is sources/linkedin.mjs — NOT the bridge that
+  // shares the platform name one line below. Ahead of the PLATFORMS test on
+  // purpose: `linkedin` is in that table, so without this the export tile would
+  // answer to the Matrix marker and ignore its own.
+  if (id === LINKEDIN_EXPORT_ID) return 'linkedin';
   // Seven status rows, one Matrix poller and therefore one disable marker.
   if (Object.hasOwn(PLATFORMS, id)) return 'matrix';
   return id;
@@ -388,6 +394,41 @@ export function discordImportState({ home = homedir() } = {}) {
 // same bus — mautrix-linkedin in bridges/docker-compose.yml, listed by
 // bridgeRows() below from the PLATFORMS table. Its rows keep the SAME
 // `linkedin` source name the export wrote, so nothing downstream changed.
+//
+// BACK AS A SECOND ROW, and the reason is the feature registry rather than a
+// reversal of that call. With `bridges` off, the bridge tile is correctly
+// hidden — the bridge is not provisioned — while `connectors.linkedin` stays
+// TRUE and connectors/sources/linkedin.mjs stays scheduled, waiting on a
+// Connections.csv nothing on screen asks for. The owner had no surface telling
+// them where to drop the file for a connector this install is actively running.
+// One row per flow: the bridge tile lives behind `bridges`, this one behind the
+// connector, and the shelf shows whichever applies (widget/ui/connections.js).
+export const LINKEDIN_EXPORT_ID = 'linkedin-export';
+
+function linkedinExportRow(home) {
+  // File-based on purpose — the export, never an API or a scrape. Connected
+  // means Connections.csv is in place; messages.csv is optional and not
+  // checked, because its absence is a choice rather than a fault. Existence
+  // only: no names, no counts of rows, nothing out of the file itself.
+  const ok = existsSync(join(home, '.hazlie', 'imports', 'linkedin', 'Connections.csv'));
+  return {
+    id: LINKEDIN_EXPORT_ID,
+    label: 'LinkedIn',
+    connected: ok,
+    detail: ok ? 'export imported' : 'needs your LinkedIn data export',
+    action: ok ? null : 'linkedin',
+    caveat: null,
+  };
+}
+
+/// 'ok' | 'missing' | 'invalid' — why the feature registry answered what it
+/// answered. It rides the status payload because the shelf is the surface that
+/// goes blank when the answer is one of the last two: every connector off, the
+/// card's own included, drawn as the same empty list as "nothing connected".
+/// The page needs to be able to say "unreadable" instead of saying nothing.
+export function featureRegistryState() {
+  return readFeatureRegistry().registryState;
+}
 
 function fullStatus(home) {
   return [
@@ -414,6 +455,7 @@ function fullStatus(home) {
     ...cloudAccountRows(home),
     notionRow(home),
     whatsappRow(home),
+    linkedinExportRow(home),
     ...bridgeRows({ home }),
   ];
 }

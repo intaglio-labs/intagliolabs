@@ -713,6 +713,22 @@ const HINTS = {
   // ~~linkedin: how to request an export and where to unzip it.~~ Gone with
   // the export itself (owner, 2026-08-25): LinkedIn is a bridge now, so its
   // tile renders the ordinary cookie-login flow like Messenger's.
+  //
+  // BACK, for the export ROW and not the bridge one (see isHiddenSource). With
+  // `bridges` off there is no bridge to log into, and the export connector is
+  // still scheduled and still polling ~/.hazlie/imports/linkedin — so this is
+  // the only place the owner can be told that the folder is what it wants. The
+  // path IS the instruction: nothing else on the shelf can name it, because no
+  // other tile is waiting on a file the owner has to put there by hand.
+  'linkedin-export': {
+    text: 'On LinkedIn: Settings → Data privacy → Get a copy of your data → tick "Connections" → '
+      + 'Request archive. When the email lands, unzip it and put Connections.csv in '
+      + '~/.hazlie/imports/linkedin.',
+    url: 'https://www.linkedin.com/mypreferences/d/download-my-data',
+    link: 'linkedin.com · get a copy of your data',
+    // One export folder per Mac, so no "+ add account" once it is imported.
+    local: true,
+  },
   // OAuth2 since Oura retired personal access tokens in Dec 2025: the PAT
   // page this used to link is a dead end, and there is no settings page to
   // send anyone to instead, so this one is text-only — the connect page
@@ -822,6 +838,9 @@ const kindOf = (id) => (id.startsWith('mail:') ? 'mail' : id);
 const CONNECTOR_ORDER = [
   'imessage',
   'whatsapp', 'messenger', 'instagram', 'twitter', 'telegram', 'discord', 'slack', 'linkedin',
+  // The export tile stands where the bridge tile would; only one of the two is
+  // ever visible, so they share a place in the scan order rather than a slot.
+  'linkedin-export',
   'mail',
   'calendar',
   'contacts',
@@ -851,8 +870,27 @@ const CONNECTOR_ORDER = [
 // The status rows themselves are untouched, exactly as the old hand-written
 // version promised: a hidden id still works everywhere else it appears.
 let featureSet = null; // filled by the first refresh(); see hzFeatures in bridge.js
+// LinkedIn is two flows behind two different flags, and exactly one tile.
+//
+// The bridge tile goes with `bridges`, above. The EXPORT row (connect/lib/status.mjs
+// LINKEDIN_EXPORT_ID) belongs to `connectors.linkedin`, which the card leaves
+// ON — connectors/sources/linkedin.mjs keeps polling ~/.hazlie/imports/linkedin
+// whatever the bridges flag says. Hiding both left a scheduled connector with
+// no surface anywhere telling the owner to drop Connections.csv in. So: show
+// the export tile when its connector is on and no bridge tile is carrying
+// LinkedIn, and never show the two at once.
+const LINKEDIN_EXPORT_ID = 'linkedin-export';
 function isHiddenSource(src) {
+  if (src.id === LINKEDIN_EXPORT_ID) {
+    return hzFeatureOn(featureSet, 'bridges')
+      || hzConnectorFeature(featureSet, 'linkedin') === false;
+  }
   if (isBridge(src)) return !hzFeatureOn(featureSet, 'bridges');
+  // `=== false` and not a falsy test, deliberately: hzConnectorFeature answers
+  // `undefined` for a connector the registry does not mention, and the daemon
+  // LEAVES SUCH A MODULE ALONE (connectorsDisabledBy). A row whose kind is
+  // unknown here is one the daemon is scheduling and ingesting, so hiding it
+  // would draw the owner a shelf that disagrees with what the machine is doing.
   return hzConnectorFeature(featureSet, kindOf(src.id)) === false;
 }
 /// Offered, but the owner has to ask for it. Labelled on the tile so "not
@@ -951,6 +989,13 @@ const NOTICES = {
   noroute: 'connect service predates /api/status — status unknown',
   error: 'checking connector status…',
   pending: 'finishing the sign-in…',
+  // NOT AN EMPTY SHELF. A missing or malformed ops/features.json resolves to
+  // everything-off — iMessage, mail, calendar and contacts included — so the
+  // grid below renders nothing, which is pixel-for-pixel what a machine that
+  // has connected nothing looks like. The one state the owner cannot diagnose
+  // is the one where the app is entirely broken, so it gets its own sentence
+  // and the alarm colour.
+  registry: 'feature registry unreadable — reinstall. nothing can be connected until it is.',
 };
 
 // WKWebView never draws the native title-attribute tooltip, so the tile's
@@ -2440,7 +2485,18 @@ async function refresh() {
       notice.hidden = false;
       return;
     }
-    notice.hidden = true;
+    // The registry outage is drawn OVER a normal payload rather than instead of
+    // one: the rows are fine, it is the answer about which of them this build
+    // offers that is missing. Assigned through element.style because these
+    // pages ship a CSP without 'unsafe-inline' (widget/test/csp-inline-style.test.mjs).
+    if (data.registryState && data.registryState !== 'ok') {
+      notice.textContent = NOTICES.registry;
+      notice.style.color = 'var(--status-bad)';
+      notice.hidden = false;
+    } else {
+      notice.style.color = '';
+      notice.hidden = true;
+    }
     // An OPEN strip survives the refresh. The cookie-paste and token/phone
     // login flows require leaving the popup (to copy cookies, a token, or a
     // code), and coming back fires the focus listener below; renderBridge

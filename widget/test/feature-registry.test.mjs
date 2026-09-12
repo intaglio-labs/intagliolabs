@@ -30,6 +30,8 @@ const connectionsJs = read('widget/ui/connections.js');
 const palette = read('widget/ui/palette.css');
 const hermes = read('ui/server/hermes.mjs');
 const daemon = read('connectors/daemon.mjs');
+const statusApi = read('connect/lib/statusApi.mjs');
+const connectStatus = read('connect/lib/status.mjs');
 
 test('the registry ships inside the bundle, where Features.swift looks for it', () => {
   assert.match(buildSh, /cp \.\.\/ops\/features\.json "\$BE\/ops\/"/u,
@@ -45,7 +47,10 @@ test('the registry ships inside the bundle, where Features.swift looks for it', 
 // the process that would otherwise install a Matrix homeserver.
 test('an unreadable registry is everything off, in Swift', () => {
   assert.match(features, /static let allOff = FeatureSet\(/u, 'the static default must exist');
-  assert.match(features, /return \.allOff/u, 'and be what load\\(\\) returns on failure');
+  // The load now answers the set AND why (RegistryState), so the failure return
+  // is a tuple. Same promise, one spelling later.
+  assert.match(features, /return \(\.allOff, \.(missing|invalid)\)/u,
+    'and be what the load returns on failure');
   // Every struct field defaults to false, so allOff is not a second list that
   // could disagree with the first.
   for (const name of ['chat', 'voice', 'bridges', 'timeline', 'constellation',
@@ -55,11 +60,81 @@ test('an unreadable registry is everything off, in Swift', () => {
   }
 });
 
+// `{"chat": 1}` IS NOT `{"chat": true}` — AND SWIFT IS WHERE THAT BIT.
+//
+// JSONSerialization returns NSNumber for both JSON `true` and JSON `1`, and
+// `as? Bool` conditionally bridges 1 to true and 0 to false. node's loader
+// requires `typeof value === 'boolean'` and throws the WHOLE override away, so
+// one override file made the app build the chat panel while hermes and the
+// daemon reported chat off — two processes acting on two different registries.
+//
+// THERE IS NO SWIFT TEST HARNESS IN THIS REPO, so this is a source scan, like
+// every other Swift assertion in this file. The behaviour was verified out of
+// band by compiling widget/src/Features.swift against a throwaway main and
+// feeding it `{"chat": 1}`, `{"chat": 0}`, `{"connectors": {"notes": 1}}` and
+// the real booleans; the numeric forms are rejected and the booleans are not.
+// connectors/test/features.test.mjs pins the node half of the same rule.
+test('a JSON number is not a JSON boolean, in the app loader too', () => {
+  assert.match(features, /CFGetTypeID\(value as CFTypeRef\) == CFBooleanGetTypeID\(\)/u,
+    'the only check that tells kCFBooleanTrue from __NSCFNumber');
+  // And it must be what BOTH merges ask. `as? Bool` anywhere in this file is
+  // the bug walking back in.
+  assert.match(features, /guard let flag = jsonBool\(value\) else \{/u, 'the feature flags');
+  assert.match(features, /\} else if let flag = jsonBool\(state\) \{/u, 'and the connector states');
+  const merge = features.slice(features.indexOf('static func merge('));
+  assert.doesNotMatch(merge.replace(/\/\/[^\n]*/gu, ''), /as\? Bool/u,
+    'a conditional Bool bridge accepts 1 and 0 — that is the whole finding');
+});
+
 test("a bad owner override is discarded, not fatal, and not a reason to fail open", () => {
   assert.match(features, /features override ignored/u,
     'the reason must reach the log');
-  assert.match(features, /catch \{[\s\S]{0,200}return base\b/u,
+  assert.match(features, /catch \{[\s\S]{0,200}return \(base, \.ok\)/u,
     'a rejected override must fall back to the SHIPPED registry, not to allOff and not to a throw');
+  // And a bad override is NOT an unreadable registry: the state stays 'ok', or
+  // the shelf would send the owner to reinstall over a typo in a file they are
+  // invited to edit.
+  assert.doesNotMatch(features, /catch \{[\s\S]{0,200}return \(base, \.invalid\)/u);
+});
+
+// A MISSING REGISTRY IS A TOTAL OUTAGE, AND IT MUST NOT LOOK LIKE A QUIET ONE.
+//
+// ALL_OFF switches off imessage, mail, calendar and contacts — the card's own
+// sources — so the daemon schedules nothing and the shelf draws an empty grid,
+// pixel for pixel what a machine with nothing connected draws. The only report
+// was one line on the daemon's stderr, outside the structured log the app reads.
+test('an unreadable registry is told apart from an empty one, everywhere', () => {
+  // Swift: the state exists, travels with the set, and names the two failures.
+  assert.match(features, /enum RegistryState: String \{/u);
+  for (const state of ['case ok', 'case missing', 'case invalid']) {
+    assert.ok(features.includes(state), `RegistryState must carry ${state}`);
+  }
+  assert.match(features, /static func loadWithState\(/u,
+    'the set and the reason must come from ONE read, or they can disagree');
+  assert.match(features, /return \(\.allOff, \.missing\)/u, 'no file at all');
+  assert.match(features, /return \(\.allOff, \.invalid\)/u, 'a file that will not parse');
+
+  // node: the same three words, from the same loader everything else uses.
+  assert.match(daemon, /readFeatureRegistry\(\{/u);
+  assert.match(daemon, /export const FEATURES_REGISTRY_STATE/u);
+  assert.match(daemon, /log\.error\('features_registry_unreadable'/u,
+    'the structured log is where the app looks; stderr is not');
+  const event = daemon.slice(daemon.indexOf("log.error('features_registry_unreadable'"));
+  const body = event.slice(0, event.indexOf('});') + 3);
+  assert.match(body, /registryState: FEATURES_REGISTRY_STATE/u);
+  // COUNTS AND NAMES ONLY, like every other line this logger carries.
+  assert.doesNotMatch(body, /readFileSync|registryPath|homedir|\$\{/u,
+    'no paths and no file contents in a log line');
+
+  // The connect payload carries it to the page...
+  assert.match(connectStatus, /export function featureRegistryState\(\)/u);
+  assert.match(statusApi, /registryState: featureRegistryState\(\)/u);
+  // ...and the page says it in words, in the alarm colour, instead of drawing
+  // the same blank shelf it draws for "nothing connected".
+  assert.match(connectionsJs, /registry: 'feature registry unreadable/u);
+  assert.match(connectionsJs, /if \(data\.registryState && data\.registryState !== 'ok'\)/u);
+  assert.match(connectionsJs, /notice\.style\.color = 'var\(--status-bad\)'/u,
+    'through element.style: these pages ship a CSP with no unsafe-inline');
 });
 
 // --- provisioning --------------------------------------------------------
@@ -298,6 +373,38 @@ test('the tile list is derived from the registry, not hand-maintained', () => {
     'and it must be resolved before the first tile is built, or the shelf renders twice');
 });
 
+// THE TWO LOADERS HAD OPPOSITE RULES FOR AN UNKNOWN CONNECTOR, and the daemon's
+// is the one that governs what actually runs. widget/test/connector-visibility
+// .test.mjs runs these rules; this pins that they are still written down here.
+test('an unrecognised connector is left alone by the page, as it is by the daemon', () => {
+  assert.match(bridgeJs, /if \(!table \|\| Object\.keys\(table\)\.length === 0\) return false;/u,
+    'no answer at all still fails closed — that is not the same as an unknown name');
+  assert.match(bridgeJs, /return value === true \|\| value === false \|\| value === 'optional' \? value : undefined;/u,
+    'a name the registry does not mention is undefined, never false');
+  assert.match(daemon, /connectorsDisabledBy/u);
+});
+
+// LINKEDIN IS TWO FLOWS AND EXACTLY ONE TILE. With `bridges` off the bridge tile
+// is correctly hidden while `connectors.linkedin` keeps the export connector
+// scheduled — and the owner had no surface anywhere telling them where to put
+// Connections.csv for a connector this install is actively polling for it.
+test('the LinkedIn export has a tile of its own when the bridge tile is gone', () => {
+  assert.match(connectStatus, /export const LINKEDIN_EXPORT_ID = 'linkedin-export';/u);
+  assert.match(connectStatus, /function linkedinExportRow\(home\)/u);
+  assert.match(connectStatus, /'imports', 'linkedin', 'Connections\.csv'/u);
+  assert.match(connectStatus, /linkedinExportRow\(home\),/u, 'and it must be in fullStatus');
+  // The page's half: its own visibility rule, its own hint, its own place in
+  // the scan order, and the drop path spelled out where the owner can read it.
+  assert.match(connectionsJs, /if \(src\.id === LINKEDIN_EXPORT_ID\) \{/u);
+  assert.match(connectionsJs, /hzConnectorFeature\(featureSet, 'linkedin'\) === false/u);
+  assert.match(connectionsJs, /'linkedin-export': \{/u, 'the export card needs its own hint');
+  assert.match(connectionsJs, /~\/\.hazlie\/imports\/linkedin/u,
+    'the drop path is the one thing only this card can say');
+  assert.match(connectionsJs, /Request archive/u, 'and the clicks that produce the file');
+  assert.match(bridgeJs, /if \(id === 'linkedin-export'\) return HZ_GLYPHS\.linkedin;/u,
+    'two rows for one platform share its mark');
+});
+
 test("'optional' is a label on the tile, not a silent third state", () => {
   assert.match(connectionsJs, /function isOptionalSource\(src\)/u);
   assert.match(connectionsJs, /\$\{src\.label\} · optional/u,
@@ -320,9 +427,23 @@ test('hermes echoes the effective set on /stats', () => {
     'one shared loader, following the pinnedThread/googleClients precedent');
   const stats = hermes.slice(hermes.indexOf("url.pathname === '/stats'"));
   const body = stats.slice(0, stats.indexOf('const gone = GONE.get'));
-  assert.match(body, /features = readFeatures\(\)/u);
-  assert.match(body, /try \{[\s\S]{0,120}readFeatures\(\)[\s\S]{0,80}catch/u,
-    'an unreadable registry must never take /stats down');
+  // THE PRODUCER, NOT THE SPELLING. This asserted the literal
+  // `features = readFeatures()` and went red the day the read moved behind the
+  // same short-TTL cache as the heavy blocks — a caching change that the wire
+  // contract (ui/test/hermes.test.mjs) already pins properly, through readAt.
+  // What matters here is that hermes' own feature set comes from the shared
+  // loader and reaches the response, however it is memoised on the way.
+  assert.match(body, /cachedStatus\([^)]*?\(\) => readFeatures\(\)/su,
+    'the shared loader must still be what produces the set');
+  // The defensive contract moved WITH the read: cachedStatus is what holds the
+  // try/catch now, and the route has to survive the null block it hands back.
+  // Asserting the old inline `try { readFeatures() } catch` here would be
+  // asserting where the try is written, not that /stats stays up.
+  const cache = hermes.slice(hermes.indexOf('function cachedStatus('), hermes.indexOf('async function handle('));
+  assert.match(cache, /catch \{[\s\S]{0,400}entry\.value = null;/u,
+    'a status block that throws must null itself, never take /stats down');
+  assert.match(body, /if \(registry !== null\)/u,
+    'and the route must survive that null rather than spreading it');
   assert.match(body, /\n        features,\n/u, 'and it must actually be sent');
 });
 

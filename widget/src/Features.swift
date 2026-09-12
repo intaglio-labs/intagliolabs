@@ -26,6 +26,20 @@ enum ConnectorState: Equatable {
   init(_ value: Bool) { self = value ? .on : .off }
 }
 
+/// WHY the answer is `allOff`, when it is. The same three words node's loader
+/// uses (connectors/lib/features.mjs), because the shelf and the daemon both
+/// have to say the same thing about the same broken install.
+///
+/// A missing or invalid registry switches off the card's own connectors too —
+/// imessage, mail, calendar, contacts — which is a total product outage, and
+/// until this existed it was indistinguishable at every surface from an install
+/// where the owner had simply connected nothing.
+enum RegistryState: String {
+  case ok
+  case missing
+  case invalid
+}
+
 struct FeatureSet: Equatable {
   var chat = false
   var voice = false
@@ -77,6 +91,7 @@ struct FeatureSet: Equatable {
 enum Features {
   private static let lock = NSLock()
   private static var cached: FeatureSet?
+  private static var cachedState: RegistryState?
 
   /// The effective set for this process. Read once; the registry ships in the
   /// bundle and the override is a developer affordance, so re-reading it on
@@ -86,9 +101,19 @@ enum Features {
     lock.lock()
     defer { lock.unlock() }
     if let cached { return cached }
-    let value = load()
+    let (value, state) = loadWithState()
     cached = value
+    cachedState = state
     return value
+  }
+
+  /// 'ok', 'missing' or 'invalid' for the set `current` returned. Read through
+  /// the same cache, so asking costs nothing and cannot disagree with it.
+  static var registryState: RegistryState {
+    _ = current
+    lock.lock()
+    defer { lock.unlock() }
+    return cachedState ?? .invalid
   }
 
   static func on(_ name: String) -> Bool { current[name] }
@@ -159,23 +184,34 @@ enum Features {
   }
 
   static func load(registry: URL? = bundledRegistry, override: URL? = ownerOverride) -> FeatureSet {
-    guard let registry,
-          let data = try? Data(contentsOf: registry),
-          let base = parseRegistry(data) else {
-      NSLog("Intaglio Labs: no readable feature registry — everything is off")
-      return .allOff
+    loadWithState(registry: registry, override: override).0
+  }
+
+  /// The set AND why. `missing` is a bundle that does not carry the file at
+  /// all; `invalid` is one that carries an unreadable one. Both answer allOff —
+  /// "the file that says what is on is unreadable" must never resolve to
+  /// "everything is on" — and the owner is owed different words for each.
+  static func loadWithState(registry: URL? = bundledRegistry,
+                            override: URL? = ownerOverride) -> (FeatureSet, RegistryState) {
+    guard let registry, let data = try? Data(contentsOf: registry) else {
+      NSLog("Intaglio Labs: no feature registry in this bundle — everything is off")
+      return (.allOff, .missing)
     }
-    guard let override, let overrideData = try? Data(contentsOf: override) else { return base }
+    guard let base = parseRegistry(data) else {
+      NSLog("Intaglio Labs: the feature registry is unreadable — everything is off")
+      return (.allOff, .invalid)
+    }
+    guard let override, let overrideData = try? Data(contentsOf: override) else { return (base, .ok) }
     guard let object = try? JSONSerialization.jsonObject(with: overrideData) as? [String: Any] else {
       NSLog("Intaglio Labs: features override is not a JSON object — ignored")
-      return base
+      return (base, .ok)
     }
     do {
-      return try merge(base, object)
+      return (try merge(base, object), .ok)
     } catch {
       // DISCARD THE OVERRIDE, KEEP THE REGISTRY. See the header.
       NSLog("Intaglio Labs: features override ignored: \(error.localizedDescription)")
-      return base
+      return (base, .ok)
     }
   }
 
@@ -186,6 +222,20 @@ enum Features {
     // Start from allOff, so a key the shipped file forgot is OFF rather than
     // inheriting whatever a struct default happened to be.
     return try? merge(.allOff, features)
+  }
+
+  /// A JSON `true`/`false`, AND NOT A NUMBER THAT LOOKS LIKE ONE.
+  ///
+  /// JSONSerialization hands back NSNumber for both `true` and `1`, and
+  /// `as? Bool` accepts either — so `{"chat": 1}` switched chat ON in the app
+  /// while node's loader (which requires `typeof value === 'boolean'`) threw the
+  /// WHOLE override away and reported chat off. One file, two answers, and the
+  /// daemon and the app acting on different registries. CFBooleanGetTypeID is
+  /// the one check that tells the two apart: JSON booleans arrive as
+  /// kCFBoolean{True,False}, JSON numbers as __NSCFNumber.
+  static func jsonBool(_ value: Any) -> Bool? {
+    guard CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID() else { return nil }
+    return (value as? NSNumber)?.boolValue
   }
 
   private struct Rejected: LocalizedError {
@@ -213,7 +263,7 @@ enum Features {
               throw Rejected(reason: "connector \"\(name)\" must be true, false or \"optional\"")
             }
             merged.connectors[name] = .optional
-          } else if let flag = state as? Bool {
+          } else if let flag = jsonBool(state) {
             merged.connectors[name] = ConnectorState(flag)
           } else {
             throw Rejected(reason: "connector \"\(name)\" must be true, false or \"optional\"")
@@ -224,7 +274,7 @@ enum Features {
       guard FeatureSet.names.contains(key) else {
         throw Rejected(reason: "unknown feature \"\(key)\"")
       }
-      guard let flag = value as? Bool else {
+      guard let flag = jsonBool(value) else {
         throw Rejected(reason: "feature \"\(key)\" must be true or false")
       }
       switch key {
