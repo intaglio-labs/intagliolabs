@@ -121,10 +121,48 @@ export const OPTIONAL_CONNECTORS = Object.freeze(
   optionalConnectors(FEATURES, CONNECTOR_NAMES)
 );
 
+// HOW SOON A SOURCE THAT COULD NOT RUN IS ASKED AGAIN, and why it is not the
+// polling interval.
+//
+// A source whose needs() reports a missing prerequisite returns early and is
+// rescheduled at its FULL interval -- fifteen minutes by default. That is the
+// right cadence for a source that is working and the wrong one for the only
+// moment this state is ever interesting: the owner has just signed in to Google
+// or dropped their LinkedIn export in, and the thing they did is a quarter of an
+// hour away from being noticed. On the second clean-machine onboarding run
+// (2026-09-12) both sources answered "not ready" at 20:51, the owner completed
+// screens 3 and 4, and ten minutes later neither had been asked again. The first
+// clean run only picked them up because reinstalling the app restarted the
+// daemon.
+//
+// So the first re-probe is a minute away, and each further one doubles until it
+// reaches the interval the source would have used anyway. needs() is an
+// existsSync or a token read, so the early probes are nearly free; the doubling
+// means a machine where a connector is simply never going to be connected
+// settles back onto its ordinary interval after a handful of ticks instead of
+// polling a missing file forever.
+//
+// It is the CEILING that matters as much as the floor: below MIN_INTERVAL_S a
+// poller is a busy-loop, and every configured interval is already >= 60 s, so
+// Math.min below can never take this under a minute.
+export const NOT_READY_REPROBE_MS = 60_000;
+
 export function sourceRetryDelay(result, intervalMs) {
-  return Number.isFinite(result?.nextDelayMs) && result.nextDelayMs >= 1_000
-    ? Math.min(60_000, Math.floor(result.nextDelayMs))
-    : intervalMs;
+  if (Number.isFinite(result?.nextDelayMs) && result.nextDelayMs >= 1_000) {
+    return Math.min(60_000, Math.floor(result.nextDelayMs));
+  }
+  // Deliberately a SECOND field rather than nextDelayMs. That one is a source's
+  // own request for a short retry and is capped at 60 s; this one is the
+  // scheduler's own back-off and has to be able to grow PAST a minute, all the
+  // way back up to the interval.
+  // No 1-second floor here, unlike the branch above. That one guards against a
+  // SOURCE handing back a silly number; this one is the scheduler's own
+  // arithmetic over its own constant, and a floor would quietly swap an
+  // injected test cadence for a fifteen-minute one.
+  if (Number.isFinite(result?.notReadyDelayMs) && result.notReadyDelayMs > 0) {
+    return Math.min(intervalMs, Math.floor(result.notReadyDelayMs));
+  }
+  return intervalMs;
 }
 
 const PORTAL_JOIN_SAMPLE_KEY = 'matrix:portal-join-rate-sample';
@@ -884,6 +922,11 @@ export function createDaemon({
   activityPath = defaultActivityPath(),
   now = Date.now,
   completePeopleYear = adminCompletePeopleYear,
+  // The first re-probe delay for a source whose prerequisites are missing;
+  // it doubles from here up to that source's interval. Injectable for the same
+  // reason activityPath is: a test cannot wait a real minute to prove that the
+  // wait ends without a restart.
+  reprobeFloorMs = NOT_READY_REPROBE_MS,
 }) {
   const timers = new Set();
   const nextRuns = new Map();
@@ -900,6 +943,22 @@ export function createDaemon({
   // different from "ready": an unevaluated source is shown rather than hidden, so
   // a needs() that is slow or throws can never silently empty the queue.
   const notReady = new Map();
+  // HOW LONG THE LAST NOT-READY ANSWER BOUGHT, per source, so the next one can
+  // double it. Cleared the moment a source becomes ready, is disabled, or its
+  // needs() starts throwing -- a back-off is about one specific kind of wait,
+  // and carrying it across a different one would silence a source that just
+  // recovered. See NOT_READY_REPROBE_MS.
+  const notReadyDelays = new Map();
+  // THE LIVE TIMER PER SOURCE, so one can be REPLACED rather than added to.
+  //
+  // `timers` is a flat set for stop(); it cannot answer "is this source already
+  // armed?". Nothing needed that while the only thing that scheduled a source
+  // was its own completion -- but probeNotReady() schedules one out of band, and
+  // without this it would arm a SECOND timer beside the one already pending.
+  // Two timers for one source is exactly the overlap the module header's
+  // setTimeout-not-setInterval rule exists to make structurally impossible:
+  // both passes read the same store and each moves a cursor the other reads.
+  const sourceTimers = new Map();
   // CONSECUTIVE needs() THROWS PER SOURCE, and the reason there is a count at
   // all rather than a verdict.
   //
@@ -942,6 +1001,13 @@ export function createDaemon({
     .filter((source) => source.walksHistory === true
       && !DEFAULT_DISABLED_CONNECTORS.includes(source.name))
     .map((source) => source.name);
+  // The same roster start() schedules from, by name, because probeNotReady()
+  // has a connector name in hand and needs the source object back.
+  const scheduledByName = new Map(
+    sources
+      .filter((source) => !DEFAULT_DISABLED_CONNECTORS.includes(source.name))
+      .map((source) => [source.name, source])
+  );
   // Install the product-level barrier once. Existing connector year receipts
   // remain useful, so an upgrade rewinds to the current year without re-fetching
   // it: only People profiles run before the older connector walk
@@ -983,6 +1049,26 @@ export function createDaemon({
       }));
     })
     .sort((a, b) => a.nextTs - b.nextTs);
+  // WHAT IS CONNECTED-BUT-NOT-YET-READABLE, in the file the app already reads.
+  //
+  // These are deliberately NOT in `queue`. scheduledQueue() filters them out
+  // because listing them as pending work is what put granola in the owner's
+  // Activity menu for an account they had never connected, and that filter is
+  // still right: a source that cannot work is not work. But "not pending" is
+  // not the same as "say nothing", and saying nothing is how a sign-in that has
+  // landed and a sign-in that never happened became indistinguishable from
+  // outside this process. So they get their own key: a name, when the re-probe
+  // is due, and HOW MANY prerequisites are missing.
+  //
+  // COUNT, NEVER THE STRINGS, for the same reason source_not_ready logs a
+  // count: needs() messages embed absolute local paths.
+  const waitingQueue = () => [...notReady.entries()]
+    .map(([connector, missing]) => ({
+      connector,
+      missing: missing.length,
+      ...(nextRuns.has(connector) ? { nextTs: nextRuns.get(connector) } : {}),
+    }))
+    .sort((a, b) => a.connector.localeCompare(b.connector));
   const intervalMsFor = (connector) =>
     (config.intervals?.[connector] ?? DEFAULT_INTERVAL_S) * 1000;
   // HOW LONG THE OUTSTANDING WORK TAKES -- backfill only, and null when there is
@@ -1109,8 +1195,15 @@ export function createDaemon({
     // clears the shelf's red line while this process is still holding ALL_OFF
     // and scheduling nothing. One word costs nothing and makes the disagreement
     // legible; connect/lib/status.mjs carries it back to the shelf.
+    const waiting = waitingQueue();
     writeActivity(
-      { ...activity, queue: scheduledQueue(), registryState: FEATURES_REGISTRY_STATE, ...(total ?? {}) },
+      {
+        ...activity,
+        queue: scheduledQueue(),
+        ...(waiting.length > 0 ? { waiting } : {}),
+        registryState: FEATURES_REGISTRY_STATE,
+        ...(total ?? {}),
+      },
       activityPath
     );
   };
@@ -1244,6 +1337,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     // bouncing the daemon.
     if (existsSync(disableMarkerPath(source.name))) {
       needsFailures.delete(source.name);
+      notReadyDelays.delete(source.name);
       yearlyBackfill.classify(source.name, false);
       yearlyBackfill.advance();
       schedulePeopleGate();
@@ -1283,6 +1377,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       const failures = (needsFailures.get(source.name) ?? 0) + 1;
       needsFailures.set(source.name, failures);
       notReady.delete(source.name);
+      notReadyDelays.delete(source.name);
       if (failures >= NEEDS_FAILURE_TOLERANCE) {
         yearlyBackfill.classify(source.name, false);
         yearlyBackfill.advance();
@@ -1321,11 +1416,26 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       // COUNT, NOT THE STRINGS. Those messages embed absolute local paths --
       // whatsapp's needs() returns "...missing at /Users/<name>/Library/Group
       // Containers/..." -- and this line runs every tick.
-      log.warn('source_not_ready', { connector: source.name, missing: missing.length });
+      // AND IT IS ASKED AGAIN SOON, not in fifteen minutes. The previous wait
+      // doubles until it reaches the interval this source would have used
+      // anyway; a source that becomes ready clears it below. See
+      // NOT_READY_REPROBE_MS.
+      const waited = notReadyDelays.get(source.name);
+      const reprobeMs = Math.min(
+        Number.isFinite(waited) ? waited * 2 : reprobeFloorMs,
+        intervalMsFor(source.name)
+      );
+      notReadyDelays.set(source.name, reprobeMs);
+      log.warn('source_not_ready', {
+        connector: source.name,
+        missing: missing.length,
+        reprobeMs,
+      });
       publishWaiting();
-      return;
+      return { notReadyDelayMs: reprobeMs };
     }
     notReady.delete(source.name);
+    notReadyDelays.delete(source.name);
     const startedTs = now();
     const socialPlatforms = source.name === 'matrix' ? connectedSocialPlatforms() : [];
     yearlyBackfill.classify(
@@ -1502,13 +1612,24 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       if (!stopped) reschedule(result);
     }, delayMs);
     timers.add(timer);
+    return timer;
   }
 
+  // ONE TIMER PER SOURCE, ALWAYS -- see sourceTimers. Arming replaces whatever
+  // was already armed for this source, so probeNotReady() can pull a waiting
+  // source forward without leaving its old fifteen-minute timer behind to fire
+  // a second, overlapping pass.
   function scheduleSource(source, delayMs) {
-    const intervalMs = (config.intervals?.[source.name] ?? DEFAULT_INTERVAL_S) * 1000;
+    const intervalMs = intervalMsFor(source.name);
+    const armed = sourceTimers.get(source.name);
+    if (armed !== undefined) {
+      clearTimeout(armed);
+      timers.delete(armed);
+      sourceTimers.delete(source.name);
+    }
     nextRuns.set(source.name, now() + delayMs);
     publishWaiting();
-    schedule(
+    const timer = schedule(
       () => runSource(source),
       delayMs,
       (result) => scheduleSource(
@@ -1516,6 +1637,61 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
         sourceRetryDelay(result, intervalMs)
       )
     );
+    if (timer !== undefined) sourceTimers.set(source.name, timer);
+  }
+
+  // ASK EVERY WAITING SOURCE AGAIN, RIGHT NOW.
+  //
+  // The back-off above shortens the wait; this removes it. The app is the
+  // daemon's parent process and it is the process that KNOWS when the owner
+  // finished signing in to Google or dropped their LinkedIn export in, so it
+  // says so (SIGUSR2) rather than leaving the daemon to find out on a timer.
+  // Onboarding then costs seconds instead of a minute, and a reinstall stops
+  // being the thing that makes a first run work.
+  //
+  // ONLY SOURCES IN `notReady`, and only ones currently ARMED. A source absent
+  // from nextRuns is mid-run -- runSource deletes it for the whole call -- and
+  // its own tick is already the probe; re-arming it there would start a second
+  // pass beside the one in flight. A needs() that THROWS is left exactly as it
+  // was: the three-strike tolerance in runSource owns that state, and answering
+  // it from here would hand the yearly walk a re-classification out of band.
+  async function probeNotReady(trigger) {
+    if (stopped) return { probed: 0, ready: [] };
+    const pending = [...notReady.keys()];
+    const ready = [];
+    for (const connector of pending) {
+      if (stopped) break;
+      const source = scheduledByName.get(connector);
+      if (source === undefined) continue;
+      // Re-read rather than trusting the snapshot: this loop awaits, and another
+      // source's tick can land inside it. A connector that answered for itself
+      // while we were waiting has already been rescheduled, and pulling it
+      // forward again would run it twice for one nudge.
+      if (!notReady.has(connector)) continue;
+      if (!nextRuns.has(connector)) continue;
+      if (existsSync(disableMarkerPath(connector))) continue;
+      let missing;
+      try {
+        missing = await source.needs({ config });
+      } catch {
+        continue;
+      }
+      if (Array.isArray(missing) && missing.length > 0) {
+        notReady.set(connector, missing);
+        continue;
+      }
+      notReady.delete(connector);
+      notReadyDelays.delete(connector);
+      ready.push(connector);
+      scheduleSource(source, 0);
+    }
+    log.info('sources_reprobed', {
+      trigger,
+      waiting: pending.length,
+      ready: ready.length,
+    });
+    publishWaiting();
+    return { probed: pending.length, ready };
   }
 
   // Retention + physical maintenance, once per day in the configured idle
@@ -1567,6 +1743,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
   }
 
   return {
+    probeNotReady,
     start() {
       const scheduledSources = sources.filter((source) => !DEFAULT_DISABLED_CONNECTORS.includes(source.name));
       sources.forEach((source) => {
@@ -1706,6 +1883,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       stopped = true;
       for (const timer of timers) clearTimeout(timer);
       timers.clear();
+      sourceTimers.clear();
       peopleGateTimer = null;
     },
   };
@@ -1715,8 +1893,49 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
+// THE NUDGE, AND WHY ITS HANDLER IS INSTALLED BEFORE THERE IS A DAEMON TO NUDGE.
+//
+// This process is a child of the app (widget/src/Connectors.swift), and the app
+// is what knows the moment the owner finished signing in to Google or dropped
+// their LinkedIn export in. A signal is the channel that already exists between
+// a parent and its child: no listener, no file to watch, nothing added to the
+// network posture at the top of this file. The back-off in NOT_READY_REPROBE_MS
+// is what covers a daemon nobody nudged.
+//
+// SIGUSR2 rather than SIGUSR1, which node reserves for its own debugger.
+//
+// AND THE DEFAULT ACTION FOR SIGUSR2 IS TERMINATE. Between exec and the line
+// that handles it, a nudge KILLS this process — and the startup this races is
+// exactly the one the app is nudging, because both are triggered by the same
+// launch. So the handler goes in as early as there is a logger to report
+// through, and a nudge that arrives before the daemon exists is REMEMBERED
+// rather than dropped: the startup probe answers the same question, but only
+// for the readiness that existed when it ran.
+let nudgeTarget = null;
+let nudgePending = false;
+
+function runNudge(daemon, log, trigger) {
+  daemon.probeNotReady(trigger).catch((error) => {
+    log.warn('reprobe_failed', { error: safeErrorFingerprint(error) });
+  });
+}
+
+function armNudge(daemon, log) {
+  nudgeTarget = daemon;
+  if (!nudgePending) return;
+  nudgePending = false;
+  runNudge(daemon, log, 'SIGUSR2-during-startup');
+}
+
 if (isMain) {
   const log = createLogger();
+  process.on('SIGUSR2', () => {
+    if (nudgeTarget === null) {
+      nudgePending = true;
+      return;
+    }
+    runNudge(nudgeTarget, log, 'SIGUSR2');
+  });
   let releaseLock = null;
   let ownerWatch = null;
   try {
@@ -1818,6 +2037,7 @@ if (isMain) {
     };
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
+    armNudge(daemon, log);
     const ownerPid = Number(process.env.INTAGLIO_CONNECTOR_OWNER_PID);
     if (Number.isInteger(ownerPid) && ownerPid > 1) {
       ownerWatch = setInterval(() => {
