@@ -204,3 +204,61 @@ export function markPersonSubRoles({ key, subRoles, configPath = ownerConfigPath
   writeMutableConfig(configPath, raw);
   return { key, subRoles: list };
 }
+
+// THE ENGINE OPT-IN, WRITTEN BY THE SERVER AND NOWHERE ELSE.
+//
+// relationshipMemory.engine is the one config key whose value decides whether
+// message excerpts leave this Mac (engines.mjs: with the key ABSENT,
+// createEngine falls back to the loopback llama engine). So it gets the same
+// atomic read-modify-write every other owner correction here gets — one tmp
+// file, one rename, 0600 — rather than a second write path in the connect
+// service, and the onboarding page never touches the file at all: it asks
+// hermes, which calls this.
+//
+// TWO VALUES, CLOSED. 'claude-cli' sets the key; 'local' DELETES it, because
+// absent-means-llama is engines.mjs's stated contract and writing the string
+// "llama" would invent a third state nothing reads. Anything else throws, and
+// the route answers 400 — an unrecognised engine name silently persisted here
+// would be read back by createEngine as "not claude-cli" and quietly mean
+// local, which is the right behaviour arrived at by accident.
+//
+// The daemon's TOP_KEYS already admits `relationshipMemory` and validateConfig
+// does not descend into it, so this write cannot stop the connectors from
+// starting. ui/test/onboarding-progress.test.mjs round-trips the written file
+// through validateConfig to keep that true.
+export const RELATIONSHIP_ENGINES = Object.freeze(['claude-cli', 'local']);
+
+export function setRelationshipEngine({ engine, configPath = ownerConfigPath() } = {}) {
+  if (!RELATIONSHIP_ENGINES.includes(engine)) {
+    throw new Error(`engine must be one of: ${RELATIONSHIP_ENGINES.join(', ')}`);
+  }
+  const raw = readMutableConfig(configPath);
+  const existing = raw.relationshipMemory
+    && typeof raw.relationshipMemory === 'object'
+    && !Array.isArray(raw.relationshipMemory)
+    ? raw.relationshipMemory
+    : null;
+  if (engine === 'local') {
+    // Nothing to opt out OF: no section, or no key in it. Do not create one
+    // just to record an absence -- an empty relationshipMemory object written
+    // by a "turn it off" press reads, to the next person, like a setting that
+    // was configured.
+    if (!existing || existing.engine === undefined) return { engine: 'local', changed: false };
+    const next = Object.fromEntries(
+      Object.entries(existing).filter(([key]) => key !== 'engine')
+    );
+    raw.relationshipMemory = next;
+    writeMutableConfig(configPath, raw);
+    return { engine: 'local', changed: true };
+  }
+  // Object.fromEntries rather than direct assignment, for the same reason
+  // markPersonRole uses it: these objects are rebuilt from parsed JSON and a
+  // `__proto__` key must land as an ordinary own property, never on a
+  // prototype. cap, mode and every other relationshipMemory setting survives.
+  raw.relationshipMemory = Object.fromEntries([
+    ...Object.entries(existing ?? {}),
+    ['engine', engine],
+  ]);
+  writeMutableConfig(configPath, raw);
+  return { engine, changed: true };
+}

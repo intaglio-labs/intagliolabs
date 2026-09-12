@@ -60,7 +60,10 @@ import {
   formatGeneralPeopleResult,
   generalPeopleAnswerCacheInput,
 } from './people/generalSearch.mjs';
-import { loadOwner, markOwnerPerson, markPersonRole, markPersonSubRoles } from './people/owner.mjs';
+import {
+  RELATIONSHIP_ENGINES, loadOwner, markOwnerPerson, markPersonRole, markPersonSubRoles,
+  setRelationshipEngine,
+} from './people/owner.mjs';
 import { SUB_ROLES as SUB_ROLE_VALUES } from './people/subRoles.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
 import {
@@ -2370,6 +2373,7 @@ const RECALL_PARAMS = Object.freeze(['q', 'limit']);
 const RELATIONSHIP_POOL_PARAMS = Object.freeze(['mode', 'includeOffered', 'minDepth', 'includeAnonymous']);
 const RELATIONSHIP_MODES = Object.freeze(['investor', 'founder', 'any']);
 const RELATIONSHIP_MODE_FIELDS = Object.freeze(['mode']);
+const CONFIG_ENGINE_FIELDS = Object.freeze(['engine']);
 const RELATIONSHIP_PAGE_BUILD_FIELDS = Object.freeze(['personKey', 'engine']);
 const RELATIONSHIP_DRAFT_FIELDS = Object.freeze(['snapshot_id']);
 // The card's own outcome post. Closed like every other admin body (review
@@ -3507,6 +3511,35 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     }
     rel.mode = body.mode;
     send(res, 200, { mode: rel.mode }, cors);
+    return;
+  }
+
+  // THE ONE SWITCH THAT DECIDES WHETHER EXCERPTS LEAVE THIS MAC.
+  //
+  // Onboarding's setup screen offers the owner's own Claude subscription for
+  // reading and drafting. Turning it on writes relationshipMemory.engine;
+  // turning it off deletes the key, because engines.mjs treats an ABSENT key
+  // as "loopback llama, nothing leaves the Mac" and writing a string for the
+  // off state would invent a fourth value nothing reads.
+  //
+  // Here rather than in the connect service, and not in the page at all. This
+  // process re-reads the config file per call (relationshipMemoryEngine), so
+  // the change takes effect with no restart; owner.mjs already owns the only
+  // atomic read-modify-write of that file in the repo; and a page that could
+  // write the privacy switch directly is a page that could write it without
+  // the owner. Bearer-only, like every route under handleAdmin.
+  if (req.method === 'POST' && url.pathname === '/admin/config/engine') {
+    if (!hasJsonMediaType(req)) {
+      send(res, 415, { error: 'content-type must be application/json' }, cors);
+      return;
+    }
+    const body = await readJson(req);
+    assertClosedFields(body, CONFIG_ENGINE_FIELDS);
+    if (!RELATIONSHIP_ENGINES.includes(body?.engine)) {
+      throw badRequest(`"engine" must be one of: ${RELATIONSHIP_ENGINES.join(', ')}`);
+    }
+    const result = setRelationshipEngine({ engine: body.engine });
+    send(res, 200, { state: 'ok', ...result }, cors);
     return;
   }
 

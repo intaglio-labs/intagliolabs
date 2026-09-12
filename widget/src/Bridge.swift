@@ -1384,6 +1384,20 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         self?.reply(webView, id, out)
       }
 
+    case "setEngine":
+      // The page sends one of two words and nothing else; hermes checks it
+      // against its own closed list and owner.mjs does the write. Anything
+      // this bridge does not recognise never reaches the route, so a page
+      // cannot even attempt to name a third engine.
+      let askedEngine = String(payload["engine"] as? String ?? "")
+      guard ["claude-cli", "local"].contains(askedEngine) else {
+        reply(webView, id, ["state": "error", "error": "unknown engine"])
+        return
+      }
+      relHermes("POST", "admin/config/engine", json: ["engine": askedEngine]) { [weak self] out in
+        self?.reply(webView, id, out)
+      }
+
     case "relMode":
       var modeBody: [String: Any] = [:]
       for k in ["mode"] {
