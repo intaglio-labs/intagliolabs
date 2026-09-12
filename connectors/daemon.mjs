@@ -31,6 +31,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runChecks } from './lib/checks.mjs';
+import { defaultDaemonLockPath, processIsAlive } from './lib/daemonLock.mjs';
 import {
   DEFAULT_HERMES_BASE_URL,
   adminCompletePeopleYear,
@@ -274,9 +275,10 @@ export function defaultCacheDir(home = homedir()) {
   return join(home, '.hazlie', 'cache');
 }
 
-export function defaultDaemonLockPath(home = homedir()) {
-  return join(home, '.hazlie', 'connectors', 'daemon.lock');
-}
+// Re-exported rather than defined: the path, the JSON shape and the liveness
+// question all live in lib/daemonLock.mjs now, because connect/lib/status.mjs
+// asks the same question about the same file and used to carry its own copy.
+export { defaultDaemonLockPath };
 
 export function defaultActivityPath(home = homedir()) {
   return join(home, '.hazlie', 'connectors', 'activity.json');
@@ -292,16 +294,6 @@ export function defaultSocialReimportCompletedPath(home = homedir()) {
 
 export function disableMarkerPath(name, home = homedir()) {
   return join(home, '.hazlie', 'connectors', `${name}.disabled`);
-}
-
-function processIsAlive(pid) {
-  if (!Number.isInteger(pid) || pid < 2) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === 'EPERM';
-  }
 }
 
 // One daemon owns the shared cursor database. A forced app stop used to leave

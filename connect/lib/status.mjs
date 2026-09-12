@@ -22,6 +22,7 @@ import {
 } from '../../connectors/lib/googleAccounts.mjs';
 import { listGoogleClients } from '../../connectors/lib/googleClients.mjs';
 import { REGISTRY_STATES, defaultOverridePath, readFeatureRegistry } from '../../connectors/lib/features.mjs';
+import { daemonLockIsLive } from '../../connectors/lib/daemonLock.mjs';
 
 const SECRETS = (home) => join(home, '.hazlie', 'secrets');
 
@@ -525,38 +526,55 @@ export function featureRegistryState({ home = homedir() } = {}) {
 /// restarting the app does not silence. The whole value of this field is that
 /// it describes a RUNNING process, so it is only reported while there is one:
 ///
-///   - the daemon holds ~/.hazlie/connectors/daemon.lock with its pid in it,
-///     so a live pid there is direct evidence and is believed whatever the
-///     file's age (an idle daemon with every connector switched off may not
-///     republish for a long time); otherwise
-///   - the activity file's own mtime has to be recent — twice the daemon's
-///     default poll interval, which is the slowest cadence at which a working
-///     daemon rewrites it.
+///   - the activity file's own mtime is recent — twice the SLOWEST configured
+///     poll interval, which is the slowest cadence at which a working daemon
+///     rewrites it; otherwise
+///   - ~~the daemon holds daemon.lock with a live pid in it.~~ A LIVE PID IS
+///     NOT A LIVE DAEMON. The lock outlives a hard kill (it is cleared only by
+///     the CLI owner-PID watch or the next acquireDaemonLock), so once macOS
+///     recycled that pid the check started asserting that a dead daemon was
+///     running and the shelf revived exactly the stale alarm this field was
+///     added to remove. daemonLockIsLive (connectors/lib/daemonLock.mjs) now
+///     also requires the pid to have STARTED no later than the lock says it
+///     did, and reads a foreign (EPERM) process as somebody else's: the daemon
+///     runs as the owner. An idle daemon with every connector switched off is
+///     still believed whatever the file's age, as long as it is the one that
+///     wrote the lock.
 ///
 /// Neither holds: `null`, and the shelf says nothing about the daemon. It is
 /// deliberately not a fourth word — `connections.js` alarms on any
 /// daemonRegistryState that is not 'ok', so a new one would trade a stale
 /// alarm for a permanent one.
-export const DAEMON_ACTIVITY_FRESH_MS = 2 * 900 * 1000; // 2x DEFAULT_INTERVAL_S
+export const DEFAULT_INTERVAL_S = 900;
 
-function daemonProcessIsAlive(home) {
-  let pid;
+// THE SLOWEST CADENCE AT WHICH A WORKING DAEMON REWRITES THE FILE, WHICH THE
+// OWNER CONFIGURES.
+//
+// ~~A hardcoded 2 x 900 s.~~ `intervals.<connector>` is a config key with a
+// ceiling of 86,400 s (connectors/daemon.mjs validateConfig), so an owner who
+// slows a connector past fifteen minutes moved the real republish cadence past
+// this window and the daemon's registry state went quiet while the daemon was
+// healthy. Derived from the configured intervals instead, doubled for the same
+// reason the constant was: one missed publish is not an outage. The default is
+// the floor, so an install with no `intervals` block behaves exactly as before.
+export function daemonActivityFreshMs({ home = homedir() } = {}) {
+  let intervals = null;
   try {
-    pid = Number(
-      JSON.parse(readFileSync(join(home, '.hazlie', 'connectors', 'daemon.lock'), 'utf8'))?.pid
-    );
+    intervals = JSON.parse(
+      readFileSync(join(home, '.hazlie', 'connectors', 'config.json'), 'utf8')
+    )?.intervals;
   } catch {
-    return false;
+    intervals = null;
   }
-  if (!Number.isInteger(pid) || pid < 2) return false;
-  try {
-    process.kill(pid, 0); // signal 0 tests for the process, it does not signal it
-    return true;
-  } catch (error) {
-    // EPERM is a process this user may not signal — which is still a process.
-    return error?.code === 'EPERM';
-  }
+  const seconds = intervals !== null && typeof intervals === 'object' && !Array.isArray(intervals)
+    ? Object.values(intervals).filter((v) => Number.isFinite(v) && v > 0)
+    : [];
+  return 2 * Math.max(DEFAULT_INTERVAL_S, ...seconds) * 1000;
 }
+
+// The window an install with no interval overrides gets, which is what this
+// constant always meant.
+export const DAEMON_ACTIVITY_FRESH_MS = 2 * DEFAULT_INTERVAL_S * 1000;
 
 export function daemonRegistryState({ home = homedir(), now = Date.now() } = {}) {
   const path = join(home, '.hazlie', 'connectors', 'activity.json');
@@ -570,8 +588,11 @@ export function daemonRegistryState({ home = homedir(), now = Date.now() } = {})
   } catch {
     return null; // no activity file is the normal case on a machine that never ran it
   }
-  if (daemonProcessIsAlive(home)) return state;
-  return now - writtenAt <= DAEMON_ACTIVITY_FRESH_MS ? state : null;
+  // Freshness first, because it is two file reads while the lock check now
+  // asks the OS when that pid started. The union is unchanged — either kind of
+  // evidence returns the state — so only the cost of the common case moves.
+  if (now - writtenAt <= daemonActivityFreshMs({ home })) return state;
+  return daemonLockIsLive({ home }) ? state : null;
 }
 
 /// The set itself, for the surfaces that draw what this build OFFERS rather
