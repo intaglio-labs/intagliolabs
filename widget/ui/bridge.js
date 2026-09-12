@@ -504,6 +504,41 @@ function hzApplyTimeOfDay(orbEl) {
 window.__hzMotion = (on) => {
   if (document.body) document.body.classList.toggle('motion-anyway', on === true);
 };
+// THE FEATURE REGISTRY, PAGE SIDE. ops/features.json, delivered on `prefs` —
+// which is a sharedAction, so every page may ask and no page's capability list
+// had to change to let it. See ops/FEATURES.md.
+//
+// Cached per page load, deliberately: the registry ships inside the bundle and
+// the owner override is read once per process on the native side, so a second
+// ask cannot return a different answer, and several callers on one page (the
+// widget bar, the connector shelf) should not each cost a bridge round trip.
+//
+// FAILS CLOSED. No bridge, no answer, nothing on. These pages only ever run
+// inside the app, where the bridge is present; if it is not, `status` and every
+// other verb on the page is dead too, and drawing a full shelf of tiles that
+// cannot be pressed would be the dishonest outcome, not the safe one.
+let hzFeaturesPromise = null;
+function hzFeatures() {
+  if (!hzFeaturesPromise) {
+    hzFeaturesPromise = hzPost('prefs')
+      .then((d) => ({
+        features: (d && d.features) || {},
+        connectors: (d && d.connectorFeatures) || {},
+      }))
+      .catch(() => ({ features: {}, connectors: {} }));
+  }
+  return hzFeaturesPromise;
+}
+/// An absent name reads as OFF, never as on.
+function hzFeatureOn(set, name) {
+  return !!(set && set.features && set.features[name] === true);
+}
+/// true | false | 'optional'. Anything unrecognised reads as false.
+function hzConnectorFeature(set, name) {
+  const value = set && set.connectors ? set.connectors[name] : false;
+  return value === true || value === 'optional' ? value : false;
+}
+
 function hzApplyPrefs() {
   hzPost('prefs')
     .then((d) => {

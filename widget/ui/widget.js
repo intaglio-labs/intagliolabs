@@ -72,6 +72,14 @@ orbEl.addEventListener('animationend', (e) => {
 // needed room the window did not have: see main.swift's cloudSlot, which
 // reserves it above the bar.
 const VOICE_TEASE = true;
+// ...and one gate ABOVE it, from ops/features.json. VOICE_TEASE answers "is
+// the voice stack good enough to arm yet"; `voice` answers "is this app
+// shipping voice at all". They are different questions and the second one wins.
+//
+// Starts FALSE and is filled in when the registry lands, so a tap in the first
+// few frames of a launch cannot promise something the build does not have. See
+// applyFeatures at the foot of this file.
+let voiceFeatureOn = false;
 // The explicit break keeps the smiley with its sentence instead of letting
 // WebKit strand it on a third line inside the fixed-width thought bubble.
 const TEASE_TEXT = 'voice coming soon.\nhelp us build it :)';
@@ -318,6 +326,18 @@ function orbTap() {
     // its tone run either way — the orb still has to answer the finger.
     hzSfx.wake();
     wakeOrb();
+    // VOICE OFF: THE ORB STILL ANSWERS THE FINGER, AND SAYS NOTHING ELSE.
+    //
+    // The wake above is deliberately outside this gate. It is the orb being
+    // alive, not the voice feature — the jackpot, the notify card and the work
+    // flywheel all still ride on it, and an orb that does not blink when
+    // pressed reads as broken rather than as dormant.
+    //
+    // What goes is the promise: no "voice coming soon" cloud for a feature that
+    // is not merely unfinished but switched off, and no arm. VOICE_TEASE keeps
+    // its exact meaning for when `voice` is on — it is still the one constant
+    // that turns the tease back into a real arm.
+    if (!voiceFeatureOn) return;
     if (VOICE_TEASE) { showTease(); return; }
     hzPost('voiceArm');
     return;
@@ -704,3 +724,31 @@ document.body.addEventListener('mousedown', (e) => {
 
 // Native owns the Reduce Motion override; ask for it once the page exists.
 hzApplyPrefs();
+
+// ---------------- the feature registry ----------------
+//
+// HIDDEN FIRST, REVEALED ON THE ANSWER. The chat pill and its glyph are hidden
+// synchronously here, before the first paint, and only come back if `chat` is
+// on. The other order — draw, then hide when the bridge answers — is a visible
+// flash of a door that does not open, on every launch, for the majority case.
+//
+// The .wbar pill and the .wchat glyph go together and cannot be separated: the
+// glyph IS the collapsed pill's only visible part, and an input with no way to
+// open it is an invisible strip of the widget that swallows clicks. With chat
+// off the widget bar is the orb alone, which is what the repackaging plan's
+// "orb, reconnect, settings" row describes.
+//
+// [hidden] LOSES TO A CLASS THAT SETS display — palette.css says so at §2837
+// and .wchat sets position/display of its own, so the attribute alone is not
+// enough. The rules are written there explicitly; do not drop them.
+chatBtn.hidden = true;
+winput.hidden = true;
+hzFeatures().then((set) => {
+  const chatOn = hzFeatureOn(set, 'chat');
+  chatBtn.hidden = !chatOn;
+  winput.hidden = !chatOn;
+  voiceFeatureOn = hzFeatureOn(set, 'voice');
+  // The bar's width is part of what native anchors side panels against, and it
+  // just changed by the whole pill.
+  reportBoundsSoon();
+});

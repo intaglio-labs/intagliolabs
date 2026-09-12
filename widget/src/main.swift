@@ -107,8 +107,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // Synchronous and tiny: the connector child is started later in this same
     // launch, so its config must exist before that race begins. The expensive
     // backend copy remains asynchronous inside ensureBackend().
+    // WHAT IS ON, BEFORE ANYTHING ACTS ON IT. Names only — see ops/FEATURES.md.
+    // This is the first line in the log that explains why a panel does not open.
+    Features.logEnabled()
+
     Provision.ensureConnectorDefaults()
     Provision.ensureBackend()
+    // Self-gating: with `bridges` off this skips the prefetch AND retires an
+    // io.intaglio.bridges agent a previous install left running under launchd.
     Provision.prefetchBridgeRuntime()
       // ~~PowerBudget.syncRuntimeFile()~~ removed with its reader. The mirror
       // existed because hermes could not see this app's UserDefaults; c00541a
@@ -223,10 +229,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // The ear: a hidden, zero-size webview kept INSIDE the widget window so
     // WebKit doesn't throttle its timers or its capture session. It stays a
     // light empty page until the first arm; models load lazily then.
-    let ear = makeEarWebView(bridge: bridge)
-    ear.frame = .zero
-    w.contentView?.addSubview(ear)
-    earWeb = ear
+    //
+    // NOT BUILT AT ALL while `voice` is off, rather than built and left unarmed.
+    // The page is cheap but it is not free — it is a live WKWebView in the
+    // widget's own window, and the point of stage 1 is that a dormant feature
+    // costs nothing at runtime. armVoice/speakAnswer below no-op to match, so
+    // earWeb staying nil is never dereferenced.
+    if Features.shouldBuildEarWebView(Features.current) {
+      let ear = makeEarWebView(bridge: bridge)
+      ear.frame = .zero
+      w.contentView?.addSubview(ear)
+      earWeb = ear
+    }
 
     // A wake from sleep is the moment status is most likely stale.
     NSWorkspace.shared.notificationCenter.addObserver(
@@ -702,7 +716,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     p.makeKeyAndOrderFront(nil)
   }
 
+  // ONE GATE, AT THE CONSTRUCTOR. Every chat entry point — the bar, a voice
+  // transcript, a voice failure note — goes through ensureChatPanel, so
+  // refusing here is what guarantees the page is never loaded while `chat` is
+  // off. The callers each guard too, because `chatPanel` staying nil has to
+  // mean "do nothing" rather than "fall through to a nil unwrap".
   private func ensureChatPanel() {
+    guard Features.shouldBuildChatPanel(Features.current) else {
+      NSLog("Intaglio Labs: chat is off — not building the chat panel")
+      return
+    }
     if chatPanel == nil {
       // No glass, no box: the chat is transparent and its elements float
       // directly on the wallpaper. Window shadow off — AppKit would draw
@@ -783,7 +806,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
 
   // MARK: voice
 
+  // With `voice` off there is no ear webview to talk to (see the build site in
+  // applicationDidFinishLaunching), so these would already be no-ops on a nil
+  // optional. The explicit guard is here so the REASON is in the log rather
+  // than the silence — a tap that does nothing and says nothing is the failure
+  // mode this whole stage is meant to avoid.
   func armVoice() {
+    guard Features.on("voice") else {
+      NSLog("Intaglio Labs: voice is off — ignoring an arm request")
+      return
+    }
     eval(earWeb, "window.__earArm && window.__earArm()")
   }
 
@@ -792,9 +824,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   }
 
   func voiceNote(_ message: String) {
-    if chatPanel != nil, let web = chatWeb {
+    // `if let panel`, not `chatPanel != nil` + `chatPanel!`. The two were
+    // equivalent while the panel was always built; with `chat` off it is
+    // legitimately nil, and a force-unwrap two lines under its own nil check is
+    // the shape that survives a refactor by crashing.
+    if let panel = chatPanel, let web = chatWeb {
       eval(web, "window.__hzVoiceNote && window.__hzVoiceNote(\(jsString(message)))")
-      present(chatPanel!)
+      present(panel)
     } else {
       pendingVoiceNote = message
       ensureChatPanel()
@@ -813,6 +849,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   }
 
   func speakAnswer(_ text: String) {
+    guard Features.on("voice") else { return }
     eval(earWeb, "window.__earSpeak && window.__earSpeak(\(jsString(text)))")
   }
 
@@ -906,6 +943,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // time. (It absorbed the constellation/sky list, retired 2026-08-24 —
   // people-sky.css survives as this popup's base stylesheet.)
   func openMonths() {
+    // THE BUTTON KEEPS ITS DOOR, IT JUST CHANGES WHAT IS BEHIND IT.
+    //
+    // The gear row's "People" button posts openMonths, and the People popup —
+    // the "Same person?" review, which the repackaging plan KEEPS, because a
+    // wrong merge is a wrong card — is reachable today only from inside this
+    // timeline (openPeople is in `people-months`' capability list and nowhere
+    // else the widget can reach). Turning the timeline off and returning early
+    // would have left the button inert and the review unreachable in the same
+    // move.
+    //
+    // Routed here in native rather than in widget.js on purpose: the page keeps
+    // posting the same verb, so Bridge.swift's capability allowlists do not
+    // change and no page gains a door it did not have.
+    if Features.peopleButtonOpensPeopleDirectly(Features.current) {
+      NSLog("Intaglio Labs: the timeline is off — the People button opens the People review")
+      openPeople()
+      return
+    }
     if let p = monthsPanel, p.isVisible {
       p.orderOut(nil)
       return

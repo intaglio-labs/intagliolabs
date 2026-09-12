@@ -788,6 +788,25 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           ? false : Bundle.main.bundlePath.hasPrefix("/Applications/"),
         "connectorsIntroDone": Bridge.connectorsIntroDone,
         "handheld": Bridge.handheld,
+        // THE FEATURE REGISTRY, TO THE PAGES. Carried on `prefs` rather than on
+        // a new verb because `prefs` is a sharedAction — bridge.js loads on
+        // every page, so every page can ask, and no page's capability list has
+        // to change to let it. See ops/FEATURES.md.
+        //
+        // Booleans only here, and the connectors table separately: a page
+        // deciding whether to draw a tile needs the three-state value, and
+        // flattening 'optional' to true/false at this boundary is exactly how
+        // the connections page would lose the distinction it exists to show.
+        "features": Dictionary(uniqueKeysWithValues:
+          FeatureSet.names.map { ($0, Features.on($0)) }),
+        "connectorFeatures": Dictionary(uniqueKeysWithValues:
+          FeatureSet.connectorNames.map { name -> (String, Any) in
+            switch Features.connector(name) {
+            case .on: return (name, true)
+            case .off: return (name, false)
+            case .optional: return (name, "optional")
+            }
+          }),
       ])
     case "setMotion":
       let on = payload["on"] as? Bool ?? false

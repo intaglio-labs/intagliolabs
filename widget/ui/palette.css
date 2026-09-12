@@ -1234,6 +1234,13 @@ body.widget { display: flex; flex-direction: column; align-items: center; paddin
   color: var(--muted);
   transition: color 0.18s ease, transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
+/* CHAT OFF (ops/features.json) HIDES THE WHOLE PILL, glyph included.
+   Written as author rules rather than left to the UA's `[hidden]`, on the
+   lesson recorded at "[hidden] LOSES TO A CLASS THAT SETS display" near the
+   onboarding rules: neither selector sets `display` today, so the UA rule does
+   win today — and the next person to give .wchat a `display` would silently
+   turn the chat button back on for a feature that is off. */
+.wchat[hidden], .wbar input[hidden] { display: none; }
 /* The press-squash in the shared rule above is a bare scale(), which would
    throw away the centring translate this button rides on. Restated with both. */
 .wchat:active { transform: translate(50%, -50%) scale(1.10, 0.91); }
