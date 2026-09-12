@@ -114,6 +114,15 @@ function classifyMailError(error) {
 }
 
 const cursorKey = (email) => `mail:${String(email).toLowerCase()}:internalDate`;
+// WHICH MAILBOX GOES FIRST NEXT FORWARD PASS (round-4 finding 4).
+//
+// The forward budget is sliced across the mailboxes that still have to run, so
+// position in the pass decides how much time a mailbox gets: the first one is
+// handed a real share and the last one is handed MIN_ACCOUNT_SLICE_MS. Fixed
+// order made that permanent -- the last mailbox was the last mailbox on every
+// pass forever, which is the starvation this cursor removes. One small integer,
+// no addresses: an index into the account list, advanced once per forward pass.
+const FORWARD_START_KEY = 'mail:forward-start';
 // The backfill gap left behind when the per-account cap cuts a newest-first
 // forward window: messages with internalDate in [from, until] — INCLUSIVE on
 // both ends, see the forward-scan comment on ties — have NOT been read, and
@@ -267,7 +276,23 @@ export function createMailSource({
       let historyHasOlder = false;
       let historyProgressed = false;
 
-      for (const [accountIndex, account] of accounts.entries()) {
+      // THE PASS ORDER. The backwards walk is not rotated: it hands every
+      // account the same year and the same whole deadline, so position buys
+      // nothing there. `accountIndex` stays the account's TRUE index whatever
+      // the order, because it is what the logs and the failure list identify a
+      // mailbox by; only the slicing below reads the pass position.
+      const rotating = yearly === null && accounts.length > 1;
+      const start = rotating
+        ? (((Number(state.getCursor(FORWARD_START_KEY)) || 0) % accounts.length) + accounts.length)
+          % accounts.length
+        : 0;
+      const passOrder = [...accounts.entries()];
+      const pass = [...passOrder.slice(start), ...passOrder.slice(0, start)];
+      // Advanced up front, so a pass that throws partway still moves the turn
+      // on: a mailbox whose scan fails must not hold first place forever.
+      if (rotating) state.setCursor(FORWARD_START_KEY, String((start + 1) % accounts.length));
+
+      for (const [passIndex, [accountIndex, account]] of pass.entries()) {
         if (yearly && state.getCursor(historyDoneKey(account.email, yearly.year)) === '1') {
           historyHasOlder ||= state.getCursor(historyOlderKey(account.email, yearly.year)) === '1';
           continue;
@@ -288,20 +313,46 @@ export function createMailSource({
         // one page out of every pass however small its slice is. That is
         // deliberate — it is what makes the walk monotone for EVERY mailbox
         // rather than only the first — and it is why the pass may exceed the
-        // run's budget by at most one page per account. A page is bounded work
+        // run's budget by at most ONE page per account. A page is bounded work
         // (PAGE_SIZE gets at the pacer's rate); an unbounded pass was the bug.
+        //
+        // ONE PAGE PER ACCOUNT, AND THE DRAIN IS INSIDE IT (round-4 finding 4).
+        // Briefly the gap drain ran with no time gate at all, which let each
+        // mailbox spend an exempt page in the fresh window AND another in the
+        // drain: at defaults (PAGE_SIZE 100 gets, 90 gets/minute → ~66s a page)
+        // that doubled the worst case from ~200s to ~400s at three mailboxes
+        // and from ~400s to ~790s at six, against a 120s budget. The gate is
+        // back; the starvation it used to cause is answered by rotating which
+        // mailbox goes first (FORWARD_START_KEY) instead.
+        //
+        // THE WORST CASE THAT LEAVES, in numbers. Every account can spend one
+        // full page beyond its slice, in whichever window was in flight when
+        // the slice ran out, and nothing after it:
+        //
+        //   mailboxes | worst-case pass | budget
+        //   3         | ~200 s          | 120 s
+        //   6         | ~400 s          | 120 s
+        //
+        // i.e. accounts × one page, or accounts × PAGE_SIZE ÷ getsPerMinute.
+        // It exceeds FORWARD_BUDGET_MS and, at six mailboxes, the 60s interval
+        // floor — a long pass reschedules from its own finish, so this costs
+        // cadence rather than correctness, and it is the shape the budget was
+        // sized against.
         //
         // AND THE SLICE HAS A FLOOR, because ~~an equal slice of whatever is
         // LEFT~~ is zero once the budget is gone. A page is exempt from the
         // slice but not from arithmetic: with three mailboxes at defaults a
-        // full page is ~66s against a 40s share, so accounts 0 and 1 overran
-        // the whole 120s and account 2 was handed `now()` on every pass,
-        // forever — a deadline already in the past is not a turn, it is a
+        // full page is ~66s against a 40s share, so the first two mailboxes
+        // overran the whole 120s and the third was handed `now()` on every
+        // pass, forever — a deadline already in the past is not a turn, it is a
         // mailbox that can do nothing but its one exempt page. The floor makes
         // the last mailbox's turn real; the cost is that a pass may exceed the
-        // run's budget by (accounts - 1) × this floor, which is bounded and
-        // still an order of magnitude inside the polling interval.
-        const remaining = accounts.length - accountIndex;
+        // run's budget by accounts × this floor — every remaining mailbox, not
+        // all but one (round-4 finding 19): once the budget is spent,
+        // `floor(negative / remaining)` is negative for the FIRST of them too,
+        // so each takes the floor. Bounded, and an order of magnitude inside
+        // the polling interval.
+        const remaining = accounts.length - passIndex;
         const accountDeadline = deadline === null || yearly
           ? deadline
           : now() + Math.max(MIN_ACCOUNT_SLICE_MS, Math.floor((deadline - now()) / remaining));
@@ -768,17 +819,23 @@ export function createMailSource({
             // from `priorGap`: the fresh window's own per-page writes are the
             // authority on what is still missing.
             const gap = fresh.truncated || nullPageSeen ? null : readGap();
-            // NO TIME PRE-CHECK, for the same reason the fresh window has
-            // none. A gate that asks "is the budget spent" before the drain's
-            // first page hands the drain nothing at all whenever the fresh
-            // window's own exempt page overran the slice — which is every pass
-            // for a later mailbox, so `forward-gap-from` never moved and the
-            // hole below that cursor was permanent. The drain's do-while stops
-            // on the NEXT page boundary exactly like the fresh window's, so an
-            // out-of-time account spends one bounded page here and returns. One
-            // page per window per pass is the guarantee that makes both walks
-            // monotone for every mailbox.
-            if (gap !== null && seen < MAX_MESSAGES_PER_ACCOUNT) {
+            // THE TIME GATE, AND WHY IT IS BACK (round-4 finding 4).
+            //
+            // Dropping it was meant to stop the drain starving. It did, at the
+            // cost of the one guarantee the slice arithmetic rests on: without
+            // it a mailbox spends an exempt page in the fresh window and a
+            // second exempt page here, so "at most one page per account beyond
+            // the budget" became two and the worst-case pass doubled (the table
+            // above). The starvation it was answering had a cheaper fix — the
+            // last mailbox was starving because it was ALWAYS the last mailbox,
+            // and the pass now rotates.
+            //
+            // With the gate, the drain runs whenever the account still has
+            // slice left, and its own do-while then stops on the next page
+            // boundary exactly like the fresh window's. So the drain either
+            // does not start or costs one bounded page, and the account's total
+            // overrun stays one page either way.
+            if (gap !== null && seen < MAX_MESSAGES_PER_ACCOUNT && !accountOutOfTime()) {
               await scanWindow({
                 // `floor(until/1000) + 1` covers every tie inside `until`'s own
                 // second without widening a second further than that: above

@@ -876,3 +876,107 @@ test('a page of nothing but deletions is not recorded as a hole', async () => {
   assert.equal(state.getCursor(GAP_FROM_KEY), null, 'no hole for messages that no longer exist');
   assert.equal(state.getCursor(GAP_UNTIL_KEY), null);
 });
+
+// ---------------------------------------------------------------------------
+// ONE BOUNDED PAGE PER ACCOUNT PER PASS, AND WHOSE TURN IT IS TO GO FIRST.
+//
+// The forward budget is sliced across the mailboxes that still have to run, so
+// a pass's cost is bounded by "each account's slice, plus at most one page it
+// was already inside when the slice ran out". Dropping the drain's time gate
+// gave every account a SECOND exempt page -- one in the fresh window and one in
+// the drain -- which doubled the worst-case pass (~200s to ~400s at three
+// mailboxes, ~400s to ~790s at six, against a 120s budget) and made the
+// guarantee the slice arithmetic rests on untrue (round-4 finding 4).
+//
+// The starvation that removal was answering is real and is fixed the other
+// way: the last mailbox was starving because it was ALWAYS the last mailbox.
+
+// N mailboxes, each with one page of one message and an already-recorded gap,
+// on a clock that spends 15s per list call against a budget that is already
+// gone. Every account therefore has MIN_ACCOUNT_SLICE_MS (10s), spends it on
+// the fresh window's one exempt page, and is out of time when the drain is
+// considered.
+function multiMailboxPass(count, { state, now: T0, passes = 1 } = {}) {
+  const emails = Array.from({ length: count }, (_, i) => `owner${i}@example.test`);
+  let clock = T0;
+  const listCalls = [];
+  const source = createMailSource({
+    accountsForScope: () => emails.map((email) => ({ email })),
+    makeClient: ({ email }) => ({
+      listMessages: async ({ q }) => {
+        listCalls.push({ email, kind: q.startsWith('after:') && q.includes('before:') ? 'drain' : 'fresh' });
+        clock += 15_000;
+        return { messages: [{ id: `${email}-1` }] };
+      },
+      getMessage: async (id) => ({ ...message(id, 5), id }),
+    }),
+    sleep: async () => {},
+  });
+  return { emails, listCalls, source, clock: () => clock, run: async () => {
+    for (let pass = 0; pass < passes; pass += 1) {
+      await source.run({
+        state,
+        config: {},
+        home: '/tmp/mail-test-home',
+        now: () => clock,
+        // A budget already spent at the top of the pass: every account falls to
+        // the MIN_ACCOUNT_SLICE_MS floor, which is the shape finding 19's
+        // arithmetic is about and the harshest case for the drain gate.
+        deadline: T0,
+        ingest: async (rows) => ({ inserted: rows.length, updated: 0, unchanged: 0 }),
+        log: { info() {}, warn() {} },
+      });
+    }
+  } };
+}
+
+function seedGaps(state, emails, { now }) {
+  for (const email of emails) {
+    state.setCursor(`mail:${email}:forward-gap-from`, String(now - 400 * 86_400_000));
+    state.setCursor(`mail:${email}:forward-gap-until`, String(now - 300 * 86_400_000));
+  }
+}
+
+for (const count of [3, 6]) {
+  test(`${count} mailboxes: an out-of-time account spends one page, not one per window`, async () => {
+    const NOW = Date.UTC(2026, 5, 1);
+    const state = memoryState();
+    const pass = multiMailboxPass(count, { state, now: NOW });
+    seedGaps(state, pass.emails, { now: NOW });
+    await pass.run();
+
+    assert.equal(pass.listCalls.length, count,
+      'one list call per mailbox: the fresh window\'s exempt page and nothing else');
+    assert.deepEqual(pass.listCalls.filter((c) => c.kind === 'drain'), [],
+      'an account already past its slice does not also spend an exempt page in the drain');
+    assert.deepEqual(
+      [...new Set(pass.listCalls.map((c) => c.email))].sort(),
+      [...pass.emails].sort(),
+      'and every mailbox still gets its one page, which is what makes the walk monotone'
+    );
+    // The gate must not silently discard the hole it declined to read.
+    for (const email of pass.emails) {
+      assert.ok(Number(state.getCursor(`mail:${email}:forward-gap-from`)) > 0,
+        'the gap is still on record for the pass that has budget for it');
+    }
+  });
+
+  test(`${count} mailboxes: the pass rotates which mailbox goes first`, async () => {
+    const NOW = Date.UTC(2026, 5, 1);
+    const state = memoryState();
+    const pass = multiMailboxPass(count, { state, now: NOW, passes: count + 1 });
+    await pass.run();
+
+    const firstOfEachPass = [];
+    for (let i = 0; i < pass.listCalls.length; i += count) {
+      firstOfEachPass.push(pass.listCalls[i].email);
+    }
+    assert.equal(firstOfEachPass.length, count + 1);
+    assert.deepEqual(
+      [...new Set(firstOfEachPass.slice(0, count))].sort(),
+      [...pass.emails].sort(),
+      'over a full cycle every mailbox takes a turn at the largest slice'
+    );
+    assert.equal(firstOfEachPass[count], firstOfEachPass[0], 'and then it wraps');
+  });
+}
