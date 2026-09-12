@@ -57,6 +57,29 @@ body.reconnect { margin: 0; -webkit-user-select: none; user-select: none; }
 .rc-asks-list { margin: 0; padding-left: 16px; font-size: 12.5px; line-height: 1.5; }
 .rc-facts { margin: 0 0 12px; }
 .rc-facts div { display: flex; gap: 10px; margin: 2px 0; }
+/* [hidden] LOSES TO ANY AUTHOR RULE THAT SETS display -- and three rules in
+ * this file set it on elements reconnect.js hides.
+ *
+ * palette.css already carries this lesson for the onboarding screens; it never
+ * travelled here. The UA stylesheet's `[hidden] { display: none }` loses to an
+ * author declaration whatever the specificity, so `el.hidden = true` changed
+ * the property and nothing on screen:
+ *
+ *   .rc-facts div   `rcRoleRow.hidden = true` on any card with a `who` string
+ *                   (which blanks the role) and `rcLeftRow.hidden = true` on
+ *                   any card with no `left` -- the card rendered the bare
+ *                   labels "who they are" and "how you left it" above empty
+ *                   values. This is the live symptom review finding 1 names.
+ *   #rcCard         `rcCard.hidden = true` on the empty state, so the stale
+ *                   card stayed up underneath "nothing to reconnect".
+ *   .rc-modes       `rcModes.hidden` never hid the picker either.
+ *
+ * The hiding logic was right in all three places; only this file defeated it.
+ * Each companion out-specifies the rule it answers, so source order is not
+ * load-bearing. */
+.rc-facts div[hidden] { display: none; }
+#rcCard[hidden] { display: none; }
+.rc-modes[hidden] { display: none; }
 .rc-facts dt { opacity: 0.55; min-width: 92px; flex-shrink: 0; }
 .rc-facts dd { margin: 0; }
 .rc-warn { color: #c96; }
