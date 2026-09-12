@@ -38,6 +38,12 @@ const exhaustedKey = (connector) => `${connectorKey(connector)}:exhausted`;
 // missedYears would rewind the entire walk to the year it is missing, undoing
 // the sprint on that source's very next tick.
 const TRAILING_KEY = `${PREFIX}:trailing`;
+// HOW LONG A GUESS MAY HOLD THE WALK. Long enough to cover the first-run stagger
+// (~10 s per source, so ~90 s across a full roster) plus a slow first tick;
+// short enough that a source whose needs() keeps throwing cannot freeze the year
+// for everybody until its three-strike tolerance is spent, which at the default
+// interval is forty-five minutes. See `provisional`.
+export const PROVISIONAL_MAX_MS = 120_000;
 const barrierKey = (year, barrier) => `${PREFIX}:barrier:${barrier}:done:${year}`;
 
 export function localYearBounds(year) {
@@ -147,8 +153,18 @@ export function createYearlyBackfill({
   // the People year re-run. The rewind is right; buying it with an eager
   // advance was not.
   //
-  // Cleared by the next ordinary classify() from a real tick, whatever it says.
-  const provisional = new Set();
+  // Cleared by the next ordinary classify() from a real tick, whatever it says --
+  // AND BY THE CLOCK, because that tick may be a long way off.
+  //
+  // The throwing path only classifies ordinarily once NEEDS_FAILURE_TOLERANCE
+  // ticks have failed, which at the default interval is forty-five minutes. For
+  // forty-five minutes advance() returned false for EVERY connector, so the year
+  // never decremented -- and a sprint source that finished the current year then
+  // had no task, no history slice and no re-arm, idling out the entire half hour
+  // this phase exists to spend. A Photos library held open by Photos.app was
+  // enough. The wait this is meant to buy is "one stagger, until the source's
+  // first real tick"; past that it is not a wait, it is the stall.
+  const provisional = new Map();
   const unclassified = () =>
     roster.filter((connector) => !classified.has(connector) && !withdrawn.has(connector));
 
@@ -213,7 +229,7 @@ export function createYearlyBackfill({
     // A withdrawal is not permanent: a source re-enabled while the process runs
     // classifies itself again on its next tick and rejoins the barrier.
     withdrawn.delete(connector);
-    if (unanswered) provisional.add(connector);
+    if (unanswered) provisional.set(connector, now());
     else provisional.delete(connector);
     const currentYear = new Date(now()).getFullYear();
     const hasCurrentCheckpoint = state.getCursor(doneKey(currentYear, connector)) === '1';
@@ -355,6 +371,10 @@ export function createYearlyBackfill({
     // its classification is not evidence the walk may spend. The wait ends at
     // that source's first real tick, which is one stagger away rather than the
     // thirty minutes the old tolerance cost.
+    // Expired guesses are dropped rather than waited on: see `provisional`.
+    for (const [connector, at] of [...provisional]) {
+      if (now() - at >= PROVISIONAL_MAX_MS) provisional.delete(connector);
+    }
     if (provisional.size > 0) return false;
     // NOTHING TO WALK IS FINISHED, not forever unfinished. Every history source
     // has been classified and none of them is available: unprovisioned,
@@ -497,7 +517,7 @@ export function createYearlyBackfill({
       active: [...active],
       // Classified on a guess rather than an answer, so the daemon can run the
       // restart reconciliation again once the last guess becomes an answer.
-      provisional: [...provisional],
+      provisional: [...provisional.keys()],
       // Walking their own backlog above the shared year; they hold nobody.
       trailing: [...trailing],
       pending: [...sourcePending, ...barrierPending],

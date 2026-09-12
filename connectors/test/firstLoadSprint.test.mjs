@@ -465,3 +465,189 @@ test('a sprint source parked on a barrier comes back on the sprint cadence', asy
   );
   assert.equal(chat.calls.history, 0, 'and it genuinely had no history window to walk');
 });
+
+// ---------------------------------------------------------------------------
+// (e) the clock, and what used to burn it
+// ---------------------------------------------------------------------------
+
+// ROUND-6 FINDING 1. The clock started at daemon boot, and the daemon boots when
+// the owner leaves screen 2 -- before the Google sign-in on screen 3, before the
+// LinkedIn export on screen 4, and with Full Disk Access still a restart prompt
+// in the middle. `sprintRoster()` asked whether a connector was SCHEDULED, which
+// on a clean Mac every local store is while none of them is readable. So the
+// half hour was spent on permission screens, and the one-shot rule made that
+// permanent: nothing re-armed it but the reinstall this file's own header calls
+// a non-feature.
+test('the clock does not start while every local store is still unreadable', async (t) => {
+  const dir = sandbox(t);
+  const state = fakeState({});
+  let readable = false;
+  const chat = {
+    name: 'imessage',
+    walksHistory: true,
+    needs: async () => (readable ? [] : ['full disk access']),
+    run: async () => ({}),
+  };
+  const instance = daemon.createDaemon({
+    config: { retention: { maintainHour: '03:30' }, intervals: { imessage: INTERVAL_S } },
+    state,
+    log: silent,
+    sources: [chat],
+    ingestOpts: {},
+    cacheDir: dir,
+    activityPath: join(dir, 'activity.json'),
+    sprintRearmMs: 120,
+    sprintHistoryBudgetMs: 60,
+  });
+  t.after(() => instance.stop());
+
+  instance.start();
+  await sleep(1_400);
+  assert.equal(
+    state.getCursor(daemon.SPRINT_STARTED_KEY),
+    null,
+    'the window was claimed before anything could read a single row'
+  );
+
+  // The owner grants the permission. The next tick can read, and THAT is when
+  // the half hour is worth starting.
+  readable = true;
+  await instance.probeNotReady('test');
+  await sleep(900);
+  assert.ok(
+    Number(state.getCursor(daemon.SPRINT_STARTED_KEY)) > 0,
+    'and it must start once a local store actually answers'
+  );
+});
+
+// AND A SPENT WINDOW IS NOT THE END OF IT, for as long as last year is open.
+test('a window burnt before anything was readable can be replaced later', async (t) => {
+  const currentYear = new Date().getFullYear();
+  const burnt = fakeState({
+    // Spent, and long enough ago to be replaceable.
+    [daemon.SPRINT_STARTED_KEY]: String(Date.now() - 7 * 60 * 60_000),
+  });
+  const chat = walker('imessage');
+  const { instance, state } = build(t, [chat.source], { state: burnt });
+
+  instance.start();
+  await sleep(2_200);
+
+  assert.ok(
+    Number(state.getCursor(daemon.SPRINT_STARTED_KEY)) > Date.now() - 60_000,
+    'a machine that still has not reached last year is owed another half hour'
+  );
+  assert.ok(chat.calls.forward >= 3, 'and it actually sprints');
+  assert.ok(currentYear > 2000);
+});
+
+test('and not before the cooling-off period is up', async (t) => {
+  const recent = fakeState({
+    // Spent, but only an hour ago.
+    [daemon.SPRINT_STARTED_KEY]: String(Date.now() - 60 * 60_000),
+  });
+  const chat = walker('imessage');
+  const { instance, state } = build(t, [chat.source], { state: recent });
+  const before = state.getCursor(daemon.SPRINT_STARTED_KEY);
+
+  instance.start();
+  await sleep(2_200);
+
+  assert.equal(state.getCursor(daemon.SPRINT_STARTED_KEY), before,
+    'six hours between windows, or this is not a phase, it is a mode');
+  assert.equal(chat.calls.forward, 1);
+});
+
+// ROUND-6 FINDING 7. A Mac whose RTC reads a date in the future at first boot
+// stamps the start from that clock; NTP corrects it minutes later and every
+// comparison is then against a timestamp from next week. `elapsed < max` alone
+// answers true for days, running the local stores at the sprint cadence on a
+// laptop the PowerBudget default was chosen to keep cool.
+test('a start stamped in the future is not a sprint with days left on it', async (t) => {
+  const fromTheFuture = fakeState({
+    [daemon.SPRINT_STARTED_KEY]: String(Date.now() + 7 * 24 * 60 * 60_000),
+  });
+  const chat = walker('imessage');
+  const { instance, state } = build(t, [chat.source], { state: fromTheFuture });
+
+  instance.start();
+  await sleep(2_200);
+
+  const started = Number(state.getCursor(daemon.SPRINT_STARTED_KEY));
+  assert.ok(started <= Date.now(),
+    'a start nobody can have made is replaced, not believed');
+  // Replaced by a real one, so the machine still gets its window.
+  assert.ok(chat.calls.forward >= 3);
+});
+
+// ROUND-6 FINDING 2. probeNotReady's guards were read before the await and acted
+// on after it. `needs()` is an existsSync for the local stores and something far
+// slower for matrix and mail, so the loop genuinely yields -- and a back-off
+// timer firing inside that window starts runSource, which deletes the source
+// from nextRuns. The loop then armed a 0 ms timer beside the pass already in
+// flight, which is two passes over one cursor: exactly what sourceTimers was
+// added to make impossible.
+test('a nudge does not arm a source whose own tick started during the probe', async (t) => {
+  const dir = sandbox(t);
+  const state = fakeState({});
+  let running = 0;
+  let overlaps = 0;
+  let ready = false;
+  // The probe's own needs() call is the one that hangs, which is what opens the
+  // window: the back-off timer fires while the loop is still awaiting it.
+  let hangNext = false;
+  let releaseProbe = null;
+  const chat = {
+    name: 'imessage',
+    walksHistory: false,
+    needs: () => {
+      if (hangNext) {
+        hangNext = false;
+        return new Promise((resolve) => { releaseProbe = () => resolve([]); });
+      }
+      return Promise.resolve(ready ? [] : ['not yet']);
+    },
+    run: async () => {
+      running += 1;
+      if (running > 1) overlaps += 1;
+      await sleep(500);
+      running -= 1;
+      return {};
+    },
+  };
+  const instance = daemon.createDaemon({
+    config: { retention: { maintainHour: '03:30' }, intervals: { imessage: INTERVAL_S } },
+    state,
+    log: silent,
+    sources: [chat],
+    ingestOpts: {},
+    cacheDir: dir,
+    activityPath: join(dir, 'activity.json'),
+    // Long enough that the timer below is the only thing that fires it, short
+    // enough that it lands inside the probe.
+    reprobeFloorMs: 300,
+  });
+  t.after(() => instance.stop());
+
+  instance.start();
+  // The first tick answers "not ready" and arms the back-off.
+  await sleep(1_200);
+  assert.equal(running, 0);
+
+  hangNext = true;
+  const probe = instance.probeNotReady('test');
+  // While the probe is stalled on that needs(), the source becomes ready and its
+  // OWN back-off timer fires: runSource starts and deletes it from nextRuns.
+  ready = true;
+  await sleep(450);
+  assert.equal(running, 1, 'the fixture has to actually start a pass inside the probe');
+
+  releaseProbe?.();
+  await probe;
+  await sleep(300);
+
+  assert.equal(
+    overlaps, 0,
+    'the probe armed a second pass over a source that was already running'
+  );
+});

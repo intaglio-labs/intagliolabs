@@ -202,6 +202,25 @@ export const SPRINT_CONNECTORS = Object.freeze(['imessage', 'calendar', 'whatsap
 // what is left of it rather than starting a fresh half hour -- and so a machine
 // that has already spent its sprint never takes another.
 export const SPRINT_STARTED_KEY = 'sprint:started-ts';
+// AND HOW LONG BEFORE A MACHINE THAT STILL HAS NOT REACHED LAST YEAR MAY HAVE
+// ANOTHER.
+//
+// ~~One sprint per install, ever.~~ The clock used to start at daemon boot, and
+// the daemon boots when the owner leaves screen 2 -- before the Google sign-in
+// on screen 3 and before the LinkedIn export on screen 4, which is an email the
+// owner may be waiting on for twenty minutes. Full Disk Access is a restart
+// prompt in the middle of that. So the half hour was spent on permission
+// screens, `sprinting()` went false forever, and nothing had been walked: the
+// one-shot rule made the failure permanent, and only the reinstall that this
+// file's own header calls a non-feature could clear it.
+//
+// Two changes, and both are needed. The clock starts when a sprint source is
+// actually READABLE rather than merely scheduled (see `ready`), and a window
+// that is fully spent may be replaced once the machine has had six hours to
+// think about it, for as long as last year is still open. Bounded on both
+// sides: the phase still lasts thirty minutes, and it still stops for good the
+// moment last year lands.
+export const SPRINT_REARM_AFTER_MS = 6 * 60 * 60_000;
 
 export function sourceRetryDelay(result, intervalMs) {
   if (Number.isFinite(result?.nextDelayMs) && result.nextDelayMs >= 1_000) {
@@ -362,6 +381,32 @@ export { defaultDaemonLockPath };
 
 export function defaultActivityPath(home = homedir()) {
   return join(home, '.hazlie', 'connectors', 'activity.json');
+}
+
+// I CAN TAKE A SIGNAL NOW, said by the only process that knows.
+//
+// SIGUSR2's default action is terminate, and this process installs its handler
+// after node has booted and evaluated seventeen static imports. The app used to
+// guess three seconds; a first launch with a cold page cache and a signature
+// check of the bundled node is exactly the case the nudge exists for, and a
+// nudge landing in that window kills the reader with no log line, because the
+// logger does not exist yet. So the handler writes its own pid here once it is
+// armed, and widget/src/Connectors.swift signals nobody else.
+//
+// The pid is the whole content: a marker left by a previous daemon names a
+// process that is gone, and the app compares it against the child it spawned.
+export function defaultNudgeReadyPath(home = homedir()) {
+  return join(home, '.hazlie', 'connectors', 'nudge-ready');
+}
+
+function announceNudgeReady(path = defaultNudgeReadyPath()) {
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, `${process.pid}\n`, { mode: 0o600 });
+  } catch {
+    // The nudge is an optimisation over the back-off, not a requirement. A
+    // marker that cannot be written costs the owner a minute, never a reader.
+  }
 }
 
 export function defaultSocialReimportPendingPath(home = homedir()) {
@@ -1029,6 +1074,15 @@ export function createDaemon({
   // setTimeout-not-setInterval rule exists to make structurally impossible:
   // both passes read the same store and each moves a cursor the other reads.
   const sourceTimers = new Map();
+  // SOURCES WHOSE needs() HAS ACTUALLY ANSWERED "[]".
+  //
+  // Not the inverse of `notReady`: absent from that map means NOT EVALUATED,
+  // which is deliberately different from ready. The sprint needs the positive
+  // fact, because "scheduled" is what it used to ask and on a clean Mac every
+  // local store is scheduled and none of them is readable -- no Full Disk
+  // Access yet -- so the phase began, and spent itself, before anything could
+  // read a single row.
+  const ready = new Set();
   // CONSECUTIVE needs() THROWS PER SOURCE, and the reason there is a count at
   // all rather than a verdict.
   //
@@ -1087,8 +1141,13 @@ export function createDaemon({
   // the connectors that may actually sprint -- a source that cannot run is not a
   // reason to keep the phase open, but it is also not a reason to close it while
   // the clock says the owner is still waiting.
+  // READABLE, not merely scheduled. This also settles the other half of the old
+  // roster's problem: `whatsapp` is in SPRINT_CONNECTORS and on a Mac that has
+  // never had WhatsApp its `done:<lastYear>` cursor is never written, so
+  // lastYearOpen() could never go false and the phase had no natural end but its
+  // own clock.
   const sprintRoster = () => SPRINT_CONNECTORS
-    .filter((connector) => scheduledByName.has(connector));
+    .filter((connector) => scheduledByName.has(connector) && ready.has(connector));
   const lastYearOpen = () => {
     const lastYear = new Date(now()).getFullYear() - 1;
     return sprintRoster().some(
@@ -1106,21 +1165,39 @@ export function createDaemon({
   const sprinting = () => {
     const started = sprintStartedTs();
     if (started === null) return false;
-    if (now() - started >= sprintMaxMs) return false;
+    const elapsed = now() - started;
+    // A NEGATIVE ELAPSED IS NOT "PLENTY OF TIME LEFT". A Mac whose RTC reads a
+    // date in the future at first boot stamps the start from that clock; NTP
+    // corrects it minutes later and every comparison below is then against a
+    // timestamp from next week. `elapsed < sprintMaxMs` alone answers true for
+    // days, running the local stores at a ten-second re-arm on a laptop the
+    // PowerBudget default was chosen to keep cool. A start in the future is a
+    // start nobody can have made: treat it as never having sprinted.
+    if (elapsed < 0 || elapsed >= sprintMaxMs) return false;
     return lastYearOpen();
   };
-  /// Begin one if this machine is owed one. Idempotent, and deliberately never
-  /// re-arms a sprint that has already been spent: the cursor is the record, and
-  /// it outlives the process.
+  /// Begin one if this machine is owed one.
+  ///
+  /// Idempotent inside a window, and re-armable outside one: a spent half hour
+  /// may be replaced after SPRINT_REARM_AFTER_MS, for as long as last year is
+  /// still open. See that constant -- a one-shot window is a window the owner's
+  /// permission prompts can burn, permanently.
   const beginSprint = (trigger) => {
-    if (sprintStartedTs() !== null) return false;
     if (sprintRoster().length === 0 || !lastYearOpen()) return false;
+    const started = sprintStartedTs();
+    if (started !== null) {
+      const age = now() - started;
+      // Inside the window, or inside the cooling-off period after it. A start in
+      // the future (see sprinting()) is neither, and is replaced on the spot.
+      if (age >= 0 && age < SPRINT_REARM_AFTER_MS) return false;
+    }
     state.setCursor(SPRINT_STARTED_KEY, String(now()));
     log.info('sprint_started', {
       trigger,
       sources: sprintRoster(),
       maxMs: sprintMaxMs,
       rearmMs: sprintRearmMs,
+      rearmed: started !== null,
     });
     return true;
   };
@@ -1472,6 +1549,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     if (existsSync(disableMarkerPath(source.name))) {
       needsFailures.delete(source.name);
       notReadyDelays.delete(source.name);
+      ready.delete(source.name);
       yearlyBackfill.classify(source.name, false);
       yearlyBackfill.advance();
       schedulePeopleGate();
@@ -1512,6 +1590,9 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       needsFailures.set(source.name, failures);
       notReady.delete(source.name);
       notReadyDelays.delete(source.name);
+      // A throw says nothing about readiness, and the sprint must not start on a
+      // source it could not ask.
+      ready.delete(source.name);
       if (failures >= NEEDS_FAILURE_TOLERANCE) {
         yearlyBackfill.classify(source.name, false);
         yearlyBackfill.advance();
@@ -1546,6 +1627,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       schedulePeopleGate();
       // Not a failure: an unprovisioned source waits, loudly, and is
       // re-checked next cycle. recordRun stays clean of noise runs.
+      ready.delete(source.name);
       notReady.set(source.name, missing);
       // COUNT, NOT THE STRINGS. Those messages embed absolute local paths --
       // whatsapp's needs() returns "...missing at /Users/<name>/Library/Group
@@ -1570,6 +1652,12 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     }
     notReady.delete(source.name);
     notReadyDelays.delete(source.name);
+    // THE MOMENT READINESS IS ESTABLISHED, which is the moment the sprint clock
+    // is worth starting. Not probeNotReady's: that one has only asked, and a
+    // window that begins on a question rather than an answer is the window the
+    // owner's permission prompts used to burn.
+    ready.add(source.name);
+    beginSprint('ready');
     const startedTs = now();
     const socialPlatforms = source.name === 'matrix' ? connectedSocialPlatforms() : [];
     // WAS THIS SOURCE'S STANDING A GUESS? If startup could not ask it, the
@@ -1860,7 +1948,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
   async function probeNotReady(trigger) {
     if (stopped) return { probed: 0, ready: [] };
     const pending = [...notReady.keys()];
-    const ready = [];
+    const readyNow = [];
     for (const connector of pending) {
       if (stopped) break;
       const source = scheduledByName.get(connector);
@@ -1878,13 +1966,25 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       } catch {
         continue;
       }
+      // AND ASKED AGAIN, BECAUSE THE AWAIT ABOVE YIELDS. The guards at the top of
+      // this iteration were true when the loop reached it and say nothing about
+      // now: this loop awaits every source in turn, and matrix's and mail's
+      // needs() are not an existsSync. A back-off timer firing inside that window
+      // starts runSource, which deletes the source from nextRuns -- and arming a
+      // 0 ms timer beside a pass already in flight is precisely the two-passes-
+      // over-one-cursor overlap sourceTimers exists to make impossible.
+      if (!notReady.has(connector) || !nextRuns.has(connector)) continue;
       if (Array.isArray(missing) && missing.length > 0) {
+        ready.delete(connector);
         notReady.set(connector, missing);
         continue;
       }
       notReady.delete(connector);
       notReadyDelays.delete(connector);
-      ready.push(connector);
+      // NOT `ready.add`. This source has not run yet; readiness is recorded by
+      // the tick that actually asks and then works, so the sprint clock starts
+      // against a source that has genuinely read something.
+      readyNow.push(connector);
       scheduleSource(source, 0);
     }
     // AND THE NUDGE IS ALSO WHEN A FIRST LOAD BEGINS. Onboarding starts the
@@ -1895,10 +1995,10 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     log.info('sources_reprobed', {
       trigger,
       waiting: pending.length,
-      ready: ready.length,
+      ready: readyNow.length,
     });
     publishWaiting();
-    return { probed: pending.length, ready };
+    return { probed: pending.length, ready: readyNow };
   }
 
   // Retention + physical maintenance, once per day in the configured idle
@@ -1949,9 +2049,14 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     );
   }
 
+  // Resolves once start()'s readiness probe has classified every source. Nothing
+  // in the daemon waits on it; the CLI's remembered-nudge path does, because a
+  // probe run against an unclassified roster is a no-op wearing a trigger name.
+  let settled = null;
   return {
     probeNotReady,
     sprintSnapshot,
+    whenSettled: () => settled ?? Promise.resolve(),
     start() {
       const scheduledSources = sources.filter((source) => !DEFAULT_DISABLED_CONNECTORS.includes(source.name));
       sources.forEach((source) => {
@@ -1991,7 +2096,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       // of it being re-checked before every run is that it is safe to call. So
       // call it once up front. Failures leave the source ABSENT from the map,
       // which shows it: unknown must never read as unprovisioned.
-      Promise.allSettled(scheduledSources.map(async (source) => {
+      const settledChain = Promise.allSettled(scheduledSources.map(async (source) => {
         // Match runSource's first gate. A manually disabled history source is
         // unavailable for the barrier even if all of its ordinary credentials
         // remain present.
@@ -2049,10 +2154,12 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
         }
         needsFailures.delete(source.name);
         if (Array.isArray(missing) && missing.length > 0) {
+          ready.delete(source.name);
           notReady.set(source.name, missing);
           yearlyBackfill.classify(source.name, false);
           return;
         }
+        ready.add(source.name);
         const socialPlatforms = source.name === 'matrix' ? connectedSocialPlatforms() : [];
         yearlyBackfill.classify(
           source.name,
@@ -2080,6 +2187,9 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
         beginSprint('startup');
         publishWaiting();
       });
+      // The chain, not the raw allSettled: a caller that waits on this must wait
+      // for the classification AND the reconcile and sprint decision that read it.
+      settled = settledChain;
 
       scheduledSources.forEach((source, i) => scheduleSource(source, 1_000 + i * FIRST_RUN_STAGGER_MS));
       scheduleMaintenance();
@@ -2147,9 +2257,16 @@ function runNudge(daemon, log, trigger) {
 
 function armNudge(daemon, log) {
   nudgeTarget = daemon;
+  announceNudgeReady();
   if (!nudgePending) return;
   nudgePending = false;
-  runNudge(daemon, log, 'SIGUSR2-during-startup');
+  // AFTER THE STARTUP READINESS PROBE, not beside it. start()'s probe is an
+  // unresolved promise at this point, so a remembered signal reached
+  // probeNotReady with `notReady` still empty -- nothing to re-probe, a no-op,
+  // and a log line naming the nudge for a sprint decision the nudge had nothing
+  // to do with. `whenSettled` resolves once that probe has classified
+  // everything, which is the same order start() already uses for its own call.
+  daemon.whenSettled().then(() => runNudge(daemon, log, 'SIGUSR2-during-startup'));
 }
 
 if (isMain) {

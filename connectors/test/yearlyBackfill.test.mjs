@@ -5,6 +5,10 @@ import {
   localYearBounds,
   yearlyBackfillCoverage,
 } from '../lib/yearlyBackfill.mjs';
+// A namespace import for anything added since, so a missing export fails its own
+// assertion rather than the whole file's module load.
+import * as yearly from '../lib/yearlyBackfill.mjs';
+const PROVISIONAL_MAX_MS = yearly.PROVISIONAL_MAX_MS;
 
 function memoryState() {
   const values = new Map();
@@ -658,3 +662,48 @@ test('a narrowed gate never narrows the completion mark', () => {
     'mail has years left; the walk is not finished because the sprinter is');
   assert.equal(Number(state.getCursor('yearly-backfill:year')), 2025);
 });
+
+// ------------------------------------------------- a guess with a clock on it
+
+// ROUND-6 FINDING 6. `provisional` is cleared by an ordinary classify(), and on
+// the throwing path that only happens once NEEDS_FAILURE_TOLERANCE ticks have
+// failed -- three ticks at the default interval is forty-five minutes, during
+// which advance() returns false for EVERY connector and the year never moves. A
+// sprint source that finished the current year then has no task, no slice and no
+// re-arm, and idles out the whole half hour the phase exists to spend. A Photos
+// library held open by Photos.app was enough to buy that.
+//
+// The wait this is meant to buy is "one stagger, until the source's first real
+// tick". Past that it is not a wait, it is the stall.
+test('a guess stops holding the walk once it is older than the stagger it covers', () => {
+  const state = memoryState();
+  let clock = NOW;
+  const backfill = createYearlyBackfill({
+    state, connectors: ['imessage', 'photos'], barriers: [], now: () => clock,
+  });
+  state.setCursor('yearly-backfill:connector:imessage:done:2026', '1');
+  backfill.classify('imessage', true);
+  backfill.classify('photos', false, { unanswered: true });
+
+  assert.equal(backfill.advance(), false, 'a fresh guess is still worth waiting on');
+  assert.deepEqual(backfill.snapshot().provisional, ['photos']);
+
+  // Still inside the window.
+  clock += daemonProvisionalWindow() - 1_000;
+  assert.equal(backfill.advance(), false);
+
+  // Past it. The source has not recovered and has not failed its tolerance
+  // either; the walk stops waiting regardless.
+  clock += 2_000;
+  assert.equal(backfill.advance(), true,
+    'forty-five minutes of frozen walk is not a wait, it is the stall');
+  assert.equal(Number(state.getCursor('yearly-backfill:year')), 2025);
+  assert.deepEqual(backfill.snapshot().provisional, []);
+});
+
+function daemonProvisionalWindow() {
+  assert.equal(typeof PROVISIONAL_MAX_MS, 'number', 'the bound has to be a real constant');
+  assert.ok(PROVISIONAL_MAX_MS >= 90_000, 'it must still cover a full first-run stagger');
+  assert.ok(PROVISIONAL_MAX_MS < 10 * 60_000, 'and be nowhere near the tolerance it replaces');
+  return PROVISIONAL_MAX_MS;
+}
