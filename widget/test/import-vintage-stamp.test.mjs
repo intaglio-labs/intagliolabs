@@ -84,8 +84,14 @@ test('the refusal this protects is still the one that reads it', () => {
   // PASS ONE: the "do not replace a newer file with an older one" guard. If it
   // ever stops going through installedVintage, the fallback above protects
   // nothing and this file should be re-read rather than silently kept green.
-  const guard = /if let existing = Bridge\.installedVintage\(of: destination\)/u;
+  const guard = /let existing = Bridge\.installedVintage\(of: destination\)/u;
   assert.match(swift, guard,
     'the newer-file refusal must still ask installedVintage how old the installed export\n' +
     'is, which is the question the fallback exists to keep answerable');
+  // AND IT DOES NOT FIRE ON A DATE THE APP KNOWS IS MEANINGLESS (round-5
+  // finding 22). Where the archive carried no date AND the stamp threw, both
+  // dates are the moment the copy landed; refusing on that turned the owner's
+  // own file away for good.
+  assert.match(swift, /!Bridge\.unstampedImports\.contains\(kind\.name\)/u,
+    'the one case the fallback cannot reach has to be excluded, not guessed at');
 });

@@ -137,9 +137,16 @@ test('a launch that could not deliver the choice tries again at the next one', (
     'there must be a resume path; without it a machine whose hermes was down for the\n' +
     'whole of one session never records the choice at all');
   const resume = bodyOf('func resumeCardDefaultsIfPending() {');
-  assert.match(resume, /guard Bridge\.cardDefaultsPending else \{ return \}/u,
+  assert.match(resume, /if Bridge\.cardDefaultsPending \{ postCardDefaults\(attempt: 0\) \}/u,
     'the resume must be a no-op once the settings have landed -- every launch after\n' +
     'the first success otherwise re-posts them');
+  // AND IT CARRIES THE MODE NOW, on the same terms and the same ladder
+  // (round-5 finding 20). The cap survived a session where hermes was down and
+  // the owner's mode pick did not.
+  assert.match(resume, /resumeCardModeIfPending\(\)/u);
+  const resumeMode = bodyOf('func resumeCardModeIfPending() {');
+  assert.match(resumeMode, /guard Bridge\.cardModePending != nil else \{ return \}/u,
+    'and it is a no-op once the pick has landed');
   assert.match(main, /bridge\.resumeCardDefaultsIfPending\(\)/u,
     'applicationDidFinishLaunching must call it; a resume nothing calls is a flag that\n' +
     'is set for ever and a card that never appears');

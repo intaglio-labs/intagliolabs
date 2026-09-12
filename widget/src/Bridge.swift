@@ -531,6 +531,44 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     set { UserDefaults.standard.set(newValue, forKey: cardDefaultsPendingKey) }
   }
 
+  // THE MODE THE OWNER PICKED, ON THE SAME TERMS AS THE CAP.
+  //
+  // The mode route answers 200 with `persisted: false` when its config write
+  // fails: the choice is live in the running reader and only its durability
+  // broke. The page retried once and then wrote a quiet note — so hermes being
+  // down for a whole first session lost the pick with nothing but a sentence
+  // the owner may have scrolled past, while `capPerDay`, chosen on the same
+  // screen, landed on a later launch.
+  //
+  // Same shape as the cap: the choice is written down HERE first and delivered
+  // until a reply says it was kept. The note is still written for the session
+  // the owner is in, because "it will be there next launch" is not what they
+  // asked for; it is the floor under that sentence rather than a replacement.
+  // EXPORTS WHOSE VINTAGE THIS APP COULD NOT ESTABLISH.
+  //
+  // The staging swap stamps the export's own date onto the installed copy so
+  // PASS ONE can ask how old it is. Two things have to go wrong together and
+  // then it cannot: the archive carries no readable date AND setResourceValues
+  // throws. Both dates are then the moment the copy landed, installedVintage
+  // answers "now", and the refusal below reads the owner's own file as older
+  // than the one they have -- permanently, with no way past it but deleting the
+  // file by hand. That is a flow that cannot be completed, which is a worse
+  // outcome than any re-import.
+  //
+  // So the app writes down that it does not know, and a date it does not know
+  // is not evidence to refuse on. Cleared the moment a stamp lands.
+  static let unstampedImportsKey = "HazlieUnstampedImports"
+  static var unstampedImports: [String] {
+    get { UserDefaults.standard.stringArray(forKey: unstampedImportsKey) ?? [] }
+    set { UserDefaults.standard.set(newValue, forKey: unstampedImportsKey) }
+  }
+
+  static let cardModePendingKey = "HazlieCardModePending"
+  static var cardModePending: String? {
+    get { UserDefaults.standard.string(forKey: cardModePendingKey) }
+    set { UserDefaults.standard.set(newValue, forKey: cardModePendingKey) }
+  }
+
   // The handoff out of onboarding: after the flow finishes, the widget's
   // gear nudges until settings is opened once, and that first open runs the
   // connectors intro. Reset by every completed flow, so replay hands off
@@ -1544,7 +1582,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       for k in ["mode"] {
         if let v = payload[k] { modeBody[k] = v }
       }
+      // WRITTEN DOWN BEFORE IT IS SENT. See cardModePending: a press is the
+      // decision and the POST is only how it travels, so a hermes that cannot
+      // keep it today must not cost the owner their pick.
+      if let mode = payload["mode"] as? String, !mode.isEmpty {
+        Bridge.cardModePending = mode
+      }
       relHermes("POST", "admin/relationship/mode", json: modeBody) { [weak self] out in
+        if out["persisted"] as? Bool == true { Bridge.cardModePending = nil }
         self?.reply(webView, id, out)
       }
 
@@ -2230,26 +2275,76 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// applicationDidFinishLaunching; a no-op on every machine whose settings
   /// have already landed, which after the first success is all of them.
   func resumeCardDefaultsIfPending() {
-    guard Bridge.cardDefaultsPending else { return }
-    postCardDefaults(attempt: 0)
+    if Bridge.cardDefaultsPending { postCardDefaults(attempt: 0) }
+    resumeCardModeIfPending()
   }
 
+  /// ONE CHAIN, NOT FOUR. recordCardDefaults is reachable from all three
+  /// startedSources call sites and resumeCardDefaultsIfPending fires
+  /// independently at launch, so a first launch with hermes down ran four
+  /// independent chains of up to ten POSTs each. Nothing breaks -- the route is
+  /// write-if-absent and always answers ok -- but it is forty requests where one
+  /// was meant, against a hermes that is already struggling, which is the only
+  /// condition under which the chains exist at all.
+  private var cardDefaultsInFlight = false
+
   private func postCardDefaults(attempt: Int) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    if attempt == 0 {
+      if cardDefaultsInFlight { return }
+      cardDefaultsInFlight = true
+    }
     relHermes("POST", "admin/config/card",
               json: ["capPerDay": 1, "producer": "eligibility"]) { [weak self] out in
       let state = out["state"] as? String ?? "unknown"
       if state == "ok" {
         Bridge.cardDefaultsPending = false
+        self?.cardDefaultsInFlight = false
         return
       }
       guard let self, attempt < Bridge.cardDefaultsRetryDelays.count else {
         // Giving up for this launch only. The flag stays set, which is what
         // makes the next one pick it up.
         NSLog("Intaglio Labs: daily card settings not recorded (\(state)) — retrying next launch")
+        self?.cardDefaultsInFlight = false
         return
       }
       DispatchQueue.main.asyncAfter(deadline: .now() + Bridge.cardDefaultsRetryDelays[attempt]) {
         self.postCardDefaults(attempt: attempt + 1)
+      }
+    }
+  }
+
+  private var cardModeInFlight = false
+
+  /// The mode's half of the same story, on the same retry ladder. A reply
+  /// without `persisted: true` is not a delivery: the route answers 200 either
+  /// way, and 200 is exactly what it says when the config write failed.
+  func resumeCardModeIfPending() {
+    dispatchPrecondition(condition: .onQueue(.main))
+    guard Bridge.cardModePending != nil else { return }
+    postCardMode(attempt: 0)
+  }
+
+  private func postCardMode(attempt: Int) {
+    guard let mode = Bridge.cardModePending else { cardModeInFlight = false; return }
+    if attempt == 0 {
+      if cardModeInFlight { return }
+      cardModeInFlight = true
+    }
+    relHermes("POST", "admin/relationship/mode", json: ["mode": mode]) { [weak self] out in
+      if out["persisted"] as? Bool == true {
+        Bridge.cardModePending = nil
+        self?.cardModeInFlight = false
+        return
+      }
+      guard let self, attempt < Bridge.cardDefaultsRetryDelays.count else {
+        NSLog("Intaglio Labs: card mode not recorded — retrying next launch")
+        self?.cardModeInFlight = false
+        return
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + Bridge.cardDefaultsRetryDelays[attempt]) {
+        self.postCardMode(attempt: attempt + 1)
       }
     }
   }
@@ -2824,7 +2919,11 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // replayed from the gear on a machine that already has an export, and
       // the owner reaching for "the LinkedIn file" in Downloads may well find
       // last year's. Compared by modification time, and refused out loud.
-      if let existing = Bridge.installedVintage(of: destination),
+      // ...unless this app could not establish the installed file's vintage at
+      // all. See unstampedImports: "now" is then a fact about the copy, not
+      // about the export, and refusing on it is the dead end.
+      if !Bridge.unstampedImports.contains(kind.name),
+         let existing = Bridge.installedVintage(of: destination),
          let picked = try? url.resourceValues(forKeys: [.contentModificationDateKey])
           .contentModificationDate,
          existing > picked {
@@ -2871,6 +2970,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     }
 
     var copied: [String] = []
+    // Names whose vintage could not be recorded; see unstampedImports. Carried
+    // back so the flow can say so rather than leaving it to a comment.
+    var unknownVintage: [String] = []
     var connections = 0
     // What has already been swapped in, and what it displaced. `backup` is nil
     // where there was nothing to displace -- a first import -- and undoing
@@ -2967,16 +3069,25 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       var dates = URLResourceValues()
       dates.contentModificationDate = Date()
       if let vintage = entry.vintage { dates.creationDate = vintage }
+      var stampedVintage = entry.vintage != nil
       do {
         try stamped.setResourceValues(dates)
       } catch {
+        stampedVintage = false
         if let vintage = entry.vintage {
           var fallback = entry.destination
           var vintageOnly = URLResourceValues()
           vintageOnly.contentModificationDate = vintage
-          try? fallback.setResourceValues(vintageOnly)
+          // The fallback only counts if it LANDED. Inside `if let vintage` the
+          // old code could not reach the no-vintage case at all, and a `try?`
+          // that swallowed a second failure looked identical to a success.
+          stampedVintage = (try? fallback.setResourceValues(vintageOnly)) != nil
         }
       }
+      var unstamped = Set(Bridge.unstampedImports)
+      if stampedVintage { unstamped.remove(entry.kind.name) } else { unstamped.insert(entry.kind.name) }
+      Bridge.unstampedImports = unstamped.sorted()
+      if !stampedVintage { unknownVintage.append(entry.kind.name) }
       copied.append(entry.kind.name)
       if entry.kind.name == "Connections.csv" {
         connections = Bridge.countRows(inCsvAt: entry.destination, anchor: entry.kind.anchor)
@@ -2993,7 +3104,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // a file, reported "N connections", and scheduled nothing to read it. The
     // same call startSources makes, on the queue it is allowed to be made on.
     DispatchQueue.main.async { [weak self] in self?.startReadingSources() }
-    return ["state": "ok", "files": copied, "connections": connections]
+    return [
+      "state": "ok", "files": copied, "connections": connections,
+      "unknownVintage": unknownVintage,
+    ]
   }
 
   /// What is already on disk, for a second run of the flow.

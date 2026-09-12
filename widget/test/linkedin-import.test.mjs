@@ -547,8 +547,11 @@ test('stamping the landing time does not make the export look newer than it is',
   // modification date has just stopped being that answer. Replaying onboarding
   // and handing back the same file in Downloads would otherwise come out as
   // "you already have a newer Connections.csv".
-  assert.match(accept, /if let existing = Bridge\.installedVintage\(of: destination\)/u,
+  assert.match(accept, /let existing = Bridge\.installedVintage\(of: destination\)/u,
     'the newer-check still reads the landing time');
+  // ...and skips it entirely for an export whose vintage could not be recorded.
+  // See Bridge.unstampedImports; round-5 finding 22.
+  assert.match(accept, /!Bridge\.unstampedImports\.contains\(kind\.name\)/u);
   const vintage = /private static func installedVintage\(of url: URL\) -> Date\? \{([\s\S]*?)\n {2}\}/u
     .exec(bridge)?.[1];
   assert.ok(vintage, 'installedVintage() not found');
