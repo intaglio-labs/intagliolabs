@@ -2114,7 +2114,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // it has credentials for and each one's needs() gates it, so the local
     // Apple stores turn on together the moment Full Disk Access lands.
     let ok = writeConnectorsConfigIfMissing()
-    // THE ONE CARD A DAY SCREEN 1 PROMISED, RECORDED AS THE OWNER'S NUMBER.
+    // THE ONE CARD A DAY SCREEN 1 PROMISED, AND THE PRODUCER THAT MAKES IT.
     //
     // hermes gates the whole reconnect card on relationshipMemory.capPerDay and
     // fails closed when it is absent -- no config, no cards -- because a
@@ -2129,13 +2129,21 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // they were shown. hermes writes it only when the key is absent, so a
     // second run of the flow never overrides a number they later changed.
     //
-    // Fire and forget, before the reader starts and never gating it: the cap
-    // decides whether a card appears tomorrow, and a hermes that is not up yet
+    // The producer travels with it because it has the same shape of problem.
+    // hermes reads an absent relationshipMemory.producer as the legacy matcher
+    // path, which is the safe reading for an owner who chose to stay there and
+    // the wrong one for a machine with no owner history at all: the card this
+    // app ships is the eligibility producer's, and every judgment behind it was
+    // made against that producer. Same rule, same call, written only if absent.
+    //
+    // Fire and forget, before the reader starts and never gating it: these
+    // decide whether a card appears tomorrow, and a hermes that is not up yet
     // is no reason to leave every source unread today.
-    relHermes("POST", "admin/config/card", json: ["capPerDay": 1]) { out in
+    relHermes("POST", "admin/config/card",
+              json: ["capPerDay": 1, "producer": "eligibility"]) { out in
       let state = out["state"] as? String ?? "unknown"
       if state != "ok" {
-        NSLog("Intaglio Labs: daily card cap not recorded (\(state))")
+        NSLog("Intaglio Labs: daily card settings not recorded (\(state))")
       }
     }
     // Started as a CHILD of this app, not bootstrapped into launchd, so the

@@ -40,14 +40,21 @@ function startReadingSourcesBody() {
   return swift.slice(start, end);
 }
 
-test('starting the reader records the daily card cap first', () => {
+test('starting the reader records the daily card settings first', () => {
   const body = startReadingSourcesBody();
   const post = body.indexOf('"admin/config/card"');
   assert.ok(post > 0,
     'startReadingSources must post admin/config/card; without it a fresh install\n' +
     "never gets a capPerDay and hermes' card route answers no-cap-configured forever");
-  assert.match(body.slice(post, post + 200), /"capPerDay": 1/u,
+  const call = body.slice(post, post + 200);
+  assert.match(call, /"capPerDay": 1/u,
     'the cap posted must be the one screen 1 promises: one a day');
+  // The producer has the same shape of problem as the cap: hermes reads an
+  // absent relationshipMemory.producer as the legacy matcher path, and the card
+  // this app ships is the eligibility producer's. A fresh install that records
+  // a cap but no producer turns the feature on pointing at the wrong producer.
+  assert.match(call, /"producer": "eligibility"/u,
+    'the producer the shipped card comes from must be recorded with the cap');
 
   const readerStart = body.indexOf('Connectors.shared.start()');
   assert.ok(readerStart > 0, 'startReadingSources must still start the reader');
@@ -57,7 +64,7 @@ test('starting the reader records the daily card cap first', () => {
     'the write behind whatever the reader does on its first pass');
 });
 
-test('the cap write cannot stop the reader from starting', () => {
+test('the settings write cannot stop the reader from starting', () => {
   const body = startReadingSourcesBody();
   // Fire and forget through relHermes, whose completion runs off the request.
   // A card that appears tomorrow is not a precondition for reading today, so a

@@ -341,42 +341,66 @@ export function setRelationshipMode({ mode, configPath = ownerConfigPath() } = {
   return { mode, changed: true };
 }
 
-// THE CAP THE OWNER SET BY PRESSING HELLO, WRITTEN ONCE AND NEVER AGAIN.
+// WHAT PRESSING HELLO SETS, WRITTEN ONCE EACH AND NEVER AGAIN.
 //
-// hermes' relationshipCap fails closed: with relationshipMemory.capPerDay
+// Two keys, one owner-initiated call, the same rule for both: write only when
+// the key is ABSENT. Anything already in the file is somebody's choice.
+//
+// capPerDay, because hermes' relationshipCap fails closed -- with the key
 // absent it returns null and the card route answers 'no-cap-configured'
-// forever, per the step-4 rule that thresholds are the owner's to set and
-// never a default invented by the server. On a fresh install the config file
-// the app writes is `{}`, so that rule -- correct in itself -- meant the
-// reconnect card could never appear on a machine nobody had hand-edited.
+// forever, per the step-4 rule that thresholds are the owner's to set and never
+// a default invented by the server. On a fresh install the config file the app
+// writes is `{}`, so that rule -- correct in itself -- meant the reconnect card
+// could never appear on a machine nobody had hand-edited. The resolution is not
+// a server-side default: screen 1 says "one person a day" and "one card a day"
+// directly above the button the owner presses to start the reader, so the press
+// IS the owner choosing one a day, and onboarding records it.
 //
-// The resolution is not a server-side default. It is that screen 1 says "one
-// person a day" and "one card a day" directly above the button the owner
-// presses to start the reader, so the press IS the owner choosing one a day,
-// and onboarding records it. Hence ensure, not set: ABSENT means nobody has
-// chosen, and any value already in the file is somebody's choice -- including
-// a 0 that means "no cards", which is exactly the fail-closed state this must
-// not quietly overturn.
+// producer, because relationshipProducerConfig reads anything but the literal
+// 'eligibility' as the legacy matcher path, calling that "the safe default for
+// an owner who has never touched this key". A fresh install has no such owner.
+// Every card judgment in the backup was made against the eligibility producer
+// and the card this product ships IS that producer, so leaving the key absent
+// hands a new install the path nobody is running rather than a safe one.
 //
-// The ceiling is the daily card's own shape. This is a feature that offers one
-// person to reconnect with per day; a number in the hundreds is a typo or a
-// caller with the wrong units, not a preference, and the cap is the last place
-// to find that out before a day's worth of people are burned.
+// ABSENT IS THE ONLY TRIGGER, and that matters most for the values that look
+// like nothing. A capPerDay of 0 is the fail-closed state expressed
+// deliberately -- "no cards" -- not an empty slot, and a producer of 'matcher'
+// is an owner on the legacy path on purpose. Neither is overwritten here.
+//
+// The ceiling on the cap is the daily card's own shape. This is a feature that
+// offers one person to reconnect with per day; a number in the hundreds is a
+// typo or a caller with the wrong units, not a preference, and the cap is the
+// last place to find that out before a day's worth of people are burned.
 export const MAX_CAP_PER_DAY = 10;
+export const RELATIONSHIP_PRODUCERS = Object.freeze(['eligibility', 'matcher']);
 
-export function ensureRelationshipCap({ capPerDay = 1, configPath = ownerConfigPath() } = {}) {
+export function ensureRelationshipDefaults({
+  capPerDay = 1, producer = 'eligibility', configPath = ownerConfigPath(),
+} = {}) {
   if (!Number.isInteger(capPerDay) || capPerDay < 1 || capPerDay > MAX_CAP_PER_DAY) {
     throw new Error(`capPerDay must be an integer from 1 through ${MAX_CAP_PER_DAY}`);
   }
+  if (!RELATIONSHIP_PRODUCERS.includes(producer)) {
+    throw new Error(`producer must be one of: ${RELATIONSHIP_PRODUCERS.join(', ')}`);
+  }
   const raw = readMutableConfig(configPath);
   const existing = relationshipMemorySection(raw);
-  if (existing && existing.capPerDay !== undefined) {
-    return { capPerDay: existing.capPerDay, changed: false };
+  const proposed = { capPerDay, producer };
+  const changed = {};
+  const additions = [];
+  for (const [key, value] of Object.entries(proposed)) {
+    const absent = !existing || existing[key] === undefined;
+    changed[key] = absent;
+    if (absent) additions.push([key, value]);
   }
-  raw.relationshipMemory = Object.fromEntries([
-    ...Object.entries(existing ?? {}),
-    ['capPerDay', capPerDay],
-  ]);
+  // One read, one write, whatever the mix: two writes for two keys would leave
+  // a window where the config on disk has a producer and no cap.
+  if (additions.length === 0) {
+    return { capPerDay: existing.capPerDay, producer: existing.producer, changed };
+  }
+  raw.relationshipMemory = Object.fromEntries([...Object.entries(existing ?? {}), ...additions]);
   writeMutableConfig(configPath, raw);
-  return { capPerDay, changed: true };
+  const written = raw.relationshipMemory;
+  return { capPerDay: written.capPerDay, producer: written.producer, changed };
 }

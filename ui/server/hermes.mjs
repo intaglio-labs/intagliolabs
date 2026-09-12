@@ -61,8 +61,9 @@ import {
   generalPeopleAnswerCacheInput,
 } from './people/generalSearch.mjs';
 import {
-  MAX_CAP_PER_DAY, RELATIONSHIP_ENGINES, RELATIONSHIP_MODES, ensureRelationshipCap, loadOwner,
-  markOwnerPerson, markPersonRole, markPersonSubRoles, setRelationshipEngine, setRelationshipMode,
+  MAX_CAP_PER_DAY, RELATIONSHIP_ENGINES, RELATIONSHIP_MODES, RELATIONSHIP_PRODUCERS,
+  ensureRelationshipDefaults, loadOwner, markOwnerPerson, markPersonRole, markPersonSubRoles,
+  setRelationshipEngine, setRelationshipMode,
 } from './people/owner.mjs';
 import { SUB_ROLES as SUB_ROLE_VALUES } from './people/subRoles.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
@@ -2373,7 +2374,7 @@ const RECALL_PARAMS = Object.freeze(['q', 'limit']);
 const RELATIONSHIP_POOL_PARAMS = Object.freeze(['mode', 'includeOffered', 'minDepth', 'includeAnonymous']);
 const RELATIONSHIP_MODE_FIELDS = Object.freeze(['mode']);
 const CONFIG_ENGINE_FIELDS = Object.freeze(['engine']);
-const CONFIG_CARD_FIELDS = Object.freeze(['capPerDay']);
+const CONFIG_CARD_FIELDS = Object.freeze(['capPerDay', 'producer']);
 const RELATIONSHIP_PAGE_BUILD_FIELDS = Object.freeze(['personKey', 'engine']);
 const RELATIONSHIP_DRAFT_FIELDS = Object.freeze(['snapshot_id']);
 // The card's own outcome post. Closed like every other admin body (review
@@ -3571,7 +3572,11 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     return;
   }
 
-  // THE CAP THAT LETS A CARD EXIST AT ALL, RECORDED FROM ONBOARDING.
+  // WHAT LETS A CARD EXIST AT ALL, RECORDED FROM ONBOARDING.
+  //
+  // Two keys a fresh install has neither of, and hermes reads both as "no owner
+  // has chosen", which is the right reading and the wrong outcome on a machine
+  // where no owner has yet had the chance.
   //
   // relationshipCap (above) fails closed: no relationshipMemory.capPerDay, no
   // cards, ever, because thresholds are the owner's to set and never a default
@@ -3579,16 +3584,25 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
   // is anything that lets the OWNER set it: a fresh install's config file is
   // `{}` and the peek route answered 'no-cap-configured' forever.
   //
+  // relationshipProducerConfig reads an absent producer as the legacy matcher
+  // path, "the safe default for an owner who has never touched this key". A
+  // fresh install has no such owner -- every card judgment in the backup was
+  // made against the eligibility producer and the shipped card IS that
+  // producer -- so absent means the new install runs the path nobody is on.
+  //
   // So the write is an onboarding action, not a server default. Screen 1 says
   // "one person a day" and "one card a day" above the button that starts the
   // reader; Bridge posts here when that button is pressed, and this records
-  // the number the owner was shown. ensureRelationshipCap writes ONLY when the
-  // key is absent, so an owner who has since chosen a different number -- or
-  // chosen a 0 that means no cards -- is never overwritten by a later run of
-  // the flow.
+  // what the owner was shown. ensureRelationshipDefaults writes each key ONLY
+  // when it is absent, so an owner who has since chosen a different number -- a
+  // 0 that means no cards, a producer deliberately left on matcher -- is never
+  // overwritten by a later run of the flow.
   //
   // Bearer-only and closed-field, like /admin/config/engine beside it: the
-  // page asks hermes, and never touches the config file itself.
+  // page asks hermes, and never touches the config file itself. Both fields are
+  // required rather than defaulted here, because a default supplied by this
+  // route is exactly the thing the step-4 rule says the server does not get to
+  // choose; the caller states what the owner was shown.
   if (req.method === 'POST' && url.pathname === '/admin/config/card') {
     if (!hasJsonMediaType(req)) {
       send(res, 415, { error: 'content-type must be application/json' }, cors);
@@ -3599,7 +3613,12 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     if (!Number.isInteger(body?.capPerDay) || body.capPerDay < 1 || body.capPerDay > MAX_CAP_PER_DAY) {
       throw badRequest(`"capPerDay" must be an integer from 1 through ${MAX_CAP_PER_DAY}`);
     }
-    const result = ensureRelationshipCap({ capPerDay: body.capPerDay, ...ownerConfigTarget(policy) });
+    if (!RELATIONSHIP_PRODUCERS.includes(body?.producer)) {
+      throw badRequest(`"producer" must be one of: ${RELATIONSHIP_PRODUCERS.join(', ')}`);
+    }
+    const result = ensureRelationshipDefaults({
+      capPerDay: body.capPerDay, producer: body.producer, ...ownerConfigTarget(policy),
+    });
     send(res, 200, { state: 'ok', ...result }, cors);
     return;
   }
