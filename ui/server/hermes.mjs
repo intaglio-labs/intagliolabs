@@ -5756,10 +5756,17 @@ function connectedWithoutRows(home) {
 // has simply expired, including the up-to-one-polling-interval gap between a
 // sprint ending and the next publish rewriting the file. The file's own mtime
 // catches a daemon that died mid-window, which `until` cannot see: the object is
-// still inside its half hour and nothing is standing behind it. Two minutes is
-// several times the gentle re-arm and well inside the phase, which is the one
-// period when this file is rewritten constantly.
-const SPRINT_FILE_FRESH_MS = 120_000;
+// still inside its half hour and nothing is standing behind it.
+//
+// FOUR MINUTES, not two. ~~Two is several times the gentle re-arm.~~ The re-arm
+// is the gap between PASSES; the file is written at the start of a pass and at
+// its end, and one sprint pass is a 120 s forward budget plus a 60 s history
+// slice, with one more slice allowed to start at the boundary. A two-minute
+// window therefore expired in the middle of a pass that was running, and screen
+// 6 dropped to "nobody qualifies yet" at the busiest moment of the phase.
+// widget/src/Connectors.swift picked 240 s for the same arithmetic, and these
+// two numbers describe the same event.
+const SPRINT_FILE_FRESH_MS = 240_000;
 
 function readerSprint(home, now = Date.now) {
   if (typeof home !== 'string' || home === '') return null; // see installHome

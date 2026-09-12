@@ -119,12 +119,16 @@ test('a tree the app cannot make owner-only is named, not swallowed', () => {
   const pass = swiftBody(connectors, 'reassertTreePerms\\(\\)');
   assert.doesNotMatch(pass, /try\? fm\.setAttributes/u,
     'a chmod that fails EPERM on a root-owned directory is the silent death itself');
-  assert.match(pass, /catch \{\n\s*blocked\.append\(path\)/u);
-  assert.match(connectors, /private\(set\) var treePermsBlockers: \[String\]/u);
-  // A symlink is no longer reported on sight: round-6 finding 3 is that the
-  // daemon traverses it, so only a link whose TARGET fails is a blocker. The
-  // shared question is pinned in its own test below.
-  assert.match(pass, /let isLink = target != path/u);
+  assert.match(pass, /catch \{\n\s*blocked\.append\(TreeBlocker\(path: path, target: nil\)\)/u,
+    'an EPERM on a root-owned directory is still named rather than discarded');
+  // The blockers carry a path and a target as two fields since round-7 finding
+  // 14; the String view is what the bridge and the page read.
+  assert.match(connectors, /private\(set\) var treePermsBlockerDetails: \[TreeBlocker\]/u);
+  assert.match(connectors, /var treePermsBlockers: \[String\]/u);
+  // A symlink is not reported on sight: round-6 finding 3 is that the daemon
+  // traverses it, so only a link whose TARGET fails is a blocker. Which
+  // component that question is asked of is round-7 finding 3, pinned below.
+  assert.match(pass, /let isLink = /u);
 });
 
 test('screen 6 says which paths to chmod instead of offering a button that cannot work', () => {
@@ -355,16 +359,11 @@ test('an in-flight flag that never completes does not silence every later resume
   assert.match(src, /if cardModeInFlight,\n\s*Date\(\)\.timeIntervalSince\(cardModeInFlightSince\) < Bridge\.inFlightStaleAfter \{ return \}/u);
 });
 
-// ROUND-6 FINDING 15. paintLoad returned before assigning when the poll failed,
-// so a failed request left the previous poll's answer standing and the "reading
-// last year" sentence outlived the phase.
-test('a failed progress poll does not leave the sprint sentence on screen', () => {
-  const paint = bodyOf(js, 'paintLoad');
-  const cleared = paint.indexOf('readerSprinting = false');
-  const guard = paint.indexOf("out.state !== 'ok'");
-  assert.ok(cleared > -1 && guard > -1 && cleared < guard,
-    'the flag has to be cleared BEFORE the early return, or a dead poll keeps it true');
-});
+// ROUND-6 FINDING 15 said a failed poll left the previous answer standing; the
+// fix cleared the flag before the early return, and round-7 finding 21 found
+// what that bought. Both are pinned by 'a poll that never arrived does not end
+// the sprint sentence' below: the flag is set from an answer and from nothing
+// else, which is neither stale nor flickering.
 
 // ROUND-6 FINDING 16. The pending mode is re-delivered at every launch until
 // hermes answers persisted:true, so a value hermes will never accept is a full
@@ -418,15 +417,12 @@ test('an empty mode is named as an empty mode, with the count that proves it', (
 test('the widening is a button the owner presses, not something the screen does', () => {
   const source = code(js);
   // Nothing posts relMode except a click handler.
-  const posts = [...source.matchAll(/hzPost\('relMode'[^)]*\)/gu)].length;
-  assert.ok(posts >= 1, 'the button has to actually write the choice');
   const handler = /loadAnyMode\.addEventListener\('click', \(\) => \{\n([\s\S]*?)\n\}\);/u.exec(js);
   assert.ok(handler, 'the button has no click handler');
   const body = code(handler[1]);
-  assert.match(body, /hzPost\('relMode', \{ mode: 'any' \}\)/u);
-  // ...and it asks again at once, because the pool it just widened may already
-  // have somebody in it.
-  assert.match(body, /hzPost\('relCardPeek'\)/u);
+  // The widening rides the REQUEST (round-7 finding 8): a one-off mode on the
+  // peek, which hermes honours for that request and never persists.
+  assert.match(body, /hzPost\('relCardPeek', \{ mode: 'any' \}\)/u);
   assert.match(body, /lastPeekAt = Date\.now\(\)/u,
     'stamped so the timer does not spend a second peek on top of the owner\'s');
 
@@ -455,4 +451,86 @@ test('the sprint sentence keeps its line while the mode row is up', () => {
   const clearedAt = peek.indexOf('hideModeShortfall()');
   const cardAt = peek.indexOf('if (out.card)');
   assert.ok(clearedAt > -1 && cardAt > -1 && clearedAt < cardAt);
+});
+
+// ------------------------------------------------------------- round-7 pins
+
+// ROUND-7 FINDING 3. `resolvingSymlinksInPath` resolves the WHOLE path, so one
+// intermediate link made every entry look linked: a `~/.hazlie` that is itself a
+// symlink, or a home under /private, marked a logs directory this app genuinely
+// owns as unrepairable instead of chmod-ing it. The question was always about
+// the final component, because that is the one chmod would follow.
+test('the link question is asked of the final component, not the whole path', () => {
+  const pass = swiftBody(connectors, 'reassertTreePerms\\(\\)');
+  assert.match(pass, /resourceValues\(forKeys: \[\.isSymbolicLinkKey\]\)/u,
+    'lstat on the last component is the question; resolving the path is not');
+  assert.doesNotMatch(pass, /let isLink = target != path/u,
+    'comparing resolved against unresolved answers about every intermediate link too');
+  // The mode is still read through the link, which is what the daemon does.
+  assert.match(pass, /attributesOfItem\(atPath: target\)/u);
+});
+
+// ROUND-7 FINDING 13. `attributesOfItem` fails for a dangling link exactly as it
+// does for a missing directory — and the daemon WARNs on one and FAILs on the
+// other, so the one that kills the reader must not be dropped like the harmless
+// one. `ln -s /Volumes/Gone/logs ~/.hazlie/logs` reported nothing wrong.
+test('a link to nowhere is reported, not skipped like a missing directory', () => {
+  const pass = swiftBody(connectors, 'reassertTreePerms\\(\\)');
+  const guard = /guard let attrs = try\? fm\.attributesOfItem\(atPath: target\) else \{([\s\S]*?)\n      \}/u
+    .exec(pass)?.[1];
+  assert.ok(guard, 'the attributes guard moved');
+  assert.match(guard, /if isLink \{ blocked\.append/u,
+    'a broken link is a FAIL in the daemon and has to be named here');
+});
+
+// ROUND-7 FINDING 14. `blocked` gained "path → target" alongside plain paths, so
+// anything downstream treating an entry as a path broke on that one element.
+test('a blocker carries its path and its target as two fields', () => {
+  assert.match(connectors, /struct TreeBlocker \{\n\s*let path: String\n\s*let target: String\?/u);
+  assert.match(connectors, /var describedForOwner: String/u,
+    'the arrow is a rendering decision and belongs at the edge');
+  assert.match(connectors, /private\(set\) var treePermsBlockerDetails: \[TreeBlocker\]/u);
+  // The bridge and the page still get sentences, which is all they ever wanted.
+  assert.match(connectors, /var treePermsBlockers: \[String\] \{ treePermsBlockerDetails\.map/u);
+});
+
+// ROUND-7 FINDING 8. The button said it would widen one card and wrote the
+// owner's mode to the config durably, with nothing on the screen saying so and
+// no way back from it there. The peek takes a one-off mode instead.
+test('widening the first card does not rewrite the standing choice', () => {
+  const source = code(js);
+  const handler = /loadAnyMode\.addEventListener\('click', \(\) => \{\n([\s\S]*?)\n\}\);/u.exec(js);
+  assert.ok(handler, 'the button has no click handler');
+  // SCREEN 6's OWN PATHS, not the whole file: screen 1's picker is where the
+  // standing mode is set, and it still writes it.
+  assert.doesNotMatch(code(handler[1]), /hzPost\('relMode'/u,
+    'this button widens one card; the standing choice is not its to change');
+  assert.doesNotMatch(bodyOf(js, 'peekCard'), /hzPost\('relMode'/u);
+  assert.match(code(handler[1]), /hzPost\('relCardPeek', \{ mode: 'any' \}\)/u,
+    'the widening rides the request, not the config');
+  // And the copy says what it does.
+  assert.match(source, /show me anyone, just this once/u);
+
+  // The verb has to carry it. hermes reads ?mode= as askedMode, which wins for
+  // that request only and never touches relationshipMemory.mode.
+  const bridge = readFileSync(join(ROOT, 'widget', 'src', 'Bridge.swift'), 'utf8');
+  const src = code(bridge);
+  assert.match(src, /peekPath \+= "&mode=\\\(mode\)"/u);
+  assert.match(src, /Bridge\.relationshipModes\.contains\(mode\)/u,
+    'and only a mode hermes would accept');
+});
+
+// ROUND-7 FINDING 21. Clearing the flag before the early return fixed a stale
+// sentence and bought a flicker: one failed poll mid-sprint dropped it, and the
+// next peek fell through to "nobody qualifies yet — i need more history", which
+// is the sentence the sprint branch exists to suppress and is false while the
+// reader is mid-pass.
+test('a poll that never arrived does not end the sprint sentence', () => {
+  const paint = bodyOf(js, 'paintLoad');
+  const guard = paint.indexOf("out.state !== 'ok'");
+  const assigned = paint.indexOf('readerSprinting = out.sprint');
+  assert.ok(guard > -1 && assigned > guard,
+    'only a poll that answered may say the phase is over');
+  assert.doesNotMatch(paint.slice(0, guard), /readerSprinting = false/u,
+    'clearing it before the return is the flicker');
 });

@@ -1143,16 +1143,21 @@ loadMode.id = 'loadMode';
 loadMode.hidden = true;
 loadStatus.after(loadMode);
 
-// AND AN OFFER, NEVER A SWITCH. The mode is the owner's choice and this screen
-// does not get to change it for them -- it says what that choice currently costs
-// and puts the alternative one press away. A flow that quietly widened the pool
-// to produce a card would be the app deciding what the owner meant.
+// AND AN OFFER, NEVER A SWITCH -- WHICH MEANS THIS ONE CARD, NOT THIS SETTING.
+//
+// ~~"start with anyone", posting relMode.~~ That wrote the mode to the config
+// durably: the comment said the screen does not get to change the owner's choice
+// and the handler changed it, with nothing on this screen to say so and no way
+// back from it here. A button that reads as widening one card must widen one
+// card. The peek takes a one-off mode (hermes' askedMode) which wins for that
+// request and leaves relationshipMemory.mode alone; the card panel's own chips
+// stay the way the standing choice is made.
 const loadAnyMode = document.createElement('button');
 loadAnyMode.className = 'ob-ghost';
 loadAnyMode.id = 'loadAnyMode';
 loadAnyMode.type = 'button';
 loadAnyMode.hidden = true;
-loadAnyMode.textContent = 'start with anyone';
+loadAnyMode.textContent = 'show me anyone, just this once';
 loadStart.before(loadAnyMode);
 
 const hideModeShortfall = () => {
@@ -1179,21 +1184,19 @@ function paintModeShortfall(out) {
 
 loadAnyMode.addEventListener('click', () => {
   loadAnyMode.disabled = true;
-  // The same verb the picker on screen 1 uses, so the choice is recorded and
-  // re-delivered exactly like the one made there (Bridge.cardModePending).
-  hzPost('relMode', { mode: 'any' })
-    .catch(() => {})
-    .then(() => {
+  hideModeShortfall();
+  // ONE REQUEST, ONE MODE. No relMode, no config write: the peek carries the
+  // widening and the owner's standing pick is still whatever they chose on
+  // screen 1. Stamped so the timer does not immediately spend a second peek on
+  // top of this one -- the throttle is on the RATE, and the owner's own press is
+  // not charged to it.
+  lastPeekAt = Date.now();
+  hzPost('relCardPeek', { mode: 'any' })
+    .then((out) => {
       loadAnyMode.disabled = false;
-      hideModeShortfall();
-      // AND ASK AGAIN AT ONCE. The pool the owner just widened may already have
-      // somebody in it, and making them wait out the fifteen-second poll for an
-      // answer that exists now is the flow standing in its own way. Stamped so
-      // the timer does not immediately spend a second one: the throttle is on
-      // the RATE, and the owner's own press is not charged to it.
-      lastPeekAt = Date.now();
-      hzPost('relCardPeek').then(peekCard).catch(() => {});
-    });
+      peekCard(out);
+    })
+    .catch(() => { loadAnyMode.disabled = false; });
 });
 
 const SOURCE_NAMES = {
@@ -1251,11 +1254,14 @@ function statusCell(row) {
 let readerSprinting = false;
 
 function paintLoad(out) {
-  // CLEARED BEFORE THE EARLY RETURN, not after it. A poll that fails while the
-  // sprint has ended leaves the previous poll's answer standing, so the "reading
-  // last year" sentence outlives the phase on the strength of a request that
-  // never arrived.
-  readerSprinting = false;
+  // CLEARED BY AN ANSWER, not by the absence of one.
+  //
+  // ~~Set false before the early return.~~ That fixed a stale sentence outliving
+  // the phase and bought a flicker instead: ONE failed poll mid-sprint dropped
+  // the flag, and the next card peek fell through to "nobody qualifies yet -- i
+  // need more history", which is the sentence the sprint branch exists to
+  // suppress and is false while the reader is mid-pass. A poll that did not
+  // arrive says nothing about the sprint; only one that did may end it.
   if (!out || out.state !== 'ok') return;
   readerSprinting = out.sprint !== null && typeof out.sprint === 'object';
   const runs = out.runs || {};

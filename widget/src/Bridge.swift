@@ -1546,7 +1546,17 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // looked at, on every poll, forever. ?peek=1 answers the tease and
     // records nothing; only the reconnect panel's own pull serves.
     case "relCardPeek":
-      relHermes("GET", "admin/relationship/card?peek=1", json: nil) { [weak self] out in
+      // AN OPTIONAL ONE-OFF MODE, and nothing durable behind it. The route reads
+      // `mode` as askedMode: it wins for THIS request only, produces and serves
+      // under it, and never touches relationshipMemory.mode. That is what lets
+      // screen 6 offer a first card outside the owner's pick without quietly
+      // rewriting the pick. Validated against the same list the picker offers,
+      // so a page cannot ask for a mode hermes would have to reject.
+      var peekPath = "admin/relationship/card?peek=1"
+      if let mode = payload["mode"] as? String, Bridge.relationshipModes.contains(mode) {
+        peekPath += "&mode=\(mode)"
+      }
+      relHermes("GET", peekPath, json: nil) { [weak self] out in
         self?.reply(webView, id, out)
       }
 

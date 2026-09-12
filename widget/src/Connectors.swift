@@ -327,14 +327,30 @@ final class Connectors {
   /// directory, and a directory this app cannot chmod — one created by a `sudo`
   /// setup run and owned by root. Named, so the owner gets a path to chmod
   /// instead of a dead reader.
-  private(set) var treePermsBlockers: [String] = []
+  /// A PATH, AND WHERE IT POINTS -- two fields rather than one string.
+  ///
+  /// `blocked` used to gain "\(path) → \(target)" alongside plain paths, so
+  /// anything downstream that treated an entry as a path (opening it, comparing
+  /// it, handing it to a shell hint) broke on that one element. The arrow is a
+  /// rendering decision and belongs at the edge.
+  struct TreeBlocker {
+    let path: String
+    let target: String?
+    var describedForOwner: String {
+      target == nil || target == path ? path : "\(path) → \(target!)"
+    }
+  }
+
+  private(set) var treePermsBlockerDetails: [TreeBlocker] = []
+  /// The owner-facing sentences, which is all the bridge and the page ever want.
+  var treePermsBlockers: [String] { treePermsBlockerDetails.map(\.describedForOwner) }
 
   private func reassertTreePerms() {
     let root = home.appendingPathComponent(".hazlie")
     let paths = [root.path] + Connectors.treeDirectories.map {
       root.appendingPathComponent($0).path
     }
-    var blocked: [String] = []
+    var blocked: [TreeBlocker] = []
     for path in paths {
       // THE SAME QUESTION THE DAEMON ASKS, which is about the TARGET.
       //
@@ -349,13 +365,33 @@ final class Connectors {
       //
       // resolvingSymlinksInPath is the traversal; `attributesOfItem` on the
       // RESOLVED path is then stat's answer, like the daemon's.
-      let target = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
-      let isLink = target != path
-      guard let attrs = try? fm.attributesOfItem(atPath: target) else { continue }
+      // THE FINAL COMPONENT, and only that.
+      //
+      // ~~resolvingSymlinksInPath and compare.~~ That resolves the WHOLE path, so
+      // one intermediate link made every entry look linked: a `~/.hazlie` that is
+      // itself a symlink (a home moved to an external volume), or a home under
+      // /private, marked a `logs` directory this app genuinely owns as
+      // unrepairable instead of chmod-ing it. The rule was always about the last
+      // component -- lstat's question -- because that is the one chmod would
+      // follow.
+      let url = URL(fileURLWithPath: path)
+      let isLink = (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?
+        .isSymbolicLink == true
+      let target = isLink ? url.resolvingSymlinksInPath().path : path
+      guard let attrs = try? fm.attributesOfItem(atPath: target) else {
+        // A DANGLING LINK IS NOT A MISSING DIRECTORY. `attributesOfItem` fails
+        // for both, and a missing path is the daemon's WARN while a link to
+        // nowhere is its FAIL -- so the one that kills the reader must not be
+        // dropped here the way the harmless one is.
+        if isLink { blocked.append(TreeBlocker(path: path, target: target)) }
+        continue
+      }
       // A missing path is the check's WARN, not its FAIL, and creating one here
       // would invent a tree the setup script owns.
       guard attrs[.type] as? FileAttributeType == .typeDirectory else {
-        if fm.fileExists(atPath: target) { blocked.append(path) }
+        if fm.fileExists(atPath: target) {
+          blocked.append(TreeBlocker(path: path, target: isLink ? target : nil))
+        }
         continue
       }
       guard let mode = (attrs[.posixPermissions] as? NSNumber)?.intValue,
@@ -367,18 +403,19 @@ final class Connectors {
       // staying silent is a dead reader -- it is named instead, with the path
       // the owner can act on.
       if isLink {
-        blocked.append("\(path) → \(target)")
+        blocked.append(TreeBlocker(path: path, target: target))
         continue
       }
       do {
         try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path)
       } catch {
-        blocked.append(path)
+        blocked.append(TreeBlocker(path: path, target: nil))
       }
     }
-    treePermsBlockers = blocked
+    treePermsBlockerDetails = blocked
     if !blocked.isEmpty {
-      NSLog("Intaglio Labs: cannot make these owner-only, the reader will refuse to start: \(blocked.joined(separator: ", "))")
+      let named = blocked.map(\.describedForOwner).joined(separator: ", ")
+      NSLog("Intaglio Labs: cannot make these owner-only, the reader will refuse to start: \(named)")
     }
   }
 
