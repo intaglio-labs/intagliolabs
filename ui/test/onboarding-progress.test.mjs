@@ -16,7 +16,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -882,6 +882,140 @@ test('the per-source counts and the calendar count agree about the owner', async
       const rows = byName(await (await call('GET', '/admin/onboarding/progress')).json());
       assert.equal(rows.mail.people, 1,
         'the owner marked themselves; that answer applies to every count on this screen');
+    });
+  });
+});
+
+// ------------------------------------- connected, and nothing has read it yet
+
+// THE 2026-09-12 ONBOARDING RUN. The owner signed in to Google on screen 3 and
+// dropped their LinkedIn export in on screen 4; screen 6 then drew calendar,
+// contacts and messages and NEITHER of the two they had just done. This table
+// is built from `context` and `run_log`, so a source that has not ingested a
+// row or recorded a run is a source it cannot see -- and the gap between
+// connecting something and the reader reaching it is precisely the window this
+// screen exists to narrate.
+//
+// The row has to be its own word. `empty` is "connected, nobody found yet",
+// which is a verdict on a search; nothing has searched.
+
+// The Google grant as connectors/lib/googleAccounts.mjs actually reads it:
+// owner-only file, owner-only directory, the address inside rather than only in
+// the name. A fixture that skipped the modes would pass here and describe a
+// file the real reader refuses.
+function seedGoogleToken(home, { scope } = {}) {
+  const dir = join(home, '.hazlie', 'secrets');
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  const path = join(dir, 'google-tokens-owner-example-test-0123456789abcdef.json');
+  writeFileSync(path, JSON.stringify({
+    access_token: 'synthetic-access',
+    refresh_token: 'synthetic-refresh',
+    account_email: 'owner@example.test',
+    scope: scope ?? 'https://www.googleapis.com/auth/gmail.readonly',
+  }), { mode: 0o600 });
+  chmodSync(path, 0o600);
+  return path;
+}
+
+function seedLinkedinExport(home) {
+  const dir = join(home, '.hazlie', 'imports', 'linkedin');
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, 'Connections.csv');
+  writeFileSync(path, 'First Name,Last Name,Company,Position,Connected On\n');
+  return path;
+}
+
+test('a Google sign-in with no rows yet is listed as waiting, not missing', async () => {
+  await withHome(async (home) => {
+    seedGoogleToken(home);
+    await withServer(home, async ({ call, db }) => {
+      markProjection(db, { projected: 1, source: 1 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      const rows = byName(body);
+
+      assert.ok(rows.mail, 'the mailbox the owner just connected had no row at all');
+      assert.equal(rows.mail.status, 'waiting');
+      assert.equal(rows.mail.rows, 0);
+      assert.equal(rows.mail.people, 0);
+      assert.equal(rows.mail.peopleKind, 'authors');
+      // It is not a source with rows, so it must not be counted as one.
+      assert.equal(body.dormant.rows, 0);
+    });
+  });
+});
+
+test('a LinkedIn export with no rows yet is listed as waiting too', async () => {
+  await withHome(async (home) => {
+    seedLinkedinExport(home);
+    await withServer(home, async ({ call, db }) => {
+      markProjection(db, { projected: 1, source: 1 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      const rows = byName(body);
+
+      assert.ok(rows.linkedin, 'the export the owner just handed over had no row');
+      assert.equal(rows.linkedin.status, 'waiting');
+      assert.equal(rows.linkedin.rows, 0);
+      // The people column still means what it means for LinkedIn, so the page's
+      // qualifier does not change under the placeholder.
+      assert.equal(rows.linkedin.peopleKind, 'listed');
+    });
+  });
+});
+
+test('with nothing connected, neither source is invented', async () => {
+  await withHome(async (home) => {
+    await withServer(home, async ({ call, db }) => {
+      markProjection(db, { projected: 1, source: 1 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      const rows = byName(body);
+      assert.equal(rows.mail, undefined, 'a mailbox nobody connected is not waiting for anything');
+      assert.equal(rows.linkedin, undefined);
+    });
+  }, {});
+});
+
+// The discriminating half: a token file whose grant does not cover Gmail is a
+// calendar-only sign-in, and mail is genuinely not connected.
+test('a Google grant without the Gmail scope does not put mail in the table', async () => {
+  await withHome(async (home) => {
+    seedGoogleToken(home, { scope: 'https://www.googleapis.com/auth/calendar.readonly' });
+    await withServer(home, async ({ call, db }) => {
+      markProjection(db, { projected: 1, source: 1 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      assert.equal(byName(body).mail, undefined,
+        'a calendar-only grant is not a connected mailbox');
+    });
+  });
+});
+
+// AND A PLACEHOLDER MUST NEVER OVERWRITE A VERDICT. The moment the connector
+// runs at all it has a run_log entry, and from then on this table answers with
+// what it read. A waiting row on top of that would erase a failure.
+test('a connected source that has already run keeps its real status', async () => {
+  await withHome(async (home) => {
+    seedGoogleToken(home);
+    seedLinkedinExport(home);
+    const state = stateDb(home);
+    for (let i = 0; i < 2; i += 1) {
+      state.prepare(
+        'INSERT INTO run_log(connector, started_ts, finished_ts, ok, error) VALUES(?, 1, 2, 0, ?)'
+      ).run('mail', 'imap login refused');
+    }
+    state.close();
+
+    await withServer(home, async ({ call, db }) => {
+      seedFixture(db);
+      markProjection(db, { projected: 9, source: 9 });
+      const rows = byName(await (await call('GET', '/admin/onboarding/progress')).json());
+
+      assert.equal(rows.mail.status, 'failing', 'two failed runs is red, placeholder or not');
+      assert.equal(rows.mail.rows, 80, 'and the rows it did ingest are still counted');
+      // linkedin HAS rows in the fixture, so it is not waiting for anybody
+      // either -- the export being present must not zero a real count.
+      assert.equal(rows.linkedin.rows, 500);
+      assert.equal(rows.linkedin.people, 500);
+      assert.equal(rows.linkedin.status, 'ok');
     });
   });
 });

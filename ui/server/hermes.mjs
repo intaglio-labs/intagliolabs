@@ -126,6 +126,14 @@ import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 // connect/ does for googleClients, so this follows the precedent rather than
 // making a third copy of the same parse. See ops/FEATURES.md.
 import { connectorsDisabledBy, readFeatureRegistry, readFeatures } from '../../connectors/lib/features.mjs';
+// AND THE SAME PRECEDENT FOR "HAS THE OWNER CONNECTED THIS YET". Both of these
+// are asked by the connector itself before every run — mail through
+// accountsWithScope, linkedin through its own needs() — so they are IMPORTED
+// rather than restated here. A third copy of "where does a Google token live"
+// is how the onboarding table and the reader come to disagree about whether a
+// source is connected, which is the exact failure below.
+import { GMAIL_SCOPE, accountsWithScopeIncludingStale } from '../../connectors/lib/googleAccounts.mjs';
+import { defaultImportDir as linkedinImportDir } from '../../connectors/sources/linkedin.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
 import { validToFor } from './memory/validity.mjs';
 import {
@@ -5504,6 +5512,45 @@ function listedOnboardingSource(source, switchedOff) {
   return owners.some((connector) => !switchedOff.has(connector));
 }
 
+// SOURCES THE OWNER HAS CONNECTED THAT HAVE NOT PRODUCED A ROW YET.
+//
+// This table is built from `context` and `run_log`, and on the second
+// clean-machine onboarding run (2026-09-12) that meant the two things the owner
+// had JUST done were the two things it did not show. They signed in to Google on
+// screen 3 and dropped their LinkedIn export in on screen 4; screen 6 then drew
+// calendar, contacts and messages and neither mail nor linkedin, because neither
+// had ingested a row or recorded a run. The screen whose whole job is "is it
+// working yet" was silent about precisely the work in question.
+//
+// A ROW WITH NOTHING IN IT IS NOT A LIE, as long as it does not claim to have
+// looked. That is why these are their own status rather than `idle` or `empty`:
+// `empty` is "connected, nobody found yet", which is an alarm, and this is not
+// one — nothing has read this source even once. The page draws `waiting` as a
+// neutral dot and "reading soon".
+//
+// FILESYSTEM FACTS ONLY, and each one asked of the module the connector itself
+// asks. A stale Google grant still counts as connected: the owner did connect
+// it, and the mail connector's first run is what discovers it is dead and turns
+// this row into a real failing one.
+//
+// The moment either source runs at all it has a run_log entry, so it leaves this
+// list and gets its ordinary verdict. This is a row for one gap — between the
+// owner connecting something and the reader reaching it — and for nothing else.
+function connectedWithoutRows(home = homedir()) {
+  const out = [];
+  try {
+    if (accountsWithScopeIncludingStale(GMAIL_SCOPE, { home }).length > 0) out.push('mail');
+  } catch {
+    // An unreadable secrets directory is the connect page's problem to report.
+    // Here it means only "cannot say it is connected", which is the state this
+    // table had before and is safe to fall back to.
+  }
+  try {
+    if (existsSync(join(linkedinImportDir(home), 'Connections.csv'))) out.push('linkedin');
+  } catch {}
+  return out;
+}
+
 // A FIVE-SECOND BODY CACHE, per server.
 //
 // This is the only route in the app that is polled while it is EXPENSIVE. It
@@ -5682,6 +5729,17 @@ function onboardingProgress(db, policy, switchedOffOverride) {
     if (contactNames > 0 || Object.hasOwn(runs, 'contacts')) names.add('contacts');
 
     const switchedOff = switchedOffOverride ?? switchedOffConnectors();
+
+    // The two the owner may have connected thirty seconds ago. Added to `names`
+    // so they are gated by exactly the same two rules as every other row -- a
+    // connector this install has switched off must not appear here either --
+    // and never for a source that already has rows or a run, which would
+    // overwrite a real verdict with a placeholder.
+    const waitingNames = new Set(
+      connectedWithoutRows().filter((source) => !names.has(source))
+    );
+    for (const source of waitingNames) names.add(source);
+
     const listedNames = [...names].filter((source) => listedOnboardingSource(source, switchedOff)).sort();
 
     // ONE GREY LINE INSTEAD OF SEVEN AMBER ROWS. Rows this install keeps and
@@ -5717,8 +5775,14 @@ function onboardingProgress(db, policy, switchedOffOverride) {
           }),
         };
       }
-      const rows = rowsBySource.get(source) ?? 0;
       const peopleKind = ONBOARDING_PEOPLE_KIND[source] ?? 'authors';
+      if (waitingNames.has(source)) {
+        // Zeroes, and a word that says nobody has looked yet. Deliberately not
+        // put through sourceStatus: every branch of it answers a question about
+        // a source that HAS been read.
+        return { source, rows: 0, people: 0, peopleKind, status: 'waiting' };
+      }
+      const rows = rowsBySource.get(source) ?? 0;
       const people = peopleKind === 'listed' ? linkedinListed
         : peopleKind === 'met' ? calendarMet
         : (peopleBySource.get(source) ?? 0);
