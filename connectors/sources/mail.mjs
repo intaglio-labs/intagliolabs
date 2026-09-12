@@ -159,9 +159,23 @@ function extractBody(payload) {
 }
 
 // Gmail's payload -> the shape connectors/lib/mailRows.mjs already speaks.
-// Addresses stay as their raw header strings: normalizeAddresses over there
-// handles both a string and mailparser's object form, so this does not need to
-// grow a parser it would then have to keep correct.
+//
+// Addresses stay as their raw header strings, and ~~normalizeAddresses over
+// there handles both a string and mailparser's object form, so this does not
+// need to grow a parser it would then have to keep correct~~ THAT WAS FALSE
+// FROM THE DAY IT WAS WRITTEN (corrected 2026-09-12). normalizeAddresses took
+// an array or mailparser's `{value:[{address}]}` and nothing else; a string
+// fell through to the empty list. So every row this adapter produced since the
+// 2026-08-26 REST switch carried meta.from/to/cc = [] and a null speaker --
+// 81,725 of them in the corpus, not one linked to a person, which is why the
+// reconnection card had never shown a Gmail contact. The comment was the only
+// thing holding the seam together and nothing tested the join.
+//
+// The premise still stands: the parser belongs over there, next to the
+// consumer, so a comment here cannot contradict it again. It is now
+// mailRows.mjs's exported parseAddressHeader, and connectors/test/
+// mailSource.test.mjs runs a real full-format payload through messageToRow so
+// this join is asserted rather than asserted-about.
 export function gmailMessageToParsed(message) {
   const p = message?.payload;
   const { text, html } = extractBody(p);
