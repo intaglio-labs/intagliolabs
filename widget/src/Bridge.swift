@@ -115,15 +115,32 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                     // In-panel API-key walkthroughs and Google OAuth.
                     "connectSecret", "openApp", "googleAuth",
                     "permissionState", "requestPermission"],
+    // The six-screen setup flow. Every entry here is a CHECK the page runs or
+    // a thing a check writes -- there is no verb in this list the page does
+    // not call, and widget/test/onboarding-capabilities.test.mjs enforces
+    // both directions. `openPeople` is gone: the flow now ends on the
+    // reconnect card, which is what it spent six screens getting ready.
     "onboarding": ["close", "moveToApplications", "onboardingDone", "spotlightWidget",
                    "widgetSpot",
-                   // The setup scenes: choosing and fetching the answer model,
-                   // and turning on the first data source.
+                   // Screen 1: the mode row, read through a peek that records
+                   // nothing and written only on an actual click.
+                   "relMode", "relCardPeek",
+                   // Screen 2: the permission rows and the reader they start.
+                   "openFullDiskAccess", "startSources",
+                   "permissionState", "requestPermission",
+                   // Screen 3: the grant, and the live read that proves it.
+                   "googleAuth", "googleProbe",
+                   // Screen 4: the export, picked and checked natively.
+                   "importLinkedIn",
+                   // Screen 5: whether the installed claude actually works,
+                   // the opt-in it may then offer, and the local model for a
+                   // Mac that has no claude on it.
+                   "engineProbe", "setEngine",
                    "setupState", "modelDownload", "modelCancel",
-                    "openFullDiskAccess", "startSources", "openPeople",
-                    "permissionState", "requestPermission",
-                    // Which scene is up, remembered so a restart resumes on it.
-                    "onboardingStep"],
+                   // Screen 6: the live table, and the panel the flow ends on.
+                   "onboardingProgress", "openReconnect",
+                   // Which scene is up, remembered so a restart resumes on it.
+                   "onboardingStep"],
     // people.html includes connector-tile.js as well as people.js (check the
     // script tags, not the file's own comment about being shared), so the People
     // popup renders connector tiles and needs the bridge verbs too. Writing this

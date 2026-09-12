@@ -7,13 +7,11 @@
 <link rel="stylesheet" href="palette.css">
 </head>
 <body class="onboarding">
-  <!-- Screen 1 of 3 (Terminal Palette.dc.html §07). The canvas draws this
-       inside a fake macOS menu bar; that is the mockup showing it as a
-       desktop screenshot, not chrome to build. -->
+
+  <!-- ============================ 1. who this is for ======================
+       The welcome. It asks for nothing and checks nothing; the only control
+       that writes anything is the mode row, and only on an actual click. -->
   <div class="ob-screen" id="screen">
-    <!-- Asleep, exactly as the widget rests: shut eyes, slow breathing, dream
-         bubbles. The same `idle` state, not a copy of it — one face can only
-         mean one thing, and "hello" is what wakes it. -->
     <div class="ob-orb">
       <span class="orb idle">
         <span class="orb-body">
@@ -32,11 +30,161 @@
         <span class="zzz z2"><i>z</i></span>
       </span>
     </div>
-    <p class="ob-tagline">personalized &amp; private AI</p>
+    <h1 class="ob-title">one person a day, worth getting back to</h1>
+    <p class="ob-tagline">i read the messages already on this Mac and find someone you have lost
+      touch with — who they are, how you left it, what they asked you. one card a day. nothing
+      leaves this Mac unless you switch it on, and i&#8217;ll show you where.</p>
+    <!-- STATIC, AND LABELLED. A drawing of a card is the only honest thing to
+         show before anything has been read; leaving it unlabelled would make
+         the first screen of the flow a fabricated result. -->
+    <div class="ob-card-demo" aria-hidden="true">
+      <span class="ob-card-tag">example</span>
+      <p class="ob-card-name">a former colleague</p>
+      <p class="ob-card-line">you last spoke eleven months ago. they asked whether you were
+        still hiring, and you never answered.</p>
+    </div>
+    <div class="ob-modes" id="modes">
+      <button class="ob-mode" data-mode="founder">founders</button>
+      <button class="ob-mode" data-mode="investor">investors</button>
+      <button class="ob-mode ob-mode-on" data-mode="any">anyone</button>
+    </div>
     <button class="ob-cta" id="cta">hello</button>
   </div>
 
-  <!-- Screen 2 of 3 (§08). Half demo, half rehearsal: the line types
+  <!-- ============================ 2. your messages ========================
+       Three rows, polled live. Full Disk Access has no query API and no
+       callback, so the only honest test is to keep attempting the read — and
+       the only honest moment to say "on" is when it actually works. -->
+  <div class="ob-screen" id="screenPerms" hidden>
+    <h1 class="ob-title">your messages</h1>
+    <p class="ob-tagline">messages, contacts and calendar are on this Mac already. macOS will
+      not let me read them until you say so.</p>
+    <div class="ob-perms" id="perms">
+      <div class="ob-perm" data-which="fda">
+        <span class="ob-perm-name">messages</span>
+        <span class="ob-perm-why">read-only, and never sent anywhere</span>
+        <button class="ob-perm-btn">open settings</button>
+      </div>
+      <!-- WHICH APP THE SWITCH BELONGS TO. The August rename left one bundle
+           id allowed and the other denied, and the owner was looking at a row
+           labelled "intaglio labs" that was the stale one. -->
+      <p class="ob-perm-bundle" id="permBundle"></p>
+      <div class="ob-perm" data-which="contacts">
+        <span class="ob-perm-name">contacts</span>
+        <span class="ob-perm-why">so a phone number has a name on it</span>
+        <button class="ob-perm-btn">allow</button>
+      </div>
+      <div class="ob-perm" data-which="calendar">
+        <span class="ob-perm-name">calendar</span>
+        <span class="ob-perm-why">so i know who you actually met</span>
+        <button class="ob-perm-btn">allow</button>
+      </div>
+    </div>
+    <p class="ob-note" id="permNote"></p>
+    <div class="ob-actions">
+      <button class="ob-ghost" id="permSkip">skip</button>
+      <button class="ob-cta ob-cta-sm" id="permNext" disabled>next</button>
+    </div>
+  </div>
+
+  <!-- ============================ 3. mail and calendar ====================
+       Two checks in order: start the grant, then prove it buys a read. -->
+  <div class="ob-screen" id="screenGoogle" hidden>
+    <h1 class="ob-title">your mail and calendar</h1>
+    <p class="ob-tagline">google, read-only. i ask for two things: read your gmail, and read
+      your calendar. i cannot send, delete or change anything.</p>
+    <!-- UNCONDITIONAL, AND BEFORE THE BUTTON. Google's own sign-in page will
+         say this app is unverified, and a warning the owner meets unprepared
+         reads as a warning about what this app does with the grant. -->
+    <p class="ob-tagline ob-quiet">google has not finished reviewing this app, so their sign-in
+      page will warn you that it is unverified. that warning is about google&#8217;s review
+      queue, not about what i do with the grant. the two permissions above are the whole ask.</p>
+    <p class="ob-status" id="googleStatus">not connected</p>
+    <div class="ob-actions">
+      <button class="ob-ghost" id="googleSkip">skip — use messages only</button>
+      <button class="ob-cta ob-cta-sm" id="googleStart">sign in to google</button>
+      <button class="ob-cta ob-cta-sm" id="googleNext" hidden>next</button>
+    </div>
+  </div>
+
+  <!-- ============================ 4. who you know ========================= -->
+  <div class="ob-screen" id="screenLinkedIn" hidden>
+    <h1 class="ob-title">who you know professionally</h1>
+    <p class="ob-tagline">linkedin will not let anything read your connections, so you ask them
+      for a copy and drop it here.</p>
+    <p class="ob-tagline ob-quiet">settings → data privacy → get a copy of your data →
+      &#8220;connections&#8221; → request. it arrives by email, usually in ten minutes.</p>
+    <p class="ob-status" id="linkedInStatus"></p>
+    <div class="ob-actions">
+      <button class="ob-ghost" id="linkedInSkip">skip</button>
+      <button class="ob-cta ob-cta-sm" id="linkedInPick">choose the file</button>
+      <button class="ob-cta ob-cta-sm" id="linkedInNext" hidden>next</button>
+    </div>
+  </div>
+
+  <!-- ============================ 5. how it reads =========================
+       The one switch in the whole flow that sends anything off this Mac, and
+       the only screen that may not offer it on a guess. -->
+  <div class="ob-screen" id="screenEngine" hidden>
+    <h1 class="ob-title">how it reads</h1>
+    <p class="ob-status" id="engineStatus">checking whether you already have claude on this Mac…</p>
+    <!-- The opt-in. Hidden until a probe comes back ok, because "you have it"
+         and "it works" are different questions and only the second one may
+         put a switch on screen. -->
+    <div class="ob-toggle-row" id="engineToggleRow" hidden>
+      <button class="ob-toggle" id="engineToggle" aria-pressed="false" role="switch">
+        <span class="ob-toggle-knob"></span>
+      </button>
+      <div class="ob-toggle-copy">
+        <p class="ob-toggle-label">use your claude subscription for reading and drafting</p>
+        <p class="ob-note">when this is on, excerpts of your messages go to anthropic&#8217;s
+          servers to be read. when it is off, nothing leaves this Mac.</p>
+      </div>
+    </div>
+    <!-- The local model download, for a Mac with no claude on it. No question
+         is asked: the tier comes from this machine's own hardware. -->
+    <div class="ob-model" id="engineModel" hidden>
+      <div class="ob-bar-track"><div class="ob-bar-fill" id="engineBar"></div></div>
+      <p class="ob-note" id="engineModelLabel"></p>
+    </div>
+    <div class="ob-actions">
+      <button class="ob-ghost" id="engineAgain" hidden>check again</button>
+      <button class="ob-ghost" id="engineLocal" hidden>use a local model instead</button>
+      <button class="ob-ghost" id="engineCancel" hidden>cancel</button>
+      <button class="ob-cta ob-cta-sm" id="engineNext">next</button>
+    </div>
+  </div>
+
+  <!-- ============================ 6. first load ===========================
+       A live table, and above it the one banner that must not be mistaken for
+       a single source's problem. -->
+  <div class="ob-screen ob-wide" id="screenLoad" hidden>
+    <h1 class="ob-title">i&#8217;m reading</h1>
+    <p class="ob-tagline">this takes a few minutes for messages and longer for mail.</p>
+    <p class="ob-banner" id="loadBanner" hidden></p>
+    <table class="ob-table" id="loadTable">
+      <thead>
+        <tr><th>source</th><th>rows</th><th id="loadPeopleHead">people who wrote to you</th><th>status</th></tr>
+      </thead>
+      <tbody id="loadBody"></tbody>
+    </table>
+    <p class="ob-status" id="loadStatus"></p>
+    <div class="ob-actions">
+      <button class="ob-ghost" id="loadStart" hidden>start it</button>
+      <button class="ob-cta ob-cta-sm" id="loadFinish" hidden>finish anyway</button>
+    </div>
+  </div>
+
+  <!-- ======================= behind the `chat` flag =======================
+       The typing demo and the widget spotlight. Neither is a check and
+       neither is part of the six-screen setup: with ops/features.json's
+       `chat` off — which is the shipping default — they are never shown, and
+       showScreen never puts them in the sequence. Kept in the DOM rather than
+       deleted because the flag exists to be turned back on, and because the
+       flight and the spotlight are the two pieces of this flow nobody would
+       rebuild from a description. See onboarding.js `demoScreens`.
+
+       Screen 2 of the old flow. Half demo, half rehearsal: the line types
        itself, then the send bounces and waits — the user presses it, and the
        orb swallows the bubble. The input is drawn, not real; the send is the
        one control that is briefly, deliberately theirs. -->
@@ -79,7 +227,7 @@
     </div>
   </div>
 
-  <!-- Screen 3 of 3. NOT the canvas's §09 any more — that scene offered the
+  <!-- The old final scene, also behind `chat`. NOT the canvas's §09 any more — that scene offered the
        connectors, which settings already does properly. This one answers the
        question the whole flow leaves behind: where did the thing I have been
        talking to actually go?
