@@ -21,7 +21,9 @@ import {
   accountsWithScopeIncludingStale,
 } from '../../connectors/lib/googleAccounts.mjs';
 import { listGoogleClients } from '../../connectors/lib/googleClients.mjs';
-import { REGISTRY_STATES, defaultOverridePath, readFeatureRegistry } from '../../connectors/lib/features.mjs';
+import {
+  REGISTRY_STATES, connectorsDisabledBy, defaultOverridePath, readFeatureRegistry,
+} from '../../connectors/lib/features.mjs';
 import { daemonLockIsLive } from '../../connectors/lib/daemonLock.mjs';
 import { CONNECTOR_NAMES } from '../../connectors/lib/connectorNames.mjs';
 
@@ -566,17 +568,42 @@ export const DEFAULT_INTERVAL_S = 900;
 // registry state as authoritative -- the stale-alarm class this window was
 // widened to remove, arriving from the other side.
 //
-// So: the MINIMUM across the whole roster, with an unlisted connector counted
-// at DEFAULT_INTERVAL_S because that is what it will actually run at. Doubled
-// for the same reason the constant was -- one missed publish is not an outage
-// -- and floored at the default, so an install with no `intervals` block, or
-// one that only ever speeds a connector up, behaves exactly as before.
+// So: the MINIMUM across the roster, with an unlisted connector counted at
+// DEFAULT_INTERVAL_S because that is what it will actually run at. Doubled for
+// the same reason the constant was -- one missed publish is not an outage --
+// and floored at the default, so an install with no `intervals` block, or one
+// that only ever speeds a connector up, behaves exactly as before.
 //
-// The remaining looseness is named rather than hidden: a connector that is
-// switched off does not tick, so an install that slows every connector it
-// still runs and leaves a fast one disabled gets a window wider than its real
-// cadence. The disabled set is not in this file, and erring wide here costs a
-// late alarm while erring narrow costs a false one.
+// ~~The minimum across the WHOLE roster.~~ Thirteen names, of which a typical
+// install configures one or two, every other counted at 900 s: the minimum was
+// 900 on every realistic install and the config could not move this number at
+// all (round-5 finding 4). A derivation that cannot change its answer is a
+// constant wearing a config's clothes.
+//
+// WHICH CONNECTORS ACTUALLY REWRITE THE FILE is the question, and the answer is
+// narrower than the roster and wider than "the ones the owner set up":
+//
+//   the FEATURE REGISTRY decides it. daemon.mjs schedules
+//   `sources` minus DEFAULT_DISABLED_CONNECTORS, and that subtraction is
+//   connectorsDisabledBy(FEATURES, ...) -- the same call, on the same registry,
+//   made here.
+//
+//   A `.disabled` MARKER DOES NOT. `run.mjs <name> --disable` is checked inside
+//   runSource, which returns early -- and schedule() still calls reschedule()
+//   afterwards, which calls publishWaiting(). A marker-disabled source goes on
+//   keeping the file fresh at its own interval, so counting it out here would
+//   widen the window for a daemon that is republishing exactly as fast as
+//   before. Prerequisites are the same story: a source with no credentials
+//   ticks, finds nothing to do, and reschedules.
+//
+// ERRING WIDE IS THE EXPENSIVE DIRECTION, which the struck paragraph above had
+// backwards. A window that is too NARROW only sends the caller to
+// daemonLockIsLive, which is the stricter evidence anyway; a window that is too
+// WIDE makes a dead daemon's last activity.json authoritative for the length of
+// it, which is the stale alarm this whole field exists to avoid. So the
+// registry is read to narrow the roster, never to guess a longer cadence than
+// the install can be shown to run at, and an unreadable registry keeps the
+// default window rather than widening on a file it could not parse.
 export function daemonActivityFreshMs({ home = homedir() } = {}) {
   let intervals = null;
   try {
@@ -589,7 +616,19 @@ export function daemonActivityFreshMs({ home = homedir() } = {}) {
   const configured = intervals !== null && typeof intervals === 'object' && !Array.isArray(intervals)
     ? intervals
     : {};
-  const cadence = Math.min(...CONNECTOR_NAMES.map((name) => {
+  let scheduled = CONNECTOR_NAMES;
+  try {
+    const { features } = readFeatureRegistry({ overridePath: defaultOverridePath(home) });
+    const off = new Set(connectorsDisabledBy(features, CONNECTOR_NAMES));
+    scheduled = CONNECTOR_NAMES.filter((name) => !off.has(name));
+  } catch {
+    scheduled = CONNECTOR_NAMES;
+  }
+  // Nothing is scheduled, so nothing rewrites the file and no cadence can be
+  // derived from it. The default window is the fail-closed answer: it is the
+  // narrowest this function ever returns.
+  if (scheduled.length === 0) return DAEMON_ACTIVITY_FRESH_MS;
+  const cadence = Math.min(...scheduled.map((name) => {
     const seconds = configured[name];
     return Number.isFinite(seconds) && seconds > 0 ? seconds : DEFAULT_INTERVAL_S;
   }));

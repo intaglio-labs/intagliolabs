@@ -152,6 +152,77 @@ test('the freshness window follows the fastest connector, not the slowest', (t) 
     'a two-day-old file is not authoritative because notion polls daily');
 });
 
+// THE ROSTER IS THE CONNECTORS THIS INSTALL SCHEDULES (round-5 finding 4).
+//
+// The minimum was taken over all thirteen names with every unconfigured one
+// counted at 900s, so on any install that does not configure all thirteen the
+// minimum was 900 and the config could not move the answer at all: a
+// derivation that always returns the constant it replaced.
+//
+// daemon.mjs schedules `sources` minus connectorsDisabledBy(FEATURES, ...), so
+// the feature registry is what decides who republishes, and the same call
+// answers it here.
+function withFeatureOverride(t, home, features) {
+  const path = join(home, '.hazlie', 'features.json');
+  writeFileSync(path, JSON.stringify(features));
+  const previous = process.env.HAZLIE_FEATURES_OVERRIDE;
+  process.env.HAZLIE_FEATURES_OVERRIDE = path;
+  t.after(() => {
+    if (previous === undefined) delete process.env.HAZLIE_FEATURES_OVERRIDE;
+    else process.env.HAZLIE_FEATURES_OVERRIDE = previous;
+  });
+}
+
+test('an install whose registry leaves one connector running is sized by that connector', (t) => {
+  const home = fakeHome(t);
+  // THE DISCRIMINATING CASE, and the one from the finding: mail at an hour on
+  // a machine where nothing else is scheduled to tick. Over the whole roster
+  // the minimum is 900 (twelve names nobody configured), and the window comes
+  // back at the default 30 minutes for a daemon that rewrites the file every
+  // 60 -- so the freshness fast path is dead and every request pays for a `ps`.
+  withFeatureOverride(t, home, {
+    bridges: false, // and therefore matrix, which IS the bridges feature
+    connectors: Object.fromEntries(
+      CONNECTOR_NAMES.filter((name) => name !== 'matrix' && name !== 'mail')
+        .map((name) => [name, false])
+    ),
+  });
+  writeFileSync(
+    join(home, '.hazlie', 'connectors', 'config.json'),
+    JSON.stringify({ intervals: { mail: 3_600 } })
+  );
+  assert.equal(daemonActivityFreshMs({ home }), 2 * 3_600 * 1000,
+    'the one connector that ticks is the one that sets the cadence');
+
+  // And a connector the registry switched off cannot widen it, however slow
+  // its leftover interval says it would have been.
+  writeFileSync(
+    join(home, '.hazlie', 'connectors', 'config.json'),
+    JSON.stringify({ intervals: { mail: 3_600, notion: 86_400 } })
+  );
+  assert.equal(daemonActivityFreshMs({ home }), 2 * 3_600 * 1000,
+    'notion is not scheduled, so its interval is not a cadence');
+});
+
+test('a registry that schedules nothing keeps the default window, not an infinite one', (t) => {
+  const home = fakeHome(t);
+  withFeatureOverride(t, home, {
+    bridges: false,
+    connectors: Object.fromEntries(
+      CONNECTOR_NAMES.filter((name) => name !== 'matrix').map((name) => [name, false])
+    ),
+  });
+  writeFileSync(
+    join(home, '.hazlie', 'connectors', 'config.json'),
+    JSON.stringify({ intervals: { mail: 86_400 } })
+  );
+  // Math.min of nothing is Infinity, and an infinite window would make a dead
+  // daemon's last word authoritative for ever. Nothing scheduled means nothing
+  // rewrites the file, so there is no cadence to derive and the narrowest
+  // answer this function has is the right one.
+  assert.equal(daemonActivityFreshMs({ home }), DAEMON_ACTIVITY_FRESH_MS);
+});
+
 // A 2-SECOND SYNCHRONOUS `ps` DOES NOT BELONG ON A REQUEST PATH (round-4
 // finding 12).
 //
