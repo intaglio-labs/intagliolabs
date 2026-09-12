@@ -160,8 +160,19 @@ test('an unreadable registry is told apart from an empty one, everywhere', () =>
   // so a repair under a running daemon must not read as a recovery.
   assert.match(connectStatus, /export function daemonRegistryState\(\{ home = homedir\(\), now = Date\.now\(\) \} = \{\}\)/u);
   assert.match(statusApi, /daemonRegistryState: daemonRegistryState\(\{ home \}\)/u);
-  assert.match(daemon, /registryState: FEATURES_REGISTRY_STATE, \.\.\./u,
+  // SCOPED TO THE CALL, not matched as one line of source. This used to pin the
+  // literal `registryState: FEATURES_REGISTRY_STATE, ...`, which is a claim
+  // about where the line WRAPS: adding one more key to the snapshot reflowed the
+  // object and failed a test about a fact that had not changed. The fact is that
+  // the word is written into the activity file beside whatever else the snapshot
+  // carries, and that is what is read here.
+  const publish = daemon.slice(daemon.indexOf('const publishActivity = (activity) => {'));
+  const written = publish.slice(publish.indexOf('writeActivity('), publish.indexOf('activityPath'));
+  assert.ok(written.length > 0, 'publishActivity no longer calls writeActivity');
+  assert.match(written, /registryState: FEATURES_REGISTRY_STATE/u,
     'published into the activity file the app already reads');
+  assert.match(written, /\.\.\.\(total \?\? \{\}\)/u,
+    'and beside the rest of the snapshot, not instead of it');
   // ...and the page says it in words, in the alarm colour, instead of drawing
   // the same blank shelf it draws for "nothing connected".
   assert.match(connectionsJs, /registry: 'feature registry unreadable/u);
