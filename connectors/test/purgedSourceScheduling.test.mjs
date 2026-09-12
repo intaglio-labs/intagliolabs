@@ -374,6 +374,12 @@ test('a history source whose needs() keeps throwing stops holding the yearly wal
 // (c) ...and a source that merely FLAPS keeps its place in the walk
 // ---------------------------------------------------------------------------
 
+// THE THROWING SOURCE BELOW IS `calendar`, NOT AN OPTIONAL CONNECTOR. `whatsapp`
+// and `granola` are 'optional' in the registry and the daemon withdraws them
+// when ~/.hazlie/connectors/<name>.disabled exists on the machine running the
+// tests -- which a fresh install writes. Three of these tests then never
+// reached their needs() probe and failed for a reason that had nothing to do
+// with the code under test (seen on the 2026-09-12 clean-machine retest).
 test('a needs() that throws once does not rewind the shared walk to this year', async (t) => {
   const dir = sandbox(t);
   const activityPath = join(dir, 'activity.json');
@@ -383,11 +389,16 @@ test('a needs() that throws once does not rewind the shared walk to this year', 
   // they were authorized in. That second part matters: without a current-year
   // receipt, classify()'s joinedMidBackfill arm rewinds a source that is
   // simply new, which is a different rule than the one under test.
-  const state = fakeState({
-    'yearly-backfill:year': String(walkYear),
-    [`yearly-backfill:connector:imessage:done:${currentYear}`]: '1',
-    [`yearly-backfill:connector:whatsapp:done:${currentYear}`]: '1',
-  });
+  // A source that walked with the group down to 2015 has every year above it
+  // marked done -- that is what makes its throw TRANSIENT rather than a late
+  // join. A fixture with only the current year done describes a source that
+  // still owes 2016-2025, and the walk is right to go back for those.
+  const doneAbove = {};
+  for (let y = walkYear + 1; y <= currentYear; y += 1) {
+    doneAbove[`yearly-backfill:connector:imessage:done:${y}`] = '1';
+    doneAbove[`yearly-backfill:connector:calendar:done:${y}`] = '1';
+  }
+  const state = fakeState({ 'yearly-backfill:year': String(walkYear), ...doneAbove });
 
   // THE DISCRIMINATING SHAPE: throw once, then answer normally. A daemon that
   // reads the first throw as "inactive" reads the next tick as a RE-ACTIVATION,
@@ -398,12 +409,12 @@ test('a needs() that throws once does not rewind the shared walk to this year', 
   // and the older years are never reached.
   let probes = 0;
   const instance = daemon.createDaemon({
-    config: { retention: { maintainHour: '03:30' }, intervals: { whatsapp: 0.05, imessage: 0.05 } },
+    config: { retention: { maintainHour: '03:30' }, intervals: { calendar: 0.05, imessage: 0.05 } },
     state,
     log: silent,
     sources: [
       {
-        name: 'whatsapp',
+        name: 'calendar',
         walksHistory: true,
         needs: async () => {
           probes += 1;
@@ -448,16 +459,16 @@ test('a needs() throw clears the stale prerequisite answer and records a failed 
   // run log's newest entry stayed the last SUCCESS.
   let probes = 0;
   const instance = daemon.createDaemon({
-    config: { retention: { maintainHour: '03:30' }, intervals: { whatsapp: 0.05 } },
+    config: { retention: { maintainHour: '03:30' }, intervals: { calendar: 0.05 } },
     state,
     log: silent,
     sources: [
       {
-        name: 'whatsapp',
+        name: 'calendar',
         walksHistory: true,
         needs: async () => {
           probes += 1;
-          if (probes <= 2) return ['the WhatsApp store is missing at <path>'];
+          if (probes <= 2) return ['the calendar store is missing at <path>'];
           throw new Error('store locked by a backup');
         },
         run: async () => ({}),
@@ -477,7 +488,7 @@ test('a needs() throw clears the stale prerequisite answer and records a failed 
   assert.ok(probes > 2, 'the source was probed after it started throwing');
   const snapshot = JSON.parse(readFileSync(activityPath, 'utf8'));
   assert.ok(
-    (snapshot.queue ?? []).some((entry) => entry.connector === 'whatsapp'),
+    (snapshot.queue ?? []).some((entry) => entry.connector === 'calendar'),
     "unknown is shown in the queue, not filtered out by last cycle's answer"
   );
   const failed = runs.filter((row) => row.ok === false);
@@ -493,7 +504,7 @@ test('the startup probe says why a source was unavailable before any tick', asyn
     state: fakeState({}),
     log: { info() {}, error() {}, warn: (event, fields) => lines.push([event, fields]) },
     sources: [
-      { name: 'whatsapp', walksHistory: true, needs: async () => { throw new Error('probe failed'); }, run: async () => ({}) },
+      { name: 'calendar', walksHistory: true, needs: async () => { throw new Error('probe failed'); }, run: async () => ({}) },
     ],
     ingestOpts: {},
     cacheDir: dir,
@@ -511,7 +522,7 @@ test('the startup probe says why a source was unavailable before any tick', asyn
   }
   const failure = lines.find(([event]) => event === 'source_needs_failed');
   assert.ok(failure, 'the startup probe logs the failure it absorbed');
-  assert.equal(failure[1].connector, 'whatsapp');
+  assert.equal(failure[1].connector, 'calendar');
   assert.equal(failure[1].at, 'startup');
   // NAMES AND COUNTS, like every other line this logger carries.
   assert.equal(typeof failure[1].error, 'string');
@@ -540,7 +551,7 @@ test('a source that throws at startup is classified, so the walk is not frozen o
     state,
     log: { info() {}, error() {}, warn: (event, fields) => lines.push([event, fields]) },
     sources: [
-      // imessage, not whatsapp: an OPTIONAL connector is withdrawn before its
+      // imessage, not calendar: an OPTIONAL connector is withdrawn before its
       // needs() probe is ever reached, so the probe under test would not run.
       { name: 'imessage', walksHistory: true, needs: async () => { throw new Error('probe failed'); }, run: async () => ({}) },
     ],
