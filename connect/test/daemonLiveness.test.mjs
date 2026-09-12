@@ -136,9 +136,13 @@ test('the freshness window follows the fastest connector, not the slowest', (t) 
   assert.equal(daemonActivityFreshMs({ home }), 2 * 7_200 * 1000,
     'a whole-roster slowdown is a real cadence change');
 
-  writeActivity(home, 'invalid');
+  // 'ok', because the word is not incidental any more: a daemon that published
+  // 'invalid' is running on ALL_OFF and scheduling no connector at all, so it
+  // rewrites this file at no connector's cadence and gets the default window
+  // whatever the intervals say. That is its own test, below.
+  writeActivity(home, 'ok');
   backdate(home, DAEMON_ACTIVITY_FRESH_MS + 60_000);
-  assert.equal(daemonRegistryState({ home }), 'invalid',
+  assert.equal(daemonRegistryState({ home }), 'ok',
     'inside the cadence this install actually runs at, with no lock file at all');
 
   backdate(home, 2 * 7_200 * 1000 + 60_000);
@@ -254,4 +258,83 @@ test('the process start probe answers from a window rather than forking per call
   forgetProcessStart(pid);
   assert.equal(processStartedAt(pid), null,
     'and dropping the entry goes back to the kernel, which no longer knows that pid');
+});
+
+// THE DAEMON'S OWN READ OF THE REGISTRY, NOT A SECOND ONE (round-6 finding 13).
+//
+// connectors/daemon.mjs freezes FEATURES and DEFAULT_DISABLED_CONNECTORS at
+// module scope; this file read the same registry per request. So an override
+// edited under a running daemon moved connect's idea of who is scheduled and
+// not the daemon's, and the two derived the same fact from different reads with
+// nothing reconciling them.
+//
+// What the daemon actually did is already on disk: `registryState` is the word
+// it read, and `queue` names the connectors it is scheduling right now.
+test('a daemon that published a broken registry gets the default window, whatever the intervals say', (t) => {
+  const home = fakeHome(t);
+  // Every connector slowed to two hours: under the roster rule alone this is a
+  // four-hour window. But ALL_OFF is what an unreadable registry answers, so
+  // that daemon schedules nothing and rewrites this file at no connector's
+  // cadence -- four hours of trusting a file from a daemon that may have died
+  // three hours ago.
+  writeFileSync(
+    join(home, '.hazlie', 'connectors', 'config.json'),
+    JSON.stringify({ intervals: Object.fromEntries(CONNECTOR_NAMES.map((n) => [n, 7_200])) })
+  );
+  writeActivity(home, 'invalid');
+  assert.equal(daemonActivityFreshMs({ home }), DAEMON_ACTIVITY_FRESH_MS);
+
+  // And the same install whose daemon read the registry cleanly keeps its real
+  // cadence: the collapse is about what the daemon said, not about the config.
+  writeActivity(home, 'ok');
+  assert.equal(daemonActivityFreshMs({ home }), 2 * 7_200 * 1000);
+});
+
+test('a connector the daemon is still queueing keeps its say after the override drops it', (t) => {
+  const home = fakeHome(t);
+  // The drift, in one machine: the owner switches everything except mail off in
+  // the override while the daemon -- which froze its registry at start -- goes
+  // on scheduling all of them. mail is slowed to two hours; the others still
+  // tick at the default and still rewrite the file.
+  withFeatureOverride(t, home, {
+    bridges: false,
+    connectors: Object.fromEntries(
+      CONNECTOR_NAMES.filter((name) => name !== 'matrix' && name !== 'mail')
+        .map((name) => [name, false])
+    ),
+  });
+  writeFileSync(
+    join(home, '.hazlie', 'connectors', 'config.json'),
+    JSON.stringify({ intervals: { mail: 7_200 } })
+  );
+  // No queue: the live registry is the only evidence, and it says mail alone.
+  writeActivity(home, 'ok');
+  assert.equal(daemonActivityFreshMs({ home }), 2 * 7_200 * 1000,
+    'with nothing else to go on, the live registry still decides');
+
+  // The daemon's own queue names imessage, which the override says is off. It
+  // is ticking at the default, so the window must come back to the default --
+  // not stay at four hours on the strength of a file the daemon never re-read.
+  writeFileSync(
+    join(home, '.hazlie', 'connectors', 'activity.json'),
+    JSON.stringify({
+      phase: 'waiting',
+      registryState: 'ok',
+      queue: [{ connector: 'imessage', nextTs: Date.now() + 60_000 }],
+    })
+  );
+  assert.equal(daemonActivityFreshMs({ home }), DAEMON_ACTIVITY_FRESH_MS,
+    'a connector the daemon is still scheduling cannot be argued away by the override');
+
+  // And a queue entry that is not a connector cannot invent a cadence.
+  writeFileSync(
+    join(home, '.hazlie', 'connectors', 'activity.json'),
+    JSON.stringify({
+      phase: 'waiting',
+      registryState: 'ok',
+      queue: [{ connector: 'maintenance', nextTs: Date.now() + 60_000 }],
+    })
+  );
+  assert.equal(daemonActivityFreshMs({ home }), 2 * 7_200 * 1000,
+    'maintenance rides the same map and is not a connector');
 });

@@ -604,7 +604,37 @@ export const DEFAULT_INTERVAL_S = 900;
 // registry is read to narrow the roster, never to guess a longer cadence than
 // the install can be shown to run at, and an unreadable registry keeps the
 // default window rather than widening on a file it could not parse.
-export function daemonActivityFreshMs({ home = homedir() } = {}) {
+// AND THE REGISTRY IS READ TWICE, BY TWO PROCESSES, AT DIFFERENT TIMES
+// (round-6 finding 13). connectors/daemon.mjs computes FEATURES and
+// DEFAULT_DISABLED_CONNECTORS at module scope and holds them for the life of
+// the process; this function reads the same file per request. An owner who
+// edits the override re-enables a connector HERE the instant they save it and
+// in the running daemon not at all, so the two derive "who is scheduled" from
+// different reads with nothing reconciling them.
+//
+// The daemon's own answer is already on disk: `queue` in activity.json is built
+// from nextRuns, so every name in it is a connector THIS daemon is scheduling
+// right now, and `registryState` is the word that daemon read. So both are used
+// and the live registry can only ever NARROW:
+//
+//   registryState not 'ok'   the daemon is running on ALL_OFF and schedules no
+//                            connector at all -- the default window, which is
+//                            the narrowest answer here.
+//   the published queue      union'd with the live-registry roster. A union can
+//                            only lower the minimum interval, which can only
+//                            narrow the window, which is the cheap direction; a
+//                            connector the override has since switched off but
+//                            the daemon is still ticking therefore keeps its
+//                            say.
+//
+// One gap stays, named rather than hidden: `queue` is filtered by notReady, so
+// a connector that the override has just switched off AND that is not ready is
+// absent from both halves while the daemon still ticks it. It costs a wider
+// window only on an install that has also slowed every connector that IS ready
+// past fifteen minutes. Closing it needs the daemon to publish its roster
+// rather than its queue.
+export function daemonActivityFreshMs({ home = homedir(), activity } = {}) {
+  const published = activity === undefined ? readActivityFile(home) : activity;
   let intervals = null;
   try {
     intervals = JSON.parse(
@@ -616,45 +646,77 @@ export function daemonActivityFreshMs({ home = homedir() } = {}) {
   const configured = intervals !== null && typeof intervals === 'object' && !Array.isArray(intervals)
     ? intervals
     : {};
-  let scheduled = CONNECTOR_NAMES;
+  // The daemon said it is scheduling nothing, so nothing republishes at any
+  // connector's cadence and no cadence can be derived from the file.
+  if (REGISTRY_STATES.includes(published?.registryState) && published.registryState !== 'ok') {
+    return DAEMON_ACTIVITY_FRESH_MS;
+  }
+  let scheduled = new Set(CONNECTOR_NAMES);
   try {
     const { features } = readFeatureRegistry({ overridePath: defaultOverridePath(home) });
     const off = new Set(connectorsDisabledBy(features, CONNECTOR_NAMES));
-    scheduled = CONNECTOR_NAMES.filter((name) => !off.has(name));
+    scheduled = new Set(CONNECTOR_NAMES.filter((name) => !off.has(name)));
   } catch {
-    scheduled = CONNECTOR_NAMES;
+    scheduled = new Set(CONNECTOR_NAMES);
   }
+  for (const name of publishedQueueConnectors(published)) scheduled.add(name);
   // Nothing is scheduled, so nothing rewrites the file and no cadence can be
   // derived from it. The default window is the fail-closed answer: it is the
   // narrowest this function ever returns.
-  if (scheduled.length === 0) return DAEMON_ACTIVITY_FRESH_MS;
-  const cadence = Math.min(...scheduled.map((name) => {
+  if (scheduled.size === 0) return DAEMON_ACTIVITY_FRESH_MS;
+  const cadence = Math.min(...[...scheduled].map((name) => {
     const seconds = configured[name];
     return Number.isFinite(seconds) && seconds > 0 ? seconds : DEFAULT_INTERVAL_S;
   }));
   return 2 * Math.max(DEFAULT_INTERVAL_S, cadence) * 1000;
 }
 
+// The connector names in the daemon's published queue. `maintenance` rides the
+// same map (daemon.mjs nextRuns) and is not a connector, so the roster decides
+// what counts rather than the file.
+function publishedQueueConnectors(activity) {
+  const queue = activity?.queue;
+  if (!Array.isArray(queue)) return [];
+  return queue
+    .map((entry) => entry?.connector)
+    .filter((name) => CONNECTOR_NAMES.includes(name));
+}
+
 // The window an install with no interval overrides gets, which is what this
 // constant always meant.
 export const DAEMON_ACTIVITY_FRESH_MS = 2 * DEFAULT_INTERVAL_S * 1000;
 
-export function daemonRegistryState({ home = homedir(), now = Date.now() } = {}) {
-  const path = join(home, '.hazlie', 'connectors', 'activity.json');
-  let state = null;
-  let writtenAt = 0;
+// The daemon's last published activity, parsed, or null. One place, because
+// two readers now want it: the registry state below and the freshness window
+// above, which reads the queue the same file carries.
+function readActivityFile(home) {
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8'));
-    if (!REGISTRY_STATES.includes(raw?.registryState)) return null;
-    state = raw.registryState;
-    writtenAt = statSync(path).mtimeMs;
+    return JSON.parse(
+      readFileSync(join(home, '.hazlie', 'connectors', 'activity.json'), 'utf8')
+    );
   } catch {
     return null; // no activity file is the normal case on a machine that never ran it
+  }
+}
+
+export function daemonRegistryState({ home = homedir(), now = Date.now() } = {}) {
+  const path = join(home, '.hazlie', 'connectors', 'activity.json');
+  const raw = readActivityFile(home);
+  if (!REGISTRY_STATES.includes(raw?.registryState)) return null;
+  const state = raw.registryState;
+  let writtenAt = 0;
+  try {
+    writtenAt = statSync(path).mtimeMs;
+  } catch {
+    return null; // it was there a moment ago and is not now: claim nothing
   }
   // Freshness first, because it is two file reads while the lock check now
   // asks the OS when that pid started. The union is unchanged — either kind of
   // evidence returns the state — so only the cost of the common case moves.
-  if (now - writtenAt <= daemonActivityFreshMs({ home })) return state;
+  // The parsed file goes with it: the window is sized partly from the queue
+  // this very read is holding, and reading it twice is how the two could
+  // disagree.
+  if (now - writtenAt <= daemonActivityFreshMs({ home, activity: raw })) return state;
   return daemonLockIsLive({ home }) ? state : null;
 }
 
