@@ -8,7 +8,9 @@
 // rows say so, instead of rendering a red X the owner cannot act on.
 
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { PLATFORMS, bridgeStatus } from './bridge.mjs';
@@ -510,17 +512,66 @@ export function featureRegistryState({ home = homedir() } = {}) {
 ///
 /// The daemon writes its own answer into the activity file it already
 /// maintains, so this is one small local read and no new channel. `null` is
-/// "it has not said" — an older daemon, or a file not written yet — and must
-/// never paint an alarm: absence of a claim is not a claim.
-export function daemonRegistryState({ home = homedir() } = {}) {
+/// "it has not said" — an older daemon, a file not written yet, or a claim
+/// nothing is standing behind any more — and must never paint an alarm:
+/// absence of a claim is not a claim.
+///
+/// AND A FILE OUTLIVES THE PROCESS THAT WROTE IT. activity.json carries no
+/// liveness stamp of its own, so a daemon that exited — a missing config is an
+/// exit 1, and so is a crash or a kill — leaves its last registryState behind.
+/// If that word was `missing` or `invalid`, the shelf then told the owner
+/// FOREVER that "the connector service is still running on the old feature
+/// registry — restart the app", about a process that is not running and that
+/// restarting the app does not silence. The whole value of this field is that
+/// it describes a RUNNING process, so it is only reported while there is one:
+///
+///   - the daemon holds ~/.hazlie/connectors/daemon.lock with its pid in it,
+///     so a live pid there is direct evidence and is believed whatever the
+///     file's age (an idle daemon with every connector switched off may not
+///     republish for a long time); otherwise
+///   - the activity file's own mtime has to be recent — twice the daemon's
+///     default poll interval, which is the slowest cadence at which a working
+///     daemon rewrites it.
+///
+/// Neither holds: `null`, and the shelf says nothing about the daemon. It is
+/// deliberately not a fourth word — `connections.js` alarms on any
+/// daemonRegistryState that is not 'ok', so a new one would trade a stale
+/// alarm for a permanent one.
+export const DAEMON_ACTIVITY_FRESH_MS = 2 * 900 * 1000; // 2x DEFAULT_INTERVAL_S
+
+function daemonProcessIsAlive(home) {
+  let pid;
   try {
-    const raw = JSON.parse(
-      readFileSync(join(home, '.hazlie', 'connectors', 'activity.json'), 'utf8')
+    pid = Number(
+      JSON.parse(readFileSync(join(home, '.hazlie', 'connectors', 'daemon.lock'), 'utf8'))?.pid
     );
-    return REGISTRY_STATES.includes(raw?.registryState) ? raw.registryState : null;
+  } catch {
+    return false;
+  }
+  if (!Number.isInteger(pid) || pid < 2) return false;
+  try {
+    process.kill(pid, 0); // signal 0 tests for the process, it does not signal it
+    return true;
+  } catch (error) {
+    // EPERM is a process this user may not signal — which is still a process.
+    return error?.code === 'EPERM';
+  }
+}
+
+export function daemonRegistryState({ home = homedir(), now = Date.now() } = {}) {
+  const path = join(home, '.hazlie', 'connectors', 'activity.json');
+  let state = null;
+  let writtenAt = 0;
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    if (!REGISTRY_STATES.includes(raw?.registryState)) return null;
+    state = raw.registryState;
+    writtenAt = statSync(path).mtimeMs;
   } catch {
     return null; // no activity file is the normal case on a machine that never ran it
   }
+  if (daemonProcessIsAlive(home)) return state;
+  return now - writtenAt <= DAEMON_ACTIVITY_FRESH_MS ? state : null;
 }
 
 /// The set itself, for the surfaces that draw what this build OFFERS rather
