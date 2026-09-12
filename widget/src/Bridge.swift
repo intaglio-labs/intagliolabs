@@ -2114,6 +2114,30 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // it has credentials for and each one's needs() gates it, so the local
     // Apple stores turn on together the moment Full Disk Access lands.
     let ok = writeConnectorsConfigIfMissing()
+    // THE ONE CARD A DAY SCREEN 1 PROMISED, RECORDED AS THE OWNER'S NUMBER.
+    //
+    // hermes gates the whole reconnect card on relationshipMemory.capPerDay and
+    // fails closed when it is absent -- no config, no cards -- because a
+    // threshold is the owner's to set and never one the server invents. The
+    // file written just above is `{}`, so without this the card never arrives
+    // on a fresh install no matter how much the reader ingests.
+    //
+    // This is not the app inventing that threshold either. Screen 1 says "one
+    // person a day" in its title and "one card a day" in the paragraph under
+    // it, directly above the button the owner pressed to get here: the press is
+    // the owner accepting one a day, and this is onboarding writing down what
+    // they were shown. hermes writes it only when the key is absent, so a
+    // second run of the flow never overrides a number they later changed.
+    //
+    // Fire and forget, before the reader starts and never gating it: the cap
+    // decides whether a card appears tomorrow, and a hermes that is not up yet
+    // is no reason to leave every source unread today.
+    relHermes("POST", "admin/config/card", json: ["capPerDay": 1]) { out in
+      let state = out["state"] as? String ?? "unknown"
+      if state != "ok" {
+        NSLog("Intaglio Labs: daily card cap not recorded (\(state))")
+      }
+    }
     // Started as a CHILD of this app, not bootstrapped into launchd, so the
     // reader inherits this app's permissions instead of needing its own.
     Provision.retireConnectorsAgent()
