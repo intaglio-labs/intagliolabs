@@ -46,24 +46,57 @@ export function processIsAlive(pid) {
   return processState(pid) !== 'dead';
 }
 
+/// HOW LONG ONE `ps` ANSWER IS GOOD FOR (round-4 finding 12).
+///
+/// A process's start time never changes while it is running, so the only thing
+/// a cache can get wrong is a pid that died and was recycled inside the window
+/// -- and the caller has already asked the kernel whether the pid is alive
+/// before it gets here. Ten seconds is short against the staleness window this
+/// feeds (tens of minutes) and long against connect's poll, which is the point:
+/// the cost moves from one fork PER REQUEST to one fork per ten seconds.
+const START_CACHE_MS = 10_000;
+const startCache = new Map();
+
 /// When the OS says the process with this pid started, in epoch ms, or null if
 /// it cannot be determined. `ps -o lstart=` is second-resolution and local
 /// time, which is all this needs: the question is whether the pid was recycled
 /// (minutes to days later), never a sub-second comparison.
-export function processStartedAt(pid) {
+///
+/// MEMOISED, because this is a SYNCHRONOUS SUBPROCESS ON A REQUEST PATH.
+/// connect's daemonRegistryState calls it through daemonLockIsLive whenever the
+/// activity file is stale -- which is precisely the state an owner sits and
+/// polls -- and a 2s-timeout `execFileSync` there blocks connect's event loop
+/// for every one of those requests. The freshness-first ordering already spares
+/// the healthy case; this spares the case that actually polls.
+export function processStartedAt(pid, { now = Date.now } = {}) {
   if (!Number.isInteger(pid) || pid < 2) return null;
+  const at = now();
+  const hit = startCache.get(pid);
+  if (hit !== undefined && at - hit.at < START_CACHE_MS) return hit.value;
+  // One daemon, one pid: the map is bounded by clearing it rather than by
+  // evicting, so a long-lived connect process cannot accumulate dead pids.
+  if (startCache.size > 16) startCache.clear();
+  let value = null;
   try {
     const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 2_000,
     }).trim();
-    if (!out) return null;
-    const parsed = Date.parse(out);
-    return Number.isFinite(parsed) ? parsed : null;
+    const parsed = out ? Date.parse(out) : NaN;
+    value = Number.isFinite(parsed) ? parsed : null;
   } catch {
-    return null;
+    value = null;
   }
+  startCache.set(pid, { at, value });
+  return value;
+}
+
+/// For tests and for anything that has just killed or started a daemon and
+/// needs the next answer to come from the OS rather than from the window above.
+export function forgetProcessStart(pid = null) {
+  if (pid === null) startCache.clear();
+  else startCache.delete(pid);
 }
 
 export function readDaemonLock({ home = homedir() } = {}) {

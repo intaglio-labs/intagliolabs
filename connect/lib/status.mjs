@@ -23,6 +23,7 @@ import {
 import { listGoogleClients } from '../../connectors/lib/googleClients.mjs';
 import { REGISTRY_STATES, defaultOverridePath, readFeatureRegistry } from '../../connectors/lib/features.mjs';
 import { daemonLockIsLive } from '../../connectors/lib/daemonLock.mjs';
+import { CONNECTOR_NAMES } from '../../connectors/lib/connectorNames.mjs';
 
 const SECRETS = (home) => join(home, '.hazlie', 'secrets');
 
@@ -547,16 +548,35 @@ export function featureRegistryState({ home = homedir() } = {}) {
 /// alarm for a permanent one.
 export const DEFAULT_INTERVAL_S = 900;
 
-// THE SLOWEST CADENCE AT WHICH A WORKING DAEMON REWRITES THE FILE, WHICH THE
-// OWNER CONFIGURES.
+// THE CADENCE AT WHICH A WORKING DAEMON REWRITES THE FILE, WHICH THE OWNER
+// CONFIGURES.
 //
 // ~~A hardcoded 2 x 900 s.~~ `intervals.<connector>` is a config key with a
 // ceiling of 86,400 s (connectors/daemon.mjs validateConfig), so an owner who
 // slows a connector past fifteen minutes moved the real republish cadence past
 // this window and the daemon's registry state went quiet while the daemon was
-// healthy. Derived from the configured intervals instead, doubled for the same
-// reason the constant was: one missed publish is not an outage. The default is
-// the floor, so an install with no `intervals` block behaves exactly as before.
+// healthy.
+//
+// ~~The MAXIMUM over the configured intervals.~~ That read the file as though
+// the slowest connector decided the cadence, and it is the fastest that does:
+// every source's reschedule calls publishWaiting, so the file is rewritten
+// whenever ANY source ticks (round-4 finding 13). `{"intervals":{"notion":
+// 86400}}` therefore bought a 48-hour window on an install still republishing
+// every fifteen minutes, and a daemon that died yesterday went on reporting its
+// registry state as authoritative -- the stale-alarm class this window was
+// widened to remove, arriving from the other side.
+//
+// So: the MINIMUM across the whole roster, with an unlisted connector counted
+// at DEFAULT_INTERVAL_S because that is what it will actually run at. Doubled
+// for the same reason the constant was -- one missed publish is not an outage
+// -- and floored at the default, so an install with no `intervals` block, or
+// one that only ever speeds a connector up, behaves exactly as before.
+//
+// The remaining looseness is named rather than hidden: a connector that is
+// switched off does not tick, so an install that slows every connector it
+// still runs and leaves a fast one disabled gets a window wider than its real
+// cadence. The disabled set is not in this file, and erring wide here costs a
+// late alarm while erring narrow costs a false one.
 export function daemonActivityFreshMs({ home = homedir() } = {}) {
   let intervals = null;
   try {
@@ -566,10 +586,14 @@ export function daemonActivityFreshMs({ home = homedir() } = {}) {
   } catch {
     intervals = null;
   }
-  const seconds = intervals !== null && typeof intervals === 'object' && !Array.isArray(intervals)
-    ? Object.values(intervals).filter((v) => Number.isFinite(v) && v > 0)
-    : [];
-  return 2 * Math.max(DEFAULT_INTERVAL_S, ...seconds) * 1000;
+  const configured = intervals !== null && typeof intervals === 'object' && !Array.isArray(intervals)
+    ? intervals
+    : {};
+  const cadence = Math.min(...CONNECTOR_NAMES.map((name) => {
+    const seconds = configured[name];
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : DEFAULT_INTERVAL_S;
+  }));
+  return 2 * Math.max(DEFAULT_INTERVAL_S, cadence) * 1000;
 }
 
 // The window an install with no interval overrides gets, which is what this

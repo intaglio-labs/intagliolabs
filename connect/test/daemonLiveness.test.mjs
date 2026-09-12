@@ -16,7 +16,10 @@ import {
   daemonActivityFreshMs,
   daemonRegistryState,
 } from '../lib/status.mjs';
-import { daemonLockIsLive, processStartedAt } from '../../connectors/lib/daemonLock.mjs';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { daemonLockIsLive, forgetProcessStart, processStartedAt } from '../../connectors/lib/daemonLock.mjs';
+import { CONNECTOR_NAMES } from '../../connectors/lib/connectorNames.mjs';
 
 function fakeHome(t) {
   const home = mkdtempSync(join(tmpdir(), 'intaglio-daemon-live-'));
@@ -96,18 +99,42 @@ test("a process this user may not signal is somebody else's", () => {
   }
 });
 
-test('the freshness window follows the configured intervals', (t) => {
+// THE REPUBLISH CADENCE IS THE FASTEST SOURCE, NOT THE SLOWEST.
+//
+// Every source's reschedule calls publishWaiting, so activity.json is rewritten
+// whenever ANY connector ticks. The window took the MAXIMUM over the configured
+// intervals, which reads one slowed connector as though it set the pace for the
+// whole daemon (round-4 finding 13).
+test('the freshness window follows the fastest connector, not the slowest', (t) => {
   const home = fakeHome(t);
+  const configPath = join(home, '.hazlie', 'connectors', 'config.json');
+  const setIntervals = (intervals) => writeFileSync(configPath, JSON.stringify({ intervals }));
+
   assert.equal(daemonActivityFreshMs({ home }), 2 * DEFAULT_INTERVAL_S * 1000,
     'no intervals block is the default window');
 
-  // An owner who slows mail to two hours has a daemon that republishes every
-  // two hours. The old hardcoded 30-minute window called that daemon dead.
-  writeFileSync(
-    join(home, '.hazlie', 'connectors', 'config.json'),
-    JSON.stringify({ intervals: { mail: 7_200, granola: 300 } })
-  );
-  assert.equal(daemonActivityFreshMs({ home }), 2 * 7_200 * 1000);
+  // THE DISCRIMINATING CASE. One rarely-polled connector slowed to its
+  // 86,400s ceiling, everything else left at the default. Under the max rule
+  // this bought a 48-hour window on an install that still republishes every
+  // fifteen minutes, so a daemon that died yesterday went on being quoted as
+  // authoritative.
+  setIntervals({ notion: 86_400 });
+  assert.equal(daemonActivityFreshMs({ home }), 2 * DEFAULT_INTERVAL_S * 1000,
+    'one slow connector does not widen the window: the others still tick');
+
+  // Mixed, same reasoning: granola at five minutes is what sets the cadence,
+  // and the floor keeps the window at the default rather than tightening to
+  // 2 x 300s.
+  setIntervals({ mail: 7_200, granola: 300 });
+  assert.equal(daemonActivityFreshMs({ home }), 2 * DEFAULT_INTERVAL_S * 1000);
+
+  // AND THE CASE THE WINDOW WAS WIDENED FOR IS STILL COVERED: when every
+  // connector is slowed, the cadence really has moved and the window moves
+  // with it.
+  const everyConnector = Object.fromEntries(CONNECTOR_NAMES.map((name) => [name, 7_200]));
+  setIntervals(everyConnector);
+  assert.equal(daemonActivityFreshMs({ home }), 2 * 7_200 * 1000,
+    'a whole-roster slowdown is a real cadence change');
 
   writeActivity(home, 'invalid');
   backdate(home, DAEMON_ACTIVITY_FRESH_MS + 60_000);
@@ -117,4 +144,43 @@ test('the freshness window follows the configured intervals', (t) => {
   backdate(home, 2 * 7_200 * 1000 + 60_000);
   assert.equal(daemonRegistryState({ home }), null,
     'past even the slow cadence, it is still silence rather than a claim');
+
+  // Back to one slow connector: the same file age that was inside the
+  // whole-roster window is outside this one, which is the whole point.
+  setIntervals({ notion: 86_400 });
+  assert.equal(daemonRegistryState({ home }), null,
+    'a two-day-old file is not authoritative because notion polls daily');
+});
+
+// A 2-SECOND SYNCHRONOUS `ps` DOES NOT BELONG ON A REQUEST PATH (round-4
+// finding 12).
+//
+// daemonRegistryState reaches daemonLockIsLive -> processStartedAt whenever the
+// activity file is stale, which is exactly the state an owner sits and polls,
+// and execFileSync there blocks connect's event loop for every one of those
+// requests. Freshness-first spared the healthy case; this spares the case that
+// actually polls.
+//
+// THE OBSERVABLE IS THE STALENESS THE CACHE BUYS, because that is the only
+// externally visible difference between one fork and none: a pid whose process
+// has exited still answers from the window, and forgetProcessStart is the way
+// back to the kernel. A process's start time never changes while it runs, so
+// the window costs nothing else.
+test('the process start probe answers from a window rather than forking per call', async () => {
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], { stdio: 'ignore' });
+  await once(child, 'spawn');
+  const { pid } = child;
+  forgetProcessStart(pid);
+
+  const began = processStartedAt(pid);
+  assert.ok(Number.isFinite(began), 'a live process has a start time');
+
+  child.kill('SIGKILL');
+  await once(child, 'exit');
+
+  assert.equal(processStartedAt(pid), began,
+    'inside the window the answer stands without asking the OS again');
+  forgetProcessStart(pid);
+  assert.equal(processStartedAt(pid), null,
+    'and dropping the entry goes back to the kernel, which no longer knows that pid');
 });
