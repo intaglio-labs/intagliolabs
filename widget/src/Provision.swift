@@ -59,6 +59,33 @@ enum Provision {
     }
   }
 
+  /// Retire an io.intaglio.bridges agent a previous install left behind.
+  ///
+  /// Skipping the INSTALL is not enough on an upgrade, and that is the whole
+  /// reason this exists: launchd already holds the job from before the bridges
+  /// feature went dormant, the plist carries RunAtLoad + KeepAlive, and it
+  /// comes back every login supervising a stack nothing on the card reads.
+  ///
+  /// Shaped like retireConnectorsAgent — bootout, then remove the plist so it
+  /// cannot be re-bootstrapped at the next login. It deliberately deletes NO
+  /// DATA: ~/.hazlie/matrix, ~/.hazlie/bridges and the owner credentials inside
+  /// them stay where they are, so turning `bridges` back on is a flag flip and a
+  /// relaunch, not a re-download and seven re-logins. Stage 1 is dormancy, not
+  /// removal.
+  static func retireBridgesAgent() {
+    let label = "io.intaglio.bridges"
+    let plist = launchAgents.appendingPathComponent("\(label).plist")
+    guard fm.fileExists(atPath: plist.path) else { return }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    p.arguments = ["bootout", "gui/\(getuid())/\(label)"]
+    try? p.run()
+    p.waitUntilExit()
+    try? fm.removeItem(at: plist)
+    NSLog("Intaglio Labs: retired the \(label) launchd agent; the bridges feature is off "
+          + "(its data under ~/.hazlie/matrix and ~/.hazlie/bridges is untouched)")
+  }
+
   /// Retire the backend jobs installed before the bundle identifier moved
   /// from com.hazlie.* to io.intaglio.*. The new plists are installed first;
   /// only then are these working fallbacks removed, so a failed upgrade never
@@ -212,6 +239,14 @@ enum Provision {
   /// a launch that gets interrupted is retried by the next one and, failing
   /// that, by setup itself.
   static func prefetchBridgeRuntime() {
+    // THE FEATURE REGISTRY DECIDES, and when it says no this is also the place
+    // an already-installed agent gets retired — this runs on every launch from
+    // main.swift, which is the only hook an upgraded machine reliably reaches.
+    guard Features.shouldPrefetchBridgeRuntime(Features.current) else {
+      if Features.shouldRetireBridgesAgent(Features.current) { retireBridgesAgent() }
+      NSLog("Intaglio Labs: bridges are off — skipping the bridge runtime prefetch")
+      return
+    }
     let script = backend.appendingPathComponent("ops/prefetch-bridges.sh")
     guard fm.fileExists(atPath: script.path) else {
       NSLog("Intaglio Labs: bundled bridge prefetch script is missing")
@@ -270,6 +305,16 @@ enum Provision {
   /// and starts the requested bridge stack. Concurrent card presses join the
   /// same run rather than racing two installers against one data directory.
   static func ensureBridgeRuntime(_ completion: @escaping (Bool) -> Void) {
+    // Second gate, not a duplicate of prefetch's: this one is reachable from a
+    // Connect press on the connections page (Bridge.swift) as well as from the
+    // prefetch, and it is the call that actually runs setup-bridges-native.sh —
+    // which is what installs io.intaglio.bridges. Refusing HERE is what keeps
+    // the agent off the machine.
+    guard Features.shouldEnsureBridgeRuntime(Features.current) else {
+      NSLog("Intaglio Labs: bridges are off — refusing to provision the Matrix runtime")
+      DispatchQueue.main.async { completion(false) }
+      return
+    }
     bridgeSetupLock.lock()
     bridgeSetupWaiters.append(completion)
     if bridgeSetupRunning {
@@ -418,10 +463,20 @@ enum Provision {
     // fails CLOSED without these (no HuggingFace fallback at runtime), so a
     // fresh Mac has no voice unless they are present. Cloned as a whole tree
     // (cp -c -R) and left alone if the directory already exists.
+    //
+    // GATED ON `voice` (stage 1). The models still ship in the bundle — taking
+    // them out is stage 2 — but a fresh install no longer grows ~495 MB in
+    // ~/.hazlie for a feature whose tap is a tease. Turning `voice` back on and
+    // relaunching clones them, because provision() is not the only caller that
+    // can: this is idempotent and skip-if-present either way.
     let voiceSrc = backend.appendingPathComponent("voice-models")
     let voiceDst = hazlie.appendingPathComponent("models/voice")
-    if fm.fileExists(atPath: voiceSrc.path), !fm.fileExists(atPath: voiceDst.path) {
-      cloneTree(voiceSrc, voiceDst)
+    if Features.shouldCloneVoiceModels(Features.current) {
+      if fm.fileExists(atPath: voiceSrc.path), !fm.fileExists(atPath: voiceDst.path) {
+        cloneTree(voiceSrc, voiceDst)
+      }
+    } else {
+      NSLog("Intaglio Labs: voice is off — skipping the voice-model clone")
     }
 
     // BOTH owner-only secrets, 0600, each left alone if already there. The body
