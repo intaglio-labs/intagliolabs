@@ -216,6 +216,18 @@ enum Provision {
         // Existing files are never touched, so this is a no-op when healthy.
         do { try ensureSecrets() }
         catch { NSLog("Intaglio Labs: secret provisioning failed: \(error)") }
+        // AND THE ONE AGENT PROVISIONING CAN LEGITIMATELY SKIP. provision()
+        // installs the llama agent only when a model is present, and an
+        // install that once read as "no weights" (the relative-link bug fixed
+        // in ModelSetup.installed on 2026-09-12, or weights that arrived later
+        // by hand) keeps the connect plist that ends this branch early -- so a
+        // Mac with weights and no llama agent would stay that way for ever.
+        let llamaPlist = launchAgents.appendingPathComponent("io.intaglio.llama-server.plist")
+        if ModelSetup.isInstalled, !fm.fileExists(atPath: llamaPlist.path) {
+          if installAgent("io.intaglio.llama-server") {
+            NSLog("Intaglio Labs: installed the llama agent for weights that were already here")
+          }
+        }
         if retireLegacyBackendAgents() { restartInstalledBackendAgents() }
         return
       }

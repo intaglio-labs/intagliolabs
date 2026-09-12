@@ -183,7 +183,19 @@ enum ModelSetup {
     // link() writes a relative destination; setup-llm.sh may write an absolute
     // one. Resolving against modelDir accepts both — an absolute path ignores
     // the base.
-    let target = URL(fileURLWithPath: dest, relativeTo: modelDir).standardizedFileURL
+    // NOT a `relativeTo:` resolution against modelDir. That is a plain path
+    // URL with no trailing slash, and Foundation resolves a relative path
+    // against the DIRECTORY CONTAINING such a base -- so
+    // "Qwen3-8B-Q4_K_M.gguf" landed at ~/.hazlie/Qwen3-8B-Q4_K_M.gguf, a file
+    // that does not exist, and every install whose link was written by
+    // link() (relative, the normal case) read as "no weights installed". The
+    // first clean-machine run (2026-09-12) therefore provisioned hermes and
+    // connect but never the llama agent. An absolute destination is taken as
+    // it is; a relative one is a child of the models directory, which is what
+    // the symlink itself means.
+    let target = (dest.hasPrefix("/")
+      ? URL(fileURLWithPath: dest)
+      : modelDir.appendingPathComponent(dest)).standardizedFileURL
     var isDir: ObjCBool = false
     guard fm.fileExists(atPath: target.path, isDirectory: &isDir), !isDir.boolValue,
           let size = (try? fm.attributesOfItem(atPath: target.path)[.size]) as? Int64,
