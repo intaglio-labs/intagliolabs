@@ -10,6 +10,16 @@
 //   timer; a hide/show cycle spent a producer peek outside its own throttle;
 //   and the resume was decided by a race between WebKit and the owner's hand.
 //
+// The round after that found the other half of three of them, which is why the
+// same four subjects are still here:
+//
+//   the cap stopped being CHECKED on the owner's path but went on being SPENT
+//   there, so alt-tabbing 40 times still killed the interval; not peeking on a
+//   re-show restarted the interval from zero, so a panel revealed often enough
+//   never peeked at all; and the bounded wait for native turned into a
+//   deadline, so a resume that arrived at 2 s was dropped and the owner redid
+//   screens 2 to 4. Each fix answered its finding and created its opposite.
+//
 // Source scan, like the other widget tests — no toolchain, no DOM.
 
 import test from 'node:test';
@@ -67,7 +77,15 @@ test('the probe cap belongs to the timer and to nothing else', () => {
   assert.doesNotMatch(code(probe.body), /GOOGLE_PROBE_CAP/u,
     'a cap checked here silently no-ops the BUTTON and the return-from-browser probe, '
     + 'and the screen sits on "opening google in your browser…" forever');
-  assert.match(probe.body, /googleProbes \+= 1/u, 'the timer still needs the spend counted');
+  // AND THE COUNTER IS THE TIMER'S TOO. Leaving the increment here was the
+  // same defect wearing a hat: pressing "connect" and alt-tabbing 40 times
+  // while signing in filled the counter, the interval killed itself on its
+  // next tick, and the screen's polling was dead for the rest of the visit
+  // with nothing on screen saying so. The cap's stated purpose is that a page
+  // cannot spend the budget by doing NOTHING; a spend driven by the owner
+  // doing something is not what it is counting.
+  assert.doesNotMatch(code(probe.body), /googleProbes/u,
+    'the owner-driven paths may not spend the timer\'s budget');
 
   const start = code(bodyOf('startGooglePolling').body);
   assert.match(start, /GOOGLE_PROBE_CAP/u, 'the cap has to be checked somewhere');
@@ -75,6 +93,9 @@ test('the probe cap belongs to the timer and to nothing else', () => {
   const intervalAt = start.indexOf('setInterval');
   assert.ok(intervalAt > -1 && capAt > intervalAt,
     'the cap is the timer callback\'s, so it cannot reach the two owner-driven paths');
+  const spendAt = start.indexOf('googleProbes += 1');
+  assert.ok(spendAt > intervalAt, 'and so is the spend — it is counting unattended probes');
+  assert.ok(spendAt > capAt, 'counted after the check, or the last tick is refused its own slot');
 
   // ONE PROBE NOW. The button starts this poll; without a leading probe the
   // first feedback after pressing it is GOOGLE_POLL_MS away — 15s, where the
@@ -96,13 +117,31 @@ test('coming back to the panel re-arms the polls without spending a peek', () =>
   // A peek is not a read: it runs produceBatch/produceOweBatch, applies the cap
   // and the servability gate, and writes the producers' refill bookkeeping.
   assert.match(body, /\n\s*tick\(\);/u, 'the table still repaints immediately — it is local and cheap');
-  assert.match(body, /if \(peekNow\) peek\(\);/u, 'the peek is the conditional one');
-  assert.doesNotMatch(body, /\n\s*peek\(\);\s*\n\s*loadTimer/u, 'the leading peek is unconditional again');
+  assert.match(body, /peekNow \|\| since >= PEEK_POLL_MS/u,
+    'a peek that is already due fires on the re-show; only one inside the window waits');
 
   const visibility = /document\.addEventListener\('visibilitychange'[\s\S]*?\n\}\);/u.exec(source)?.[0];
   assert.ok(visibility, 'the visibilitychange handler was not found');
   assert.match(visibility, /startLoadPolling\(\{ peekNow: false \}\)/u,
     'every hide/show cycle would otherwise spend one relCardPeek outside the 15s throttle');
+
+  // AND THE THROTTLE IS A RATE, SO IT IS KEPT AS A TIME.
+  //
+  // `peekNow: false` plus a fresh setInterval restarted the fifteen seconds
+  // from zero on every re-show, so a panel ordered out and revealed more often
+  // than PEEK_POLL_MS reached the mark exactly never — screen 6's reconnect
+  // card never populated, which is the one thing the flow is walking towards.
+  // The previous behaviour over-spent; that one could spend nothing.
+  assert.match(source, /^let lastPeekAt = 0;$/mu,
+    'the last peek has to outlive any one arming of the poll');
+  assert.doesNotMatch(code(bodyOf('startLoadPolling').body), /let lastPeekAt/u,
+    'a per-arming variable is the bug, not the fix');
+  assert.match(body, /lastPeekAt = Date\.now\(\);/u, 'and it is stamped when a peek is spent');
+  // The not-yet-due path waits out the REMAINDER and then falls into the
+  // interval, so re-arming can delay a peek and can never cancel one.
+  assert.match(body, /setTimeout\([\s\S]{0,160}PEEK_POLL_MS - since\)/u);
+  assert.match(code(bodyOf('stopLoadPolling').body), /clearTimeout\(loadPeekDelay\)/u,
+    'leaving the screen has to cancel the pending peek as well as the intervals');
 
   // And entering the screen for real still peeks: the flow ends on a card, and
   // a screen that never asked for one would wait out the ten minutes.
@@ -126,8 +165,8 @@ test('the resume is decided by native, not by a race with the owner\'s hand', ()
 
   const resume = /window\.__hzOnboardingResume = \(step\) => \{([\s\S]*?)\n\};/u.exec(source)?.[1];
   assert.ok(resume, '__hzOnboardingResume not found');
-  assert.match(resume, /if \(entrySettled\) return;/u,
-    'native sends a resume only to a freshly loaded page; a settled one has been told already');
+  assert.match(resume, /if \(resumeHeard\) return true;/u,
+    'native sends one resume per open; a second delivery of it is a repeat, not a new word');
   assert.match(resume, /settleEntry\(\)/u);
   assert.match(resume, /pendingAdvance = false/u,
     'a held press was aimed at the welcome, and a resume moves them past it');
@@ -146,4 +185,70 @@ test('the resume is decided by native, not by a race with the owner\'s hand', ()
   assert.ok(fallback, 'nothing bounds the wait');
   assert.match(fallback, /settleEntry\(\)/u);
   assert.match(fallback, /flushPendingAdvance\(\)/u);
+});
+
+test('a resume that arrives after the bound is still honoured if nobody pressed', () => {
+  // THE BOUND IS ON WAITING, NOT A DEADLINE ON NATIVE. ENTRY_WAIT_MS settles
+  // the PRESS: after it, the welcome's button works. A resume arriving at 2 s
+  // — a cold launch on a slow machine, which is the launch that follows
+  // granting Full Disk Access and taking macOS's "Quit & Reopen" — was then
+  // returned from without doing anything, and the owner redid screens 2 to 4.
+  // If nobody has pressed, nothing has been decided, and the ownerMoved flag
+  // was right about that much.
+  const resume = /window\.__hzOnboardingResume = \(step\) => \{([\s\S]*?)\n\};/u.exec(source)?.[1];
+  assert.ok(resume, '__hzOnboardingResume not found');
+  assert.match(resume, /const late = entrySettled;/u,
+    'settling has to be read BEFORE settleEntry() makes it true for everyone');
+  assert.match(resume, /if \(late && ownerPressed\) return true;/u,
+    'a late resume is dropped only when the owner has moved under their own steam');
+  assert.ok(resume.indexOf('const late') < resume.indexOf('settleEntry()'));
+  assert.ok(resume.indexOf('if (late && ownerPressed)') < resume.indexOf('showScreen('),
+    'and the drop is decided before the flow moves');
+
+  // ownerPressed is the press itself, not the queued advance: pendingAdvance
+  // is consumed by the flush and would read false again the moment it fired.
+  assert.match(source, /^let ownerPressed = false;$/mu);
+  const cta = /document\.getElementById\('cta'\)\.addEventListener\('click', \(\) => \{([\s\S]*?)\n\}\);/u
+    .exec(source)?.[1];
+  assert.ok(cta, "the welcome's button was not found");
+  assert.match(cta, /ownerPressed = true;/u);
+
+  // NATIVE DOES NOT RELY ON THE ABOVE. main.swift asks the page to acknowledge
+  // and delivers again once there is a page to deliver to; the two defences
+  // answer different halves of the same hop, and neither is the other's excuse.
+  const swift = readFileSync(join(ROOT, 'widget', 'src', 'main.swift'), 'utf8');
+  assert.match(swift, /private func deliverToOnboarding\(/u);
+  assert.match(swift, /web\.evaluateJavaScript\(js\) \{[\s\S]{0,200}whenPageFinishes/u,
+    'the retry is armed on the answer, not fired blind');
+  assert.doesNotMatch(swift, /web\?\.evaluateJavaScript\(\s*\n?\s*"window\.__hzOnboarding/u,
+    'the unacknowledged fire-and-forget delivery is back');
+  for (const verb of ['__hzOnboardingResume', '__hzOnboardingReset']) {
+    const body = new RegExp(`window\\.${verb} = \\(\\w*\\) => \\{([\\s\\S]*?)\\n\\};`, 'u')
+      .exec(source)?.[1];
+    assert.ok(body, `${verb} not found`);
+    assert.match(body, /return true;/u, `${verb} has to answer, or every delivery looks lost`);
+  }
+});
+
+test('the held press says so, and Escape takes it back', () => {
+  // The CTA plays its sound and then swallows the move while the gate is
+  // closed, which reads as a dead button. Disabling it is the affordance and
+  // it also stops a second press replaying the sound.
+  const cta = /document\.getElementById\('cta'\)\.addEventListener\('click', \(\) => \{([\s\S]*?)\n\}\);/u
+    .exec(source)?.[1];
+  assert.ok(cta, "the welcome's button was not found");
+  assert.match(cta, /if \(!entrySettled\) setCtaHeld\(true\);/u);
+  assert.match(code(bodyOf('setCtaHeld').body), /\.disabled = on/u);
+  assert.match(readFileSync(join(ROOT, 'widget', 'ui', 'palette.css'), 'utf8'),
+    /\.ob-cta\[disabled\]/u, 'the disabled state has to be visible, not just semantic');
+  // Released whenever the wait ends, by either route.
+  assert.match(code(bodyOf('settleEntry').body), /setCtaHeld\(false\)/u);
+
+  // And a press held by the gate is cancelled with the flow. The page survives
+  // the close, so otherwise the fallback fires showScreen() behind a panel
+  // nobody can see and the next open has to undo it.
+  const escape = /if \(e\.key === 'Escape'\) \{([\s\S]*?)\n {2}\}/u.exec(source)?.[1];
+  assert.ok(escape, 'the Escape branch was not found');
+  assert.match(escape, /pendingAdvance = false;/u);
+  assert.match(escape, /setCtaHeld\(false\);/u);
 });

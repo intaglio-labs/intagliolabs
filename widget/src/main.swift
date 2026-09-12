@@ -717,19 +717,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // mid-flow is a CONTINUATION — macOS offers "Quit & Reopen" the moment Full
     // Disk Access is granted, and taking it used to throw away every step
     // already done and start again from the welcome, immediately after the
-    // hardest step in the flow. Guarded because on the very first open the page
-    // has not loaded yet, which is harmless: a fresh page starts on screen 1.
+    // hardest step in the flow. On the very first open the page has not loaded
+    // yet and hears neither word — which is NOT harmless for a resume, so the
+    // delivery is acknowledged and repeated once the page exists. See
+    // deliverToOnboarding.
     let web = p.contentView as? WKWebView
     if resume, let step = Bridge.onboardingStep,
        let json = String(data: (try? JSONSerialization.data(withJSONObject: [step])) ?? Data(),
                          encoding: .utf8) {
-      web?.evaluateJavaScript(
-        "window.__hzOnboardingResume && window.__hzOnboardingResume(\(json)[0])")
+      deliverToOnboarding(
+        web, "window.__hzOnboardingResume && window.__hzOnboardingResume(\(json)[0])")
     } else {
-      web?.evaluateJavaScript("window.__hzOnboardingReset && window.__hzOnboardingReset()")
+      deliverToOnboarding(web, "window.__hzOnboardingReset && window.__hzOnboardingReset()")
     }
     NSApp.activate(ignoringOtherApps: true)
     p.makeKeyAndOrderFront(nil)
+  }
+
+  /// Say it once, and say it again if the page was not there to hear it.
+  ///
+  /// SENDING IS NOT ARRIVING. Both onboarding entry points are evaluated
+  /// against a panel built moments earlier, and on the very first launch that
+  /// document has not parsed onboarding.js yet — the comment above says WebKit
+  /// can run the evaluation seconds later, and the page's own gate bounds its
+  /// wait at ENTRY_WAIT_MS. A delivery that lands after that bound is a
+  /// delivery the page is entitled to ignore, and the cost of ignoring it is
+  /// the owner redoing screens 2 to 4 on the cold launch that follows granting
+  /// Full Disk Access — the one launch where this matters most.
+  ///
+  /// So the page acknowledges: both functions return true, and `false` or nil
+  /// means nothing was listening. The delivery is then made again the moment
+  /// the page finishes loading, which is the first instant there is anything
+  /// to deliver to. Once, not on a timer: the second attempt is talking to a
+  /// parsed document, and if that fails the page's own late-arrival rule is
+  /// what is left.
+  private func deliverToOnboarding(_ web: WKWebView?, _ js: String) {
+    guard let web else { return }
+    web.evaluateJavaScript(js) { [weak self] answered, _ in
+      guard (answered as? Bool) != true else { return }
+      self?.bridge.whenPageFinishes(web) { page in page.evaluateJavaScript(js) }
+    }
   }
 
   // ONE GATE, AT THE CONSTRUCTOR. Every chat entry point — the bar, a voice

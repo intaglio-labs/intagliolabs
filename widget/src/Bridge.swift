@@ -165,6 +165,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // identity here should come from the code that made the view.
   private var pageOf: [ObjectIdentifier: String] = [:]
 
+  // Deliveries waiting on a page that has not finished loading. See
+  // whenPageFinishes, below the navigation delegate that drains it.
+  private var afterLoad: [ObjectIdentifier: [(WKWebView) -> Void]] = [:]
+
   func register(_ webView: WKWebView, as page: String) {
     pageOf[ObjectIdentifier(webView)] = page
   }
@@ -639,6 +643,26 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // through scaleChanged, which is the case this cannot see.
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     webView.pageZoom = Bridge.scale
+    for work in afterLoad.removeValue(forKey: ObjectIdentifier(webView)) ?? [] { work(webView) }
+  }
+
+  /// Work to run the next time this page finishes loading.
+  ///
+  /// FOR THE WORD THAT ARRIVED TOO EARLY. A caller that evaluates JavaScript
+  /// against a panel it has just built is talking to a document that may not
+  /// have parsed its script yet — WebKit runs the evaluation when the document
+  /// exists, which on a cold first launch can be seconds after the call and
+  /// after the owner has started pressing things. The caller checks whether
+  /// the page answered and, if it did not, leaves the delivery here to be made
+  /// again once there is a page to make it to.
+  ///
+  /// One-shot and main-queue only, like every other webview touch here. A page
+  /// that never finishes loading keeps its closure; that is one closure on a
+  /// window the app holds anyway, and the alternative (a timer) would have to
+  /// guess at the same answer.
+  func whenPageFinishes(_ web: WKWebView, _ work: @escaping (WKWebView) -> Void) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    afterLoad[ObjectIdentifier(web), default: []].append(work)
   }
 
   // Webviews may navigate to file: URLs and nowhere else.
@@ -2492,11 +2516,17 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// newlines inside quotes. The same character walk as connectors/lib/csv.mjs
   /// because it has to reach the same header row on the same file.
   ///
-  /// The text handed in is a bounded head, so the final row may be a fragment.
-  /// That is fine: a fragment either holds the columns or it does not, and a
-  /// header that does not fit in 4 KB is not a LinkedIn export.
-  private static func csvRows(_ text: String) -> [[String]] {
-    var rows: [[String]] = []
+  /// ONE WALK, TWO CONSUMERS, AND ONLY ONE OF THEM KEEPS ANYTHING. The rows
+  /// are handed over as they are parsed and dropped again unless the caller
+  /// holds on to them: countRows() reads a whole 8-10 MB export through this
+  /// and keeps one row at a time, where collecting first meant ~400k live
+  /// Strings for a 30k-connection file while the import button spun. csvRows()
+  /// below is the collecting caller, and it is only ever handed a 4 KB head.
+  ///
+  /// A bounded head's final row may be a fragment. That is fine: a fragment
+  /// either holds the columns or it does not, and a header that does not fit
+  /// in 4 KB is not a LinkedIn export.
+  private static func csvScan(_ text: String, _ onRow: ([String]) -> Void) {
     var row: [String] = []
     var field = ""
     var inQuotes = false
@@ -2522,7 +2552,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         if c == "\r", let next = iterator.next(), next != "\n" { pending = next }
         row.append(field)
         field = ""
-        rows.append(row)
+        onRow(row)
         row = []
         continue
       }
@@ -2530,8 +2560,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     }
     if !field.isEmpty || !row.isEmpty {
       row.append(field)
-      rows.append(row)
+      onRow(row)
     }
+  }
+
+  /// Every row at once, for the callers that need to look back over them. Only
+  /// ever handed a bounded head — see csvScan.
+  private static func csvRows(_ text: String) -> [[String]] {
+    var rows: [[String]] = []
+    csvScan(text) { rows.append($0) }
     return rows
   }
 
@@ -2592,6 +2629,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// failure on the SECOND file of a multi-select puts the first one back
   /// rather than leaving Connections.csv new and messages.csv old. The
   /// backups are removed once every file has landed.
+  ///
+  /// N FILES MEANS N DIFFERENT FILES. Two picks of the same kind -- the export
+  /// and the browser's second download of it -- share a destination, and the
+  /// whole-or-nothing story does not survive two turns round the swap loop
+  /// aimed at the same path: the second consumed the first one's backup and
+  /// then failed, leaving nothing to undo with. They are refused in the first
+  /// pass, by name, before anything is written.
   private func acceptLinkedInFiles(_ urls: [URL]) -> [String: Any] {
     let fm = FileManager.default
     if let zip = urls.first(where: { $0.pathExtension.lowercased() == "zip" }) {
@@ -2620,13 +2664,35 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           "firstColumn": Bridge.firstColumn(of: head),
         ]
       }
+      // ONE FILE PER KIND, AND NEITHER OF TWO IS A DEFAULT.
+      //
+      // `Connections.csv` and `Connections (1).csv` both classify as
+      // Connections.csv, so a multi-select of the two staged both copies to
+      // the SAME `.importing` path and swapped both into the same
+      // destination. The second turn round the swap loop removed the backup
+      // the first had just made, its replace then threw on a temporary that
+      // had already been consumed, and the undo had nothing left to put back:
+      // the export the owner had was gone and linkedin.mjs reported it
+      // missing. That is the one outcome this whole function is written to
+      // make impossible, and it happened in exactly the case the undo path
+      // was added for.
+      //
+      // The panel cannot say which of the two was meant — the order `urls`
+      // arrive in is the panel's, not a preference — so this refuses and
+      // names both files rather than silently picking one.
+      if let clash = accepted.first(where: { $0.kind.name == kind.name }) {
+        return [
+          "state": "error", "reason": "duplicate",
+          "file": kind.name,
+          "files": [clash.url.lastPathComponent, url.lastPathComponent],
+        ]
+      }
       let destination = linkedInDirectory.appendingPathComponent(kind.name)
       // DO NOT REPLACE A NEWER FILE WITH AN OLDER ONE. Onboarding can be
       // replayed from the gear on a machine that already has an export, and
       // the owner reaching for "the LinkedIn file" in Downloads may well find
       // last year's. Compared by modification time, and refused out loud.
-      if let existing = try? destination.resourceValues(forKeys: [.contentModificationDateKey])
-          .contentModificationDate,
+      if let existing = Bridge.installedVintage(of: destination),
          let picked = try? url.resourceValues(forKeys: [.contentModificationDateKey])
           .contentModificationDate,
          existing > picked {
@@ -2647,7 +2713,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     } catch {
       return ["state": "error", "reason": "copy", "file": accepted.first?.kind.name ?? ""]
     }
-    var staged: [(temporary: URL, destination: URL, kind: (anchor: String, name: String))] = []
+    var staged: [(temporary: URL, destination: URL, kind: (anchor: String, name: String),
+                  vintage: Date?)] = []
     let discardStaged = { for entry in staged { try? fm.removeItem(at: entry.temporary) } }
     for entry in accepted {
       let destination = linkedInDirectory.appendingPathComponent(entry.kind.name)
@@ -2663,7 +2730,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         try? fm.removeItem(at: temporary)
         return ["state": "error", "reason": "copy", "file": entry.kind.name]
       }
-      staged.append((temporary, destination, entry.kind))
+      // Read from the PICKED file rather than the copy: this is the export's
+      // own date, and the swap below puts it on the destination's creation
+      // date so it survives the modification date being stamped to now.
+      let vintage = try? entry.url.resourceValues(forKeys: [.contentModificationDateKey])
+        .contentModificationDate
+      staged.append((temporary, destination, entry.kind, vintage))
     }
 
     var copied: [String] = []
@@ -2680,7 +2752,12 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           continue
         }
         do {
-          _ = try fm.replaceItemAt(entry.destination, withItemAt: backup)
+          // `.usingNewMetadataOnly` here for the same reason as in the swap:
+          // the default keeps the metadata of the item being replaced, which
+          // is the file this pick just wrote and whose dates were stamped.
+          // The backup has to come back as itself, vintage included.
+          _ = try fm.replaceItemAt(entry.destination, withItemAt: backup,
+                                   options: [.usingNewMetadataOnly])
         } catch {
           // The atomic path refused. Fall back to a rename -- but never delete
           // the backup, which at this point is the owner's only copy of the
@@ -2707,7 +2784,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           try? fm.removeItem(at: backup)
           _ = try fm.replaceItemAt(
             entry.destination, withItemAt: entry.temporary,
-            backupItemName: backupName, options: [.withoutDeletingBackupItem]
+            backupItemName: backupName,
+            // `.usingNewMetadataOnly` OR THE READER NEVER SEES THE FILE.
+            // replaceItemAt's default is to carry the DISPLACED item's
+            // metadata onto the replacement, and the displaced item here is
+            // the previous export — whose modification date is precisely the
+            // cursor linkedin.mjs compares against
+            // (`newestMtime <= stored` skips the scan). Keeping it would mean
+            // the new export lands, the screen reports its count, and the
+            // connector logs `unchangedSinceMtime: true` forever.
+            options: [.withoutDeletingBackupItem, .usingNewMetadataOnly]
           )
         } else {
           // replaceItemAt needs something to replace; on a first import there
@@ -2720,6 +2806,26 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         return ["state": "error", "reason": "copy", "file": entry.kind.name]
       }
       swapped.append((entry.destination, hadPrevious ? backup : nil))
+      // AND THE FILE HAS TO LOOK NEW, not merely be new.
+      //
+      // `.usingNewMetadataOnly` above stops the previous export's date being
+      // carried over, but the staged copy's own date is the PICKED file's,
+      // and re-importing an export the connector has already read leaves that
+      // date equal to the stored cursor — the same silent skip by a different
+      // route. The modification date is therefore stamped to the moment the
+      // file landed, which is what the cursor is really asking about.
+      //
+      // The creation date keeps the export's own vintage, because the refusal
+      // in PASS ONE still has to be able to ask how old the installed export
+      // is. See installedVintage.
+      //
+      // Best effort: a stamp that fails costs one skipped scan (the connector
+      // catches up when the next export lands) and never the file.
+      var stamped = entry.destination
+      var dates = URLResourceValues()
+      dates.contentModificationDate = Date()
+      if let vintage = entry.vintage { dates.creationDate = vintage }
+      try? stamped.setResourceValues(dates)
       copied.append(entry.kind.name)
       if entry.kind.name == "Connections.csv" {
         connections = Bridge.countRows(inCsvAt: entry.destination, anchor: entry.kind.anchor)
@@ -2769,6 +2875,26 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     ]
   }
 
+  /// HOW OLD THE INSTALLED EXPORT IS, which is no longer its modification date.
+  ///
+  /// The swap stamps the destination's modification date to the moment the
+  /// file landed, so the reader's mtime cursor sees a new file. That makes the
+  /// modification date answer "when did this arrive" — and the refusal in PASS
+  /// ONE has to ask the other question, "how old is the export sitting here",
+  /// or replaying onboarding and handing back the same file in Downloads comes
+  /// out as "that one is older than the one you have".
+  ///
+  /// The same swap puts the export's own date on the CREATION date, so that
+  /// carries the vintage. A file the owner dropped into the directory by hand
+  /// has had neither treatment: its modification date IS its vintage, and its
+  /// creation date is when it was copied in, which is at or after it. The
+  /// earlier of the two is therefore the vintage in both cases, and nothing
+  /// has to be stored anywhere to tell the two kinds of file apart.
+  private static func installedVintage(of url: URL) -> Date? {
+    let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
+    return [values?.contentModificationDate, values?.creationDate].compactMap { $0 }.min()
+  }
+
   private static func readHead(of url: URL, bytes: Int) -> String? {
     guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
     defer { try? handle.close() }
@@ -2805,21 +2931,36 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// paragraph mentions the columns, so the same file could be CLASSIFIED on an
   /// exact field match at the real header and COUNTED from a preamble line that
   /// merely contains "First Name", inflating the "N connections already here"
-  /// the screen shows by the preamble's offset. Both now walk csvRows and
-  /// compare whole trimmed fields.
+  /// the screen shows by the preamble's offset. Both now find the header by the
+  /// same rule, over whole trimmed fields.
+  ///
+  /// AND THE HEADER IS FOUND IN THE HEAD, then the body is STREAMED. Sharing
+  /// the rule used to mean sharing csvRows over the whole file, which for a
+  /// 30k-connection export is ~8-10 MB collected into ~400k live Strings on a
+  /// background queue while the import button spins. The header is found the
+  /// same way on the same bounded 4 KB head linkedInKind classifies from — a
+  /// file whose header does not fit in that head never reaches this function,
+  /// because the classifier would already have refused it — and the rest of
+  /// the file is walked a row at a time and counted, keeping one row.
   private static func countRows(inCsvAt url: URL, anchor: String) -> Int {
+    guard let head = readHead(of: url, bytes: 4096),
+          let headerIndex = csvRows(head).firstIndex(where: { csvFields($0).contains(anchor) })
+    else { return 0 }
     let data = (try? Data(contentsOf: url)) ?? Data()
     guard let text = String(data: data, encoding: .utf8)
       ?? String(data: data, encoding: .isoLatin1) else { return 0 }
-    let rows = csvRows(text)
-    guard let headerIndex = rows.firstIndex(where: { csvFields($0).contains(anchor) }) else {
-      return 0
+    // Rows are ordered and the head is a prefix, so the header's index in the
+    // head is its index in the file.
+    var index = -1
+    var count = 0
+    csvScan(text) { row in
+      index += 1
+      guard index > headerIndex else { return }
+      // Blank rows are not records. The old walk skipped empty LINES for the
+      // same reason; a row whose every field is empty is the same thing here.
+      if row.contains(where: { !$0.trimmingCharacters(in: csvFieldTrim).isEmpty }) { count += 1 }
     }
-    // Blank rows are not records. The old walk skipped empty LINES for the same
-    // reason; a row whose every field is empty is the same thing here.
-    return rows[(headerIndex + 1)...].filter { row in
-      row.contains { !$0.trimmingCharacters(in: csvFieldTrim).isEmpty }
-    }.count
+    return count
   }
 
   private func bridgeCall(

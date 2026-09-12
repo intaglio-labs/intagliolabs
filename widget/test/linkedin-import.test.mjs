@@ -136,9 +136,9 @@ test('the connection count is counted, quote-aware, not guessed from newlines', 
   // field; splitting on "\n" would report more connections than the owner has.
   // csvRows() is the RFC-4180 walk that already knows this, and is now the only
   // copy of it in the file.
-  assert.match(COUNT_ROWS, /csvRows\(text\)/u);
+  assert.match(COUNT_ROWS, /csvScan\(text\)/u);
   // Counted from after the header ROW, the same slice csvObjects takes.
-  assert.match(COUNT_ROWS, /rows\[\(headerIndex \+ 1\)\.\.\.\]/u);
+  assert.match(COUNT_ROWS, /guard index > headerIndex else \{ return \}/u);
   assert.match(accept,
     /connections = Bridge\.countRows\(inCsvAt: entry\.destination, anchor: entry\.kind\.anchor\)/u);
 });
@@ -380,4 +380,184 @@ test('the header is matched as a field, not as a substring of the file', () => {
   assert.match(kindOf, /require/u, 'and the second column is required');
   // A column named "First Name (Legal)" must not satisfy it.
   assert.equal(classify('First Name (Legal),Last Name,URL\nA,B,C\n'), null);
+});
+
+
+// THE COUNT DOES NOT COLLECT THE FILE IT COUNTS (review finding 11).
+//
+// Sharing the header rule with the classifier was right; sharing it by running
+// csvRows over the whole file was not. csvRows' doc comment still said "the
+// text handed in is a bounded head" while countRows handed it an 8-10 MB
+// export — a per-Character Swift walk collecting ~400k live Strings on a
+// background queue while the import button spins. The header is found on the
+// same 4 KB head the CLASSIFIER uses, and the body is walked a row at a time.
+test('the header comes from the head and the body is streamed, not collected', () => {
+  assert.ok(COUNT_ROWS, 'countRows() not found');
+  assert.match(COUNT_ROWS, /readHead\(of: url, bytes: 4096\)/u,
+    'the header rule runs on the same bounded head the classifier refuses files from');
+  assert.match(COUNT_ROWS, /csvRows\(head\)\.firstIndex\(where: \{ csvFields\(\$0\)\.contains\(anchor\) \}\)/u,
+    'and it is still the exact-field rule, not a substring');
+  assert.doesNotMatch(COUNT_ROWS, /let rows = csvRows\(text\)/u,
+    'the whole export is collected into an array again');
+
+  // The walk itself is now a stream with two consumers, and only one of them
+  // keeps anything. csvRows is the collecting one and must stay off this path.
+  const scan = /private static func csvScan\(_ text: String, _ onRow: \(\[String\]\) -> Void\) \{([\s\S]*?)\n {2}\}/u
+    .exec(bridge)?.[1];
+  assert.ok(scan, 'csvScan() not found — the walk has to exist exactly once');
+  assert.match(scan, /onRow\(row\)/u, 'rows are handed over as they are parsed');
+  assert.doesNotMatch(scan, /rows\.append/u, 'the walk itself may not accumulate');
+  const collect = /private static func csvRows\(_ text: String\) -> \[\[String\]\] \{([\s\S]*?)\n {2}\}/u
+    .exec(bridge)?.[1];
+  assert.ok(collect, 'csvRows() not found');
+  assert.match(collect, /csvScan\(text\)/u, 'ONE walk: csvRows is a consumer of it, not a second copy');
+
+  // And the classifier still reads the same 4 KB, so a file whose header does
+  // not fit in the head never reaches the count in the first place.
+  assert.match(accept, /readHead\(of: url, bytes: 4096\)/u);
+});
+
+test('the head-scoped header lands on the same row the whole file does', () => {
+  // The head is a prefix and rows are ordered, so the header's index in the
+  // head is its index in the file — including past a "Notes:" preamble, which
+  // is the case that makes the claim worth checking rather than assuming.
+  for (const name of ['Connections.csv', 'Connections-preamble.csv']) {
+    const text = fixture(name);
+    const rowsOfHead = parseCsv(text.slice(0, 4096));
+    const rowsOfAll = parseCsv(text);
+    const rule = (row) => row.some((f) => f.trim().replace(/^\uFEFF/u, '') === 'First Name');
+    const inHead = rowsOfHead.findIndex(rule);
+    assert.ok(inHead > -1, `${name}: the header does not fit in the head`);
+    assert.equal(inHead, rowsOfAll.findIndex(rule), `${name}: the two indexes disagree`);
+    assert.equal(countFrom(text, 'First Name'),
+      rowsOfAll.slice(inHead + 1).filter((r) => r.some((f) => f.trim() !== '')).length);
+  }
+});
+
+// TWO PICKS OF ONE KIND ARE ONE DESTINATION (review finding 1).
+//
+// `Connections.csv` and `Connections (1).csv` — the export and the browser's
+// second download of it — both classify as Connections.csv. Nothing deduped
+// them, so both were staged to the same `.importing` path and swapped into the
+// same destination: the second turn round the swap loop removed the backup the
+// first had just made, its replace threw on a temporary already consumed, and
+// the undo had nothing left to put back. The owner's export was gone and
+// linkedin.mjs reported it missing — the exact outcome the undo path was added
+// to prevent, in the exact case it was added for.
+const DUP = /"reason": "duplicate"[\s\S]{0,300}?"files": \[([^\]]*)\]/u.exec(accept);
+
+test('a second file of a kind already picked is refused, by name', () => {
+  assert.ok(DUP, 'nothing refuses two picks of the same kind');
+  // BOTH names: the remedy is choosing between them, and the app cannot.
+  assert.match(DUP[1], /clash\.url\.lastPathComponent/u, 'the file already accepted');
+  assert.match(DUP[1], /url\.lastPathComponent/u, 'and the one that clashed with it');
+
+  // In PASS ONE, before anything is written — same rule as every other refusal.
+  const passOne = accept.indexOf('// PASS ONE');
+  const passTwo = accept.indexOf('// PASS TWO');
+  const at = accept.indexOf('"reason": "duplicate"');
+  assert.ok(at > passOne && at < passTwo, 'a duplicate must be refused before anything is staged');
+  assert.match(accept, /accepted\.first\(where: \{ \$0\.kind\.name == kind\.name \}\)/u,
+    'deduped by KIND, which is what shares a destination — not by file name');
+
+  // And the screen can say it: a refusal the page renders as "i couldn't read
+  // that file" would send the owner back to the columns.
+  const page = readFileSync(join(ROOT, 'widget', 'ui', 'onboarding.js'), 'utf8');
+  assert.match(page, /out\.reason === 'duplicate'/u);
+  assert.match(page, /out\.files/u, 'and names both files, as the bridge sends them');
+});
+
+/// Whether the import dedupes by kind at all, and on which field — READ OUT OF
+/// the Swift rather than assumed, so the model below refuses only what the code
+/// refuses. Without this the pair of fixtures would pass against an import that
+/// has no dedupe in it, which is what the pair is here to rule out.
+const DEDUPE = /accepted\.first\(where: \{ \$0\.kind\.(\w+) == kind\.(\w+) \}\)/u.exec(accept);
+
+/// PASS ONE as the Swift is required to implement it: classify every file, and
+/// refuse the second of any kind rather than letting two picks share one
+/// destination.
+function acceptPass(files) {
+  const accepted = [];
+  for (const file of files) {
+    const kind = classify(file.text);
+    if (!kind) return { refused: 'columns', file: file.name };
+    const clash = DEDUPE ? accepted.find((a) => a.kind === kind) : null;
+    if (clash) return { refused: 'duplicate', file: kind, files: [clash.name, file.name] };
+    accepted.push({ name: file.name, kind });
+  }
+  return { accepted };
+}
+
+const pick = (name, as = name) => ({ name: as, text: fixture(name) });
+
+test('two files of the same kind are refused; N different kinds are not', () => {
+  assert.ok(DEDUPE, 'the import does not dedupe picks by kind at all');
+  assert.deepEqual([DEDUPE[1], DEDUPE[2]], ['name', 'name'],
+    'the destination is named by kind.name, so that is what two picks collide on');
+  // The real multi-select: the export and the browser's second download of it.
+  // Different names, one kind, one destination.
+  const both = acceptPass([pick('Connections.csv'), pick('Connections-preamble.csv', 'Connections (1).csv')]);
+  assert.equal(both.refused, 'duplicate');
+  assert.equal(both.file, 'Connections.csv');
+  assert.deepEqual(both.files, ['Connections.csv', 'Connections (1).csv'],
+    'both names, because choosing between them is the owner\'s to do');
+
+  // The order does not decide it either: neither pick is the default.
+  const swapped = acceptPass([pick('Connections-preamble.csv', 'Connections (1).csv'), pick('Connections.csv')]);
+  assert.equal(swapped.refused, 'duplicate');
+
+  // ...and the pick this whole two-pass shape exists for still goes through
+  // whole: two files, two kinds, two destinations.
+  const pair = acceptPass([pick('Connections.csv'), pick('messages.csv')]);
+  assert.ok(!pair.refused, `a legitimate multi-select was refused: ${pair.refused}`);
+  assert.deepEqual(pair.accepted.map((a) => a.kind), ['Connections.csv', 'messages.csv']);
+});
+
+// THE READER HAS TO SEE A NEW FILE (review finding 6).
+//
+// linkedin.mjs skips its whole scan when `newestMtime <= stored`, and both
+// ways of putting a file at the destination can hand it an mtime that is not
+// newer. replaceItemAt's DEFAULT is to carry the DISPLACED item's metadata
+// onto the replacement — and the displaced item is the previous export, whose
+// mtime is precisely the stored cursor. The import would land, the screen
+// would report its count, and the connector would log `unchangedSinceMtime:
+// true` forever.
+test('the swapped-in export looks new to the connector that reads it', () => {
+  const swap = accept.slice(accept.indexOf('var copied: [String] = []'));
+  assert.match(swap, /options: \[\.withoutDeletingBackupItem, \.usingNewMetadataOnly\]/u,
+    'without this the new export inherits the old one\'s modification date');
+  assert.match(swap, /dates\.contentModificationDate = Date\(\)/u,
+    'and a re-picked export carries its own unchanged date, which is the same skip');
+  // The gate this is answering, read from the connector rather than written
+  // down twice.
+  const linkedin = readFileSync(join(ROOT, 'connectors', 'sources', 'linkedin.mjs'), 'utf8');
+  assert.match(linkedin, /newestMtime <= stored/u,
+    'if the connector stops gating on mtime this stamping needs revisiting');
+
+  // The undo restores the backup as ITSELF. Default options there would put
+  // the metadata of the file being replaced — the one this pick just stamped —
+  // onto the export being put back.
+  const undo = /let undoSwapped = \{([\s\S]*?)\n {4}\}/u.exec(swap)?.[1];
+  assert.ok(undo, 'undoSwapped was not found');
+  assert.match(undo, /options: \[\.usingNewMetadataOnly\]/u);
+});
+
+test('stamping the landing time does not make the export look newer than it is', () => {
+  // The refusal in PASS ONE asks how old the INSTALLED export is, and the
+  // modification date has just stopped being that answer. Replaying onboarding
+  // and handing back the same file in Downloads would otherwise come out as
+  // "you already have a newer Connections.csv".
+  assert.match(accept, /if let existing = Bridge\.installedVintage\(of: destination\)/u,
+    'the newer-check still reads the landing time');
+  const vintage = /private static func installedVintage\(of url: URL\) -> Date\? \{([\s\S]*?)\n {2}\}/u
+    .exec(bridge)?.[1];
+  assert.ok(vintage, 'installedVintage() not found');
+  assert.match(vintage, /\.contentModificationDateKey, \.creationDateKey/u);
+  assert.match(vintage, /\.min\(\)/u,
+    'the earlier of the two is the vintage for a stamped file AND a hand-placed one');
+  // ...which requires the swap to put the export's own date somewhere.
+  const swap = accept.slice(accept.indexOf('var copied: [String] = []'));
+  assert.match(swap, /dates\.creationDate = vintage/u);
+  assert.match(accept, /let vintage = try\? entry\.url\.resourceValues/u,
+    'read from the PICKED file, which is the only thing that knows the export\'s date');
 });

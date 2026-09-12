@@ -159,9 +159,28 @@ function nextScreen() {
 // a resume, where native is putting them on a later screen the press was never
 // aimed at. The wait is one message hop. ENTRY_WAIT_MS bounds it so a page
 // opened with no native behind it is never stuck.
+//
+// AND THE BOUND IS A BOUND ON WAITING, NOT A DEADLINE ON NATIVE. A resume that
+// arrives at 2 s — a cold launch on a slow machine, which is exactly the
+// launch that follows granting Full Disk Access and taking macOS's "Quit &
+// Reopen" — used to be dropped on the floor, and the owner redid screens 2 to
+// 4. What the fallback settles is the PRESS: after it, the welcome's button
+// works. If nobody has pressed it, nothing has been decided and a late resume
+// is still the right answer, which is what the ownerMoved flag was right
+// about. So the late rule is the old one: honour it unless the owner has
+// already moved under their own steam. main.swift does not rely on this — it
+// asks the page to acknowledge and re-delivers if it did not — but the two
+// defences answer different halves of the same hop.
 const ENTRY_WAIT_MS = 1500;
 let entrySettled = false;
 let pendingAdvance = false;
+// The one press this flow holds. Not `pendingAdvance`, which is consumed by
+// the flush: this records that the owner acted at all.
+let ownerPressed = false;
+// Native says exactly one of resume/reset per open. A resume is a launch-only
+// word about a freshly loaded page, so a second one is a re-delivery of the
+// first and must not move a flow that has already acted on it.
+let resumeHeard = false;
 const entryFallback = setTimeout(() => {
   settleEntry();
   flushPendingAdvance();
@@ -170,6 +189,16 @@ const entryFallback = setTimeout(() => {
 function settleEntry() {
   entrySettled = true;
   clearTimeout(entryFallback);
+  setCtaHeld(false);
+}
+
+// The held press, shown. The CTA plays its sound and then swallows the move
+// while the gate is closed, which reads as a dead button; disabling it says
+// "heard you, waiting" in the one vocabulary the screen already has, and stops
+// a second press playing the sound again. `.ob-cta[disabled]` is in palette.css.
+function setCtaHeld(on) {
+  const cta = document.getElementById('cta');
+  if (cta) cta.disabled = on;
 }
 
 function flushPendingAdvance() {
@@ -185,13 +214,23 @@ function flushPendingAdvance() {
 // at launch, which always builds the panel and its page fresh, and a reused
 // panel is rewound by __hzOnboardingReset below.
 window.__hzOnboardingResume = (step) => {
-  if (entrySettled) return;
+  // Acknowledged either way: main.swift reads this to decide whether anything
+  // was listening, and a page that has already been told was listening.
+  if (resumeHeard) return true;
+  resumeHeard = true;
+  // Late, i.e. the fallback has already let the welcome's button go live.
+  const late = entrySettled;
   settleEntry();
+  // They pressed on before native spoke and the flow let them. Yanking them
+  // back now is the failure the hold exists to prevent, in the other
+  // direction.
+  if (late && ownerPressed) return true;
   clearDemo();
   demoArmed = false;
   // Their press was aimed at the welcome; native is moving them past it.
   pendingAdvance = false;
   showScreen(resumeTarget(step));
+  return true;
 };
 
 // A REMEMBERED STEP MAY NO LONGER BE A SCREEN. `chat` can be turned off
@@ -224,6 +263,8 @@ window.__hzOnboardingReset = () => {
   // ...and a press held while the page was waiting was aimed at this screen,
   // which is the screen it is now on. Honour it rather than eating it.
   flushPendingAdvance();
+  // Acknowledged, for the same reason as the resume above.
+  return true;
 };
 
 // The optional scenes, resolved once. hzFeatures() caches per page load and
@@ -263,6 +304,10 @@ modesEl.addEventListener('click', (e) => {
 
 document.getElementById('cta').addEventListener('click', () => {
   hzSfx.wake();
+  ownerPressed = true;
+  // Held rather than acted on, and the button says so until native speaks or
+  // the gate times out. See setCtaHeld.
+  if (!entrySettled) setCtaHeld(true);
   nextScreen();
 });
 
@@ -505,7 +550,8 @@ function paintGoogle(out) {
   googleStatus.textContent = 'that sign-in did not finish';
 }
 
-// THE CAP BELONGS TO THE TIMER, AND ONLY TO IT.
+// THE CAP BELONGS TO THE TIMER, AND ONLY TO IT — THE SPENDING AS WELL AS THE
+// CHECK.
 //
 // It used to be checked here, ahead of everything, so once the window's 40
 // were spent the BUTTON and the returning-from-the-browser probe both became
@@ -514,8 +560,14 @@ function paintGoogle(out) {
 // many words: the two paths that answer an owner action probe immediately
 // regardless. An owner who alt-tabs enough to spend the cap is the owner most
 // likely to be waiting on this screen.
+//
+// Moving the check out but leaving the COUNT here was the same bug wearing a
+// hat: 40 alt-tabs while signing in still filled the counter, the interval
+// killed itself on its next tick, and the screen's automatic polling was dead
+// for the rest of the visit with nothing on screen saying so. The cap's own
+// stated purpose is that a page cannot spend the budget by doing NOTHING, so
+// what it counts is the probes nobody asked for.
 function probeGoogle() {
-  googleProbes += 1;
   return hzPost('googleProbe').then(paintGoogle).catch(() => {});
 }
 
@@ -537,6 +589,7 @@ function startGooglePolling() {
       stopGooglePolling();
       return;
     }
+    googleProbes += 1;
     probeGoogle();
   }, GOOGLE_POLL_MS);
 }
@@ -601,6 +654,16 @@ function paintLinkedIn(out) {
   if (out.reason === 'newer') {
     linkedInStatus.textContent =
       `you already have a newer ${out.file} — i kept the one you have.`;
+    return;
+  }
+  if (out.reason === 'duplicate') {
+    // BOTH NAMES, because the remedy is choosing between them and the app
+    // cannot do that. Two downloads of the same export — Connections.csv and
+    // Connections (1).csv — are one destination, and picking one on the
+    // owner's behalf would be guessing at which is the real one.
+    const [first, second] = out.files || [];
+    linkedInStatus.textContent =
+      `"${first}" and "${second}" are both ${out.file} — choose one.`;
     return;
   }
   linkedInStatus.textContent = "i couldn't read that file.";
@@ -928,6 +991,11 @@ loadStart.addEventListener('click', () => {
 
 let loadTimer = null;
 let loadPeekTimer = null;
+// The wait-out-the-remainder timer, and when the last peek actually went. Both
+// belong to the PAGE, not to one arming of the poll: the whole point is that
+// arming it again does not reset the throttle. See startLoadPolling.
+let loadPeekDelay = null;
+let lastPeekAt = 0;
 let loadSince = 0;
 
 // The table is cheap and local, so it can be quick. The card peek is NOT: a
@@ -941,8 +1009,10 @@ const PEEK_POLL_MS = 15000;
 function stopLoadPolling() {
   if (loadTimer) clearInterval(loadTimer);
   if (loadPeekTimer) clearInterval(loadPeekTimer);
+  if (loadPeekDelay) clearTimeout(loadPeekDelay);
   loadTimer = null;
   loadPeekTimer = null;
+  loadPeekDelay = null;
 }
 
 // THE FLOW ALWAYS HAS AN EXIT. relCardPeek can legitimately answer null
@@ -959,6 +1029,17 @@ function stopLoadPolling() {
 // a panel that is occluded and revealed repeatedly would then cost more than
 // the 3s poll this replaced. The TABLE still repaints immediately, because
 // that is the part the owner is looking at and it is local and cheap.
+//
+// BUT NOT PEEKING IS NOT THE SAME AS NEVER PEEKING, and the first version of
+// this could not tell the difference. `peekNow: false` dropped the leading
+// peek AND started a fresh interval from zero, so a panel ordered out and
+// revealed more often than PEEK_POLL_MS reached the fifteen-second mark
+// exactly never: screen 6's reconnect card never populated, which is the one
+// thing the whole flow is walking towards. The throttle is a rate, so it is
+// kept as a TIME — `lastPeekAt`, which outlives any one arming. A peek that is
+// already due fires now; one that is not waits out its remainder and then
+// falls into the interval, so re-arming can delay a peek and can never cancel
+// one.
 function startLoadPolling({ peekNow = true } = {}) {
   stopLoadPolling();
   const tick = () => {
@@ -967,13 +1048,25 @@ function startLoadPolling({ peekNow = true } = {}) {
     if (Date.now() - loadSince > 10 * 60 * 1000) loadFinish.hidden = false;
   };
   const peek = () => {
-    if (currentScreen !== '6') { stopLoadPolling(); return; }
+    if (currentScreen !== '6') { stopLoadPolling(); return false; }
+    // Stamped when it is SPENT, not when it answers: the throttle is on the
+    // asking, and the answer can take as long as the producers take.
+    lastPeekAt = Date.now();
     hzPost('relCardPeek').then(peekCard).catch(() => {});
+    return true;
   };
+  const armPeeks = () => { loadPeekTimer = setInterval(peek, PEEK_POLL_MS); };
   tick();
-  if (peekNow) peek();
   loadTimer = setInterval(tick, LOAD_POLL_MS);
-  loadPeekTimer = setInterval(peek, PEEK_POLL_MS);
+  const since = Date.now() - lastPeekAt;
+  if (peekNow || since >= PEEK_POLL_MS) {
+    if (peek()) armPeeks();
+  } else {
+    loadPeekDelay = setTimeout(() => {
+      loadPeekDelay = null;
+      if (peek()) armPeeks();
+    }, PEEK_POLL_MS - since);
+  }
 }
 
 function enterLoad() {
@@ -1037,6 +1130,11 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape') {
     clearDemo();
+    // A press held by the entry gate is cancelled with the flow. It survives
+    // the close otherwise — the page does — and fires showScreen() behind a
+    // panel nobody can see, which the next open then has to undo.
+    pendingAdvance = false;
+    setCtaHeld(false);
     // Dismissing is not finishing, but it IS leaving: the page survives the
     // close, so a poll not stopped here runs behind a window nobody can see.
     leaveFlow();

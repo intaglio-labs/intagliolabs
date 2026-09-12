@@ -73,7 +73,7 @@ test('a remembered step that is no longer shown falls back to an earlier one', (
   assert.match(resume, /if \(flow\.includes\(key\)\) return key;/u);
   assert.match(resume, /for \(let i = at - 1; i >= 0; i -= 1\)/u, 'walks BACKWARDS');
   assert.match(resume, /return '1';/u, 'and only reaches the welcome as the floor');
-  assert.match(js, /window\.__hzOnboardingResume = \(step\) => \{[\s\S]{0,200}resumeTarget\(step\)/u);
+  assert.match(js, /window\.__hzOnboardingResume = \(step\) => \{[\s\S]{0,1200}resumeTarget\(step\)/u);
 });
 
 test('each screen enters its own check and stops it on the way out', () => {
@@ -188,11 +188,13 @@ test('the google probe is capped for the whole visit, and reachable by hand', ()
   assert.match(js, /const GOOGLE_PROBE_CAP = \d+;/u);
   const probe = /function probeGoogle\(\) \{([\s\S]*?)\n\}/u.exec(js)?.[1];
   assert.ok(probe, 'probeGoogle() not found');
-  assert.match(probe, /googleProbes \+= 1/u, 'every probe counts against the cap');
-  // ...but the cap is CHECKED in the timer, not here. Checked here it also
-  // swallowed the button and the return-from-browser probe, and the screen
-  // froze on "opening google in your browser…" with no way to ask again. See
+  // ...and the cap is CHECKED AND SPENT in the timer, not here. Either one
+  // here reaches the button and the return-from-browser probe: checking it
+  // froze the screen on "opening google in your browser…" with no way to ask
+  // again, and counting it let 40 alt-tabs kill the interval instead. See
   // onboarding-flow-guards.test.mjs for the rest of that rule.
+  assert.doesNotMatch(probe, /googleProbes/u,
+    'an owner-driven probe may not spend the timer\'s budget');
   assert.doesNotMatch(probe, /GOOGLE_PROBE_CAP/u, 'the cap may not sit on the owner-driven path');
   assert.match(js, /function startGooglePolling\(\) \{[\s\S]{0,900}googleProbes >= GOOGLE_PROBE_CAP/u,
     'and it still has to be enforced on the timer');
@@ -241,7 +243,11 @@ test('the flow does not start until native has said where it starts', () => {
   // The first fix made that a race (`ownerMoved`: whoever got there first
   // won). This one removes it: native always speaks exactly once per open, so
   // the page holds the one press available on the welcome until it has.
-  assert.match(js, /window\.__hzOnboardingResume = \(step\) => \{\s*\n\s*if \(entrySettled\) return;/u);
+  // A resume is native's one launch-time word about a freshly loaded page, so
+  // a second delivery of it is a repeat and must not move a flow that already
+  // acted on the first. What it is NOT is a deadline: see the late-arrival
+  // rule in onboarding-flow-guards.test.mjs.
+  assert.match(js, /window\.__hzOnboardingResume = \(step\) => \{[\s\S]{0,300}if \(resumeHeard\) return true;/u);
   assert.match(js, /function nextScreen\(\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(!entrySettled\) \{ pendingAdvance = true; return; \}/u,
     'a press before native speaks is held, not acted on and then undone');
   assert.match(js, /window\.__hzOnboardingReset = \(\) => \{\s*\n\s*settleEntry\(\);/u,
