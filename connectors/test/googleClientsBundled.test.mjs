@@ -24,7 +24,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -193,13 +193,23 @@ test('the bundled directory is resolved against the module, not the cwd', () => 
 });
 
 // ---------------------------------------------------------------------------
-// ONE RULE, THREE READERS (round-4 finding 7).
+// ONE RULE, THREE READERS (round-4 finding 7, corrected by round-5 finding 2).
 //
 // Selection enumerated ~/.hazlie/secrets with a plain read while the read path
 // put the same file through readSecretJson's 0600-file/0700-parent gauntlet.
 // The two disagreed, and because a secrets-dir file SHADOWS the bundled client
 // of the same name, the disagreement meant adding a file made a working
 // install stop working.
+//
+// Round 4 settled it by making a secrets file that fails the gauntlet "not a
+// client at all" — which handed its NAME to the bundled file beside it. That
+// is the one substitution this module exists to prevent: a grant carrying
+// `client: "work"` refreshed against a bundled `work` of a different
+// client_id is invalid_grant an hour later, with nothing naming the mode.
+//
+// The rule these tests pin: absent → the bundle; present → the file owns its
+// name; unusable → an error that names the file and the fix, and a row that
+// says so rather than one that quietly resolves elsewhere.
 
 // The mode is the whole point, so it is set explicitly rather than left to the
 // fixture: 0644 is what a file created under the default umask gets.
@@ -210,32 +220,98 @@ function writeLooseSecret(home, name, body) {
   return path;
 }
 
-test('a world-readable secrets file does not shadow the bundled client it shares a name with', (t) => {
+test('a world-readable secrets file is an error, NOT a swap to the bundled client of that name', (t) => {
   const at = box(t, { bundled: { prod: PROD } });
   writeLooseSecret(at.home, 'prod', { client_id: 'LOOSE-ID', client_secret: 'LOOSE-SECRET', label: 'loose' });
 
-  // The install was working before that file appeared and must still work.
-  const c = readGoogleClient('prod', at);
-  assert.equal(c.id, 'PROD-ID', 'the bundled credential still answers');
-  assert.equal(c.label, 'Intaglio (prod)');
+  // The failing input from round-5 finding 2, in miniature: an existing grant
+  // says `client: "prod"`, and the bundle holds a DIFFERENT credential under
+  // that name. Answering with it is the invalid_grant an hour later.
+  assert.throws(() => readGoogleClient('prod', at), (error) => {
+    assert.match(error.message, /group or other users/u, 'the gauntlet names the mode');
+    assert.match(error.message, /google-client-prod\.json/u, 'and the file');
+    return true;
+  });
 
-  // And selection agrees with the read, which is the actual invariant: a name
-  // that is offered is a name that can be read.
-  assert.deepEqual(listGoogleClients(at).map((c2) => c2.label), ['Intaglio (prod)']);
-  assert.equal(defaultGoogleClient(at).label, 'Intaglio (prod)');
+  // Selection keeps the name — the owner put a file there — and does not
+  // describe it with the bundled credential's label, which is what made the
+  // substitution invisible.
+  const rows = listGoogleClients(at);
+  assert.deepEqual(rows.map((c) => c.name), ['prod']);
+  assert.equal(rows[0].label, 'prod', 'not "Intaglio (prod)": that is the other credential');
+  assert.match(rows[0].unusable, /group or other users/u, 'and the row says why');
+  assert.equal(defaultGoogleClient(at).name, 'prod');
 });
 
 test('a world-readable secrets file with no bundle to fall back on still says why', (t) => {
   const at = box(t, {});
   writeLooseSecret(at.home, 'prod', { client_id: 'LOOSE-ID', client_secret: 'LOOSE-SECRET' });
 
-  // Not offered...
-  assert.deepEqual(listGoogleClients(at).map((c) => c.name), [],
-    'a credential the reader would refuse is not a credential to offer');
-  assert.equal(defaultGoogleClient(at), null);
-  // ...and not silent: the read throws the gauntlet's own message, naming the
+  // Offered, and marked: a machine that holds a credential with the wrong mode
+  // is not a machine that holds none, and "no client is installed" would be
+  // the wrong sentence to put in front of the owner.
+  const rows = listGoogleClients(at);
+  assert.deepEqual(rows.map((c) => c.name), ['prod']);
+  assert.match(rows[0].unusable, /group or other users/u);
+  assert.equal(defaultGoogleClient(at).name, 'prod');
+  // And not silent: the read throws the gauntlet's own message, naming the
   // mode, so the owner can fix the file rather than guess.
   assert.throws(() => readGoogleClient('prod', at), /group or other users/u);
+});
+
+test('a 0755 secrets DIRECTORY does not silently swap every client for the bundle', (t) => {
+  // Round-5 finding 3: the gauntlet holds a secret's PARENT to 0700, so one
+  // `chmod 755 ~/.hazlie/secrets` — the clean-machine state Connectors.swift
+  // repairs — fails every secrets file at once. Under the round-4 rule that
+  // silently replaced the whole installed client list with the bundle's.
+  const at = box(t, {
+    secrets: { prod: { client_id: 'MINE-ID', client_secret: 'MINE-SECRET', label: 'mine' } },
+    bundled: { prod: PROD },
+  });
+  const dir = join(at.home, '.hazlie', 'secrets');
+  chmodSync(dir, 0o755); // still owner-writable, so box()'s own cleanup copes
+
+  assert.throws(() => readGoogleClient('prod', at), (error) => {
+    assert.match(error.message, /must have mode 0700/u, 'the directory and its mode are named');
+    assert.match(error.message, /secrets/u);
+    return true;
+  });
+  const rows = listGoogleClients(at);
+  assert.deepEqual(rows.map((c) => c.name), ['prod'], 'the name is still the owner’s');
+  assert.notEqual(rows[0].label, 'Intaglio (prod)',
+    'the bundled credential must not describe a row it is not going to serve');
+  assert.match(rows[0].unusable, /must have mode 0700/u);
+});
+
+test('a malformed secrets file is not offered, and does not fall back to the bundle either', (t) => {
+  // The two halves of the rule pull in different directions here on purpose.
+  // There is no credential in a half-written file, so selection skips it as it
+  // always has — but the name is still spoken for, and answering the read with
+  // the bundle's unrelated `prod` is the same substitution a wrong mode used
+  // to cause.
+  const at = box(t, { bundled: { prod: PROD } });
+  writeFileSync(
+    join(at.home, '.hazlie', 'secrets', 'google-client-prod.json'),
+    JSON.stringify({ client_id: 'ONLY-HALF' }),
+    { mode: 0o600 }
+  );
+  assert.deepEqual(listGoogleClients(at).map((c) => c.name), ['prod']);
+  assert.equal(listGoogleClients(at)[0].unusable, undefined,
+    'a malformed file is skipped in selection, so the bundled row it shadows stands');
+  assert.throws(() => readGoogleClient('prod', at), /missing client_id or client_secret/u);
+});
+
+test('a dangling symlink in the secrets dir is not treated as an absent file', (t) => {
+  // existsSync() follows the link and answers false, which would hand the name
+  // straight back to the bundle — the substitution above, reached through a
+  // link sitting in plain sight in the directory listing.
+  const at = box(t, { bundled: { prod: PROD } });
+  symlinkSync(
+    join(at.home, '.hazlie', 'secrets', 'nowhere.json'),
+    join(at.home, '.hazlie', 'secrets', 'google-client-prod.json')
+  );
+  assert.throws(() => readGoogleClient('prod', at), /unusable/u);
+  assert.match(listGoogleClients(at)[0].unusable, /regular, non-symlink file|missing/u);
 });
 
 test('an owner-only secrets file still wins, so the shadowing rule is unchanged', (t) => {

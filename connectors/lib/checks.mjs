@@ -32,6 +32,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as sqlite from 'node:sqlite';
 import { helperAvailable } from './apple-data.mjs';
+import { OWNER_ONLY_DIR_MODE } from './secrets.mjs';
 
 const PASS = 'PASS';
 const WARN = 'WARN';
@@ -128,7 +129,14 @@ function checkSqliteBackup() {
 // connector cursors, store snapshots in cache/). One group-readable directory
 // quietly widens all of it, so the tree is checked as a whole rather than
 // trusting whichever setup run created each piece.
+//
+// The mode itself comes from secrets.mjs, which is where the readers demand it
+// of a secret's own parent directory (round-5 finding 3). Restating the literal
+// here is how this check and the reader that fails on a 0755 ~/.hazlie/secrets
+// could have drifted apart without anything saying so.
 const TREE_DIRS = ['bin', 'lib', 'cache', 'connectors', 'secrets', 'context', 'logs'];
+const TREE_MODE = OWNER_ONLY_DIR_MODE;
+const TREE_MODE_TEXT = TREE_MODE.toString(8).padStart(4, '0');
 
 function checkTreePerms(home) {
   const name = 'hazlie-tree-perms';
@@ -146,7 +154,7 @@ function checkTreePerms(home) {
   } catch {
     return result(name, FAIL, `${root} does not exist`, 'run ops/setup-llm.sh, then ops/setup-connectors.sh');
   }
-  if (rootMode !== 0o700) problems.push(`.hazlie is ${rootMode.toString(8)}`);
+  if (rootMode !== TREE_MODE) problems.push(`.hazlie is ${rootMode.toString(8)}`);
   for (const child of TREE_DIRS) {
     const p = join(root, child);
     let mode;
@@ -156,25 +164,25 @@ function checkTreePerms(home) {
       missing.push(child);
       continue;
     }
-    if (mode !== 0o700) problems.push(`${child}/ is ${mode === null ? 'not a directory' : mode.toString(8)}`);
+    if (mode !== TREE_MODE) problems.push(`${child}/ is ${mode === null ? 'not a directory' : mode.toString(8)}`);
   }
   if (problems.length > 0) {
     return result(
       name,
       FAIL,
-      `expected mode 0700 throughout; ${problems.join(', ')}`,
-      `chmod 700 the named paths under ${root} (ops/setup-connectors.sh reasserts all of them)`
+      `expected mode ${TREE_MODE_TEXT} throughout; ${problems.join(', ')}`,
+      `chmod ${TREE_MODE.toString(8)} the named paths under ${root} (ops/setup-connectors.sh reasserts all of them)`
     );
   }
   if (missing.length > 0) {
     return result(
       name,
       WARN,
-      `0700 where present; missing: ${missing.join(', ')}`,
+      `${TREE_MODE_TEXT} where present; missing: ${missing.join(', ')}`,
       'run ops/setup-connectors.sh to create the full runtime tree'
     );
   }
-  return result(name, PASS, `~/.hazlie and ${TREE_DIRS.length} children are 0700`);
+  return result(name, PASS, `~/.hazlie and ${TREE_DIRS.length} children are ${TREE_MODE_TEXT}`);
 }
 
 // --- secrets ------------------------------------------------------------------

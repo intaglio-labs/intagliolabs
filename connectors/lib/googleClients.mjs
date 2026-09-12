@@ -48,8 +48,15 @@
 // build machine chose; ~/.hazlie is what this install chose, and an owner who
 // drops in a re-issued credential must not be silently overruled by the copy
 // inside the .app.
+//
+// AND IT WINS EVEN WHEN IT IS BROKEN (round-5 finding 2). "Wins" is about the
+// NAME, not about being readable: a secrets file that fails the permission
+// gauntlet is an error naming the file and the fix, never a quiet fall back to
+// the bundled credential of the same name. See guardedClientFile below for
+// why that distinction is the difference between a message the owner can act
+// on and a mailbox that dies an hour later.
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,41 +100,100 @@ function readClientFile(path) {
 }
 
 // ONE RULE FOR WHAT COUNTS AS A CLIENT FILE, APPLIED BY ALL THREE READERS
-// (round-4 finding 7).
+// (round-4 finding 7, corrected by round-5 findings 2 and 3).
 //
 // Selection (listGoogleClients, defaultGoogleClient) used to enumerate the
 // secrets directory with a plain read while readGoogleClient put the very same
 // file through readSecretJson's 0600-file/0700-parent gauntlet. The two
 // disagreed, and the disagreement had teeth: a client hand-created under umask
-// 022 was OFFERED as the default and then threw when read, and because a
-// secrets-dir file shadows the bundled client of the same name, adding that
-// file made a working install stop working.
+// 022 was OFFERED as the default and then threw when read.
 //
-// The rule, now decided in one place: a credential in ~/.hazlie/secrets IS a
-// secret and is held to the gauntlet; one inside the app bundle is not and
-// never was (see the header -- a file in a signed .app is world-readable by
-// design and would fail every time). A secrets file that fails the gauntlet is
-// therefore not a client at all: selection does not offer it, and it does not
-// shadow the bundled copy that still works.
+// Round 4 settled the disagreement the wrong way round. It made a secrets file
+// that fails the gauntlet "not a client at all", so the BUNDLED file of the
+// same name answered instead -- which is the one substitution this module
+// exists to prevent. `~/.hazlie/secrets/google-client-work.json` restored at
+// 0644 by an rsync, beside a bundled `google-client-work.json` holding a
+// different client_id, meant every grant carrying `client: "work"` was
+// refreshed against a credential that did not mint it: invalid_grant an hour
+// later, and nothing anywhere naming the mode. Finding 3 is the same failure
+// one level up -- `chmod 755 ~/.hazlie/secrets` fails the gauntlet for EVERY
+// file at once, so every named client on the machine would have been swapped
+// for the bundle's in one step.
 //
-// It is not silent. The read path below falls back to the bundle and, when
-// there is no bundle to fall back to, still throws the gauntlet's own message
-// naming the file and the mode it needs.
-function readGuardedClientFile(path) {
-  if (!existsSync(path)) return null;
+// So the rule, decided in one place and the same for all three readers:
+//
+//   ABSENT      the bundle answers. That is what the bundle is for.
+//   PRESENT     the file owns its name, usable or not. It is never stood in
+//               for by a same-named bundled credential, because a grant can
+//               only be renewed by the client that issued it, and a legible
+//               "fix this file" beats a dead mailbox an hour later.
+//
+// Which leaves what SELECTION shows for a present file it cannot use, and the
+// two reasons it cannot are not the same reason:
+//
+//   REFUSED     mode, ownership, a symlink, or a parent directory that is not
+//               0700. The credential inside may be perfectly good; this is the
+//               reader declining to trust it, and it is the failure that hits
+//               every file at once when ~/.hazlie/secrets is 0755. So the name
+//               is offered, carrying `unusable`. Withholding it would leave
+//               ops/gcal-auth.mjs saying "no Google OAuth client is installed
+//               on this Mac" about a machine holding one with the wrong mode --
+//               true about the state, useless about the cause.
+//   MALFORMED   not JSON, or no client_id/client_secret. There is no
+//               credential in it to offer, so selection skips it exactly as it
+//               always has; the read still throws rather than substituting.
+//
+// A credential inside the app bundle is not a secret and never was (see the
+// header: a file in a signed .app is world-readable by design and would fail
+// the gauntlet every time), so the bundle keeps its plain read.
+//
+// Returns exactly one of:
+//   { client }                          usable
+//   { absent: true }                    nothing at that path
+//   { problem, refused: true }          present, and the gauntlet said no
+//   { problem, malformed: true }        present, and there is no credential in it
+function guardedClientFile(path) {
+  // lstat, not existsSync: a dangling symlink "does not exist" to existsSync,
+  // and treating one as ABSENT would hand its name back to the bundle -- the
+  // substitution above, reached through a link the owner can see in the
+  // directory listing.
+  try {
+    lstatSync(path);
+  } catch {
+    return { absent: true };
+  }
   let raw;
   try {
     raw = assertOwnerOnlyFile(path, { label: 'google client' });
-  } catch {
-    return null;
+  } catch (error) {
+    return { problem: error?.message ?? String(error), refused: true };
   }
+  let c;
   try {
-    const c = JSON.parse(raw);
-    if (!c?.client_id || !c?.client_secret) return null;
-    return c;
+    c = JSON.parse(raw);
   } catch {
-    return null;
+    return { problem: `google client file is not valid JSON: ${path}`, malformed: true };
   }
+  if (!c?.client_id || !c?.client_secret) {
+    return {
+      problem: `google client file is missing client_id or client_secret: ${path}`,
+      malformed: true,
+    };
+  }
+  return { client: c };
+}
+
+// The sentence a caller that cannot use the file should throw or show. Says
+// what is wrong, and says out loud that the bundled copy is NOT going to be
+// used instead -- otherwise the obvious next thought ("the app ships one, why
+// is it not just using that") is exactly the wrong one.
+function unusableClientError(name, problem) {
+  return new Error(
+    `google client "${name}" is unusable: ${problem}. Fix the file (mode 0600, inside a `
+      + '0700 directory) or remove it; a credential shipped with the app is not substituted '
+      + 'for it, because Google refuses to refresh a grant against a client that did not '
+      + 'issue it'
+  );
 }
 
 // Every `google-client-<name>.json` in one directory, newest caller wins.
@@ -145,15 +211,36 @@ function clientsIn(dir, { guarded = false } = {}) {
   for (const file of names) {
     if (!file.startsWith(PREFIX) || !file.endsWith(SUFFIX)) continue;
     const path = join(dir, file);
-    const c = guarded ? readGuardedClientFile(path) : readClientFile(path);
-    if (!c) continue; // malformed or not owner-only; the read path says which
     const name = file.slice(PREFIX.length, -SUFFIX.length);
+    if (!guarded) {
+      // A malformed file SHIPPED IN A BUNDLE is skipped rather than offered:
+      // nobody on this machine can fix it, and one bad staged credential must
+      // not cost the others their row.
+      const c = readClientFile(path);
+      if (!c) continue;
+      out.push({
+        name,
+        label: typeof c.label === 'string' && c.label ? c.label : name,
+        // An install with several registered clients and no legacy pair needs a
+        // tiebreak that the build machine can set. `"default": true` in the
+        // credential is it; see defaultGoogleClient.
+        preferred: c.default === true,
+      });
+      continue;
+    }
+    const held = guardedClientFile(path);
+    if (held.absent || held.malformed) continue; // nothing there to offer
+    if (held.refused) {
+      // OFFERED, AND SAID TO BE BROKEN. The name is taken -- the owner put a
+      // file there -- so it must not silently become the bundle's. `label`
+      // stays the bare name because the file's own label was never read.
+      out.push({ name, label: name, preferred: false, unusable: held.problem });
+      continue;
+    }
+    const c = held.client;
     out.push({
       name,
       label: typeof c.label === 'string' && c.label ? c.label : name,
-      // An install with several registered clients and no legacy pair needs a
-      // tiebreak that the build machine can set. `"default": true` in the
-      // credential is it; see defaultGoogleClient.
       preferred: c.default === true,
     });
   }
@@ -185,17 +272,26 @@ export function readGoogleClient(
 ) {
   if (name && name !== DEFAULT_CLIENT) {
     const path = googleClientPath(name, home);
-    // SAME ORDER AS SELECTION, SAME RULE (round-4 finding 7). A usable
-    // secrets-dir file wins; one that is absent OR that the gauntlet rejects
-    // falls through to the bundle, which is exactly the set of files
-    // listGoogleClients/defaultGoogleClient would have offered. Only when
-    // nothing is usable anywhere does readSecretJson run, and then its throw is
-    // the diagnostic: it names the file, and whether the problem is a missing
-    // file, a mode, a parse or a missing key.
-    const mine = readGuardedClientFile(path);
-    if (mine) {
-      return { name, id: mine.client_id, secret: mine.client_secret, label: mine.label ?? name };
+    // SAME ORDER AS SELECTION, SAME RULE. A usable secrets-dir file wins; an
+    // ABSENT one falls through to the bundle; a PRESENT one that the gauntlet
+    // rejects stops here with the gauntlet's own sentence (round-5 finding 2).
+    // Falling through on a rejection is what paired a live `client: "work"`
+    // grant with the bundle's unrelated `work` credential -- a substitution
+    // Google answers with invalid_grant an hour later, while every surface on
+    // this machine still reads "connected". Only when nothing is present
+    // anywhere does readSecretJson run, and then its throw is the diagnostic:
+    // it names the file, and whether the problem is a missing file, a mode, a
+    // parse or a missing key.
+    const mine = guardedClientFile(path);
+    if (mine.client) {
+      return {
+        name,
+        id: mine.client.client_id,
+        secret: mine.client.client_secret,
+        label: mine.client.label ?? name,
+      };
     }
+    if (mine.problem) throw unusableClientError(name, mine.problem);
     const bundled = readClientFile(join(bundledDir, `${PREFIX}${name}${SUFFIX}`));
     if (bundled) {
       return {
@@ -223,9 +319,12 @@ export function readGoogleClient(
   // when there is genuinely nothing to sign in with.
   if (!(existsSync(legacyIdPath(home)) && existsSync(legacySecretPath(home)))) {
     const named = `${PREFIX}${DEFAULT_CLIENT}${SUFFIX}`;
-    const c =
-      readGuardedClientFile(join(secretsDir(home), named))
-      ?? readClientFile(join(bundledDir, named));
+    // Same three-way answer as the named branch above: a `google-client-
+    // default.json` the owner put here and got the mode wrong on is an error,
+    // not a reason to sign in under the build machine's default instead.
+    const held = guardedClientFile(join(secretsDir(home), named));
+    if (held.problem) throw unusableClientError(DEFAULT_CLIENT, held.problem);
+    const c = held.client ?? readClientFile(join(bundledDir, named));
     if (c) {
       return {
         name: DEFAULT_CLIENT,
@@ -245,11 +344,15 @@ export function readGoogleClient(
 
 /**
  * Every client this machine can sign in with, for a UI that has to offer a
- * choice. Unreadable entries are skipped rather than thrown: one malformed
- * credential must not cost the others their row.
+ * choice. A malformed BUNDLED credential is skipped rather than thrown: one
+ * bad staged file must not cost the others their row.
  *
  * Bundled clients are merged in under the same names, and a secrets-dir file
- * shadows the bundled one it shares a name with.
+ * shadows the bundled one it shares a name with — including a secrets file
+ * that cannot be read, which carries `unusable` (the sentence saying why)
+ * instead of being dropped. Dropping it would hand its name back to the
+ * bundle, and a caller comparing this list against a grant's `client` would
+ * see a name that still resolves while resolving to the wrong credential.
  */
 export function listGoogleClients({ home = homedir(), bundledDir = bundledClientsDir() } = {}) {
   const out = [];
@@ -261,7 +364,7 @@ export function listGoogleClients({ home = homedir(), bundledDir = bundledClient
   for (const c of clientsIn(secretsDir(home), { guarded: true })) merged.set(c.name, c);
   for (const c of merged.values()) {
     if (c.name === DEFAULT_CLIENT && out.length) continue; // the legacy pair already claimed it
-    out.push({ name: c.name, label: c.label });
+    out.push({ name: c.name, label: c.label, ...(c.unusable ? { unusable: c.unusable } : {}) });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -284,6 +387,13 @@ export function listGoogleClients({ home = homedir(), bundledDir = bundledClient
  *      ships several says which is the front door;
  *   4. nothing. Guessing between two clients would hand half the accounts a
  *      credential whose refresh Google declines.
+ *
+ * A secrets file that cannot be read counts as a client here (round-5
+ * finding 3). Skipping it would answer null on a machine whose one credential
+ * is sitting in ~/.hazlie/secrets with the wrong mode, and null is rendered by
+ * ops/gcal-auth.mjs as "no Google OAuth client is installed on this Mac" —
+ * true about the state and useless about the cause. Returned, the read that
+ * follows names the file and the mode.
  */
 export function defaultGoogleClient({ home = homedir(), bundledDir = bundledClientsDir() } = {}) {
   if (existsSync(legacyIdPath(home)) && existsSync(legacySecretPath(home))) {

@@ -18,6 +18,23 @@ import { lstatSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
+// THE MODE EVERY DIRECTORY HOLDING A SECRET MUST HAVE, stated once because
+// three components enforce it and any two of them disagreeing is silent
+// (round-5 finding 3):
+//
+//   the app creates it and reasserts it   widget/src/Connectors.swift
+//                                         (reassertTreePerms)
+//   doctor fails the install on it        connectors/lib/checks.mjs
+//                                         (checkTreePerms, ~/.hazlie + children)
+//   every secret read demands it          the gauntlet below, of the parent
+//                                         directory of the file being read
+//
+// They already agreed on 0700 — by restating the literal in three files. One
+// definition means changing the rule is one edit instead of three and a grep,
+// and that a secrets file refused here is refused for a reason doctor can name
+// and the app can repair.
+export const OWNER_ONLY_DIR_MODE = 0o700;
+
 export function defaultHermesTokenPath(home = homedir()) {
   return join(home, '.hazlie', 'secrets', 'hermes-token.txt');
 }
@@ -47,9 +64,10 @@ export function assertOwnerOnlyFile(filePath, { label, setupHint = 'see ops/CONN
   }
   const parent = dirname(filePath);
   const parentMode = statSync(parent).mode & 0o777;
-  if (parentMode !== 0o700) {
+  if (parentMode !== OWNER_ONLY_DIR_MODE) {
     throw new Error(
-      `${label} directory must have mode 0700: ${parent} is ${parentMode.toString(8)}`
+      `${label} directory must have mode ${OWNER_ONLY_DIR_MODE.toString(8).padStart(4, '0')}: `
+        + `${parent} is ${parentMode.toString(8)}`
     );
   }
   return readFileSync(filePath, 'utf8');
