@@ -90,6 +90,18 @@ CREATE INDEX IF NOT EXISTS person_event_links_context ON person_event_links(cont
 CREATE INDEX IF NOT EXISTS person_event_links_source_authored ON person_event_links(source, authored, context_id);
 CREATE INDEX IF NOT EXISTS person_event_links_source_role ON person_event_links(source, role, context_id);
 CREATE INDEX IF NOT EXISTS person_event_links_conversation ON person_event_links(person_key, conversation_key, context_id);
+-- The two scans behind /admin/onboarding/progress, which a live setup screen
+-- polls. Both are COUNT(DISTINCT person_key) and NEITHER index above covers
+-- person_key, so both fell back to a full table scan plus a temp B-tree per
+-- group -- over a table that is a multiple of the corpus, on a poll, on the one
+-- screen whose whole job is to be watched while the corpus is being built.
+--
+-- Column order is the query's order: the equality/filter columns first, then
+-- person_key last so the count is answered from the index alone.
+--   WHERE authored = 1 AND room = 0 GROUP BY source
+CREATE INDEX IF NOT EXISTS person_event_links_authored_room ON person_event_links(authored, room, source, person_key);
+--   WHERE source = ? AND role IN (...)   (linkedin profiles, calendar attendance)
+CREATE INDEX IF NOT EXISTS person_event_links_source_role_person ON person_event_links(source, role, person_key);
 
 CREATE TABLE IF NOT EXISTS person_channels(
   person_key TEXT NOT NULL REFERENCES people(person_key) ON DELETE CASCADE,

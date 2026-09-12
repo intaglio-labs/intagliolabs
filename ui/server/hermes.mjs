@@ -3598,7 +3598,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
   //             shows 0/0 forever. Counted from state.db's contact_ids and
   //             labelled peopleKind:'names'.
   if (req.method === 'GET' && url.pathname === '/admin/onboarding/progress') {
-    send(res, 200, onboardingProgress(db, policy), cors);
+    send(res, 200, cachedOnboardingProgress(db, policy), cors);
     return;
   }
 
@@ -5362,7 +5362,46 @@ function listedOnboardingSource(source, switchedOff) {
   return owners.some((connector) => !switchedOff.has(connector));
 }
 
-function onboardingProgress(db, policy) {
+// A FIVE-SECOND BODY CACHE, per server.
+//
+// This is the only route in the app that is polled while it is EXPENSIVE. It
+// walks `context` grouped by source and runs three COUNT(DISTINCT person_key)
+// scans over person_event_links -- a table that is a multiple of the corpus --
+// and screen 6 polls it for as long as the owner leaves the setup screen open,
+// on the exact machine where the projection is being built underneath it.
+//
+// Five seconds, not thirty: this screen's contract is that it is watching. A
+// number that is at most five seconds old still reads as live, and the poll it
+// serves is itself on a five-second clock, so in the ordinary case the cache
+// absorbs the duplicate reads (the widget's own polls, a second panel) rather
+// than the owner's.
+//
+// Holder discipline is /stats': per-server from start(), never module scope,
+// because the test suite runs two servers in one process and they must not
+// share a body. Cleared by invalidateCorpusStats, so a purge is visible at
+// once rather than up to five seconds later.
+const ONBOARDING_PROGRESS_TTL_MS = 5_000;
+const ONBOARDING_PROGRESS_CACHE_KEY = 'onboardingProgress';
+
+function cachedOnboardingProgress(db, policy, now = Date.now) {
+  const holder = policy?.statsCacheHolder ?? FALLBACK_STATS_CACHE;
+  // THE REGISTRY IS AN INPUT, NOT PART OF THE CORPUS. Which connectors are
+  // switched off decides which ROWS exist at all, and an owner who turns a
+  // bridge back on and comes to this screen must see the row appear rather
+  // than wait out a TTL. It is a cheap read behind its own cache, so it is
+  // taken every time and forms part of the key; only the expensive half — the
+  // corpus walk and the three COUNT(DISTINCT) scans — is what the TTL holds.
+  const switchedOff = switchedOffConnectors();
+  const key = [...switchedOff].sort().join(',');
+  const at = now();
+  const entry = holder[ONBOARDING_PROGRESS_CACHE_KEY];
+  if (entry && entry.key === key && at - entry.at < ONBOARDING_PROGRESS_TTL_MS) return entry.body;
+  const body = onboardingProgress(db, policy, switchedOff);
+  holder[ONBOARDING_PROGRESS_CACHE_KEY] = { at, key, body };
+  return body;
+}
+
+function onboardingProgress(db, policy, switchedOffOverride) {
   const projection = peopleProjectionStatus(db, policy);
   // A missing projection state table is not "caught up"; it is "we cannot say
   // yet", which is the grey reading state. Fail toward the honest word.
@@ -5437,7 +5476,7 @@ function onboardingProgress(db, policy) {
     const names = new Set([...rowsBySource.keys(), ...Object.keys(runs)]);
     if (contactNames > 0 || Object.hasOwn(runs, 'contacts')) names.add('contacts');
 
-    const switchedOff = switchedOffConnectors();
+    const switchedOff = switchedOffOverride ?? switchedOffConnectors();
     const listedNames = [...names].filter((source) => listedOnboardingSource(source, switchedOff)).sort();
 
     // ONE GREY LINE INSTEAD OF SEVEN AMBER ROWS. Rows this install keeps and
@@ -6192,6 +6231,9 @@ const CORPUS_STATS_BLOCKS = Object.freeze(['sweep', 'lookup']);
 function invalidateCorpusStats(policy) {
   const holder = policy?.statsCacheHolder ?? FALLBACK_STATS_CACHE;
   for (const key of CORPUS_STATS_BLOCKS) delete holder[key];
+  // The setup screen's table is corpus-derived too, and it is the one surface
+  // where a stale count after a purge would be read as the purge not working.
+  delete holder[ONBOARDING_PROGRESS_CACHE_KEY];
 }
 
 // Shipped on /stats.features beside `readAt`. The three processes that read

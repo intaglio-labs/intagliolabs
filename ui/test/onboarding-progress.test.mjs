@@ -634,3 +634,99 @@ test('the progress route is bearer-only', async () => {
     }, serverOpts);
   }, { allowedOrigins: ALLOWED_ORIGIN });
 });
+
+// ---------------------------------------------- what the poll costs the box
+
+test('the table is cached for five seconds, per server', async () => {
+  // THE ONLY EXPENSIVE ROUTE IN THE APP THAT IS POLLED. It walks `context`
+  // grouped by source and runs three COUNT(DISTINCT person_key) scans over
+  // person_event_links — a table that is a multiple of the corpus — and screen
+  // 6 polls it for as long as the owner leaves the setup screen open, on the
+  // exact machine where the projection is being built underneath it.
+  //
+  // The holder is the per-server one /stats uses, passed in here so the test
+  // can say which answer came from the cache and which from the database.
+  const holder = {};
+  await withHome(async (home) => {
+    await withServer(home, async ({ call, db }) => {
+      seedFixture(db);
+      markProjection(db, { projected: 9, source: 9 });
+
+      const first = await (await call('GET', '/admin/onboarding/progress')).json();
+      const mailRows = first.sources.find((s) => s.source === 'mail').rows;
+      assert.equal(mailRows, 80, 'the fixture, as seeded');
+      assert.ok(holder.onboardingProgress, 'the body was not cached at all');
+
+      // Change the corpus underneath it. A second poll inside the window must
+      // still answer the cached body — that IS the cache.
+      seedRows(db, 'mail', 25);
+      const second = await (await call('GET', '/admin/onboarding/progress')).json();
+      assert.equal(second.sources.find((s) => s.source === 'mail').rows, 80,
+        'a poll inside the five seconds must not re-run the scans');
+
+      // And the ONLY reason it did not see them is the cache: drop the entry
+      // and the same request reads the new rows. Without this the test would
+      // pass just as well against a route that ignores the insert.
+      delete holder.onboardingProgress;
+      const third = await (await call('GET', '/admin/onboarding/progress')).json();
+      assert.equal(third.sources.find((s) => s.source === 'mail').rows, 105,
+        'with the entry gone the scans run again and see the new rows');
+    }, { statsCacheHolder: holder });
+  });
+});
+
+test('two servers in one process do not share the cached table', async () => {
+  // The test suite runs more than one server, and a module-scope cache would
+  // have one of them answering with the other's corpus.
+  const first = {};
+  const second = {};
+  await withHome(async (home) => {
+    await withServer(home, async ({ call, db }) => {
+      seedRows(db, 'mail', 7);
+      await call('GET', '/admin/onboarding/progress');
+    }, { statsCacheHolder: first });
+    await withServer(home, async ({ call, db }) => {
+      seedRows(db, 'imessage', 3);
+      await call('GET', '/admin/onboarding/progress');
+    }, { statsCacheHolder: second });
+  });
+  assert.ok(first.onboardingProgress && second.onboardingProgress, 'both servers cached');
+  assert.notEqual(first.onboardingProgress, second.onboardingProgress,
+    'and they are not the same object');
+});
+
+test('the two counting scans have an index that covers them', () => {
+  // Both are COUNT(DISTINCT person_key) and none of the existing indexes
+  // carries person_key, so both fell back to a full scan of
+  // person_event_links plus a temp B-tree per group — on a poll, on the screen
+  // whose whole job is to be watched while the corpus is being built.
+  const schema = readFileSync(
+    join(import.meta.dirname, '..', 'server', 'people', 'projection.mjs'), 'utf8');
+  //   WHERE authored = 1 AND room = 0 GROUP BY source
+  assert.match(schema,
+    /CREATE INDEX IF NOT EXISTS person_event_links_authored_room ON person_event_links\(authored, room, source, person_key\)/u);
+  //   WHERE source = ? AND role IN (...)
+  assert.match(schema,
+    /CREATE INDEX IF NOT EXISTS person_event_links_source_role_person ON person_event_links\(source, role, person_key\)/u);
+});
+
+test('SQLite actually uses them, rather than scanning the table', async () => {
+  // The plan, from the database, for the exact statements the route runs. An
+  // index that exists and is not chosen buys nothing.
+  await withHome(async (home) => {
+    await withServer(home, async ({ db }) => {
+      seedFixture(db);
+      const plan = (sql) => db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all()
+        .map((row) => row.detail).join(' | ');
+      const authored = plan(
+        'SELECT source, COUNT(DISTINCT person_key) AS n FROM person_event_links '
+        + 'WHERE authored = 1 AND room = 0 GROUP BY source');
+      assert.match(authored, /USING (COVERING )?INDEX person_event_links_authored_room/u, authored);
+      assert.doesNotMatch(authored, /SCAN person_event_links(?! USING)/u, authored);
+      const role = plan(
+        "SELECT COUNT(DISTINCT person_key) AS n FROM person_event_links "
+        + "WHERE source = 'linkedin' AND role = 'profile'");
+      assert.match(role, /USING (COVERING )?INDEX person_event_links_source_role_person/u, role);
+    });
+  });
+});
