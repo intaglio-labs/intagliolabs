@@ -255,7 +255,14 @@ test('a resume that arrives after the bound is still honoured if nobody pressed'
   // navigation; deferred the other way, didFinish drains an empty list and the
   // closure appended afterwards never runs -- on exactly the cold first launch
   // this defence exists for. The ordering is pinned in onboarding-delivery.
-  assert.match(swift, /whenPageFinishes\(web\) \{[\s\S]{0,200}web\.evaluateJavaScript\(js\)/u,
+  // Ordering, not adjacency. The booking grew a condition of its own -- it is
+  // made once per page and the pending delivery is REPLACED rather than
+  // stacked (round-5 finding 14) -- so a character window between the two
+  // calls pins the shape of the prose rather than the property. What has to
+  // hold is only that the booking precedes the first attempt.
+  const booked = swift.indexOf('whenPageFinishes(web) {');
+  const attempted = swift.indexOf('web.evaluateJavaScript(js)');
+  assert.ok(booked > 0 && attempted > booked,
     'the retry is booked before the first attempt, so it cannot be lost to the race');
   assert.match(swift, /answered as\? Bool\) == true/u,
     'and a page that answered still cancels it, rather than being delivered to twice');

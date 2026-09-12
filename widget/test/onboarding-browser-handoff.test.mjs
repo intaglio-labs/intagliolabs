@@ -103,6 +103,36 @@ test('the scrim comes back when the owner returns, by either route', () => {
     'and the observers are what call it');
 });
 
+// ANY OF THIS APP'S WINDOWS IS A RETURN (round-5 finding 15).
+//
+// The key-window observer was filtered to the onboarding panel itself, and the
+// widget window is ordered out for the flow's duration -- so the
+// non-activating route only ever fired for a click on the scrim. An owner who
+// cancels in the browser and then clicks some other panel of ours was left
+// with a full-screen `.normal` scrim reading "waiting for you in the browser…"
+// underneath everything, with no way back until openOnboarding ran again.
+//
+// didBecomeKey is posted only for windows in this process, so the widened
+// filter still means "we are being used again", and the yielded-flag guard in
+// restoreOnboardingFromBrowser makes every other window's key event a no-op.
+test('any window of this app becoming key is a return, not only the onboarding panel', () => {
+  const launch = code(mainSwift);
+  const observer = /for name in \[NSApplication\.didBecomeActiveNotification, NSWindow\.didBecomeKeyNotification\] \{([\s\S]*?)\n    \}\n/u
+    .exec(launch)?.[1];
+  assert.ok(observer, 'the two return observers are no longer registered together');
+  assert.doesNotMatch(observer, /!== self\.onboardingPanel/u,
+    'a filter to the onboarding panel leaves the scrim stranded whenever the owner comes\n' +
+    'back through any other window of ours');
+  assert.doesNotMatch(observer, /as\? PopupPanel/u,
+    'and there is nothing left to narrow the notification to one window');
+  assert.match(observer, /restoreOnboardingFromBrowser\(\)/u,
+    'both notifications still call the restore');
+  // The guard that makes the widening safe lives in the restore itself, which
+  // the test above pins: it lifts only a scrim this handoff lowered.
+  assert.match(swiftFunc('restoreOnboardingFromBrowser'),
+    /guard onboardingYieldedToBrowser else \{ return \}/u);
+});
+
 test('a showing of the flow never starts from a lowered scrim', () => {
   // The restore rides on the owner coming back to this app. An owner who
   // abandons the sign-in from inside the browser never does, so the panel is

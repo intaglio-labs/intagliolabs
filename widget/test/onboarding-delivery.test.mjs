@@ -59,9 +59,48 @@ test('a page that answered cancels the repeat rather than never booking it', () 
   const body = deliverBody();
   assert.match(body, /answered as\? Bool\) == true/u,
     'the page acknowledges by returning true, and that answer is what cancels');
-  assert.match(body, /guard !delivery\.answered else \{ return \}/u,
+  assert.match(body, /!pending\.answered else \{ return \}/u,
     'the booked repeat must check the acknowledgement before re-delivering, or every\n' +
     'first launch delivers the resume twice');
+});
+
+// ONE BOOKING PER PAGE, AND IT CARRIES THE LATEST WORD (round-5 finding 14).
+//
+// whenPageFinishes APPENDS and didFinish drains. From the second showing
+// onward the page has long since finished, so each openOnboarding added a
+// closure that would never run -- until the webview reloads (WebKit
+// content-process recovery, or a re-issued loadFileURL), at which point the
+// whole pile fires at once and every unacknowledged one delivers its own old
+// `__hzOnboardingResume(step)`, jumping the owner to a screen from a showing
+// they had already left.
+//
+// So the pending delivery is a property a later showing REPLACES, the booked
+// closure reads that property when it runs rather than capturing a delivery of
+// its own, and the booking is made only when this page does not already hold
+// one.
+test('a second showing replaces the pending delivery instead of stacking another', () => {
+  const body = deliverBody();
+  assert.match(body, /pendingOnboardingDelivery = delivery/u,
+    'each showing must install ITS delivery as the pending one, which is what cancels the\n' +
+    'previous showing: a stale resume step must never be replayable');
+  assert.match(body, /self\.pendingOnboardingDelivery, !pending\.answered/u,
+    'and the booked closure must read the pending delivery when it runs rather than\n' +
+    'capturing one, or replacing the property changes nothing about what fires');
+
+  assert.match(body, /if onboardingRepeatBookedFor != page \{/u,
+    'the booking must be conditional on this page not already holding one; an\n' +
+    'unconditional whenPageFinishes call is one never-drained closure per showing');
+  assert.match(body, /self\.onboardingRepeatBookedFor = nil/u,
+    'a booking that has fired must be forgotten, or the next showing relies on a closure\n' +
+    'didFinish has already taken off the list');
+});
+
+test('the delivery carries the word it is to deliver', () => {
+  // The booked closure no longer captures `js`, so the pending delivery has to
+  // hold it -- otherwise a repeat would have nothing to say.
+  assert.match(code(main), /final class OnboardingDelivery \{\n\s*let js: String/u,
+    'OnboardingDelivery must carry the script: that is what makes replacing the pending\n' +
+    'delivery replace the word a reload would repeat');
 });
 
 test('the list the repeat is booked on is still one-shot', () => {

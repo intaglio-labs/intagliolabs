@@ -359,14 +359,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // own `focus` probe already relies on. Watching only the application
     // notification would leave the scrim behind in that case, so both are
     // watched and the flag makes the second one a no-op.
+    //
+    // ANY OF THIS APP'S WINDOWS, NOT ONLY THE ONBOARDING PANEL (round-5
+    // finding 15). The filter was `note.object === onboardingPanel`, and the
+    // widget window is ordered out for the flow's duration, so the
+    // non-activating route only ever fired for a click on the scrim itself. An
+    // owner who cancels in the browser and then clicks some other panel of ours
+    // left a full-screen `.normal` scrim reading "waiting for you in the
+    // browser…" sitting under everything until openOnboarding was called again.
+    // didBecomeKey is posted only for windows in THIS process, so dropping the
+    // filter widens it to exactly "we are being used again" — and
+    // restoreOnboardingFromBrowser is guarded on the yielded flag, so every
+    // other window becoming key is already a no-op.
     for name in [NSApplication.didBecomeActiveNotification, NSWindow.didBecomeKeyNotification] {
       NotificationCenter.default.addObserver(
         forName: name, object: nil, queue: .main
-      ) { [weak self] note in
-        guard let self else { return }
-        if name == NSWindow.didBecomeKeyNotification,
-           (note.object as? PopupPanel) !== self.onboardingPanel { return }
-        self.restoreOnboardingFromBrowser()
+      ) { [weak self] _ in
+        self?.restoreOnboardingFromBrowser()
       }
     }
 
@@ -771,13 +780,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     p.makeKeyAndOrderFront(nil)
   }
 
-  /// One delivery's "the page took it", shared by the two closures below.
+  /// One delivery: the word to say, and whether the page took it.
   /// Main queue only, like every other webview touch here: `didFinish` and an
   /// `evaluateJavaScript` completion are both delivered there, so this is
   /// shared state with one writer and no concurrency.
   private final class OnboardingDelivery {
+    let js: String
     var answered = false
+    init(_ js: String) { self.js = js }
   }
+
+  /// The delivery a booked repeat would make, and the page it is booked on.
+  ///
+  /// ONE BOOKING PER PAGE, REPLACED RATHER THAN STACKED (round-5 finding 14).
+  /// whenPageFinishes appends, and didFinish drains — so from the second
+  /// showing onward, on a page that has long since finished, every
+  /// openOnboarding added a closure that would never run. Harmless as leaks go,
+  /// until the webview reloads: WebKit content-process recovery or a re-issued
+  /// loadFileURL fires the whole accumulated pile at once, and the ones whose
+  /// delivery was never acknowledged deliver a resume step from an earlier
+  /// showing, jumping the owner to a screen they left behind.
+  ///
+  /// So the pending delivery lives here, where a later showing REPLACES it, and
+  /// the booked closure reads it when it runs rather than capturing it. The
+  /// booking itself is made only when this page does not already hold one.
+  private var pendingOnboardingDelivery: OnboardingDelivery?
+  private var onboardingRepeatBookedFor: ObjectIdentifier?
 
   /// Say it once, and say it again if the page was not there to hear it.
   ///
@@ -805,15 +833,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   /// first launch this function exists for. Booked first and cancelled by a
   /// page that answered, so the race has no losing side: the worst case is one
   /// redundant delivery to a page that already took the first one.
+  ///
+  /// AND THE BOOKING IS REPLACED, NOT REPEATED. The pending delivery is a
+  /// property this showing overwrites, so a reload can only ever replay the
+  /// LATEST word — never a resume step from a showing the owner has moved on
+  /// from — and the list holds one closure per page rather than one per
+  /// showing. See pendingOnboardingDelivery.
   private func deliverToOnboarding(_ web: WKWebView?, _ js: String) {
     guard let web else { return }
-    let delivery = OnboardingDelivery()
-    bridge.whenPageFinishes(web) { page in
-      guard !delivery.answered else { return }
-      page.evaluateJavaScript(js)
+    let delivery = OnboardingDelivery(js)
+    pendingOnboardingDelivery = delivery
+    let page = ObjectIdentifier(web)
+    if onboardingRepeatBookedFor != page {
+      onboardingRepeatBookedFor = page
+      bridge.whenPageFinishes(web) { [weak self] loaded in
+        guard let self else { return }
+        // One-shot: didFinish removed it as it ran, so the next showing books
+        // again rather than relying on a closure that is no longer on the list.
+        self.onboardingRepeatBookedFor = nil
+        guard let pending = self.pendingOnboardingDelivery, !pending.answered else { return }
+        self.pendingOnboardingDelivery = nil
+        loaded.evaluateJavaScript(pending.js)
+      }
     }
-    web.evaluateJavaScript(js) { answered, _ in
-      if (answered as? Bool) == true { delivery.answered = true }
+    web.evaluateJavaScript(js) { [weak self] answered, _ in
+      guard (answered as? Bool) == true else { return }
+      delivery.answered = true
+      if self?.pendingOnboardingDelivery === delivery { self?.pendingOnboardingDelivery = nil }
     }
   }
 

@@ -208,7 +208,17 @@ enum Provision {
   /// Serialises the llama repair below. ensureBackend hops to a global queue,
   /// so two calls in one launch run their bodies concurrently.
   private static let llamaRepairLock = NSLock()
+  /// Set only by an install that SUCCEEDED — see repairLlamaAgent.
   private static var llamaRepairAttempted = false
+  /// When a failed attempt may be made again, and how many have failed. Both
+  /// are read and written under llamaRepairLock.
+  private static var llamaRepairNotBefore = Date.distantPast
+  private static var llamaRepairFailures = 0
+  /// 30 s, doubling to a ten-minute ceiling. Long enough that a `launchctl
+  /// bootstrap` racing a previous bootout has finished, short enough that the
+  /// next ensureBackend() of an ordinary session gets another go.
+  private static let llamaRepairBackoffFloor: TimeInterval = 30
+  private static let llamaRepairBackoffCeiling: TimeInterval = 600
 
   /// AND THE ONE AGENT PROVISIONING CAN LEGITIMATELY SKIP. provision() installs
   /// the llama agent only when a model is present, and an install that once
@@ -223,18 +233,35 @@ enum Provision {
   /// land on the first bootstrap and leave the agent absent — the state this
   /// repair exists to end. The lock is held across installAgent rather than
   /// only around the flag, because it is the launchctl pair that must not
-  /// interleave, and the flag is set only when an attempt is actually made:
-  /// weights that arrive later in the same session still get their agent from
-  /// a later call.
+  /// interleave, and the weights-and-no-plist guard comes first: weights that
+  /// arrive later in the same session still get their agent from a later call.
+  ///
+  /// ONCE IS ONCE PER SUCCESS, NOT ONCE PER TRY (round-5 finding 21). The flag
+  /// was set before installAgent ran, so a `launchctl bootstrap` that failed
+  /// transiently — most likely against an agent still booting out from the run
+  /// before — burnt the launch's only attempt, and ensureBackend calling again
+  /// five minutes later did nothing. A failure now leaves the flag clear and
+  /// puts a backoff in front of the next try, so the interleaving guarantee is
+  /// unchanged (the lock, not the flag, is what provides it) and the one-shot
+  /// loss is gone.
   private static func repairLlamaAgent() {
     llamaRepairLock.lock()
     defer { llamaRepairLock.unlock() }
-    guard !llamaRepairAttempted else { return }
+    guard !llamaRepairAttempted, Date() >= llamaRepairNotBefore else { return }
     let llamaPlist = launchAgents.appendingPathComponent("io.intaglio.llama-server.plist")
     guard ModelSetup.isInstalled, !fm.fileExists(atPath: llamaPlist.path) else { return }
-    llamaRepairAttempted = true
     if installAgent("io.intaglio.llama-server") {
+      llamaRepairAttempted = true
+      llamaRepairFailures = 0
       NSLog("Intaglio Labs: installed the llama agent for weights that were already here")
+    } else {
+      llamaRepairFailures += 1
+      let delay = min(
+        llamaRepairBackoffCeiling,
+        llamaRepairBackoffFloor * pow(2, Double(llamaRepairFailures - 1))
+      )
+      llamaRepairNotBefore = Date().addingTimeInterval(delay)
+      NSLog("Intaglio Labs: llama agent install failed (\(llamaRepairFailures)); retrying in \(Int(delay))s")
     }
   }
 

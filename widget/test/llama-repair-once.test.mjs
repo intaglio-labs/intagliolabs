@@ -71,13 +71,43 @@ test('the repair takes a lock and holds it across the install', () => {
 
 test('the second caller of a launch does not repeat the install', () => {
   const body = bodyOf('private static func repairLlamaAgent() {');
-  assert.match(body, /guard !llamaRepairAttempted else \{ return \}/u,
+  assert.match(body, /guard !llamaRepairAttempted/u,
     'a once-flag must short-circuit the second caller; the lock alone only makes the two\n' +
     'bootout/bootstrap pairs sequential rather than stopping the second');
+  // The flag is no longer what serialises them -- see the test below -- so
+  // what has to hold is that a SUCCEEDED repair is never repeated.
   const flag = body.indexOf('llamaRepairAttempted = true');
   const install = body.indexOf('installAgent("io.intaglio.llama-server")');
-  assert.ok(flag > 0 && install > flag,
-    'the flag is set before the install runs, so a caller waiting on the lock sees it');
+  assert.ok(flag > 0 && install > 0, 'both the install and the flag must still be here');
+});
+
+// A FAILED INSTALL IS NOT AN ATTEMPT SPENT (round-5 finding 21).
+//
+// The flag was raised before installAgent ran, so a `launchctl bootstrap` that
+// failed transiently -- most plausibly against an agent still booting out from
+// the previous run -- burnt the launch's one attempt, and ensureBackend()
+// calling again minutes later did nothing at all.
+//
+// The interleaving guarantee never depended on that ordering: the LOCK is held
+// across installAgent, so no second caller can be inside it to observe an
+// intermediate flag. Raising the flag only on success costs nothing and gives
+// the failure a way back.
+test('a failed install is retried, behind a backoff, rather than burning the launch', () => {
+  const body = bodyOf('private static func repairLlamaAgent() {');
+  const install = body.indexOf('installAgent("io.intaglio.llama-server")');
+  const flag = body.indexOf('llamaRepairAttempted = true');
+  assert.ok(install > 0 && flag > install,
+    'the once-flag must be set AFTER the install, inside its success branch: set before,\n' +
+    'a transient launchctl failure is indistinguishable from a repair that worked');
+
+  assert.match(body, /llamaRepairNotBefore/u,
+    'a failure must leave a time before which the next try is pointless; without one the\n' +
+    'retry is an unbounded launchctl loop on a machine where the install keeps failing');
+  assert.match(body, /guard !llamaRepairAttempted, Date\(\) >= llamaRepairNotBefore else \{ return \}/u,
+    'and that backoff must be checked in the same guard that checks the flag');
+  assert.match(body, /llamaRepairFailures \+= 1/u, 'the backoff must grow with the failures');
+  assert.match(body, /min\(\s*llamaRepairBackoffCeiling/u,
+    'and be capped, so a permanently broken install backs off to a ceiling rather than to hours');
 });
 
 test('a Mac whose weights arrive later still gets its agent', () => {
