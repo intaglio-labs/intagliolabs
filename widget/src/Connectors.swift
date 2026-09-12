@@ -380,7 +380,7 @@ final class Connectors {
     environment["INTAGLIO_CONNECTOR_OWNER_PID"] = String(ProcessInfo.processInfo.processIdentifier)
     // WHICH MACHINE THE OWNER ASKED FOR, in the one channel that already carries
     // a parent fact to this child. The daemon's first-load sprint re-arms in ten
-    // seconds at full speed and a minute otherwise; a config key would be a
+    // seconds at full speed and twenty otherwise; a config key would be a
     // SECOND writer for a setting that already has one here, and two definitions
     // of the same switch is how they come to disagree.
     //
