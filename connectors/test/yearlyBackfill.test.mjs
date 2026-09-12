@@ -236,3 +236,61 @@ test('a withdrawn source that comes back rejoins the barrier', () => {
   assert.deepEqual(q.snapshot().pending.sort(), ['imessage', 'matrix']);
   assert.equal(q.advance(), false);
 });
+
+// NOTHING TO WALK IS FINISHED, NOT FOREVER UNFINISHED.
+//
+// advance() returned false while `active` was empty, so an install where every
+// history source is unavailable — now reachable in one step, because an
+// unreadable feature registry is ALL_OFF — never set COMPLETE. Nothing was
+// stuck on a year, because nothing was walking one; what was stuck is every
+// consumer of `historyComplete`, which stays false: calendar and granola keep
+// clipping their ordinary scans to the current year, waiting on a backfill that
+// no source will ever run.
+test('an empty active roster completes instead of waiting for nobody', () => {
+  const state = memoryState();
+  const q = createYearlyBackfill({ state, connectors: ['imessage', 'granola'], now: () => NOW });
+  q.classify('imessage', false);
+  assert.equal(q.advance(), false, 'one member is still unclassified — that is a real wait');
+
+  q.classify('granola', false);
+  assert.deepEqual(q.snapshot().active, []);
+  assert.equal(q.advance(), true, 'every source classified, none of them available: done');
+  assert.equal(q.snapshot().complete, true);
+  assert.equal(q.snapshot().year, 2026, 'and no year was walked, because there was nothing to walk');
+});
+
+test('a withdrawn-to-empty roster completes the same way', () => {
+  const state = memoryState();
+  const q = createYearlyBackfill({ state, connectors: ['matrix'], now: () => NOW });
+  q.withdraw('matrix');
+  assert.equal(q.advance(), true);
+  assert.equal(q.snapshot().complete, true);
+});
+
+// AND IT IS NOT A ONE-WAY DOOR. Completion from an empty roster is the same
+// durable mark a finished walk leaves, and the same re-authorization path
+// reopens it: a source that becomes available later reopens the current year.
+test('a source that arrives after an empty-roster completion reopens the walk', () => {
+  const state = memoryState();
+  const q = createYearlyBackfill({ state, connectors: ['imessage'], now: () => NOW });
+  q.classify('imessage', false);
+  assert.equal(q.advance(), true);
+  assert.equal(q.snapshot().complete, true);
+
+  q.classify('imessage', true);
+  assert.equal(q.snapshot().complete, false, 'an authorized source has history to read');
+  assert.equal(q.snapshot().year, 2026);
+  assert.deepEqual(q.snapshot().pending, ['imessage']);
+});
+
+// The restart path has to settle it too: with nothing active, no source will
+// ever call advance(), so reconcile() breaking out on an empty roster left the
+// mark unset until something was connected.
+test('restart reconciliation settles an install with no history sources', () => {
+  const state = memoryState();
+  const q = createYearlyBackfill({ state, connectors: ['imessage'], now: () => NOW });
+  q.classify('imessage', false);
+  const recovery = q.reconcile();
+  assert.equal(recovery.complete, true);
+  assert.equal(state.getCursor('yearly-backfill:complete'), '1');
+});

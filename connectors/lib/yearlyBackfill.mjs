@@ -182,7 +182,21 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
     // Wait for every source to have had its prerequisite check this process.
     // Otherwise the first fast source could advance before later staggered
     // sources have even been classified.
-    if (unclassified().length > 0 || active.size === 0) return false;
+    if (unclassified().length > 0) return false;
+    // NOTHING TO WALK IS FINISHED, not forever unfinished. Every history source
+    // has been classified and none of them is available: unprovisioned,
+    // disabled, withdrawn, or — reachable in one step since the feature
+    // registry arrived — every connector off because the registry could not be
+    // read. Returning false there left COMPLETE unset forever, and the sources
+    // that gate on `historyComplete` (calendar, granola) kept clipping their
+    // ordinary scans to the current year, waiting on a backfill no source would
+    // ever run. It is not a one-way door: classify(name, true) reopens the
+    // current year for a source that arrives later, exactly as it does after a
+    // walk that really finished.
+    if (active.size === 0) {
+      state.setCursor(COMPLETE_KEY, '1');
+      return true;
+    }
     const value = year();
     if (![...active].every((connector) => done(connector, value))) return false;
     if (!barrierRoster.every((barrier) => barrierDone(barrier, value))) return false;
@@ -208,12 +222,14 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
     let advanced = 0;
     while (true) {
       const before = snapshot();
-      if (
-        !before.classified
-        || before.complete
-        || before.active.length === 0
-        || before.pending.length > 0
-      ) break;
+      if (!before.classified || before.complete) break;
+      // An empty roster has to be settled HERE or nowhere: advance() is only
+      // ever called from a scheduled source's path, and this install has none.
+      if (before.active.length === 0) {
+        if (advance()) advanced += 1;
+        break;
+      }
+      if (before.pending.length > 0) break;
       const previousYear = before.year;
       if (!advance()) break;
       advanced += 1;
