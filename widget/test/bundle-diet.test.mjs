@@ -295,8 +295,8 @@ test('the launch-time reconciliation is not even armed without a model', () => {
   const at = mainCode.indexOf('reconcileAutomaticModelWhenSafe()');
   assert.ok(at > 0, 'launch must still reconcile an INSTALLED model after an upgrade');
   const near = mainCode.slice(Math.max(0, at - 500), at);
-  assert.match(near, /guard ModelSetup\.isInstalled else \{/u,
-    'the launch call must be guarded on an installed model, in the launch sequence '
+  assert.match(near, /guard ModelSetup\.isInstalled \|\| ModelSetup\.hasUnfinishedDownload else \{/u,
+    'the launch call must be guarded on an installed model or an interrupted download the owner asked for, '
     + 'where a reader looks for what a first launch does');
 });
 

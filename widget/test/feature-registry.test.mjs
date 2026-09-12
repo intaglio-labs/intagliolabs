@@ -463,7 +463,7 @@ test('the daemon derives its disabled set instead of keeping a second list', () 
 });
 
 test('hermes echoes the effective set on /stats', () => {
-  assert.match(hermes, /import \{ readFeatures \} from '\.\.\/\.\.\/connectors\/lib\/features\.mjs'/u,
+  assert.match(hermes, /import \{[^}]*\breadFeatures\b[^}]*\} from '\.\.\/\.\.\/connectors\/lib\/features\.mjs'/u,
     'one shared loader, following the pinnedThread/googleClients precedent');
   const stats = hermes.slice(hermes.indexOf("url.pathname === '/stats'"));
   const body = stats.slice(0, stats.indexOf('const gone = GONE.get'));
