@@ -53,7 +53,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readSecretJson, readSecretLine } from './secrets.mjs';
+import { assertOwnerOnlyFile, readSecretJson, readSecretLine } from './secrets.mjs';
 
 const PREFIX = 'google-client-';
 const SUFFIX = '.json';
@@ -92,10 +92,49 @@ function readClientFile(path) {
   }
 }
 
+// ONE RULE FOR WHAT COUNTS AS A CLIENT FILE, APPLIED BY ALL THREE READERS
+// (round-4 finding 7).
+//
+// Selection (listGoogleClients, defaultGoogleClient) used to enumerate the
+// secrets directory with a plain read while readGoogleClient put the very same
+// file through readSecretJson's 0600-file/0700-parent gauntlet. The two
+// disagreed, and the disagreement had teeth: a client hand-created under umask
+// 022 was OFFERED as the default and then threw when read, and because a
+// secrets-dir file shadows the bundled client of the same name, adding that
+// file made a working install stop working.
+//
+// The rule, now decided in one place: a credential in ~/.hazlie/secrets IS a
+// secret and is held to the gauntlet; one inside the app bundle is not and
+// never was (see the header -- a file in a signed .app is world-readable by
+// design and would fail every time). A secrets file that fails the gauntlet is
+// therefore not a client at all: selection does not offer it, and it does not
+// shadow the bundled copy that still works.
+//
+// It is not silent. The read path below falls back to the bundle and, when
+// there is no bundle to fall back to, still throws the gauntlet's own message
+// naming the file and the mode it needs.
+function readGuardedClientFile(path) {
+  if (!existsSync(path)) return null;
+  let raw;
+  try {
+    raw = assertOwnerOnlyFile(path, { label: 'google client' });
+  } catch {
+    return null;
+  }
+  try {
+    const c = JSON.parse(raw);
+    if (!c?.client_id || !c?.client_secret) return null;
+    return c;
+  } catch {
+    return null;
+  }
+}
+
 // Every `google-client-<name>.json` in one directory, newest caller wins.
 // Used for both the secrets dir and the bundle so the two are read by the
 // same rules and can be merged without either shape being special.
-function clientsIn(dir) {
+// `guarded` says which side of the rule above the directory sits on.
+function clientsIn(dir, { guarded = false } = {}) {
   const out = [];
   let names = [];
   try {
@@ -105,8 +144,9 @@ function clientsIn(dir) {
   }
   for (const file of names) {
     if (!file.startsWith(PREFIX) || !file.endsWith(SUFFIX)) continue;
-    const c = readClientFile(join(dir, file));
-    if (!c) continue; // malformed; the status page reports the account that needed it
+    const path = join(dir, file);
+    const c = guarded ? readGuardedClientFile(path) : readClientFile(path);
+    if (!c) continue; // malformed or not owner-only; the read path says which
     const name = file.slice(PREFIX.length, -SUFFIX.length);
     out.push({
       name,
@@ -145,16 +185,25 @@ export function readGoogleClient(
 ) {
   if (name && name !== DEFAULT_CLIENT) {
     const path = googleClientPath(name, home);
-    if (!existsSync(path)) {
-      const bundled = readClientFile(join(bundledDir, `${PREFIX}${name}${SUFFIX}`));
-      if (bundled) {
-        return {
-          name,
-          id: bundled.client_id,
-          secret: bundled.client_secret,
-          label: bundled.label ?? name,
-        };
-      }
+    // SAME ORDER AS SELECTION, SAME RULE (round-4 finding 7). A usable
+    // secrets-dir file wins; one that is absent OR that the gauntlet rejects
+    // falls through to the bundle, which is exactly the set of files
+    // listGoogleClients/defaultGoogleClient would have offered. Only when
+    // nothing is usable anywhere does readSecretJson run, and then its throw is
+    // the diagnostic: it names the file, and whether the problem is a missing
+    // file, a mode, a parse or a missing key.
+    const mine = readGuardedClientFile(path);
+    if (mine) {
+      return { name, id: mine.client_id, secret: mine.client_secret, label: mine.label ?? name };
+    }
+    const bundled = readClientFile(join(bundledDir, `${PREFIX}${name}${SUFFIX}`));
+    if (bundled) {
+      return {
+        name,
+        id: bundled.client_id,
+        secret: bundled.client_secret,
+        label: bundled.label ?? name,
+      };
     }
     const c = readSecretJson(path, {
       label: `google client "${name}"`,
@@ -163,10 +212,20 @@ export function readGoogleClient(
     });
     return { name, id: c.client_id, secret: c.client_secret, label: c.label ?? name };
   }
-  if (!existsSync(legacyIdPath(home))) {
+  // BOTH LEGACY FILES, because it takes both to be the legacy pair — which is
+  // what listGoogleClients and defaultGoogleClient have always required
+  // (round-4 finding 10). Testing only the id file meant a half-present pair
+  // (a secret deleted, a restore that dropped one) skipped the named/bundled
+  // default entirely and fell to readSecretLine, which threw on the missing
+  // half: the sign-in button 502'd on a machine that was holding a perfectly
+  // usable bundled credential the whole time. With both tested, a half pair is
+  // no pair, the bundled default answers, and the throw below is reached only
+  // when there is genuinely nothing to sign in with.
+  if (!(existsSync(legacyIdPath(home)) && existsSync(legacySecretPath(home)))) {
     const named = `${PREFIX}${DEFAULT_CLIENT}${SUFFIX}`;
     const c =
-      readClientFile(join(secretsDir(home), named)) ?? readClientFile(join(bundledDir, named));
+      readGuardedClientFile(join(secretsDir(home), named))
+      ?? readClientFile(join(bundledDir, named));
     if (c) {
       return {
         name: DEFAULT_CLIENT,
@@ -199,7 +258,7 @@ export function listGoogleClients({ home = homedir(), bundledDir = bundledClient
   }
   const merged = new Map();
   for (const c of clientsIn(bundledDir)) merged.set(c.name, c);
-  for (const c of clientsIn(secretsDir(home))) merged.set(c.name, c);
+  for (const c of clientsIn(secretsDir(home), { guarded: true })) merged.set(c.name, c);
   for (const c of merged.values()) {
     if (c.name === DEFAULT_CLIENT && out.length) continue; // the legacy pair already claimed it
     out.push({ name: c.name, label: c.label });
@@ -232,7 +291,7 @@ export function defaultGoogleClient({ home = homedir(), bundledDir = bundledClie
   }
   const merged = new Map();
   for (const c of clientsIn(bundledDir)) merged.set(c.name, c);
-  for (const c of clientsIn(secretsDir(home))) merged.set(c.name, c);
+  for (const c of clientsIn(secretsDir(home), { guarded: true })) merged.set(c.name, c);
   const rows = [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
   if (rows.length === 1) return { name: rows[0].name, label: rows[0].label };
   const marked = rows.find((c) => c.preferred);

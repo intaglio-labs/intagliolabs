@@ -191,3 +191,95 @@ test('the bundled directory is resolved against the module, not the cwd', () => 
   assert.ok(dir.startsWith('/'), 'absolute, so no caller can change it by chdir');
   assert.doesNotMatch(dir, /connectors/u, 'it lives beside features.json, not under connectors/');
 });
+
+// ---------------------------------------------------------------------------
+// ONE RULE, THREE READERS (round-4 finding 7).
+//
+// Selection enumerated ~/.hazlie/secrets with a plain read while the read path
+// put the same file through readSecretJson's 0600-file/0700-parent gauntlet.
+// The two disagreed, and because a secrets-dir file SHADOWS the bundled client
+// of the same name, the disagreement meant adding a file made a working
+// install stop working.
+
+// The mode is the whole point, so it is set explicitly rather than left to the
+// fixture: 0644 is what a file created under the default umask gets.
+function writeLooseSecret(home, name, body) {
+  const path = join(home, '.hazlie', 'secrets', `google-client-${name}.json`);
+  writeFileSync(path, JSON.stringify(body), { mode: 0o644 });
+  chmodSync(path, 0o644);
+  return path;
+}
+
+test('a world-readable secrets file does not shadow the bundled client it shares a name with', (t) => {
+  const at = box(t, { bundled: { prod: PROD } });
+  writeLooseSecret(at.home, 'prod', { client_id: 'LOOSE-ID', client_secret: 'LOOSE-SECRET', label: 'loose' });
+
+  // The install was working before that file appeared and must still work.
+  const c = readGoogleClient('prod', at);
+  assert.equal(c.id, 'PROD-ID', 'the bundled credential still answers');
+  assert.equal(c.label, 'Intaglio (prod)');
+
+  // And selection agrees with the read, which is the actual invariant: a name
+  // that is offered is a name that can be read.
+  assert.deepEqual(listGoogleClients(at).map((c2) => c2.label), ['Intaglio (prod)']);
+  assert.equal(defaultGoogleClient(at).label, 'Intaglio (prod)');
+});
+
+test('a world-readable secrets file with no bundle to fall back on still says why', (t) => {
+  const at = box(t, {});
+  writeLooseSecret(at.home, 'prod', { client_id: 'LOOSE-ID', client_secret: 'LOOSE-SECRET' });
+
+  // Not offered...
+  assert.deepEqual(listGoogleClients(at).map((c) => c.name), [],
+    'a credential the reader would refuse is not a credential to offer');
+  assert.equal(defaultGoogleClient(at), null);
+  // ...and not silent: the read throws the gauntlet's own message, naming the
+  // mode, so the owner can fix the file rather than guess.
+  assert.throws(() => readGoogleClient('prod', at), /group or other users/u);
+});
+
+test('an owner-only secrets file still wins, so the shadowing rule is unchanged', (t) => {
+  // The counterweight to the two tests above: the rule is about the GAUNTLET,
+  // not about secrets losing their precedence.
+  const at = box(t, {
+    secrets: { prod: { client_id: 'MINE-ID', client_secret: 'MINE-SECRET', label: 'mine' } },
+    bundled: { prod: PROD },
+  });
+  assert.equal(readGoogleClient('prod', at).id, 'MINE-ID');
+  assert.equal(listGoogleClients(at)[0].label, 'mine');
+});
+
+// A HALF-PRESENT LEGACY PAIR IS NO PAIR (round-4 finding 10).
+//
+// listGoogleClients and defaultGoogleClient have always required BOTH legacy
+// files; readGoogleClient tested only the id file. So with `gcal-client-id.txt`
+// present and the secret deleted -- a restore that dropped one, a half-finished
+// tidy -- defaultGoogleClient answered `default` (the bundle's sole row),
+// readGoogleClient saw the id file, skipped the bundle, and threw from
+// readSecretLine on the missing half. The sign-in button 502'd on a machine
+// holding a perfectly usable credential.
+test('a half-present legacy pair falls through to the bundled default', (t) => {
+  const at = box(t, { legacy: true, bundled: { default: { ...PROD, label: 'shipped default' } } });
+  rmSync(join(at.home, '.hazlie', 'secrets', 'gcal-client-secret.txt'));
+
+  assert.equal(defaultGoogleClient(at).name, DEFAULT_CLIENT, 'selection already said this');
+  const c = readGoogleClient(DEFAULT_CLIENT, at);
+  assert.equal(c.id, 'PROD-ID', 'and the read must agree with it');
+  assert.equal(c.label, 'shipped default');
+});
+
+test('a complete legacy pair is still never substituted for', (t) => {
+  // The guarantee the fix above must not cost: a grant carrying no `client`
+  // was issued by these two files, and Google will not renew it against a
+  // different credential.
+  const at = box(t, { legacy: true, bundled: { default: PROD } });
+  const c = readGoogleClient(DEFAULT_CLIENT, at);
+  assert.equal(c.id, 'LEGACY-ID');
+  assert.equal(c.secret, 'LEGACY-SECRET');
+});
+
+test('a half-present legacy pair with nothing to fall back on names the missing file', (t) => {
+  const at = box(t, { legacy: true });
+  rmSync(join(at.home, '.hazlie', 'secrets', 'gcal-client-secret.txt'));
+  assert.throws(() => readGoogleClient(DEFAULT_CLIENT, at), /google client secret file is missing/u);
+});
