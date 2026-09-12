@@ -106,7 +106,14 @@ enum ModelSetup {
     let fingerprint = automaticFingerprint
     guard let current = installed else {
       _ = allowFreshInstall
-      return nil
+      // A DOWNLOAD THE APP DID NOT SURVIVE IS STILL A DOWNLOAD THE OWNER ASKED
+      // FOR. This is not the fresh-install arm coming back: it answers nil on
+      // every machine that has not been through onboarding's engine screen, and
+      // when it answers it names the tier THAT REQUEST was for rather than
+      // whatever `recommended` says today. Nothing is fetched that was not
+      // already asked for once, out loud, on the screen that states the disk
+      // and battery cost.
+      return unfinishedDownload?.id
     }
     guard let previous = defaults.string(forKey: automaticFingerprintKey) else {
       // Migration from the old manual picker: respect what is already active,
@@ -152,6 +159,17 @@ enum ModelSetup {
 
   /// The tier already installed, if any — decided by the symlink's target, so
   /// it agrees with whatever setup-llm.sh last pointed it at.
+  ///
+  /// A LINK IS NOT WEIGHTS. `destinationOfSymbolicLink` reads the link, not
+  /// what it points at, and succeeds perfectly well on a link whose target was
+  /// deleted — by hand, by a disk cleaner, by moving ~/.hazlie between Macs.
+  /// Answering "installed" there is not a cosmetic lie: `isInstalled` arms the
+  /// launch reconciliation and `automaticTarget` passes its `guard let current`,
+  /// so a machine with no weights at all could be handed a 2.5-4.7 GB download
+  /// nobody asked for — the exact case the fresh-install arm was removed to
+  /// close. The truncated-real-file case was already handled by the size
+  /// comparison in the branch below; this is the same standard applied to the
+  /// link, which is the shape the model is actually installed in.
   static var installed: ModelTier? {
     let link = modelDir.appendingPathComponent("model.gguf")
     guard let dest = try? fm.destinationOfSymbolicLink(atPath: link.path) else {
@@ -162,10 +180,68 @@ enum ModelSetup {
       else { return nil }
       return tiers.first { $0.bytes == size }
     }
-    return tiers.first { $0.file == (dest as NSString).lastPathComponent }
+    // link() writes a relative destination; setup-llm.sh may write an absolute
+    // one. Resolving against modelDir accepts both — an absolute path ignores
+    // the base.
+    let target = URL(fileURLWithPath: dest, relativeTo: modelDir).standardizedFileURL
+    var isDir: ObjCBool = false
+    guard fm.fileExists(atPath: target.path, isDirectory: &isDir), !isDir.boolValue,
+          let size = (try? fm.attributesOfItem(atPath: target.path)[.size]) as? Int64,
+          let tier = tiers.first(where: {
+            $0.file == (dest as NSString).lastPathComponent && $0.bytes == size
+          })
+    else {
+      reportBrokenLink(dest)
+      return nil
+    }
+    return tier
+  }
+
+  /// Said once per app run, not once per read: `installed` is asked on every
+  /// settings render and every status payload, and a log line per read would
+  /// bury the one that matters.
+  private static var brokenLinkReported = false
+  private static func reportBrokenLink(_ dest: String) {
+    lock.lock(); defer { lock.unlock() }
+    guard !brokenLinkReported else { return }
+    brokenLinkReported = true
+    NSLog("Intaglio Labs: models/model.gguf points at \(dest), which is not a complete model "
+          + "file — treating this Mac as having no weights installed")
   }
 
   static var isInstalled: Bool { installed != nil }
+
+  /// A download that the app did not live long enough to finish.
+  ///
+  /// Written when `download()` starts and removed on every ending it reaches —
+  /// success, cancel, or a reported failure. So this file surviving means one
+  /// thing only: the process went away mid-fetch. Quitting the app thirty
+  /// seconds into onboarding's 4.7 GB download used to strand it completely —
+  /// `onboardingDone` is posted whether or not the weights landed, so nothing
+  /// was installed, nothing was armed, and the only recovery was replaying the
+  /// whole gear-menu flow.
+  ///
+  /// THE PARTIAL BYTES ARE NOT THE EVIDENCE, the request is. URLSession keeps
+  /// its in-flight file in the system temp directory, which is gone with the
+  /// process; the only thing that ever appears under ~/.hazlie/models is
+  /// `.<tier file>.part`, and that is written after all the bytes have landed
+  /// and removed again once the digest checks out — it marks the verify window,
+  /// not the fetch. Both are read here, because either one means the owner
+  /// asked for this tier and did not get it.
+  static var unfinishedDownload: ModelTier? {
+    if let id = try? String(contentsOf: pendingMarker, encoding: .utf8),
+       let tier = tiers.first(where: { $0.id == id.trimmingCharacters(in: .whitespacesAndNewlines) }) {
+      return tier
+    }
+    return tiers.first { fm.fileExists(atPath: partialPath(for: $0)) }
+  }
+
+  static var hasUnfinishedDownload: Bool { unfinishedDownload != nil }
+
+  private static var pendingMarker: URL { modelDir.appendingPathComponent(".pending-download") }
+  private static func partialPath(for tier: ModelTier) -> String {
+    modelDir.appendingPathComponent(".\(tier.file).part").path
+  }
 
   // MARK: download
 
@@ -244,9 +320,14 @@ enum ModelSetup {
       done("could not create the models folder")
       return
     }
+    // The request, on disk, before a byte moves. Every ending below clears it,
+    // so it outlives only a process that went away mid-fetch — see
+    // unfinishedDownload, which is what picks it back up on the next launch.
+    try? tier.id.write(to: pendingMarker, atomically: true, encoding: .utf8)
 
     let finish: (String?) -> Void = { reason in
       DispatchQueue.main.async {
+        try? fm.removeItem(at: pendingMarker)
         task = nil
         driver = nil
         busy = false

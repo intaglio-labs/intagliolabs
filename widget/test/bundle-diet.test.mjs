@@ -156,10 +156,57 @@ test('an automatic model target requires a model that is already installed', () 
   const at = modelSetupCode.indexOf('static func automaticTarget(');
   assert.ok(at > 0, 'automaticTarget must still exist — it is the upgrade path');
   const body = modelSetupCode.slice(at, at + 400);
-  assert.match(body, /guard let current = installed else \{\s*(?:_ = allowFreshInstall\s*)?return nil/u,
-    'with nothing installed it must answer nil — never `recommended`');
+  assert.match(body, /guard let current = installed else \{\s*(?:_ = allowFreshInstall\s*)?\s*return unfinishedDownload\?\.id/u,
+    'with nothing installed and nothing asked for it must answer nil — never `recommended`');
   assert.doesNotMatch(body, /allowFreshInstall \? recommended/u,
     'the fresh-install arm is what began a 4 GB download on a launch nobody asked');
+  // The resume arm is not the fresh-install arm wearing a hat: it may only ever
+  // name the tier the interrupted REQUEST was for. Answering `recommended`
+  // there would fetch weights nobody picked on a machine that has none.
+  assert.doesNotMatch(body, /unfinishedDownload[^\n]*recommended/u);
+});
+
+// A DANGLING LINK IS NOT AN INSTALLED MODEL, and both of stage 2's locks open
+// if it counts as one. destinationOfSymbolicLink reads the link, not what it
+// points at, so `~/.hazlie/models/model.gguf -> Qwen3-8B-Q4_K_M.gguf` with the
+// .gguf deleted answered "installed". That arms the launch reconciliation
+// (isInstalled) and clears automaticTarget's `guard let current`, so a Mac with
+// no weights at all could be handed a 2.5-4.7 GB fetch — the case the
+// fresh-install arm was removed to close, reached by a different door.
+test('a link with nothing behind it is not an installed model', () => {
+  const at = modelSetupCode.indexOf('static var installed: ModelTier? {');
+  assert.ok(at > 0, 'installed must still exist — it is what both locks read');
+  const body = modelSetupCode.slice(at, modelSetupCode.indexOf('\n  }', at));
+  assert.doesNotMatch(body, /return tiers\.first \{ \$0\.file == \(dest as NSString\)\.lastPathComponent \}/u,
+    'the tier may not be decided by the link text alone — that is the dangling-link bug');
+  assert.match(body, /fm\.fileExists\(atPath: target\.path, isDirectory: &isDir\)/u,
+    'the link target must be shown to exist');
+  assert.match(body, /!isDir\.boolValue/u, 'and to be a file rather than a directory');
+  assert.match(body, /\$0\.bytes == size/u,
+    'and to weigh what that tier weighs — the same standard the real-file branch already held');
+  assert.match(body, /reportBrokenLink\(dest\)/u, 'a broken link is worth exactly one log line');
+});
+
+// AN INTERRUPTED DOWNLOAD IS NOT A FRESH INSTALL. Quitting thirty seconds into
+// onboarding's fetch stranded it: onboardingDone is posted whether or not the
+// weights landed, so nothing was installed, the timer was never armed, and the
+// only recovery was replaying the whole gear-menu flow. The request is recorded
+// before the first byte moves and cleared on every ending download() reaches,
+// so the file surviving means the process went away mid-fetch and nothing else.
+test('a download the app did not survive is picked up again, and only that', () => {
+  assert.match(modelSetupCode, /try\? tier\.id\.write\(to: pendingMarker, atomically: true, encoding: \.utf8\)/u,
+    'the request must be on disk before the fetch starts');
+  const finishAt = modelSetupCode.indexOf('let finish: (String?) -> Void = { reason in');
+  assert.ok(finishAt > 0, 'download() must still funnel every ending through finish');
+  assert.match(modelSetupCode.slice(finishAt, finishAt + 400), /try\? fm\.removeItem\(at: pendingMarker\)/u,
+    'every ending — success, cancel, failure — must clear it, or a finished download resumes forever');
+  const at = modelSetupCode.indexOf('static var unfinishedDownload: ModelTier? {');
+  assert.ok(at > 0, 'the resume path must be readable in one place');
+  const body = modelSetupCode.slice(at, modelSetupCode.indexOf('\n  }', at));
+  assert.match(body, /pendingMarker/u, 'the recorded request is the evidence');
+  assert.match(body, /partialPath\(for: \$0\)/u,
+    'and so is the staged .part file, which is the only other thing an interrupted fetch leaves');
+  assert.doesNotMatch(body, /recommended/u, 'it answers what was asked for, never what fits today');
 });
 
 test('the launch-time reconciliation is not even armed without a model', () => {
