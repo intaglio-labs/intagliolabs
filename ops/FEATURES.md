@@ -61,6 +61,14 @@ to be indistinguishable from a clean read) and `invalid` (there and refused).
 Neither of the last two changes `registryState`; see the two failure rules
 below.
 
+**The shelf says so when they disagree.** The daemon publishes the registry
+state it is running on into `~/.hazlie/connectors/activity.json` — the file the
+app already reads — and the connect status payload carries that as
+`daemonRegistryState` beside its own `registryState`. Repair a broken registry
+under a running daemon and the shelf stops saying "reinstall" and starts saying
+"restart the app", instead of going quiet about a machine that is scheduling
+nothing.
+
 **A flip needs restarts, and the three readers disagree about when.**
 `Features.current` caches for the app's whole process lifetime and `daemon.mjs`
 caches at module load, so changing the override takes an **app restart and a

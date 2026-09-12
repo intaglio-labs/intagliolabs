@@ -1022,8 +1022,43 @@ const NOTICES = {
   // has connected nothing looks like. The one state the owner cannot diagnose
   // is the one where the app is entirely broken, so it gets its own sentence
   // and the alarm colour.
-  registry: 'feature registry unreadable — reinstall. nothing can be connected until it is.',
+  registry: 'feature registry unreadable — reinstall, then restart the app. '
+    + 'nothing can be connected until it is.',
+  // A DIFFERENT SITUATION, AND DIFFERENT WORDS. The registry this page reads is
+  // fine; the daemon that does the ingesting loaded the broken one at startup
+  // and caches it for its whole process life (connectors/daemon.mjs resolves it
+  // at module scope). Repairing the file clears the line above while nothing is
+  // being scheduled, so the shelf would go quiet about a machine that reads
+  // nothing at all. Telling the owner to reinstall here would be wrong — the
+  // bundle is fine. The daemon has to go round again.
+  registryStale: 'the connector service is still running on the old feature registry — '
+    + 'restart the app.',
 };
+
+/// WHICH LINE THE OWNER IS OWED, and whether it is an alarm — one decision, so
+/// that the colour cannot be left behind by a path that forgot to clear it.
+///
+/// It was: the registry path painted --status-bad and only the all-clear path
+/// reset it, so a repaired registry followed by an ordinary "cannot reach
+/// connect" rendered a routine, transient line in the alarm colour. The reset
+/// belongs to the same place the set does.
+///
+/// `null` is "say nothing", which is the ordinary answer.
+function noticeFor(data) {
+  if (!data || data.state !== 'ok') {
+    return { text: (data && NOTICES[data.state]) || NOTICES.error, alarm: false };
+  }
+  // The registry outage is drawn OVER a normal payload rather than instead of
+  // one: the rows are fine, it is the answer about which of them this build
+  // offers that is missing.
+  if (data.registryState && data.registryState !== 'ok') {
+    return { text: NOTICES.registry, alarm: true };
+  }
+  if (data.daemonRegistryState && data.daemonRegistryState !== 'ok') {
+    return { text: NOTICES.registryStale, alarm: true };
+  }
+  return null;
+}
 
 // WKWebView never draws the native title-attribute tooltip, so the tile's
 // name needs one of our own: a single shared element, fixed-position and
@@ -2499,6 +2534,16 @@ const finishSettingsPointer = () => {
 document.addEventListener('pointerup', finishSettingsPointer, true);
 document.addEventListener('pointercancel', finishSettingsPointer, true);
 
+/// THE ONLY PLACE THE NOTICE IS WRITTEN. Colour through element.style because
+/// these pages ship a CSP with no 'unsafe-inline'
+/// (widget/test/csp-inline-style.test.mjs), and cleared on every path rather
+/// than on the happy one: the element keeps whatever the last notice painted.
+function showNotice(chosen) {
+  notice.textContent = chosen ? chosen.text : '';
+  notice.style.color = chosen && chosen.alarm ? 'var(--status-bad)' : '';
+  notice.hidden = !chosen;
+}
+
 async function refresh() {
   try {
     // BEFORE THE FIRST TILE IS BUILT. Cached after the first call (hzFeatures
@@ -2507,23 +2552,8 @@ async function refresh() {
     // which is a visible flash of connectors this build does not offer.
     featureSet = await hzFeatures();
     const data = await hzPost('status');
-    if (data.state !== 'ok') {
-      notice.textContent = NOTICES[data.state] || NOTICES.error;
-      notice.hidden = false;
-      return;
-    }
-    // The registry outage is drawn OVER a normal payload rather than instead of
-    // one: the rows are fine, it is the answer about which of them this build
-    // offers that is missing. Assigned through element.style because these
-    // pages ship a CSP without 'unsafe-inline' (widget/test/csp-inline-style.test.mjs).
-    if (data.registryState && data.registryState !== 'ok') {
-      notice.textContent = NOTICES.registry;
-      notice.style.color = 'var(--status-bad)';
-      notice.hidden = false;
-    } else {
-      notice.style.color = '';
-      notice.hidden = true;
-    }
+    showNotice(noticeFor(data));
+    if (data.state !== 'ok') return;
     // An OPEN strip survives the refresh. The cookie-paste and token/phone
     // login flows require leaving the popup (to copy cookies, a token, or a
     // code), and coming back fires the focus listener below; renderBridge
@@ -2547,8 +2577,7 @@ async function refresh() {
     grid.replaceChildren(...orderSources(shown)
       .map((s) => card(s, kept && kept.dataset.id === s.id ? kept : null)));
   } catch {
-    notice.textContent = NOTICES.error;
-    notice.hidden = false;
+    showNotice({ text: NOTICES.error, alarm: false });
   }
 }
 

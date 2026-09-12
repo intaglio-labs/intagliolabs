@@ -1058,7 +1058,16 @@ export function createDaemon({
   };
   const publishActivity = (activity) => {
     const total = totalWorkEstimate();
-    writeActivity({ ...activity, queue: scheduledQueue(), ...(total ?? {}) }, activityPath);
+    // WHICH REGISTRY THIS PROCESS IS RUNNING ON, in the file the app already
+    // reads. FEATURE_REGISTRY is resolved once at module scope while connect
+    // re-reads it per request, so a registry repaired under a running daemon
+    // clears the shelf's red line while this process is still holding ALL_OFF
+    // and scheduling nothing. One word costs nothing and makes the disagreement
+    // legible; connect/lib/status.mjs carries it back to the shelf.
+    writeActivity(
+      { ...activity, queue: scheduledQueue(), registryState: FEATURES_REGISTRY_STATE, ...(total ?? {}) },
+      activityPath
+    );
   };
   const publishWaiting = () => {
     const next = scheduledQueue()[0];
@@ -1543,6 +1552,12 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       });
       if (scheduledSources.length === 0) {
         log.warn('no_sources', { detail: 'connectors/sources/ is empty; every source is disabled or missing' });
+        // AND SAY SO ON DISK. publishWaiting only writes when there is a next
+        // task, so the state an unreadable registry produces — nothing
+        // scheduled, ever — was also the state in which this daemon never wrote
+        // an activity file at all. The one outage the owner cannot diagnose is
+        // not the one to stay silent about.
+        publishActivity({ phase: 'waiting' });
       }
     },
     stop() {

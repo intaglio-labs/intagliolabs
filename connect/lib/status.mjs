@@ -19,7 +19,7 @@ import {
   accountsWithScopeIncludingStale,
 } from '../../connectors/lib/googleAccounts.mjs';
 import { listGoogleClients } from '../../connectors/lib/googleClients.mjs';
-import { defaultOverridePath, readFeatureRegistry } from '../../connectors/lib/features.mjs';
+import { REGISTRY_STATES, defaultOverridePath, readFeatureRegistry } from '../../connectors/lib/features.mjs';
 
 const SECRETS = (home) => join(home, '.hazlie', 'secrets');
 
@@ -498,6 +498,29 @@ export function featureRegistryStatus({ home = homedir() } = {}) {
 
 export function featureRegistryState({ home = homedir() } = {}) {
   return featureRegistryStatus({ home }).registryState;
+}
+
+/// WHERE THE DAEMON STANDS, which is not always where this page stands.
+///
+/// connectors/daemon.mjs resolves the registry ONCE, at module scope; this file
+/// re-reads it per request. Repair a broken ops/features.json under a running
+/// daemon and the shelf's red line clears and the tiles come back, while the
+/// daemon still holds ALL_OFF and schedules nothing until it is restarted — the
+/// notice asserting a recovery that has not happened.
+///
+/// The daemon writes its own answer into the activity file it already
+/// maintains, so this is one small local read and no new channel. `null` is
+/// "it has not said" — an older daemon, or a file not written yet — and must
+/// never paint an alarm: absence of a claim is not a claim.
+export function daemonRegistryState({ home = homedir() } = {}) {
+  try {
+    const raw = JSON.parse(
+      readFileSync(join(home, '.hazlie', 'connectors', 'activity.json'), 'utf8')
+    );
+    return REGISTRY_STATES.includes(raw?.registryState) ? raw.registryState : null;
+  } catch {
+    return null; // no activity file is the normal case on a machine that never ran it
+  }
 }
 
 /// The set itself, for the surfaces that draw what this build OFFERS rather

@@ -127,14 +127,23 @@ test('an unreadable registry is told apart from an empty one, everywhere', () =>
     'no paths and no file contents in a log line');
 
   // The connect payload carries it to the page...
-  assert.match(connectStatus, /export function featureRegistryState\(\)/u);
-  assert.match(statusApi, /registryState: featureRegistryState\(\)/u);
+  assert.match(connectStatus, /export function featureRegistryStatus\(\{ home = homedir\(\) \} = \{\}\)/u,
+    'with the home every other reader on that page takes');
+  assert.match(statusApi, /featureRegistryStatus\(\{ home \}\)/u);
+  // And the daemon's own view beside it: it caches the registry at module scope,
+  // so a repair under a running daemon must not read as a recovery.
+  assert.match(connectStatus, /export function daemonRegistryState\(\{ home = homedir\(\) \} = \{\}\)/u);
+  assert.match(statusApi, /daemonRegistryState: daemonRegistryState\(\{ home \}\)/u);
+  assert.match(daemon, /registryState: FEATURES_REGISTRY_STATE, \.\.\./u,
+    'published into the activity file the app already reads');
   // ...and the page says it in words, in the alarm colour, instead of drawing
   // the same blank shelf it draws for "nothing connected".
   assert.match(connectionsJs, /registry: 'feature registry unreadable/u);
   assert.match(connectionsJs, /if \(data\.registryState && data\.registryState !== 'ok'\)/u);
-  assert.match(connectionsJs, /notice\.style\.color = 'var\(--status-bad\)'/u,
-    'through element.style: these pages ship a CSP with no unsafe-inline');
+  assert.match(connectionsJs, /notice\.style\.color = chosen && chosen\.alarm \? 'var\(--status-bad\)' : '';/u,
+    'through element.style (these pages ship a CSP with no unsafe-inline), and '
+      + 'CLEARED on every path rather than only on the happy one — see '
+      + 'widget/test/registry-notice.test.mjs');
 });
 
 // --- provisioning --------------------------------------------------------
@@ -364,7 +373,9 @@ test('the tile list is derived from the registry, not hand-maintained', () => {
   assert.doesNotMatch(connectionsJs, /^const HIDDEN_CONNECTORS = new Set\(\[/mu,
     'the hardcoded set must be gone, not shadowed');
   assert.match(connectionsJs, /function isHiddenSource\(src\)/u);
-  assert.match(connectionsJs, /hzConnectorFeature\(featureSet, kindOf\(src\.id\)\) === false/u);
+  assert.match(connectionsJs, /hzConnectorFeature\(featureSet, connectorOf\(src\.id\)\) === false/u,
+    'by CONNECTOR, not by id: a mail:<address> row is the mail connector and the '
+      + 'export row is the linkedin one');
   // LINKEDIN IS BOTH A BRIDGE PLATFORM AND THE EXPORT CONNECTOR, sharing one
   // hermes source name. Filtering by id would have switched the export off with
   // the bridge tile; isBridge is the discriminator.
@@ -384,11 +395,14 @@ test('an unrecognised connector is left alone by the page, as it is by the daemo
   assert.match(daemon, /connectorsDisabledBy/u);
 });
 
-// LINKEDIN IS TWO FLOWS AND EXACTLY ONE TILE. With `bridges` off the bridge tile
-// is correctly hidden while `connectors.linkedin` keeps the export connector
-// scheduled — and the owner had no surface anywhere telling them where to put
-// Connections.csv for a connector this install is actively polling for it.
-test('the LinkedIn export has a tile of its own when the bridge tile is gone', () => {
+// LINKEDIN IS TWO FLOWS AND ONE TILE PER FLOW THIS BUILD ACTUALLY RUNS. With
+// `bridges` off the bridge tile is correctly hidden while `connectors.linkedin`
+// keeps the export connector scheduled — and the owner had no surface anywhere
+// telling them where to put Connections.csv for a connector this install is
+// actively polling for it. With bridges ON that connector is STILL scheduled, so
+// the export tile stays too and the pair is named apart; hiding it there was the
+// same defect mirrored. widget/test/connector-visibility.test.mjs runs the rule.
+test('the LinkedIn export has a tile of its own, on either side of the bridges flag', () => {
   assert.match(connectStatus, /export const LINKEDIN_EXPORT_ID = 'linkedin-export';/u);
   assert.match(connectStatus, /function linkedinExportRow\(home\)/u);
   assert.match(connectStatus, /'imports', 'linkedin', 'Connections\.csv'/u);
