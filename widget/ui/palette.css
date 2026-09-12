@@ -3108,3 +3108,206 @@ body.connections .tile-tip.on { opacity: 1; }
 .confirm-yes { border-color: rgba(51, 255, 102, 0.35) !important; color: var(--status-ok) !important; }
 .confirm-yes:hover:not(:disabled) { background: rgba(51, 255, 102, 0.08) !important; }
 .confirm.done .confirm-text { opacity: 0.55; }
+
+/* ---------------- onboarding: the six setup screens ----------------
+   ─────────────────────────────────────────────────────────────────────────────
+   These screens sit directly on the scrim, which is a dimmed DESKTOP — its
+   lightness is whatever wallpaper is behind it. Everything below therefore
+   either carries its own surface or is bright enough not to depend on one;
+   --muted (#5c5c5c) was chosen against the widget's solid #141412 and lands
+   near 2:1 here, which is the mistake the "onboarding legibility" block above
+   was written to fix and which is easy to make again one rule at a time.
+
+   Additive: nothing above this comment changes. .ob-screen, .ob-cta,
+   .ob-cta-sm, .ob-tagline, .ob-status, .ob-perms and .ob-perm already exist
+   and are reused as they are. */
+
+.ob-title {
+  font-size: 26px; font-weight: 600; line-height: 1.25;
+  color: var(--fg); max-width: 22ch;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), 0 2px 18px rgba(0, 0, 0, 0.55);
+}
+/* The second paragraph on a screen: still body copy, deliberately quieter, so
+   the screen has one thing to read first. Not --muted — see the header. */
+.ob-tagline.ob-quiet { font-size: 15px; color: #b3ada1; font-weight: 400; }
+.ob-note { font-size: 12.5px; line-height: 1.45; color: #a8a296; max-width: 46ch; }
+
+/* THE EXAMPLE CARD. Static, and labelled, because it is a drawing of a result
+   on the one screen that runs before anything has been read. An unlabelled
+   mock of the product's own output is a fabricated measurement. The tag is
+   therefore part of the component and not an optional decoration. */
+.ob-card-demo {
+  position: relative;
+  width: 100%; max-width: 420px;
+  padding: 18px 20px 16px;
+  border-radius: 14px;
+  border: 1px dashed rgba(234, 234, 234, 0.18);
+  background: rgba(14, 13, 12, 0.86);
+  text-align: left;
+}
+.ob-card-tag {
+  position: absolute; top: -9px; left: 16px;
+  padding: 2px 8px; border-radius: 999px;
+  font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: #0f0e0c; background: var(--hazelnut);
+}
+.ob-card-name { font-size: 14px; font-weight: 600; color: #f0e6d2; margin-bottom: 5px; }
+.ob-card-line { font-size: 13px; line-height: 1.5; color: #b3ada1; }
+
+/* The mode row. Three words, one on, and the one that is on is stated by
+   weight and a filled pill rather than by colour alone. */
+.ob-modes { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.ob-mode {
+  font: inherit; font-size: 12.5px;
+  padding: 7px 16px; border-radius: 999px;
+  border: 1px solid rgba(234, 234, 234, 0.16);
+  background: rgba(255, 255, 255, 0.04);
+  color: #b3ada1; cursor: pointer;
+}
+.ob-mode:hover { color: #ddd7cb; border-color: rgba(234, 234, 234, 0.3); }
+.ob-mode-on {
+  color: #0f0e0c; font-weight: 600;
+  background: var(--hazelnut-light); border-color: transparent;
+}
+
+/* The permission rows reuse .ob-perm's box; these are the parts the new markup
+   names differently. */
+.ob-perm-name { font-size: 14px; font-weight: 600; color: #f0e6d2; flex: 0 0 auto; }
+.ob-perm-why { font-size: 12.5px; line-height: 1.4; color: #a8a296; flex: 1 1 auto; min-width: 0; }
+.ob-perm-btn {
+  font: inherit; font-size: 12px;
+  flex: 0 0 auto; padding: 6px 14px; border-radius: 999px;
+  border: 1px solid rgba(234, 234, 234, 0.2);
+  background: transparent; color: #ddd7cb; cursor: pointer;
+}
+.ob-perm-btn:hover:not(:disabled) { border-color: var(--hazelnut); color: var(--hazelnut-light); }
+.ob-perm-btn:disabled { cursor: default; opacity: 0.75; }
+/* NOTHING TO GRANT IS NOT A GRANT. A Mac where Messages has never been opened
+   has no chat.db, so the switch would buy nothing — and the row must not look
+   like the green one beside it. Dashed and grey: present, inert, explained. */
+.ob-perm.nothing {
+  border-style: dashed;
+  border-color: rgba(234, 234, 234, 0.14);
+  background: transparent;
+}
+.ob-perm.nothing .ob-perm-name, .ob-perm.nothing .ob-perm-why { color: var(--secondary); }
+/* WHICH BUNDLE THE SWITCH BELONGS TO. Small, monospaced, directly under the
+   row it qualifies — a bundle id is an identifier the owner will compare
+   character by character against a list in System Settings. */
+.ob-perm-bundle {
+  font-family: var(--mono); font-size: 11px; color: #9d978b;
+  padding-left: 14px; margin-top: -4px; align-self: flex-start;
+}
+
+/* The button row every screen ends with. The skip is a REAL option on four of
+   these six screens, so it is readable rather than hidden — a choice you can
+   barely see is not one you were offered. */
+.ob-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; justify-content: center; }
+.ob-ghost {
+  font: inherit; font-size: 12.5px;
+  padding: 8px 14px; border-radius: 999px;
+  border: 1px solid transparent; background: transparent;
+  color: #9d978b; cursor: pointer;
+}
+.ob-ghost:hover { color: #ddd7cb; border-color: rgba(234, 234, 234, 0.18); }
+.ob-ghost[hidden] { display: none; }
+.ob-cta[disabled] { opacity: 0.4; cursor: default; }
+
+/* A check's answer, in its own colour. .ob-status already exists as the quiet
+   default; these three are the verdicts. */
+.ob-status.ok { color: #8fd3a6; }
+.ob-status.warn { color: #e0a23c; }
+.ob-status.bad { color: var(--status-bad); }
+
+/* THE ENGINE OPT-IN. The one switch in this flow that sends anything off this
+   Mac, so the sentence under it is part of the control and is sized to be
+   read — not a footnote beside a toggle that is already flipped. */
+.ob-toggle-row { display: flex; align-items: flex-start; gap: 14px; max-width: 480px; text-align: left; }
+.ob-toggle-row[hidden] { display: none; }
+.ob-toggle {
+  flex: 0 0 auto; width: 44px; height: 26px; padding: 3px;
+  border-radius: 999px; border: 1px solid rgba(234, 234, 234, 0.2);
+  background: rgba(255, 255, 255, 0.05); cursor: pointer;
+  display: flex; align-items: center;
+}
+.ob-toggle-knob {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #9d978b;
+  transition: transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1), background 0.15s ease;
+}
+.ob-toggle.on { background: rgba(143, 211, 166, 0.22); border-color: rgba(143, 211, 166, 0.5); }
+.ob-toggle.on .ob-toggle-knob { transform: translateX(18px); background: #8fd3a6; }
+.ob-toggle-copy { display: flex; flex-direction: column; gap: 5px; }
+.ob-toggle-label { font-size: 14px; font-weight: 600; color: #f0e6d2; line-height: 1.35; }
+
+/* The local model's download. One bar, one line, no percentage: the line says
+   how many gigabytes of how many, which is the number a person waiting
+   actually uses. */
+.ob-model { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 420px; }
+.ob-model[hidden] { display: none; }
+.ob-bar-track {
+  height: 6px; border-radius: 999px; overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+}
+.ob-bar-fill {
+  height: 100%; width: 0;
+  background: linear-gradient(90deg, var(--hazelnut), var(--hazelnut-light));
+  transition: width 240ms ease;
+}
+
+/* ---- the first-load table ----
+   Wider than the rest of the flow, because it is the one screen with columns
+   rather than a paragraph. */
+.ob-screen.ob-wide { max-width: 720px; }
+.ob-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
+.ob-table th {
+  font-size: 11px; font-weight: 500; letter-spacing: 0.07em; text-transform: uppercase;
+  color: #9d978b; padding: 0 10px 8px; border-bottom: 1px solid rgba(234, 234, 234, 0.12);
+}
+.ob-table td {
+  padding: 10px; color: #ddd7cb;
+  border-bottom: 1px solid rgba(234, 234, 234, 0.06);
+  font-variant-numeric: tabular-nums;
+}
+.ob-table[hidden] { display: none; }
+/* WHAT THE PEOPLE COLUMN MEANS FOR THIS ROW. It is not the same question on
+   every source: a LinkedIn export has no authors at all, and an address book's
+   rows are names rather than correspondents. Counting those as "people who
+   wrote to you" is the single most likely false amber on this screen, so the
+   qualifier travels with the number instead of living in a header that can
+   only say one thing. */
+.ob-qualifier { color: #9d978b; font-size: 11.5px; }
+
+/* The four verdicts. Each carries a dot as well as a colour, because amber and
+   the hazelnut accent are both warm and this is the one place in the app where
+   a warm colour means "look at this" rather than "this is the accent". */
+.ob-st { white-space: nowrap; }
+.ob-st::before {
+  content: ''; display: inline-block;
+  width: 6px; height: 6px; border-radius: 50%;
+  margin-right: 7px; vertical-align: middle;
+  background: currentColor;
+}
+.ob-st.green { color: #8fd3a6; }
+.ob-st.amber { color: #e0a23c; }
+.ob-st.red { color: var(--status-bad); }
+.ob-st.grey { color: var(--secondary); }
+
+/* ABOVE THE TABLE, NOT IN IT. The daemon holding a stale lock, or exiting on a
+   config error, makes every source read zero — and a per-row warning would
+   then blame five sources for one process that is not running. Full width and
+   its own surface so it cannot be read as one row's problem. */
+.ob-banner {
+  width: 100%;
+  padding: 10px 14px; border-radius: 10px;
+  font-size: 13px; color: var(--status-bad);
+  border: 1px solid rgba(255, 83, 71, 0.35);
+  background: rgba(255, 83, 71, 0.08);
+  text-align: left;
+}
+.ob-banner[hidden] { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  body:not(.motion-anyway) .ob-toggle-knob { transition: none; }
+  body:not(.motion-anyway) .ob-bar-fill { transition: none; }
+}
