@@ -137,16 +137,21 @@ test('a machine that has not finished last year takes several ticks in seconds',
 });
 
 test('the sprint hands the history pass a bigger budget', async (t) => {
-  const chat = walker('imessage');
+  // FORTY-FIVE SECONDS, and the assertion is thirty. HISTORY_BUDGET_MS is twenty,
+  // so any threshold under it is met by the ordinary budget too and the test
+  // passes on a tree that has no sprint at all -- which is what the first
+  // version of this did. `openSlices: 1` keeps the pass itself short: what is
+  // asserted is the deadline HANDED to the source, not how long it spends.
+  const chat = walker('imessage', { openSlices: 1 });
   const { instance } = build(t, [chat.source], {
-    daemon: { sprintHistoryBudgetMs: 5_000 },
+    daemon: { sprintHistoryBudgetMs: 45_000 },
   });
   const armedAt = Date.now();
   instance.start();
   await sleep(1_400);
   assert.ok(chat.calls.deadlines.length > 0, 'the history pass never ran');
   assert.ok(
-    chat.calls.deadlines[0] > armedAt + 2_000,
+    chat.calls.deadlines[0] >= armedAt + 30_000,
     'a sprinting source gets the sprint budget, not the ordinary 20 s one'
   );
 });
