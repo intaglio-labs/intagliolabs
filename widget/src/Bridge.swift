@@ -1478,6 +1478,19 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       ModelSetup.cancel()
       reply(webView, id, ["state": "ok"])
 
+    case "engineProbe":
+      // ASKS THE CLIENT, DOES NOT ASK THE FILESYSTEM. See EngineProbe.swift:
+      // "the binary resolves" is not the same question as "the binary works",
+      // and only the second one may be allowed to offer a switch that sends
+      // message excerpts off this Mac. The reply carries the configured engine
+      // as well, so the toggle renders from the config file rather than from a
+      // default that would read as an opt-out the owner never made.
+      EngineProbe.run { [weak self] out in
+        var result = out
+        if result["state"] == nil { result["state"] = "error" }
+        self?.reply(webView, id, result)
+      }
+
     case "onboardingStep":
       // Fire-and-forget from showScreen(). Bounded because it is a UserDefaults
       // key written from a webview message, and an unbounded string there is a
