@@ -86,7 +86,23 @@ final class Distiller {
   // and the topic chips on the people panel are counted per CONVERSATION from
   // it -- so leaving it off would quietly staleness the one part of this pipeline
   // the owner does see.
-  private var distillationEnabled: Bool { fm.fileExists(atPath: enableMarker.path) }
+  //
+  // TWO SWITCHES NOW, ANDed, and they say different things. The marker below is
+  // "the output has no door yet" (owner, 2026-08-27). `distiller` in
+  // ops/features.json is "the household claim pipeline is not the reconnection
+  // card's work" (the Reconnect-Only repackaging, 2026-09-12). Either being off
+  // is enough. ANDing rather than replacing is the point: creating the marker
+  // must not silently undo the newer decision, and flipping the feature on must
+  // not silently undo the older one.
+  //
+  // The SWEEP, LOOKUP and LINT markers below are deliberately NOT gated on any
+  // feature flag. They are the card — the sweep is its ingest, the lookup writes
+  // its "changed since" line, lint keeps its receipts honest. Gate those and the
+  // product stops.
+  private var distillationEnabled: Bool {
+    Features.shouldDistill(Features.current,
+                          markerPresent: fm.fileExists(atPath: enableMarker.path))
+  }
 
   /// Create this file to run passes again, matching the connectors' marker idiom
   /// (`~/.hazlie/connectors/<name>.disabled`) with the polarity reversed: theirs
@@ -244,9 +260,18 @@ final class Distiller {
   private func announceDisabledOnce() {
     guard !saidDisabled else { return }
     saidDisabled = true
+    // NAME THE SWITCH THAT IS ACTUALLY OFF. This used to say "create the marker
+    // to re-enable" unconditionally; with the feature flag ANDed in front of it
+    // that sentence is false on a machine where the marker already exists, and a
+    // log line that tells you to do something that will not work is worse than
+    // one that says nothing.
+    let featureOff = !Features.on("distiller")
     NSLog(
       "Intaglio Labs: distillation is off (no in-app way to review claims yet); "
-        + "episode index still rebuilding. Create \(enableMarker.path) to re-enable."
+        + "episode index still rebuilding. "
+        + (featureOff
+           ? "The `distiller` feature is off — see ops/FEATURES.md."
+           : "Create \(enableMarker.path) to re-enable.")
     )
   }
 

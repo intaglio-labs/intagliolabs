@@ -277,6 +277,27 @@ test('an Origin-less request with a valid bearer token is accepted', async () =>
   assert.equal(res.status, 200);
 });
 
+// WHAT THIS INSTALL BELIEVES IS ON, asked rather than inspected. Three processes
+// read ops/features.json, and the owner override at ~/.hazlie/features.json
+// means the shipped file is not the answer — so /stats is where the retest gets
+// to ask. Live rather than a source scan: the point is that the loader really
+// runs inside hermes' process and reaches the wire.
+test('/stats echoes the effective feature set', async () => {
+  const body = await (await authedGet('/stats')).json();
+  assert.ok(body.features, '/stats must carry the feature set');
+  // Pinned against the shipped registry, so this fails if a non-card surface is
+  // switched on and nobody notices it got as far as the API.
+  assert.equal(body.features.chat, false);
+  assert.equal(body.features.bridges, false);
+  assert.equal(body.features.voice, false);
+  assert.equal(body.features.distiller, false);
+  // The three states survive the JSON round trip. Flattening 'optional' here
+  // would make an offered source indistinguishable from a dormant one.
+  assert.equal(body.features.connectors.imessage, true);
+  assert.equal(body.features.connectors.whatsapp, 'optional');
+  assert.equal(body.features.connectors.photos, false);
+});
+
 test('an Origin-less request with a wrong bearer token is rejected', async () => {
   for (const value of [
     `Bearer ${'d'.repeat(64)}`, // right shape, wrong token

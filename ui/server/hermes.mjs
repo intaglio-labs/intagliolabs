@@ -117,6 +117,11 @@ import {
   projectionState,
 } from './people/projection.mjs';
 import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
+// ONE SHARED LOADER, in connectors/lib. hermes already reaches into that
+// directory for pinnedThread (memory/select.mjs, memory/episodic.mjs) and
+// connect/ does for googleClients, so this follows the precedent rather than
+// making a third copy of the same parse. See ops/FEATURES.md.
+import { readFeatures } from '../../connectors/lib/features.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
 import { validToFor } from './memory/validity.mjs';
 import {
@@ -5744,8 +5749,36 @@ async function handle(db, req, res, cors, url, policy) {
     } catch {
       cards = null;
     }
+    // THE EFFECTIVE FEATURE SET, echoed so a machine can be ASKED what it
+    // believes rather than inspected. Three processes read ops/features.json —
+    // this one, the connectors daemon and the app — and the owner override at
+    // ~/.hazlie/features.json means the shipped file is not the answer. /stats
+    // is where "what is actually on, on THIS install" lives, which is the
+    // question the retest has to ask from outside.
+    //
+    // Read per request rather than cached at boot, unlike the daemon's start-up
+    // read: this endpoint is asked rarely, and a stale echo would be worse than
+    // useless here — it is read precisely to find out whether an override
+    // landed. Wrapped like every other aggregate above: an unreadable registry
+    // must never take /stats down, and readFeatures already answers ALL_OFF
+    // rather than throwing.
+    let features = null;
+    try {
+      features = readFeatures();
+    } catch {
+      features = null;
+    }
     send(res, 200,
-      { rows: Number(n), memory: memoryProgress(db), peopleProjection: peopleProjectionStatus(db, policy), sweep, lookup, lint, cards },
+      {
+        rows: Number(n),
+        memory: memoryProgress(db),
+        peopleProjection: peopleProjectionStatus(db, policy),
+        sweep,
+        lookup,
+        lint,
+        cards,
+        features,
+      },
       cors);
     return;
   }
