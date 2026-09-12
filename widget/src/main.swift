@@ -771,6 +771,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     p.makeKeyAndOrderFront(nil)
   }
 
+  /// One delivery's "the page took it", shared by the two closures below.
+  /// Main queue only, like every other webview touch here: `didFinish` and an
+  /// `evaluateJavaScript` completion are both delivered there, so this is
+  /// shared state with one writer and no concurrency.
+  private final class OnboardingDelivery {
+    var answered = false
+  }
+
   /// Say it once, and say it again if the page was not there to hear it.
   ///
   /// SENDING IS NOT ARRIVING. Both onboarding entry points are evaluated
@@ -788,11 +796,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   /// to deliver to. Once, not on a timer: the second attempt is talking to a
   /// parsed document, and if that fails the page's own late-arrival rule is
   /// what is left.
+  ///
+  /// AND THE REPEAT IS BOOKED BEFORE THE FIRST ATTEMPT, NOT INSIDE ITS ANSWER.
+  /// Registering from the completion handler assumes WebKit answers the
+  /// evaluation before it reports didFinish for that navigation; if it defers
+  /// the evaluation past didFinish instead, the repeat is appended to a list
+  /// that has already been drained and nothing ever runs it — the exact cold
+  /// first launch this function exists for. Booked first and cancelled by a
+  /// page that answered, so the race has no losing side: the worst case is one
+  /// redundant delivery to a page that already took the first one.
   private func deliverToOnboarding(_ web: WKWebView?, _ js: String) {
     guard let web else { return }
-    web.evaluateJavaScript(js) { [weak self] answered, _ in
-      guard (answered as? Bool) != true else { return }
-      self?.bridge.whenPageFinishes(web) { page in page.evaluateJavaScript(js) }
+    let delivery = OnboardingDelivery()
+    bridge.whenPageFinishes(web) { page in
+      guard !delivery.answered else { return }
+      page.evaluateJavaScript(js)
+    }
+    web.evaluateJavaScript(js) { answered, _ in
+      if (answered as? Bool) == true { delivery.answered = true }
     }
   }
 

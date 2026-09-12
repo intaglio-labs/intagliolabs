@@ -249,8 +249,16 @@ test('a resume that arrives after the bound is still honoured if nobody pressed'
   // answer different halves of the same hop, and neither is the other's excuse.
   const swift = readFileSync(join(ROOT, 'widget', 'src', 'main.swift'), 'utf8');
   assert.match(swift, /private func deliverToOnboarding\(/u);
-  assert.match(swift, /web\.evaluateJavaScript\(js\) \{[\s\S]{0,200}whenPageFinishes/u,
-    'the retry is armed on the answer, not fired blind');
+  // THE RETRY IS BOOKED FIRST AND CANCELLED BY THE ANSWER, not armed inside
+  // the answer. Arming it from the evaluation's completion handler assumed
+  // WebKit answers the evaluation before it reports didFinish for that
+  // navigation; deferred the other way, didFinish drains an empty list and the
+  // closure appended afterwards never runs -- on exactly the cold first launch
+  // this defence exists for. The ordering is pinned in onboarding-delivery.
+  assert.match(swift, /whenPageFinishes\(web\) \{[\s\S]{0,200}web\.evaluateJavaScript\(js\)/u,
+    'the retry is booked before the first attempt, so it cannot be lost to the race');
+  assert.match(swift, /answered as\? Bool\) == true/u,
+    'and a page that answered still cancels it, rather than being delivered to twice');
   assert.doesNotMatch(swift, /web\?\.evaluateJavaScript\(\s*\n?\s*"window\.__hzOnboarding/u,
     'the unacknowledged fire-and-forget delivery is back');
   for (const verb of ['__hzOnboardingResume', '__hzOnboardingReset']) {
