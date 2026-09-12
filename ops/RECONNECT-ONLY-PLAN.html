@@ -1,0 +1,274 @@
+<title>Reconnect, Only</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,500;1,400&display=swap">
+<style>
+:root {
+  --ground:#f2f4f7; --surface:#fff; --surface-2:#e9edf2;
+  --line:#d1d8e0; --line-strong:#aeb8c4;
+  --fg:#161a20; --fg-2:#49525f; --fg-3:#76808d;
+  --accent:#1a6b6b; --accent-soft:#dcecec;
+  --warn:#9c4a20; --warn-soft:#f7e8df;
+  --stop:#98332f; --stop-soft:#f7e4e3;
+  --dorm:#5b4a9c; --dorm-soft:#e9e4f6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:#12151b; --surface:#191d24; --surface-2:#212630;
+    --line:#2c323d; --line-strong:#434c59;
+    --fg:#e5e9ee; --fg-2:#a6afbb; --fg-3:#78828f;
+    --accent:#5cbdb6; --accent-soft:#15302f;
+    --warn:#d9915e; --warn-soft:#31221a;
+    --stop:#dd7d78; --stop-soft:#33201f;
+    --dorm:#a795e0; --dorm-soft:#241f36;
+  }
+}
+:root[data-theme="dark"] {
+  --ground:#12151b; --surface:#191d24; --surface-2:#212630;
+  --line:#2c323d; --line-strong:#434c59;
+  --fg:#e5e9ee; --fg-2:#a6afbb; --fg-3:#78828f;
+  --accent:#5cbdb6; --accent-soft:#15302f;
+  --warn:#d9915e; --warn-soft:#31221a;
+  --stop:#dd7d78; --stop-soft:#33201f;
+  --dorm:#a795e0; --dorm-soft:#241f36;
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--ground); color:var(--fg); font-family:"IBM Plex Serif",Georgia,serif; font-size:17px; line-height:1.62; -webkit-font-smoothing:antialiased; }
+.wrap { max-width:56rem; margin:0 auto; padding-block:4rem 7rem; padding-inline:1.5rem; display:flex; flex-direction:column; gap:3rem; }
+h1,h2,h3,.label,table,.pill,.stat-n,.step .id { font-family:"IBM Plex Sans",system-ui,sans-serif; }
+.label { font-size:.7rem; font-weight:600; letter-spacing:.13em; text-transform:uppercase; color:var(--fg-3); }
+h1 { font-size:clamp(2rem,5vw,2.9rem); line-height:1.08; font-weight:600; letter-spacing:-.022em; margin:.5rem 0 0; text-wrap:balance; }
+h2 { font-size:1.44rem; font-weight:600; letter-spacing:-.01em; margin:0 0 .3rem; text-wrap:balance; }
+h3 { font-size:1.01rem; font-weight:600; margin:0 0 .35rem; }
+p { margin:0 0 1rem; max-width:44rem; } p:last-child { margin-bottom:0; }
+section { display:flex; flex-direction:column; gap:1rem; }
+.sec-head { display:flex; flex-direction:column; gap:.15rem; }
+.lede { font-size:1.14rem; line-height:1.55; color:var(--fg-2); }
+code { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:.85em; background:var(--surface-2); border:1px solid var(--line); border-radius:3px; padding:.08em .34em; word-break:break-word; }
+pre { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:.82rem; line-height:1.55; background:var(--surface-2); border:1px solid var(--line); border-radius:4px; padding:.9rem 1rem; overflow-x:auto; margin:0; color:var(--fg-2); }
+.card { background:var(--surface); border:1px solid var(--line); border-radius:4px; padding:1.3rem 1.45rem; display:flex; flex-direction:column; gap:.7rem; }
+.card.go { border-left:3px solid var(--accent); }
+.card.no { border-left:3px solid var(--stop); }
+.card.hm { border-left:3px solid var(--warn); }
+.pill { display:inline-block; font-size:.65rem; font-weight:600; letter-spacing:.09em; text-transform:uppercase; padding:.2rem .5rem; border-radius:3px; white-space:nowrap; }
+.p-go { background:var(--accent-soft); color:var(--accent); }
+.p-no { background:var(--stop-soft); color:var(--stop); }
+.p-hm { background:var(--warn-soft); color:var(--warn); }
+.p-dm { background:var(--dorm-soft); color:var(--dorm); }
+.tbl { overflow-x:auto; border:1px solid var(--line); border-radius:4px; background:var(--surface); }
+table { border-collapse:collapse; width:100%; font-size:.86rem; }
+th,td { text-align:left; padding:.6rem .8rem; border-bottom:1px solid var(--line); vertical-align:top; line-height:1.5; }
+th { font-size:.66rem; font-weight:600; letter-spacing:.09em; text-transform:uppercase; color:var(--fg-3); background:var(--surface-2); white-space:nowrap; }
+tr:last-child td { border-bottom:none; }
+td.k { font-weight:600; white-space:nowrap; }
+td.n, th.n { text-align:right; font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(9rem,1fr)); gap:1px; background:var(--line); border:1px solid var(--line); border-radius:4px; overflow:hidden; }
+.stat { background:var(--surface); padding:.95rem 1.05rem; display:flex; flex-direction:column; gap:.15rem; }
+.stat-n { font-size:1.45rem; font-weight:600; font-variant-numeric:tabular-nums; letter-spacing:-.02em; line-height:1.1; }
+.stat-l { font-size:.76rem; color:var(--fg-3); font-family:"IBM Plex Sans",sans-serif; line-height:1.35; }
+ul,ol { margin:0; padding-left:1.15rem; display:flex; flex-direction:column; gap:.42rem; max-width:44rem; }
+li::marker { color:var(--fg-3); }
+.rule { height:1px; background:var(--line); border:0; margin:0; }
+.note { font-size:.9rem; color:var(--fg-2); border-left:2px solid var(--line-strong); padding-left:.9rem; }
+.steps { display:flex; flex-direction:column; gap:.7rem; }
+.step { display:grid; grid-template-columns:5.5rem 1fr; gap:1rem; background:var(--surface); border:1px solid var(--line); border-radius:4px; padding:1.1rem 1.3rem; }
+.step .id { font-size:.8rem; color:var(--fg-3); line-height:1.5; }
+.step .id b { display:block; font-size:1.05rem; color:var(--fg); }
+.step .body { display:flex; flex-direction:column; gap:.45rem; }
+.step .body p { font-size:.95rem; }
+.step .done { font-size:.85rem; color:var(--fg-2); border-left:2px solid var(--accent); padding-left:.8rem; }
+.step .done b { color:var(--accent); font-family:"IBM Plex Sans",sans-serif; font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; }
+@media (max-width:600px){ .step { grid-template-columns:1fr; } }
+a { color:var(--accent); }
+:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+</style>
+
+<div class="wrap">
+
+<header>
+  <div class="label">Hazlie · repackaging plan · 12 Sep 2026 · branch rishab</div>
+  <h1>Reconnect, Only</h1>
+  <p class="lede" style="margin-top:1rem">
+    One product: a card a day that reopens a relationship worth reopening, with a message you would
+    actually send. Everything else in the app goes dormant in place, the install shrinks by gigabytes,
+    onboarding becomes the list of things the card needs and nothing more, and the whole path gets
+    walked again from a clean machine before anyone else installs it. The bar for "magical" is written
+    down first so the retest can fail.
+  </p>
+</header>
+
+<hr class="rule">
+
+<section>
+  <div class="sec-head"><div class="label">The bar</div><h2>What magical means, as measurements</h2></div>
+  <div class="tbl"><table>
+    <thead><tr><th>Promise</th><th>Measured as</th><th>Target</th></tr></thead>
+    <tbody>
+      <tr><td class="k">It works out of the box</td><td>Fresh Mac → first card on screen, wall clock, while the owner does nothing but click through onboarding</td><td>Under 20 minutes with iMessage, Contacts, Calendar; mail keeps filling in behind</td></tr>
+      <tr><td class="k">The first five are real</td><td>Owner verdicts on the first five cards served</td><td>Zero "never this person"; at most one "not useful"</td></tr>
+      <tr><td class="k">It knows the person</td><td>Card carries who · how you left it · what they asked, each with a quoted receipt</td><td>Every served card has a page; every line quotes them</td></tr>
+      <tr><td class="k">It writes the first line</td><td>"Draft a text" returns two openers that mention only facts on the card</td><td>Under 15 s; owner copies one without editing at least half the time (measured over the 8-week read)</td></tr>
+      <tr><td class="k">One tap away</td><td>Clicks from an idle desktop to the card</td><td>One, on the widget bar or the lit orb</td></tr>
+      <tr><td class="k">Nothing leaves unasked</td><td>Egress ledger vs. what the box actually sends</td><td>Only what onboarding showed and the owner switched on</td></tr>
+      <tr><td class="k">Honest while loading</td><td>Onboarding shows people linked per connected source, live</td><td>A source that links zero people says so, not "connected"</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="label">Inventory findings that change the plan</div><h2>Four things the walk-through found before any design</h2></div>
+  <div class="card no">
+    <span class="pill p-no">First-load bug · needs your toggle</span>
+    <h3>iMessage has not ingested a message since 31 August</h3>
+    <p>The connectors daemon runs as a child of the app, so macOS attributes its Full Disk Access to the app's bundle identifier. The 30 August rename from <code>com.hazlie.widget</code> to <code>io.intaglio.widget</code> left the new identifier without the grant: the system grant table shows the old id allowed, the new id denied. Every one of about 95 daily passes since has failed with a fingerprint that hides the message, and nothing on screen said so. Fix is a toggle in System Settings → Privacy &amp; Security → Full Disk Access, which only the owner can flip; the pane is open. Two lessons go into the plan: onboarding must verify the grant from the app process and re-verify after every update, and a source that fails on a streak must turn its tile amber, not stay "connected".</p>
+  </div>
+  <div class="card no">
+    <span class="pill p-no">First-load bug · fix in progress</span>
+    <h3>Gmail has never linked a single person</h3>
+    <p>All 81,725 mail rows have an empty sender. The REST connector hands the raw <code>From:</code> header string to a normaliser that only accepts arrays, so it returns nothing, and its own comment claims the opposite. Since the 26 August switch from IMAP, every mail row is participant-less: the card's "wrote to you" gate has never seen a Gmail contact, and the investor pool starved partly for this reason. The parser fix is being written now with a test that fails on the old code. Existing rows cannot be repaired from the database, because only the empty lists were stored; mail is purged and re-pulled during the retest, which is when a re-pull was due anyway.</p>
+  </div>
+  <div class="card hm">
+    <span class="pill p-hm">Onboarding teaches the wrong product</span>
+    <h3>Today's onboarding demos chat and voice, then downloads a 2.5 to 4.7 GB model</h3>
+    <p>The three screens are a typing demo into the orb, a "find your widget" spotlight, and a model tier picker. None of them mention a person. The model is required only if there is no other engine; with the owner's Claude subscription detected, the card path needs no local model at all. Onboarding becomes the prerequisite list below.</p>
+  </div>
+  <div class="card hm">
+    <span class="pill p-hm">Weight the card does not carry</span>
+    <h3>703 MB bundle, 12 GB on disk after setup, four launch agents</h3>
+    <p>496 MB of the bundle is speech models for a voice feature that is a tease flag. Provisioning installs a Matrix homeserver and seven chat bridges (5.2 GB) and the local model (up to 4.7 GB). The card reads iMessage, mail, calendar, contacts and the LinkedIn export. Everything else stays in the repository and switches off.</p>
+  </div>
+  <div class="stats">
+    <div class="stat"><div class="stat-n">415k</div><div class="stat-l">iMessage rows · frozen since 31 Aug (the grant)</div></div>
+    <div class="stat"><div class="stat-n">81.7k</div><div class="stat-l">mail rows purged · re-pull underway with senders</div></div>
+    <div class="stat"><div class="stat-n">6,976</div><div class="stat-l">LinkedIn connections · 1,028 with a DM</div></div>
+    <div class="stat"><div class="stat-n">21.6k</div><div class="stat-l">calendar events</div></div>
+    <div class="stat"><div class="stat-n">1.3 GB</div><div class="stat-l">backed up today, integrity ok</div></div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="label">Keep · dormant · out of the bundle</div><h2>Pare down without deleting</h2></div>
+  <p>Dormant means: code stays in the repository, the feature is behind a flag that defaults off, its provisioning step is skipped, its launch agent is not installed, and onboarding never mentions it. A test pins each flag so a future session cannot turn one on by accident.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Piece</th><th>Fate</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td class="k">Widget bar: orb, reconnect, settings</td><td><span class="pill p-go">keep</span></td><td>The one-tap door. Chat button and voice arm hidden behind the flag.</td></tr>
+      <tr><td class="k">Reconnect card, drafts, mode picker</td><td><span class="pill p-go">keep</span></td><td>The product.</td></tr>
+      <tr><td class="k">People "Same person?" review</td><td><span class="pill p-go">keep</span></td><td>Identity merges decide whose messages count; a wrong merge is a wrong card.</td></tr>
+      <tr><td class="k">Connections page (Google, LinkedIn drop, permissions)</td><td><span class="pill p-go">keep, trimmed</span></td><td>Only the tiles the card reads: iMessage, Contacts, Calendar, Google, LinkedIn export, WhatsApp optional.</td></tr>
+      <tr><td class="k">hermes relationship modules, people projection, connectors daemon</td><td><span class="pill p-go">keep</span></td><td>The engine room. Producer, Owe, pages, sweep, lookup, lint, drafts.</td></tr>
+      <tr><td class="k">Connectors: imessage · mail · calendar · contacts · linkedin</td><td><span class="pill p-go">keep</span></td><td>Participant sources the card is built from.</td></tr>
+      <tr><td class="k">Connectors: whatsapp · granola</td><td><span class="pill p-hm">optional tile</span></td><td>Participant sources, small today; offered, not required.</td></tr>
+      <tr><td class="k">Connectors: notes · files · photos · notion · oura · health</td><td><span class="pill p-dm">dormant</span></td><td>Content-only or non-person; nothing on the card reads them.</td></tr>
+      <tr><td class="k">Matrix homeserver + mautrix bridges, BridgeLogin.swift</td><td><span class="pill p-dm">dormant</span></td><td>5.2 GB, a launch agent, and the largest login surface, for sources the card can live without at launch. Re-enable per platform later.</td></tr>
+      <tr><td class="k">Chat page, frontier handoff (PR #41), general search</td><td><span class="pill p-dm">dormant</span></td><td>Not the product. Kept for the "ask more" idea.</td></tr>
+      <tr><td class="k">Voice (ear page, voice-models)</td><td><span class="pill p-dm">dormant</span> + <span class="pill p-no">out of bundle</span></td><td>496 MB for a tease flag. Models fetched on demand if ever turned on.</td></tr>
+      <tr><td class="k">People timeline, constellation</td><td><span class="pill p-dm">dormant</span></td><td>Exploration surfaces; the card is the surface now.</td></tr>
+      <tr><td class="k">Distiller timer (household claims)</td><td><span class="pill p-dm">dormant</span></td><td>Already off by marker; the sweep is the card's ingest.</td></tr>
+      <tr><td class="k">Local model + llama runtime</td><td><span class="pill p-hm">on demand</span></td><td>Downloaded only when onboarding finds no Claude CLI, or the owner picks local. Runtime (56 MB) stays bundled so the fallback is one click.</td></tr>
+      <tr><td class="k">Dev desk</td><td><span class="pill p-go">keep, never ships</span></td><td>Unchanged rule.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="label">Onboarding</div><h2>The prerequisite list, each with a check the app runs and a fix it offers</h2></div>
+  <p>Six screens. Every one ends in a state the app has verified, from its own process, never from a shell. The last screen is the first card.</p>
+  <div class="steps">
+    <div class="step"><div class="id"><b>1</b>Who this is for</div><div class="body">
+      <p>One paragraph and one example card, built from placeholder text, so the owner knows what they are setting up. Founder or investor mode chosen here; "any" is the default.</p>
+    </div></div>
+    <div class="step"><div class="id"><b>2</b>Your messages</div><div class="body">
+      <p>Full Disk Access for iMessage, Contacts, Calendar. The app opens the right Settings pane, polls the grant from the app process, and shows the row count as it lands. <b>Check:</b> chat.db readable and Contacts framework answers. <b>Fix:</b> deep link to the exact pane, with a picture.</p>
+    </div></div>
+    <div class="step"><div class="id"><b>3</b>Your mail and calendar</div><div class="body">
+      <p>Google sign-in, read-only, one or more accounts. The consent screen shows the unverified-app warning until Google's review lands; the screen says so in plain words and shows the two permissions being asked. <b>Check:</b> token file written and one <code>messages.list</code> succeeds. <b>Fix:</b> retry, or skip with the card working from iMessage alone.</p>
+    </div></div>
+    <div class="step"><div class="id"><b>4</b>Who you know professionally</div><div class="body">
+      <p>Drop zone for the LinkedIn data export, with the four-click path to request it. <b>Check:</b> Connections.csv parsed, count shown, tags derived (investor · founder · operator counts). <b>Fix:</b> skip; modes stay at "any" until it arrives, and the drop zone lives on the connections page.</p>
+    </div></div>
+    <div class="step"><div class="id"><b>5</b>How it reads</div><div class="body">
+      <p>The engine. <b>Check:</b> is the Claude CLI installed and signed in (one <code>claude -p</code> ping from the app)? If yes: "Use your Claude subscription for reading and drafting", off until tapped, with the plain sentence about what leaves the Mac. If no: download the local model sized to this Mac's memory, and say what that costs in disk and battery. Writes <code>relationshipMemory.engine</code>. No engine, no pages; the card still serves from counts and quotes.</p>
+    </div></div>
+    <div class="step"><div class="id"><b>6</b>First load</div><div class="body">
+      <p>A live table: source · rows · people who wrote to you · status. Mail shows its backfill estimate from measured rate. The sweep and page builder start on the eligible pool as soon as identity settles. The screen ends when the first card is servable and shows it. <b>Check:</b> every connected source links more than zero people, or the row turns amber and says "connected, nobody found yet" with a report button. This check would have caught the Gmail bug on day one.</p>
+    </div></div>
+  </div>
+  <p class="note">Removed from onboarding: the typing demo, the widget spotlight, the model tier picker as a mandatory step, the "unify your circles" ring. Nothing is deleted; the screens stay in the file behind the same flag as their features.</p>
+</section>
+
+<section>
+  <div class="sec-head"><div class="label">Backup and restore</div><h2>Taken today, restored after the fresh load proves itself</h2></div>
+  <p>Backup at <code>~/hazlie-backup-20260912-*</code>: <code>context.db</code> and <code>state.db</code> via SQLite's online backup (integrity ok, 543,488 rows, 200 card judgments, 35 claim decisions), secrets, imports, people overrides, connector config, sweep and lint markers. Not backed up on purpose: models, bridges, Matrix, binaries. They are downloads, not data.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>What</th><th>After the fresh-load test</th></tr></thead>
+    <tbody>
+      <tr><td class="k">Owner judgments (rm_card_event, claim_decision, suppressions, mutes, lint resolutions)</td><td>Restored. These cannot be regenerated and they are the 8-week experiment's data.</td></tr>
+      <tr><td class="k">Pages, sweep proposals, lookups</td><td>Restored with the database; the sweep cursor resumes where it was.</td></tr>
+      <tr><td class="k">Mail rows</td><td>Purged and re-pulled with the fixed parser. The existing rows have no sender to repair from.</td></tr>
+      <tr><td class="k">Google tokens, connector config, LinkedIn import</td><td>Restored, so no second sign-in.</td></tr>
+    </tbody>
+  </table></div>
+  <pre>restore:  launchctl bootout gui/$UID/io.intaglio.hermes io.intaglio.connect
+          cp backup/context.db ~/.hazlie/context/   cp backup/state.db ~/.hazlie/connectors/
+          cp -R backup/secrets backup/imports backup/people ~/.hazlie/   cp backup/connectors-config.json ~/.hazlie/connectors/config.json
+          launchctl bootstrap …   then: purge source=mail via hermes, let the connector re-backfill</pre>
+</section>
+
+<section>
+  <div class="sec-head"><div class="label">Full retest, from onboarding</div><h2>Clean machine to first card, timed, twice</h2></div>
+  <div class="tbl"><table>
+    <thead><tr><th>Step</th><th>Do</th><th>Pass when</th></tr></thead>
+    <tbody>
+      <tr><td class="k">R0</td><td>Stop agents; move <code>~/.hazlie</code> aside (keep the models dir on the second run to skip the download); remove the app; install the new build.</td><td>No agent from the old install is loaded; Settings shows no stale grants.</td></tr>
+      <tr><td class="k">R1</td><td>Launch. Walk screens 1 to 5 exactly as a new owner would, using the real accounts.</td><td>Each check turns green from the app's own process; nothing needs a terminal.</td></tr>
+      <tr><td class="k">R2</td><td>Screen 6 first load, stopwatch running.</td><td>iMessage, Contacts, Calendar link people within minutes; mail shows people linked > 0 within the first pass (the bug's regression test); first card under the target.</td></tr>
+      <tr><td class="k">R3</td><td>Judge the first five cards; draft a text on two.</td><td>Meets the bar's first-five and draft targets; every line has a receipt.</td></tr>
+      <tr><td class="k">R4</td><td>Egress: run with the network monitor on for the whole session.</td><td>Only Google's APIs, and Anthropic only if the engine toggle was tapped.</td></tr>
+      <tr><td class="k">R5</td><td>Bundle and disk: size the .app and <code>~/.hazlie</code> after R2.</td><td>Bundle under 250 MB; disk under 2 GB without the local model.</td></tr>
+      <tr><td class="k">R6</td><td>Restore the backup per the box above; purge and re-pull mail.</td><td>Judgment counts match the backup; mail people linked > 0 after the first history pass.</td></tr>
+      <tr><td class="k">R7</td><td>Second cold run on the cofounder's Mac (no Claude CLI), taking the local-model path.</td><td>Same bar; download honest about size and time.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="label">Order of work</div><h2>Six stages, a checkpoint you can judge after each</h2></div>
+  <div class="steps">
+    <div class="step"><div class="id"><b>0</b>today</div><div class="body">
+      <p>Backup taken. Mail sender fix landed (49 tests) and the re-pull is running with senders present. Full Disk Access re-granted to the renamed app (your toggle). Onboarding self-check for "connected but nobody found", plus a failure-streak signal per source.</p>
+      <div class="done"><b>checkpoint</b> Mail purged and re-pulled on this machine; the connections page shows Gmail linking people. Investor pool re-counted.</div>
+    </div></div>
+    <div class="step"><div class="id"><b>1</b>flags</div><div class="body">
+      <p>One feature registry (<code>features.json</code> in the bundle, read by Swift and hermes): chat, voice, bridges, timeline, constellation, distiller, content connectors. All default off. Provisioning, launch agents, onboarding and the widget bar consult it. A test pins the defaults.</p>
+      <div class="done"><b>checkpoint</b> Build installs with no bridge or Matrix agent, no chat button, no voice arm; everything else identical.</div>
+    </div></div>
+    <div class="step"><div class="id"><b>2</b>bundle</div><div class="body">
+      <p>Voice models out of the bundle. Local model download moved behind screen 5's decision. Bridge runtime prefetch off.</p>
+      <div class="done"><b>checkpoint</b> Bundle under 250 MB; first launch downloads nothing unless asked.</div>
+    </div></div>
+    <div class="step"><div class="id"><b>3</b>onboarding</div><div class="body">
+      <p>The six screens above, with the app-process checks. Engine detection and the opt-in toggle. Live first-load table with per-source people counts.</p>
+      <div class="done"><b>checkpoint</b> You walk it once on this Mac with <code>~/.hazlie</code> moved aside; every screen's check goes green without a terminal.</div>
+    </div></div>
+    <div class="step"><div class="id"><b>4</b>the card, magical</div><div class="body">
+      <p>What the retest and your judging say is still short: the first-five bar, draft quality with the lookup's corroborated "changed since" line, orb timing, copy. Each fix reviewed adversarially per the house rules.</p>
+      <div class="done"><b>checkpoint</b> First five cards meet the bar on the restored data.</div>
+    </div></div>
+    <div class="step"><div class="id"><b>5</b>retest</div><div class="body">
+      <p>R0 through R7 above, timed, with the results written into this page.</p>
+      <div class="done"><b>checkpoint</b> Two cold runs pass. Then merge <code>rishab</code>.</div>
+    </div></div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="label">Decisions for you</div><h2>Five calls, defaults stated</h2></div>
+  <ol>
+    <li><b>WhatsApp at launch?</b> It is a bridge-free connector with 43 people today. Default: optional tile, off the required path.</li>
+    <li><b>Engine default when the Claude CLI is present.</b> Default: shown, off until tapped, per the privacy page. Alternative: pre-checked with the sentence above it.</li>
+    <li><b>Local model tier when no CLI.</b> Default: pick by RAM, no choice screen.</li>
+    <li><b>Mail re-pull now or during the retest?</b> Default: now, on this machine, so the investor pool can be re-counted before onboarding work starts.</li>
+    <li><b>Google verification demo video.</b> Still needs your recording; the submission is otherwise complete.</li>
+  </ol>
+</section>
+
+</div>
