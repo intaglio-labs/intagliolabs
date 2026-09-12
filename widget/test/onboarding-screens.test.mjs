@@ -188,8 +188,14 @@ test('the google probe is capped for the whole visit, and reachable by hand', ()
   assert.match(js, /const GOOGLE_PROBE_CAP = \d+;/u);
   const probe = /function probeGoogle\(\) \{([\s\S]*?)\n\}/u.exec(js)?.[1];
   assert.ok(probe, 'probeGoogle() not found');
-  assert.match(probe, /googleProbes >= GOOGLE_PROBE_CAP/u, 'the cap is enforced in the probe');
-  assert.match(probe, /googleProbes \+= 1/u, 'and every probe counts against it');
+  assert.match(probe, /googleProbes \+= 1/u, 'every probe counts against the cap');
+  // ...but the cap is CHECKED in the timer, not here. Checked here it also
+  // swallowed the button and the return-from-browser probe, and the screen
+  // froze on "opening google in your browser…" with no way to ask again. See
+  // onboarding-flow-guards.test.mjs for the rest of that rule.
+  assert.doesNotMatch(probe, /GOOGLE_PROBE_CAP/u, 'the cap may not sit on the owner-driven path');
+  assert.match(js, /function startGooglePolling\(\) \{[\s\S]{0,900}googleProbes >= GOOGLE_PROBE_CAP/u,
+    'and it still has to be enforced on the timer');
   // The two paths that matter still probe at once: coming back from the
   // browser, and pressing the button.
   assert.match(js, /window\.addEventListener\('focus'[\s\S]{0,120}probeGoogle\(\)/u);
@@ -225,17 +231,25 @@ test('the "nothing is running" banner is about the daemon, never about chat.db',
   assert.match(paint, /out\.daemonLastRunTs/u, 'the run log is the only input');
 });
 
-test('a resume that arrives after the owner has moved is ignored', () => {
+test('the flow does not start until native has said where it starts', () => {
   // native calls __hzOnboardingResume right after creating the panel, and on a
   // first launch the page has not loaded — WebKit runs the evaluation once the
   // document exists, which on the owner's machine was AFTER they pressed
   // "hello". The flow was yanked from the permissions screen to the remembered
   // step, so screen 2 was on screen for a few frames and never seen.
-  assert.match(js, /window\.__hzOnboardingResume = \(step\) => \{\s*\n\s*if \(ownerMoved\) return;/u);
-  assert.match(js, /function nextScreen\(\) \{\s*\n\s*ownerMoved = true;/u,
-    'the owner moving the flow is what makes their press win');
-  assert.match(js, /window\.__hzOnboardingReset = \(\) => \{[\s\S]{0,200}ownerMoved = false;/u,
-    'a replay from settings starts the question over');
+  //
+  // The first fix made that a race (`ownerMoved`: whoever got there first
+  // won). This one removes it: native always speaks exactly once per open, so
+  // the page holds the one press available on the welcome until it has.
+  assert.match(js, /window\.__hzOnboardingResume = \(step\) => \{\s*\n\s*if \(entrySettled\) return;/u);
+  assert.match(js, /function nextScreen\(\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(!entrySettled\) \{ pendingAdvance = true; return; \}/u,
+    'a press before native speaks is held, not acted on and then undone');
+  assert.match(js, /window\.__hzOnboardingReset = \(\) => \{\s*\n\s*settleEntry\(\);/u,
+    'a replay from settings settles the page too, or the flow stays frozen');
+  // Code only: the comment above the gate keeps the history of the flag it
+  // replaced, which is the house convention and would otherwise match here.
+  const codeOnly = js.split('\n').filter((line) => !/^\s*\/\//u.test(line)).join('\n');
+  assert.doesNotMatch(codeOnly, /ownerMoved/u, 'the race flag is gone');
 });
 
 test('screen 4 is entered, and reports an export that is already here', () => {

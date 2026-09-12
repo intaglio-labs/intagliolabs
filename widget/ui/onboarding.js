@@ -123,37 +123,74 @@ document.addEventListener('visibilitychange', () => {
   // re-armed — it has a focus probe and a button, and restarting its window
   // here would reopen ten minutes of API calls nobody asked for.
   if (currentScreen === '2') startPermPolling();
-  if (currentScreen === '6') startLoadPolling();
+  if (currentScreen === '6') startLoadPolling({ peekNow: false });
 });
 
 function nextScreen() {
-  ownerMoved = true;
+  // HELD, not dropped, until native has said where this flow starts. See the
+  // entry gate below.
+  if (!entrySettled) { pendingAdvance = true; return; }
   const at = flow.indexOf(currentScreen);
   const to = at === -1 ? '1' : flow[Math.min(at + 1, flow.length - 1)];
   showScreen(to);
 }
 
-// Whether the owner has moved the flow themselves yet. See the resume guard.
-let ownerMoved = false;
+// A RESUME THAT ARRIVES LATE IS NOT A RESUME — SO THE FLOW WAITS FOR IT.
+//
+// native calls exactly one of __hzOnboardingResume and __hzOnboardingReset on
+// every open (main.swift openOnboarding: the remembered step if this is a
+// launch back into a flow, a rewind otherwise), immediately after creating the
+// panel. On the very first launch the page has not finished loading, so WebKit
+// runs the evaluation once the document exists — which can be seconds later,
+// and on the owner's machine that was AFTER they had pressed "hello". The flow
+// showed the welcome, moved to the permissions screen on the click, and was
+// then yanked to the remembered step: screen 2 was on screen for a few frames
+// and the owner never saw it, on the one screen everything downstream depends
+// on.
+//
+// The first fix was an `ownerMoved` flag — whichever of the two got there
+// first won. That is a race with a coin in it, not one race fewer, and losing
+// it costs the owner screens 2 to 4 a second time.
+//
+// This removes the race instead of picking a winner. The welcome is painted as
+// it always was (there is no blank screen and nothing to see), but the one
+// press available on it is HELD until native has spoken, and then replayed on
+// a rewind — the owner is exactly where they thought they were — or dropped on
+// a resume, where native is putting them on a later screen the press was never
+// aimed at. The wait is one message hop. ENTRY_WAIT_MS bounds it so a page
+// opened with no native behind it is never stuck.
+const ENTRY_WAIT_MS = 1500;
+let entrySettled = false;
+let pendingAdvance = false;
+const entryFallback = setTimeout(() => {
+  settleEntry();
+  flushPendingAdvance();
+}, ENTRY_WAIT_MS);
+
+function settleEntry() {
+  entrySettled = true;
+  clearTimeout(entryFallback);
+}
+
+function flushPendingAdvance() {
+  if (!pendingAdvance) return;
+  pendingAdvance = false;
+  nextScreen();
+}
 
 // Called by native when the app is launching back into a flow it was already in,
 // rather than replaying one from settings.
 //
-// A RESUME THAT ARRIVES LATE IS NOT A RESUME. native calls this immediately
-// after creating the panel, and on the very first launch the page has not
-// finished loading — WebKit then runs the evaluation once the document exists,
-// which can be seconds later, and on the owner's machine that was AFTER they
-// had pressed "hello". The flow showed the welcome, moved to the permissions
-// screen on the click, and was then yanked to the remembered step: screen 2
-// was on screen for a few frames and the owner never saw it, on the one screen
-// everything downstream depends on.
-//
-// So a resume is only honoured while the flow is still sitting where it
-// started. Once the owner has moved it themselves, their press wins.
+// Only ever the FIRST word about this page: main.swift passes resume:true only
+// at launch, which always builds the panel and its page fresh, and a reused
+// panel is rewound by __hzOnboardingReset below.
 window.__hzOnboardingResume = (step) => {
-  if (ownerMoved) return;
+  if (entrySettled) return;
+  settleEntry();
   clearDemo();
   demoArmed = false;
+  // Their press was aimed at the welcome; native is moving them past it.
+  pendingAdvance = false;
   showScreen(resumeTarget(step));
 };
 
@@ -178,12 +215,15 @@ function resumeTarget(step) {
 // Native calls this on every open; on the very first one the page has not
 // loaded yet, which is why the caller guards on the function existing.
 window.__hzOnboardingReset = () => {
+  settleEntry();
   clearDemo();
   demoArmed = false;
-  ownerMoved = false;
   // Replays always start at the welcome; the app location is handled by the
   // normal DMG/Finder install flow, not as a product onboarding step.
   showScreen('1');
+  // ...and a press held while the page was waiting was aimed at this screen,
+  // which is the screen it is now on. Honour it rather than eating it.
+  flushPendingAdvance();
 };
 
 // The optional scenes, resolved once. hzFeatures() caches per page load and
@@ -465,8 +505,16 @@ function paintGoogle(out) {
   googleStatus.textContent = 'that sign-in did not finish';
 }
 
+// THE CAP BELONGS TO THE TIMER, AND ONLY TO IT.
+//
+// It used to be checked here, ahead of everything, so once the window's 40
+// were spent the BUTTON and the returning-from-the-browser probe both became
+// silent no-ops and the screen sat on "opening google in your browser…"
+// forever. The comment above GOOGLE_POLL_MS asserts the opposite of that in so
+// many words: the two paths that answer an owner action probe immediately
+// regardless. An owner who alt-tabs enough to spend the cap is the owner most
+// likely to be waiting on this screen.
 function probeGoogle() {
-  if (googleProbes >= GOOGLE_PROBE_CAP) { stopGooglePolling(); return Promise.resolve(); }
   googleProbes += 1;
   return hzPost('googleProbe').then(paintGoogle).catch(() => {});
 }
@@ -478,8 +526,17 @@ function probeGoogle() {
 function startGooglePolling() {
   stopGooglePolling();
   googleUntil = Date.now() + 10 * 60 * 1000;
+  // ONE PROBE NOW. The button starts this poll, and without a leading probe
+  // the first feedback the owner gets after pressing it is one GOOGLE_POLL_MS
+  // away -- 15s, where the 3s poll this replaced used to answer in 3.
+  probeGoogle();
   googleTimer = setInterval(() => {
-    if (currentScreen !== '3' || Date.now() > googleUntil) { stopGooglePolling(); return; }
+    // The cap is the timer's, so a page left sitting on this screen cannot
+    // spend the per-user read budget by doing nothing.
+    if (currentScreen !== '3' || Date.now() > googleUntil || googleProbes >= GOOGLE_PROBE_CAP) {
+      stopGooglePolling();
+      return;
+    }
     probeGoogle();
   }, GOOGLE_POLL_MS);
 }
@@ -830,8 +887,13 @@ function paintLoad(out) {
   const dormantRows = Number(out.dormant?.rows || 0);
   loadDormant.hidden = dormantRows === 0;
   if (dormantRows > 0) {
+    // NOT "switched-off sources". `dormant` collects every source that fails
+    // EITHER gate -- the ones a bridge flag turned off AND the ones that were
+    // never going to mint a person at all (photos, notes, files, web, seed,
+    // hazlie_digest). Nothing switched photos off; calling it switched off
+    // sends the owner looking for a switch that does not exist.
     loadDormant.textContent =
-      `${dormantRows.toLocaleString()} rows from switched-off sources are kept but not read`;
+      `${dormantRows.toLocaleString()} rows are kept from sources this install does not read people from`;
   }
 
   // ABOVE THE TABLE, NOT IN IT. The daemon holding a stale lock, or exiting on
@@ -890,7 +952,14 @@ function stopLoadPolling() {
 // Split out of enterLoad so coming back to a panel that was ordered out
 // resumes the polls without resetting the ten-minute clock the owner has
 // already been waiting on.
-function startLoadPolling() {
+// `peekNow` is false on the re-show path. A peek is not a read: it runs
+// produceBatch/produceOweBatch, applies the cap and the servability gate and
+// writes the producers' refill bookkeeping. Firing one on every hide/show
+// cycle spends exactly what PEEK_POLL_MS was introduced to stop spending, and
+// a panel that is occluded and revealed repeatedly would then cost more than
+// the 3s poll this replaced. The TABLE still repaints immediately, because
+// that is the part the owner is looking at and it is local and cheap.
+function startLoadPolling({ peekNow = true } = {}) {
   stopLoadPolling();
   const tick = () => {
     if (currentScreen !== '6') { stopLoadPolling(); return; }
@@ -902,7 +971,7 @@ function startLoadPolling() {
     hzPost('relCardPeek').then(peekCard).catch(() => {});
   };
   tick();
-  peek();
+  if (peekNow) peek();
   loadTimer = setInterval(tick, LOAD_POLL_MS);
   loadPeekTimer = setInterval(peek, PEEK_POLL_MS);
 }
