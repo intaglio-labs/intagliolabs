@@ -275,6 +275,47 @@ final class Connectors {
     process?.qualityOfService = PowerBudget.current == .full ? .userInitiated : .utility
   }
 
+  /// Every directory the daemon's `hazlie-tree-perms` check inspects, which is
+  /// `TREE_DIRS` in connectors/lib/checks.mjs and nothing else. The two lists
+  /// are pinned to each other by widget/test/daemon-tree-perms.test.mjs, which
+  /// reads checks.mjs rather than restating it: a directory added there and
+  /// not here becomes a fatal check the app cannot satisfy, and the failure is
+  /// written only to the daemon's own log.
+  static let treeDirectories = ["bin", "lib", "cache", "connectors", "secrets", "context", "logs"]
+
+  /// THE DAEMON REFUSES A HOME IT CANNOT TRUST, AND IT MEANS THE WHOLE TREE.
+  ///
+  /// hazlie-tree-perms is fatal when ~/.hazlie **or any of TREE_DIRS** is wider
+  /// than 0700, and it says so only in the daemon's own log: on the first
+  /// clean-machine run (2026-09-12) a ~/.hazlie created by hand as 755 left the
+  /// reader dead four starts in a row while onboarding waited for rows. Fixing
+  /// only the top directory left the same silent death one level down — a
+  /// `mkdir -p ~/.hazlie/connectors` under umask 022 lands BOTH at 755, and
+  /// writeConnectorsConfigIfMissing does not re-attribute a directory that
+  /// already exists. The app owns this tree, so it reasserts the mode it would
+  /// have created every part of it with.
+  ///
+  /// SYMLINKS ARE READ, NOT FOLLOWED. `attributesOfItem` is lstat's answer, so
+  /// a linked directory reports as a link and is skipped; `chmod` would follow
+  /// it and change the mode of something on the other side of the link that
+  /// this app does not own. Missing directories are skipped too — the check
+  /// only WARNs on those, and creating them here would invent a tree the
+  /// setup script is responsible for.
+  private func reassertTreePerms() {
+    let root = home.appendingPathComponent(".hazlie")
+    let paths = [root.path] + Connectors.treeDirectories.map {
+      root.appendingPathComponent($0).path
+    }
+    for path in paths {
+      guard let attrs = try? fm.attributesOfItem(atPath: path),
+            attrs[.type] as? FileAttributeType == .typeDirectory,
+            let mode = (attrs[.posixPermissions] as? NSNumber)?.intValue,
+            mode & 0o777 != 0o700
+      else { continue }
+      try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path)
+    }
+  }
+
   /// Start the daemon if it is not already up and its config exists. Safe to
   /// call repeatedly — onboarding calls it the moment it writes the config.
   func start(bypassingThrottle: Bool = false) {
@@ -286,17 +327,7 @@ final class Connectors {
     // No config means the daemon would exit(1) immediately and we would respawn
     // it forever. Onboarding writes it and then calls start().
     guard fm.fileExists(atPath: config.path) else { return }
-    // THE DAEMON REFUSES A HOME IT CANNOT TRUST. Its hazlie-tree-perms check is
-    // fatal when ~/.hazlie is wider than 0700, and it says so only in its own
-    // log: on the first clean-machine run (2026-09-12) a ~/.hazlie created by
-    // hand as 755 left the reader dead four starts in a row while onboarding
-    // waited for rows. The app owns this directory, so reassert the mode it
-    // would have created it with rather than let a mkdir somewhere else decide
-    // whether anything ever gets read. Only the top directory: the children
-    // are created 0700 by whoever writes them, and chmod'ing through a tree
-    // that may hold a symlinked models directory is not this function's job.
-    try? fm.setAttributes([.posixPermissions: 0o700],
-                          ofItemAtPath: home.appendingPathComponent(".hazlie").path)
+    reassertTreePerms()
 
     let since = Date().timeIntervalSince(lastStart)
     if !bypassingThrottle && since < throttle {

@@ -18,10 +18,17 @@ test('Connectors.start() reasserts 0700 on ~/.hazlie before spawning the daemon'
   const start = /func start\(bypassingThrottle: Bool = false\) \{([\s\S]*?)\n  \}/u.exec(swift)?.[1];
   assert.ok(start, 'start() not found');
   const guardAt = start.indexOf('guard fm.fileExists(atPath: config.path)');
-  const modeAt = start.search(/setAttributes\(\[\.posixPermissions: 0o700\],\s*ofItemAtPath: home\.appendingPathComponent\("\.hazlie"\)\.path\)/u);
+  // The chmod moved into reassertTreePerms when the fix grew to cover the
+  // CHILDREN as well: the daemon's check is fatal on ~/.hazlie AND on each of
+  // its TREE_DIRS, and one `mkdir -p ~/.hazlie/connectors` under umask 022
+  // lands both at 755. What that function covers, and that its list is
+  // checks.mjs' own, is pinned in daemon-tree-perms.test.mjs. The ordering --
+  // after the config guard, before the spawn, so neither can skip it -- is
+  // pinned here, which is what this file has always been about.
+  const modeAt = start.indexOf('reassertTreePerms()');
   const spawnAt = start.indexOf('let p = Process()');
-  assert.ok(guardAt >= 0 && modeAt >= 0 && spawnAt >= 0, 'guard, chmod and spawn must all be in start()');
-  assert.ok(guardAt < modeAt && modeAt < spawnAt, 'the chmod sits between the config guard and the spawn');
+  assert.ok(guardAt >= 0 && modeAt >= 0 && spawnAt >= 0, 'guard, reassert and spawn must all be in start()');
+  assert.ok(guardAt < modeAt && modeAt < spawnAt, 'the reassert sits between the config guard and the spawn');
 });
 
 test('the daemon still treats a wide ~/.hazlie as fatal, so the app-side reassert is load-bearing', () => {
