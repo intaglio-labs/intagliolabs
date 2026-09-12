@@ -229,6 +229,20 @@ const MAIL_PARTICIPANT_FIELDS = Object.freeze(['from', 'to', 'cc', 'bcc']);
 // once `<...>` and every quoted run are gone, a leftover piece is kept only
 // if it looks like an address at all (an `@`, no whitespace), which is what
 // lets a MIXED list -- `a@x.com, Bob <b@x.com>` -- keep both.
+// TWO PARSERS, DELIBERATELY (2026-09-12). connectors/lib/mailRows.mjs now
+// exports parseAddressHeader, which learned the same lesson on the ingest
+// side: the Gmail REST adapter had been handing raw header strings to a
+// normalizeAddresses that only accepted arrays, so every mail row in the
+// corpus was written with no participants at all. The obvious move is to
+// share one parser, and the import graph allows it — ui/server/memory/
+// select.mjs already imports connectors/lib/pinnedThread.mjs. It was NOT
+// done, for a behavioural reason rather than a structural one: that parser is
+// STRICTER than this one (it validates the token it extracts, drops group
+// syntax and RFC comments, and refuses a bracket that holds no address), so
+// adopting it here would change which mail rows this guard suppresses a
+// reconnection card for. That is a product decision with its own tests, not a
+// refactor to slip in beside a connector fix. Merge them deliberately or not
+// at all.
 function headerAddresses(raw) {
   const out = [];
   for (const m of raw.matchAll(/<([^<>]*)>/gu)) out.push(m[1]);
