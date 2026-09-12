@@ -111,7 +111,7 @@ import {
   timeoutError,
   LLAMA_UNREACHABLE_STATUS,
 } from './llamaReady.mjs';
-import { loadSpine } from './people/graph.mjs';
+import { loadSpine, PERSON_SOURCE_POLICY } from './people/graph.mjs';
 import {
   clearPeopleProjection,
   ensurePeopleProjectionSchema,
@@ -124,7 +124,7 @@ import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 // directory for pinnedThread (memory/select.mjs, memory/episodic.mjs) and
 // connect/ does for googleClients, so this follows the precedent rather than
 // making a third copy of the same parse. See ops/FEATURES.md.
-import { readFeatures } from '../../connectors/lib/features.mjs';
+import { connectorsDisabledBy, readFeatureRegistry, readFeatures } from '../../connectors/lib/features.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
 import { validToFor } from './memory/validity.mjs';
 import {
@@ -3566,9 +3566,25 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
   //             outranks everything, including reading: a source that cannot
   //             be read is not waiting on the projection.
   //
-  // TWO SOURCES ARE COUNTED DIFFERENTLY AND SAY SO, because the obvious
-  // uniform count is wrong for both:
+  // WHICH SOURCES GET A ROW AT ALL is the other thing the first version got
+  // wrong: it listed every source with rows. Two gates now, both in
+  // listedOnboardingSource -- the source must be able to mint people
+  // (PERSON_SOURCE_POLICY 'participant') and its connector must not be
+  // switched off in the feature registry. Everything else with rows collapses
+  // into `dormant: {sources, rows}`, one grey line on the page, because a
+  // photo library and a switched-off bridge are neither a failure nor
+  // something the owner can act on.
   //
+  // THREE SOURCES ARE COUNTED DIFFERENTLY AND SAY SO, because the obvious
+  // uniform count is wrong for all three:
+  //
+  //   calendar  every calendar link is an ATTENDEE (or the organizer), and
+  //             graph.mjs marks all of them authored=0 -- an invitation has no
+  //             author. Under the authored count calendar is permanently 0
+  //             against however many rows it has: on the owner's machine, 0
+  //             out of 21,630, amber, about a calendar that was working
+  //             perfectly. Counted on attendee/organizer links and labelled
+  //             peopleKind:'met' so the cell heads "people you met".
   //   linkedin  a Connections.csv export is entirely role='profile',
   //             authored=0. Under an authored=1 count it is permanently 0
   //             people against thousands of rows — permanent amber, on the
@@ -5254,6 +5270,98 @@ function sourceStatus({ rows, people, failStreak, projectionCurrent }) {
   return 'idle';
 }
 
+// WHICH CONNECTOR OWNS A HERMES SOURCE -- the exact inverse of daemon.mjs's
+// CONNECTOR_HERMES_SOURCE, and a copy rather than an import on purpose:
+// daemon.mjs reads the feature registry, the bridge databases and the retention
+// config at module scope, and none of that belongs in hermes' import graph for
+// the sake of one lookup table. The lockstep is a FACT rather than an
+// instruction -- onboarding-progress.test.mjs imports both and asserts they
+// invert, so a new bridge platform or a renamed connector fails a test instead
+// of quietly dropping a source out of the owner's table.
+//
+// `matrix` appears against seven sources because it is transport, not
+// provenance: one /sync carries every bridge, and the row's source is whichever
+// bridge's ghost sent it. `linkedin` has two owners because it genuinely has
+// two -- the Connections.csv export and the bridge's DMs land in the same
+// hermes source from different connectors, so LinkedIn is read as long as
+// EITHER is on.
+export const SOURCE_CONNECTORS = Object.freeze({
+  imessage: Object.freeze(['imessage']),
+  calendar: Object.freeze(['calendar']),
+  mail: Object.freeze(['mail']),
+  granola: Object.freeze(['granola']),
+  health: Object.freeze(['oura']),
+  photos: Object.freeze(['photos']),
+  notes: Object.freeze(['notes']),
+  notion: Object.freeze(['notion']),
+  files: Object.freeze(['files']),
+  whatsapp: Object.freeze(['whatsapp']),
+  linkedin: Object.freeze(['linkedin', 'matrix']),
+  messenger: Object.freeze(['matrix']),
+  instagram: Object.freeze(['matrix']),
+  twitter: Object.freeze(['matrix']),
+  telegram: Object.freeze(['matrix']),
+  discord: Object.freeze(['matrix']),
+  slack: Object.freeze(['matrix']),
+});
+
+// Contacts is the one connector with NO hermes source at all
+// (CONNECTOR_HERMES_SOURCE.contacts is null -- it writes state.db and never
+// ingests), so its name lives here rather than in the map above.
+const CONTACTS_CONNECTOR = 'contacts';
+
+const ONBOARDING_CONNECTORS = Object.freeze([...new Set(
+  [CONTACTS_CONNECTOR, ...Object.values(SOURCE_CONNECTORS).flat()]
+)]);
+
+// Sources whose people column is not "who wrote to you". Both of these would
+// otherwise be a permanent, structural amber on the most ordinary input each
+// one has -- see the route comment.
+const ONBOARDING_PEOPLE_KIND = Object.freeze({ linkedin: 'listed', calendar: 'met' });
+
+// Which connectors this install has switched off: `false` in the registry, plus
+// matrix whenever `bridges` is off. connectorsDisabledBy is the one place that
+// knows the second rule, so it is asked rather than re-derived.
+//
+// A registry that could NOT BE READ answers ALL_OFF by design, which is the
+// right answer for a scheduler and the wrong one here: it would empty this
+// table and report a broken bundle as "everything you connected is switched
+// off". So the filter applies only when the registry was actually read.
+// Hiding nothing is this screen's failure mode of choice; /stats is where the
+// unreadable registry is reported as itself.
+function switchedOffConnectors() {
+  const { features, registryState } = readFeatureRegistry();
+  if (registryState !== 'ok') return new Set();
+  return new Set(connectorsDisabledBy(features, ONBOARDING_CONNECTORS));
+}
+
+// Does this source belong in the owner's table at all? TWO GATES, and the
+// screen had neither.
+//
+// CAN IT MINT PEOPLE. Only a PERSON_SOURCE_POLICY 'participant' source ever
+// resolves a person; files, photos and notes are content-only or non-person by
+// design, so "connected, nobody found yet" against them is an alarm about a
+// source doing exactly its job -- three amber rows the owner cannot act on,
+// next to the one that means something.
+//
+// IS THIS INSTALL READING IT. A connector the registry has switched off is not
+// running, so its legacy rows are evidence of nothing. Left in the table they
+// are worse than noise: an Instagram archive from before the bridges were
+// turned off has real authored links and paints GREEN, which reads as a live
+// source on a machine that has not touched it in months.
+//
+// An UNMAPPED participant source is LISTED rather than hidden, the same way
+// connectorsDisabledBy leaves a connector with no registry entry alone: a newly
+// added source showing up in this table is a far smaller wrong than one the
+// owner's only diagnostic screen silently drops.
+function listedOnboardingSource(source, switchedOff) {
+  if (source === CONTACTS_CONNECTOR) return !switchedOff.has(CONTACTS_CONNECTOR);
+  if (PERSON_SOURCE_POLICY[source] !== 'participant') return false;
+  const owners = SOURCE_CONNECTORS[source];
+  if (owners === undefined) return true;
+  return owners.some((connector) => !switchedOff.has(connector));
+}
+
 function onboardingProgress(db, policy) {
   const projection = peopleProjectionStatus(db, policy);
   // A missing projection state table is not "caught up"; it is "we cannot say
@@ -5273,6 +5381,7 @@ function onboardingProgress(db, policy) {
   // `context` (person_event_links.source is a column of its own).
   const peopleBySource = new Map();
   let linkedinListed = 0;
+  let calendarMet = 0;
   try {
     for (const row of db.prepare(
       'SELECT source, COUNT(DISTINCT person_key) AS n FROM person_event_links ' +
@@ -5283,6 +5392,29 @@ function onboardingProgress(db, policy) {
     linkedinListed = Number(db.prepare(
       "SELECT COUNT(DISTINCT person_key) AS n FROM person_event_links " +
       "WHERE source = 'linkedin' AND role = 'profile'"
+    ).get()?.n ?? 0);
+    // NOBODY AUTHORS AN INVITATION. graph.mjs mints calendar links from the
+    // attendee list and the organizer -- role 'attendee', 'organizer' or
+    // 'declined', authored:false on every single one, because an invite is not
+    // a message. The authored count above is therefore STRUCTURALLY zero for
+    // calendar however well the connector is working, and on the owner's own
+    // machine it painted "connected, nobody found yet" over 21,630 calendar
+    // rows: the exact failure state this screen exists to catch, reported
+    // about the working case.
+    //
+    // 'declined' is left out. The response the owner has on file says that
+    // person did not come, and every other calendar consumer here
+    // (calendarReconnect, matcher, the eligibility producer) already drops
+    // declines; counting them under a column headed "people you met" would be
+    // the same class of lie in the other direction.
+    //
+    // `room` is deliberately NOT in this predicate. graph.mjs sets room only
+    // for message threads, so no calendar link has ever carried it, and a
+    // filter that cannot fire reads as a rule about invitations that is not
+    // one.
+    calendarMet = Number(db.prepare(
+      "SELECT COUNT(DISTINCT person_key) AS n FROM person_event_links " +
+      "WHERE source = 'calendar' AND role IN ('attendee', 'organizer')"
     ).get()?.n ?? 0);
   } catch {
     // The projection tables are created lazily; before the first rebuild they
@@ -5305,7 +5437,22 @@ function onboardingProgress(db, policy) {
     const names = new Set([...rowsBySource.keys(), ...Object.keys(runs)]);
     if (contactNames > 0 || Object.hasOwn(runs, 'contacts')) names.add('contacts');
 
-    const sources = [...names].sort().map((source) => {
+    const switchedOff = switchedOffConnectors();
+    const listedNames = [...names].filter((source) => listedOnboardingSource(source, switchedOff)).sort();
+
+    // ONE GREY LINE INSTEAD OF SEVEN AMBER ROWS. Rows this install keeps and
+    // no longer reads people from -- a photo library, an Instagram archive
+    // from before the bridges were switched off. They are not a per-source
+    // problem and they are not the owner's to fix, so they collapse to names
+    // and a total; the page says one sentence about them and moves on.
+    const dormantNames = [...rowsBySource.keys()]
+      .filter((source) => !listedOnboardingSource(source, switchedOff)).sort();
+    const dormant = {
+      sources: dormantNames,
+      rows: dormantNames.reduce((total, source) => total + (rowsBySource.get(source) ?? 0), 0),
+    };
+
+    const sources = listedNames.map((source) => {
       const failStreak = runs[source]?.failStreak ?? 0;
       if (source === 'contacts') {
         // Both cells carry the same number because the address book's rows ARE
@@ -5327,13 +5474,15 @@ function onboardingProgress(db, policy) {
         };
       }
       const rows = rowsBySource.get(source) ?? 0;
-      const listed = source === 'linkedin';
-      const people = listed ? linkedinListed : (peopleBySource.get(source) ?? 0);
+      const peopleKind = ONBOARDING_PEOPLE_KIND[source] ?? 'authors';
+      const people = peopleKind === 'listed' ? linkedinListed
+        : peopleKind === 'met' ? calendarMet
+        : (peopleBySource.get(source) ?? 0);
       return {
         source,
         rows,
         people,
-        peopleKind: listed ? 'listed' : 'authors',
+        peopleKind,
         status: sourceStatus({ rows, people, failStreak, projectionCurrent }),
       };
     });
@@ -5341,6 +5490,7 @@ function onboardingProgress(db, policy) {
     return {
       state: 'ok',
       sources,
+      dormant,
       projection,
       runs,
       daemonLastRunTs,

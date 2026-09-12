@@ -632,15 +632,31 @@ const loadStatus = document.getElementById('loadStatus');
 const loadStart = document.getElementById('loadStart');
 const loadFinish = document.getElementById('loadFinish');
 
+// THE ONE LINE THE TABLE DOES NOT GET A ROW FOR. Rows kept from sources this
+// install does not read people from — a photo library, a bridge switched off in
+// ops/features.json. The route collapses them to a total on purpose (see
+// `dormant` in /admin/onboarding/progress), so this is a sentence rather than
+// seven grey rows the owner would read as seven things to fix. Built here
+// rather than in onboarding.html because it is the route's shape that decides
+// whether it says anything at all.
+const loadDormant = document.createElement('p');
+loadDormant.className = 'ob-status';
+loadDormant.id = 'loadDormant';
+loadDormant.hidden = true;
+loadStatus.before(loadDormant);
+
 const SOURCE_NAMES = {
   imessage: 'messages', mail: 'mail', calendar: 'calendar',
   contacts: 'contacts', linkedin: 'linkedin',
 };
 
 // What the people column MEANS for this source, because it is not the same
-// question everywhere. A LinkedIn export has no authors at all, and an address
-// book's rows are names rather than correspondents.
-const PEOPLE_SUFFIX = { listed: 'in your export', names: 'in your address book' };
+// question everywhere. A LinkedIn export has no authors at all, an address
+// book's rows are names rather than correspondents, and a calendar's people are
+// the ones who were in the room — nobody authors an invitation.
+const PEOPLE_SUFFIX = {
+  listed: 'in your export', names: 'in your address book', met: 'you met',
+};
 
 const STATUS_COPY = {
   reading: 'reading',
@@ -699,6 +715,16 @@ function paintLoad(out) {
     return tr;
   }));
 
+  // BELOW THE TABLE, AND ONLY WHEN THERE IS SOMETHING TO SAY. Silent at zero:
+  // a fresh install has no legacy rows, and a sentence about none of them is
+  // one more thing to read on the screen that is already asking for patience.
+  const dormantRows = Number(out.dormant?.rows || 0);
+  loadDormant.hidden = dormantRows === 0;
+  if (dormantRows > 0) {
+    loadDormant.textContent =
+      `${dormantRows.toLocaleString()} rows from switched-off sources are kept but not read`;
+  }
+
   // ABOVE THE TABLE, NOT IN IT. The daemon holding a stale lock, or exiting on
   // a config error, makes every source read zero — and per-source amber would
   // then blame five sources for one process that is not running.
@@ -753,6 +779,7 @@ function peekCard(out) {
     // panel that actually serves, which is where this whole flow was going.
     stopLoadPolling();
     document.getElementById('loadTable').hidden = true;
+    loadDormant.hidden = true;
     loadStatus.textContent = 'here is your first one.';
     finish();
     return;

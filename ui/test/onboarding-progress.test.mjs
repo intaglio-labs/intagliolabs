@@ -21,8 +21,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { start } from '../server/hermes.mjs';
-import { validateConfig } from '../../connectors/daemon.mjs';
+import { start, SOURCE_CONNECTORS } from '../server/hermes.mjs';
+import { validateConfig, CONNECTOR_HERMES_SOURCE } from '../../connectors/daemon.mjs';
 
 const TOKEN = 'f'.repeat(64);
 
@@ -59,16 +59,42 @@ CREATE TABLE IF NOT EXISTS run_log(
 // from inside a try/finally, so `finally` restored $HOME the instant the
 // promise was created and every path under test resolved against the real
 // home while the assertions ran against the tmp one.
+// AND THE FEATURE REGISTRY IS PINNED TO THE SHIPPED ONE. The progress table
+// now asks the registry which connectors are switched on, so a developer's own
+// ~/.hazlie/features.json would decide which rows these assertions see. HOME is
+// already a tmpdir, which handles that; HAZLIE_FEATURES_OVERRIDE='none' handles
+// the other half — an override path exported in the shell the test runs from.
+// See connectors/lib/features.mjs defaultOverridePath.
 async function withHome(fn, serverOpts = {}) {
   const home = mkdtempSync(join(tmpdir(), 'onboarding-home-'));
   mkdirSync(join(home, '.hazlie', 'connectors'), { recursive: true });
   const previous = process.env.HOME;
+  const previousFeatures = process.env.HAZLIE_FEATURES_OVERRIDE;
   process.env.HOME = home;
+  process.env.HAZLIE_FEATURES_OVERRIDE = 'none';
   try {
     await fn(home, serverOpts);
   } finally {
     if (previous === undefined) delete process.env.HOME;
     else process.env.HOME = previous;
+    if (previousFeatures === undefined) delete process.env.HAZLIE_FEATURES_OVERRIDE;
+    else process.env.HAZLIE_FEATURES_OVERRIDE = previousFeatures;
+  }
+}
+
+// The owner override, for the one question the shipped registry cannot answer
+// twice: what this table does when a switch is the OTHER way. Same file and
+// same loader the owner's own escape hatch uses.
+async function withFeatureOverride(home, features, fn) {
+  const path = join(home, '.hazlie', 'features-test.json');
+  writeFileSync(path, JSON.stringify(features));
+  const previous = process.env.HAZLIE_FEATURES_OVERRIDE;
+  process.env.HAZLIE_FEATURES_OVERRIDE = path;
+  try {
+    await fn();
+  } finally {
+    if (previous === undefined) delete process.env.HAZLIE_FEATURES_OVERRIDE;
+    else process.env.HAZLIE_FEATURES_OVERRIDE = previous;
   }
 }
 
@@ -238,10 +264,23 @@ test('the engine route refuses the browser channel in both of its shapes', async
 //   linkedin  500 profile rows, zero authored. The most common LinkedIn
 //             input there is — a Connections.csv with no messages.csv. Must
 //             be 500 and 'listed', never 0 and amber.
-//   calendar  rows whose only links are role='attendee', authored = 0. An
-//             invite you were on is not somebody writing to you. Must be 0
-//             and amber.
+//   calendar  rows whose only links are role='attendee'/'organizer'/'declined',
+//             authored = 0 on every one of them — that is what graph.mjs mints
+//             from an invite. Under the authored count it is permanently 0
+//             against 12 rows, which is the amber this screen exists to catch
+//             being painted over a calendar that works. Must be 5 (four
+//             attendees and the organizer, never the person who declined) and
+//             green.
 //   contacts  no context rows whatsoever; counted from state.db.
+//   photos    rows, and no links ever — PERSON_SOURCE_POLICY calls it
+//             'non-person' and the projection will not write a link for it, so
+//             an amber row against it is a failure report about a source doing
+//             its job. Must not be in the table at all.
+//   instagram rows AND authored links, from a bridge the registry has since
+//             switched off (`bridges: false`). Legacy rows, read by nothing.
+//             Must not be in the table either — and it is the case that
+//             separates "this source can mint people" from "this install is
+//             reading it", because on the arithmetic alone it is green.
 
 function seedPerson(db, key, name) {
   db.prepare(
@@ -281,6 +320,8 @@ function seedFixture(db) {
   const imessage = seedRows(db, 'imessage', 40);
   const linkedin = seedRows(db, 'linkedin', 500);
   const calendar = seedRows(db, 'calendar', 12);
+  const instagram = seedRows(db, 'instagram', 30);
+  seedRows(db, 'photos', 40);
 
   // mail: rows, and links that are NOT authored — the sender never resolved.
   seedPerson(db, 'mail:nobody', 'Nobody');
@@ -305,12 +346,27 @@ function seedFixture(db) {
     seedLink(db, { key, contextId: linkedin[i], source: 'linkedin', role: 'profile', authored: 0, room: 0 });
   }
 
-  // calendar: attendees only.
+  // calendar: four attendees, the organizer EventKit did not repeat in the
+  // attendee list, and one person who declined. None of them authored
+  // anything, because nobody authors an invitation.
   for (let i = 0; i < 4; i += 1) {
     const key = `calendar:attendee${i}`;
     seedPerson(db, key, `Attendee ${i}`);
     seedLink(db, { key, contextId: calendar[i], source: 'calendar', role: 'attendee', authored: 0, room: 0 });
   }
+  seedPerson(db, 'calendar:host', 'Host');
+  seedLink(db, { key: 'calendar:host', contextId: calendar[0], source: 'calendar', role: 'organizer', authored: 0, room: 0 });
+  seedPerson(db, 'calendar:regrets', 'Regrets');
+  seedLink(db, { key: 'calendar:regrets', contextId: calendar[4], source: 'calendar', role: 'declined', authored: 0, room: 0 });
+
+  // instagram: a bridge that used to run. Rows, and people who wrote to you
+  // directly — green on the arithmetic, and switched off in the registry.
+  for (let i = 0; i < 3; i += 1) {
+    const key = `instagram:ghost${i}`;
+    seedPerson(db, key, `Ghost ${i}`);
+    seedLink(db, { key, contextId: instagram[i], source: 'instagram', role: 'counterparty', authored: 1, room: 0 });
+  }
+  // photos: rows, no links, no person it could ever mint.
 }
 
 // The projection's own triggers bump source_revision on every context insert,
@@ -365,8 +421,12 @@ test('the table counts who wrote to you, and says so differently where that is n
         'the single most likely false amber in this screen');
 
       assert.equal(rows.calendar.rows, 12);
-      assert.equal(rows.calendar.people, 0, 'an invite you were on is not somebody writing to you');
-      assert.equal(rows.calendar.status, 'empty');
+      assert.equal(rows.calendar.people, 5,
+        'four attendees and the organizer; the invitation itself has no author');
+      assert.equal(rows.calendar.peopleKind, 'met',
+        'so the page can head that cell "people you met" rather than claiming they wrote');
+      assert.equal(rows.calendar.status, 'ok',
+        'a calendar full of invites is the other false amber, and the one the owner hit');
 
       assert.equal(rows.contacts.people, 2, 'counted from state.db, not from context');
       assert.equal(rows.contacts.peopleKind, 'names');
@@ -383,6 +443,90 @@ function rowsBySourceOf(db) {
       .map((r) => [r.source, Number(r.n)])
   );
 }
+
+// ---------------------------------------------- who belongs in the table
+
+test('a source only gets a row if it can mint people AND this install reads it', async () => {
+  await withHome(async (home) => {
+    await withServer(home, async ({ call, db }) => {
+      seedFixture(db);
+      // Mail that WORKED, so the two halves of the rule are visible at once:
+      // the authored count is still the right question for a message source,
+      // and it is not the question for calendar.
+      seedPerson(db, 'mail:realsender', 'Real Sender');
+      seedLink(db, {
+        key: 'mail:realsender',
+        contextId: db.prepare("SELECT MIN(id) AS id FROM context WHERE source = 'mail'").get().id,
+        source: 'mail', role: 'sender', authored: 1, room: 0,
+      });
+      markProjection(db, { projected: 9, source: 9 });
+
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      const rows = byName(body);
+
+      assert.equal(rows.mail.people, 1, 'a resolved sender is still counted on authorship');
+      assert.equal(rows.mail.peopleKind, 'authors');
+      assert.equal(rows.mail.status, 'ok');
+
+      assert.equal(rows.calendar.people, 5);
+      assert.equal(rows.calendar.peopleKind, 'met');
+      assert.equal(rows.calendar.status, 'ok');
+
+      // 40 photo rows are not a source that failed to find anybody; they are a
+      // source that was never going to.
+      assert.equal(rows.photos, undefined, 'a non-person source has no row to be amber in');
+      // And 30 instagram rows with three resolved authors are green on the
+      // arithmetic and unread by this install. The registry decides, not the
+      // count.
+      assert.equal(rows.instagram, undefined, 'a switched-off bridge has no row either');
+
+      // ONE GREY LINE, NOT SEVEN AMBER ROWS.
+      assert.deepEqual(body.dormant, { sources: ['instagram', 'photos'], rows: 70 });
+    });
+  });
+});
+
+test('switching bridges back on puts instagram in the table and takes it out of dormant', async () => {
+  await withHome(async (home) => {
+    await withServer(home, async ({ call, db }) => {
+      seedFixture(db);
+      markProjection(db, { projected: 9, source: 9 });
+      await withFeatureOverride(home, { bridges: true }, async () => {
+        const body = await (await call('GET', '/admin/onboarding/progress')).json();
+        const rows = byName(body);
+        // The same rows, the same links, the same arithmetic — one flag apart.
+        // A hardcoded list of "bridge sources" would pass the test above and
+        // fail this one.
+        assert.equal(rows.instagram.rows, 30);
+        assert.equal(rows.instagram.people, 3);
+        assert.equal(rows.instagram.status, 'ok');
+        assert.deepEqual(body.dormant, { sources: ['photos'], rows: 40 });
+      });
+      // And back, because the registry is read per request rather than cached.
+      const after = await (await call('GET', '/admin/onboarding/progress')).json();
+      assert.deepEqual(after.dormant.sources, ['instagram', 'photos']);
+    });
+  });
+});
+
+// The map hermes uses to answer "whose connector is this source?" is the
+// inverse of the daemon's own. Two hand-maintained lists in two files that have
+// to agree is exactly the shape ops/FEATURES.md set out to kill, so this is the
+// thing that checks they do — a new bridge platform, or a renamed connector,
+// fails here rather than quietly dropping a source out of the owner's table.
+test('the source-to-connector map inverts the daemon\'s own', () => {
+  const expected = new Map();
+  for (const [connector, source] of Object.entries(CONNECTOR_HERMES_SOURCE)) {
+    if (source === null) continue; // contacts: a connector with no corpus at all
+    for (const name of Array.isArray(source) ? source : [source]) {
+      expected.set(name, [...(expected.get(name) ?? []), connector].sort());
+    }
+  }
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(SOURCE_CONNECTORS).map(([s, c]) => [s, [...c].sort()])),
+    Object.fromEntries([...expected.entries()])
+  );
+});
 
 test('a projection that has not caught up is grey, even where it would be green', async () => {
   await withHome(async (home) => {
@@ -465,7 +609,7 @@ test('the progress route answers counts and state, and no content', async () => 
       const body = JSON.parse(raw);
       assert.deepEqual(
         Object.keys(body).sort(),
-        ['daemonLastRunTs', 'projection', 'runs', 'sources', 'state']
+        ['daemonLastRunTs', 'dormant', 'projection', 'runs', 'sources', 'state']
       );
       for (const source of body.sources) {
         assert.deepEqual(
@@ -473,6 +617,9 @@ test('the progress route answers counts and state, and no content', async () => 
           ['people', 'peopleKind', 'rows', 'source', 'status']
         );
       }
+      // COLLAPSED, deliberately: names and one total. A per-source breakdown
+      // here would be the same table again, and the page would draw it.
+      assert.deepEqual(Object.keys(body.dormant).sort(), ['rows', 'sources']);
     });
   });
 });
