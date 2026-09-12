@@ -181,6 +181,16 @@ cp ../ops/gcal-auth.mjs ../ops/oura-auth.mjs \
 # line shipped eight per-process agents that each announced themselves in Login
 # Items -- see ops/bridge-supervisor.mjs for why there is one now.
 cp ../ops/io.intaglio.bridges.plist ../ops/bridge-supervisor.mjs "$BE/ops/"
+# THE FEATURE REGISTRY. Which surfaces this build ships — read by the app
+# (Features.swift, at backend/ops/features.json), by hermes and by the
+# connectors daemon (connectors/lib/features.mjs, at ../../ops/features.json
+# relative to itself). It lands in ops/ rather than beside inference-profiles
+# .json in config/ because that ONE relative path has to resolve identically in
+# a checkout and in the bundle, and it does: connectors/lib/../../ops is the
+# repo root's ops/ here and this directory there. A missing copy is not a silent
+# downgrade -- every reader answers "everything off" -- but it is a broken
+# build, so see widget/test/feature-registry.test.mjs.
+cp ../ops/features.json "$BE/ops/"
 # A downloaded app executes these directly. Preserve the source mode, but also
 # set it explicitly so an archive or checkout that lost executable bits cannot
 # silently turn first-launch bridge warming off.
