@@ -225,7 +225,10 @@ test('the official clients receive prompts over stdin without inherited API cred
 
   // The model-visible working directory gets the same per-run wipe — "empty"
   // must be a property of every run, not of the first (review 2026-08-31).
-  const workDir = between(runner, 'private func freshFrontierWorkingDirectory', 'private func executable');
+  // `executable(named:)` lost its `private` when EngineProbe started resolving
+  // the same binary through it; the boundary this slice ends at is the
+  // function, not its visibility.
+  const workDir = between(runner, 'private func freshFrontierWorkingDirectory', 'func executable(named');
   assert.match(workDir, /removeItem\(at:\s*work\)/u,
     'the shared work directory must be emptied before every run');
   assert.doesNotMatch(runner, /frontierWorkingDirectory\(\)\.path/u,
