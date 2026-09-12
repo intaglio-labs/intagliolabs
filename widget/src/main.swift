@@ -72,6 +72,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   private var reconnectPanel: PopupPanel?
   private var monthsPanel: PopupPanel?
   private var onboardingPanel: PopupPanel?
+  // Set while the onboarding scrim is standing aside for the system browser
+  // during Google sign-in. See yieldOnboardingToBrowser.
+  private var onboardingYieldedToBrowser = false
   private var earWeb: WKWebView?
   // Messages submitted (typed or spoken) before the chat page is alive, in
   // arrival order. The chatReady handshake takes the first; the bridge pulls
@@ -339,6 +342,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       let work = DispatchWorkItem { [weak self] in self?.rehomeWidget() }
       self.screenChangeWork = work
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    // COMING BACK FROM THE BROWSER, by either of the two routes there are.
+    //
+    // yieldOnboardingToBrowser puts the scrim behind for the length of a
+    // Google sign-in. Activating this app is the obvious return, but the
+    // onboarding panel is a .nonactivatingPanel: clicking it can make it key
+    // without making this app active, which is exactly the return the page's
+    // own `focus` probe already relies on. Watching only the application
+    // notification would leave the scrim behind in that case, so both are
+    // watched and the flag makes the second one a no-op.
+    for name in [NSApplication.didBecomeActiveNotification, NSWindow.didBecomeKeyNotification] {
+      NotificationCenter.default.addObserver(
+        forName: name, object: nil, queue: .main
+      ) { [weak self] note in
+        guard let self else { return }
+        if name == NSWindow.didBecomeKeyNotification,
+           (note.object as? PopupPanel) !== self.onboardingPanel { return }
+        self.restoreOnboardingFromBrowser()
+      }
     }
 
     // First launch shows the welcome flow. Only completing it sets the flag,
@@ -706,6 +729,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     // Re-set every time: the display can change between one showing and the
     // next, and a stale frame would dim the wrong rectangle.
     p.setFrame(frame, display: false)
+    // ...and the LEVEL, for the same reason. yieldOnboardingToBrowser leaves
+    // this panel at .normal and behind, and the way back is the owner
+    // returning to the app -- which a flow escaped from inside the browser
+    // never does. Without this, the next showing would be a scrim that no
+    // longer covers anything, which is a broken flow rather than a broken
+    // moment. Every showing starts above ordinary windows.
+    p.level = .floating
+    onboardingYieldedToBrowser = false
     // And rewind the flow. The panel and its page are both reused, so without
     // this, reopening from settings resumes on whatever screen it was last
     // abandoned on rather than on the welcome. Guarded because on the very
@@ -1323,6 +1354,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       p.level = .floating
       p.orderFrontRegardless()
     }
+  }
+
+  // GET OUT OF THE BROWSER'S WAY, WITH NOTHING TO TELL US WHEN IT IS OVER.
+  //
+  // Google will not run OAuth in an embedded webview, so sign-in happens in
+  // the owner's own browser (see GoogleLogin). The scrim is full-screen at
+  // .floating and a browser window is an ordinary one, so the consent page
+  // came up UNDERNEATH it: visible through nothing, unclickable, and the only
+  // way through was Escape -- which closes the flow rather than reaching
+  // Google. Seen live on the clean-machine walk (2026-09-12).
+  //
+  // Lowering to .normal alone is a race this cannot afford to lose. The panel
+  // is non-activating, so this app may well be inactive already; NSWorkspace
+  // brings the browser forward asynchronously, and whichever of the two moves
+  // last wins the ordering. So the scrim goes BEHIND as well -- the same
+  // answer yieldForSettings reached, and for the same reason: this is a
+  // window the owner works in for a while, not a dialog they dismiss.
+  //
+  // It stays VISIBLE rather than hidden: the page is showing "waiting for you
+  // in the browser…" and a scrim that vanished would read as the flow ending.
+  //
+  // There is no completion to restore on, because consent finishes in another
+  // application. The way back is the owner returning here -- see the two
+  // observers in applicationDidFinishLaunching -- and, whatever happens, the
+  // next showing of the flow re-raises it in openOnboarding.
+  func yieldOnboardingToBrowser() {
+    guard let p = onboardingPanel, p.isVisible else { return }
+    onboardingYieldedToBrowser = true
+    p.level = .normal
+    p.orderBack(nil)
+  }
+
+  // ...and back on top when the owner comes back. Guarded on the flag so this
+  // never lifts a scrim that some other path deliberately lowered.
+  private func restoreOnboardingFromBrowser() {
+    guard onboardingYieldedToBrowser else { return }
+    onboardingYieldedToBrowser = false
+    guard let p = onboardingPanel, p.isVisible else { return }
+    p.level = .floating
+    p.orderFrontRegardless()
   }
 
   func setupProgress(_ payload: [String: Any]) {

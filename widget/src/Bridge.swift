@@ -65,6 +65,11 @@ protocol BridgeDelegate: AnyObject {
   // dialog: it also pushes the scrim BEHIND, because Settings is a window the
   // owner works in for a while rather than answers and dismisses.
   func yieldForSettings(_ yield: Bool)
+  /// The system browser has just been handed the Google authorization URL.
+  /// Like yieldForSettings there is no completion to restore on -- consent
+  /// happens in another application and nothing calls back -- so this one
+  /// takes no argument and the way back is the owner returning to the app.
+  func yieldOnboardingToBrowser()
 }
 
 final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, URLSessionTaskDelegate {
@@ -1025,6 +1030,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
               // completed. Returning to the app fires the shelf's focus refresh;
               // the token file remains the source of truth. `why` is reserved
               // for a local validation or browser-launch failure.
+              // AND THE SCRIM GETS OUT OF THE BROWSER'S WAY. The onboarding
+              // panel is full-screen at .floating; a browser window is an
+              // ordinary one, so Google's consent page opened UNDERNEATH a
+              // scrim that swallowed every click on it. The only route to the
+              // browser was Escape, which closes the flow. Seen live on the
+              // clean-machine walk (2026-09-12): Dia opened behind and could
+              // not be reached. Yielding on the launch macOS accepted, not on
+              // consent, because consent is the thing that cannot be observed
+              // from here.
+              if ok { self.delegate?.yieldOnboardingToBrowser() }
               var out: [String: Any] = ["ok": ok, "opened": ok]
               if let why { out["refused"] = why }
               self.reply(webView, id, out)
