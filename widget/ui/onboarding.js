@@ -1085,6 +1085,13 @@ const STATUS_COPY = {
   ok: 'reading',
   empty: 'connected, nobody found yet',
   idle: 'waiting',
+  // CONNECTED, AND NOBODY HAS LOOKED YET -- which is not the same sentence as
+  // `empty`, and must not wear its amber. This is the row for the thirty
+  // seconds after the owner signs in to Google or drops their export in:
+  // the route can see the token file or the CSV, and the reader has not
+  // reached the source even once. "connected, nobody found yet" there would
+  // report a verdict on a search that has not happened.
+  waiting: 'reading soon',
   failing: 'not reading',
   skipped: 'not connected',
 };
@@ -1290,7 +1297,23 @@ function peekCard(out) {
     loadFinish.hidden = false;
     return;
   }
-  if (out.reason) loadStatus.textContent = `no card yet — ${out.reason}`;
+  // THE REASON IS A WIRE WORD, NOT A SENTENCE FOR A PERSON. `pool-exhausted`
+  // reached the owner verbatim on the clean-machine run, on the screen whose
+  // entire job is to say how it is going. It means the producer found nobody
+  // who qualifies YET -- an install with too little history behind it, which is
+  // the ordinary state of the machine this screen is drawn on -- so it says
+  // that, and says when it will look again if the route told us.
+  if (out.reason === 'pool-exhausted') {
+    const minutes = Number(out.retryAfterMs) > 0
+      ? Math.max(1, Math.round(Number(out.retryAfterMs) / 60000))
+      : null;
+    loadStatus.textContent =
+      'nobody qualifies yet — i need more history before i can pick someone'
+      + (minutes === null ? '' : `, checking again in ${minutes} min`);
+    return;
+  }
+  // Every other reason is one the owner cannot act on and would not recognise.
+  if (out.reason) loadStatus.textContent = 'no card yet';
 }
 
 loadFinish.addEventListener('click', () => finish());
