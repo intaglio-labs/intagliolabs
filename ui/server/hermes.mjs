@@ -5781,11 +5781,16 @@ function readerSprint(home, now = Date.now) {
     const at = now();
     if (at >= until) return null;
     if (at - statSync(path).mtimeMs > SPRINT_FILE_FRESH_MS) return null;
+    // The year the walk is on, when the daemon said it. The phase no longer stops
+    // at last year, so a screen that names one has to name the real one; an older
+    // daemon that does not publish it leaves the page with the generic sentence.
+    const year = Number(sprint.year);
     return {
       since,
       until,
       sources: (Array.isArray(sprint.sources) ? sprint.sources : [])
         .filter((name) => typeof name === 'string' && name.length > 0),
+      ...(Number.isInteger(year) && year >= 1900 && year <= 3000 ? { year } : {}),
     };
   } catch {
     return null;

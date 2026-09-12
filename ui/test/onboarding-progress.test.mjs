@@ -1229,3 +1229,39 @@ test('an explicitly null config path is this machine, the same as an absent one'
     }, { ownerConfigPath: null });
   });
 });
+
+// THE PHASE RUNS ITS WHOLE WINDOW NOW, so the year it is on is the only thing
+// that can name it truthfully — "last year" is right for about a minute of a
+// half hour. An older daemon that does not publish one leaves the page with the
+// generic sentence rather than a wrong year.
+test('the walk year rides along with the sprint, when the daemon says it', async () => {
+  await withHome(async (home) => {
+    const since = Date.now() - 60_000;
+    writeActivity(home, {
+      phase: 'syncing',
+      queue: [],
+      sprint: { since, until: since + 30 * 60_000, sources: ['imessage'], year: 2021 },
+    });
+    await withServer(home, async ({ call, db }) => {
+      markProjection(db, { projected: 1, source: 1 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      assert.equal(body.sprint.year, 2021);
+    });
+  });
+
+  await withHome(async (home) => {
+    const since = Date.now() - 60_000;
+    writeActivity(home, {
+      phase: 'syncing',
+      queue: [],
+      // An older daemon, or a nonsense value.
+      sprint: { since, until: since + 30 * 60_000, sources: ['imessage'], year: 'soon' },
+    });
+    await withServer(home, async ({ call, db }) => {
+      markProjection(db, { projected: 1, source: 1 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      assert.ok(body.sprint, 'the sprint is still relayed');
+      assert.equal(body.sprint.year, undefined, 'a year nobody can read is not a year');
+    });
+  });
+});

@@ -269,7 +269,7 @@ test('screen 6 says what the reader is doing about an empty pool', () => {
 
   const peek = bodyOf(js, 'peekCard');
   assert.match(peek, /if \(readerSprinting\) \{/u);
-  assert.match(peek, /reading last year so i can tell who has gone quiet/u);
+  assert.match(peek, /sprintSentence\(\)/u);
   // ...and the pool sentence is still there for a machine that is NOT sprinting,
   // which is every machine past its first half hour.
   assert.match(peek, /nobody qualifies yet/u);
@@ -443,8 +443,8 @@ test('the widening is a button the owner presses, not something the screen does'
 test('the sprint sentence keeps its line while the mode row is up', () => {
   const peek = bodyOf(js, 'peekCard');
   const branch = peek.slice(peek.indexOf("'pool-exhausted-mode'"));
-  assert.match(branch, /readerSprinting\n\s*\? 'reading last year so i can tell who has gone quiet'/u,
-    'both are true at once: the reader is filling last year AND the mode is empty');
+  assert.match(branch, /readerSprinting \? sprintSentence\(\) : ''/u,
+    'both are true at once: the reader is still walking AND the mode is empty');
   // And the row is cleared on every other answer, so a remedy is never left
   // standing under a problem that has moved on.
   assert.match(peek, /hideModeShortfall\(\);/u);
@@ -533,4 +533,41 @@ test('a poll that never arrived does not end the sprint sentence', () => {
     'only a poll that answered may say the phase is over');
   assert.doesNotMatch(paint.slice(0, guard), /readerSprinting = false/u,
     'clearing it before the return is the flicker');
+});
+
+// THE PHASE NO LONGER STOPS AT LAST YEAR, so a screen that names one has to name
+// the real one. The card wants somebody QUIET, and on a live install the first
+// investor card only appeared once the walk was several years down — "reading
+// last year" would have been true for about a minute of a half-hour window.
+test('the sprint sentence names the year the reader is actually on', () => {
+  const say = bodyOf(js, 'sprintSentence');
+  assert.match(say, /readerSprintYear === currentYear - 1 \? 'last year'/u,
+    'last year is still said as "last year", because that is how a person says it');
+  assert.match(say, /String\(readerSprintYear\)/u, 'and any other year is named');
+  // A daemon that does not publish the year gets a sentence without one: vague
+  // rather than wrong.
+  assert.match(say, /readerSprintYear === null/u);
+
+  const paint = bodyOf(js, 'paintLoad');
+  assert.match(paint, /readerSprintYear = readerSprinting && Number\.isInteger\(out\.sprint\.year\)/u,
+    'the page reads the year the route relays');
+});
+
+// ROUND-8 (live): "show me anyone, just this once" is a look, not a choice — and
+// the picker must not adopt it. On a one-off reply `servedMode` is the one-off
+// and `mode` is still the owner's standing pick, so preferring servedMode would
+// move the picker to 'any' because somebody pressed a button that says it is
+// just this once.
+test('a one-off look does not move the card picker', () => {
+  const rc = readFileSync(join(ROOT, 'widget', 'ui', 'reconnect.js'), 'utf8');
+  const adopt = /function adoptServerMode\(out\) \{\n([\s\S]*?)\n\}/u.exec(rc)?.[1];
+  assert.ok(adopt, 'adoptServerMode not found');
+  assert.match(code(adopt), /out\?\.oneOff === true/u,
+    'the reply says which kind of look it was; the picker has to read it');
+  // On a one-off it takes `mode`, which is the standing pick, and never
+  // servedMode.
+  assert.match(
+    code(adopt),
+    /out\?\.oneOff === true\n\s*\? \(MODES\.includes\(out\?\.mode\) \? out\.mode : null\)/u
+  );
 });

@@ -181,32 +181,62 @@ test('a network source keeps its interval while a local one sprints', async (t) 
     `mail ran ${mail.calls.forward} times; its quota is not the sprint's to spend`);
 });
 
-// AND IT ENDS. Both ways: the year lands, or the half hour runs out.
-test('the sprint stops when last year is recorded done', async (t) => {
-  // Two slices of work in total, so the walk finishes the current year and then
-  // last year within a couple of ticks -- and the second of those is the whole
-  // condition. The pass that records it republishes on its way out, which is
-  // what clears the claim from the activity file.
+// AND IT ENDS. ~~When last year lands, or when the half hour runs out.~~ Last
+// year was never the goal: the phase exists to reach the FIRST CARD, and the card
+// wants somebody quiet. Live on run four at 23:20, twenty-three minutes in, the
+// sprint ended because last year had landed -- with the owner's mode pool still
+// empty and thirty-seven people in the pool overall. On run three the first
+// investor card only appeared once the walk reached about 2021.
+//
+// So it runs its window out while there is history left, and the only thing that
+// ends it early is a roster with nothing left to read.
+test('the sprint keeps going after last year lands', async (t) => {
+  const currentYear = new Date().getFullYear();
   const chat = walker('imessage', { openSlices: 2 });
   const { instance, state, activityPath } = build(t, [chat.source]);
 
   instance.start();
-  await sleep(2_200);
+  await sleep(2_400);
 
-  const lastYear = new Date().getFullYear() - 1;
   assert.equal(
-    state.getCursor(`yearly-backfill:connector:imessage:done:${lastYear}`),
+    state.getCursor(`yearly-backfill:connector:imessage:done:${currentYear - 1}`),
     '1',
-    'the fixture has to actually reach last year, or this proves nothing'
+    'the fixture has to actually finish last year, or this proves nothing'
   );
-  assert.equal(snapshotOf(activityPath).sprint, undefined,
-    'a finished phase stops claiming the machine is racing');
-
-  const settled = chat.calls.forward;
-  await sleep(700);
-  assert.equal(chat.calls.forward, settled,
-    'and the source is back on its interval');
+  assert.ok(
+    Number(state.getCursor('yearly-backfill:year')) < currentYear - 1,
+    'and the walk carried on below it'
+  );
+  const sprint = snapshotOf(activityPath).sprint;
+  assert.ok(sprint, 'the phase must still be running: its job is the first card, not last year');
+  assert.equal(sprint.year, Number(state.getCursor('yearly-backfill:year')),
+    'and it publishes the year it is actually on, so the screen can say it');
 });
+
+// WHAT DOES END IT EARLY: a roster with nothing left to read. `exhausted` is set
+// when a connector reports that nothing older exists, and task() answers null
+// below that -- so however much window is left, there is nothing for it to spend
+// it on. This is also what keeps the six-hour re-arm from becoming four sprints a
+// day for ever on a Mac where every store begins this year.
+test('a roster with nothing left to read ends the phase whatever the clock says', async (t) => {
+  const currentYear = new Date().getFullYear();
+  const chat = walker('imessage');
+  const { instance, state, activityPath } = build(t, [chat.source], {
+    state: fakeState({
+      [daemon.SPRINT_STARTED_KEY]: String(Date.now() - 60_000),
+      [`yearly-backfill:connector:imessage:done:${currentYear}`]: '1',
+      'yearly-backfill:connector:imessage:exhausted': '1',
+    }),
+  });
+
+  instance.start();
+  await sleep(1_600);
+
+  assert.equal(snapshotOf(activityPath).sprint, undefined,
+    'twenty-nine minutes of window left and nothing to read is not a sprint');
+  assert.equal(chat.calls.forward, 1, 'and nothing re-arms');
+});
+
 
 test('the sprint stops when its own clock runs out', async (t) => {
   const clock = { now: Date.now() };

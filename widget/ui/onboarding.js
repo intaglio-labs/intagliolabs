@@ -1169,6 +1169,21 @@ const hideModeShortfall = () => {
 /// read like one a person wrote.
 const article = (word) => (/^[aeiou]/iu.test(word) ? 'an' : 'a');
 
+// WHICH YEAR, BECAUSE IT IS NOT ALWAYS LAST YEAR.
+//
+// The phase used to stop the moment last year landed, so "reading last year" was
+// true for the whole of it. It runs its window out now -- the card wants somebody
+// QUIET, and on a real install the first one only appeared once the walk was
+// several years down -- so naming last year would be right for a minute and stale
+// after that. An older daemon that does not publish the year gets the sentence
+// without one, which is vague rather than wrong.
+function sprintSentence() {
+  const currentYear = new Date().getFullYear();
+  if (readerSprintYear === null) return 'reading back through your history so i can tell who has gone quiet';
+  const named = readerSprintYear === currentYear - 1 ? 'last year' : String(readerSprintYear);
+  return `reading ${named} so i can tell who has gone quiet`;
+}
+
 function paintModeShortfall(out) {
   const mode = typeof out.mode === 'string' && out.mode.length > 0 ? out.mode : null;
   const inAll = Number(out.counts?.any) > 0
@@ -1252,6 +1267,8 @@ function statusCell(row) {
 // screen 6, because the table's poll is the one told and the card peek's is the
 // one with a sentence to write. See peekCard.
 let readerSprinting = false;
+// Which year the reader is on, when it said. See sprintSentence.
+let readerSprintYear = null;
 
 function paintLoad(out) {
   // CLEARED BY AN ANSWER, not by the absence of one.
@@ -1264,6 +1281,9 @@ function paintLoad(out) {
   // arrive says nothing about the sprint; only one that did may end it.
   if (!out || out.state !== 'ok') return;
   readerSprinting = out.sprint !== null && typeof out.sprint === 'object';
+  readerSprintYear = readerSprinting && Number.isInteger(out.sprint.year)
+    ? out.sprint.year
+    : null;
   const runs = out.runs || {};
   const rows = (out.sources || []).filter((row) => {
     // A Mac with no chat.db has nothing to read and never will; a row at zero
@@ -1480,7 +1500,7 @@ function peekCard(out) {
     // this reason (connectors/daemon.mjs, SPRINT_MAX_MS), and while it is doing
     // that the honest sentence names the work rather than the shortfall.
     if (readerSprinting) {
-      loadStatus.textContent = 'reading last year so i can tell who has gone quiet';
+      loadStatus.textContent = sprintSentence();
       return;
     }
     const minutes = Number(out.retryAfterMs) > 0
@@ -1495,9 +1515,7 @@ function peekCard(out) {
   // there are people, and none of them is in the group the owner picked. The
   // sprint sentence keeps the line above, because both are true at once.
   if (out.reason === 'pool-exhausted-mode') {
-    loadStatus.textContent = readerSprinting
-      ? 'reading last year so i can tell who has gone quiet'
-      : '';
+    loadStatus.textContent = readerSprinting ? sprintSentence() : '';
     paintModeShortfall(out);
     return;
   }

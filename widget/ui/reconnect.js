@@ -39,8 +39,17 @@ let currentMode = readMode();
 // light up. A response that names neither (an Owe card, or an older hermes)
 // leaves the picker exactly as it is.
 function adoptServerMode(out) {
-  const fromServer = MODES.includes(out?.servedMode) ? out.servedMode
-    : MODES.includes(out?.mode) ? out.mode : null;
+  // A ONE-OFF LOOK IS NOT A CHOICE. `?mode=` serves a card under a mode the
+  // owner did not pick and deliberately never persists it, so on that reply
+  // `servedMode` is the one-off and `mode` is still the standing choice.
+  // Preferring servedMode here would move the picker to 'any' because somebody
+  // pressed "show me anyone, just this once" on the onboarding screen -- the
+  // durable write that button was rewritten to stop making, arriving through the
+  // picker instead.
+  const fromServer = out?.oneOff === true
+    ? (MODES.includes(out?.mode) ? out.mode : null)
+    : MODES.includes(out?.servedMode) ? out.servedMode
+      : MODES.includes(out?.mode) ? out.mode : null;
   if (fromServer === null || fromServer === currentMode) return;
   currentMode = fromServer;
   writeMode(fromServer);

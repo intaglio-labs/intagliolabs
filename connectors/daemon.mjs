@@ -1148,36 +1148,36 @@ export function createDaemon({
   // THE SPRINT: is this machine still inside its first-load half hour, and is
   // there still a reason for one?
   //
-  // BOTH HALVES, on every ask. The clock alone would keep sprinting a walk that
-  // finished last year in four minutes; the walk alone would sprint forever on a
-  // machine whose only local source is unprovisioned. `lastYearOpen` is asked of
-  // the connectors that may actually sprint -- a source that cannot run is not a
-  // reason to keep the phase open, but it is also not a reason to close it while
-  // the clock says the owner is still waiting.
-  // READABLE, not merely scheduled. This also settles the other half of the old
-  // roster's problem: `whatsapp` is in SPRINT_CONNECTORS and on a Mac that has
-  // never had WhatsApp its `done:<lastYear>` cursor is never written, so
-  // lastYearOpen() could never go false and the phase had no natural end but its
-  // own clock.
+  // BOTH HALVES, on every ask. The clock alone would keep sprinting a machine
+  // with nothing left to read; the work alone would sprint for ever.
+  //
+  // READABLE, not merely scheduled. `whatsapp` is in SPRINT_CONNECTORS and on a
+  // Mac that has never had WhatsApp it is scheduled and can answer nothing, so a
+  // roster built from the schedule alone had a member that could never finish
+  // and no natural end but its own clock.
   const sprintRoster = () => SPRINT_CONNECTORS
     .filter((connector) => scheduledByName.has(connector) && ready.has(connector));
-  // EXHAUSTED IS DONE, for this question as for every other.
+  // IS THERE STILL ANYTHING FOR THE PHASE TO WALK?
   //
-  // ~~A raw read of the done cursor.~~ record() sets `exhausted` whenever a
-  // connector reports that nothing older exists, and task() then answers null
-  // for every older year -- so `done:<lastYear>` is NEVER written for it. On a
-  // Mac where WhatsApp was installed this year, or iMessage on a new machine, or
-  // a Google account created this year, that made lastYearOpen() true for ever:
-  // sprinting() stayed true inside any window and beginSprint re-armed every six
-  // hours, four thirty-minute sprints a day for the life of the install, with
-  // screen 6 permanently saying it was reading last year. The module's own
-  // done() is exhausted || the cursor, and this has to ask the same question.
-  const connectorDone = (connector, year) =>
-    state.getCursor(`yearly-backfill:connector:${connector}:exhausted`) === '1'
-    || state.getCursor(`yearly-backfill:connector:${connector}:done:${year}`) === '1';
-  const lastYearOpen = () => {
-    const lastYear = new Date(now()).getFullYear() - 1;
-    return sprintRoster().some((connector) => !connectorDone(connector, lastYear));
+  // ~~Last year is not done yet.~~ That is not what the sprint is for. Its job is
+  // the FIRST CARD, and the card wants somebody quiet -- which on run four meant
+  // the walk had to reach about 2021 before a single investor qualified, five
+  // years below the year the old condition stopped at. Live at 23:20, twenty-three
+  // minutes in: the phase ended because last year had landed, with the owner's
+  // mode pool still empty and thirty-seven people in the pool overall. The window
+  // is the budget; last year was never the goal.
+  //
+  // So it runs its half hour while there is history left to walk. EXHAUSTED is
+  // what says there is not: record() sets it when a connector reports nothing
+  // older exists, and task() answers null for every year below that -- so a
+  // roster of exhausted sources has nothing this phase can do, however much
+  // window is left. That is also what keeps the six-hour re-arm from becoming
+  // four sprints a day for ever on a Mac where every store begins this year.
+  const sprintWorkOutstanding = () => {
+    if (state.getCursor('yearly-backfill:complete') === '1') return false;
+    return sprintRoster().some(
+      (connector) => state.getCursor(`yearly-backfill:connector:${connector}:exhausted`) !== '1'
+    );
   };
   // Epoch ms, or null where this machine has never begun one. Read from the
   // cursor store rather than a field, so a restart inside the window resumes
@@ -1199,7 +1199,7 @@ export function createDaemon({
     // PowerBudget default was chosen to keep cool. A start in the future is a
     // start nobody can have made: treat it as never having sprinted.
     if (elapsed < 0 || elapsed >= sprintMaxMs) return false;
-    return lastYearOpen();
+    return sprintWorkOutstanding();
   };
   /// Begin one if this machine is owed one.
   ///
@@ -1208,7 +1208,7 @@ export function createDaemon({
   /// still open. See that constant -- a one-shot window is a window the owner's
   /// permission prompts can burn, permanently.
   const beginSprint = (trigger) => {
-    if (sprintRoster().length === 0 || !lastYearOpen()) return false;
+    if (sprintRoster().length === 0 || !sprintWorkOutstanding()) return false;
     const started = sprintStartedTs();
     if (started !== null) {
       const age = now() - started;
@@ -1262,7 +1262,16 @@ export function createDaemon({
   const sprintSnapshot = () => {
     const started = sprintStartedTs();
     if (started === null || !sprinting()) return null;
-    return { since: started, until: started + sprintMaxMs, sources: sprintRoster() };
+    return {
+      since: started,
+      until: started + sprintMaxMs,
+      sources: sprintRoster(),
+      // WHICH YEAR IT IS ON. The phase no longer stops at last year, so a screen
+      // saying "reading last year" would be wrong for most of the window --
+      // right at the start and stale from then on. The walk's own position is
+      // the only thing that can say it truthfully.
+      year: yearlyBackfill.snapshot().year,
+    };
   };
   // Install the product-level barrier once. Existing connector year receipts
   // remain useful, so an upgrade rewinds to the current year without re-fetching
