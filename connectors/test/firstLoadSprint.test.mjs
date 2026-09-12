@@ -731,8 +731,11 @@ test('a nudge does not arm a source whose own tick started during the probe', as
 // it. The thing that failed was a moment; the window is half an hour. Waiting
 // fifteen minutes inside it spends most of what is left on one ENOSPC.
 test('a sprint source that throws once is tried again inside the window', async (t) => {
-  let throws = 1;
   const calls = { forward: 0 };
+  // The live shape: a sprint already under way -- which it can only be because a
+  // pass completed -- and then one throw. A source that has never completed a
+  // pass has not started a window and gets no ladder, which is the other half of
+  // round-7 finding 10.
   const source = {
     name: 'imessage',
     walksHistory: true,
@@ -743,10 +746,7 @@ test('a sprint source that throws once is tried again inside the window', async 
         return { ingested: 1, historyProgressed: true };
       }
       calls.forward += 1;
-      if (throws > 0) {
-        throws -= 1;
-        throw new Error('ENOSPC');
-      }
+      if (calls.forward === 2) throw new Error('ENOSPC');
       return {};
     },
   };
@@ -759,7 +759,7 @@ test('a sprint source that throws once is tried again inside the window', async 
   await sleep(1_800);
 
   assert.ok(
-    calls.forward >= 2,
+    calls.forward >= 3,
     `a source that threw once was left for its whole interval (${calls.forward} runs)`
   );
 });
@@ -773,8 +773,15 @@ test('a source that keeps throwing falls back to its interval after the ladder',
     name: 'imessage',
     walksHistory: true,
     needs: async () => [],
-    run: async () => {
+    run: async (ctx) => {
+      if (ctx.history === true) {
+        await sleep(20);
+        return { ingested: 1, historyProgressed: true };
+      }
       calls.forward += 1;
+      // The first pass completes, which is what starts the window; everything
+      // after it throws.
+      if (calls.forward === 1) return {};
       throw new Error('still broken');
     },
   };
@@ -785,9 +792,9 @@ test('a source that keeps throwing falls back to its interval after the ladder',
   instance.start();
   await sleep(2_400);
 
-  // One first run plus exactly three ladder attempts; the fourth would be the
-  // ten-minute interval, which is well outside this window.
-  assert.equal(calls.forward, 4,
+  // The pass that started the window, the throw, and exactly three ladder
+  // attempts. A sixth would be the ten-minute interval, well outside this window.
+  assert.equal(calls.forward, 5,
     `the ladder is three attempts, not a loop (${calls.forward} runs)`);
 });
 
@@ -801,4 +808,118 @@ test('the ladder is three bounded steps, and the first is not the sprint cadence
   for (const step of daemon.SPRINT_RETRY_LADDER_MS) {
     assert.ok(step < daemon.SPRINT_MAX_MS / 4, `${step} is not a retry inside a sprint`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// (g) round 7: when the phase is genuinely over, and who it counts
+// ---------------------------------------------------------------------------
+
+// ROUND-7 FINDING 2. `lastYearOpen` read the done cursor raw, and record() sets
+// `exhausted` whenever a connector reports nothing older exists -- after which
+// task() answers null for every older year and `done:<lastYear>` is NEVER
+// written. On a Mac where WhatsApp was installed this year, or iMessage on a new
+// machine, that made the phase's own end condition unreachable: four
+// thirty-minute sprints a day for the life of the install, with screen 6
+// permanently claiming it was reading last year.
+test('a source that has reached the beginning of its store ends the phase', async (t) => {
+  const currentYear = new Date().getFullYear();
+  const exhausted = fakeState({
+    [`yearly-backfill:connector:imessage:done:${currentYear}`]: '1',
+    // Reached the beginning of its store this year: there IS no last year for it.
+    'yearly-backfill:connector:imessage:exhausted': '1',
+  });
+  const chat = walker('imessage');
+  const { instance, state } = build(t, [chat.source], { state: exhausted });
+
+  instance.start();
+  await sleep(2_200);
+
+  assert.equal(
+    state.getCursor(daemon.SPRINT_STARTED_KEY),
+    null,
+    'exhausted is done; a phase whose end condition can never be met never ends'
+  );
+  assert.equal(chat.calls.forward, 1, 'and nothing sprints');
+});
+
+// ROUND-7 FINDING 10. `ready` is credential PRESENCE: a Google token file whose
+// refresh has been revoked answers needs() with [] and then throws on every run.
+// Starting the clock there spends the half hour on a credential that cannot read,
+// which is the failure the six-hour re-arm exists to survive rather than cause.
+test('a credential that is present but unusable does not start the clock', async (t) => {
+  const dir = sandbox(t);
+  const state = fakeState({});
+  const source = {
+    name: 'imessage',
+    walksHistory: true,
+    // Present, and useless.
+    needs: async () => [],
+    run: async () => { throw new Error('invalid_grant'); },
+  };
+  const instance = daemon.createDaemon({
+    config: { retention: { maintainHour: '03:30' }, intervals: { imessage: INTERVAL_S } },
+    state,
+    log: silent,
+    sources: [source],
+    ingestOpts: {},
+    cacheDir: dir,
+    activityPath: join(dir, 'activity.json'),
+    sprintRearmMs: 120,
+    sprintHistoryBudgetMs: 60,
+  });
+  t.after(() => instance.stop());
+
+  instance.start();
+  await sleep(1_600);
+  assert.equal(
+    state.getCursor(daemon.SPRINT_STARTED_KEY),
+    null,
+    'the clock started on a source that has never completed a pass'
+  );
+});
+
+// ROUND-7 FINDING 11. The throw path dropped the source from `ready` on the
+// FIRST throw, and `ready` is what sprintRoster() is built from -- so one flaky
+// needs() narrowed the sprint's own roster on the spot. An advance() landing in
+// that window then writes the source into the durable trailing set, permanently
+// outside the barrier, and missedYears() will never rewind for it. The
+// three-strike tolerance exists precisely so one throw moves nothing.
+//
+// The roster is the observable: it is what the narrowing happens to, and what
+// everything downstream of it reads.
+test('one flaky needs() does not drop a source out of the sprint roster', async (t) => {
+  let calls = 0;
+  const source = {
+    name: 'imessage',
+    walksHistory: true,
+    needs: async () => {
+      calls += 1;
+      // Ready at startup and on the first tick, then one throw on the next.
+      if (calls === 3) throw new Error('store locked by a backup');
+      return [];
+    },
+    run: async (ctx) => {
+      if (ctx.history !== true) return {};
+      await sleep(20);
+      return { ingested: 1, historyProgressed: true };
+    },
+  };
+  const { instance } = build(t, [source]);
+
+  instance.start();
+  await sleep(1_300);
+  assert.deepEqual(
+    instance.sprintSnapshot()?.sources,
+    ['imessage'],
+    'the fixture has to get the phase running before the throw'
+  );
+
+  // The throw lands on the next tick.
+  await sleep(900);
+  assert.ok(calls >= 3, `the fixture never reached the throw (${calls} probes)`);
+  assert.deepEqual(
+    instance.sprintSnapshot()?.sources,
+    ['imessage'],
+    'one throw narrowed the sprint roster, which is how a source ends up trailing for good'
+  );
 });

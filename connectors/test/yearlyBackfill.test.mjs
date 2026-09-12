@@ -707,3 +707,99 @@ function daemonProvisionalWindow() {
   assert.ok(PROVISIONAL_MAX_MS < 10 * 60_000, 'and be nowhere near the tolerance it replaces');
   return PROVISIONAL_MAX_MS;
 }
+
+// ------------------------------------------------- round 7: the barrier again
+
+// ROUND-7 FINDING 5. `gatingConnectors` subtracted `trailing` before it looked at
+// the sprint, so when the phase ended the gate was STILL only the fast sources.
+// One thirty-minute sprint narrowed the barrier for the life of the install:
+// iMessage advanced the shared year alone, and because a trailing source walks
+// years ABOVE the shared one, a shared year falling faster than mail walks means
+// the catch-up loop is never reached and the mark never clears.
+test('the barrier is whole again the moment the phase is over', () => {
+  const state = memoryState();
+  const now = () => NOW; // 2026
+  let sprinting = true;
+  const backfill = createYearlyBackfill({
+    state,
+    connectors: ['imessage', 'mail'],
+    barriers: [],
+    now,
+    sprintingRoster: () => (sprinting ? ['imessage'] : null),
+  });
+  backfill.classify('imessage', true);
+  backfill.classify('mail', true);
+
+  backfill.record('imessage', { historyDone: true, historyHasOlder: true }, 2026);
+  assert.equal(backfill.advance(), true, 'the sprint advances on its own roster');
+  assert.deepEqual(backfill.snapshot().trailing, ['mail']);
+
+  // The phase ends. mail is still behind, and it holds the year again.
+  sprinting = false;
+  backfill.record('imessage', { historyDone: true, historyHasOlder: true }, 2025);
+  assert.equal(
+    backfill.advance(),
+    false,
+    'outside a sprint a source that is behind holds the year, or the barrier is gone for good'
+  );
+  assert.equal(Number(state.getCursor('yearly-backfill:year')), 2025);
+});
+
+// ROUND-7 FINDING 6. A trailing source holds a current-year receipt by
+// definition, so `completedBeforeAuthorization` was false -- and `missedYears` is
+// false too, because trailing means behind by design. Go inactive, let the other
+// timelines exhaust and COMPLETE land, come back, and nothing reopened: task()
+// answered null for the rest of the session.
+test('a trailing source that comes back is not locked out by a completion', () => {
+  const state = memoryState();
+  const now = () => NOW;
+  state.setCursor('yearly-backfill:year', '2025');
+  state.setCursor('yearly-backfill:trailing', JSON.stringify(['mail']));
+  state.setCursor('yearly-backfill:connector:mail:done:2026', '1');
+  // The sprinter's own receipts for the years the walk came through. Without
+  // them IT is the one that reads as late, and its rewind clears COMPLETE for a
+  // different reason -- which would make this test pass while proving nothing.
+  state.setCursor('yearly-backfill:connector:imessage:done:2026', '1');
+  state.setCursor('yearly-backfill:complete', '1');
+  const backfill = createYearlyBackfill({
+    state, connectors: ['imessage', 'mail'], barriers: [], now,
+  });
+  backfill.classify('imessage', true);
+  backfill.classify('mail', true);
+
+  assert.equal(state.getCursor('yearly-backfill:complete'), null,
+    'a walk cannot be complete over a source it deliberately went past');
+  // ONLY THE MARK WENT. A full rewind would drag the whole roster back to the
+  // current year to re-fetch what everybody already has.
+  assert.equal(Number(state.getCursor('yearly-backfill:year')), 2025);
+  assert.equal(backfill.task('mail')?.year, 2025,
+    'and the source has years to walk again — here, caught up, the shared one');
+});
+
+// ROUND-7 FINDING 12. Dropping the guess alone let advance() step over a source
+// classified inactive on nothing but a throw -- and its recovery three minutes
+// later then read as a re-activation, rewinding YEAR_KEY to the current year,
+// deleting COMPLETE and reopening every barrier. During a sprint that discards
+// everything the phase walked.
+test('a guess that expires marks the source behind by design, not late', () => {
+  const state = memoryState();
+  let clock = NOW;
+  const backfill = createYearlyBackfill({
+    state, connectors: ['imessage', 'photos'], barriers: [], now: () => clock,
+  });
+  state.setCursor('yearly-backfill:connector:imessage:done:2026', '1');
+  backfill.classify('imessage', true);
+  backfill.classify('photos', false, { unanswered: true });
+
+  clock += PROVISIONAL_MAX_MS + 1_000;
+  assert.equal(backfill.advance(), true, 'the walk stops waiting on a guess that never became an answer');
+  assert.equal(Number(state.getCursor('yearly-backfill:year')), 2025);
+  assert.deepEqual(backfill.snapshot().trailing, ['photos'],
+    'the walk went past it on our decision, which is what trailing means');
+
+  // Photos recovers. It is behind, not late, so nothing is rewound.
+  backfill.classify('photos', true);
+  assert.equal(Number(state.getCursor('yearly-backfill:year')), 2025,
+    'a rewind here throws away everything the sprint walked');
+  assert.equal(backfill.task('photos')?.year, 2026, 'and it walks the year it actually missed');
+});

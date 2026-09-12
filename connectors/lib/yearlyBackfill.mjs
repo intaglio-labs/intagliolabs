@@ -203,11 +203,25 @@ export function createYearlyBackfill({
   // the year on an empty gate, past every source at once, with nobody walking
   // the years it skipped. Fall back to the whole roster there.
   const gatingConnectors = () => {
-    const held = [...active].filter((connector) => !trailing.has(connector));
     const sprint = sprintingRoster();
-    if (sprint === null) return held;
-    const narrowed = held.filter((connector) => sprint.includes(connector));
-    return narrowed.length === 0 ? held : narrowed;
+    // OUTSIDE A SPRINT, EVERYBODY HOLDS THE YEAR AGAIN.
+    //
+    // ~~active minus trailing, always.~~ That kept the barrier narrowed to the
+    // fast sources for the life of the install: one thirty-minute phase marked
+    // mail and photos trailing, and after it ended the gate was still only
+    // iMessage, which then advanced the shared year alone for ever. A trailing
+    // source walks years ABOVE the shared one, so a shared year that keeps
+    // falling faster than it walks means the catch-up loop in task() is never
+    // reached and the mark never clears. The narrowing is the phase; the moment
+    // the phase is over the roster is whole again, and a trailing source holds
+    // the year exactly like anybody else while it finishes its own backlog.
+    if (sprint === null) return [...active];
+    const narrowed = [...active]
+      .filter((connector) => !trailing.has(connector) && sprint.includes(connector));
+    // A sprint with no eligible source active is not a sprint: it would advance
+    // the year on an empty gate, past every source at once, with nobody walking
+    // the years it skipped.
+    return narrowed.length === 0 ? [...active] : narrowed;
   };
 
   const missedYears = (connector) => {
@@ -237,6 +251,16 @@ export function createYearlyBackfill({
     // missedYears because a walk can finish inside the current year (every
     // timeline exhausted at once), which leaves no year above the saved one
     // for missedYears to find while COMPLETE still locks task() shut.
+    // AND A TRAILING SOURCE IS LOCKED OUT BY IT TOO (round-7 finding 6). A
+    // connector left above the walk holds a current-year receipt by definition,
+    // so hasCurrentCheckpoint is true and this was false -- while missedYears is
+    // also false, because trailing means behind by design. Go inactive and come
+    // back after the remaining timelines exhaust and COMPLETE lands, and nothing
+    // reopened: task() answered null for the rest of the session and its older
+    // history was unreachable until a restart repaired the mark.
+    const completedWhileBehind =
+      state.getCursor(COMPLETE_KEY) === '1'
+      && trailing.has(connector);
     const completedBeforeAuthorization =
       state.getCursor(COMPLETE_KEY) === '1'
       && !hasCurrentCheckpoint;
@@ -252,7 +276,15 @@ export function createYearlyBackfill({
       // `classified` is process-local, while COMPLETE is durable. A connector
       // authorized between launches still has to reopen the current-year
       // barrier.
-      if (completedBeforeAuthorization || missedYears(connector)) {
+      if (completedWhileBehind && !completedBeforeAuthorization && !missedYears(connector)) {
+        // ONLY THE MARK, not the year. A trailing connector's missing years are
+        // ABOVE the shared one, and task() already knows how to walk those; a
+        // full rewind would drag the whole roster back to the current year to
+        // fetch what everybody else has, and still hand this connector nothing
+        // (it holds the current year's receipt by definition). What cannot stand
+        // is a COMPLETE written over a source the walk deliberately went past.
+        state.deleteCursor(COMPLETE_KEY);
+      } else if (completedBeforeAuthorization || missedYears(connector)) {
         state.deleteCursor(exhaustedKey(connector));
         state.deleteCursor(COMPLETE_KEY);
         state.setCursor(YEAR_KEY, String(currentYear));
@@ -371,9 +403,23 @@ export function createYearlyBackfill({
     // its classification is not evidence the walk may spend. The wait ends at
     // that source's first real tick, which is one stagger away rather than the
     // thirty minutes the old tolerance cost.
-    // Expired guesses are dropped rather than waited on: see `provisional`.
+    // Expired guesses are dropped rather than waited on: see `provisional` --
+    // AND THE SOURCE THEY BELONG TO IS MARKED BEHIND BY DESIGN, not left to look
+    // late.
+    //
+    // Dropping the guess alone let advance() step over a source classified
+    // inactive on nothing but a throw, and its recovery three minutes later then
+    // read as a re-activation: missedYears rewound YEAR_KEY to the current year,
+    // deleted COMPLETE and reopened every barrier, discarding everything a sprint
+    // had walked. The walk went past it on our decision, which is exactly what
+    // `trailing` means, so that is what it is recorded as.
     for (const [connector, at] of [...provisional]) {
-      if (now() - at >= PROVISIONAL_MAX_MS) provisional.delete(connector);
+      if (now() - at < PROVISIONAL_MAX_MS) continue;
+      provisional.delete(connector);
+      if (!done(connector, year())) {
+        trailing.add(connector);
+        writeTrailing();
+      }
     }
     if (provisional.size > 0) return false;
     // NOTHING TO WALK IS FINISHED, not forever unfinished. Every history source

@@ -1048,6 +1048,10 @@ export function createDaemon({
   sprintMaxMs = SPRINT_MAX_MS,
   sprintHistoryBudgetMs = SPRINT_HISTORY_BUDGET_MS,
   sprintRetryLadderMs = SPRINT_RETRY_LADDER_MS,
+  // Injectable for the same reason the sprint knobs are: several behaviours only
+  // appear when two sources tick inside one window, and ten seconds apart makes
+  // that a ten-second test. Production always takes the constant.
+  firstRunStaggerMs = FIRST_RUN_STAGGER_MS,
 }) {
   const timers = new Set();
   const nextRuns = new Map();
@@ -1157,11 +1161,23 @@ export function createDaemon({
   // own clock.
   const sprintRoster = () => SPRINT_CONNECTORS
     .filter((connector) => scheduledByName.has(connector) && ready.has(connector));
+  // EXHAUSTED IS DONE, for this question as for every other.
+  //
+  // ~~A raw read of the done cursor.~~ record() sets `exhausted` whenever a
+  // connector reports that nothing older exists, and task() then answers null
+  // for every older year -- so `done:<lastYear>` is NEVER written for it. On a
+  // Mac where WhatsApp was installed this year, or iMessage on a new machine, or
+  // a Google account created this year, that made lastYearOpen() true for ever:
+  // sprinting() stayed true inside any window and beginSprint re-armed every six
+  // hours, four thirty-minute sprints a day for the life of the install, with
+  // screen 6 permanently saying it was reading last year. The module's own
+  // done() is exhausted || the cursor, and this has to ask the same question.
+  const connectorDone = (connector, year) =>
+    state.getCursor(`yearly-backfill:connector:${connector}:exhausted`) === '1'
+    || state.getCursor(`yearly-backfill:connector:${connector}:done:${year}`) === '1';
   const lastYearOpen = () => {
     const lastYear = new Date(now()).getFullYear() - 1;
-    return sprintRoster().some(
-      (connector) => state.getCursor(`yearly-backfill:connector:${connector}:done:${lastYear}`) !== '1'
-    );
+    return sprintRoster().some((connector) => !connectorDone(connector, lastYear));
   };
   // Epoch ms, or null where this machine has never begun one. Read from the
   // cursor store rather than a field, so a restart inside the window resumes
@@ -1632,9 +1648,15 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       needsFailures.set(source.name, failures);
       notReady.delete(source.name);
       notReadyDelays.delete(source.name);
-      // A throw says nothing about readiness, and the sprint must not start on a
-      // source it could not ask.
-      ready.delete(source.name);
+      // A THROW SAYS NOTHING ABOUT READINESS -- AND ONE THROW SAYS NOTHING AT ALL.
+      //
+      // Dropping it on the FIRST throw narrowed sprintRoster() on the spot, and
+      // an advance() landing in that window added the source to the durable
+      // trailing set: iMessage's needs() throwing once on a Time Machine pass
+      // left it permanently outside the barrier. The three-strike tolerance
+      // exists precisely so one throw does not move anything, and `ready` was
+      // routing around it.
+      if (failures >= NEEDS_FAILURE_TOLERANCE) ready.delete(source.name);
       if (failures >= NEEDS_FAILURE_TOLERANCE) {
         yearlyBackfill.classify(source.name, false);
         advanceWalk();
@@ -1694,12 +1716,14 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     }
     notReady.delete(source.name);
     notReadyDelays.delete(source.name);
-    // THE MOMENT READINESS IS ESTABLISHED, which is the moment the sprint clock
-    // is worth starting. Not probeNotReady's: that one has only asked, and a
-    // window that begins on a question rather than an answer is the window the
-    // owner's permission prompts used to burn.
+    // READY MEANS ITS PREREQUISITES ARE PRESENT. It does NOT yet mean the source
+    // can read: a Google token file whose refresh has been revoked answers
+    // needs() with [] and then throws on every run. The sprint clock therefore
+    // starts further down, after a pass has actually completed -- see the
+    // beginSprint('worked') call at the end of the try. Otherwise half an hour
+    // is spent on a credential that is present and useless, which is exactly the
+    // state the six-hour re-arm exists to survive rather than to cause.
     ready.add(source.name);
-    beginSprint('ready');
     const startedTs = now();
     const socialPlatforms = source.name === 'matrix' ? connectedSocialPlatforms() : [];
     // WAS THIS SOURCE'S STANDING A GUESS? If startup could not ask it, the
@@ -1732,10 +1756,6 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       startedTs,
     });
     let nextDelayMs = null;
-    // Read ONCE, before the forward pass, so one tick has one answer about which
-    // phase it is in; re-asked after the history loop, where the answer may have
-    // just changed because this very pass finished the year.
-    const sprintingNow = sprinting();
     let sprintDelayMs = null;
     // THE ONE STOP THAT MUST NOT COME STRAIGHT BACK. A pass that read nothing is
     // a source with nothing to give, and asking it again in ten seconds is a
@@ -1767,6 +1787,13 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       // The forward pass first, always: what arrived since last time is more
       // urgent than what happened in 2019, and history must never delay it.
       const forward = (await source.run(makeCtx({ deadline: now() + FORWARD_BUDGET_MS }))) ?? {};
+      // A PASS THAT COMPLETED, which is the first moment anything is known to be
+      // READABLE rather than merely credentialed -- and therefore the moment the
+      // half hour is worth starting. Here rather than at the end of the tick,
+      // because the history budget just below and the re-arm at the end both ask
+      // whether a sprint is on, and a clock started after them would miss its own
+      // first pass.
+      beginSprint('worked');
       if (source.name === 'matrix' && Number.isInteger(forward.historyDiscoveryPending)) {
         observePortalJoinRate(
           state,
@@ -1819,7 +1846,9 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
         // times the slice -- and paired with the re-arm below, which is what
         // actually moves the needle: the budget decides how much one tick walks,
         // the re-arm decides how soon the next tick comes.
-        const inSprint = sprintingNow && SPRINT_CONNECTORS.includes(source.name);
+        // Asked now, not before the forward pass: that pass may have been the one
+        // that started the phase.
+        const inSprint = sprinting() && SPRINT_CONNECTORS.includes(source.name);
         const deadline = now() + (inSprint ? sprintHistoryBudgetMs : HISTORY_BUDGET_MS);
         let slices = 0;
         let gained = 0;
@@ -2084,11 +2113,10 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       readyNow.push(connector);
       scheduleSource(source, 0);
     }
-    // AND THE NUDGE IS ALSO WHEN A FIRST LOAD BEGINS. Onboarding starts the
-    // reader before the owner has connected anything, so the startup check below
-    // can run on a machine with no local store to walk yet; the nudge is the
-    // moment that stops being true.
-    beginSprint(trigger);
+    // THE NUDGE DOES NOT START THE CLOCK. It starts a RUN -- scheduleSource above
+    // -- and the pass that run completes is what starts the window. See
+    // beginSprint('worked'): readiness is credential presence, and a credential
+    // that is present and unusable would otherwise spend the half hour.
     log.info('sources_reprobed', {
       trigger,
       waiting: pending.length,
@@ -2278,17 +2306,16 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
           });
         }
         schedulePeopleGate();
-        // AFTER the probe, not before it: beginSprint asks which sprint-eligible
-        // sources are scheduled and whether last year is still open, and both
-        // answers are worth having once readiness has been evaluated.
-        beginSprint('startup');
+        // NO beginSprint HERE EITHER. The startup probe establishes readiness,
+        // which is credential presence and not the ability to read; the first
+        // pass that actually completes is what claims the window.
         publishWaiting();
       });
       // The chain, not the raw allSettled: a caller that waits on this must wait
       // for the classification AND the reconcile and sprint decision that read it.
       settled = settledChain;
 
-      scheduledSources.forEach((source, i) => scheduleSource(source, 1_000 + i * FIRST_RUN_STAGGER_MS));
+      scheduledSources.forEach((source, i) => scheduleSource(source, 1_000 + i * firstRunStaggerMs));
       scheduleMaintenance();
       log.info('daemon_started', {
         sources: scheduledSources.map((s) => s.name),
@@ -2467,6 +2494,11 @@ if (isMain) {
 
     const shutdown = (signal) => {
       log.info('daemon_stopping', { signal });
+      // The marker says "this pid can take a signal". Left behind, a recycled
+      // pid lets the app send SIGUSR2 to a child that has not installed its
+      // handler yet -- the silent kill the marker exists to prevent, arriving
+      // through the marker itself.
+      try { unlinkSync(defaultNudgeReadyPath()); } catch {}
       if (ownerWatch) clearInterval(ownerWatch);
       daemon.stop();
       state.close();
