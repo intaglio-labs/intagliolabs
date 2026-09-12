@@ -509,6 +509,93 @@ test('switching bridges back on puts instagram in the table and takes it out of 
   });
 });
 
+// ------------------------------------------ the owner is not somebody you met
+
+// "PEOPLE YOU MET" COUNTS DISTINCT PERSON KEYS, AND THE OWNER HAS ONE.
+//
+// graph.mjs now drops owner ADDRESSES before a calendar participant is minted,
+// which closes the common case. It does not close this one: an identity the
+// owner marked as themselves (config ownerPersonKeys) is dropped only from the
+// finished graph, and links already written into the projection outlive the
+// rebuild that would drop them. So the count has to exclude those keys itself.
+//
+// Without it a calendar of solo events — a focus block, a dentist appointment,
+// a flight, each with the owner as its only attendee and organizer — reports at
+// least one person met and paints GREEN, which is the same lie this count was
+// added to remove, pointing the other way.
+
+function seedSoloCalendar(db, ownerKey) {
+  db.exec('SELECT 1');
+  const calendar = seedRows(db, 'calendar', 9);
+  seedPerson(db, ownerKey, 'Owner Name');
+  // Every event: the owner on the guest list, and the owner as its organizer.
+  for (let i = 0; i < 9; i += 1) {
+    seedLink(db, {
+      key: ownerKey, contextId: calendar[i], source: 'calendar',
+      role: i % 3 === 0 ? 'organizer' : 'attendee', authored: 0, room: 0,
+    });
+  }
+  return calendar;
+}
+
+function writeOwnerKeys(home, keys) {
+  writeFileSync(configPath(home), JSON.stringify({ selfName: 'Owner', ownerPersonKeys: keys }, null, 2));
+}
+
+test('a calendar of solo events reports nobody met, and is amber', async () => {
+  await withHome(async (home) => {
+    writeOwnerKeys(home, ['calendar:owner-alias']);
+    await withServer(home, async ({ call, db }) => {
+      seedSoloCalendar(db, 'calendar:owner-alias');
+      markProjection(db, { projected: 9, source: 9 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      const rows = byName(body);
+      assert.equal(rows.calendar.rows, 9, 'the rows are real and were read');
+      assert.equal(rows.calendar.people, 0, 'the owner is not somebody the owner met');
+      assert.equal(rows.calendar.status, 'empty',
+        'rows in, nobody found, projection current: amber, not the green a self-link buys');
+    });
+  });
+});
+
+test('and the same calendar with one real guest is green again', async () => {
+  // THE DISCRIMINATING HALF. "Exclude the owner" and "return zero" are the same
+  // number on the fixture above; they are not the same number here, and a
+  // filter that dropped every calendar person would leave this screen amber on
+  // a calendar that works — the exact failure the `met` count exists to stop.
+  await withHome(async (home) => {
+    writeOwnerKeys(home, ['calendar:owner-alias']);
+    await withServer(home, async ({ call, db }) => {
+      const calendar = seedSoloCalendar(db, 'calendar:owner-alias');
+      seedPerson(db, 'calendar:dana', 'Dana Reed');
+      seedLink(db, {
+        key: 'calendar:dana', contextId: calendar[1], source: 'calendar',
+        role: 'attendee', authored: 0, room: 0,
+      });
+      markProjection(db, { projected: 9, source: 9 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      const rows = byName(body);
+      assert.equal(rows.calendar.people, 1, 'one guest, counted once, owner excluded');
+      assert.equal(rows.calendar.status, 'ok');
+    });
+  });
+});
+
+test('with no owner key marked, nothing is excluded', async () => {
+  // The config is the only source of this list. An empty one must not turn
+  // into an empty IN () clause or a query that quietly filters by accident.
+  await withHome(async (home) => {
+    writeFileSync(configPath(home), JSON.stringify({ selfName: 'Owner' }, null, 2));
+    await withServer(home, async ({ call, db }) => {
+      seedSoloCalendar(db, 'calendar:someone');
+      markProjection(db, { projected: 9, source: 9 });
+      const rows = byName(await (await call('GET', '/admin/onboarding/progress')).json());
+      assert.equal(rows.calendar.people, 1, 'an unmarked key is an ordinary person');
+      assert.equal(rows.calendar.status, 'ok');
+    });
+  });
+});
+
 // The map hermes uses to answer "whose connector is this source?" is the
 // inverse of the daemon's own. Two hand-maintained lists in two files that have
 // to agree is exactly the shape ops/FEATURES.md set out to kill, so this is the

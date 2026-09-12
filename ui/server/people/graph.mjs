@@ -403,6 +403,21 @@ export function personSignalsForRow(row, meta, owner) {
       const add = (email, name, role = 'attendee') => {
         const id = String(email ?? '').toLowerCase();
         if (!id || seen.has(id)) return;
+        // THE OWNER IS ON EVERY INVITATION THEY WERE SENT. This was the one
+        // participant branch with no owner filter at all -- mail drops owner
+        // addresses above, granola drops them below -- so the owner's own
+        // address was minted as a person with role 'organizer' or 'attendee'.
+        // The only self-suppression downstream is the key-level
+        // `!owner.keys.has(p.key)` at the end of buildGraph, and an ALIAS the
+        // owner has never explicitly marked does not reach it: a calendar of
+        // solo events then reported people met, which is the same lie the
+        // count above was written to remove, pointing the other way.
+        //
+        // By ADDRESS only, exactly as the mail branch decides it. A name check
+        // here would drop a genuine attendee who happens to share the owner's
+        // first name, and every calendar participant arrives with an address
+        // or is not added at all.
+        if (isOwnerAddress(id, owner)) return;
         seen.add(id);
         out.push({
           id, channel: 'calendar', ts, fromMe: false, name: namelike(name) ? name : undefined,

@@ -5421,6 +5421,18 @@ function onboardingProgress(db, policy, switchedOffOverride) {
   const peopleBySource = new Map();
   let linkedinListed = 0;
   let calendarMet = 0;
+  // AND THE OWNER IS NOT SOMEBODY YOU MET. graph.mjs drops owner ADDRESSES
+  // before a calendar participant is minted, but an identity the owner marked
+  // as themselves by KEY (config ownerPersonKeys) is only removed from the
+  // finished graph -- and links already written into the projection outlive
+  // the rebuild that would drop them. Without this, a calendar of solo events
+  // reports at least one person met and paints green, which is the same class
+  // of lie this count was added to remove, in the other direction.
+  let ownerKeys = [];
+  try { ownerKeys = [...(loadOwner().keys ?? [])].filter((key) => typeof key === 'string'); } catch {}
+  const notOwner = ownerKeys.length > 0
+    ? ` AND person_key NOT IN (${ownerKeys.map(() => '?').join(',')})`
+    : '';
   try {
     for (const row of db.prepare(
       'SELECT source, COUNT(DISTINCT person_key) AS n FROM person_event_links ' +
@@ -5453,8 +5465,8 @@ function onboardingProgress(db, policy, switchedOffOverride) {
     // one.
     calendarMet = Number(db.prepare(
       "SELECT COUNT(DISTINCT person_key) AS n FROM person_event_links " +
-      "WHERE source = 'calendar' AND role IN ('attendee', 'organizer')"
-    ).get()?.n ?? 0);
+      "WHERE source = 'calendar' AND role IN ('attendee', 'organizer')" + notOwner
+    ).get(...ownerKeys)?.n ?? 0);
   } catch {
     // The projection tables are created lazily; before the first rebuild they
     // are simply absent, and zero people is the truthful answer then.
