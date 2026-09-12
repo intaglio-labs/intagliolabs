@@ -1176,6 +1176,11 @@ function statusCell(row) {
 let readerSprinting = false;
 
 function paintLoad(out) {
+  // CLEARED BEFORE THE EARLY RETURN, not after it. A poll that fails while the
+  // sprint has ended leaves the previous poll's answer standing, so the "reading
+  // last year" sentence outlives the phase on the strength of a request that
+  // never arrived.
+  readerSprinting = false;
   if (!out || out.state !== 'ok') return;
   readerSprinting = out.sprint !== null && typeof out.sprint === 'object';
   const runs = out.runs || {};

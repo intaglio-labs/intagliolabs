@@ -99,11 +99,21 @@ test('the reassert reads a symlink rather than chmod-ing through it', () => {
   // .typeSymbolicLink and is skipped. setAttributes/chmod FOLLOWS the link,
   // so without this guard a models directory linked to an external disk has
   // the mode of whatever it points at changed by this app.
-  assert.match(body, /attributesOfItem/u,
-    'the mode must be read with attributesOfItem, which does not traverse a symlink');
+  assert.match(body, /attributesOfItem/u, 'the mode is read, not assumed');
   assert.match(body, /FileAttributeType\s*==\s*\.typeDirectory|\.typeDirectory/u,
-    'only real directories may be chmod-ed -- a symlink reports .typeSymbolicLink and\n'
-    + 'chmod would follow it to something this app does not own');
-  assert.doesNotMatch(body, /destinationOfSymbolicLink|resolvingSymlinksInPath/u,
-    'nothing here may resolve a link and then act on the other side of it');
+    'only real directories may be chmod-ed');
+  // RESOLVE TO ASK, NEVER TO ACT.
+  //
+  // ~~Nothing here may resolve a link at all.~~ Round-6 finding 3: the daemon's
+  // own check uses statSync, which traverses, so refusing to look through the
+  // link made the two disagree about a working install -- the reader ran and
+  // screen 6 said it could not start. The rule that actually matters is the
+  // second half of the old one: chmod FOLLOWS a link, so it may only ever be
+  // called on a path that is not one. A link is reported, never written to.
+  assert.match(body, /resolvingSymlinksInPath/u,
+    'the target is what the daemon asks about, so it is what this must ask about');
+  assert.doesNotMatch(body, /setAttributes\(\[\.posixPermissions: 0o700\], ofItemAtPath: target\)/u,
+    'chmod through a link changes something on the other side that this app does not own');
+  assert.match(body, /if isLink \{\n\s*blocked\.append/u,
+    'a link whose target fails is NAMED rather than written to');
 });

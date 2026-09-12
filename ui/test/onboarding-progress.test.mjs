@@ -16,7 +16,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -1154,5 +1154,53 @@ test('a config path that names no install reports nothing, never this machine', 
       assert.equal(body.sprint, undefined,
         'a path that belongs to no install is not a reason to describe this Mac');
     }, { ownerConfigPath: join(loose, 'config.json') });
+  });
+});
+
+// ROUND-6 FINDING 5. A file outlives the process that wrote it, and the daemon
+// drops this key by REWRITING the file. So a daemon that was killed, quit with
+// the app, or exited on its own fatal tree-perms check leaves its last sprint
+// object on disk for ever — and screen 6 then printed "reading last year so i
+// can tell who has gone quiet" directly underneath its own banner saying
+// "nothing is running. let me start it."
+test('a sprint whose window has expired is not relayed', async () => {
+  await withHome(async (home) => {
+    const since = Date.now() - 40 * 60_000;
+    writeActivity(home, {
+      phase: 'syncing',
+      queue: [],
+      // Half an hour long, and it ended ten minutes ago.
+      sprint: { since, until: since + 30 * 60_000, sources: ['imessage'] },
+    });
+    await withServer(home, async ({ call, db }) => {
+      markProjection(db, { projected: 1, source: 1 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      assert.equal(body.sprint, undefined,
+        'the key survives on disk until the next publish, which may never come');
+    });
+  });
+});
+
+test('a sprint nothing has written in minutes is not relayed either', async () => {
+  await withHome(async (home) => {
+    const since = Date.now() - 60_000;
+    writeActivity(home, {
+      phase: 'syncing',
+      queue: [],
+      // Still well inside its window: only the file's own age can say the
+      // daemon behind it is gone.
+      sprint: { since, until: since + 30 * 60_000, sources: ['imessage'] },
+    });
+    // The daemon died a quarter of an hour ago; the object is still "current".
+    const path = join(home, '.hazlie', 'connectors', 'activity.json');
+    const old = new Date(Date.now() - 15 * 60_000);
+    utimesSync(path, old, old);
+
+    await withServer(home, async ({ call, db }) => {
+      markProjection(db, { projected: 1, source: 1 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      assert.equal(body.sprint, undefined,
+        'a sprint mid-window with nothing standing behind it is still a dead claim');
+    });
   });
 });

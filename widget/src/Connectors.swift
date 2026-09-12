@@ -49,6 +49,18 @@ final class Connectors {
   }
   private var activityFile: URL { home.appendingPathComponent(".hazlie/connectors/activity.json") }
 
+  /// HOW LONG A PUBLISHED `syncing` MAY STILL BE BELIEVED.
+  ///
+  /// `startedTs` is published BEFORE the forward pass, and one pass is bounded by
+  /// FORWARD_BUDGET_MS (120 s) plus a history slice on top. ~~Ninety seconds~~
+  /// was sized against the ordinary 20 s history budget and was already short of
+  /// the forward budget alone; the first-load sprint raises the history half to
+  /// 60 s, so a real pass can run for three minutes while the menu shows nothing
+  /// happening — during the half hour when the most is happening. 240 s covers
+  /// 120 + 60 with room, and is still short enough that a daemon killed
+  /// mid-syncing stops claiming it within one polling interval.
+  static let syncingWindowMs: Double = 240_000
+
   private var activitySnapshot: [String: Any]? {
     guard let data = try? Data(contentsOf: activityFile),
           let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -94,7 +106,7 @@ final class Connectors {
     if raw["phase"] as? String == "syncing",
        let connector = raw["connector"] as? String,
        let started = raw["startedTs"] as? Double,
-       now - started < 90_000 {
+       now - started < Connectors.syncingWindowMs {
       let platforms = raw["platforms"] as? [String] ?? []
       let label = connector == "matrix" && !platforms.isEmpty
         ? platforms.joined(separator: " · ")
@@ -231,7 +243,7 @@ final class Connectors {
     if raw["phase"] as? String == "syncing",
        let connector = raw["connector"] as? String,
        let started = raw["startedTs"] as? Double,
-       Date().timeIntervalSince1970 * 1000 - started < 90_000 {
+       Date().timeIntervalSince1970 * 1000 - started < Connectors.syncingWindowMs {
       let platforms = raw["platforms"] as? [String] ?? []
       if connector == "matrix", !platforms.isEmpty {
         return "syncing \(platforms.joined(separator: " · "))"
@@ -324,18 +336,40 @@ final class Connectors {
     }
     var blocked: [String] = []
     for path in paths {
-      guard let attrs = try? fm.attributesOfItem(atPath: path) else { continue }
-      let kind = attrs[.type] as? FileAttributeType
+      // THE SAME QUESTION THE DAEMON ASKS, which is about the TARGET.
+      //
+      // checks.mjs uses statSync, which traverses a final symlink;
+      // attributesOfItem does not, and reporting every link as unrepairable made
+      // the two disagree about a working install. `ln -s /Volumes/Data/logs
+      // ~/.hazlie/logs` with the target at 0700 PASSES the daemon's fatal check
+      // and the reader runs -- while screen 6 said "i cannot start reading" and
+      // hid the only button on it. The round-5 fix shared the MODE between the
+      // two files and left the STAT SEMANTICS divergent, which is the same drift
+      // one level down.
+      //
+      // resolvingSymlinksInPath is the traversal; `attributesOfItem` on the
+      // RESOLVED path is then stat's answer, like the daemon's.
+      let target = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+      let isLink = target != path
+      guard let attrs = try? fm.attributesOfItem(atPath: target) else { continue }
       // A missing path is the check's WARN, not its FAIL, and creating one here
       // would invent a tree the setup script owns.
-      if kind == .typeSymbolicLink || (kind != .typeDirectory && fm.fileExists(atPath: path)) {
-        blocked.append(path)
+      guard attrs[.type] as? FileAttributeType == .typeDirectory else {
+        if fm.fileExists(atPath: target) { blocked.append(path) }
         continue
       }
-      guard kind == .typeDirectory,
-            let mode = (attrs[.posixPermissions] as? NSNumber)?.intValue,
+      guard let mode = (attrs[.posixPermissions] as? NSNumber)?.intValue,
             mode & 0o777 != 0o700
       else { continue }
+      // STILL NOT CHMOD'ING THROUGH A LINK. The round-5 reasoning holds: the
+      // thing on the other side is somewhere this app does not own, and widening
+      // or narrowing it is not ours to do. But the daemon FAILS on it, so
+      // staying silent is a dead reader -- it is named instead, with the path
+      // the owner can act on.
+      if isLink {
+        blocked.append("\(path) → \(target)")
+        continue
+      }
       do {
         try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path)
       } catch {
@@ -480,11 +514,31 @@ final class Connectors {
   /// terminate, and the child installs its handler early but not instantly; a
   /// process that started moments ago is also one whose own startup probe is
   /// about to ask this very question. So: no signal, and nothing lost.
-  private let nudgeGrace: TimeInterval = 3
+  /// WHAT THE CHILD SAID, not what this process guessed.
+  ///
+  /// ~~Three seconds since lastStart.~~ That is the parent's own bookkeeping
+  /// measured against nothing the child ever confirmed, and the window it is
+  /// covering is node booting and evaluating seventeen static imports --
+  /// node:sqlite among them -- before its handler is installed. Anything landing
+  /// in that window takes SIGUSR2's default action and KILLS the reader, with no
+  /// log line, because the process never reached its logger. On a warm Mac three
+  /// seconds is plenty; a first-ever launch with a cold page cache and a
+  /// code-signature check of the bundled node is exactly the case the nudge was
+  /// built for, and the one where a guess is worth least.
+  ///
+  /// So the daemon writes this file once its handler is armed, with its own pid
+  /// in it, and a nudge is sent only to a process that has said it can take one.
+  /// A stale marker from a previous daemon names a different pid and is ignored.
+  private var nudgeReadyFile: URL {
+    home.appendingPathComponent(".hazlie/connectors/nudge-ready")
+  }
+
   func nudge() {
     guard !stopping, !modelMaintenancePaused else { return }
     guard let p = process, p.isRunning else { return }
-    guard Date().timeIntervalSince(lastStart) >= nudgeGrace else { return }
+    guard let raw = try? String(contentsOf: nudgeReadyFile, encoding: .utf8),
+          Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)) == p.processIdentifier
+    else { return }
     kill(p.processIdentifier, SIGUSR2)
   }
 

@@ -145,8 +145,12 @@ test('a launch that could not deliver the choice tries again at the next one', (
   // the owner's mode pick did not.
   assert.match(resume, /resumeCardModeIfPending\(\)/u);
   const resumeMode = bodyOf('func resumeCardModeIfPending() {');
-  assert.match(resumeMode, /guard Bridge\.cardModePending != nil else \{ return \}/u,
+  assert.match(resumeMode, /guard let mode = Bridge\.cardModePending else \{ return \}/u,
     'and it is a no-op once the pick has landed');
+  // AND IT STOPS. Round-6 finding 16: a value hermes refuses was re-delivered at
+  // every launch for ever, with nothing recording that it had already failed.
+  assert.match(resumeMode, /Bridge\.relationshipModes\.contains\(mode\)/u);
+  assert.match(resumeMode, /Bridge\.cardModeLaunches < Bridge\.cardModeMaxLaunches/u);
   assert.match(main, /bridge\.resumeCardDefaultsIfPending\(\)/u,
     'applicationDidFinishLaunching must call it; a resume nothing calls is a flag that\n' +
     'is set for ever and a card that never appears');

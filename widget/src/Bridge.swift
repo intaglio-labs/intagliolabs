@@ -563,6 +563,23 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     set { UserDefaults.standard.set(newValue, forKey: unstampedImportsKey) }
   }
 
+  /// The modes hermes accepts (ui/server/people/owner.mjs RELATIONSHIP_MODES),
+  /// and the values onboarding.html's picker carries. Restated rather than
+  /// derived because nothing crosses that boundary at build time — and pinned to
+  /// the page by widget/test/first-run-waiting.test.mjs so the two cannot drift.
+  static let relationshipModes: Set<String> = ["founder", "investor", "any"]
+
+  /// How many launches a pending mode may survive. The retry exists for a hermes
+  /// that is down today; a value it refuses is not going to start being accepted
+  /// on the ninth morning, and a pending write with no ceiling is a request this
+  /// app makes for the life of the install.
+  static let cardModeMaxLaunches = 8
+  static let cardModeLaunchesKey = "HazlieCardModeLaunches"
+  static var cardModeLaunches: Int {
+    get { UserDefaults.standard.integer(forKey: cardModeLaunchesKey) }
+    set { UserDefaults.standard.set(newValue, forKey: cardModeLaunchesKey) }
+  }
+
   static let cardModePendingKey = "HazlieCardModePending"
   static var cardModePending: String? {
     get { UserDefaults.standard.string(forKey: cardModePendingKey) }
@@ -1585,8 +1602,15 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // WRITTEN DOWN BEFORE IT IS SENT. See cardModePending: a press is the
       // decision and the POST is only how it travels, so a hermes that cannot
       // keep it today must not cost the owner their pick.
-      if let mode = payload["mode"] as? String, !mode.isEmpty {
+      // VALIDATED BEFORE IT IS REMEMBERED. The pending value is re-delivered at
+      // every launch until hermes answers persisted:true, so a mode hermes will
+      // never accept is a full retry ladder on every launch, for ever, with
+      // nothing recording that it has already failed a hundred times. The page
+      // only offers these three today; that is a reason to write the list down,
+      // not a reason to trust the payload.
+      if let mode = payload["mode"] as? String, Bridge.relationshipModes.contains(mode) {
         Bridge.cardModePending = mode
+        Bridge.cardModeLaunches = 0
       }
       relHermes("POST", "admin/relationship/mode", json: modeBody) { [weak self] out in
         if out["persisted"] as? Bool == true { Bridge.cardModePending = nil }
@@ -2287,12 +2311,27 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// was meant, against a hermes that is already struggling, which is the only
   /// condition under which the chains exist at all.
   private var cardDefaultsInFlight = false
+  private var cardDefaultsInFlightSince = Date.distantPast
+  private var cardModeInFlightSince = Date.distantPast
+
+  /// HOW LONG AN IN-FLIGHT FLAG MAY STAND WITHOUT A COMPLETION.
+  ///
+  /// The flags are cleared on success and on giving up, which covers every
+  /// completion — and a completion that never arrives is not one of them. A
+  /// request that neither succeeds nor errors therefore pinned the flag for the
+  /// life of the process and made every later resume a silent no-op. The chains
+  /// exist only when hermes is already struggling, which is the condition most
+  /// likely to produce exactly that. Longer than the whole retry ladder (about
+  /// two minutes), so this can never cut a live chain short.
+  static let inFlightStaleAfter: TimeInterval = 300
 
   private func postCardDefaults(attempt: Int) {
     dispatchPrecondition(condition: .onQueue(.main))
     if attempt == 0 {
-      if cardDefaultsInFlight { return }
+      if cardDefaultsInFlight,
+         Date().timeIntervalSince(cardDefaultsInFlightSince) < Bridge.inFlightStaleAfter { return }
       cardDefaultsInFlight = true
+      cardDefaultsInFlightSince = Date()
     }
     relHermes("POST", "admin/config/card",
               json: ["capPerDay": 1, "producer": "eligibility"]) { [weak self] out in
@@ -2322,19 +2361,33 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// way, and 200 is exactly what it says when the config write failed.
   func resumeCardModeIfPending() {
     dispatchPrecondition(condition: .onQueue(.main))
-    guard Bridge.cardModePending != nil else { return }
+    guard let mode = Bridge.cardModePending else { return }
+    // A value this build does not recognise, or one that has outlived its
+    // ceiling, is dropped rather than re-sent for ever. See cardModeMaxLaunches.
+    guard Bridge.relationshipModes.contains(mode),
+          Bridge.cardModeLaunches < Bridge.cardModeMaxLaunches
+    else {
+      NSLog("Intaglio Labs: giving up on an unrecorded card mode after \(Bridge.cardModeLaunches) launches")
+      Bridge.cardModePending = nil
+      Bridge.cardModeLaunches = 0
+      return
+    }
+    Bridge.cardModeLaunches += 1
     postCardMode(attempt: 0)
   }
 
   private func postCardMode(attempt: Int) {
     guard let mode = Bridge.cardModePending else { cardModeInFlight = false; return }
     if attempt == 0 {
-      if cardModeInFlight { return }
+      if cardModeInFlight,
+         Date().timeIntervalSince(cardModeInFlightSince) < Bridge.inFlightStaleAfter { return }
       cardModeInFlight = true
+      cardModeInFlightSince = Date()
     }
     relHermes("POST", "admin/relationship/mode", json: ["mode": mode]) { [weak self] out in
       if out["persisted"] as? Bool == true {
         Bridge.cardModePending = nil
+        Bridge.cardModeLaunches = 0
         self?.cardModeInFlight = false
         return
       }

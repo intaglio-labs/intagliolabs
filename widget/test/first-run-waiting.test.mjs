@@ -89,9 +89,9 @@ test('the app tells the reader to look again instead of restarting it', () => {
   assert.match(nudge, /SIGUSR2/u, 'SIGUSR1 is reserved by node for its own debugger');
   assert.match(nudge, /p\.isRunning/u, 'signalling a dead pid is signalling somebody else');
   // SIGUSR2's default action is terminate, and the daemon installs its handler
-  // a moment after exec. A process that young is also one whose own startup
-  // probe is about to ask the same question.
-  assert.match(nudge, /nudgeGrace/u, 'a just-spawned daemon must not be signalled');
+  // only once node has booted. A guessed grace was round-6 finding 10; the
+  // readiness marker the child writes is pinned in its own test below.
+  assert.match(nudge, /nudgeReadyFile/u, 'a daemon that has not said it is armed is not signalled');
   assert.doesNotMatch(nudge, /terminate\(\)/u,
     'a missing token file is not a reason to throw away a pass in flight');
 });
@@ -120,9 +120,11 @@ test('a tree the app cannot make owner-only is named, not swallowed', () => {
   assert.doesNotMatch(pass, /try\? fm\.setAttributes/u,
     'a chmod that fails EPERM on a root-owned directory is the silent death itself');
   assert.match(pass, /catch \{\n\s*blocked\.append\(path\)/u);
-  assert.match(pass, /typeSymbolicLink/u,
-    'a symlinked directory is skipped by design, and the skip has to be reported');
   assert.match(connectors, /private\(set\) var treePermsBlockers: \[String\]/u);
+  // A symlink is no longer reported on sight: round-6 finding 3 is that the
+  // daemon traverses it, so only a link whose TARGET fails is a blocker. The
+  // shared question is pinned in its own test below.
+  assert.match(pass, /let isLink = target != path/u);
 });
 
 test('screen 6 says which paths to chmod instead of offering a button that cannot work', () => {
@@ -213,7 +215,10 @@ test('the card-defaults retry is one chain, not one per call site', () => {
   const bridge = readFileSync(join(ROOT, 'widget', 'src', 'Bridge.swift'), 'utf8');
   const src = code(bridge);
   assert.match(src, /private var cardDefaultsInFlight = false/u);
-  assert.match(src, /if cardDefaultsInFlight \{ return \}/u);
+  // The guard carries a staleness clause since round-6 finding 14: a completion
+  // that never arrives must not silence every later resume for the life of the
+  // process.
+  assert.match(src, /if cardDefaultsInFlight,/u);
   // And the flag has to be released on every exit, or one failed launch
   // silences every later attempt in the same session.
   const releases = src.match(/cardDefaultsInFlight = false/gu) ?? [];
@@ -276,4 +281,107 @@ test('the app tells the reader which machine the owner asked for', () => {
   // parent fact to this child; a config key would be a second writer for a
   // setting that already has one here.
   assert.match(connectors, /environment\["INTAGLIO_PERFORMANCE"\] = PowerBudget\.current == \.full \? "full" : "trickle"/u);
+});
+
+// ------------------------------------------------------------- round-6 pins
+
+// ROUND-6 FINDING 3. checks.mjs uses statSync, which traverses a final symlink;
+// attributesOfItem does not. `ln -s /Volumes/Data/logs ~/.hazlie/logs` with the
+// target at 0700 PASSES the daemon's fatal check and the reader runs — while
+// screen 6 said "i cannot start reading" and hid the only button on it. The
+// round-5 fix shared the MODE between the two files and left the STAT SEMANTICS
+// divergent, which is the same drift one level down.
+test('the app asks the same question about a symlink that the daemon asks', () => {
+  const pass = swiftBody(connectors, 'reassertTreePerms\\(\\)');
+  assert.match(pass, /resolvingSymlinksInPath\(\)/u,
+    'the daemon traverses the link; so must this, or they disagree about a working install');
+  assert.match(pass, /attributesOfItem\(atPath: target\)/u,
+    'and the mode question is asked of the target, not the link');
+  // A link whose target is fine is silent. Only one whose target fails the
+  // daemon's test is named — and it is named rather than chmod'd, because what
+  // is on the other side is not this app's to widen or narrow.
+  assert.match(pass, /if isLink \{\n\s*blocked\.append/u);
+});
+
+// ROUND-6 FINDING 10. SIGUSR2's default action is terminate, and the child
+// installs its handler after node boots and evaluates seventeen static imports.
+// Three seconds since lastStart is the parent's own bookkeeping measured against
+// nothing the child ever said — and a first-ever launch with a cold page cache
+// and a signature check of the bundled node is exactly the case the nudge exists
+// for, and the one where a guess is worth least.
+test('the nudge waits for the child to say it can take one', () => {
+  const nudge = swiftBody(connectors, 'nudge\\(\\)');
+  assert.doesNotMatch(nudge, /nudgeGrace/u, 'a guessed grace is not a readiness signal');
+  assert.match(nudge, /nudgeReadyFile/u);
+  // The marker names a pid, so one left by a previous daemon is ignored rather
+  // than believed about the current child.
+  assert.match(nudge, /== p\.processIdentifier/u);
+  const daemonSrc = readFileSync(join(ROOT, 'connectors', 'daemon.mjs'), 'utf8');
+  assert.match(code(daemonSrc), /function announceNudgeReady/u,
+    'and the child has to write it');
+  const arm = /function armNudge\(daemon, log\) \{([\s\S]*?)\n\}/u.exec(daemonSrc)?.[1];
+  assert.ok(arm, 'armNudge not found');
+  assert.match(arm, /announceNudgeReady\(\)/u, 'written when the handler is armed, not before');
+});
+
+// ROUND-6 FINDING 11. `startedTs` is published BEFORE the forward pass, and one
+// pass is bounded by FORWARD_BUDGET_MS (120 s) plus a history slice — 60 s of it
+// during the sprint. Ninety seconds was sized against the ordinary 20 s budget
+// and was already short of the forward budget alone, so the menu showed nothing
+// happening during the half hour when the most is happening.
+test('the "syncing" row outlives a pass that is genuinely running', () => {
+  assert.match(connectors, /static let syncingWindowMs: Double = 240_000/u);
+  assert.doesNotMatch(code(connectors), /< 90_000/u,
+    'the old window is shorter than one bounded forward pass');
+  const daemonSrc = readFileSync(join(ROOT, 'connectors', 'daemon.mjs'), 'utf8');
+  const forward = /export const FORWARD_BUDGET_MS = ([0-9_]+);/u.exec(daemonSrc)?.[1];
+  const sprint = /export const SPRINT_HISTORY_BUDGET_MS = ([0-9_]+);/u.exec(daemonSrc)?.[1];
+  assert.ok(forward && sprint, 'the two budgets this window has to cover');
+  assert.ok(
+    240_000 >= Number(forward.replace(/_/gu, '')) + Number(sprint.replace(/_/gu, '')),
+    'the window must cover a forward pass plus a sprint history slice'
+  );
+});
+
+// ROUND-6 FINDING 14. The in-flight flags are cleared on success and on giving
+// up, which covers every completion — and a completion that never arrives is not
+// one of them. The chains exist only when hermes is already struggling, which is
+// the condition most likely to produce exactly that.
+test('an in-flight flag that never completes does not silence every later resume', () => {
+  const bridge = readFileSync(join(ROOT, 'widget', 'src', 'Bridge.swift'), 'utf8');
+  const src = code(bridge);
+  assert.match(src, /static let inFlightStaleAfter: TimeInterval/u);
+  assert.match(src, /if cardDefaultsInFlight,\n\s*Date\(\)\.timeIntervalSince\(cardDefaultsInFlightSince\) < Bridge\.inFlightStaleAfter \{ return \}/u);
+  assert.match(src, /if cardModeInFlight,\n\s*Date\(\)\.timeIntervalSince\(cardModeInFlightSince\) < Bridge\.inFlightStaleAfter \{ return \}/u);
+});
+
+// ROUND-6 FINDING 15. paintLoad returned before assigning when the poll failed,
+// so a failed request left the previous poll's answer standing and the "reading
+// last year" sentence outlived the phase.
+test('a failed progress poll does not leave the sprint sentence on screen', () => {
+  const paint = bodyOf(js, 'paintLoad');
+  const cleared = paint.indexOf('readerSprinting = false');
+  const guard = paint.indexOf("out.state !== 'ok'");
+  assert.ok(cleared > -1 && guard > -1 && cleared < guard,
+    'the flag has to be cleared BEFORE the early return, or a dead poll keeps it true');
+});
+
+// ROUND-6 FINDING 16. The pending mode is re-delivered at every launch until
+// hermes answers persisted:true, so a value hermes will never accept is a full
+// retry ladder on every launch for ever, with nothing recording that it has
+// already failed a hundred times.
+test('a mode hermes will never take is not retried until the end of the install', () => {
+  const bridge = readFileSync(join(ROOT, 'widget', 'src', 'Bridge.swift'), 'utf8');
+  const src = code(bridge);
+  assert.match(src, /static let relationshipModes: Set<String> = \["founder", "investor", "any"\]/u);
+  assert.match(src, /Bridge\.relationshipModes\.contains\(mode\)/u,
+    'validated before it is remembered');
+  assert.match(src, /cardModeMaxLaunches/u, 'and a ceiling on how long it is carried');
+
+  // AND THE LIST MATCHES THE PICKER. Nothing crosses that boundary at build
+  // time, so the pin is what stops the two drifting.
+  const html = readFileSync(join(ROOT, 'widget', 'ui', 'onboarding.html'), 'utf8');
+  const offered = [...html.matchAll(/data-mode="([a-z]+)"/gu)].map((m) => m[1]).sort();
+  assert.deepEqual(offered, ['any', 'founder', 'investor'],
+    'the picker offers exactly what Bridge accepts');
 });
