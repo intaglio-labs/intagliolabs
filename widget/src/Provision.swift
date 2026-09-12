@@ -205,6 +205,39 @@ enum Provision {
     }
   }
 
+  /// Serialises the llama repair below. ensureBackend hops to a global queue,
+  /// so two calls in one launch run their bodies concurrently.
+  private static let llamaRepairLock = NSLock()
+  private static var llamaRepairAttempted = false
+
+  /// AND THE ONE AGENT PROVISIONING CAN LEGITIMATELY SKIP. provision() installs
+  /// the llama agent only when a model is present, and an install that once
+  /// read as "no weights" (the relative-link bug fixed in ModelSetup.installed
+  /// on 2026-09-12, or weights that arrived later by hand) keeps the connect
+  /// plist that ends ensureBackend's first branch early -- so a Mac with
+  /// weights and no llama agent would stay that way for ever.
+  ///
+  /// ONCE PER LAUNCH, UNDER A LOCK. installAgent boots the agent OUT and then
+  /// bootstraps it back in; two concurrent ensureBackend() calls would both
+  /// pass the "no plist" test and interleave those, so the second bootout can
+  /// land on the first bootstrap and leave the agent absent — the state this
+  /// repair exists to end. The lock is held across installAgent rather than
+  /// only around the flag, because it is the launchctl pair that must not
+  /// interleave, and the flag is set only when an attempt is actually made:
+  /// weights that arrive later in the same session still get their agent from
+  /// a later call.
+  private static func repairLlamaAgent() {
+    llamaRepairLock.lock()
+    defer { llamaRepairLock.unlock() }
+    guard !llamaRepairAttempted else { return }
+    let llamaPlist = launchAgents.appendingPathComponent("io.intaglio.llama-server.plist")
+    guard ModelSetup.isInstalled, !fm.fileExists(atPath: llamaPlist.path) else { return }
+    llamaRepairAttempted = true
+    if installAgent("io.intaglio.llama-server") {
+      NSLog("Intaglio Labs: installed the llama agent for weights that were already here")
+    }
+  }
+
   static func ensureBackend() {
     DispatchQueue.global(qos: .utility).async {
       let connectPlist = launchAgents.appendingPathComponent("io.intaglio.connect.plist")
@@ -216,18 +249,7 @@ enum Provision {
         // Existing files are never touched, so this is a no-op when healthy.
         do { try ensureSecrets() }
         catch { NSLog("Intaglio Labs: secret provisioning failed: \(error)") }
-        // AND THE ONE AGENT PROVISIONING CAN LEGITIMATELY SKIP. provision()
-        // installs the llama agent only when a model is present, and an
-        // install that once read as "no weights" (the relative-link bug fixed
-        // in ModelSetup.installed on 2026-09-12, or weights that arrived later
-        // by hand) keeps the connect plist that ends this branch early -- so a
-        // Mac with weights and no llama agent would stay that way for ever.
-        let llamaPlist = launchAgents.appendingPathComponent("io.intaglio.llama-server.plist")
-        if ModelSetup.isInstalled, !fm.fileExists(atPath: llamaPlist.path) {
-          if installAgent("io.intaglio.llama-server") {
-            NSLog("Intaglio Labs: installed the llama agent for weights that were already here")
-          }
-        }
+        repairLlamaAgent()
         if retireLegacyBackendAgents() { restartInstalledBackendAgents() }
         return
       }

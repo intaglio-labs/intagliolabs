@@ -30,7 +30,20 @@ test('an already-provisioned install with weights and no llama agent gets the ag
   const ensure = /static func ensureBackend\(\) \{([\s\S]*?)\n  \}/u.exec(provision)?.[1];
   assert.ok(ensure, 'ensureBackend not found');
   const early = ensure.indexOf('guard !fm.fileExists(atPath: connectPlist.path) else {');
-  const repair = ensure.search(/if ModelSetup\.isInstalled, !fm\.fileExists\(atPath: llamaPlist\.path\) \{\s*if installAgent\("io\.intaglio\.llama-server"\)/u);
+  // The repair moved behind a named function when it gained a lock and a
+  // once-flag: two concurrent ensureBackend() calls both passed the "no plist"
+  // test and interleaved installAgent's bootout/bootstrap pair. That guarding
+  // is pinned in llama-repair-once.test.mjs; this file still pins that the
+  // repair runs on the already-provisioned branch, before its return, which is
+  // the branch a Mac with late-arriving weights takes.
+  const repair = ensure.indexOf('repairLlamaAgent()');
   const ret = ensure.indexOf('return\n      }', early);
   assert.ok(early >= 0 && repair > early && ret > repair, 'the repair sits inside the already-provisioned branch, before its return');
+
+  const body = /private static func repairLlamaAgent\(\) \{([\s\S]*?)\n  \}/u.exec(provision)?.[1];
+  assert.ok(body, 'repairLlamaAgent not found');
+  assert.match(body, /ModelSetup\.isInstalled, !fm\.fileExists\(atPath: llamaPlist\.path\)/u,
+    'weights present and no agent is still the condition the repair acts on');
+  assert.match(body, /installAgent\("io\.intaglio\.llama-server"\)/u,
+    'and installing that agent is still what it does');
 });
