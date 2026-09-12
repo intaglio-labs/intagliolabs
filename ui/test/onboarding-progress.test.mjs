@@ -1204,3 +1204,28 @@ test('a sprint nothing has written in minutes is not relayed either', async () =
     });
   });
 });
+
+// `null` IS "NOBODY SAID", ON BOTH SIDES OF THE SEAM (round-7 finding 20).
+//
+// ownerConfigFile coalesces a null ownerConfigPath to the running user's
+// config, so the routes that read the owner's settings answer from this
+// machine. installHome only special-cased `undefined`, so the same null went to
+// installHomeFor -> null and these two readers answered nothing: one policy
+// object describing two installs, which is the shape of the finding
+// installHome was added to close.
+test('an explicitly null config path is this machine, the same as an absent one', async () => {
+  await withHome(async (home) => {
+    const since = Date.now() - 60_000;
+    writeActivity(home, {
+      phase: 'syncing',
+      queue: [],
+      sprint: { since, until: since + 30 * 60_000, sources: ['imessage'] },
+    });
+    await withServer(home, async ({ call, db }) => {
+      markProjection(db, { projected: 1, source: 1 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      assert.ok(body.sprint, 'null names no other install, so it means this one');
+      assert.equal(body.sprint.since, since);
+    }, { ownerConfigPath: null });
+  });
+});

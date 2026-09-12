@@ -5,7 +5,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -471,7 +471,13 @@ async function withEligibilityServer(fn, opts = {}) {
     method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  try { await fn({ call, db: server.db }); } finally { await server.close(); }
+  // The config path too: a one-off widened look must leave the owner's
+  // persisted pick where it was, and the only way to say that is to read it.
+  try {
+    await fn({ call, db: server.db }, { configPath: join(dir, 'config.json') });
+  } finally {
+    await server.close();
+  }
 }
 
 function insertPersonRow(db, { key, name, role = 'friend', subRoles = [], sent, received, met = 0 }, now) {
@@ -1140,5 +1146,123 @@ test("'any' never reports a mode-empty pool, because there is nothing to widen t
     const out = await (await call('GET', '/admin/relationship/card')).json();
     if (out.card === null) assert.notEqual(out.reason, 'pool-exhausted-mode');
     assert.equal(out.counts, undefined);
+  });
+});
+
+// ONE LOOK AT A WIDER POOL, WITHOUT CHANGING WHAT THE OWNER IS ON.
+//
+// "nobody quiet who is an investor yet -- N people in all; start with anyone?"
+// is only an offer if the page can take it up without moving the picker. So
+// the route accepts a mode for THIS REQUEST: it produces and serves under it,
+// reports it as the card's provenance, and leaves rel.mode and the owner's
+// config exactly where they were. POST /admin/relationship/mode stays the only
+// thing that changes what the owner is on, because that is a decision.
+test('?mode= serves a card from that mode without changing the owner\'s pick', async () => {
+  await withEligibilityServer(async ({ call, db }, { configPath }) => {
+    const now = Date.now();
+    seedReconnectCandidateMode(db, 'name:one off any', 'One Off Any', now);
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+
+    // Nobody is an investor, so the ordinary ask has nothing -- the state the
+    // page's widen button is offered from.
+    const narrow = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(narrow.card, null);
+    assert.equal(narrow.reason, 'pool-exhausted-mode');
+    assert.equal(narrow.oneOff, undefined, 'an ordinary ask is not a one-off');
+
+    // The widened look.
+    const wide = await (await call('GET', '/admin/relationship/card?mode=any')).json();
+    assert.ok(wide.card, 'a card produced and served under the mode this request named');
+    assert.equal(wide.card.personKey, 'name:one off any');
+    assert.equal(wide.servedMode, 'any', 'provenance: the card was produced under any');
+    assert.equal(wide.mode, 'investor', 'and the owner is still on investor');
+    assert.equal(wide.oneOff, true, 'said in as many words, so the picker need not infer it');
+
+    // Neither the process nor the file moved.
+    const after = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(after.mode, 'investor', 'the next ordinary ask is still the owner\'s mode');
+    assert.equal(
+      JSON.parse(readFileSync(configPath, 'utf8')).relationshipMemory.mode,
+      'investor',
+      'and the persisted pick is untouched: a look is not a decision'
+    );
+  });
+});
+
+test('a mode the closed set does not name is ignored, not honoured', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedReconnectCandidateMode(db, 'name:one off ignored', 'One Off Ignored', now);
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+    // This value would otherwise reach produceBatch, which treats an unknown
+    // mode as 'any' -- so an ignored param must be ignored HERE, at the edge.
+    const out = await (await call('GET', '/admin/relationship/card?mode=anyone')).json();
+    assert.equal(out.card, null, 'still the investor pool, which is empty');
+    assert.equal(out.oneOff, undefined);
+    assert.equal(out.mode, 'investor');
+  });
+});
+
+test('a one-off peek teases from the widened pool and is still a peek', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedReconnectCandidateMode(db, 'name:one off peek', 'One Off Peek', now);
+    await call('POST', '/admin/relationship/mode', { mode: 'founder' });
+
+    const peek = await (await call('GET', '/admin/relationship/card?peek=1&mode=any')).json();
+    assert.equal(peek.peek, true);
+    assert.equal(peek.card.personKey, 'name:one off peek');
+    assert.equal(peek.oneOff, true);
+    // A peek records nothing, one-off or not: 'shown' is what pickProducer
+    // reads and what starts the person's cooldown.
+    const events = db.prepare("SELECT COUNT(*) AS n FROM rm_card_event WHERE event = 'shown'").get();
+    assert.equal(events.n, 0);
+  });
+});
+
+// THE COUNTS ARE TAKEN WHEN A REFILL RUNS, NOT WHEN A POLL ARRIVES
+// (round-7 finding 15).
+//
+// Two full pool scans per request looked cheap because they only happen off
+// 'any'. That is true of the mode and not of the frequency: a founder or
+// investor owner on a fresh Mac is throttled on nearly every poll, the setup
+// screen polls every ~15 s, and the first-load retry window holds that state
+// for the whole half hour. The counts are memoised against the refill attempt
+// that produced the answer, so the staleness they buy is bounded by the retry
+// window itself -- a minute on a first load.
+test('the pool is not re-counted for every poll inside one throttle window', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedReconnectCandidateMode(db, 'name:counted one', 'Counted One', now);
+    seedReconnectCandidateMode(db, 'name:counted two', 'Counted Two', now);
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+
+    const first = await (await call('GET', '/admin/relationship/card')).json();
+    assert.deepEqual(first.counts, { mode: 0, any: 2 });
+
+    // Somebody new arrives -- the sprint does exactly this -- and the next
+    // poll lands inside the same throttle window.
+    seedReconnectCandidateMode(db, 'name:counted three', 'Counted Three', now);
+    const second = await (await call('GET', '/admin/relationship/card')).json();
+    assert.deepEqual(second.counts, { mode: 0, any: 2 },
+      'the same answer, from the same refill attempt: no second pair of scans');
+  });
+});
+
+test('the counts are measured together, mode beside any', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedReconnectCandidateMode(db, 'name:measured any', 'Measured Any', now);
+    await call('POST', '/admin/relationship/mode', { mode: 'founder' });
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    // `mode` is a reading of the founder pool taken in the same breath as
+    // `any`, not a constant the branch already knew. In this branch it reads
+    // zero because the branch is only reached when the last refill found the
+    // mode pool empty -- but it is measured, and the reason is what says which
+    // case this is.
+    assert.equal(typeof out.counts.mode, 'number');
+    assert.equal(out.counts.mode, 0);
+    assert.equal(out.counts.any, 1);
+    assert.equal(out.reason, 'pool-exhausted-mode');
   });
 });

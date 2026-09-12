@@ -3232,9 +3232,16 @@ function ownerConfigFile(policy) {
 // through. The readers answer nothing for it, which is the same answer
 // grantsHomeFor already gives such a caller, and the same reason: a path that
 // names no install is not a reason to describe this Mac.
+//
+// AND `null` IS "NOBODY SAID", THE SAME AS `undefined` (round-7 finding 20).
+// ownerConfigFile coalesces a null ownerConfigPath to the running user's
+// config; this treated it as a path belonging to no install and answered
+// nothing, so one policy object described two installs -- the very shape this
+// function exists to close, four lines further in.
 function installHome(policy) {
-  if (policy?.ownerConfigPath === undefined) return homedir();
-  return installHomeFor(policy.ownerConfigPath);
+  const named = policy?.ownerConfigPath;
+  if (named === undefined || named === null) return homedir();
+  return installHomeFor(named);
 }
 
 // loadOwner() through the same seam, for the call sites that have `policy`.
@@ -3338,26 +3345,48 @@ function relationshipProducerConfig(policy) {
 // under 'anyone', and the screen said what it would have said on an empty
 // machine.
 //
-// Returns `{ mode: 0, any: N }` only for the case that deserves a different
-// sentence: the mode asked for has nobody AND widening would show somebody.
-// Null otherwise -- on 'any', where there is nothing to widen to; when the mode
-// pool does have people, because then the refill is merely throttled and the
-// ordinary retry sentence is the true one; and when the house really is empty.
+// Returns `{ mode: M, any: N }` whenever there is anybody in the house at all
+// and the owner is on a sub-role mode, or null. `mode` is that mode's own
+// count, not a constant: it used to be returned only on the path that had
+// already established it was zero (round-7 finding 22), so the only value ever
+// on the wire was 0 and the number said nothing. A throttled poll with people
+// waiting IN the mode is a different sentence again -- "one moment" rather than
+// "nobody yet" -- and the caller can now tell those apart. Null stays for the
+// two cases with nothing to say: 'any', which has nothing to widen to, and an
+// empty house, where the count is the reason.
 //
 // COUNTS, NEVER NAMES. This reply is a reason, not a queue: who is offered is
-// decided at produce time, by the producer, under its gates. And the two pool
-// reads only happen off 'any', so an install on the default never pays for it.
-function modeEmptyCounts(db, mode, now) {
+// decided at produce time, by the producer, under its gates.
+//
+// COUNTED ONCE PER REFILL, NOT ONCE PER POLL (round-7 finding 15). Two full
+// pool scans per request looked cheap because they only run off 'any' -- true
+// of the mode, not of the frequency. A founder or investor owner on a fresh Mac
+// is throttled on nearly every poll, the setup screen polls every ~15 s, and the
+// first-load retry window holds that state for the whole half hour: two scans
+// every fifteen seconds for thirty minutes, on the machine already running the
+// sprint. The counts are memoised against the refill attempt that produced this
+// answer (`rel.refill[key].at`), so they are recomputed exactly when a refill
+// actually ran and reused for every poll it throttles. The staleness that buys
+// is bounded by the retry window itself -- a minute on the first load, which is
+// the only load where the pool moves fast enough to matter.
+function modeEmptyCounts(db, rel, mode, refillKey, now) {
   if (mode !== 'founder' && mode !== 'investor') return null;
-  try {
-    const forMode = eligiblePool(db, { mode, now }).length;
-    if (forMode > 0) return null;
-    const forAny = eligiblePool(db, { mode: 'any', now }).length;
-    if (forAny === 0) return null;
-    return { mode: forMode, any: forAny };
-  } catch {
-    return null; // a pool this route cannot count is not a claim it can make
+  const at = rel.refill?.[refillKey]?.at ?? null;
+  const cached = rel.modeCounts;
+  if (cached !== undefined && cached !== null && cached.key === refillKey && cached.at === at) {
+    return cached.counts;
   }
+  let counts = null;
+  try {
+    const forAny = eligiblePool(db, { mode: 'any', now }).length;
+    // The house first, because an empty one is the common fresh-install state
+    // and needs no second scan to answer.
+    if (forAny > 0) counts = { mode: eligiblePool(db, { mode, now }).length, any: forAny };
+  } catch {
+    counts = null; // a pool this route cannot count is not a claim it can make
+  }
+  rel.modeCounts = { key: refillKey, at, counts };
+  return counts;
 }
 
 // THE MODE THE OWNER IS ON, for every route that REPORTS one (round-4
@@ -3907,7 +3936,31 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
   }
 
   if (req.method === 'GET' && url.pathname === '/admin/relationship/card') {
-    // A `mode` query param is accepted-and-ignored here for v1: this route
+    // ?mode=<any|founder|investor> -- ONE REQUEST'S MODE, AND NOTHING ELSE'S.
+    //
+    // ~~"accepted-and-ignored for v1"~~ (the paragraph below, kept because it
+    // explains why it was ignored and what changed). That was written when this
+    // route only served whatever the last refresh had produced. It refills
+    // synchronously now, per mode, behind a per-mode throttle -- so a mode named
+    // here is one this request can actually produce and serve under, which is
+    // what the panel's "show me anyone, just this once" needs.
+    //
+    // JUST THIS ONCE IS THE POINT. It does not write rel.mode and it does not
+    // touch the owner's config: POST /admin/relationship/mode is the only thing
+    // that changes what the owner is ON, because that is a decision and this is
+    // a look. The reply still reports `mode` as the owner's own pick, reports
+    // `servedMode` as the mode the card in hand was produced under (this one),
+    // and carries `oneOff: true` so the panel need not infer from those two
+    // disagreeing that its picker should stay put.
+    //
+    // It DOES produce a batch under the named mode, which is durable: the same
+    // batch a refresh in that mode would write, recorded with its own
+    // evidence.mode. That is the price of serving a real card rather than a
+    // preview, and it makes no claim about what the owner prefers.
+    const askedMode = RELATIONSHIP_MODES.includes(url.searchParams.get('mode'))
+      ? url.searchParams.get('mode')
+      : null;
+    // ~~A `mode` query param is accepted-and-ignored here for v1: this route
     // only ever serves whatever the last refresh's batch produced (any mode
     // it ran with), and re-filtering by a mode the caller now prefers is a
     // ranking decision, not a serve-time one. Re-refresh with the mode you
@@ -3988,7 +4041,9 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
           rel.ownerAddresses = loadOwner(ownerLoadOptions(policy)).addresses ?? null;
         } catch { rel.ownerAddresses = null; }
       }
-      const reconnectMode = rel.mode ?? producerConfig.mode;
+      // The request's own mode wins for THIS request only (see askedMode
+      // above); absent one, the process pick, then the persisted config.
+      const reconnectMode = askedMode ?? rel.mode ?? producerConfig.mode;
       const refillRetryMs = refillRetryMsFor(db);
       // The cross-kind exclusion, narrowed to the queue THIS route would
       // serve from -- daily.mjs's one LIVE definition, same five clauses as
@@ -4049,11 +4104,11 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
           // retry after whichever kind was most recently attempted cools down.
           const at = Math.max(
             rel.refill.owe.at ?? 0,
-            rel.refill[reconnectRefillKey(rel.mode ?? producerConfig.mode)]?.at ?? 0
+            rel.refill[reconnectRefillKey(reconnectMode)]?.at ?? 0
           );
           retryAfterMs = Math.max(0, refillRetryMs - (now - at));
           // AND WHETHER IT IS THE MODE THAT IS EMPTY, rather than the house.
-          modeEmpty = modeEmptyCounts(db, reconnectMode, now);
+          modeEmpty = modeEmptyCounts(db, rel, reconnectMode, reconnectRefillKey(reconnectMode), now);
         } else {
           servingKind = decision.servingKind;
         }
@@ -4072,10 +4127,11 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         // means the PICKER is: there are people to show, none of them in the
         // mode being asked for, and the panel can offer to widen instead of
         // telling the owner to come back later.
-        reason: modeEmpty === null ? 'pool-exhausted' : 'pool-exhausted-mode',
+        reason: modeEmpty !== null && modeEmpty.mode === 0 ? 'pool-exhausted-mode' : 'pool-exhausted',
         retryAfterMs,
         mode: relationshipMode(rel, policy),
         ...(modeEmpty === null ? {} : { counts: modeEmpty }),
+        ...(askedMode === null ? {} : { oneOff: true }),
         ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
       return;
     }
@@ -4089,8 +4145,12 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // whichever mode is live right now. Owe carries no mode (evidence.mode
     // is always absent on an Owe card) and is unaffected; the matcher path
     // never sets rel.mode, so its cards are unaffected too.
+    // askedMode first, for the same reason the refill used it: a card produced
+    // under a one-off mode has that mode in its evidence, and filtering the
+    // queue by rel.mode here would drop the very card this request just made.
+    const serveMode = askedMode ?? rel.mode;
     const servingQueue = (servingKind === null ? rel.cards : rel.cards.filter((c) => c.kind === servingKind))
-      .filter((c) => c.kind !== 'reconnect' || rel.mode == null || c.evidence?.mode === rel.mode);
+      .filter((c) => c.kind !== 'reconnect' || serveMode == null || c.evidence?.mode === serveMode);
 
     // PAGE-FIRST: among the unjudged candidates, serve whichever already has
     // a built page (accepted or pending items -- readPersonPage already omits
@@ -4239,7 +4299,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
             overdueDays: card.evidence?.overdueDays ?? null,
             owe_kind: card.evidence?.owe_kind ?? null,
           },
-        }, ...(expectSuperseded ? { expectSuperseded: true, reason: 'expect-superseded' } : {}) }, cors);
+        }, ...(askedMode === null ? {} : { oneOff: true }),
+        ...(expectSuperseded ? { expectSuperseded: true, reason: 'expect-superseded' } : {}) }, cors);
         return;
       }
       // Resolve the quote from the LIVE row. Row gone or edited: the receipt
@@ -4331,6 +4392,11 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         // The card asked for is gone; this is the next one. A reason BESIDE a
         // non-null card, which no other branch of this route produces.
         ...(expectSuperseded ? { expectSuperseded: true, reason: 'expect-superseded' } : {}),
+        // ONE LOOK, NOT A NEW PICK. `mode` above is still the owner's own; this
+        // says the card beside it was served under a mode named by the request,
+        // so a panel reconciling its picker against `servedMode` knows to leave
+        // the picker where the owner put it.
+        ...(askedMode === null ? {} : { oneOff: true }),
         ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
       return;
     }
@@ -4348,6 +4414,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // carrying cap/blocked/queue-empty, which the panel needs more. The flag
     // is on every branch so there is one field to test regardless.
     send(res, 200, { card: null, reason, mode: relationshipMode(rel, policy),
+      ...(askedMode === null ? {} : { oneOff: true }),
       ...(expectSuperseded ? { expectSuperseded: true } : {}),
       ...(rel.refreshing ? { refreshing: true } : {}),
       ...(rel.lastError ? { lastError: rel.lastError } : {}),
