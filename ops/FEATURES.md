@@ -52,10 +52,12 @@ shipped file. A developer turns a feature on locally without a rebuild.
 **A flip needs restarts, and the three readers disagree about when.**
 `Features.current` caches for the app's whole process lifetime and `daemon.mjs`
 caches at module load, so changing the override takes an **app restart and a
-daemon restart**; hermes re-reads per request, which means `/stats.features` can
-report the new set while the app and the daemon are still acting on the old one.
-Read `/stats.features` as "what the file says", not "what this install
-believes".
+daemon restart**; hermes re-reads the registry on a 30 s TTL, which means
+`/stats.features` can report the new set — within thirty seconds of the edit —
+while the app and the daemon are still acting on the old one. `/stats.features`
+carries `readAt`, the moment hermes last read the file, so the age of that
+answer is legible rather than assumed. Read `/stats.features` as "what the file
+said, as of `readAt`", not "what this install believes".
 
 ## Two failure rules, and they point opposite ways
 
@@ -86,8 +88,10 @@ Every process logs which features are on at startup, **names only**.
 
 Stage 2 of the repackaging makes the registry decide what **ships**, not only
 what runs: `widget/build.sh` reads `ops/features.json` before it assembles the
-app, and refuses to install a bundle over `BUNDLE_BUDGET_MB` (250) unless
-`voice` is on. Measured on 2026-09-12, both flags off:
+app, and refuses to install a bundle over its budget: `BUNDLE_BUDGET_MB` (250),
+or `BUNDLE_BUDGET_VOICE_MB` (800) when `voice` is on. A voice build is ~496 MB
+heavier by design; that is a bigger number, not the absence of one. Measured on
+2026-09-12, both flags off:
 
 | piece | MB | shipped when | why |
 |---|---:|---|---|
