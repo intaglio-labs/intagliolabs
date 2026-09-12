@@ -32,6 +32,64 @@ if ! FILE_PROVIDER_CONFLICTS="$(
   exit 1
 fi
 
+# THE FEATURE REGISTRY DECIDES WHAT SHIPS, not only what runs.
+#
+# Stage 1 gated PROVISIONING on ops/features.json: with voice off, nothing
+# clones the speech models into ~/.hazlie. They were still inside the .app, so
+# every download paid 496 MB for a feature whose tap is a tease. Stage 2 reads
+# the same one file here, at build time, so a dormant feature costs nothing to
+# ship either. The flag is the only switch — turning voice back on and
+# rebuilding restores the old bundle exactly.
+#
+# READ ONCE, AND FATAL IF UNREADABLE. Features.swift answers an unreadable
+# registry with "everything off", because a broken bundle must not provision a
+# Matrix homeserver. A BUILD has the opposite duty: the file is right there in
+# the checkout, and quietly shipping a stripped bundle because someone left a
+# trailing comma in it is how a release loses a feature with nobody noticing.
+# node is already a build dependency (check-staged-connectors.mjs below), so
+# this needs no jq and no shell JSON parsing.
+FEATURES_JSON="../ops/features.json"
+read_feature() {
+  node -e '
+    const fs = require("node:fs");
+    const reg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (reg.version !== 1) throw new Error(`features.json version ${reg.version} is not 1`);
+    const value = (reg.features || {})[process.argv[2]];
+    if (typeof value !== "boolean") {
+      throw new Error(`features.json has no boolean "${process.argv[2]}"`);
+    }
+    process.stdout.write(value ? "on" : "off");
+  ' "$FEATURES_JSON" "$1"
+}
+FEATURE_VOICE="$(read_feature voice)"
+FEATURE_BRIDGES="$(read_feature bridges)"
+echo "features: voice=$FEATURE_VOICE bridges=$FEATURE_BRIDGES (ops/features.json)"
+
+# THE BUNDLE BUDGET, in MB, enforced at the foot of this script BEFORE the app
+# is installed.
+#
+# 703 MB was the number that started this: 496 MB of speech models, and the rest
+# a node runtime, a llama runtime and a connectors tree that had never been
+# looked at. The plan's stage 2 checkpoint is "bundle under 250 MB; first launch
+# downloads nothing unless asked", and a checkpoint nothing measures is a wish.
+# This is the measurement, and it fails the build rather than reporting.
+#
+# What is inside the budget, and why each one stays:
+#
+#   node       ~112 MB  the backend runs on it and a downloaded app has no other
+#   llama       ~56 MB  the local-answer fallback must be ONE click, not a
+#                       toolchain; the weights are downloaded, the runtime is not
+#   connectors  ~12 MB  after the prune below (sourcemaps, .d.ts, markdown and
+#                       test/example trees are not opened by node at runtime)
+#   yq          12 MB   only when `bridges` is on — it exists to patch mautrix
+#                       YAML and nothing else calls it
+#   everything else is under 5 MB together
+#
+# `voice` on is expected to blow through this: the model tree alone is twice the
+# budget. That build reports its size and is allowed, because the flag is a
+# deliberate act and the number is then the point rather than a surprise.
+BUNDLE_BUDGET_MB=250
+
 mkdir -p build
 # Pin the target: swiftc's default is the SDK's OS, which can be NEWER than
 # the running system — LaunchServices then refuses the app with -10825.
@@ -131,7 +189,16 @@ clone_tree ../prompts "$BE/prompts"
 # still come from this checkout. A dependency change misses the cache and falls
 # back to the authoritative repo tree.
 mkdir -p "$BE/connectors"
-rsync -a --exclude node_modules ../connectors/ "$BE/connectors/"
+# The excludes beyond node_modules are the bundle diet (stage 2): connectors/
+# test is 516 KB of fixtures the daemon never opens, and AGENTS.md is for
+# whoever is reading the tree. Both were already being deleted from the staged
+# copy a few lines below -- excluding them here is the same outcome without the
+# copy. Anchored to the top of the transfer (`/test`) so a source module called
+# test/ deeper in could not disappear silently. NOT prompts/: those .md files
+# ARE the runtime (ui/server resolves ../../../prompts/*.md), which is why the
+# markdown sweep below is scoped to connectors/node_modules and nothing else.
+rsync -a --exclude node_modules --exclude '/test' --exclude '*.md' \
+  ../connectors/ "$BE/connectors/"
 INSTALLED_CONNECTORS="/Applications/Intaglio Labs.app/Contents/Resources/backend/connectors"
 # Release builds set HAZLIE_STAGE_DIR. They must never inherit executable code
 # from an installed app, even with the same lockfile: the release checkout is
@@ -201,14 +268,27 @@ clone_tree ../bridges "$BE/bridges"
 # The bridge installer needs yq to safely patch third-party YAML templates.
 # Ship the static editor in the app instead of requiring every downloaded-app
 # user to have Homebrew. This is a build requirement only, not a runtime one.
-YQ_SRC="$(command -v yq 2>/dev/null || true)"
-if [ -z "$YQ_SRC" ]; then
-  echo "ERROR: yq is required to build a self-contained social bridge installer." >&2
-  exit 1
+#
+# GATED ON `bridges`, for the same reason the speech models are gated on
+# `voice`. yq is a 12 MB static Go binary whose only caller in this product is
+# ops/setup-bridges-native.sh (`YQ="${HZ_YQ:-$REPO/tools/yq}"`), and that script
+# is already refused by Features.shouldEnsureBridgeRuntime while bridges are
+# off. Shipping the editor for a stack that is never installed is 12 MB of a
+# 250 MB budget, or 5%. Turning `bridges` back on and rebuilding restores it;
+# the signing block below already asks `[ -f "$BE/tools/yq" ]` before signing
+# it, so an absent tools/ needs nothing else.
+if [ "$FEATURE_BRIDGES" = on ]; then
+  YQ_SRC="$(command -v yq 2>/dev/null || true)"
+  if [ -z "$YQ_SRC" ]; then
+    echo "ERROR: yq is required to build a self-contained social bridge installer." >&2
+    exit 1
+  fi
+  mkdir -p "$BE/tools"
+  cp -L "$YQ_SRC" "$BE/tools/yq"
+  chmod 755 "$BE/tools/yq"
+else
+  echo "bridges: off in ops/features.json — yq (12 MB) stays out of the bundle"
 fi
-mkdir -p "$BE/tools"
-cp -L "$YQ_SRC" "$BE/tools/yq"
-chmod 755 "$BE/tools/yq"
 
 # THE TELEGRAM APP CREDENTIAL, if this build machine has one.
 #
@@ -258,6 +338,35 @@ swiftc -O -target "$(uname -m)-apple-macos13.0" -o "$BE/helpers/apple-data" help
 # ui-server. Copying a nonexistent dir hard-fails the build under set -e.)
 # Runtime doesn't need the test trees.
 find "$BE" -type d -name test -prune -exec rm -rf {} + 2>/dev/null || true
+
+# NOR THE PARTS OF node_modules THAT EXIST FOR PEOPLE READING IT.
+#
+# The connectors tree is 24 MB and node opens about 12 MB of it: the other half
+# is 7.6 MB of sourcemaps, 1.1 MB of markdown, 0.8 MB of .d.ts and 3.1 MB of
+# test/example/doc directories. Measured, not estimated -- `find ... | xargs du`
+# over the installed tree on 2026-09-12.
+#
+# PRUNED FROM THE CLONE rather than excluded from the copy, on purpose. The copy
+# is `cp -c -R`, an APFS clone that finishes in seconds; rsync-ing 23 MB of tiny
+# files on a File Provider-backed checkout is the forty-minute rebuild the
+# clone_tree comment above exists to avoid. Deleting from the clone frees those
+# blocks and cannot touch the repo, because copy-on-write.
+#
+# SCOPED TO connectors/node_modules, and that scope is load-bearing. The same
+# sweep run over "$BE" would take prompts/*.md with it -- which hermes reads at
+# runtime (ui/server/relationship/draft.mjs and friends resolve
+# ../../../prompts/*.md) -- producing a bundle that installs cleanly, launches
+# cleanly and answers nothing.
+if [ -d "$BE/connectors/node_modules" ]; then
+  find "$BE/connectors/node_modules" -type d \
+    \( -name test -o -name tests -o -name __tests__ -o -name doc -o -name docs \
+       -o -name example -o -name examples -o -name benchmark -o -name benchmarks \
+       -o -name coverage -o -name .github \) \
+    -prune -exec rm -rf {} + 2>/dev/null || true
+  find "$BE/connectors/node_modules" -type f \
+    \( -name '*.md' -o -name '*.markdown' -o -name '*.d.ts' -o -name '*.map' \) \
+    -delete 2>/dev/null || true
+fi
 
 # NODE RUNTIME: the small wrapper + its libnode dylib, with the wrapper's
 # @rpath reference rewritten to @executable_path/../lib so it finds the dylib
@@ -373,12 +482,27 @@ fi
 # The runtime fails CLOSED without these (no HuggingFace fallback at runtime), so
 # a fresh Mac has no voice unless they ship. Cloned in (cp -c -R: instant on
 # APFS); provision clones them back out to ~/.hazlie/models/voice on first run.
-VOICE_SRC="$HOME/.hazlie/models/voice"
-if [ -d "$VOICE_SRC" ]; then
-  cp -c -R "$VOICE_SRC" "$BE/voice-models" 2>/dev/null || cp -R "$VOICE_SRC" "$BE/voice-models"
+#
+# OUT OF THE BUNDLE WHILE `voice` IS OFF (stage 2). Stage 1 stopped provision()
+# cloning these into ~/.hazlie; they were still 496 MB of every download, for a
+# feature whose orb tap is a tease. The copy path below is unchanged and is what
+# runs the moment the flag goes back on -- taking the models out of the bundle
+# is a build-time consequence of the flag, not a second decision anyone has to
+# remember to reverse.
+#
+# The re-enable is therefore: flip `voice` in ops/features.json, rebuild. The
+# models still come from ~/.hazlie/models/voice on the BUILD machine, exactly as
+# before, and provision clones them back out on the target's first run.
+if [ "$FEATURE_VOICE" = on ]; then
+  VOICE_SRC="$HOME/.hazlie/models/voice"
+  if [ -d "$VOICE_SRC" ]; then
+    cp -c -R "$VOICE_SRC" "$BE/voice-models" 2>/dev/null || cp -R "$VOICE_SRC" "$BE/voice-models"
+  else
+    echo "WARNING: no voice models at $VOICE_SRC — run voice/setup-voice.sh." >&2
+    echo "         This build will have NO voice on a fresh machine." >&2
+  fi
 else
-  echo "WARNING: no voice models at $VOICE_SRC — run voice/setup-voice.sh." >&2
-  echo "         This build will have NO voice on a fresh machine." >&2
+  echo "voice: off in ops/features.json — the ~496 MB model tree stays out of the bundle"
 fi
 
 # Plist templates (@HOME@/@REPO@ placeholders) — provision renders them:
@@ -544,6 +668,31 @@ else
   echo "WARNING: no code-signing identity found; signed ad-hoc." >&2
   echo "         macOS will re-ask for microphone access on every arm." >&2
   echo "         Fix: create a code-signing identity, or set HAZLIE_SIGN_IDENTITY." >&2
+fi
+
+# THE SIZE, MEASURED AND ENFORCED -- BEFORE THE INSTALL.
+#
+# The assembled, signed bundle is the artifact a person downloads, so this is
+# the honest place to measure: after every copy and every signature, before
+# anything reaches /Applications. Refusing here means an over-budget build never
+# becomes the installed app, which is the only version of this check that has
+# teeth; a check at the very foot of the script would report the number after
+# the damage.
+#
+# `du -sm` is MiB, and so is the budget it is compared against. The two agree
+# with each other, which is what matters; the `du -sh` line beside it is the
+# number a person reads.
+BUNDLE_MB="$(du -sm "$APP" | cut -f1)"
+echo "bundle: $(du -sh "$APP" | cut -f1) (budget ${BUNDLE_BUDGET_MB} MB)"
+if [ "$FEATURE_VOICE" = on ]; then
+  echo "bundle: over budget is expected with voice on — the model tree alone is ~496 MB"
+elif [ "$BUNDLE_MB" -gt "$BUNDLE_BUDGET_MB" ]; then
+  echo "ERROR: the bundle is ${BUNDLE_MB} MB, over the ${BUNDLE_BUDGET_MB} MB budget." >&2
+  echo "       Nothing was installed. What is in there:" >&2
+  du -sm "$BE"/* 2>/dev/null | sort -rn | head -8 >&2 || true
+  echo "       Either take the weight out or raise BUNDLE_BUDGET_MB deliberately," >&2
+  echo "       in the same commit, with the reason -- see ops/FEATURES.md." >&2
+  exit 1
 fi
 
 # /Applications, exactly one copy. It is the app's real home (the onboarding
