@@ -51,7 +51,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { canonicalHash } from './contentHash.mjs';
 import { recallClaims, groundingLines, pendingForQuery } from './memory/retrieve.mjs';
 import { episodicContext } from './memory/episodic.mjs';
-import { selectRows } from './memory/select.mjs';
+import { countSelectable, selectRows } from './memory/select.mjs';
 import { answerPersonSearch, detectIntro, detectPersonSearch } from './people/search.mjs';
 import {
   planGeneralPeopleQuestion,
@@ -4674,6 +4674,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         throw error;
       }
       schedulePeopleRebuild(db, policy, 'admin/people/clear');
+      invalidateCorpusStats(policy);
       send(res, 200, { cleared }, cors);
       return;
     }
@@ -4718,6 +4719,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         throw e;
       }
       if (isProjectedPeopleSource(body.source)) schedulePeopleRebuild(db, policy, 'admin/retain');
+      invalidateCorpusStats(policy);
       send(res, 200, { deleted, claims_deleted: claimsDeleted }, cors);
       return;
     }
@@ -4753,6 +4755,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       // mechanism.
       maintainNow(db);
       if (isProjectedPeopleSource(body.source)) schedulePeopleRebuild(db, policy, 'admin/purge');
+      invalidateCorpusStats(policy);
       send(res, 200, { deleted, claims_deleted: claimsDeleted, maintained: true }, cors);
       return;
     }
@@ -4798,6 +4801,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         throw e;
       }
       if (isProjectedPeopleSource(body.source)) schedulePeopleRebuild(db, policy, 'admin/delete-entities');
+      invalidateCorpusStats(policy);
       send(res, 200, { deleted, claims_deleted: claimsDeleted }, cors);
       return;
     }
@@ -5111,11 +5115,19 @@ function memoryProgress(db) {
       db.prepare("SELECT count(*) AS n FROM distill_run WHERE status = 'running'").get()?.n ?? 0
     );
     // A wide window so this is "everything still to read", not "this month's".
-    const pending = selectRows(db, {
+    //
+    // COUNT(*), NOT `.length`. This was selectRows(...).length -- up to a
+    // hundred thousand corpus rows read out of SQLite, decoded into JavaScript
+    // objects with their text and meta, and then discarded to take the length
+    // of the array. On a polled route. countSelectable runs the same selector
+    // under the same limit and returns the same number without materialising a
+    // single row; the limit is inside the subquery, so a corpus with more than
+    // `limit` selectable rows still reports exactly `limit`, as it always did.
+    const pending = countSelectable(db, {
       sinceChangedAt: Number(runs?.cursor ?? 0),
       fromDays: 3650,
       limit: 100000,
-    }).length;
+    });
     const done = Number(runs?.done ?? 0);
     return {
       claims,
@@ -5949,23 +5961,39 @@ async function handleVaultAsk(db, req, res, cors, policy) {
 // therefore never waits on the walk again, which is the property the daemon
 // probe needs.
 //
+// CACHED: sweep, lookup and features, all three on this TTL.
+//
+// ~~features is read per request on purpose -- a stale echo of the effective
+// feature set is worse than useless.~~ That sentence stood here for sixty
+// lines above `cachedStatus(statusCache, 'features', ...)`, which is a wire
+// contract describing the opposite of the code. What the original was
+// protecting is still true and is still true UNDER the cache: an owner
+// override becomes visible without a restart. The TTL changes the resolution
+// of that from "this instant" to "within STATS_CACHE_TTL_MS", and `readAt` on
+// the block makes the age legible rather than implicit, which the per-request
+// read never did.
+//
 // Deliberately NOT cached: rows, peopleProjection, lint and cards are counts
-// or state reads (lint 2ms, cards 1ms on the live database), and features is
-// read per request on purpose -- see its own comment, a stale echo of the
-// effective feature set is worse than useless.
+// or state reads (lint 2ms, cards 1ms on the live database).
 //
 // memory is uncached too, and that one is a JUDGEMENT AND NOT A MEASUREMENT:
 // it was not timed during the incident. Do not read its presence here as
-// evidence that it is cheap. memoryProgress's `pending` is
-// selectRows({fromDays: 3650, limit: 100000}).length -- it materialises up to
-// a hundred thousand corpus rows to take their length -- so on a large corpus
-// it is the obvious next offender on this route, and the fix there is a
-// COUNT(*) in memory/select.mjs rather than another cache. Time it before
+// evidence that it is cheap. `pending` used to be
+// selectRows({fromDays: 3650, limit: 100000}).length -- a hundred thousand
+// corpus rows materialised to take their length -- and is now
+// countSelectable(), the COUNT(*) this comment asked for. Time it before
 // widening this cache to cover it.
 //
-// The holder is created per server in start() and arrives on `policy` rather
-// than living at module scope: two servers in one process (the test suite runs
-// two) must not share a cache.
+// INVALIDATION. A purge deletes rows; the cached blocks do not notice, and for
+// up to a TTL afterwards /stats answered `rows: 0` beside sweep and lookup
+// numbers computed over the corpus that was just removed -- with no staleMs,
+// because a cached block inside its TTL certifies itself as current. Every
+// route that clears the people projection now clears the corpus-derived blocks
+// too (invalidateCorpusStats), so the two halves of one answer cannot disagree.
+//
+// The holder is created per server in start() and arrives on `policy`: two
+// servers in one process (the test suite runs two) must not share a cache.
+// FALLBACK_STATS_CACHE below covers the one caller that has no holder.
 export const STATS_CACHE_TTL_MS = 30_000;
 
 // How long after answering a stale request the refresh behind it starts.
@@ -5977,6 +6005,44 @@ export const STATS_CACHE_TTL_MS = 30_000;
 // already older than its TTL, and one more 50ms is not a number anybody reads
 // off /stats.
 const STATS_REFRESH_DELAY_MS = 50;
+
+// A refresh that never lands must not freeze the block forever.
+//
+// `entry.refreshing` is a latch, cleared only in the deferred timer's finally.
+// If that timer never fires -- an unref'd timer on a process shutting down, a
+// synchronous compute that wedges, a fake-timer test that never advances --
+// the entry stays latched, every later request skips scheduling a refresh, and
+// the block is served from a value that ages without bound while faithfully
+// reporting a growing staleMs. Past two TTLs the latch is treated as lost and
+// a new refresh is allowed: at worst two refreshes overlap, which costs one
+// extra walk, and the alternative is a number that is never computed again.
+const STATS_REFRESH_LOST_TTLS = 2;
+
+// The holder of last resort, for a caller that reaches handle() without the
+// per-server one start() creates.
+//
+// `policy.statsCacheHolder ?? policy` fell back to the POLICY OBJECT, and on
+// that path the policy is a fresh per-request literal -- so the fallback was a
+// cache with a lifetime of one request, which is to say no cache at all, for
+// exactly the route the cache exists to keep cheap. Module scope shares one
+// cache between such callers; that is the tradeoff, and it is the right way
+// round, because two servers in one process both get their OWN holder from
+// start() and never reach this.
+const FALLBACK_STATS_CACHE = {};
+
+// The blocks computed FROM THE CORPUS, and therefore the blocks a purge,
+// retain or entity delete makes wrong. `features` is a file read and is not
+// affected by anything that happens to `context`.
+const CORPUS_STATS_BLOCKS = Object.freeze(['sweep', 'lookup']);
+
+// Drop the corpus-derived blocks so the next /stats recomputes them. Called
+// from every route that clears the people projection -- the two states go
+// stale for the same reason and at the same instant, and a cached block inside
+// its TTL reports no staleMs at all, so nothing downstream could tell.
+function invalidateCorpusStats(policy) {
+  const holder = policy?.statsCacheHolder ?? FALLBACK_STATS_CACHE;
+  for (const key of CORPUS_STATS_BLOCKS) delete holder[key];
+}
 
 // Shipped on /stats.features beside `readAt`. The three processes that read
 // ops/features.json do not read it at the same times: the app (Features.swift)
@@ -5996,7 +6062,9 @@ const FEATURES_READ_NOTE =
   + 'the app and daemon apply flags at their next restart';
 
 function cachedStatus(holder, key, compute, { ttlMs = STATS_CACHE_TTL_MS, now = Date.now() } = {}) {
-  const entry = (holder[key] ??= { value: null, computedAt: null, refreshing: false });
+  const entry = (holder[key] ??= {
+    value: null, computedAt: null, refreshing: false, refreshStartedAt: null,
+  });
   const run = () => {
     try {
       entry.value = compute();
@@ -6009,9 +6077,16 @@ function cachedStatus(holder, key, compute, { ttlMs = STATS_CACHE_TTL_MS, now = 
     }
     entry.computedAt = Date.now();
   };
+  // A latch that has been held longer than two TTLs is a refresh that is not
+  // coming back -- see STATS_REFRESH_LOST_TTLS. Without this the block is
+  // frozen for the life of the process.
+  const latchLost = entry.refreshing
+    && entry.refreshStartedAt !== null
+    && now - entry.refreshStartedAt >= ttlMs * STATS_REFRESH_LOST_TTLS;
   if (entry.computedAt === null) run();
-  else if (!entry.refreshing && now - entry.computedAt >= ttlMs) {
+  else if ((!entry.refreshing || latchLost) && now - entry.computedAt >= ttlMs) {
     entry.refreshing = true;
+    entry.refreshStartedAt = now;
     // A real timer, not setImmediate and not 0ms -- see STATS_REFRESH_DELAY_MS
     // for the measurement. unref'd because a warm cache is never a reason to
     // hold the process (or a test's server.close()) open.
@@ -6020,6 +6095,7 @@ function cachedStatus(holder, key, compute, { ttlMs = STATS_CACHE_TTL_MS, now = 
         run();
       } finally {
         entry.refreshing = false;
+        entry.refreshStartedAt = null;
       }
     }, STATS_REFRESH_DELAY_MS).unref?.();
   }
@@ -6072,7 +6148,7 @@ async function handle(db, req, res, cors, url, policy) {
     // above for the measurements and for what the cache does and does not
     // promise. cachedStatus keeps the old defensive contract: a status that
     // throws nulls its own block and never takes /stats down.
-    const statusCache = policy.statsCacheHolder ?? policy;
+    const statusCache = policy.statsCacheHolder ?? FALLBACK_STATS_CACHE;
     const statusOpts = {
       ttlMs: policy.statsCacheTtlMs ?? STATS_CACHE_TTL_MS,
       now: Date.now(),
@@ -6562,6 +6638,13 @@ export async function start({
   // Production passes neither.
   statsCacheTtlMs,
   statusProbes,
+  // Test seam: the holder itself, so a test can inspect a cached entry or put
+  // one into a state a timer cannot be made to produce -- notably a
+  // `refreshing` latch left behind by a refresh that never landed, which is
+  // the one case STATS_REFRESH_LOST_TTLS exists for and the one case no amount
+  // of waiting can create. Production passes nothing and gets the per-server
+  // holder below.
+  statsCacheHolder: statsCacheHolderOverride,
   llamaModel = process.env.HAZLIE_MAIN_MODEL,
 } = {}) {
   const allowedOriginSet = parseAllowedOrigins(allowedOrigins);
@@ -6607,7 +6690,7 @@ export async function start({
   // Same reasoning again, for GET /stats' memoised sweep/lookup blocks: the
   // cache must live for the process and must NOT be shared between two servers
   // in one process, so it is a per-start() holder rather than module state.
-  const statsCacheHolder = {};
+  const statsCacheHolder = statsCacheHolderOverride ?? {};
   const configuredDbPath = dbPath ?? process.env.HERMES_DB;
   const resolvedDbPath = configuredDbPath ?? DEFAULT_DB_PATH;
   // Summary generation was retired. Remove its private derived database and

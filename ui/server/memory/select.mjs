@@ -251,6 +251,54 @@ export function selectRows(
   return rows;
 }
 
+// HOW MANY ROWS selectRows WOULD RETURN, without returning any of them.
+//
+// The progress block on /stats reported `pending` as
+// selectRows({fromDays: 3650, limit: 100000}).length: a hundred thousand rows
+// read out of SQLite, decoded into JavaScript objects carrying their text and
+// meta, and thrown away to take the length of the array -- on a route the
+// widget polls.
+//
+// THE LIMIT IS INSIDE THE SUBQUERY, and that is what makes this EXACTLY the
+// old number rather than merely a better one. `SELECT COUNT(*) FROM context
+// WHERE ...` would answer the true population; `.length` answered
+// min(population, limit), because the selector's own LIMIT capped the array.
+// Counting over the limited query preserves that, cap and all, so a caller
+// reading "100000 pending" keeps getting 100000 and not a suddenly larger
+// figure that means something different.
+//
+// Same allowlist, same bindings, same pinned-thread exclusion -- it is
+// selectionSql verbatim, so the two can only diverge by somebody editing that
+// function, which changes both.
+export function countSelectable(
+  db,
+  {
+    sinceChangedAt = 0,
+    sinceId = 0,
+    fromDays = DEFAULT_FROM_DAYS,
+    limit = DEFAULT_ROW_CAP,
+    now = Date.now(),
+    excludeChatGuids = null,
+  } = {}
+) {
+  if (!Number.isFinite(sinceChangedAt) || sinceChangedAt < 0) {
+    throw new Error('sinceChangedAt must be a non-negative number');
+  }
+  if (!Number.isInteger(sinceId) || sinceId < 0) {
+    throw new Error('sinceId must be a non-negative integer');
+  }
+  if (!Number.isFinite(fromDays) || fromDays <= 0) throw new Error('fromDays must be positive');
+  if (!Number.isInteger(limit) || limit < 1) throw new Error('limit must be a positive integer');
+  const guids = excludeChatGuids ?? pinnedThreadGuids();
+  if (!Array.isArray(guids) || guids.some((g) => typeof g !== 'string')) {
+    throw new Error('excludeChatGuids must be an array of strings');
+  }
+  const row = db
+    .prepare(`SELECT count(*) AS n FROM (${selectionSql(guids.length)})`)
+    .get(sinceChangedAt, sinceChangedAt, sinceId, now - fromDays * DAY_MS, ...guids, limit);
+  return Number(row?.n ?? 0);
+}
+
 // What a run would read, per source, without reading any text. Used by
 // --dry-run and by the review page's provenance line.
 export function selectionCounts(db, opts = {}) {
