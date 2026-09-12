@@ -976,6 +976,17 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           self.reply(webView, id, d)
         }
       }
+    case "googleProbe":
+      // Whether the grant actually buys a READ, not whether a token file
+      // exists. See connect/server.mjs — consent can complete and
+      // messages.list still answer 403, and the token on disk cannot tell the
+      // difference. Counts and HTTP statuses come back; no address, no message
+      // id, no header, no snippet. 25s, because it is one live API call per
+      // account and a 5s default would report a slow network as a failed grant.
+      bridgeCall("GET", "api/google-probe", timeout: 25) { [weak self] d in
+        self?.reply(webView, id, d)
+      }
+
     case "connectSecret":
       let p = String(payload["p"] as? String ?? "")
       let value = String(payload["value"] as? String ?? "")

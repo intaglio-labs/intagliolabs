@@ -172,12 +172,12 @@
     {
       "host": "www.googleapis.com",
       "kind": "api",
-      "component": "connectors/lib/gcalClient.mjs",
+      "component": "connectors/lib/gcalClient.mjs, connectors/lib/gmailClient.mjs, connect/server.mjs",
       "direction": "inbound-fetch",
       "purpose": "read the owner's own calendar and mailbox. Calendar: the owner's calendar lives in Notion Calendar, which speaks to Google directly and never syncs into Calendar.app. Mail: replaced IMAP on 2026-08-26 \u2014 Google will not accept gmail.readonly over IMAP, which demands the full-mailbox scope (read, write, delete and send), so reaching mail over REST is what keeps the grant read-only",
       "credential": "google access token, scopes calendar.readonly and gmail.readonly \u2014 read-only in both: cannot create, move or delete an event, and cannot send, delete or even mark a message read",
-      "decision": "ui/AGENTS.md egress policy, amended 2026-08-19",
-      "evidence": "connectors/lib/gcalClient.mjs"
+      "decision": "ui/AGENTS.md egress policy, amended 2026-08-19. 2026-09-12: connect/server.mjs /api/google-probe joins this row rather than opening a new one. Same host, same installed client, same gmail.readonly grant, and strictly less data than connectors/sources/mail.mjs already fetches -- one messages.list with maxResults=1, whose reply is reduced to a count and an HTTP status before it leaves that function. It exists because a token file on disk does not establish that the grant buys a read: consent can complete while the project is over its restricted-scope user cap, or with gmail.readonly unticked, and the onboarding screen must be able to say so. Recorded here per this file's own rule that a row's decision must describe what THAT invocation does -- the component field named only gcalClient.mjs while gmailClient.mjs had ridden it since 2026-08-26.",
+      "evidence": "connectors/lib/gcalClient.mjs, connect/server.mjs googleProbe()"
     },
     {
       "host": "discord.com",

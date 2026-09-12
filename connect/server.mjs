@@ -31,6 +31,7 @@ import { bridgeApiResponse } from './lib/bridgeApi.mjs';
 import { decide, fetchPending } from './lib/memory.mjs';
 import { readStatus } from './lib/status.mjs';
 import { listGoogleClients } from '../connectors/lib/googleClients.mjs';
+import { googleProbe } from './lib/googleProbe.mjs';
 import { sameOrigin } from './lib/origin.mjs';
 import { bearerAuthorized, statusResponse } from './lib/statusApi.mjs';
 import { mintToken, validateToken } from './lib/tokens.mjs';
@@ -236,6 +237,7 @@ const server = createServer(async (req, res) => {
   }
 });
 
+
 async function handleRequest(req, res) {
   if (!ALLOWED_HOSTS.has(req.headers.host ?? '')) {
     send(res, 403, 'Forbidden host.', 'text/plain; charset=utf-8');
@@ -393,6 +395,49 @@ async function handleRequest(req, res) {
       send(res, 500, JSON.stringify({ error: 'could not start the authorization helper' }),
         'application/json; charset=utf-8');
     }
+    return;
+  }
+
+  // /api/google-probe — DID THE GRANT ACTUALLY BUY A READ?
+  //
+  // A token file on disk is not the question. Consent can complete and the
+  // read still fail: the project can be over its restricted-scope user cap,
+  // gmail.readonly can be unticked on the consent screen while calendar stays
+  // on, or the grant can be revoked afterwards. In every one of those the
+  // token exists, /api/status says `connected`, and the mail connector then
+  // reads nothing — which is the shape onboarding's "your mail and calendar"
+  // screen exists to catch BEFORE the owner walks away believing it worked.
+  //
+  // So this does the smallest real read there is: one messages.list with
+  // maxResults=1, per live account, and reports what Google said.
+  //
+  // COUNTS AND STATUSES ONLY. No account address, no message id, no header,
+  // no snippet, nothing from the mailbox. The failure `reason` is lifted from
+  // Google's own error body through a strict allowlist pattern and bounded —
+  // it is a machine token like insufficientPermissions, and the whole point of
+  // extracting it rather than passing the message through is that the message
+  // carries the account's email address.
+  //
+  // Native-only, like every other /api route here: Origin-less and bearer.
+  // The egress is already declared — ops/EGRESS.json's www.googleapis.com row
+  // names reading the owner's mailbox under gmail.readonly, and this reaches
+  // that host with the same client, the same scope and strictly less data than
+  // connectors/sources/mail.mjs already fetches.
+  if (url.pathname === '/api/google-probe') {
+    if (req.headers.origin !== undefined) {
+      send(res, 403, JSON.stringify({ error: 'browser channel refused' }),
+        'application/json; charset=utf-8');
+      return;
+    }
+    if (!bearerAuthorized(req.headers.authorization)) {
+      send(res, 401, JSON.stringify({ error: 'unauthorized' }), 'application/json; charset=utf-8');
+      return;
+    }
+    if (req.method !== 'GET') {
+      send(res, 405, JSON.stringify({ error: 'GET only' }), 'application/json; charset=utf-8');
+      return;
+    }
+    send(res, 200, JSON.stringify(await googleProbe()), 'application/json; charset=utf-8');
     return;
   }
 
