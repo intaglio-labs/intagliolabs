@@ -290,6 +290,11 @@ function paintMode(mode) {
 // the real one. relCardPeek is used because it already answers the server's
 // current mode and records nothing: no `shown`, no cap slot, no cooldown.
 function enterWelcome() {
+  // A REPLAY IS NOT THE SESSION THAT FAILED. The note is written by writeMode
+  // and cleared by nothing, so an apology from a run where hermes was down
+  // survived every later showing of this screen -- including one where the
+  // choice had since landed.
+  modeNote.textContent = '';
   hzPost('relCardPeek')
     .then((out) => { if (out && typeof out.mode === 'string') paintMode(out.mode); })
     .catch(() => {});
@@ -319,9 +324,13 @@ function writeMode(mode, retried) {
       if (!out || typeof out.persisted !== 'boolean') return undefined;
       if (out.persisted) { modeNote.textContent = ''; return undefined; }
       if (!retried) return writeMode(mode, true);
-      modeNote.textContent = 'i could not write that choice down, so it will go back to the '
-        + 'last saved one when the reader restarts. it is in use until then, and you can set '
-        + 'it again on the card.';
+      // AND THE SENTENCE CHANGED WITH THE FACTS. The pick is now written down
+      // natively the moment it is made and re-delivered until the reader keeps
+      // it (Bridge.cardModePending), exactly as the daily cap already was -- so
+      // "it will go back to the last saved one" stopped being true. What is
+      // still true is that it is not saved YET.
+      modeNote.textContent = 'i could not write that choice down yet, so i am holding on to it '
+        + 'and will try again. it is in use right now either way.';
       return undefined;
     })
     .catch(() => {});
@@ -589,6 +598,20 @@ const GOOGLE_PROBE_CAP = 40;
 // answer a second factor; past it, an owner staring at this screen has a
 // browser they did not finish with, and saying so is the useful thing.
 const GOOGLE_WAIT_MS = 4 * GOOGLE_POLL_MS;
+// HOW MUCH OF THAT WINDOW IS LEFT, and why it is a variable.
+//
+// Coming back from the browser used to ZERO the window, on the theory that an
+// owner who has returned has finished with it. They have -- but `ops/gcal-auth`
+// is still writing the grant, and the focus event beats that write by about a
+// second. The probe then reads zero live accounts with the window already spent
+// and the screen says "that sign-in did not finish" about a consent the owner
+// just completed: the exact accusation the window exists to prevent, arriving
+// through the one event most likely to coincide with it.
+//
+// So focus RESTARTS the window rather than clearing it, and shortens it to a
+// single poll: long enough to cover the token write, short enough that an owner
+// who really did cancel hears so within fifteen seconds instead of a minute.
+let googleWaitMs = GOOGLE_WAIT_MS;
 
 function paintGoogle(out) {
   googleStatus.classList.remove('ok', 'warn', 'bad');
@@ -644,7 +667,7 @@ function paintGoogle(out) {
   // takes, and the leading probe fires within a second of the press. Neutral,
   // and no colour class -- an empty result during a sign-in that is still
   // happening is the expected reading, not a finding.
-  if (Date.now() - googleOpenedAt < GOOGLE_WAIT_MS) {
+  if (Date.now() - googleOpenedAt < googleWaitMs) {
     googleStatus.textContent = 'waiting for you in the browser…';
     return;
   }
@@ -759,20 +782,40 @@ function stopGooglePolling() {
 // the owner asking again, and that is a different thing from a page sitting on
 // this screen for an hour.
 function enterGoogle() {
+  // EXCEPT WHEN THERE IS A CONSENT SCREEN STILL OPEN.
+  //
+  // Clearing the press on re-entry made this screen forget a sign-in that is
+  // still happening: it says "not connected" about a browser tab the owner is
+  // looking at, and the poll that would have turned it green has been stopped,
+  // so nothing but another focus event ever corrects it. A re-entry is this
+  // screen starting over for everything EXCEPT the one thing that outlives it.
+  const outstanding = googleAsked && Date.now() - googleOpenedAt < googleWaitMs;
   stopGooglePolling();
   googleProbes = 0;
-  googleAsked = false;
   googleRefusal = null;
-  googleOpenedAt = 0;
-  probeGoogle();
+  googleAsked = outstanding;
+  if (!outstanding) {
+    googleOpenedAt = 0;
+    googleWaitMs = GOOGLE_WAIT_MS;
+    probeGoogle();
+    return;
+  }
+  // The budget is per VISIT, so this visit gets its own; the press it is
+  // waiting on is not a new one.
+  startGooglePolling();
 }
 
 window.addEventListener('focus', () => {
   if (currentScreen !== '3') return;
-  // THE OWNER IS BACK, so the waiting copy has outlived its moment. Whether
-  // the sign-in worked is now the probe's to say, including the answer that it
-  // did not finish -- which is only ever true of a browser the owner has left.
-  googleOpenedAt = 0;
+  // THE OWNER IS BACK, and the probe about to run is the one most likely to
+  // race the grant being written. See googleWaitMs: one more poll of neutral
+  // copy, not none, and not the whole minute the press bought.
+  if (googleAsked) {
+    googleOpenedAt = Date.now();
+    googleWaitMs = GOOGLE_POLL_MS;
+  } else {
+    googleOpenedAt = 0;
+  }
   probeGoogle();
 });
 
@@ -798,6 +841,7 @@ googleStart.addEventListener('click', () => {
       // probes immediately and that probe is the one that used to paint the
       // accusation.
       googleOpenedAt = Date.now();
+      googleWaitMs = GOOGLE_WAIT_MS;
       startGooglePolling();
     })
     .catch(() => {
@@ -827,6 +871,16 @@ function paintLinkedIn(out) {
     linkedInStatus.textContent = n > 0
       ? `${n.toLocaleString()} connections`
       : 'imported';
+    // AND WHEN ITS AGE COULD NOT BE RECORDED, SAY SO HERE RATHER THAN LET IT
+    // SURFACE LATER AS A REFUSAL. An export with no readable date whose stamp
+    // also failed leaves the installed copy dated "now", and a later import of
+    // the owner's own file would otherwise be turned away as older than the one
+    // they have. Native no longer refuses on a date it does not know; this is
+    // the sentence that stops the owner being surprised by the consequence.
+    if (Array.isArray(out.unknownVintage) && out.unknownVintage.length > 0) {
+      linkedInStatus.textContent +=
+        " — i could not tell how old it is, so i won't turn away a later one.";
+    }
     linkedInNext.hidden = false;
     return;
   }

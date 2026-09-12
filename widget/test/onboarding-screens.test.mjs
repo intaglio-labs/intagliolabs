@@ -213,8 +213,14 @@ test('the google probe is capped for the whole visit, and reachable by hand', ()
   const click = /googleStart\.addEventListener\('click', \(\) => \{([\s\S]*?)\n\}\);/u.exec(js)?.[1];
   assert.ok(click, 'the sign-in button has no click handler');
   assert.match(click, /startGooglePolling\(\)/u, 'pressing the button still starts the poll');
-  assert.match(js, /function enterGoogle\(\) \{[\s\S]{0,400}googleProbes = 0;[\s\S]{0,120}probeGoogle\(\)/u,
-    'the cap is per visit, not per page load');
+  // The budget is reset once per VISIT, and the visit probes at once either
+  // way -- directly when there is nothing in flight, or through the poll it
+  // restarts when there is (startGooglePolling leads with a probe).
+  const entry = /function enterGoogle\(\) \{([\s\S]*?)\n\}/u.exec(js)?.[1];
+  assert.ok(entry, 'enterGoogle() not found');
+  assert.match(entry, /googleProbes = 0;/u, 'the cap is per visit, not per page load');
+  assert.match(entry, /probeGoogle\(\)|startGooglePolling\(\)/u,
+    'and the visit asks once on arrival');
 });
 
 test('a fresh install with nothing signed in reads "not connected", not a failed sign-in', () => {
@@ -231,8 +237,14 @@ test('a fresh install with nothing signed in reads "not connected", not a failed
     'and the alarm colour comes after that gate');
   assert.match(js, /googleStart\.addEventListener\('click', \(\) => \{\s*googleAsked = true;/u,
     'the button is what sets it');
-  assert.match(js, /function enterGoogle\(\) \{[\s\S]{0,400}googleAsked = false;/u,
+  // A new visit starts unasked -- unless a consent screen from the last one is
+  // still open, which is round-5 finding 7 and is pinned in
+  // first-run-waiting.test.mjs. `outstanding` is false whenever there is no
+  // press in flight, which is every fresh arrival.
+  assert.match(js, /function enterGoogle\(\) \{[\s\S]{0,700}googleAsked = outstanding;/u,
     'and a new visit starts unasked');
+  assert.match(js, /const outstanding = googleAsked && Date\.now\(\) - googleOpenedAt < googleWaitMs;/u,
+    'and "still in flight" is a window, not a latch');
 });
 
 test('a sign-in that never started says so, instead of "opening google…" forever', () => {
@@ -313,7 +325,7 @@ test('a refusal survives the probes that follow, and a real grant clears it', ()
     'both states that would otherwise say less must consult it');
   assert.match(paint, /out\.reading > 0\) \{\s*\n\s*googleRefusal = null;/u,
     'and an account that actually reads clears it');
-  assert.match(js, /function enterGoogle\(\) \{[\s\S]{0,400}googleRefusal = null;/u,
+  assert.match(js, /function enterGoogle\(\) \{[\s\S]{0,700}googleRefusal = null;/u,
     'a new visit starts with no stale explanation');
   const click = /googleStart\.addEventListener\('click', \(\) => \{([\s\S]*?)\n\}\);/u.exec(js)?.[1];
   assert.match(click, /^\s*googleAsked = true;\s*\n\s*googleRefusal = null;/u,
@@ -341,9 +353,15 @@ test('a sign-in still happening in the browser is not called a failed one', () =
   assert.doesNotMatch(waiting, /classList\.add/u, 'and it is neutral, not amber and not red');
   // It is a WAIT, not a latch: the alarm copy has to stay reachable on a
   // machine where the focus event never arrives.
-  assert.match(paint, /Date\.now\(\) - googleOpenedAt < GOOGLE_WAIT_MS/u);
+  // The window is a variable because coming back from the browser SHORTENS it
+  // rather than spending it (round-5 finding 9): the focus event beats the
+  // grant being written by about a second, and zeroing it there produced the
+  // accusation this whole test is about.
+  assert.match(paint, /Date\.now\(\) - googleOpenedAt < googleWaitMs/u);
   assert.match(js, /const GOOGLE_WAIT_MS = \d+ \* GOOGLE_POLL_MS;/u,
     'stated in ticks of the poll that repaints the screen');
+  assert.match(js, /let googleWaitMs = GOOGLE_WAIT_MS;/u,
+    'and a press starts from the full window');
   // Set only by a browser that opened, and by nothing else.
   const click = /googleStart\.addEventListener\('click', \(\) => \{([\s\S]*?)\n\}\);/u.exec(js)?.[1];
   assert.ok(click.indexOf('googleOpenedAt = Date.now();') > click.indexOf('googleRefusal = why;'),
@@ -352,10 +370,17 @@ test('a sign-in still happening in the browser is not called a failed one', () =
     'and the stamp lands before the probe that would otherwise accuse');
   // Ended by the owner coming back, by an account that reads, and by a new visit.
   const focus = /window\.addEventListener\('focus', \(\) => \{\n([\s\S]*?)\n\}\);/u.exec(js)?.[1];
+  // Ended for a visit with nothing in flight; shortened to one poll for one
+  // that has, because that probe is the one racing the token write.
   assert.match(focus, /googleOpenedAt = 0;/u, 'coming back ends the wait');
+  assert.match(focus, /googleWaitMs = GOOGLE_POLL_MS;/u,
+    'and shortens rather than spends it while a sign-in is outstanding');
   assert.match(paint, /out\.reading > 0\) \{[\s\S]{0,80}googleOpenedAt = 0;/u,
     'and so does a grant that actually reads');
-  assert.match(js, /function enterGoogle\(\) \{[\s\S]{0,500}googleOpenedAt = 0;/u,
+  // A new visit starts with nothing in flight, and says so in the branch that
+  // decides there is nothing: the other branch is a consent screen the owner
+  // still has open, whose stamp is the only thing a re-entry must not drop.
+  assert.match(js, /function enterGoogle\(\) \{[\s\S]{0,900}if \(!outstanding\) \{\s*\n\s*googleOpenedAt = 0;/u,
     'a new visit starts with nothing in flight');
 });
 

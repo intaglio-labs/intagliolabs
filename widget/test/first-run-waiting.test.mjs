@@ -138,3 +138,110 @@ test('screen 6 says which paths to chmod instead of offering a button that canno
   const after = paint.slice(paint.indexOf('treePermsBlockers'));
   assert.match(after, /loadStart\.hidden = true/u);
 });
+
+// ------------------------------------------- screen 3, and the browser tab in it
+
+// ROUND-5 FINDING 9. The focus event beats `ops/gcal-auth.mjs` finishing its
+// write by about a second, and zeroing the grace window there meant the probe it
+// triggers reads zero live accounts with no window left — so the screen says
+// "that sign-in did not finish" about a consent the owner just completed. The
+// one event most likely to coincide with the race was the one that spent the
+// protection against it.
+test('coming back from the browser shortens the grace window instead of spending it', () => {
+  const handler = /window\.addEventListener\('focus', \(\) => \{\n([\s\S]*?)\n\}\);/u.exec(js);
+  assert.ok(handler, 'the focus handler moved');
+  const body = code(handler[1]);
+  assert.match(body, /googleOpenedAt = Date\.now\(\)/u,
+    'the window is restarted, not cleared, while a sign-in is outstanding');
+  assert.match(body, /googleWaitMs = GOOGLE_POLL_MS/u,
+    'one more poll, not the whole minute the press bought');
+  // And still reachable: an owner who really cancelled has to hear so.
+  assert.match(body, /googleOpenedAt = 0/u,
+    'with nothing outstanding the window stays spent');
+});
+
+// ROUND-5 FINDING 7. Re-entering screen 3 while consent is still open threw the
+// press away: the screen said "not connected" about a browser tab the owner was
+// looking at, and the poll that would have turned it green had been stopped, so
+// nothing but another focus event ever corrected it.
+test('re-entering screen 3 does not forget a sign-in that is still in the browser', () => {
+  const body = bodyOf(js, 'enterGoogle');
+  assert.match(body, /const outstanding = googleAsked && Date\.now\(\) - googleOpenedAt < googleWaitMs/u);
+  assert.doesNotMatch(body, /^\s*googleAsked = false;/mu,
+    'an unconditional clear is what loses the outstanding press');
+  assert.match(body, /googleAsked = outstanding/u);
+  // A visit with a press still in flight has to keep watching for it.
+  assert.match(body, /startGooglePolling\(\)/u);
+});
+
+// --------------------------------------------- the pick, and whether it survives
+
+// ROUND-5 FINDING 20. The mode route answers 200 with `persisted: false` when
+// its config write fails, so hermes being down for a whole first session lost
+// the owner's pick with nothing but a note they may have scrolled past — while
+// `capPerDay`, chosen on the same screen, landed on a later launch.
+test('the mode pick is written down and re-delivered, like the cap', () => {
+  const bridge = readFileSync(join(ROOT, 'widget', 'src', 'Bridge.swift'), 'utf8');
+  const src = code(bridge);
+  assert.match(src, /static var cardModePending: String\?/u,
+    'the choice has to outlive the session that could not deliver it');
+  assert.match(src, /Bridge\.cardModePending = mode/u,
+    'recorded before the POST, because the press is the decision');
+  // `persisted` is the only word that means kept: the route answers 200 either
+  // way, and 200 is exactly what it says when the write failed.
+  assert.match(src, /out\["persisted"\] as\? Bool == true \{\s*\n\s*Bridge\.cardModePending = nil/u);
+  assert.match(src, /func resumeCardModeIfPending\(\)/u);
+  assert.match(src, /resumeCardModeIfPending\(\)/u, 'and something at launch has to call it');
+});
+
+test('a stale apology about the mode does not survive a replay of the flow', () => {
+  const body = bodyOf(js, 'enterWelcome');
+  assert.match(body, /modeNote\.textContent = ''/u);
+  // And the sentence matches what now happens: the pick is held and retried.
+  // Code only: the comment above the new copy quotes the old sentence to
+  // explain why it went, which a raw scan would find.
+  assert.doesNotMatch(code(js), /it will go back to the/u,
+    'the old copy promised a revert that no longer happens');
+  assert.match(code(js), /i am holding on to it/u);
+});
+
+// ROUND-5 FINDING 13. recordCardDefaults is reachable from three startedSources
+// call sites and resumeCardDefaultsIfPending fires independently at launch, so a
+// first launch with hermes down ran four chains of up to ten POSTs each against
+// a hermes already struggling — the only condition under which the chains exist.
+test('the card-defaults retry is one chain, not one per call site', () => {
+  const bridge = readFileSync(join(ROOT, 'widget', 'src', 'Bridge.swift'), 'utf8');
+  const src = code(bridge);
+  assert.match(src, /private var cardDefaultsInFlight = false/u);
+  assert.match(src, /if cardDefaultsInFlight \{ return \}/u);
+  // And the flag has to be released on every exit, or one failed launch
+  // silences every later attempt in the same session.
+  const releases = src.match(/cardDefaultsInFlight = false/gu) ?? [];
+  assert.ok(releases.length >= 2, 'both the success and the give-up path release it');
+});
+
+// ------------------------------------------ the export whose age nobody can tell
+
+// ROUND-5 FINDING 22. The staging swap stamps the export's own date onto the
+// installed copy so the refusal can ask how old it is. Two things going wrong
+// together defeat it: an archive with no readable date AND a setResourceValues
+// that throws. Both dates are then the moment the copy landed, installedVintage
+// answers "now", and the owner's own file is refused as older than the one they
+// have — permanently, with no way past it but deleting the file by hand. The
+// fallback could not reach that case: it lived inside `if let vintage`.
+test('a date this app could not record is not evidence to refuse the owner with', () => {
+  const bridge = readFileSync(join(ROOT, 'widget', 'src', 'Bridge.swift'), 'utf8');
+  const src = code(bridge);
+  assert.match(src, /static var unstampedImports: \[String\]/u,
+    'the app has to write down that it does not know');
+  assert.match(src, /!Bridge\.unstampedImports\.contains\(kind\.name\),\n\s*let existing = Bridge\.installedVintage/u,
+    'and the refusal has to consult it before it fires');
+  // A `try?` that swallowed a second failure read exactly like a success.
+  assert.match(src, /stampedVintage = \(try\? fallback\.setResourceValues\(vintageOnly\)\) != nil/u,
+    'the fallback only counts if it landed');
+  assert.match(src, /"unknownVintage": unknownVintage/u, 'and the flow is told');
+
+  const paint = bodyOf(js, 'paintLinkedIn');
+  assert.match(paint, /out\.unknownVintage/u);
+  assert.match(paint, /could not tell how old it is/u);
+});
