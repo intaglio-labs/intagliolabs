@@ -30,7 +30,9 @@ import { PLATFORMS, bridgeStatus, beginCommand, beginLogin, loadPanel, relay } f
 import { bridgeApiResponse } from './lib/bridgeApi.mjs';
 import { decide, fetchPending } from './lib/memory.mjs';
 import { featureSetFor, readStatus, visibleStatusRows } from './lib/status.mjs';
-import { defaultGoogleClient, listGoogleClients } from '../connectors/lib/googleClients.mjs';
+import {
+  defaultGoogleClient, listGoogleClients, unusableClientMessage,
+} from '../connectors/lib/googleClients.mjs';
 import { googleProbe } from './lib/googleProbe.mjs';
 import { sameOrigin } from './lib/origin.mjs';
 import { bearerAuthorized, statusResponse } from './lib/statusApi.mjs';
@@ -125,6 +127,29 @@ function readBody(req, limit = 8 * 1024) {
 // Renders the queue, or an honest failure. A page that cannot reach hermes
 // says so; it never renders an empty queue, because "nothing to review" and
 // "the store is unreachable" are opposite facts that look identical.
+// WHAT THE AUTHORIZATION HELPER SAID, if it said anything this server is
+// willing to repeat (round-6 finding 4).
+//
+// ops/gcal-auth.mjs prints every deliberate diagnostic through fail(), which
+// prefixes `gcal-auth: ` and exits. Only text after the LAST such prefix is
+// returned: that file's header is explicit that no credential value is ever
+// interpolated into one of those messages, while anything else on stderr is a
+// node stack or a runtime warning -- text nobody wrote for an owner to read,
+// possibly naming paths nobody chose to publish. Those are dropped and the
+// generic sentence stands.
+//
+// Whitespace is collapsed because fail() messages are indented over several
+// lines for a terminal, and this one is going into a single line on a screen.
+const HELPER_PREFIX = 'gcal-auth: ';
+
+function helperDiagnostic(stderr) {
+  const text = typeof stderr === 'string' ? stderr : '';
+  const at = text.lastIndexOf(HELPER_PREFIX);
+  if (at === -1) return null;
+  const said = text.slice(at + HELPER_PREFIX.length).replace(/\s+/gu, ' ').trim();
+  return said === '' ? null : said.slice(0, 400);
+}
+
 // "12,15,19" → [12, 15, 19]. Anything that is not a positive integer is dropped
 // rather than failing the whole decision: one malformed id must not cost the
 // owner the reading they just did.
@@ -339,9 +364,24 @@ async function handleRequest(req, res) {
         const picked = defaultGoogleClient();
         if (picked) asked = picked.name;
       }
-      const known = listGoogleClients().some((c) => c.name === asked);
-      if (!known && asked !== 'default') {
+      const row = listGoogleClients().find((c) => c.name === asked);
+      if (row === undefined && asked !== 'default') {
         send(res, 400, JSON.stringify({ error: `no OAuth client named "${asked}"` }),
+          'application/json; charset=utf-8');
+        return;
+      }
+      // AND A CLIENT THE READER REFUSES IS REFUSED HERE, WITH THE REASON
+      // (round-6 finding 4).
+      //
+      // `unusable` is the sentence googleClients.mjs composes for a credential
+      // it will not read -- the mode, the file, and the fix. Without this the
+      // name passed the membership test, the helper was spawned, it printed
+      // that sentence on a stderr this server discards, exited, and the owner
+      // was told "check that the Google client credential is installed" about a
+      // credential that IS installed and merely 0644. The opposite of the
+      // message the machine had already written.
+      if (row?.unusable) {
+        send(res, 400, JSON.stringify({ error: unusableClientMessage(asked, row.unusable) }),
           'application/json; charset=utf-8');
         return;
       }
@@ -376,10 +416,22 @@ async function handleRequest(req, res) {
     // helper logs "waiting for approval" first, and pinning a line number
     // would break the moment anyone adds a line above it.
     try {
+      // STDERR IS READ, NOT DISCARDED (round-6 finding 4). Everything the
+      // helper refuses to start for -- an unusable credential, a half-present
+      // legacy pair, no client on the machine at all -- it says through fail(),
+      // which prints one `gcal-auth: ` line on stderr and exits. Ignoring that
+      // stream left this server guessing, and its guess named the one cause
+      // that was ruled out by the owner having a credential at all.
       const child = spawn(process.execPath, [scriptPath, '--print-url', '--client', client], {
-        stdio: ['ignore', 'pipe', 'ignore'],
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: process.env,
       });
+      let said = '';
+      child.stderr.setEncoding('utf8');
+      // Kept draining for the life of the child, and bounded: an unread pipe
+      // fills and blocks the helper mid-sign-in, and an unbounded buffer is a
+      // process that talks its way into this server's memory.
+      child.stderr.on('data', (d) => { if (said.length < 4_096) said += d; });
       const url = await new Promise((resolve) => {
         let buf = '';
         // If the helper cannot start — a missing client credential is the
@@ -398,7 +450,8 @@ async function handleRequest(req, res) {
       child.unref();
       if (!url) {
         send(res, 502, JSON.stringify({
-          error: 'the authorization helper did not start; check that the Google client credential is installed',
+          error: helperDiagnostic(said)
+            ?? 'the authorization helper did not start; check that the Google client credential is installed',
         }), 'application/json; charset=utf-8');
         return;
       }

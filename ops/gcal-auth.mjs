@@ -242,7 +242,15 @@ const chosen = (() => {
     const c = readGoogleClient(name);
     return { id: c.id, secret: c.secret };
   } catch (error) {
-    return fail(`OAuth client "${name}" is not usable: ${error.message}`);
+    // The reader's own sentence, unwrapped when it already names the client.
+    // It says `google client "work" is unusable: …` on the path that matters
+    // most, and "OAuth client "work" is not usable: google client "work" is
+    // unusable: …" is what the wrapper made of that. This message is no longer
+    // only a line in a terminal: connect reads this stderr and puts it in the
+    // 502 the onboarding screen paints (round-6 finding 4), so it is the
+    // sentence the owner reads.
+    const detail = error?.message ?? String(error);
+    return fail(detail.includes(`"${name}"`) ? detail : `OAuth client "${name}" is not usable: ${detail}`);
   }
 })();
 const clientId = chosen.id;

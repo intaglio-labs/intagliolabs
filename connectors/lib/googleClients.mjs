@@ -187,13 +187,24 @@ function guardedClientFile(path) {
 // what is wrong, and says out loud that the bundled copy is NOT going to be
 // used instead -- otherwise the obvious next thought ("the app ships one, why
 // is it not just using that") is exactly the wrong one.
+//
+// EXPORTED, BECAUSE THE SENTENCE HAS TO REACH THE OWNER AND THIS THROW IS NOT
+// HOW IT GETS THERE (round-6 finding 4). The throw reaches ops/gcal-auth.mjs,
+// which prints it on stderr and exits; connect spawned that helper with stderr
+// discarded and answered a generic 502, so the one actionable message on the
+// machine was composed, printed and thrown away. connect/server.mjs now refuses
+// before it spawns anything when the chosen client carries `unusable`, and
+// composes that refusal from here so the page, the helper and this module all
+// say the same thing.
+export function unusableClientMessage(name, problem) {
+  return `google client "${name}" is unusable: ${problem}. Fix the file (mode 0600, inside a `
+    + '0700 directory) or remove it; a credential shipped with the app is not substituted '
+    + 'for it, because Google refuses to refresh a grant against a client that did not '
+    + 'issue it';
+}
+
 function unusableClientError(name, problem) {
-  return new Error(
-    `google client "${name}" is unusable: ${problem}. Fix the file (mode 0600, inside a `
-      + '0700 directory) or remove it; a credential shipped with the app is not substituted '
-      + 'for it, because Google refuses to refresh a grant against a client that did not '
-      + 'issue it'
-  );
+  return new Error(unusableClientMessage(name, problem));
 }
 
 // Every `google-client-<name>.json` in one directory, newest caller wins.
