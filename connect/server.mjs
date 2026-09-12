@@ -30,6 +30,9 @@ import { PLATFORMS, bridgeStatus, beginCommand, beginLogin, loadPanel, relay } f
 import { bridgeApiResponse } from './lib/bridgeApi.mjs';
 import { decide, fetchPending } from './lib/memory.mjs';
 import { featureSetFor, readStatus, visibleStatusRows } from './lib/status.mjs';
+// The rule for how much of a spawned helper's stderr may be shown to the owner
+// lives beside the rule's reasoning, and is unit-tested there.
+import { helperDiagnostic } from './lib/helperSays.mjs';
 import {
   defaultGoogleClient, listGoogleClients, unusableClientMessage,
 } from '../connectors/lib/googleClients.mjs';
@@ -127,29 +130,6 @@ function readBody(req, limit = 8 * 1024) {
 // Renders the queue, or an honest failure. A page that cannot reach hermes
 // says so; it never renders an empty queue, because "nothing to review" and
 // "the store is unreachable" are opposite facts that look identical.
-// WHAT THE AUTHORIZATION HELPER SAID, if it said anything this server is
-// willing to repeat (round-6 finding 4).
-//
-// ops/gcal-auth.mjs prints every deliberate diagnostic through fail(), which
-// prefixes `gcal-auth: ` and exits. Only text after the LAST such prefix is
-// returned: that file's header is explicit that no credential value is ever
-// interpolated into one of those messages, while anything else on stderr is a
-// node stack or a runtime warning -- text nobody wrote for an owner to read,
-// possibly naming paths nobody chose to publish. Those are dropped and the
-// generic sentence stands.
-//
-// Whitespace is collapsed because fail() messages are indented over several
-// lines for a terminal, and this one is going into a single line on a screen.
-const HELPER_PREFIX = 'gcal-auth: ';
-
-function helperDiagnostic(stderr) {
-  const text = typeof stderr === 'string' ? stderr : '';
-  const at = text.lastIndexOf(HELPER_PREFIX);
-  if (at === -1) return null;
-  const said = text.slice(at + HELPER_PREFIX.length).replace(/\s+/gu, ' ').trim();
-  return said === '' ? null : said.slice(0, 400);
-}
-
 // "12,15,19" → [12, 15, 19]. Anything that is not a positive integer is dropped
 // rather than failing the whole decision: one malformed id must not cost the
 // owner the reading they just did.
