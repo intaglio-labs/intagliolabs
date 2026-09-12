@@ -172,12 +172,19 @@ export const NOT_READY_REPROBE_MS = 60_000;
 export const SPRINT_MAX_MS = 30 * 60_000;
 export const SPRINT_HISTORY_BUDGET_MS = 60_000;
 // Two re-arms, because the owner already told us which machine they want. A
-// fresh install defaults to less-power (PowerBudget's own default, and its
-// comment makes the case: a hot laptop on somebody's first evening is the
-// impression that sticks), so the GENTLE one is the default here too. Even at a
-// minute this is fifteen times the cadence the sprint replaces.
+// fresh install defaults to less-power (PowerBudget's own default), so the
+// GENTLE one is the default here too.
+//
+// TWENTY SECONDS, NOT SIXTY. ~~A minute, on the reading that less-power means a
+// cool lap.~~ Against a 60 s history budget that is a 25% duty cycle, for at
+// most half an hour, on disk-bound reads of local sqlite files -- and the thing
+// the owner is waiting for is their FIRST CARD. Twenty gives a 75% duty cycle
+// under the same ceiling and the same half hour, and the first evening this is
+// protecting is the one where nothing has appeared yet. PowerBudget's own
+// argument (a hot laptop on somebody's first evening is the impression that
+// sticks) is about the steady state, and this phase ends.
 export const SPRINT_REARM_MS = 10_000;
-export const SPRINT_REARM_GENTLE_MS = 60_000;
+export const SPRINT_REARM_GENTLE_MS = 20_000;
 // How the app tells its child which the owner picked. The same channel that
 // already carries the owner pid at spawn (widget/src/Connectors.swift), not a
 // config key: a second writer for a fact that already has one is how two

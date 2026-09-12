@@ -274,13 +274,16 @@ test('a restart inside the window keeps sprinting on what is left', async (t) =>
 
 test('the re-arm follows the performance mode the app was told to use', () => {
   assert.equal(daemon.SPRINT_REARM_MS, 10_000);
-  assert.equal(daemon.SPRINT_REARM_GENTLE_MS, 60_000);
+  // Twenty, not sixty: against the 60 s history budget a minute is a 25% duty
+  // cycle for at most half an hour of disk-bound reads, and what the owner is
+  // waiting on is their first card.
+  assert.equal(daemon.SPRINT_REARM_GENTLE_MS, 20_000);
   assert.equal(daemon.defaultSprintRearmMs({ INTAGLIO_PERFORMANCE: 'full' }), 10_000);
   // A fresh install defaults to less-power, and so does a standalone run of the
-  // daemon with nothing in its environment. Even at a minute this is fifteen
-  // times the cadence it replaces.
-  assert.equal(daemon.defaultSprintRearmMs({}), 60_000);
-  assert.equal(daemon.defaultSprintRearmMs({ INTAGLIO_PERFORMANCE: 'trickle' }), 60_000);
+  // daemon with nothing in its environment. Even so this is forty-five times the
+  // cadence it replaces.
+  assert.equal(daemon.defaultSprintRearmMs({}), 20_000);
+  assert.equal(daemon.defaultSprintRearmMs({ INTAGLIO_PERFORMANCE: 'trickle' }), 20_000);
 });
 
 test('the sprint re-arm travels through the one place that replaces a timer', () => {
