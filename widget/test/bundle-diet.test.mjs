@@ -17,7 +17,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -73,12 +75,9 @@ test('the bundle budget is a constant, measured, and enforced before the install
   assert.match(buildCode, /BUNDLE_MB="\$\(du -sm "\$APP" \| cut -f1\)"/u,
     'measure the assembled bundle, in the same unit as the budget');
   assert.match(buildCode, /du -sh "\$APP"/u, 'and print a number a person reads');
-  assert.match(buildCode, /\[ "\$BUNDLE_MB" -gt "\$BUNDLE_BUDGET_MB" \]/u);
   const at = buildCode.indexOf('BUNDLE_MB="$(du -sm');
-  const fail = buildCode.slice(at, at + 900);
+  const fail = buildCode.slice(at, at + 1200);
   assert.match(fail, /exit 1/u, 'over budget must fail the build, not warn');
-  assert.match(fail, /if \[ "\$FEATURE_VOICE" = on \]/u,
-    'unless voice is on — that build is deliberately 500 MB heavier');
   // TEETH. A budget checked after `ditto "$APP" "$DEST"` reports the number
   // once the over-budget app is already the installed one.
   const installAt = buildCode.indexOf('ditto --norsrc --noextattr "$APP" "$DEST"');
@@ -87,19 +86,102 @@ test('the bundle budget is a constant, measured, and enforced before the install
     'the budget check must run BEFORE /Applications is written, or it only reports');
 });
 
+// A VOICE BUILD IS HEAVIER, NOT UNMEASURED. `if [ "$FEATURE_VOICE" = on ]` used
+// to skip the comparison outright, which is the one configuration where a 2 GB
+// regression from a cause having nothing to do with voice would have shipped
+// with nothing to stop it. The flag excuses ~496 MB of model tree; it does not
+// excuse the rest of the bundle.
+test('voice on gets its own budget rather than no budget', () => {
+  assert.match(buildCode, /^BUNDLE_BUDGET_VOICE_MB=800$/mu,
+    'the voice build needs a number of its own, and 800 is ~119 MB over its measured 681');
+  const at = buildCode.indexOf('BUNDLE_MB="$(du -sm');
+  const block = buildCode.slice(at, at + 1200);
+  assert.match(block, /if \[ "\$FEATURE_VOICE" = on \]/u,
+    'the flag still chooses — a voice build is deliberately 500 MB heavier');
+  assert.match(block, /BUDGET_MB="\$BUNDLE_BUDGET_VOICE_MB"/u, 'and what it chooses is a budget');
+  assert.match(block, /BUDGET_MB="\$BUNDLE_BUDGET_MB"/u);
+  // The comparison must be OUTSIDE the flag: one `if`, always reached.
+  const cmpAt = block.indexOf('[ "$BUNDLE_MB" -gt "$BUDGET_MB" ]');
+  assert.ok(cmpAt > 0, 'the size must be compared against whichever budget was chosen');
+  assert.ok(cmpAt > block.indexOf('BUDGET_MB="$BUNDLE_BUDGET_MB"'),
+    'the comparison must come after both arms have set a budget, not inside one of them');
+  assert.doesNotMatch(block.slice(0, cmpAt), /over budget is expected with voice on/u,
+    'no arm may announce that it is skipping the check');
+});
+
 test('the connectors tree ships without the parts node never opens', () => {
   assert.match(buildCode, /rsync -a --exclude node_modules --exclude '\/test' --exclude '\*\.md' \\/u,
     'the source copy must drop the test tree and the markdown');
-  const at = buildCode.indexOf('$BE/connectors/node_modules" -type d');
+  const at = buildCode.indexOf('$BE/connectors/node_modules" -type f');
   assert.ok(at > 0, 'the cloned node_modules must be pruned too — it is 23 of the 24 MB');
-  const prune = buildCode.slice(at - 200, at + 800);
-  for (const name of ['test', 'docs', 'examples', 'coverage', '.github']) {
-    assert.match(prune, new RegExp(`-name ${name.replace('.', '\\.')}\\b`, 'u'),
-      `the prune must cover ${name}/`);
-  }
+  const prune = buildCode.slice(at - 200, at + 400);
   for (const ext of ['\\*\\.md', '\\*\\.d\\.ts', '\\*\\.map']) {
     assert.match(prune, new RegExp(`-name '${ext}'`, 'u'),
       `the prune must cover ${ext} (sourcemaps alone are 7.6 MB)`);
+  }
+  // A .md, a .d.ts and a .map say what the FILE is. A directory called
+  // examples/ says what somebody called a directory, and in node_modules that
+  // is not a fact about the code: libphonenumber-js/mobile/examples is a
+  // declared exports entry. No -type d sweep may run in there again.
+  assert.doesNotMatch(buildCode, /find "\$BE\/connectors\/node_modules" -type d/u,
+    'pruning node_modules by directory name deletes declared package entry points');
+});
+
+// THE SWEEP, RUN. Everything above reads the source; this runs it.
+//
+// The pruning steps are lifted verbatim out of build.sh and executed against a
+// fixture tree, because the two bugs they had were both about WHICH PATHS a
+// pattern reaches, and no amount of reading the pattern shows you that. Before
+// this, `find "$BE" -type d -name test -prune -exec rm -rf {} +` ran over the
+// whole backend — so a prompts/test/ or ui/server/**/test/ directory would have
+// gone silently, while a comment 140 lines above claimed the rsync anchoring
+// made exactly that impossible — and the node_modules directory sweep took
+// libphonenumber-js/mobile/examples, which that package's exports map declares
+// as "./mobile/examples".
+test('the sweep takes our test tree and the dead weight, and nothing else', () => {
+  // Between the helper build and the node runtime copy is the whole pruning
+  // region, in this version and in every version before it.
+  const from = build.indexOf('-o "$BE/helpers/apple-data"');
+  const to = build.indexOf('# NODE RUNTIME:');
+  assert.ok(from > 0 && to > from, 'could not find the pruning region in build.sh');
+  const sweep = build.slice(build.indexOf('\n', from) + 1, to);
+
+  const BE = mkdtempSync(join(tmpdir(), 'bundle-sweep-'));
+  const write = (rel, body = 'x') => {
+    mkdirSync(join(BE, dirname(rel)), { recursive: true });
+    writeFileSync(join(BE, rel), body);
+  };
+  const nm = 'connectors/node_modules';
+  try {
+    // Ours, and the only directory the sweep is allowed to take.
+    write('connect/test/server.test.mjs');
+    // A declared entry point of a real dependency. Deleting it breaks an import
+    // in the bundle and nowhere else, which is why it went unnoticed.
+    write(`${nm}/libphonenumber-js/mobile/examples/package.json`, '{}');
+    write(`${nm}/libphonenumber-js/mobile/examples/examples.mobile.json.js`);
+    // Source trees that merely share a name with ours.
+    write('prompts/test/fixture.md', '# a prompt fixture');
+    write('ui/server/relationship/test/draft.mjs');
+    // The weight that is genuinely dead, and its neighbour that is not.
+    write(`${nm}/undici/README.md`);
+    write(`${nm}/undici/index.d.ts`);
+    write(`${nm}/undici/index.js.map`);
+    write(`${nm}/undici/index.js`);
+
+    execFileSync('sh', ['-c', `set -eu\n${sweep}`], { env: { ...process.env, BE } });
+
+    const gone = (rel) => assert.equal(existsSync(join(BE, rel)), false, `${rel} should be gone`);
+    const kept = (rel) => assert.equal(existsSync(join(BE, rel)), true, `${rel} must survive`);
+    gone('connect/test');
+    gone(`${nm}/undici/README.md`);
+    gone(`${nm}/undici/index.d.ts`);
+    gone(`${nm}/undici/index.js.map`);
+    kept(`${nm}/undici/index.js`);
+    kept(`${nm}/libphonenumber-js/mobile/examples/examples.mobile.json.js`);
+    kept('prompts/test/fixture.md');
+    kept('ui/server/relationship/test/draft.mjs');
+  } finally {
+    rmSync(BE, { recursive: true, force: true });
   }
 });
 

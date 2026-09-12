@@ -89,6 +89,13 @@ echo "features: voice=$FEATURE_VOICE bridges=$FEATURE_BRIDGES (ops/features.json
 # budget. That build reports its size and is allowed, because the flag is a
 # deliberate act and the number is then the point rather than a surprise.
 BUNDLE_BUDGET_MB=250
+# ITS OWN BUDGET, NOT NO BUDGET. Skipping the comparison outright was the one
+# configuration where a 2 GB regression from an unrelated cause would have
+# shipped unmeasured -- "voice is on" excuses the ~496 MB model tree and nothing
+# else. Measured 2026-09-12: the voice-off install is 185 MB, so a voice-on one
+# lands near 681 MB and 800 leaves the same kind of headroom 250 leaves the
+# build it governs.
+BUNDLE_BUDGET_VOICE_MB=800
 
 mkdir -p build
 # Pin the target: swiftc's default is the SDK's OS, which can be NEWER than
@@ -194,7 +201,10 @@ mkdir -p "$BE/connectors"
 # whoever is reading the tree. Both were already being deleted from the staged
 # copy a few lines below -- excluding them here is the same outcome without the
 # copy. Anchored to the top of the transfer (`/test`) so a source module called
-# test/ deeper in could not disappear silently. NOT prompts/: those .md files
+# test/ deeper in could not disappear silently. That claim was false until
+# 2026-09-12 -- an unanchored `find "$BE" -type d -name test` ran 140 lines
+# below and took any of them -- and is true now that the find is gone.
+# NOT prompts/: those .md files
 # ARE the runtime (ui/server resolves ../../../prompts/*.md), which is why the
 # markdown sweep below is scoped to connectors/node_modules and nothing else.
 rsync -a --exclude node_modules --exclude '/test' --exclude '*.md' \
@@ -336,15 +346,27 @@ swiftc -O -target "$(uname -m)-apple-macos13.0" -o "$BE/helpers/apple-data" help
 # (No common/: it did not cross to this repo and nothing bundled imports it —
 # verified zero `../common` / `/common/` references in connect/connectors/
 # ui-server. Copying a nonexistent dir hard-fails the build under set -e.)
-# Runtime doesn't need the test trees.
-find "$BE" -type d -name test -prune -exec rm -rf {} + 2>/dev/null || true
+# Runtime doesn't need OUR test trees, and the list is exact.
+#
+# This used to be `find "$BE" -type d -name test -prune -exec rm -rf {} +`, which
+# deleted any directory called test anywhere in the backend -- including inside
+# node_modules, where a directory name is not a hint about what the file is for.
+# It also made a liar of the `--exclude '/test'` anchoring above, whose comment
+# claims a deeper test/ could not disappear silently; it could, 140 lines later.
+# Naming the path is both the fix and the documentation: this is OUR test
+# tree, at a path we can point at. connectors/test never arrives (rsync excludes
+# it above), and connect/test is the only other one that does -- so that is the
+# whole list, and it grows by hand when a new one appears rather than by a
+# pattern that also matches things nobody here wrote.
+rm -rf "$BE/connect/test"
 
 # NOR THE PARTS OF node_modules THAT EXIST FOR PEOPLE READING IT.
 #
 # The connectors tree is 24 MB and node opens about 12 MB of it: the other half
 # is 7.6 MB of sourcemaps, 1.1 MB of markdown, 0.8 MB of .d.ts and 3.1 MB of
 # test/example/doc directories. Measured, not estimated -- `find ... | xargs du`
-# over the installed tree on 2026-09-12.
+# over the installed tree on 2026-09-12. The first three are taken below; the
+# directories are deliberately left, for the reason under FILES ONLY.
 #
 # PRUNED FROM THE CLONE rather than excluded from the copy, on purpose. The copy
 # is `cp -c -R`, an APFS clone that finishes in seconds; rsync-ing 23 MB of tiny
@@ -357,12 +379,24 @@ find "$BE" -type d -name test -prune -exec rm -rf {} + 2>/dev/null || true
 # runtime (ui/server/relationship/draft.mjs and friends resolve
 # ../../../prompts/*.md) -- producing a bundle that installs cleanly, launches
 # cleanly and answers nothing.
+# FILES ONLY. NO DIRECTORIES.
+#
+# A directory sweep by bare name was deleting a declared package entry point:
+# libphonenumber-js/mobile/examples/ has its own package.json and is named in
+# that package's exports map as "./mobile/examples", so an import of it would
+# have resolved in the checkout and thrown ERR_MODULE_NOT_FOUND in the bundle
+# only. Nothing imports it today, which is the worst version of this -- the rule
+# is name-based and unbounded by depth, so it comes back with every dependency
+# change, and the next one may not be latent.
+#
+# The alternative was to prune only top-level package directories not named in
+# that package's exports/main/files. It was not worth writing: measured
+# 2026-09-12, the whole directory sweep was 3.1 MB against a 250 MB budget and
+# an installed bundle of 185 MB. The file sweep is 9.3 MB and carries none of
+# this risk, because a .md, a .d.ts and a .map are about what the file IS, not
+# what a directory is called. Sixty-two MB of headroom is worth more than three
+# MB of it, so the directories stay.
 if [ -d "$BE/connectors/node_modules" ]; then
-  find "$BE/connectors/node_modules" -type d \
-    \( -name test -o -name tests -o -name __tests__ -o -name doc -o -name docs \
-       -o -name example -o -name examples -o -name benchmark -o -name benchmarks \
-       -o -name coverage -o -name .github \) \
-    -prune -exec rm -rf {} + 2>/dev/null || true
   find "$BE/connectors/node_modules" -type f \
     \( -name '*.md' -o -name '*.markdown' -o -name '*.d.ts' -o -name '*.map' \) \
     -delete 2>/dev/null || true
@@ -683,14 +717,20 @@ fi
 # with each other, which is what matters; the `du -sh` line beside it is the
 # number a person reads.
 BUNDLE_MB="$(du -sm "$APP" | cut -f1)"
-echo "bundle: $(du -sh "$APP" | cut -f1) (budget ${BUNDLE_BUDGET_MB} MB)"
+# Which budget applies is decided by the flag, and there is always one. A voice
+# build is ~496 MB heavier by design; it is not thereby unmeasured.
 if [ "$FEATURE_VOICE" = on ]; then
-  echo "bundle: over budget is expected with voice on — the model tree alone is ~496 MB"
-elif [ "$BUNDLE_MB" -gt "$BUNDLE_BUDGET_MB" ]; then
-  echo "ERROR: the bundle is ${BUNDLE_MB} MB, over the ${BUNDLE_BUDGET_MB} MB budget." >&2
+  BUDGET_MB="$BUNDLE_BUDGET_VOICE_MB"
+  echo "bundle: $(du -sh "$APP" | cut -f1) (budget ${BUDGET_MB} MB, voice on)"
+else
+  BUDGET_MB="$BUNDLE_BUDGET_MB"
+  echo "bundle: $(du -sh "$APP" | cut -f1) (budget ${BUDGET_MB} MB)"
+fi
+if [ "$BUNDLE_MB" -gt "$BUDGET_MB" ]; then
+  echo "ERROR: the bundle is ${BUNDLE_MB} MB, over the ${BUDGET_MB} MB budget." >&2
   echo "       Nothing was installed. What is in there:" >&2
   du -sm "$BE"/* 2>/dev/null | sort -rn | head -8 >&2 || true
-  echo "       Either take the weight out or raise BUNDLE_BUDGET_MB deliberately," >&2
+  echo "       Either take the weight out or raise the budget deliberately," >&2
   echo "       in the same commit, with the reason -- see ops/FEATURES.md." >&2
   exit 1
 fi
