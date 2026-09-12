@@ -1121,6 +1121,81 @@ loadDormant.id = 'loadDormant';
 loadDormant.hidden = true;
 loadStatus.before(loadDormant);
 
+// THE POOL IS NOT EMPTY, THE MODE IS -- and those are different sentences.
+//
+// Live on run three: twenty minutes in, the eligible pool held six people and
+// none of them was an investor. "nobody qualifies yet, i need more history" is
+// then false twice over: there IS history, and there ARE people. What there is
+// not is anybody in the group the owner picked on screen 1.
+//
+// Built here rather than in onboarding.html for the same reason loadDormant is:
+// it is the ROUTE's answer that decides whether this says anything at all, and
+// a row that is hidden on every ordinary install belongs next to the code that
+// decides to show it.
+//
+// Its own line, under the status rather than replacing it, because the sprint
+// sentence above is still true while this is: the reader is filling last year,
+// and the mode is empty, and the owner may want to act on the second without
+// being told the first has stopped.
+const loadMode = document.createElement('p');
+loadMode.className = 'ob-status';
+loadMode.id = 'loadMode';
+loadMode.hidden = true;
+loadStatus.after(loadMode);
+
+// AND AN OFFER, NEVER A SWITCH. The mode is the owner's choice and this screen
+// does not get to change it for them -- it says what that choice currently costs
+// and puts the alternative one press away. A flow that quietly widened the pool
+// to produce a card would be the app deciding what the owner meant.
+const loadAnyMode = document.createElement('button');
+loadAnyMode.className = 'ob-ghost';
+loadAnyMode.id = 'loadAnyMode';
+loadAnyMode.type = 'button';
+loadAnyMode.hidden = true;
+loadAnyMode.textContent = 'start with anyone';
+loadStart.before(loadAnyMode);
+
+const hideModeShortfall = () => {
+  loadMode.hidden = true;
+  loadAnyMode.hidden = true;
+};
+
+/// "an investor", "a founder". The route names the mode; the sentence has to
+/// read like one a person wrote.
+const article = (word) => (/^[aeiou]/iu.test(word) ? 'an' : 'a');
+
+function paintModeShortfall(out) {
+  const mode = typeof out.mode === 'string' && out.mode.length > 0 ? out.mode : null;
+  const inAll = Number(out.counts?.any) > 0
+    ? ` — ${Number(out.counts.any).toLocaleString()} `
+      + `${Number(out.counts.any) === 1 ? 'person' : 'people'} in all`
+    : '';
+  loadMode.textContent = mode === null
+    ? `nobody quiet in that group yet${inAll}`
+    : `nobody quiet who is ${article(mode)} ${mode} yet${inAll}`;
+  loadMode.hidden = false;
+  loadAnyMode.hidden = false;
+}
+
+loadAnyMode.addEventListener('click', () => {
+  loadAnyMode.disabled = true;
+  // The same verb the picker on screen 1 uses, so the choice is recorded and
+  // re-delivered exactly like the one made there (Bridge.cardModePending).
+  hzPost('relMode', { mode: 'any' })
+    .catch(() => {})
+    .then(() => {
+      loadAnyMode.disabled = false;
+      hideModeShortfall();
+      // AND ASK AGAIN AT ONCE. The pool the owner just widened may already have
+      // somebody in it, and making them wait out the fifteen-second poll for an
+      // answer that exists now is the flow standing in its own way. Stamped so
+      // the timer does not immediately spend a second one: the throttle is on
+      // the RATE, and the owner's own press is not charged to it.
+      lastPeekAt = Date.now();
+      hzPost('relCardPeek').then(peekCard).catch(() => {});
+    });
+});
+
 const SOURCE_NAMES = {
   imessage: 'messages', mail: 'mail', calendar: 'calendar',
   contacts: 'contacts', linkedin: 'linkedin',
@@ -1365,6 +1440,9 @@ function enterLoad() {
 
 function peekCard(out) {
   if (!out) return;
+  // Cleared on every answer: this row belongs to one reason, and leaving it up
+  // under a different one would offer a remedy for a problem that has moved on.
+  hideModeShortfall();
   if (out.card) {
     // A real card is waiting. The table has done its job; hand over to the
     // panel that actually serves, which is where this whole flow was going.
@@ -1405,6 +1483,16 @@ function peekCard(out) {
     loadStatus.textContent =
       'nobody qualifies yet — i need more history before i can pick someone'
       + (minutes === null ? '' : `, checking again in ${minutes} min`);
+    return;
+  }
+  // THE MODE IS EMPTY, NOT THE POOL. See paintModeShortfall: there is history and
+  // there are people, and none of them is in the group the owner picked. The
+  // sprint sentence keeps the line above, because both are true at once.
+  if (out.reason === 'pool-exhausted-mode') {
+    loadStatus.textContent = readerSprinting
+      ? 'reading last year so i can tell who has gone quiet'
+      : '';
+    paintModeShortfall(out);
     return;
   }
   // Every other reason is one the owner cannot act on and would not recognise.

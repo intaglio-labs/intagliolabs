@@ -385,3 +385,74 @@ test('a mode hermes will never take is not retried until the end of the install'
   assert.deepEqual(offered, ['any', 'founder', 'investor'],
     'the picker offers exactly what Bridge accepts');
 });
+
+// ------------------------------------------- the mode is empty, not the pool
+
+// LIVE ON RUN THREE: twenty minutes in, the eligible pool held six people and
+// none of them was an investor. "nobody qualifies yet, i need more history" is
+// then false twice over — there IS history and there ARE people. What there is
+// not is anybody in the group the owner picked on screen 1, and that is a
+// different sentence with a different remedy.
+test('an empty mode is named as an empty mode, with the count that proves it', () => {
+  const peek = bodyOf(js, 'peekCard');
+  assert.match(peek, /out\.reason === 'pool-exhausted-mode'/u);
+  assert.match(peek, /paintModeShortfall\(out\)/u);
+  // The generic pool sentence must not be what this reason reaches: it says the
+  // opposite of what is true.
+  const modeAt = peek.indexOf("'pool-exhausted-mode'");
+  const poolAt = peek.indexOf('nobody qualifies yet');
+  assert.ok(modeAt > -1 && poolAt > -1 && poolAt < modeAt,
+    'the generic branch returns before this one, so they cannot collide');
+
+  const paint = bodyOf(js, 'paintModeShortfall');
+  assert.match(paint, /nobody quiet who is \$\{article\(mode\)\} \$\{mode\} yet/u,
+    'the owner picked a word; say it back to them');
+  assert.match(paint, /out\.counts\?\.any/u, 'and the count that says the pool is not the problem');
+  assert.match(paint, /person' : 'people'/u, 'one person is not "1 people"');
+});
+
+// AN OFFER, NEVER A SWITCH. The mode is the owner's choice; this screen says
+// what it currently costs and puts the alternative one press away. A flow that
+// quietly widened the pool to produce a card would be the app deciding what the
+// owner meant.
+test('the widening is a button the owner presses, not something the screen does', () => {
+  const source = code(js);
+  // Nothing posts relMode except a click handler.
+  const posts = [...source.matchAll(/hzPost\('relMode'[^)]*\)/gu)].length;
+  assert.ok(posts >= 1, 'the button has to actually write the choice');
+  const handler = /loadAnyMode\.addEventListener\('click', \(\) => \{\n([\s\S]*?)\n\}\);/u.exec(js);
+  assert.ok(handler, 'the button has no click handler');
+  const body = code(handler[1]);
+  assert.match(body, /hzPost\('relMode', \{ mode: 'any' \}\)/u);
+  // ...and it asks again at once, because the pool it just widened may already
+  // have somebody in it.
+  assert.match(body, /hzPost\('relCardPeek'\)/u);
+  assert.match(body, /lastPeekAt = Date\.now\(\)/u,
+    'stamped so the timer does not spend a second peek on top of the owner\'s');
+
+  // The reason branch itself must not post anything: no auto-switch.
+  const peek = bodyOf(js, 'peekCard');
+  assert.doesNotMatch(peek, /hzPost\('relMode'/u,
+    'a screen that switches the mode for the owner is deciding what they meant');
+
+  // AND THE VERB HAS TO BE ONE THIS PAGE MAY CALL. Bridge gates every verb by
+  // page, so a button wired to one the onboarding page is not allowed reaches
+  // the owner as a press that silently does nothing.
+  const bridge = readFileSync(join(ROOT, 'widget', 'src', 'Bridge.swift'), 'utf8');
+  const allowed = /"onboarding": \[([\s\S]*?)\],\n/u.exec(bridge)?.[1] ?? '';
+  assert.match(allowed, /"relMode"/u, 'the onboarding page must be allowed to write the mode');
+  assert.match(allowed, /"relCardPeek"/u, 'and to ask again straight after');
+});
+
+test('the sprint sentence keeps its line while the mode row is up', () => {
+  const peek = bodyOf(js, 'peekCard');
+  const branch = peek.slice(peek.indexOf("'pool-exhausted-mode'"));
+  assert.match(branch, /readerSprinting\n\s*\? 'reading last year so i can tell who has gone quiet'/u,
+    'both are true at once: the reader is filling last year AND the mode is empty');
+  // And the row is cleared on every other answer, so a remedy is never left
+  // standing under a problem that has moved on.
+  assert.match(peek, /hideModeShortfall\(\);/u);
+  const clearedAt = peek.indexOf('hideModeShortfall()');
+  const cardAt = peek.indexOf('if (out.card)');
+  assert.ok(clearedAt > -1 && cardAt > -1 && clearedAt < cardAt);
+});
