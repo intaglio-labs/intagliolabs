@@ -2471,7 +2471,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// real and csvObjects handles it.
   private static func linkedInKind(of head: String) -> (anchor: String, name: String)? {
     for row in csvRows(head) {
-      let fields = Set(row.map { $0.trimmingCharacters(in: csvFieldTrim) })
+      let fields = csvFields(row)
       for kind in linkedInKinds where fields.contains(kind.anchor) {
         if kind.require.isEmpty || kind.require.contains(where: { fields.contains($0) }) {
           return (kind.anchor, kind.name)
@@ -2479,6 +2479,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
     }
     return nil
+  }
+
+  /// One parsed row's fields, trimmed the way csv.mjs trims them. Shared so
+  /// that "which file is this" and "how many records does it hold" cannot
+  /// drift into two different rules about the same header.
+  private static func csvFields(_ row: [String]) -> Set<String> {
+    Set(row.map { $0.trimmingCharacters(in: csvFieldTrim) })
   }
 
   /// RFC-4180 rows: quoted fields, doubled-quote escapes, and commas and
@@ -2575,9 +2582,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// way for the owner to tell which half landed. A pick is ONE action. It
   /// succeeds whole or it changes nothing on disk.
   ///
-  /// The copies themselves are staged beside their destinations and renamed
-  /// only once every one of them has landed, so even a disk error in the
-  /// middle of pass two leaves the previous export exactly as it was.
+  /// The copies themselves are staged beside their destinations and swapped in
+  /// only once every one of them has landed. The swap is
+  /// `FileManager.replaceItemAt`, which is the atomic primitive: the old
+  /// `removeItem(destination)` + `moveItem` pair had a window in which the
+  /// previous export was already gone and the replacement was still named
+  /// `.importing`, and a crash there destroyed an export the owner had. Each
+  /// replace also leaves the file it displaced beside it as `.previous`, so a
+  /// failure on the SECOND file of a multi-select puts the first one back
+  /// rather than leaving Connections.csv new and messages.csv old. The
+  /// backups are removed once every file has landed.
   private func acceptLinkedInFiles(_ urls: [URL]) -> [String: Any] {
     let fm = FileManager.default
     if let zip = urls.first(where: { $0.pathExtension.lowercased() == "zip" }) {
@@ -2654,18 +2668,64 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
 
     var copied: [String] = []
     var connections = 0
+    // What has already been swapped in, and what it displaced. `backup` is nil
+    // where there was nothing to displace -- a first import -- and undoing
+    // that one means removing the file this pick put there.
+    var swapped: [(destination: URL, backup: URL?)] = []
+    let undoSwapped = {
+      for entry in swapped.reversed() {
+        guard let backup = entry.backup else {
+          // Nothing was displaced, so undoing it is removing what we put there.
+          try? fm.removeItem(at: entry.destination)
+          continue
+        }
+        do {
+          _ = try fm.replaceItemAt(entry.destination, withItemAt: backup)
+        } catch {
+          // The atomic path refused. Fall back to a rename -- but never delete
+          // the backup, which at this point is the owner's only copy of the
+          // export this pick displaced.
+          try? fm.removeItem(at: entry.destination)
+          try? fm.moveItem(at: backup, to: entry.destination)
+        }
+      }
+      swapped = []
+    }
+    let dropBackups = {
+      for entry in swapped { if let backup = entry.backup { try? fm.removeItem(at: backup) } }
+    }
     for entry in staged {
+      let backupName = "\(entry.kind.name).previous"
+      let backup = linkedInDirectory.appendingPathComponent(backupName)
+      let hadPrevious = fm.fileExists(atPath: entry.destination.path)
       do {
-        if fm.fileExists(atPath: entry.destination.path) { try fm.removeItem(at: entry.destination) }
-        try fm.moveItem(at: entry.temporary, to: entry.destination)
+        if hadPrevious {
+          // ATOMIC, and it keeps the file it displaced. A per-file
+          // remove-then-move is not a swap: it has a window with neither file
+          // at the destination, and nothing to put back when a later file in
+          // the same pick fails.
+          try? fm.removeItem(at: backup)
+          _ = try fm.replaceItemAt(
+            entry.destination, withItemAt: entry.temporary,
+            backupItemName: backupName, options: [.withoutDeletingBackupItem]
+          )
+        } else {
+          // replaceItemAt needs something to replace; on a first import there
+          // is nothing, and a rename onto a free name is already atomic.
+          try fm.moveItem(at: entry.temporary, to: entry.destination)
+        }
       } catch {
+        undoSwapped()
+        discardStaged()
         return ["state": "error", "reason": "copy", "file": entry.kind.name]
       }
+      swapped.append((entry.destination, hadPrevious ? backup : nil))
       copied.append(entry.kind.name)
       if entry.kind.name == "Connections.csv" {
         connections = Bridge.countRows(inCsvAt: entry.destination, anchor: entry.kind.anchor)
       }
     }
+    dropBackups()
 
     // The reader only picks a source up when it runs, and the owner is
     // watching this screen now.
@@ -2735,41 +2795,31 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   ///
   /// QUOTE-AWARE, because a LinkedIn position or company can contain a comma
   /// AND a newline inside a quoted field, and counting "\n" would then report
-  /// more connections than the owner has. Rows are counted from the line after
+  /// more connections than the owner has. Rows are counted from the row after
   /// the anchor's header, which is also how csvObjects slices them.
+  ///
+  /// ONE HEADER RULE, NOT TWO. This used to find the header with
+  /// `line.contains(anchor)` -- the substring test linkedInKind was rewritten
+  /// to abolish, for the same reasons and on the same file. The consequence was
+  /// not hypothetical: LinkedIn's export opens with a "Notes:" preamble whose
+  /// paragraph mentions the columns, so the same file could be CLASSIFIED on an
+  /// exact field match at the real header and COUNTED from a preamble line that
+  /// merely contains "First Name", inflating the "N connections already here"
+  /// the screen shows by the preamble's offset. Both now walk csvRows and
+  /// compare whole trimmed fields.
   private static func countRows(inCsvAt url: URL, anchor: String) -> Int {
     let data = (try? Data(contentsOf: url)) ?? Data()
     guard let text = String(data: data, encoding: .utf8)
       ?? String(data: data, encoding: .isoLatin1) else { return 0 }
-    var inQuotes = false
-    var lines: [String] = []
-    var current = ""
-    var iterator = text.makeIterator()
-    var pending: Character?
-    while let c = pending ?? iterator.next() {
-      pending = nil
-      if c == "\"" {
-        // A doubled quote inside a quoted field is an escaped quote, not the
-        // end of it.
-        if inQuotes, let next = iterator.next() {
-          if next == "\"" { current.append("\"\""); continue }
-          inQuotes = false
-          pending = next
-          continue
-        }
-        inQuotes.toggle()
-        continue
-      }
-      if !inQuotes, c == "\n" || c == "\r" {
-        if !current.isEmpty { lines.append(current) }
-        current = ""
-        continue
-      }
-      current.append(c)
+    let rows = csvRows(text)
+    guard let headerIndex = rows.firstIndex(where: { csvFields($0).contains(anchor) }) else {
+      return 0
     }
-    if !current.isEmpty { lines.append(current) }
-    guard let headerIndex = lines.firstIndex(where: { $0.contains(anchor) }) else { return 0 }
-    return lines.count - headerIndex - 1
+    // Blank rows are not records. The old walk skipped empty LINES for the same
+    // reason; a row whose every field is empty is the same thing here.
+    return rows[(headerIndex + 1)...].filter { row in
+      row.contains { !$0.trimmingCharacters(in: csvFieldTrim).isEmpty }
+    }.count
   }
 
   private func bridgeCall(

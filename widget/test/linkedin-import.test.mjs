@@ -127,18 +127,128 @@ test('a zip is refused with a sentence, not extracted', () => {
     'nothing in the import spawns anything to open an archive');
 });
 
+const COUNT_ROWS = /private static func countRows\(inCsvAt url: URL, anchor: String\) -> Int \{([\s\S]*?)\n {2}\}/u
+  .exec(bridge)?.[1];
+
 test('the connection count is counted, quote-aware, not guessed from newlines', () => {
-  const count = /private static func countRows\(inCsvAt url: URL, anchor: String\) -> Int \{([\s\S]*?)\n {2}\}/u
-    .exec(bridge)?.[1];
-  assert.ok(count, 'countRows() not found');
+  assert.ok(COUNT_ROWS, 'countRows() not found');
   // A position or company can carry a comma AND a newline inside a quoted
   // field; splitting on "\n" would report more connections than the owner has.
-  assert.match(count, /var inQuotes = false/u);
-  assert.match(count, /if !inQuotes, c == "\\n" \|\| c == "\\r"/u);
-  // Counted from after the header row, the same slice csvObjects takes.
-  assert.match(count, /lines\.count - headerIndex - 1/u);
+  // csvRows() is the RFC-4180 walk that already knows this, and is now the only
+  // copy of it in the file.
+  assert.match(COUNT_ROWS, /csvRows\(text\)/u);
+  // Counted from after the header ROW, the same slice csvObjects takes.
+  assert.match(COUNT_ROWS, /rows\[\(headerIndex \+ 1\)\.\.\.\]/u);
   assert.match(accept,
     /connections = Bridge\.countRows\(inCsvAt: entry\.destination, anchor: entry\.kind\.anchor\)/u);
+});
+
+// ONE HEADER RULE, NOT TWO.
+//
+// linkedInKind was rewritten to find the header the way csv.mjs does — the
+// first row holding a FIELD whose trim() equals the anchor — because
+// `head.contains(anchor)` also matches the anchor appearing in LinkedIn's
+// "Notes:" preamble or in somebody's job title. countRows kept the substring
+// rule, so the same file could be CLASSIFIED at the real header and COUNTED
+// from a preamble line, and the "N connections already here" the second-run
+// screen shows came out inflated by the preamble's offset.
+test('the count finds the header by the same rule the classifier does', () => {
+  assert.doesNotMatch(COUNT_ROWS, /\$0\.contains\(anchor\)/u, 'the substring rule is back');
+  assert.match(COUNT_ROWS, /csvFields\(\$0\)\.contains\(anchor\)/u);
+  // Shared, not copied: both call the same helper, so they cannot drift into
+  // two different rules about the same header.
+  const kindOf = /private static func linkedInKind\(of head: String\)[\s\S]*?\n {2}\}/u.exec(bridge)?.[0];
+  assert.match(kindOf, /csvFields\(row\)/u);
+  assert.match(bridge, /private static func csvFields\(_ row: \[String\]\) -> Set<String> \{/u);
+});
+
+/// The count, as the Swift is required to implement it: the first row whose
+/// trimmed fields hold the anchor exactly, then every non-blank row after it.
+function countFrom(text, anchor) {
+  const rows = parseCsv(text);
+  const at = rows.findIndex((row) => row.some((f) => f.trim().replace(/^\uFEFF/u, '') === anchor));
+  if (at === -1) return 0;
+  return rows.slice(at + 1).filter((row) => row.some((f) => f.trim() !== '')).length;
+}
+
+/// And the rule it replaced, for the disagreement.
+function countFromSubstring(text, anchor) {
+  const lines = [];
+  let inQuotes = false;
+  let current = '';
+  for (const c of text) {
+    if (c === '"') { inQuotes = !inQuotes; continue; }
+    if (!inQuotes && (c === '\n' || c === '\r')) {
+      if (current !== '') lines.push(current);
+      current = '';
+      continue;
+    }
+    current += c;
+  }
+  if (current !== '') lines.push(current);
+  const at = lines.findIndex((line) => line.includes(anchor));
+  return at === -1 ? 0 : lines.length - at - 1;
+}
+
+test('a preamble that mentions the column no longer inflates the count', () => {
+  // A REAL EXPORT SHAPE. LinkedIn opens Connections.csv with "Notes:" and a
+  // quoted paragraph; this one names the First Name column inside it, which is
+  // the sentence the old rule counted from.
+  const text = fixture('Connections-preamble.csv');
+  assert.equal(classify(text), 'Connections.csv', 'it is still the same file to the classifier');
+  assert.equal(countFrom(text, 'First Name'), 3, 'three connections, counted from the header row');
+  assert.equal(countFromSubstring(text, 'First Name'), 4,
+    'the old rule counted from the preamble — this is the discriminating pair');
+});
+
+test('the ordinary export counts the same under both rules', () => {
+  // The shipped fixture has a preamble that does NOT name the column, which is
+  // why the substring rule survived this long. Both answers agree here, and
+  // that is the point: the fix is not a change of answer on real input.
+  const text = fixture('Connections.csv');
+  assert.equal(countFrom(text, 'First Name'), 2);
+  assert.equal(countFromSubstring(text, 'First Name'), 2);
+});
+
+// A PICK IS ONE ACTION: IT SUCCEEDS WHOLE OR IT CHANGES NOTHING ON DISK.
+//
+// The doc comment above acceptLinkedInFiles has said that for a while; the
+// swap loop did not implement it. It was per-file `removeItem(destination)`
+// then `moveItem`, which has a window with NEITHER file at the destination —
+// a crash there destroys an export the owner had while the replacement is
+// still named `.importing` — and no way to put anything back when the second
+// file of a multi-select fails. Connections.csv new, messages.csv old.
+test('the swap is atomic per file and undone as a whole', () => {
+  const swap = accept.slice(accept.indexOf('var copied: [String] = []'));
+  assert.ok(swap, 'the swap loop was not found');
+  assert.match(swap, /fm\.replaceItemAt\(\s*\n?\s*entry\.destination, withItemAt: entry\.temporary/u,
+    'replaceItemAt is the atomic primitive; remove-then-move is not a swap');
+  assert.doesNotMatch(swap, /removeItem\(at: entry\.destination\)[\s\S]{0,120}moveItem\(at: entry\.temporary/u,
+    'the remove-then-move window is back');
+  // The displaced file is kept beside its destination so a failure on a LATER
+  // file can put this one back.
+  assert.match(swap, /backupItemName: backupName/u);
+  assert.match(swap, /\.withoutDeletingBackupItem/u);
+  assert.match(swap, /undoSwapped\(\)/u, 'a failure must restore what has already been swapped');
+  assert.match(swap, /dropBackups\(\)/u, 'and a success must not leave .previous files lying around');
+  // The undo never deletes the backup without putting it back: at that point it
+  // is the owner's only copy of the export this pick displaced.
+  const undo = /let undoSwapped = \{([\s\S]*?)\n {4}\}/u.exec(swap)?.[1];
+  assert.ok(undo, 'undoSwapped was not found');
+  assert.doesNotMatch(undo, /removeItem\(at: backup\)/u);
+  assert.match(undo, /moveItem\(at: backup, to: entry\.destination\)/u,
+    'the fallback path puts the backup back by hand');
+});
+
+test('the atomicity the comment claims is the atomicity the code has', () => {
+  const doc = /\/\/\/ Check every picked file[\s\S]*?\n  private func acceptLinkedInFiles/u.exec(bridge)?.[0];
+  assert.ok(doc, 'the acceptLinkedInFiles doc comment was not found');
+  assert.match(doc, /succeeds whole or it changes nothing on disk/u);
+  // The claim now names the mechanism, so the next reader can check it in one
+  // step rather than believing a sentence.
+  assert.match(doc, /replaceItemAt/u);
+  assert.match(doc, /previous/u, 'and says what happens to the file it displaced');
+  assert.doesNotMatch(doc, /renamed\s*\n?\s*\/\/\/ only once/u);
 });
 
 test('the reader is started, with its config, on the main queue', () => {
@@ -258,7 +368,15 @@ test('the header is matched as a field, not as a substring of the file', () => {
     'a substring of the first 4 KB is not a column');
   const kindOf = /private static func linkedInKind\(of head: String\)[\s\S]*?\n {2}\}/u.exec(bridge)?.[0];
   assert.ok(kindOf, 'linkedInKind(of:) not found — the exact-field rule has to live somewhere');
-  assert.match(kindOf, /trimmingCharacters/u, 'fields are trimmed the way csv.mjs trims them');
+  // The trim moved into csvFields(), which countRows() now shares. Follow it
+  // there rather than dropping the assertion: BOM and whitespace handling is
+  // what makes "the same rule" the same rule.
+  assert.match(kindOf, /csvFields\(row\)/u);
+  const fieldsOf = /private static func csvFields\(_ row: \[String\]\) -> Set<String> \{[\s\S]*?\n {2}\}/u
+    .exec(bridge)?.[0];
+  assert.ok(fieldsOf, 'csvFields() not found');
+  assert.match(fieldsOf, /trimmingCharacters\(in: csvFieldTrim\)/u,
+    'fields are trimmed the way csv.mjs trims them, BOM included');
   assert.match(kindOf, /require/u, 'and the second column is required');
   // A column named "First Name (Legal)" must not satisfy it.
   assert.equal(classify('First Name (Legal),Last Name,URL\nA,B,C\n'), null);
