@@ -812,6 +812,45 @@ test('switching mode serves that mode\'s queued card without writing a new batch
   });
 });
 
+// SERVED MODE IS PROVENANCE, NOT POLICY (round-5 finding 10).
+//
+// `mode` says what the owner is on; `servedMode` says which mode produced the
+// card in their hand, and reconnect.js prefers servedMode over mode precisely
+// because the card is the truthful thing to light up. Filling servedMode in
+// from the config when the card carries none makes the route assert a
+// provenance it does not have -- and it asserts exactly the value that makes a
+// panel comparing the two conclude the card already matches the picker.
+test('servedMode stays null for a card that records no mode, while mode still answers', async () => {
+  // The failing input: a reconnect card produced before any mode was ever
+  // recorded (STUB_CARDS carry no evidence.mode, which is also the shape of
+  // every Owe card) on an install whose CONFIG says founder. rel.mode is unset
+  // -- nobody has posted one in this process -- so the card still serves.
+  await withServer(async ({ call }) => {
+    assert.equal((await (await call('POST', '/admin/relationship/refresh')).json()).started, true);
+    await settle();
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(out.card.kind, 'reconnect');
+    assert.equal(out.card.personKey, 'name:lapsed colleague');
+    assert.equal(out.mode, 'founder', 'the config is what the owner is on');
+    assert.equal(out.servedMode, null,
+      'and the card cannot claim it was produced under that, because it was produced under nothing');
+  }, { relationshipProducerConfig: { producer: 'matcher', mode: 'founder' } });
+});
+
+test('servedMode names the mode a card WAS produced under', async () => {
+  // The counterweight: when the batch records a mode, that is the answer, and
+  // it is the card's own rather than the process's or the config's.
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedReconnectCandidateMode(db, 'name:served founder', 'Served Founder', now, ['founder']);
+    await call('POST', '/admin/relationship/mode', { mode: 'founder' });
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(out.card.personKey, 'name:served founder');
+    assert.equal(out.servedMode, 'founder');
+    assert.equal(out.mode, 'founder');
+  });
+});
+
 test('a mode with an empty queue refills once and is throttled after; a different mode is unaffected', async () => {
   await withEligibilityServer(async ({ call, db }) => {
     // Nobody is eligible for reconnect in any mode: every refill attempt for

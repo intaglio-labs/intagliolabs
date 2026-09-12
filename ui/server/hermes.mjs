@@ -3235,6 +3235,50 @@ function ownerLoadOptions(policy) {
   return policy?.ownerConfigPath === undefined ? {} : { configPath: policy.ownerConfigPath };
 }
 
+// THE OWNER'S CONFIG, PARSED ONCE PER VERSION OF THE FILE (round-5 finding 18).
+//
+// relationshipCap and relationshipProducerConfig each opened, read and parsed
+// config.json on every call, and between them they are called from five
+// branches of GET /admin/relationship/card -- a route the panel polls. That is
+// several synchronous reads of the same file per request, on the one thread
+// that also serves everything else.
+//
+// Memoised on the file's identity rather than for a duration, because the
+// value has to change the instant it changes: POST /admin/relationship/mode
+// writes this file and the very next card request must serve the new mode
+// (round-4 finding 1). stat is one syscall against read + parse, and the stamp
+// is mtime in NANOseconds plus size, inode and device -- mtimeMs alone is
+// millisecond-grained, and a write landing in the same millisecond as the read
+// that cached it is exactly the mode route's shape.
+//
+// Keyed by path because the tests point `policy.ownerConfigPath` at their own
+// tmpdir; the map is cleared rather than grown when a run accumulates paths.
+const ownerConfigCache = new Map();
+const OWNER_CONFIG_CACHE_MAX = 32;
+
+function readOwnerConfig(policy) {
+  const path = ownerConfigFile(policy);
+  let stamp;
+  try {
+    const st = statSync(path, { bigint: true });
+    stamp = `${st.mtimeNs}:${st.size}:${st.ino}:${st.dev}`;
+  } catch {
+    ownerConfigCache.delete(path);
+    return null; // no file is the same answer it has always been: no config
+  }
+  const hit = ownerConfigCache.get(path);
+  if (hit !== undefined && hit.stamp === stamp) return hit.cfg;
+  let cfg = null;
+  try {
+    cfg = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    cfg = null; // an unparseable config reads as no config, as it did before
+  }
+  if (ownerConfigCache.size >= OWNER_CONFIG_CACHE_MAX) ownerConfigCache.clear();
+  ownerConfigCache.set(path, { stamp, cfg });
+  return cfg;
+}
+
 // The global cap comes from the owner's config (relationshipMemory.capPerDay)
 // or a start() override for tests. No config means no cards -- fail closed,
 // per the step-4 rule: thresholds are the owner's or the gates artifact's to
@@ -3244,11 +3288,8 @@ function relationshipCap(policy) {
   // EXPLICIT no-cap -- the fail-closed scenario -- and tests pass it to stay
   // isolated from whatever config the machine they run on happens to carry.
   if (policy.relationshipCap !== undefined) return policy.relationshipCap;
-  try {
-    const cfg = JSON.parse(readFileSync(ownerConfigFile(policy), 'utf8'));
-    const n = cfg?.relationshipMemory?.capPerDay;
-    if (Number.isInteger(n) && n > 0) return { max: n, windowMs: 86_400_000 };
-  } catch {}
+  const n = readOwnerConfig(policy)?.relationshipMemory?.capPerDay;
+  if (Number.isInteger(n) && n > 0) return { max: n, windowMs: 86_400_000 };
   return null;
 }
 
@@ -3260,17 +3301,13 @@ function relationshipCap(policy) {
 // the safe default for an owner who has never touched this key.
 function relationshipProducerConfig(policy) {
   if (policy.relationshipProducerConfig !== undefined) return policy.relationshipProducerConfig;
-  try {
-    const cfg = JSON.parse(readFileSync(ownerConfigFile(policy), 'utf8'));
-    const producer = cfg?.relationshipMemory?.producer;
-    const mode = cfg?.relationshipMemory?.mode;
-    return {
-      producer: producer === 'eligibility' ? 'eligibility' : 'matcher',
-      mode: RELATIONSHIP_MODES.includes(mode) ? mode : 'any',
-    };
-  } catch {
-    return { producer: 'matcher', mode: 'any' };
-  }
+  const cfg = readOwnerConfig(policy);
+  const producer = cfg?.relationshipMemory?.producer;
+  const mode = cfg?.relationshipMemory?.mode;
+  return {
+    producer: producer === 'eligibility' ? 'eligibility' : 'matcher',
+    mode: RELATIONSHIP_MODES.includes(mode) ? mode : 'any',
+  };
 }
 
 // THE MODE THE OWNER IS ON, for every route that REPORTS one (round-4
@@ -4215,7 +4252,16 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         drafts = [];
       }
       send(res, 200, { card: { ...card, quote, sentence, left, leftTone, who: page.sections.who?.text ?? null, page, changed, drafts },
-        servedMode: card.kind === 'reconnect' ? (card.evidence?.mode ?? relationshipMode(rel, policy)) : null,
+        // PROVENANCE, NOT POLICY (round-5 finding 10). `servedMode` answers
+        // "which mode produced the card in your hand", and the only thing that
+        // knows is the batch the card came out of. A card produced before any
+        // mode was ever recorded has no answer, and `null` is that answer: the
+        // config fallback would have this route assert that an unlabelled card
+        // was produced under whatever the picker says today, so a panel
+        // comparing the two to decide whether a refresh is needed would
+        // conclude the card already matches. `mode` on the next line is the
+        // one that means "what the owner is on", and it keeps the fallback.
+        servedMode: card.kind === 'reconnect' ? (card.evidence?.mode ?? null) : null,
         mode: relationshipMode(rel, policy),
         // The card asked for is gone; this is the next one. A reason BESIDE a
         // non-null card, which no other branch of this route produces.

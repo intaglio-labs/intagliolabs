@@ -22,7 +22,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -486,5 +486,55 @@ test('onboarding progress does not warn about an absent projection table', async
       [],
       'an absent projection table is the same exemption the sibling catch already makes'
     );
+  });
+});
+
+// THE CONFIG IS PARSED ONCE PER VERSION OF THE FILE, NOT ONCE PER CALL
+// (round-5 finding 18).
+//
+// relationshipCap and relationshipProducerConfig each read and parsed
+// config.json on every call, from five branches of a route the panel polls.
+// Memoising them is only safe if the memo dies the instant the file changes,
+// and the file changes from inside this very process: POST
+// /admin/relationship/mode writes it and the next GET must serve the new mode.
+//
+// So the risk the cache introduces is staleness, and that is what this pins --
+// including back-to-back rewrites, which is where a cache stamped with
+// millisecond-grained mtime alone would hand back the previous parse.
+test('a config rewritten under the running server is seen by the very next request', async () => {
+  await withHome(async ({ home, call }) => {
+    writeFileSync(configPathIn(home), '{}\n');
+    const empty = await (await call('GET', '/admin/relationship/card?peek=1')).json();
+    assert.equal(empty.reason, 'no-cap-configured', 'no cap in the file is no cap');
+    assert.equal(empty.mode, 'any', 'and no mode in the file is the default mode');
+
+    // Written the way the daemon, an editor, or a restore writes it: straight
+    // over the file, with no route involved.
+    for (const mode of ['founder', 'investor']) {
+      writeFileSync(configPathIn(home), JSON.stringify({
+        relationshipMemory: { capPerDay: 1, mode, producer: 'eligibility' },
+      }));
+      const out = await (await call('GET', '/admin/relationship/card?peek=1')).json();
+      assert.equal(out.mode, mode, `the ${mode} write is visible to the next request`);
+      assert.notEqual(out.reason, 'no-cap-configured', 'and so is the cap beside it');
+    }
+
+    // Back-to-back, no awaits between the writes: two versions of the file
+    // inside the same millisecond, and the second one is the one that counts.
+    writeFileSync(configPathIn(home), JSON.stringify({
+      relationshipMemory: { capPerDay: 1, mode: 'any', producer: 'eligibility' },
+    }));
+    writeFileSync(configPathIn(home), JSON.stringify({
+      relationshipMemory: { capPerDay: 1, mode: 'founder', producer: 'eligibility' },
+    }));
+    const last = await (await call('GET', '/admin/relationship/card?peek=1')).json();
+    assert.equal(last.mode, 'founder', 'the newest version of the file is the one that answers');
+
+    // And a file that goes away goes back to answering nothing, rather than
+    // to the last thing the cache happened to hold.
+    rmSync(configPathIn(home));
+    const gone = await (await call('GET', '/admin/relationship/card?peek=1')).json();
+    assert.equal(gone.reason, 'no-cap-configured');
+    assert.equal(gone.mode, 'any');
   });
 });

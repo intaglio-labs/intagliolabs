@@ -225,3 +225,54 @@ test('the canonical shape still carries its own install, so existing callers are
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+// A PATH IS A PLACE, NOT A STRING (round-5 finding 17).
+//
+// The test above compares the install rebuilt from the config path against the
+// config path -- and both the rebuilding and the comparison used to be done on
+// the raw string. Every spelling below names exactly the canonical file and
+// failed one or both, and the failure is silent: zero Google grants, which is
+// to say none of the owner's own addresses, on an install the caller named
+// correctly.
+test('a canonical-but-differently-spelled config path still names its install', () => {
+  const home = mkdtempSync(join(tmpdir(), 'hazlie-owner-spelling-'));
+  try {
+    grantAt(home, 'owner@example.test');
+    mkdirSync(join(home, '.hazlie', 'connectors'), { recursive: true, mode: 0o700 });
+    writeFileSync(ownerConfigPath(home), '{}', { mode: 0o600 });
+
+    // Built by hand rather than with join(), which would normalise them away
+    // before loadOwner ever saw them. Each is what some caller actually
+    // produces: a concatenated prefix, a `./` from a relative resolve, a `..`
+    // from walking up out of a sibling directory.
+    const spellings = [
+      `${home}/.hazlie/connectors//config.json`,
+      `${home}/.hazlie/connectors/./config.json`,
+      `${home}/.hazlie/connectors/../connectors/config.json`,
+      `${home}/./.hazlie/connectors/config.json`,
+      `${home}//.hazlie/connectors/config.json`,
+    ];
+    for (const configPath of spellings) {
+      assert.equal(loadOwner({ configPath }).addresses.has('owner@example.test'), true,
+        `${configPath} is the canonical config file, so its install's grants count`);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a path that names no install is still refused after normalisation', () => {
+  // The counterweight: normalising must not turn "we cannot tell which install
+  // this is" into a yes. A bare tmpdir config still contributes nothing --
+  // never the running machine's grants.
+  const elsewhere = mkdtempSync(join(tmpdir(), 'hazlie-owner-nameless-2-'));
+  try {
+    const configPath = `${elsewhere}/./config.json`;
+    writeFileSync(join(elsewhere, 'config.json'), JSON.stringify({ selfName: 'Owner' }), { mode: 0o600 });
+    const owner = loadOwner({ configPath });
+    assert.deepEqual([...owner.addresses], []);
+    assert.deepEqual(owner.names, ['Owner']);
+  } finally {
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+});

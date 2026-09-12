@@ -13,9 +13,11 @@
 // legacy `mail.accounts[].user` array, and the `ownerEmails` aliases the owner
 // listed by hand. Nothing is inferred from the corpus.
 
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { listGoogleAccounts } from '../../../connectors/lib/googleAccounts.mjs';
 
 const RELATIONSHIP_ROLES = new Set(['friend', 'business', 'romantic', 'family']);
@@ -58,10 +60,41 @@ function emailsIn(identifiers) {
 // by rebuilding it and comparing. Anything else has named no install, and the
 // honest answer for an install we cannot name is NO grants -- never the
 // running machine's.
+//
+// THE COMPARISON IS BETWEEN PLACES, NOT BETWEEN STRINGS (round-5 finding 17).
+//
+// Both halves of the test were done on the raw string: three dirname hops off
+// the path as given, then `===` against the path as given. A path can name the
+// canonical install and still fail both -- a doubled slash, a `.` or `..`
+// segment, a symlinked home, or a tmpdir handed over as /var/... and rebuilt
+// as /private/var/..., since /var is itself a symlink on macOS. And the hops
+// are the worse half: `.hazlie/connectors/./config.json` hops to the
+// GRANDPARENT of the install, so no comparison could have rescued it.
+//
+// Failing here is not a smaller answer, it is a silently empty one: zero
+// Google grants, i.e. none of the owner's own addresses, on a config file that
+// named the install perfectly well.
+//
+// So canonicalise FIRST and hop the canonical path. realpath on the DIRECTORY
+// plus the basename, rather than on the whole path, because the config file
+// itself need not exist yet -- a fresh install is exactly the case where it
+// does not -- while the directory holding it usually does. A path that cannot
+// be resolved at all falls back to resolve(), which still settles the slashes
+// and the dot segments.
+function canonicalPath(path) {
+  const absolute = resolve(path);
+  try {
+    return join(realpathSync(dirname(absolute)), basename(absolute));
+  } catch {
+    return absolute;
+  }
+}
+
 function grantsHomeFor({ home, homeGiven, configPath }) {
   if (homeGiven || configPath === null) return home;
-  const candidate = dirname(dirname(dirname(configPath)));
-  return ownerConfigPath(candidate) === configPath ? candidate : null;
+  const canonical = canonicalPath(configPath);
+  const candidate = dirname(dirname(dirname(canonical)));
+  return canonicalPath(ownerConfigPath(candidate)) === canonical ? candidate : null;
 }
 
 export function loadOwner(options = {}) {
