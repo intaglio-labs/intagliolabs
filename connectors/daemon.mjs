@@ -516,6 +516,19 @@ const FIRST_RUN_STAGGER_MS = 10_000;
 // while the source stays visible, stays classified, and still gets its history
 // slice.
 export const FORWARD_BUDGET_MS = 120_000;
+// HOW MANY CONSECUTIVE needs() THROWS BEFORE A SOURCE LEAVES THE YEARLY
+// BARRIER. Three, because the throws this absorbs are momentary -- a token
+// file being rewritten, a store locked by a backup -- while the thing it
+// prevents is permanent: classifying a source inactive and then active again
+// rewinds the shared walk to the current year for EVERY source. Three polling
+// intervals of a stalled backfill is the price of not oscillating.
+export const NEEDS_FAILURE_TOLERANCE = 3;
+// TODO: only mail reads ctx.deadline. matrix's forward pass is the other one
+// that can run for many minutes, and while it does it is absent from the
+// activity queue and reads as unscheduled -- the same symptom this budget was
+// added for. It is registry-disabled on every default install, which is why it
+// is a note rather than a change.
+
 
 function configError(message) {
   return new Error(`config.json: ${message}`);
@@ -899,6 +912,27 @@ export function createDaemon({
   // different from "ready": an unevaluated source is shown rather than hidden, so
   // a needs() that is slow or throws can never silently empty the queue.
   const notReady = new Map();
+  // CONSECUTIVE needs() THROWS PER SOURCE, and the reason there is a count at
+  // all rather than a verdict.
+  //
+  // A throwing needs() cannot be classified as "inactive" on the spot. It is
+  // the same call classify(name, true) later reads as a RE-ACTIVATION, and
+  // that rewinds the shared yearly walk: wasInactive deletes COMPLETE, sets
+  // the year back to the CURRENT one and reopens its barriers, for every
+  // source. So a token file being rewritten under a walk at 2015 -- a throw
+  // that lasts one tick -- would reset everybody to 2026, every time it
+  // happened, and the backfill would never reach the older years. Trading a
+  // stall for an oscillation is the worse trade: an oscillation is permanent.
+  //
+  // A source that FLAPS therefore keeps its place: below the tolerance the
+  // barrier is untouched, exactly as it was before the classification existed,
+  // and the walk simply waits. Only a source that fails NEEDS_FAILURE_TOLERANCE
+  // ticks in a row is genuinely unavailable, and only then does it leave the
+  // barrier so advance() can move the year without it -- which is the deadlock
+  // the classification was added to break. The cost of the tolerance is at
+  // most three polling intervals of a stalled backfill; the cost of getting it
+  // wrong in the other direction is a backfill that never finishes.
+  const needsFailures = new Map();
   let stopped = false;
   const peopleBarrierEnabled = typeof completePeopleYear === 'function'
     && typeof ingestOpts?.tokenFile === 'string';
@@ -1216,6 +1250,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     // `run.mjs <name> --disable` takes effect at the next tick without
     // bouncing the daemon.
     if (existsSync(disableMarkerPath(source.name))) {
+      needsFailures.delete(source.name);
       yearlyBackfill.classify(source.name, false);
       yearlyBackfill.advance();
       schedulePeopleGate();
@@ -1226,30 +1261,63 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     // it: calendar's Google backend requires OAuth tokens that the local
     // backend has no use for. Sources that ignore the argument are unaffected.
     //
-    // A THROW HERE IS AN ANSWER, NOT AN ESCAPE. This call sat outside every
-    // try in the process: a needs() that threw (an unreadable store, a token
-    // file mid-rewrite) rejected straight past runSource into schedule()'s
-    // catch, which logs and reschedules -- and never classifies. classify() is
-    // reached only from a scheduled source's path, so a roster member whose
-    // needs() keeps throwing is a member nothing will EVER classify, and
-    // advance() waits on it forever: the year never moves for anybody. Treat
-    // it as the answer it is -- this source cannot run, so it is unavailable
-    // for the barrier -- and leave `notReady` alone, because unknown must
-    // still not read to the owner as unprovisioned.
+    // A THROW HERE IS AN ANSWER, NOT AN ESCAPE -- EVENTUALLY. This call sat
+    // outside every try in the process: a needs() that threw (an unreadable
+    // store, a token file mid-rewrite) rejected straight past runSource into
+    // schedule()'s catch, which logs and reschedules -- and never classifies.
+    // classify() is reached only from a scheduled source's path, so a roster
+    // member whose needs() keeps throwing is a member nothing will EVER
+    // classify, and advance() waits on it forever: the year never moves for
+    // anybody.
+    //
+    // But answering on the FIRST throw is the other bug. classify(name, false)
+    // followed by a working tick's classify(name, true) is a re-activation, and
+    // a re-activation rewinds the shared yearly walk to the current year for
+    // every source (see needsFailures above). One flaky tick must not cost the
+    // backfill its progress, so the answer is given only after the tolerance --
+    // until then this is the stall it always was, and the source keeps its
+    // place in the walk.
+    //
+    // `notReady` is CLEARED either way, and deliberately not set: absent from
+    // that map is "not evaluated", which is shown in the activity queue rather
+    // than hidden. Leaving the last answer standing was worse than both -- a
+    // source that was unprovisioned last tick stayed filtered out of the queue
+    // on the strength of a check that no longer runs.
     let missing;
     try {
       missing = await source.needs({ config });
     } catch (error) {
-      yearlyBackfill.classify(source.name, false);
-      yearlyBackfill.advance();
-      schedulePeopleGate();
+      const failures = (needsFailures.get(source.name) ?? 0) + 1;
+      needsFailures.set(source.name, failures);
+      notReady.delete(source.name);
+      if (failures >= NEEDS_FAILURE_TOLERANCE) {
+        yearlyBackfill.classify(source.name, false);
+        yearlyBackfill.advance();
+        schedulePeopleGate();
+      }
+      // AND IT COUNTS AS A RUN THAT FAILED. Without this the run log's last
+      // entry for the source stays its last SUCCESS, so "why has this source
+      // not produced anything since Tuesday" has no answer anywhere the owner
+      // can reach -- the same reason the run.mjs catch below records one.
+      state.recordRun({
+        connector: source.name,
+        startedTs: now(),
+        finishedTs: now(),
+        ok: false,
+        error: safeErrorFingerprint(error),
+      });
       log.warn('source_needs_failed', {
         connector: source.name,
+        failures,
+        // The word the barrier acted on, so the log says whether this throw
+        // moved anything or was absorbed.
+        barrier: failures >= NEEDS_FAILURE_TOLERANCE ? 'unavailable' : 'waiting',
         error: safeErrorFingerprint(error),
       });
       publishWaiting();
       return;
     }
+    needsFailures.delete(source.name);
     if (Array.isArray(missing) && missing.length > 0) {
       yearlyBackfill.classify(source.name, false);
       yearlyBackfill.advance();
@@ -1553,17 +1621,33 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
           yearlyBackfill.classify(source.name, false);
           return;
         }
-        // Same reasoning as runSource's gate: a throwing needs() leaves the
-        // source ABSENT from notReady (unknown must not read as unprovisioned)
-        // but it must still leave the barrier, or advance() waits on a
-        // classification that only a working needs() could ever produce.
+        // Same reasoning as runSource's gate, including the tolerance: a
+        // throwing needs() leaves the source ABSENT from notReady (unknown
+        // must not read as unprovisioned), and it leaves the BARRIER only once
+        // it has thrown often enough to be more than a flap -- a first throw
+        // here simply means the first scheduled tick decides, a second later.
+        //
+        // AND IT IS SAID OUT LOUD. This path runs BEFORE any tick, so it is
+        // the one that answers "why was this source unavailable at startup",
+        // and it used to swallow the error whole: the single diagnostic for
+        // that question did not exist on the path that reaches it first.
         let missing;
         try {
           missing = await source.needs({ config });
-        } catch {
-          yearlyBackfill.classify(source.name, false);
+        } catch (error) {
+          const failures = (needsFailures.get(source.name) ?? 0) + 1;
+          needsFailures.set(source.name, failures);
+          if (failures >= NEEDS_FAILURE_TOLERANCE) yearlyBackfill.classify(source.name, false);
+          log.warn('source_needs_failed', {
+            connector: source.name,
+            failures,
+            barrier: failures >= NEEDS_FAILURE_TOLERANCE ? 'unavailable' : 'waiting',
+            at: 'startup',
+            error: safeErrorFingerprint(error),
+          });
           return;
         }
+        needsFailures.delete(source.name);
         if (Array.isArray(missing) && missing.length > 0) {
           notReady.set(source.name, missing);
           yearlyBackfill.classify(source.name, false);

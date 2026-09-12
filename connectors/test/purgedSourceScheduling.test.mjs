@@ -321,11 +321,15 @@ test('the global reset is a call of its own, and a purge can decline it', (t) =>
 // (b) and a roster member nothing can classify no longer holds the walk
 // ---------------------------------------------------------------------------
 
-test('a history source whose needs() throws does not hold the yearly walk forever', async (t) => {
+test('a history source whose needs() keeps throwing stops holding the yearly walk', async (t) => {
   const dir = sandbox(t);
   const activityPath = join(dir, 'activity.json');
   const instance = daemon.createDaemon({
-    config: { retention: { maintainHour: '03:30' } },
+    // A tick every 50ms, so the tolerance is reached inside a test rather than
+    // inside three quarters of an hour. createDaemon takes the config it is
+    // given; MIN_INTERVAL_S is validateConfig's floor for a config read off
+    // disk, which is not this path.
+    config: { retention: { maintainHour: '03:30' }, intervals: { whatsapp: 0.05, imessage: 0.05 } },
     state: fakeState({
       [`yearly-backfill:connector:imessage:done:${new Date().getFullYear()}`]: '1',
     }),
@@ -350,10 +354,8 @@ test('a history source whose needs() throws does not hold the yearly walk foreve
   });
   try {
     instance.start();
-    // Short of the first source's 1s tick: the walk has to recover from
-    // start()'s classification alone, because a needs() that throws once will
-    // throw on the tick too.
-    await sleep(600);
+    // Long enough for the startup probe plus NEEDS_FAILURE_TOLERANCE ticks.
+    await sleep(1_400);
   } finally {
     instance.stop();
   }
@@ -365,4 +367,151 @@ test('a history source whose needs() throws does not hold the yearly walk foreve
     'the current year is complete for every source that can be classified, so the walk moves on'
   );
   assert.deepEqual(snapshot.backfill, ['imessage']);
+});
+
+// ---------------------------------------------------------------------------
+// (c) ...and a source that merely FLAPS keeps its place in the walk
+// ---------------------------------------------------------------------------
+
+test('a needs() that throws once does not rewind the shared walk to this year', async (t) => {
+  const dir = sandbox(t);
+  const activityPath = join(dir, 'activity.json');
+  const currentYear = new Date().getFullYear();
+  const walkYear = 2015;
+  // A walk well down in the backfill, with both sources finished for the year
+  // they were authorized in. That second part matters: without a current-year
+  // receipt, classify()'s joinedMidBackfill arm rewinds a source that is
+  // simply new, which is a different rule than the one under test.
+  const state = fakeState({
+    'yearly-backfill:year': String(walkYear),
+    [`yearly-backfill:connector:imessage:done:${currentYear}`]: '1',
+    [`yearly-backfill:connector:whatsapp:done:${currentYear}`]: '1',
+  });
+
+  // THE DISCRIMINATING SHAPE: throw once, then answer normally. A daemon that
+  // reads the first throw as "inactive" reads the next tick as a RE-ACTIVATION,
+  // and a re-activation deletes COMPLETE, sets the year to the current one and
+  // reopens its barriers — for every source, not just this one. Under a source
+  // that throws every few ticks (a token file being rewritten) that is not a
+  // stall, it is an oscillation: the walk is dragged back to this year forever
+  // and the older years are never reached.
+  let probes = 0;
+  const instance = daemon.createDaemon({
+    config: { retention: { maintainHour: '03:30' }, intervals: { whatsapp: 0.05, imessage: 0.05 } },
+    state,
+    log: silent,
+    sources: [
+      {
+        name: 'whatsapp',
+        walksHistory: true,
+        needs: async () => {
+          probes += 1;
+          if (probes === 1) throw new Error('token file mid-rewrite');
+          return [];
+        },
+        run: async () => ({}),
+      },
+      { name: 'imessage', walksHistory: true, needs: async () => [], run: async () => ({}) },
+    ],
+    ingestOpts: {},
+    cacheDir: dir,
+    activityPath,
+  });
+  try {
+    instance.start();
+    await sleep(1_200);
+  } finally {
+    instance.stop();
+  }
+
+  assert.ok(probes > 1, 'the source recovered and was probed again');
+  assert.equal(state.getCursor('yearly-backfill:year'), String(walkYear),
+    'one bad probe does not cost the backfill eleven years of progress');
+  assert.equal(state.getCursor('yearly-backfill:complete'), null);
+});
+
+// ---------------------------------------------------------------------------
+// (d) and the answer it gives about itself while it throws
+// ---------------------------------------------------------------------------
+
+test('a needs() throw clears the stale prerequisite answer and records a failed run', async (t) => {
+  const dir = sandbox(t);
+  const activityPath = join(dir, 'activity.json');
+  const runs = [];
+  const state = fakeState({});
+  state.recordRun = (row) => runs.push(row);
+
+  // Unprovisioned first, then unanswerable. `notReady` is a filter on the
+  // activity queue: leaving the old answer standing kept the source hidden
+  // from the queue on the strength of a check that no longer runs, and the
+  // run log's newest entry stayed the last SUCCESS.
+  let probes = 0;
+  const instance = daemon.createDaemon({
+    config: { retention: { maintainHour: '03:30' }, intervals: { whatsapp: 0.05 } },
+    state,
+    log: silent,
+    sources: [
+      {
+        name: 'whatsapp',
+        walksHistory: true,
+        needs: async () => {
+          probes += 1;
+          if (probes <= 2) return ['the WhatsApp store is missing at <path>'];
+          throw new Error('store locked by a backup');
+        },
+        run: async () => ({}),
+      },
+    ],
+    ingestOpts: {},
+    cacheDir: dir,
+    activityPath,
+  });
+  try {
+    instance.start();
+    await sleep(1_300);
+  } finally {
+    instance.stop();
+  }
+
+  assert.ok(probes > 2, 'the source was probed after it started throwing');
+  const snapshot = JSON.parse(readFileSync(activityPath, 'utf8'));
+  assert.ok(
+    (snapshot.queue ?? []).some((entry) => entry.connector === 'whatsapp'),
+    "unknown is shown in the queue, not filtered out by last cycle's answer"
+  );
+  const failed = runs.filter((row) => row.ok === false);
+  assert.ok(failed.length > 0, 'an unanswerable prerequisite check is a run that failed');
+  assert.equal(typeof failed[0].error, 'string');
+});
+
+test('the startup probe says why a source was unavailable before any tick', async (t) => {
+  const dir = sandbox(t);
+  const lines = [];
+  const instance = daemon.createDaemon({
+    config: { retention: { maintainHour: '03:30' } },
+    state: fakeState({}),
+    log: { info() {}, error() {}, warn: (event, fields) => lines.push([event, fields]) },
+    sources: [
+      { name: 'whatsapp', walksHistory: true, needs: async () => { throw new Error('probe failed'); }, run: async () => ({}) },
+    ],
+    ingestOpts: {},
+    cacheDir: dir,
+    activityPath: join(dir, 'activity.json'),
+  });
+  try {
+    instance.start();
+    // SHORT OF THE FIRST TICK (1s + stagger). Only the startup pre-check has
+    // run by now, and it used to swallow the error with a bare catch: the one
+    // diagnostic for "why was this source unavailable at startup" did not
+    // exist on the path that runs first.
+    await sleep(400);
+  } finally {
+    instance.stop();
+  }
+  const failure = lines.find(([event]) => event === 'source_needs_failed');
+  assert.ok(failure, 'the startup probe logs the failure it absorbed');
+  assert.equal(failure[1].connector, 'whatsapp');
+  assert.equal(failure[1].at, 'startup');
+  // NAMES AND COUNTS, like every other line this logger carries.
+  assert.equal(typeof failure[1].error, 'string');
 });
