@@ -139,3 +139,52 @@ test('nothing in the probe reaches a shell', () => {
   assert.doesNotMatch(probe, /launchPath/u);
   assert.match(probe, /process\.executableURL = binary/u);
 });
+
+// THE JOB HAS TO BE HELD, or the screen waits on a callback nobody owns.
+//
+// Every internal callback in ProbeJob is [weak self] — the readability
+// handlers, the termination handler, the timer — which is correct, because the
+// strong path out of a Process' pipe back into the job is what would otherwise
+// keep a settled job alive forever. It also means the ONLY strong reference to
+// a running job is whatever the caller kept. `job.start()`'s own
+// `queue.async { [self] … }` block is not that: it is released the moment the
+// block returns, milliseconds after the spawn, and the job deallocates before
+// its first byte arrives. maybeFinish() never runs, finish is never called,
+// and the flag that guards the spawn is never cleared — so screen 5 sits on
+// "checking whether you already have claude on this Mac…" and every later
+// probe answers `busy` for the life of the process.
+//
+// FrontierRunner.swift keeps the job in `active` for exactly this reason and
+// clears it in its finish closure. This is the same rule, read out of the
+// source rather than trusted.
+test('the running job is held in a static and released when it finishes', () => {
+  assert.match(probe, /private static var activeJob: ProbeJob\?/u,
+    'a running job needs an owner outside start()\'s own async block');
+
+  const run = /static func run\(_ done: @escaping \(\[String: Any\]\) -> Void\) \{([\s\S]*?)\n {2}\}/u
+    .exec(probe)?.[1];
+  assert.ok(run, 'EngineProbe.run() not found');
+
+  // Stored BEFORE the spawn, so nothing can settle against an unheld job.
+  const stored = run.indexOf('activeJob = job');
+  const started = run.indexOf('job.start()');
+  assert.ok(stored > -1, 'the job is never stored');
+  assert.ok(started > -1, 'the job is never started');
+  assert.ok(stored < started, 'the job must be held BEFORE it is started');
+
+  // And released on the way out, or the next probe answers busy forever.
+  assert.match(run, /activeJob = nil/u, 'finish must release the job');
+  const cleared = run.indexOf('activeJob = nil');
+  assert.ok(cleared < stored, 'the release belongs in the finish closure, above the store');
+});
+
+test('busy is reachable only while a real job is alive', () => {
+  const run = /static func run\(_ done: @escaping \(\[String: Any\]\) -> Void\) \{([\s\S]*?)\n {2}\}/u
+    .exec(probe)?.[1];
+  // The guard reads the HELD JOB, not a separate Bool that can outlive it. A
+  // bare flag is what let a deallocated job leave the probe wedged on busy.
+  assert.match(run, /guard activeJob == nil else \{[\s\S]{0,120}"state": "busy"/u,
+    'busy must be decided by the job that is actually alive');
+  assert.doesNotMatch(probe, /private static var running/u,
+    'the separate running flag is what outlived the job it described');
+});

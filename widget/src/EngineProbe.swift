@@ -59,7 +59,22 @@ enum EngineProbe {
   private static let timeoutSeconds = 20
 
   private static let queue = DispatchQueue(label: "io.intaglio.engine-probe")
-  private static var running = false
+  /// THE RUNNING JOB, HELD. Not a Bool, and not nothing.
+  ///
+  /// Every callback inside ProbeJob is `[weak self]`, which is correct — the
+  /// strong path from a Process' pipe back into the job is exactly what would
+  /// keep a settled job alive forever. It also means nothing inside the job
+  /// keeps it alive, and `start()`'s own `queue.async { [self] … }` block is
+  /// released the instant it returns. Without an owner out here the job
+  /// deallocated milliseconds after the spawn, `maybeFinish()` never ran,
+  /// `finish` was never called, and a plain `running` flag stayed true for the
+  /// life of the process — screen 5 waiting forever on a probe that had
+  /// already been collected, every later probe answering `busy`.
+  ///
+  /// So the job itself is the state: holding it is what makes the spawn
+  /// survive, and `busy` is then reachable only while a real one is alive.
+  /// FrontierRunner.swift:54 does the same thing for the same reason.
+  private static var activeJob: ProbeJob?
 
   /// The engine the owner's config currently selects, read back from disk.
   ///
@@ -90,7 +105,7 @@ enum EngineProbe {
       DispatchQueue.main.async { done(out) }
     }
     queue.async {
-      guard !running else {
+      guard activeJob == nil else {
         finish(["state": "busy"])
         return
       }
@@ -98,13 +113,15 @@ enum EngineProbe {
         finish(["state": "missing"])
         return
       }
-      running = true
       let job = ProbeJob(binary: binary) { result in
-        queue.async { running = false }
+        // Released on the serial queue that took it, so the next probe cannot
+        // read a half-cleared slot.
+        queue.async { activeJob = nil }
         var out = result
         out["binary"] = binary.path
         finish(out)
       }
+      activeJob = job
       job.start()
     }
   }
