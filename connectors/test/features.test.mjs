@@ -14,6 +14,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ALL_OFF,
+  readFeatureRegistry,
   CONNECTOR_FEATURE_NAMES,
   DEFAULT_REGISTRY_PATH,
   FEATURE_NAMES,
@@ -242,4 +243,83 @@ test('the startup log carries names only, and marks the optional ones', () => {
 
 test('the registry resolves at the same relative path a bundle would use', () => {
   assert.equal(DEFAULT_REGISTRY_PATH, join(ROOT, 'ops', 'features.json'));
+});
+
+// --- numeric booleans ----------------------------------------------------
+
+// `{"chat": 1}` IS NOT `{"chat": true}`, in either loader.
+//
+// JSON has a boolean type and this file requires it. The app's loader used
+// `value as? Bool`, which accepts NSNumber 1 and 0 — so one override file
+// switched chat ON in the app while the whole override was thrown away here,
+// leaving hermes and the daemon reporting it off. Two processes, one file, two
+// answers. Features.swift now checks CFBooleanGetTypeID; this is the node half
+// of the same rule, said out loud so nobody relaxes it to `!!value`.
+test('a numeric 1 or 0 is not a boolean, and takes the whole override down with it', () => {
+  assert.throws(() => mergeFeatures(ALL_OFF, { chat: 1 }), /feature "chat" must be true or false/u);
+  assert.throws(() => mergeFeatures(ALL_OFF, { chat: 0 }), /feature "chat" must be true or false/u);
+  assert.throws(() => mergeFeatures(ALL_OFF, { connectors: { notes: 1 } }),
+    /connector "notes" must be true, false or "optional"/u);
+  assert.throws(() => mergeFeatures(ALL_OFF, { chat: 'true' }), /feature "chat"/u);
+  // The discriminating half: a real boolean still works, and so does 'optional'.
+  assert.equal(mergeFeatures(ALL_OFF, { chat: true }).chat, true);
+  assert.equal(mergeFeatures(ALL_OFF, { connectors: { notes: true } }).connectors.notes, true);
+  assert.equal(
+    mergeFeatures(ALL_OFF, { connectors: { whatsapp: 'optional' } }).connectors.whatsapp,
+    'optional'
+  );
+
+  // And a rejected override leaves the SHIPPED registry standing, rather than
+  // failing all the way to ALL_OFF.
+  const home = tempHome(JSON.stringify({ chat: 1 }));
+  const problems = [];
+  const features = readFeatures({
+    overridePath: defaultOverridePath(home),
+    onProblem: (reason) => problems.push(reason),
+  });
+  assert.equal(features.chat, false);
+  assert.equal(features.connectors.imessage, true, 'the registry survives its override being wrong');
+  assert.match(problems.join('\n'), /features override ignored: feature "chat"/u);
+});
+
+// --- why the answer is all-off -------------------------------------------
+
+// A MISSING REGISTRY AND A BROKEN ONE ARE BOTH TOTAL OUTAGES, and neither used
+// to be distinguishable downstream from an install where nothing is connected.
+test('the registry says whether it was read, missing, or unreadable', () => {
+  const home = tempHome();
+  const ok = readFeatureRegistry({ overridePath: join(home, 'none.json') });
+  assert.equal(ok.registryState, 'ok');
+  assert.equal(ok.features.connectors.imessage, true);
+
+  const missing = readFeatureRegistry({
+    registryPath: join(home, 'no-such-features.json'),
+    overridePath: join(home, 'none.json'),
+  });
+  assert.equal(missing.registryState, 'missing');
+  assert.deepEqual(missing.features, ALL_OFF, 'and it is still everything off');
+
+  const badPath = join(home, 'broken.json');
+  writeFileSync(badPath, '{"version": 1, "features": {"nonesuch": true}}');
+  const invalid = readFeatureRegistry({
+    registryPath: badPath,
+    overridePath: join(home, 'none.json'),
+  });
+  assert.equal(invalid.registryState, 'invalid');
+  assert.deepEqual(invalid.features, ALL_OFF);
+
+  writeFileSync(badPath, 'not json at all');
+  assert.equal(
+    readFeatureRegistry({ registryPath: badPath, overridePath: join(home, 'none.json') }).registryState,
+    'invalid'
+  );
+
+  // A BAD OVERRIDE IS NOT A BAD REGISTRY. The registry was read; something the
+  // owner wrote was ignored. Reporting that as an outage would send them to
+  // reinstall over a typo in a file they are invited to edit.
+  const withBadOverride = tempHome('{"nonesuch": true}');
+  assert.equal(
+    readFeatureRegistry({ overridePath: defaultOverridePath(withBadOverride) }).registryState,
+    'ok'
+  );
 });

@@ -29,6 +29,15 @@ import {
 } from '../server/hermes.mjs';
 import { refreshPeopleProjection } from '../server/people/projection.mjs';
 
+// HERMETIC /stats. hermes resolves ~/.hazlie/features.json at request time, so
+// the feature assertions below were assertions about the DEVELOPER's override:
+// `{"bridges":true}` there — the escape hatch the registry deliberately offers —
+// turned them red on that machine and nowhere else. 'none' means the shipped
+// ops/features.json and nothing merged over it. It is set at module scope, not
+// inside the test, because the registry sits behind a short TTL cache that an
+// earlier /stats call in this file has already warmed.
+process.env.HAZLIE_FEATURES_OVERRIDE = 'none';
+
 const TEST_LLAMA_KEY = 'a'.repeat(64);
 const TEST_BEARER_TOKEN = 'c'.repeat(64);
 const ALLOWED_ORIGIN = 'http://localhost:8081';

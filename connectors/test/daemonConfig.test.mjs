@@ -1,6 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
+// THIS FILE PINS POLICY, SO IT MUST NOT READ THE DEVELOPER'S MACHINE.
+//
+// daemon.mjs resolves the feature registry at MODULE SCOPE, and the owner
+// override is ~/.hazlie/features.json — so the assertions below on
+// DEFAULT_DISABLED_CONNECTORS and OPTIONAL_CONNECTORS were a function of $HOME.
+// A developer with `{"bridges":true}` in their override saw this file go red
+// for something they had deliberately switched on for an afternoon, and a
+// developer with `{"connectors":{"notes":true}}` saw the dormancy loop fail.
+// 'none' means the shipped ops/features.json and nothing else.
+//
+// Set before the import and therefore before daemon.mjs runs, which is what the
+// dynamic import below is for: a static import is hoisted above this line.
+process.env.HAZLIE_FEATURES_OVERRIDE = 'none';
+const {
   CONNECTOR_HERMES_SOURCE,
   CONNECTOR_NAMES,
   DEFAULT_DISABLED_CONNECTORS,
@@ -10,9 +23,12 @@ import {
   RETENTION_SOURCES,
   sourceRetryDelay,
   validateConfig,
-} from '../daemon.mjs';
-import { msUntilIdleWindow } from '../retain.mjs';
-import { parseArgs, purgeHermesSources } from '../run.mjs';
+} = await import('../daemon.mjs');
+// Dynamic for the same reason, and not only for tidiness: both of these import
+// daemon.mjs themselves, so a static import here would evaluate it — registry
+// and all — before the line above ran.
+const { msUntilIdleWindow } = await import('../retain.mjs');
+const { parseArgs, purgeHermesSources } = await import('../run.mjs');
 
 test('an empty config is valid — every section is optional until its source lands', () => {
   assert.deepEqual(validateConfig({}), {});

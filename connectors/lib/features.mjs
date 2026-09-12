@@ -54,7 +54,20 @@ const here = dirname(fileURLToPath(import.meta.url));
 /// Same relative path in a checkout and inside the app bundle. See the header.
 export const DEFAULT_REGISTRY_PATH = join(here, '..', '..', 'ops', 'features.json');
 
-export function defaultOverridePath(home = homedir()) {
+/// The owner override's path — and the one knob a TEST is allowed to turn.
+///
+/// HAZLIE_FEATURES_OVERRIDE names another file, or the literal 'none' for "no
+/// override at all". Without it, a test that pins what this install ships was
+/// really reading the DEVELOPER's ~/.hazlie/features.json: the daemon reads the
+/// override at module scope and hermes reads it per request, so a local
+/// `{"bridges":true}` turned the policy assertions red on that machine and
+/// nowhere else. The variable belongs HERE rather than in each caller, because
+/// hermes, the daemon and connect all reach the registry through this function
+/// and only one of them is a file a test can edit.
+export function defaultOverridePath(home = homedir(), env = process.env) {
+  const configured = env?.HAZLIE_FEATURES_OVERRIDE;
+  if (configured === 'none') return null;
+  if (typeof configured === 'string' && configured !== '') return configured;
   return join(home, '.hazlie', 'features.json');
 }
 
@@ -138,10 +151,27 @@ export function parseRegistry(text) {
   return mergeFeatures(ALL_OFF, raw.features);
 }
 
-/// The effective set: shipped registry, then the owner override merged over it.
+/// WHY THE REGISTRY IS ALL_OFF, when it is.
+///
+/// 'ok'      — it was read and parsed.
+/// 'missing' — the file is not there. On a shipped app that means a broken
+///             bundle; in a checkout, a deleted ops/features.json.
+/// 'invalid' — it is there and unreadable: bad JSON, wrong version, a key or
+///             value the loader refuses.
+///
+/// Both of the last two resolve to ALL_OFF, which is right — "the file that
+/// says what is on is unreadable" must never resolve to "everything is on" —
+/// and both used to be INDISTINGUISHABLE FROM A CORRECT ALL-OFF INSTALL at
+/// every surface that reads them. The connections shelf drew the same empty
+/// list it draws for "nothing connected", and the only report was one line on
+/// the daemon's stderr. A total product outage deserves a different sentence
+/// than a quiet Tuesday, so the state travels with the set.
+export const REGISTRY_STATES = Object.freeze(['ok', 'missing', 'invalid']);
+
+/// The effective set AND why it is what it is: `{ features, registryState }`.
 /// `onProblem` is called with a one-line reason for anything that had to be
 /// ignored; it never throws out of here.
-export function readFeatures({
+export function readFeatureRegistry({
   registryPath = DEFAULT_REGISTRY_PATH,
   overridePath = defaultOverridePath(),
   onProblem = () => {},
@@ -150,21 +180,35 @@ export function readFeatures({
   try {
     features = parseRegistry(readFileSync(registryPath, 'utf8'));
   } catch (error) {
-    onProblem(`features registry unreadable, everything is off: ${error.message}`);
-    return ALL_OFF;
+    // ENOENT is the bundle being incomplete; anything else is the file being
+    // wrong. Same ALL_OFF answer, different thing to tell the owner.
+    const registryState = error?.code === 'ENOENT' ? 'missing' : 'invalid';
+    onProblem(`features registry ${registryState}, everything is off: ${error.message}`);
+    return { features: ALL_OFF, registryState };
   }
   let overrideText = null;
   try {
+    // A null path is "no override", not a file at "null": HAZLIE_FEATURES_OVERRIDE=none
+    // says so explicitly, and readFileSync(null) throwing into the catch below
+    // would have been the right answer for the wrong reason.
+    if (overridePath === null || overridePath === undefined) {
+      return { features, registryState: 'ok' };
+    }
     overrideText = readFileSync(overridePath, 'utf8');
   } catch {
-    return features; // no override is the normal case, not a problem
+    return { features, registryState: 'ok' }; // no override is the normal case, not a problem
   }
   try {
-    return mergeFeatures(features, JSON.parse(overrideText));
+    return { features: mergeFeatures(features, JSON.parse(overrideText)), registryState: 'ok' };
   } catch (error) {
     onProblem(`features override ignored: ${error.message}`);
-    return features;
+    return { features, registryState: 'ok' };
   }
+}
+
+/// The effective set, for the many callers that only want the answer.
+export function readFeatures(options = {}) {
+  return readFeatureRegistry(options).features;
 }
 
 /// Names only — never the file, never a count that would let a reader guess at
