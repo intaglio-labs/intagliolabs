@@ -86,6 +86,32 @@ test('a JSON number is not a JSON boolean, in the app loader too', () => {
     'a conditional Bool bridge accepts 1 and 0 — that is the whole finding');
 });
 
+// AND `{"version": true}` IS NOT `{"version": 1}` — THE SAME BUG, ONE FIELD UP.
+//
+// jsonBool was applied to every flag and not to the version, and `as? Int` on
+// the NSNumber that JSON `true` bridges to yields 1. So a registry shipped with
+// `"version": true` parsed in the app — full feature set, chat panel and all —
+// while node (`raw?.version !== 1`) threw the file away and answered ALL_OFF:
+// the daemon scheduling nothing and the shelf drawing its red line, on the same
+// Mac, off the same file.
+//
+// Verified out of band the way the flags were, by compiling widget/src/
+// Features.swift against a throwaway main and feeding it each version value:
+// `true` and `false` are refused, `1` and `1.0` are accepted, `"1"` and `2` are
+// refused — and the pre-fix file accepts `true`, which is the finding. node
+// agrees on every one of those, including 1.0.
+test('a JSON boolean is not a version number either', () => {
+  assert.match(features, /static func jsonNumber\(_ value: Any\?\) -> NSNumber\? \{/u,
+    'the version needs the same CFBoolean discrimination the flags have');
+  assert.match(features, /CFGetTypeID\(value as CFTypeRef\) != CFBooleanGetTypeID\(\) else \{ return nil \}/u,
+    'a boolean is refused before the NSNumber bridge can launder it into 1');
+  assert.match(features, /jsonNumber\(object\["version"\]\)\?\.intValue == 1,/u,
+    'and it must be what parseRegistry asks');
+  const parse = features.slice(features.indexOf('static func parseRegistry('));
+  assert.doesNotMatch(parse.slice(0, parse.indexOf('\n  }')), /as\? Int/u,
+    'a conditional Int bridge accepts true — that is the whole finding');
+});
+
 test("a bad owner override is discarded, not fatal, and not a reason to fail open", () => {
   assert.match(features, /features override ignored/u,
     'the reason must reach the log');

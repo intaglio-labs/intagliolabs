@@ -217,7 +217,7 @@ enum Features {
 
   static func parseRegistry(_ data: Data) -> FeatureSet? {
     guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          (object["version"] as? Int) == 1,
+          jsonNumber(object["version"])?.intValue == 1,
           let features = object["features"] as? [String: Any] else { return nil }
     // Start from allOff, so a key the shipped file forgot is OFF rather than
     // inheriting whatever a struct default happened to be.
@@ -236,6 +236,20 @@ enum Features {
   static func jsonBool(_ value: Any) -> Bool? {
     guard CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID() else { return nil }
     return (value as? NSNumber)?.boolValue
+  }
+
+  /// A JSON NUMBER, AND NOT A BOOLEAN WEARING ONE'S CLOTHES. The same NSNumber
+  /// ambiguity as jsonBool, one field further up and pointing the other way:
+  /// `as? Int` on the NSNumber that JSON `true` bridges to yields 1, so
+  /// `{"version": true}` passed this app's version check while node's loader
+  /// (`raw?.version !== 1`) refused the whole file. A registry shipped that way
+  /// meant the daemon at ALL_OFF, scheduling nothing and painting the shelf's
+  /// red line, while the app ran the full feature set — chat panel and all. Two
+  /// processes, one file, opposite answers, which is the exact failure jsonBool
+  /// exists to prevent one field below.
+  static func jsonNumber(_ value: Any?) -> NSNumber? {
+    guard let value, CFGetTypeID(value as CFTypeRef) != CFBooleanGetTypeID() else { return nil }
+    return value as? NSNumber
   }
 
   private struct Rejected: LocalizedError {
