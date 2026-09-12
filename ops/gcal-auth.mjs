@@ -51,11 +51,16 @@
 
 import { createServer } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { lstatSync, readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import { writeFileSync, renameSync, existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import { googleTokensPath, listGoogleAccounts } from '../connectors/lib/googleAccounts.mjs';
+import {
+  DEFAULT_CLIENT,
+  defaultGoogleClient,
+  readGoogleClient,
+} from '../connectors/lib/googleClients.mjs';
 
 const SECRETS_DIR = join(homedir(), '.hazlie', 'secrets');
 // ~~Two fixed filenames.~~ Resolved through connectors/lib/googleClients.mjs
@@ -101,27 +106,12 @@ function fail(msg) {
   process.exit(1);
 }
 
-// Same discipline as hermes readSecretFile and ops/oura-auth.mjs: refuse
-// symlinks, group/other bits, foreign owners and loose parent dirs.
-function readSecret(path, label) {
-  let st;
-  try {
-    st = lstatSync(path);
-  } catch {
-    fail(
-      `${label} missing at ${path}\n` +
-        '  Create an OAuth client first — see the runbook printed by: node ops/gcal-auth.mjs --help'
-    );
-  }
-  if (!st.isFile() || st.isSymbolicLink()) fail(`${label} must be a regular file: ${path}`);
-  if ((st.mode & 0o077) !== 0) fail(`${label} must be 0600: chmod 600 '${path}'`);
-  if (st.uid !== process.getuid()) fail(`${label} must be owned by this user: ${path}`);
-  const dir = lstatSync(dirname(path));
-  if ((dir.mode & 0o777) !== 0o700) fail(`parent of ${label} must be 0700: chmod 700 '${dirname(path)}'`);
-  const value = readFileSync(path, 'utf8').trim();
-  if (!value || value.includes('\n')) fail(`${label} must be one non-empty line`);
-  return value;
-}
+// ~~function readSecret(path, label)~~ — the permission gauntlet (no symlinks,
+// no group/other bits, owner is us, parent 0700) moved wholesale into
+// connectors/lib/secrets.mjs, which is what readGoogleClient goes through. It
+// is not gone, it is shared: two copies of that check is one copy that gets
+// forgotten. The bundled clients staged by widget/build.sh deliberately do NOT
+// pass it, and the registry says why.
 
 // ONE FILE PER ACCOUNT (owner, 2026-08-26: "i need to be able to add multiple
 // mailboxes"). A Google grant authorizes ONE account — one mailbox, one
@@ -223,27 +213,36 @@ working in an hour, so this exits non-zero if one is absent.
   process.exit(0);
 }
 
-// Resolved through the client registry so --client works, and so a legacy
-// install with only the two loose files keeps working untouched: they ARE the
-// client named "default".
+// Resolved through the client registry (connectors/lib/googleClients.mjs), so
+// --client picks a registered pair, a legacy install with only the two loose
+// files keeps working untouched — they ARE the client named "default" — and an
+// install whose only credential is the one shipped in the app bundle can sign
+// in at all. This used to read the two fixed filenames itself, which on a
+// clean machine meant exiting before printing anything, which is what the
+// onboarding button showed the owner: nothing.
+//
+// NO SECRET VALUE REACHES fail(). The registry's errors name paths and missing
+// keys; the credentials themselves are never interpolated into a message that
+// goes to stderr and from there into the connect server's log.
 const chosen = (() => {
-  if (CLIENT_ARG === 'default') {
-    return {
-      id: readSecret(CLIENT_ID_FILE, 'gcal client id'),
-      secret: readSecret(CLIENT_SECRET_FILE, 'gcal client secret'),
-    };
-  }
-  const path = join(SECRETS_DIR, `google-client-${CLIENT_ARG}.json`);
-  if (!existsSync(path)) {
-    fail(`no OAuth client named "${CLIENT_ARG}" at ${path}\n` +
-      '  Register one, or omit --client to use the default pair.');
+  let name = CLIENT_ARG;
+  if (name === DEFAULT_CLIENT) {
+    const picked = defaultGoogleClient();
+    if (!picked) {
+      fail(
+        'no Google OAuth client is installed on this Mac.\n' +
+          `  Register one at ${SECRETS_DIR}/google-client-<name>.json holding\n` +
+          '  {"client_id": "...", "client_secret": "..."} — or see the runbook:\n' +
+          '    node ops/gcal-auth.mjs --help'
+      );
+    }
+    name = picked.name;
   }
   try {
-    const c = JSON.parse(readFileSync(path, 'utf8'));
-    if (!c.client_id || !c.client_secret) fail(`${path} needs client_id and client_secret`);
-    return { id: c.client_id, secret: c.client_secret };
+    const c = readGoogleClient(name);
+    return { id: c.id, secret: c.secret };
   } catch (error) {
-    return fail(`${path} is not readable JSON: ${error.message}`);
+    return fail(`OAuth client "${name}" is not usable: ${error.message}`);
   }
 })();
 const clientId = chosen.id;

@@ -30,7 +30,7 @@ import { PLATFORMS, bridgeStatus, beginCommand, beginLogin, loadPanel, relay } f
 import { bridgeApiResponse } from './lib/bridgeApi.mjs';
 import { decide, fetchPending } from './lib/memory.mjs';
 import { featureSetFor, readStatus, visibleStatusRows } from './lib/status.mjs';
-import { listGoogleClients } from '../connectors/lib/googleClients.mjs';
+import { defaultGoogleClient, listGoogleClients } from '../connectors/lib/googleClients.mjs';
 import { googleProbe } from './lib/googleProbe.mjs';
 import { sameOrigin } from './lib/origin.mjs';
 import { bearerAuthorized, statusResponse } from './lib/statusApi.mjs';
@@ -326,7 +326,19 @@ async function handleRequest(req, res) {
       // argument, and an unregistered name would reach the helper as one.
       // Names are [a-z0-9-] by construction there, but checking membership is
       // the guarantee, not the character class.
-      const asked = typeof body.client === 'string' ? body.client : 'default';
+      //
+      // "default" IS NOT A CLIENT NAME HERE, it is "whichever one this
+      // install should use". On a machine that predates named clients it
+      // still means the legacy pair; on a fresh install whose only credential
+      // is the one widget/build.sh staged into the bundle it means that one.
+      // Resolving it BEFORE the membership check is what stops the button
+      // from spawning a helper that exits without printing — the 502 below is
+      // honest, but it is the answer to a question nobody had to ask.
+      let asked = typeof body.client === 'string' && body.client ? body.client : 'default';
+      if (asked === 'default') {
+        const picked = defaultGoogleClient();
+        if (picked) asked = picked.name;
+      }
       const known = listGoogleClients().some((c) => c.name === asked);
       if (!known && asked !== 'default') {
         send(res, 400, JSON.stringify({ error: `no OAuth client named "${asked}"` }),
