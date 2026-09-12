@@ -22,6 +22,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_CLIENT, listGoogleClients, readGoogleClient } from '../lib/googleClients.mjs';
 
+// Nothing here may read whatever THIS machine holds. A bundled client staged
+// into the checkout's ops/google-clients would otherwise join every listing
+// below; naming a directory that does not exist is what keeps these hermetic.
+const NO_BUNDLE = join(tmpdir(), 'hazlie-tests-no-bundled-clients');
+
 function box(t, { legacy = true, extra = {} } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'gclients-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
@@ -42,7 +47,7 @@ test('the legacy pair IS the client named "default"', (t) => {
   // it, and rewriting a live credential to tidy a filename is how an install
   // stops being able to refresh.
   const home = box(t);
-  const c = readGoogleClient(DEFAULT_CLIENT, { home });
+  const c = readGoogleClient(DEFAULT_CLIENT, { home, bundledDir: NO_BUNDLE });
   assert.equal(c.id, 'LEGACY-ID');
   assert.equal(c.secret, 'LEGACY-SECRET');
 });
@@ -52,23 +57,23 @@ test('a grant with no client field resolves to the legacy pair', (t) => {
   // clients were named carry no `client`, and the pair that issued them is
   // exactly what undefined must resolve to.
   const home = box(t);
-  assert.equal(readGoogleClient(undefined, { home }).id, 'LEGACY-ID');
+  assert.equal(readGoogleClient(undefined, { home, bundledDir: NO_BUNDLE }).id, 'LEGACY-ID');
 });
 
 test('two clients resolve independently', (t) => {
   const home = box(t, { extra: {
     external: { client_id: 'EXT-ID', client_secret: 'EXT-SECRET', label: 'External' },
   } });
-  assert.equal(readGoogleClient('default', { home }).id, 'LEGACY-ID');
-  assert.equal(readGoogleClient('external', { home }).id, 'EXT-ID');
-  assert.equal(readGoogleClient('external', { home }).secret, 'EXT-SECRET');
+  assert.equal(readGoogleClient('default', { home, bundledDir: NO_BUNDLE }).id, 'LEGACY-ID');
+  assert.equal(readGoogleClient('external', { home, bundledDir: NO_BUNDLE }).id, 'EXT-ID');
+  assert.equal(readGoogleClient('external', { home, bundledDir: NO_BUNDLE }).secret, 'EXT-SECRET');
 });
 
 test('both are offered to a UI that must ask which to use', (t) => {
   const home = box(t, { extra: {
     external: { client_id: 'a', client_secret: 'b', label: 'External (any Google account)' },
   } });
-  const names = listGoogleClients({ home });
+  const names = listGoogleClients({ home, bundledDir: NO_BUNDLE });
   assert.deepEqual(names.map((c) => c.name), ['default', 'external']);
   assert.equal(names[1].label, 'External (any Google account)', 'the label is what a person reads');
 });
@@ -77,7 +82,7 @@ test('an install with no legacy pair still lists its registered clients', (t) =>
   const home = box(t, { legacy: false, extra: {
     only: { client_id: 'a', client_secret: 'b' },
   } });
-  const names = listGoogleClients({ home });
+  const names = listGoogleClients({ home, bundledDir: NO_BUNDLE });
   assert.deepEqual(names.map((c) => c.name), ['only']);
   assert.equal(names[0].label, 'only', 'a missing label falls back to the name, not to blank');
 });
@@ -89,12 +94,12 @@ test('a malformed client is skipped, not fatal', (t) => {
     good: { client_id: 'a', client_secret: 'b' },
     broken: { client_id: 'a' },
   } });
-  assert.deepEqual(listGoogleClients({ home }).map((c) => c.name), ['default', 'good']);
+  assert.deepEqual(listGoogleClients({ home, bundledDir: NO_BUNDLE }).map((c) => c.name), ['default', 'good']);
 });
 
 test('an unknown client name throws rather than silently using the wrong one', (t) => {
   // Falling back here would pair a grant with a credential that cannot renew
   // it, and the failure would surface an hour later as a dead mailbox.
   const home = box(t);
-  assert.throws(() => readGoogleClient('nope', { home }));
+  assert.throws(() => readGoogleClient('nope', { home, bundledDir: NO_BUNDLE }));
 });
