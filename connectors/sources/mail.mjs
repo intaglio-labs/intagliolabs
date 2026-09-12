@@ -268,6 +268,29 @@ export function createMailSource({
           historyHasOlder ||= state.getCursor(historyOlderKey(account.email, yearly.year)) === '1';
           continue;
         }
+        // THE FORWARD BUDGET, SHARED ACROSS THE MAILBOXES THAT STILL HAVE TO
+        // RUN THIS PASS.
+        //
+        // The backwards walk takes the run's deadline whole, because it is a
+        // year at a time and every account is walking the same year. The
+        // forward scan cannot: its cap is PER ACCOUNT (2,000 gets), so one
+        // deadline for the whole pass is one deadline the first mailbox spends
+        // in full, every pass, forever — the second and third would never make
+        // a single call on a cold window. An equal slice of whatever is LEFT
+        // gives each account a turn and still returns inside the run's budget.
+        //
+        // A slice bounds pages after the first, not the first: scanWindow's
+        // do-while checks it at page boundaries, so every account gets at least
+        // one page out of every pass however small its slice is. That is
+        // deliberate — it is what makes the walk monotone for EVERY mailbox
+        // rather than only the first — and it is why the pass may exceed the
+        // run's budget by at most one page per account. A page is bounded work
+        // (PAGE_SIZE gets at the pacer's rate); an unbounded pass was the bug.
+        const remaining = accounts.length - accountIndex;
+        const accountDeadline = deadline === null || yearly
+          ? deadline
+          : now() + Math.max(0, Math.floor((deadline - now()) / remaining));
+        const accountOutOfTime = () => accountDeadline !== null && now() >= accountDeadline;
         const { backfillDays, maxBodyBytes, getsPerMinute, historyPagesPerPass } = accountSettings(config, account.email);
         const spacingMs = 60_000 / getsPerMinute;
         // A minimum spacing enforced between every Gmail API call this
@@ -650,7 +673,16 @@ export function createMailSource({
                     ? { from: pageLowest, until: pageHighest }
                     : null,
                 });
-              } while (!capHit && !belowFloor && pageToken && seen < MAX_MESSAGES_PER_ACCOUNT);
+                // THE BUDGET, CHECKED ON A PAGE BOUNDARY — the same place the
+                // backwards walk checks its own, and for the same reason: the
+                // page's ingest, gap and cursor are already persisted, and
+                // `truncated` above has already recorded the hole this stop
+                // leaves behind. Every interleaving still under-claims
+                // coverage, so stopping here costs a re-read at worst.
+              } while (
+                !capHit && !belowFloor && pageToken
+                && seen < MAX_MESSAGES_PER_ACCOUNT && !accountOutOfTime()
+              );
 
               return { landed, truncated: capHit || (!belowFloor && Boolean(pageToken)) };
             };
@@ -721,7 +753,7 @@ export function createMailSource({
             // from `priorGap`: the fresh window's own per-page writes are the
             // authority on what is still missing.
             const gap = fresh.truncated || nullPageSeen ? null : readGap();
-            if (gap !== null && seen < MAX_MESSAGES_PER_ACCOUNT) {
+            if (gap !== null && seen < MAX_MESSAGES_PER_ACCOUNT && !accountOutOfTime()) {
               await scanWindow({
                 // `floor(until/1000) + 1` covers every tie inside `until`'s own
                 // second without widening a second further than that: above

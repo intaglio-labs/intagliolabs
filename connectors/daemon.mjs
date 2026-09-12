@@ -499,6 +499,32 @@ const MIN_INTERVAL_S = 60;
 export const DEFAULT_INTERVAL_S = 900;
 const FIRST_RUN_STAGGER_MS = 10_000;
 
+// AND THE FORWARD PASS GETS ONE TOO, for the reason the history pass got one.
+//
+// "The forward pass is small" held only while every source had a cursor. Delete
+// one mid-life -- a purge, a hand-run DELETE against state.db, a store that
+// reports a new stream -- and the source falls back to its cold-start floor:
+// for mail that is January 1st of the current year, so the window reopens to
+// months of mail and the pass runs to its own per-account cap (2,000 messages
+// at ~90 API calls a minute, ~22 minutes PER MAILBOX) instead of the couple of
+// seconds an ordinary tick costs.
+//
+// Nothing above noticed. runSource() deletes the source from `nextRuns` for the
+// whole call, so an hour-long pass is an hour in which the source is absent
+// from the activity queue and reads as unscheduled; the history slice below is
+// only reached AFTER the forward pass returns, so its year never starts; and an
+// app restart killed the pass before it had logged anything at all. That was
+// the 2026-09-12 stall: mail "missing from the queue" while it was in fact
+// running the whole time.
+//
+// So the forward pass is bounded like the backwards one. A source that pages is
+// expected to check this between pages and return; one that ignores it behaves
+// exactly as before. Generous next to a healthy tick (seconds) and still well
+// inside the polling interval, so a cold window drains over several passes
+// while the source stays visible, stays classified, and still gets its history
+// slice.
+export const FORWARD_BUDGET_MS = 120_000;
+
 function configError(message) {
   return new Error(`config.json: ${message}`);
 }
@@ -1207,7 +1233,31 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     // Config reaches needs() because a source's prerequisites can depend on
     // it: calendar's Google backend requires OAuth tokens that the local
     // backend has no use for. Sources that ignore the argument are unaffected.
-    const missing = await source.needs({ config });
+    //
+    // A THROW HERE IS AN ANSWER, NOT AN ESCAPE. This call sat outside every
+    // try in the process: a needs() that threw (an unreadable store, a token
+    // file mid-rewrite) rejected straight past runSource into schedule()'s
+    // catch, which logs and reschedules -- and never classifies. classify() is
+    // reached only from a scheduled source's path, so a roster member whose
+    // needs() keeps throwing is a member nothing will EVER classify, and
+    // advance() waits on it forever: the year never moves for anybody. Treat
+    // it as the answer it is -- this source cannot run, so it is unavailable
+    // for the barrier -- and leave `notReady` alone, because unknown must
+    // still not read to the owner as unprovisioned.
+    let missing;
+    try {
+      missing = await source.needs({ config });
+    } catch (error) {
+      yearlyBackfill.classify(source.name, false);
+      yearlyBackfill.advance();
+      schedulePeopleGate();
+      log.warn('source_needs_failed', {
+        connector: source.name,
+        error: safeErrorFingerprint(error),
+      });
+      publishWaiting();
+      return;
+    }
     if (Array.isArray(missing) && missing.length > 0) {
       yearlyBackfill.classify(source.name, false);
       yearlyBackfill.advance();
@@ -1239,7 +1289,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     try {
       // The forward pass first, always: what arrived since last time is more
       // urgent than what happened in 2019, and history must never delay it.
-      const forward = (await source.run(makeCtx())) ?? {};
+      const forward = (await source.run(makeCtx({ deadline: now() + FORWARD_BUDGET_MS }))) ?? {};
       if (source.name === 'matrix' && Number.isInteger(forward.historyDiscoveryPending)) {
         observePortalJoinRate(
           state,
@@ -1511,7 +1561,17 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
           yearlyBackfill.classify(source.name, false);
           return;
         }
-        const missing = await source.needs({ config });
+        // Same reasoning as runSource's gate: a throwing needs() leaves the
+        // source ABSENT from notReady (unknown must not read as unprovisioned)
+        // but it must still leave the barrier, or advance() waits on a
+        // classification that only a working needs() could ever produce.
+        let missing;
+        try {
+          missing = await source.needs({ config });
+        } catch {
+          yearlyBackfill.classify(source.name, false);
+          return;
+        }
         if (Array.isArray(missing) && missing.length > 0) {
           notReady.set(source.name, missing);
           yearlyBackfill.classify(source.name, false);
