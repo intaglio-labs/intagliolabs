@@ -16,6 +16,11 @@ dist/
 .hazlie/
 secrets/
 credentials*.json
+# Google OAuth clients staged into the app bundle by widget/build.sh, and the
+# checkout-side directory it reads them into. This repository is PUBLIC: a
+# client id committed here is a Google project handed to whoever clones it.
+ops/google-clients/
+google-client-*.json
 *.pem
 *.key
 *.p12

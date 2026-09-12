@@ -274,6 +274,54 @@ cp ../ops/features.json "$BE/ops/"
 chmod 755 "$BE/ops/prefetch-bridges.sh" \
           "$BE/ops/setup-bridges-native.sh" "$BE/ops/build-libolm.sh" \
           "$BE/ops/build-synapse.sh"
+
+# THE GOOGLE OAUTH CLIENTS THIS BUILD MACHINE HOLDS.
+#
+# Onboarding screen 3's "sign in to google" button spawns ops/gcal-auth.mjs,
+# which needs an OAuth client id and secret. Until now the only place it looked
+# was ~/.hazlie/secrets, which on a machine that has never run this before is an
+# EMPTY DIRECTORY — so on the clean-machine retest (2026-09-12) the helper
+# exited before printing, connect answered 502, and the owner got a button that
+# did nothing. Registering a Google Cloud project is not a step a first run can
+# ask for. So the client ships with the app, exactly as the Telegram pair above
+# does, and connectors/lib/googleClients.mjs reads it when the secrets dir has
+# no file of that name.
+#
+# A DESKTOP CLIENT SECRET IS NOT A SECRET. RFC 8252 §8.5 says a native app
+# cannot keep one; Google issues Desktop credentials on that understanding, and
+# the flow's security is PKCE plus the loopback redirect, both of which this
+# helper uses. What the bundle holds is extractable with `strings` either way.
+#
+# BUT IT STILL MUST NOT BE COMMITTED — this repository is PUBLIC, and a client
+# id in public code is how Telegram bans an api_id (see above) and how a Google
+# project acquires traffic nobody authorised. Hence ops/google-clients/ in
+# .gitignore, and widget/test/google-clients-bundle.test.mjs pinning both this
+# block and that rule.
+#
+# NAMES ONLY IN THE LOG. The file names say which clients shipped, which is the
+# thing a build log has to answer; their contents are never echoed.
+if [ "${HAZLIE_SHIP_GOOGLE_CLIENTS:-1}" = 0 ]; then
+  echo "google clients: staging skipped (HAZLIE_SHIP_GOOGLE_CLIENTS=0)"
+else
+  mkdir -p "$BE/ops/google-clients"
+  GC_STAGED=""
+  for gc in "$HOME"/.hazlie/secrets/google-client-*.json; do
+    # An unmatched glob expands to itself under `set -u`; the -f test is what
+    # turns "no clients on this machine" into a skip rather than a copy error.
+    [ -f "$gc" ] || continue
+    cp "$gc" "$BE/ops/google-clients/"
+    # 0600 in ~/.hazlie, 0644 in the bundle, and deliberately: the installed app
+    # is read by whoever launches it, and a mode the reader cannot satisfy would
+    # make the credential unreadable rather than private.
+    chmod 644 "$BE/ops/google-clients/$(basename "$gc")"
+    GC_STAGED="$GC_STAGED $(basename "$gc")"
+  done
+  if [ -n "$GC_STAGED" ]; then
+    echo "google clients: staged$GC_STAGED"
+  else
+    echo "google clients: none on this machine; first run will ask the owner to register one"
+  fi
+fi
 clone_tree ../bridges "$BE/bridges"
 # The bridge installer needs yq to safely patch third-party YAML templates.
 # Ship the static editor in the app instead of requiring every downloaded-app
