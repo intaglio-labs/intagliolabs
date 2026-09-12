@@ -43,6 +43,11 @@ async function withServer(fn, opts = {}) {
     // path, and the owner's config on a dev Mac may select the eligibility
     // producer. Same reason relationshipCap is pinned above.
     relationshipProducerConfig: { producer: 'matcher', mode: 'any' },
+    // AND ISOLATED FROM THE MACHINE'S CONFIG THE OTHER WAY: the mode route
+    // WRITES that file now (the picker's choice has to survive a restart, which
+    // is what the screen offering it promises). Without this line every mode
+    // post below edits the developer's own ~/.hazlie/connectors/config.json.
+    ownerConfigPath: join(dir, 'config.json'),
     ...opts,
   });
   const base = `http://127.0.0.1:${server.port}`;
@@ -457,6 +462,8 @@ async function withEligibilityServer(fn, opts = {}) {
     relationshipCap: CAP,
     relationshipProducerConfig: { producer: 'eligibility', mode: 'any' },
     peopleProjectionAutoRebuild: false,
+    // See withServer above: the mode route writes the owner's config file.
+    ownerConfigPath: join(dir, 'config.json'),
     ...opts,
   });
   const base = `http://127.0.0.1:${server.port}`;
@@ -640,6 +647,9 @@ test('a restart hydrates BOTH kinds, and recovers rel.mode from the reconnect ba
   const opts = {
     port: 0, dbPath, llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN, relationshipCap: CAP,
     relationshipProducerConfig: { producer: 'eligibility', mode: 'any' },
+    // See withServer above: the mode route writes the owner's config file, so
+    // a restart test that posts a mode needs a config path of its own.
+    ownerConfigPath: join(dir, 'config.json'),
     peopleProjectionAutoRebuild: false,
   };
   const now = Date.now();
@@ -757,7 +767,10 @@ test('POST /admin/relationship/mode: unknown fields/mode 400, no card event of i
 
     const ok = await call('POST', '/admin/relationship/mode', { mode: 'founder' });
     assert.equal(ok.status, 200);
-    assert.deepEqual(await ok.json(), { mode: 'founder' });
+    // `persisted` is the route saying the choice reached the config file as
+    // well as this process -- the mode row's own promise ("your choice is kept
+    // by the reader"). relationship-mode-config.test.mjs reads the file back.
+    assert.deepEqual(await ok.json(), { mode: 'founder', persisted: true });
 
     const events = db.prepare('SELECT COUNT(*) AS n FROM rm_card_event').get();
     assert.equal(events.n, 0, 'switching mode alone records no event of any kind');
@@ -825,6 +838,9 @@ test('hydrate restores all three reconnect modes plus Owe after a restart', asyn
   const opts = {
     port: 0, dbPath, llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN, relationshipCap: CAP,
     relationshipProducerConfig: { producer: 'eligibility', mode: 'any' },
+    // See withServer above: the mode route writes the owner's config file, so
+    // a restart test that posts a mode needs a config path of its own.
+    ownerConfigPath: join(dir, 'config.json'),
     peopleProjectionAutoRebuild: false,
   };
   const now = Date.now();

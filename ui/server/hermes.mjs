@@ -61,8 +61,8 @@ import {
   generalPeopleAnswerCacheInput,
 } from './people/generalSearch.mjs';
 import {
-  RELATIONSHIP_ENGINES, loadOwner, markOwnerPerson, markPersonRole, markPersonSubRoles,
-  setRelationshipEngine,
+  MAX_CAP_PER_DAY, RELATIONSHIP_ENGINES, RELATIONSHIP_MODES, ensureRelationshipCap, loadOwner,
+  markOwnerPerson, markPersonRole, markPersonSubRoles, setRelationshipEngine, setRelationshipMode,
 } from './people/owner.mjs';
 import { SUB_ROLES as SUB_ROLE_VALUES } from './people/subRoles.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
@@ -2371,9 +2371,9 @@ const DECIDE_FIELDS = Object.freeze(['claim_id', 'action', 'reason']);
 const PENDING_PARAMS = Object.freeze(['limit']);
 const RECALL_PARAMS = Object.freeze(['q', 'limit']);
 const RELATIONSHIP_POOL_PARAMS = Object.freeze(['mode', 'includeOffered', 'minDepth', 'includeAnonymous']);
-const RELATIONSHIP_MODES = Object.freeze(['investor', 'founder', 'any']);
 const RELATIONSHIP_MODE_FIELDS = Object.freeze(['mode']);
 const CONFIG_ENGINE_FIELDS = Object.freeze(['engine']);
+const CONFIG_CARD_FIELDS = Object.freeze(['capPerDay']);
 const RELATIONSHIP_PAGE_BUILD_FIELDS = Object.freeze(['personKey', 'engine']);
 const RELATIONSHIP_DRAFT_FIELDS = Object.freeze(['snapshot_id']);
 // The card's own outcome post. Closed like every other admin body (review
@@ -3189,6 +3189,14 @@ function relationshipState(db, policy) {
   return holder.__relationship;
 }
 
+// Where the three config-writing routes below write. Undefined -- production
+// -- means owner.mjs picks ~/.hazlie/connectors/config.json itself; a test
+// passes a path in its own tmpdir. Spread rather than passed as a key, because
+// `{ configPath: undefined }` would override owner.mjs's default with nothing.
+function ownerConfigTarget(policy) {
+  return policy.ownerConfigPath === undefined ? {} : { configPath: policy.ownerConfigPath };
+}
+
 // The global cap comes from the owner's config (relationshipMemory.capPerDay)
 // or a start() override for tests. No config means no cards -- fail closed,
 // per the step-4 rule: thresholds are the owner's or the gates artifact's to
@@ -3510,7 +3518,27 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       throw badRequest(`"mode" must be one of: ${RELATIONSHIP_MODES.join(', ')}`);
     }
     rel.mode = body.mode;
-    send(res, 200, { mode: rel.mode }, cors);
+    // AND KEPT, because the screen that offers this row promises it is: "your
+    // choice is kept by the reader". Before this line the choice lived only in
+    // rel.mode, so the next hermes restart reverted an owner who picked
+    // founders back to the producer config's default and nothing on screen
+    // ever said so. owner.mjs owns the only atomic read-modify-write of the
+    // config file in this repo; the running mode above is what THIS process
+    // serves, the file is what the next one reads.
+    //
+    // A failed write does not fail the request: the mode the owner just picked
+    // is already in effect for this process, and answering 4xx would make the
+    // picker look broken when what actually broke is durability. It is
+    // reported instead, and logged as a type -- no path, no mode text, the
+    // same counts-and-reasons discipline every other log line here keeps.
+    let persisted = true;
+    try {
+      setRelationshipMode({ mode: body.mode, ...ownerConfigTarget(policy) });
+    } catch (error) {
+      persisted = false;
+      console.warn(`relationship mode not persisted (${error?.name ?? 'Error'})`);
+    }
+    send(res, 200, { mode: rel.mode, persisted }, cors);
     return;
   }
 
@@ -3538,7 +3566,40 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     if (!RELATIONSHIP_ENGINES.includes(body?.engine)) {
       throw badRequest(`"engine" must be one of: ${RELATIONSHIP_ENGINES.join(', ')}`);
     }
-    const result = setRelationshipEngine({ engine: body.engine });
+    const result = setRelationshipEngine({ engine: body.engine, ...ownerConfigTarget(policy) });
+    send(res, 200, { state: 'ok', ...result }, cors);
+    return;
+  }
+
+  // THE CAP THAT LETS A CARD EXIST AT ALL, RECORDED FROM ONBOARDING.
+  //
+  // relationshipCap (above) fails closed: no relationshipMemory.capPerDay, no
+  // cards, ever, because thresholds are the owner's to set and never a default
+  // invented by this server. That rule is right and it stays. What was missing
+  // is anything that lets the OWNER set it: a fresh install's config file is
+  // `{}` and the peek route answered 'no-cap-configured' forever.
+  //
+  // So the write is an onboarding action, not a server default. Screen 1 says
+  // "one person a day" and "one card a day" above the button that starts the
+  // reader; Bridge posts here when that button is pressed, and this records
+  // the number the owner was shown. ensureRelationshipCap writes ONLY when the
+  // key is absent, so an owner who has since chosen a different number -- or
+  // chosen a 0 that means no cards -- is never overwritten by a later run of
+  // the flow.
+  //
+  // Bearer-only and closed-field, like /admin/config/engine beside it: the
+  // page asks hermes, and never touches the config file itself.
+  if (req.method === 'POST' && url.pathname === '/admin/config/card') {
+    if (!hasJsonMediaType(req)) {
+      send(res, 415, { error: 'content-type must be application/json' }, cors);
+      return;
+    }
+    const body = await readJson(req);
+    assertClosedFields(body, CONFIG_CARD_FIELDS);
+    if (!Number.isInteger(body?.capPerDay) || body.capPerDay < 1 || body.capPerDay > MAX_CAP_PER_DAY) {
+      throw badRequest(`"capPerDay" must be an integer from 1 through ${MAX_CAP_PER_DAY}`);
+    }
+    const result = ensureRelationshipCap({ capPerDay: body.capPerDay, ...ownerConfigTarget(policy) });
     send(res, 200, { state: 'ok', ...result }, cors);
     return;
   }
@@ -6862,6 +6923,17 @@ export async function start({
   relationshipMatcher,
   relationshipCap,
   relationshipProducerConfig,
+  // Test seam for the three routes that WRITE the owner's config file (the
+  // engine opt-in, the mode, the daily cap). Production leaves it undefined
+  // and owner.mjs resolves ~/.hazlie/connectors/config.json itself.
+  //
+  // It exists because the alternative bit a real machine. The mode route began
+  // persisting what it used to only hold in memory, and every route test that
+  // had ever posted a mode -- none of which redirect HOME, because until then
+  // the route wrote nothing -- immediately started editing the developer's own
+  // config. A test that reaches outside its tmpdir is a test that can only be
+  // noticed by accident.
+  ownerConfigPath: ownerConfigPathOverride,
   // Test seam for the person-page builder: a pre-built `{name, complete}`
   // engine, so a route test never spawns the real claude CLI or reaches
   // loopback llama-server. Production leaves this undefined and
@@ -6981,6 +7053,7 @@ export async function start({
         relationshipMatcher,
         relationshipCap,
         relationshipProducerConfig,
+        ownerConfigPath: ownerConfigPathOverride,
         relationshipMemoryEngine: relationshipMemoryEngineOverride,
         relationshipLookupEngine: relationshipLookupEngineOverride,
         relationshipHolder,

@@ -46,6 +46,9 @@ async function withCardServer(fn, opts = {}) {
     // background work these tests are not about, and an explicit null keeps
     // the machine's own config out of the run.
     relationshipMemoryEngine: null,
+    // The mode route writes the owner's config file; without a path of its own
+    // a mode post from here edits the developer's ~/.hazlie config.
+    ownerConfigPath: join(dir, 'config.json'),
     ...opts,
   });
   const base = `http://127.0.0.1:${server.port}`;

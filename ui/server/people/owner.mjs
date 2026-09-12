@@ -261,6 +261,20 @@ export function markPersonSubRoles({ key, subRoles, configPath = ownerConfigPath
 // does not descend into it, so this write cannot stop the connectors from
 // starting. ui/test/onboarding-progress.test.mjs round-trips the written file
 // through validateConfig to keep that true.
+// The relationshipMemory section as a plain object, or null when there is
+// none. Shared by the three setters below because each of them must preserve
+// every key it does not own: capPerDay gates the card, engine decides whether
+// excerpts leave the Mac, and mode picks the queue -- losing one while writing
+// another would switch a feature off as a side effect of setting an unrelated
+// one.
+function relationshipMemorySection(raw) {
+  return raw.relationshipMemory
+    && typeof raw.relationshipMemory === 'object'
+    && !Array.isArray(raw.relationshipMemory)
+    ? raw.relationshipMemory
+    : null;
+}
+
 export const RELATIONSHIP_ENGINES = Object.freeze(['claude-cli', 'local']);
 
 export function setRelationshipEngine({ engine, configPath = ownerConfigPath() } = {}) {
@@ -268,11 +282,7 @@ export function setRelationshipEngine({ engine, configPath = ownerConfigPath() }
     throw new Error(`engine must be one of: ${RELATIONSHIP_ENGINES.join(', ')}`);
   }
   const raw = readMutableConfig(configPath);
-  const existing = raw.relationshipMemory
-    && typeof raw.relationshipMemory === 'object'
-    && !Array.isArray(raw.relationshipMemory)
-    ? raw.relationshipMemory
-    : null;
+  const existing = relationshipMemorySection(raw);
   if (engine === 'local') {
     // Nothing to opt out OF: no section, or no key in it. Do not create one
     // just to record an absence -- an empty relationshipMemory object written
@@ -296,4 +306,77 @@ export function setRelationshipEngine({ engine, configPath = ownerConfigPath() }
   ]);
   writeMutableConfig(configPath, raw);
   return { engine, changed: true };
+}
+
+// THE QUEUE THE OWNER PICKED ON SCREEN 1, KEPT.
+//
+// The mode row on onboarding's first screen is not a preview: the note under
+// it says "your choice is kept by the reader". It was not. POST
+// /admin/relationship/mode set rel.mode on the running hermes and nothing
+// else, so the choice survived exactly as long as that process did and a
+// restart silently reverted every owner who picked founders or investors back
+// to the producer config's 'any'.
+//
+// The closed set lives here, next to the write, and hermes imports it --
+// RELATIONSHIP_MODES was hermes' own const, and a second copy in this file
+// would be a closed set that two files could disagree about.
+export const RELATIONSHIP_MODES = Object.freeze(['investor', 'founder', 'any']);
+
+export function setRelationshipMode({ mode, configPath = ownerConfigPath() } = {}) {
+  if (!RELATIONSHIP_MODES.includes(mode)) {
+    throw new Error(`mode must be one of: ${RELATIONSHIP_MODES.join(', ')}`);
+  }
+  const raw = readMutableConfig(configPath);
+  const existing = relationshipMemorySection(raw);
+  // An unchanged choice is not a write. The mode row posts on every click,
+  // including the click that re-picks what is already selected, and rewriting
+  // the file for that would churn the one file the connectors daemon reads at
+  // start for no change at all.
+  if (existing && existing.mode === mode) return { mode, changed: false };
+  raw.relationshipMemory = Object.fromEntries([
+    ...Object.entries(existing ?? {}),
+    ['mode', mode],
+  ]);
+  writeMutableConfig(configPath, raw);
+  return { mode, changed: true };
+}
+
+// THE CAP THE OWNER SET BY PRESSING HELLO, WRITTEN ONCE AND NEVER AGAIN.
+//
+// hermes' relationshipCap fails closed: with relationshipMemory.capPerDay
+// absent it returns null and the card route answers 'no-cap-configured'
+// forever, per the step-4 rule that thresholds are the owner's to set and
+// never a default invented by the server. On a fresh install the config file
+// the app writes is `{}`, so that rule -- correct in itself -- meant the
+// reconnect card could never appear on a machine nobody had hand-edited.
+//
+// The resolution is not a server-side default. It is that screen 1 says "one
+// person a day" and "one card a day" directly above the button the owner
+// presses to start the reader, so the press IS the owner choosing one a day,
+// and onboarding records it. Hence ensure, not set: ABSENT means nobody has
+// chosen, and any value already in the file is somebody's choice -- including
+// a 0 that means "no cards", which is exactly the fail-closed state this must
+// not quietly overturn.
+//
+// The ceiling is the daily card's own shape. This is a feature that offers one
+// person to reconnect with per day; a number in the hundreds is a typo or a
+// caller with the wrong units, not a preference, and the cap is the last place
+// to find that out before a day's worth of people are burned.
+export const MAX_CAP_PER_DAY = 10;
+
+export function ensureRelationshipCap({ capPerDay = 1, configPath = ownerConfigPath() } = {}) {
+  if (!Number.isInteger(capPerDay) || capPerDay < 1 || capPerDay > MAX_CAP_PER_DAY) {
+    throw new Error(`capPerDay must be an integer from 1 through ${MAX_CAP_PER_DAY}`);
+  }
+  const raw = readMutableConfig(configPath);
+  const existing = relationshipMemorySection(raw);
+  if (existing && existing.capPerDay !== undefined) {
+    return { capPerDay: existing.capPerDay, changed: false };
+  }
+  raw.relationshipMemory = Object.fromEntries([
+    ...Object.entries(existing ?? {}),
+    ['capPerDay', capPerDay],
+  ]);
+  writeMutableConfig(configPath, raw);
+  return { capPerDay, changed: true };
 }
