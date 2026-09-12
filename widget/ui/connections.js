@@ -827,11 +827,39 @@ const CONNECTOR_ORDER = [
   'contacts',
   'photos', 'notes', 'files', 'granola', 'oura', 'notion',
 ];
-// TEMPORARILY HIDDEN (owner, front-end only, 2026-08-22 — "bring them back
-// later"). The connectors and their status are untouched; the tiles just
-// don't render. To restore one, delete it from this set. Nothing else keys
-// off it, so a hidden id still works everywhere else it appears.
-const HIDDEN_CONNECTORS = new Set(['oura', 'photos', 'files', 'notion', 'notes']);
+// ~~TEMPORARILY HIDDEN (owner, front-end only, 2026-08-22 — "bring them back
+// later"): const HIDDEN_CONNECTORS = new Set(['oura', 'photos', 'files',
+// 'notion', 'notes']).~~ DERIVED from ops/features.json now (see
+// ops/FEATURES.md), together with the daemon's DEFAULT_DISABLED_CONNECTORS,
+// which used to carry a comment telling whoever edited one list to remember the
+// other. Same five ids fall out of the registry today; the difference is that
+// nobody has to remember.
+//
+// The rows come from connect/lib/status.mjs and its `id` is not always a
+// connector name, so two rules rather than one:
+//
+//   * a row whose connector feature is false is hidden;
+//   * EVERY BRIDGE TILE is hidden while `bridges` is off — messenger,
+//     instagram, twitter, telegram, discord, slack and LinkedIn's bridge row.
+//     `isBridge` is the discriminator, not the id, and that matters for
+//     LinkedIn specifically: `linkedin` is BOTH a bridge platform and the
+//     connector that reads the data export, sharing one hermes source name.
+//     The export connector stays on (the card's professional tags come from
+//     it); what goes is the login tile for a bridge that is not provisioned.
+//     Filtering by id would have switched off the export with it.
+//
+// The status rows themselves are untouched, exactly as the old hand-written
+// version promised: a hidden id still works everywhere else it appears.
+let featureSet = null; // filled by the first refresh(); see hzFeatures in bridge.js
+function isHiddenSource(src) {
+  if (isBridge(src)) return !hzFeatureOn(featureSet, 'bridges');
+  return hzConnectorFeature(featureSet, kindOf(src.id)) === false;
+}
+/// Offered, but the owner has to ask for it. Labelled on the tile so "not
+/// connected" does not read as "broken" for a source nothing auto-starts.
+function isOptionalSource(src) {
+  return !isBridge(src) && hzConnectorFeature(featureSet, kindOf(src.id)) === 'optional';
+}
 // Status returns one real row per authorized mailbox plus a synthetic `mail`
 // row for starting another grant. Once a real account exists, its card owns
 // "+ add account"; leaving the synthetic grey tile visible makes a successful
@@ -843,7 +871,7 @@ function visibleSources(sources) {
     (s) => s.connected && typeof s.id === 'string' && s.id.startsWith('mail:')
   );
   return sources
-    .filter((s) => !HIDDEN_CONNECTORS.has(kindOf(s.id)) && !(hasGoogleAccount && s.id === 'mail'))
+    .filter((s) => !isHiddenSource(s) && !(hasGoogleAccount && s.id === 'mail'))
     .map((s) => s.id.startsWith('mail:')
       ? { ...s, clients: addGoogle && Array.isArray(addGoogle.clients) ? addGoogle.clients : [] }
       : s);
@@ -1047,11 +1075,25 @@ function card(src, keep) {
     dot.className = 'dot off';
   }
 
+  // 'optional' in ops/features.json: a real participant source, small today,
+  // offered but never auto-started — the daemon leaves it to the owner's own
+  // Connect press. SAY SO ON THE TILE. Without the word, "not connected" on a
+  // source the app will never start by itself reads as something that failed,
+  // and the shelf's whole promise is that a tile tells you whose move it is.
+  //
+  // The label rides the tooltip rather than a new element: these tiles are
+  // 4-to-a-row squares with the label already in the hover tip, and a second
+  // line of text inside one would cost the grid its shape. dataset.optional is
+  // for the tests and for anyone styling it later.
+  const optional = isOptionalSource(src);
+  if (optional) row.dataset.optional = 'true';
+  const tipLabel = optional ? `${src.label} · optional` : src.label;
+
   row.append(mark, name, dot);
 
-  row.addEventListener('mouseenter', () => showTileTip(row, src.label));
+  row.addEventListener('mouseenter', () => showTileTip(row, tipLabel));
   row.addEventListener('mouseleave', hideTileTip);
-  row.addEventListener('focus', () => showTileTip(row, src.label));
+  row.addEventListener('focus', () => showTileTip(row, tipLabel));
   row.addEventListener('blur', hideTileTip);
 
   // Every tile opens a hint. It has two sizes: the FIRST press of a kind
@@ -2387,6 +2429,11 @@ document.addEventListener('pointercancel', finishSettingsPointer, true);
 
 async function refresh() {
   try {
+    // BEFORE THE FIRST TILE IS BUILT. Cached after the first call (hzFeatures
+    // in bridge.js), so every later refresh pays nothing — but the shelf must
+    // never render once from an unknown registry and then re-render smaller,
+    // which is a visible flash of connectors this build does not offer.
+    featureSet = await hzFeatures();
     const data = await hzPost('status');
     if (data.state !== 'ok') {
       notice.textContent = NOTICES[data.state] || NOTICES.error;

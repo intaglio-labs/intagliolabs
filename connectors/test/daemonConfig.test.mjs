@@ -5,6 +5,7 @@ import {
   CONNECTOR_NAMES,
   DEFAULT_DISABLED_CONNECTORS,
   observePortalJoinRate,
+  OPTIONAL_CONNECTORS,
   portalJoinMsPerRoom,
   RETENTION_SOURCES,
   sourceRetryDelay,
@@ -95,9 +96,34 @@ test('the connector roster and its hermes-source mapping stay in lockstep', () =
   }
 });
 
+// ~~assert.deepEqual(DEFAULT_DISABLED_CONNECTORS, ['oura', 'photos', 'files',
+// 'notion', 'notes'])~~ — the list is DERIVED from ops/features.json now (see
+// ops/FEATURES.md), so this pins the RULE rather than a transcription of the
+// answer. connectors/test/features.test.mjs pins the registry's own defaults;
+// what matters here is that the daemon honours all three connector states, and
+// that `matrix` follows the bridges feature, which no connector key expresses.
 test('hidden Settings integrations are inert in the daemon by default', () => {
-  assert.deepEqual(DEFAULT_DISABLED_CONNECTORS, ['oura', 'photos', 'files', 'notion', 'notes']);
+  for (const name of ['oura', 'photos', 'files', 'notion', 'notes']) {
+    assert.ok(DEFAULT_DISABLED_CONNECTORS.includes(name),
+      `${name} is dormant in the registry and must never be scheduled`);
+  }
+  // Matrix is the transport the seven bridges share, not a source anyone
+  // connects. With `bridges` off, scheduling it means polling a Synapse that
+  // provisioning no longer installs.
+  assert.ok(DEFAULT_DISABLED_CONNECTORS.includes('matrix'));
+  // THE DISCRIMINATING HALF: 'optional' is not `false`. Collapsing the two would
+  // disable WhatsApp and Granola permanently, leaving the owner's Connect press
+  // with nothing to turn on.
+  for (const name of ['whatsapp', 'granola']) {
+    assert.ok(!DEFAULT_DISABLED_CONNECTORS.includes(name), `${name} is offered, not disabled`);
+    assert.ok(OPTIONAL_CONNECTORS.includes(name));
+  }
+  for (const name of ['imessage', 'mail', 'calendar', 'contacts', 'linkedin']) {
+    assert.ok(!DEFAULT_DISABLED_CONNECTORS.includes(name),
+      `${name} is what the reconnection card is built from`);
+  }
   for (const name of DEFAULT_DISABLED_CONNECTORS) assert.ok(CONNECTOR_NAMES.includes(name));
+  for (const name of OPTIONAL_CONNECTORS) assert.ok(CONNECTOR_NAMES.includes(name));
 });
 
 test('a source can request a bounded urgent retry without changing its normal interval', () => {

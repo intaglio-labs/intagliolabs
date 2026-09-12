@@ -48,6 +48,12 @@ import { createLogger } from './lib/log.mjs';
 import { safeErrorFingerprint } from './lib/safeError.mjs';
 import { createYearlyBackfill } from './lib/yearlyBackfill.mjs';
 import {
+  connectorsDisabledBy,
+  enabledFeatureNames,
+  optionalConnectors,
+  readFeatures,
+} from './lib/features.mjs';
+import {
   retentionPass,
   maintainPass,
   msUntilIdleWindow,
@@ -101,11 +107,34 @@ export const CONNECTOR_NAMES = Object.freeze([
 // Settings deliberately keeps these integrations out of the current product
 // surface. A hidden connector must also be inert: scheduling it anyway leaks
 // implementation-in-progress into Activity and can touch data the person
-// cannot enable or control from the app. Keep this in lockstep with
-// widget/ui/connections.js's HIDDEN_CONNECTORS until each integration ships.
-export const DEFAULT_DISABLED_CONNECTORS = Object.freeze([
-  'oura', 'photos', 'files', 'notion', 'notes',
-]);
+// cannot enable or control from the app.
+//
+// ~~Keep this in lockstep with widget/ui/connections.js's HIDDEN_CONNECTORS
+// until each integration ships.~~ That was two hand-maintained lists, in two
+// languages, that had to agree, with nothing checking that they did. Both are
+// DERIVED now, from ops/features.json — see ops/FEATURES.md. The lockstep is a
+// fact rather than an instruction.
+//
+// `matrix` joins the list whenever `bridges` is off, and it is the entry the
+// registry cannot express directly: Matrix is not a source somebody connects,
+// it is the transport the seven bridges share, so it follows the bridges
+// feature rather than a connector key of its own. Omitting it would leave the
+// daemon polling a Synapse that provisioning no longer installs.
+export const FEATURES = readFeatures({
+  onProblem: (reason) => process.stderr.write(`connectors: ${reason}\n`),
+});
+export const DEFAULT_DISABLED_CONNECTORS = Object.freeze(
+  connectorsDisabledBy(FEATURES, CONNECTOR_NAMES)
+);
+// Offered on the connections page, NOT auto-started here. These stay
+// schedulable on purpose: 'optional' means the owner's own connect action
+// (WhatsApp's .disabled marker, Granola's credential) is the gate, and a source
+// that is never scheduled can never notice that gate opening. Exported so the
+// distinction is visible to a reader and to the tests, not because the
+// scheduler branches on it — the existing per-source gates already do that.
+export const OPTIONAL_CONNECTORS = Object.freeze(
+  optionalConnectors(FEATURES, CONNECTOR_NAMES)
+);
 
 export function sourceRetryDelay(result, intervalMs) {
   return Number.isFinite(result?.nextDelayMs) && result.nextDelayMs >= 1_000
@@ -1468,6 +1497,12 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       log.info('daemon_started', {
         sources: scheduledSources.map((s) => s.name),
         hidden: DEFAULT_DISABLED_CONNECTORS,
+        // NAMES ONLY — the logger refuses row content and this is the same
+        // discipline: what is on, never the file and never a count that could
+        // be read as owner data. It is also the line that answers "why did this
+        // source never run" without anyone opening the bundle.
+        features: enabledFeatureNames(FEATURES),
+        optional: OPTIONAL_CONNECTORS,
         maintainHour: config.retention?.maintainHour ?? '03:30',
       });
       if (scheduledSources.length === 0) {
