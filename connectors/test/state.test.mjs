@@ -83,7 +83,9 @@ test('deleteCursors wipes a connector namespace and nothing adjacent', (t) => {
   state.setCursor('mail:INBOX:uidvalidity', '7');
   state.setCursor('mail:Sent:uid', '19');
   state.setCursor('mailx', 'must survive'); // prefix-adjacent, different connector
-  assert.equal(state.deleteCursors('mail'), 3);
+  // ONE COUNT PER THING COUNTED: this connector's namespace, and the shared
+  // walk rows (none here — mail took no part in a yearly walk in this fixture).
+  assert.deepEqual(state.deleteCursors('mail'), { cursorsDeleted: 3, yearlyWalkReopened: 0 });
   assert.equal(state.getCursor('mail:INBOX:uidvalidity'), null);
   assert.equal(state.getCursor('mailx'), 'must survive');
 });
@@ -119,9 +121,12 @@ test('a purge forgets the scheduler’s progress too, and only this connector’
   state.setCursor('yearly-backfill:complete', '0');
   state.setCursor('yearly-backfill:barrier:people:done:2024', '1');
 
-  // Ten, not eight: the eight above plus the two global keys, because mail was
-  // one of the sources the barrier was counting. See below.
-  assert.equal(state.deleteCursors('mail'), 10);
+  // Eight in mail's own namespace, and the walk reopen counted separately:
+  // the two global keys plus the current year's People barrier, because mail
+  // was one of the sources that barrier was counting. Folding them into one
+  // total was how a purge of ONE connector reported a number that described
+  // rows belonging to nobody's namespace. See below.
+  assert.deepEqual(state.deleteCursors('mail'), { cursorsDeleted: 8, yearlyWalkReopened: 2 });
 
   for (const gone of [
     'mail:someone@example.com:internalDate',
@@ -170,7 +175,7 @@ test('a purge of a source that never walked history leaves the barrier alone', (
   state.setCursor('yearly-backfill:year', '2024');
   state.setCursor('yearly-backfill:complete', '1');
 
-  assert.equal(state.deleteCursors('notion'), 1);
+  assert.deepEqual(state.deleteCursors('notion'), { cursorsDeleted: 1, yearlyWalkReopened: 0 });
   assert.equal(state.getCursor('yearly-backfill:complete'), '1');
   assert.equal(state.getCursor('yearly-backfill:year'), '2024');
 });
@@ -186,10 +191,14 @@ test('and the same is true through the helper --purge actually calls', (t) => {
   state.setCursor('yearly-backfill:complete', '1');
   state.setCursor('yearly-backfill:year', '2019');
 
-  const { cursorsDeleted } = wipeLocalArtifacts('mail', { state, cacheDir: join(dir, 'cache') });
+  const { cursorsDeleted, yearlyWalkReopened } = wipeLocalArtifacts('mail', { state, cacheDir: join(dir, 'cache') });
   // Printed by run.mjs: the only way an operator tells a complete purge from
-  // the old half of one is to see the number.
-  assert.equal(cursorsDeleted, 4);
+  // the old half of one is to see the number — and it has to be the number for
+  // THIS connector, which is the two rows under `mail:` and
+  // `yearly-backfill:connector:mail:`. The shared complete/year pair is the
+  // walk reopen and is reported as itself.
+  assert.equal(cursorsDeleted, 2);
+  assert.equal(yearlyWalkReopened, 2);
   assert.equal(state.getCursor('yearly-backfill:connector:mail:done:2025'), null);
   assert.equal(state.getCursor('yearly-backfill:connector:imessage:done:2025'), '1');
   // The gate mail was counted in, through the helper --purge actually calls.
@@ -343,4 +352,36 @@ test('a contacts purge removes names and private avatar bytes', (t) => {
   wipeLocalArtifacts('contacts', { state, cacheDir: join(dir, 'cache') });
   assert.equal(Number(state.db.prepare('SELECT count(*) AS n FROM contact_ids').get().n), 0);
   assert.equal(Number(state.db.prepare('SELECT count(*) AS n FROM contact_avatars').get().n), 0);
+});
+
+test('reopening the walk clears the barriers for the year the walk restarts at', (t) => {
+  const dir = sandbox(t);
+  const state = openStateDb(join(dir, 'state.db'));
+  t.after(() => state.close());
+  const wallYear = new Date().getFullYear();
+  const walkYear = 2031; // any year the wall clock is not in
+
+  state.setCursor('mail:someone@example.com:internalDate', '1757000000000');
+  state.setCursor(`yearly-backfill:connector:mail:done:${walkYear}`, '1');
+  state.setCursor('yearly-backfill:complete', '1');
+  state.setCursor('yearly-backfill:year', String(walkYear));
+  state.setCursor(`yearly-backfill:barrier:people:done:${walkYear}`, '1');
+  state.setCursor(`yearly-backfill:barrier:people:done:${wallYear}`, '1');
+
+  // ONE WALK, ONE CLOCK. yearlyBackfill resolves the walk's year through an
+  // injected `now`; this read the wall clock, so under a test clock — or a
+  // purge that straddles midnight on 31 December — it cleared the barriers for
+  // a year the walk was not restarting at. advance() then steps past the year
+  // it IS restarting at with its product phase still marked done.
+  const { yearlyWalkReopened } = wipeLocalArtifacts('mail', {
+    state,
+    cacheDir: join(dir, 'cache'),
+    now: () => new Date(walkYear, 5, 1).getTime(),
+  });
+
+  assert.equal(state.getCursor(`yearly-backfill:barrier:people:done:${walkYear}`), null,
+    'the year the walk restarts at cannot still be marked done');
+  assert.equal(state.getCursor(`yearly-backfill:barrier:people:done:${wallYear}`), '1',
+    "and another year's finished work is not this purge's business");
+  assert.equal(yearlyWalkReopened, 3, 'complete, year, and the one barrier for that year');
 });

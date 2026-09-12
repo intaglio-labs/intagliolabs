@@ -39,7 +39,7 @@ test('a pending social reimport purges every platform before wiping Matrix curso
     deleteCursors(name) {
       assert.equal(name, 'matrix');
       calls.push('local:matrix');
-      return 4;
+      return { cursorsDeleted: 4, yearlyWalkReopened: 3 };
     },
   };
 
@@ -57,6 +57,7 @@ test('a pending social reimport purges every platform before wiping Matrix curso
     applied: true,
     deleted: CONNECTOR_HERMES_SOURCE.matrix.length * 2,
     cursorsDeleted: 4,
+    yearlyWalkReopened: 3,
   });
   assert.equal(existsSync(paths.pendingPath), false);
   assert.equal(existsSync(paths.completedPath), true);
@@ -71,7 +72,7 @@ test('an interrupted social purge keeps the pending marker and Matrix cursors fo
   const state = {
     deleteCursors() {
       cursorWipes += 1;
-      return 1;
+      return { cursorsDeleted: 1, yearlyWalkReopened: 0 };
     },
   };
 

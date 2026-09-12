@@ -290,7 +290,8 @@ test('the global reset is a call of its own, and a purge can decline it', (t) =>
 
   // ONE CONNECTOR'S NAMESPACE AND NOTHING ELSE. `changes` counts only that.
   seed();
-  assert.equal(state.deleteCursors('mail', { reopenYearly: false }), 2);
+  assert.deepEqual(state.deleteCursors('mail', { reopenYearly: false }),
+    { cursorsDeleted: 2, yearlyWalkReopened: 0 });
   assert.equal(state.getCursor('mail:owner@example.test:internalDate'), null);
   assert.equal(state.getCursor(`yearly-backfill:connector:mail:done:${year}`), null);
   for (const [kept, value] of [

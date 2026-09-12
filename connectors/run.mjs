@@ -174,7 +174,10 @@ if (isMain) {
       // is the class that survived the 2026-09-12 mail purge and quietly kept
       // three finished years marked finished. It is printed because the only
       // way an operator can tell a complete purge from the old half of one is
-      // to see the number.
+      // to see the number. `yearlyWalkReopened` prints beside it and counts the
+      // SHARED rows -- complete, year, and this year's barriers -- which belong
+      // to no connector's namespace and used to be folded into the first
+      // number, where they described rows the operator had not purged.
       const local = wipeLocalArtifacts(name, { state, cacheDir, log });
       console.log(JSON.stringify({ connector: name, hermesSource, ...purged, ...local }));
     } else {

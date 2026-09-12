@@ -127,7 +127,7 @@ export async function maintainPass({ log, ingestOpts }) {
 // purged source cannot resume from a cursor that points past its own absence
 // — the next run re-observes from scratch and re-ingests only what the
 // owner still wants held.
-export function wipeLocalArtifacts(connector, { state, cacheDir, log }) {
+export function wipeLocalArtifacts(connector, { state, cacheDir, log, now = Date.now }) {
   // ONE TRANSACTION over the database half. These deletes are one statement
   // about one connector -- the cursors that say where it got to and the tables
   // only it writes -- and a partial application of that statement is a state
@@ -135,10 +135,19 @@ export function wipeLocalArtifacts(connector, { state, cacheDir, log }) {
   // and the undecoded queue still pointing at rows hermes no longer holds. The
   // cache directory is outside it because a filesystem removal cannot join a
   // SQLite transaction; it is idempotent and re-derivable, so it goes last.
+  // TWO NUMBERS. `cursorsDeleted` is this connector's own namespace; the walk
+  // reopen is three shared rows plus the current year's barriers and belongs
+  // to nobody's namespace. Folded into one total it made a purge of one
+  // connector report a count that had nothing to do with that connector, on
+  // the line an operator reads to tell a complete purge from the old half of
+  // one.
   let cursorsDeleted = 0;
+  let yearlyWalkReopened = 0;
   state.db.exec('BEGIN IMMEDIATE');
   try {
-    cursorsDeleted = state.deleteCursors(connector);
+    // `now` reaches deleteCursors because reopening the walk clears the
+    // barriers for A year, and it has to be the year the walk restarts at.
+    ({ cursorsDeleted, yearlyWalkReopened } = state.deleteCursors(connector, { now }));
     if (connector === 'imessage') state.db.exec('DELETE FROM imessage_undecoded');
     if (connector === 'contacts') {
       // Contact thumbnails are household-private state too. Leaving them behind
@@ -151,8 +160,8 @@ export function wipeLocalArtifacts(connector, { state, cacheDir, log }) {
     throw error;
   }
   rmSync(join(cacheDir, connector), { recursive: true, force: true });
-  log?.info('local_artifacts_wiped', { connector, cursorsDeleted });
-  return { cursorsDeleted };
+  log?.info('local_artifacts_wiped', { connector, cursorsDeleted, yearlyWalkReopened });
+  return { cursorsDeleted, yearlyWalkReopened };
 }
 
 // CLI: an explicit invocation means the operator wants retention NOW, idle

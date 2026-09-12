@@ -248,7 +248,15 @@ export function openStateDb(path = defaultStateDbPath()) {
 
   // Where the SHARED yearly walk stands — the three keys that are nobody's
   // connector namespace. Exposed on the handle below; see the comment there.
-  function reopenYearlyWalk() {
+  //
+  // `now` IS INJECTABLE, and it has to be. yearlyBackfill resolves the walk's
+  // year through its own injected clock (yearlyBackfill.mjs savedYear), and
+  // this used the wall clock -- so under a test clock, or a purge that
+  // straddles midnight on 31 December, the barriers cleared here are for a
+  // different year than the one the reopened walk restarts at, and advance()
+  // then steps past that year without rebuilding its product phase. One walk,
+  // one clock.
+  function reopenYearlyWalk({ now = Date.now } = {}) {
     let changes = 0;
     // COMPLETE, because yearlyBackfill.task() short-circuits on it for EVERY
     // connector: left standing over a purged source's missing checkpoints it
@@ -270,7 +278,7 @@ export function openStateDb(path = defaultStateDbPath()) {
     // piece of state have to leave the same state behind. Barrier names are not
     // known in this file, so the year is the key and the LIKE covers the roster.
     // Older years are finished work and are left alone.
-    changes += Number(deleteBarriersStmt.run(String(new Date().getFullYear())).changes);
+    changes += Number(deleteBarriersStmt.run(String(new Date(now()).getFullYear())).changes);
     return changes;
   }
 
@@ -352,10 +360,11 @@ export function openStateDb(path = defaultStateDbPath()) {
     // "this namespace and nothing else". The default stays ON: retain.mjs's
     // purge is the only production caller and is the path the whole branch
     // exists for, so flipping the default would silently restore the bug the
-    // paragraphs above describe. A caller that wants the two halves separately
-    // now calls deleteCursors(name, { reopenYearly: false }) and
-    // reopenYearlyWalk(), each returning its own count.
-    deleteCursors(connector, { reopenYearly = true } = {}) {
+    // paragraphs above describe. Either way the two halves are counted
+    // separately in the return, and a caller that wants them applied
+    // separately calls deleteCursors(name, { reopenYearly: false }) and then
+    // reopenYearlyWalk() itself.
+    deleteCursors(connector, { reopenYearly = true, now = Date.now } = {}) {
       if (typeof connector !== 'string' || connector.length === 0) {
         throw new Error('deleteCursors requires a connector name');
       }
@@ -364,7 +373,7 @@ export function openStateDb(path = defaultStateDbPath()) {
       const walked = reopenYearly && Number(
         countYearlyStmt.get(yearly, `yearly-backfill:connector:${escaped}:%`)?.n ?? 0
       ) > 0;
-      const changes = Number(
+      const cursorsDeleted = Number(
         deleteCursorsStmt.run(
           connector,
           `${escaped}:%`,
@@ -373,7 +382,17 @@ export function openStateDb(path = defaultStateDbPath()) {
           `${connector}:history-slices-per-pass`
         ).changes
       );
-      return changes + (walked ? reopenYearlyWalk() : 0);
+      // TWO COUNTS, BECAUSE THEY ARE ABOUT TWO THINGS. ~~One total.~~ The
+      // caller logs its return as `cursorsDeleted` for ONE connector, and the
+      // total silently folded in the shared complete/year rows and every
+      // barrier row for the current year -- so a purge of notion reported a
+      // number that had nothing to do with notion's namespace, and an operator
+      // reading it to tell a complete purge from the old half of one was
+      // reading the wrong number to do it with.
+      return {
+        cursorsDeleted,
+        yearlyWalkReopened: walked ? reopenYearlyWalk({ now }) : 0,
+      };
     },
 
     recordRun({

@@ -151,7 +151,11 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
     // connecting Instagram after Messenger is the common case because both use
     // the one Matrix source. Clear only this connector's year checkpoints, not
     // anybody else's, and restart it at the current year.
-    state.deleteCursors(connectorKey(connector));
+    // The walk's clock travels with the call. This one only ever clears this
+    // connector's own namespace -- the yearly-backfill prefix means the global
+    // half does not fire -- but a clock that reaches one door into that state
+    // and not the others is how the years drift apart.
+    state.deleteCursors(connectorKey(connector), { now });
     state.deleteCursor(COMPLETE_KEY);
     const currentYear = new Date(now()).getFullYear();
     state.setCursor(YEAR_KEY, String(currentYear));
