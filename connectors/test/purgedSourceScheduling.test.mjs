@@ -517,6 +517,54 @@ test('the startup probe says why a source was unavailable before any tick', asyn
   assert.equal(typeof failure[1].error, 'string');
 });
 
+// A FIRST THROW AT STARTUP MUST NOT FREEZE THE WALK (round-4 finding 14).
+//
+// The startup probe used to classify an unanswerable source unavailable
+// immediately. It was then put behind the running daemon's three-strike
+// tolerance, and that tolerance is for a DIFFERENT problem: a source
+// classified inactive and then active again is a re-classification, and only a
+// re-classification can disturb the walk. At startup nothing has been
+// classified yet, so there is nothing to re-classify -- and withholding the
+// answer freezes advance() on unclassified() for every source, and leaves
+// reconcile() (which runs once, here, and nowhere else) giving up on the spot.
+//
+// The observable is the simplest form of that deadlock: one history source,
+// unavailable. "Nothing to walk" is FINISHED, not forever unfinished, and the
+// sources that gate on historyComplete depend on hearing so.
+test('a source that throws at startup is classified, so the walk is not frozen on it', async (t) => {
+  const dir = sandbox(t);
+  const state = fakeState({});
+  const lines = [];
+  const instance = daemon.createDaemon({
+    config: { retention: { maintainHour: '03:30' } },
+    state,
+    log: { info() {}, error() {}, warn: (event, fields) => lines.push([event, fields]) },
+    sources: [
+      // imessage, not whatsapp: an OPTIONAL connector is withdrawn before its
+      // needs() probe is ever reached, so the probe under test would not run.
+      { name: 'imessage', walksHistory: true, needs: async () => { throw new Error('probe failed'); }, run: async () => ({}) },
+    ],
+    ingestOpts: {},
+    cacheDir: dir,
+    activityPath: join(dir, 'activity.json'),
+  });
+  try {
+    instance.start();
+    // SHORT OF THE FIRST TICK (1s + stagger): only the startup probe and the
+    // reconcile that follows it have run.
+    await sleep(400);
+  } finally {
+    instance.stop();
+  }
+  assert.equal(state.getCursor('yearly-backfill:complete'), '1',
+    'the only history source is unavailable, which reconcile can only settle once it is classified');
+  const failure = lines.find(([event]) => event === 'source_needs_failed');
+  assert.ok(failure, 'and it is still said out loud');
+  assert.equal(failure[1].at, 'startup');
+  assert.equal(failure[1].barrier, 'unavailable',
+    'the log word has to match what the barrier actually did, not what a tick would have done');
+});
+
 // ---------------------------------------------------------------------------
 // (e) and the LAST mailbox's gap drain is a turn, not a leftover
 // ---------------------------------------------------------------------------

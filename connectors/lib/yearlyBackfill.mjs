@@ -96,29 +96,60 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
     for (const barrier of barrierRoster) state.deleteCursor(barrierKey(value, barrier));
   };
 
+  // YEARS THE WALK HAS ALREADY LEFT BEHIND THIS CONNECTOR.
+  //
+  // The walk runs newest-first and only ever decrements, so a year ABOVE the
+  // saved year that this connector has not completed is a year nothing will
+  // bring back on its own: the connector has to have the walk rewound to reach
+  // it. That, and only that, is what the rewind below is for.
+  //
+  // The saved year itself is EXCLUDED. It is in progress for everybody, and a
+  // connector that went unavailable and came back inside it has missed
+  // nothing -- which is the whole of round-4 finding 3. `classify(name,false)`
+  // after NEEDS_FAILURE_TOLERANCE throws (a store locked by a Time Machine
+  // pass, a token file mid-rewrite) followed by the recovering tick's
+  // `classify(name,true)` used to read as a re-activation and drag a backfill
+  // sitting at 2015 back to the current year for EVERY source. A transient
+  // outage now costs the ticks it lasted and nothing else.
+  //
+  // A connector marked exhausted is done for every year by definition, so
+  // `done()` rather than a raw cursor read.
+  const missedYears = (connector) => {
+    const from = year();
+    const currentYear = new Date(now()).getFullYear();
+    for (let value = currentYear; value > from; value -= 1) {
+      if (!done(connector, value)) return true;
+    }
+    return false;
+  };
+
   function classify(connector, available) {
     if (!roster.includes(connector)) return;
     // A withdrawal is not permanent: a source re-enabled while the process runs
     // classifies itself again on its next tick and rejoins the barrier.
     withdrawn.delete(connector);
-    const wasInactive = classified.has(connector) && !active.has(connector);
     const currentYear = new Date(now()).getFullYear();
     const hasCurrentCheckpoint = state.getCursor(doneKey(currentYear, connector)) === '1';
+    // A walk that finished WITHOUT this connector. Kept separate from
+    // missedYears because a walk can finish inside the current year (every
+    // timeline exhausted at once), which leaves no year above the saved one
+    // for missedYears to find while COMPLETE still locks task() shut.
     const completedBeforeAuthorization =
       state.getCursor(COMPLETE_KEY) === '1'
       && !hasCurrentCheckpoint;
-    const joinedMidBackfill = year() < currentYear && !hasCurrentCheckpoint;
     classified.add(connector);
     if (available) {
       active.add(connector);
-      // A connector can become available while the app is open (OAuth/login).
-      // Re-open its exhaustion mark and the global completion gate. Existing
-      // per-year completion marks for other sources make this an inexpensive
-      // catch-up rather than a full re-read.
-      // The second condition matters after an app restart: `classified` is
-      // process-local, while COMPLETE is durable. A connector authorized
-      // between launches still has to reopen the current-year barrier.
-      if (wasInactive || completedBeforeAuthorization || joinedMidBackfill) {
+      // A connector can become available while the app is open (OAuth/login),
+      // or arrive mid-walk having never been in it. Re-open its exhaustion
+      // mark and the global completion gate. Existing per-year completion
+      // marks for other sources make this an inexpensive catch-up rather than
+      // a full re-read.
+      // completedBeforeAuthorization matters after an app restart:
+      // `classified` is process-local, while COMPLETE is durable. A connector
+      // authorized between launches still has to reopen the current-year
+      // barrier.
+      if (completedBeforeAuthorization || missedYears(connector)) {
         state.deleteCursor(exhaustedKey(connector));
         state.deleteCursor(COMPLETE_KEY);
         state.setCursor(YEAR_KEY, String(currentYear));

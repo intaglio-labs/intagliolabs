@@ -294,3 +294,101 @@ test('restart reconciliation settles an install with no history sources', () => 
   assert.equal(recovery.complete, true);
   assert.equal(state.getCursor('yearly-backfill:complete'), '1');
 });
+
+// A SOURCE THAT COMES BACK IS NOT A SOURCE THAT ARRIVED (round-4 finding 3).
+//
+// classify(name, false) after the daemon's needs()-failure tolerance, followed
+// by the recovering tick's classify(name, true), used to read as an
+// activation: the walk was rewound to the current year, COMPLETE was deleted
+// and every barrier reopened -- for EVERY source, not just the one that
+// blipped. A store locked by a backup for three polling intervals therefore
+// cost a multi-year backfill its whole position.
+//
+// The rewind exists for a real case and must survive: a source the walk has
+// genuinely left years behind has no other way back. So the question is not
+// "was it inactive" but "is there a year above the walk that this source has
+// not done", and the walk's OWN year is not one of them -- it is in progress
+// for everybody.
+test('a source that goes unavailable and recovers keeps the walk where it was', () => {
+  const state = memoryState();
+  // A backfill that has walked 2026 down to 2015: every year above the current
+  // one is complete for both sources, which is what advance() required to get
+  // here.
+  state.setCursor('yearly-backfill:year', '2015');
+  for (let year = 2026; year > 2015; year -= 1) {
+    state.setCursor(`yearly-backfill:connector:imessage:done:${year}`, '1');
+    state.setCursor(`yearly-backfill:connector:mail:done:${year}`, '1');
+    state.setCursor(`yearly-backfill:barrier:people:done:${year}`, '1');
+  }
+  const backfill = createYearlyBackfill({
+    state,
+    connectors: ['imessage', 'mail'],
+    barriers: ['people'],
+    now: () => NOW,
+  });
+  backfill.classify('imessage', true);
+  backfill.classify('mail', true);
+  assert.equal(backfill.snapshot().year, 2015, 'the restart picks the walk up where it left off');
+
+  // Three failed ticks: the daemon's tolerance is spent and mail leaves the
+  // barrier so the walk is not frozen on it.
+  backfill.classify('mail', false);
+  assert.equal(backfill.snapshot().year, 2015, 'leaving is not what rewinds');
+
+  // The store unlocks.
+  backfill.classify('mail', true);
+  assert.equal(backfill.snapshot().year, 2015,
+    'and coming back must not drag eleven years of finished work to the top');
+  assert.equal(state.getCursor('yearly-backfill:complete'), null);
+  assert.equal(state.getCursor('yearly-backfill:barrier:people:done:2026'), '1',
+    'nor reopen a barrier that was crossed a decade of years ago');
+  assert.equal(state.getCursor('yearly-backfill:connector:mail:done:2026'), '1');
+});
+
+// THE REWIND THE ABOVE MUST NOT COST US. Same shape, except this source really
+// was absent while the walk moved: it has no 2019, and nothing else will ever
+// go back for it.
+test('a source the walk actually left behind still rewinds to the current year', () => {
+  const state = memoryState();
+  state.setCursor('yearly-backfill:year', '2015');
+  for (let year = 2026; year > 2015; year -= 1) {
+    state.setCursor(`yearly-backfill:connector:imessage:done:${year}`, '1');
+    state.setCursor(`yearly-backfill:barrier:people:done:${year}`, '1');
+    // mail was unavailable for 2019 and 2018 and has no checkpoint for them.
+    if (year !== 2019 && year !== 2018) {
+      state.setCursor(`yearly-backfill:connector:mail:done:${year}`, '1');
+    }
+  }
+  const backfill = createYearlyBackfill({
+    state,
+    connectors: ['imessage', 'mail'],
+    barriers: ['people'],
+    now: () => NOW,
+  });
+  backfill.classify('imessage', true);
+  backfill.classify('mail', true);
+  assert.equal(backfill.snapshot().year, 2026,
+    'a source missing a year above the walk gets the walk back');
+  assert.equal(state.getCursor('yearly-backfill:barrier:people:done:2026'), null,
+    'and the catch-up reopens the current-year barrier it has to cross again');
+});
+
+// A source that blips INSIDE the year the walk is on has missed nothing at
+// all: nobody has finished this year yet, including the sources that never
+// went away.
+test('a blip inside the current year is not a catch-up', () => {
+  const state = memoryState();
+  const backfill = createYearlyBackfill({
+    state,
+    connectors: ['imessage', 'mail'],
+    now: () => NOW,
+  });
+  backfill.classify('imessage', true);
+  backfill.classify('mail', true);
+  backfill.record('imessage', { historyDone: true, historyHasOlder: true });
+  backfill.classify('mail', false);
+  backfill.classify('mail', true);
+  assert.equal(state.getCursor('yearly-backfill:connector:imessage:done:2026'), '1',
+    'the recovery left the other source its finished year');
+  assert.equal(backfill.snapshot().year, 2026);
+});

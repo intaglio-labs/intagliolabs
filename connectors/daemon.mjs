@@ -48,6 +48,12 @@ import { openStateDb, runCounts } from './lib/state.mjs';
 import { createLogger } from './lib/log.mjs';
 import { safeErrorFingerprint } from './lib/safeError.mjs';
 import { createYearlyBackfill } from './lib/yearlyBackfill.mjs';
+// Moved to a leaf module so connect can read the roster without loading this
+// file's module-scope registry resolution; re-exported because run.mjs, the
+// config validator and three tests already import it from here.
+import { CONNECTOR_NAMES } from './lib/connectorNames.mjs';
+
+export { CONNECTOR_NAMES };
 import {
   connectorsDisabledBy,
   enabledFeatureNames,
@@ -75,35 +81,6 @@ function connectedSocialPlatforms() {
     .map(([id, platform]) => ({ id, label: platform.label }));
 }
 
-// The closed set of connectors this daemon will ever schedule. A sources/
-// module whose name is not here is a typo or an unreviewed data source, and
-// both must fail loudly at startup rather than quietly begin polling.
-export const CONNECTOR_NAMES = Object.freeze([
-  'imessage',
-  'calendar',
-  'mail',
-  'granola',
-  'oura',
-  'photos',
-  'notes',
-  'contacts',
-  'notion',
-  'files',
-  'whatsapp',
-  // The social bridges' DMs, read out of the local Matrix bus. One connector
-  // for seven platforms: the row's `source` comes from which bridge's ghost
-  // sent it (lib/matrixRows.mjs), so messenger and slack land as themselves.
-  'matrix',
-  // Back as a second, independent source of `linkedin` rows. The bridge
-  // (above) supplies live DMs but not the export's connection metadata
-  // (name, position, company, Connected On) or the historical message
-  // archive — nothing about a live chat session can produce those. Same
-  // hermes source name as the bridge's LinkedIn rows, different entity_id
-  // namespace (linkedin:conn:/linkedin:msg: vs the bridge's linkedin:<event
-  // id>), so the two coexist without colliding row-for-row. See
-  // sources/linkedin.mjs.
-  'linkedin',
-]);
 
 // Settings deliberately keeps these integrations out of the current product
 // surface. A hidden connector must also be inert: scheduling it anyway leaks
@@ -516,12 +493,23 @@ const FIRST_RUN_STAGGER_MS = 10_000;
 // while the source stays visible, stays classified, and still gets its history
 // slice.
 export const FORWARD_BUDGET_MS = 120_000;
-// HOW MANY CONSECUTIVE needs() THROWS BEFORE A SOURCE LEAVES THE YEARLY
-// BARRIER. Three, because the throws this absorbs are momentary -- a token
-// file being rewritten, a store locked by a backup -- while the thing it
-// prevents is permanent: classifying a source inactive and then active again
-// rewinds the shared walk to the current year for EVERY source. Three polling
-// intervals of a stalled backfill is the price of not oscillating.
+// HOW MANY CONSECUTIVE needs() THROWS BEFORE A RUNNING SOURCE LEAVES THE
+// YEARLY BARRIER. Three, because the throws this absorbs are momentary -- a
+// token file being rewritten, a store locked by a backup -- while what it
+// prevents is a source dropping out of the activity queue and back in on every
+// flap. Three polling intervals of a stalled backfill is the price.
+//
+// IT IS NO LONGER THE ONLY THING STANDING BETWEEN A FLAP AND A REWOUND WALK
+// (round-4 finding 3). This tolerance used to carry that on its own, and it
+// could not: above three ticks the recovery still read as a re-activation and
+// dragged a multi-year backfill to the current year for every source.
+// yearlyBackfill.classify now rewinds only for a connector the walk has
+// actually left years behind, so a recovery after ANY number of failed ticks
+// costs the ticks it lasted and nothing more.
+//
+// STARTUP DOES NOT USE IT. See the startup probe: with nothing classified yet,
+// classify(name, false) is a first answer rather than a re-classification, and
+// withholding it freezes advance() for every source.
 export const NEEDS_FAILURE_TOLERANCE = 3;
 // TODO: only mail reads ctx.deadline. matrix's forward pass is the other one
 // that can run for many minutes, and while it does it is absent from the
@@ -932,6 +920,11 @@ export function createDaemon({
   // the classification was added to break. The cost of the tolerance is at
   // most three polling intervals of a stalled backfill; the cost of getting it
   // wrong in the other direction is a backfill that never finishes.
+  //
+  // What the tolerance does NOT have to buy any more is the walk's position:
+  // classify() rewinds only for a connector that has actually been left behind
+  // (connectors/lib/yearlyBackfill.mjs, missedYears). A source that goes
+  // unavailable for an hour and recovers keeps the year it was on.
   const needsFailures = new Map();
   let stopped = false;
   const peopleBarrierEnabled = typeof completePeopleYear === 'function'
@@ -1271,12 +1264,12 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     // anybody.
     //
     // But answering on the FIRST throw is the other bug. classify(name, false)
-    // followed by a working tick's classify(name, true) is a re-activation, and
-    // a re-activation rewinds the shared yearly walk to the current year for
-    // every source (see needsFailures above). One flaky tick must not cost the
-    // backfill its progress, so the answer is given only after the tolerance --
-    // until then this is the stall it always was, and the source keeps its
-    // place in the walk.
+    // followed by a working tick's classify(name, true) drops the source out of
+    // the activity queue and back in on every flap, and -- until round-4
+    // finding 3 -- rewound the shared yearly walk with it. One flaky tick must
+    // not cost the backfill its progress, so the answer is given only after the
+    // tolerance; until then this is the stall it always was, and the source
+    // keeps its place in the walk either way.
     //
     // `notReady` is CLEARED either way, and deliberately not set: absent from
     // that map is "not evaluated", which is shown in the activity queue rather
@@ -1621,11 +1614,21 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
           yearlyBackfill.classify(source.name, false);
           return;
         }
-        // Same reasoning as runSource's gate, including the tolerance: a
-        // throwing needs() leaves the source ABSENT from notReady (unknown
-        // must not read as unprovisioned), and it leaves the BARRIER only once
-        // it has thrown often enough to be more than a flap -- a first throw
-        // here simply means the first scheduled tick decides, a second later.
+        // Same reasoning as runSource's gate for notReady -- a throwing needs()
+        // leaves the source ABSENT from that map, because unknown must not read
+        // as unprovisioned.
+        //
+        // BUT NOT THE TOLERANCE (round-4 finding 14). The three-strike rule
+        // exists to stop a flaky tick from turning into a RE-activation, and a
+        // re-activation is what rewinds the shared walk. At startup nothing has
+        // been classified yet, so classify(name, false) here is the source's
+        // FIRST answer rather than a re-classification, and it costs the walk
+        // nothing. Withholding it costs plenty: advance() waits on
+        // unclassified(), so one throwing needs() froze the year for every
+        // source until the tolerance was spent -- up to 30 minutes at default
+        // intervals -- and reconcile() below, which runs once and only here,
+        // gave up immediately on an unclassified roster and left a restart's
+        // already-complete barriers uncrossed.
         //
         // AND IT IS SAID OUT LOUD. This path runs BEFORE any tick, so it is
         // the one that answers "why was this source unavailable at startup",
@@ -1635,13 +1638,16 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
         try {
           missing = await source.needs({ config });
         } catch (error) {
+          // The count carries into the running daemon's own gate, so a source
+          // that is broken rather than briefly locked reaches the tolerance
+          // one tick sooner than if startup had said nothing.
           const failures = (needsFailures.get(source.name) ?? 0) + 1;
           needsFailures.set(source.name, failures);
-          if (failures >= NEEDS_FAILURE_TOLERANCE) yearlyBackfill.classify(source.name, false);
+          yearlyBackfill.classify(source.name, false);
           log.warn('source_needs_failed', {
             connector: source.name,
             failures,
-            barrier: failures >= NEEDS_FAILURE_TOLERANCE ? 'unavailable' : 'waiting',
+            barrier: 'unavailable',
             at: 'startup',
             error: safeErrorFingerprint(error),
           });
