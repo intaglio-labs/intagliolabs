@@ -1511,7 +1511,18 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // route. Polled every 3s while the screen is up, which is why it must
       // stay a read of already-computed numbers and never trigger a rebuild.
       relHermes("GET", "admin/onboarding/progress", json: nil) { [weak self] out in
-        self?.reply(webView, id, out)
+        // AND WHY THE READER IS NOT RUNNING, when this app already knows.
+        //
+        // hazlie-tree-perms is FATAL in the daemon and says so only in the
+        // daemon's own log. Connectors.reassertTreePerms tries to satisfy it at
+        // every start and cannot for three shapes -- a symlinked directory, a
+        // path that is not a directory, a directory owned by root -- so the
+        // owner watches this screen wait for rows that will never come. The
+        // paths ride along with the table that is doing the waiting.
+        var body = out
+        let blockers = Connectors.shared.treePermsBlockers
+        if !blockers.isEmpty { body["treePermsBlockers"] = blockers }
+        self?.reply(webView, id, body)
       }
 
     case "setEngine":

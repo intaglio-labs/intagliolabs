@@ -105,3 +105,36 @@ test('completing a connect screen nudges the reader that is already running', ()
     'start() is silent when the daemon is up, and those are the calls that matter');
   assert.ok(startsIt < nudges, 'nudge a daemon that exists: start first, then ask it to look');
 });
+
+// ---------------------------------------------------- the tree the reader refuses
+
+// ROUND-5 FINDING 5. hazlie-tree-perms is FATAL in the daemon and reported only
+// in the daemon's own log. reassertTreePerms tries to satisfy it at every start
+// and cannot for three shapes the check fails on: a directory symlinked to a
+// wider target (the check's statSync follows the link; this deliberately does
+// not), a TREE_DIR path that exists and is not a directory, and a directory
+// this app cannot chmod — one created by a sudo setup run and owned by root.
+// On 2026-09-12 that was four dead starts with onboarding waiting for rows.
+test('a tree the app cannot make owner-only is named, not swallowed', () => {
+  const pass = swiftBody(connectors, 'reassertTreePerms\\(\\)');
+  assert.doesNotMatch(pass, /try\? fm\.setAttributes/u,
+    'a chmod that fails EPERM on a root-owned directory is the silent death itself');
+  assert.match(pass, /catch \{\n\s*blocked\.append\(path\)/u);
+  assert.match(pass, /typeSymbolicLink/u,
+    'a symlinked directory is skipped by design, and the skip has to be reported');
+  assert.match(connectors, /private\(set\) var treePermsBlockers: \[String\]/u);
+});
+
+test('screen 6 says which paths to chmod instead of offering a button that cannot work', () => {
+  const bridge = readFileSync(join(ROOT, 'widget', 'src', 'Bridge.swift'), 'utf8');
+  assert.match(code(bridge), /body\["treePermsBlockers"\] = blockers/u,
+    'the table doing the waiting is where the reason belongs');
+
+  const paint = bodyOf(js, 'paintLoad');
+  assert.match(paint, /out\.treePermsBlockers/u);
+  assert.match(paint, /chmod 700/u, 'name the fix, not the condition');
+  // The start button restarts a reader that will refuse again for the same
+  // reason. Offering it is offering a loop.
+  const after = paint.slice(paint.indexOf('treePermsBlockers'));
+  assert.match(after, /loadStart\.hidden = true/u);
+});

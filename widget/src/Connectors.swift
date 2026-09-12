@@ -301,18 +301,50 @@ final class Connectors {
   /// this app does not own. Missing directories are skipped too — the check
   /// only WARNs on those, and creating them here would invent a tree the
   /// setup script is responsible for.
+  /// AND WHAT THE PASS COULD NOT FIX, said out loud.
+  ///
+  /// The skip and the swallowed EPERM above are both right and both silent, and
+  /// the check they are trying to satisfy is FATAL: the daemon exits, the reader
+  /// is dead, and the only record is a line in the daemon's own log. That is the
+  /// 2026-09-12 failure exactly — four starts in a row with onboarding waiting
+  /// for rows and nothing anywhere saying why.
+  ///
+  /// Three shapes reach here and leave without a repair, and the check fails on
+  /// all three: a directory symlinked to a wider target (`statSync` follows the
+  /// link, this deliberately does not), a TREE_DIR path that exists and is not a
+  /// directory, and a directory this app cannot chmod — one created by a `sudo`
+  /// setup run and owned by root. Named, so the owner gets a path to chmod
+  /// instead of a dead reader.
+  private(set) var treePermsBlockers: [String] = []
+
   private func reassertTreePerms() {
     let root = home.appendingPathComponent(".hazlie")
     let paths = [root.path] + Connectors.treeDirectories.map {
       root.appendingPathComponent($0).path
     }
+    var blocked: [String] = []
     for path in paths {
-      guard let attrs = try? fm.attributesOfItem(atPath: path),
-            attrs[.type] as? FileAttributeType == .typeDirectory,
+      guard let attrs = try? fm.attributesOfItem(atPath: path) else { continue }
+      let kind = attrs[.type] as? FileAttributeType
+      // A missing path is the check's WARN, not its FAIL, and creating one here
+      // would invent a tree the setup script owns.
+      if kind == .typeSymbolicLink || (kind != .typeDirectory && fm.fileExists(atPath: path)) {
+        blocked.append(path)
+        continue
+      }
+      guard kind == .typeDirectory,
             let mode = (attrs[.posixPermissions] as? NSNumber)?.intValue,
             mode & 0o777 != 0o700
       else { continue }
-      try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path)
+      do {
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path)
+      } catch {
+        blocked.append(path)
+      }
+    }
+    treePermsBlockers = blocked
+    if !blocked.isEmpty {
+      NSLog("Intaglio Labs: cannot make these owner-only, the reader will refuse to start: \(blocked.joined(separator: ", "))")
     }
   }
 

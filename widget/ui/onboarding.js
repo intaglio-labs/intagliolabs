@@ -1177,6 +1177,24 @@ function paintLoad(out) {
   if (stopped) loadBanner.textContent = 'nothing is running. let me start it.';
   loadStart.hidden = !stopped;
 
+  // AND WHEN PRESSING THE BUTTON CANNOT WORK, SAY SO INSTEAD.
+  //
+  // The reader refuses a ~/.hazlie it cannot trust and says so only in its own
+  // log, so a directory this app could not make owner-only -- symlinked to a
+  // wider target, not a directory at all, or owned by root from a sudo setup
+  // run -- is four dead starts and a screen that waits forever. The native side
+  // knows which paths it could not fix; this is the only place the owner is
+  // looking while it happens.
+  const blockers = out.treePermsBlockers;
+  if (Array.isArray(blockers) && blockers.length > 0) {
+    loadBanner.hidden = false;
+    loadBanner.textContent =
+      'i cannot start reading until these are yours alone — run chmod 700 on '
+      + blockers.join(' ');
+    // The button restarts the reader, and the reader will refuse again.
+    loadStart.hidden = true;
+  }
+
   const projection = out.projection;
   if (projection && projection.lastRebuildError) {
     loadStatus.classList.add('bad');
