@@ -665,6 +665,14 @@ function paintGoogleRefusal() {
 // browser with {ok, opened} straight from GoogleLogin — so an absent `state`
 // is success here, and testing `state !== 'ok'` would paint every working
 // sign-in amber.
+//
+// AND THE POSITIVE FIELDS ARE TESTED, NOT INFERRED FROM TWO ABSENCES. The
+// success reply is `{ok: true, opened: true}`, so `opened === false` is the
+// native side saying in as many words that no browser opened. Today
+// GoogleLogin.present always supplies a `why` alongside a false, which is the
+// only reason reading neither field has worked; a future `done(false, nil)`
+// would return null here and start ten minutes of live Gmail reads against a
+// browser that never opened. Read what the reply says.
 function googleAuthRefusal(out) {
   if (!out) return 'could not start the google sign-in';
   if (typeof out.refused === 'string' && out.refused) return out.refused;
@@ -673,6 +681,7 @@ function googleAuthRefusal(out) {
       ? out.error
       : 'could not start the google sign-in';
   }
+  if (out.ok === false || out.opened === false) return 'could not start the google sign-in';
   return null;
 }
 
@@ -725,10 +734,25 @@ function stopGooglePolling() {
   googleTimer = null;
 }
 
+// AND THE OLD POLL IS STOPPED BEFORE THE NEW BUDGET IS HANDED OUT. The
+// interval self-terminates only on a tick where the screen has changed, so
+// leaving screen 3 and returning inside the ten-minute window comes back to a
+// poll that is still alive -- and resetting the counter under it gives that
+// same interval a second full GOOGLE_PROBE_CAP. Every probe is a live Gmail
+// read, so a few laps of screen 3 spent the budget several times over.
+// Stopping first makes the reset mean what it says: one visit, one budget.
+//
+// Stopped rather than restarted, because the lines that follow already clear
+// `googleAsked` and `googleOpenedAt` -- a re-entry is this screen starting
+// over, and a poll left running underneath that contradicted it. The owner is
+// not left without an answer: the entry probes once, and returning from the
+// browser probes again on window focus.
+//
+// The cap itself is per VISIT, not per page load: leaving and coming back is
+// the owner asking again, and that is a different thing from a page sitting on
+// this screen for an hour.
 function enterGoogle() {
-  // The cap is per VISIT, not per page load: leaving and coming back is the
-  // owner asking again, and that is a different thing from a page sitting on
-  // this screen for an hour.
+  stopGooglePolling();
   googleProbes = 0;
   googleAsked = false;
   googleRefusal = null;
