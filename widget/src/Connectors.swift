@@ -418,6 +418,33 @@ final class Connectors {
     p.terminate()
   }
 
+  /// TELL THE READER THE OWNER HAS JUST CONNECTED SOMETHING.
+  ///
+  /// The daemon starts at app launch, which on a first run is BEFORE the owner
+  /// signs in to Google on screen 3 and before they hand over their LinkedIn
+  /// export on screen 4. Both sources answer "not ready" at that point and then
+  /// wait out a back-off before asking again. This app is the process that knows
+  /// the wait is over, so it says so instead of leaving the daemon to find out.
+  ///
+  /// NOT A RESTART. restart() exists for a TCC grant, which the child evaluates
+  /// when it opens a file and which its startup preflight already ran — there is
+  /// nothing to re-examine short of a new process. A missing token file is the
+  /// opposite: the daemon asks every source on every tick, so all it needs is to
+  /// be asked to tick now. Bouncing it would throw away whatever pass is in
+  /// flight to learn something a signal delivers for free.
+  ///
+  /// A DAEMON TOO YOUNG TO SIGNAL IS LEFT ALONE. SIGUSR2's default action is
+  /// terminate, and the child installs its handler early but not instantly; a
+  /// process that started moments ago is also one whose own startup probe is
+  /// about to ask this very question. So: no signal, and nothing lost.
+  private let nudgeGrace: TimeInterval = 3
+  func nudge() {
+    guard !stopping, !modelMaintenancePaused else { return }
+    guard let p = process, p.isRunning else { return }
+    guard Date().timeIntervalSince(lastStart) >= nudgeGrace else { return }
+    kill(p.processIdentifier, SIGUSR2)
+  }
+
   /// Hold the always-running daemon only for the short model activation handoff.
   /// The multi-gigabyte staging download runs beside the active model.
   func pauseForModelMaintenance() {

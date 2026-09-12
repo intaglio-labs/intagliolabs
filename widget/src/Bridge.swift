@@ -2176,6 +2176,18 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     // reader inherits this app's permissions instead of needing its own.
     Provision.retireConnectorsAgent()
     Connectors.shared.start()
+    // AND IF IT WAS ALREADY UP, TELL IT SOMETHING CHANGED.
+    //
+    // start() is idempotent and therefore silent when the daemon is running,
+    // which is the case on every call after the first — and those later calls
+    // are the interesting ones: this method is called when screen 2 is left,
+    // after the Google sign-in, after the LinkedIn import and on entering
+    // screen 6. On the second clean-machine run the daemon had already answered
+    // "not ready" for mail and linkedin before the owner did either, and
+    // nothing here told it otherwise; ten minutes later it still had not asked
+    // again. The nudge is what makes the reader look within seconds of the
+    // owner finishing. See Connectors.nudge().
+    Connectors.shared.nudge()
     Distiller.shared.start()
     return ok
   }
