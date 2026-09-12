@@ -21,6 +21,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -180,9 +181,10 @@ async function withHome(fn, serverOpts = {}) {
   process.env.HOME = home;
   process.env.HAZLIE_FEATURES_OVERRIDE = 'none';
   const dir = mkdtempSync(join(tmpdir(), 'relmem-db-'));
+  const dbPath = join(dir, 'context.db');
   const server = await start({
     port: 0,
-    dbPath: join(dir, 'context.db'),
+    dbPath,
     llamaApiKey: 'd'.repeat(64),
     bearerToken: TOKEN,
     peopleProjectionAutoRebuild: false,
@@ -195,7 +197,7 @@ async function withHome(fn, serverOpts = {}) {
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   try {
-    await fn({ home, call, base });
+    await fn({ home, call, base, dbPath });
   } finally {
     await server.close();
     if (previousHome === undefined) delete process.env.HOME;
@@ -356,4 +358,133 @@ test('both routes refuse the browser channel in either shape', async () => {
     }
     assert.deepEqual(readConfig(home), { selfName: 'Owner' }, 'no attempt wrote anything');
   }, { allowedOrigins: ALLOWED_ORIGIN });
+});
+
+// --------------------------------------------------- reading the choice back
+
+// THE OTHER HALF OF "YOUR CHOICE IS KEPT BY THE READER" (round-4 finding 1).
+//
+// Persisting the mode was only ever half of it. Onboarding's enterWelcome asks
+// relCardPeek for the current mode and paints the row from the answer, on the
+// stated ground that a replayed onboarding must not redraw as "anyone" and put
+// the owner one tap from overwriting a choice they made. The peek answered
+// `rel.mode ?? null`, and rel.mode is written by the mode route or recovered
+// from a reconnect batch -- neither of which exists on the install this screen
+// is actually drawn on: config written, hermes restarted, no batch yet.
+//
+// A FRESH PROCESS IS THE POINT. `start()` below is a new server over an empty
+// database, so rel.mode is undefined and the persisted config is the only
+// thing that can answer.
+test('a fresh reader reports the persisted mode, with no batch to recover it from', async () => {
+  await withHome(async ({ home, call }) => {
+    writeFileSync(configPathIn(home), JSON.stringify({
+      relationshipMemory: { mode: 'founder', capPerDay: 1, producer: 'eligibility' },
+    }));
+
+    const peek = await call('GET', '/admin/relationship/card?peek=1');
+    assert.equal(peek.status, 200);
+    const out = await peek.json();
+    assert.equal(out.card, null, 'nothing has been produced, which is the state under test');
+    assert.equal(out.mode, 'founder',
+      'the peek must answer the mode on disk, not null -- null is what repaints "anyone"');
+  });
+});
+
+// The same read on the branch a genuinely fresh install hits FIRST: no cap has
+// been recorded yet, so the card route short-circuits before it ever looks at
+// a card. That early return carried no mode at all.
+test('the no-cap answer still carries the mode, because that is the fresh-install branch', async () => {
+  await withHome(async ({ home, call }) => {
+    writeFileSync(configPathIn(home), JSON.stringify({ relationshipMemory: { mode: 'investor' } }));
+
+    const out = await (await call('GET', '/admin/relationship/card?peek=1')).json();
+    assert.equal(out.reason, 'no-cap-configured', 'the branch under test');
+    assert.equal(out.mode, 'investor');
+  });
+});
+
+// THE SEAM HAS TO BE THE SAME SEAM ON BOTH SIDES (round-4 finding 6).
+//
+// The three config-WRITING routes went through policy.ownerConfigPath while
+// relationshipCap and relationshipProducerConfig opened
+// ~/.hazlie/connectors/config.json by hand. A test could therefore post a mode
+// into its tmpdir and then assert the effect against a completely different
+// file.
+//
+// This discriminates by pointing the two at DIFFERENT files: $HOME holds one
+// answer, the seam holds another. Only code that honours the seam can report
+// the seam's.
+test('the config readers honour ownerConfigPath, not homedir', async () => {
+  const elsewhere = mkdtempSync(join(tmpdir(), 'relmem-seam-'));
+  const seamPath = join(elsewhere, 'config.json');
+  writeFileSync(seamPath, JSON.stringify({
+    relationshipMemory: { mode: 'founder', capPerDay: 3, producer: 'eligibility' },
+  }));
+
+  await withHome(async ({ home, call }) => {
+    // The home config disagrees on every key the seam sets.
+    writeFileSync(configPathIn(home), JSON.stringify({
+      relationshipMemory: { mode: 'investor', producer: 'matcher' },
+    }));
+
+    const out = await (await call('GET', '/admin/relationship/card?peek=1')).json();
+    assert.equal(out.mode, 'founder', 'the mode came from the seam, not from $HOME');
+    assert.notEqual(out.reason, 'no-cap-configured',
+      'and so did the cap: $HOME records none, the seam records three');
+  }, { ownerConfigPath: seamPath });
+});
+
+// THE ORDINARY PRE-PROJECTION STATE IS NOT A WARNING (round-4 finding 9).
+//
+// person_identifiers is created lazily by the projection, so the owner-filter
+// query throws `no such table` on every fresh install -- and screen 6 polls
+// this route on a timer, so the load screen wrote the line continuously. The
+// sibling catch twelve lines down already exempted exactly this message.
+// AN ABSENT PROJECTION TABLE IS NOT A CAVEAT (round-4 finding 9).
+//
+// The owner filter's catch warned on ANY failure, including `no such table`,
+// while the sibling catch twelve lines below it already exempted exactly that
+// message. Screen 6 polls this route on a timer, so on any install in that
+// state the load screen wrote the line continuously.
+//
+// THE STATE HAS TO BE BUILT BY HAND, and that is worth saying: the finding's
+// own route to it -- "before the first rebuild" -- is closed, because
+// onboardingProgress opens with peopleProjectionStatus, which runs
+// ensurePeopleProjectionSchema and creates person_identifiers before the owner
+// query is reached. What remains reachable is the schema failing to apply at
+// all (peopleProjectionStatus swallows that and answers null) and then every
+// projection query throwing. ensurePeopleProjectionSchema memoises per
+// database handle, and start() has already applied it, so dropping the table
+// out from under the running server reproduces that state exactly.
+test('onboarding progress does not warn about an absent projection table', async () => {
+  await withHome(async ({ home, call, dbPath }) => {
+    // ownerEmails is what makes this reach the query at all: the identifier
+    // lookup runs only when the owner HAS addresses and no marked keys.
+    writeFileSync(configPathIn(home), JSON.stringify({ ownerEmails: ['owner@example.com'] }));
+
+    const side = new DatabaseSync(dbPath);
+    try {
+      side.exec('DROP TABLE IF EXISTS person_identifiers');
+    } finally {
+      side.close();
+    }
+
+    const warnings = [];
+    const realWarn = console.warn;
+    console.warn = (...args) => { warnings.push(args.join(' ')); };
+    let body;
+    try {
+      const res = await call('GET', '/admin/onboarding/progress');
+      assert.equal(res.status, 200);
+      body = await res.json();
+    } finally {
+      console.warn = realWarn;
+    }
+    assert.ok(body, 'the route still answers -- a number with a caveat beats a blank screen');
+    assert.deepEqual(
+      warnings.filter((line) => /owner filter unavailable/u.test(line)),
+      [],
+      'an absent projection table is the same exemption the sibling catch already makes'
+    );
+  });
 });

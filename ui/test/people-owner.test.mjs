@@ -159,3 +159,69 @@ test('the calendar config has no account list of its own to miss', async () => {
     'a calendar account list would need adding to loadOwner');
   assert.equal(typeof daemon.DEFAULT_INTERVAL_S, 'number');
 });
+
+// ---------------------------------------------------------------------------
+// WHICH INSTALL'S GRANTS (round-4 finding 11).
+//
+// The grants live at <home>/.hazlie/secrets, so loadOwner has to know which
+// home a config file belongs to. It worked that out with three unconditional
+// dirname hops off configPath -- correct for exactly one path shape, and
+// silently wrong for every other one a caller can hand it.
+
+function grantAt(home, email) {
+  mkdirSync(join(home, '.hazlie', 'secrets'), { recursive: true, mode: 0o700 });
+  writeFileSync(
+    googleTokensPath(email, home),
+    JSON.stringify({ account_email: email, access_token: 'a', refresh_token: 'r', scope: '' }),
+    { mode: 0o600 }
+  );
+}
+
+test('an explicit home names the install, whatever the config file is called', () => {
+  const home = mkdtempSync(join(tmpdir(), 'hazlie-owner-home-'));
+  const elsewhere = mkdtempSync(join(tmpdir(), 'hazlie-owner-cfg-'));
+  try {
+    grantAt(home, 'owner@example.test');
+    // A config that is NOT <home>/.hazlie/connectors/config.json: the dirname
+    // hops resolve this to the tmpdir's grandparent, which holds no grants and
+    // is not an install at all.
+    const configPath = join(elsewhere, 'config.json');
+    writeFileSync(configPath, JSON.stringify({ ownerEmails: ['alias@example.test'] }), { mode: 0o600 });
+
+    const owner = loadOwner({ home, configPath });
+    assert.equal(owner.addresses.has('owner@example.test'), true,
+      'the install was named outright, so its grants count');
+    assert.equal(owner.addresses.has('alias@example.test'), true,
+      'and the named config file is still the one that was read');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
+test('a config path that names no install reads no grants, never the running machine\'s', () => {
+  const elsewhere = mkdtempSync(join(tmpdir(), 'hazlie-owner-nameless-'));
+  try {
+    const configPath = join(elsewhere, 'config.json');
+    writeFileSync(configPath, JSON.stringify({ selfName: 'Owner' }), { mode: 0o600 });
+    const owner = loadOwner({ configPath });
+    assert.deepEqual([...owner.addresses], [],
+      'an install we cannot name contributes nothing; the alternative is this Mac');
+    assert.deepEqual(owner.names, ['Owner'], 'the config itself is still read');
+  } finally {
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
+test('the canonical shape still carries its own install, so existing callers are unchanged', () => {
+  const home = mkdtempSync(join(tmpdir(), 'hazlie-owner-canon-'));
+  try {
+    grantAt(home, 'owner@example.test');
+    mkdirSync(join(home, '.hazlie', 'connectors'), { recursive: true, mode: 0o700 });
+    const configPath = ownerConfigPath(home);
+    writeFileSync(configPath, '{}', { mode: 0o600 });
+    assert.equal(loadOwner({ configPath }).addresses.has('owner@example.test'), true);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

@@ -63,7 +63,7 @@ import {
 import {
   MAX_CAP_PER_DAY, RELATIONSHIP_ENGINES, RELATIONSHIP_MODES, RELATIONSHIP_PRODUCERS,
   ensureRelationshipDefaults, loadOwner, markOwnerPerson, markPersonRole, markPersonSubRoles,
-  setRelationshipEngine, setRelationshipMode,
+  ownerConfigPath, setRelationshipEngine, setRelationshipMode,
 } from './people/owner.mjs';
 import { SUB_ROLES as SUB_ROLE_VALUES } from './people/subRoles.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
@@ -3155,7 +3155,7 @@ function relationshipState(db, policy) {
       if (existsSync(statePath)) stateDb = new DatabaseSync(statePath, { readOnly: true });
     } catch {}
     try { resDb = openResolutionsDb(); } catch {}
-    try { owner = loadOwner(); } catch {}
+    try { owner = loadOwner(ownerLoadOptions(policy)); } catch {}
     const service = createRelationshipMemory({ contextDb: db, stateDb, resolutionsDb: resDb,
       ...(owner ? { owner } : {}) });
     const llamaCall = async (messages, max_tokens = 120, temperature = 0.2) => {
@@ -3198,6 +3198,35 @@ function ownerConfigTarget(policy) {
   return policy.ownerConfigPath === undefined ? {} : { configPath: policy.ownerConfigPath };
 }
 
+// AND WHERE THE READERS READ, which is the same file or the seam is a lie
+// (round-4 finding 6). The three writing routes above went through
+// ownerConfigTarget while relationshipCap and relationshipProducerConfig below
+// still opened ~/.hazlie/connectors/config.json by hand, so a route test could
+// post a cap or a mode into its own tmpdir and then assert the effect against
+// the developer's real config -- passing or failing on what that machine
+// happened to hold rather than on what the route did.
+function ownerConfigFile(policy) {
+  return policy.ownerConfigPath ?? ownerConfigPath();
+}
+
+// loadOwner() through the same seam, for the call sites that have `policy`.
+//
+// NOT EVERY CALL SITE DOES, and that is stated rather than hidden: the people
+// search and projection helpers (tryPersonSearch, tryGeneralPeopleSearch,
+// rebuildPeopleCore, schedulePeopleProjectionRefresh) take no policy argument,
+// so their loadOwner() still resolves the real homedir. Threading policy
+// through them is a separate change; what matters here is that the routes that
+// READ the owner beside a route that WRITES the owner's config agree about
+// which file that is.
+//
+// A configPath outside the canonical <home>/.hazlie/connectors/config.json
+// shape carries no install with it, and owner.mjs answers such a caller with
+// NO Google grants rather than the running machine's -- which is exactly what
+// a tmpdir config in a test should get.
+function ownerLoadOptions(policy) {
+  return policy?.ownerConfigPath === undefined ? {} : { configPath: policy.ownerConfigPath };
+}
+
 // The global cap comes from the owner's config (relationshipMemory.capPerDay)
 // or a start() override for tests. No config means no cards -- fail closed,
 // per the step-4 rule: thresholds are the owner's or the gates artifact's to
@@ -3208,7 +3237,7 @@ function relationshipCap(policy) {
   // isolated from whatever config the machine they run on happens to carry.
   if (policy.relationshipCap !== undefined) return policy.relationshipCap;
   try {
-    const cfg = JSON.parse(readFileSync(join(homedir(), '.hazlie', 'connectors', 'config.json'), 'utf8'));
+    const cfg = JSON.parse(readFileSync(ownerConfigFile(policy), 'utf8'));
     const n = cfg?.relationshipMemory?.capPerDay;
     if (Number.isInteger(n) && n > 0) return { max: n, windowMs: 86_400_000 };
   } catch {}
@@ -3224,7 +3253,7 @@ function relationshipCap(policy) {
 function relationshipProducerConfig(policy) {
   if (policy.relationshipProducerConfig !== undefined) return policy.relationshipProducerConfig;
   try {
-    const cfg = JSON.parse(readFileSync(join(homedir(), '.hazlie', 'connectors', 'config.json'), 'utf8'));
+    const cfg = JSON.parse(readFileSync(ownerConfigFile(policy), 'utf8'));
     const producer = cfg?.relationshipMemory?.producer;
     const mode = cfg?.relationshipMemory?.mode;
     return {
@@ -3234,6 +3263,25 @@ function relationshipProducerConfig(policy) {
   } catch {
     return { producer: 'matcher', mode: 'any' };
   }
+}
+
+// THE MODE THE OWNER IS ON, for every route that REPORTS one (round-4
+// finding 1).
+//
+// `rel.mode` is this PROCESS's running pick. It is written by the mode route
+// and recovered by hydrateCards off the latest reconnect batch -- and on a
+// fresh install neither has happened yet: the owner picks "founders" on
+// onboarding's first screen, the config is written, hermes restarts before any
+// batch exists, and rel.mode is still undefined. Answering null there is what
+// let onboarding's enterWelcome skip paintMode and redraw "anyone" selected,
+// one tap away from writing `any` back over the founder the owner chose.
+//
+// The persisted config is the fallback, which is the same `?? producerConfig
+// .mode` the card route's own production paths already apply before they
+// produce or serve. There is no third answer: RELATIONSHIP_MODES-checked
+// config, else 'any'.
+function relationshipMode(rel, policy) {
+  return rel.mode ?? relationshipProducerConfig(policy).mode;
 }
 
 // The engine person-page building uses, same seam discipline as
@@ -3450,9 +3498,9 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       const { aliases } = resolutionState(resDb);
       // The year barrier explicitly asks for fresh profiles, so it pays the
       // blocking graph rebuild instead of accepting stale-while-refresh data.
-      yearCore(db, state, { now: Date.now(), owner: loadOwner(), aliases, blocking: true });
+      yearCore(db, state, { now: Date.now(), owner: loadOwner(ownerLoadOptions(policy)), aliases, blocking: true });
       return buildYear(db, state, {
-        year, owner: loadOwner(), aliases, cap: Infinity,
+        year, owner: loadOwner(ownerLoadOptions(policy)), aliases, cap: Infinity,
       }).people.length;
     });
     send(res, 200, { year, profiles, complete: true, state: 'complete' }, cors);
@@ -3795,7 +3843,14 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     const expect = expectRaw !== null && /^\d+$/u.test(expectRaw) ? Number(expectRaw) : null;
     const rel = relationshipState(db, policy);
     const cap = relationshipCap(policy);
-    if (!cap) { send(res, 200, { card: null, reason: 'no-cap-configured' }, cors); return; }
+    // WITH THE MODE, like every other answer this route gives. A fresh
+    // install has no cap until onboarding's card-config POST lands, so this
+    // is the FIRST branch a replayed onboarding hits -- and a reply with no
+    // mode in it is what repainted "anyone" over the owner's pick.
+    if (!cap) {
+      send(res, 200, { card: null, reason: 'no-cap-configured', mode: relationshipMode(rel, policy) }, cors);
+      return;
+    }
 
     // Refill on empty: with a batch depth of 5 (produceBatch's/produceOweBatch's
     // default), the owner judging every card in a batch used to leave the
@@ -3824,16 +3879,17 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       // process from the same local config people/graph.mjs takes its
       // identity from -- owe.mjs holds none of its own, deliberately.
       if (rel.ownerAddresses === undefined) {
-        // No configPath, and there is no other call in this file that passes
-        // one to compare against: `grep -n 'loadOwner(' ui/server/hermes.mjs`
-        // returns eleven bare calls and nothing else, and hermes has no
-        // ownerConfigPath seam at all (review G finding 8's second half,
-        // checked rather than assumed). If a HOME-relocated install is ever
-        // supported, every one of these eleven has to learn about it
-        // together -- adding it here alone would make the card route read a
-        // different owner from the people projection, which is worse than
-        // reading the same default everywhere.
-        try { rel.ownerAddresses = loadOwner().addresses ?? null; } catch { rel.ownerAddresses = null; }
+        // THROUGH THE SEAM (round-4 finding 11). This comment used to say
+        // hermes had no ownerConfigPath seam at all; it acquired one with the
+        // three config-writing routes above, and a card route that reads the
+        // owner from the real homedir while the mode route beside it writes a
+        // test's tmpdir is the half-applied seam that finding names. Every
+        // loadOwner() in this file that has `policy` in hand now goes through
+        // ownerLoadOptions; the four that sit in policy-less people helpers
+        // are listed there.
+        try {
+          rel.ownerAddresses = loadOwner(ownerLoadOptions(policy)).addresses ?? null;
+        } catch { rel.ownerAddresses = null; }
       }
       const reconnectMode = rel.mode ?? producerConfig.mode;
       // The cross-kind exclusion, narrowed to the queue THIS route would
@@ -3903,7 +3959,13 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       }
     }
     if (refillThrottled) {
+      // WITH THE MODE, like every other answer (round-4 finding 1). This is
+      // the branch a configured-but-empty install lands on -- cap recorded,
+      // producer selected, nothing to produce from yet -- so a reply without
+      // one here repaints the picker exactly where the finding says it must
+      // not.
       send(res, 200, { card: null, reason: 'pool-exhausted', retryAfterMs,
+        mode: relationshipMode(rel, policy),
         ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
       return;
     }
@@ -4059,7 +4121,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       if (peek) {
         // The tease only: who and why-in-numbers, never the receipt. The
         // widget renders name plus quiet/overdue days on the orb's title.
-        send(res, 200, { peek: true, card: {
+        send(res, 200, { peek: true, mode: relationshipMode(rel, policy), card: {
           personKey: card.personKey, name: card.name, kind: card.kind,
           snapshot_id: card.snapshot_id,
           evidence: {
@@ -4145,8 +4207,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         drafts = [];
       }
       send(res, 200, { card: { ...card, quote, sentence, left, leftTone, who: page.sections.who?.text ?? null, page, changed, drafts },
-        servedMode: card.kind === 'reconnect' ? (card.evidence?.mode ?? rel.mode ?? null) : null,
-        mode: rel.mode ?? null,
+        servedMode: card.kind === 'reconnect' ? (card.evidence?.mode ?? relationshipMode(rel, policy)) : null,
+        mode: relationshipMode(rel, policy),
         // The card asked for is gone; this is the next one. A reason BESIDE a
         // non-null card, which no other branch of this route produces.
         ...(expectSuperseded ? { expectSuperseded: true, reason: 'expect-superseded' } : {}),
@@ -4166,7 +4228,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // rather than as `reason`, because on THIS branch `reason` is already
     // carrying cap/blocked/queue-empty, which the panel needs more. The flag
     // is on every branch so there is one field to test regardless.
-    send(res, 200, { card: null, reason, mode: rel.mode ?? null,
+    send(res, 200, { card: null, reason, mode: relationshipMode(rel, policy),
       ...(expectSuperseded ? { expectSuperseded: true } : {}),
       ...(rel.refreshing ? { refreshing: true } : {}),
       ...(rel.lastError ? { lastError: rel.lastError } : {}),
@@ -5518,7 +5580,7 @@ function onboardingProgress(db, policy, switchedOffOverride) {
   // addresses graph.mjs drops before it mints a calendar participant.
   let ownerKeys = [];
   try {
-    const owner = loadOwner();
+    const owner = loadOwner(ownerLoadOptions(policy));
     ownerKeys = [...(owner.keys ?? [])].filter((key) => typeof key === 'string');
     if (ownerKeys.length === 0) {
       const addresses = [...(owner.addresses ?? [])].filter(
@@ -5538,7 +5600,18 @@ function onboardingProgress(db, policy, switchedOffOverride) {
     // they met -- with nothing anywhere to say so. The count is still
     // published, because a number with a known caveat beats a blank screen;
     // the caveat now exists.
-    console.warn(`onboarding progress: owner filter unavailable (${error?.message ?? error})`);
+    //
+    // EXCEPT FOR THE ONE STATE THAT IS NOT A CAVEAT (round-4 finding 9).
+    // person_identifiers is created lazily by the projection, so before the
+    // first rebuild this query throws `no such table` on EVERY fresh install
+    // -- and screen 6 polls this route on a timer, so the ordinary load screen
+    // wrote the line continuously. It is the same exemption the people-counts
+    // catch below already makes, for the same table and the same reason: no
+    // projection yet means an empty owner filter is the truthful answer, not a
+    // degraded one.
+    if (!/no such table/iu.test(String(error?.message ?? ''))) {
+      console.warn(`onboarding progress: owner filter unavailable (${error?.message ?? error})`);
+    }
   }
   const notOwner = ownerKeys.length > 0
     ? ` AND person_key NOT IN (${ownerKeys.map(() => '?').join(',')})`
@@ -5963,7 +6036,7 @@ function schedulePeopleRebuild(db, policy, reason) {
     try {
       withPeopleDbs(db, (peopleDb, resDb) => {
         const { aliases } = resolutionState(resDb);
-        materializedPeopleGraph(db, peopleDb, { now: Date.now(), owner: loadOwner(), aliases, force: false });
+        materializedPeopleGraph(db, peopleDb, { now: Date.now(), owner: loadOwner(ownerLoadOptions(policy)), aliases, force: false });
       });
       state.lastRebuildError = null;
     } catch (e) {
@@ -6658,7 +6731,7 @@ const PEOPLE_YEAR_COMPLETION_FIELDS = Object.freeze(['year']);
 // pairs still needing the owner's eyes; decide records one call. Split out so
 // handle() stays a flat dispatch table.
 async function handlePeople(db, req, res, cors, url, policy) {
-  const owner = loadOwner();
+  const owner = loadOwner(ownerLoadOptions(policy));
 
   // Timeframe in days back (0 = all time), from the popup's selector. Clamped to
   // a decade so a fat-fingered value can't ask for an epoch before the corpus.

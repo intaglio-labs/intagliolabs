@@ -41,20 +41,43 @@ function emailsIn(identifiers) {
   return [...out];
 }
 
-export function loadOwner({ home = homedir(), configPath = null } = {}) {
+// WHICH INSTALL'S GOOGLE GRANTS COUNT AS THE OWNER'S (round-4 finding 11).
+//
+// The grants live at <home>/.hazlie/secrets, so an EXPLICIT `home` names the
+// install outright and wins over everything below. The complication is
+// `configPath`: a caller may hand over a config file without saying which
+// install it belongs to, and reading the RUNNING machine's grants for it would
+// make a test pointing at a temporary config answer differently on every
+// developer's Mac -- which is what this derivation exists to prevent.
+//
+// It used to be three unconditional dirname hops off configPath. That is
+// correct for exactly one path shape and silently wrong for every other: a
+// config in a bare tmpdir resolved its grants to the tmpdir's grandparent,
+// which on a Mac is somewhere under /var/folders. So the hops now only stand
+// in for `home` when the path IS <home>/.hazlie/connectors/config.json, proven
+// by rebuilding it and comparing. Anything else has named no install, and the
+// honest answer for an install we cannot name is NO grants -- never the
+// running machine's.
+function grantsHomeFor({ home, homeGiven, configPath }) {
+  if (homeGiven || configPath === null) return home;
+  const candidate = dirname(dirname(dirname(configPath)));
+  return ownerConfigPath(candidate) === configPath ? candidate : null;
+}
+
+export function loadOwner(options = {}) {
+  const { configPath = null } = options;
+  // `home` is read off the options object rather than destructured with a
+  // default, because grantsHomeFor has to know the difference between "the
+  // caller named this install" and "nobody said, so it is this machine".
+  const homeGiven = options.home !== undefined;
+  const home = homeGiven ? options.home : homedir();
   let raw = {};
   try {
     raw = JSON.parse(readFileSync(configPath ?? ownerConfigPath(home), 'utf8')) ?? {};
   } catch {
     raw = {};
   }
-  // The grants live beside the config (<home>/.hazlie/secrets), so a caller
-  // that named a config file has named the install those grants belong to.
-  // Without this a test pointing at a temporary config would read the real
-  // machine's accounts and answer differently on every developer's Mac.
-  const grantsHome = configPath === null
-    ? home
-    : dirname(dirname(dirname(configPath)));
+  const grantsHome = grantsHomeFor({ home, homeGiven, configPath });
   const addresses = new Set();
   for (const a of raw?.mail?.accounts ?? []) {
     if (typeof a?.user === 'string' && a.user.includes('@')) addresses.add(a.user.toLowerCase());
@@ -76,7 +99,7 @@ export function loadOwner({ home = homedir(), configPath = null } = {}) {
   // sides now agree about who "me" is. An alias the owner has never marked and
   // never authorized is still not guessed at — that is what `ownerEmails` is
   // for, and it stays the only way in.
-  for (const account of listGoogleAccounts({ home: grantsHome })) {
+  for (const account of (grantsHome === null ? [] : listGoogleAccounts({ home: grantsHome }))) {
     if (typeof account?.email === 'string' && account.email.includes('@')) {
       addresses.add(account.email.toLowerCase());
     }
