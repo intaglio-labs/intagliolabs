@@ -147,6 +147,55 @@ export const OPTIONAL_CONNECTORS = Object.freeze(
 // Math.min below can never take this under a minute.
 export const NOT_READY_REPROBE_MS = 60_000;
 
+// THE FIRST-LOAD SPRINT, and the arithmetic that makes it necessary.
+//
+// The reconnect card needs somebody who has gone QUIET: RECONNECT_GATES asks for
+// a person whose last activity is at least 180 days old. On a fresh Mac the
+// forward window reaches about 157 days back and the yearly walk is still inside
+// the current year, so NOBODY in the loaded corpus can qualify until last year's
+// history lands -- and last year's history is paced at HISTORY_BUDGET_MS (20 s)
+// per source per tick, with ticks fifteen minutes apart. Live on 2026-09-12 run
+// two: thirty minutes after a fresh install the pool was empty in every mode,
+// and iMessage's 2026 pass had gained 5.8k rows and then 9.9k rows in two ticks
+// a quarter of an hour apart. The first card was hours away, and nothing on
+// screen said so.
+//
+// So a machine that has not yet finished LAST year walks it hard for half an
+// hour: a longer history budget, and a re-arm measured in seconds rather than
+// the polling interval. Then it stops, permanently, whichever way it ended --
+// this is a first-load phase, not a mode.
+//
+// LOCAL STORES ONLY. mail, granola, matrix and oura are network sources against
+// rate-limited APIs, and the mail connector's own pacer is built around a
+// per-minute budget it shares with nothing; sprinting one of those trades a
+// first card for a 429. The sprint reads sqlite files on the owner's own disk.
+export const SPRINT_MAX_MS = 30 * 60_000;
+export const SPRINT_HISTORY_BUDGET_MS = 60_000;
+// Two re-arms, because the owner already told us which machine they want. A
+// fresh install defaults to less-power (PowerBudget's own default, and its
+// comment makes the case: a hot laptop on somebody's first evening is the
+// impression that sticks), so the GENTLE one is the default here too. Even at a
+// minute this is fifteen times the cadence the sprint replaces.
+export const SPRINT_REARM_MS = 10_000;
+export const SPRINT_REARM_GENTLE_MS = 60_000;
+// How the app tells its child which the owner picked. The same channel that
+// already carries the owner pid at spawn (widget/src/Connectors.swift), not a
+// config key: a second writer for a fact that already has one is how two
+// definitions of the same setting drift apart. Absent means gentle, which is
+// what a standalone `npm run daemon` and a fresh install both are.
+export const PERFORMANCE_ENV = 'INTAGLIO_PERFORMANCE';
+export function defaultSprintRearmMs(env = process.env) {
+  return env[PERFORMANCE_ENV] === 'full' ? SPRINT_REARM_MS : SPRINT_REARM_GENTLE_MS;
+}
+// WHICH CONNECTORS MAY SPRINT. Named rather than derived from `walksHistory`,
+// because the property that matters is not "walks history" but "reads a local
+// file nobody is rate-limiting".
+export const SPRINT_CONNECTORS = Object.freeze(['imessage', 'calendar', 'whatsapp']);
+// WHEN THE SPRINT BEGAN, durably, so a restart inside the window resumes with
+// what is left of it rather than starting a fresh half hour -- and so a machine
+// that has already spent its sprint never takes another.
+export const SPRINT_STARTED_KEY = 'sprint:started-ts';
+
 export function sourceRetryDelay(result, intervalMs) {
   if (Number.isFinite(result?.nextDelayMs) && result.nextDelayMs >= 1_000) {
     return Math.min(60_000, Math.floor(result.nextDelayMs));
@@ -161,6 +210,15 @@ export function sourceRetryDelay(result, intervalMs) {
   // injected test cadence for a fifteen-minute one.
   if (Number.isFinite(result?.notReadyDelayMs) && result.notReadyDelayMs > 0) {
     return Math.min(intervalMs, Math.floor(result.notReadyDelayMs));
+  }
+  // THE SPRINT RE-ARM, which is the only delay here allowed to be SHORTER than
+  // the interval without a source asking for it. It comes back through this
+  // function rather than being armed directly so the one-timer-per-source rule
+  // in scheduleSource still holds: a sprint tick replaces the pending timer
+  // exactly as an ordinary one does, and there is never a second pass in flight
+  // over the same cursor.
+  if (Number.isFinite(result?.sprintDelayMs) && result.sprintDelayMs > 0) {
+    return Math.min(intervalMs, Math.floor(result.sprintDelayMs));
   }
   return intervalMs;
 }
@@ -927,6 +985,11 @@ export function createDaemon({
   // reason activityPath is: a test cannot wait a real minute to prove that the
   // wait ends without a restart.
   reprobeFloorMs = NOT_READY_REPROBE_MS,
+  // Injectable for the same reason reprobeFloorMs is: a test cannot wait out a
+  // ten-second re-arm, let alone a thirty-minute sprint.
+  sprintRearmMs = defaultSprintRearmMs(),
+  sprintMaxMs = SPRINT_MAX_MS,
+  sprintHistoryBudgetMs = SPRINT_HISTORY_BUDGET_MS,
 }) {
   const timers = new Set();
   const nextRuns = new Map();
@@ -1062,6 +1125,57 @@ export function createDaemon({
   //
   // COUNT, NEVER THE STRINGS, for the same reason source_not_ready logs a
   // count: needs() messages embed absolute local paths.
+  // THE SPRINT: is this machine still inside its first-load half hour, and is
+  // there still a reason for one?
+  //
+  // BOTH HALVES, on every ask. The clock alone would keep sprinting a walk that
+  // finished last year in four minutes; the walk alone would sprint forever on a
+  // machine whose only local source is unprovisioned. `lastYearOpen` is asked of
+  // the connectors that may actually sprint -- a source that cannot run is not a
+  // reason to keep the phase open, but it is also not a reason to close it while
+  // the clock says the owner is still waiting.
+  const sprintRoster = () => SPRINT_CONNECTORS
+    .filter((connector) => scheduledByName.has(connector));
+  const lastYearOpen = () => {
+    const lastYear = new Date(now()).getFullYear() - 1;
+    return sprintRoster().some(
+      (connector) => state.getCursor(`yearly-backfill:connector:${connector}:done:${lastYear}`) !== '1'
+    );
+  };
+  // Epoch ms, or null where this machine has never begun one. Read from the
+  // cursor store rather than a field, so a restart inside the window resumes
+  // with what is left of it and a machine that has spent its sprint takes no
+  // second one.
+  const sprintStartedTs = () => {
+    const parsed = Number(state.getCursor(SPRINT_STARTED_KEY));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  };
+  const sprinting = () => {
+    const started = sprintStartedTs();
+    if (started === null) return false;
+    if (now() - started >= sprintMaxMs) return false;
+    return lastYearOpen();
+  };
+  /// Begin one if this machine is owed one. Idempotent, and deliberately never
+  /// re-arms a sprint that has already been spent: the cursor is the record, and
+  /// it outlives the process.
+  const beginSprint = (trigger) => {
+    if (sprintStartedTs() !== null) return false;
+    if (sprintRoster().length === 0 || !lastYearOpen()) return false;
+    state.setCursor(SPRINT_STARTED_KEY, String(now()));
+    log.info('sprint_started', {
+      trigger,
+      sources: sprintRoster(),
+      maxMs: sprintMaxMs,
+      rearmMs: sprintRearmMs,
+    });
+    return true;
+  };
+  const sprintSnapshot = () => {
+    const started = sprintStartedTs();
+    if (started === null || !sprinting()) return null;
+    return { since: started, until: started + sprintMaxMs, sources: sprintRoster() };
+  };
   const waitingQueue = () => [...notReady.entries()]
     .map(([connector, missing]) => ({
       connector,
@@ -1196,11 +1310,16 @@ export function createDaemon({
     // and scheduling nothing. One word costs nothing and makes the disagreement
     // legible; connect/lib/status.mjs carries it back to the shelf.
     const waiting = waitingQueue();
+    // A SIBLING KEY, like `waiting`, and absent once the phase ends. The panel
+    // and screen 6 both draw a sentence off it, and a phase that is over has to
+    // stop claiming the machine is racing.
+    const sprint = sprintSnapshot();
     writeActivity(
       {
         ...activity,
         queue: scheduledQueue(),
         ...(waiting.length > 0 ? { waiting } : {}),
+        ...(sprint === null ? {} : { sprint }),
         registryState: FEATURES_REGISTRY_STATE,
         ...(total ?? {}),
       },
@@ -1468,6 +1587,11 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       startedTs,
     });
     let nextDelayMs = null;
+    // Read ONCE, before the forward pass, so one tick has one answer about which
+    // phase it is in; re-asked after the history loop, where the answer may have
+    // just changed because this very pass finished the year.
+    const sprintingNow = sprinting();
+    let sprintDelayMs = null;
     try {
       // The forward pass first, always: what arrived since last time is more
       // urgent than what happened in 2019, and history must never delay it.
@@ -1520,9 +1644,22 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
         // enough that the owner never notices (this is their daily driver, and
         // the forward pass has already run), and it self-tunes -- a fast Mac
         // simply gets through more history per cycle.
-        const deadline = now() + HISTORY_BUDGET_MS;
+        // AND THE SPRINT SPENDS A BIGGER ONE. Same shape, same self-tuning, three
+        // times the slice -- and paired with the re-arm below, which is what
+        // actually moves the needle: the budget decides how much one tick walks,
+        // the re-arm decides how soon the next tick comes.
+        const inSprint = sprintingNow && SPRINT_CONNECTORS.includes(source.name);
+        const deadline = now() + (inSprint ? sprintHistoryBudgetMs : HISTORY_BUDGET_MS);
         let slices = 0;
         let gained = 0;
+        // THE ONE STOP THAT MUST NOT COME STRAIGHT BACK. A pass that read nothing
+        // is a source with nothing to give, and asking it again in ten seconds is
+        // a busy-loop. Every other ending -- the clock ran out mid-year, or the
+        // year finished and the next one is waiting -- is work in progress, and
+        // during a sprint the next tick belongs seconds later. Finishing 2026 and
+        // then waiting a quarter of an hour to begin 2025 is exactly the pacing
+        // the sprint exists to replace.
+        let stoppedOnNothing = false;
         try {
           while (now() < deadline) {
             const rawBack = (await source.run(makeCtx({ history: true, historyWindow, deadline }))) ?? {};
@@ -1549,7 +1686,21 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
             if (
               back.ingested === 0 && back.updated === 0 && back.unchanged === 0
               && rawBack.historyProgressed !== true
-            ) break;
+            ) {
+              stoppedOnNothing = true;
+              break;
+            }
+          }
+          // COME STRAIGHT BACK. The whole point of the phase: the year is still
+          // open and the clock is what stopped this pass, so the next one is
+          // seconds away rather than a polling interval. Recomputed rather than
+          // reusing `inSprint`, because a pass that just recorded last year as
+          // done has ENDED the sprint and must not be the thing that extends it.
+          if (
+            slices > 0 && !stoppedOnNothing
+            && sprinting() && SPRINT_CONNECTORS.includes(source.name)
+          ) {
+            sprintDelayMs = sprintRearmMs;
           }
           if (slices > 0) {
             // A short rolling measurement is enough for the activity panel to
@@ -1561,6 +1712,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
               year: historyWindow.year,
               slices,
               gained,
+              ...(sprintDelayMs === null ? {} : { sprintRearmMs: sprintDelayMs }),
             });
           }
         } catch (error) {
@@ -1597,7 +1749,10 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     } finally {
       publishActivity({ phase: 'idle', connector: source.name, finishedTs: now() });
     }
-    return { nextDelayMs };
+    // nextDelayMs first: a source that asked for a short retry of its own (a
+    // rate-limited portal join) is answering about work the sprint knows nothing
+    // about. sourceRetryDelay reads them in that order too.
+    return { nextDelayMs, sprintDelayMs };
   }
 
   function schedule(fn, delayMs, reschedule) {
@@ -1704,6 +1859,11 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       ready.push(connector);
       scheduleSource(source, 0);
     }
+    // AND THE NUDGE IS ALSO WHEN A FIRST LOAD BEGINS. Onboarding starts the
+    // reader before the owner has connected anything, so the startup check below
+    // can run on a machine with no local store to walk yet; the nudge is the
+    // moment that stops being true.
+    beginSprint(trigger);
     log.info('sources_reprobed', {
       trigger,
       waiting: pending.length,
@@ -1763,6 +1923,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
 
   return {
     probeNotReady,
+    sprintSnapshot,
     start() {
       const scheduledSources = sources.filter((source) => !DEFAULT_DISABLED_CONNECTORS.includes(source.name));
       sources.forEach((source) => {
@@ -1885,6 +2046,10 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
           });
         }
         schedulePeopleGate();
+        // AFTER the probe, not before it: beginSprint asks which sprint-eligible
+        // sources are scheduled and whether last year is still open, and both
+        // answers are worth having once readiness has been evaluated.
+        beginSprint('startup');
         publishWaiting();
       });
 
