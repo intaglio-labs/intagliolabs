@@ -302,7 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // launch downloads nothing unless asked" and one of these is in a file
       // this stage does not own.
       DispatchQueue.main.async {
-        guard ModelSetup.isInstalled else {
+        guard ModelSetup.isInstalled || ModelSetup.hasUnfinishedDownload else {
           NSLog("Intaglio Labs: no local model installed — nothing to reconcile, "
                 + "and nothing downloads until onboarding asks")
           return
