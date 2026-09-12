@@ -206,6 +206,24 @@ test('the google probe is capped for the whole visit, and reachable by hand', ()
     'the cap is per visit, not per page load');
 });
 
+test('a fresh install with nothing signed in reads "not connected", not a failed sign-in', () => {
+  // Seen live on the first clean-machine run (2026-09-12): the probe that
+  // fires on entering screen 3 came back {accounts:0, stale:0, failures:[]}
+  // and paintGoogle's last branch painted "that sign-in did not finish" in the
+  // alarm colour before the owner had pressed anything. The failure copy is
+  // for a sign-in the owner STARTED this visit and came back from empty.
+  const paint = /function paintGoogle\(out\) \{[\s\S]*?\n\}/u.exec(js)?.[0];
+  assert.ok(paint, 'paintGoogle() not found');
+  assert.match(paint, /if \(!googleAsked\) \{[\s\S]{0,120}'not connected'/u,
+    'the empty state is "not connected" until the owner asks');
+  assert.match(paint, /googleAsked[\s\S]*classList\.add\('bad'\)[\s\S]{0,80}did not finish/u,
+    'and the alarm colour comes after that gate');
+  assert.match(js, /googleStart\.addEventListener\('click', \(\) => \{\s*googleAsked = true;/u,
+    'the button is what sets it');
+  assert.match(js, /function enterGoogle\(\) \{[\s\S]{0,400}googleAsked = false;/u,
+    'and a new visit starts unasked');
+});
+
 test('the permission poll asks for no diagnostic; entering the screen does', () => {
   // writeDiagnostic() evaluates every permission a second time and writes a
   // file. On the poll path that was four chat.db opens, a createDirectory and

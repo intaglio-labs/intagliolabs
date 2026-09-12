@@ -494,6 +494,8 @@ const googleStart = document.getElementById('googleStart');
 let googleTimer = null;
 let googleUntil = 0;
 let googleProbes = 0;
+// Set when the owner presses the button this visit; see paintGoogle's last branch.
+let googleAsked = false;
 
 // EVERY PROBE IS A REAL GMAIL READ, per live account
 // (connect/lib/googleProbe.mjs asks messages.list), uncached and unthrottled,
@@ -544,6 +546,16 @@ function paintGoogle(out) {
   if (out.stale > 0) {
     googleStatus.classList.add('warn');
     googleStatus.textContent = 'that sign-in has expired — sign in again';
+    return;
+  }
+  // NOTHING SIGNED IN. Before the owner has pressed the button this is the
+  // ordinary state of a fresh install, and the immediate probe on entering the
+  // screen used to paint it in the alarm colour as a sign-in that "did not
+  // finish" -- an accusation about a step nobody had taken (seen live on the
+  // first clean-machine run, 2026-09-12). The failure copy belongs to a
+  // sign-in the owner started on this visit and came back from empty-handed.
+  if (!googleAsked) {
+    googleStatus.textContent = 'not connected';
     return;
   }
   googleStatus.classList.add('bad');
@@ -604,12 +616,14 @@ function enterGoogle() {
   // owner asking again, and that is a different thing from a page sitting on
   // this screen for an hour.
   googleProbes = 0;
+  googleAsked = false;
   probeGoogle();
 }
 
 window.addEventListener('focus', () => { if (currentScreen === '3') probeGoogle(); });
 
 googleStart.addEventListener('click', () => {
+  googleAsked = true;
   googleStatus.textContent = 'opening google in your browser…';
   hzPost('googleAuth', { flow: 'google' }).catch(() => {});
   startGooglePolling();
