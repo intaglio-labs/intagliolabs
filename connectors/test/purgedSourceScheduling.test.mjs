@@ -853,3 +853,130 @@ test('the last mailbox drains its gap even when the budget is already spent', as
   assert.equal(state.getCursor('mail:three@example.test:forward-gap-until'), null);
   assert.ok(GAP_FROM < GAP_UNTIL);
 });
+
+// ---------------------------------------------------------------------------
+// (f) and a gate that refuses the SAME mailbox every pass is not a gate
+// ---------------------------------------------------------------------------
+
+// ROUND-5 FINDING 6. The rotation answers ORDERING starvation: the mailbox that
+// was always last now sometimes goes first. It does not answer the other shape,
+// which is a mailbox whose fresh window FITS IN ONE PAGE and still spends the
+// whole slice doing it.
+//
+// At defaults a page is 100 gets at 90 a minute, ~66 s, against a 40 s share at
+// three mailboxes. So every mailbox, in every rotation position, finishes its
+// fresh window already out of time and has its drain gated out — on every pass,
+// forever. `forward-gap-*` never moves and those messages are never read.
+function everyMailboxBusy({ cursors = {} } = {}) {
+  const BASE = new Date(2026, 5, 1, 12, 0, 0).getTime();
+  let clock = BASE;
+  const queries = [];
+  const map = new Map(Object.entries(cursors));
+  const state = {
+    getCursor: (k) => map.get(k) ?? null,
+    setCursor: (k, v) => map.set(k, String(v)),
+    deleteCursor: (k) => map.delete(k),
+  };
+  const emails = ['one@example.test', 'two@example.test', 'three@example.test'];
+  const GAP_FROM = BASE - 40 * 86_400_000;
+  const GAP_UNTIL = BASE - 30 * 86_400_000;
+  for (const email of emails) {
+    // Caught up to an hour ago, and carrying a hole from a truncated pass
+    // weeks before that.
+    if (!map.has(`mail:${email}:internalDate`)) {
+      state.setCursor(`mail:${email}:internalDate`, String(BASE - 3_600_000));
+      state.setCursor(`mail:${email}:forward-gap-from`, String(GAP_FROM));
+      state.setCursor(`mail:${email}:forward-gap-until`, String(GAP_UNTIL));
+    }
+  }
+
+  const source = createMailSource({
+    accountsForScope: () => emails.map((email) => ({ email })),
+    sleep: async (ms) => { clock += ms; },
+    makeClient: ({ email }) => ({
+      listMessages: async ({ q }) => {
+        queries.push({ email, q });
+        // The drain query: one message, inside the hole.
+        if (q.includes('before:')) return { messages: [`${email}-gap`].map((id) => ({ id })) };
+        // The fresh window: ONE page, full, and FINISHED — no nextPageToken.
+        // A hundred gets is ~66 s against a 40 s share, so the mailbox leaves
+        // its own window out of time without ever being truncated.
+        return {
+          messages: Array.from({ length: 100 }, (_, i) => ({ id: `${email}-fresh-${i}` })),
+        };
+      },
+      getMessage: async (id) => ({
+        id,
+        internalDate: String(
+          String(id).endsWith('-gap') ? GAP_UNTIL - 1_000 : BASE - 60_000
+        ),
+        payload: {
+          mimeType: 'text/plain',
+          headers: [
+            { name: 'Message-ID', value: `<${id}@example.test>` },
+            { name: 'From', value: 'friend@example.test' },
+            { name: 'To', value: 'owner@example.test' },
+            { name: 'Subject', value: String(id) },
+          ],
+          body: { data: Buffer.from(String(id)).toString('base64url') },
+        },
+      }),
+    }),
+  });
+  const ctx = {
+    state,
+    config: { mail: { backfillDays: 1400 } },
+    home: '/tmp/mail-busy-test-home',
+    now: () => clock,
+    history: false,
+    ingest: async (rows) => ({ inserted: rows.length, updated: 0, unchanged: 0 }),
+    log: { info() {}, warn() {} },
+    deadline: BASE + 120_000,
+  };
+  const drainsFor = (email) => queries.filter(
+    (entry) => entry.email === email && entry.q.includes(`before:${Math.floor(GAP_UNTIL / 1000) + 1}`)
+  ).length;
+  return { source, ctx, state, queries, drainsFor, map, emails };
+}
+
+test('a busy mailbox whose own fresh page spends its slice still drains, one pass later', async () => {
+  const first = everyMailboxBusy();
+  await first.source.run(first.ctx);
+
+  for (const email of first.emails) {
+    assert.equal(first.drainsFor(email), 0,
+      'the fresh page really does leave every mailbox out of time');
+    assert.equal(
+      first.state.getCursor(`mail:${email}:forward-drain-owed`),
+      '1',
+      'a drain the gate turned away has to be remembered, or it is turned away forever'
+    );
+    assert.ok(first.state.getCursor(`mail:${email}:forward-gap-from`),
+      'and the hole is still open');
+  }
+
+  // The next pass, carrying the same cursors forward.
+  const second = everyMailboxBusy({ cursors: Object.fromEntries(first.map) });
+  await second.source.run(second.ctx);
+
+  for (const email of second.emails) {
+    assert.equal(second.drainsFor(email), 1,
+      `${email} was gated out of its own hole on a second consecutive pass`);
+    assert.equal(second.state.getCursor(`mail:${email}:forward-gap-from`), null,
+      'the hole is read and released');
+    assert.equal(second.state.getCursor(`mail:${email}:forward-drain-owed`), null,
+      'and the turn is spent rather than left standing against a hole that is gone');
+  }
+});
+
+// ROUND-5 FINDING 19. The pass order only matters when there is a deadline to
+// slice: without one every mailbox has the whole pass however it is ordered.
+// Writing the cursor anyway moved a stored index that meant nothing, so an
+// install that later gained a deadline started from wherever the drift left it.
+test('the pass order is not rotated when there is no deadline to slice', async () => {
+  const { source, ctx, state } = everyMailboxBusy();
+  delete ctx.deadline;
+  await source.run(ctx);
+  assert.equal(state.getCursor('mail:forward-start'), null,
+    'position buys nothing without a deadline, so it must not be spent');
+});

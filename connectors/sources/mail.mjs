@@ -132,6 +132,22 @@ const FORWARD_START_KEY = 'mail:forward-start';
 // the cap can cut a run of same-millisecond messages in half.
 const gapFromKey = (email) => `mail:${String(email).toLowerCase()}:forward-gap-from`;
 const gapUntilKey = (email) => `mail:${String(email).toLowerCase()}:forward-gap-until`;
+// THE DRAIN IS OWED A TURN, per mailbox.
+//
+// The time gate is right about the ordinary case and wrong about one shape of
+// mailbox: a fresh window that FITS IN ONE PAGE and still spends the whole slice
+// doing it. At defaults a page is ~66 s against a 40 s share at three mailboxes,
+// so `accountOutOfTime()` is true by the time the drain is reached, every pass,
+// in every rotation position -- the rotation answers ORDERING starvation and
+// this is slice-versus-page starvation. The gap below the cursor then never
+// moves and those messages are never read at all.
+//
+// So a drain the gate turned away once is let through once. Written when the
+// gate refuses it, spent when it runs, and cleared the moment there is no hole
+// left. The cost is the second exempt page the gate exists to prevent, on
+// ALTERNATE passes rather than every pass -- an amortised half page per mailbox
+// against a hole that otherwise stays open forever.
+const drainOwedKey = (email) => `mail:${String(email).toLowerCase()}:forward-drain-owed`;
 const historyPageKey = (email, year) =>
   `mail:${String(email).toLowerCase()}:history-year:${year}:page`;
 const historyDoneKey = (email, year) =>
@@ -281,7 +297,12 @@ export function createMailSource({
       // nothing there. `accountIndex` stays the account's TRUE index whatever
       // the order, because it is what the logs and the failure list identify a
       // mailbox by; only the slicing below reads the pass position.
-      const rotating = yearly === null && accounts.length > 1;
+      // AND ONLY WHEN THERE IS A DEADLINE TO SLICE. `accountDeadline` is null
+      // without one, so every mailbox has the whole pass however it is ordered
+      // and the position buys nothing -- one cursor write per pass for no
+      // effect, moving a stored index that means nothing until a deadline
+      // arrives and then starts from wherever the drift left it.
+      const rotating = yearly === null && accounts.length > 1 && deadline !== null;
       const start = rotating
         ? (((Number(state.getCursor(FORWARD_START_KEY)) || 0) % accounts.length) + accounts.length)
           % accounts.length
@@ -835,7 +856,20 @@ export function createMailSource({
             // boundary exactly like the fresh window's. So the drain either
             // does not start or costs one bounded page, and the account's total
             // overrun stays one page either way.
-            if (gap !== null && seen < MAX_MESSAGES_PER_ACCOUNT && !accountOutOfTime()) {
+            //
+            // AND A GATE THAT REFUSES THE SAME MAILBOX EVERY TIME IS NOT A GATE
+            // (round-5 finding 6). See drainOwedKey: a fresh window that fits in
+            // one page and still spends the whole slice leaves the drain gated
+            // out in every rotation position, forever. The turn it is owed is
+            // spent here.
+            const drainOwed = state.getCursor(drainOwedKey(account.email)) === '1';
+            const drainBlocked = gap !== null
+              && seen < MAX_MESSAGES_PER_ACCOUNT
+              && accountOutOfTime()
+              && !drainOwed;
+            if (drainBlocked) state.setCursor(drainOwedKey(account.email), '1');
+            if (gap !== null && seen < MAX_MESSAGES_PER_ACCOUNT && !drainBlocked) {
+              state.deleteCursor(drainOwedKey(account.email));
               await scanWindow({
                 // `floor(until/1000) + 1` covers every tie inside `until`'s own
                 // second without widening a second further than that: above
@@ -859,6 +893,11 @@ export function createMailSource({
                 },
               });
             }
+            // No hole, nothing owed. Kept out of the branches above because the
+            // drain can close the gap from inside its own onPage, and a turn
+            // owed against a hole that no longer exists would spend a page on
+            // an empty query the next time the slice ran short.
+            if (readGap() === null) state.deleteCursor(drainOwedKey(account.email));
           }
 
           // accountIndex, NEVER account.email. This file's own LOG POLICY
