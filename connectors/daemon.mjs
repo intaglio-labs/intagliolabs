@@ -1438,10 +1438,29 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     notReadyDelays.delete(source.name);
     const startedTs = now();
     const socialPlatforms = source.name === 'matrix' ? connectedSocialPlatforms() : [];
+    // WAS THIS SOURCE'S STANDING A GUESS? If startup could not ask it, the
+    // restart reconciliation ran against an incomplete answer and stopped: it
+    // is called ONCE, and the year it could have crossed has no task left in it
+    // to call advance() again. So the first real answer re-runs it.
+    const wasProvisional = yearlyBackfill.snapshot().provisional.includes(source.name);
     yearlyBackfill.classify(
       source.name,
       source.walksHistory === true && (source.name !== 'matrix' || socialPlatforms.length > 0)
     );
+    if (wasProvisional) {
+      const recovery = yearlyBackfill.reconcile();
+      if (recovery.advanced > 0 || recovery.repaired) {
+        log.info('history_reconciled_after_guess', {
+          connector: source.name,
+          fromYear: recovery.fromYear,
+          toYear: recovery.year,
+          barriers: recovery.advanced,
+          repaired: recovery.repaired,
+          complete: recovery.complete,
+        });
+      }
+      schedulePeopleGate();
+    }
     publishActivity({
       phase: 'syncing',
       connector: source.name,
@@ -1820,7 +1839,16 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
           // one tick sooner than if startup had said nothing.
           const failures = (needsFailures.get(source.name) ?? 0) + 1;
           needsFailures.set(source.name, failures);
-          yearlyBackfill.classify(source.name, false);
+          // CLASSIFIED, AND MARKED AS A GUESS. The classification still has to
+          // happen -- advance() waits on unclassified(), and reconcile() below
+          // gives up on an unclassified roster -- but a throw is "we could not
+          // ask", and the walk must not advance a year on the strength of it.
+          // A Photos library locked for twenty seconds across a restart was
+          // enough to advance 2026 past a source that had 2026 work, and the
+          // recovering tick then rewound the whole walk to fetch it again.
+          // See yearlyBackfill's `provisional`; the wait ends at this source's
+          // first real tick, one stagger away.
+          yearlyBackfill.classify(source.name, false, { unanswered: true });
           log.warn('source_needs_failed', {
             connector: source.name,
             failures,
@@ -1844,11 +1872,15 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
         );
       })).then(() => {
         const recovery = yearlyBackfill.reconcile();
-        if (recovery.advanced > 0) {
+        if (recovery.advanced > 0 || recovery.repaired) {
           log.info('history_restart_reconciled', {
             fromYear: recovery.fromYear,
             toYear: recovery.year,
             barriers: recovery.advanced,
+            // A COMPLETE mark that nothing could have written honestly, cleared.
+            // It is the one line that explains why a machine that reported its
+            // history finished has started walking again.
+            repaired: recovery.repaired,
             complete: recovery.complete,
           });
         }

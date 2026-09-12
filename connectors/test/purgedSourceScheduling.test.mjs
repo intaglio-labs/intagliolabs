@@ -528,32 +528,44 @@ test('the startup probe says why a source was unavailable before any tick', asyn
   assert.equal(typeof failure[1].error, 'string');
 });
 
-// A FIRST THROW AT STARTUP MUST NOT FREEZE THE WALK (round-4 finding 14).
+// A FIRST THROW AT STARTUP MUST NOT FREEZE THE WALK (round-4 finding 14) -- AND
+// MUST NOT BE SPENT AS THOUGH IT WERE AN ANSWER (round-5 findings 1 and 8).
 //
 // The startup probe used to classify an unanswerable source unavailable
 // immediately. It was then put behind the running daemon's three-strike
-// tolerance, and that tolerance is for a DIFFERENT problem: a source
-// classified inactive and then active again is a re-classification, and only a
+// tolerance, and that tolerance is for a DIFFERENT problem: a source classified
+// inactive and then active again is a re-classification, and only a
 // re-classification can disturb the walk. At startup nothing has been
 // classified yet, so there is nothing to re-classify -- and withholding the
 // answer freezes advance() on unclassified() for every source, and leaves
-// reconcile() (which runs once, here, and nowhere else) giving up on the spot.
+// reconcile() (which runs once, here) giving up on the spot.
 //
-// The observable is the simplest form of that deadlock: one history source,
-// unavailable. "Nothing to walk" is FINISHED, not forever unfinished, and the
-// sources that gate on historyComplete depend on hearing so.
-test('a source that throws at startup is classified, so the walk is not frozen on it', async (t) => {
+// The round-4 fix classified on the first throw, and round 5 found what that
+// bought: a throw is "we could not ask", and the walk was spending it as "this
+// source has nothing here". So the classification happens and the WALK waits --
+// for one stagger, until the source's first real tick, rather than the thirty
+// minutes the old tolerance cost. The deadlock the round-4 fix closed is still
+// closed; it now closes one tick later.
+test('a throw at startup classifies the source but does not settle the walk on it', async (t) => {
   const dir = sandbox(t);
   const state = fakeState({});
-  const lines = [];
+  let throws = 1;
   const instance = daemon.createDaemon({
     config: { retention: { maintainHour: '03:30' } },
     state,
-    log: { info() {}, error() {}, warn: (event, fields) => lines.push([event, fields]) },
+    log: silent,
     sources: [
       // imessage, not calendar: an OPTIONAL connector is withdrawn before its
       // needs() probe is ever reached, so the probe under test would not run.
-      { name: 'imessage', walksHistory: true, needs: async () => { throw new Error('probe failed'); }, run: async () => ({}) },
+      {
+        name: 'imessage',
+        walksHistory: true,
+        needs: async () => {
+          if (throws > 0) { throws -= 1; throw new Error('probe failed'); }
+          return ['still not connected'];
+        },
+        run: async () => ({}),
+      },
     ],
     ingestOpts: {},
     cacheDir: dir,
@@ -564,16 +576,169 @@ test('a source that throws at startup is classified, so the walk is not frozen o
     // SHORT OF THE FIRST TICK (1s + stagger): only the startup probe and the
     // reconcile that follows it have run.
     await sleep(400);
+    assert.equal(
+      state.getCursor('yearly-backfill:complete'),
+      null,
+      'a walk must not be declared finished on the strength of a needs() that threw'
+    );
+
+    // The first tick answers properly -- still unavailable, but this time it is
+    // an ANSWER -- and the deadlock closes.
+    await sleep(1_200);
+    assert.equal(
+      state.getCursor('yearly-backfill:complete'),
+      '1',
+      'nothing to walk is FINISHED, one real answer later'
+    );
   } finally {
     instance.stop();
   }
-  assert.equal(state.getCursor('yearly-backfill:complete'), '1',
-    'the only history source is unavailable, which reconcile can only settle once it is classified');
-  const failure = lines.find(([event]) => event === 'source_needs_failed');
-  assert.ok(failure, 'and it is still said out loud');
-  assert.equal(failure[1].at, 'startup');
-  assert.equal(failure[1].barrier, 'unavailable',
-    'the log word has to match what the barrier actually did, not what a tick would have done');
+});
+
+// THE 2015 FIXTURE (round-5 finding 1). The test above ran from an EMPTY state,
+// where the saved year IS the current year, so it could not tell a completion
+// that is true from one that is merely convenient. This one can: a walk deep in
+// the past, every year above it already done, and a restart at a moment when
+// nothing can be read. `active.size === 0` used to write COMPLETE at 2015 with
+// every year below unread -- and the mark is durable, so no recovery undoes it:
+// classify(name, true) finds the current year's checkpoint present, and
+// missedYears walks down to 2015 and finds every year done.
+test('a restart with nothing readable does not declare a walk at 2015 finished', async (t) => {
+  const dir = sandbox(t);
+  const currentYear = new Date().getFullYear();
+  const cursors = { 'yearly-backfill:year': '2015' };
+  for (let y = currentYear; y >= 2016; y -= 1) {
+    cursors[`yearly-backfill:connector:imessage:done:${y}`] = '1';
+  }
+  const state = fakeState(cursors);
+  const instance = daemon.createDaemon({
+    config: { retention: { maintainHour: '03:30' } },
+    state,
+    log: silent,
+    sources: [{
+      name: 'imessage',
+      walksHistory: true,
+      needs: async () => ['full disk access has gone away'],
+      run: async () => ({}),
+    }],
+    ingestOpts: {},
+    cacheDir: dir,
+    activityPath: join(dir, 'activity.json'),
+  });
+  try {
+    instance.start();
+    await sleep(1_400);
+  } finally {
+    instance.stop();
+  }
+  assert.equal(
+    state.getCursor('yearly-backfill:complete'),
+    null,
+    'COMPLETE at 2015 is permanent, and 2015 and everything below it would never be read'
+  );
+  assert.equal(state.getCursor('yearly-backfill:year'), '2015',
+    'and the walk keeps its place');
+});
+
+// AND AN INSTALL ALREADY CARRYING THE MARK GETS OUT OF IT. The guard above stops
+// it being written again; this is the only way off a machine that has it.
+test('a COMPLETE that nothing could have written honestly is cleared at startup', async (t) => {
+  const dir = sandbox(t);
+  const currentYear = new Date().getFullYear();
+  const cursors = {
+    'yearly-backfill:year': '2015',
+    'yearly-backfill:complete': '1',
+  };
+  for (let y = currentYear; y >= 2016; y -= 1) {
+    cursors[`yearly-backfill:connector:imessage:done:${y}`] = '1';
+  }
+  const state = fakeState(cursors);
+  const instance = daemon.createDaemon({
+    config: { retention: { maintainHour: '03:30' } },
+    state,
+    log: silent,
+    // Readable again -- which on the shipped code changed nothing at all.
+    sources: [{ name: 'imessage', walksHistory: true, needs: async () => [], run: async () => ({}) }],
+    ingestOpts: {},
+    cacheDir: dir,
+    activityPath: join(dir, 'activity.json'),
+  });
+  try {
+    instance.start();
+    await sleep(600);
+  } finally {
+    instance.stop();
+  }
+  assert.equal(
+    state.getCursor('yearly-backfill:complete'),
+    null,
+    'a source that is active and not done at the saved year proves the mark was vacuous'
+  );
+  assert.equal(state.getCursor('yearly-backfill:year'), '2015',
+    'the walk resumes where it was, rather than being dragged to the current year');
+});
+
+// A TWENTY-SECOND LOCK MUST NOT COST A YEAR (round-5 finding 8).
+//
+// Three history sources. `calendar` and `mail` are readable and have already
+// finished the current year, so nothing in that year is pending for them -- and
+// `mail` is a TIMELINE, which is what makes advance() decrement the year rather
+// than declare the whole walk finished. `imessage` has NOT finished the current
+// year and its needs() throws once -- a Photos library or a chat.db held by a
+// backup across a restart.
+//
+// Classifying the thrower inactive and then advancing means reconcile leaves
+// the current year behind on the strength of calendar alone. The thrower
+// recovers on its first tick, missedYears finds the current year undone, and
+// the whole walk is rewound to fetch it again: barriers reopened, the People
+// year re-run, for a store that was locked for twenty seconds.
+test('a momentary throw at startup does not advance the walk past the year it owns', async (t) => {
+  const dir = sandbox(t);
+  const currentYear = new Date().getFullYear();
+  let throws = 1;
+  const state = fakeState({
+    'yearly-backfill:year': String(currentYear),
+    [`yearly-backfill:connector:calendar:done:${currentYear}`]: '1',
+    [`yearly-backfill:connector:mail:done:${currentYear}`]: '1',
+  });
+  const instance = daemon.createDaemon({
+    config: { retention: { maintainHour: '03:30' } },
+    state,
+    log: silent,
+    sources: [
+      // First in the list, so its recovering tick lands inside this window.
+      {
+        name: 'imessage',
+        walksHistory: true,
+        needs: async () => {
+          if (throws > 0) { throws -= 1; throw new Error('store locked by a backup'); }
+          return [];
+        },
+        run: async () => ({}),
+      },
+      { name: 'calendar', walksHistory: true, needs: async () => [], run: async () => ({}) },
+      { name: 'mail', walksHistory: true, needs: async () => [], run: async () => ({}) },
+    ],
+    ingestOpts: {},
+    cacheDir: dir,
+    activityPath: join(dir, 'activity.json'),
+  });
+  try {
+    instance.start();
+    await sleep(400);
+    assert.equal(
+      state.getCursor('yearly-backfill:year'),
+      String(currentYear),
+      'the walk stepped over a year on the strength of a probe that could not answer'
+    );
+    // The thrower recovers. There is nothing to rewind, because nothing moved.
+    await sleep(1_200);
+    assert.equal(state.getCursor('yearly-backfill:year'), String(currentYear));
+    assert.equal(state.getCursor('yearly-backfill:complete'), null,
+      'and the year it owns is still open for it to walk');
+  } finally {
+    instance.stop();
+  }
 });
 
 // ---------------------------------------------------------------------------

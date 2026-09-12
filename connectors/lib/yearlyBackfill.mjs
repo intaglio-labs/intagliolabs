@@ -83,6 +83,23 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
   // unprovisioned source has, and the same standing it would have if it were
   // scheduled and found its marker.
   const withdrawn = new Set();
+  // CLASSIFIED, BUT ON A GUESS.
+  //
+  // A needs() that THROWS is not an answer. The daemon's startup probe still has
+  // to classify such a source — advance() waits on unclassified(), so withholding
+  // the classification freezes the year for everybody — but the classification it
+  // gives is "we could not ask", and the walk must not spend that as though it
+  // were "this source has nothing here".
+  //
+  // Without this, a Photos library locked for twenty seconds across a restart
+  // was enough: the source is classified inactive, reconcile() advances 2026 to
+  // 2025 without it, the source recovers on its first tick, missedYears finds
+  // 2026 undone and rewinds the whole walk back to 2026 — barriers reopened,
+  // the People year re-run. The rewind is right; buying it with an eager
+  // advance was not.
+  //
+  // Cleared by the next ordinary classify() from a real tick, whatever it says.
+  const provisional = new Set();
   const unclassified = () =>
     roster.filter((connector) => !classified.has(connector) && !withdrawn.has(connector));
 
@@ -123,11 +140,13 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
     return false;
   };
 
-  function classify(connector, available) {
+  function classify(connector, available, { unanswered = false } = {}) {
     if (!roster.includes(connector)) return;
     // A withdrawal is not permanent: a source re-enabled while the process runs
     // classifies itself again on its next tick and rejoins the barrier.
     withdrawn.delete(connector);
+    if (unanswered) provisional.add(connector);
+    else provisional.delete(connector);
     const currentYear = new Date(now()).getFullYear();
     const hasCurrentCheckpoint = state.getCursor(doneKey(currentYear, connector)) === '1';
     // A walk that finished WITHOUT this connector. Kept separate from
@@ -154,6 +173,23 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
         state.deleteCursor(COMPLETE_KEY);
         state.setCursor(YEAR_KEY, String(currentYear));
         reopenBarriers(currentYear);
+      } else if (exhausted(connector) && year() === currentYear && !hasCurrentCheckpoint) {
+        // NEW YEAR'S DAY, and the connector that did not go first.
+        //
+        // `exhausted` means "the walk reached the beginning of this store". It
+        // is a statement about OLDER data, and on 1 January the walk is standing
+        // in a year that is NEWER than anything it has seen. The first connector
+        // to tick finds 2027 undone, rewinds above, and sets YEAR to 2027; every
+        // connector after it then sees year() === currentYear, finds nothing
+        // missed, and keeps its exhausted mark — so done() answers true for a
+        // year it has never scanned, and that year is never read at all.
+        //
+        // Deliberately narrower than the rewind: the walk must be standing AT
+        // the current year. A connector exhausted mid-walk (it joined at 2020
+        // and its store began there) has year() far below the current one and
+        // keeps its mark, so this cannot cost it a re-scan of a year it
+        // correctly finished.
+        state.deleteCursor(exhaustedKey(connector));
       }
     } else {
       active.delete(connector);
@@ -218,6 +254,12 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
     // Otherwise the first fast source could advance before later staggered
     // sources have even been classified.
     if (unclassified().length > 0) return false;
+    // AND WAIT FOR THE GUESSES TO BECOME ANSWERS. See `provisional`: a source
+    // whose needs() threw has been classified so the barrier is not frozen, but
+    // its classification is not evidence the walk may spend. The wait ends at
+    // that source's first real tick, which is one stagger away rather than the
+    // thirty minutes the old tolerance cost.
+    if (provisional.size > 0) return false;
     // NOTHING TO WALK IS FINISHED, not forever unfinished. Every history source
     // has been classified and none of them is available: unprovisioned,
     // disabled, withdrawn, or — reachable in one step since the feature
@@ -229,6 +271,24 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
     // current year for a source that arrives later, exactly as it does after a
     // walk that really finished.
     if (active.size === 0) {
+      // ONLY WHERE THE WALK IS STANDING AT THE CURRENT YEAR, which is the state
+      // this branch was written for: a machine on which no history source is
+      // available at all, so nothing has ever walked.
+      //
+      // Without the guard this writes COMPLETE at WHATEVER year the walk had
+      // reached, and COMPLETE is durable. An install whose walk was at 2015 and
+      // which restarted at a moment when every history source was unavailable —
+      // a 0755 ~/.hazlie, a momentary loss of Full Disk Access, an unreadable
+      // secrets directory — was marked complete at 2015 with every year below it
+      // unread. Recovery could not undo it: classify(name, true) finds the
+      // current year's checkpoint present, so completedBeforeAuthorization is
+      // false, and missedYears walks down to 2015 and finds every year done, so
+      // that is false too. task() then answers null for everybody, forever.
+      //
+      // Withholding COMPLETE here costs nothing: the only two sources that gate
+      // on it (calendar, granola) are themselves members of this roster, so
+      // `active.size === 0` is a state in which neither of them is running.
+      if (year() !== new Date(now()).getFullYear()) return false;
       state.setCursor(COMPLETE_KEY, '1');
       return true;
     }
@@ -252,8 +312,30 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
   // task to call advance() then deadlocks: there is no task left in that year
   // to make the call. Walk completed barriers now and stop at the first year
   // that has real pending work (or at global completion).
+  // A COMPLETE THAT CANNOT BE TRUE, cleared once per process.
+  //
+  // The guard in advance() stops this being written again; installs carrying it
+  // already need a way out, and there is exactly one state that proves the mark
+  // was written vacuously. A walk that finished honestly at year V did so with
+  // every active connector done at V — advance() requires that before either of
+  // its completion branches — so COMPLETE standing over an ACTIVE connector that
+  // is NOT done at the saved year is a mark nothing could have written honestly.
+  //
+  // It is not a guess and it cannot oscillate: clearing it lets advance() decide
+  // again from the receipts on disk, and if the walk really is finished it is
+  // re-set in the same reconcile() below.
+  function repairVacuousCompletion() {
+    if (state.getCursor(COMPLETE_KEY) !== '1') return false;
+    if (active.size === 0) return false;
+    const value = year();
+    if ([...active].every((connector) => done(connector, value))) return false;
+    state.deleteCursor(COMPLETE_KEY);
+    return true;
+  }
+
   function reconcile() {
     const fromYear = year();
+    const repaired = repairVacuousCompletion();
     let advanced = 0;
     while (true) {
       const before = snapshot();
@@ -271,7 +353,7 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
       const after = snapshot();
       if (after.complete || after.year >= previousYear) break;
     }
-    return { fromYear, advanced, ...snapshot() };
+    return { fromYear, advanced, repaired, ...snapshot() };
   }
 
   function snapshot() {
@@ -290,6 +372,9 @@ export function createYearlyBackfill({ state, connectors, barriers = [], now = D
       complete: state.getCursor(COMPLETE_KEY) === '1',
       classified: unclassified().length === 0,
       active: [...active],
+      // Classified on a guess rather than an answer, so the daemon can run the
+      // restart reconciliation again once the last guess becomes an answer.
+      provisional: [...provisional],
       pending: [...sourcePending, ...barrierPending],
     };
   }

@@ -392,3 +392,145 @@ test('a blip inside the current year is not a catch-up', () => {
     'the recovery left the other source its finished year');
   assert.equal(backfill.snapshot().year, 2026);
 });
+
+// --------------------------------------------------------------- new year's day
+
+// THE FIRST CONNECTOR TO TICK AFTER NEW YEAR TOOK THE YEAR WITH IT.
+//
+// `exhausted` means the walk reached the BEGINNING of a connector's store. It is
+// a statement about older data, and on 1 January the walk is standing in a year
+// newer than anything it has seen. On that morning the first connector to
+// classify finds the new year undone, rewinds, and sets YEAR to it; every
+// connector after that sees year() === currentYear, finds nothing missed, and
+// keeps its exhausted mark. done() then answers true for a year that connector
+// has never scanned, and the new year is never read for it at all.
+test('a connector exhausted last year still gets the new year', () => {
+  const state = memoryState();
+  const newYear = new Date(2027, 0, 1, 9).getTime();
+  const now = () => newYear;
+  // Where the walk stood on 31 December: both had finished 2026, and `mail` had
+  // also reached the beginning of its store. imessage had not, which is what
+  // makes it the connector that opens the new year.
+  state.setCursor('yearly-backfill:year', '2026');
+  state.setCursor('yearly-backfill:connector:imessage:done:2026', '1');
+  state.setCursor('yearly-backfill:connector:mail:done:2026', '1');
+  state.setCursor('yearly-backfill:connector:mail:exhausted', '1');
+
+  const backfill = createYearlyBackfill({
+    state, connectors: ['imessage', 'mail'], barriers: [], now,
+  });
+  // imessage goes first and takes the year with it.
+  backfill.classify('imessage', true);
+  assert.equal(Number(state.getCursor('yearly-backfill:year')), 2027,
+    'the first connector to tick opens the new year');
+  // mail follows, and finds the walk already standing in a year it has never
+  // scanned.
+  backfill.classify('mail', true);
+
+  assert.ok(backfill.task('imessage'), 'imessage gets 2027');
+  assert.ok(
+    backfill.task('mail'),
+    'mail kept an exhaustion mark from 2026 and would never scan 2027'
+  );
+  assert.equal(backfill.task('mail').year, 2027);
+});
+
+// THE SAME MORNING ON AN INSTALL WHOSE WALK HAD ACTUALLY FINISHED. Every
+// timeline exhausted means COMPLETE was set in December; the first connector
+// reopens through completedBeforeAuthorization rather than missedYears, and the
+// second still has to lose a mark that is about a year below this one.
+test('a finished walk reopens for the new year for every connector, not just the first', () => {
+  const state = memoryState();
+  const now = () => new Date(2027, 0, 1, 9).getTime();
+  state.setCursor('yearly-backfill:year', '2026');
+  state.setCursor('yearly-backfill:complete', '1');
+  for (const connector of ['imessage', 'mail']) {
+    state.setCursor(`yearly-backfill:connector:${connector}:done:2026`, '1');
+    state.setCursor(`yearly-backfill:connector:${connector}:exhausted`, '1');
+  }
+  const backfill = createYearlyBackfill({
+    state, connectors: ['imessage', 'mail'], barriers: [], now,
+  });
+  backfill.classify('imessage', true);
+  backfill.classify('mail', true);
+
+  assert.equal(state.getCursor('yearly-backfill:complete'), null);
+  assert.equal(backfill.task('imessage')?.year, 2027);
+  assert.equal(backfill.task('mail')?.year, 2027,
+    'the second connector kept a December exhaustion mark over a January year');
+});
+
+// AND THE NARROWNESS IS THE POINT. A connector exhausted mid-walk -- it joined
+// at 2020 because its store begins there -- must keep its mark, or every launch
+// costs it a re-scan of a year it correctly finished.
+test('a connector exhausted mid-walk keeps its mark', () => {
+  const state = memoryState();
+  const now = () => NOW; // 2026
+  state.setCursor('yearly-backfill:year', '2020');
+  for (let y = 2026; y >= 2020; y -= 1) {
+    state.setCursor(`yearly-backfill:connector:imessage:done:${y}`, '1');
+    state.setCursor(`yearly-backfill:connector:mail:done:${y}`, '1');
+  }
+  state.setCursor('yearly-backfill:connector:mail:exhausted', '1');
+
+  const backfill = createYearlyBackfill({
+    state, connectors: ['imessage', 'mail'], barriers: [], now,
+  });
+  backfill.classify('imessage', true);
+  backfill.classify('mail', true);
+
+  assert.equal(state.getCursor('yearly-backfill:connector:mail:exhausted'), '1',
+    'the walk is nowhere near the current year; nothing here is a new year');
+  assert.equal(backfill.task('mail'), null);
+});
+
+// ------------------------------------------------ a completion nobody could mean
+
+test('nothing available does not declare a walk deep in the past finished', () => {
+  const state = memoryState();
+  const now = () => NOW; // 2026
+  state.setCursor('yearly-backfill:year', '2015');
+  for (let y = 2026; y >= 2016; y -= 1) {
+    state.setCursor(`yearly-backfill:connector:imessage:done:${y}`, '1');
+  }
+  const backfill = createYearlyBackfill({
+    state, connectors: ['imessage'], barriers: [], now,
+  });
+  backfill.classify('imessage', false);
+  assert.equal(backfill.advance(), false);
+  assert.equal(state.getCursor('yearly-backfill:complete'), null,
+    'COMPLETE is durable, and at 2015 it hides every year below it forever');
+
+  // The same branch on a machine that never walked at all is still the answer
+  // it was written to give.
+  const fresh = memoryState();
+  const vacant = createYearlyBackfill({
+    state: fresh, connectors: ['imessage'], barriers: [], now,
+  });
+  vacant.classify('imessage', false);
+  assert.equal(vacant.advance(), true);
+  assert.equal(fresh.getCursor('yearly-backfill:complete'), '1',
+    'nothing to walk is still FINISHED where the walk never started');
+});
+
+test('a classification made on a guess does not move the walk', () => {
+  const state = memoryState();
+  const now = () => NOW;
+  state.setCursor('yearly-backfill:year', '2026');
+  state.setCursor('yearly-backfill:connector:mail:done:2026', '1');
+  const backfill = createYearlyBackfill({
+    state, connectors: ['imessage', 'mail'], barriers: [], now,
+  });
+  backfill.classify('mail', true);
+  backfill.classify('imessage', false, { unanswered: true });
+
+  assert.deepEqual(backfill.snapshot().provisional, ['imessage']);
+  assert.equal(backfill.advance(), false, 'a needs() that threw is not evidence');
+  assert.equal(Number(state.getCursor('yearly-backfill:year')), 2026);
+
+  // The first real answer ends the wait, whatever it says.
+  backfill.classify('imessage', false);
+  assert.deepEqual(backfill.snapshot().provisional, []);
+  assert.equal(backfill.advance(), true);
+  assert.equal(Number(state.getCursor('yearly-backfill:year')), 2025);
+});

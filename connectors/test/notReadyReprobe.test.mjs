@@ -79,11 +79,20 @@ function gatedSource(name, { missing = ['waiting for the owner'] } = {}) {
   };
 }
 
+// TEN MINUTES, SAID OUT LOUD IN THE FIXTURE. The interval is what a not-ready
+// source used to wait, and every assertion below lands seconds after the first
+// tick -- so the fixture states the discrimination rather than leaving it to the
+// 900-second default.
+const INTERVAL_S = 600;
+
 function build(t, sources, opts = {}) {
   const dir = sandbox(t);
   const activityPath = join(dir, 'activity.json');
   const instance = daemon.createDaemon({
-    config: { retention: { maintainHour: '03:30' } },
+    config: {
+      retention: { maintainHour: '03:30' },
+      intervals: Object.fromEntries(sources.map((s) => [s.name, INTERVAL_S])),
+    },
     state: fakeState(),
     log: silent,
     sources,
@@ -109,8 +118,10 @@ test('a source that becomes ready is re-probed within the back-off, not at the i
   // interval this source's second question would be 900 seconds away.
   const { instance } = build(t, [source], { reprobeFloorMs: 200 });
 
+  const armedAt = Date.now();
   instance.start();
-  // The first tick is armed at 1 s and answers "not ready".
+  // The first tick is armed at 1 s and answers "not ready". Its next question
+  // would be INTERVAL_S away without the back-off.
   await sleep(1_200);
   assert.equal(state.runs, 0, 'a source with a missing prerequisite must not run');
   assert.ok(state.probes >= 2, 'startup probes once and the first tick probes again');
@@ -122,6 +133,10 @@ test('a source that becomes ready is re-probed within the back-off, not at the i
   assert.ok(
     state.runs >= 1,
     `a source that became ready was never asked again: ${state.runs} runs, ${state.probes} probes`
+  );
+  assert.ok(
+    Date.now() - armedAt < INTERVAL_S * 1000,
+    'the run has to land well inside the interval, or nothing has changed'
   );
 });
 
