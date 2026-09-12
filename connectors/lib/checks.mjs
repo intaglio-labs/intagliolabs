@@ -468,15 +468,15 @@ function readConfigLeniently(home) {
 // different local app serving HTML on :8787, which is why hermes moved to
 // :51789 on this Mac.) Exported so run.mjs can gate hand-runs on the same
 // probe the daemon's preflight uses.
-export async function verifyHermesIdentity(base, { fetchImpl = fetch } = {}) {
+export async function verifyHermesIdentity(base, { fetchImpl = fetch, timeoutMs = HERMES_HEALTH_TIMEOUT_MS } = {}) {
   const offBox = loopbackProblem(base);
   if (offBox) {
-    return { ok: false, detail: `hermes URL ${base} ${offBox}`, fix: LOOPBACK_FIX };
+    return { ok: false, kind: 'off-box', detail: `hermes URL ${base} ${offBox}`, fix: LOOPBACK_FIX };
   }
   let res;
   try {
     res = await fetchImpl(`${base}/health`, {
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(timeoutMs),
       // Without this a squatter on the port answers 302 to a host it controls,
       // that host returns {"ok":true}, and the identity gate this function
       // exists to be passes — after which the caller POSTs household rows to
@@ -485,8 +485,24 @@ export async function verifyHermesIdentity(base, { fetchImpl = fetch } = {}) {
       redirect: 'error',
     });
   } catch (error) {
+    // TWO DIFFERENT MACHINE STATES, and the caller has to be able to tell them
+    // apart. A refused connection means nothing holds the port; a timeout means
+    // something accepted the connection and has not answered yet, which on a
+    // single-threaded hermes is what a synchronous warm looks like from outside.
+    // Only the second is worth trying again, so the kind travels with the
+    // verdict rather than being re-derived from the detail string.
+    if (isTimeoutFailure(error)) {
+      return {
+        ok: false,
+        kind: 'timeout',
+        detail: `${base}/health did not answer within ${timeoutMs}ms`,
+        fix: 'hermes accepted the connection but did not answer — it is busy or wedged. '
+          + 'Check the hermes log, then launchctl kickstart -k gui/$UID/io.intaglio.hermes',
+      };
+    }
     return {
       ok: false,
+      kind: 'unreachable',
       detail: `${base}/health unreachable (${error?.cause?.code ?? error?.name ?? error})`,
       fix: 'launchctl kickstart -k gui/$UID/io.intaglio.hermes (or bash ops/setup-connectors.sh)',
     };
@@ -510,6 +526,7 @@ export async function verifyHermesIdentity(base, { fetchImpl = fetch } = {}) {
   if (res.status !== 200 || keys === null || keys.length !== 1 || keys[0] !== 'ok' || body.ok !== true) {
     return {
       ok: false,
+      kind: 'not-hermes',
       detail: `${base}/health answered ${res.status} with a non-Hermes body — another process may hold the port`,
       fix: `lsof -nP -iTCP:${new URL(base).port} -sTCP:LISTEN  # see who holds the port, then point HAZLIE_HERMES_URL (or config.json "hermesUrl") at the real hermes`,
     };
@@ -517,12 +534,60 @@ export async function verifyHermesIdentity(base, { fetchImpl = fetch } = {}) {
   return { ok: true };
 }
 
-async function checkHermesHealth(env, config) {
+// ONE PROBE IS NOT A VERDICT ON A SINGLE-THREADED SERVER.
+//
+// This check is FATAL in daemon.mjs' preflight: a FAIL here exits the daemon
+// and stops every connector. On 2026-09-12 the sibling /stats probe did exactly
+// that and the fix was to stop conflating slow with dead -- but the same
+// conflation survived HERE, one probe wide. Hermes is one node process; while
+// it is inside a synchronous block it serves NOTHING, /health included. It
+// warms the people core 250ms after listen() with ~7.6s of straight-line work
+// (ui/server/hermes.mjs), so a preflight landing in that window gets no answer
+// inside any single budget, FAILs, and kills the daemon over a server that is
+// two seconds from being fine.
+//
+// So a timeout is retried rather than believed. Four attempts with growing
+// gaps spans ~30s, which clears the warm with room, and a hermes still silent
+// after 30s is genuinely wedged -- that FAIL is the one the check is for.
+//
+// WHAT IS NOT RETRIED, because retrying it only delays a true answer: an
+// ECONNREFUSED (nothing is listening -- a second probe cannot conjure a
+// process), an off-box URL, and a 200 whose body is not hermes' (a squatter
+// answers the same way every time, and this is the identity gate that stops
+// household rows being POSTed at it).
+export const HERMES_HEALTH_TIMEOUT_MS = 4000;
+
+// 4s + 2 + 4s + 4 + 4s + 8 + 4s = 30s worst case, all four attempts timing out.
+const HERMES_HEALTH_BACKOFF_MS = [2000, 4000, 8000];
+
+// The seams are the same pair checkHermesStats takes, plus `sleep` so a test
+// proves the retry loop without waiting the production half-minute for it.
+export async function checkHermesHealth(env, config, {
+  fetchImpl = fetch,
+  timeoutMs = HERMES_HEALTH_TIMEOUT_MS,
+  backoffMs = HERMES_HEALTH_BACKOFF_MS,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
   const name = 'hermes-health';
   const base = hermesBase(env, config);
-  const identity = await verifyHermesIdentity(base);
-  if (!identity.ok) return result(name, FAIL, identity.detail, identity.fix);
-  return result(name, PASS, `${base}/health is Hermes`);
+  const attempts = backoffMs.length + 1;
+  let last = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    last = await verifyHermesIdentity(base, { fetchImpl, timeoutMs });
+    // `attempts` is in the PASS detail because "it answered on the third try"
+    // is the observation that explains a slow launch, and a check that swallows
+    // it leaves the next incident with nothing to read.
+    if (last.ok) return result(name, PASS, `${base}/health is Hermes (attempts: ${attempt})`);
+    if (last.kind !== 'timeout') return result(name, FAIL, last.detail, last.fix);
+    if (attempt < attempts) await sleep(backoffMs[attempt - 1]);
+  }
+  const spanMs = backoffMs.reduce((sum, ms) => sum + ms, 0) + attempts * timeoutMs;
+  return result(
+    name,
+    FAIL,
+    `${last.detail} on any of ${attempts} attempts over ~${Math.round(spanMs / 1000)}s`,
+    last.fix
+  );
 }
 
 // The /stats probe's ceiling, raised from 4s on 2026-09-12. It is not a

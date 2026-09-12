@@ -21,7 +21,12 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { checkHermesStats, HERMES_STATS_TIMEOUT_MS } from '../lib/checks.mjs';
+import {
+  checkHermesHealth,
+  checkHermesStats,
+  HERMES_HEALTH_TIMEOUT_MS,
+  HERMES_STATS_TIMEOUT_MS,
+} from '../lib/checks.mjs';
 import { partitionChecks } from '../daemon.mjs';
 
 const TOKEN = 'a'.repeat(64);
@@ -160,4 +165,129 @@ test('a 401 is still a FAIL, and still names the token mismatch', async () => {
 
 test('the production budget is 10s, not the 4s that timed out under load', () => {
   assert.equal(HERMES_STATS_TIMEOUT_MS, 10_000);
+});
+
+// --- hermes-health: the same conflation, one probe wide -------------------
+//
+// The /stats downgrade above leans on hermes-health being the honest liveness
+// check ("hermes is alive (see hermes-health)"). It was not: it probed once
+// with a 4s ceiling and FAILed, and a FAIL here is fatal in daemon.mjs'
+// preflight. Hermes is single-threaded, so its ~7.6s synchronous people-core
+// warm 250ms after listen() blocks /health too -- a preflight landing in that
+// window killed the daemon exactly as /stats did, over a server that was about
+// to be fine.
+//
+// A blocked /health is therefore retried; a refused one is not.
+
+// A stub whose /health never answers for the first `blockFirst` requests and
+// answers exactly like hermes after that. Holding the response open (rather
+// than delaying it) is the real shape: the socket is accepted, the process is
+// busy, nothing comes back.
+async function stubHealth({ blockFirst = 0, body = '{"ok":true}' } = {}) {
+  let seen = 0;
+  const held = new Set();
+  const srv = createServer((req, res) => {
+    if (req.url !== '/health') {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    seen += 1;
+    if (seen <= blockFirst) {
+      held.add(res);
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(body);
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  return {
+    port,
+    env: { HAZLIE_HERMES_URL: `http://127.0.0.1:${port}` },
+    get seen() { return seen; },
+    async stop() {
+      for (const res of held) res.destroy();
+      srv.closeAllConnections?.();
+      await new Promise((r) => srv.close(r));
+    },
+  };
+}
+
+// Real timeouts, toy sleeps: the backoff is counted, not waited for, so the
+// test proves the loop rather than the clock.
+function health(h, { timeoutMs = 120, backoffMs = [1, 1, 1] } = {}) {
+  const slept = [];
+  const run = checkHermesHealth(h.env, {}, {
+    timeoutMs,
+    backoffMs,
+    sleep: async (ms) => { slept.push(ms); },
+  });
+  return { run, slept };
+}
+
+test('a hermes that is warming, not dead, is retried and PASSes', async () => {
+  // THE 2026-09-12 SHAPE. The first two probes land inside the synchronous
+  // warm and get nothing; the third lands after it. One probe called this a
+  // dead hermes and exited the daemon.
+  const h = await stubHealth({ blockFirst: 2 });
+  try {
+    const { run, slept } = health(h);
+    const r = await run;
+    assert.equal(r.status, 'PASS', 'a hermes that answered on the third probe is alive');
+    assert.match(r.detail, /attempts: 3/u, 'and the PASS must say it took three');
+    assert.equal(h.seen, 3, 'exactly three probes — no more than the answer needed');
+    assert.deepEqual(slept, [1, 1], 'and it backed off between them');
+  } finally {
+    await h.stop();
+  }
+});
+
+test('nothing listening is still an immediate FAIL — retrying cannot conjure a process', async () => {
+  const h = await stubHealth();
+  await h.stop();
+  const started = Date.now();
+  const { run, slept } = health(h, { backoffMs: [5000, 5000, 5000] });
+  const r = await run;
+  assert.equal(r.status, 'FAIL');
+  assert.match(r.detail, /ECONNREFUSED/u);
+  assert.deepEqual(slept, [], 'a refused connection must not sleep through the backoff');
+  assert.ok(Date.now() - started < 2000, 'and must not wait out the retry budget');
+});
+
+test('a hermes that never answers is still the FAIL, after the whole budget', async () => {
+  const h = await stubHealth({ blockFirst: Infinity });
+  try {
+    const { run, slept } = health(h);
+    const r = await run;
+    assert.equal(r.status, 'FAIL', 'thirty seconds of silence is a wedged hermes');
+    assert.match(r.detail, /did not answer within 120ms/u);
+    assert.match(r.detail, /4 attempts/u, 'and the detail must say how hard it tried');
+    assert.equal(h.seen, 4, 'four probes, not one and not forever');
+    assert.deepEqual(slept, [1, 1, 1]);
+  } finally {
+    await h.stop();
+  }
+});
+
+test('a squatter on the port is not retried — its answer will not change', async () => {
+  // The identity gate is what stops household rows being POSTed at another
+  // process. Retrying a deterministic wrong answer only delays the verdict.
+  const h = await stubHealth({ body: '{"ok":true,"service":"vite"}' });
+  try {
+    const { run, slept } = health(h);
+    const r = await run;
+    assert.equal(r.status, 'FAIL');
+    assert.match(r.detail, /non-Hermes body/u);
+    assert.equal(h.seen, 1, 'one probe is enough for an answer that is already final');
+    assert.deepEqual(slept, []);
+  } finally {
+    await h.stop();
+  }
+});
+
+test('the retry budget spans the synchronous warm it exists for', () => {
+  // ~7.6s of straight-line work starting 250ms after listen(). A budget that
+  // did not outlast it would be the same bug with more steps.
+  assert.equal(HERMES_HEALTH_TIMEOUT_MS, 4000);
 });
