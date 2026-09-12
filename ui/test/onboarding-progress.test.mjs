@@ -1090,3 +1090,69 @@ test('no activity file at all is not an error', async () => {
     });
   });
 });
+
+// WHICH INSTALL'S ~/.hazlie THESE TWO READ (round-6 finding 12).
+//
+// `ownerConfigPath` exists so a caller can point hermes at an install that is
+// not the running user's -- every route that reads the owner's config goes
+// through it. The two filesystem readers this route added did not: both took
+// `home = homedir()` and were called with no argument, so screen 6 reported the
+// named install's rows beside the RUNNING user's sprint and the running user's
+// "is Google connected". One screen describing two machines, which is the
+// failure grantsHomeFor in ui/server/people/owner.mjs had just been hardened
+// against, two functions away.
+test('the sprint comes from the install the caller named, not from the running user', async () => {
+  await withHome(async (runningHome) => {
+    // The machine hermes happens to be running on is mid-sprint...
+    const theirs = Date.now() - 60_000;
+    writeActivity(runningHome, {
+      phase: 'syncing',
+      queue: [],
+      sprint: { since: theirs, until: theirs + 30 * 60_000, sources: ['imessage'] },
+    });
+
+    // ...while the install actually being asked about is not. Canonical shape,
+    // because that is what names an install: <home>/.hazlie/connectors/config.json.
+    const named = mkdtempSync(join(tmpdir(), 'onboarding-named-'));
+    mkdirSync(join(named, '.hazlie', 'connectors'), { recursive: true });
+    writeFileSync(configPath(named), '{}\n');
+    const mine = Date.now() - 5 * 60_000;
+    writeActivity(named, {
+      phase: 'syncing',
+      queue: [],
+      sprint: { since: mine, until: mine + 30 * 60_000, sources: ['calendar'] },
+    });
+
+    await withServer(runningHome, async ({ call, db }) => {
+      markProjection(db, { projected: 1, source: 1 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      assert.ok(body.sprint, 'the named install is sprinting, so there is a sentence to carry');
+      assert.equal(body.sprint.since, mine, 'and it is that install\'s, not this machine\'s');
+      assert.deepEqual(body.sprint.sources, ['calendar']);
+    }, { ownerConfigPath: configPath(named) });
+  });
+});
+
+test('a config path that names no install reports nothing, never this machine', async () => {
+  await withHome(async (runningHome) => {
+    const since = Date.now() - 60_000;
+    writeActivity(runningHome, {
+      phase: 'syncing',
+      queue: [],
+      sprint: { since, until: since + 30 * 60_000, sources: ['imessage'] },
+    });
+    // A bare tmpdir config, which is what a test hands over and what a caller
+    // who has named no install looks like. owner.mjs already answers such a
+    // caller with no Google grants; these two answer with no sprint and no
+    // waiting rows, for the same reason.
+    const loose = mkdtempSync(join(tmpdir(), 'onboarding-loose-'));
+    writeFileSync(join(loose, 'config.json'), '{}\n');
+
+    await withServer(runningHome, async ({ call, db }) => {
+      markProjection(db, { projected: 1, source: 1 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      assert.equal(body.sprint, undefined,
+        'a path that belongs to no install is not a reason to describe this Mac');
+    }, { ownerConfigPath: join(loose, 'config.json') });
+  });
+});

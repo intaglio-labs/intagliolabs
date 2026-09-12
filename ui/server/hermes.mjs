@@ -62,8 +62,8 @@ import {
 } from './people/generalSearch.mjs';
 import {
   MAX_CAP_PER_DAY, RELATIONSHIP_ENGINES, RELATIONSHIP_MODES, RELATIONSHIP_PRODUCERS,
-  ensureRelationshipDefaults, loadOwner, markOwnerPerson, markPersonRole, markPersonSubRoles,
-  ownerConfigPath, setRelationshipEngine, setRelationshipMode,
+  ensureRelationshipDefaults, installHomeFor, loadOwner, markOwnerPerson, markPersonRole,
+  markPersonSubRoles, ownerConfigPath, setRelationshipEngine, setRelationshipMode,
 } from './people/owner.mjs';
 import { SUB_ROLES as SUB_ROLE_VALUES } from './people/subRoles.mjs';
 import { peopleReview, decide as peopleDecide, openResolutionsDb } from './people/init.mjs';
@@ -3217,6 +3217,26 @@ function ownerConfigFile(policy) {
   return policy.ownerConfigPath ?? ownerConfigPath();
 }
 
+// WHICH INSTALL'S ~/.hazlie THE FILESYSTEM READERS READ (round-6 finding 12).
+//
+// ownerConfigFile and ownerLoadOptions put the config and the owner behind the
+// `ownerConfigPath` seam. The readers that go to the filesystem for something
+// OTHER than the config -- Google grants, the LinkedIn export, the daemon's
+// activity file -- each took `home = homedir()` and were called with no
+// argument, so an install named through that seam had screen 6 reporting its
+// own rows beside the running user's "is Google connected" and the running
+// user's sprint sentence: one screen describing two machines.
+//
+// installHomeFor is owner.mjs' own derivation, shared rather than repeated, and
+// its null -- a config path that belongs to no install -- is passed straight
+// through. The readers answer nothing for it, which is the same answer
+// grantsHomeFor already gives such a caller, and the same reason: a path that
+// names no install is not a reason to describe this Mac.
+function installHome(policy) {
+  if (policy?.ownerConfigPath === undefined) return homedir();
+  return installHomeFor(policy.ownerConfigPath);
+}
+
 // loadOwner() through the same seam, for the call sites that have `policy`.
 //
 // NOT EVERY CALL SITE DOES, and that is stated rather than hidden: the people
@@ -5582,8 +5602,11 @@ function listedOnboardingSource(source, switchedOff) {
 // The moment either source runs at all it has a run_log entry, so it leaves this
 // list and gets its ordinary verdict. This is a row for one gap — between the
 // owner connecting something and the reader reaching it — and for nothing else.
-function connectedWithoutRows(home = homedir()) {
+function connectedWithoutRows(home) {
   const out = [];
+  // A caller who named a config file belonging to no install gets nothing here,
+  // never the running user's ~/.hazlie. See installHome.
+  if (typeof home !== 'string' || home === '') return out;
   try {
     if (accountsWithScopeIncludingStale(GMAIL_SCOPE, { home }).length > 0) out.push('mail');
   } catch {
@@ -5609,7 +5632,8 @@ function connectedWithoutRows(home = homedir()) {
 //
 // Absent, unreadable, or written by an older daemon all mean the same thing and
 // paint the same way: nothing. Absence of a claim is not a claim.
-function readerSprint(home = homedir()) {
+function readerSprint(home) {
+  if (typeof home !== 'string' || home === '') return null; // see installHome
   try {
     const raw = JSON.parse(
       readFileSync(join(home, '.hazlie', 'connectors', 'activity.json'), 'utf8')
@@ -5815,7 +5839,7 @@ function onboardingProgress(db, policy, switchedOffOverride) {
     // and never for a source that already has rows or a run, which would
     // overwrite a real verdict with a placeholder.
     const waitingNames = new Set(
-      connectedWithoutRows().filter((source) => !names.has(source))
+      connectedWithoutRows(installHome(policy)).filter((source) => !names.has(source))
     );
     for (const source of waitingNames) names.add(source);
 
@@ -5874,7 +5898,7 @@ function onboardingProgress(db, policy, switchedOffOverride) {
       };
     });
 
-    const sprint = readerSprint();
+    const sprint = readerSprint(installHome(policy));
     return {
       state: 'ok',
       sources,

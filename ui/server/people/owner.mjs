@@ -90,11 +90,28 @@ function canonicalPath(path) {
   }
 }
 
-function grantsHomeFor({ home, homeGiven, configPath }) {
-  if (homeGiven || configPath === null) return home;
+/// THE INSTALL A CONFIG PATH BELONGS TO, or null when the path names none.
+///
+/// Exported because hermes asks the same question of the same seam. Several of
+/// its readers take a `home` and go looking under `<home>/.hazlie` for grants,
+/// an activity file, a LinkedIn export; a caller who points hermes at one
+/// install's config and then has those readers answer from the RUNNING user's
+/// home gets one screen describing two machines (round-6 finding 12). They ask
+/// this rather than repeat the dirname arithmetic, so there is one answer to
+/// "which install is this" and one place it can be wrong.
+///
+/// Null is a real answer and the safe one: a path that names no install is not
+/// an invitation to fall back to this Mac.
+export function installHomeFor(configPath) {
+  if (typeof configPath !== 'string' || configPath === '') return null;
   const canonical = canonicalPath(configPath);
   const candidate = dirname(dirname(dirname(canonical)));
   return canonicalPath(ownerConfigPath(candidate)) === canonical ? candidate : null;
+}
+
+function grantsHomeFor({ home, homeGiven, configPath }) {
+  if (homeGiven || configPath === null) return home;
+  return installHomeFor(configPath);
 }
 
 export function loadOwner(options = {}) {
