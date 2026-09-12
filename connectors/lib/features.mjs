@@ -64,11 +64,28 @@ export const DEFAULT_REGISTRY_PATH = join(here, '..', '..', 'ops', 'features.jso
 /// nowhere else. The variable belongs HERE rather than in each caller, because
 /// hermes, the daemon and connect all reach the registry through this function
 /// and only one of them is a file a test can edit.
+///
+/// EMPTY IS NONE, NOT "READ $HOME". `HAZLIE_FEATURES_OVERRIDE=` is the spelling
+/// a wrapper produces from a variable that was never set
+/// (`HAZLIE_FEATURES_OVERRIDE=$MAYBE node --test …`), and falling through to the
+/// owner file there un-hermeticized exactly the tests this knob exists to make
+/// hermetic. Setting the variable at all is a decision; setting it to nothing is
+/// the decision to use no override, like the literal 'none'.
 export function defaultOverridePath(home = homedir(), env = process.env) {
   const configured = env?.HAZLIE_FEATURES_OVERRIDE;
-  if (configured === 'none') return null;
-  if (typeof configured === 'string' && configured !== '') return configured;
+  if (configured === 'none' || configured === '') return null;
+  if (typeof configured === 'string') return configured;
   return join(home, '.hazlie', 'features.json');
+}
+
+/// Whether the override path was NAMED by somebody rather than being the
+/// default owner file. It separates two silences: the owner file is usually
+/// absent and that is the normal case, while a path a human typed that is not
+/// there is a mis-pointed escape hatch — which used to be indistinguishable
+/// from a clean read of a file that was never opened.
+export function overrideIsConfigured(env = process.env) {
+  const configured = env?.HAZLIE_FEATURES_OVERRIDE;
+  return typeof configured === 'string' && configured !== '' && configured !== 'none';
 }
 
 /// The boolean surfaces. Order is the order they are logged in.
@@ -168,12 +185,34 @@ export function parseRegistry(text) {
 /// than a quiet Tuesday, so the state travels with the set.
 export const REGISTRY_STATES = Object.freeze(['ok', 'missing', 'invalid']);
 
-/// The effective set AND why it is what it is: `{ features, registryState }`.
-/// `onProblem` is called with a one-line reason for anything that had to be
-/// ignored; it never throws out of here.
+/// AND WHAT BECAME OF THE OVERRIDE, which is a separate question with separate
+/// consequences.
+///
+/// 'none'    — there was none to apply: no path, or the owner file is simply
+///             not there. The normal case, and silent.
+/// 'ok'      — a file was read and merged.
+/// 'missing' — a path somebody NAMED is not there. The escape hatch is
+///             mis-pointed, which used to look exactly like no override at all.
+/// 'invalid' — it is there and was refused: bad JSON, an unknown key, an
+///             illegal value. Discarded; the shipped registry still applies.
+///
+/// None of the last two touch `registryState`. A bad override is not a broken
+/// bundle, and reporting it as one would send the owner to reinstall over a
+/// typo in a file they are invited to edit.
+export const OVERRIDE_STATES = Object.freeze(['none', 'ok', 'missing', 'invalid']);
+
+/// The effective set AND why it is what it is:
+/// `{ features, registryState, overrideState }`. `onProblem` is called with a
+/// one-line reason for anything that had to be ignored; it never throws out of
+/// here.
+///
+/// `overrideConfigured` says whether the path was named rather than defaulted —
+/// see overrideIsConfigured. It is only ever used to decide whether an ABSENT
+/// override is worth a word.
 export function readFeatureRegistry({
   registryPath = DEFAULT_REGISTRY_PATH,
   overridePath = defaultOverridePath(),
+  overrideConfigured = overrideIsConfigured(),
   onProblem = () => {},
 } = {}) {
   let features = ALL_OFF;
@@ -184,7 +223,7 @@ export function readFeatureRegistry({
     // wrong. Same ALL_OFF answer, different thing to tell the owner.
     const registryState = error?.code === 'ENOENT' ? 'missing' : 'invalid';
     onProblem(`features registry ${registryState}, everything is off: ${error.message}`);
-    return { features: ALL_OFF, registryState };
+    return { features: ALL_OFF, registryState, overrideState: 'none' };
   }
   let overrideText = null;
   try {
@@ -192,17 +231,31 @@ export function readFeatureRegistry({
     // says so explicitly, and readFileSync(null) throwing into the catch below
     // would have been the right answer for the wrong reason.
     if (overridePath === null || overridePath === undefined) {
-      return { features, registryState: 'ok' };
+      return { features, registryState: 'ok', overrideState: 'none' };
     }
     overrideText = readFileSync(overridePath, 'utf8');
-  } catch {
-    return { features, registryState: 'ok' }; // no override is the normal case, not a problem
+  } catch (error) {
+    // THE ONE CASE THAT IS NOT NORMAL. A file that is not there is the usual
+    // shape of "this machine has no override" — unless somebody named it, in
+    // which case they are acting on a file nothing read. Anything other than
+    // ENOENT (a directory, a permission, an unreadable device) is the file
+    // existing and refusing, which is worth saying whoever chose the path.
+    const overrideState = error?.code === 'ENOENT' ? 'missing' : 'invalid';
+    if (overrideState === 'invalid' || overrideConfigured) {
+      onProblem(`features override unreadable, ignored: ${error.message}`);
+      return { features, registryState: 'ok', overrideState };
+    }
+    return { features, registryState: 'ok', overrideState: 'none' };
   }
   try {
-    return { features: mergeFeatures(features, JSON.parse(overrideText)), registryState: 'ok' };
+    return {
+      features: mergeFeatures(features, JSON.parse(overrideText)),
+      registryState: 'ok',
+      overrideState: 'ok',
+    };
   } catch (error) {
     onProblem(`features override ignored: ${error.message}`);
-    return { features, registryState: 'ok' };
+    return { features, registryState: 'ok', overrideState: 'invalid' };
   }
 }
 

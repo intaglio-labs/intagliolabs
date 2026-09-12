@@ -19,7 +19,7 @@ import {
   accountsWithScopeIncludingStale,
 } from '../../connectors/lib/googleAccounts.mjs';
 import { listGoogleClients } from '../../connectors/lib/googleClients.mjs';
-import { readFeatureRegistry } from '../../connectors/lib/features.mjs';
+import { defaultOverridePath, readFeatureRegistry } from '../../connectors/lib/features.mjs';
 
 const SECRETS = (home) => join(home, '.hazlie', 'secrets');
 
@@ -426,8 +426,27 @@ function linkedinExportRow(home) {
 /// goes blank when the answer is one of the last two: every connector off, the
 /// card's own included, drawn as the same empty list as "nothing connected".
 /// The page needs to be able to say "unreadable" instead of saying nothing.
-export function featureRegistryState() {
-  return readFeatureRegistry().registryState;
+/// WITH `home`, because every other reader on this page has one. The override
+/// lives at ~/.hazlie/features.json, so a read with no argument answers about
+/// the DEVELOPER's machine on an alt-home install and in every temp-home test —
+/// the same class of bug HAZLIE_FEATURES_OVERRIDE closes one layer down.
+/// `overrideState` rides along because it is the part of this answer a home can
+/// change: a broken registry is a broken bundle, the same file for every home.
+export function featureRegistryStatus({ home = homedir() } = {}) {
+  const { registryState, overrideState } = readFeatureRegistry({
+    overridePath: defaultOverridePath(home),
+  });
+  return { registryState, overrideState };
+}
+
+export function featureRegistryState({ home = homedir() } = {}) {
+  return featureRegistryStatus({ home }).registryState;
+}
+
+/// The set itself, for the surfaces that draw what this build OFFERS rather
+/// than only why it could not say.
+export function featureSetFor({ home = homedir() } = {}) {
+  return readFeatureRegistry({ overridePath: defaultOverridePath(home) }).features;
 }
 
 function fullStatus(home) {

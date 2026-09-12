@@ -49,6 +49,18 @@ silently ship an app with a feature missing.
 `~/.hazlie/features.json`, same shape, **partial allowed**, merged over the
 shipped file. A developer turns a feature on locally without a rebuild.
 
+`HAZLIE_FEATURES_OVERRIDE` points the loader somewhere else: another file, or
+`none` for no override at all. **An empty value means `none`, not "read
+`$HOME`"** — `HAZLIE_FEATURES_OVERRIDE=$MAYBE node --test …` with `MAYBE` unset
+is how a wrapper silently handed the hermetic tests the developer's own file.
+
+The read answers `overrideState` beside `registryState`: `none` (nothing to
+apply — the owner file is usually absent, and that is silent), `ok`, `missing`
+(a path somebody *named* is not there — a mis-pointed escape hatch, which used
+to be indistinguishable from a clean read) and `invalid` (there and refused).
+Neither of the last two changes `registryState`; see the two failure rules
+below.
+
 **A flip needs restarts, and the three readers disagree about when.**
 `Features.current` caches for the app's whole process lifetime and `daemon.mjs`
 caches at module load, so changing the override takes an **app restart and a
