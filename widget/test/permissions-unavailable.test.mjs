@@ -56,10 +56,19 @@ test('no caller collapses unavailable back into granted by accident', () => {
   // there — the real photos probe is the Photos.sqlite read in
   // fullDiskAccessibleSources(), and a missing chat.db says nothing about a
   // photo library. It must say so explicitly rather than by omission.
-  const photos = /static func photos\(\) -> Status \{([\s\S]*?)\n {2}\}/u.exec(permissions)?.[1];
-  assert.ok(photos, 'photos() not found');
-  assert.match(photos, /== \.unavailable \? \.granted/u,
+  // It takes the disk answer rather than asking again — `all` has already
+  // done that protected read, and doing it twice per poll doubled every tccd
+  // denial on a machine that has said no — so the fold lives in photos(disk:).
+  const photos = /static func photos\(disk: Status\) -> Status \{([\s\S]*?)\n {2}\}/u
+    .exec(permissions)?.[1];
+  assert.ok(photos, 'photos(disk:) not found');
+  assert.match(photos, /disk == \.unavailable \? \.granted/u,
     'photos folds the third state deliberately and visibly');
+  // And the map probes the disk once for both rows it answers from.
+  const all = /static var all: \[String: String\] \{([\s\S]*?)\n {2}\}/u.exec(permissions)?.[1];
+  assert.ok(all, 'Permissions.all not found');
+  assert.equal((all.match(/fullDisk\(\)/gu) ?? []).length, 1,
+    'one protected read per map: the fda row and the photos fold share it');
 
   // The full-disk edge detector acts on an actual successful read only.
   assert.match(watch, /guard now == \.granted, let before = lastKnown, before != \.granted/u,

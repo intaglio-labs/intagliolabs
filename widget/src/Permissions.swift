@@ -87,16 +87,22 @@ enum Permissions {
   //
   // If PhotoKit ever grows a people API this comes back, and photos leaves the
   // disk grant at the same time -- see photos.mjs.
-  static func photos() -> Status {
+  /// TAKES THE DISK ANSWER RATHER THAN ASKING FOR IT AGAIN. `all` already
+  /// evaluated fullDisk(), and fullDisk() is a real protected read — a
+  /// FileHandle open on chat.db and a one-byte read, which on a denied machine
+  /// is a tccd denial event. Asking twice per call doubled every one of those
+  /// for an answer that cannot have changed in between.
+  static func photos(disk: Status) -> Status {
     // `unavailable` is a fact about chat.db, not about the photo library, and
     // fullDisk() is only a PROXY here — the actual photos probe is the
     // Photos.sqlite read in fullDiskAccessibleSources(). A Mac with no
     // Messages history says nothing either way about Photos, so this reports
     // exactly what it reported before the third state existed rather than
     // passing an unrelated absence through to a photos row.
-    let disk = fullDisk()
-    return disk == .unavailable ? .granted : disk
+    disk == .unavailable ? .granted : disk
   }
+
+  static func photos() -> Status { photos(disk: fullDisk()) }
 
   /// Bring this app forward before asking.
   ///
@@ -301,7 +307,10 @@ enum Permissions {
   /// kind. This records what each API actually returned, so the next person
   /// looking at "it just says open settings" has a fact to start from instead
   /// of a guess.
-  static func writeDiagnostic() {
+  /// `mapped` is passed in by a caller that has already built it, so the one
+  /// path that writes this file on a screen entry does not evaluate every
+  /// permission twice to do it.
+  static func writeDiagnostic(mapped: [String: String]? = nil) {
     let logs = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".hazlie/logs")
     try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true,
@@ -309,7 +318,7 @@ enum Permissions {
     let payload: [String: Any] = [
       "contacts_raw": CNContactStore.authorizationStatus(for: .contacts).rawValue,
       "calendar_raw": EKEventStore.authorizationStatus(for: .event).rawValue,
-      "mapped": all,
+      "mapped": mapped ?? all,
       "bundle": Bundle.main.bundleIdentifier ?? "?",
       "path": Bundle.main.bundleURL.path,
       "active": NSApp.isActive,
@@ -320,12 +329,16 @@ enum Permissions {
     try? data.write(to: logs.appendingPathComponent("permissions.json"))
   }
 
+  /// ONE DISK PROBE PER MAP. `photos()` is derived from the same answer the
+  /// `fda` row reports, so reading it twice was two protected reads for one
+  /// fact — and this map is what a live screen polls.
   static var all: [String: String] {
-    [
+    let disk = fullDisk()
+    return [
       "contacts": contacts().rawValue,
       "calendar": calendar().rawValue,
-      "photos": photos().rawValue,
-      "fda": fullDisk().rawValue,
+      "photos": photos(disk: disk).rawValue,
+      "fda": disk.rawValue,
     ]
   }
 }
