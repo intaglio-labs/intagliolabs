@@ -88,6 +88,24 @@ Every process logs which features are on at startup, **names only**.
 
 | flag | effect |
 |---|---|
+### LinkedIn is two flows behind two flags
+
+`linkedin` is both a bridge platform and the connector that reads the data
+export, sharing one hermes source name. The bridge tile follows `bridges`; the
+export tile follows `connectors.linkedin`, which stays **true** with bridges
+off — `connectors/sources/linkedin.mjs` is scheduled and polling
+`~/.hazlie/imports/linkedin` either way. So **both tiles are drawn when both
+flows are live**, named "LinkedIn (bridge)" and "LinkedIn (export)"; with
+bridges off there is one tile and it keeps the plain name. Never a scheduled
+connector with no surface, in either direction.
+
+The rule lives in `visibleStatusRows` (`connect/lib/status.mjs`) for the connect
+page and is mirrored by `isHiddenSource`/`visibleSources` in
+`widget/ui/connections.js` — the shelf is a classic `<script>` in a WKWebView
+and cannot import a node module. Both are pinned against the same cases
+(`connect/test/linkedinTiles.test.mjs`,
+`widget/test/connector-visibility.test.mjs`).
+
 | `bridges` | `Provision.prefetchBridgeRuntime` and `ensureBridgeRuntime` return early; `ops/setup-bridges-native.sh` never runs, so `io.intaglio.bridges` is never installed. An agent a previous install left behind is **retired on the next launch** — `launchctl bootout` and the plist removed, everything under `~/.hazlie/matrix` and `~/.hazlie/bridges` left on disk. The `matrix` connector is disabled with it. **`tools/yq` (12 MB) also stays out of the bundle** — see below. |
 | `voice` | the ~496 MB speech models are **not copied into the bundle at all** (stage 2), the clone into `~/.hazlie/models/voice` is skipped, the hidden ear webview is not built, `armVoice`/`speakAnswer` are no-ops, and the orb's tap stops teasing. |
 | `chat` | the chat panel and its webview are never built; `openChat`, `openChat(with:)` and `voiceNote` log and return. The widget hides `#wchat` and the message pill. |

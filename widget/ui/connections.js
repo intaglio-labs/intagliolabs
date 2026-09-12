@@ -838,8 +838,8 @@ const kindOf = (id) => (id.startsWith('mail:') ? 'mail' : id);
 const CONNECTOR_ORDER = [
   'imessage',
   'whatsapp', 'messenger', 'instagram', 'twitter', 'telegram', 'discord', 'slack', 'linkedin',
-  // The export tile stands where the bridge tile would; only one of the two is
-  // ever visible, so they share a place in the scan order rather than a slot.
+  // The export tile stands beside the bridge tile when both flows are provisioned
+  // (visibleSources names them apart then), and in its place when they are not.
   'linkedin-export',
   'mail',
   'calendar',
@@ -880,10 +880,23 @@ let featureSet = null; // filled by the first refresh(); see hzFeatures in bridg
 // the export tile when its connector is on and no bridge tile is carrying
 // LinkedIn, and never show the two at once.
 const LINKEDIN_EXPORT_ID = 'linkedin-export';
+/// THE CONNECTOR A ROW BELONGS TO, which is not always the row's id. `mail:<…>`
+/// rows are the mail connector, and the export row is the `linkedin` connector —
+/// sources/linkedin.mjs, the thing that polls ~/.hazlie/imports/linkedin. That
+/// second mapping used to live inside isHiddenSource only, so isOptionalSource
+/// asked the registry about a connector named "linkedin-export" that does not
+/// exist and got `undefined`: the tile showed and was never labelled optional
+/// while the daemon was waiting for the owner to start it. One mapping, both
+/// rules. connect/lib/status.mjs' connectorForStatusRow is its server-side twin.
+const connectorOf = (id) => (id === LINKEDIN_EXPORT_ID ? 'linkedin' : kindOf(id));
 function isHiddenSource(src) {
+  // The export row answers to its own connector and NOTHING ELSE. It used to
+  // hide whenever `bridges` came on, which re-created the bug it was brought
+  // back to fix, mirrored: connectors.linkedin stays true with bridges on, so
+  // the export connector is still scheduled and still polling, and the hint
+  // carrying the drop path was the only place that path is written down.
   if (src.id === LINKEDIN_EXPORT_ID) {
-    return hzFeatureOn(featureSet, 'bridges')
-      || hzConnectorFeature(featureSet, 'linkedin') === false;
+    return hzConnectorFeature(featureSet, 'linkedin') === false;
   }
   if (isBridge(src)) return !hzFeatureOn(featureSet, 'bridges');
   // `=== false` and not a falsy test, deliberately: hzConnectorFeature answers
@@ -891,12 +904,12 @@ function isHiddenSource(src) {
   // LEAVES SUCH A MODULE ALONE (connectorsDisabledBy). A row whose kind is
   // unknown here is one the daemon is scheduling and ingesting, so hiding it
   // would draw the owner a shelf that disagrees with what the machine is doing.
-  return hzConnectorFeature(featureSet, kindOf(src.id)) === false;
+  return hzConnectorFeature(featureSet, connectorOf(src.id)) === false;
 }
 /// Offered, but the owner has to ask for it. Labelled on the tile so "not
 /// connected" does not read as "broken" for a source nothing auto-starts.
 function isOptionalSource(src) {
-  return !isBridge(src) && hzConnectorFeature(featureSet, kindOf(src.id)) === 'optional';
+  return !isBridge(src) && hzConnectorFeature(featureSet, connectorOf(src.id)) === 'optional';
 }
 // Status returns one real row per authorized mailbox plus a synthetic `mail`
 // row for starting another grant. Once a real account exists, its card owns
@@ -908,11 +921,25 @@ function visibleSources(sources) {
   const hasGoogleAccount = sources.some(
     (s) => s.connected && typeof s.id === 'string' && s.id.startsWith('mail:')
   );
-  return sources
+  const shown = sources
     .filter((s) => !isHiddenSource(s) && !(hasGoogleAccount && s.id === 'mail'))
     .map((s) => s.id.startsWith('mail:')
       ? { ...s, clients: addGoogle && Array.isArray(addGoogle.clients) ? addGoogle.clients : [] }
       : s);
+  // TWO LINKEDIN TILES, WHEN BOTH FLOWS ARE REALLY RUNNING — and then they have
+  // to say which is which. With `bridges` on and `connectors.linkedin` true the
+  // bridge logs in and the export connector polls the import folder, so both
+  // are work the owner can act on and both carry the label "LinkedIn" from
+  // connect/lib/status.mjs. Only rename them when both survive the filter: with
+  // bridges off there is a single tile and "(export)" is noise on it.
+  const bridgeRow = shown.find((s) => s.id === 'linkedin');
+  const exportRow = shown.find((s) => s.id === LINKEDIN_EXPORT_ID);
+  if (!bridgeRow || !exportRow) return shown;
+  return shown.map((s) => {
+    if (s.id === 'linkedin') return { ...s, label: `${s.label} (bridge)` };
+    if (s.id === LINKEDIN_EXPORT_ID) return { ...s, label: `${s.label} (export)` };
+    return s;
+  });
 }
 // Google sign-in is intentionally parked while its authorization path is not
 // ready to ship. Keep its normal tile so people can discover it, but mute it

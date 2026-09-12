@@ -29,7 +29,7 @@ import { secretResponse } from './lib/secretApi.mjs';
 import { PLATFORMS, bridgeStatus, beginCommand, beginLogin, loadPanel, relay } from './lib/bridge.mjs';
 import { bridgeApiResponse } from './lib/bridgeApi.mjs';
 import { decide, fetchPending } from './lib/memory.mjs';
-import { readStatus } from './lib/status.mjs';
+import { featureSetFor, readStatus, visibleStatusRows } from './lib/status.mjs';
 import { listGoogleClients } from '../connectors/lib/googleClients.mjs';
 import { googleProbe } from './lib/googleProbe.mjs';
 import { sameOrigin } from './lib/origin.mjs';
@@ -748,7 +748,11 @@ async function handleRequest(req, res) {
     return;
   }
 
-  send(res, 200, renderConnectPage(readStatus(), { token }));
+  // THE SAME SHELF THE WIDGET DRAWS. This page used to render readStatus() raw,
+  // so a build that installs no bridge still offered seven bridge logins here
+  // and LinkedIn appeared twice under one name. visibleStatusRows is the one
+  // place those rules live; see connect/lib/status.mjs.
+  send(res, 200, renderConnectPage(visibleStatusRows(readStatus(), featureSetFor()), { token }));
 }
 
 server.listen(PORT, '127.0.0.1', () => {

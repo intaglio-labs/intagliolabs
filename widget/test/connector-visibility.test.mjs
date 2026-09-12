@@ -43,13 +43,16 @@ runInContext([
   block(connectionsJs, 'const BRIDGE_FLOW = {', '};', 'BRIDGE_FLOW'),
   line(connectionsJs, 'const isBridge =', 'isBridge'),
   line(connectionsJs, "const LINKEDIN_EXPORT_ID =", 'LINKEDIN_EXPORT_ID'),
+  line(connectionsJs, 'const connectorOf =', 'connectorOf'),
   block(connectionsJs, 'function isHiddenSource(src) {', '}', 'isHiddenSource'),
   block(connectionsJs, 'function isOptionalSource(src) {', '}', 'isOptionalSource'),
+  block(connectionsJs, 'function visibleSources(sources) {', '}', 'visibleSources'),
   'let featureSet = null;',
   'this.setFeatures = (f) => { featureSet = f; };',
   'this.hidden = (src) => isHiddenSource(src);',
   'this.optional = (src) => isOptionalSource(src);',
   'this.bridge = (src) => isBridge(src);',
+  'this.visible = (rows) => visibleSources(rows);',
   'this.connectorFeature = (set, name) => hzConnectorFeature(set, name);',
   'this.exportId = LINKEDIN_EXPORT_ID;',
 ].join('\n'), context);
@@ -111,15 +114,54 @@ test('with bridges off, LinkedIn is its export tile — the one the connector wa
     'the bridge tile stays behind the bridges feature');
 });
 
-test('with bridges on, LinkedIn is its bridge tile and only that', () => {
+// BOTH PATHS ARE REAL, SO BOTH GET A TILE — with names that say which is which.
+//
+// Hiding the export tile whenever `bridges` came on re-created, mirrored, the
+// bug the export tile was brought back to fix: `connectors.linkedin` stays TRUE
+// with bridges on, so sources/linkedin.mjs is still scheduled and still polling
+// ~/.hazlie/imports/linkedin, and HINTS['linkedin-export'] — the only place the
+// drop path is written down anywhere — became unreachable. A scheduled
+// connector with no surface, again. The rule is now the rule the daemon uses:
+// a tile per flow this install actually runs.
+test('with bridges on, LinkedIn keeps both tiles, and they say which is which', () => {
   context.setFeatures(registry({}, { bridges: true }));
-  assert.equal(context.hidden(row('linkedin', { action: 'bridge' })), false);
-  assert.equal(context.hidden(row(context.exportId)), true,
-    'two LinkedIn tiles is worse than either one of them');
+  const bridge = row('linkedin', { action: 'bridge', label: 'LinkedIn' });
+  const exported = row(context.exportId, { action: 'linkedin', label: 'LinkedIn' });
+  assert.equal(context.hidden(bridge), false);
+  assert.equal(context.hidden(exported), false,
+    'the export connector is still scheduled, so it still needs a surface');
+
+  const labels = context.visible([bridge, exported]).map((s) => s.label);
+  assert.deepEqual(labels, ['LinkedIn (bridge)', 'LinkedIn (export)'],
+    'two tiles both called LinkedIn is a shelf that cannot be read');
+});
+
+test('with bridges off, the one LinkedIn tile keeps its plain name', () => {
+  context.setFeatures(registry());
+  const shown = context.visible([
+    row('linkedin', { action: 'bridge', label: 'LinkedIn' }),
+    row(context.exportId, { action: 'linkedin', label: 'LinkedIn' }),
+  ]);
+  assert.deepEqual(shown.map((s) => s.id), [context.exportId]);
+  assert.equal(shown[0].label, 'LinkedIn', 'nothing to tell it apart from');
 });
 
 test('switching the linkedin connector off takes its export tile with it', () => {
   context.setFeatures(registry({ linkedin: false }));
   assert.equal(context.hidden(row(context.exportId)), true);
   assert.equal(context.hidden(row('linkedin', { action: 'bridge' })), true);
+});
+
+// ONE ROW, TWO MAPPINGS, AND THEY HAVE TO AGREE. isHiddenSource mapped
+// `linkedin-export` to the `linkedin` feature and isOptionalSource did not, so
+// with connectors.linkedin: "optional" the tile was shown (correctly) and drawn
+// as ordinary work the app would start by itself (wrongly) — while the daemon
+// waited for the owner.
+test('the export row reads the linkedin feature for optional too, not just for hidden', () => {
+  context.setFeatures(registry({ linkedin: 'optional' }));
+  assert.equal(context.hidden(row(context.exportId)), false);
+  assert.equal(context.optional(row(context.exportId)), true,
+    'the same id must resolve to the same connector in both rules');
+  assert.equal(context.optional(row('linkedin', { action: 'bridge' })), false,
+    'a bridge tile is never labelled from a connector feature');
 });

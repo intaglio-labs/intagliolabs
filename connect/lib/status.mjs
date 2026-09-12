@@ -415,10 +415,67 @@ function linkedinExportRow(home) {
     id: LINKEDIN_EXPORT_ID,
     label: 'LinkedIn',
     connected: ok,
+    // OPTIONAL, like "add another Google account" and for the same reason. The
+    // archive is requested from LinkedIn, produced in its own time, mailed,
+    // downloaded and unzipped by hand — a standing invitation rather than
+    // outstanding work. Counted as work, the connect page's footer on a Mac
+    // that never drops the file could never reach "all set", and the row took
+    // the page's single filled accent away from something actionable.
+    optional: true,
     detail: ok ? 'export imported' : 'needs your LinkedIn data export',
     action: ok ? null : 'linkedin',
     caveat: null,
   };
+}
+
+/// WHICH ROWS THIS BUILD ACTUALLY OFFERS — the one place that rule is written.
+///
+/// readStatus() answers every source this install CAN connect; the feature
+/// registry says which of them this build runs. Until now only the widget shelf
+/// (widget/ui/connections.js) applied that, and connect/server.mjs rendered the
+/// raw list — so the loopback page drew bridge tiles for a bridge that is not
+/// provisioned and two rows both called "LinkedIn".
+///
+/// Two rules, and the second is the one that is easy to forget:
+///
+///   * a row whose CONNECTOR feature is false is hidden — by connector, not by
+///     id, because `mail:<address>` rows are the mail connector and the export
+///     row is the linkedin one;
+///   * every bridge tile goes with `bridges`, because the Matrix bus IS that
+///     feature. `isBridgeRow` is the discriminator rather than the id, which
+///     matters for LinkedIn precisely: `linkedin` is both a bridge platform and
+///     the connector that reads the data export.
+///
+/// A connector the registry does not mention at all is LEFT ALONE, matching
+/// connectorsDisabledBy: the daemon schedules such a module, and a shelf that
+/// hid it would disagree with what the machine is doing.
+///
+/// The widget cannot import this (the shelf is a classic <script> in a
+/// WKWebView), so connections.js carries the mirror; both are pinned against
+/// the same cases, here and in widget/test/connector-visibility.test.mjs.
+function isBridgeRow(row) {
+  return row.action === 'bridge' || Object.hasOwn(PLATFORMS, row.id);
+}
+
+export function visibleStatusRows(rows, features) {
+  const shown = rows.filter((row) => {
+    if (isBridgeRow(row)) return features?.bridges === true;
+    return features?.connectors?.[connectorForStatusRow(row.id)] !== false;
+  });
+  // BOTH LINKEDIN FLOWS CAN BE LIVE AT ONCE, and then each has to say which it
+  // is. With `bridges` on and `connectors.linkedin` true the bridge logs in and
+  // sources/linkedin.mjs still polls ~/.hazlie/imports/linkedin, so both are
+  // real work — but they share the label the platform gave them. Rename only
+  // when both survive: with bridges off there is one tile and "(export)" is
+  // noise on it.
+  const both = shown.some((row) => row.id === 'linkedin')
+    && shown.some((row) => row.id === LINKEDIN_EXPORT_ID);
+  if (!both) return shown;
+  return shown.map((row) => {
+    if (row.id === 'linkedin') return { ...row, label: `${row.label} (bridge)` };
+    if (row.id === LINKEDIN_EXPORT_ID) return { ...row, label: `${row.label} (export)` };
+    return row;
+  });
 }
 
 /// 'ok' | 'missing' | 'invalid' — why the feature registry answered what it
