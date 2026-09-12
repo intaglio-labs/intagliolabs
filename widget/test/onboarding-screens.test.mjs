@@ -19,6 +19,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const html = readFileSync(join(ROOT, 'widget', 'ui', 'onboarding.html'), 'utf8');
 const js = readFileSync(join(ROOT, 'widget', 'ui', 'onboarding.js'), 'utf8');
 const features = JSON.parse(readFileSync(join(ROOT, 'ops', 'features.json'), 'utf8'));
+const bridge = readFileSync(join(ROOT, 'widget', 'src', 'Bridge.swift'), 'utf8');
 
 const screensBlock = /const screens = \{([\s\S]*?)\n\};/u.exec(js)?.[1] ?? '';
 const screenIds = [...screensBlock.matchAll(/getElementById\('([^']+)'\)/gu)].map((m) => m[1]);
@@ -139,4 +140,153 @@ test('the unverified-app warning is on screen before the sign-in button', () => 
   assert.ok(button > -1);
   assert.ok(warning < button, 'it must be read before the button is pressed');
   assert.match(html, /about google&#8217;s\s*\n?\s*review\s*\n?\s*queue, not about what i do with the grant/u);
+});
+
+// ---- what the polls cost, and when they stop -----------------------------
+
+test('leaving the flow stops every poll, not just changing screen', () => {
+  // showScreen() was the ONLY caller of leaveScreen, so Escape stopped
+  // nothing: currentScreen never changed, every tick's own guard therefore
+  // never fired, and the panel reuses the same loaded page. From screen 3 that
+  // is a live Gmail read every poll for the rest of the ten-minute window;
+  // from screen 6 a relCardPeek that refills the producer's batch, forever,
+  // behind a closed window.
+  assert.match(js, /function leaveFlow\(\) \{\s*\n\s*leaveScreen\(currentScreen\);\s*\n\}/u,
+    'leaveFlow() must stop the screen the flow is actually on');
+  const escape = /if \(e\.key === 'Escape'\) \{([\s\S]*?)\n {2}\}/u.exec(js)?.[1];
+  assert.ok(escape, 'the Escape handler is gone');
+  assert.match(escape, /leaveFlow\(\)/u, 'escape leaves');
+  assert.ok(escape.indexOf('leaveFlow()') < escape.indexOf("hzPost('close')"),
+    'and it stops the polls BEFORE the window goes');
+  const finish = /function finish\(\) \{([\s\S]*?)\n\}/u.exec(js)?.[1];
+  assert.match(finish, /leaveFlow\(\)/u, 'finishing leaves too');
+  // Native can also order the panel out on its own routes, and an ordered-out
+  // webview reports itself hidden. That is the only signal the page gets.
+  assert.match(js, /visibilitychange[\s\S]{0,200}document\.hidden[\s\S]{0,40}leaveFlow\(\)/u);
+});
+
+test('no poll on this flow runs at the old three-second rate', () => {
+  // Each of these is a real cost somewhere: a protected read that a denied
+  // machine records as a tccd denial, a Gmail call out of the connector's
+  // measured budget, and a card peek that refills a producer batch.
+  for (const [name, ms] of [['PERM_POLL_MS', 3000], ['GOOGLE_POLL_MS', 15000],
+                            ['LOAD_POLL_MS', 5000], ['PEEK_POLL_MS', 15000]]) {
+    assert.match(js, new RegExp(`const ${name} = ${ms};`, 'u'), `${name} is ${ms}`);
+  }
+  // And the constants are what the timers are actually given.
+  assert.match(js, /\}, PERM_POLL_MS\);/u);
+  assert.match(js, /\}, GOOGLE_POLL_MS\);/u);
+  assert.match(js, /setInterval\(tick, LOAD_POLL_MS\)/u);
+  assert.match(js, /setInterval\(peek, PEEK_POLL_MS\)/u);
+  assert.doesNotMatch(js, /setInterval\([^)]*, 3000\)/u, 'nothing is left on the old rate');
+  assert.doesNotMatch(js, /setInterval\([^)]*, 1500\)/u);
+});
+
+test('the google probe is capped for the whole visit, and reachable by hand', () => {
+  // A page left sitting on screen 3 must not be able to spend the mail
+  // connector's Gmail budget by doing nothing.
+  assert.match(js, /const GOOGLE_PROBE_CAP = \d+;/u);
+  const probe = /function probeGoogle\(\) \{([\s\S]*?)\n\}/u.exec(js)?.[1];
+  assert.ok(probe, 'probeGoogle() not found');
+  assert.match(probe, /googleProbes >= GOOGLE_PROBE_CAP/u, 'the cap is enforced in the probe');
+  assert.match(probe, /googleProbes \+= 1/u, 'and every probe counts against it');
+  // The two paths that matter still probe at once: coming back from the
+  // browser, and pressing the button.
+  assert.match(js, /window\.addEventListener\('focus'[\s\S]{0,120}probeGoogle\(\)/u);
+  assert.match(js, /googleStart\.addEventListener\('click'[\s\S]{0,300}startGooglePolling\(\)/u);
+  assert.match(js, /function enterGoogle\(\) \{[\s\S]{0,400}googleProbes = 0;[\s\S]{0,120}probeGoogle\(\)/u,
+    'the cap is per visit, not per page load');
+});
+
+test('the permission poll asks for no diagnostic; entering the screen does', () => {
+  // writeDiagnostic() evaluates every permission a second time and writes a
+  // file. On the poll path that was four chat.db opens, a createDirectory and
+  // a JSON write every tick, forever, for a row that the first attempt
+  // already primed.
+  const poll = /function startPermPolling\(\) \{([\s\S]*?)\n\}/u.exec(js)?.[1];
+  assert.ok(poll, 'startPermPolling() not found');
+  assert.match(poll, /hzPost\('permissionState'\)/u, 'the poll asks for the state alone');
+  assert.doesNotMatch(poll, /diagnostic/u, 'and never for the diagnostic');
+  assert.match(js, /function enterPerms\(\) \{[\s\S]{0,600}hzPost\('permissionState', \{ diagnostic: true \}\)/u,
+    'entering the screen is when somebody is about to read the file');
+});
+
+test('the "nothing is running" banner is about the daemon, never about chat.db', () => {
+  // Whether this Mac has an iMessage database says nothing about whether the
+  // reader has ever run — and the fallback hid the banner AND its start button
+  // on exactly the machine most likely to need them.
+  assert.match(js, /const stopped = last === null \|\| \(Date\.now\(\) - last\) > 10 \* 60 \* 1000;/u);
+  const paint = /function paintLoad\(out\) \{([\s\S]*?)\n\}/u.exec(js)?.[1];
+  assert.ok(paint, 'paintLoad() not found');
+  const bannerAt = paint.indexOf('const stopped =');
+  const region = paint.slice(bannerAt, paint.indexOf('loadStart.hidden'));
+  assert.doesNotMatch(region, /noMessagesOnThisMac/u,
+    'the banner may not read the iMessage flag at all');
+  assert.match(paint, /out\.daemonLastRunTs/u, 'the run log is the only input');
+});
+
+test('a resume that arrives after the owner has moved is ignored', () => {
+  // native calls __hzOnboardingResume right after creating the panel, and on a
+  // first launch the page has not loaded — WebKit runs the evaluation once the
+  // document exists, which on the owner's machine was AFTER they pressed
+  // "hello". The flow was yanked from the permissions screen to the remembered
+  // step, so screen 2 was on screen for a few frames and never seen.
+  assert.match(js, /window\.__hzOnboardingResume = \(step\) => \{\s*\n\s*if \(ownerMoved\) return;/u);
+  assert.match(js, /function nextScreen\(\) \{\s*\n\s*ownerMoved = true;/u,
+    'the owner moving the flow is what makes their press win');
+  assert.match(js, /window\.__hzOnboardingReset = \(\) => \{[\s\S]{0,200}ownerMoved = false;/u,
+    'a replay from settings starts the question over');
+});
+
+test('screen 4 is entered, and reports an export that is already here', () => {
+  const show = /function showScreen\(n\) \{([\s\S]*?)\n\}/u.exec(js)?.[1] ?? '';
+  assert.match(show, /key === '4'\) enterLinkedIn\(\)/u,
+    'screen 4 had no enter hook at all, so it could not look');
+  assert.match(js, /function enterLinkedIn\(\) \{[\s\S]{0,200}hzPost\('linkedInState'\)/u);
+  const paint = /function paintLinkedInExisting\(out\) \{([\s\S]*?)\n\}/u.exec(js)?.[1];
+  assert.ok(paint, 'paintLinkedInExisting() not found');
+  assert.match(paint, /out\.present !== true/u, 'nothing is claimed when nothing is there');
+  assert.match(paint, /connections already here/u);
+  assert.match(paint, /linkedInPick\.textContent = 'replace'/u, 'the button offers the replacement');
+  assert.match(paint, /linkedInNext\.hidden = false/u, 'and the flow can go on without re-picking');
+});
+
+test('the two screens that write something slowly say so', () => {
+  // Neither is a code change: relMode is a fire-and-forget POST to a reader
+  // that may still be starting, and the engine switch writes a config key the
+  // page builder reads when it STARTS a page. A privacy switch that looks
+  // instant while a build is in flight is the one kind of lie this screen
+  // cannot afford, so the screen says what it does.
+  const welcome = html.slice(html.indexOf('id="modes"'), html.indexOf('id="cta"'));
+  assert.match(welcome, /kept by the reader/u, 'screen 1 says when the mode lands');
+  const engine = html.slice(html.indexOf('id="engineToggleRow"'), html.indexOf('id="engineModel"'));
+  assert.match(engine, /applies to the next page it builds/u,
+    'screen 5 says the switch is not retroactive');
+});
+
+test('a step remembered under the old numbering is not resumed into', () => {
+  // THE VOCABULARY CHANGED UNDER THE SAME KEY. The old flow had three scenes
+  // and wrote '1', '2', '3' for welcome, typing demo and widget spotlight. The
+  // six-screen flow writes those same characters for welcome, permissions and
+  // google sign-in. An owner who FINISHED the old flow has a '3' on disk
+  // meaning "the last screen", and resumeTarget() accepts it verbatim
+  // (flow.includes('3') is true) — dropping them into google sign-in and
+  // skipping the permissions screen everything downstream depends on.
+  //
+  // No value can tell the two apart, so the KEY carries the version.
+  const key = /static let stepDefaultsKey = "([^"]+)"/u.exec(bridge)?.[1];
+  assert.ok(key, 'stepDefaultsKey not found');
+  assert.notEqual(key, 'HazlieOnboardingStep', 'the old key must not be read');
+  assert.match(key, /-v2$/u, 'and the new one says which vocabulary it holds');
+  // The old key is named exactly once, to be removed — never to be read.
+  assert.match(bridge, /static let legacyStepDefaultsKey = "HazlieOnboardingStep"/u);
+  const prop = /static var onboardingStep: String\? \{([\s\S]*?)\n {2}\}/u.exec(bridge)?.[1];
+  assert.ok(prop, 'onboardingStep not found');
+  assert.match(prop, /removeObject\(forKey: legacyStepDefaultsKey\)/u, 'the old value is cleared');
+  assert.match(prop, /string\(forKey: stepDefaultsKey\)/u);
+  assert.doesNotMatch(prop, /string\(forKey: legacyStepDefaultsKey\)/u,
+    "a stored '3' under the old key must not reach resumeTarget at all");
+  // And with nothing under the new key, native takes the reset path rather
+  // than resuming: a fresh page starts on screen 1.
+  assert.match(js, /window\.__hzOnboardingReset = \(\) =>/u);
 });

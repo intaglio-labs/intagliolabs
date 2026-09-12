@@ -76,9 +76,12 @@ test('the named exception is still true', () => {
 // seven-day cooldown and flips the producers' turn. ?peek=1 does none of it,
 // which is why the welcome screen may use it to read the current mode and the
 // first-load screen may poll it without spending the owner's daily card.
+// linkedInState is a read in the strict sense the list means: it reports
+// whether an export is already on disk, when it landed and how many records it
+// holds. Counts and a date -- no names, no companies, no row content.
 const READS = ['permissionState', 'setupState', 'engineProbe', 'googleProbe',
                'onboardingProgress', 'relCardPeek', 'widgetSpot', 'openFullDiskAccess',
-               'openReconnect', 'close'];
+               'openReconnect', 'close', 'linkedInState'];
 
 test('the page can only reach the six checks it is supposed to', () => {
   // The verbs that write something, named one by one, so adding a write to

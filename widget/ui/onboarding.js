@@ -79,6 +79,7 @@ function showScreen(n) {
   if (key === '1') enterWelcome();
   if (key === '2') enterPerms();
   if (key === '3') enterGoogle();
+  if (key === '4') enterLinkedIn();
   if (key === '5') enterEngine();
   if (key === '6') enterLoad();
   // The scrim gets out of the way of the real widget only on the spotlight.
@@ -99,15 +100,58 @@ function leaveScreen(key) {
   if (key === '6') stopLoadPolling();
 }
 
+// LEAVING THE FLOW IS LEAVING A SCREEN, and it was not treated as one.
+//
+// showScreen() is the only caller of leaveScreen, so escaping the panel — or
+// finishing it — stopped nothing: `currentScreen` never changed, every tick's
+// own `if (currentScreen !== …) return` guard therefore never fired, and the
+// panel reuses the same loaded page, so the timers outlived the window. From
+// screen 3 that is a live Gmail messages.list every poll for the rest of the
+// ten-minute window; from screen 6 a relCardPeek that refills the producer's
+// batch, forever, behind a closed panel.
+function leaveFlow() {
+  leaveScreen(currentScreen);
+}
+
+// ...and the panel can also go away without the page being told: native orders
+// it out on its own routes (the widget's own close, a screen change). An
+// ordered-out webview reports itself hidden, which is the only signal the page
+// gets, so it is treated as leaving too.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { leaveFlow(); return; }
+  // Back on screen: re-arm the two local polls. Google is deliberately not
+  // re-armed — it has a focus probe and a button, and restarting its window
+  // here would reopen ten minutes of API calls nobody asked for.
+  if (currentScreen === '2') startPermPolling();
+  if (currentScreen === '6') startLoadPolling();
+});
+
 function nextScreen() {
+  ownerMoved = true;
   const at = flow.indexOf(currentScreen);
   const to = at === -1 ? '1' : flow[Math.min(at + 1, flow.length - 1)];
   showScreen(to);
 }
 
+// Whether the owner has moved the flow themselves yet. See the resume guard.
+let ownerMoved = false;
+
 // Called by native when the app is launching back into a flow it was already in,
 // rather than replaying one from settings.
+//
+// A RESUME THAT ARRIVES LATE IS NOT A RESUME. native calls this immediately
+// after creating the panel, and on the very first launch the page has not
+// finished loading — WebKit then runs the evaluation once the document exists,
+// which can be seconds later, and on the owner's machine that was AFTER they
+// had pressed "hello". The flow showed the welcome, moved to the permissions
+// screen on the click, and was then yanked to the remembered step: screen 2
+// was on screen for a few frames and the owner never saw it, on the one screen
+// everything downstream depends on.
+//
+// So a resume is only honoured while the flow is still sitting where it
+// started. Once the owner has moved it themselves, their press wins.
 window.__hzOnboardingResume = (step) => {
+  if (ownerMoved) return;
   clearDemo();
   demoArmed = false;
   showScreen(resumeTarget(step));
@@ -136,6 +180,7 @@ function resumeTarget(step) {
 window.__hzOnboardingReset = () => {
   clearDemo();
   demoArmed = false;
+  ownerMoved = false;
   // Replays always start at the welcome; the app location is handled by the
   // normal DMG/Finder install flow, not as a product onboarding step.
   showScreen('1');
@@ -285,6 +330,13 @@ permsEl.addEventListener('click', async (e) => {
 // Settings behind our back.
 let permTimer = null;
 
+// 3s, not 1.5s. Every tick is a real protected read — a FileHandle open on
+// chat.db and a one-byte read — and on a denied machine every one of those is
+// a tccd denial event. The row still turns green within a breath of the switch
+// moving in Settings, which is the whole point of polling at all; twice the
+// number of denials bought none of it.
+const PERM_POLL_MS = 3000;
+
 function startPermPolling() {
   stopPermPolling();
   permTimer = setInterval(async () => {
@@ -308,7 +360,7 @@ function startPermPolling() {
       // see more, and it only picks that up when it runs.
       if (Object.values(next).includes('granted')) startedSources();
     }
-  }, 1500);
+  }, PERM_POLL_MS);
 }
 
 function stopPermPolling() {
@@ -324,7 +376,13 @@ function startedSources() {
 }
 
 function enterPerms() {
-  hzPost('permissionState').then((res) => {
+  // THE DIAGNOSTIC IS ASKED FOR HERE, and only here and after a request.
+  // Permissions.writeDiagnostic() evaluates every permission a second time and
+  // writes ~/.hazlie/logs/permissions.json; on the poll path that was a second
+  // full round of protected reads plus a createDirectory and a file write
+  // every tick. It is worth writing when somebody is about to read it — the
+  // moment this screen opens, and the moment a prompt has been answered.
+  hzPost('permissionState', { diagnostic: true }).then((res) => {
     if (!res) return;
     if (typeof res.bundle === 'string' && res.bundle) {
       permBundle.textContent = `granting to: ${res.bundle}`;
@@ -350,6 +408,24 @@ const googleStart = document.getElementById('googleStart');
 
 let googleTimer = null;
 let googleUntil = 0;
+let googleProbes = 0;
+
+// EVERY PROBE IS A REAL GMAIL READ, per live account
+// (connect/lib/googleProbe.mjs asks messages.list), uncached and unthrottled,
+// against the same measured per-user ceiling the mail connector is spending
+// while the daemon backfills behind this screen. At 3s that was 200 probes in
+// the ten-minute window and roughly 40 calls a minute out of the budget — and
+// the failure it produced was self-inflicted: the probe 403s with
+// rateLimitExceeded and this screen renders "signed in, but google refused the
+// read", an amber accusation caused by the poll asking.
+//
+// 15s is still well inside "it turns green while you are looking at it", and
+// the two paths that actually matter — coming back from the browser, and
+// pressing the button — probe immediately regardless.
+const GOOGLE_POLL_MS = 15000;
+// And a ceiling on the whole visit, so a page left open on this screen cannot
+// spend the budget by sitting there. 40 covers the ten-minute window.
+const GOOGLE_PROBE_CAP = 40;
 
 function paintGoogle(out) {
   googleStatus.classList.remove('ok', 'warn', 'bad');
@@ -390,6 +466,8 @@ function paintGoogle(out) {
 }
 
 function probeGoogle() {
+  if (googleProbes >= GOOGLE_PROBE_CAP) { stopGooglePolling(); return Promise.resolve(); }
+  googleProbes += 1;
   return hzPost('googleProbe').then(paintGoogle).catch(() => {});
 }
 
@@ -403,7 +481,7 @@ function startGooglePolling() {
   googleTimer = setInterval(() => {
     if (currentScreen !== '3' || Date.now() > googleUntil) { stopGooglePolling(); return; }
     probeGoogle();
-  }, 3000);
+  }, GOOGLE_POLL_MS);
 }
 
 function stopGooglePolling() {
@@ -412,6 +490,10 @@ function stopGooglePolling() {
 }
 
 function enterGoogle() {
+  // The cap is per VISIT, not per page load: leaving and coming back is the
+  // owner asking again, and that is a different thing from a page sitting on
+  // this screen for an hour.
+  googleProbes = 0;
   probeGoogle();
 }
 
@@ -467,7 +549,34 @@ function paintLinkedIn(out) {
   linkedInStatus.textContent = "i couldn't read that file.";
 }
 
-document.getElementById('linkedInPick').addEventListener('click', () => {
+// THE SECOND RUN (design P12). A machine that imported an export last month
+// met this screen saying only "choose the file", with `next` disabled — the
+// flow asking again for something it already had, and the only way past it
+// being to hand over the same file twice. Counts and a date, read from the
+// file the connector actually reads; the button then offers to replace it.
+const linkedInPick = document.getElementById('linkedInPick');
+
+function paintLinkedInExisting(out) {
+  if (!out || out.present !== true) return;
+  linkedInStatus.classList.remove('warn', 'bad');
+  linkedInStatus.classList.add('ok');
+  const n = Number(out.connections || 0);
+  const when = Number(out.modifiedTs);
+  const dated = Number.isFinite(when)
+    ? ` · imported ${new Date(when).toLocaleDateString()}`
+    : '';
+  linkedInStatus.textContent = n > 0
+    ? `${n.toLocaleString()} connections already here${dated}`
+    : `an export is already here${dated}`;
+  linkedInPick.textContent = 'replace';
+  linkedInNext.hidden = false;
+}
+
+function enterLinkedIn() {
+  hzPost('linkedInState').then(paintLinkedInExisting).catch(() => {});
+}
+
+linkedInPick.addEventListener('click', () => {
   hzPost('importLinkedIn').then(paintLinkedIn).catch(() => {});
 });
 linkedInNext.addEventListener('click', () => nextScreen());
@@ -728,8 +837,17 @@ function paintLoad(out) {
   // ABOVE THE TABLE, NOT IN IT. The daemon holding a stale lock, or exiting on
   // a config error, makes every source read zero — and per-source amber would
   // then blame five sources for one process that is not running.
+  // KEYED OFF THE RUN LOG, AND NOTHING ELSE. This used to fall back to
+  // `!noMessagesOnThisMac` when there was no run history at all — so whether
+  // the Mac happens to have an iMessage database decided whether the owner was
+  // told the reader is not running. A Mac with no Messages history and no run
+  // history got neither the banner nor the button to start it, which is
+  // exactly the machine most likely to need both; and `noMessagesOnThisMac` is
+  // only ever set if screen 2 was painted, so a resume straight into this
+  // screen left it false and got the banner by accident rather than by fact.
+  // No run history means nothing has run. That is the whole question.
   const last = out.daemonLastRunTs;
-  const stopped = last === null ? !noMessagesOnThisMac : (Date.now() - last) > 10 * 60 * 1000;
+  const stopped = last === null || (Date.now() - last) > 10 * 60 * 1000;
   loadBanner.hidden = !stopped;
   if (stopped) loadBanner.textContent = 'nothing is running. let me start it.';
   loadStart.hidden = !stopped;
@@ -747,29 +865,52 @@ loadStart.addEventListener('click', () => {
 });
 
 let loadTimer = null;
+let loadPeekTimer = null;
 let loadSince = 0;
+
+// The table is cheap and local, so it can be quick. The card peek is NOT: a
+// peek runs produceBatch/produceOweBatch, applies the cap and the servability
+// gate and writes the producers' refill bookkeeping, and the route's own
+// comment describes the widget poll it was designed against as TEN MINUTES.
+// Three seconds was two hundred times that rate.
+const LOAD_POLL_MS = 5000;
+const PEEK_POLL_MS = 15000;
 
 function stopLoadPolling() {
   if (loadTimer) clearInterval(loadTimer);
+  if (loadPeekTimer) clearInterval(loadPeekTimer);
   loadTimer = null;
+  loadPeekTimer = null;
 }
 
 // THE FLOW ALWAYS HAS AN EXIT. relCardPeek can legitimately answer null
 // forever — a config with no capPerDay returns {card:null,
 // reason:'no-cap-configured'} immediately and permanently — and a screen that
 // waits for a card would then spin for the life of the install.
-function enterLoad() {
-  loadSince = Date.now();
-  loadFinish.hidden = true;
+// Split out of enterLoad so coming back to a panel that was ordered out
+// resumes the polls without resetting the ten-minute clock the owner has
+// already been waiting on.
+function startLoadPolling() {
   stopLoadPolling();
   const tick = () => {
     if (currentScreen !== '6') { stopLoadPolling(); return; }
     hzPost('onboardingProgress').then(paintLoad).catch(() => {});
-    hzPost('relCardPeek').then(peekCard).catch(() => {});
     if (Date.now() - loadSince > 10 * 60 * 1000) loadFinish.hidden = false;
   };
+  const peek = () => {
+    if (currentScreen !== '6') { stopLoadPolling(); return; }
+    hzPost('relCardPeek').then(peekCard).catch(() => {});
+  };
   tick();
-  loadTimer = setInterval(tick, 3000);
+  peek();
+  loadTimer = setInterval(tick, LOAD_POLL_MS);
+  loadPeekTimer = setInterval(peek, PEEK_POLL_MS);
+}
+
+function enterLoad() {
+  loadSince = Date.now();
+  loadFinish.hidden = true;
+  startLoadPolling();
 }
 
 function peekCard(out) {
@@ -796,6 +937,8 @@ loadFinish.addEventListener('click', () => finish());
 
 // ---------------- flow ----------------
 function finish() {
+  // Every poll stops before the window does. See leaveFlow().
+  leaveFlow();
   // Put the widget back under the windows before anything else. Native does
   // this too when the panel closes, because a desktop widget left floating
   // above everything would be the worst bug this app could ship — but asking
@@ -825,6 +968,9 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape') {
     clearDemo();
+    // Dismissing is not finishing, but it IS leaving: the page survives the
+    // close, so a poll not stopped here runs behind a window nobody can see.
+    leaveFlow();
     hzSfx.close();
     hzPost('spotlightWidget', { on: false }).catch(() => {});
     hzPost('close');

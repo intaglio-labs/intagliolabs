@@ -48,6 +48,11 @@
       <button class="ob-mode" data-mode="investor">investors</button>
       <button class="ob-mode ob-mode-on" data-mode="any">anyone</button>
     </div>
+    <!-- The write goes to the reader, which may still be starting up on a
+         first launch. Saying so beats a row that shows a choice the reader
+         never received and silently redraws as the old one on the way back. -->
+    <p class="ob-note">your choice is kept by the reader, so on a first run it lands once the
+      reader is up. you can change it on the card whenever you like.</p>
     <button class="ob-cta" id="cta">hello</button>
   </div>
 
@@ -139,6 +144,12 @@
         <p class="ob-toggle-label">use your claude subscription for reading and drafting</p>
         <p class="ob-note">when this is on, excerpts of your messages go to anthropic&#8217;s
           servers to be read. when it is off, nothing leaves this Mac.</p>
+        <!-- The switch writes the config key the page builder reads when it
+             STARTS a page. It does not reach into one already running, and a
+             privacy switch that looks instant while a build is in flight is
+             the one kind of lie this screen cannot afford. -->
+        <p class="ob-note">turning it off applies to the next page it builds &#8212; a page
+          already being written finishes with what it started.</p>
       </div>
     </div>
     <!-- The local model download, for a Mac with no claude on it. No question
