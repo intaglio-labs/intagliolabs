@@ -53,6 +53,13 @@
          never received and silently redraws as the old one on the way back. -->
     <p class="ob-note">your choice is kept by the reader, so on a first run it lands once the
       reader is up. you can change it on the card whenever you like.</p>
+    <!-- AND WHEN THE SENTENCE ABOVE TURNS OUT NOT TO BE TRUE. The mode route
+         answers 200 with persisted:false when its config write fails, because
+         the choice IS live in that reader; what did not happen is the writing
+         down. Same quiet voice as the note above it and no alarm colour: this
+         is a choice that will not survive a restart, not something the owner
+         did wrong. Empty until there is something to say, like permNote. -->
+    <p class="ob-note" id="modeNote"></p>
     <button class="ob-cta" id="cta">hello</button>
   </div>
 

@@ -117,9 +117,14 @@ test('the welcome asks for nothing and writes only on a click', () => {
   const enter = /function enterWelcome\(\) \{([\s\S]*?)\n\}/u.exec(js)?.[1];
   assert.ok(enter, 'enterWelcome() not found');
   assert.match(enter, /hzPost\('relCardPeek'\)[\s\S]{0,200}paintMode\(out\.mode\)/u);
-  assert.doesNotMatch(enter, /hzPost\('relMode'/u, 'entering the screen writes nothing');
+  assert.doesNotMatch(enter, /writeMode\(|hzPost\('relMode'/u, 'entering the screen writes nothing');
   // The peek is the right read here precisely because it records nothing.
-  assert.match(js, /modesEl\.addEventListener\('click'[\s\S]{0,300}hzPost\('relMode'/u);
+  // The click writes through writeMode, which is the one place that posts the
+  // mode and reads back whether hermes managed to keep it -- see
+  // onboarding-mode-persist.
+  assert.match(js, /modesEl\.addEventListener\('click'[\s\S]{0,300}writeMode\(btn\.dataset\.mode/u);
+  assert.match(js, /function writeMode\([\s\S]{0,600}hzPost\('relMode'/u,
+    'writeMode is still what posts the mode');
 });
 
 test('the example card on the welcome is labelled as one', () => {

@@ -276,6 +276,7 @@ hzFeatures().then((set) => {
 
 // ---------------- 1: who this is for ----------------
 const modesEl = document.getElementById('modes');
+const modeNote = document.getElementById('modeNote');
 
 function paintMode(mode) {
   for (const b of modesEl.querySelectorAll('.ob-mode')) {
@@ -294,12 +295,44 @@ function enterWelcome() {
     .catch(() => {});
 }
 
+// AND THE ROUTE'S ANSWER IS READ, because it is the only thing that knows.
+//
+// POST /admin/relationship/mode deliberately answers 200 with
+// `persisted: false` when its config write fails: the mode IS live in the
+// running reader, so a 4xx would make the picker look broken when what broke
+// is durability. Throwing that flag away left the note directly under this row
+// promising "your choice is kept by the reader" while the next restart
+// silently reverted it to the old one.
+//
+// Retried once -- the write is an atomic read-modify-write of one small file,
+// so a second attempt is a real chance rather than a ritual -- and then said
+// out loud. Quietly: the same ob-note voice as the promise it is correcting,
+// no alarm colour, because nothing the owner did caused this and the choice
+// they made is in force right now.
+//
+// A reply with no `persisted` at all is a reply that never reached the route.
+// That is the hermes-still-starting case the note above already describes, so
+// there is nothing here to add to it.
+function writeMode(mode, retried) {
+  return hzPost('relMode', { mode })
+    .then((out) => {
+      if (!out || typeof out.persisted !== 'boolean') return undefined;
+      if (out.persisted) { modeNote.textContent = ''; return undefined; }
+      if (!retried) return writeMode(mode, true);
+      modeNote.textContent = 'i could not write that choice down, so it will go back to the '
+        + 'last saved one when the reader restarts. it is in use until then, and you can set '
+        + 'it again on the card.';
+      return undefined;
+    })
+    .catch(() => {});
+}
+
 // Only an actual click writes. See above.
 modesEl.addEventListener('click', (e) => {
   const btn = e.target.closest('.ob-mode');
   if (!btn) return;
   paintMode(btn.dataset.mode);
-  hzPost('relMode', { mode: btn.dataset.mode }).catch(() => {});
+  writeMode(btn.dataset.mode, false);
 });
 
 document.getElementById('cta').addEventListener('click', () => {
