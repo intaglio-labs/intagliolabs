@@ -5,6 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { acquireDaemonLock, defaultDaemonLockPath } from '../daemon.mjs';
 import { daemonLockIsLive } from '../lib/daemonLock.mjs';
+// A NAMESPACE IMPORT for everything added since, deliberately: a named import of
+// an export the module does not have yet is a LINK error, and that fails this
+// whole file with one unhelpful line instead of letting each assertion below say
+// what it actually found.
+import * as daemonLock from '../lib/daemonLock.mjs';
+const forgetProcessStart = (...args) => daemonLock.forgetProcessStart(...args);
+const processStartedAt = (...args) => daemonLock.processStartedAt(...args);
+const processStartCacheEntry = (...args) => daemonLock.processStartCacheEntry(...args);
 
 const homes = [];
 const fakeHome = () => {
@@ -71,4 +79,76 @@ test('a foreign process holds its lock but never vouches for the daemon', () => 
     daemonLockIsLive({ home, state: () => 'foreign', startedAt: () => startedTs - 1_000 }),
     false
   );
+});
+
+// ---------------------------------------------------------- the start-time memo
+
+// A FAILURE IS NOT AN ANSWER, AND MUST NOT BE HELD LIKE ONE.
+//
+// processStartedAt memoises for ten seconds because it forks `ps` on a request
+// path. The catch wrote its `null` into that cache exactly like a real reading,
+// so one fork failure or one 2 s timeout reported a LIVE daemon as dead for the
+// next ten seconds of requests — and connect's daemonRegistryState answers null
+// for every one of them, which is the shelf going quiet about a healthy daemon.
+test('a transient ps failure is not cached for as long as a real reading', () => {
+  forgetProcessStart();
+  let clock = 1_000_000;
+  const now = () => clock;
+  // A pid that cannot exist: `ps` answers nothing, which is the same shape as a
+  // failure, so this exercises the null path without breaking a real process.
+  const pid = 2 ** 22;
+
+  assert.equal(processStartedAt(pid, { now }), null);
+  clock += 2_000;
+  // Past the failure window, this must ask again rather than serve the null.
+  // Nothing observable changes about the ANSWER for a dead pid, so the memo
+  // itself is what is asserted: a real reading would still be held here.
+  const entry = processStartCacheEntry(pid);
+  assert.ok(entry, 'the memo still exists; it is the window that changed');
+  assert.equal(processStartedAt(pid, { now }), null);
+  assert.equal(
+    processStartCacheEntry(pid).at,
+    clock,
+    'a failed reading older than a second must be re-taken, not served'
+  );
+
+  // A real reading is still held for the full window.
+  forgetProcessStart();
+  const self = processStartedAt(process.pid, { now });
+  assert.ok(Number.isFinite(self), 'this process has a start time');
+  const takenAt = processStartCacheEntry(process.pid).at;
+  clock += 5_000;
+  assert.equal(processStartedAt(process.pid, { now }), self);
+  assert.equal(
+    processStartCacheEntry(process.pid).at,
+    takenAt,
+    'a good reading must not be re-forked five seconds later'
+  );
+});
+
+// THE CLOCK SEAM HAD NO WAY IN. processStartedAt takes `now`, and the only
+// production caller — daemonLockIsLive — passed nothing, so a supervisor that
+// kills a daemon and starts another on a recycled pid inside the ten-second
+// window read the dead process's start time for the live one.
+test('daemonLockIsLive can move the clock the memo runs on', () => {
+  const seen = [];
+  const home = fakeHome();
+  mkdirSync(join(home, '.hazlie', 'connectors'), { recursive: true });
+  writeFileSync(
+    defaultDaemonLockPath(home),
+    JSON.stringify({ pid: process.pid, token: 'x'.repeat(32), startedTs: Date.now() }),
+    { mode: 0o600 }
+  );
+  daemonLockIsLive({
+    home,
+    now: () => 424_242,
+    state: () => 'alive',
+    startedAt: (pid, options) => {
+      seen.push(options);
+      return 1;
+    },
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(typeof seen[0]?.now, 'function', 'the seam has to reach the memo');
+  assert.equal(seen[0].now(), 424_242);
 });

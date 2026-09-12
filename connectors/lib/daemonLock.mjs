@@ -55,6 +55,16 @@ export function processIsAlive(pid) {
 /// feeds (tens of minutes) and long against connect's poll, which is the point:
 /// the cost moves from one fork PER REQUEST to one fork per ten seconds.
 const START_CACHE_MS = 10_000;
+/// AND A FAILURE IS NOT AN ANSWER, so it is not held like one.
+///
+/// `value = null` from the catch was written into the cache exactly like a real
+/// reading, so one fork failure or one 2 s timeout reported a LIVE daemon as
+/// dead for the next ten seconds of requests — and connect's daemonRegistryState
+/// returns null for every one of them. Caching it for a second still spares a
+/// persistently broken `ps` from forking on every request, which is the whole
+/// reason the memo exists, while a transient blip costs one second instead of
+/// ten.
+const START_FAILURE_CACHE_MS = 1_000;
 const startCache = new Map();
 
 /// When the OS says the process with this pid started, in epoch ms, or null if
@@ -72,7 +82,10 @@ export function processStartedAt(pid, { now = Date.now } = {}) {
   if (!Number.isInteger(pid) || pid < 2) return null;
   const at = now();
   const hit = startCache.get(pid);
-  if (hit !== undefined && at - hit.at < START_CACHE_MS) return hit.value;
+  if (hit !== undefined) {
+    const ttl = hit.value === null ? START_FAILURE_CACHE_MS : START_CACHE_MS;
+    if (at - hit.at < ttl) return hit.value;
+  }
   // One daemon, one pid: the map is bounded by clearing it rather than by
   // evicting, so a long-lived connect process cannot accumulate dead pids.
   if (startCache.size > 16) startCache.clear();
@@ -90,6 +103,14 @@ export function processStartedAt(pid, { now = Date.now } = {}) {
   }
   startCache.set(pid, { at, value });
   return value;
+}
+
+/// What the memo is holding for a pid, so a test can assert WHEN a reading was
+/// taken rather than inferring it from an answer that looks the same either way.
+/// Read-only; nothing in production reads it.
+export function processStartCacheEntry(pid) {
+  const hit = startCache.get(pid);
+  return hit === undefined ? null : { at: hit.at, value: hit.value };
 }
 
 /// For tests and for anything that has just killed or started a daemon and
@@ -135,10 +156,18 @@ const START_SLACK_MS = 2_000;
 /// Undeterminable start time is read as not-live: this answer only ever
 /// silences a notice, and going quiet about a daemon we cannot vouch for is
 /// the direction that cannot invent an alarm.
+/// `now` is threaded through to processStartedAt on purpose. Its memo is
+/// module-global and keyed by pid alone, so a test — or a supervisor that kills
+/// a daemon and starts another inside the cache window — could read the dead
+/// process's start time for the new one. There was no way to move that clock
+/// from here: the only production caller passed no options, so the seam existed
+/// and nothing could reach it. forgetProcessStart remains the way to drop an
+/// entry outright.
 export function daemonLockIsLive({
   home = homedir(),
   startedAt = processStartedAt,
   state = processState,
+  now = Date.now,
 } = {}) {
   const lock = readDaemonLock({ home });
   if (lock === null || lock.pid === null) return false;
@@ -147,7 +176,7 @@ export function daemonLockIsLive({
   // pid-reuse risk, and the same fail-quiet answer: the activity file's own
   // mtime is left to decide.
   if (lock.startedTs === null) return false;
-  const began = startedAt(lock.pid);
+  const began = startedAt(lock.pid, { now });
   if (!Number.isFinite(began)) return false;
   return began <= lock.startedTs + START_SLACK_MS;
 }
