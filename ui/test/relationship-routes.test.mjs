@@ -1050,3 +1050,95 @@ test('the owner\'s ME lines reach the prompt as a tone sample but never the stor
     for (const row of stored) assert.ok(!row.text.includes(meText));
   }, { relationshipMemoryEngine: engine });
 });
+
+// ------------------------------------------------------------------
+// THE FIRST LOAD IS NOT A STEADY STATE (run 3, fresh Mac, twenty minutes in).
+//
+// The fifteen-minute refill throttle exists so an exhausted producer does not
+// write an empty batch on every poll. It was armed against an empty pool
+// before the daemon's first-load sprint delivered anybody, so when the pool
+// DID fill -- investor going from nobody to somebody -- the route went on
+// answering "come back in 13.5 minutes" to an owner sitting on the setup
+// screen with nothing else to look at.
+
+function markShown(db, key, kind, now = Date.now()) {
+  db.prepare(
+    'INSERT INTO rm_card_event(person_key, kind, event, rule_version, time_band, created_at) '
+    + "VALUES (?, ?, 'shown', 'test', 'morning', ?)"
+  ).run(key, kind, now);
+}
+
+test('an install that has never shown a reconnect card retries in a minute, not a quarter hour', async () => {
+  await withEligibilityServer(async ({ call }) => {
+    // Nobody eligible anywhere: the exhausted answer, which is the one that
+    // carries the retry the panel waits on.
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(out.card, null);
+    assert.ok(out.retryAfterMs <= 60_000,
+      `a first load must come back inside a minute, not ${out.retryAfterMs} ms: the pool is`
+      + ' filling under the sprint while the owner watches');
+  });
+});
+
+test('once a reconnect card has been shown, the quarter hour stands', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    // The steady-state machine the throttle was written for. One shown card is
+    // the whole difference, and it is append-only, so this only goes one way.
+    markShown(db, 'name:already seen', 'reconnect');
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(out.card, null);
+    assert.ok(out.retryAfterMs > 60_000,
+      `an install past its first card must not re-run the producer every minute (${out.retryAfterMs} ms)`);
+    assert.ok(out.retryAfterMs <= 15 * 60_000);
+  });
+});
+
+// AND "NOBODY" HAS TWO MEANINGS, only one of which the owner can do anything
+// about. On run 3 the investor pool held nobody while six people were waiting
+// under 'anyone', and the screen said what it would have said on an empty
+// machine.
+test('a mode with nobody in it says so, and says how many there are in all', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    // Two people who qualify for 'any' and for no sub-role mode.
+    seedReconnectCandidateMode(db, 'name:mode empty one', 'Mode Empty One', now);
+    seedReconnectCandidateMode(db, 'name:mode empty two', 'Mode Empty Two', now);
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(out.card, null);
+    assert.equal(out.reason, 'pool-exhausted-mode',
+      'the picker is what is empty, not the house');
+    assert.equal(out.mode, 'investor');
+    assert.deepEqual(out.counts, { mode: 0, any: 2 },
+      'counts, so the panel can offer to widen -- and counts only, never names');
+    assert.ok(!JSON.stringify(out).includes('Mode Empty One'),
+      'a reason is not a queue: nobody is named in it');
+  });
+});
+
+test('a house with nobody in it keeps the old reason', async () => {
+  await withEligibilityServer(async ({ call }) => {
+    // Same mode, nobody anywhere. There is nothing to widen to, so the answer
+    // must stay the one the panel already knows.
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(out.card, null);
+    assert.equal(out.reason, 'pool-exhausted');
+    assert.equal(out.counts, undefined);
+  });
+});
+
+test("'any' never reports a mode-empty pool, because there is nothing to widen to", async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    // A founder nobody has offered yet: the 'any' pool can pick them up, so
+    // this branch is never reached -- but if it were, 'any' has no wider pool
+    // to name and must not claim one.
+    seedReconnectCandidateMode(db, 'name:mode any only', 'Mode Any Only', now, ['founder']);
+    await call('POST', '/admin/relationship/mode', { mode: 'any' });
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    if (out.card === null) assert.notEqual(out.reason, 'pool-exhausted-mode');
+    assert.equal(out.counts, undefined);
+  });
+});

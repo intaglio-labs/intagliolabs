@@ -93,7 +93,7 @@ import { eligiblePool, produceBatch, PRODUCER_VERSION } from './relationship/pro
 import { produceOweBatch, OWE_PRODUCER_VERSION } from './relationship/owe.mjs';
 import { createDraft, existingDrafts } from './relationship/draft.mjs';
 import {
-  CARD_PRODUCERS, REFILL_RETRY_MS, LIVE_WINDOW_MS, produceDailyBatch,
+  CARD_PRODUCERS, REFILL_RETRY_MS, LIVE_WINDOW_MS, produceDailyBatch, refillRetryMsFor,
   isSnapshotConsumed, isSnapshotFresh,
 } from './relationship/daily.mjs';
 import { cardStats } from './relationship/controls.mjs';
@@ -3330,6 +3330,36 @@ function relationshipProducerConfig(policy) {
   };
 }
 
+// IS IT THE HOUSE THAT IS EMPTY, OR THE PICKER?
+//
+// "nothing to review, come back in fifteen minutes" is one sentence for two
+// situations, and only one of them is the owner's to do anything about. On run
+// 3 (fresh Mac) the investor pool held nobody while six people were waiting
+// under 'anyone', and the screen said what it would have said on an empty
+// machine.
+//
+// Returns `{ mode: 0, any: N }` only for the case that deserves a different
+// sentence: the mode asked for has nobody AND widening would show somebody.
+// Null otherwise -- on 'any', where there is nothing to widen to; when the mode
+// pool does have people, because then the refill is merely throttled and the
+// ordinary retry sentence is the true one; and when the house really is empty.
+//
+// COUNTS, NEVER NAMES. This reply is a reason, not a queue: who is offered is
+// decided at produce time, by the producer, under its gates. And the two pool
+// reads only happen off 'any', so an install on the default never pays for it.
+function modeEmptyCounts(db, mode, now) {
+  if (mode !== 'founder' && mode !== 'investor') return null;
+  try {
+    const forMode = eligiblePool(db, { mode, now }).length;
+    if (forMode > 0) return null;
+    const forAny = eligiblePool(db, { mode: 'any', now }).length;
+    if (forAny === 0) return null;
+    return { mode: forMode, any: forAny };
+  } catch {
+    return null; // a pool this route cannot count is not a claim it can make
+  }
+}
+
 // THE MODE THE OWNER IS ON, for every route that REPORTS one (round-4
 // finding 1).
 //
@@ -3935,6 +3965,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     const producerConfig = relationshipProducerConfig(policy);
     let refillThrottled = false;
     let retryAfterMs = 0;
+    // Set only when the MODE is what is empty -- see modeEmptyCounts.
+    let modeEmpty = null;
     let servingKind = null;
     if (producerConfig.producer === 'eligibility' && !rel.refreshing) {
       const now = Date.now();
@@ -3957,6 +3989,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         } catch { rel.ownerAddresses = null; }
       }
       const reconnectMode = rel.mode ?? producerConfig.mode;
+      const refillRetryMs = refillRetryMsFor(db);
       // The cross-kind exclusion, narrowed to the queue THIS route would
       // serve from -- daily.mjs's one LIVE definition, same five clauses as
       // the turn check and the serve loop below (review F findings 4 and 8).
@@ -3984,7 +4017,10 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         // rules change that tightened a producer's gates would still starve
         // its refill behind a queue chosen under the rules just rejected.
         currentVersions: CURRENT_PRODUCER_VERSION,
-        refillRetryMs: REFILL_RETRY_MS,
+        // Shortened while this install has never shown a reconnect card: the
+        // pool is filling under the daemon's first-load sprint and the owner
+        // is watching it happen. See daily.mjs refillRetryMsFor.
+        refillRetryMs,
         // A queued card that cannot be served does not hold its kind's turn
         // (review findings 1 and 2): the muted/suppressed person, the card
         // whose quote row was deleted, the commitment claim that was
@@ -4015,7 +4051,9 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
             rel.refill.owe.at ?? 0,
             rel.refill[reconnectRefillKey(rel.mode ?? producerConfig.mode)]?.at ?? 0
           );
-          retryAfterMs = Math.max(0, REFILL_RETRY_MS - (now - at));
+          retryAfterMs = Math.max(0, refillRetryMs - (now - at));
+          // AND WHETHER IT IS THE MODE THAT IS EMPTY, rather than the house.
+          modeEmpty = modeEmptyCounts(db, reconnectMode, now);
         } else {
           servingKind = decision.servingKind;
         }
@@ -4029,8 +4067,15 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       // producer selected, nothing to produce from yet -- so a reply without
       // one here repaints the picker exactly where the finding says it must
       // not.
-      send(res, 200, { card: null, reason: 'pool-exhausted', retryAfterMs,
+      send(res, 200, { card: null,
+        // 'pool-exhausted' still means the house is empty. 'pool-exhausted-mode'
+        // means the PICKER is: there are people to show, none of them in the
+        // mode being asked for, and the panel can offer to widen instead of
+        // telling the owner to come back later.
+        reason: modeEmpty === null ? 'pool-exhausted' : 'pool-exhausted-mode',
+        retryAfterMs,
         mode: relationshipMode(rel, policy),
+        ...(modeEmpty === null ? {} : { counts: modeEmpty }),
         ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
       return;
     }
@@ -5632,17 +5677,36 @@ function connectedWithoutRows(home) {
 //
 // Absent, unreadable, or written by an older daemon all mean the same thing and
 // paint the same way: nothing. Absence of a claim is not a claim.
-function readerSprint(home) {
+// A FILE OUTLIVES THE PROCESS THAT WROTE IT, and the daemon drops this key by
+// REWRITING the file. So a daemon that was killed, quit with the app, or exited
+// on its own fatal tree-perms check leaves its last sprint object on disk
+// forever -- and screen 6 then printed "reading last year so i can tell who has
+// gone quiet" directly underneath its own banner saying "nothing is running. let
+// me start it." Quit the app mid-sprint, reopen it to that screen, and there it
+// was. connect/lib/status.mjs has daemonActivityFreshMs for exactly this reason.
+//
+// TWO GATES, because they catch different corpses. `until` catches a claim that
+// has simply expired, including the up-to-one-polling-interval gap between a
+// sprint ending and the next publish rewriting the file. The file's own mtime
+// catches a daemon that died mid-window, which `until` cannot see: the object is
+// still inside its half hour and nothing is standing behind it. Two minutes is
+// several times the gentle re-arm and well inside the phase, which is the one
+// period when this file is rewritten constantly.
+const SPRINT_FILE_FRESH_MS = 120_000;
+
+function readerSprint(home, now = Date.now) {
   if (typeof home !== 'string' || home === '') return null; // see installHome
+  const path = join(home, '.hazlie', 'connectors', 'activity.json');
   try {
-    const raw = JSON.parse(
-      readFileSync(join(home, '.hazlie', 'connectors', 'activity.json'), 'utf8')
-    );
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
     const sprint = raw?.sprint;
     if (sprint === null || typeof sprint !== 'object' || Array.isArray(sprint)) return null;
     const since = Number(sprint.since);
     const until = Number(sprint.until);
     if (!Number.isFinite(since) || !Number.isFinite(until)) return null;
+    const at = now();
+    if (at >= until) return null;
+    if (at - statSync(path).mtimeMs > SPRINT_FILE_FRESH_MS) return null;
     return {
       since,
       until,

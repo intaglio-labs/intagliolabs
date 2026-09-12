@@ -11,6 +11,11 @@ import {
   CARD_PRODUCERS, CONSUMING_EVENTS, REFILL_RETRY_MS,
   isSnapshotConsumed, isSnapshotFresh, isSnapshotLive, liveQueuePersonKeys, pickProducer, produceDailyBatch,
 } from '../server/relationship/daily.mjs';
+// A NAMESPACE IMPORT for the first-load window, deliberately: a named import of
+// an export the module does not have is a LINK error, and that fails this whole
+// file with one unhelpful line instead of letting the two tests below say what
+// they actually found.
+import * as daily from '../server/relationship/daily.mjs';
 
 const NOW = Date.parse('2026-06-01T12:00:00Z');
 const DAY = 86_400_000;
@@ -463,4 +468,34 @@ test('liveQueuePersonKeys: producerVersion and the caller\'s own servable gate',
   assert.equal(seen[0].snapshot_id, one.snapshot_id);
   assert.equal(seen[0].kind, 'reconnect');
   assert.equal(seen[0].quoteContextId, null, 'decoded the same way hydrateCards decodes evidence');
+});
+
+// ---- the first load's own refill window ----------------------------------
+//
+// The quarter hour protects a steady-state machine: an empty pool a minute ago
+// is almost certainly empty now, so re-running the producer per poll buys an
+// empty batch. On a first load neither half holds -- the daemon's sprint is
+// filling the pool while the owner watches the setup screen -- and on run 3 a
+// fresh Mac was told to come back in 13.5 minutes about a pool that had just
+// gained people.
+test('the refill window is a minute until the first reconnect card has been shown', () => {
+  const db = openDb(':memory:');
+  assert.equal(daily.FIRST_LOAD_REFILL_RETRY_MS, 60_000);
+  assert.equal(daily.refillRetryMsFor(db), daily.FIRST_LOAD_REFILL_RETRY_MS, 'nothing shown: still the first load');
+
+  // An OWE card is not the end of it: the first load is about the pool the
+  // sprint fills, and that is reconnect's.
+  insertShown(db, { kind: 'owe', createdAt: NOW });
+  assert.equal(daily.refillRetryMsFor(db), daily.FIRST_LOAD_REFILL_RETRY_MS);
+
+  insertShown(db, { kind: 'reconnect', createdAt: NOW });
+  assert.equal(daily.refillRetryMsFor(db), REFILL_RETRY_MS, 'one card served ends it, permanently');
+});
+
+test('a database that cannot answer keeps the long window', () => {
+  // This is an optimisation for a state we can recognise; "could not tell" is
+  // not that state, and guessing short would re-run a producer every minute
+  // for the life of the process.
+  const broken = { prepare() { throw new Error('no such table: rm_card_event'); } };
+  assert.equal(daily.refillRetryMsFor(broken), REFILL_RETRY_MS);
 });

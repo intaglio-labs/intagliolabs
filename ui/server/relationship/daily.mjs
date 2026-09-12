@@ -20,6 +20,47 @@ export const CARD_PRODUCERS = Object.freeze(['owe', 'reconnect']);
 // kind writes a fresh empty batch for that kind.
 export const REFILL_RETRY_MS = 15 * 60_000;
 
+// EXCEPT ON THE LOAD WHERE THE POOL IS STILL FILLING.
+//
+// The fifteen minutes protect a STEADY-STATE machine: a pool that was empty a
+// minute ago is almost certainly still empty, and re-running the producer on
+// every poll buys an empty batch and nothing else. Neither half holds on a
+// first load. The daemon walks last year hard for the first half hour, so
+// people cross the 180-day quiet gate while the owner watches; the owner IS
+// watching, on the setup screen, with nothing else to look at; and the
+// producer is one SQL statement, so asking again costs nothing worth saving.
+//
+// Measured on run 3 (fresh Mac, twenty minutes in): the investor pool had gone
+// from nobody to somebody and the route was still answering "come back in
+// 13.5 minutes", because the throttle was armed against an empty pool before
+// the sprint delivered anyone.
+export const FIRST_LOAD_REFILL_RETRY_MS = 60_000;
+
+// WHICH OF THE TWO THIS INSTALL IS ON. First load means exactly "no reconnect
+// card has ever been shown here" -- not an elapsed time since install, which
+// would need a clock this process does not keep and would expire while the
+// owner was still waiting. The first card served ends it, and rm_card_event is
+// append-only, so the answer only ever moves one way.
+//
+// `reconnect` because that is the pool the sprint fills and the one the
+// finding is about. It gates the policy-wide retry, so an install that has
+// shown Owe cards but never a reconnect one keeps the short window for both --
+// which is true of a machine still in its first load by the only definition
+// that matters here, and Owe's producer is the same single statement.
+//
+// A database that cannot answer keeps the long window: this is an optimisation
+// for a known state, and "could not tell" is not that state.
+export function refillRetryMsFor(db) {
+  try {
+    const shown = db.prepare(
+      "SELECT 1 AS seen FROM rm_card_event WHERE event = 'shown' AND kind = 'reconnect' LIMIT 1"
+    ).get();
+    return shown === undefined ? FIRST_LOAD_REFILL_RETRY_MS : REFILL_RETRY_MS;
+  } catch {
+    return REFILL_RETRY_MS;
+  }
+}
+
 // The kind whose turn it is: whichever was LEAST RECENTLY shown (a 'shown'
 // rm_card_event), never-shown counting as -Infinity (goes first). A tie
 // (including "neither has ever been shown") resolves to CARD_PRODUCERS[0].
