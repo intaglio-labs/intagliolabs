@@ -59,6 +59,15 @@ enum FullDiskWatch {
     defer { lastKnown = now }
     // `lastKnown == nil` means begin() never ran, and a first reading is a
     // baseline rather than an edge.
+    //
+    // THREE-STATE READ, ONE EDGE. Permissions.Status gained `unavailable` (a
+    // Mac with no chat.db, reported as `.unavailable`), and the test that
+    // matters here is unchanged by it:
+    // only an actual successful read is `granted`, and only a transition INTO
+    // that is worth respawning the daemon for. `unavailable -> granted` is a
+    // real edge and fires deliberately — it means Messages was opened for the
+    // first time and there is now a store the daemon's startup preflight has
+    // never seen.
     guard now == .granted, let before = lastKnown, before != .granted else { return false }
     NSLog("Intaglio Labs: full disk access arrived — respawning connectors, not the app")
     Connectors.shared.restart()

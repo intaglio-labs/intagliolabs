@@ -74,7 +74,25 @@ final class FullDiskHelper {
     timer?.invalidate()
     let t = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
       guard let self else { return }
-      guard Permissions.fullDisk() == .granted else { return }
+      // `unavailable` — no chat.db on this Mac — is not a grant and must not
+      // settle this card on its own: the switch the owner is being asked to
+      // flip still governs Notes. But the card cannot then confirm anything
+      // from chat.db either, so it falls back to the OTHER protected stores it
+      // probes directly. If any of them reads, the grant demonstrably landed.
+      // If none does, the card keeps watching and says why rather than sitting
+      // silent on a machine where its usual proof can never arrive.
+      let disk = Permissions.fullDisk()
+      if disk == .unavailable {
+        guard !Permissions.fullDiskAccessibleSources().isEmpty else {
+          self.statusLabel?.stringValue = "no Messages history on this Mac"
+          return
+        }
+        self.timer?.invalidate()
+        self.timer = nil
+        self.showGranted()
+        return
+      }
+      guard disk == .granted else { return }
       self.timer?.invalidate()
       self.timer = nil
       self.showGranted()

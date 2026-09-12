@@ -203,8 +203,14 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   }
 
   private func beginAutomaticModelReconciliation() {
-    let allowFreshInstall = !Bridge.needsOnboarding
-    guard let tier = ModelSetup.automaticTarget(allowFreshInstall: allowFreshInstall) else {
+    // `allowFreshInstall` IS DEAD and this is the last caller passing it.
+    // ModelSetup.automaticTarget discards the value (`_ = allowFreshInstall`,
+    // ModelSetup.swift) — the fresh-install case is decided by `installed ==
+    // nil` inside the function instead. It was bound to a local here, which
+    // made the call site read as though onboarding state still influenced the
+    // answer. Inlined so nothing in this file implies a dependency that is
+    // not there; deleting the PARAMETER belongs to ModelSetup.swift.
+    guard let tier = ModelSetup.automaticTarget(allowFreshInstall: false) else {
       return
     }
     let replacingExisting = ModelSetup.installed != nil
@@ -1518,7 +1524,20 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
 
     case "permissionState":
       Permissions.writeDiagnostic()
-      reply(webView, id, ["state": "ok", "permissions": Permissions.all])
+      // WHICH APP THE GRANT WOULD LAND ON, said out loud.
+      //
+      // The 30 August rename left com.hazlie.widget allowed in Full Disk
+      // Access and io.intaglio.widget denied. fullDisk() probes from THIS
+      // process, so it reported denied correctly — but the owner was looking
+      // at a Settings list holding a row labelled "intaglio labs" with its
+      // switch ON, and the screen stayed red with nothing to explain the
+      // contradiction. writeDiagnostic() has recorded `bundle` and `path` to
+      // a log file the whole time; the screen is where it is actually needed.
+      reply(webView, id, [
+        "state": "ok",
+        "permissions": Permissions.all,
+        "bundle": Bundle.main.bundleIdentifier ?? "?",
+      ])
 
     case "requestPermission":
       // A real system prompt, in context, naming this app. macOS shows it once

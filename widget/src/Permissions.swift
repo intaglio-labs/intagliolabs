@@ -17,7 +17,22 @@ import Contacts
 import EventKit
 
 enum Permissions {
-  enum Status: String { case granted, denied, undetermined }
+  /// FOUR STATES, AND THE FOURTH IS NOT A KIND OF GRANTED.
+  ///
+  /// `unavailable` means the thing the permission would unlock is not on this
+  /// Mac at all — today that is only Full Disk Access on a machine where
+  /// Messages has never been opened, so `~/Library/Messages/chat.db` does not
+  /// exist. That used to report `granted`, on the reasoning that a screen
+  /// demanding a permission which would buy nothing is just a wall. The
+  /// reasoning is still right; the WORD was wrong. "granted" travelled out to
+  /// the onboarding screen, painted a green row, started the reader, and then
+  /// screen 6 showed iMessage with zero rows and no explanation — the app
+  /// claiming it could read something it had never been able to read.
+  ///
+  /// So the two facts are separated: `granted` is a successful protected read,
+  /// `unavailable` is "there is nothing here", and every caller says which of
+  /// those it means rather than inferring one from the other.
+  enum Status: String { case granted, denied, undetermined, unavailable }
 
   // Held only while a request is in flight; see the comment at their use.
   private static var contactStore: CNContactStore?
@@ -73,7 +88,14 @@ enum Permissions {
   // If PhotoKit ever grows a people API this comes back, and photos leaves the
   // disk grant at the same time -- see photos.mjs.
   static func photos() -> Status {
-    fullDisk()
+    // `unavailable` is a fact about chat.db, not about the photo library, and
+    // fullDisk() is only a PROXY here — the actual photos probe is the
+    // Photos.sqlite read in fullDiskAccessibleSources(). A Mac with no
+    // Messages history says nothing either way about Photos, so this reports
+    // exactly what it reported before the third state existed rather than
+    // passing an unrelated absence through to a photos row.
+    let disk = fullDisk()
+    return disk == .unavailable ? .granted : disk
   }
 
   /// Bring this app forward before asking.
@@ -170,10 +192,11 @@ enum Permissions {
     let db = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent("Library/Messages/chat.db")
     guard FileManager.default.fileExists(atPath: db.path) else {
-      // No Messages history on this Mac: nothing to read, so nothing to grant.
-      // Reported as granted rather than denied — a screen that demands a
-      // permission which would buy nothing is just a wall.
-      return .granted
+      // No Messages history on this Mac: nothing to read, so nothing to grant
+      // AND nothing to claim. See Status.unavailable — this answered `granted`
+      // until 2026-09-12, which made a fresh Mac's onboarding paint a green
+      // "messages" row for a source that would stay empty forever.
+      return .unavailable
     }
     guard let handle = try? FileHandle(forReadingFrom: db) else { return .denied }
     defer { try? handle.close() }
@@ -221,6 +244,13 @@ enum Permissions {
   ///
   /// Protected-file sources still need an actual read probe; framework-backed
   /// sources use the same native authorization state their readers depend on.
+  /// NOTE ON `unavailable` HERE: this function never consults fullDisk()'s
+  /// enum at all — it probes each protected file itself and admits a source
+  /// only on a successful read. A Mac with no chat.db therefore drops
+  /// "imessage" from this set for the same reason it always did (the read
+  /// fails), with no third-state handling needed. Stated rather than left to
+  /// be re-derived, because the obvious edit when the enum grew a case was to
+  /// add a branch here, and the right answer was that there is nothing to add.
   static func accessibleLocalSources() -> Set<String> {
     var sources = fullDiskAccessibleSources()
     if contacts() == .granted { sources.insert("contacts") }
