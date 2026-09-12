@@ -181,6 +181,10 @@ export function openStateDb(path = defaultStateDbPath()) {
     "DELETE FROM cursor WHERE (name = ? OR name LIKE ? ESCAPE '\\' "
       + "OR name = ? OR name LIKE ? ESCAPE '\\') AND name <> ?"
   );
+  // Did this connector take part in the yearly walk at all? See deleteCursors.
+  const countYearlyStmt = db.prepare(
+    "SELECT COUNT(*) AS n FROM cursor WHERE name = ? OR name LIKE ? ESCAPE '\\'"
+  );
   const recordRunStmt = db.prepare(
     'INSERT INTO run_log(connector, started_ts, finished_ts, ok, ingested, updated, unchanged, deleted, error) ' +
       'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
@@ -270,13 +274,39 @@ export function openStateDb(path = defaultStateDbPath()) {
     // Wipes every cursor a connector owns: the exact name plus the
     // `<name>:...` namespace. Used by run.mjs --purge so a purged source
     // re-ingests from scratch instead of resuming past its own absence.
+    //
+    // AND THE GLOBAL GATE, WHEN THIS CONNECTOR WAS PART OF WHAT CLOSED IT.
+    //
+    // `yearly-backfill:complete` is not somebody else's key. It is the barrier
+    // that says every history-walking source has finished walking, and
+    // yearlyBackfill.task() short-circuits on it for EVERY connector — so a
+    // purge that removes one source's year checkpoints while leaving COMPLETE
+    // set means the purged source is never scheduled to walk its history
+    // again. The rows come back forward-only, and the years that were marked
+    // done stay gone.
+    //
+    // It survived because classify() happens to delete COMPLETE when it sees a
+    // connector with no current-year checkpoint — a branch written for a
+    // connector that becomes available mid-run, which rescues this by
+    // accident, and only while the connector is still available. Correctness
+    // that depends on an unrelated branch is not correctness.
+    //
+    // GATED ON THIS CONNECTOR'S OWN EVIDENCE rather than on a walksHistory
+    // flag the caller would have to supply: the purge path in run.mjs never
+    // loads the source module. A connector that has yearly-backfill rows is by
+    // definition one that took part in the walk, and one that has none
+    // contributed nothing the barrier could have been counting — so the
+    // globals are left exactly as they were.
     deleteCursors(connector) {
       if (typeof connector !== 'string' || connector.length === 0) {
         throw new Error('deleteCursors requires a connector name');
       }
       const escaped = connector.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
       const yearly = `yearly-backfill:connector:${connector}`;
-      return Number(
+      const walked = Number(
+        countYearlyStmt.get(yearly, `yearly-backfill:connector:${escaped}:%`)?.n ?? 0
+      ) > 0;
+      let changes = Number(
         deleteCursorsStmt.run(
           connector,
           `${escaped}:%`,
@@ -285,6 +315,16 @@ export function openStateDb(path = defaultStateDbPath()) {
           `${connector}:history-slices-per-pass`
         ).changes
       );
+      if (walked) {
+        // The year too: with COMPLETE gone and the saved year still pointing
+        // at 1997, the reopened walk would resume at 1997 and the purged
+        // source's recent years would never be fetched. An absent year reads
+        // as the current one, which is where a re-walk has to start.
+        for (const key of ['yearly-backfill:complete', 'yearly-backfill:year']) {
+          changes += Number(deleteCursorStmt.run(key).changes);
+        }
+      }
+      return changes;
     },
 
     recordRun({

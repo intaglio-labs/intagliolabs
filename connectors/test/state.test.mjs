@@ -119,7 +119,9 @@ test('a purge forgets the scheduler’s progress too, and only this connector’
   state.setCursor('yearly-backfill:complete', '0');
   state.setCursor('yearly-backfill:barrier:people:done:2024', '1');
 
-  assert.equal(state.deleteCursors('mail'), 8);
+  // Ten, not eight: the eight above plus the two global keys, because mail was
+  // one of the sources the barrier was counting. See below.
+  assert.equal(state.deleteCursors('mail'), 10);
 
   for (const gone of [
     'mail:someone@example.com:internalDate',
@@ -138,12 +140,39 @@ test('a purge forgets the scheduler’s progress too, and only this connector’
   for (const [kept, value] of [
     ['imessage:history-year:2024:ceiling', '17'],
     ['yearly-backfill:connector:imessage:done:2024', '1'],
-    ['yearly-backfill:year', '2024'],
-    ['yearly-backfill:complete', '0'],
     ['yearly-backfill:barrier:people:done:2024', '1'],
   ]) {
     assert.equal(state.getCursor(kept), value, `${kept} belongs to somebody else`);
   }
+  // AND THE GLOBAL GATE IS NOT SOMEBODY ELSE'S. `yearly-backfill:complete` is
+  // the barrier saying every history source has finished walking, and
+  // yearlyBackfill.task() short-circuits on it for EVERY connector — so left
+  // standing after mail's checkpoints are gone it means mail is never
+  // scheduled to walk its history again: the rows come back forward-only and
+  // the purged years stay purged. The saved year goes with it, because a walk
+  // reopened at 1997 would not re-fetch the recent years either; absent reads
+  // as the current year, which is where a re-walk starts.
+  assert.equal(state.getCursor('yearly-backfill:complete'), null,
+    'the barrier cannot still say the walk is finished');
+  assert.equal(state.getCursor('yearly-backfill:year'), null,
+    'and the reopened walk starts at the current year');
+});
+
+test('a purge of a source that never walked history leaves the barrier alone', (t) => {
+  // The gate is this connector's OWN evidence, not a walksHistory flag the
+  // caller would have to supply — run.mjs's purge path never loads the source
+  // module. A connector with no yearly-backfill rows contributed nothing the
+  // barrier could have been counting, so nothing about it is now untrue.
+  const state = openStateDb(join(sandbox(t), 'state.db'));
+  t.after(() => state.close());
+  state.setCursor('notion:page-cursor', 'abc');
+  state.setCursor('yearly-backfill:connector:imessage:done:2025', '1');
+  state.setCursor('yearly-backfill:year', '2024');
+  state.setCursor('yearly-backfill:complete', '1');
+
+  assert.equal(state.deleteCursors('notion'), 1);
+  assert.equal(state.getCursor('yearly-backfill:complete'), '1');
+  assert.equal(state.getCursor('yearly-backfill:year'), '2024');
 });
 
 test('and the same is true through the helper --purge actually calls', (t) => {
@@ -154,12 +183,18 @@ test('and the same is true through the helper --purge actually calls', (t) => {
   state.setCursor('yearly-backfill:connector:mail:done:2025', '1');
   state.setCursor('yearly-backfill:connector:imessage:done:2025', '1');
 
+  state.setCursor('yearly-backfill:complete', '1');
+  state.setCursor('yearly-backfill:year', '2019');
+
   const { cursorsDeleted } = wipeLocalArtifacts('mail', { state, cacheDir: join(dir, 'cache') });
   // Printed by run.mjs: the only way an operator tells a complete purge from
   // the old half of one is to see the number.
-  assert.equal(cursorsDeleted, 2);
+  assert.equal(cursorsDeleted, 4);
   assert.equal(state.getCursor('yearly-backfill:connector:mail:done:2025'), null);
   assert.equal(state.getCursor('yearly-backfill:connector:imessage:done:2025'), '1');
+  // The gate mail was counted in, through the helper --purge actually calls.
+  assert.equal(state.getCursor('yearly-backfill:complete'), null);
+  assert.equal(state.getCursor('yearly-backfill:year'), null);
 });
 
 test('recordRun lands a complete row, and counts default to zero', (t) => {
