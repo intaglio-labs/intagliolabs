@@ -36,7 +36,7 @@ test('the import checks the exact anchors the parser keys on', () => {
     .map((m) => m[1]);
   assert.deepEqual(anchors, ['First Name', 'CONVERSATION ID'], 'the parser has two anchors');
 
-  const kinds = /linkedInKinds: \[\(anchor: String, name: String\)\] = \[([\s\S]*?)\n {2}\]/u
+  const kinds = /linkedInKinds: \[\(anchor: String, require: \[String\], name: String\)\] = \[([\s\S]*?)\n {2}\]/u
     .exec(bridge)?.[1];
   assert.ok(kinds, 'Bridge.linkedInKinds not found');
   for (const anchor of anchors) {
@@ -47,15 +47,31 @@ test('the import checks the exact anchors the parser keys on', () => {
   assert.match(kinds, /"messages\.csv"/u);
 });
 
-test('nothing is copied until the anchor is found', () => {
+test('nothing is copied until EVERY picked file has been checked', () => {
   assert.ok(accept, 'acceptLinkedInFiles not found');
-  const guardAt = accept.indexOf('linkedInKinds.first(where:');
-  const copyAt = accept.indexOf('copyItem(at: url');
+  const guardAt = accept.indexOf('Bridge.linkedInKind(of: head)');
+  const copyAt = accept.indexOf('copyItem(at: entry.url');
   assert.ok(guardAt > -1, 'the anchor check is gone');
   assert.ok(copyAt > -1, 'the copy is gone');
   assert.ok(guardAt < copyAt, 'the anchor is checked BEFORE the copy, not after it');
   // The failure returns rather than falling through to the copy.
   assert.match(accept, /else \{[\s\S]{0,400}"reason": "columns"[\s\S]{0,200}\n\s*\}/u);
+  // AND THE CHECKING LOOP IS A SEPARATE LOOP. Selecting Connections.csv and
+  // Profile.csv together used to land the first, fail on the second, and
+  // leave a half-applied import with nothing scheduled to read it.
+  const passOne = accept.indexOf('// PASS ONE');
+  const passTwo = accept.indexOf('// PASS TWO');
+  assert.ok(passOne > -1 && passTwo > passOne, 'the check and the copy share one loop again');
+  assert.ok(copyAt > passTwo, 'every copy belongs to the second pass');
+  for (const reason of ['unreadable', 'columns', 'newer']) {
+    const at = accept.indexOf(`"reason": "${reason}"`);
+    assert.ok(at > passOne && at < passTwo, `${reason} must be refused before anything is written`);
+  }
+  // Even a disk error mid-copy leaves the previous export alone: the copies
+  // are staged beside their destinations and only renamed once all of them
+  // have landed.
+  assert.match(accept, /\.importing/u, 'copies are staged');
+  assert.ok(accept.search(/fm\.moveItem\(at: entry\.temporary/u) > copyAt, 'and swapped in after');
 });
 
 test('the failure names the column back, bounded and stripped', () => {
@@ -69,18 +85,23 @@ test('the failure names the column back, bounded and stripped', () => {
   assert.match(firstColumn, /controlCharacters/u);
 });
 
-test('the anchor may appear anywhere in the head, not only on line one', () => {
+test('the header may appear anywhere in the head, not only on line one', () => {
   // LinkedIn puts a "Notes:" paragraph above the real header and csvObjects
   // handles it, so a line-one check would reject files that parse perfectly.
+  // The rule is csv.mjs's: scan ROWS, compare FIELDS.
   assert.match(bridge, /readHead\(of: url, bytes: 4096\)/u);
-  assert.match(accept, /head\.contains\(\$0\.anchor\)/u,
-    'contains, not a line-one comparison');
+  const kindOf = /private static func linkedInKind\(of head: String\)[\s\S]*?\n {2}\}/u.exec(bridge)?.[0];
+  assert.ok(kindOf, 'linkedInKind(of:) not found');
+  assert.match(kindOf, /for row in csvRows\(head\)/u, 'rows, not a line-one comparison');
+  assert.match(kindOf, /fields\.contains\(kind\.anchor\)/u, 'an exact field, not a substring');
+  // And the fixture with the preamble still classifies (see the fixture tests
+  // below), which is what says the scan actually reaches past it.
 });
 
 test('the export lands 0600 inside a 0700 directory', () => {
   assert.match(accept, /posixPermissions: 0o700/u, 'the directory');
-  assert.match(accept, /setAttributes\(\[\.posixPermissions: 0o600\], ofItemAtPath: destination\.path\)/u,
-    'the file');
+  assert.match(accept, /setAttributes\(\[\.posixPermissions: 0o600\], ofItemAtPath: temporary\.path\)/u,
+    'the file, set on the staged copy so it is never briefly world-readable');
   assert.match(bridge, /\.hazlie\/imports\/linkedin/u, 'where the connector looks for it');
 });
 
@@ -116,11 +137,129 @@ test('the connection count is counted, quote-aware, not guessed from newlines', 
   assert.match(count, /if !inQuotes, c == "\\n" \|\| c == "\\r"/u);
   // Counted from after the header row, the same slice csvObjects takes.
   assert.match(count, /lines\.count - headerIndex - 1/u);
-  assert.match(accept, /connections = Bridge\.countRows\(inCsvAt: destination, anchor: kind\.anchor\)/u);
+  assert.match(accept,
+    /connections = Bridge\.countRows\(inCsvAt: entry\.destination, anchor: entry\.kind\.anchor\)/u);
 });
 
-test('the reader is nudged once the files are on disk', () => {
-  // A connector only picks a source up when it runs, and the owner is watching
-  // this screen now.
-  assert.match(accept, /Connectors\.shared\.start\(\)/u);
+test('the reader is started, with its config, on the main queue', () => {
+  // THREE FAILURES IN ONE LINE, and the old one had all three.
+  //
+  // Connectors.start() alone is a no-op when ~/.hazlie/connectors/config.json
+  // is absent, and screen 2's "skip" never writes it — so on the skip path
+  // this import copied a file, said "N connections" and scheduled nothing.
+  // startReadingSources() is the same path startSources takes, config and all.
+  //
+  // And it is main-thread-assumed: no lock, mutable isRunning/lastStart/
+  // process, and its own retry and termination handling re-dispatched onto
+  // .main. acceptLinkedInFiles runs on a background queue, so it hops.
+  assert.match(accept, /DispatchQueue\.main\.async \{ \[weak self\] in self\?\.startReadingSources\(\) \}/u);
+  assert.doesNotMatch(accept, /(?<!\.)\bConnectors\.shared\.start\(\)/u,
+    'the bare start() is what skipped the config write');
+  const starter = /private func startReadingSources\(\) -> Bool \{([\s\S]*?)\n {2}\}/u.exec(bridge)?.[1];
+  assert.ok(starter, 'startReadingSources() not found');
+  assert.match(starter, /dispatchPrecondition\(condition: \.onQueue\(\.main\)\)/u);
+  for (const step of ['writeConnectorsConfigIfMissing\\(\\)', 'retireConnectorsAgent\\(\\)',
+                      'Connectors\\.shared\\.start\\(\\)', 'Distiller\\.shared\\.start\\(\\)']) {
+    assert.match(starter, new RegExp(step, 'u'), `startSources does ${step} and so must this`);
+  }
+  // And the verb the page calls goes through the same function, so the two
+  // cannot drift apart again.
+  assert.match(bridge, /case "startSources":\s*\n\s*reply\(webView, id, \["state": startReadingSources\(\) \? "ok" : "error"\]\)/u);
+});
+
+test('a second run is told what is already on disk, as counts', () => {
+  // P12: a machine that imported last month met screen 4 saying only "choose
+  // the file", with next disabled — the flow asking again for something it
+  // already had, and the only way forward being to hand over the same file
+  // twice.
+  const state = /private func linkedInState\(\) -> \[String: Any\] \{([\s\S]*?)\n {2}\}/u
+    .exec(bridge)?.[1];
+  assert.ok(state, 'linkedInState() not found');
+  // It is the same check the import runs, so a file the parser cannot read is
+  // not reported as an export that is already here.
+  assert.match(state, /Bridge\.linkedInKind\(of: head\)/u);
+  assert.match(state, /"present": false/u, 'and says so when there is nothing');
+  assert.match(state, /"connections": Bridge\.countRows/u);
+  assert.match(state, /"modifiedTs"/u, 'when it landed');
+  // COUNTS ONLY. No row content crosses the bridge from this file.
+  assert.doesNotMatch(state, /firstColumn|head\b.*return|"rows":/u);
+});
+
+// ONE COLUMN IS NOT A FILE IDENTITY.
+//
+// The LinkedIn export zip holds three files with an exact `First Name` column:
+// Connections.csv, Profile.csv and Contacts.csv. A substring check for "First
+// Name" anywhere in the first 4 KB passes all three — so picking Profile.csv
+// (the obvious mistake: it is alphabetically adjacent and its name sounds like
+// the right one) passed the check, was COPIED OVER Connections.csv, and
+// ingested as connections with no `URL` and no `Connected On`: every row gets
+// the export's fallback timestamp and a hashed slug instead of a real profile.
+// A good export is destroyed and the screen says "imported".
+//
+// So the check is the parser's own rule (csv.mjs: a header FIELD whose trim()
+// equals the anchor, not a substring of the file) PLUS a second column that
+// only the file we want has. Connections.csv carries `Connected On` and `URL`;
+// Profile.csv carries neither; Contacts.csv carries `Profile URL`, which is a
+// different field and must not be mistaken for `URL`.
+//
+// The three fixtures below are real export headers. The rule is READ OUT OF
+// Bridge.swift and applied to them through csv.mjs's own parser, so a rule that
+// would accept the wrong file fails here rather than on somebody's machine.
+import { parseCsv } from '../../connectors/lib/csv.mjs';
+
+const KINDS = [...(/linkedInKinds: \[\(anchor: String, require: \[String\], name: String\)\] = \[([\s\S]*?)\n {2}\]/u
+  .exec(bridge)?.[1] ?? '')
+  .matchAll(/\(\s*"([^"]+)",\s*\[([^\]]*)\],\s*"([^"]+)"\s*\)/gu)]
+  .map((m) => ({
+    anchor: m[1],
+    require: [...m[2].matchAll(/"([^"]+)"/gu)].map((r) => r[1]),
+    name: m[3],
+  }));
+
+// The rule, as the Swift is required to implement it: the first row whose
+// trimmed FIELDS contain the anchor exactly and at least one required column.
+function classify(text) {
+  for (const row of parseCsv(text)) {
+    const fields = new Set(row.map((f) => f.trim().replace(/^﻿/u, '')));
+    for (const kind of KINDS) {
+      if (!fields.has(kind.anchor)) continue;
+      if (kind.require.length === 0 || kind.require.some((c) => fields.has(c))) return kind.name;
+    }
+  }
+  return null;
+}
+
+const fixture = (name) =>
+  readFileSync(join(ROOT, 'widget', 'test', 'fixtures', 'linkedin', name), 'utf8');
+
+test('the anchor table names a second, discriminating column', () => {
+  assert.ok(KINDS.length > 0, 'linkedInKinds is not in the (anchor, require, name) shape');
+  const connections = KINDS.find((k) => k.name === 'Connections.csv');
+  assert.ok(connections, 'Connections.csv is not in the table');
+  assert.equal(connections.anchor, 'First Name');
+  assert.deepEqual(connections.require, ['Connected On', 'URL'],
+    'the two columns linkedinRows.mjs actually reads: the dormancy clock and the profile slug');
+});
+
+test('Connections.csv is accepted, Profile.csv and Contacts.csv are not', () => {
+  assert.equal(classify(fixture('Connections.csv')), 'Connections.csv',
+    'the real export, preamble and all, must still pass');
+  assert.equal(classify(fixture('Profile.csv')), null,
+    'Profile.csv has an exact First Name column and would overwrite the good export');
+  assert.equal(classify(fixture('Contacts.csv')), null,
+    '"Profile URL" is not "URL" — an exact field match is what tells them apart');
+});
+
+test('the header is matched as a field, not as a substring of the file', () => {
+  // `head.contains("First Name")` also accepts a column called
+  // "First Name (Legal)", which passes the check and then throws inside
+  // csvObjects. The parser compares f.trim() === anchor; so does this.
+  assert.doesNotMatch(accept, /head\.contains\(\$0\.anchor\)/u,
+    'a substring of the first 4 KB is not a column');
+  const kindOf = /private static func linkedInKind\(of head: String\)[\s\S]*?\n {2}\}/u.exec(bridge)?.[0];
+  assert.ok(kindOf, 'linkedInKind(of:) not found — the exact-field rule has to live somewhere');
+  assert.match(kindOf, /trimmingCharacters/u, 'fields are trimmed the way csv.mjs trims them');
+  assert.match(kindOf, /require/u, 'and the second column is required');
+  // A column named "First Name (Legal)" must not satisfy it.
+  assert.equal(classify('First Name (Legal),Last Name,URL\nA,B,C\n'), null);
 });

@@ -130,8 +130,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                    "permissionState", "requestPermission",
                    // Screen 3: the grant, and the live read that proves it.
                    "googleAuth", "googleProbe",
-                   // Screen 4: the export, picked and checked natively.
-                   "importLinkedIn",
+                   // Screen 4: the export, picked and checked natively, and
+                   // what is already on disk from a previous run.
+                   "importLinkedIn", "linkedInState",
                    // Screen 5: whether the installed claude actually works,
                    // the opt-in it may then offer, and the local model for a
                    // Mac that has no claude on it.
@@ -440,9 +441,24 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     }
   }
 
-  static let stepDefaultsKey = "HazlieOnboardingStep"
+  // VERSIONED, because the vocabulary changed under the same key.
+  //
+  // The old flow had three scenes and wrote '1', '2', '3' for welcome, typing
+  // demo and widget spotlight. The six-screen flow writes the same characters
+  // for welcome, permissions and Google sign-in. An owner who FINISHED the old
+  // flow yesterday has a '3' on disk meaning "the last screen", and the new
+  // build reads it as "resume into Google sign-in" — dropping them back into
+  // the middle of a flow they completed, and skipping the permissions screen
+  // that everything else depends on. There is no way to tell the two apart by
+  // value, so the KEY carries the version and a value written under the old
+  // one is not read at all. The legacy key is removed rather than left to rot.
+  static let legacyStepDefaultsKey = "HazlieOnboardingStep"
+  static let stepDefaultsKey = "HazlieOnboardingStep-v2"
   static var onboardingStep: String? {
-    get { UserDefaults.standard.string(forKey: stepDefaultsKey) }
+    get {
+      UserDefaults.standard.removeObject(forKey: legacyStepDefaultsKey)
+      return UserDefaults.standard.string(forKey: stepDefaultsKey)
+    }
     set {
       if let v = newValue { UserDefaults.standard.set(v, forKey: stepDefaultsKey) }
       else { UserDefaults.standard.removeObject(forKey: stepDefaultsKey) }
@@ -1594,22 +1610,27 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       reply(webView, id, ["state": "ok"])
 
     case "startSources":
-      // Write the connectors config if it is not there, then (re)start the
-      // daemon. There is no list of sources to choose: the daemon runs every
-      // connector it has credentials for and each one's needs() gates it, so
-      // the local Apple stores turn on together the moment Full Disk Access
-      // lands. The config is what makes the daemon boot AT ALL -- without it
-      // the agent parks at exit 1 -- so writing it is the whole action.
-      let ok = writeConnectorsConfigIfMissing()
-      // Started as a CHILD of this app, not bootstrapped into launchd, so the
-      // reader inherits this app's permissions instead of needing its own.
-      Provision.retireConnectorsAgent()
-      Connectors.shared.start()
-      Distiller.shared.start()
-      reply(webView, id, ["state": ok ? "ok" : "error"])
+      reply(webView, id, ["state": startReadingSources() ? "ok" : "error"])
+
+    case "linkedInState":
+      // WHAT IS ALREADY HERE, so a second run of the flow does not ask for a
+      // file it has. Counts and a date; see linkedInState().
+      DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        guard let self else { return }
+        self.reply(webView, id, self.linkedInState())
+      }
 
     case "permissionState":
-      Permissions.writeDiagnostic()
+      // NO DIAGNOSTIC ON THE POLL PATH. This screen polls while it is up, and
+      // writeDiagnostic() evaluates Permissions.all a second time and writes a
+      // JSON file — so a 1.5s poll was four chat.db opens, a createDirectory
+      // and a file write every tick, forever, and on a denied machine four
+      // tccd denial events with it. The FDA row is primed by the FIRST
+      // attempt; the rest bought nothing. The page asks for the diagnostic on
+      // entry and after a request, which is when somebody is actually going to
+      // read the file.
+      let permissions = Permissions.all
+      if payload["diagnostic"] as? Bool == true { Permissions.writeDiagnostic(mapped: permissions) }
       // WHICH APP THE GRANT WOULD LAND ON, said out loud.
       //
       // The 30 August rename left com.hazlie.widget allowed in Full Disk
@@ -1621,7 +1642,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // a log file the whole time; the screen is where it is actually needed.
       reply(webView, id, [
         "state": "ok",
-        "permissions": Permissions.all,
+        "permissions": permissions,
         "bundle": Bundle.main.bundleIdentifier ?? "?",
       ])
 
@@ -1641,6 +1662,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         // Granted mid-flow means the reader can suddenly see more; nudge it so
         // the owner does not wait for the next poll to see anything happen.
         if status == .granted { Connectors.shared.start() }
+        // The one moment the raw authorization values are worth a file: a
+        // prompt was just displayed (or declined to display) and this is what
+        // each API answered afterwards.
+        Permissions.writeDiagnostic()
         self.reply(webView, id, ["state": "ok", "which": which, "status": status.rawValue])
       }
 
@@ -2043,6 +2068,36 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     }.resume()
   }
 
+  /// Write the connectors config if it is missing, retire the launchd agent
+  /// and start the daemon as a child of this app.
+  ///
+  /// THE ONE PLACE THAT DOES IT, because two callers need all three steps and
+  /// one of them used to do only the last. The config is what makes the daemon
+  /// boot AT ALL — without it the agent parks at exit 1, and Connectors.start()
+  /// returns silently — so writing it is the whole action, and an importer
+  /// that calls start() alone on a machine where screen 2 was skipped
+  /// schedules nothing at all.
+  ///
+  /// MAIN QUEUE ONLY. Connectors.start() takes no lock, reads and writes
+  /// isRunning, lastStart and process, and re-dispatches its own throttle
+  /// retry and termination handling onto .main — it is main-thread-assumed,
+  /// and every other call site is on main. The LinkedIn import runs its checks
+  /// on a background queue, so it hops before it calls this.
+  @discardableResult
+  private func startReadingSources() -> Bool {
+    dispatchPrecondition(condition: .onQueue(.main))
+    // There is no list of sources to choose: the daemon runs every connector
+    // it has credentials for and each one's needs() gates it, so the local
+    // Apple stores turn on together the moment Full Disk Access lands.
+    let ok = writeConnectorsConfigIfMissing()
+    // Started as a CHILD of this app, not bootstrapped into launchd, so the
+    // reader inherits this app's permissions instead of needing its own.
+    Provision.retireConnectorsAgent()
+    Connectors.shared.start()
+    Distiller.shared.start()
+    return ok
+  }
+
   /// The connectors daemon refuses to start without ~/.hazlie/connectors/config.json
   /// and says so; on a fresh install nothing writes it, so the agent parks at
   /// exit 1 forever and no data ever arrives. This writes the minimum valid one.
@@ -2366,18 +2421,112 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
 
   // MARK: the LinkedIn export
 
-  /// The two header columns that identify LinkedIn's two files, and the
-  /// canonical names the connector looks for.
+  /// The header columns that identify LinkedIn's files, and the canonical
+  /// names the connector looks for.
   ///
   /// CLASSIFIED BY ANCHOR, NOT BY FILENAME. The owner may have renamed the
   /// file, and a downloaded copy is frequently `Connections (1).csv`. The
   /// anchor is what the parser actually keys on
   /// (connectors/lib/linkedinRows.mjs), so it is also what decides which file
   /// this is — and checking it is checking the parse.
-  private static let linkedInKinds: [(anchor: String, name: String)] = [
-    ("First Name", "Connections.csv"),
-    ("CONVERSATION ID", "messages.csv"),
+  ///
+  /// AND BY A SECOND COLUMN, because one column is not a file identity. The
+  /// export zip holds THREE files with an exact `First Name` column:
+  /// Connections.csv, Profile.csv and Contacts.csv. On the anchor alone,
+  /// picking Profile.csv passes the check and is copied OVER Connections.csv —
+  /// and then ingests as connections with no `URL` and no `Connected On`, so
+  /// every row lands on the export's fallback timestamp under a hashed slug,
+  /// with the screen reporting "imported". A good export destroyed by a file
+  /// whose name sounds right.
+  ///
+  /// `require` names the two columns linkedinRows.mjs actually reads — the
+  /// dormancy clock and the profile slug — and one of them must be there.
+  /// Contacts.csv's `Profile URL` is a DIFFERENT field, which is why the
+  /// comparison below is exact rather than a substring.
+  private static let linkedInKinds: [(anchor: String, require: [String], name: String)] = [
+    ("First Name", ["Connected On", "URL"], "Connections.csv"),
+    ("CONVERSATION ID", [], "messages.csv"),
   ]
+
+  /// Whitespace, newlines and a byte-order mark.
+  ///
+  /// csv.mjs compares `f.trim() === anchor`, and JS `trim()` strips U+FEFF.
+  /// Swift's `.whitespacesAndNewlines` does not, so a BOM'd export would read
+  /// its first column as "\u{FEFF}First Name" here and "First Name" there —
+  /// the two sides disagreeing about the same file, which is the whole thing
+  /// this check exists to prevent.
+  private static let csvFieldTrim = CharacterSet.whitespacesAndNewlines
+    .union(CharacterSet(charactersIn: "\u{FEFF}"))
+
+  /// Which LinkedIn file this is, decided by THE PARSER'S OWN RULE.
+  ///
+  /// connectors/lib/csv.mjs finds the header as the first row holding a FIELD
+  /// whose trim() equals the anchor. `head.contains(anchor)` is not that rule:
+  /// it also accepts a column called "First Name (Legal)" — which passes here
+  /// and then throws inside csvObjects — and it accepts the anchor turning up
+  /// in LinkedIn's Notes: preamble or in somebody's job title. Same walk, same
+  /// comparison, same answer.
+  ///
+  /// Rows are scanned rather than assuming row zero, because the preamble is
+  /// real and csvObjects handles it.
+  private static func linkedInKind(of head: String) -> (anchor: String, name: String)? {
+    for row in csvRows(head) {
+      let fields = Set(row.map { $0.trimmingCharacters(in: csvFieldTrim) })
+      for kind in linkedInKinds where fields.contains(kind.anchor) {
+        if kind.require.isEmpty || kind.require.contains(where: { fields.contains($0) }) {
+          return (kind.anchor, kind.name)
+        }
+      }
+    }
+    return nil
+  }
+
+  /// RFC-4180 rows: quoted fields, doubled-quote escapes, and commas and
+  /// newlines inside quotes. The same character walk as connectors/lib/csv.mjs
+  /// because it has to reach the same header row on the same file.
+  ///
+  /// The text handed in is a bounded head, so the final row may be a fragment.
+  /// That is fine: a fragment either holds the columns or it does not, and a
+  /// header that does not fit in 4 KB is not a LinkedIn export.
+  private static func csvRows(_ text: String) -> [[String]] {
+    var rows: [[String]] = []
+    var row: [String] = []
+    var field = ""
+    var inQuotes = false
+    var iterator = text.makeIterator()
+    var pending: Character?
+    while let c = pending ?? iterator.next() {
+      pending = nil
+      if inQuotes {
+        if c == "\"" {
+          guard let next = iterator.next() else { inQuotes = false; break }
+          if next == "\"" { field.append("\""); continue }
+          inQuotes = false
+          pending = next
+          continue
+        }
+        field.append(c)
+        continue
+      }
+      if c == "\"" { inQuotes = true; continue }
+      if c == "," { row.append(field); field = ""; continue }
+      if c == "\n" || c == "\r" {
+        // CRLF is one ending, not two.
+        if c == "\r", let next = iterator.next(), next != "\n" { pending = next }
+        row.append(field)
+        field = ""
+        rows.append(row)
+        row = []
+        continue
+      }
+      field.append(c)
+    }
+    if !field.isEmpty || !row.isEmpty {
+      row.append(field)
+      rows.append(row)
+    }
+    return rows
+  }
 
   private var linkedInDirectory: URL {
     FileManager.default.homeDirectoryForCurrentUser
@@ -2416,8 +2565,19 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     }
   }
 
-  /// Check every picked file, copy only the ones that parse, and answer with
-  /// the count this app counted itself.
+  /// Check every picked file, then copy — and answer with the count this app
+  /// counted itself.
+  ///
+  /// TWO PASSES, AND THAT IS THE POINT. The check and the copy used to share
+  /// one loop, so a multi-select of Connections.csv + Profile.csv copied the
+  /// first, failed on the second, painted an error and never started the
+  /// reader: a half-applied import with nothing scheduled to read it, and no
+  /// way for the owner to tell which half landed. A pick is ONE action. It
+  /// succeeds whole or it changes nothing on disk.
+  ///
+  /// The copies themselves are staged beside their destinations and renamed
+  /// only once every one of them has landed, so even a disk error in the
+  /// middle of pass two leaves the previous export exactly as it was.
   private func acceptLinkedInFiles(_ urls: [URL]) -> [String: Any] {
     let fm = FileManager.default
     if let zip = urls.first(where: { $0.pathExtension.lowercased() == "zip" }) {
@@ -2426,8 +2586,9 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
         "file": zip.lastPathComponent,
       ]
     }
-    var copied: [String] = []
-    var connections = 0
+
+    // PASS ONE: every file is checked, and nothing is written.
+    var accepted: [(url: URL, kind: (anchor: String, name: String))] = []
     for url in urls {
       // 4 KB is well past LinkedIn's Notes: preamble and its header, and a
       // bounded read means a file the owner picked by mistake -- a 2 GB
@@ -2435,7 +2596,7 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       guard let head = Bridge.readHead(of: url, bytes: 4096) else {
         return ["state": "error", "reason": "unreadable", "file": url.lastPathComponent]
       }
-      guard let kind = Bridge.linkedInKinds.first(where: { head.contains($0.anchor) }) else {
+      guard let kind = Bridge.linkedInKind(of: head) else {
         // NAME THE COLUMN BACK. "I cannot read this" is an accusation with no
         // remedy in it; "the first one is Prénom" tells the owner exactly what
         // happened and that an English export is the fix.
@@ -2460,27 +2621,92 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
           "file": kind.name,
         ]
       }
+      accepted.append((url, kind))
+    }
+
+    // PASS TWO: stage every copy, then swap them in.
+    do {
+      try fm.createDirectory(at: linkedInDirectory, withIntermediateDirectories: true,
+                             attributes: [.posixPermissions: 0o700])
+      try fm.setAttributes([.posixPermissions: 0o700],
+                           ofItemAtPath: linkedInDirectory.path)
+    } catch {
+      return ["state": "error", "reason": "copy", "file": accepted.first?.kind.name ?? ""]
+    }
+    var staged: [(temporary: URL, destination: URL, kind: (anchor: String, name: String))] = []
+    let discardStaged = { for entry in staged { try? fm.removeItem(at: entry.temporary) } }
+    for entry in accepted {
+      let destination = linkedInDirectory.appendingPathComponent(entry.kind.name)
+      let temporary = linkedInDirectory
+        .appendingPathComponent("\(entry.kind.name).importing")
       do {
-        try fm.createDirectory(at: linkedInDirectory, withIntermediateDirectories: true,
-                               attributes: [.posixPermissions: 0o700])
-        try fm.setAttributes([.posixPermissions: 0o700],
-                             ofItemAtPath: linkedInDirectory.path)
-        if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
-        try fm.copyItem(at: url, to: destination)
+        if fm.fileExists(atPath: temporary.path) { try fm.removeItem(at: temporary) }
+        try fm.copyItem(at: entry.url, to: temporary)
         // The owner's professional graph, in a directory only they can open.
-        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
       } catch {
-        return ["state": "error", "reason": "copy", "file": kind.name]
+        discardStaged()
+        try? fm.removeItem(at: temporary)
+        return ["state": "error", "reason": "copy", "file": entry.kind.name]
       }
-      copied.append(kind.name)
-      if kind.anchor == "First Name" {
-        connections = Bridge.countRows(inCsvAt: destination, anchor: kind.anchor)
+      staged.append((temporary, destination, entry.kind))
+    }
+
+    var copied: [String] = []
+    var connections = 0
+    for entry in staged {
+      do {
+        if fm.fileExists(atPath: entry.destination.path) { try fm.removeItem(at: entry.destination) }
+        try fm.moveItem(at: entry.temporary, to: entry.destination)
+      } catch {
+        return ["state": "error", "reason": "copy", "file": entry.kind.name]
+      }
+      copied.append(entry.kind.name)
+      if entry.kind.name == "Connections.csv" {
+        connections = Bridge.countRows(inCsvAt: entry.destination, anchor: entry.kind.anchor)
       }
     }
+
     // The reader only picks a source up when it runs, and the owner is
     // watching this screen now.
-    Connectors.shared.start()
+    //
+    // AND THE CONFIG IS WRITTEN HERE TOO. Connectors.start() returns silently
+    // when ~/.hazlie/connectors/config.json is absent, and screen 2's "skip"
+    // never calls startSources — so on the skip path this whole import landed
+    // a file, reported "N connections", and scheduled nothing to read it. The
+    // same call startSources makes, on the queue it is allowed to be made on.
+    DispatchQueue.main.async { [weak self] in self?.startReadingSources() }
     return ["state": "ok", "files": copied, "connections": connections]
+  }
+
+  /// What is already on disk, for a second run of the flow.
+  ///
+  /// THE SECOND-RUN CASE (design P12). A machine that imported an export last
+  /// month still met screen 4 saying only "choose the file", with `next`
+  /// disabled — the flow asking again for something the owner had already
+  /// given it, and the only way forward being to hand over the same file
+  /// twice. This reports the export the app can see: when it landed, and how
+  /// many records it holds.
+  ///
+  /// COUNTS ONLY. No names, no companies, no row content ever crosses the
+  /// bridge from this file; the page renders a number and a date and offers to
+  /// replace it.
+  private func linkedInState() -> [String: Any] {
+    let fm = FileManager.default
+    let destination = linkedInDirectory.appendingPathComponent("Connections.csv")
+    guard fm.fileExists(atPath: destination.path),
+          let head = Bridge.readHead(of: destination, bytes: 4096),
+          let kind = Bridge.linkedInKind(of: head), kind.name == "Connections.csv"
+    else { return ["state": "ok", "present": false] }
+    let modified = (try? destination.resourceValues(forKeys: [.contentModificationDateKey])
+      .contentModificationDate)?.timeIntervalSince1970
+    return [
+      "state": "ok",
+      "present": true,
+      "file": kind.name,
+      "connections": Bridge.countRows(inCsvAt: destination, anchor: kind.anchor),
+      "modifiedTs": modified.map { $0 * 1000 } ?? NSNull(),
+    ]
   }
 
   private static func readHead(of url: URL, bytes: Int) -> String? {
