@@ -1019,3 +1019,74 @@ test('a connected source that has already run keeps its real status', async () =
     });
   });
 });
+
+// ------------------------------------------------- the reader's first-load sprint
+
+// WHY THE POOL IS EMPTY ON A FRESH MAC, RELAYED RATHER THAN RE-DERIVED.
+//
+// The card wants somebody whose last activity is at least 180 days old; a fresh
+// install's forward window reaches about 157 days back, so nobody can qualify
+// until last year's history lands. The daemon walks last year hard for the first
+// half hour and publishes `sprint` into the activity file it already maintains.
+// This route carries that one fact to screen 6, and must never decide for itself
+// whether a sprint is on: the daemon is the only process that knows, and a
+// second opinion here is a sentence contradicting the work actually happening.
+function writeActivity(home, body) {
+  writeFileSync(
+    join(home, '.hazlie', 'connectors', 'activity.json'),
+    JSON.stringify(body),
+    { mode: 0o600 }
+  );
+}
+
+test('the progress table carries the reader\'s sprint through', async () => {
+  await withHome(async (home) => {
+    const since = Date.now() - 4 * 60_000;
+    writeActivity(home, {
+      phase: 'syncing',
+      connector: 'imessage',
+      queue: [],
+      sprint: { since, until: since + 30 * 60_000, sources: ['imessage', 'calendar'] },
+    });
+    await withServer(home, async ({ call, db }) => {
+      markProjection(db, { projected: 1, source: 1 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      assert.ok(body.sprint, 'screen 6 has no other way to know why the pool is empty');
+      assert.equal(body.sprint.since, since);
+      assert.deepEqual(body.sprint.sources, ['imessage', 'calendar']);
+    });
+  });
+});
+
+test('no sprint, no claim — and a malformed one is the same as none', async () => {
+  await withHome(async (home) => {
+    writeActivity(home, { phase: 'waiting', queue: [] });
+    await withServer(home, async ({ call, db }) => {
+      markProjection(db, { projected: 1, source: 1 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      assert.equal(body.sprint, undefined,
+        'a phase that has ended must not keep claiming the machine is racing');
+    });
+  });
+
+  await withHome(async (home) => {
+    // An older daemon, or a half-written file. Absence of a claim is not a claim.
+    writeActivity(home, { phase: 'waiting', queue: [], sprint: { sources: ['imessage'] } });
+    await withServer(home, async ({ call, db }) => {
+      markProjection(db, { projected: 1, source: 1 });
+      const body = await (await call('GET', '/admin/onboarding/progress')).json();
+      assert.equal(body.sprint, undefined, 'a sprint with no window is not a sprint');
+    });
+  });
+});
+
+test('no activity file at all is not an error', async () => {
+  await withHome(async (home) => {
+    await withServer(home, async ({ call, db }) => {
+      markProjection(db, { projected: 1, source: 1 });
+      const res = await call('GET', '/admin/onboarding/progress');
+      assert.equal(res.status, 200);
+      assert.equal((await res.json()).sprint, undefined);
+    });
+  });
+});

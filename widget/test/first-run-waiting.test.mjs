@@ -245,3 +245,35 @@ test('a date this app could not record is not evidence to refuse the owner with'
   assert.match(paint, /out\.unknownVintage/u);
   assert.match(paint, /could not tell how old it is/u);
 });
+
+// -------------------------------------------------- the first-load sprint, on screen 6
+
+// The card wants somebody whose last activity is at least 180 days old, and a
+// fresh install's forward window reaches about 157 days back — so "i need more
+// history" is true and useless. The reader walks last year hard for the first
+// half hour precisely to close that gap, and while it is doing so the honest
+// sentence names the work rather than the shortfall.
+test('screen 6 says what the reader is doing about an empty pool', () => {
+  const paint = bodyOf(js, 'paintLoad');
+  assert.match(paint, /readerSprinting = out\.sprint/u,
+    'the table poll is the one the route tells; the peek is the one with a sentence');
+
+  const peek = bodyOf(js, 'peekCard');
+  assert.match(peek, /if \(readerSprinting\) \{/u);
+  assert.match(peek, /reading last year so i can tell who has gone quiet/u);
+  // ...and the pool sentence is still there for a machine that is NOT sprinting,
+  // which is every machine past its first half hour.
+  assert.match(peek, /nobody qualifies yet/u);
+  const sprintAt = peek.indexOf('readerSprinting');
+  const poolAt = peek.indexOf('nobody qualifies yet');
+  assert.ok(sprintAt > -1 && sprintAt < poolAt,
+    'the sprint line comes first, or it can never paint');
+});
+
+test('the app tells the reader which machine the owner asked for', () => {
+  // The daemon's sprint re-arms in ten seconds at full speed and a minute
+  // otherwise. The spawn environment is the one channel that already carries a
+  // parent fact to this child; a config key would be a second writer for a
+  // setting that already has one here.
+  assert.match(connectors, /environment\["INTAGLIO_PERFORMANCE"\] = PowerBudget\.current == \.full \? "full" : "trickle"/u);
+});

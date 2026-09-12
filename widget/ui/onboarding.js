@@ -1170,8 +1170,14 @@ function statusCell(row) {
   return cell;
 }
 
+// IS THE READER STILL WALKING LAST YEAR? Held between the two polls that draw
+// screen 6, because the table's poll is the one told and the card peek's is the
+// one with a sentence to write. See peekCard.
+let readerSprinting = false;
+
 function paintLoad(out) {
   if (!out || out.state !== 'ok') return;
+  readerSprinting = out.sprint !== null && typeof out.sprint === 'object';
   const runs = out.runs || {};
   const rows = (out.sources || []).filter((row) => {
     // A Mac with no chat.db has nothing to read and never will; a row at zero
@@ -1376,6 +1382,18 @@ function peekCard(out) {
   // the ordinary state of the machine this screen is drawn on -- so it says
   // that, and says when it will look again if the route told us.
   if (out.reason === 'pool-exhausted') {
+    // AND WHEN THE READER IS ALREADY DOING SOMETHING ABOUT IT, SAY THAT INSTEAD.
+    //
+    // "i need more history" is true and useless on a fresh Mac: the card wants
+    // somebody whose last activity is at least 180 days old, the forward window
+    // only reaches about 157 days back, and nobody can qualify until last year
+    // lands. The reader walks last year hard for the first half hour for exactly
+    // this reason (connectors/daemon.mjs, SPRINT_MAX_MS), and while it is doing
+    // that the honest sentence names the work rather than the shortfall.
+    if (readerSprinting) {
+      loadStatus.textContent = 'reading last year so i can tell who has gone quiet';
+      return;
+    }
     const minutes = Number(out.retryAfterMs) > 0
       ? Math.max(1, Math.round(Number(out.retryAfterMs) / 60000))
       : null;

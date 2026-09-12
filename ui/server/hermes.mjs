@@ -5597,6 +5597,39 @@ function connectedWithoutRows(home = homedir()) {
   return out;
 }
 
+// THE READER'S FIRST-LOAD SPRINT, relayed rather than re-derived.
+//
+// The daemon publishes `sprint` into the activity file it already maintains
+// (connectors/daemon.mjs, SPRINT_MAX_MS) and screen 6 needs the one fact it
+// carries: this machine is walking last year hard, which is why the pool has
+// nobody quiet in it yet. Reading the file is the whole integration -- hermes
+// must not decide for itself whether a sprint is on, because the daemon is the
+// only process that knows, and a second opinion here would be a sentence the
+// owner sees contradicting the work actually happening.
+//
+// Absent, unreadable, or written by an older daemon all mean the same thing and
+// paint the same way: nothing. Absence of a claim is not a claim.
+function readerSprint(home = homedir()) {
+  try {
+    const raw = JSON.parse(
+      readFileSync(join(home, '.hazlie', 'connectors', 'activity.json'), 'utf8')
+    );
+    const sprint = raw?.sprint;
+    if (sprint === null || typeof sprint !== 'object' || Array.isArray(sprint)) return null;
+    const since = Number(sprint.since);
+    const until = Number(sprint.until);
+    if (!Number.isFinite(since) || !Number.isFinite(until)) return null;
+    return {
+      since,
+      until,
+      sources: (Array.isArray(sprint.sources) ? sprint.sources : [])
+        .filter((name) => typeof name === 'string' && name.length > 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
 // A FIVE-SECOND BODY CACHE, per server.
 //
 // This is the only route in the app that is polled while it is EXPENSIVE. It
@@ -5841,6 +5874,7 @@ function onboardingProgress(db, policy, switchedOffOverride) {
       };
     });
 
+    const sprint = readerSprint();
     return {
       state: 'ok',
       sources,
@@ -5848,6 +5882,7 @@ function onboardingProgress(db, policy, switchedOffOverride) {
       projection,
       runs,
       daemonLastRunTs,
+      ...(sprint === null ? {} : { sprint }),
     };
   });
 }

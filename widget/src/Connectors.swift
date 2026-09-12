@@ -378,6 +378,17 @@ final class Connectors {
     p.arguments = [script.path]
     var environment = ProcessInfo.processInfo.environment
     environment["INTAGLIO_CONNECTOR_OWNER_PID"] = String(ProcessInfo.processInfo.processIdentifier)
+    // WHICH MACHINE THE OWNER ASKED FOR, in the one channel that already carries
+    // a parent fact to this child. The daemon's first-load sprint re-arms in ten
+    // seconds at full speed and a minute otherwise; a config key would be a
+    // SECOND writer for a setting that already has one here, and two definitions
+    // of the same switch is how they come to disagree.
+    //
+    // Read at spawn, so a mode changed under a running daemon reaches it at the
+    // next start -- which is the same bargain applyPerformanceMode() already
+    // strikes, and for the same reason: bouncing the reader to change a dial
+    // throws away the pass the dial exists to speed up.
+    environment["INTAGLIO_PERFORMANCE"] = PowerBudget.current == .full ? "full" : "trickle"
     p.environment = environment
     // Same log files the agent wrote, so nothing that reads them has to change.
     let logs = home.appendingPathComponent(".hazlie/logs")
