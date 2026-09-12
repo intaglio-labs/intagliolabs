@@ -112,7 +112,17 @@ test('the probe cap belongs to the timer and to nothing else', () => {
     'startGooglePolling probes once immediately');
 
   // The two paths the comment above GOOGLE_POLL_MS promises are unconditional.
-  assert.match(source, /window\.addEventListener\('focus', \(\) => \{ if \(currentScreen === '3'\) probeGoogle\(\); \}\)/u);
+  // ~~A single-line match on the whole handler.~~ It grew a body when the
+  // waiting state landed: coming back from the browser now also ends the wait,
+  // which is what lets the failure copy be reached at all. Read as a block, so
+  // the pin is on what the handler does rather than on how long it is.
+  const focus = code(
+    /window\.addEventListener\('focus', \(\) => \{\n([\s\S]*?)\n\}\);/u.exec(source)?.[1] ?? '');
+  assert.ok(focus, 'the return-from-browser probe is gone');
+  assert.match(focus, /currentScreen !== '3'/u, 'still only on the google screen');
+  assert.match(focus, /probeGoogle\(\)/u, 'and it still probes at once, cap or no cap');
+  assert.doesNotMatch(focus, /GOOGLE_PROBE_CAP|googleProbes/u,
+    'the owner coming back is not an unattended probe');
   // ~~A character-distance match from the click handler to startGooglePolling.~~
   // The button now reads the reply before it decides — a sign-in that never
   // opened a browser gets no ten-minute poll — and the handler grew past

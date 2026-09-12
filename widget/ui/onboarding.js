@@ -511,6 +511,20 @@ let googleAsked = false;
 // specific sentence is the one worth keeping. Cleared on entering the screen
 // and on every fresh press, so it never outlives the attempt it describes.
 let googleRefusal = null;
+// WHEN THE BROWSER WAS OPENED, or 0 if no sign-in is in flight.
+//
+// The press starts a poll with a leading probe, and on a fresh install that
+// probe answers {accounts:0, stale:0, failures:[]} -- which is indistinguishable
+// from a sign-in the owner walked away from. Live on the clean-machine walk
+// (2026-09-12) the alarm-coloured "that sign-in did not finish" appeared within
+// a second of the press, while the browser was still opening. The googleAsked
+// gate fixed the probe on ENTERING the screen; this is the same accusation one
+// press later.
+//
+// Cleared by the owner coming back (the focus probe), by an account that
+// actually reads, and by the wait below running out -- so the failure copy is
+// still reachable on a machine where the focus event never arrives.
+let googleOpenedAt = 0;
 
 // EVERY PROBE IS A REAL GMAIL READ, per live account
 // (connect/lib/googleProbe.mjs asks messages.list), uncached and unthrottled,
@@ -528,6 +542,13 @@ const GOOGLE_POLL_MS = 15000;
 // And a ceiling on the whole visit, so a page left open on this screen cannot
 // spend the budget by sitting there. 40 covers the ten-minute window.
 const GOOGLE_PROBE_CAP = 40;
+// HOW LONG "waiting for you in the browser…" OUTLIVES THE PRESS with nobody
+// coming back. Four ticks of the poll, so it is stated in the unit that
+// actually repaints the screen rather than in a second number that has to be
+// kept in step with the first. A minute is long enough to pick an account and
+// answer a second factor; past it, an owner staring at this screen has a
+// browser they did not finish with, and saying so is the useful thing.
+const GOOGLE_WAIT_MS = 4 * GOOGLE_POLL_MS;
 
 function paintGoogle(out) {
   googleStatus.classList.remove('ok', 'warn', 'bad');
@@ -540,6 +561,7 @@ function paintGoogle(out) {
   }
   if (out.reading > 0) {
     googleRefusal = null;
+    googleOpenedAt = 0;
     googleStatus.classList.add('ok');
     const n = out.reading;
     googleStatus.textContent = `mail and calendar — ${n} account${n === 1 ? '' : 's'}, reading`;
@@ -576,6 +598,14 @@ function paintGoogle(out) {
   if (paintGoogleRefusal()) return;
   if (!googleAsked) {
     googleStatus.textContent = 'not connected';
+    return;
+  }
+  // STILL IN THE BROWSER. Nothing is wrong yet: consent takes as long as it
+  // takes, and the leading probe fires within a second of the press. Neutral,
+  // and no colour class -- an empty result during a sign-in that is still
+  // happening is the expected reading, not a finding.
+  if (Date.now() - googleOpenedAt < GOOGLE_WAIT_MS) {
+    googleStatus.textContent = 'waiting for you in the browser…';
     return;
   }
   googleStatus.classList.add('bad');
@@ -669,10 +699,18 @@ function enterGoogle() {
   googleProbes = 0;
   googleAsked = false;
   googleRefusal = null;
+  googleOpenedAt = 0;
   probeGoogle();
 }
 
-window.addEventListener('focus', () => { if (currentScreen === '3') probeGoogle(); });
+window.addEventListener('focus', () => {
+  if (currentScreen !== '3') return;
+  // THE OWNER IS BACK, so the waiting copy has outlived its moment. Whether
+  // the sign-in worked is now the probe's to say, including the answer that it
+  // did not finish -- which is only ever true of a browser the owner has left.
+  googleOpenedAt = 0;
+  probeGoogle();
+});
 
 googleStart.addEventListener('click', () => {
   googleAsked = true;
@@ -687,14 +725,20 @@ googleStart.addEventListener('click', () => {
       const why = googleAuthRefusal(out);
       if (why) {
         googleAsked = false;
+        googleOpenedAt = 0;
         googleRefusal = why;
         paintGoogleRefusal();
         return;
       }
+      // A BROWSER IS OPEN. Marked before the poll, because startGooglePolling
+      // probes immediately and that probe is the one that used to paint the
+      // accusation.
+      googleOpenedAt = Date.now();
       startGooglePolling();
     })
     .catch(() => {
       googleAsked = false;
+      googleOpenedAt = 0;
       googleRefusal = 'could not start the google sign-in';
       paintGoogleRefusal();
     });
