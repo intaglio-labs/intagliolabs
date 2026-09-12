@@ -7,10 +7,16 @@
 // addresses that mean "from me", names that mean "the owner", and explicitly
 // owner-marked graph identities. Callers pass this into buildGraph so the graph
 // module carries no identity.
+//
+// The addresses come from three places, all local: the Google grants on this
+// machine (which is where an OAuth install's mailboxes actually are), the
+// legacy `mail.accounts[].user` array, and the `ownerEmails` aliases the owner
+// listed by hand. Nothing is inferred from the corpus.
 
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { listGoogleAccounts } from '../../../connectors/lib/googleAccounts.mjs';
 
 const RELATIONSHIP_ROLES = new Set(['friend', 'business', 'romantic', 'family']);
 const SUB_ROLES = new Set(['investor', 'founder', 'operator']);
@@ -42,9 +48,38 @@ export function loadOwner({ home = homedir(), configPath = null } = {}) {
   } catch {
     raw = {};
   }
+  // The grants live beside the config (<home>/.hazlie/secrets), so a caller
+  // that named a config file has named the install those grants belong to.
+  // Without this a test pointing at a temporary config would read the real
+  // machine's accounts and answer differently on every developer's Mac.
+  const grantsHome = configPath === null
+    ? home
+    : dirname(dirname(dirname(configPath)));
   const addresses = new Set();
   for (const a of raw?.mail?.accounts ?? []) {
     if (typeof a?.user === 'string' && a.user.includes('@')) addresses.add(a.user.toLowerCase());
+  }
+  // AND EVERY GOOGLE ACCOUNT THIS MAC HOLDS A GRANT FOR, which is where the
+  // owner's own addresses actually live now.
+  //
+  // `mail.accounts[]` stopped deciding which mailboxes exist when the
+  // connector moved to OAuth (2026-08-26 — connect/lib/status.mjs: "an
+  // AUTHORIZED account is a configured one"). Nothing writes that array any
+  // more, so on an ordinary install it is EMPTY and this set held only
+  // `ownerEmails`, which is empty too until the owner marks somebody. The
+  // owner's own Gmail address was therefore not an owner address at all, and
+  // graph.mjs minted them as a calendar person off their own invitations: a
+  // calendar of solo events reported people met.
+  //
+  // This is not inference. A grant on this machine is an account the owner
+  // signed into; the calendar connector reads the same grants, so the two
+  // sides now agree about who "me" is. An alias the owner has never marked and
+  // never authorized is still not guessed at — that is what `ownerEmails` is
+  // for, and it stays the only way in.
+  for (const account of listGoogleAccounts({ home: grantsHome })) {
+    if (typeof account?.email === 'string' && account.email.includes('@')) {
+      addresses.add(account.email.toLowerCase());
+    }
   }
   // Additional owner addresses beyond the mail-connector accounts — the
   // owner's other aliases (old company addresses, forwards) that Intaglio Labs has no

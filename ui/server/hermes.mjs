@@ -5428,16 +5428,50 @@ function onboardingProgress(db, policy, switchedOffOverride) {
   // the rebuild that would drop them. Without this, a calendar of solo events
   // reports at least one person met and paints green, which is the same class
   // of lie this count was added to remove, in the other direction.
+  //
+  // AND ownerPersonKeys IS EMPTY ON EVERY DEFAULT INSTALL. Marking an identity
+  // as yourself is a deliberate act (owner.mjs), so gating this filter on that
+  // set alone meant the route was unfiltered exactly where it mattered: a
+  // fresh machine, which is the machine this screen is drawn on. The fallback
+  // is the owner's own ADDRESSES, resolved to keys through the projection's
+  // own identifier table -- an exact lookup, not a guess, and the same
+  // addresses graph.mjs drops before it mints a calendar participant.
   let ownerKeys = [];
-  try { ownerKeys = [...(loadOwner().keys ?? [])].filter((key) => typeof key === 'string'); } catch {}
+  try {
+    const owner = loadOwner();
+    ownerKeys = [...(owner.keys ?? [])].filter((key) => typeof key === 'string');
+    if (ownerKeys.length === 0) {
+      const addresses = [...(owner.addresses ?? [])].filter(
+        (address) => typeof address === 'string' && address.length > 0
+      );
+      if (addresses.length > 0) {
+        ownerKeys = db.prepare(
+          'SELECT DISTINCT person_key FROM person_identifiers WHERE identifier IN ('
+          + addresses.map(() => '?').join(',') + ')'
+        ).all(...addresses).map((row) => String(row.person_key));
+      }
+    }
+  } catch (error) {
+    // WHY THE COUNT MAY BE WRONG, SAID ONCE. This was a bare catch that left
+    // the filter empty, so an unreadable config or an absent projection table
+    // silently produced an UNFILTERED count -- the owner counted as somebody
+    // they met -- with nothing anywhere to say so. The count is still
+    // published, because a number with a known caveat beats a blank screen;
+    // the caveat now exists.
+    console.warn(`onboarding progress: owner filter unavailable (${error?.message ?? error})`);
+  }
   const notOwner = ownerKeys.length > 0
     ? ` AND person_key NOT IN (${ownerKeys.map(() => '?').join(',')})`
     : '';
   try {
+    // THE SAME FILTER, because the two numbers are drawn side by side. The
+    // per-source counts excluded nobody while calendarMet excluded the owner,
+    // so the same screen disagreed with itself about whether the owner is a
+    // person.
     for (const row of db.prepare(
-      'SELECT source, COUNT(DISTINCT person_key) AS n FROM person_event_links ' +
-      'WHERE authored = 1 AND room = 0 GROUP BY source'
-    ).all()) {
+      'SELECT source, COUNT(DISTINCT person_key) AS n FROM person_event_links '
+      + 'WHERE authored = 1 AND room = 0' + notOwner + ' GROUP BY source'
+    ).all(...ownerKeys)) {
       peopleBySource.set(String(row.source), Number(row.n));
     }
     linkedinListed = Number(db.prepare(
@@ -5467,9 +5501,15 @@ function onboardingProgress(db, policy, switchedOffOverride) {
       "SELECT COUNT(DISTINCT person_key) AS n FROM person_event_links " +
       "WHERE source = 'calendar' AND role IN ('attendee', 'organizer')" + notOwner
     ).get(...ownerKeys)?.n ?? 0);
-  } catch {
+  } catch (error) {
     // The projection tables are created lazily; before the first rebuild they
-    // are simply absent, and zero people is the truthful answer then.
+    // are simply absent, and zero people is the truthful answer then. Any
+    // OTHER failure here is a count this screen is about to draw as zero, so
+    // it says which one and why rather than painting "nobody found yet" over a
+    // corpus that has people in it.
+    if (!/no such table/iu.test(String(error?.message ?? ''))) {
+      console.warn(`onboarding progress: people counts unavailable (${error?.message ?? error})`);
+    }
   }
 
   return withPeopleDbs(db, (state) => {

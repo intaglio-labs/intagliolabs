@@ -817,3 +817,71 @@ test('SQLite actually uses them, rather than scanning the table', async () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// ...and on the machine this screen is actually drawn on, where nothing is
+// marked
+// ---------------------------------------------------------------------------
+
+function seedIdentifier(db, identifier, key) {
+  db.prepare('INSERT OR REPLACE INTO person_identifiers(identifier, person_key) VALUES(?, ?)')
+    .run(identifier, key);
+}
+
+test('the owner is excluded by address when no key has been marked', async () => {
+  // ownerPersonKeys is EMPTY until the owner deliberately marks an identity,
+  // which is the state of every fresh install — so the filter that excluded
+  // the owner was off in exactly the case this screen exists for. The
+  // addresses are the fallback, resolved through the projection's own
+  // identifier table: an exact lookup, not a guess.
+  //
+  // HETEROGENEOUS ON PURPOSE. The owner's alias, a genuine guest, and a third
+  // address that is nobody's: "exclude everything" and "exclude nothing" both
+  // fail here.
+  await withHome(async (home) => {
+    writeFileSync(configPath(home), JSON.stringify({
+      selfName: 'Owner',
+      ownerEmails: ['owner@old-co.test'],
+    }, null, 2));
+    await withServer(home, async ({ call, db }) => {
+      const calendar = seedSoloCalendar(db, 'calendar:owner-alias');
+      seedIdentifier(db, 'owner@old-co.test', 'calendar:owner-alias');
+      seedPerson(db, 'calendar:dana', 'Dana Reed');
+      seedIdentifier(db, 'dana@example.test', 'calendar:dana');
+      seedLink(db, {
+        key: 'calendar:dana', contextId: calendar[1], source: 'calendar',
+        role: 'attendee', authored: 0, room: 0,
+      });
+      markProjection(db, { projected: 9, source: 9 });
+      const rows = byName(await (await call('GET', '/admin/onboarding/progress')).json());
+      assert.equal(rows.calendar.people, 1,
+        'Dana is somebody they met; the owner is not, however the owner was recognised');
+      assert.equal(rows.calendar.status, 'ok');
+    });
+  });
+});
+
+test('the per-source counts and the calendar count agree about the owner', async () => {
+  // The two numbers are drawn on the same screen. calendarMet excluded the
+  // owner and the per-source counts excluded nobody, so a mail corpus the
+  // owner had written to reported one more person under `mail` than the same
+  // filter would allow anywhere else.
+  await withHome(async (home) => {
+    writeOwnerKeys(home, ['mail:owner']);
+    await withServer(home, async ({ call, db }) => {
+      db.exec('SELECT 1');
+      const mail = seedRows(db, 'mail', 6);
+      seedPerson(db, 'mail:owner', 'Owner Name');
+      seedPerson(db, 'mail:dana', 'Dana Reed');
+      // authored = 1 is what the per-source count reads: somebody who WROTE.
+      // The owner authors their own sent mail, which is not somebody they know.
+      for (const [index, key] of [[0, 'mail:owner'], [1, 'mail:dana']]) {
+        seedLink(db, { key, contextId: mail[index], source: 'mail', authored: 1, role: 'sender', room: 0 });
+      }
+      markProjection(db, { projected: 6, source: 6 });
+      const rows = byName(await (await call('GET', '/admin/onboarding/progress')).json());
+      assert.equal(rows.mail.people, 1,
+        'the owner marked themselves; that answer applies to every count on this screen');
+    });
+  });
+});
