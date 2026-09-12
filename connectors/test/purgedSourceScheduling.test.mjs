@@ -980,3 +980,129 @@ test('the pass order is not rotated when there is no deadline to slice', async (
   assert.equal(state.getCursor('mail:forward-start'), null,
     'position buys nothing without a deadline, so it must not be spent');
 });
+
+// ---------------------------------------------------------------------------
+// (g) the cap starves the drain exactly the way the clock does
+// ---------------------------------------------------------------------------
+
+// ROUND-6 FINDING 9. The owed turn only covered the DEADLINE. A mailbox that
+// reaches MAX_MESSAGES_PER_ACCOUNT in its fresh window fails both conditions at
+// once -- the drain does not run, and nothing records that one is due -- so the
+// next pass starts from the same position with the same outcome. A high-volume
+// mailbox never reads its gap at all, which is the starvation this whole
+// mechanism was added to end, one class over.
+function capFilling({ cursors = {} } = {}) {
+  const BASE = new Date(2026, 5, 1, 12, 0, 0).getTime();
+  let clock = BASE;
+  const queries = [];
+  const map = new Map(Object.entries(cursors));
+  const state = {
+    getCursor: (k) => map.get(k) ?? null,
+    setCursor: (k, v) => map.set(k, String(v)),
+    deleteCursor: (k) => map.delete(k),
+  };
+  const email = 'busy@example.test';
+  const GAP_FROM = BASE - 40 * 86_400_000;
+  const GAP_UNTIL = BASE - 30 * 86_400_000;
+  if (!map.has(`mail:${email}:internalDate`)) {
+    state.setCursor(`mail:${email}:internalDate`, String(BASE - 3_600_000));
+    state.setCursor(`mail:${email}:forward-gap-from`, String(GAP_FROM));
+    state.setCursor(`mail:${email}:forward-gap-until`, String(GAP_UNTIL));
+  }
+
+  const source = createMailSource({
+    accountsForScope: () => [{ email }],
+    // No clock cost: the CAP is what has to stop this pass, not the deadline.
+    sleep: async () => {},
+    makeClient: () => ({
+      listMessages: async ({ q, pageToken }) => {
+        queries.push({ q });
+        if (q.includes('before:')) return { messages: [{ id: 'gap-1' }] };
+        // Endless full pages of fresh mail: 2,000 gets and the per-account cap
+        // is spent, with the deadline untouched.
+        const page = Number(pageToken ?? 0);
+        return {
+          messages: Array.from({ length: 100 }, (_, i) => ({ id: `fresh-${page}-${i}` })),
+          nextPageToken: String(page + 1),
+        };
+      },
+      getMessage: async (id) => ({
+        id,
+        internalDate: String(String(id).startsWith('gap') ? GAP_UNTIL - 1_000 : BASE - 60_000),
+        payload: {
+          mimeType: 'text/plain',
+          headers: [
+            { name: 'Message-ID', value: `<${id}@example.test>` },
+            { name: 'From', value: 'friend@example.test' },
+            { name: 'To', value: 'owner@example.test' },
+            { name: 'Subject', value: String(id) },
+          ],
+          body: { data: Buffer.from(String(id)).toString('base64url') },
+        },
+      }),
+    }),
+  });
+  const ctx = {
+    state,
+    config: { mail: { backfillDays: 1400 } },
+    home: '/tmp/mail-cap-test-home',
+    now: () => clock,
+    history: false,
+    ingest: async (rows) => ({ inserted: rows.length, updated: 0, unchanged: 0 }),
+    log: { info() {}, warn() {} },
+    // Deliberately absent: with no deadline nothing can be out of TIME, so only
+    // the cap can block the drain.
+  };
+  // ANY bounded query. The drain is the only pass that carries a `before:`, and
+  // matching the literal ceiling would miss the real second pass: a fresh window
+  // that truncates records a hole of its own, so the gap the next drain is
+  // handed is WIDER than the one this fixture seeded.
+  const drains = () => queries.filter((entry) => entry.q.includes('before:')).length;
+  return { source, ctx, state, drains, map, email };
+}
+
+test('a mailbox that fills the message cap owes a drain, and takes it next pass', async () => {
+  const first = capFilling();
+  await first.source.run(first.ctx);
+
+  assert.equal(first.drains(), 0, 'the cap really does block the drain');
+  assert.equal(
+    first.state.getCursor(`mail:${first.email}:forward-drain-owed`),
+    '1',
+    'and nothing recorded that a turn was due, so every later pass ended the same way'
+  );
+
+  const second = capFilling({ cursors: Object.fromEntries(first.map) });
+  await second.source.run(second.ctx);
+  assert.equal(second.drains(), 1, 'the owed turn is spent on the pass after');
+
+  // AND IT KEEPS GETTING TURNS. This mailbox fills the cap on every pass, so a
+  // fresh hole is recorded every time and the gap never closes -- the failure
+  // mode being fixed is not "the hole is left open", it is that the drain NEVER
+  // RUNS. A third pass drains too, because the second re-owed one on its way
+  // out: the mailbox alternates instead of starving.
+  const third = capFilling({ cursors: Object.fromEntries(second.map) });
+  await third.source.run(third.ctx);
+  assert.equal(third.drains(), 1, 'and the pass after that, rather than once and never again');
+});
+
+// ROUND-6 FINDING 17. `drainOwedKey` is keyed by address and cleared only from
+// inside the account loop, so a mailbox whose grant is revoked leaves its mark
+// behind. The same address re-authorised later starts life owing a drain against
+// a gap that no longer exists, and spends an exempt page on an empty query.
+test('a mailbox this install no longer has does not keep its cursors', async () => {
+  // The previous pass remembered both mailboxes; this one only has the busy
+  // account, which is what a revoked grant looks like from here.
+  const { source, ctx, state, email } = capFilling({
+    cursors: {
+      'mail:gone@example.test:forward-drain-owed': '1',
+      'mail:accounts-seen': JSON.stringify(['busy@example.test', 'gone@example.test']),
+    },
+  });
+  await source.run(ctx);
+
+  assert.equal(state.getCursor('mail:gone@example.test:forward-drain-owed'), null,
+    'durable state keyed by an identifier nothing collects is state nothing collects');
+  assert.equal(state.getCursor(`mail:${email}:forward-drain-owed`), '1',
+    'and the mailbox this install DOES have keeps its own');
+});

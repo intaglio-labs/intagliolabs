@@ -148,6 +148,22 @@ const gapUntilKey = (email) => `mail:${String(email).toLowerCase()}:forward-gap-
 // ALTERNATE passes rather than every pass -- an amortised half page per mailbox
 // against a hole that otherwise stays open forever.
 const drainOwedKey = (email) => `mail:${String(email).toLowerCase()}:forward-drain-owed`;
+// WHICH MAILBOXES THIS INSTALL HAD LAST PASS, so the per-address cursors of one
+// it no longer has can be dropped. Addresses only, in the cursor store this
+// connector already owns -- the same place the per-account cursors themselves
+// live, and never a log line.
+const ACCOUNTS_SEEN_KEY = 'mail:accounts-seen';
+function previousAccounts(state) {
+  try {
+    const parsed = JSON.parse(state.getCursor(ACCOUNTS_SEEN_KEY) ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter((email) => typeof email === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+function rememberAccounts(state, emails) {
+  state.setCursor(ACCOUNTS_SEEN_KEY, JSON.stringify([...emails].sort()));
+}
 const historyPageKey = (email, year) =>
   `mail:${String(email).toLowerCase()}:history-year:${year}:page`;
 const historyDoneKey = (email, year) =>
@@ -302,6 +318,22 @@ export function createMailSource({
       // and the position buys nothing -- one cursor write per pass for no
       // effect, moving a stored index that means nothing until a deadline
       // arrives and then starts from wherever the drift left it.
+      // CURSORS FOR MAILBOXES THIS INSTALL NO LONGER HAS. `drainOwedKey` is keyed
+      // by address and cleared only from inside the account loop, so a mailbox
+      // whose grant is revoked leaves its mark behind -- and the same address
+      // re-authorised later starts life owing a drain against a gap that no
+      // longer exists, spending one exempt page on an empty query. Durable state
+      // keyed by an identifier nothing collects.
+      //
+      // The address never reaches a log line; this is a cursor delete, and the
+      // key it deletes was written by this same connector.
+      {
+        const live = new Set(accounts.map((account) => String(account.email).toLowerCase()));
+        for (const email of previousAccounts(state)) {
+          if (!live.has(email)) state.deleteCursor(drainOwedKey(email));
+        }
+        rememberAccounts(state, [...live]);
+      }
       const rotating = yearly === null && accounts.length > 1 && deadline !== null;
       const start = rotating
         ? (((Number(state.getCursor(FORWARD_START_KEY)) || 0) % accounts.length) + accounts.length)
@@ -774,6 +806,51 @@ export function createMailSource({
               return { landed, truncated: capHit || (!belowFloor && Boolean(pageToken)) };
             };
 
+            // ONE DRAIN, CALLABLE FROM EITHER SIDE OF THE FRESH WINDOW.
+            //
+            // Ordinarily it runs after: new mail outranks an old hole. But an
+            // owed turn that can never be taken is not a turn, and a mailbox
+            // whose fresh window fills MAX_MESSAGES_PER_ACCOUNT on every pass
+            // arrives at the drain with the cap already spent every time -- so
+            // the turn it was owed is re-owed for ever and the hole is never
+            // read, which is the starvation the owing was added to end. When one
+            // is owed it therefore goes FIRST, before the cap and the slice are
+            // spent. The cost is that the fresh window starts a page down on
+            // alternate passes; nothing is lost, because the forward cursor
+            // never moves backwards, it only advances a little later.
+            const drainGap = async (gap) => {
+              await scanWindow({
+                // `floor(until/1000) + 1` covers every tie inside `until`'s own
+                // second without widening a second further than that: above
+                // the ceiling there is no early exit to bound the waste (a
+                // message above `until` says nothing about the hole), so this
+                // side is kept as tight as the tie rule allows.
+                q: `after:${Math.floor(gap.from / 1000) - 1} before:${Math.floor(gap.until / 1000) + 1}`,
+                minTs: gap.from,
+                maxTs: gap.until,
+                onPage: ({ lowest, truncated }) => {
+                  // A drain that read to the bottom has read the whole
+                  // remaining hole: BOTH keys go, including the case where its
+                  // lowest row sits exactly on gap.from. Otherwise the ceiling
+                  // only ever comes DOWN. The cursor is never touched here —
+                  // the gap lives entirely below it.
+                  if (!truncated) {
+                    writeGap(null);
+                    return;
+                  }
+                  if (lowest > 0) writeGap({ from: gap.from, until: Math.min(gap.until, lowest) });
+                },
+              });
+            };
+            // The turn this mailbox was owed, taken before anything else can
+            // spend the budget it needs.
+            const owedGap = state.getCursor(drainOwedKey(account.email)) === '1'
+              ? readGap()
+              : null;
+            if (owedGap !== null) {
+              state.deleteCursor(drainOwedKey(account.email));
+              await drainGap(owedGap);
+            }
             const priorGap = readGap();
             // Set when the fresh window records a hole for a page it just
             // fetched (see nullPage below). It suppresses THIS pass's drain,
@@ -839,7 +916,12 @@ export function createMailSource({
             // newest-first from the ceiling down. Re-read rather than trusted
             // from `priorGap`: the fresh window's own per-page writes are the
             // authority on what is still missing.
-            const gap = fresh.truncated || nullPageSeen ? null : readGap();
+            // THE HOLE ITSELF, asked for unconditionally. `suppressed` below is a
+            // statement about whether re-reading it THIS pass is worth the gets,
+            // not about whether it exists -- and conflating the two is what left
+            // a cap-filled pass with no hole to owe a turn against.
+            const heldGap = readGap();
+            const suppressed = fresh.truncated || nullPageSeen;
             // THE TIME GATE, AND WHY IT IS BACK (round-4 finding 4).
             //
             // Dropping it was meant to stop the drain starving. It did, at the
@@ -862,36 +944,34 @@ export function createMailSource({
             // one page and still spends the whole slice leaves the drain gated
             // out in every rotation position, forever. The turn it is owed is
             // spent here.
-            const drainOwed = state.getCursor(drainOwedKey(account.email)) === '1';
-            const drainBlocked = gap !== null
-              && seen < MAX_MESSAGES_PER_ACCOUNT
-              && accountOutOfTime()
-              && !drainOwed;
-            if (drainBlocked) state.setCursor(drainOwedKey(account.email), '1');
-            if (gap !== null && seen < MAX_MESSAGES_PER_ACCOUNT && !drainBlocked) {
-              state.deleteCursor(drainOwedKey(account.email));
-              await scanWindow({
-                // `floor(until/1000) + 1` covers every tie inside `until`'s own
-                // second without widening a second further than that: above
-                // the ceiling there is no early exit to bound the waste (a
-                // message above `until` says nothing about the hole), so this
-                // side is kept as tight as the tie rule allows.
-                q: `after:${Math.floor(gap.from / 1000) - 1} before:${Math.floor(gap.until / 1000) + 1}`,
-                minTs: gap.from,
-                maxTs: gap.until,
-                onPage: ({ lowest, truncated }) => {
-                  // A drain that read to the bottom has read the whole
-                  // remaining hole: BOTH keys go, including the case where its
-                  // lowest row sits exactly on gap.from. Otherwise the ceiling
-                  // only ever comes DOWN. The cursor is never touched here —
-                  // the gap lives entirely below it.
-                  if (!truncated) {
-                    writeGap(null);
-                    return;
-                  }
-                  if (lowest > 0) writeGap({ from: gap.from, until: Math.min(gap.until, lowest) });
-                },
-              });
+            // THE CAP STARVES IT THE SAME WAY THE CLOCK DOES (round-6 finding 9),
+            // AND SO DOES THE SUPPRESSION.
+            //
+            // The first version only owed a turn when the DEADLINE blocked the
+            // drain. A mailbox whose fresh window fills MAX_MESSAGES_PER_ACCOUNT
+            // truncates, which zeroes the gap and fails every condition at once:
+            // the drain does not run, and nothing records that one is due -- so
+            // the next pass starts from the same place with the same outcome. A
+            // high-volume mailbox never reads its hole at all, which is the
+            // starvation this mechanism was added to end, one class over.
+            //
+            // THREE WAYS TO BE BLOCKED, ONE RULE. Out of slice, gets already
+            // spent this pass, or the cap reached -- each one owes a turn, and an
+            // owed turn overrides the first two on the pass after. It does NOT
+            // override the cap: `seen` cannot be spent past, so a drain launched
+            // there would burn a list call to fetch nothing. That turn stays
+            // owed for the next pass, where `seen` starts at zero.
+            const capSpent = seen >= MAX_MESSAGES_PER_ACCOUNT;
+            const blocked = capSpent || suppressed || accountOutOfTime();
+            // OWED AGAIN IF THERE IS STILL A HOLE, even where a turn was already
+            // spent at the top of this pass. A mailbox that fills the cap every
+            // time records a FRESH hole on every truncation, so "it already had
+            // its turn" would hand it exactly one drain in the life of the
+            // install and then starve it again -- the same bug wearing the fix.
+            if (heldGap !== null && blocked) {
+              state.setCursor(drainOwedKey(account.email), '1');
+            } else if (heldGap !== null) {
+              await drainGap(heldGap);
             }
             // No hole, nothing owed. Kept out of the branches above because the
             // drain can close the gap from inside its own onPage, and a turn
