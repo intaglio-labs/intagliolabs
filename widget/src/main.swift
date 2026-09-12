@@ -292,7 +292,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // Hardware/app upgrades may change the safest model tier. The bridge
       // waits for the published processing queues to become idle, stages the
       // new weights beside the current model, and only then switches it.
-      DispatchQueue.main.async { self.bridge.reconcileAutomaticModelWhenSafe() }
+      //
+      // ONLY WHEN THERE IS A MODEL TO RECONCILE. This is the launch sequence,
+      // which is where a reader looks to answer "what does a first launch do",
+      // so the answer is written here rather than inferred three files away:
+      // with no weights on disk there is nothing to upgrade, and the timer is
+      // not armed at all. ModelSetup.automaticTarget refuses the same case on
+      // its own — two locks on purpose, because stage 2's checkpoint is "first
+      // launch downloads nothing unless asked" and one of these is in a file
+      // this stage does not own.
+      DispatchQueue.main.async {
+        guard ModelSetup.isInstalled else {
+          NSLog("Intaglio Labs: no local model installed — nothing to reconcile, "
+                + "and nothing downloads until onboarding asks")
+          return
+        }
+        self.bridge.reconcileAutomaticModelWhenSafe()
+      }
       // And notice the grant arriving later. Granting Full Disk Access makes
       // macOS offer "Quit & Reopen"; this app does not need either half of that
       // offer, but the daemon just started above does need respawning. See

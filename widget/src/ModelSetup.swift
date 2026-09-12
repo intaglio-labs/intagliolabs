@@ -79,13 +79,34 @@ enum ModelSetup {
   }
 
   /// The tier an automatic launch-time reconciliation should stage, if any.
-  /// A missing model is automatic only after onboarding has completed; the
-  /// first-run CTA owns the initial multi-gigabyte fetch.
+  ///
+  /// AN UPGRADE PATH, NEVER A FIRST INSTALL. This answers nil unless a model is
+  /// already on disk, so the only automatic fetch left in the app is "this Mac
+  /// or this app changed and the weights you already have are no longer the
+  /// right ones". A machine that has never had weights is never handed a
+  /// multi-gigabyte download it did not ask for.
+  ///
+  /// It used to read `allowFreshInstall ? recommended : nil`, with
+  /// `allowFreshInstall = !Bridge.needsOnboarding` at the only call site. That
+  /// is the same sentence as: any launch, sixty seconds in, on any machine that
+  /// had clicked past onboarding without a model, could begin a 2.5-4.7 GB
+  /// download nobody had asked for. Stage 2's checkpoint is "first launch
+  /// downloads nothing unless asked", and asked means the `modelDownload`
+  /// bridge verb — onboarding screen 5, the screen that states the disk and
+  /// battery cost before the fetch starts. `ModelSetup.recommended` still picks
+  /// the tier for that screen; what has gone is the caller that did not need a
+  /// person.
+  ///
+  /// `allowFreshInstall` survives as a parameter only because its one caller
+  /// lives in Bridge.swift, which belongs to a later stage of this repackaging.
+  /// It is deliberately ignored, and no value of it reopens the fresh-install
+  /// arm.
   static func automaticTarget(allowFreshInstall: Bool) -> String? {
     let defaults = UserDefaults.standard
     let fingerprint = automaticFingerprint
     guard let current = installed else {
-      return allowFreshInstall ? recommended : nil
+      _ = allowFreshInstall
+      return nil
     }
     guard let previous = defaults.string(forKey: automaticFingerprintKey) else {
       // Migration from the old manual picker: respect what is already active,
