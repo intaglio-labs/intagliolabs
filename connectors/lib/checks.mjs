@@ -525,7 +525,33 @@ async function checkHermesHealth(env, config) {
   return result(name, PASS, `${base}/health is Hermes`);
 }
 
-async function checkHermesStats(env, home, config) {
+// The /stats probe's ceiling, raised from 4s on 2026-09-12. It is not a
+// liveness budget -- hermes-health is, and it answered in 1-18ms throughout the
+// incident that moved this number. It is the budget for hermes' most expensive
+// DIAGNOSTIC route, which on that day took 15.9s, 9.1s, 6.1s and 1.0s on four
+// consecutive calls while the people core warmed after an install. ui/'s side
+// of the fix memoises the two O(people) blocks behind a 30s TTL, so the walk is
+// now paid at most once per TTL and between requests; 10s is the headroom for
+// the one cold request that still pays it, on a machine already at 98% CPU.
+export const HERMES_STATS_TIMEOUT_MS = 10_000;
+
+// A fetch rejection that means "it did not answer in time", as distinct from
+// "there is nothing there". Verified on node 24: AbortSignal.timeout rejects
+// fetch with a DOMException named TimeoutError, while a refused connection
+// arrives as TypeError('fetch failed') with cause.code ECONNREFUSED. The
+// undici codes cover a stall that lands during the body read rather than the
+// headers.
+function isTimeoutFailure(error) {
+  return error?.name === 'TimeoutError'
+    || error?.cause?.name === 'TimeoutError'
+    || error?.cause?.code === 'UND_ERR_HEADERS_TIMEOUT'
+    || error?.cause?.code === 'UND_ERR_BODY_TIMEOUT';
+}
+
+// `fetchImpl`/`timeoutMs` are test seams, the same pair checkConnectHealth
+// takes: a test proves the timeout branch against a real stub server without
+// waiting the production ten seconds for it.
+export async function checkHermesStats(env, home, config, { fetchImpl = fetch, timeoutMs = HERMES_STATS_TIMEOUT_MS } = {}) {
   const name = 'hermes-stats';
   // The destination is settled BEFORE the token is read, not after. This probe
   // is the one place doctor spends the bearer, so an off-box URL has to end the
@@ -546,18 +572,43 @@ async function checkHermesStats(env, home, config) {
   if (!/^[0-9a-f]{64}$/.test(token)) {
     return result(name, FAIL, `${tokenPath} is not one 256-bit hex token`, 'rm the file and re-run ops/setup-llm.sh');
   }
+  // A SLOW /stats IS NOT A DEAD HERMES, and conflating the two stopped the
+  // house's ingestion on 2026-09-12: this check FAILed on a 4s timeout,
+  // daemon.mjs' partitionChecks treats every non-`fda-*` FAIL as fatal, and the
+  // daemon exited while hermes was answering /health in milliseconds. Nothing
+  // restarted it until somebody noticed by hand.
+  //
+  // So the timeout branch below is a WARN, and the reasoning is that liveness
+  // is ALREADY covered: checkHermesHealth runs immediately before this one in
+  // runChecks, is FAIL-and-fatal on its own, and proves both that the port
+  // answers and that the thing answering is hermes. What this check adds is the
+  // BEARER CHANNEL, and a channel that could not be proven inside the budget is
+  // unproven, not broken. Everything else here still FAILs -- a refused or
+  // unreachable port, a non-200, a body that is not hermes' -- because each of
+  // those says something is wrong with the port rather than slow behind it.
+  //
+  // partitionChecks needs no change for this: it filters on status === 'FAIL'
+  // and a WARN was already non-fatal. daemon.mjs is untouched.
+  const timeoutFix =
+    'hermes is alive (see hermes-health) — /stats is slow, not down, so this no longer stops ingestion. ' +
+    'If it persists, GET /stats and read sweep.computedAt / lookup.computedAt: those two blocks walk every ' +
+    'person in the house and are memoised for 30s, so a cold cache or a machine pinned at 100% CPU is the ' +
+    'expected cause and neither needs a restart.';
   let res;
   try {
     // No Origin header on purpose: that is what selects Hermes' bearer
     // channel, the same channel every connector uses. Passing this check
     // therefore attests the exact auth path production writes ride.
-    res = await fetch(`${base}/stats`, {
+    res = await fetchImpl(`${base}/stats`, {
       headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(timeoutMs),
       // This request carries the bearer. A redirect would carry it onward.
       redirect: 'error',
     });
   } catch (error) {
+    if (isTimeoutFailure(error)) {
+      return result(name, WARN, `${base}/stats did not answer within ${timeoutMs}ms — the bearer channel is unproven, not broken`, timeoutFix);
+    }
     return result(name, FAIL, `${base}/stats unreachable (${error?.cause?.code ?? error?.name ?? error})`, 'see hermes-health');
   }
   if (res.status !== 200) {
@@ -571,7 +622,19 @@ async function checkHermesStats(env, home, config) {
         : 'see hermes-health'
     );
   }
-  const body = await res.json().catch(() => null);
+  // The timeout covers the BODY too, not just the headers, and the two failures
+  // are not the same finding: a stall here is the slow-/stats case again (WARN),
+  // while anything else that will not parse is a body that is not hermes' (FAIL).
+  // `.catch(() => null)` used to collapse both into the second.
+  let body = null;
+  try {
+    body = await res.json();
+  } catch (error) {
+    if (isTimeoutFailure(error)) {
+      return result(name, WARN, `${base}/stats did not finish answering within ${timeoutMs}ms — the bearer channel is unproven, not broken`, timeoutFix);
+    }
+    body = null;
+  }
   if (typeof body?.rows !== 'number') {
     return result(name, FAIL, `${base}/stats returned an unexpected shape`, 'another process may hold the port; see hermes-health');
   }
