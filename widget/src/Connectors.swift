@@ -286,6 +286,17 @@ final class Connectors {
     // No config means the daemon would exit(1) immediately and we would respawn
     // it forever. Onboarding writes it and then calls start().
     guard fm.fileExists(atPath: config.path) else { return }
+    // THE DAEMON REFUSES A HOME IT CANNOT TRUST. Its hazlie-tree-perms check is
+    // fatal when ~/.hazlie is wider than 0700, and it says so only in its own
+    // log: on the first clean-machine run (2026-09-12) a ~/.hazlie created by
+    // hand as 755 left the reader dead four starts in a row while onboarding
+    // waited for rows. The app owns this directory, so reassert the mode it
+    // would have created it with rather than let a mkdir somewhere else decide
+    // whether anything ever gets read. Only the top directory: the children
+    // are created 0700 by whoever writes them, and chmod'ing through a tree
+    // that may hold a symlinked models directory is not this function's job.
+    try? fm.setAttributes([.posixPermissions: 0o700],
+                          ofItemAtPath: home.appendingPathComponent(".hazlie").path)
 
     let since = Date().timeIntervalSince(lastStart)
     if !bypassingThrottle && since < throttle {
