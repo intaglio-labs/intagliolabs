@@ -840,6 +840,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   }
 
   func voiceNote(_ message: String) {
+    // DROPPED, NOT QUEUED, when there is no panel it could ever reach.
+    //
+    // The else arm below sets pendingVoiceNote and calls ensureChatPanel(),
+    // which with `chat` off builds nothing — so takePendingVoiceNote(), which
+    // only the chat page's ready handshake calls, is never reached. The note sat
+    // in a property for the life of the process: not shown, not delivered, not
+    // dropped, not logged. Dead today only because the ear is not built without
+    // `voice`; live the moment an override says voice:true without chat:true,
+    // which the override explicitly allows.
+    //
+    // The log carries a LENGTH and never the words. A voice note is the owner
+    // talking, and this file's rule for saying what happened is names and counts.
+    guard Features.shouldBuildChatPanel(Features.current) else {
+      NSLog("Intaglio Labs: chat is off — dropped a voice note of \(message.count) characters")
+      return
+    }
     // `if let panel`, not `chatPanel != nil` + `chatPanel!`. The two were
     // equivalent while the panel was always built; with `chat` off it is
     // legitimately nil, and a force-unwrap two lines under its own nil check is

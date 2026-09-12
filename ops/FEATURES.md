@@ -49,6 +49,14 @@ silently ship an app with a feature missing.
 `~/.hazlie/features.json`, same shape, **partial allowed**, merged over the
 shipped file. A developer turns a feature on locally without a rebuild.
 
+**A flip needs restarts, and the three readers disagree about when.**
+`Features.current` caches for the app's whole process lifetime and `daemon.mjs`
+caches at module load, so changing the override takes an **app restart and a
+daemon restart**; hermes re-reads per request, which means `/stats.features` can
+report the new set while the app and the daemon are still acting on the old one.
+Read `/stats.features` as "what the file says", not "what this install
+believes".
+
 ## Two failure rules, and they point opposite ways
 
 1. **A missing or malformed registry is `allOff`.** "The file that says what is

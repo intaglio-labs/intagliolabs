@@ -97,11 +97,44 @@ test('an already-installed bridges agent is retired on the next launch', () => {
     'retiring the agent must not touch ~/.hazlie/matrix or ~/.hazlie/bridges');
   // And it has to be REACHED. prefetchBridgeRuntime runs on every launch from
   // main.swift, which is the only hook an upgraded machine reliably reaches.
+  //
+  // Scoped to the bridges-off arm of the guard rather than to the first 700
+  // bytes of the function. Same promise, said properly: the byte count was a
+  // stand-in for "in the early-return arm", and it went red the day that arm
+  // grew a comment explaining why the call is dispatched rather than made.
   const prefetch = provision.slice(provision.indexOf('static func prefetchBridgeRuntime'));
-  assert.match(prefetch.slice(0, 700), /retireBridgesAgent\(\)/u,
+  const guardAt = prefetch.indexOf('guard Features.shouldPrefetchBridgeRuntime');
+  assert.ok(guardAt > 0, 'the prefetch must still ask the registry first');
+  const offArm = prefetch.slice(guardAt, prefetch.indexOf('\n    }\n', guardAt));
+  assert.match(offArm, /retireBridgesAgent\(\)/u,
     'nothing would call it otherwise');
   assert.match(main, /Provision\.prefetchBridgeRuntime\(\)/u,
     'and launch must still call the prefetch, which is now also the retirement hook');
+});
+
+// RETIRING IS NOT FREE, AND LAUNCH IS THE WORST PLACE TO PAY FOR IT.
+// prefetchBridgeRuntime() is called synchronously from
+// applicationDidFinishLaunching, and retireBridgesAgent() does p.run() +
+// waitUntilExit() on `launchctl bootout` of a KeepAlive supervisor owning
+// Synapse and seven mautrix children. Bare on that thread, the first launch
+// after upgrading a machine that HAD bridges beachballs for the length of the
+// teardown — the cost landing on exactly the install this stage makes lighter.
+test('the bridges agent is retired off the main thread', () => {
+  const prefetch = provision.slice(provision.indexOf('static func prefetchBridgeRuntime'));
+  const head = prefetch.slice(0, 1800).replace(/\/\/[^\n]*/gu, '');
+  const calls = [...head.matchAll(/retireBridgesAgent\(\)/gu)];
+  assert.ok(calls.length > 0, 'the prefetch must still be the retirement hook');
+  for (const call of calls) {
+    assert.match(head.slice(Math.max(0, call.index - 80), call.index),
+      /DispatchQueue\.global\(qos: \.utility\)\.async \{\s*$/u,
+      'retireBridgesAgent must be dispatched to the utility queue, never called '
+      + 'on the thread that is trying to finish launching');
+  }
+  // The precedent it follows, named here so retiring THAT one says so too.
+  assert.match(
+    main,
+    /DispatchQueue\.global\(qos: \.utility\)\.async \{\s*\n\s*Provision\.retireConnectorsAgent\(\)/u,
+    'main.swift does the same for the connectors agent, and for the same reason');
 });
 
 test('the voice models are not cloned into ~/.hazlie when voice is off', () => {
@@ -121,6 +154,37 @@ test('the dormant panels are never built', () => {
   assert.match(ensureChat.slice(0, 400), /guard Features\.shouldBuildChatPanel/u,
     'every chat entry point goes through ensureChatPanel, so the gate belongs there');
   assert.match(ensureChat.slice(0, 400), /NSLog/u, 'and it must say so');
+});
+
+// SURVIVING chatPanel == nil IS NOT THE SAME AS HANDLING IT. voiceNote's else
+// arm set pendingVoiceNote and called ensureChatPanel(), which with `chat` off
+// builds nothing — so takePendingVoiceNote(), reached only by the chat page's
+// ready handshake, is never called and the note sits in a property for the life
+// of the process. Not shown, not delivered, not dropped, not logged. Dead only
+// because the ear is not built without `voice`; live the moment an override
+// says voice:true without chat:true, which it explicitly allows.
+test('a voice note with chat off is dropped and counted, never queued', () => {
+  const at = main.indexOf('func voiceNote(');
+  assert.ok(at > 0, 'could not find voiceNote');
+  const rest = main.slice(at);
+  const body = rest.slice(0, rest.indexOf('\n  }\n') + 5).replace(/\/\/[^\n]*/gu, '');
+  const gateAt = body.indexOf('guard Features.shouldBuildChatPanel(Features.current) else {');
+  const queueAt = body.indexOf('pendingVoiceNote = message');
+  assert.ok(gateAt >= 0, 'voiceNote must ask whether a panel can exist at all');
+  assert.ok(queueAt > gateAt,
+    'the queue must be unreachable with chat off — a pending note nothing drains '
+    + 'is worse than a dropped one, because nothing ever says it happened');
+  // The guard's OWN block, not everything up to the queue — the chat-on path
+  // between them legitimately passes the message to the page, and a slice that
+  // swallowed it would make the privacy assertion below pass for the wrong
+  // reason and then fail for the wrong reason.
+  const drop = body.slice(gateAt, body.indexOf('\n    }', gateAt));
+  assert.match(drop, /\breturn\b/u, 'the gate must return, not fall through');
+  assert.match(drop, /NSLog\([^\n]*message\.count/u, 'and it must say so as a COUNT');
+  // A voice note is the owner talking. Names and counts, never the words —
+  // the same rule Features.logEnabled holds to.
+  assert.doesNotMatch(drop, /jsString\(message\)|\\\(message\)(?!\.count)/u,
+    'the log must never carry the text of the note');
 });
 
 // EVERY CHAT CALLER HAS TO SURVIVE chatPanel STAYING NIL. A gate that turns a

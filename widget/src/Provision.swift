@@ -243,8 +243,25 @@ enum Provision {
     // an already-installed agent gets retired — this runs on every launch from
     // main.swift, which is the only hook an upgraded machine reliably reaches.
     guard Features.shouldPrefetchBridgeRuntime(Features.current) else {
-      if Features.shouldRetireBridgesAgent(Features.current) { retireBridgesAgent() }
       NSLog("Intaglio Labs: bridges are off — skipping the bridge runtime prefetch")
+      // OFF THE MAIN THREAD, because retiring is not free.
+      //
+      // This call used to sit here bare, and prefetchBridgeRuntime() is invoked
+      // synchronously from applicationDidFinishLaunching. retireBridgesAgent
+      // does p.run() + p.waitUntilExit() on `launchctl bootout` of a KeepAlive
+      // supervisor that owns Synapse and seven mautrix children — so the first
+      // launch after upgrading a machine that HAD bridges installed beachballed
+      // for however long that teardown takes. The cost lands on exactly the
+      // install that stage 1 was meant to make lighter.
+      //
+      // main.swift does the same thing with retireConnectorsAgent() for the
+      // same reason; this follows that precedent rather than inventing a
+      // second shape. Still idempotent: the plist-existence guard inside
+      // retireBridgesAgent means a launch that raced or repeated it is a no-op,
+      // and nothing here waits on the result.
+      if Features.shouldRetireBridgesAgent(Features.current) {
+        DispatchQueue.global(qos: .utility).async { retireBridgesAgent() }
+      }
       return
     }
     let script = backend.appendingPathComponent("ops/prefetch-bridges.sh")
