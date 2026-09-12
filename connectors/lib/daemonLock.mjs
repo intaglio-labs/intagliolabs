@@ -60,11 +60,24 @@ const START_CACHE_MS = 10_000;
 /// `value = null` from the catch was written into the cache exactly like a real
 /// reading, so one fork failure or one 2 s timeout reported a LIVE daemon as
 /// dead for the next ten seconds of requests — and connect's daemonRegistryState
-/// returns null for every one of them. Caching it for a second still spares a
-/// persistently broken `ps` from forking on every request, which is the whole
-/// reason the memo exists, while a transient blip costs one second instead of
-/// ten.
-const START_FAILURE_CACHE_MS = 1_000;
+/// returns null for every one of them. A failure is held briefly instead.
+///
+/// HELD FOR AS LONG AS IT COST TO PRODUCE, TIMES A MARGIN (round-6 finding 8).
+/// A flat second was below the price of the failure it was caching: on a Mac
+/// where `ps` is consistently slow — a security agent hooking process
+/// enumeration, or heavy load — every probe stalls the event loop for the full
+/// 2 s timeout, and a 1 s window turns that into a 2 s stall per second of
+/// polling. That is the memo inverted: it made a slow `ps` ten times more
+/// expensive than caching the failure like a reading ever was.
+///
+/// So the window is derived from the measurement rather than guessed. A fork
+/// that fails in five milliseconds — including the ordinary `ps` non-zero exit
+/// for a pid that is simply gone — still clears in the floor's one second,
+/// which is the transient case above, unchanged. A probe that burns the timeout
+/// buys eight seconds of quiet. And the ceiling is the window a REAL reading
+/// gets: a failure is never worth holding longer than an answer.
+const START_FAILURE_FLOOR_MS = 1_000;
+const START_FAILURE_MARGIN = 4;
 const startCache = new Map();
 
 /// When the OS says the process with this pid started, in epoch ms, or null if
@@ -82,10 +95,7 @@ export function processStartedAt(pid, { now = Date.now } = {}) {
   if (!Number.isInteger(pid) || pid < 2) return null;
   const at = now();
   const hit = startCache.get(pid);
-  if (hit !== undefined) {
-    const ttl = hit.value === null ? START_FAILURE_CACHE_MS : START_CACHE_MS;
-    if (at - hit.at < ttl) return hit.value;
-  }
+  if (hit !== undefined && at - hit.at < hit.ttl) return hit.value;
   // One daemon, one pid: the map is bounded by clearing it rather than by
   // evicting, so a long-lived connect process cannot accumulate dead pids.
   if (startCache.size > 16) startCache.clear();
@@ -101,7 +111,13 @@ export function processStartedAt(pid, { now = Date.now } = {}) {
   } catch {
     value = null;
   }
-  startCache.set(pid, { at, value });
+  // The same clock the window is measured in, so a test can drive both -- and
+  // so a machine whose `ps` is slow is measured rather than assumed.
+  const cost = Math.max(0, now() - at);
+  const ttl = value === null
+    ? Math.min(START_CACHE_MS, Math.max(START_FAILURE_FLOOR_MS, cost * START_FAILURE_MARGIN))
+    : START_CACHE_MS;
+  startCache.set(pid, { at, value, ttl });
   return value;
 }
 
@@ -110,7 +126,9 @@ export function processStartedAt(pid, { now = Date.now } = {}) {
 /// Read-only; nothing in production reads it.
 export function processStartCacheEntry(pid) {
   const hit = startCache.get(pid);
-  return hit === undefined ? null : { at: hit.at, value: hit.value };
+  // `ttl` too, because the window a failure gets is now derived from what that
+  // failure cost rather than from a constant a test could read for itself.
+  return hit === undefined ? null : { at: hit.at, value: hit.value, ttl: hit.ttl };
 }
 
 /// For tests and for anything that has just killed or started a daemon and

@@ -152,3 +152,72 @@ test('daemonLockIsLive can move the clock the memo runs on', () => {
   assert.equal(typeof seen[0]?.now, 'function', 'the seam has to reach the memo');
   assert.equal(seen[0].now(), 424_242);
 });
+
+// A SLOW `ps` MUST NOT BE CACHED FOR LESS THAN IT COSTS (round-6 finding 8).
+//
+// The failure window was a flat second, below the price of the failure it was
+// holding. `processStartedAt` forks synchronously with a 2 s timeout, on
+// connect's only thread, so on a Mac where `ps` is consistently slow -- a
+// security agent hooking process enumeration, heavy load -- a 1 s window turns
+// one 2 s stall per ten seconds into one 2 s stall per second of polling. That
+// is the memo inverted: caching the failure like a real reading was cheaper.
+//
+// So the window is measured, not guessed: as long as the probe cost, times a
+// margin, floored at the second the transient case already had and capped at
+// the window a real reading gets.
+test('a failure that cost two seconds is held for longer than one that cost nothing', () => {
+  forgetProcessStart();
+  const pid = 2 ** 22; // cannot exist: `ps` answers nothing, which is the null path
+
+  // A clock that makes the probe LOOK slow: `at` is read before the fork and
+  // the cost is read after it, so two readings two seconds apart is a 2 s
+  // probe as far as the window is concerned.
+  let clock = 1_000_000;
+  const readings = [clock, clock + 2_000];
+  let i = 0;
+  const slow = () => (i < readings.length ? readings[i++] : readings[readings.length - 1]);
+  assert.equal(processStartedAt(pid, { now: slow }), null);
+  const slowEntry = processStartCacheEntry(pid);
+  assert.equal(slowEntry.value, null);
+  assert.equal(slowEntry.ttl, 8_000,
+    'four times what it cost: a 2 s stall every second of polling is worse than the bug\n' +
+    'this failure window was added to fix');
+
+  // Five seconds on -- past the old flat second, inside the measured window --
+  // it must answer from the memo rather than fork again.
+  clock = 1_005_000;
+  assert.equal(processStartedAt(pid, { now: () => clock }), null);
+  assert.equal(processStartCacheEntry(pid).at, 1_000_000,
+    'a probe that cost two seconds is not re-taken one second later');
+
+  // And past it, it is re-taken.
+  clock = 1_009_000;
+  assert.equal(processStartedAt(pid, { now: () => clock }), null);
+  assert.equal(processStartCacheEntry(pid).at, 1_009_000);
+
+  // A CHEAP failure is still the transient case, and still clears in a second:
+  // the floor is what the round-5 fix bought, and it is not being spent here.
+  forgetProcessStart();
+  let fast = 2_000_000;
+  assert.equal(processStartedAt(pid, { now: () => fast }), null);
+  assert.equal(processStartCacheEntry(pid).ttl, 1_000);
+  fast = 2_001_500;
+  assert.equal(processStartedAt(pid, { now: () => fast }), null);
+  assert.equal(processStartCacheEntry(pid).at, 2_001_500,
+    'a failure that cost nothing is worth nothing; ask again');
+});
+
+test('a failure is never held longer than a real reading', () => {
+  forgetProcessStart();
+  const pid = 2 ** 22;
+  // A probe that somehow takes a full minute (a clock jump, a stopped world)
+  // must not put the answer out of reach for four.
+  const readings = [5_000_000, 5_060_000];
+  let i = 0;
+  assert.equal(
+    processStartedAt(pid, { now: () => (i < readings.length ? readings[i++] : readings[1]) }),
+    null
+  );
+  assert.equal(processStartCacheEntry(pid).ttl, 10_000,
+    'the ceiling is the window a real reading gets: a failure is never worth more');
+});
