@@ -434,36 +434,106 @@ test('with no sprint, a slow source still holds the year', async (t) => {
     'and nothing was marked behind by design');
 });
 
-// THE STALL THAT LOOKED EMPTIEST FROM INSIDE THE LOOP. A sprint source that
-// finished its year and is waiting for the barrier has no history window at all
-// this tick, so a re-arm keyed off "did this pass read anything" saw zero and
-// went back to sleep for the full interval. Waiting on a barrier the sprint is
-// clearing is the state that most needs to come back soon.
-test('a sprint source parked on a barrier comes back on the sprint cadence', async (t) => {
+// A SOURCE WITH NOTHING TO DO WAITS TO BE TOLD, RATHER THAN ASKING.
+//
+// It used to poll: a sprint source whose year was finished re-armed anyway, on
+// the theory that a barrier about to lift is the state that most needs to come
+// back soon. Run four showed what that costs -- calendar re-ran every twenty-two
+// seconds for minutes, logging `ingested 0, updated 0, unchanged 153` each time,
+// which on a Google-calendar install is an API call every twenty seconds to
+// re-read the same rows. Nothing it did could move the year; only the barrier
+// lifting could.
+//
+// So the wake-up is an EVENT. Whoever advances the year pulls the waiting sprint
+// sources forward (wakeSprintSources), and in the meantime they sit on their
+// interval and cost nothing.
+test('a source parked on a barrier waits quietly, then is woken when the year moves', async (t) => {
   const currentYear = new Date().getFullYear();
-  // imessage is already done for the current year, and the People barrier is not
-  // crossed -- so task() answers null and the history block never runs.
+  // imessage is already done for the current year, so task() answers null and
+  // the history block cannot run. The People barrier is what holds the walk.
   const parked = fakeState({
     [`yearly-backfill:connector:imessage:done:${currentYear}`]: '1',
   });
   const chat = walker('imessage', { openSlices: 50 });
-  const { instance } = build(t, [chat.source], {
+  // HELD OPEN RATHER THAN POLLED. The People gate's own retry has a five-second
+  // floor, so a fixture that answered "not yet" would spend this whole test
+  // waiting for one retry. Holding the call open is the same state -- a barrier
+  // that has not been crossed -- and the test decides when it lifts.
+  let liftBarrier = null;
+  const { instance, state } = build(t, [chat.source], {
     state: parked,
     daemon: {
       ingestOpts: { tokenFile: '/synthetic/hermes-token' },
-      // Never answers, so the barrier stays uncrossed for the whole window.
-      completePeopleYear: async () => ({ complete: false, retryAfterMs: 60_000 }),
+      completePeopleYear: () => new Promise((resolve) => {
+        liftBarrier = () => resolve({ complete: true });
+      }),
     },
   });
+
+  instance.start();
+  await sleep(1_600);
+  const whileHeld = chat.calls.forward;
+  assert.equal(whileHeld, 1,
+    `a source with nothing to do ticked ${whileHeld} times; every one of those is a store re-read`);
+  assert.equal(chat.calls.history, 0, 'and it genuinely had no window to walk');
+
+  // The barrier lifts. The year moves, and the source that was waiting on it is
+  // pulled forward rather than left on its ten-minute interval.
+  assert.ok(liftBarrier, 'the fixture never reached the People gate');
+  liftBarrier();
+  await sleep(1_200);
+
+  assert.ok(
+    Number(state.getCursor('yearly-backfill:year')) <= currentYear - 1,
+    'the barrier lifting has to actually advance the walk, or this proves nothing'
+  );
+  assert.ok(
+    chat.calls.forward > whileHeld,
+    'the walk moved and nothing woke the source that was waiting for it'
+  );
+  assert.ok(chat.calls.history > 0, 'and it got a year to walk');
+});
+
+// RUN FOUR: "did work" counted rows EXAMINED. A pass that re-read a hundred and
+// fifty three unchanged rows was indistinguishable from one that landed a
+// hundred and fifty three, so a source with nothing new came straight back --
+// every twenty-two seconds, for minutes. On a Google-calendar install that is an
+// API call every twenty seconds to fetch the same rows again.
+//
+// `unchanged` is rows examined. The sprint exists to MOVE the walk, so what
+// counts is rows that landed and a slice that advanced.
+test('a pass that only re-read unchanged rows does not come straight back', async (t) => {
+  const calls = { forward: 0, history: 0 };
+  const source = {
+    name: 'calendar',
+    walksHistory: true,
+    needs: async () => [],
+    run: async (ctx) => {
+      if (ctx.history !== true) {
+        calls.forward += 1;
+        return { ingested: 0, updated: 0, unchanged: 153 };
+      }
+      // The live shape one level down: the slice looks at rows and gains none,
+      // and does not claim to have finished or progressed.
+      calls.history += 1;
+      await sleep(20);
+      return { ingested: 0, updated: 0, unchanged: 153 };
+    },
+  };
+  const { instance, state } = build(t, [source]);
 
   instance.start();
   await sleep(2_200);
 
   assert.ok(
-    chat.calls.forward >= 3,
-    `a source waiting on a barrier ticked ${chat.calls.forward} times; it used to sleep out the interval`
+    Number(state.getCursor(daemon.SPRINT_STARTED_KEY)) > 0,
+    'the sprint has to be running, or this test proves nothing about it'
   );
-  assert.equal(chat.calls.history, 0, 'and it genuinely had no history window to walk');
+  assert.equal(
+    calls.forward, 1,
+    `calendar ran ${calls.forward} times over the same unchanged rows; `
+      + 'unchanged is rows examined, not rows gained'
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -650,4 +720,85 @@ test('a nudge does not arm a source whose own tick started during the probe', as
     overlaps, 0,
     'the probe armed a second pass over a source that was already running'
   );
+});
+
+// ---------------------------------------------------------------------------
+// (f) a failure inside the window is a moment, not a reason to leave
+// ---------------------------------------------------------------------------
+
+// RUN FOUR: imessage threw once at 22:58:20 -- the disk had filled -- and was
+// rescheduled at its full interval while the sprint window ticked away without
+// it. The thing that failed was a moment; the window is half an hour. Waiting
+// fifteen minutes inside it spends most of what is left on one ENOSPC.
+test('a sprint source that throws once is tried again inside the window', async (t) => {
+  let throws = 1;
+  const calls = { forward: 0 };
+  const source = {
+    name: 'imessage',
+    walksHistory: true,
+    needs: async () => [],
+    run: async (ctx) => {
+      if (ctx.history === true) {
+        await sleep(30);
+        return { ingested: 1, historyProgressed: true };
+      }
+      calls.forward += 1;
+      if (throws > 0) {
+        throws -= 1;
+        throw new Error('ENOSPC');
+      }
+      return {};
+    },
+  };
+  const { instance } = build(t, [source], {
+    // The shipped ladder is 20 s / 60 s / 180 s; these stand in for it.
+    daemon: { sprintRetryLadderMs: [150, 300, 600] },
+  });
+
+  instance.start();
+  await sleep(1_800);
+
+  assert.ok(
+    calls.forward >= 2,
+    `a source that threw once was left for its whole interval (${calls.forward} runs)`
+  );
+});
+
+// AND A SOURCE THAT KEEPS THROWING IS NOT RETRIED AT THE SPRINT CADENCE. That is
+// a hot loop against whatever is broken; three attempts backing off, then the
+// ordinary interval, which is where a genuinely broken source belongs.
+test('a source that keeps throwing falls back to its interval after the ladder', async (t) => {
+  const calls = { forward: 0 };
+  const source = {
+    name: 'imessage',
+    walksHistory: true,
+    needs: async () => [],
+    run: async () => {
+      calls.forward += 1;
+      throw new Error('still broken');
+    },
+  };
+  const { instance } = build(t, [source], {
+    daemon: { sprintRetryLadderMs: [100, 150, 200] },
+  });
+
+  instance.start();
+  await sleep(2_400);
+
+  // One first run plus exactly three ladder attempts; the fourth would be the
+  // ten-minute interval, which is well outside this window.
+  assert.equal(calls.forward, 4,
+    `the ladder is three attempts, not a loop (${calls.forward} runs)`);
+});
+
+test('the ladder is three bounded steps, and the first is not the sprint cadence', () => {
+  assert.deepEqual([...daemon.SPRINT_RETRY_LADDER_MS], [20_000, 60_000, 180_000]);
+  assert.ok(
+    daemon.SPRINT_RETRY_LADDER_MS[0] > daemon.SPRINT_REARM_MS,
+    'a failing source must not be retried as fast as a working one'
+  );
+  // And every step is still well inside the half-hour window it exists to spend.
+  for (const step of daemon.SPRINT_RETRY_LADDER_MS) {
+    assert.ok(step < daemon.SPRINT_MAX_MS / 4, `${step} is not a retry inside a sprint`);
+  }
 });

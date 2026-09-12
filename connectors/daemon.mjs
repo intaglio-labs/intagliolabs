@@ -185,6 +185,11 @@ export const SPRINT_HISTORY_BUDGET_MS = 60_000;
 // sticks) is about the steady state, and this phase ends.
 export const SPRINT_REARM_MS = 10_000;
 export const SPRINT_REARM_GENTLE_MS = 20_000;
+// AND WHAT A FAILURE INSIDE THE WINDOW COSTS. Three attempts backing off, then
+// the ordinary interval: a source that threw once (a full disk, a store locked
+// for a second) is worth a quick retry inside a half-hour window, and one that
+// is genuinely broken is not worth the sprint cadence against whatever broke.
+export const SPRINT_RETRY_LADDER_MS = Object.freeze([20_000, 60_000, 180_000]);
 // How the app tells its child which the owner picked. The same channel that
 // already carries the owner pid at spawn (widget/src/Connectors.swift), not a
 // config key: a second writer for a fact that already has one is how two
@@ -1042,6 +1047,7 @@ export function createDaemon({
   sprintRearmMs = defaultSprintRearmMs(),
   sprintMaxMs = SPRINT_MAX_MS,
   sprintHistoryBudgetMs = SPRINT_HISTORY_BUDGET_MS,
+  sprintRetryLadderMs = SPRINT_RETRY_LADDER_MS,
 }) {
   const timers = new Set();
   const nextRuns = new Map();
@@ -1083,6 +1089,9 @@ export function createDaemon({
   // Access yet -- so the phase began, and spent itself, before anything could
   // read a single row.
   const ready = new Set();
+  // Consecutive failures inside the sprint window, per source. See
+  // SPRINT_RETRY_LADDER_MS; cleared by any pass that completes.
+  const sprintFailures = new Map();
   // CONSECUTIVE needs() THROWS PER SOURCE, and the reason there is a count at
   // all rather than a verdict.
   //
@@ -1201,6 +1210,39 @@ export function createDaemon({
     });
     return true;
   };
+  // THE WALK MOVED, SO THE SOURCES WAITING ON IT SHOULD LOOK NOW.
+  //
+  // A sprint source caught up to the walk year deliberately does not re-arm: it
+  // has nothing to do until the year decrements, and polling to discover that is
+  // what had calendar re-reading the same rows every twenty seconds. This is the
+  // other half -- the event. Whoever moves the year says so, and the sources that
+  // were waiting are pulled forward to the sprint cadence instead of their
+  // interval.
+  //
+  // Never a source that is mid-run (absent from nextRuns), for the same reason
+  // probeNotReady skips those: arming beside a pass in flight is two passes over
+  // one cursor. And never one that is already due sooner than the re-arm, which
+  // would push it back rather than forward.
+  const wakeSprintSources = () => {
+    if (stopped || !sprinting()) return;
+    for (const connector of sprintRoster()) {
+      if (!nextRuns.has(connector) || notReady.has(connector)) continue;
+      const source = scheduledByName.get(connector);
+      if (source === undefined) continue;
+      if ((nextRuns.get(connector) ?? 0) - now() <= sprintRearmMs) continue;
+      scheduleSource(source, sprintRearmMs);
+    }
+  };
+
+  /// advance(), plus the wake-up its own effect earns. Every caller in this file
+  /// goes through here so none of them can forget the second half.
+  const advanceWalk = () => {
+    const before = yearlyBackfill.snapshot().year;
+    const moved = yearlyBackfill.advance();
+    if (moved && yearlyBackfill.snapshot().year !== before) wakeSprintSources();
+    return moved;
+  };
+
   const sprintSnapshot = () => {
     const started = sprintStartedTs();
     if (started === null || !sprinting()) return null;
@@ -1443,7 +1485,7 @@ export function createDaemon({
         const result = await completePeopleYear({ year }, ingestOpts);
         if (result.complete === true) {
           yearlyBackfill.recordBarrier('people', year);
-          yearlyBackfill.advance();
+          advanceWalk();
         }
         publishWaiting();
         if (result.complete !== true) {
@@ -1551,7 +1593,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       notReadyDelays.delete(source.name);
       ready.delete(source.name);
       yearlyBackfill.classify(source.name, false);
-      yearlyBackfill.advance();
+      advanceWalk();
       schedulePeopleGate();
       log.info('source_disabled', { connector: source.name });
       return;
@@ -1595,7 +1637,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       ready.delete(source.name);
       if (failures >= NEEDS_FAILURE_TOLERANCE) {
         yearlyBackfill.classify(source.name, false);
-        yearlyBackfill.advance();
+        advanceWalk();
         schedulePeopleGate();
       }
       // AND IT COUNTS AS A RUN THAT FAILED. Without this the run log's last
@@ -1623,7 +1665,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     needsFailures.delete(source.name);
     if (Array.isArray(missing) && missing.length > 0) {
       yearlyBackfill.classify(source.name, false);
-      yearlyBackfill.advance();
+      advanceWalk();
       schedulePeopleGate();
       // Not a failure: an unprovisioned source waits, loudly, and is
       // re-checked next cycle. recordRun stays clean of noise runs.
@@ -1706,6 +1748,21 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     // barrier the sprint is actively clearing is the state that most needs to
     // come back soon, and it is the one that looks emptiest from inside the loop.
     let stoppedOnNothing = false;
+    // WHAT "THIS PASS DID WORK" ACTUALLY MEANS, and why it is not the run counts.
+    //
+    // Live on run four: calendar re-ran every twenty-two seconds for minutes,
+    // logging `ingested 0, updated 0, unchanged 153` every time. It had finished
+    // the walk year, so task() answered null, the history block never ran, and a
+    // re-arm keyed off "the pass did not read NOTHING" saw a hundred and fifty
+    // three unchanged rows and came straight back. On a Google-calendar install
+    // that is an API call every twenty seconds for the whole half hour, to
+    // re-read the same rows.
+    //
+    // `unchanged` is rows EXAMINED, not rows gained. The sprint exists to move
+    // the walk, so the things that count are rows that landed and a history slice
+    // that moved: anything else is the source telling us it has nothing to do.
+    let historyGained = 0;
+    let historyMoved = false;
     try {
       // The forward pass first, always: what arrived since last time is more
       // urgent than what happened in 2019, and history must never delay it.
@@ -1766,6 +1823,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
         const deadline = now() + (inSprint ? sprintHistoryBudgetMs : HISTORY_BUDGET_MS);
         let slices = 0;
         let gained = 0;
+        historyMoved = false;
         try {
           while (now() < deadline) {
             const rawBack = (await source.run(makeCtx({ history: true, historyWindow, deadline }))) ?? {};
@@ -1777,13 +1835,15 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
             // logged as null, which is how it went unnoticed -- and the all-zero
             // guard below could never fire through its first condition.
             gained += back.ingested + back.updated;
+            if (rawBack.historyProgressed === true) historyMoved = true;
             // Nothing read means the walk reached the beginning of the store.
             // The source records that itself; stop asking.
             if (rawBack.historyDone === true) {
+              historyMoved = true;
               // The year this pass was HANDED, which for a trailing connector is
               // above the shared one. See yearlyBackfill.record.
               yearlyBackfill.record(source.name, rawBack, historyWindow.year);
-              yearlyBackfill.advance();
+              advanceWalk();
               schedulePeopleGate();
               break;
             }
@@ -1803,6 +1863,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
             // A short rolling measurement is enough for the activity panel to
             // turn a known number of remaining history slices into elapsed
             // wall-clock time. It is private cursor state, never corpus.
+            historyGained += gained;
             state.setCursor(HISTORY_RATE_KEY(source.name), String(slices));
             log.info('history_pass', {
               connector: source.name,
@@ -1819,25 +1880,38 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
           });
         }
       }
-      // COME STRAIGHT BACK. The whole point of the phase, and it is asked OUTSIDE
-      // the history block on purpose: the three states worth returning for are a
-      // pass the clock cut short, a pass that finished a year with more below it,
-      // and a tick that found no window because a barrier has not lifted yet.
-      // Only the first two are visible from inside the loop, and the live stall
-      // was the third.
+      // COME STRAIGHT BACK, BUT ONLY IF THIS PASS MOVED SOMETHING.
+      //
+      // ~~Anything but a pass that read nothing.~~ That let a source with a year
+      // already finished re-arm for ever: task() answers null, the history block
+      // never runs, and `unchanged` rows from the forward pass are not "work".
+      // See historyGained / historyMoved above -- and `historyWindow !== null`,
+      // which is the other half: a source caught up to the walk year has nothing
+      // to sprint at until the walk MOVES, and nothing it does in the meantime
+      // will move it.
+      //
+      // What wakes it when the walk does move is wakeSprintSources(), called
+      // wherever the year advances. That is an event rather than a poll, so the
+      // stall this replaced stays fixed without anybody re-reading a store every
+      // twenty seconds to find out.
       //
       // `sprinting()` is re-asked rather than reusing `sprintingNow`, because a
       // pass that just recorded last year has ENDED the phase and must not be
-      // the thing that extends it. `outstanding` is what keeps this from
-      // becoming a busy-loop on a source that is genuinely finished.
+      // the thing that extends it.
+      const movedSomething = (counts.ingested ?? 0) + (counts.updated ?? 0) > 0
+        || historyGained > 0
+        || historyMoved;
       if (
         !stoppedOnNothing
+        && movedSomething
+        && historyWindow !== null
         && sprinting()
         && SPRINT_CONNECTORS.includes(source.name)
         && yearlyBackfill.outstanding(source.name)
       ) {
         sprintDelayMs = sprintRearmMs;
       }
+      sprintFailures.delete(source.name);
       state.recordRun({
         connector: source.name,
         startedTs,
@@ -1861,7 +1935,30 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
         ok: false,
         error: safeErrorFingerprint(error),
       });
-      log.error('source_failed', { connector: source.name, error: safeErrorFingerprint(error) });
+      // A FAILURE DURING THE SPRINT IS NOT A REASON TO LEAVE THE PHASE.
+      //
+      // Live on run four: imessage threw once at 22:58:20 -- the disk filled --
+      // and was rescheduled at its full interval while the sprint window ticked
+      // away without it. The thing that failed was a moment, and the window is
+      // half an hour; waiting fifteen minutes inside it spends most of what is
+      // left on one ENOSPC.
+      //
+      // A SHORT LADDER, NOT THE SPRINT CADENCE. A source that is failing must
+      // not be retried every twenty seconds -- that is a hot loop against
+      // whatever is broken. Three attempts backing off, and then the ordinary
+      // interval, which is where a genuinely broken source belongs.
+      if (sprinting() && SPRINT_CONNECTORS.includes(source.name)) {
+        const attempt = sprintFailures.get(source.name) ?? 0;
+        if (attempt < sprintRetryLadderMs.length) {
+          sprintFailures.set(source.name, attempt + 1);
+          sprintDelayMs = sprintRetryLadderMs[attempt];
+        }
+      }
+      log.error('source_failed', {
+        connector: source.name,
+        error: safeErrorFingerprint(error),
+        ...(sprintDelayMs === null ? {} : { sprintRetryMs: sprintDelayMs }),
+      });
     } finally {
       publishActivity({ phase: 'idle', connector: source.name, finishedTs: now() });
     }
