@@ -751,8 +751,24 @@ test('two truncations in a row walk the ceiling DOWN, page by page, and never wi
   );
   assert.equal(state.getCursor(GAP_FROM_KEY), floorAfterFirst, 'and never move the floor');
 
-  await source.run(forwardCtx(state, ingested, { now: NOW }));
-  assert.equal(state.getCursor(GAP_FROM_KEY), null, 'the third pass finishes the hole');
+  // AND IT FINISHES. ~~On the third pass.~~ An owed drain is capped at half the
+  // per-account budget (round-7 finding 1: it runs BEFORE the fresh window, and
+  // spending the whole cap there left new mail with nothing and re-owed itself,
+  // for as many passes as the hole took), so a hole this size takes one pass
+  // more than it used to. The pass COUNT was never the property worth pinning;
+  // that the hole closes, monotonically, and that every message lands, is.
+  let passes = 2;
+  while (state.getCursor(GAP_FROM_KEY) !== null && passes < 8) {
+    const ceilingBefore = Number(state.getCursor(GAP_UNTIL_KEY));
+    await source.run(forwardCtx(state, ingested, { now: NOW }));
+    passes += 1;
+    const after = state.getCursor(GAP_UNTIL_KEY);
+    if (after !== null) {
+      assert.ok(Number(after) < ceilingBefore,
+        `pass ${passes} left the ceiling where it was: a drain that stops making progress never ends`);
+    }
+  }
+  assert.equal(state.getCursor(GAP_FROM_KEY), null, `the hole closes (took ${passes} passes)`);
   assert.equal(state.getCursor(GAP_UNTIL_KEY), null);
   assert.equal(distinctIds(ingested).size, 4500, 'and all 4,500 messages landed');
   // Inclusive boundaries re-read a boundary row per window; nothing re-reads a

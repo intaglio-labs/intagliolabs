@@ -148,6 +148,10 @@ const gapUntilKey = (email) => `mail:${String(email).toLowerCase()}:forward-gap-
 // ALTERNATE passes rather than every pass -- an amortised half page per mailbox
 // against a hole that otherwise stays open forever.
 const drainOwedKey = (email) => `mail:${String(email).toLowerCase()}:forward-drain-owed`;
+// The most an owed drain may spend before the fresh window has had its turn.
+// Half, so a hole bigger than the whole cap can never leave new mail with
+// nothing: see the owed-drain call site.
+const OWED_DRAIN_GETS = Math.floor(MAX_MESSAGES_PER_ACCOUNT / 2);
 // WHICH MAILBOXES THIS INSTALL HAD LAST PASS, so the per-address cursors of one
 // it no longer has can be dropped. Addresses only, in the cursor store this
 // connector already owns -- the same place the per-account cursors themselves
@@ -327,10 +331,28 @@ export function createMailSource({
       //
       // The address never reaches a log line; this is a cursor delete, and the
       // key it deletes was written by this same connector.
-      {
+      //
+      // AND NEVER ON AN EMPTY LIST (round-7 finding 16). `accountsForScope` is
+      // stricter than the stale-tolerant reader needs() uses, so a pass that
+      // lands inside a token refresh can see zero accounts -- and wiping every
+      // remembered address there deletes the cursors of mailboxes this install
+      // very much still has. An empty roster says the app could not ask, not
+      // that the owner has no mail.
+      //
+      // AND THE WHOLE NAMESPACE, not just the owed flag (round-7 finding 17).
+      // The gap, the forward cursor and the per-year history receipts are keyed
+      // by the same address; leaving them meant a re-authorised mailbox came
+      // back owing a drain against a gap that was ALSO still there. The prefix
+      // delete is this connector's own namespace and nobody else's.
+      if (accounts.length > 0) {
         const live = new Set(accounts.map((account) => String(account.email).toLowerCase()));
         for (const email of previousAccounts(state)) {
-          if (!live.has(email)) state.deleteCursor(drainOwedKey(email));
+          if (live.has(email)) continue;
+          if (typeof state.deleteCursors === 'function') {
+            state.deleteCursors(`mail:${email}`);
+          } else {
+            state.deleteCursor(drainOwedKey(email));
+          }
         }
         rememberAccounts(state, [...live]);
       }
@@ -690,7 +712,25 @@ export function createMailSource({
             // (the cap cut a page, or a page token is still in hand). It runs
             // after that page's ingest resolves and before the next list
             // call, which is what bounds a killed pass to one page.
-            const scanWindow = async ({ q: query, minTs, maxTs, onPage }) => {
+            // `gets` BOUNDS ONE CALL, on top of the per-account cap.
+            //
+            // Round-7 finding 1: the owed drain runs BEFORE the fresh window, and
+            // `seen` is one closure variable for the whole account. A hole
+            // holding more than MAX_MESSAGES_PER_ACCOUNT therefore spent the
+            // entire cap at the top of the pass -- the fresh window then entered
+            // with nothing left, landed no rows, and truncated, which re-owed the
+            // drain and made the next pass byte-identical. New mail stopped
+            // landing on that account for as many passes as the hole took to
+            // drain, which is hours, and inverts this file's own rule that new
+            // mail matters more than an old hole.
+            //
+            // So the owed drain gets a page and the fresh window keeps the rest.
+            const scanWindow = async ({ q: query, minTs, maxTs, onPage, gets = null }) => {
+              // Computed at entry against whatever `seen` already is, so it is a
+              // ceiling on THIS call and still respects the account's cap.
+              const ceiling = gets === null
+                ? MAX_MESSAGES_PER_ACCOUNT
+                : Math.min(MAX_MESSAGES_PER_ACCOUNT, seen + gets);
               let pageToken;
               let highestIn = 0;
               let lowestIn = Number.POSITIVE_INFINITY;
@@ -726,7 +766,7 @@ export function createMailSource({
                 let pageLowest = Number.POSITIVE_INFINITY;
                 let pageInWindow = 0;
                 for (const [stubIndex, stub] of (list.messages ?? []).entries()) {
-                  if (seen >= MAX_MESSAGES_PER_ACCOUNT) {
+                  if (seen >= ceiling) {
                     capHit = true;
                     break;
                   }
@@ -800,7 +840,7 @@ export function createMailSource({
                 // coverage, so stopping here costs a re-read at worst.
               } while (
                 !capHit && !belowFloor && pageToken
-                && seen < MAX_MESSAGES_PER_ACCOUNT && !accountOutOfTime()
+                && seen < ceiling && !accountOutOfTime()
               );
 
               return { landed, truncated: capHit || (!belowFloor && Boolean(pageToken)) };
@@ -818,8 +858,9 @@ export function createMailSource({
             // spent. The cost is that the fresh window starts a page down on
             // alternate passes; nothing is lost, because the forward cursor
             // never moves backwards, it only advances a little later.
-            const drainGap = async (gap) => {
+            const drainGap = async (gap, { gets = null } = {}) => {
               await scanWindow({
+                gets,
                 // `floor(until/1000) + 1` covers every tie inside `until`'s own
                 // second without widening a second further than that: above
                 // the ceiling there is no early exit to bound the waste (a
@@ -849,7 +890,15 @@ export function createMailSource({
               : null;
             if (owedGap !== null) {
               state.deleteCursor(drainOwedKey(account.email));
-              await drainGap(owedGap);
+              // HALF THE CAP, and the other half is the reserve.
+              //
+              // Not a page: after any truncation the owed drain IS the ordinary
+              // path, and a hole of a few hundred messages should close in one
+              // pass rather than five. Not the whole cap either, which is the
+              // starvation -- what matters is that the fresh window can never
+              // arrive with nothing left, so new mail keeps landing however deep
+              // the hole is.
+              await drainGap(owedGap, { gets: OWED_DRAIN_GETS });
             }
             const priorGap = readGap();
             // Set when the fresh window records a hole for a page it just
@@ -970,8 +1019,14 @@ export function createMailSource({
             // install and then starve it again -- the same bug wearing the fix.
             if (heldGap !== null && blocked) {
               state.setCursor(drainOwedKey(account.email), '1');
-            } else if (heldGap !== null) {
+            } else if (heldGap !== null && owedGap === null) {
+              // ONE DRAIN PER PASS. An owed drain that narrowed the hole without
+              // closing it leaves heldGap non-null, and running the ordinary one
+              // on top doubles the cost of the very pass the owing exists to
+              // bound (round-7 finding 18). What is left is owed, not taken now.
               await drainGap(heldGap);
+            } else if (heldGap !== null) {
+              state.setCursor(drainOwedKey(account.email), '1');
             }
             // No hole, nothing owed. Kept out of the branches above because the
             // drain can close the gap from inside its own onPage, and a turn

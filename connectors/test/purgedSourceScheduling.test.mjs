@@ -1106,3 +1106,79 @@ test('a mailbox this install no longer has does not keep its cursors', async () 
   assert.equal(state.getCursor(`mail:${email}:forward-drain-owed`), '1',
     'and the mailbox this install DOES have keeps its own');
 });
+
+// ROUND-7 FINDING 1. `seen` is one counter for the whole account and the owed
+// drain now runs BEFORE the fresh window. A hole holding more than the
+// per-account cap therefore spent the entire cap at the top of the pass: the
+// fresh window entered with nothing left, landed no rows, truncated, and re-owed
+// the drain — so the next pass was byte-identical and new mail stopped landing
+// on that account for as many passes as the hole took to drain. That inverts the
+// file's own rule that new mail matters more than an old hole.
+test('an owed drain leaves the fresh window enough budget to land new mail', async () => {
+  const BASE = new Date(2026, 5, 1, 12, 0, 0).getTime();
+  const email = 'deep@example.test';
+  const GAP_FROM = BASE - 400 * 86_400_000;
+  const GAP_UNTIL = BASE - 30 * 86_400_000;
+  const map = new Map(Object.entries({
+    [`mail:${email}:internalDate`]: String(BASE - 3_600_000),
+    [`mail:${email}:forward-gap-from`]: String(GAP_FROM),
+    [`mail:${email}:forward-gap-until`]: String(GAP_UNTIL),
+    [`mail:${email}:forward-drain-owed`]: '1',
+  }));
+  const state = {
+    getCursor: (k) => map.get(k) ?? null,
+    setCursor: (k, v) => map.set(k, String(v)),
+    deleteCursor: (k) => map.delete(k),
+  };
+  const fresh = [];
+  const source = createMailSource({
+    accountsForScope: () => [{ email }],
+    sleep: async () => {},
+    makeClient: () => ({
+      // Both windows page for ever: the hole is deeper than the cap, and so is
+      // the backlog of new mail above the cursor.
+      listMessages: async ({ q, pageToken }) => {
+        const page = Number(pageToken ?? 0);
+        const tag = q.includes('before:') ? 'gap' : 'fresh';
+        return {
+          messages: Array.from({ length: 100 }, (_, i) => ({ id: `${tag}-${page}-${i}` })),
+          nextPageToken: String(page + 1),
+        };
+      },
+      getMessage: async (id) => ({
+        id,
+        internalDate: String(
+          String(id).startsWith('gap') ? GAP_UNTIL - 1_000 : BASE - 60_000
+        ),
+        payload: {
+          mimeType: 'text/plain',
+          headers: [
+            { name: 'Message-ID', value: `<${id}@example.test>` },
+            { name: 'From', value: 'friend@example.test' },
+            { name: 'To', value: 'owner@example.test' },
+            { name: 'Subject', value: String(id) },
+          ],
+          body: { data: Buffer.from(String(id)).toString('base64url') },
+        },
+      }),
+    }),
+  });
+
+  await source.run({
+    state,
+    config: { mail: { backfillDays: 1400 } },
+    home: '/tmp/mail-deep-test-home',
+    now: () => BASE,
+    history: false,
+    ingest: async (rows) => {
+      for (const row of rows) if (String(row.entity_id ?? '').includes('fresh')) fresh.push(row);
+      return { inserted: rows.length, updated: 0, unchanged: 0 };
+    },
+    log: { info() {}, warn() {} },
+  });
+
+  assert.ok(
+    fresh.length > 0,
+    'the drain spent the whole cap and new mail landed nothing — for every pass the hole lasts'
+  );
+});
