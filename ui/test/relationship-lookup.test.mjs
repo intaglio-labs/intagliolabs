@@ -846,12 +846,20 @@ test('/stats carries lookup with real cost; the card carries `changed`, null onc
     assert.equal(before.card.changed.quote, 'Web Change Person was named VP of Engineering in May 2026.');
     assert.equal(before.card.changed.date, '2026-05');
     // The two numbers the card needs to say "2 sources" rather than showing
-    // one url as though it were all there was.
+    // one url as though it were all there was. `sources` is the COUNT on the
+    // card reply (cardFacts.mjs's changedForCard) and the list it used to be
+    // is `sourceUrls`; the desk reads newestWebChange directly and still sees
+    // the full source objects.
     assert.equal(before.card.changed.corroboration, 2);
+    assert.equal(before.card.changed.sources, 2, '`sources` is a count on the card');
     assert.deepEqual(
-      before.card.changed.sources.map((source) => source.url).sort(),
+      [...before.card.changed.sourceUrls].sort(),
       ['https://acme.example/news', 'https://techpress.example/acme']
     );
+    // The three fields the page always reads, present together or `changed`
+    // is null: text, a source count, and when it was seen.
+    assert.equal(before.card.changed.text, 'Named VP of Engineering at Acme in May 2026.');
+    assert.equal(typeof before.card.changed.at, 'number');
     assert.notEqual(before.card.sentence, undefined, '`changed` never displaces `sentence`');
 
     // Delete the web row -- the receipt is gone, so `changed` must be gone.

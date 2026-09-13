@@ -90,6 +90,7 @@ import {
 } from './relationship/lint.mjs';
 import { createEngine, createLookupEngine } from './relationship/engines.mjs';
 import { eligiblePool, produceBatch, PRODUCER_VERSION } from './relationship/producer.mjs';
+import { personCardFacts, changedForCard } from './relationship/cardFacts.mjs';
 import { produceOweBatch, OWE_PRODUCER_VERSION } from './relationship/owe.mjs';
 import { createDraft, existingDrafts } from './relationship/draft.mjs';
 import {
@@ -4315,6 +4316,16 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
           card: {
             personKey: card.personKey, name: card.name, kind: card.kind,
             snapshot_id: card.snapshot_id,
+            // THE SAME PERSON FACTS THE SERVE CARRIES (surface review C
+            // findings 13/14/15), and for the same reason they are safe on a
+            // tease: they are counts and dates, never message text. The page
+            // reads one set of field names whether it drew the card from a
+            // peek or from a serve, so the tease cannot render thinner than
+            // the thing it is teasing.
+            ...personCardFacts(db, card.personKey, {
+              now: nowForLive,
+              evidenceLastMeetingDaysAgo: card.evidence?.lastMeetingDaysAgo ?? null,
+            }),
             evidence: {
               dormancyDays: card.evidence?.dormancyDays ?? null,
               overdueDays: card.evidence?.overdueDays ?? null,
@@ -4400,7 +4411,15 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       } catch {
         drafts = [];
       }
-      send(res, 200, { card: { ...card, quote, sentence, left, leftTone, who: page.sections.who?.text ?? null, page, changed, drafts },
+      // The person facts, on the serve exactly as on the peek above. Spread
+      // AFTER `...card` so a producer that one day puts its own
+      // lastMeetingDaysAgo on the card object cannot shadow the pinned shape.
+      const facts = personCardFacts(db, card.personKey, {
+        now: nowForLive,
+        evidenceLastMeetingDaysAgo: card.evidence?.lastMeetingDaysAgo ?? null,
+      });
+      send(res, 200, { card: { ...card, quote, sentence, left, leftTone, who: page.sections.who?.text ?? null, page,
+        changed: changedForCard(changed), drafts, ...facts },
         // PROVENANCE, NOT POLICY (round-5 finding 10). `servedMode` answers
         // "which mode produced the card in your hand", and the only thing that
         // knows is the batch the card came out of. A card produced before any
