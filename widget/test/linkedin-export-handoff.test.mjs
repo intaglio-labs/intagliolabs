@@ -436,9 +436,17 @@ test('the card drops the hold line as soon as the file lands', () => {
   const changed = /func linkedInExportChanged\(\) \{([\s\S]*?)\n  \}/u.exec(mainSwift)?.[1] ?? '';
   assert.match(code(changed), /reconnectPanel/u,
     'the card page has to be poked, not only the two that show the file itself');
-  // __hzReconnectShow IS pull(), so the re-fetch clears the line and can bring
-  // the standing pick's own card with it.
-  assert.match(reconnectJs, /window\.__hzReconnectShow = pull;/u);
+  // __hzReconnectShow REACHES pull(), so the re-fetch clears the line and can
+  // bring the standing pick's own card with it.
+  //
+  // ~~`window.__hzReconnectShow = pull;`~~ — it is a wrapper since the panel
+  // gained a state of its own to protect (2026-09-13). Sitting on "show me
+  // another" is the owner's turn, and refetching there spends a serve they did
+  // not ask for; every other state still refetches, which is what this hook is
+  // for and what this test is about. The pin holds the call, not the identity.
+  const hook = /window\.__hzReconnectShow = ([\s\S]*?);\n/u.exec(reconnectJs)?.[1] ?? '';
+  assert.ok(hook, '__hzReconnectShow is not assigned at all');
+  assert.match(hook, /pull\(\)|^pull$/u, 'the re-show has to reach pull()');
 });
 
 test('screen 6 asks again too, if the flow is still open', () => {

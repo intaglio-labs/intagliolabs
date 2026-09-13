@@ -18,7 +18,16 @@
       <span class="rc-title" id="rcTitle">reconnect?</span>
       <button class="rc-close" id="rcClose" title="Close">✕</button>
     </div>
-    <div class="rc-modes" id="rcModes" role="group" aria-label="reconnect mode">
+    <!-- THE CHIP ROW IS GONE FROM THE PRODUCT, AND KEPT IN THE MARKUP.
+         Owner, 2026-09-13: "the any/founder/investor thing isn't necessary —
+         reconnect should be one person. user can dismiss and ask for another
+         one if they like." So reconnect serves from `any` and nothing on this
+         page asks for a group. It is `hidden` here rather than deleted because
+         the whole mechanism behind it -- the server's mode, the one-off
+         widening, the hold line -- is still in the code and still reachable
+         when the registry turns `timeline` on; reconnect.js reveals the row
+         only in that case, and selectMode refuses to post otherwise. -->
+    <div class="rc-modes" id="rcModes" role="group" aria-label="reconnect mode" hidden>
       <button class="rc-mode" id="rcModeAny" data-mode="any">any</button>
       <button class="rc-mode" id="rcModeFounder" data-mode="founder">founder</button>
       <button class="rc-mode" id="rcModeInvestor" data-mode="investor">investor</button>
@@ -82,6 +91,18 @@
         <div class="rc-actions-error" id="rcActionsError" hidden></div>
         <input id="rcFeedback" type="text" placeholder="why? (optional — this trains it)" autocomplete="off" spellcheck="false">
       </div>
+    </div>
+    <!-- ONE PERSON, AND A WAY TO SAY "NOT THAT ONE".
+         A verdict used to pull the next card straight away, which made a
+         dismissal cost an interruption the owner never asked for. The day's
+         one card is served without asking; every card after it is a PULL, and
+         there are three of those. So a rejection stops here, with the one
+         thing the owner might still want on screen, and nothing happens until
+         they press it. "will text them" does not come through here -- that
+         ends the day, as it always did. -->
+    <div class="rc-another" id="rcAnother" hidden>
+      <p class="rc-another-msg" id="rcAnotherMsg"></p>
+      <button class="rc-another-btn" id="rcAnotherBtn">show me another</button>
     </div>
     <div class="rc-empty" id="rcEmpty" hidden>
       <p class="rc-empty-msg" id="rcEmptyMsg">nothing to review — the orb will light up when there is.</p>

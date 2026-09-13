@@ -598,7 +598,14 @@ test('a one-off look does not move the card picker', () => {
 // hand-off: the card the owner asked for never reached them.
 test('a card widened just this once survives the hand-off to the panel', () => {
   const peek = bodyOf(js, 'peekCard');
-  assert.match(peek, /finishedOnOneOff = out\.oneOff === true && typeof out\.servedMode === 'string'/u,
+  // ~~`finishedOnOneOff = out.oneOff === true && …`~~ — the assignment gained a
+  // `modesOn &&` in front of it when the groups went behind `timeline`
+  // (2026-09-13). A widening the owner could not have asked for is not one to
+  // carry across the hand-off, and hermes does not send `oneOff` on that path
+  // any more; this is the page refusing to act on it if an older one does. The
+  // pin is what it always was — servedMode is the field, `mode` on that reply is
+  // the standing pick — with the gate allowed in front of it.
+  assert.match(peek, /finishedOnOneOff = (?:modesOn && )?out\.oneOff === true && typeof out\.servedMode === 'string'/u,
     'servedMode is what the panel must ask for; `mode` on that reply is the standing pick');
 
   const fin = bodyOf(js, 'finish');
@@ -613,7 +620,12 @@ test('a card widened just this once survives the hand-off to the panel', () => {
   assert.match(src, /private var pendingOneOffMode: String\?/u);
   assert.doesNotMatch(src, /pendingOneOffMode.*UserDefaults|UserDefaults.*pendingOneOffMode/u);
   assert.match(src, /if let mode = payload\["oneOffMode"\] as\? String, Bridge\.relationshipModes\.contains\(mode\)/u);
-  assert.match(src, /cardPath \+= "\?mode=\\\(mode\)"\n\s*pendingOneOffMode = nil/u,
+  // ~~`cardPath += "?mode=\\(mode)"`~~ — the card request grew a second query
+  // flag (`pull=1`, "the owner asked for another one", 2026-09-13), so the path
+  // is assembled from a list instead of concatenated once. What this pin is
+  // about is unchanged and is the line under it: the widening is TAKEN, not
+  // read, on the first pull that follows the hand-off.
+  assert.match(src, /cardQuery\.append\("mode=\\\(mode\)"\)\n\s*pendingOneOffMode = nil/u,
     'spent on the first pull, so "just this once" is true');
 });
 

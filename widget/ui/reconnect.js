@@ -8,6 +8,26 @@
 const el = (id) => document.getElementById(id);
 let card = null;
 
+// ONE PERSON, NOT A GROUP (owner, 2026-09-13: "the any/founder/investor thing
+// isn't necessary -- reconnect should be one person. user can dismiss and ask
+// for another one if they like").
+//
+// Everything the chip row drove is still here -- the standing mode, the one-off
+// widening, the hold line, the three-way picker -- and every one of those is
+// now behind this flag, which the registry leaves OFF. Gated rather than
+// deleted because the mechanism is sound and the decision is a product one:
+// `timeline` turns the whole group idea back on in one place, and nothing else
+// in this file has to be remembered to do it.
+//
+// FALSE UNTIL THE REGISTRY SAYS OTHERWISE, and hzFeatures fails closed, so a
+// page that cannot ask shows no chips rather than chips that post nothing.
+let modesOn = false;
+
+// Whether the panel is sitting on "show me another" with a live button. It is
+// the one state that must survive the panel being hidden and shown again: see
+// window.__hzReconnectShow at the foot of this file.
+let awaitingPull = false;
+
 // The mode picker: 'any' · 'founder' · 'investor'.
 //
 // THE SERVER OWNS THIS, localStorage only remembers it (review finding 7).
@@ -56,6 +76,10 @@ function adoptServerMode(out) {
   // permanently, because a file has not arrived yet. The line under the chips
   // exists precisely to say the pick is being held rather than changed, and it
   // would have been describing a pick this function had just thrown away.
+  // Nothing to reconcile when there is no picker to reconcile WITH -- and this
+  // is the function that writes localStorage, so with the row gone it would be
+  // remembering a choice the owner has no way to make.
+  if (!modesOn) return;
   const held = out?.oneOff === true || typeof out?.modeFallback === 'string';
   const fromServer = held
     ? (MODES.includes(out?.mode) ? out.mode : null)
@@ -73,6 +97,9 @@ function adoptServerMode(out) {
 function showOneOff(out) {
   const line = el('rcOneOff');
   if (!line) return;
+  // "shown once from any" is a sentence about a pick the owner did not make,
+  // which only means something while there is a pick. See modesOn.
+  if (!modesOn) { line.hidden = true; line.textContent = ''; return; }
   const served = MODES.includes(out?.servedMode) ? out.servedMode : null;
   const show = out?.oneOff === true && served !== null;
   line.hidden = !show;
@@ -103,6 +130,10 @@ function showOneOff(out) {
 function showModeFallback(out) {
   const line = el('rcFallback');
   if (!line) return;
+  // Same reason as showOneOff: with no chips there is no lit chip to explain,
+  // and hermes serves from `any` for everyone, which is what this line was
+  // apologising for.
+  if (!modesOn) { line.hidden = true; line.textContent = ''; return; }
   const mode = typeof out?.mode === 'string' ? out.mode : '';
   const show = out?.modeFallback === 'linkedin-pending' && mode !== '' && mode !== 'any';
   line.hidden = !show;
@@ -159,12 +190,24 @@ const EMPTY_REASONS = {
   'pool-exhausted': 'still reading back through your history — nobody has been quiet long enough yet.',
   // There are people and there is history; none of them is in the group the
   // picker is on. The chips are right above this line, which is the remedy.
+  // ONLY WITH THE CHIPS. hermes serves from `any` for everyone now, so this
+  // reason should never arrive -- and if an older reader sends it anyway, a
+  // line telling the owner to press one of three buttons that are not on the
+  // screen is worse than the plain "nobody yet". See emptyLine.
   'pool-exhausted-mode': 'nobody quiet in the group you picked yet — try another chip above.',
   // Not a reason the route sends: the panel's own, for a hermes it could not
   // reach at all. See pull()'s catch.
   unreachable: 'i cannot reach the part of me that does the reading. it may still be starting up.',
 };
 const EMPTY_DEFAULT = 'nothing to review — the orb will light up when there is.';
+
+// The one reason whose sentence depends on what is on the screen. Everything
+// else in the table is true either way.
+function emptyLine(out) {
+  const reason = out?.reason;
+  if (!modesOn && reason === 'pool-exhausted-mode') return EMPTY_REASONS['pool-exhausted'];
+  return EMPTY_REASONS[reason] ?? EMPTY_DEFAULT;
+}
 
 function renderEmpty(out) {
   card = null;
@@ -174,15 +217,17 @@ function renderEmpty(out) {
   showModeFallback(out);
   el('rcCard').hidden = true;
   el('rcEmpty').hidden = false;
-  el('rcEmptyMsg').textContent = out?.refreshing
-    ? 'still looking…'
-    : (EMPTY_REASONS[out?.reason] ?? EMPTY_DEFAULT);
+  // The empty state is an answer; the pause between cards is a question. One
+  // of them is on screen at a time, and this is the answer arriving.
+  el('rcAnother').hidden = true;
+  awaitingPull = false;
+  el('rcEmptyMsg').textContent = out?.refreshing ? 'still looking…' : emptyLine(out);
   // Reset to the reconnect defaults between cards: the empty state is where
   // the mode picker (reconnect's own) lives while nothing is showing, so it
   // must not stay hidden from a previous Owe card.
   el('rcTitle').textContent = 'reconnect?';
   el('rcYes').textContent = 'will text them';
-  el('rcModes').hidden = false;
+  el('rcModes').hidden = !modesOn;
   el('rcActionsError').hidden = true;
   el('rcActionsError').textContent = '';
   setVerdictButtonsDisabled(false);
@@ -465,6 +510,8 @@ function render(c) {
   card = c;
   el('rcCard').hidden = false;
   el('rcEmpty').hidden = true;
+  el('rcAnother').hidden = true;
+  awaitingPull = false;
   // Reset here rather than only where it is set: every path that draws a card
   // has to clear a line about a different one.
   const oneOff = el('rcOneOff');
@@ -484,7 +531,7 @@ function render(c) {
   const isOwe = c.kind === 'owe';
   el('rcTitle').textContent = isOwe ? 'owe?' : 'reconnect?';
   el('rcYes').textContent = isOwe ? 'will reply' : 'will text them';
-  el('rcModes').hidden = false;
+  el('rcModes').hidden = !modesOn;
 
   const trigger = triggerLine(c);
   el('rcTrigger').textContent = trigger;
@@ -660,6 +707,84 @@ el('rcDraft').addEventListener('click', async () => {
 // catch that could not fire.
 const reachedHermes = (out) => out?.state === 'ok';
 
+// THE VERDICTS THAT LEAVE THE DAY OPEN. "will text them" is the one that closes
+// it — the owner did the thing the card asked for, and the day has had its
+// interruption — so every other button is a rejection, and a rejection is the
+// owner saying "not that one", which is a question about the next one rather
+// than an answer about the day.
+const REJECTIONS = new Set(['dismissed', 'muted']);
+
+// Pure, so the state machine can be run in a test rather than read. Returns
+// 'another' when the page should stop and offer the button, 'pull' when it
+// should go straight on to the next card as it always did.
+//
+// WITH THE CHIPS ON, NOTHING CHANGES. `timeline` is the old product, pulls and
+// all — the server serves under a picked mode and the panel walks the queue on
+// its own — so the flag decides this too, in one expression, rather than in
+// four call sites.
+function verdictNext(event, modes) {
+  if (modes) return 'pull';
+  return REJECTIONS.has(event) ? 'another' : 'pull';
+}
+
+// What a card asked for with the pull flag turned into. Pure for the same
+// reason: this is the part with the branches, and the branch that matters is
+// the one nobody can produce on demand (three pulls spent, on a real day).
+//
+//   card            -> render it
+//   pulls-exhausted -> the sentence, and NO button: pressing again cannot work
+//                      until tomorrow, and a button that cannot work is worse
+//                      than none. `retryAfterMs` rides the reply and is not
+//                      rendered — "more tomorrow" already names the moment, and
+//                      a minute count on top of it is a second clock to be
+//                      wrong about.
+//   anything else   -> the ordinary empty state, which has its own sentence for
+//                      every reason the route sends.
+//   unreachable     -> the pause stays, WITH the button. A reader that was
+//                      restarting is a reason to try again, not a reason to
+//                      tell the owner their day is over.
+const PULLS_DONE = "that's enough for today — more tomorrow";
+
+function pullPanel(out) {
+  if (!reachedHermes(out)) {
+    return { panel: 'another', msg: EMPTY_REASONS.unreachable, button: true };
+  }
+  if (out.card) return { panel: 'card', msg: '', button: false };
+  if (out.reason === 'pulls-exhausted') {
+    return { panel: 'another', msg: PULLS_DONE, button: false };
+  }
+  return { panel: 'empty', msg: '', button: false };
+}
+
+// The pause between two cards. `card` is cleared with it: the verdict for the
+// card that was here has been recorded, and a stray click must not post a
+// second one against a snapshot the owner has finished with.
+function showAnother(msg, button) {
+  card = null;
+  el('rcCard').hidden = true;
+  el('rcEmpty').hidden = true;
+  el('rcAnother').hidden = false;
+  el('rcAnotherMsg').textContent = msg;
+  el('rcAnotherBtn').hidden = !button;
+  el('rcAnotherBtn').disabled = false;
+  awaitingPull = button;
+  fit();
+}
+
+// Drawing a served card, wherever it came from. The 'opened' event is deduped
+// per snapshot SERVER-side (a re-show of the same pending card used to post
+// another, and openRate = opened/shown climbed past 1), so this can stay
+// unconditional.
+function renderServed(out) {
+  render(out.card);
+  // SAY WHERE IT CAME FROM. A one-off card was served under a mode the owner
+  // did not pick -- onboarding's "just this once" -- and the chip beside it
+  // is still their own. Without a word here that reads as the picker lying
+  // about the card in hand.
+  showOneOff(out);
+  hzPost('relEvent', { snapshot_id: out.card.snapshot_id, person_key: out.card.personKey, event: 'opened' }).catch(() => {});
+}
+
 async function pull() {
   try {
     const out = await hzPost('relCard');
@@ -668,24 +793,37 @@ async function pull() {
     // Before either branch: this line is about the CHIPS, so it is equally true
     // of a fallback card and of an empty answer under the same standing pick.
     showModeFallback(out);
-    if (out?.card) {
-      render(out.card);
-      // SAY WHERE IT CAME FROM. A one-off card was served under a mode the owner
-      // did not pick -- onboarding's "just this once" -- and the chip beside it
-      // is still their own. Without a word here that reads as the picker lying
-      // about the card in hand.
-      showOneOff(out);
-      // 'opened' is deduped per snapshot SERVER-side (a re-show of the same
-      // pending card used to post another, and openRate = opened/shown
-      // climbed past 1), so this can stay unconditional.
-      hzPost('relEvent', { snapshot_id: out.card.snapshot_id, person_key: out.card.personKey, event: 'opened' }).catch(() => {});
-    } else renderEmpty(out);
+    if (out?.card) renderServed(out);
+    else renderEmpty(out);
   } catch {
     // Kept for the one failure that IS a throw: a webview torn down mid-message.
     // The reachable path is the state check above.
     renderEmpty({ reason: 'unreachable' });
   }
 }
+
+// "show me another". The flag on the request is what tells hermes this is the
+// owner asking rather than the day's one card being delivered — the day's card
+// is an interruption nobody chose, and these are not.
+async function pullAnother() {
+  const btn = el('rcAnotherBtn');
+  btn.disabled = true;
+  let out = null;
+  try {
+    out = await hzPost('relCard', { pull: true });
+  } catch {
+    // Same shape as pull()'s catch, and it lands on the unreachable branch of
+    // pullPanel below, which keeps the button.
+    out = null;
+  }
+  const next = pullPanel(out);
+  btn.disabled = false;
+  if (next.panel === 'card') { renderServed(out); return; }
+  if (next.panel === 'empty') { renderEmpty(out); return; }
+  showAnother(next.msg, next.button);
+}
+
+el('rcAnotherBtn').addEventListener('click', () => { pullAnother(); });
 
 const VERDICT_BUTTON_IDS = ['rcYes', 'rcNo', 'rcMute', 'rcNever', 'rcNotThisKind'];
 
@@ -713,6 +851,10 @@ async function verdict(event, extra = {}) {
     // Mac as one that was recorded — and then pull() moved on to the next card,
     // losing the owner's judgment silently.
     if (!out || out.state !== 'ok' || out.ok === false) throw new Error('relEvent rejected');
+    // ~~`await pull()` on every verdict.~~ That made a dismissal fetch the next
+    // card by itself, which is the app deciding the owner wants another one.
+    // They may; the button is how they say so.
+    if (verdictNext(event, modesOn) === 'another') { showAnother('noted.', true); return; }
     await pull(); // next card, or the empty state -- clears the error on success
   } catch {
     setVerdictButtonsDisabled(false);
@@ -733,10 +875,15 @@ el('rcClose').addEventListener('click', () => hzPost('close').catch(() => {}));
 // The empty state ("nothing to review") left the panel with nothing useful to
 // do -- the mode picker above still works, but there was no way to ask for a
 // fresh batch under the picked mode without leaving and reopening the panel.
+//
+// NO MODE ON THE BODY WITH THE CHIPS GONE. hermes reads an absent one as its
+// own config default, which is `any` — the mode this product now has — so
+// sending the page's remembered chip would be the one relMode-shaped write
+// left on a page that is not supposed to make any.
 el('rcRefresh').addEventListener('click', () => {
   const btn = el('rcRefresh');
   btn.disabled = true;
-  hzPost('relRefresh', { mode: currentMode })
+  hzPost('relRefresh', modesOn ? { mode: currentMode } : {})
     .then(pull, () => {})
     .finally(() => { btn.disabled = false; });
 });
@@ -746,7 +893,12 @@ el('rcRefresh').addEventListener('click', () => {
 // nothing at all -- which is exactly the state after a restart, when the
 // picker says 'investor' and the server's rel.mode is null. The server is
 // the one that has to be told; a tap is the telling.
+//
+// AND WITH THE ROW GONE IT POSTS NOTHING AT ALL. The listeners stay attached to
+// buttons nobody can reach, so this is the guard that makes "the page never
+// posts relMode" a property of one function rather than of the markup.
 function selectMode(mode) {
+  if (!modesOn) return;
   if (!MODES.includes(mode)) return;
   currentMode = mode;
   writeMode(mode);
@@ -756,9 +908,31 @@ function selectMode(mode) {
 el('rcModeAny').addEventListener('click', () => selectMode('any'));
 el('rcModeFounder').addEventListener('click', () => selectMode('founder'));
 el('rcModeInvestor').addEventListener('click', () => selectMode('investor'));
-renderModes();
+
+// THE ROW IS REVEALED, NEVER DRAWN. It ships `hidden` in the markup, so a page
+// that cannot reach the registry — or one the registry says no to — never
+// flashes three chips and then takes them away.
+hzFeatures()
+  .then((set) => {
+    modesOn = hzFeatureOn(set, 'timeline');
+    if (!modesOn) return;
+    el('rcModes').hidden = false;
+    renderModes();
+    fit();
+  })
+  .catch(() => {});
 
 // A hidden panel that comes back must refetch: a card acted on elsewhere
 // must not linger. Native pokes this on every re-show.
-window.__hzReconnectShow = pull;
+//
+// EXCEPT WHEN THE PANEL IS MID-QUESTION. Sitting on "show me another" is the
+// owner's turn, not a stale card: refetching there would spend a serve they
+// have not asked for — and with the day's one interruption already delivered,
+// the answer is "that's all for today" and the button they were looking at is
+// gone. So the pause is redrawn and nothing is fetched. Every other state
+// still refetches, which is what this hook is for.
+window.__hzReconnectShow = () => {
+  if (awaitingPull) { fit(); return; }
+  pull();
+};
 pull();

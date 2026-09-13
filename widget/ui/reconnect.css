@@ -172,6 +172,25 @@ body.reconnect { margin: 0; -webkit-user-select: none; user-select: none; }
 }
 .rc-refresh:hover { background: rgba(127, 127, 127, 0.25); }
 
+/* The panel between one card and the next. Same quiet centred shape as the
+   empty state -- it is the same kind of moment, a page with nothing on it and
+   one thing you may do -- but its own block, because the empty state is a
+   verdict about the queue and this is a pause in the middle of using it.
+   Its own [hidden] rule for the reason the comment above #rcCard gives: a
+   class that sets `display` out-specifies the attribute unless it is
+   answered, and .rc-another does not set one only because it does not need
+   one today. The rule is here so it cannot start needing one silently. */
+.rc-another { opacity: 0.75; padding: 18px 4px; text-align: center; }
+.rc-another[hidden] { display: none; }
+.rc-another-msg { margin: 0 0 10px; }
+.rc-another-msg:empty { display: none; }
+.rc-another-btn {
+  border: 1px solid var(--edge, #444); background: rgba(127, 127, 127, 0.12);
+  color: inherit; border-radius: 7px; padding: 5px 11px; font-size: 12.5px; cursor: pointer;
+}
+.rc-another-btn:hover { background: rgba(127, 127, 127, 0.25); }
+.rc-another-btn[hidden] { display: none; }
+
 /* ---------------- the export offer (export.html) ----------------
    The Downloads watcher's "found your export" lives in a panel now, because a
    system notification was the whole of it once and produced nothing at all on

@@ -1794,11 +1794,21 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // SPENT, NOT READ. See openReconnect: the widening is for the pull that
       // follows the hand-off and for nothing after it, so taking it here is what
       // makes "just this once" true.
-      var cardPath = "admin/relationship/card"
+      var cardQuery: [String] = []
       if let mode = pendingOneOffMode {
-        cardPath += "?mode=\(mode)"
+        cardQuery.append("mode=\(mode)")
         pendingOneOffMode = nil
       }
+      // THE OWNER ASKED FOR ANOTHER ONE. The day's card is served without being
+      // asked for and counts as the day's one interruption; a pull is the owner
+      // pressing "show me another" after rejecting it, which hermes allows three
+      // times a day and then answers `pulls-exhausted`. It is one boolean from
+      // the page and it becomes one query flag -- nothing else about the request
+      // changes, so a page that does not send it gets exactly today's behaviour.
+      if payload["pull"] as? Bool == true { cardQuery.append("pull=1") }
+      let cardPath = cardQuery.isEmpty
+        ? "admin/relationship/card"
+        : "admin/relationship/card?" + cardQuery.joined(separator: "&")
       relHermes("GET", cardPath, json: nil) { [weak self] out in
         self?.reply(webView, id, out)
       }
