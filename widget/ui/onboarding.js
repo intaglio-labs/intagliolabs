@@ -1199,7 +1199,12 @@ function paintModeShortfall(out) {
 
 loadAnyMode.addEventListener('click', () => {
   loadAnyMode.disabled = true;
-  hideModeShortfall();
+  // NOT HIDDEN ON THE PRESS. A widened peek that lands on the refill throttle
+  // comes back a plain `pool-exhausted` with no counts -- modeEmptyCounts answers
+  // nothing for 'any' -- so nothing repaints the row, the button vanishes, and
+  // the sentence reverts to the sprint line until the next ordinary poll fifteen
+  // seconds later. It is self-healing and it reads as the press having failed.
+  // The row goes when an ANSWER says it should, which is peekCard's job.
   // ONE REQUEST, ONE MODE. No relMode, no config write: the peek carries the
   // widening and the owner's standing pick is still whatever they chose on
   // screen 1. Stamped so the timer does not immediately spend a second peek on
@@ -1209,7 +1214,7 @@ loadAnyMode.addEventListener('click', () => {
   hzPost('relCardPeek', { mode: 'any' })
     .then((out) => {
       loadAnyMode.disabled = false;
-      peekCard(out);
+      peekCard(out, { fromOneOff: true });
     })
     .catch(() => { loadAnyMode.disabled = false; });
 });
@@ -1473,11 +1478,16 @@ function enterLoad() {
 // lit. The widening has to travel with the hand-off or it is not a hand-off.
 let finishedOnOneOff = null;
 
-function peekCard(out) {
+function peekCard(out, { fromOneOff = false } = {}) {
   if (!out) return;
   // Cleared on every answer: this row belongs to one reason, and leaving it up
   // under a different one would offer a remedy for a problem that has moved on.
-  hideModeShortfall();
+  //
+  // EXCEPT the answer to the press itself. A widened peek that hits the refill
+  // throttle answers `pool-exhausted` with no counts, and clearing the row there
+  // takes away the button that produced it for a reason that has not changed:
+  // the owner's mode is still empty, and they may well want to press again.
+  if (!(fromOneOff && out.reason === 'pool-exhausted')) hideModeShortfall();
   if (out.card) {
     // The mode this card was produced under, when it was not the owner's own.
     // `mode` on a one-off reply is still the standing pick, so servedMode is
@@ -1506,6 +1516,14 @@ function peekCard(out) {
   // the ordinary state of the machine this screen is drawn on -- so it says
   // that, and says when it will look again if the route told us.
   if (out.reason === 'pool-exhausted') {
+    // The press was answered by a throttle, not by an empty house. Say so and
+    // leave the row where it was.
+    if (fromOneOff) {
+      loadStatus.textContent = readerSprinting
+        ? sprintSentence()
+        : 'still looking — try that again in a moment';
+      return;
+    }
     // AND WHEN THE READER IS ALREADY DOING SOMETHING ABOUT IT, SAY THAT INSTEAD.
     //
     // "i need more history" is true and useless on a fresh Mac: the card wants

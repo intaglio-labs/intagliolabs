@@ -613,3 +613,23 @@ test('the panel says a card came from somewhere the owner did not pick', () => {
   assert.match(code(render), /oneOff\.hidden = true/u,
     'every path that draws a card clears a line about a different one');
 });
+
+// ROUND-8 FINDING 12. A widened peek that lands on the refill throttle answers a
+// plain `pool-exhausted` with no counts — modeEmptyCounts returns nothing for
+// 'any' — so clearing the row on the press took away the button that produced it
+// for a reason that had not changed. Self-healing at the next poll, and it reads
+// as the press having failed.
+test('a press answered by a throttle does not take the button away', () => {
+  const handler = /loadAnyMode\.addEventListener\('click', \(\) => \{\n([\s\S]*?)\n\}\);/u.exec(js);
+  assert.ok(handler, 'the button has no click handler');
+  assert.doesNotMatch(code(handler[1]), /hideModeShortfall\(\)/u,
+    'the row goes when an ANSWER says so, not when the press is made');
+  assert.match(code(handler[1]), /peekCard\(out, \{ fromOneOff: true \}\)/u,
+    'and the answer has to know which press it is answering');
+
+  const peek = bodyOf(js, 'peekCard');
+  assert.match(peek, /if \(!\(fromOneOff && out\.reason === 'pool-exhausted'\)\) hideModeShortfall\(\);/u);
+  // ...and it says what happened rather than reverting to a sentence about
+  // something else.
+  assert.match(peek, /still looking — try that again in a moment/u);
+});
