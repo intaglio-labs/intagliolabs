@@ -349,7 +349,12 @@ export function createMailSource({
         for (const email of previousAccounts(state)) {
           if (live.has(email)) continue;
           if (typeof state.deleteCursors === 'function') {
-            state.deleteCursors(`mail:${email}`);
+            // `{ reopenYearly: false }`, because this is a CONNECTOR-scoped verb
+            // being used as a prefix delete. It is correct today only because
+            // nothing writes a per-address yearly receipt: the day something
+            // does, dropping one stale mailbox would call reopenYearlyWalk()
+            // and reset the shared walk for every source on the machine.
+            state.deleteCursors(`mail:${email}`, { reopenYearly: false });
           } else {
             state.deleteCursor(drainOwedKey(email));
           }

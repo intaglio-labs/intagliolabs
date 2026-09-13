@@ -226,6 +226,25 @@ export const SPRINT_STARTED_KEY = 'sprint:started-ts';
 // sides: the phase still lasts thirty minutes, and it still stops for good the
 // moment last year lands.
 export const SPRINT_REARM_AFTER_MS = 6 * 60 * 60_000;
+// AND A WINDOW THAT LANDED NOTHING DOES NOT GET REPEATED FOUR TIMES A DAY.
+//
+// `exhausted` is an honest end for a source that can be marked exhausted, and
+// calendar cannot: record() refuses it by name, because calendar's stopping
+// point is the oldest year any other source reaches. So on a Mac with Google
+// Calendar the per-source test collapses to "is the whole walk COMPLETE", which
+// on an install with years of mail is never -- and the six-hour re-arm then runs
+// four thirty-minute windows a day, for ever, each one tripling the history
+// budget and re-arming the local stores at ten seconds on the owner's daily
+// driver.
+//
+// The outcome is the bound the receipts cannot give. A whole window that landed
+// no rows across the entire roster has nothing to show for itself, and repeating
+// it in six hours is a guess against the evidence; a day is. One that DID land
+// rows is worth another, which is the case the re-arm was written for.
+export const SPRINT_BARREN_HOLD_MS = 24 * 60 * 60_000;
+// Rows the current window has landed, so the judgement above has something to
+// read. Reset when a window begins.
+export const SPRINT_GAINED_KEY = 'sprint:gained';
 
 export function sourceRetryDelay(result, intervalMs) {
   if (Number.isFinite(result?.nextDelayMs) && result.nextDelayMs >= 1_000) {
@@ -1207,6 +1226,16 @@ export function createDaemon({
   /// may be replaced after SPRINT_REARM_AFTER_MS, for as long as last year is
   /// still open. See that constant -- a one-shot window is a window the owner's
   /// permission prompts can burn, permanently.
+  const windowGained = () => {
+    const parsed = Number(state.getCursor(SPRINT_GAINED_KEY));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  };
+  /// Rows this window has landed. Called from a completed pass of a sprint
+  /// source; see SPRINT_BARREN_HOLD_MS for what reads it.
+  const recordSprintGain = (rows) => {
+    if (!(rows > 0) || !sprinting()) return;
+    state.setCursor(SPRINT_GAINED_KEY, String(windowGained() + rows));
+  };
   const beginSprint = (trigger) => {
     if (sprintRoster().length === 0 || !sprintWorkOutstanding()) return false;
     const started = sprintStartedTs();
@@ -1215,8 +1244,18 @@ export function createDaemon({
       // Inside the window, or inside the cooling-off period after it. A start in
       // the future (see sprinting()) is neither, and is replaced on the spot.
       if (age >= 0 && age < SPRINT_REARM_AFTER_MS) return false;
+      // AND A BARREN ONE WAITS A DAY, not six hours. See SPRINT_BARREN_HOLD_MS:
+      // the receipts cannot end the phase on a Mac with calendar in the roster,
+      // and a window that landed nothing is the evidence that says so.
+      if (age >= 0 && windowGained() === 0 && age < SPRINT_BARREN_HOLD_MS) return false;
     }
     state.setCursor(SPRINT_STARTED_KEY, String(now()));
+    state.deleteCursor(SPRINT_GAINED_KEY);
+    // A NEW WINDOW STARTS THE LADDER OVER. The retry ladder is per window, and
+    // leaving the count behind made it single-use per install: a source that
+    // spent all three attempts on a Time Machine pass six hours ago got no fast
+    // retry at all inside this window, for an unrelated transient.
+    sprintFailures.clear();
     log.info('sprint_started', {
       trigger,
       sources: sprintRoster(),
@@ -1243,6 +1282,10 @@ export function createDaemon({
     if (stopped || !sprinting()) return;
     for (const connector of sprintRoster()) {
       if (!nextRuns.has(connector) || notReady.has(connector)) continue;
+      // Nothing left for this one to walk: dragging it to a ten-second tick buys
+      // a forward pass that finds task() null and goes back to sleep, which is
+      // the waste the movedSomething gate was added to stop.
+      if (!yearlyBackfill.outstanding(connector)) continue;
       const source = scheduledByName.get(connector);
       if (source === undefined) continue;
       if ((nextRuns.get(connector) ?? 0) - now() <= sprintRearmMs) continue;
@@ -1250,14 +1293,23 @@ export function createDaemon({
     }
   };
 
-  /// advance(), plus the wake-up its own effect earns. Every caller in this file
-  /// goes through here so none of them can forget the second half.
-  const advanceWalk = () => {
+  /// ANYTHING THAT CAN MOVE THE YEAR, plus the wake-up that move earns.
+  ///
+  /// ~~advanceWalk() around advance().~~ advance() is not the only door: classify()
+  /// rewinds on a re-activation, reopen() rewinds outright, and reconcile() loops
+  /// advance() across several years at once. Each of those leaves real work in
+  /// front of sources that are parked at their full interval, and each was
+  /// reached without the wake -- so the owner finishing a Google sign-in ten
+  /// minutes into the window moved the walk and nothing looked at it for fifteen
+  /// minutes. Comparing the year around the call catches every one of them,
+  /// including the ones nobody has written yet.
+  const afterWalkMoves = (fn) => {
     const before = yearlyBackfill.snapshot().year;
-    const moved = yearlyBackfill.advance();
-    if (moved && yearlyBackfill.snapshot().year !== before) wakeSprintSources();
-    return moved;
+    const result = fn();
+    if (yearlyBackfill.snapshot().year !== before) wakeSprintSources();
+    return result;
   };
+  const advanceWalk = () => afterWalkMoves(() => yearlyBackfill.advance());
 
   const sprintSnapshot = () => {
     const started = sprintStartedTs();
@@ -1740,12 +1792,14 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     // is called ONCE, and the year it could have crossed has no task left in it
     // to call advance() again. So the first real answer re-runs it.
     const wasProvisional = yearlyBackfill.snapshot().provisional.includes(source.name);
-    yearlyBackfill.classify(
+    // Through afterWalkMoves: classify() rewinds the year for a source that has
+    // come back, and the sources parked on the old one have to hear about it.
+    afterWalkMoves(() => yearlyBackfill.classify(
       source.name,
       source.walksHistory === true && (source.name !== 'matrix' || socialPlatforms.length > 0)
-    );
+    ));
     if (wasProvisional) {
-      const recovery = yearlyBackfill.reconcile();
+      const recovery = afterWalkMoves(() => yearlyBackfill.reconcile());
       if (recovery.advanced > 0 || recovery.repaired) {
         log.info('history_reconciled_after_guess', {
           connector: source.name,
@@ -1766,6 +1820,17 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
     });
     let nextDelayMs = null;
     let sprintDelayMs = null;
+    // WHERE THE WALK WAS WHEN THIS TICK LOOKED.
+    //
+    // wakeSprintSources deliberately skips a source that is mid-run -- arming
+    // beside a pass in flight is two passes over one cursor -- and that source
+    // then re-armed from the historyWindow it captured BEFORE the year moved.
+    // With sources on independent timers at a ten-second cadence, overlaps are
+    // the common case: iMessage finishes a year, the walk drops, calendar is in
+    // flight with a null window from the year that just ended, and goes back to
+    // its interval with a fresh year waiting. The skip is right; the missing half
+    // is looking again on the way out.
+    const walkYearSeen = yearlyBackfill.snapshot().year;
     // THE ONE STOP THAT MUST NOT COME STRAIGHT BACK. A pass that read nothing is
     // a source with nothing to give, and asking it again in ten seconds is a
     // busy-loop. Every other ending is work in progress.
@@ -1820,7 +1885,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       if (Number.isFinite(forward.retryAfterMs) && forward.retryAfterMs >= 1_000) {
         nextDelayMs = Math.min(60_000, Math.floor(forward.retryAfterMs));
       }
-      if (forward.historyReopened === true) yearlyBackfill.reopen(source.name);
+      if (forward.historyReopened === true) afterWalkMoves(() => yearlyBackfill.reopen(source.name));
       const counts = runCounts(forward);
 
       // Then ONE slice of history, if this source walks backwards and has not
@@ -1939,15 +2004,22 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
       const movedSomething = (counts.ingested ?? 0) + (counts.updated ?? 0) > 0
         || historyGained > 0
         || historyMoved;
+      // A year that moved WHILE this pass ran is work that arrived after the
+      // window was captured, so it counts even though this tick's own window was
+      // null and it moved nothing of its own.
+      const walkMovedUnderUs = yearlyBackfill.snapshot().year !== walkYearSeen;
       if (
         !stoppedOnNothing
-        && movedSomething
-        && historyWindow !== null
+        && (walkMovedUnderUs || (movedSomething && historyWindow !== null))
         && sprinting()
         && SPRINT_CONNECTORS.includes(source.name)
         && yearlyBackfill.outstanding(source.name)
       ) {
         sprintDelayMs = sprintRearmMs;
+      }
+      // What this pass landed, for the barren-window judgement in beginSprint.
+      if (SPRINT_CONNECTORS.includes(source.name)) {
+        recordSprintGain((counts.ingested ?? 0) + (counts.updated ?? 0) + historyGained);
       }
       sprintFailures.delete(source.name);
       state.recordRun({
@@ -2301,7 +2373,7 @@ const makeCtx = ({ history = false, historyWindow = null, deadline = null } = {}
             && (source.name !== 'matrix' || socialPlatforms.length > 0)
         );
       })).then(() => {
-        const recovery = yearlyBackfill.reconcile();
+        const recovery = afterWalkMoves(() => yearlyBackfill.reconcile());
         if (recovery.advanced > 0 || recovery.repaired) {
           log.info('history_restart_reconciled', {
             fromYear: recovery.fromYear,
@@ -2507,7 +2579,16 @@ if (isMain) {
       // pid lets the app send SIGUSR2 to a child that has not installed its
       // handler yet -- the silent kill the marker exists to prevent, arriving
       // through the marker itself.
-      try { unlinkSync(defaultNudgeReadyPath()); } catch {}
+      // ONLY IF IT IS STILL OURS. The marker is one shared path holding a pid,
+      // and a relaunch can have the incoming daemon write it before the outgoing
+      // one finishes closing its database -- a large WAL checkpoint against a
+      // cold node start is enough. Unlinking blindly there deletes the new
+      // daemon's marker, announceNudgeReady runs once so it never comes back,
+      // and every nudge is silently dropped for that daemon's whole life.
+      try {
+        const path = defaultNudgeReadyPath();
+        if (Number(readFileSync(path, 'utf8').trim()) === process.pid) unlinkSync(path);
+      } catch {}
       if (ownerWatch) clearInterval(ownerWatch);
       daemon.stop();
       state.close();

@@ -620,26 +620,80 @@ test('the clock does not start while every local store is still unreadable', asy
   );
 });
 
-// AND A SPENT WINDOW IS NOT THE END OF IT, for as long as last year is open.
-test('a window burnt before anything was readable can be replaced later', async (t) => {
-  const currentYear = new Date().getFullYear();
-  const burnt = fakeState({
-    // Spent, and long enough ago to be replaceable.
+// AND A SPENT WINDOW IS NOT THE END OF IT -- WHEN IT DID SOME GOOD.
+//
+// A machine that still has history to read is owed another window six hours
+// later: the first one may have been spent on Full Disk Access and a LinkedIn
+// export email, and a one-shot rule makes that permanent.
+test('a spent window that landed rows is replaced later', async (t) => {
+  const spent = fakeState({
     [daemon.SPRINT_STARTED_KEY]: String(Date.now() - 7 * 60 * 60_000),
+    // It walked something before it ran out.
+    [daemon.SPRINT_GAINED_KEY]: '4210',
   });
   const chat = walker('imessage');
-  const { instance, state } = build(t, [chat.source], { state: burnt });
+  const { instance, state } = build(t, [chat.source], { state: spent });
 
   instance.start();
   await sleep(2_200);
 
   assert.ok(
     Number(state.getCursor(daemon.SPRINT_STARTED_KEY)) > Date.now() - 60_000,
-    'a machine that still has not reached last year is owed another half hour'
+    'a machine that still has history to read is owed another half hour'
   );
   assert.ok(chat.calls.forward >= 3, 'and it actually sprints');
-  assert.ok(currentYear > 2000);
+  // Reset on arming and counted again from zero: the new window is judged on
+  // what IT lands, not on what the last one did.
+  assert.ok(
+    Number(state.getCursor(daemon.SPRINT_GAINED_KEY) ?? 0) < 4210,
+    'the new window inherited the old one\'s tally'
+  );
 });
+
+// AND A WINDOW THAT LANDED NOTHING WAITS A DAY.
+//
+// `exhausted` cannot end the phase on a Mac with calendar in the roster --
+// record() refuses that mark by name, because calendar's stopping point is the
+// oldest year any other source reaches -- so the per-source test collapses to
+// "is the whole walk COMPLETE", which on an install with years of mail is never.
+// The six-hour re-arm then runs four thirty-minute windows a day for ever, each
+// tripling the history budget and re-arming the local stores at ten seconds, on
+// the owner's daily driver. The outcome is the bound the receipts cannot give.
+test('a window that landed nothing is not repeated six hours later', async (t) => {
+  const barren = fakeState({
+    // Spent, seven hours ago, and it moved nothing.
+    [daemon.SPRINT_STARTED_KEY]: String(Date.now() - 7 * 60 * 60_000),
+  });
+  const chat = walker('imessage');
+  const { instance, state } = build(t, [chat.source], { state: barren });
+  const before = state.getCursor(daemon.SPRINT_STARTED_KEY);
+
+  instance.start();
+  await sleep(2_200);
+
+  assert.equal(state.getCursor(daemon.SPRINT_STARTED_KEY), before,
+    'four barren half hours a day on somebody\'s daily driver is not a first load');
+  assert.equal(chat.calls.forward, 1, 'and nothing sprints');
+});
+
+// A DAY LATER IT IS WORTH ANOTHER LOOK. The bound is a hold, not a verdict: the
+// machine may have gained a connector, or a store may have become readable.
+test('a barren window is owed another one a day later', async (t) => {
+  const barren = fakeState({
+    [daemon.SPRINT_STARTED_KEY]: String(Date.now() - 25 * 60 * 60_000),
+  });
+  const chat = walker('imessage');
+  const { instance, state } = build(t, [chat.source], { state: barren });
+
+  instance.start();
+  await sleep(2_200);
+
+  assert.ok(
+    Number(state.getCursor(daemon.SPRINT_STARTED_KEY)) > Date.now() - 60_000,
+    'a hold that never lifts is a verdict, and this is not one'
+  );
+});
+
 
 test('and not before the cooling-off period is up', async (t) => {
   const recent = fakeState({
@@ -951,5 +1005,79 @@ test('one flaky needs() does not drop a source out of the sprint roster', async 
     instance.sprintSnapshot()?.sources,
     ['imessage'],
     'one throw narrowed the sprint roster, which is how a source ends up trailing for good'
+  );
+});
+
+// ROUND-8 FINDING 3/5. advanceWalk() covered advance(), which is not the only
+// door: classify() rewinds on a re-activation, reopen() rewinds outright, and
+// reconcile() loops advance() across several years. Each leaves real work in
+// front of sources parked at their full interval. Failing input: the owner
+// finishes a Google sign-in ten minutes into the window, the walk rewinds to the
+// current year with work for everybody, and the local store keeps sleeping.
+//
+// The People barrier is held open throughout, so the ORDINARY advance cannot
+// move the year: the only thing that moves it here is the rewind, which is the
+// door under test.
+test('a walk rewound by a source coming back wakes the ones parked on it', async (t) => {
+  const currentYear = new Date().getFullYear();
+  // The walk has already come down a year, and imessage has the receipts for
+  // both — so it is parked, and it is not itself the one that looks late.
+  const parked = fakeState({
+    // The one-time People-barrier install resets the year to the current one on
+    // a state that has never seen it; this fixture is an install that has.
+    'yearly-backfill:people-barrier-version': '1',
+    'yearly-backfill:year': String(currentYear - 1),
+    [`yearly-backfill:connector:imessage:done:${currentYear}`]: '1',
+    [`yearly-backfill:connector:imessage:done:${currentYear - 1}`]: '1',
+    [daemon.SPRINT_STARTED_KEY]: String(Date.now() - 60_000),
+    [daemon.SPRINT_GAINED_KEY]: '100',
+  });
+  const chat = walker('imessage', { openSlices: 50 });
+  let signedIn = false;
+  const late = {
+    name: 'calendar',
+    walksHistory: true,
+    needs: async () => (signedIn ? [] : ['waiting for the owner']),
+    run: async (ctx) => {
+      if (ctx.history !== true) return {};
+      await sleep(20);
+      return { ingested: 1, historyProgressed: true };
+    },
+  };
+  const { instance, state } = build(t, [chat.source, late], {
+    state: parked,
+    daemon: {
+      firstRunStaggerMs: 200,
+      reprobeFloorMs: 250,
+      ingestOpts: { tokenFile: '/synthetic/hermes-token' },
+      // Never crossed: advance() stops at the barrier, so the year can only move
+      // by the rewind below.
+      completePeopleYear: () => new Promise(() => {}),
+    },
+  });
+
+  instance.start();
+  await sleep(1_600);
+  const parkedAt = chat.calls.forward;
+  assert.equal(
+    Number(state.getCursor('yearly-backfill:year')),
+    currentYear - 1,
+    'the barrier has to actually hold the walk, or the rewind is not what moved it'
+  );
+
+  // The sign-in lands. calendar classifies active, has none of the years the
+  // walk came through, and the rewind reopens the current year for everybody.
+  signedIn = true;
+  await sleep(1_400);
+
+  assert.equal(
+    Number(state.getCursor('yearly-backfill:year')),
+    currentYear,
+    'the fixture has to actually rewind the walk'
+  );
+  assert.ok(
+    chat.calls.forward > parkedAt,
+    `the walk reopened with work for everybody and the parked source slept through it `
+      + `(${parkedAt} then ${chat.calls.forward})`
   );
 });
