@@ -34,5 +34,16 @@ test('Connectors.start() reasserts 0700 on ~/.hazlie before spawning the daemon'
 test('the daemon still treats a wide ~/.hazlie as fatal, so the app-side reassert is load-bearing', () => {
   const checks = readFileSync(join(ROOT, '..', 'connectors', 'lib', 'checks.mjs'), 'utf8');
   assert.match(checks, /hazlie-tree-perms/u);
-  assert.match(checks, /expected mode 0700 throughout/u);
+  // ~~/expected mode 0700 throughout/~~ — the literal became
+  // `${TREE_MODE_TEXT}` when the octal moved into a shared constant, and this
+  // line has been red since, for a spelling change rather than a behaviour one.
+  // The two halves of the claim are asserted separately now: the check FAILS on
+  // a wide tree, and the mode it demands is still 0700.
+  assert.match(checks, /expected mode \$\{TREE_MODE_TEXT\} throughout/u);
+  assert.match(checks, /const TREE_MODE = OWNER_ONLY_DIR_MODE;/u);
+  const secrets = readFileSync(join(ROOT, '..', 'connectors', 'lib', 'secrets.mjs'), 'utf8');
+  assert.match(secrets, /export const OWNER_ONLY_DIR_MODE = 0o700;/u,
+    'if the tree stops being owner-only, the app-side reassert needs rewriting, not this test');
+  assert.match(checks, /if \(problems\.length > 0\) \{\s*\n\s*return result\(\s*\n\s*name,\s*\n\s*FAIL,/u,
+    'a wide tree must still be FATAL, not a warning');
 });
