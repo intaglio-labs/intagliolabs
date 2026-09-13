@@ -67,6 +67,21 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
   /// is an answer and it has to stick.
   private static let offeredDefaultsKey = "HazlieLinkedInOffered"
 
+  /// WHEN THIS OWNER STARTED WAITING, and how long the waiting may last.
+  ///
+  /// An owner who pressed "later" and never imports was enumerated over two
+  /// folders every sixty seconds, on every launch, for the life of the install
+  /// -- while hermes tells that same owner "your linkedin export never arrived"
+  /// after seven days. Two parts of one feature disagreeing about whether the
+  /// wait ever ends.
+  ///
+  /// Twice the sentence's bound, deliberately: seven days is when the CARD
+  /// stops promising, and an owner who requested the archive late in that week
+  /// should still have it taken when it lands. After a fortnight the pickers
+  /// are the way in, and they always were.
+  private static let armedDefaultsKey = "HazlieLinkedInWatchArmed"
+  private static let giveUpAfter: TimeInterval = 14 * 24 * 60 * 60
+
   private weak var bridge: Bridge?
   /// EVERYTHING BELOW THIS LINE IS THE QUEUE'S. The event handlers run there,
   /// the scan runs there and stop() runs there, so the watch list is built there
@@ -76,7 +91,7 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
   private let queue = DispatchQueue(label: "io.intaglio.exportwatch", qos: .utility)
   /// What a candidate looked like when it was measured, so "still growing" can
   /// be answered without a directory event that is never coming. See scan().
-  private var seen: [String: (size: Int, at: Date)] = [:]
+  private var seen: [String: (size: Int, at: Date?)] = [:]
   /// Whether a folder is actually open. NOT "begin() has been called": a denied
   /// folder used to leave this true forever, so granting it later in System
   /// Settings did nothing until the app was relaunched — while screen 4 went on
@@ -87,6 +102,23 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
   private var finished = false
   /// The didBecomeActive observer, registered once. See begin().
   private var activation: NSObjectProtocol?
+  /// The bridge to re-arm with, kept because a retry has no caller to pass one.
+  private weak var armedBridge: Bridge?
+  /// THE OFFER ON SCREEN, or nil. While this is set nothing new is offered:
+  /// across scans the sweep used to find the next archive, overwrite the
+  /// pending one and repaint the open panel, so the filename changed under the
+  /// owner's cursor and a click could import a file other than the name they
+  /// read.
+  private var offering: String?
+  /// Answered "not now" this session. In memory and cleared when the owner
+  /// comes back to the app, which is what makes ✕ a deferral rather than a
+  /// refusal: it stops the sweep re-presenting the same archive every minute,
+  /// and the next activation offers it again.
+  private var deferred: Set<String> = []
+  /// How many times in a row a path has been found still growing. See
+  /// settleAgain: without this, a file that never settles re-enumerates both
+  /// folders every three seconds for as long as it keeps changing.
+  private var attempts: [String: Int] = [:]
   private var rescan: DispatchWorkItem?
   /// The slow sweep, for a change no directory event describes. See armSweep.
   private var sweep: DispatchWorkItem?
@@ -127,10 +159,41 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
   ///   until the app is relaunched.
   func begin(bridge: Bridge) {
     dispatchPrecondition(condition: .onQueue(.main))
+    self.armedBridge = bridge
+    // REGISTERED BEFORE THE REFUSALS, because the refusals are what it exists to
+    // retry: a folder the owner grants later in System Settings, and a registry
+    // the owner switches linkedin back on in. Both happen while this app is in
+    // the background, and coming back to it is when they have just happened.
+    if activation == nil {
+      activation = NotificationCenter.default.addObserver(
+        forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+      ) { [weak self] _ in self?.rearm() }
+    }
     guard !finished, !watching else { return }
-    guard Features.connector("linkedin") != .off else { finished = true; return }
+    // RETRYABLE, NOT PERMANENT (review finding 12). The registry is mutable at
+    // runtime -- the settings shelf switches this connector on and off -- so a
+    // refusal on it must not outlive the setting that caused it. The one
+    // permanent refusal is an export that is already installed, which is the
+    // only condition here that cannot revert.
+    guard Features.connector("linkedin") != .off else { return }
     guard !Bridge.linkedInExportInstalled else { finished = true; return }
+    // AND THE WAIT HAS AN END. See giveUpAfter.
+    let armedAt = UserDefaults.standard.double(forKey: Self.armedDefaultsKey)
+    if armedAt <= 0 {
+      UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.armedDefaultsKey)
+    } else if Date().timeIntervalSince1970 - armedAt > Self.giveUpAfter {
+      finished = true
+      return
+    }
     self.bridge = bridge
+    // CLAIMED HERE, ON THE MAIN THREAD, BEFORE THE BLOCK THAT BLOCKS (review
+    // finding 14). The queue block below parks inside open(O_EVTONLY) for as
+    // long as the consent dialog is on screen, so assigning `watching` from
+    // inside it left a window in which a second arm -- press "request a copy",
+    // answer the dialog slowly, come back and press "later" -- walked past the
+    // guard and opened a second source per folder. Given back below if nothing
+    // actually opened.
+    watching = true
 
     // The delegate and the category both have to exist before a notification
     // naming the category is sent, or the banner arrives with no button on it.
@@ -192,6 +255,40 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
       for source in self.sources { source.cancel() }
       self.sources = []
       self.seen = [:]
+    }
+  }
+
+  /// Try again, from the outside. Coming back to the app is when a denied folder
+  /// has just been granted, or the registry just switched this connector on --
+  /// and it is also when an offer the owner put off with ✕ may be made again.
+  private func rearm() {
+    dispatchPrecondition(condition: .onQueue(.main))
+    queue.async { [weak self] in self?.deferred = [] }
+    guard let bridge = armedBridge else { return }
+    if watching {
+      queue.async { [weak self] in self?.scan() }
+      return
+    }
+    begin(bridge: bridge)
+  }
+
+  /// THE OWNER ANSWERED. `keep` is what spends the offer.
+  ///
+  /// ~~The key was written when the offer was MADE~~, which spent it on an
+  /// offer drawn under the onboarding scrim, on an import that failed, and on a
+  /// ✕ -- three ways to lose an archive for the life of the install, on the one
+  /// path whose whole purpose is not to lose it. It is written by the two
+  /// answers that actually end an offer: an import that worked, and "not this
+  /// one". A failure and a "not now" leave it exactly where it was.
+  func answerOffer(_ key: String, keep: Bool) {
+    queue.async { [weak self] in
+      guard let self else { return }
+      if keep { Self.rememberOffer(key) } else { self.deferred.insert(key) }
+      self.offering = nil
+      self.attempts[key] = nil
+      // An import that worked installs an export, and that is the end of this
+      // watcher -- scan() notices, and says so rather than leaving it to luck.
+      self.scan()
     }
   }
 
@@ -303,8 +400,20 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
   /// timer fires three seconds later, the file is still growing, and no further
   /// event is ever coming to correct it. This is how the scan gets to look
   /// again at a file it has decided not to judge yet.
-  private func settleAgain() {
+  /// How many times in a row one path may be found still growing before this
+  /// stops chasing it. Twenty settles is a minute of three-second scans, which
+  /// is generous for a file that is genuinely being written and finite for one
+  /// that is not: a stalled download, or a Connections.csv some other tool keeps
+  /// rewriting, used to re-enumerate both folders every three seconds for as
+  /// long as it lasted and offer nothing at all. The sixty-second sweep still
+  /// looks, so a file that settles later is still found.
+  private static let settleAttempts = 20
+
+  private func settleAgain(for path: String) {
     dispatchPrecondition(condition: .onQueue(queue))
+    let tries = (attempts[path] ?? 0) + 1
+    attempts[path] = tries
+    guard tries <= Self.settleAttempts else { return }
     scheduleScan()
   }
 
@@ -318,6 +427,12 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
     // settings row, a file dropped on the panel. Each of those is a reason to
     // stop, and this is the check that notices.
     if Bridge.linkedInExportInstalled { stop(); return }
+    // AN OFFER ON SCREEN IS A REASON TO FIND NOTHING NEW (review finding 5).
+    // "One offer at a time" held only inside a single pass of this function;
+    // across scans the sweep found the next archive and repainted the panel the
+    // owner was reading, so the filename changed under their cursor and a click
+    // could import something other than the name they had just read.
+    guard offering == nil else { return }
     let fm = FileManager.default
     let already = Set(Self.offeredKeys)
     for directory in Self.watched {
@@ -335,18 +450,31 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
         // A part-downloaded file is usually named `.crdownload`/`.download`/
         // `.part` and never matches at all, but a placeholder under the FINAL
         // name is a thing some clients create.
-        guard size > 0 else { settleAgain(); continue }
+        guard size > 0 else { settleAgain(for: found.url.path); continue }
         // STILL GROWING? Measured against the last look rather than against the
         // clock: a file whose size has not moved since the previous scan has
         // stopped being written, and one that has moved gets another settle.
         // Neither is marked offered, so nothing is spent on a partial file.
+        //
+        // THE DATE IS PART OF "THE SAME FILE" (review finding 15). Keyed on the
+        // path with a size alone, a download deleted and fetched again from the
+        // same server matched the OLD entry on its first scan -- same path, same
+        // size -- passed the settle check immediately, and was offered while it
+        // was still being written, with a new mtime that made the offer key new.
+        // The whole guard, spent on a partial file.
         let previous = seen[found.url.path]
-        seen[found.url.path] = (size, Date())
-        guard let previous, previous.size == size else { settleAgain(); continue }
+        seen[found.url.path] = (size, found.at)
+        guard let previous, previous.size == size, previous.at == found.at else {
+          settleAgain(for: found.url.path)
+          continue
+        }
         let key = Self.offerKey(found.url, size: size, at: found.at)
-        guard !already.contains(key) else { continue }
-        Self.rememberOffer(key)
-        offer(found.url, vintage: found.at, in: directory)
+        guard !already.contains(key), !deferred.contains(key) else { continue }
+        // NOT RECORDED HERE. See answerOffer: the key is written by the answer,
+        // because an offer nobody saw, an import that failed and a ✕ all used to
+        // spend it.
+        offering = key
+        offer(found.url, vintage: found.at, in: directory, key: key)
         // ONE OFFER AT A TIME. Two banners for two files in the same folder is
         // an inbox, not an offer, and the second is nearly always the browser's
         // duplicate download of the first.
@@ -442,7 +570,7 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
   /// So the offer goes to a panel this app draws itself, which is on screen
   /// because this code put it there, and the notification is a bonus for the
   /// Macs that deliver one.
-  private func offer(_ url: URL, vintage: Date?, in directory: URL) {
+  private func offer(_ url: URL, vintage: Date?, in directory: URL, key: String) {
     let dated: String
     if let vintage, !Calendar.current.isDateInToday(vintage) {
       let when = DateFormatter()
@@ -454,8 +582,11 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
     }
     let name = url.lastPathComponent
     let folder = directory.lastPathComponent
+    // The key travels with it, because the answer is what spends the offer and
+    // the answer comes back through the bridge.
     DispatchQueue.main.async { [weak self] in
-      self?.bridge?.linkedInExportFound(at: url, name: name, folder: folder, dated: dated)
+      self?.bridge?.linkedInExportFound(
+        at: url, name: name, folder: folder, dated: dated, key: key)
     }
     ModelSetup.notify(
       title: "found your LinkedIn export",

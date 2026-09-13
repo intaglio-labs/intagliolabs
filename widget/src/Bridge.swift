@@ -645,7 +645,8 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// a folder right now, and one restored across a relaunch would be a panel
   /// asking about something that may have been moved, renamed or imported since.
   /// ExportWatch re-finds whatever is still there on its own.
-  private var pendingExport: (url: URL, name: String, folder: String, dated: String)?
+  private var pendingExport:
+    (url: URL, name: String, folder: String, dated: String, key: String)?
 
   /// The one-off mode the reconnect panel's NEXT pull should use, handed over by
   /// onboarding's "just this once" button. Instance state and not UserDefaults:
@@ -2322,24 +2323,40 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       }
 
     case "exportDecide":
-      // YES OR NO, ABOUT THE FILE NATIVE FOUND. The page names no file: it
-      // answers about whatever this bridge is holding, so a compromised panel
-      // can accept an offer it was shown and nothing else.
+      // THREE ANSWERS, AND ONLY TWO OF THEM SPEND THE OFFER.
       //
-      // EITHER ANSWER SPENDS THE OFFER. "not this one" is a real answer -- the
-      // owner has looked at the name and it is not the archive they want -- and
-      // ExportWatch has already written the key, so nothing re-offers it.
+      //   take: true    import it. The offer ends if the import WORKED -- a
+      //                 failure leaves the archive exactly where it was, still
+      //                 the one the owner wanted, and the key is
+      //                 (path, size, mtime), none of which a failure changes,
+      //                 so spending it there refused that file forever.
+      //   take: false   "not this one". A real answer, and it ends the offer.
+      //   no `take`     "not now" -- the ✕. Closes the panel and takes the glow
+      //                 back, and leaves the archive re-offerable: the watcher
+      //                 holds it aside until the owner next comes back to the
+      //                 app. The close box used to post nothing at all, so the
+      //                 gear glowed forever over an offer nothing could
+      //                 re-present.
+      //
+      // The page names no file: it answers about whatever this bridge is
+      // holding, so a compromised panel can accept an offer it was shown and
+      // nothing else.
       guard let pending = pendingExport else {
         reply(webView, id, ["state": "ok", "taken": false])
         return
       }
+      let take = payload["take"] as? Bool
       pendingExport = nil
       delegate?.linkedInExportOfferClosed()
-      guard payload["take"] as? Bool == true else {
+      guard take == true else {
+        // `false` is a verdict and spends it; a missing `take` is the ✕.
+        ExportWatch.shared.answerOffer(pending.key, keep: take == false)
         reply(webView, id, ["state": "ok", "taken": false])
         return
       }
       importLinkedIn(files: [pending.url]) { [weak self] out in
+        let ok = out["state"] as? String == "ok"
+        ExportWatch.shared.answerOffer(pending.key, keep: ok)
         self?.reply(webView, id, ["state": "ok", "taken": true,
                                   "result": out["state"] as? String ?? "error",
                                   "reason": out["reason"] as? String ?? NSNull(),
@@ -3604,9 +3621,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// Mac it was walked on -- see ExportWatch.offer. The panel is the surface
   /// this app can actually guarantee, so the offer lives here until it is
   /// answered and the delegate is what puts it on screen.
-  func linkedInExportFound(at url: URL, name: String, folder: String, dated: String) {
+  func linkedInExportFound(at url: URL, name: String, folder: String, dated: String,
+                           key: String) {
     dispatchPrecondition(condition: .onQueue(.main))
-    pendingExport = (url, name, folder, dated)
+    pendingExport = (url, name, folder, dated, key)
     delegate?.linkedInExportOffered(name: name)
   }
 

@@ -42,10 +42,18 @@ function done(line) {
   fit();
 }
 
+// THREE ANSWERS. `true` imports, `false` is "not this one", and `null` is the
+// ✕ -- "not now", which closes the panel and takes the gear glow back while
+// leaving the archive re-offerable when the owner next comes back to the app.
+//
+// ~~The ✕ posted `close` alone~~, so native never heard a verdict: the pending
+// offer stayed set, the export errand was never taken back, and the gear glowed
+// for the rest of the session over an offer nothing could re-present. A close
+// box that silently strands a surface is worse than no close box.
 function decide(take) {
   el('exTake').disabled = true;
   el('exSkip').disabled = true;
-  hzPost('exportDecide', { take })
+  hzPost('exportDecide', take === null ? {} : { take })
     .then((out) => {
       if (!take || out?.taken !== true) { hzPost('close').catch(() => {}); return; }
       if (out.result === 'ok') {
@@ -96,7 +104,7 @@ el('exSkip').addEventListener('click', () => {
   if (el('exTake').hidden) { hzPost('close').catch(() => {}); return; }
   decide(false);
 });
-el('exClose').addEventListener('click', () => hzPost('close').catch(() => {}));
+el('exClose').addEventListener('click', () => decide(null));
 
 // Native pokes this when it re-shows the panel for a new offer, the way the
 // reconnect card refetches on every show: a panel that survived hidden must

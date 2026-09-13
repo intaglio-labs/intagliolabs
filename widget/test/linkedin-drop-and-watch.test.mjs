@@ -177,15 +177,15 @@ test('a file still being written does not spend the one offer', () => {
   // Measured against the LAST LOOK, not against the clock: a file whose size has
   // not moved since the previous scan has stopped being written.
   assert.match(scan, /let previous = seen\[found\.url\.path\]/u);
-  assert.match(scan, /guard let previous, previous\.size == size else \{ settleAgain\(\); continue \}/u,
+  assert.match(scan, /previous\.size == size, previous\.at == found\.at else \{/u,
     'a file that grew between two looks must not be offered');
-  assert.match(code(watch), /private func settleAgain\(\)/u,
+  assert.match(code(watch), /private func settleAgain\(for path: String\)/u,
     'and the scan has to re-look on its own, because no directory event is coming');
   // Neither the zero-byte case nor the growing case marks the file offered, so
   // a partial download cannot spend the one offer it gets.
-  const offeredAt = scan.indexOf('Self.rememberOffer(key)');
+  const offeredAt = scan.indexOf('offering = key');
   assert.ok(offeredAt > scan.indexOf('previous.size == size'),
-    'nothing may be recorded as offered before it has been found to be still');
+    'nothing may be offered before it has been found to be still');
 });
 
 test('what was offered is remembered by what it was, not only where', () => {
@@ -209,7 +209,7 @@ test('an old archive is offered with its date on it', () => {
   // Downloads imports on one press and the connector ingests a year-old graph
   // as current. It cannot be refused outright (an owner restoring a Mac may
   // mean it), so the banner says how old it is and the press is informed.
-  const offer = swiftFunc(watch, 'offer\\(_ url: URL, vintage: Date\\?, in directory: URL\\)');
+  const offer = swiftFunc(watch, 'offer\\(_ url: URL, vintage: Date\\?, in directory: URL, key: String\\)');
   assert.match(code(offer), /DateFormatter/u,
     'the offer has to be able to say when the file is from');
   // ...and the panel says it too, not only the banner that may never arrive.
@@ -233,7 +233,7 @@ test('an old archive is offered with its date on it', () => {
 // offers are also SPENT either way -- a recorded offer nobody saw is the bug
 // being fixed, so the record has to follow the thing the owner can see.
 test('an export found raises an in-app offer, not only a notification', () => {
-  const offer = /private func offer\(_ url: URL, vintage: Date\?, in directory: URL\) \{([\s\S]*?)\n  \}/u
+  const offer = /private func offer\(_ url: URL, vintage: Date\?, in directory: URL, key: String\) \{([\s\S]*?)\n  \}/u
     .exec(watch)?.[1] ?? '';
   assert.ok(offer, 'offer() not found');
   assert.match(code(offer), /linkedInExportFound/u,
@@ -267,7 +267,7 @@ test('the panel says which file, and where it came from', () => {
   assert.match(js, /out\.dated/u, 'and how old it is, which the notification already said');
   // Two answers, and "not this one" is a real answer that spends the offer.
   // One verdict verb, and the button decides which answer it carries.
-  assert.match(js, /hzPost\('exportDecide', \{ take \}\)/u);
+  assert.match(js, /hzPost\('exportDecide', take === null \? \{\} : \{ take \}\)/u);
   assert.match(js, /addEventListener\('click', \(\) => decide\(true\)\)/u);
   assert.match(js, /decide\(false\)/u);
   assert.match(html, /id="exTake"/u);
@@ -340,6 +340,188 @@ test('notification permission is asked for, and the banner waits for the answer'
   assert.doesNotMatch(code(notify), /center\.add\(req, withCompletionHandler: nil\)/u,
     'a notification that fails silently is how "nothing happened" becomes unexplainable');
   assert.match(code(notify), /NSLog/u);
+});
+
+// -------------------------------------------------- the offer's lifetime
+
+// AN OFFER IS SPENT WHEN IT IS ANSWERED, NOT WHEN IT IS MADE.
+//
+// Recording the key at offer time was wrong in three directions at once, and
+// the closing review found all three:
+//
+//   the panel draws UNDER the onboarding scrim, so an owner who pressed
+//   "later" with an archive already in Downloads had it offered, recorded and
+//   never seen -- and the notification is then the only surface left, which is
+//   the surface this whole batch exists because it does not arrive;
+//   a FAILED import spends it, and the key is (path, size, mtime), none of
+//   which a failure changes, so that archive is refused for the life of the
+//   install;
+//   and the ✕ spends it too, while never posting a verdict at all.
+//
+// So the key is written by the two answers that end an offer: an import that
+// worked, and "not this one". Everything else leaves it re-offerable.
+test('the offer key is written when the owner answers, not when we ask', () => {
+  const scan = code(swiftFunc(watch, 'scan\\(\\)'));
+  assert.doesNotMatch(scan, /rememberOffer/u,
+    'the scan may not spend an offer the owner has not seen yet');
+  // The two answers that end it, and nothing else.
+  assert.match(code(watch), /func answerOffer\(_ key: String, keep: Bool\)/u);
+  const decide = code(/case "exportDecide":([\s\S]*?)\n    case "/u.exec(bridge)?.[1] ?? '');
+  assert.match(decide, /answerOffer/u, 'a verdict is what spends it');
+  // A FAILED IMPORT IS NOT AN ANSWER. The archive is still there and still the
+  // one the owner wanted; only a success ends the offer.
+  assert.match(decide, /out\["state"\] as\? String == "ok"/u);
+});
+
+test('the ✕ is "not now", and the glow goes with it', () => {
+  const js = read('widget/ui/export.js');
+  // ~~`exClose` posted `close` alone~~, so pendingExport stayed set, the export
+  // errand was never taken back, and the gear glowed forever with a hover
+  // pointing at an offer nothing could re-present.
+  assert.match(js, /el\('exClose'\)\.addEventListener\('click', \(\) => decide\(null\)\)/u,
+    'the close box has to post a verdict, not just close the window');
+  // Three answers now, and only two of them spend the offer.
+  assert.match(js, /decide\(true\)/u);
+  assert.match(js, /decide\(false\)/u);
+  assert.match(code(bridge), /let take = payload\["take"\] as\? Bool/u);
+  const decide = code(/case "exportDecide":([\s\S]*?)\n    case "/u.exec(bridge)?.[1] ?? '');
+  assert.match(decide, /guard take == true else \{/u,
+    '"not now" is a third answer, not a missing one');
+  assert.match(decide, /keep: take == false/u,
+    'and only the explicit "not this one" spends the offer');
+  // Either way the panel and the glow go.
+  assert.match(decide, /linkedInExportOfferClosed\(\)/u);
+});
+
+test('nothing is offered into a scrim the owner cannot see past', () => {
+  // makePanel builds at .normal and the onboarding scrim is full-screen at
+  // .floating, with the widget window ordered out for the flow's duration --
+  // so both surfaces of the offer are invisible while the flow is open.
+  const offered = /func linkedInExportOffered\(name: String\) \{([\s\S]*?)\n  \}/u
+    .exec(mainSwift)?.[1] ?? '';
+  assert.ok(offered, 'linkedInExportOffered not found');
+  assert.match(code(offered), /guard onboardingPanel\?\.isVisible != true else \{/u,
+    'the existing guard elsewhere in this file is the pattern to copy');
+  assert.match(code(offered), /deferredExportOffer = name/u, 'held, not dropped');
+  // ...and handed over when the flow ends, by whichever route it ends.
+  assert.match(code(mainSwift), /func presentDeferredExportOffer\(\)/u);
+  assert.match(code(mainSwift), /presentDeferredExportOffer\(\)/u);
+});
+
+test('a second find does not replace the offer being read', () => {
+  // "One offer at a time" held only inside one scan(). Across scans the sweep
+  // found the next archive, overwrote pendingExport and repainted the open
+  // panel -- so the filename changed under the cursor, and a click landing
+  // between the repaint and its round-trip imported a different file.
+  const scan = code(swiftFunc(watch, 'scan\\(\\)'));
+  assert.match(scan, /guard offering == nil else \{ return \}/u,
+    'an offer on screen is a reason to find nothing new');
+  assert.match(code(watch), /offering = key/u);
+  assert.match(code(watch), /offering = nil/u, 'and it is cleared when the offer ends');
+});
+
+test('a background find does not pull the app in front of the owner', () => {
+  // The sweep is most likely to fire while the owner is in the browser at
+  // LinkedIn, which is where "request a copy" just sent them. present()
+  // activates the app; a file-arrival notice may not.
+  const show = /private func showExportOffer\(_ name: String\) \{([\s\S]*?)\n  \}/u
+    .exec(mainSwift)?.[1] ?? '';
+  assert.ok(show, 'showExportOffer not found');
+  assert.doesNotMatch(code(show), /(?<!\w)present\(exportPanel!\)/u,
+    'present() calls NSApp.activate(ignoringOtherApps:)');
+  assert.match(code(mainSwift), /func presentWithoutStealingFocus\(/u);
+  assert.match(code(show), /presentWithoutStealingFocus\(exportPanel!\)/u);
+  // ...and the non-activating one does not activate.
+  const quiet = /private func presentWithoutStealingFocus\(_ panel: PopupPanel\) \{([\s\S]*?)\n  \}/u
+    .exec(mainSwift)?.[1] ?? '';
+  assert.doesNotMatch(code(quiet), /NSApp\.activate/u);
+  assert.match(code(quiet), /orderFrontRegardless\(\)/u);
+});
+
+test('the wait ends, the way the sentence about it does', () => {
+  // An owner who pressed "later" and never imports was enumerated over two
+  // folders every 60s, on every launch, for the life of the install -- while
+  // hermes tells that same owner "your linkedin export never arrived" after a
+  // week. The two must not disagree about whether the wait ever ends.
+  assert.match(code(watch), /armedDefaultsKey/u, 'it has to know when it started waiting');
+  assert.match(code(watch), /private static let giveUpAfter/u);
+  const begin = /func begin\(bridge: Bridge\) \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '';
+  assert.match(code(begin), /giveUpAfter/u);
+});
+
+test('a file that never stops growing stops being re-scanned', () => {
+  // Both settle paths re-armed a 3s scan with no cap, so a name that keeps
+  // being appended to re-enumerated both folders every three seconds forever
+  // and never offered anything.
+  assert.match(code(watch), /private static let settleAttempts/u);
+  const settle = /private func settleAgain\(for path: String\) \{([\s\S]*?)\n  \}/u
+    .exec(watch)?.[1] ?? '';
+  assert.ok(settle, 'settleAgain no longer knows which file it is waiting on');
+  assert.match(code(settle), /settleAttempts/u, 'and it gives up on that file');
+});
+
+test('turning the connector back on does not need a relaunch', () => {
+  // `watching` is deliberately retryable because a denied folder can be
+  // granted later. The registry is runtime-mutable in exactly the same way --
+  // the settings shelf can switch linkedin back on -- so a registry refusal
+  // must not be the permanent kind. The only permanent refusal is an export
+  // that is already installed, which is the one condition that cannot revert.
+  const begin = code(/func begin\(bridge: Bridge\) \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '');
+  assert.doesNotMatch(begin, /Features\.connector\("linkedin"\) != \.off else \{ finished = true/u,
+    'a registry refusal has to be retryable');
+  assert.match(begin, /Features\.connector\("linkedin"\) != \.off else \{ return \}/u);
+  assert.match(begin, /linkedInExportInstalled else \{ finished = true; return \}/u,
+    'and the one that cannot revert is still the one that is permanent');
+  // Something has to try again. Coming back to the app is the moment a
+  // registry change or a folder grant has just happened.
+  assert.match(code(watch), /self\?\.rearm\(\)/u);
+});
+
+test('a drop the row cannot answer for is still answered', () => {
+  // refuseLinkedInDrop is installed by linkedInRow(), so it did not exist at
+  // all with linkedin off in the registry, and it returned early once an
+  // export was installed. Native swallows every drop now, so those two states
+  // were silent: the owner dropped a file on the panel and nothing happened.
+  const js = read('widget/ui/connections.js');
+  const hook = /window\.__hzLinkedInDropRefused = \(name\) => \{([\s\S]*?)\n\};/u.exec(js)?.[1] ?? '';
+  assert.ok(hook, 'the drop-refusal hook is gone');
+  assert.match(hook, /showNotice/u, 'with no row to speak for it, the shelf says it');
+  const row = /function linkedInRow\(\) \{([\s\S]*?)\n\}/u.exec(js)?.[1] ?? '';
+  const refuse = /refuseLinkedInDrop = \(name\) => \{([\s\S]*?)\n  \};/u.exec(row)?.[1] ?? '';
+  assert.ok(refuse, 'refuseLinkedInDrop not found');
+  assert.doesNotMatch(code(refuse), /if \(installed\) return;/u,
+    'an imported export does not make a mis-drop unworthy of an answer');
+});
+
+test('arming twice while the consent dialog is up opens one set of watchers', () => {
+  // `watching` was assigned from inside the queue block, which parks in
+  // open(O_EVTONLY) for as long as the dialog is on screen -- so a second arm
+  // in that window passed the guard and appended a second source per folder.
+  const begin = code(/func begin\(bridge: Bridge\) \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '');
+  const claimAt = begin.indexOf('watching = true');
+  const queueAt = begin.indexOf('queue.async');
+  assert.ok(claimAt > -1 && claimAt < queueAt,
+    'the claim has to be taken on the main thread, before the block that blocks');
+  assert.match(begin, /self\.watching = opened/u, 'and given back if nothing opened');
+});
+
+test('the settle check cannot be passed by a different file of the same size', () => {
+  // `seen` was keyed on path with a size and an unread date. Download
+  // Connections.csv, delete it, download it again: the new file's first scan
+  // finds the old entry, the sizes match, and it is offered mid-write -- with
+  // a new mtime, so the offer is spent on a partial file.
+  const scan = code(swiftFunc(watch, 'scan\\(\\)'));
+  assert.match(scan, /previous\.size == size, previous\.at == found\.at/u,
+    'the date has to be compared too, or it is a different file wearing the same size');
+});
+
+test('the wake hook is one line, and the export hook is defined once', () => {
+  // A paste landed the whole of __hzExportFound INSIDE the __hzWake arrow body,
+  // with the module-scope copy still there. Valid JavaScript, invisible to
+  // node --check, and two copies of one function is how they come to differ.
+  assert.equal((widgetJs.match(/window\.__hzExportFound = /gu) ?? []).length, 1);
+  assert.match(widgetJs,
+    /window\.__hzWake = \(\) => \{ hzApplyTod\(\); refreshRelCard\(\); checkLinkedInReady\(\); \};/u);
 });
 
 // -------------------------------------------------- 10: one import at a time

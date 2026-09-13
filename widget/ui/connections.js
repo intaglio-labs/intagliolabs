@@ -494,17 +494,20 @@ function linkedInRow() {
     installed = out?.present === true;
     if (!installed) { paint(); return; }
     const n = Number(out.connections || 0);
-    const when = Number(out.modifiedTs);
+    // THE THIRD `Number(null) === 0` SITE. Bridge sends NSNull when it cannot
+    // read the file's date, and coercing it here rendered "2,970 · 1 jan" with
+    // a hover saying "imported on 01/01/1970" — a wrong number, shown to the
+    // owner, on the same page the shared reader was introduced to fix.
+    const when = hzExportReadyAt(out.modifiedTs);
     // A DAY AND A SHORT MONTH. ~~toLocaleDateString()~~ is "13/09/2026", and
     // "2,970 connections · 13/09/2026" is 267px of a 252px row. The word
     // "connections" and the year both go to the hover, where the count is
     // spelled out in full.
-    const short = Number.isFinite(when)
-      ? new Date(when).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
-        .toLowerCase()
-      : '';
+    const short = when === null ? ''
+      : new Date(when).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+        .toLowerCase();
     const dated = short ? ` · ${short}` : '';
-    const full = Number.isFinite(when) ? ` on ${new Date(when).toLocaleDateString()}` : '';
+    const full = when === null ? '' : ` on ${new Date(when).toLocaleDateString()}`;
     say(n > 0 ? `${n.toLocaleString()}${dated}` : `an export is here${dated}`,
       n > 0
         ? `${n.toLocaleString()} connections, imported${full}. ${LINKEDIN_HELP} press to replace it.`
@@ -529,8 +532,11 @@ function linkedInRow() {
   // happens to the row, which is what every other refusal here does — the
   // owner has to be able to read it after the file has gone back to wherever
   // they dragged it from.
+  // ~~`if (installed) return;`~~ An export already being imported does not make
+  // a mis-drop unworthy of an answer: native swallows every drop on this panel
+  // now, so if this row says nothing, nothing does. The line goes back to what
+  // is installed on the next read.
   refuseLinkedInDrop = (name) => {
-    if (installed) return;
     say("that isn't a linkedin export",
       `${name || 'that file'} is not Connections.csv or the zip linkedin sends. ${LINKEDIN_HELP}`);
     fitConnections();
@@ -1237,7 +1243,13 @@ window.__hzLinkedInChanged = () => { if (repaintLinkedIn) repaintLinkedIn(); };
 // ...and a drop this panel was given and could not use. Native takes every file
 // drop on this window now, so it is the only thing that can answer for one.
 window.__hzLinkedInDropRefused = (name) => {
-  if (refuseLinkedInDrop) refuseLinkedInDrop(String(name ?? ''));
+  const dropped = String(name ?? '');
+  if (refuseLinkedInDrop) { refuseLinkedInDrop(dropped); return; }
+  // NO ROW TO SPEAK FOR IT. linkedInRow() is not built when the registry has
+  // linkedin off, and native swallows every drop regardless — so without this
+  // the owner dropped a file on the panel and nothing anywhere said a word.
+  // The shelf's own notice line is the one surface that is always here.
+  showNotice({ text: `${dropped || 'that file'} is not a linkedin export.` });
 };
 
 // ---------------- the connectors intro (yeeted) ----------------

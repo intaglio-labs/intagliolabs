@@ -275,7 +275,7 @@ test('it watches Downloads and Desktop, and takes a denial silently', () => {
 test('it offers, and never imports on its own', () => {
   // A file appearing in Downloads is not consent to read it. Nothing in this
   // file may call the import except in answer to a press.
-  const offer = /private func offer\(_ url: URL, vintage: Date\?, in directory: URL\) \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '';
+  const offer = /private func offer\(_ url: URL, vintage: Date\?, in directory: URL, key: String\) \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '';
   assert.match(offer, /ModelSetup\.notify/u, 'the app has one notifier, and this is it');
   assert.doesNotMatch(offer, /importLinkedIn/u);
   const scan = /private func scan\(\) \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '';
@@ -747,6 +747,23 @@ test('an absent export-ready marker is absent, not 1970', () => {
   const ms = Date.UTC(2026, 8, 6);
   assert.equal(readyAt(ms), ms);
   assert.equal(readyAt(String(ms)), ms, 'a number over the bridge may arrive as a string');
+});
+
+test('the imported date is a date, not the epoch', () => {
+  // THE THIRD SITE, and the one that printed a number at the owner. Bridge
+  // sends NSNull for `modifiedTs` when it cannot read the file's date, and both
+  // pages coerced it: the settings row rendered "2,970 · 1 jan" with a hover
+  // saying "imported on 01/01/1970", and screen 4 said "imported 01/01/1970".
+  // Same defect, same two pages, and the shared reader existed by then.
+  for (const [name, page] of [['connections.js', connectionsJs],
+    ['onboarding.js', onboardingJs]]) {
+    assert.match(page, /hzExportReadyAt\(out\.modifiedTs\)/u,
+      `${name} still coerces the modification date itself`);
+    assert.doesNotMatch(code(page), /Number\(out\.modifiedTs\)/u);
+  }
+  // ...and nothing is rendered from it when there is no date.
+  assert.match(connectionsJs, /const short = when === null \? ''/u);
+  assert.match(onboardingJs, /const dated = when === null/u);
 });
 
 test('both surfaces read the marker through that one helper', () => {

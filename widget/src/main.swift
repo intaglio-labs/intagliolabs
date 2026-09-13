@@ -75,6 +75,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   private var reconnectPanel: PopupPanel?
   /// The Downloads watcher's "found your export" offer. See linkedInExportOffered.
   private var exportPanel: PopupPanel?
+  /// An offer that arrived while the onboarding scrim was up, waiting for the
+  /// flow to end. See presentDeferredExportOffer.
+  private var deferredExportOffer: String?
   private var monthsPanel: PopupPanel?
   private var onboardingPanel: PopupPanel?
   // Set while the onboarding scrim is standing aside for the system browser
@@ -672,6 +675,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
     }
   }
 
+  /// Show a panel the owner did not ask for, without taking the screen.
+  ///
+  /// present() below calls NSApp.activate(ignoringOtherApps:), which is right
+  /// for every panel that answers a press: the owner just clicked something and
+  /// a popup behind another app's window is not presented. The export offer is
+  /// the one panel nobody pressed for -- it arrives when a download finishes --
+  /// and its most likely moment is while the owner is in the browser at
+  /// LinkedIn, where "request a copy" sent them (review finding 6).
+  ///
+  /// orderFrontRegardless puts it in front of this app's own windows without
+  /// activating the app, so it is waiting when they come back and it does not
+  /// interrupt what they are doing to get there.
+  private func presentWithoutStealingFocus(_ panel: PopupPanel) {
+    watchForOutsideClicks()
+    defer { notifyPanelState() }
+    place(panel)
+    panel.orderFrontRegardless()
+  }
+
   private func present(_ panel: PopupPanel) {
     watchForOutsideClicks()
     defer { notifyPanelState() } // something now covers the dream band
@@ -751,6 +773,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       p.willOrderOut = { [weak self] in
         reportPanels?()
         self?.spotlightWidget(false)
+        // AND THE OFFER THE SCRIM WAS COVERING. An export found while the flow
+        // was open is held rather than drawn under it; this is the moment it
+        // can be seen. See linkedInExportOffered.
+        self?.presentDeferredExportOffer()
         // ...and the widget comes back however the flow ended — finished,
         // escaped from scene 1, or the panel closed by any native path. At
         // its own level: below every window, exactly as it lives.
@@ -1536,6 +1562,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
   // something and the widget is on the desktop by definition.
   func linkedInExportOffered(name: String) {
     dispatchPrecondition(condition: .onQueue(.main))
+    // NOT UNDER THE SCRIM. makePanel builds at .normal and the onboarding panel
+    // is full-screen at .floating, with the widget window ordered out for the
+    // flow's duration -- so both of this offer's surfaces are invisible while
+    // the flow is open, and the owner would never see the one thing they had
+    // just been told to expect. The offer is held; it is not spent, because the
+    // key is written by the ANSWER now. The same guard the dream band uses.
+    guard onboardingPanel?.isVisible != true else {
+      deferredExportOffer = name
+      return
+    }
+    showExportOffer(name)
+  }
+
+  /// The offer the scrim was covering, once it is gone.
+  func presentDeferredExportOffer() {
+    dispatchPrecondition(condition: .onQueue(.main))
+    guard let name = deferredExportOffer else { return }
+    deferredExportOffer = nil
+    // Only if it is still the offer: answering it from the notification while
+    // the flow was open leaves nothing to present, and the page closes itself
+    // on an empty exportOffer either way.
+    showExportOffer(name)
+  }
+
+  private func showExportOffer(_ name: String) {
+    dispatchPrecondition(condition: .onQueue(.main))
     if exportPanel == nil {
       exportPanel = makePanel(page: "export", size: capped(Self.scaled(Self.exportBase, Bridge.scale)))
       exportPanel!.hasShadow = false
@@ -1546,7 +1598,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       (exportPanel?.contentView as? WKWebView)?
         .evaluateJavaScript("window.__hzExportShow && window.__hzExportShow()")
     }
-    present(exportPanel!)
+    // WITHOUT PULLING THE APP IN FRONT OF THE OWNER (review finding 6). present()
+    // calls NSApp.activate(ignoringOtherApps:), and the moment this is most
+    // likely to fire is while the owner is in the browser at LinkedIn -- which
+    // is exactly where "request a copy" sent them. A file-arrival notice is not
+    // worth taking the screen for.
+    presentWithoutStealingFocus(exportPanel!)
     eval(widgetWeb, "window.__hzExportFound && window.__hzExportFound(\(jsString(name)))")
   }
 

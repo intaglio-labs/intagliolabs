@@ -994,10 +994,13 @@ function paintLinkedInExisting(out) {
   linkedInStatus.classList.remove('warn', 'bad');
   linkedInStatus.classList.add('ok');
   const n = Number(out.connections || 0);
-  const when = Number(out.modifiedTs);
-  const dated = Number.isFinite(when)
-    ? ` · imported ${new Date(when).toLocaleDateString()}`
-    : '';
+  // Through the shared reader: Bridge sends NSNull when it cannot read the
+  // file's date, `Number(null)` is 0 and finite, and this screen rendered
+  // "imported 01/01/1970". Same defect, same page pair, third site.
+  const when = hzExportReadyAt(out.modifiedTs);
+  const dated = when === null
+    ? ''
+    : ` · imported ${new Date(when).toLocaleDateString()}`;
   linkedInStatus.textContent = n > 0
     ? `${n.toLocaleString()} connections already here${dated}`
     : `an export is already here${dated}`;

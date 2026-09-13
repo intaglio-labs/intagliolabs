@@ -557,18 +557,7 @@ const hzApplyTod = hzApplyTimeOfDay(orbEl);
 // whether LinkedIn has mailed the archive while the Mac was asleep, which is
 // exactly when it would have. checkLinkedInReady is defined further down;
 // this runs long after the page has finished loading.
-window.__hzWake = () => { hzApplyTod(); refreshRelCard(); checkLinkedInReady();
-
-// THE WATCHER FOUND AN EXPORT. A panel opens with the offer on it, and this is
-// the second surface: a panel can be behind something, and the widget is on the
-// desktop by definition. Pushed by native rather than polled -- the finding is
-// an event, and the gear is not a status light.
-//
-// A null takes it back, which is how the offer being answered (by either
-// button, or by the notification) puts the glow out.
-window.__hzExportFound = (name) => {
-  setGearErrand('export', typeof name === 'string' && name !== '');
-}; };
+window.__hzWake = () => { hzApplyTod(); refreshRelCard(); checkLinkedInReady(); };
 winput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitFromWidget();
 });
