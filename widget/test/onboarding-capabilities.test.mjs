@@ -91,8 +91,16 @@ const READS = ['permissionState', 'setupState', 'engineProbe', 'googleProbe',
 test('the page can only reach the six checks it is supposed to', () => {
   // The verbs that write something, named one by one, so adding a write to
   // this page is a decision somebody makes here rather than a line of JS.
+  //
+  // `watchForExport` is a write in the sense this list means. It starts a
+  // background watcher and, the first time, makes macOS ask the owner for their
+  // Downloads and Desktop folders — which is the whole reason it is a verb at
+  // all rather than something the app does at launch. Arming it belongs to the
+  // one screen that has just explained what file is coming; doing it from
+  // applicationDidFinishLaunching put both system dialogs over screens 1 to 3.
   const WRITES = ['relMode', 'setEngine', 'startSources', 'requestPermission',
-                  'importLinkedIn', 'googleAuth', 'modelDownload', 'modelCancel',
+                  'importLinkedIn', 'watchForExport', 'googleAuth',
+                  'modelDownload', 'modelCancel',
                   'onboardingStep', 'onboardingDone', 'spotlightWidget', 'moveToApplications'];
   const extra = [...declared].filter((v) => !WRITES.includes(v) && !READS.includes(v));
   assert.deepEqual(extra, [], `unclassified onboarding verbs: ${extra.join(', ')}`);

@@ -323,13 +323,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // offer, but the daemon just started above does need respawning. See
       // FullDiskWatch for why that is the only thing that happens.
       DispatchQueue.main.async { FullDiskWatch.begin() }
-      // And notice the LinkedIn export arriving. It lands in ~/Downloads
-      // minutes or hours after the owner asked LinkedIn for it, long after the
-      // setup flow that asked has closed — so the app watches for it rather
-      // than waiting to be reopened. It does nothing on a Mac that already has
-      // an export, including asking for the Downloads-folder grant.
-      // See ExportWatch.
-      DispatchQueue.main.async { ExportWatch.shared.begin(bridge: self.bridge) }
+      // And notice the LinkedIn export arriving. It lands in ~/Downloads minutes
+      // or hours after the owner asked LinkedIn for it, long after the setup
+      // flow that asked has closed — so the app watches for it rather than
+      // waiting to be reopened.
+      //
+      // ONLY FOR AN OWNER WHO IS PAST THE FLOW. Starting it here unconditionally
+      // put the Downloads and Desktop consent dialogs on screen over onboarding
+      // screens 1 to 3, with no context, while screen 2 is telling its own story
+      // about a different grant — and before anything had mentioned an export
+      // (review finding 2, 2026-09-13). A first-run owner arms it from screen 4
+      // instead, where the file has just been explained; see the
+      // `watchForExport` bridge verb.
+      DispatchQueue.main.async {
+        guard Bridge.onboarded else { return }
+        ExportWatch.shared.begin(bridge: self.bridge)
+      }
     }
 
     // THE DISPLAY CHANGING IS AN EVENT, and until now nothing treated it as one.
@@ -1053,13 +1062,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BridgeDelegate {
       // webview leaves WebKit's own drag handling alone.
       // See ClickThroughWebView.onFileDrop.
       (connectionsPanel?.contentView as? ClickThroughWebView)?.onFileDrop = { [weak self] urls in
-        guard let self else { return false }
-        // Only files this import could possibly want. Anything else falls
-        // through to WebKit, which is what a drag onto a page normally means.
+        guard let self else { return }
         let wanted = urls.filter { ExportWatch.looksLikeExport($0.lastPathComponent) }
-        guard !wanted.isEmpty else { return false }
+        guard !wanted.isEmpty else {
+          // ~~`return false`, handing it to WebKit.~~ WebKit NAVIGATES to a
+          // dropped file, and the compartment is keyed on this view, so falling
+          // through gave the dropped document the settings panel's own grants
+          // (review finding 1). Nothing falls through now.
+          //
+          // Which leaves the owner, who aimed a file at a row that says "drop it
+          // here" and is owed an answer. The row says what the file was not.
+          // Through jsString because this is a filename off the owner's disk on
+          // its way into a JavaScript string literal.
+          let name = urls.first?.lastPathComponent ?? ""
+          self.eval(self.connectionsPanel?.contentView as? WKWebView,
+                    "window.__hzLinkedInDropRefused && "
+                      + "window.__hzLinkedInDropRefused(\(self.jsString(name)))")
+          return
+        }
         self.bridge.importLinkedIn(files: wanted) { _ in }
-        return true
       }
     }
     present(connectionsPanel!)

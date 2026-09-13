@@ -183,7 +183,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
                    // page. `importLinkedIn` is the picker, which now also takes
                    // the zip LinkedIn sends. `linkedInState` is what is already
                    // on disk from a previous run.
-                   "openLinkedInExport", "importLinkedIn", "linkedInState",
+                   // `watchForExport` arms the Downloads watcher, from the one
+                   // screen that has explained what the file is -- see the case.
+                   "openLinkedInExport", "watchForExport",
+                   "importLinkedIn", "linkedInState",
                    // Screen 5: whether the installed claude actually works,
                    // the opt-in it may then offer, and the local model for a
                    // Mac that has no claude on it.
@@ -220,8 +223,16 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   // whenPageFinishes, below the navigation delegate that drains it.
   private var afterLoad: [ObjectIdentifier: [(WKWebView) -> Void]] = [:]
 
-  func register(_ webView: WKWebView, as page: String) {
+  // The ONE file each view may load, recorded beside the compartment it shares
+  // a lifetime with. See the navigation policy: this table is what makes the
+  // compartment a property of a DOCUMENT and not merely of a view, which is the
+  // assumption every grant above was written under. Nil for the ear, whose page
+  // comes through the custom scheme and is fenced inside the handler instead.
+  private var allowedDocument: [ObjectIdentifier: URL] = [:]
+
+  func register(_ webView: WKWebView, as page: String, document: URL? = nil) {
     pageOf[ObjectIdentifier(webView)] = page
+    allowedDocument[ObjectIdentifier(webView)] = document
   }
 
   private func allows(_ webView: WKWebView, _ type: String) -> Bool {
@@ -822,14 +833,46 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     afterLoad[ObjectIdentifier(web), default: []].append(work)
   }
 
-  // Webviews may navigate to file: URLs and nowhere else.
+  // A WEBVIEW MAY LOAD THE ONE DOCUMENT IT WAS BUILT FOR, AND NOTHING ELSE.
+  //
+  // ~~"Webviews may navigate to file: URLs and nowhere else."~~ `url?.isFileURL
+  // == true` is EVERY FILE ON THE DISK, and the compartment above is keyed on
+  // the view rather than on the document — so any file that got itself loaded
+  // into a page inherited that page's grants. Review finding 1 (2026-09-13)
+  // found the way in: a file dropped on the settings panel and not claimed by
+  // the export handler fell through to WebKit, which navigates to it, and an
+  // .html file dropped there could then call uninstallApp.
+  //
+  // ClickThroughWebView swallows those drops now, which closes that route.
+  // This is the fence behind it, and the one that keeps holding when some later
+  // surface accepts a drop, a paste, or a link nobody thought about: the URL a
+  // view was registered with is the only file it may ever load. Everything a
+  // page legitimately fetches after that first load — its stylesheet, its
+  // scripts — is a subresource and never reaches this delegate.
+  //
+  // The custom scheme keeps its blanket allowance: AssetSchemeHandler serves
+  // only out of the bundle's own ui directory, so that fence is already inside
+  // it.
   func webView(
     _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
   ) {
-    let url = navigationAction.request.url
-    let ok = url?.isFileURL == true || url?.scheme == AssetSchemeHandler.scheme
-    decisionHandler(ok ? .allow : .cancel)
+    if navigationAction.request.url?.scheme == AssetSchemeHandler.scheme {
+      decisionHandler(.allow)
+      return
+    }
+    guard let url = navigationAction.request.url, url.isFileURL,
+          let allowed = allowedDocument[ObjectIdentifier(webView)]
+    else {
+      decisionHandler(.cancel)
+      return
+    }
+    // Resolved on both sides: a symlinked home, or a path carrying `..`, must
+    // not be able to read as a different string for the same file — nor as the
+    // same string for a different one.
+    let same = url.standardizedFileURL.resolvingSymlinksInPath()
+      == allowed.standardizedFileURL.resolvingSymlinksInPath()
+    decisionHandler(same ? .allow : .cancel)
   }
 
   // MARK: messages
@@ -2245,6 +2288,26 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       if openedExport { delegate?.yieldOnboardingToBrowser() }
       reply(webView, id, ["state": openedExport ? "ok" : "error", "opened": openedExport])
 
+    case "watchForExport":
+      // ARM THE WATCHER, FROM THE ONE SCREEN THAT HAS EXPLAINED THE FILE.
+      //
+      // The first read of ~/Downloads is what makes macOS ask the owner for that
+      // folder, and starting the watcher at launch put that dialog over
+      // onboarding screens 1 to 3 — no context, and while screen 2 is telling
+      // its own story about a different grant (review finding 2). Screen 4 is
+      // where the owner has just been told there is a file coming, so it is
+      // where the question about the folder it will land in belongs.
+      //
+      // Sent by "request a copy" and by "later", which are the two answers that
+      // mean the file is still to come. "i have it" does not: that path ends in
+      // an installed export, and ExportWatch refuses to start for one.
+      //
+      // Answers immediately. Whether a folder actually opened is not this
+      // screen's business — the pickers work either way — and a reply that
+      // waited on a TCC dialog would hang the press.
+      ExportWatch.shared.begin(bridge: self)
+      reply(webView, id, ["state": "ok"])
+
     case "openApp":
       let bundleId = String((payload["bundleId"] as? String ?? "").prefix(96))
       guard allowedApps.contains(bundleId),
@@ -3183,6 +3246,10 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     return rows
   }
 
+  /// Serialises acceptLinkedInFiles across its three callers. See the docstring
+  /// there for what overlapping calls did to each other's staged copies.
+  private static let importLock = NSLock()
+
   /// Where the installed export lives — the directory
   /// connectors/sources/linkedin.mjs polls.
   ///
@@ -3220,14 +3287,35 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// owner to do the work by hand on the screen that is about handing a file
   /// over. (Foundation has no archive API at all, so there is no third option.)
   ///
-  /// ONE ENTRY, BY NAME, AND NOTHING ELSE. The pattern is the literal
-  /// `Connections.csv` with no wildcard in it, so unzip can match at most the
-  /// one root entry: a `dir/Connections.csv` does NOT match, and neither does
-  /// anything else in the archive. The export holds Profile.csv and
-  /// Contacts.csv, both of which carry an exact `First Name` column and both of
-  /// which would destroy a good import if they landed at the destination —
-  /// linkedInKind's second column is the check that catches that, and refusing
-  /// by name here means it never has to.
+  /// ONE ENTRY, CHOSEN BY NAME, AND NOTHING ELSE.
+  ///
+  /// ~~"The pattern is the literal `Connections.csv` with no wildcard in it, so
+  /// unzip can match at most the one root entry."~~ True, and it was the wrong
+  /// entry to insist on (review finding 5, 2026-09-13): a Complete archive
+  /// NESTS its files under `Complete_LinkedInDataExport_<stamp>/`, and so does
+  /// any archive re-made with Finder's Compress. Those all came back `.notFound`
+  /// — and the sentence that answer produces tells the owner to ask LinkedIn for
+  /// "Connections", which they already did, and requesting again produces the
+  /// identical archive. A dead end reached by doing everything right.
+  ///
+  /// So the archive is LISTED first (`unzip -Z1`) and the entry is chosen here,
+  /// where a rule can be written, rather than left to a shell-glob-shaped
+  /// pattern:
+  ///
+  ///   the basename must be exactly `Connections.csv`, so Profile.csv and
+  ///   Contacts.csv — which share its anchor column and would destroy a good
+  ///   import — cannot be reached by any depth of nesting;
+  ///   `__MACOSX/` is skipped, because Finder's Compress puts a resource-fork
+  ///   stub of that very name in there and its body is not a CSV;
+  ///   the shallowest match wins, so a root entry beats a nested one;
+  ///   and a name that appears TWICE is refused rather than extracted, because
+  ///   `unzip -p` would concatenate both bodies into one file and the 4 KB head
+  ///   check downstream only ever sees the first (review finding 17).
+  ///
+  /// The chosen name is then escaped before it goes back to unzip, whose `-p`
+  /// pattern is a glob: an entry under a folder called `w[x]` does not match
+  /// itself unless its brackets are quoted. Verified both ways against a real
+  /// archive in linkedin-export-handoff.test.mjs.
   ///
   /// The zip's own modification date is stamped onto the extracted copy. Every
   /// caller downstream reads that date — PASS ONE refuses an older export than
@@ -3240,9 +3328,13 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// are different sentences on the screen, and only the second has a remedy.
   enum ZipExtraction {
     case extracted(URL)
-    /// The archive opened; there is no root `Connections.csv` in it.
+    /// The archive opened and lists no `Connections.csv` ANYWHERE in it, at any
+    /// depth. The one failure with a remedy in it: the owner asked LinkedIn for
+    /// the wrong thing, and the next request can fix it.
     case notFound
-    /// Could not be read as an archive at all.
+    /// Could not be read as an archive at all — or could, and the entry it lists
+    /// could not be taken out of it. Either way there is nothing for the owner
+    /// to do differently, so they are not told to do anything.
     case unreadable
   }
 
@@ -3252,8 +3344,121 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// reports the archive as unreadable, which is what it is.
   private static let zipExtractionCap = 512 * 1024 * 1024
 
+  /// The entry names in an archive, or nil if it could not be read as one.
+  /// `-Z1` is zipinfo's bare-name listing: one name per line, no columns to
+  /// parse and no sizes or dates to mistake for one.
+  ///
+  /// Bounded like everything else that reads a file the owner did not write: a
+  /// listing this large is not a LinkedIn export, and the alternative is holding
+  /// an arbitrary archive's whole name table in memory.
+  private static let zipListingCap = 4 * 1024 * 1024
+
+  static func zipEntries(in zip: URL) -> [String]? {
+    guard let data = runCapturing(
+      "/usr/bin/unzip", ["-Z1", zip.path], cap: zipListingCap),
+      data.status == 0, let text = String(data: data.output, encoding: .utf8)
+    else { return nil }
+    return text.split(whereSeparator: \.isNewline).map(String.init)
+  }
+
+  /// The one entry to take out, by the rule in extractConnections' docstring.
+  /// Returns nil when there is none, and `.some(nil)` is not a case: a duplicate
+  /// name is reported as no usable entry, because extracting it would
+  /// concatenate two bodies into one file.
+  static func connectionsEntry(among entries: [String]) -> String? {
+    let wanted = entries.filter { name in
+      // Finder's Compress puts a resource-fork stub under this prefix with the
+      // very same basename, and its body is not a CSV.
+      guard !name.hasPrefix("__MACOSX/"), !name.contains("/__MACOSX/") else { return false }
+      // A name carrying a control character cannot have come back intact from a
+      // newline-separated listing, so it is not a name we can hand back.
+      guard !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+      else { return false }
+      return (name as NSString).lastPathComponent == "Connections.csv"
+    }
+    // Shallowest first: a root entry beats a nested one, and among equals the
+    // archive's own order decides rather than anything this app invents.
+    guard let best = wanted.min(by: {
+      $0.filter { $0 == "/" }.count < $1.filter { $0 == "/" }.count
+    }) else { return nil }
+    // TWO ENTRIES OF ONE NAME. `unzip -p` writes both bodies to the stream and
+    // the 4 KB head check downstream only sees the first, so the second
+    // header row would reach the connector as data (review finding 17).
+    guard wanted.filter({ $0 == best }).count == 1 else { return nil }
+    return best
+  }
+
+  /// An entry name as an unzip PATTERN. `-p` globs, so a name is not literally
+  /// itself: `w[x]/Connections.csv` matches nothing until its brackets are
+  /// quoted. unzip's matcher takes backslash as the escape.
+  static func zipPattern(_ entry: String) -> String {
+    var out = ""
+    for character in entry {
+      if "*?[]\\".contains(character) { out.append("\\") }
+      out.append(character)
+    }
+    return out
+  }
+
+  /// Run a tool and keep its stdout, up to a cap. The child is always reaped and
+  /// the pipe is always closed — the two paths that used to `terminate()` and
+  /// return left a zombie and a leaked descriptor behind them every time an
+  /// archive failed (review finding 17).
+  private static func runCapturing(
+    _ tool: String, _ arguments: [String], cap: Int,
+    into sink: FileHandle? = nil
+  ) -> (status: Int32, output: Data, written: Int, overflowed: Bool)? {
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: tool)
+    // NO SHELL, and an absolute path. `arguments` goes to execve directly, so
+    // nothing in a file name is interpreted — and a file URL's `path` always
+    // begins with "/", so unzip can never read the archive's own name as a flag.
+    task.arguments = arguments
+    let pipe = Pipe()
+    task.standardOutput = pipe
+    // unzip's own chatter is not for the owner; the reply says what happened.
+    task.standardError = FileHandle.nullDevice
+    guard (try? task.run()) != nil else {
+      try? pipe.fileHandleForReading.close()
+      try? pipe.fileHandleForWriting.close()
+      return nil
+    }
+    // OURS TO CLOSE. The child holds its own copy; leaving this open means the
+    // read below never sees EOF when the child exits.
+    try? pipe.fileHandleForWriting.close()
+    var collected = Data()
+    var written = 0
+    var overflowed = false
+    while true {
+      let chunk = pipe.fileHandleForReading.availableData
+      if chunk.isEmpty { break }
+      written += chunk.count
+      if written > cap {
+        overflowed = true
+        // Killed rather than left to fill the disk behind us. The drain below
+        // is what stops the child blocking in write() against a full pipe with
+        // nobody reading, which is a terminate() that never lands.
+        task.terminate()
+        break
+      }
+      if let sink { sink.write(chunk) } else { collected.append(chunk) }
+    }
+    if overflowed { while !pipe.fileHandleForReading.availableData.isEmpty {} }
+    try? pipe.fileHandleForReading.close()
+    // ALWAYS, on every path out of this function. A Process that is never waited
+    // on stays a zombie for the life of the app.
+    task.waitUntilExit()
+    return (task.terminationStatus, collected, written, overflowed)
+  }
+
   static func extractConnections(fromZipAt zip: URL) -> ZipExtraction {
     let fm = FileManager.default
+    // LISTED FIRST, so the entry is chosen by a rule written here rather than
+    // by a glob. See the docstring: a Complete archive nests, and the old
+    // root-only pattern answered `.notFound` for the ordinary case.
+    guard let entries = zipEntries(in: zip) else { return .unreadable }
+    guard let entry = connectionsEntry(among: entries) else { return .notFound }
+
     let out = fm.temporaryDirectory
       .appendingPathComponent("hazlie-linkedin-\(UUID().uuidString)")
       .appendingPathComponent("Connections.csv")
@@ -3264,56 +3469,25 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
     } catch { return .unreadable }
     let discard = { try? fm.removeItem(at: out.deletingLastPathComponent()) }
 
-    // NO SHELL, and an absolute path. `arguments` goes to execve directly, so
-    // nothing in the file name is interpreted — and a file URL's `path` always
-    // begins with "/", so unzip can never read the archive's own name as one of
-    // its flags.
-    let task = Process()
-    task.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-    task.arguments = ["-p", zip.path, "Connections.csv"]
-    let pipe = Pipe()
-    task.standardOutput = pipe
-    // unzip's own chatter is not for the owner; the reply says what happened.
-    task.standardError = FileHandle.nullDevice
-    guard (try? task.run()) != nil else { discard(); return .unreadable }
-
     guard fm.createFile(atPath: out.path, contents: nil,
-                        attributes: [.posixPermissions: 0o600]) else {
-      task.terminate()
-      discard()
-      return .unreadable
-    }
-    guard let sink = try? FileHandle(forWritingTo: out) else {
-      task.terminate(); discard(); return .unreadable
-    }
-    var written = 0
-    var overflowed = false
-    while true {
-      let chunk = pipe.fileHandleForReading.availableData
-      if chunk.isEmpty { break }
-      written += chunk.count
-      if written > zipExtractionCap {
-        overflowed = true
-        // Killed rather than left to fill the disk behind us — and the pipe is
-        // drained afterwards, because a terminate() with a full pipe can leave
-        // the child blocked in write().
-        task.terminate()
-        break
-      }
-      sink.write(chunk)
-    }
-    if overflowed { while !pipe.fileHandleForReading.availableData.isEmpty {} }
-    try? sink.close()
-    task.waitUntilExit()
+                        attributes: [.posixPermissions: 0o600]),
+          let sink = try? FileHandle(forWritingTo: out)
+    else { discard(); return .unreadable }
 
-    if overflowed { discard(); return .unreadable }
-    // unzip answers 11 for "no matching files", which is the archive opening
-    // fine and holding no Connections.csv — the one failure with a remedy in it.
-    if task.terminationStatus == 11 { discard(); return .notFound }
-    guard task.terminationStatus == 0, written > 0 else {
+    let run = runCapturing("/usr/bin/unzip",
+                           ["-p", zip.path, zipPattern(entry)],
+                           cap: zipExtractionCap, into: sink)
+    try? sink.close()
+    guard let run, !run.overflowed else { discard(); return .unreadable }
+
+    // unzip answers 11 for "no matching files". The listing above said the entry
+    // is there, so reaching this means the pattern and the name disagreed — an
+    // archive we cannot take the file out of, rather than one without it in.
+    if run.status == 11 { discard(); return .unreadable }
+    guard run.status == 0, run.written > 0 else {
       discard()
       // A zero-byte success is an empty entry, which is not an export either.
-      return task.terminationStatus == 0 ? .notFound : .unreadable
+      return run.status == 0 ? .notFound : .unreadable
     }
 
     // THE ARCHIVE'S OWN DATE, or the vintage is "now" and PASS ONE below cannot
@@ -3420,7 +3594,26 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
   /// vintage comparison or the atomic swap. The owner still sees the name they
   /// picked in every refusal, because "Complete_LinkedInDataExport_2026.zip" is
   /// what is in their Downloads folder and "Connections.csv" is not.
+  ///
+  /// ONE AT A TIME, ACROSS ALL THREE WAYS IN (review finding 10). The picker,
+  /// the Downloads watcher's notification press and a file dropped on the
+  /// settings panel can all land at once, on different queues, and they all
+  /// stage through the same `Connections.csv.importing` and
+  /// `Connections.csv.previous` paths. The staging step removes an existing
+  /// `.importing` unconditionally, so an overlapping call could delete another's
+  /// staged copy between its stage and its swap — and the undo it left behind
+  /// would then be operating on a file some other call had replaced. Everything
+  /// this function says about being whole-or-nothing was true only WITHIN one
+  /// call; the lock is what makes it true of the destination.
+  ///
+  /// The work inside is filesystem copies of an 8-10 MB file, so a blocked
+  /// second caller waits rather than fails: two imports the owner really did
+  /// start should both happen, in some order, and neither should lose.
   private func acceptLinkedInFiles(_ urls: [URL]) -> [String: Any] {
+    Bridge.importLock.lock()
+    // Every failure in this function is an early return, and there are a dozen
+    // of them. Only a defer covers them all.
+    defer { Bridge.importLock.unlock() }
     let fm = FileManager.default
 
     // PASS ZERO: unpack the archives. Nothing is written outside the temporary

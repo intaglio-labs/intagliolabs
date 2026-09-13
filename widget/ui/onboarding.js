@@ -956,8 +956,8 @@ function paintLinkedIn(out) {
   // and only one of them has a remedy in it.
   if (out.reason === 'zip-connections') {
     linkedInStatus.textContent =
-      `there is no Connections.csv in ${out.file || 'that zip'} — ask linkedin for `
-      + '"connections" and it will be in the next one.';
+      `there is no Connections.csv anywhere in ${out.file || 'that zip'} — tick `
+      + '"connections" when you request the export and it will be in the next one.';
     return;
   }
   if (out.reason === 'zip') {
@@ -1034,8 +1034,20 @@ window.__hzLinkedInChanged = () => {
 // email in ten minutes or tomorrow, and the flow is not going to sit on this
 // screen for either. The status line says what was opened and `later` still
 // goes on.
+//
+// AND THIS SCREEN IS WHERE THE WATCHER IS ARMED, not the launch.
+//
+// The first read of ~/Downloads is what makes macOS ask the owner for that
+// folder, and arming at launch put that dialog over screens 1 to 3 — before
+// anything had mentioned an export, and while screen 2 is explaining a
+// different grant with a different dialog. Both answers that mean "the file is
+// still to come" arm it: this button and `later`. "i have it" does not, because
+// that path ends with an export installed and there is then nothing to wait for.
+const armExportWatch = () => { hzPost('watchForExport').catch(() => {}); };
+
 const linkedInRequest = document.getElementById('linkedInRequest');
 linkedInRequest.addEventListener('click', () => {
+  armExportWatch();
   linkedInStatus.classList.remove('ok', 'warn', 'bad');
   linkedInStatus.textContent = 'opening linkedin in your browser…';
   hzPost('openLinkedInExport')
@@ -1063,6 +1075,12 @@ linkedInPick.addEventListener('click', () => {
 });
 linkedInNext.addEventListener('click', () => nextScreen());
 document.getElementById('linkedInSkip').addEventListener('click', () => {
+  // "LATER" MEANS LATER, WHICH IS THE ANSWER THAT MOST NEEDS THE WATCHER. The
+  // owner is going on without the file and is the least likely of anyone to
+  // reopen this flow when it arrives; arming here is what makes the button
+  // honest. `skipped` still records it, which is what screen 6 renders as "not
+  // connected" — true at that moment, and the import corrects it.
+  armExportWatch();
   skipped.add('linkedin');
   nextScreen();
 });

@@ -165,7 +165,7 @@ test('screen 4 says the three things that decide when the file arrives', () => {
 test('the watcher does not run for a Mac that already has an export', () => {
   const begin = /func begin\(bridge: Bridge\) \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '';
   assert.ok(begin, 'ExportWatch.begin not found');
-  assert.match(code(begin), /guard !Bridge\.linkedInExportInstalled else \{ return \}/u,
+  assert.match(code(begin), /guard !Bridge\.linkedInExportInstalled else \{ finished = true; return \}/u,
     'an owner who imported months ago must never meet the Downloads prompt at all');
   // ...and the check is the import's own rule, not fileExists: a file the
   // connector cannot read is not an export the owner has.
@@ -190,7 +190,7 @@ test('it watches Downloads and Desktop, and takes a denial silently', () => {
 test('it offers, and never imports on its own', () => {
   // A file appearing in Downloads is not consent to read it. Nothing in this
   // file may call the import except in answer to a press.
-  const offer = /private func offer\(_ url: URL\) \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '';
+  const offer = /private func offer\(_ url: URL, vintage: Date\?\) \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '';
   assert.match(offer, /ModelSetup\.notify/u, 'the app has one notifier, and this is it');
   assert.doesNotMatch(offer, /importLinkedIn/u);
   const scan = /private func scan\(\) \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '';
@@ -276,11 +276,12 @@ test('a dropped file is taken natively, because a page never sees its path', () 
   // location. Reading the bytes in the page and posting them would put the
   // owner's whole professional graph through the bridge, which is the thing
   // linkedInState's counts-only rule exists to prevent.
-  assert.match(windows, /var onFileDrop: \(\(\[URL\]\) -> Bool\)\?/u);
+  assert.match(windows, /var onFileDrop: \(\(\[URL\]\) -> Void\)\?/u);
   assert.match(windows, /override func performDragOperation\(_ sender: NSDraggingInfo\) -> Bool/u);
   assert.match(windows, /urlReadingFileURLsOnly/u);
-  // Anything the handler does not claim behaves exactly as WebKit always did.
-  assert.match(windows, /return super\.performDragOperation\(sender\)/u);
+  // What happens to a drop this handler does not want is pinned in
+  // linkedin-drop-and-watch.test.mjs: it is refused here, never handed to
+  // WebKit, which navigates to it and hands it this page's bridge grants.
   // Installed on the settings panel only, and it goes through the same import.
   const install = /\(connectionsPanel\?\.contentView as\? ClickThroughWebView\)\?\.onFileDrop = \{([\s\S]*?)\n      \}/u
     .exec(mainSwift)?.[1] ?? '';
@@ -288,6 +289,8 @@ test('a dropped file is taken natively, because a page never sees its path', () 
   assert.match(install, /ExportWatch\.looksLikeExport/u,
     'a drag of something else must fall through to WebKit');
   assert.match(install, /self\.bridge\.importLinkedIn\(files: wanted\)/u);
+  // Nothing falls through to WebKit any more; see linkedin-drop-and-watch.
+  assert.match(install, /__hzLinkedInDropRefused/u);
   assert.equal((mainSwift.match(/onFileDrop = /gu) ?? []).length, 1,
     'one page takes file drops, and it is the one with the picker on it');
 });
@@ -448,11 +451,9 @@ test('the gear says which errand its glow is about, and takes it back', () => {
   // to badge an errand already run.
   const check = /function checkLinkedInReady\(\) \{([\s\S]*?)\n\}/u.exec(widgetJs)?.[1] ?? '';
   assert.match(check, /Number\.isFinite\(Number\(out\?\.readyTs\)\)/u);
-  assert.match(check, /window\.__hzGearNudge\(true\)/u);
-  // The glow going off takes the sentence with it, or the hover keeps making a
-  // claim after the thing that made it has gone.
-  const nudge = /window\.__hzGearNudge = \(on\) => \{([\s\S]*?)\n\};/u.exec(widgetJs)?.[1] ?? '';
-  assert.match(nudge, /if \(on !== true\) gearBtn\.title = 'Settings';/u);
+  assert.match(check, /setGearErrand\('linkedin'/u);
+  // The glow is shared with the onboarding handoff and each errand raises and
+  // drops its own; linkedin-drop-and-watch.test.mjs pins that arrangement.
   // Asked on load and on a wake -- the mail most likely arrived while the Mac
   // was asleep -- and never on a timer.
   assert.match(widgetJs, /__hzWake = \(\) => \{[^}]*checkLinkedInReady\(\);/u);
@@ -475,10 +476,15 @@ test('the settings row rides the fetch the panel already makes', () => {
   // second -- the two facts arrive from different places at different times.
   const row = /function linkedInRow\(\) \{([\s\S]*?)\n\}/u.exec(connectionsJs)?.[1] ?? '';
   assert.match(row, /if \(installed\) return;/u);
-  assert.match(row, /if \(readyTs !== null\) \{ say\(LINKEDIN_READY/u);
+  assert.match(row, /if \(linkedInReadyTs !== null\) \{/u);
   // ...and null is an answer too, or the row keeps saying "open the email"
   // after the owner has.
-  assert.match(row, /readyTs = Number\.isFinite\(Number\(ts\)\) \? Number\(ts\) : null;/u);
+  assert.match(connectionsJs, /linkedInReadyTs = Number\.isFinite\(Number\(ts\)\) \? Number\(ts\) : null;/u);
+  // BUFFERED, so a refresh() that beats renderSettings does not drop the answer
+  // on the floor and leave the row saying "waiting for your file" (finding 13).
+  assert.match(connectionsJs, /let linkedInReadyTs = null;/u);
+  assert.match(connectionsJs, /let noteLinkedInReady = \(ts\) => \{/u,
+    'the buffer has to exist before the row does, not be installed by it');
 });
 
 // -------------------------------------------------- the extraction, for real
@@ -486,18 +492,20 @@ test('the settings row rides the fetch the panel already makes', () => {
 // THE ONE TEST HERE THAT RUNS SOMETHING.
 //
 // Everything above is a source scan, because the Swift needs a toolchain and an
-// AppKit session. The extraction does not: it is one `/usr/bin/unzip` invocation
-// whose exact argv is written down in Bridge.swift, and the question that
-// matters — does THAT argv pull exactly Connections.csv out of an archive shaped
-// like LinkedIn's — is answerable here against a real archive.
+// AppKit session. The extraction does not: it is `/usr/bin/unzip` twice, under a
+// rule for choosing the entry that is written down in Bridge.swift, and the
+// question that matters — does that rule take exactly Connections.csv out of an
+// archive shaped like LinkedIn's — is answerable here against real archives.
 //
-// It is a genuine discriminator rather than a restatement. The export holds
-// Profile.csv and Contacts.csv, both carrying an exact `First Name` column, and
-// either of them landing at the destination destroys a good import. A pattern
-// with a wildcard in it, or a rule that matched an entry's basename rather than
-// its whole path, would pass a reading of the code and fail here.
-const ZIP_ARGV = /arguments = \["-p", zip\.path, "([^"]+)"\]/u.exec(bridge)?.[1];
-
+// THE RULE IS READ OUT OF THE SWIFT, not restated. `connectionsEntry` is
+// re-implemented below from its own stated terms, and the terms are asserted
+// against the source, so a rule that changed without this test changing fails
+// here rather than on somebody's Mac.
+//
+// It discriminates. The export holds Profile.csv and Contacts.csv, both carrying
+// an exact `First Name` column, and either landing at the destination destroys a
+// good import. The archive LinkedIn actually sends nests everything one level
+// down, which the first version of this could not reach at all.
 const haveZip = (() => {
   try {
     execFileSync('/usr/bin/zip', ['-v'], { stdio: 'ignore' });
@@ -505,40 +513,123 @@ const haveZip = (() => {
   } catch { return false; }
 })();
 
-test('the argv in Bridge.swift pulls Connections.csv and nothing else', { skip: !haveZip && 'no /usr/bin/zip on this machine' }, () => {
-  assert.ok(ZIP_ARGV, 'the unzip invocation is gone or has changed shape');
+/// The chooser, as Bridge.swift is required to implement it.
+function chooseEntry(entries) {
+  const wanted = entries.filter((name) => !name.startsWith('__MACOSX/')
+    && !name.includes('/__MACOSX/')
+    // eslint-disable-next-line no-control-regex
+    && !/[\u0000-\u001f\u007f]/u.test(name)
+    && name.split('/').pop() === 'Connections.csv');
+  if (wanted.length === 0) return null;
+  const depth = (n) => n.split('/').length - 1;
+  const best = wanted.reduce((a, b) => (depth(b) < depth(a) ? b : a));
+  return wanted.filter((n) => n === best).length === 1 ? best : null;
+}
+
+/// unzip's -p pattern is a glob, so an entry is not literally itself.
+const pattern = (entry) => entry.replace(/[*?[\]\\]/gu, (c) => `\\${c}`);
+
+test('the chooser rule is the one Bridge.swift states', () => {
+  const choose = /static func connectionsEntry\(among entries: \[String\]\) -> String\? \{([\s\S]*?)\n  \}/u
+    .exec(bridge)?.[1];
+  assert.ok(choose, 'connectionsEntry() not found');
+  assert.match(choose, /lastPathComponent == "Connections\.csv"/u, 'basename, at any depth');
+  assert.match(choose, /__MACOSX\//u, "Finder's resource-fork stub shares the basename");
+  assert.match(choose, /controlCharacters/u);
+  assert.match(choose, /\$0 == "\/" \}\.count < /u, 'shallowest wins');
+  assert.match(choose, /wanted\.filter\(\{ \$0 == best \}\)\.count == 1/u,
+    'two entries of one name concatenate under unzip -p');
+  // And the listing it is handed comes from zipinfo's bare-name mode, which has
+  // no columns to misparse.
+  assert.match(bridge, /\["-Z1", zip\.path\]/u);
+  assert.match(bridge, /\["-p", zip\.path, zipPattern\(entry\)\]/u,
+    'and the chosen name goes back as a quoted pattern, not raw');
+});
+
+test('a real LinkedIn-shaped archive gives up Connections.csv and nothing else',
+  { skip: !haveZip && 'no /usr/bin/zip on this machine' }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'hazlie-zip-'));
   try {
-    // An archive shaped like LinkedIn's: the file we want, the two decoys that
-    // share its anchor column, and a same-named entry one level down.
     const connections = 'First Name,Last Name,URL,Connected On\nAda,L,https://x/in/a,01 Jan 2020\n';
-    writeFileSync(join(dir, 'Connections.csv'), connections);
-    writeFileSync(join(dir, 'Profile.csv'), 'First Name,Last Name,Headline\nP,Q,r\n');
-    writeFileSync(join(dir, 'Contacts.csv'), 'First Name,Last Name,Profile URL\nC,D,https://y\n');
-    mkdirSync(join(dir, 'nested'));
-    writeFileSync(join(dir, 'nested', 'Connections.csv'), 'NOT,THE,ONE\n');
-    execFileSync('/usr/bin/zip', ['-q', '-r', 'export.zip',
-      'Connections.csv', 'Profile.csv', 'Contacts.csv', 'nested'], { cwd: dir });
+    // WHAT LINKEDIN ACTUALLY SENDS: everything one level down, under the
+    // archive's own name. The root-only pattern this replaced found nothing
+    // here and told the owner to request the export again.
+    const folder = 'Complete_LinkedInDataExport_2026-09-13';
+    mkdirSync(join(dir, folder));
+    writeFileSync(join(dir, folder, 'Connections.csv'), connections);
+    writeFileSync(join(dir, folder, 'Profile.csv'), 'First Name,Last Name,Headline\nP,Q,r\n');
+    writeFileSync(join(dir, folder, 'Contacts.csv'), 'First Name,Last Name,Profile URL\nC,D,https://y\n');
+    // Finder's Compress leaves one of these, with the same basename.
+    mkdirSync(join(dir, '__MACOSX'));
+    writeFileSync(join(dir, '__MACOSX', 'Connections.csv'), 'NOT,A,CSV\n');
+    execFileSync('/usr/bin/zip', ['-q', '-r', 'export.zip', folder, '__MACOSX'], { cwd: dir });
+
+    const listing = execFileSync('/usr/bin/unzip', ['-Z1', join(dir, 'export.zip')],
+      { encoding: 'utf8' }).split('\n').filter(Boolean);
+    const entry = chooseEntry(listing);
+    assert.equal(entry, `${folder}/Connections.csv`);
 
     const out = execFileSync('/usr/bin/unzip',
-      ['-p', join(dir, 'export.zip'), ZIP_ARGV], { encoding: 'utf8' });
-    assert.equal(out, connections,
-      'the extraction took something other than the root Connections.csv');
-    assert.doesNotMatch(out, /Headline|Profile URL|NOT,THE,ONE/u,
+      ['-p', join(dir, 'export.zip'), pattern(entry)], { encoding: 'utf8' });
+    assert.equal(out, connections);
+    assert.doesNotMatch(out, /Headline|Profile URL|NOT,A,CSV/u,
       'a decoy came out of the archive alongside it');
-
-    // ...and the archive that opened fine with no Connections.csv in it, which
-    // is the owner asking LinkedIn for the wrong thing. unzip answers 11, and
-    // Bridge.swift keys its separate sentence on exactly that.
-    execFileSync('/usr/bin/zip', ['-q', 'partial.zip', 'Profile.csv'], { cwd: dir });
-    let status = 0;
-    try {
-      execFileSync('/usr/bin/unzip', ['-p', join(dir, 'partial.zip'), ZIP_ARGV],
-        { stdio: 'ignore' });
-    } catch (e) { status = e.status; }
-    assert.equal(status, 11);
-    assert.match(bridge, /terminationStatus == 11[\s\S]{0,120}return \.notFound/u);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('an entry name that globs still matches itself once it is quoted',
+  { skip: !haveZip && 'no /usr/bin/zip on this machine' }, () => {
+  // unzip -p takes a PATTERN, so a folder called `w[x]` does not match itself.
+  // Nothing in a LinkedIn archive is named this way -- which is exactly why an
+  // unquoted pattern would pass every hand-check and fail on the one archive
+  // somebody re-made inside a folder with a bracket in its name.
+  const dir = mkdtempSync(join(tmpdir(), 'hazlie-zip-'));
+  try {
+    const connections = 'First Name,Last Name,URL,Connected On\nB,C,https://x/in/b,02 Feb 2021\n';
+    mkdirSync(join(dir, 'w[x]'));
+    writeFileSync(join(dir, 'w[x]', 'Connections.csv'), connections);
+    execFileSync('/usr/bin/zip', ['-q', '-r', 'odd.zip', 'w[x]'], { cwd: dir });
+    const entry = 'w[x]/Connections.csv';
+    let raw = '';
+    try {
+      raw = execFileSync('/usr/bin/unzip', ['-p', join(dir, 'odd.zip'), entry],
+        { encoding: 'utf8' });
+    } catch { raw = ''; }
+    assert.notEqual(raw, connections, 'if this ever matches raw, the quoting is dead code');
+    assert.equal(
+      execFileSync('/usr/bin/unzip', ['-p', join(dir, 'odd.zip'), pattern(entry)],
+        { encoding: 'utf8' }),
+      connections);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an archive with no Connections.csv anywhere is the one with a remedy',
+  { skip: !haveZip && 'no /usr/bin/zip on this machine' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hazlie-zip-'));
+  try {
+    writeFileSync(join(dir, 'Profile.csv'), 'First Name,Last Name,Headline\nP,Q,r\n');
+    execFileSync('/usr/bin/zip', ['-q', 'partial.zip', 'Profile.csv'], { cwd: dir });
+    const listing = execFileSync('/usr/bin/unzip', ['-Z1', join(dir, 'partial.zip')],
+      { encoding: 'utf8' }).split('\n').filter(Boolean);
+    assert.equal(chooseEntry(listing), null);
+    // ...and it is decided from the LISTING now, not from unzip's exit code. A
+    // status 11 after a listing that named the entry means the pattern and the
+    // name disagreed, which is not something the owner can fix by asking again.
+    assert.match(bridge, /guard let entry = connectionsEntry\(among: entries\) else \{ return \.notFound \}/u);
+    assert.match(bridge, /if run\.status == 11 \{ discard\(\); return \.unreadable \}/u);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('two entries of one name are refused rather than concatenated', () => {
+  // unzip -p writes both bodies to the stream, and the 4 KB head check
+  // downstream only ever sees the first -- so the second header row would reach
+  // the connector as a data row (review finding 17).
+  assert.equal(chooseEntry(['Connections.csv', 'Connections.csv']), null);
+  assert.equal(chooseEntry(['a/Connections.csv', 'Connections.csv']), 'Connections.csv');
 });

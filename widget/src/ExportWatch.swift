@@ -32,13 +32,24 @@ import UserNotifications
 //   the owner has asked LinkedIn for a file and does not have it yet. The moment
 //   they do, it stops -- see stop(), and the check at the top of scan().
 //
-// THE TCC PROMPT IS THE COST. The first read of ~/Downloads or ~/Desktop makes
-// macOS ask the owner whether this app may see that folder, and it asks at
-// whatever moment the watcher starts rather than in response to something they
-// did. That was weighed and accepted: the alternative is a feature that only
-// works for owners who remember to come back. A denial is handled in silence --
-// the directory simply never opens, this file does nothing for the rest of the
-// run, and the picker on screen 4 and in settings is unaffected.
+// THE TCC PROMPT IS THE COST, AND WHEN IT ARRIVES IS THE WHOLE OF IT. The first
+// read of ~/Downloads or ~/Desktop makes macOS ask whether this app may see that
+// folder.
+//
+// ~~"it asks at whatever moment the watcher starts rather than in response to
+// something they did. That was weighed and accepted."~~ What was accepted was
+// not what shipped: begin() ran from applicationDidFinishLaunching, so on a
+// first run both dialogs arrived over onboarding screens 1 to 3 — with no
+// context, before anything had mentioned an export, and while screen 2 is
+// telling its own story about a different grant with a different dialog (review
+// finding 2, 2026-09-13). It is asked FOR something now: screen 4's "request a
+// copy" or "later" arms it, and a launch arms it only for an owner already past
+// the flow. See begin().
+//
+// A denial is still silent -- there is nothing the owner can usefully do about
+// it from here and both pickers work regardless -- but it is no longer
+// permanent: `watching` stays false, so the next arming tries again, and macOS
+// answers a denied folder without a second dialog.
 final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
   static let shared = ExportWatch()
 
@@ -48,6 +59,14 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
   /// Where the candidate's path travels from the banner to the press.
   private static let pathKey = "path"
 
+  /// What the owner has already been asked about, kept across launches.
+  ///
+  /// ~~A per-process Set~~ (review finding 12): an owner who let the banner go,
+  /// or who keeps an unrelated `Connections.csv` on their Desktop, met the same
+  /// offer at every launch for the rest of the install's life. Ignoring an offer
+  /// is an answer and it has to stick.
+  private static let offeredDefaultsKey = "HazlieLinkedInOffered"
+
   private weak var bridge: Bridge?
   /// EVERYTHING BELOW THIS LINE IS THE QUEUE'S. The event handlers run there,
   /// the scan runs there and stop() runs there, so the watch list is built there
@@ -55,11 +74,17 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
   /// the queue is a race for the sake of two lines.
   private var sources: [DispatchSourceFileSystemObject] = []
   private let queue = DispatchQueue(label: "io.intaglio.exportwatch", qos: .utility)
-  /// Paths already offered this run. A directory event fires for every write,
-  /// and a folder that already holds an export would otherwise produce one
-  /// notification per unrelated download for the rest of the session.
-  private var offered: Set<String> = []
-  private var started = false
+  /// What a candidate looked like when it was measured, so "still growing" can
+  /// be answered without a directory event that is never coming. See scan().
+  private var seen: [String: (size: Int, at: Date)] = [:]
+  /// Whether a folder is actually open. NOT "begin() has been called": a denied
+  /// folder used to leave this true forever, so granting it later in System
+  /// Settings did nothing until the app was relaunched — while screen 4 went on
+  /// promising to take the file when it arrived (review finding 2).
+  private var watching = false
+  /// Refused for good — the registry has linkedin off, or an export is already
+  /// installed. Different from `watching`, which a later attempt may retry.
+  private var finished = false
   private var rescan: DispatchWorkItem?
 
   /// The two folders a browser puts a download in. Desktop is here because
@@ -70,18 +95,38 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
             home.appendingPathComponent("Desktop", isDirectory: true)]
   }
 
-  /// Start watching, unless there is nothing to wait for.
+  /// Start watching, if this owner has anything to wait for.
   ///
-  /// The installed-export check is the gate, and it is checked HERE rather than
-  /// only in the callback: an owner who imported an export months ago should
-  /// never see the Downloads prompt at all, because for them this feature has
-  /// nothing to offer.
+  /// WHEN THIS MAY BE CALLED IS THE WHOLE FINDING. `open(O_EVTONLY)` below is
+  /// what makes macOS ask the owner for their Downloads and Desktop folders, and
+  /// it used to be called from applicationDidFinishLaunching — so on a first
+  /// run the two system dialogs arrived over onboarding screens 1 to 3, with no
+  /// context, while screen 2 is telling its own story about a DIFFERENT grant
+  /// with a different dialog, and before anyone had mentioned an export (review
+  /// finding 2). It is now reached from two places, and both mean the owner has
+  /// just been told what the file is:
+  ///
+  ///   screen 4, when they press "request a copy" or "later"
+  ///   launch, but only for an owner who has already finished the flow
+  ///
+  /// THREE REFUSALS, and two of them are permanent:
+  ///
+  ///   the registry has `connectors.linkedin` off, so this install does not run
+  ///   that connector at all — the same flag that hides its tile. Asking such an
+  ///   owner for a folder on its behalf, and then offering imports for a source
+  ///   nothing reads, is work nobody asked for (review finding 3).
+  ///
+  ///   an export is already installed, so there is nothing to wait for.
+  ///
+  ///   ...and `watching`, which is NOT permanent. A denied folder must leave
+  ///   this retryable, or granting it later in System Settings does nothing
+  ///   until the app is relaunched.
   func begin(bridge: Bridge) {
     dispatchPrecondition(condition: .onQueue(.main))
-    guard !started else { return }
-    guard !Bridge.linkedInExportInstalled else { return }
+    guard !finished, !watching else { return }
+    guard Features.connector("linkedin") != .off else { finished = true; return }
+    guard !Bridge.linkedInExportInstalled else { finished = true; return }
     self.bridge = bridge
-    started = true
 
     // The delegate and the category both have to exist before a notification
     // naming the category is sent, or the banner arrives with no button on it.
@@ -97,14 +142,26 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
     queue.async { [weak self] in
       guard let self else { return }
       for directory in Self.watched { self.watch(directory) }
+      // OPENED, NOT MERELY ATTEMPTED. Both folders denied means this call
+      // achieved nothing, and the next trigger — the owner coming back from
+      // System Settings, or the next launch — gets to try again. macOS asks
+      // once and then answers a denial without a dialog, so a retry costs the
+      // owner no second prompt.
+      let opened = self.sources.isEmpty == false
+      DispatchQueue.main.async { self.watching = opened }
+      guard opened else { return }
       // One look now: the archive may well have landed while the app was not
-      // running, or during the setup flow the owner just finished.
+      // running, or while the owner was in the browser asking for it.
       self.scan()
     }
   }
 
   /// Stop for good. Called when an export lands, by whichever route.
   func stop() {
+    DispatchQueue.main.async { [weak self] in
+      self?.finished = true
+      self?.watching = false
+    }
     queue.async { [weak self] in
       guard let self else { return }
       self.rescan?.cancel()
@@ -114,6 +171,7 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
       // already have handed to something else.
       for source in self.sources { source.cancel() }
       self.sources = []
+      self.seen = [:]
     }
   }
 
@@ -157,8 +215,42 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
     queue.asyncAfter(deadline: .now() + Self.settleSeconds, execute: work)
   }
 
-  /// NAMES ONLY. Nothing here opens a candidate; the import does that, after a
-  /// press. `contentsOfDirectory` is the read the consent prompt is about.
+  /// What an offer is remembered by.
+  ///
+  /// ~~The path alone~~ (review finding 4). The path went into the set BEFORE
+  /// the import ran and no failure took it out, so a file offered while it was
+  /// still downloading — the import answering "i couldn't open that zip" — was
+  /// burnt for the rest of the install. Size and date as well: the same archive
+  /// finishing its download is a different thing to offer, and an unchanged file
+  /// is still only offered once.
+  private static func offerKey(_ url: URL, size: Int, at: Date?) -> String {
+    "\(url.path)|\(size)|\(at.map { String(Int($0.timeIntervalSince1970)) } ?? "-")"
+  }
+
+  private static var offeredKeys: Set<String> {
+    get { Set(UserDefaults.standard.stringArray(forKey: offeredDefaultsKey) ?? []) }
+    // Bounded: this is a list of things the owner has already been asked about,
+    // and it must not become an unbounded defaults entry on a Downloads folder
+    // somebody never tidies.
+    set { UserDefaults.standard.set(Array(newValue.suffix(200)), forKey: offeredDefaultsKey) }
+  }
+
+  /// Look again shortly, with no directory event to ride on.
+  ///
+  /// WRITING BYTES INTO AN EXISTING FILE DOES NOT TOUCH THE DIRECTORY VNODE, so
+  /// for any client that creates the final name and then fills it (curl -o, and
+  /// some app downloaders) there is exactly ONE event: the create. The settle
+  /// timer fires three seconds later, the file is still growing, and no further
+  /// event is ever coming to correct it. This is how the scan gets to look
+  /// again at a file it has decided not to judge yet.
+  private func settleAgain() {
+    dispatchPrecondition(condition: .onQueue(queue))
+    scheduleScan()
+  }
+
+  /// NAMES AND SIZES ONLY. Nothing here opens a candidate; the import does that,
+  /// after a press. `contentsOfDirectory` is the read the consent prompt is
+  /// about.
   private func scan() {
     dispatchPrecondition(condition: .onQueue(queue))
     guard !sources.isEmpty else { return }
@@ -167,6 +259,7 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
     // stop, and this is the check that notices.
     if Bridge.linkedInExportInstalled { stop(); return }
     let fm = FileManager.default
+    let already = Self.offeredKeys
     for directory in Self.watched {
       guard let names = try? fm.contentsOfDirectory(
         at: directory, includingPropertiesForKeys: [.contentModificationDateKey],
@@ -175,31 +268,59 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
       // Newest first, so the owner is offered the download they just made
       // rather than whichever one the filesystem happened to list first.
       let candidates = names
-        .filter { Self.looksLikeExport($0.lastPathComponent) }
-        .filter { !offered.contains($0.path) }
-        .sorted { a, b in
-          let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey])
-            .contentModificationDate) ?? .distantPast
-          let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey])
-            .contentModificationDate) ?? .distantPast
-          return da > db
-        }
+        .compactMap { Self.candidate(at: $0) }
+        .sorted { a, b in (a.at ?? .distantPast) > (b.at ?? .distantPast) }
       for found in candidates {
-        // A part-downloaded file is named `.crdownload`/`.download`/`.part` and
-        // does not match above, but a zero-byte placeholder under the FINAL name
-        // is a thing some clients create. Nothing to offer until there is
-        // something in it — and it is not marked as offered either, so the scan
-        // after the next write picks it up.
-        let size = (try? found.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-        guard size > 0 else { continue }
-        offered.insert(found.path)
-        offer(found)
+        let size = (try? found.url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        // A part-downloaded file is usually named `.crdownload`/`.download`/
+        // `.part` and never matches at all, but a placeholder under the FINAL
+        // name is a thing some clients create.
+        guard size > 0 else { settleAgain(); continue }
+        // STILL GROWING? Measured against the last look rather than against the
+        // clock: a file whose size has not moved since the previous scan has
+        // stopped being written, and one that has moved gets another settle.
+        // Neither is marked offered, so nothing is spent on a partial file.
+        let previous = seen[found.url.path]
+        seen[found.url.path] = (size, Date())
+        guard let previous, previous.size == size else { settleAgain(); continue }
+        let key = Self.offerKey(found.url, size: size, at: found.at)
+        guard !already.contains(key) else { continue }
+        Self.offeredKeys = already.union([key])
+        offer(found.url, vintage: found.at)
         // ONE OFFER AT A TIME. Two banners for two files in the same folder is
         // an inbox, not an offer, and the second is nearly always the browser's
         // duplicate download of the first.
         return
       }
     }
+  }
+
+  /// A thing in a watched folder that might be the export, and when it is from.
+  ///
+  /// SAFARI EXPANDS THE ARCHIVE (review finding 6). With "open safe files after
+  /// downloading" on — which is the default — what lands is a FOLDER,
+  /// `Complete_LinkedInDataExport_x/`, and the watcher was blind to it: the
+  /// folder has no extension to match and `.skipsSubdirectoryDescendants` hid
+  /// the CSV inside it. For the default Safari configuration that was the whole
+  /// feature dark. A matching folder is answered with the Connections.csv inside
+  /// it, which is a file the import already knows how to take.
+  private static func candidate(at url: URL) -> (url: URL, at: Date?)? {
+    let values = try? url.resourceValues(
+      forKeys: [.isDirectoryKey, .contentModificationDateKey])
+    let at = values?.contentModificationDate
+    if values?.isDirectory == true {
+      guard looksLikeExportFolder(url.lastPathComponent) else { return nil }
+      let inside = url.appendingPathComponent("Connections.csv")
+      guard FileManager.default.fileExists(atPath: inside.path) else { return nil }
+      // The CSV's own date, not the folder's: the folder's changes when
+      // anything in it does, and the vintage refusal downstream is about the
+      // export.
+      let insideAt = (try? inside.resourceValues(forKeys: [.contentModificationDateKey]))?
+        .contentModificationDate
+      return (inside, insideAt ?? at)
+    }
+    guard looksLikeExport(url.lastPathComponent) else { return nil }
+    return (url, at)
   }
 
   /// The names LinkedIn's export actually arrives under.
@@ -226,12 +347,38 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
     return !digits.isEmpty && digits.allSatisfy { $0.isNumber }
   }
 
+  /// The FOLDER Safari leaves when it expands the archive for you. Same name as
+  /// the zip without the extension, so the same unambiguous substring decides
+  /// it — a directory called `Downloads` or `Connections` is not this.
+  static func looksLikeExportFolder(_ name: String) -> Bool {
+    name.lowercased().contains("linkedindataexport")
+  }
+
   /// AN OFFER, NOT AN IMPORT. The file is named so the owner can tell whether it
   /// is the one they were expecting, and nothing is read until they answer.
-  private func offer(_ url: URL) {
+  ///
+  /// ...AND DATED, WHICH IS NOT DECORATION (review finding 11). The `newer`
+  /// refusal inside the import only compares a pick against an INSTALLED export,
+  /// and a fresh Mac has none — so a year-old archive left in Downloads imports
+  /// on one press and the connector ingests a year-old graph as current. It
+  /// cannot be refused outright, because an owner restoring a Mac may well mean
+  /// it, so the date rides the offer and the press is an informed one.
+  ///
+  /// Today's download says nothing, because "found your export, from today" is
+  /// noise on the one case this is really for.
+  private func offer(_ url: URL, vintage: Date?) {
+    let dated: String
+    if let vintage, !Calendar.current.isDateInToday(vintage) {
+      let when = DateFormatter()
+      when.dateStyle = .medium
+      when.timeStyle = .none
+      dated = ", from \(when.string(from: vintage))"
+    } else {
+      dated = ""
+    }
     ModelSetup.notify(
       title: "found your LinkedIn export",
-      body: "\(url.lastPathComponent) — import it?",
+      body: "\(url.lastPathComponent)\(dated) — import it?",
       category: Self.category,
       userInfo: [Self.pathKey: url.path])
   }
@@ -288,7 +435,7 @@ final class ExportWatch: NSObject, UNUserNotificationCenterDelegate {
     let why: String
     switch out["reason"] as? String {
     case "zip-connections":
-      why = "there is no Connections.csv in that zip — ask LinkedIn for \"Connections\"."
+      why = "there is no Connections.csv anywhere in that zip — tick \"connections\" when you request it."
     case "zip": why = "i couldn't open that zip."
     case "columns": why = "i don't recognise that file's columns — i can only read the english export."
     case "newer": why = "you already have a newer \(file) — i kept the one you have."

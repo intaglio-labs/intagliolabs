@@ -385,7 +385,8 @@ const LINKEDIN_READY = 'your export is ready — open the email';
 // says what to do about it.
 const LINKEDIN_REFUSALS = {
   'zip-connections': ['no connections in that zip',
-    'ask linkedin for "connections" when you request the export and it will be in the next one.'],
+    'there is no Connections.csv anywhere in that archive. tick "connections" when you '
+    + 'request the export and it will be in the next one.'],
   zip: ["couldn't open that zip", 'that file is not an archive i can read.'],
   columns: ["columns i don't recognise", 'i can only read the english export today.'],
   newer: ['yours is older — kept', 'the export already here is newer than the file you chose.'],
@@ -398,12 +399,27 @@ const LINKEDIN_REFUSAL_DEFAULT = ["couldn't read that file", "i couldn't read th
 // watcher's notification, a file dropped on this panel — can repaint it.
 // Native calls __hzLinkedInChanged; see main.swift linkedInExportChanged.
 let repaintLinkedIn = null;
-// ...and so the shelf can hand the row the one fact it cannot ask for itself.
-// `linkedinExportReady` rides connect's linkedin-export source row, which
-// refresh() below already fetches on every open and every focus — asking for it
-// a second time through a bridge verb of its own would be two readers of one
-// note, which is how two lines in one panel come to disagree.
-let noteLinkedInReady = null;
+// The drop the export filter turned away, so the row that says "drop it here"
+// can say what the file was not. Native swallows every drop on this panel now —
+// it used to hand unmatched ones to WebKit, which NAVIGATES to them — so
+// without a word here a drop the owner aimed at this row vanishes in silence.
+let refuseLinkedInDrop = null;
+// ...and the one fact the row cannot ask for itself. `linkedinExportReady`
+// rides connect's linkedin-export source row, which refresh() below already
+// fetches on every open and every focus — asking for it a second time through a
+// bridge verb of its own would be two readers of one note, which is how two
+// lines in one panel come to disagree.
+//
+// BUFFERED, NOT A SLOT TO CALL BACK INTO (review finding 13). renderSettings is
+// async and builds the row after its own `await`, so refresh() could get there
+// first, find nothing to hand the value to, and drop it — leaving the row
+// reading "waiting for your file", which is the one sentence the marker exists
+// to replace, until something refocused the panel. The value is kept here and
+// the row reads it when it is built, whichever of the two arrives first.
+let linkedInReadyTs = null;
+let noteLinkedInReady = (ts) => {
+  linkedInReadyTs = Number.isFinite(Number(ts)) ? Number(ts) : null;
+};
 
 function linkedInRow() {
   const row = document.createElement('div');
@@ -433,11 +449,15 @@ function linkedInRow() {
   // answers arrive from different places at different times — the shelf hands
   // over the mail's timestamp, `linkedInState` says whether a file is here —
   // and whichever lands second must not paint the other one's answer away.
-  let readyTs = null;
+  // `linkedInReadyTs` is module-level and may already hold an answer refresh()
+  // delivered before this row existed; see the buffer above.
   let installed = false;
   const paint = () => {
     if (installed) return;
-    if (readyTs !== null) { say(LINKEDIN_READY, `${LINKEDIN_HELP} press to choose it.`); return; }
+    if (linkedInReadyTs !== null) {
+      say(LINKEDIN_READY, `${LINKEDIN_HELP} press to choose it.`);
+      return;
+    }
     say(LINKEDIN_WAITING, LINKEDIN_HELP);
   };
 
@@ -460,10 +480,21 @@ function linkedInRow() {
   repaintLinkedIn = ask;
   // A TIMESTAMP OR NULL, and null is an answer: the note is spent the moment an
   // export is installed, so the row has to be able to stop saying "open the
-  // email" once the owner has.
+  // email" once the owner has. Writes the module-level buffer, so a later
+  // rebuild of this row starts from the same answer.
   noteLinkedInReady = (ts) => {
-    readyTs = Number.isFinite(Number(ts)) ? Number(ts) : null;
+    linkedInReadyTs = Number.isFinite(Number(ts)) ? Number(ts) : null;
     paint();
+    fitConnections();
+  };
+  // A DROP THIS ROW ASKED FOR AND COULD NOT USE. Stays until the next thing
+  // happens to the row, which is what every other refusal here does — the
+  // owner has to be able to read it after the file has gone back to wherever
+  // they dragged it from.
+  refuseLinkedInDrop = (name) => {
+    if (installed) return;
+    say("that isn't a linkedin export",
+      `${name || 'that file'} is not Connections.csv or the zip linkedin sends. ${LINKEDIN_HELP}`);
     fitConnections();
   };
   ask();
@@ -1165,6 +1196,11 @@ renderSettings();
 // when it is built, so without this it would go on saying "waiting for your
 // file" about a file that is installed. See main.swift linkedInExportChanged.
 window.__hzLinkedInChanged = () => { if (repaintLinkedIn) repaintLinkedIn(); };
+// ...and a drop this panel was given and could not use. Native takes every file
+// drop on this window now, so it is the only thing that can answer for one.
+window.__hzLinkedInDropRefused = (name) => {
+  if (refuseLinkedInDrop) refuseLinkedInDrop(String(name ?? ''));
+};
 
 // ---------------- the connectors intro (yeeted) ----------------
 // There WAS a guided first visit here: a banner above the shelf ("first --
@@ -1264,9 +1300,15 @@ const HINTS = {
     // thing, and the one written here was the one that asks the owner to go
     // digging in a hidden folder. The card carries the picker now (see
     // `pickLinkedInExport` below); the sentence is only how you get the file.
+    // ~~"unzip it and choose Connections.csv here."~~ The zip is the only thing
+    // LinkedIn ever sends, and the import takes Connections.csv out of it now
+    // (Bridge extractConnections) — so this card was still asking the owner to
+    // do by hand the job the picker on it had just been taught to do, and
+    // contradicting that picker's own message ("choose the zip LinkedIn sent
+    // you") on the same install (review finding 9).
     text: 'On LinkedIn: Settings → Data privacy → Get a copy of your data → tick "Connections" → '
-      + 'Request archive. It arrives by email, usually in ten minutes — unzip it and choose '
-      + 'Connections.csv here.',
+      + 'Request archive. It arrives by email, usually in ten minutes — hand me the zip and '
+      + 'I will take it from there.',
     url: 'https://www.linkedin.com/mypreferences/d/download-my-data',
     link: 'linkedin.com · get a copy of your data',
     // One export folder per Mac, so no "+ add account" once it is imported.
@@ -1830,8 +1872,8 @@ function card(src, keep) {
         // extractConnections); the two answers left are the two real failures,
         // and only one of them has a remedy in it.
         if (out.reason === 'zip-connections') {
-          say(`there is no Connections.csv in ${out.file || 'that zip'} — ask linkedin for `
-            + '"connections" and it will be in the next one.');
+          say(`there is no Connections.csv anywhere in ${out.file || 'that zip'} — tick `
+            + '"connections" when you request the export and it will be in the next one.');
           return;
         }
         if (out.reason === 'zip') {

@@ -132,18 +132,45 @@ test('an older pick cannot overwrite a newer export', () => {
 // CSV — PASS ZERO ends where PASS ONE begins and changes nothing after it.
 test('the zip is unpacked, and only Connections.csv comes out of it', () => {
   assert.match(bridge, /UTType\("public\.zip-archive"\)/u, 'still offered in the panel');
-  const extract = /static func extractConnections\(fromZipAt zip: URL\) -> ZipExtraction \{([\s\S]*?)\n {2}\}/u
+  const extract = /static func extractConnections\(fromZipAt zip: URL\) -> ZipExtraction \{([\s\S]*?)\n  \}/u
     .exec(bridge)?.[1];
   assert.ok(extract, 'extractConnections() not found');
-  assert.match(extract, /executableURL = URL\(fileURLWithPath: "\/usr\/bin\/unzip"\)/u);
-  // ONE ENTRY, BY NAME. The export holds Profile.csv and Contacts.csv as well,
-  // both with an exact `First Name` column, and either landing at the
-  // destination destroys a good import. A pattern with a wildcard in it could
-  // match more than one entry and unzip -p would concatenate them.
-  assert.match(extract, /arguments = \["-p", zip\.path, "Connections\.csv"\]/u);
-  // NO SHELL. `arguments` goes to execve, so nothing in a file name is
-  // interpreted on the way.
-  assert.doesNotMatch(extract, /\/bin\/sh|-c"|NSAppleScript/u);
+  // LISTED FIRST, then one entry taken by name. ~~A literal `Connections.csv`
+  // pattern~~ matched a root entry only, and the archive LinkedIn actually
+  // sends nests everything a level down -- so the ordinary case came back
+  // "there is no Connections.csv in that zip" and told the owner to request it
+  // again, which produces the identical archive (review finding 5).
+  assert.match(extract, /zipEntries\(in: zip\)/u);
+  assert.match(extract, /connectionsEntry\(among: entries\)/u);
+  assert.match(extract, /zipPattern\(entry\)/u,
+    "unzip's -p takes a glob, so the chosen name has to be quoted to match itself");
+  // The decoys are still unreachable: Profile.csv and Contacts.csv share the
+  // anchor column and either would destroy a good import, and the chooser
+  // matches the basename exactly at any depth. linkedin-export-handoff runs
+  // that rule against real archives.
+  assert.match(bridge, /lastPathComponent == "Connections\.csv"/u);
+  // NO SHELL anywhere in the pair. `arguments` goes to execve, so nothing in a
+  // file name is interpreted on the way.
+  assert.match(bridge, /executableURL = URL\(fileURLWithPath: tool\)/u);
+  assert.doesNotMatch(extract, /\/bin\/sh|NSAppleScript/u);
+});
+
+test('neither unzip is left unreaped, and neither pipe is left open', () => {
+  // Both early exits used to terminate() and return without waitUntilExit(),
+  // and the pipe's read end was never closed -- a zombie and a leaked
+  // descriptor for every archive that failed (review finding 17). One runner
+  // now owns both calls, and it always reaps.
+  const run = /private static func runCapturing\(([\s\S]*?)\n  \}/u.exec(bridge)?.[1] ?? '';
+  assert.ok(run, 'runCapturing() not found');
+  assert.match(run, /task\.waitUntilExit\(\)/u);
+  assert.match(run, /pipe\.fileHandleForReading\.close\(\)/u);
+  // The write end is ours to close too, or the read below never sees EOF.
+  assert.match(run, /pipe\.fileHandleForWriting\.close\(\)/u);
+  // Exactly one place spawns anything in this whole region.
+  const region = /\/\/ MARK: the LinkedIn export([\s\S]*?)\n {2}private func bridgeCall\(/u
+    .exec(bridge)?.[1] ?? '';
+  assert.equal((region.match(/Process\(\)/gu) ?? []).length, 1,
+    'one runner, so there is one place that can leak a child');
 });
 
 test('extraction happens before PASS ONE and buys no shortcut through it', () => {
@@ -169,8 +196,13 @@ test('an archive that opened and has no Connections.csv says so separately', () 
   // no remedy in it; "there is no Connections.csv in there" tells the owner to
   // tick Connections next time, which is the whole fix.
   assert.match(bridge, /case notFound/u);
-  assert.match(bridge, /terminationStatus == 11[\s\S]{0,120}return \.notFound/u,
-    "unzip answers 11 for no-matching-files, which is the archive being fine");
+  // DECIDED FROM THE LISTING, not from an exit code. ~~`terminationStatus == 11`
+  // -> .notFound~~ conflated two different things once the entry was chosen
+  // ahead of time: 11 after a listing that NAMED the entry means the pattern and
+  // the name disagreed, which is not something the owner can fix by asking
+  // LinkedIn again.
+  assert.match(bridge, /guard let entry = connectionsEntry\(among: entries\) else \{ return \.notFound \}/u);
+  assert.match(bridge, /if run\.status == 11 \{ discard\(\); return \.unreadable \}/u);
   const unpack = accept.slice(accept.indexOf('// PASS ZERO'), accept.indexOf('// PASS ONE'));
   assert.match(unpack, /"reason": "zip-connections"/u);
   assert.match(unpack, /"reason": "zip"/u);

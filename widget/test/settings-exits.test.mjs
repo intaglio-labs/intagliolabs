@@ -236,6 +236,15 @@ test('the shelf offers the LinkedIn picker instead of a dotfile path', () => {
   assert.ok(hint, 'the export hint was not found');
   assert.doesNotMatch(hint.replace(/\/\/[^\n]*/gu, ''), /~\/\.hazlie/u,
     'a raw dotfile path in a tooltip is an invitation to go editing one by hand');
+  // AND IT MUST NOT ASK FOR THE UNZIPPING EITHER. The import takes
+  // Connections.csv out of the archive now, so a card still reading "unzip it
+  // and choose Connections.csv here" was asking the owner to do by hand the job
+  // its own picker had just been taught, and contradicting that picker's
+  // message ("choose the zip LinkedIn sent you") on the same install — review
+  // finding 9. Code only, because the sentence it replaced is kept above it,
+  // struck, like every other one in this repo.
+  assert.doesNotMatch(hint.replace(/\/\/[^\n]*/gu, ''), /unzip it/u,
+    'the zip is the only thing LinkedIn sends, and the app opens it now');
   assert.ok(connectionsGrants.has('importLinkedIn'), 'the page must be allowed to ask');
   assert.match(connections, /pickLinkedInExport\(pick, tip\)/u);
   // Every branch native can answer with is said, including the two that have a

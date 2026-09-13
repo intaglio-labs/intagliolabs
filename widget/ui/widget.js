@@ -727,13 +727,35 @@ monthsBtn.addEventListener('click', () => {
 // the gear is the next scene's door — so it bounces and glows until settings
 // has been opened once. Native drives it live (finish -> on, open -> off);
 // the prefs check below is what survives a relaunch in between.
-window.__hzGearNudge = (on) => {
-  gearBtn.classList.toggle('nudge', on === true);
-  // The nudge going off takes its sentence with it. The hover is what says
-  // WHICH errand the glow is about (see linkedInReady below), and a sentence
-  // left behind after the glow is a claim nothing on screen is making.
-  if (on !== true) gearBtn.title = 'Settings';
-};
+// ONE GLOW, MORE THAN ONE ERRAND, AND NEITHER MAY HIDE THE OTHER.
+//
+// There are two reasons the gear can want the owner: the handoff out of
+// onboarding (native drives it: finish -> on, open -> off) and LinkedIn having
+// mailed the export (below). They shared the class and the title, so whichever
+// spoke last owned the hover and the other errand went invisible — and the
+// LinkedIn one only ever turned the glow ON, so it also outlived its own errand
+// (review finding 20).
+//
+// Each errand is named, so turning one off cannot take the other's glow with it,
+// and the title says whichever is outstanding. The handoff is the more urgent of
+// the two while it lasts: it is the flow's own last instruction.
+// Most specific first, NOT most recent. The handoff's own hover is the bare
+// word "Settings", which says nothing an owner cannot already see, so an errand
+// with an actual sentence in it outranks it whenever both are outstanding.
+const GEAR_ERRANDS = [
+  ['linkedin', 'your export is ready — open the email'],
+  ['handoff', 'Settings'],
+];
+const gearErrands = new Set();
+
+function setGearErrand(name, on) {
+  if (on === true) gearErrands.add(name); else gearErrands.delete(name);
+  gearBtn.classList.toggle('nudge', gearErrands.size > 0);
+  const speaking = GEAR_ERRANDS.find(([errand]) => gearErrands.has(errand));
+  gearBtn.title = speaking ? speaking[1] : 'Settings';
+}
+
+window.__hzGearNudge = (on) => setGearErrand('handoff', on === true);
 hzPost('prefs')
   .then((p) => {
     if (p && p.onboarded === true && p.connectorsIntroDone === false) {
@@ -756,14 +778,22 @@ hzPost('prefs')
 // installed, so there is no second condition to get wrong here, and no way for
 // this to badge an errand the owner has already run.
 //
+// NULL IS AN ANSWER TOO, and it used to be treated as "no news": this returned
+// early, so the glow it raised outlived the errand — imported the export, and
+// the gear went on asking for it until something else cleared the class (review
+// finding 20). A reply that says there is no note takes the errand back.
+//
+// A reply that never CAME is different again, and neither raises the errand nor
+// clears it: a hermes that is still starting up has no opinion about the owner's
+// inbox, and a glow must not be dropped on its silence.
+//
 // Asked when the page loads and again on a wake, and never on a timer: the note
 // is written at most once and the gear is not a status light.
 function checkLinkedInReady() {
   hzPost('linkedInReady')
     .then((out) => {
-      if (!Number.isFinite(Number(out?.readyTs))) return;
-      window.__hzGearNudge(true);
-      gearBtn.title = 'your export is ready — open the email';
+      if (out?.state !== 'ok') return;
+      setGearErrand('linkedin', Number.isFinite(Number(out?.readyTs)));
     })
     .catch(() => {});
 }
