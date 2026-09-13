@@ -1154,7 +1154,9 @@ END;
    The plan's logging contract -- product events without SOURCE text: the
    only text columns are the closed dismissal-reason enum and the owner's own
    free-text note, never a row's content. 'shown' rows are what the
-   global frequency cap counts, and they are recorded by the SERVER when a
+   global frequency cap counts -- ~~all of them~~ the ones whose 'pulled' is 0,
+   since 2026-09-13: the cap counts interruptions, and a card the owner asked
+   for after rejecting one is not one. They are recorded by the SERVER when a
    card is first handed out -- client-side recording double-counted
    relaunches into the cap; a dismissal's structured reason rides the same
    event rather than a parallel table, so one query answers "what happened to
@@ -1183,7 +1185,17 @@ CREATE TABLE IF NOT EXISTS rm_card_event(
   note         TEXT,
   rule_version TEXT NOT NULL,
   time_band    TEXT NOT NULL CHECK (time_band IN ('morning','afternoon','evening','night')),
-  created_at   INTEGER NOT NULL
+  created_at   INTEGER NOT NULL,
+  /* WAS THIS CARD AN INTERRUPTION, OR DID THE OWNER ASK FOR IT? Only a
+     'shown' row can be pulled: 1 means the owner rejected a card and asked
+     for another, so this serve was their own doing and the frequency cap
+     does not count it (see controls.mjs underGlobalCap / PULLS_PER_DAY).
+     LAST, not beside snapshot_id, because healCardEventColumns ALTERs it onto
+     existing databases and an ALTER appends -- a fresh database and a healed
+     one must not carry the same table in two different column orders.
+     DEFAULT 0 is the honest back-fill: every row that predates the column was
+     an interruption, which is exactly what the cap counted it as. */
+  pulled       INTEGER NOT NULL DEFAULT 0 CHECK (pulled IN (0,1))
 );
 CREATE INDEX IF NOT EXISTS rm_card_event_shown ON rm_card_event(event, created_at);
 /* The card route's acted/shown checks key on snapshot_id against a table
@@ -1433,6 +1445,10 @@ function migrate(db) {
   // storeLookup throwing mid-pass, which is exactly the failure the lookup
   // review found leaving distill_run and person_lookup_run 'running'.
   healLookupColumns(db);
+  // Same doctrine again, for rm_card_event.pulled: the card has been serving
+  // on the reference install since before that column existed, so its table
+  // is the one shape CREATE TABLE IF NOT EXISTS can never fix.
+  healCardEventColumns(db);
   if (version >= SCHEMA_VERSION) return;
   if (version < 1) {
     // Rewrites every page under secure_delete. Cheap on a small database and
@@ -1745,6 +1761,38 @@ function healLookupColumns(db) {
     }
   }
 }
+
+// rm_card_event.pulled, healed on EVERY open for the same reason the lookup
+// columns are: the stamp is a cache and the DDL is the truth. No
+// SCHEMA_VERSION bump goes with it -- a version branch would only record what
+// this function already guarantees, and a database stamped past the bump but
+// missing the column (the failure mode that moved the lookup ALTERs out here
+// in the first place) would never run the branch again.
+//
+// The consequence of NOT healing is not a startup error: it is the card
+// route's INSERT throwing at the moment a card is handed over, which is the
+// one moment the owner is watching.
+function healCardEventColumns(db) {
+  const hasTable = db
+    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'rm_card_event'")
+    .get() !== undefined;
+  if (!hasTable) return;
+  const cols = new Set(
+    db.prepare("SELECT name FROM pragma_table_info('rm_card_event')").all().map((c) => c.name)
+  );
+  if (!cols.has('pulled')) {
+    // NO BACK-FILL, and none is needed: DEFAULT 0 says "this was an
+    // interruption", which is what every pre-existing row was -- there was no
+    // way to ask for another card before this column existed. Contrast
+    // person_lookup_change.contradicts_anchor_unknown, whose default WOULD
+    // have asserted a check nobody ran.
+    db.exec(
+      'ALTER TABLE rm_card_event ADD COLUMN pulled INTEGER NOT NULL DEFAULT 0 ' +
+      'CHECK (pulled IN (0,1))'
+    );
+  }
+}
+
 
 // claim.subject widens from the single literal 'owner' (L5 step 2). A CHECK
 // constraint cannot be ALTERed in SQLite, so the table is rebuilt and rows
@@ -4342,6 +4390,25 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // requests, which is the ordinary case and not something to fail on.
     const expectRaw = url.searchParams.get('expect');
     const expect = expectRaw !== null && /^\d+$/u.test(expectRaw) ? Number(expectRaw) : null;
+    // ?pull=1 -- THE OWNER ASKED FOR ANOTHER ONE (2026-09-13, owner decision).
+    //
+    // The cap counts interruptions, and a card the owner rejected interrupted
+    // them for nothing. So a rejection buys a PULL: a serve that the day's
+    // spent interruption does not refuse, up to PULLS_PER_DAY, recorded as
+    // `pulled` on its own 'shown' row so it is not counted as an interruption
+    // either -- by this cap today or by any reading of the log afterwards.
+    //
+    // IT CHANGES THE GATE, NOT THE RECORDING, which is what keeps it
+    // orthogonal to ?peek=1: a peek with pull=1 asks "would another one be
+    // served", spends nothing and records nothing, so the panel can offer the
+    // button honestly instead of finding out by pressing it.
+    //
+    // NOT A CAPABILITY, the same way `expect` is not one: it cannot reach a
+    // card this request would not otherwise be allowed to serve (the mute, the
+    // suppression, the servability gate and the producer's turn are all
+    // upstream of it), and its only power is over the owner's own attention
+    // budget, which is the thing the owner is asking to spend.
+    const pull = url.searchParams.get('pull') === '1';
     const rel = relationshipState(db, policy);
     // THE OWNER'S STANDING PICK, ONCE, and whether this install can serve it
     // yet. Every branch below reports `mode` as this value -- it is what the
@@ -4683,7 +4750,10 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         expectSuperseded = true;
       }
     }
-    let capBlocked = false;
+    // WHY NOTHING WAS SERVED, when the gate is what refused: `{ reason }` plus,
+    // for a refused pull, how long the refusal lasts. Set once, by the first
+    // candidate that would have cost something.
+    let gateBlocked = null;
 
     for (const card of orderedCards) {
       // 'shown' is recorded HERE, once per snapshot, when the card is first
@@ -4701,10 +4771,23 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         // this window has an interruption left. A PEEK checks it (an orb
         // that lights for a card the cap will refuse is a lie) but never
         // spends it, and records no 'shown'.
-        if (!rel.service.controls.underGlobalCap({ ...cap })) { capBlocked = true; break; }
+        //
+        // AND WHETHER THIS ONE IS AN INTERRUPTION OR A PULL. serveAllowance
+        // owns the whole of that decision (controls.mjs): inside the cap it is
+        // an interruption; past the cap it is a pull if the owner asked for
+        // one and today's rejections have not already bought three; otherwise
+        // nothing is served. Asked per candidate rather than once per request
+        // because a card can still be skipped below after its slot is spent,
+        // and the next one must face the cap as it now stands.
+        const allow = rel.service.controls.serveAllowance({ cap, pull });
+        if (!allow.allowed) { gateBlocked = allow; break; }
         if (!peek) {
           rel.service.controls.recordEvent({ personKey: card.personKey, kind: card.kind,
-            event: 'shown', ruleVersion: card.producer_version, snapshotId: card.snapshot_id });
+            event: 'shown', ruleVersion: card.producer_version, snapshotId: card.snapshot_id,
+            // The whole of the pull's durable record. Without it the next
+            // request counts this serve as an interruption and the budget is
+            // the cap again.
+            pulled: allow.pulled });
         }
       }
       if (peek) {
@@ -4712,6 +4795,11 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         // widget renders name plus quiet/overdue days on the orb's title.
         send(res, 200, { peek: true, mode: pick,
           ...heldFields,
+          // HOW MANY TIMES "show me another" CAN STILL BE ANSWERED TODAY, on
+          // the tease as on the serve: the panel decides whether to draw the
+          // button from this, rather than by pressing it and being refused.
+          // A peek spends nothing, so this is the budget as it stands.
+          pullsLeft: rel.service.controls.pullsLeft({ now: nowForLive }),
           // WHERE THE TEASED CARD CAME FROM, on the peek as on the serve
           // (round-8 finding 1). The panel's one-off hand-off reads exactly
           // this field off exactly this reply -- the peek is what the widen
@@ -4841,6 +4929,11 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         servedMode: card.kind === 'reconnect' ? (card.evidence?.mode ?? null) : null,
         mode: pick,
         ...heldFields,
+        // WHAT IS LEFT OF TODAY'S "show me another", counted AFTER this serve
+        // -- so a card that just spent a pull reports the budget the next ask
+        // will actually meet, and an accept on this card drops it to zero on
+        // the next reply.
+        pullsLeft: rel.service.controls.pullsLeft({ now: nowForLive }),
         // The card asked for is gone; this is the next one. A reason BESIDE a
         // non-null card, which no other branch of this route produces.
         ...(expectSuperseded ? { expectSuperseded: true, reason: 'expect-superseded' } : {}),
@@ -4857,7 +4950,15 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // people alike. 'cap' means come back tomorrow; a block reason means the
     // queue holds cards the owner's own controls (or a deleted source) are
     // refusing.
-    const reason = capBlocked ? 'cap' : (blockedReasons[0] ?? 'queue-empty');
+    //
+    // AND NOW A THIRD SENTENCE. 'cap' still means "the day's interruption is
+    // spent" and is what an ordinary poll gets. 'pulls-exhausted' is the
+    // owner pressed "show me another" and today has no more, either because
+    // three rejections have already been answered or because a card was
+    // accepted and the day is done. It carries retryAfterMs (to local
+    // midnight, which is when the budget returns) for the same reason
+    // 'pool-exhausted' does: "come back later" is not a time.
+    const reason = gateBlocked?.reason ?? (blockedReasons[0] ?? 'queue-empty');
     // expectSuperseded RIDES THIS BRANCH TOO (review G finding 7): it was
     // computed above and then thrown away here, so a panel that asked for a
     // specific card and got nothing could not tell "your card is gone AND
@@ -4867,6 +4968,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // is on every branch so there is one field to test regardless.
     send(res, 200, { card: null, reason, mode: pick,
       ...heldFields,
+      ...(gateBlocked?.retryAfterMs === undefined ? {} : { retryAfterMs: gateBlocked.retryAfterMs }),
+      pullsLeft: rel.service.controls.pullsLeft({ now: nowForLive }),
       ...(askedMode === null ? {} : { oneOff: true }),
       ...(expectSuperseded ? { expectSuperseded: true } : {}),
       ...(rel.refreshing ? { refreshing: true } : {}),

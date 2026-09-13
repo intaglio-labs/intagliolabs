@@ -124,7 +124,15 @@ export function pickProducer(db, { now = Date.now() } = {}) {
 // A PEEK vs A SERVE. A serve hands a card to the owner: it records 'shown'
 // (once per snapshot), spends a cap slot, starts the 7-day pool cooldown for
 // that person, and -- via pickProducer, which reads 'shown' -- passes the
-// turn to the other producer. A peek answers only "is there a card, and what
+// turn to the other producer.
+//
+// ~~spends a cap slot~~ EXCEPT WHEN IT IS A PULL (2026-09-13). A card served
+// past a spent cap because the owner rejected one and asked for another
+// records `pulled` on its 'shown' row, and controls.mjs' underGlobalCap does
+// not count it -- the cap counts interruptions, and that serve was the owner's
+// own doing. The other three still happen, and should: a pulled card really
+// was offered to this person (the cooldown) and really was a card of its kind
+// (the turn). Only the interruption budget treats it differently. A peek answers only "is there a card, and what
 // would it tease", recording nothing. The widget's 10-minute background poll
 // peeks; only the card panel's own pull serves. Before this split the poll
 // served, so cap slots and cooldowns were spent on cards no human ever saw

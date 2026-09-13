@@ -17,6 +17,46 @@ const DAY = 86_400_000;
 // a new open loop opened) is not muted forever off one tap.
 export const NOT_THIS_KIND_MUTE_DAYS = 90;
 
+// HOW MANY EXTRA CARDS A REJECTION CAN BUY, IN ONE DAY.
+//
+// The cap counts INTERRUPTIONS -- the times this app lit up on its own and
+// asked for the owner's attention -- and a card the owner rejected is an
+// interruption that turned out to be worth nothing. "Show me another one" is
+// then the owner asking, not the app interrupting, so it must not be paid for
+// out of the same budget: the old behaviour counted every 'shown' row, so a
+// dismissal spent the day's only card and the honest answer to "another?" was
+// "come back tomorrow".
+//
+// A BUDGET RATHER THAN NO LIMIT, because a pull still costs a person out of
+// the pool (the 7-day recently-offered cooldown) and an unbounded "next" turns
+// a considered daily card into a feed. Three is the number the owner named.
+export const PULLS_PER_DAY = 3;
+
+// THE PULL BUDGET IS A CALENDAR DAY, NOT A ROLLING WINDOW, and it is the
+// machine's own clock zone -- the same local-time discipline timeBand keeps
+// above, and the same one cardStats' daysServed already counts in. "Come back
+// tomorrow" is a sentence about the owner's day; a rolling 24h window would
+// have it come due mid-afternoon.
+//
+// The frequency cap keeps its own rolling window (it is configured as one, in
+// the owner's config), so the two really are different clocks. That is
+// deliberate and is the smaller surprise: the cap is a rate limit, the pull
+// budget is a daily allowance.
+export function startOfLocalDay(now = Date.now()) {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+// How long until the budget resets, for the route's retryAfterMs. setHours(24)
+// on a local Date lands on the next local midnight through a DST change, which
+// adding 86_400_000 does not.
+export function msUntilLocalMidnight(now = Date.now()) {
+  const d = new Date(now);
+  d.setHours(24, 0, 0, 0);
+  return Math.max(0, d.getTime() - now);
+}
+
 // Local time band, deterministic from the machine's own clock zone. These are
 // product events about the OWNER's day, so local time is the honest axis; a
 // UTC band would call a Honolulu evening "morning".
@@ -89,19 +129,28 @@ export function createControls(db, { canonicalOf = (k) => k } = {}) {
     },
 
     // ---- events and structured dismissal --------------------------------
-    recordEvent({ personKey, kind, event, reason = null, note = null, ruleVersion, snapshotId = null, now = Date.now() }) {
+    // `pulled` marks a 'shown' the OWNER ASKED FOR after rejecting one, rather
+    // than an interruption this app decided to make. It is what underGlobalCap
+    // does not count and what the pull budget does; see PULLS_PER_DAY.
+    recordEvent({ personKey, kind, event, reason = null, note = null, ruleVersion, snapshotId = null, pulled = false, now = Date.now() }) {
       if (event === 'dismissed' && reason !== null && !DISMISS_REASONS.includes(reason)) {
         throw new Error(`dismissal reason must be one of: ${DISMISS_REASONS.join(', ')}`);
       }
       if (event !== 'dismissed' && reason !== null) {
         throw new Error('only a dismissal carries a reason');
       }
+      // Only a serve can be pulled. A 'dismissed' or 'accepted' row marked
+      // pulled would be a verdict claiming to be an interruption, and the two
+      // counts below (interruptions, pulls) read the same column.
+      if (pulled && event !== 'shown') {
+        throw new Error('only a shown card is pulled: a pull is how the card was served, not how it was judged');
+      }
       db.prepare(
-        'INSERT INTO rm_card_event(person_key, kind, event, reason, note, rule_version, snapshot_id, time_band, created_at) ' +
-          'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO rm_card_event(person_key, kind, event, reason, note, rule_version, snapshot_id, pulled, time_band, created_at) ' +
+          'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(requireKey(personKey, 'personKey'), requireKey(kind, 'kind'), event, reason,
         note === null ? null : String(note).slice(0, 500),
-        requireKey(ruleVersion, 'ruleVersion'), snapshotId, timeBand(now), now);
+        requireKey(ruleVersion, 'ruleVersion'), snapshotId, pulled ? 1 : 0, timeBand(now), now);
     },
     // The one-tap dismissal. 'never-this-person' IS the permanent control
     // reached from a card -- the plan lists it among the reasons precisely so
@@ -132,14 +181,70 @@ export function createControls(db, { canonicalOf = (k) => k } = {}) {
     // numbers are NOT defaulted here: thresholds come from the sealed Phase 0
     // gates artifact, and inventing a "reasonable" default is exactly the
     // fabrication rule 1 forbids. No cap configured means nothing shows.
+    //
+    // IT COUNTS INTERRUPTIONS, NOT CARDS HANDED OVER (2026-09-13, owner
+    // decision). A 'shown' row marked `pulled` is a card the owner asked for
+    // after rejecting one, and asking is not being interrupted -- counting it
+    // made the day's single interruption also the day's single card, so the
+    // answer to "that one's not relevant, show me another" was "come back
+    // tomorrow". Rows written before the column existed read 0 and count, which
+    // is right: every one of them was an interruption.
     underGlobalCap({ max, windowMs, now = Date.now() } = {}) {
       if (!Number.isInteger(max) || max < 0 || !Number.isFinite(windowMs) || windowMs <= 0) {
         return false; // fail closed: an unconfigured cap caps at zero
       }
       const n = Number(db.prepare(
-        "SELECT COUNT(*) AS n FROM rm_card_event WHERE event = 'shown' AND created_at > ?"
+        "SELECT COUNT(*) AS n FROM rm_card_event WHERE event = 'shown' AND pulled = 0 AND created_at > ?"
       ).get(now - windowMs).n);
       return n < max;
+    },
+
+    // How many pulls today's rejections have already bought, and whether the
+    // day is over. LOCAL CALENDAR DAY, see startOfLocalDay.
+    pullsUsed({ now = Date.now() } = {}) {
+      return Number(db.prepare(
+        "SELECT COUNT(*) AS n FROM rm_card_event WHERE event = 'shown' AND pulled = 1 AND created_at >= ?"
+      ).get(startOfLocalDay(now)).n);
+    },
+    // AN ACCEPT ENDS THE DAY, pulled or not. "Will text them" is the outcome
+    // the card exists for: once it has happened there is nothing left to offer
+    // today, and offering anyway would turn a day that WORKED into a feed. A
+    // rejection buys another look precisely because it produced nothing.
+    acceptedToday({ now = Date.now() } = {}) {
+      return db.prepare(
+        "SELECT 1 FROM rm_card_event WHERE event = 'accepted' AND created_at >= ? LIMIT 1"
+      ).get(startOfLocalDay(now)) !== undefined;
+    },
+
+    // HOW MANY MORE TIMES "show me another" CAN BE ANSWERED TODAY. Zero once an
+    // accept has ended the day, whatever is left of the budget -- so a surface
+    // can stop offering the button rather than offering it and being refused.
+    pullsLeft({ now = Date.now() } = {}) {
+      if (this.acceptedToday({ now })) return 0;
+      return Math.max(0, PULLS_PER_DAY - this.pullsUsed({ now }));
+    },
+
+    // MAY THIS REQUEST BE SERVED A CARD, AND AT WHOSE EXPENSE -- the whole of
+    // the cap decision in one place, so the route does not re-derive half of it.
+    //
+    //   { allowed: true, pulled: false }   an interruption, inside the cap
+    //   { allowed: true, pulled: true }    the cap is spent, the owner asked
+    //   { allowed: false, reason: 'cap' }  the cap is spent and nobody asked
+    //   { allowed: false, reason: 'pulls-exhausted', retryAfterMs }
+    //
+    // THE CAP IS SPENT FIRST, EVEN WHEN A PULL IS ASKED FOR. A pull is a
+    // fallback, not a preference: while the owner still has an interruption
+    // owing to them, that is what pays, and `pulled` stays reserved for rows
+    // that really were served past the cap. An owner on the shipped one-a-day
+    // never sees the difference; an owner who raised their cap keeps the cards
+    // they configured before spending a rejection's allowance.
+    serveAllowance({ cap, pull = false, now = Date.now() } = {}) {
+      if (this.underGlobalCap({ ...cap, now })) return { allowed: true, pulled: false };
+      if (!pull) return { allowed: false, reason: 'cap' };
+      if (this.pullsLeft({ now }) === 0) {
+        return { allowed: false, reason: 'pulls-exhausted', retryAfterMs: msUntilLocalMidnight(now) };
+      }
+      return { allowed: true, pulled: true };
     },
 
     // The single gate, checked before candidate ranking AND immediately
