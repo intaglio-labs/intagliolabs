@@ -64,9 +64,32 @@ test('messages: multiline content, UTC dates, bad dates skipped', () => {
 
 test('date parsers refuse the shapes they do not own', () => {
   assert.equal(parseConnectedOn('15 Aug 2021') === null, false);
-  assert.equal(parseConnectedOn('2021-08-15'), null);
   assert.equal(parseMessageDate('2023-06-01 18:02:33 UTC') === null, false);
   assert.equal(parseMessageDate('yesterday'), null);
+});
+
+// A non-English export writes its own month names, so every row of one used
+// to parse to null and the connection landed on the export's date instead of
+// its own. LinkedIn writes some exports numerically; a leading four-digit
+// field can only be a year, so those are readable without guessing.
+test('the ISO connection date reads, and the ambiguous slash forms do not', () => {
+  assert.equal(parseConnectedOn('2021-08-15'), parseConnectedOn('15 Aug 2021'),
+    'the same day, whichever way the export wrote it');
+  assert.equal(parseConnectedOn('2021/08/15'), parseConnectedOn('15 Aug 2021'));
+  assert.equal(parseConnectedOn('2021-8-5'), parseConnectedOn('05 Aug 2021'), 'unpadded reads too');
+
+  // 08/15/2021 and 15/08/2021 are the same eight characters meaning different
+  // days, and the file does not say which convention wrote them. This is the
+  // dormancy clock, so an ambiguous date is refused rather than guessed.
+  assert.equal(parseConnectedOn('08/15/2021'), null);
+  assert.equal(parseConnectedOn('15/08/2021'), null);
+  assert.equal(parseConnectedOn('01 juin 2020'), null, 'a month table this file does not have');
+
+  // Date rolls February 31st into March rather than refusing, so a bad day
+  // used to come back as a real timestamp for the wrong month.
+  assert.equal(parseConnectedOn('31 Feb 2021'), null);
+  assert.equal(parseConnectedOn('2021-02-31'), null);
+  assert.equal(parseConnectedOn('2021-13-01'), null);
 });
 
 test('the spine normalizers make identifiers collide with iMessage/mail keys', () => {
