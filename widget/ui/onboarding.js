@@ -1320,6 +1320,14 @@ function sprintSentence() {
 // Same sentence here and on the card (reconnect.js), because it is the same
 // fact: two wordings for one cause is two explanations, and the owner only gets
 // to believe one.
+//
+// IT DOES NOT ARRIVE ON THE REASON YOU WOULD EXPECT. The flag rides
+// `pool-exhausted`, not `pool-exhausted-mode` — hermes suppresses the latter
+// while the pick is held, because under the fallback the serve mode is already
+// `any` and there is nothing left to widen to. Written down here because the
+// first version of this branch lived in the `pool-exhausted-mode` path and was
+// therefore unreachable: the sentence existed, the tests passed, and nothing
+// could ever have painted it. See peekCard.
 const linkedInPendingLine = (mode) =>
   `${mode} cards start when your linkedin export lands`;
 const linkedInPending = (out) =>
@@ -1331,10 +1339,13 @@ function paintModeShortfall(out) {
   if (linkedInPending(out)) {
     loadMode.textContent = linkedInPendingLine(out.mode);
     loadMode.hidden = false;
-    // The widening still stands: it is a one-off peek under `any`, which is the
-    // one group that does not need the export at all, and it is the only thing
-    // on this screen the owner can press about it.
-    loadAnyMode.hidden = false;
+    // AND NO OFFER TO WIDEN, because the widening has already happened. Under
+    // the fallback hermes is serving from `any` already, so "show me anyone,
+    // just this once" asks the owner to choose what they are being given —
+    // and a one-off peek names a mode, which suppresses the fallback and comes
+    // back with the identical empty answer. A button that cannot change the
+    // screen it is on is worse than no button.
+    loadAnyMode.hidden = true;
     return;
   }
   const mode = typeof out.mode === 'string' && out.mode.length > 0 ? out.mode : null;
@@ -1705,6 +1716,17 @@ function peekCard(out, { fromOneOff = false } = {}) {
         : 'still looking — try that again in a moment';
       return;
     }
+    // THE PICK IS BEING HELD, AND NO AMOUNT OF READING WILL RELEASE IT.
+    //
+    // This is where the flag actually lands. hermes suppresses
+    // `pool-exhausted-mode` while the pick is held — the serve mode is already
+    // `any`, so there is nothing to widen to and no counts to report — which
+    // means a fallback empty answer arrives as a plain `pool-exhausted` with
+    // `modeFallback` on it. Its own line, under whatever the status says next,
+    // because both facts are true at once: the house is empty AND the owner's
+    // group is waiting on a file. The sentence about the file is the one they
+    // can act on.
+    if (linkedInPending(out)) paintModeShortfall(out);
     // AND WHEN THE READER IS ALREADY DOING SOMETHING ABOUT IT, SAY THAT INSTEAD.
     //
     // "i need more history" is true and useless on a fresh Mac: the card wants

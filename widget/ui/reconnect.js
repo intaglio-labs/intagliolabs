@@ -46,7 +46,18 @@ function adoptServerMode(out) {
   // pressed "show me anyone, just this once" on the onboarding screen -- the
   // durable write that button was rewritten to stop making, arriving through the
   // picker instead.
-  const fromServer = out?.oneOff === true
+  //
+  // AND NEITHER IS A HELD PICK, which is the same bug arriving by a second
+  // route. Under `modeFallback: 'linkedin-pending'` hermes serves from `any`
+  // and sends `servedMode: 'any'` with `mode` still the owner's investor or
+  // founder — the same shape as a one-off, with `oneOff` absent because nobody
+  // asked for this widening. Taking servedMode there would have moved the
+  // picker to `any` and WRITTEN IT: the owner's standing choice replaced,
+  // permanently, because a file has not arrived yet. The line under the chips
+  // exists precisely to say the pick is being held rather than changed, and it
+  // would have been describing a pick this function had just thrown away.
+  const held = out?.oneOff === true || typeof out?.modeFallback === 'string';
+  const fromServer = held
     ? (MODES.includes(out?.mode) ? out.mode : null)
     : MODES.includes(out?.servedMode) ? out.servedMode
       : MODES.includes(out?.mode) ? out.mode : null;

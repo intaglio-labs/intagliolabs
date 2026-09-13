@@ -566,10 +566,27 @@ test('a one-off look does not move the card picker', () => {
     'the reply says which kind of look it was; the picker has to read it');
   // On a one-off it takes `mode`, which is the standing pick, and never
   // servedMode.
-  assert.match(
-    code(adopt),
-    /out\?\.oneOff === true\n\s*\? \(MODES\.includes\(out\?\.mode\) \? out\.mode : null\)/u
-  );
+  //
+  // THE RULE, NOT THE TWO LINES IT HAPPENED TO BE WRITTEN ON. This asserted the
+  // literal `out?.oneOff === true\n ? (MODES.includes(out?.mode) ...)` and went
+  // red the day a SECOND reply shape needed the same treatment: a pick held on
+  // `modeFallback: 'linkedin-pending'` is also served under a mode the owner did
+  // not choose, also sends `servedMode: 'any'` with `mode` still their own, and
+  // carries no `oneOff`, because nobody asked for that widening. The two are one
+  // rule now -- the server served something the owner did not pick, so read
+  // `mode` -- and what this has to hold down is that a one-off is still on that
+  // side of it, however the condition comes to be spelled.
+  assert.match(code(adopt), /out\?\.oneOff === true \|\| /u,
+    'a one-off must still be one of the cases that refuse servedMode');
+  assert.match(code(adopt), /const held = /u);
+  assert.match(code(adopt), /\? \(MODES\.includes\(out\?\.mode\) \? out\.mode : null\)/u,
+    'and the held branch takes the standing pick');
+  // The ordering is what makes it work: servedMode may only be preferred on the
+  // branch that is NOT held.
+  const heldAt = code(adopt).indexOf('const fromServer = held');
+  const servedAt = code(adopt).indexOf('out.servedMode');
+  assert.ok(heldAt > -1 && servedAt > heldAt,
+    'servedMode must sit on the not-held branch, below the test for it');
 });
 
 // ---------------------------------------------- the widened card has to arrive
