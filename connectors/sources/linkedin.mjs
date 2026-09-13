@@ -19,15 +19,17 @@
 // LOG POLICY: counts only — never a name, company, or message fragment.
 
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { connectionsToRows, messagesToRows } from '../lib/linkedinRows.mjs';
+import { clearExportReady, importDir } from '../lib/linkedinExport.mjs';
 
 const CURSOR_KEY = 'linkedin:max-mtime';
 
-export function defaultImportDir(home = homedir()) {
-  return join(home, '.hazlie', 'imports', 'linkedin');
-}
+// The import folder, and the name the rest of the repo already calls it by.
+// The derivation itself moved to lib/linkedinExport.mjs, next to the marker
+// that lives in the same directory -- two readers deriving one path by hand is
+// how two surfaces come to disagree about where the file goes.
+export { importDir as defaultImportDir };
 
 export function createLinkedinSource({ home } = {}) {
   return {
@@ -36,7 +38,7 @@ export function createLinkedinSource({ home } = {}) {
     // What is MISSING, so [] means ready. Connections.csv is the requirement;
     // messages.csv is optional and its absence is not a fault.
     needs() {
-      const dir = defaultImportDir(home);
+      const dir = importDir(home);
       const conn = join(dir, 'Connections.csv');
       return existsSync(conn)
         ? []
@@ -47,7 +49,15 @@ export function createLinkedinSource({ home } = {}) {
     },
 
     async run(ctx) {
-      const dir = defaultImportDir(home ?? ctx.home);
+      const dir = importDir(home ?? ctx.home);
+      // THE EXPORT IS HERE, SO THE NUDGE IS SPENT. run() is only reached once
+      // needs() has seen Connections.csv, which is exactly the event
+      // export-ready.json was waiting for: the owner opened the mail, followed
+      // it, and dropped the file. Deleting it here rather than at the surfaces
+      // keeps "is the export ready to fetch" a fact about the disk instead of a
+      // flag somebody has to remember to clear. Idempotent -- an absent marker
+      // is the state this is trying to reach.
+      clearExportReady(home ?? ctx.home);
       const files = ['Connections.csv', 'messages.csv']
         .map((name) => join(dir, name))
         .filter((p) => existsSync(p));

@@ -26,6 +26,7 @@ import {
 } from '../../connectors/lib/features.mjs';
 import { daemonLockIsLive } from '../../connectors/lib/daemonLock.mjs';
 import { CONNECTOR_NAMES } from '../../connectors/lib/connectorNames.mjs';
+import { exportInstalled, exportReadyAt } from '../../connectors/lib/linkedinExport.mjs';
 
 const SECRETS = (home) => join(home, '.hazlie', 'secrets');
 
@@ -416,11 +417,20 @@ function linkedinExportRow(home) {
   // means Connections.csv is in place; messages.csv is optional and not
   // checked, because its absence is a choice rather than a fault. Existence
   // only: no names, no counts of rows, nothing out of the file itself.
-  const ok = existsSync(join(home, '.hazlie', 'imports', 'linkedin', 'Connections.csv'));
+  const ok = exportInstalled(home);
   return {
     id: LINKEDIN_EXPORT_ID,
     label: 'LinkedIn',
     connected: ok,
+    // THE ONE ROW WHERE "NOT CONNECTED" MAY NOT BE THE OWNER'S MOVE TO MAKE.
+    // Every other tile here is connected by signing in; this one waits on
+    // LinkedIn to build an archive and mail it. The mail connector recognises
+    // that mail and leaves a marker (connectors/lib/linkedinExport.mjs), so
+    // this row can say "your export is ready — open the email" instead of
+    // repeating "needs your LinkedIn data export" at somebody who already
+    // asked for it. A TIMESTAMP OR NULL, never the subject: the surfaces only
+    // need to know that it happened and when.
+    linkedinExportReady: exportReadyAt(home),
     // OPTIONAL, like "add another Google account" and for the same reason. The
     // archive is requested from LinkedIn, produced in its own time, mailed,
     // downloaded and unzipped by hand — a standing invitation rather than

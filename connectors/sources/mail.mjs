@@ -60,7 +60,8 @@
 import { homedir } from 'node:os';
 import { createGmailClient } from '../lib/gmailClient.mjs';
 import { GMAIL_SCOPE, accountsWithScope } from '../lib/googleAccounts.mjs';
-import { DEFAULT_MAX_BODY_BYTES, messageToRow } from '../lib/mailRows.mjs';
+import { DEFAULT_MAX_BODY_BYTES, messageToRow, normalizeAddresses } from '../lib/mailRows.mjs';
+import { noteExportReady } from '../lib/linkedinExport.mjs';
 
 const DEFAULT_BACKFILL_DAYS = 30;
 // Forward scans stay bounded so a first run cannot monopolize the daemon.
@@ -244,6 +245,69 @@ export function gmailMessageToParsed(message) {
   };
 }
 
+// "YOUR EXPORT IS READY" -- THE ONE MAIL THIS CONNECTOR READS AS AN EVENT.
+//
+// The LinkedIn export is the only source in this system the owner has to go and
+// FETCH: request it, wait hours, and come back for a mail with a download in
+// it. Nothing was watching for that mail, so the archive sat in an inbox while
+// the setup screen went on saying the export was missing. Recognising it costs
+// one header test on mail this connector is fetching anyway, and what it buys
+// is a sentence the owner can act on.
+//
+// A MATCH IS A NUDGE, NOT A ROW. Nothing here writes to the corpus, changes an
+// ingest, or follows a link. The mail lands in `context` exactly as it would
+// have; this is a second, smaller reading of the same message.
+//
+// THE SENDER IS THE HALF THAT IS TIGHT, and it is checked first for that
+// reason: `linkedin.com` itself or a subdomain of it (`e.linkedin.com`,
+// `bounce.linkedin.com` -- the notification traffic moves between them), and
+// never a domain that merely ENDS in the string, which is what an anchored
+// `.linkedin.com` suffix keeps out of `notlinkedin.com`.
+const LINKEDIN_SENDER = /^(?:[a-z0-9-]+\.)*linkedin\.com$/u;
+function fromLinkedin(raw) {
+  return normalizeAddresses(raw).some((address) => {
+    const at = address.lastIndexOf('@');
+    return at !== -1 && LINKEDIN_SENDER.test(address.slice(at + 1));
+  });
+}
+
+// THE SUBJECT IS THE HALF THAT CANNOT BE TIGHT, because LinkedIn writes it
+// several ways and has changed it before: "Your LinkedIn data is ready",
+// "Your download is ready". So the test is `ready` AND (`data` OR `download`)
+// -- the smallest rule both of those known subjects satisfy.
+//
+// NOT "data AND ready-or-download", which is the obvious reading of the same
+// three words and which "Your download is ready" FAILS: there is no `data` in
+// it. The availability word is the one that must always be present; what it is
+// about may be called either thing. Word-bounded, so "already" is not "ready"
+// and "metadata" is not "data".
+//
+// A false positive costs a badge the owner dismisses by looking at their mail;
+// a false negative costs the whole feature, silently. The sender gate is what
+// makes that trade safe -- only LinkedIn's own mail is ever examined.
+function subjectSaysReady(subject) {
+  const text = typeof subject === 'string' ? subject.toLowerCase() : '';
+  if (!/\bready\b/u.test(text)) return false;
+  return /\bdata\b/u.test(text) || /\bdownloads?\b/u.test(text);
+}
+
+// `{ at, subject }` for a mail that says the export is downloadable, else null.
+// Exported for the fixture test: this is a rule about wording, and a rule about
+// wording that nothing pins is a rule that drifts.
+//
+// The timestamp is Gmail's internalDate where the caller has one -- the same
+// value every cursor in this file compares -- and the parsed date otherwise.
+// SUBJECT ONLY beyond that: no body, no link, no sender. See lib/
+// linkedinExport.mjs for why the marker holds so little.
+export function linkedinExportReadyNote(parsed, ts) {
+  if (!fromLinkedin(parsed?.from) || !subjectSaysReady(parsed?.subject)) return null;
+  const at = Number.isFinite(ts) ? Number(ts)
+    : parsed?.date instanceof Date ? parsed.date.getTime()
+    : Number.NaN;
+  if (!Number.isFinite(at)) return null;
+  return { at, subject: typeof parsed?.subject === 'string' ? parsed.subject : null };
+}
+
 // Per-account settings still come from the connectors config, but the config
 // no longer names the ACCOUNTS — the grants do. `mail.accounts[]` was the list
 // of mailboxes to read when a mailbox meant "an address plus an app password";
@@ -306,6 +370,12 @@ export function createMailSource({
       let inserted = 0;
       let updated = 0;
       let unchanged = 0;
+      // The newest "your export is ready" mail this pass read, across every
+      // mailbox, and how many it saw. Run-scoped rather than per-account: the
+      // owner may have requested the export from one address and read it in
+      // another, and the marker names one event whoever received it.
+      let exportReady = null;
+      let exportReadySeen = 0;
       const failures = [];
       const yearly = ctx.history === true && ctx.historyWindow?.year ? ctx.historyWindow : null;
       let historyDone = true;
@@ -805,6 +875,19 @@ export function createMailSource({
                     pageInWindow += 1;
                   }
                   const parsed = gmailMessageToParsed(full);
+                  // IN THE FORWARD SCAN ONLY, and that is the point rather than
+                  // an oversight. This window is new mail (and, on a first run,
+                  // the backfill days behind it); the backwards yearly walk is
+                  // months and years old by construction, and a download link
+                  // from last spring is not news -- badging it would send the
+                  // owner to a mail whose archive LinkedIn has long since
+                  // expired. Every forward path comes through here: the fresh
+                  // window and both gap drains all run this same loop.
+                  const note = linkedinExportReadyNote(parsed, internal);
+                  if (note !== null) {
+                    exportReadySeen += 1;
+                    if (exportReady === null || note.at > exportReady.at) exportReady = note;
+                  }
                   const row = toRow(parsed, {
                     account: account.email,
                     folder: 'INBOX',
@@ -1065,6 +1148,23 @@ export function createMailSource({
           const { status, kind } = classifyMailError(error);
           log.warn('mail_account_failed', { connector: 'mail', accountIndex, status, kind });
         }
+      }
+
+      // THE NOTE, WRITTEN ONCE PER PASS AND ONLY DOWNWARD-SAFE. noteExportReady
+      // refuses while Connections.csv is already in place (the nudge has been
+      // answered) and refuses a mail no newer than the marker on disk, so a
+      // backfill re-reading the same message -- or a second mailbox holding a
+      // copy of it -- rewrites nothing.
+      //
+      // COUNTS ONLY IN THE LOG (connectors/AGENTS.md): how many such mails this
+      // pass saw and whether the marker moved. The subject goes in the marker,
+      // which is a file in the owner's own import folder; the log is a second
+      // corpus if anything quotable ever reaches it.
+      if (exportReady !== null) {
+        const noted = noteExportReady(home, exportReady);
+        log.info('mail_linkedin_export_ready', {
+          connector: 'mail', seen: exportReadySeen, noted: noted ? 1 : 0,
+        });
       }
 
       if (accounts.length > 0 && failures.length === accounts.length) {
