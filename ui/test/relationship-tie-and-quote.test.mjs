@@ -188,19 +188,21 @@ test('an ack word beside real content is content, at any length', () => {
   assert.equal(isSubstantiveQuote('sounds good, i will send the deck friday'), true);
 });
 
-// The bound is on DISTINCT words, not on the word count: repetition does not
-// make a message. Eight words and five ideas, all of them "yes", is still an
-// acknowledgement -- a plain count of six would have let it through and a
-// card would have quoted it.
-test('the acknowledgement rule is bounded by how much is said, not how long it is', () => {
+// AND THERE IS NO LENGTH AT WHICH A PURE ACKNOWLEDGEMENT BECOMES A QUOTE.
+// The rule was briefly capped at six distinct ack words, on the theory that
+// past some number of them somebody must be saying something. Piling up more
+// ways to say yes does not add a thing to say, and the cap put these on a
+// card.
+test('a message of nothing but acknowledgements is never quotable, however many it uses', () => {
+  assert.equal(isSubstantiveQuote('haha ok yes sure thanks cool nice'), false,
+    'seven words, seven of them acknowledgements, nothing said');
+  assert.equal(isSubstantiveQuote('sounds good got it done thanks so much'), false);
   assert.equal(isSubstantiveQuote('ok ok thanks thanks haha haha sure sure'), false,
-    'eight words, five of them repeats');
+    'and repetition is not length either');
   assert.equal(isSubstantiveQuote('yeah sure sounds good'), false);
 
-  // Past the bound the rule lets go, which is the narrowing: seven different
-  // acknowledgements in a row is somebody saying something, and the list is
-  // not there to decide that it is not.
-  assert.equal(isSubstantiveQuote('sounds good got it done thanks so much'), true,
-    'seven distinct words is past where a word list gets to judge');
+  // The counter-case, which passes on one ordinary word regardless: the gate
+  // is "nothing but", not "contains".
+  assert.equal(isSubstantiveQuote("Yes, let's do Tuesday at 4"), true, 'it passes on tuesday');
 });
 

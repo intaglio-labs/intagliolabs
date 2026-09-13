@@ -297,21 +297,18 @@ const QUOTE_LOOKBACK = 12;
 const QUOTE_MIN_WORDS = 3;
 const QUOTE_MIN_CHARS = 12;
 
-// A bare acknowledgement is not a quote -- and this test applies ONLY to a
-// SHORT WHOLE MESSAGE made of nothing else (polish review finding 14). The
-// words below are not banned words: several of them ("got", "it", "sounds",
-// "good", "done", "right") are ordinary content words, and the rule has
-// always required EVERY word to be one of them, so an ack word beside real
-// content was never the problem. What was unbounded is the other direction --
-// a message of any length built solely from listed words was unquotable, with
-// nothing anywhere saying why.
+// A bare acknowledgement is not a quote, and there is NO LENGTH AT WHICH THAT
+// STOPS BEING TRUE (polish review 2, finding 6). The rule was briefly capped
+// at six distinct acknowledgements on the theory that past some number of
+// them somebody must be saying something; "haha ok yes sure thanks cool nice"
+// is seven, is nothing but acknowledgement, and cleared the cap straight onto
+// a card. Piling up more ways to say yes does not add a thing to say.
 //
-// The bound is on DISTINCT words, not on the word count, because repetition
-// does not make a message: "ok ok thanks thanks haha haha sure sure" is eight
-// words and five ideas, all of them "yes", and a raw count of six would have
-// let it through while a card quoted it. Past this many distinct
-// acknowledgements somebody is saying something, whatever the vocabulary.
-const QUOTE_MAX_ACK_WORDS = 6;
+// The words below are not banned words, and never were. The test requires
+// EVERY word to be a listed one, so an acknowledgement beside real content is
+// real content at any length -- "i got it done, and it is really very good"
+// quotes fine, because "i", "and" and "is" are not acknowledgements. What the
+// rule rejects is a message that is nothing else.
 
 const ACK_WORDS = new Set([
   'ok', 'okay', 'k', 'kk', 'okey', 'okie', 'yes', 'yep', 'yeah', 'yup', 'ya', 'no', 'nope',
@@ -340,9 +337,7 @@ export function isSubstantiveQuote(text) {
   // punctuation-only): nothing a card can quote. "Heyo 100%!" is two.
   if (words.length < QUOTE_MIN_WORDS) return false;
 
-  const distinct = new Set(words);
-  if (distinct.size <= QUOTE_MAX_ACK_WORDS && words.every((w) => ACK_WORDS.has(w))) return false;
-  return true;
+  return words.some((w) => !ACK_WORDS.has(w));
 }
 
 // The newest authored direct row that clears isSubstantiveQuote, looking
