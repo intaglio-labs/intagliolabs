@@ -52,8 +52,8 @@ function lift(names) {
 }
 
 const fns = lift([
-  'quietPhrase', 'whenPhrase', 'personField', 'whoLine', 'linkedSince', 'spokeLastLine',
-  'historyLine', 'changedLine', 'sourceCount', 'triggerLine', 'tieLine',
+  'quietPhrase', 'monthsOrYears', 'whenPhrase', 'personField', 'whoLine', 'linkedSince',
+  'spokeLastLine', 'historyLine', 'changedLine', 'sourceCount', 'triggerLine', 'tieLine',
 ]);
 
 const DAY = 86400000;
@@ -65,8 +65,21 @@ test('a gap is said the way a person would say it', () => {
   assert.equal(fns.quietPhrase(3), '3d', 'a few days IS the natural unit');
   assert.equal(fns.quietPhrase(30), '4 weeks');
   assert.equal(fns.quietPhrase(200), '7 months');
-  assert.equal(fns.quietPhrase(634), '2 years', 'the live run-4 card said "quiet 634 days"');
-  assert.equal(fns.quietPhrase(365), 'about a year');
+  // ~~12 to 17 months all read "about a year"~~ — five months of difference
+  // flattened into a shrug, next to a history row counting to the day. Whole
+  // months carry all the way to 23.
+  assert.equal(fns.quietPhrase(365), '12 months');
+  assert.equal(fns.quietPhrase(425), '14 months');
+  assert.equal(fns.quietPhrase(634), '21 months', 'the live run-4 card said "quiet 634 days"');
+  // Past two years a month count stops being something anyone holds, so it
+  // steps in half years.
+  assert.equal(fns.quietPhrase(730), '2 years');
+  assert.equal(fns.quietPhrase(912), '2.5 years');
+  assert.equal(fns.quietPhrase(1095), '3 years');
+  // And the two formatters on this card agree about the same span: a trigger
+  // saying "21 months" over a history row saying "2 years ago" is the two-units
+  // defect this finding is about, one line further down.
+  assert.equal(fns.whenPhrase(NOW - 634 * DAY, NOW), '21 months ago');
 });
 
 test('a timestamp becomes a month this year and a distance before that', () => {
@@ -103,12 +116,13 @@ test('the fields are read whether hermes nests them or not', () => {
     lastFromThem: NOW - 240 * DAY,
     lastFromOwner: NOW - 400 * DAY,
     lastSeen: NOW - 240 * DAY,
-    lastMeetingDaysAgo: 700,
+    lastMeetingAt: NOW - 730 * DAY,
+    lastMeetingDaysAgo: 730,
     evidence: { messages: 21, dormancyDays: 240, meetings: 1 },
   };
   assert.equal(fns.whoLine(wire), 'Partner at Sequoia');
   assert.match(fns.spokeLastLine(wire), /^they wrote last, /u);
-  assert.match(fns.historyLine(wire), /^21 messages · met 1×, last 2 years ago$/u);
+  assert.match(fns.historyLine(wire, NOW), /^21 messages · met 1×, last 2 years ago$/u);
   assert.equal(fns.triggerLine({ ...wire, kind: 'reconnect' }), 'quiet 8 months');
   assert.equal(fns.personField({ person: { title: 'Partner' } }, 'title'), 'Partner');
   assert.equal(fns.personField({ title: 'Partner' }, 'title'), 'Partner');
@@ -147,12 +161,13 @@ test('each number has one home on the card', () => {
   // the trigger, again in the tie sentence and a third time in the history row.
   const card = {
     kind: 'reconnect',
-    evidence: { messages: 21, dormancyDays: 634, meetings: 1, lastMeetingDaysAgo: 700 },
+    lastMeetingAt: NOW - 730 * DAY,
+    evidence: { messages: 21, dormancyDays: 634, meetings: 1 },
   };
   const trigger = fns.triggerLine(card);
-  const history = fns.historyLine(card);
-  assert.equal(trigger, 'quiet 2 years', 'the trigger owns why now, and only that');
-  assert.doesNotMatch(trigger, /21|message|met/u, 'counts do not belong in the trigger');
+  const history = fns.historyLine(card, NOW);
+  assert.equal(trigger, 'quiet 21 months', 'the trigger owns why now, and only that');
+  assert.doesNotMatch(trigger, /21 message|met/u, 'counts do not belong in the trigger');
   assert.match(history, /21 messages/u);
   assert.match(history, /met 1×, last 2 years ago/u, 'and the meeting date it always had');
   assert.doesNotMatch(history, /quiet/u, 'the silence is said once, at the top');
@@ -164,12 +179,28 @@ test('each number has one home on the card', () => {
   // is 0, so a finite-number test written the obvious way turns "we cannot say
   // when you last met" into "you met today".
   for (const unknown of [null, undefined, 'never']) {
-    const line = fns.historyLine({ lastMeetingDaysAgo: unknown, evidence: { meetings: 2, messages: 0 } });
+    const line = fns.historyLine({ lastMeetingDaysAgo: unknown, evidence: { meetings: 2, messages: 0 } }, NOW);
     assert.equal(line, 'met 2×', `${String(unknown)} must not become a date`);
   }
-  // And the shipping shape: the count is top-level on the card, beside `person`.
-  assert.match(fns.historyLine({ lastMeetingDaysAgo: 700, evidence: { meetings: 1, messages: 0 } }),
+  // THE INSTANT, NOT THE DAY COUNT. `lastMeetingDaysAgo` is computed when the
+  // snapshot is produced and rendered when it is served, so a card sitting in a
+  // queue for a week read a week fresh. `lastMeetingAt` cannot go stale between
+  // the two, and it wins wherever both are present.
+  const twoYears = NOW - 730 * DAY;
+  assert.match(fns.historyLine({ lastMeetingAt: twoYears, evidence: { meetings: 1, messages: 0 } }, NOW),
     /met 1×, last 2 years ago/u);
+  assert.match(
+    fns.historyLine({ lastMeetingAt: twoYears, lastMeetingDaysAgo: 3, evidence: { meetings: 1, messages: 0 } }, NOW),
+    /met 1×, last 2 years ago/u,
+    'the instant wins over the day count it was derived from');
+  // The day count stays readable for one release, for a card built before the
+  // instant was on the wire.
+  assert.match(fns.historyLine({ lastMeetingDaysAgo: 700, evidence: { meetings: 1, messages: 0 } }, NOW),
+    /met 1×, last \d+ (months|years) ago/u);
+  for (const bad of [null, undefined, 'never', 0]) {
+    const line = fns.historyLine({ lastMeetingAt: bad, evidence: { meetings: 2, messages: 0 } }, NOW);
+    assert.equal(line, 'met 2×', `lastMeetingAt ${String(bad)} must not become a date`);
+  }
 });
 
 test('a public-web change carries how many sources stand behind it', () => {
@@ -250,6 +281,24 @@ test('the last three person facts reach the card', () => {
     assert.equal(fns.linkedSince({ person: { connectedOn: bad } }), '',
       `${String(bad)} must not become a year`);
   }
+});
+
+test('a peek renders as a tease and never as a thin card', () => {
+  // The peek's consumer is the always-on orb, and hermes deliberately sends it
+  // no person facts, no quote and no timestamps (polish review finding 10) —
+  // personKey, name, kind, snapshot_id and three day counts. If the panel ever
+  // draws one of these, every helper has to answer empty rather than half.
+  const peek = {
+    personKey: 'p1', name: 'Sam', kind: 'reconnect', snapshot_id: 7,
+    evidence: { dormancyDays: 634, overdueDays: null, owe_kind: null },
+  };
+  assert.equal(fns.triggerLine(peek), 'quiet 21 months', 'the tease is the silence, and it renders');
+  assert.equal(fns.whoLine(peek), '');
+  assert.equal(fns.linkedSince(peek), '');
+  assert.equal(fns.spokeLastLine(peek), '');
+  assert.equal(fns.historyLine(peek, NOW), '', 'no counts on a peek means no history row');
+  assert.equal(fns.changedLine(peek), '');
+  assert.equal(fns.tieLine(peek), '');
 });
 
 test('the card has somewhere to put the two new lines', () => {

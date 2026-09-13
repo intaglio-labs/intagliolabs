@@ -183,12 +183,24 @@ function quietPhrase(days) {
   const d = Math.max(0, Math.round(Number(days) || 0));
   if (d < 14) return `${d}d`;
   if (d < 60) return `${Math.round(d / 7)} weeks`;
-  if (d < 545) {
-    const months = Math.max(1, Math.round(d / 30.4));
-    return months >= 12 ? 'about a year' : `${months} months`;
-  }
-  const years = Math.round(d / 365);
-  return years <= 1 ? 'about a year' : `${years} years`;
+  return monthsOrYears(d);
+}
+
+// WHOLE MONTHS UNTIL THEY STOP MEANING ANYTHING, then half years.
+//
+// ~~12 to 17 months all read "about a year"~~ — five months of difference
+// flattened into a shrug, on a card whose history row counts to the day and
+// beside a tie sentence that used to print the raw figure. "14 months" is a
+// gap a person can hold; so is "2.5 years"; "about a year" is neither, and it
+// was the widest rounding on the card by some distance.
+//
+// The step changes at two years because that is where a month count stops
+// being something anybody carries around: nobody thinks "31 months".
+function monthsOrYears(days) {
+  const months = Math.max(1, Math.round(days / 30.4));
+  if (months < 24) return `${months} month${months === 1 ? '' : 's'}`;
+  const years = Math.round(months / 6) / 2;
+  return `${years} year${years === 1 ? '' : 's'}`;
 }
 
 const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june',
@@ -213,10 +225,11 @@ function whenPhrase(ms, now = Date.now()) {
   if (days < 60) return `${Math.round(days / 7)} weeks ago`;
   const then = new Date(t);
   if (then.getFullYear() === new Date(now).getFullYear()) return `in ${MONTHS[then.getMonth()]}`;
-  const months = Math.round(days / 30.4);
-  if (months < 18) return `${months} months ago`;
-  const years = Math.round(days / 365);
-  return years <= 1 ? 'a year ago' : `${years} years ago`;
+  // THE SAME RULE AS quietPhrase ABOVE, and that is the point: a trigger line
+  // reading "quiet 21 months" over a history row reading "met 1×, last 2 years
+  // ago" is one span in two units, which is the defect this card keeps being
+  // reviewed for. One function decides where months become years.
+  return `${monthsOrYears(days)} ago`;
 }
 
 // WHERE THE PERSON'S OWN FACTS LIVE ON THE REPLY. hermes reads them from the
@@ -308,18 +321,31 @@ function spokeLastLine(c) {
 // invites the next question and has always had the answer beside it:
 // evidence.lastMeetingDaysAgo is computed by the matcher and was dropped on the
 // floor.
-function historyLine(c) {
+// `now` is a parameter for the same reason whenPhrase takes one: every
+// assertion about "2 years ago" is otherwise an assertion about the day the
+// suite happens to run, and a fixture that is true this fortnight and false the
+// next is worse than no fixture.
+function historyLine(c, now = Date.now()) {
   const ev = c.evidence ?? {};
   const bits = [];
   if (ev.messages) bits.push(`${ev.messages} message${ev.messages === 1 ? '' : 's'}`);
-  // typeof, NOT Number.isFinite(Number(x)). Number(null) is 0, so the obvious
-  // spelling turns "this corpus cannot say when you last met" into "you met
-  // today" — and both of the columns feeding this are nullable by design.
-  // cardFacts.mjs carries the same warning on the server side of the same field.
+  // THE INSTANT FIRST. `lastMeetingDaysAgo` is a number computed when the
+  // snapshot was PRODUCED and rendered when it is SERVED, so a card that sat in
+  // the queue for a week said the meeting was a week more recent than it was —
+  // silently, and worse the longer the backlog. `lastMeetingAt` is the same
+  // fact as an instant, which cannot drift between the two moments. The day
+  // count stays readable for one release, for cards built before it.
+  //
+  // typeof, NOT Number.isFinite(Number(x)), on both: Number(null) is 0, so the
+  // obvious spelling turns "this corpus cannot say when you last met" into "you
+  // met today". cardFacts.mjs carries the same warning on its own side.
+  const metAt = personField(c, 'lastMeetingAt');
   const metDays = personField(c, 'lastMeetingDaysAgo') ?? ev.lastMeetingDaysAgo;
-  const metWhen = typeof metDays === 'number' && Number.isFinite(metDays) && metDays >= 0
-    ? whenPhrase(Date.now() - metDays * 86400000)
-    : null;
+  const metWhen = typeof metAt === 'number' && Number.isFinite(metAt) && metAt > 0
+    ? whenPhrase(metAt, now)
+    : typeof metDays === 'number' && Number.isFinite(metDays) && metDays >= 0
+      ? whenPhrase(now - metDays * 86400000, now)
+      : null;
   if (ev.meetings) {
     bits.push(`met ${ev.meetings}×${metWhen === null ? '' : `, last ${metWhen}`}`);
   }
