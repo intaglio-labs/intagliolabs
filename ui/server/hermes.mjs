@@ -126,7 +126,9 @@ import { detectSyncStatus, answerSyncStatus } from './status/sync-status.mjs';
 // directory for pinnedThread (memory/select.mjs, memory/episodic.mjs) and
 // connect/ does for googleClients, so this follows the precedent rather than
 // making a third copy of the same parse. See ops/FEATURES.md.
-import { connectorsDisabledBy, readFeatureRegistry, readFeatures } from '../../connectors/lib/features.mjs';
+import {
+  DEFAULT_REGISTRY_PATH, connectorsDisabledBy, defaultOverridePath, readFeatureRegistry, readFeatures,
+} from '../../connectors/lib/features.mjs';
 // AND THE SAME PRECEDENT FOR "HAS THE OWNER CONNECTED THIS YET". Both of these
 // are asked by the connector itself before every run — mail through
 // accountsWithScope, linkedin through its own needs() — so they are IMPORTED
@@ -3332,6 +3334,80 @@ function readOwnerConfig(policy) {
   return cfg;
 }
 
+// MODES ARE RETIRED FROM THE PRODUCT SURFACE, AND KEPT IN THE CODE
+// (2026-09-13, owner decision: "the any/founder/investor thing isn't necessary
+// -- reconnect should be one person").
+//
+// The picker is gone from the widget; the queues, the sub-role gate in
+// producer.mjs, the per-mode hydration and the LinkedIn hold all stay exactly
+// as they are, behind this one question. Nothing is deleted, because the
+// reasoning that built them is sound and the decision that retired them is a
+// product decision that can be taken back -- which is what a flag is for.
+//
+// `timeline` IS THE FLAG, AND IT IS NOT A NEW ONE. It is the same registry key
+// the People door reads, and the registry refuses a key it does not know
+// (mergeFeatures throws, the whole file reads as invalid, everything goes off),
+// so inventing `relationshipModes` here would have turned a shipped
+// ops/features.json into a dead install. Sub-role modes ARE the people-shaped
+// half of this app -- investor/founder come from `people.sub_roles`, which the
+// LinkedIn export fills -- so they belong to the same door.
+//
+// WHAT "OFF" MEANS, in one place so no branch invents its own answer: the
+// effective serving mode is 'any', `?mode=` is not a request anybody made,
+// linkedinPendingFallback holds nobody, and 'pool-exhausted-mode' is never the
+// reason. POST /admin/relationship/mode still accepts and still persists -- the
+// key stays valid in the owner's config, and refusing it would break a widget
+// that has not shipped its update yet -- it simply decides nothing.
+//
+// READ PER REQUEST, MEMOISED ON THE FILES' OWN IDENTITY, exactly as
+// readOwnerConfig is and for the same reason: this sits on a polled route, and
+// a TTL would mean an owner override that takes effect "in a while". Two stats
+// against a read and a parse.
+const featureRegistryCache = new Map();
+const FEATURE_REGISTRY_CACHE_MAX = 8;
+
+function fileStamp(path) {
+  try {
+    const st = statSync(path, { bigint: true });
+    return `${st.mtimeNs}:${st.size}:${st.ino}:${st.dev}`;
+  } catch {
+    return 'absent';
+  }
+}
+
+// NOT THROUGH ownerConfigPath, AND THAT IS DELIBERATE (cf. round-6 finding 12,
+// which put the OTHER filesystem readers behind that seam). features.mjs owns
+// where the registry and its override live -- the daemon, the app and /stats
+// all reach it the same way -- and a second resolution rule invented here would
+// be a fourth opinion about the file whose whole purpose is that three
+// processes agree on it. Its own seam is HAZLIE_FEATURES_OVERRIDE, which is
+// what the tests set; a policy that names a tmpdir install does not imply a
+// features file, and nothing writes one.
+function currentFeatures() {
+  // The override path comes from the environment on every call
+  // (HAZLIE_FEATURES_OVERRIDE, features.mjs' one test knob), so it is part of
+  // the key rather than of the stamp: two paths are two answers, not one
+  // answer that changed.
+  const overridePath = defaultOverridePath();
+  const key = `${DEFAULT_REGISTRY_PATH}|${overridePath ?? 'none'}`;
+  const stamp = `${fileStamp(DEFAULT_REGISTRY_PATH)}|${overridePath === null ? 'none' : fileStamp(overridePath)}`;
+  const hit = featureRegistryCache.get(key);
+  if (hit !== undefined && hit.stamp === stamp) return hit.features;
+  // readFeatureRegistry answers ALL_OFF rather than throwing on anything it
+  // cannot read, which is the fail-closed direction this wants: an unreadable
+  // registry retires the modes, it does not resurrect them.
+  const { features } = readFeatureRegistry();
+  if (featureRegistryCache.size >= FEATURE_REGISTRY_CACHE_MAX) featureRegistryCache.clear();
+  featureRegistryCache.set(key, { stamp, features });
+  return features;
+}
+
+// Whether the mode picker is part of the product on this install. Every branch
+// that reads a mode goes through this one question.
+function relationshipModesLive() {
+  return currentFeatures().timeline === true;
+}
+
 // The global cap comes from the owner's config (relationshipMemory.capPerDay)
 // or a start() override for tests. No config means no cards -- fail closed,
 // per the step-4 rule: thresholds are the owner's or the gates artifact's to
@@ -3575,8 +3651,16 @@ function modeHoldSince(db, { start, now, record }) {
 // `{ reason, since }` while the pick is held, else null. `since` may itself be
 // null -- see modeHoldSince, which also says why `record` is the card route's
 // alone.
+// AND NOT AT ALL WHILE THE MODES ARE RETIRED. With the picker gone there is no
+// pick to hold: every card comes from 'any' because that is the only mode, not
+// because an export is late, and saying 'linkedin-pending' would explain a
+// substitution nobody made. The check sits INSIDE rather than at the two call
+// sites so the clock is stopped as well as the sentence -- modeHoldSince below
+// still runs with start=false, which deletes a row left behind by an install
+// that was held when the flag flipped.
 function linkedinPendingFallback(db, policy, pick, { now = Date.now(), record = false } = {}) {
-  const held = (pick === 'investor' || pick === 'founder')
+  const held = relationshipModesLive()
+    && (pick === 'investor' || pick === 'founder')
     && relationshipProducerConfig(policy).producer === 'eligibility'
     && !linkedinHasPeople(db);
   const since = modeHoldSince(db, { start: held, now, record });
@@ -3858,6 +3942,14 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
   // mode (see the card route's mode filter below) or refills exactly once,
   // through the same synchronous eligibility-producer path any other refill
   // uses.
+  //
+  // AND IT STILL ACCEPTS ONE WITH THE MODES RETIRED (2026-09-13), which is
+  // deliberate rather than an oversight. The route writes rel.mode and the
+  // owner's config key; serving reads neither while the flag is off (see
+  // relationshipModesLive), so the write decides nothing -- and refusing it
+  // instead would 400 at a widget that has not shipped its update yet, over a
+  // key the config has always accepted and the file already carries. When the
+  // flag goes back on, the pick the owner made is the pick they get.
   if (req.method === 'POST' && url.pathname === '/admin/relationship/mode') {
     const rel = relationshipState(db, policy);
     const body = await readJson(req);
@@ -4117,7 +4209,14 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     const producerConfig = relationshipProducerConfig(policy);
     if (producerConfig.producer === 'eligibility') {
       const body = await readJson(req).catch(() => null);
-      const mode = RELATIONSHIP_MODES.includes(body?.mode) ? body.mode : (rel.mode ?? producerConfig.mode);
+      // WITH THE MODES RETIRED THIS PRODUCES UNDER 'any', whatever the body or
+      // the config says. A batch produced under a mode the serve loop filters
+      // out is a batch nobody can ever be shown, and the refill that would
+      // have replaced it is throttled per (kind, mode) -- so honouring a mode
+      // here while ignoring it there is how the queue goes quiet.
+      const mode = !relationshipModesLive()
+        ? 'any'
+        : (RELATIONSHIP_MODES.includes(body?.mode) ? body.mode : (rel.mode ?? producerConfig.mode));
       try {
         const now = Date.now();
         const { batchId, cards } = produceBatch(db, { mode, now });
@@ -4203,7 +4302,15 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // batch a refresh in that mode would write, recorded with its own
     // evidence.mode. That is the price of serving a real card rather than a
     // preview, and it makes no claim about what the owner prefers.
-    const askedMode = RELATIONSHIP_MODES.includes(url.searchParams.get('mode'))
+    //
+    // ~~AND IT IS ONE THE PRODUCT STILL HAS.~~ With the modes retired (see
+    // relationshipModesLive) there is no wider pool to ask for and no picker to
+    // leave standing, so `?mode=` names nothing: it is ignored exactly as an
+    // unrecognised value always was, and the reply carries no `oneOff`. The
+    // paragraphs above are kept whole because they are the contract this route
+    // goes back to the moment the flag is on again.
+    const modesLive = relationshipModesLive();
+    const askedMode = modesLive && RELATIONSHIP_MODES.includes(url.searchParams.get('mode'))
       ? url.searchParams.get('mode')
       : null;
     // ~~A `mode` query param is accepted-and-ignored here for v1: this route
@@ -4247,7 +4354,11 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // widen button, which is a one-off ask for 'any'. A named mode is the
     // request's decision, and `oneOff` is how the reply says so.
     const producerConfig = relationshipProducerConfig(policy);
-    const pick = relationshipMode(rel, policy);
+    // 'any' IS THE ONLY ANSWER WHILE THE MODES ARE RETIRED, and it is reported
+    // rather than omitted: `mode` is on every branch of this route because a
+    // reply without one repainted the picker (round-4 finding 1), and a widget
+    // that still reads the field must read something true.
+    const pick = modesLive ? relationshipMode(rel, policy) : 'any';
     const held = askedMode === null
       ? linkedinPendingFallback(db, policy, pick, { record: true })
       : null;
@@ -4318,7 +4429,12 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       // resolves to 'any' here and nowhere else: rel.mode and the owner's
       // config are untouched, so the moment LinkedIn lands the next request
       // produces under the pick again with nothing to undo.
-      const reconnectMode = modeFallback !== null
+      // WHAT THIS REQUEST PRODUCES UNDER. 'any' whenever the modes are
+      // retired -- not rel.mode, and not the persisted config either: an
+      // owner who picked investors before the flag flipped still has that key
+      // on disk, and producing an investor batch that the serve filter below
+      // then drops would wedge the queue behind its own refill throttle.
+      const reconnectMode = !modesLive || modeFallback !== null
         ? 'any'
         : (askedMode ?? rel.mode ?? producerConfig.mode);
       const refillRetryMs = refillRetryMsFor(db);
@@ -4393,7 +4509,12 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
           // on that path and modeEmptyCounts answers null for 'any' anyway;
           // this says it rather than leaning on it, because the reason is the
           // fallback and not the mode's name.
-          modeEmpty = modeFallback !== null
+          // NOR WHILE THE MODES ARE RETIRED, for the same reason as the hold:
+          // 'pool-exhausted-mode' exists so the panel can offer to widen to
+          // 'any', and there is nothing to widen from. reconnectMode is 'any'
+          // on that path and modeEmptyCounts answers null for 'any' anyway;
+          // this says it rather than leaning on it.
+          modeEmpty = modeFallback !== null || !modesLive
             ? null
             : modeEmptyCounts(db, rel, reconnectMode, reconnectRefillKey(reconnectMode), now);
         } else {
@@ -4436,7 +4557,17 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // askedMode first, for the same reason the refill used it: a card produced
     // under a one-off mode has that mode in its evidence, and filtering the
     // queue by rel.mode here would drop the very card this request just made.
-    const serveMode = modeFallback !== null ? 'any' : (askedMode ?? rel.mode);
+    //
+    // RETIRED MODES SERVE 'any', AND ONLY 'any'. Every eligibility-path
+    // reconnect snapshot records its mode, so filtering to 'any' is what keeps
+    // an unjudged investor batch -- produced before the flag flipped, or by a
+    // /refresh that named one -- from being served under a reply that says
+    // 'any'. The MATCHER path is left unfiltered exactly as it is today: its
+    // snapshots carry no evidence.mode at all, so 'any' would match none of
+    // them and the orb would go dark on an install that never had modes.
+    const serveMode = !modesLive
+      ? (producerConfig.producer === 'eligibility' ? 'any' : null)
+      : (modeFallback !== null ? 'any' : (askedMode ?? rel.mode));
     const servingQueue = (servingKind === null ? rel.cards : rel.cards.filter((c) => c.kind === servingKind))
       .filter((c) => c.kind !== 'reconnect' || serveMode == null || c.evidence?.mode === serveMode);
 

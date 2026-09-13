@@ -25,7 +25,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -400,7 +400,27 @@ test('ranking: depth desc, then change (reserved, always 0), then quiet days des
   assert.equal(tieA.meetings, 10);
 });
 
-test('produceBatch writes a batch + snapshot in the shape hydrateCards reads', async () => {
+// THE REGISTRY, PINNED FOR THE ONE TEST THAT NEEDS A MODE. Sub-role modes are
+// retired from the product surface (2026-09-13) and serve only while the
+// registry's `timeline` flag is on -- with it off, /refresh produces under
+// 'any' whatever the config says, because a batch nobody can be served is how
+// the queue goes quiet. This test is about a FOUNDER batch, so it says so.
+// Every other test in this file reaches produceBatch/eligiblePool directly,
+// where the mode is an argument and no flag is involved.
+function useTimelineFlag(t) {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-producer-features-'));
+  const path = join(dir, 'features.json');
+  writeFileSync(path, JSON.stringify({ timeline: true }));
+  const previous = process.env.HAZLIE_FEATURES_OVERRIDE;
+  process.env.HAZLIE_FEATURES_OVERRIDE = path;
+  t.after(() => {
+    if (previous === undefined) delete process.env.HAZLIE_FEATURES_OVERRIDE;
+    else process.env.HAZLIE_FEATURES_OVERRIDE = previous;
+  });
+}
+
+test('produceBatch writes a batch + snapshot in the shape hydrateCards reads', async (t) => {
+  useTimelineFlag(t);
   const dir = mkdtempSync(join(tmpdir(), 'rel-producer-'));
   const server = await start({
     port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: 'e'.repeat(64),

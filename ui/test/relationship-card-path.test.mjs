@@ -24,7 +24,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -35,8 +35,24 @@ const TOKEN = 'f'.repeat(64);
 const CAP = { max: 5, windowMs: 86_400_000 };
 const DAY = 86_400_000;
 
+// Sub-role modes serve only while the registry's `timeline` flag is on
+// (2026-09-13, the picker is retired by default) -- so a test that switches
+// modes has to turn it on, and every other test here pins it OFF rather than
+// inheriting the developer's own ~/.hazlie/features.json. 'none' is
+// features.mjs' spelling for "the shipped registry alone".
+function featureOverridePath(features) {
+  if (features === undefined) return 'none';
+  const dir = mkdtempSync(join(tmpdir(), 'rel-card-path-features-'));
+  const path = join(dir, 'features.json');
+  writeFileSync(path, JSON.stringify(features));
+  return path;
+}
+
 async function withCardServer(fn, opts = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'rel-card-path-'));
+  const { features, ...startOpts } = opts;
+  const previousFeatures = process.env.HAZLIE_FEATURES_OVERRIDE;
+  process.env.HAZLIE_FEATURES_OVERRIDE = featureOverridePath(features);
   const server = await start({
     port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
     relationshipCap: CAP,
@@ -49,7 +65,7 @@ async function withCardServer(fn, opts = {}) {
     // The mode route writes the owner's config file; without a path of its own
     // a mode post from here edits the developer's ~/.hazlie config.
     ownerConfigPath: join(dir, 'config.json'),
-    ...opts,
+    ...startOpts,
   });
   // THE LINKEDIN EXPORT HAS LANDED. hermes HOLDS an investor or founder pick
   // while LinkedIn has contributed nobody -- the sub-role modes are a LinkedIn
@@ -77,7 +93,13 @@ async function withCardServer(fn, opts = {}) {
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
   const get = async (path) => (await call('GET', path)).json();
-  try { await fn({ call, get, db: server.db }); } finally { await server.close(); }
+  try {
+    await fn({ call, get, db: server.db });
+  } finally {
+    await server.close();
+    if (previousFeatures === undefined) delete process.env.HAZLIE_FEATURES_OVERRIDE;
+    else process.env.HAZLIE_FEATURES_OVERRIDE = previousFeatures;
+  }
 }
 
 const settle = (ms = 60) => new Promise((r) => setTimeout(r, ms));
@@ -369,7 +391,9 @@ test('a batch produced while a page pass is running is queued, not dropped', asy
     await settle(300);
     assert.equal(asked.length, 2, 'the queued batch got its page pass once the first drained');
     assert.ok(asked[1].includes('Queued Second'), 'and it is the second batch\'s person');
-  }, { relationshipMemoryEngine: engine });
+    // Modes live: this test's second batch exists BECAUSE the mode switch
+    // produces one, which is a thing only a moded install does.
+  }, { relationshipMemoryEngine: engine, features: { timeline: true } });
 });
 
 // ---- 9 + 13: drafts ------------------------------------------------------

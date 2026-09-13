@@ -16,7 +16,7 @@ import { start, openDb } from '../server/hermes.mjs';
 // for it say what it found.
 import * as hermes from '../server/hermes.mjs';
 import { produceOweBatch, OWE_PRODUCER_VERSION } from '../server/relationship/owe.mjs';
-import { produceBatch } from '../server/relationship/producer.mjs';
+import { produceBatch, PRODUCER_VERSION } from '../server/relationship/producer.mjs';
 
 const TOKEN = 'e'.repeat(64);
 const CAP = { max: 5, windowMs: 86_400_000 };
@@ -38,8 +38,39 @@ const STUB_CARDS = [{
   producer_version: 'rm-match-v13',
 }];
 
+// THE FEATURE REGISTRY, PINNED PER TEST (2026-09-13).
+//
+// Sub-role modes are retired from the product surface and serve only while the
+// registry's `timeline` flag is on -- the same flag the People door reads, and
+// the only one this surface is allowed to consult (an unknown registry key
+// makes the whole file invalid, which switches everything off). So a test about
+// modes has to turn it on, and every other test has to pin it OFF rather than
+// inheriting whatever ~/.hazlie/features.json the developer happens to carry:
+// HAZLIE_FEATURES_OVERRIDE='none' is features.mjs' own spelling for "the
+// shipped registry alone", which is what this app installs with.
+function featureOverridePath(features) {
+  if (features === undefined) return 'none';
+  const dir = mkdtempSync(join(tmpdir(), 'rel-routes-features-'));
+  const path = join(dir, 'features.json');
+  writeFileSync(path, JSON.stringify(features));
+  return path;
+}
+
+// Set around the server's whole lifetime, because the card route reads the
+// registry per request rather than at start().
+function withFeatures(features) {
+  const previous = process.env.HAZLIE_FEATURES_OVERRIDE;
+  process.env.HAZLIE_FEATURES_OVERRIDE = featureOverridePath(features);
+  return () => {
+    if (previous === undefined) delete process.env.HAZLIE_FEATURES_OVERRIDE;
+    else process.env.HAZLIE_FEATURES_OVERRIDE = previous;
+  };
+}
+
 async function withServer(fn, opts = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'rel-routes-'));
+  const { features, ...startOpts } = opts;
+  const restoreFeatures = withFeatures(features);
   const server = await start({
     port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
     relationshipMatcher: async () => ({ cards: structuredClone(STUB_CARDS), focus: 'x', currentTopics: [] }),
@@ -53,14 +84,14 @@ async function withServer(fn, opts = {}) {
     // is what the screen offering it promises). Without this line every mode
     // post below edits the developer's own ~/.hazlie/connectors/config.json.
     ownerConfigPath: join(dir, 'config.json'),
-    ...opts,
+    ...startOpts,
   });
   const base = `http://127.0.0.1:${server.port}`;
   const call = (method, path, body) => fetch(base + path, {
     method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  try { await fn({ call, db: server.db }); } finally { await server.close(); }
+  try { await fn({ call, db: server.db }); } finally { await server.close(); restoreFeatures(); }
 }
 
 const settle = () => new Promise((r) => setTimeout(r, 50)); // refresh is fire-and-forget
@@ -462,6 +493,8 @@ test('/stats.cards is null, not a crash, against a pre-migration database', asyn
 
 async function withEligibilityServer(fn, opts = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'rel-routes-owe-'));
+  const { features, ...startOpts } = opts;
+  const restoreFeatures = withFeatures(features);
   const server = await start({
     port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
     relationshipCap: CAP,
@@ -469,7 +502,7 @@ async function withEligibilityServer(fn, opts = {}) {
     peopleProjectionAutoRebuild: false,
     // See withServer above: the mode route writes the owner's config file.
     ownerConfigPath: join(dir, 'config.json'),
-    ...opts,
+    ...startOpts,
   });
   // THE LINKEDIN EXPORT HAS LANDED, for every test in this file.
   //
@@ -496,8 +529,19 @@ async function withEligibilityServer(fn, opts = {}) {
     await fn({ call, db: server.db }, { configPath: join(dir, 'config.json') });
   } finally {
     await server.close();
+    restoreFeatures();
   }
 }
+
+// THE MODE SURFACE, WITH THE FLAG ON. Every test below that picks a sub-role
+// mode, reads `servedMode`, asks for a one-off `?mode=`, or expects
+// 'pool-exhausted-mode' is the contract for an install where the modes are
+// LIVE -- which is the registry's `timeline` flag, off in the shipped
+// ops/features.json since 2026-09-13. They are kept exactly as they were:
+// retiring the picker did not make any of them wrong, it made them conditional,
+// and the flag is the condition.
+const withModes = (fn, opts = {}) =>
+  withEligibilityServer(fn, { features: { timeline: true }, ...opts });
 
 function insertPersonRow(db, { key, name, role = 'friend', subRoles = [], sent, received, met = 0 }, now) {
   db.prepare(
@@ -691,7 +735,12 @@ test('an Owe card\'s sentence stays the template even when the person has a how_
   });
 });
 
-test('a restart hydrates BOTH kinds, and recovers rel.mode from the reconnect batch even when Owe is the newer one', async () => {
+test('a restart hydrates BOTH kinds, and recovers rel.mode from the reconnect batch even when Owe is the newer one', async (t) => {
+  // rel.mode recovery only decides anything while the modes are live; see
+  // withModes. This test builds its own servers, so it turns the flag on for
+  // itself and hands the restore to the runner rather than to a finally that
+  // a failed assertion would skip.
+  t.after(withFeatures({ timeline: true }));
   const dir = mkdtempSync(join(tmpdir(), 'rel-routes-owe-hydrate-'));
   const dbPath = join(dir, 'context.db');
   const opts = {
@@ -808,7 +857,7 @@ function seedReconnectCandidateMode(db, key, name, now, subRoles = []) {
 }
 
 test('POST /admin/relationship/mode: unknown fields/mode 400, no card event of its own', async () => {
-  await withEligibilityServer(async ({ call, db }) => {
+  await withModes(async ({ call, db }) => {
     const bad = await call('POST', '/admin/relationship/mode', { mode: 'any', extra: 1 });
     assert.equal(bad.status, 400);
 
@@ -828,7 +877,7 @@ test('POST /admin/relationship/mode: unknown fields/mode 400, no card event of i
 });
 
 test('switching mode serves that mode\'s queued card without writing a new batch; switching back does the same', async () => {
-  await withEligibilityServer(async ({ call, db }) => {
+  await withModes(async ({ call, db }) => {
     const now = Date.now();
     seedReconnectCandidateMode(db, 'name:mode any', 'Mode Any', now);
     seedReconnectCandidateMode(db, 'name:mode founder', 'Mode Founder', now, ['founder']);
@@ -884,13 +933,13 @@ test('servedMode stays null for a card that records no mode, while mode still an
     assert.equal(out.mode, 'founder', 'the config is what the owner is on');
     assert.equal(out.servedMode, null,
       'and the card cannot claim it was produced under that, because it was produced under nothing');
-  }, { relationshipProducerConfig: { producer: 'matcher', mode: 'founder' } });
+  }, { relationshipProducerConfig: { producer: 'matcher', mode: 'founder' }, features: { timeline: true } });
 });
 
 test('servedMode names the mode a card WAS produced under', async () => {
   // The counterweight: when the batch records a mode, that is the answer, and
   // it is the card's own rather than the process's or the config's.
-  await withEligibilityServer(async ({ call, db }) => {
+  await withModes(async ({ call, db }) => {
     const now = Date.now();
     seedReconnectCandidateMode(db, 'name:served founder', 'Served Founder', now, ['founder']);
     await call('POST', '/admin/relationship/mode', { mode: 'founder' });
@@ -902,7 +951,7 @@ test('servedMode names the mode a card WAS produced under', async () => {
 });
 
 test('a mode with an empty queue refills once and is throttled after; a different mode is unaffected', async () => {
-  await withEligibilityServer(async ({ call, db }) => {
+  await withModes(async ({ call, db }) => {
     // Nobody is eligible for reconnect in any mode: every refill attempt for
     // 'investor' will produce zero cards.
     await call('POST', '/admin/relationship/mode', { mode: 'investor' });
@@ -921,7 +970,8 @@ test('a mode with an empty queue refills once and is throttled after; a differen
   });
 });
 
-test('hydrate restores all three reconnect modes plus Owe after a restart', async () => {
+test('hydrate restores all three reconnect modes plus Owe after a restart', async (t) => {
+  t.after(withFeatures({ timeline: true })); // see withModes: three modes only exist while the flag is on
   const dir = mkdtempSync(join(tmpdir(), 'rel-routes-mode-hydrate-'));
   const dbPath = join(dir, 'context.db');
   const opts = {
@@ -1150,7 +1200,7 @@ test('once a reconnect card has been shown, the quarter hour stands', async () =
 // under 'anyone', and the screen said what it would have said on an empty
 // machine.
 test('a mode with nobody in it says so, and says how many there are in all', async () => {
-  await withEligibilityServer(async ({ call, db }) => {
+  await withModes(async ({ call, db }) => {
     const now = Date.now();
     // Two people who qualify for 'any' and for no sub-role mode.
     seedReconnectCandidateMode(db, 'name:mode empty one', 'Mode Empty One', now);
@@ -1170,7 +1220,7 @@ test('a mode with nobody in it says so, and says how many there are in all', asy
 });
 
 test('a house with nobody in it keeps the old reason', async () => {
-  await withEligibilityServer(async ({ call }) => {
+  await withModes(async ({ call }) => {
     // Same mode, nobody anywhere. There is nothing to widen to, so the answer
     // must stay the one the panel already knows.
     await call('POST', '/admin/relationship/mode', { mode: 'investor' });
@@ -1182,7 +1232,7 @@ test('a house with nobody in it keeps the old reason', async () => {
 });
 
 test("'any' never reports a mode-empty pool, because there is nothing to widen to", async () => {
-  await withEligibilityServer(async ({ call, db }) => {
+  await withModes(async ({ call, db }) => {
     const now = Date.now();
     // A founder nobody has offered yet: the 'any' pool can pick them up, so
     // this branch is never reached -- but if it were, 'any' has no wider pool
@@ -1204,7 +1254,7 @@ test("'any' never reports a mode-empty pool, because there is nothing to widen t
 // config exactly where they were. POST /admin/relationship/mode stays the only
 // thing that changes what the owner is on, because that is a decision.
 test('?mode= serves a card from that mode without changing the owner\'s pick', async () => {
-  await withEligibilityServer(async ({ call, db }, { configPath }) => {
+  await withModes(async ({ call, db }, { configPath }) => {
     const now = Date.now();
     seedReconnectCandidateMode(db, 'name:one off any', 'One Off Any', now);
     await call('POST', '/admin/relationship/mode', { mode: 'investor' });
@@ -1236,7 +1286,7 @@ test('?mode= serves a card from that mode without changing the owner\'s pick', a
 });
 
 test('a mode the closed set does not name is ignored, not honoured', async () => {
-  await withEligibilityServer(async ({ call, db }) => {
+  await withModes(async ({ call, db }) => {
     const now = Date.now();
     seedReconnectCandidateMode(db, 'name:one off ignored', 'One Off Ignored', now);
     await call('POST', '/admin/relationship/mode', { mode: 'investor' });
@@ -1250,7 +1300,7 @@ test('a mode the closed set does not name is ignored, not honoured', async () =>
 });
 
 test('a one-off peek teases from the widened pool and is still a peek', async () => {
-  await withEligibilityServer(async ({ call, db }) => {
+  await withModes(async ({ call, db }) => {
     const now = Date.now();
     seedReconnectCandidateMode(db, 'name:one off peek', 'One Off Peek', now);
     await call('POST', '/admin/relationship/mode', { mode: 'founder' });
@@ -1277,7 +1327,7 @@ test('a one-off peek teases from the widened pool and is still a peek', async ()
 // that produced the answer, so the staleness they buy is bounded by the retry
 // window itself -- a minute on a first load.
 test('the pool is not re-counted for every poll inside one throttle window', async () => {
-  await withEligibilityServer(async ({ call, db }) => {
+  await withModes(async ({ call, db }) => {
     const now = Date.now();
     seedReconnectCandidateMode(db, 'name:counted one', 'Counted One', now);
     seedReconnectCandidateMode(db, 'name:counted two', 'Counted Two', now);
@@ -1296,7 +1346,7 @@ test('the pool is not re-counted for every poll inside one throttle window', asy
 });
 
 test('the counts are measured together, mode beside any', async () => {
-  await withEligibilityServer(async ({ call, db }) => {
+  await withModes(async ({ call, db }) => {
     const now = Date.now();
     seedReconnectCandidateMode(db, 'name:measured any', 'Measured Any', now);
     await call('POST', '/admin/relationship/mode', { mode: 'founder' });
@@ -1325,7 +1375,7 @@ test('the counts are measured together, mode beside any', async () => {
 // the standing pick (`mode`) on every card reply, `oneOff` when the request
 // named its own mode.
 test('peek and serve both carry the card\'s provenance and the standing pick', async () => {
-  await withEligibilityServer(async ({ call, db }) => {
+  await withModes(async ({ call, db }) => {
     const now = Date.now();
     seedReconnectCandidateMode(db, 'name:contract any', 'Contract Any', now);
     await call('POST', '/admin/relationship/mode', { mode: 'investor' });
@@ -1349,7 +1399,7 @@ test('peek and serve both carry the card\'s provenance and the standing pick', a
 });
 
 test('a standing peek reports its own mode, and no oneOff', async () => {
-  await withEligibilityServer(async ({ call, db }) => {
+  await withModes(async ({ call, db }) => {
     const now = Date.now();
     seedReconnectCandidateMode(db, 'name:contract standing', 'Contract Standing', now);
     await call('POST', '/admin/relationship/mode', { mode: 'any' });
@@ -1362,7 +1412,7 @@ test('a standing peek reports its own mode, and no oneOff', async () => {
 });
 
 test('an Owe peek has no mode to report, and says so rather than guessing', async () => {
-  await withEligibilityServer(async ({ call, db }) => {
+  await withModes(async ({ call, db }) => {
     const now = Date.now();
     seedOweOpenLoopCandidate(db, 'name:contract owe', 'Contract Owe', now);
     // Owe goes first when neither kind has been shown (CARD_PRODUCERS order).
@@ -1425,6 +1475,98 @@ test('a pool that could not be counted is not remembered as an empty one', () =>
 // a test harness, and a fallback belongs to whatever has to run a batch, but
 // neither is a choice the owner made and a settings page must not show either
 // back to them as one.
+// ---------------------------------------------------------------------
+// THE MODES, RETIRED FROM THE PRODUCT SURFACE (2026-09-13, owner decision:
+// "the any/founder/investor thing isn't necessary -- reconnect should be one
+// person. user can dismiss and ask for another one if they like").
+//
+// Everything above this line is the contract with the registry's `timeline`
+// flag ON, and it is kept whole. These are the contract with it OFF, which is
+// what ops/features.json ships: one queue, one answer, and no sentence about a
+// pick nobody can make any more.
+
+test('an investor pick in the config serves anyone, and says so without a fallback', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    // Nobody here is an investor. With the modes live this is exactly the
+    // 'pool-exhausted-mode' state -- people in the house, none in the picker --
+    // and the reply would carry counts and an offer to widen. With them retired
+    // there is nothing to widen FROM: the card is simply served.
+    seedReconnectCandidateMode(db, 'name:retired any', 'Retired Any', now);
+
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(out.card?.personKey, 'name:retired any', `a card was served (reason: ${out.reason})`);
+    assert.equal(out.mode, 'any', 'the only mode there is');
+    assert.equal(out.servedMode, 'any', 'and the card was produced under it');
+    assert.equal(out.modeFallback, undefined, 'nothing is being held from anybody');
+    assert.equal(out.heldSince, undefined);
+    assert.equal(out.counts, undefined);
+    assert.equal(out.oneOff, undefined);
+  }, { relationshipProducerConfig: { producer: 'eligibility', mode: 'investor' } });
+});
+
+test('?mode= names nothing, because there is nothing to name', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedReconnectCandidateMode(db, 'name:retired oneoff', 'Retired Oneoff', now, ['founder']);
+    // A founder, asked for as founders: with the modes live this produces and
+    // serves a founder batch and answers oneOff. Retired, it is the ordinary
+    // 'any' serve -- the param is ignored at the edge, exactly as a value
+    // outside the closed set always was.
+    const out = await (await call('GET', '/admin/relationship/card?mode=founder')).json();
+    assert.equal(out.oneOff, undefined, 'no look was taken at anything wider');
+    assert.equal(out.mode, 'any');
+    assert.equal(out.servedMode, 'any');
+    const modes = db.prepare(
+      "SELECT DISTINCT json_extract(evidence, '$.mode') AS mode FROM rm_candidate_snapshot WHERE kind = 'reconnect'"
+    ).all().map((r) => r.mode);
+    assert.deepEqual(modes, ['any'], 'and no founder batch was produced behind it');
+  });
+});
+
+test('the mode route still accepts and persists a pick that decides nothing', async () => {
+  // Kept working on purpose: the key stays valid in the owner's config, a
+  // widget that has not shipped its update yet must not start 400ing, and the
+  // pick is there to be honoured again if the flag goes back on.
+  await withEligibilityServer(async ({ call, db }, { configPath }) => {
+    const now = Date.now();
+    seedReconnectCandidateMode(db, 'name:retired pick', 'Retired Pick', now);
+    const posted = await call('POST', '/admin/relationship/mode', { mode: 'founder' });
+    assert.equal(posted.status, 200);
+    assert.deepEqual(await posted.json(), { mode: 'founder', persisted: true });
+    assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).relationshipMemory.mode, 'founder',
+      'the owner\'s choice is still kept');
+
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(out.card?.personKey, 'name:retired pick', 'and it changed nothing about who is served');
+    assert.equal(out.mode, 'any');
+  });
+});
+
+test('a batch produced under a mode before the flag flipped is not served as anyone', async () => {
+  await withEligibilityServer(async ({ call, db }) => {
+    const now = Date.now();
+    // The state a real install lands in: an unjudged investor batch, produced
+    // while the picker existed, sitting in the queue when the flag goes off.
+    // Serving it would put a card in the owner's hand under a reply that says
+    // 'any' -- so it is filtered, and the refill produces an 'any' batch.
+    seedReconnectCandidateMode(db, 'name:retired stale', 'Retired Stale', now, ['investor']);
+    seedReconnectCandidateMode(db, 'name:retired fresh', 'Retired Fresh', now);
+    const batchId = Number(db.prepare(
+      'INSERT INTO rm_candidate_batch(created_at, candidate_count, gate, cap_config) VALUES (?, 1, ?, NULL)'
+    ).run(now - 1000, 'open').lastInsertRowid);
+    db.prepare(
+      'INSERT INTO rm_candidate_snapshot(batch_id, person_key, kind, summary, evidence, producer_version, rank_strategy, created_at) '
+      + "VALUES (?, 'name:retired stale', 'reconnect', 'quiet a while', ?, ?, 'combined-v13', ?)"
+    ).run(batchId, JSON.stringify({ mode: 'investor' }), PRODUCER_VERSION, now - 1000);
+
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.ok(out.card, `something was served (reason: ${out.reason})`);
+    assert.notEqual(out.card.personKey, 'name:retired stale', 'the off-mode snapshot stays unserved');
+    assert.equal(out.servedMode, 'any');
+  });
+});
+
 test('GET /admin/config/card reports the owner\'s own four keys, and null for the ones nobody set', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rel-routes-config-'));
   const configPath = join(dir, 'config.json');

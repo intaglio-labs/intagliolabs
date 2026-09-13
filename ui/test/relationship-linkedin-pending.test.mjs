@@ -19,7 +19,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -29,8 +29,30 @@ const TOKEN = 'e'.repeat(64);
 const CAP = { max: 5, windowMs: 86_400_000 };
 const DAY = 86_400_000;
 
+// THE HOLD IS PART OF THE MODE SURFACE, so every test in this file runs with
+// the registry's `timeline` flag ON (2026-09-13). The picker is retired by
+// default now: with the flag off there is no pick to hold -- every card comes
+// from 'any' because that is the only mode, not because an export is late --
+// and linkedinPendingFallback answers null outright. That is its own test, at
+// the foot of this file; everything above it is the contract for an install
+// where the modes are live, unchanged.
+//
+// HAZLIE_FEATURES_OVERRIDE is features.mjs' own test knob, and pointing it at a
+// file of this file's own making is also what keeps these tests off whatever
+// ~/.hazlie/features.json the developer happens to carry.
+function featureOverridePath(features) {
+  if (features === undefined) return 'none';
+  const dir = mkdtempSync(join(tmpdir(), 'rel-linkedin-features-'));
+  const path = join(dir, 'features.json');
+  writeFileSync(path, JSON.stringify(features));
+  return path;
+}
+
 async function withServer(fn, opts = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'rel-linkedin-pending-'));
+  const { features = { timeline: true }, ...startOpts } = opts;
+  const previousFeatures = process.env.HAZLIE_FEATURES_OVERRIDE;
+  process.env.HAZLIE_FEATURES_OVERRIDE = featureOverridePath(features);
   const server = await start({
     port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
     relationshipCap: CAP,
@@ -39,7 +61,7 @@ async function withServer(fn, opts = {}) {
     // The mode route writes this file, and the readers read it: without the
     // seam every mode post below would edit the developer's own config.
     ownerConfigPath: join(dir, 'config.json'),
-    ...opts,
+    ...startOpts,
   });
   const base = `http://127.0.0.1:${server.port}`;
   const call = (method, path, body) => fetch(base + path, {
@@ -50,6 +72,8 @@ async function withServer(fn, opts = {}) {
     await fn({ call, db: server.db, configPath: join(dir, 'config.json') });
   } finally {
     await server.close();
+    if (previousFeatures === undefined) delete process.env.HAZLIE_FEATURES_OVERRIDE;
+    else process.env.HAZLIE_FEATURES_OVERRIDE = previousFeatures;
   }
 }
 
@@ -270,7 +294,16 @@ test('a linkedin message row is not a profile row, and does not lift the hold', 
 // comes due, and a page can only say something else after a while if something
 // counted the while.
 
-test('heldSince rides the fallback, holds still across polls, and survives a restart', async () => {
+test('heldSince rides the fallback, holds still across polls, and survives a restart', async (t) => {
+  // This test builds its own servers, so it turns the mode flag on for itself
+  // (see withServer above) and hands the restore to the runner rather than to a
+  // finally a failed assertion would skip.
+  const previousFeatures = process.env.HAZLIE_FEATURES_OVERRIDE;
+  process.env.HAZLIE_FEATURES_OVERRIDE = featureOverridePath({ timeline: true });
+  t.after(() => {
+    if (previousFeatures === undefined) delete process.env.HAZLIE_FEATURES_OVERRIDE;
+    else process.env.HAZLIE_FEATURES_OVERRIDE = previousFeatures;
+  });
   const dir = mkdtempSync(join(tmpdir(), 'rel-linkedin-held-'));
   const opts = {
     port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
@@ -382,4 +415,38 @@ test('the setup screen relays the hold rather than deciding it a second time', a
     assert.equal(after.modeFallback, undefined,
       'and it is not held behind the five-second body cache, either');
   });
+});
+
+// --- AND WITH THE MODES RETIRED, THERE IS NOTHING TO HOLD -------------------
+//
+// Everything above runs with the registry's `timeline` flag on. Off -- which is
+// what ops/features.json ships since 2026-09-13 -- the picker is gone: every
+// card comes from 'any' because that is the only mode, not because an export is
+// late. Saying 'linkedin-pending' there would explain a substitution nobody
+// made, and the seven-day sentence the clock exists for would be counting a
+// wait the owner is not in.
+
+test('the pick is never held while the modes are retired, and the clock is dropped', async () => {
+  await withServer(async ({ call, db }) => {
+    const now = Date.now();
+    // Exactly the fixture the first test in this file uses: an investor pick,
+    // and LinkedIn has contributed nobody.
+    seedCandidate(db, 'name:retired investor', 'Retired Investor', now, ['investor']);
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+    // A clock left running by the install that WAS held when the flag flipped.
+    db.prepare('INSERT OR REPLACE INTO rm_mode_hold(id, since) VALUES (1, ?)').run(now - 3 * DAY);
+
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(out.modeFallback, undefined, 'nothing is being held from anybody');
+    assert.equal(out.heldSince, undefined, 'and no wait is being counted');
+    assert.equal(out.mode, 'any');
+    assert.equal(
+      db.prepare('SELECT since FROM rm_mode_hold WHERE id = 1').get(), undefined,
+      'the stale clock is stopped rather than left to describe a wait that ended'
+    );
+
+    const progress = await (await call('GET', '/admin/onboarding/progress')).json();
+    assert.equal(progress.modeFallback, undefined, 'the setup screen relays the same nothing');
+    assert.equal(progress.heldSince, undefined);
+  }, { features: { timeline: false } });
 });

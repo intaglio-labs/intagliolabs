@@ -173,13 +173,29 @@ test('a cap or a producer outside its set throws and writes nothing', () => {
 // ownerConfigPath() and relationshipCap both resolve through. Awaited inside
 // the try, not returned from it: returning the promise restores $HOME before
 // the assertions run.
+//
+// `features` NAMES THE REGISTRY THIS SERVER RUNS UNDER (2026-09-13). Sub-role
+// modes are retired from the product surface and serve only while the registry's
+// `timeline` flag is on, so a test whose subject is the MODE -- that it reaches
+// the reply, that it comes from the seam's file rather than $HOME -- has to say
+// so. Omitted means 'none', the shipped registry alone, which is both the
+// default install and what keeps every other test here off the developer's own
+// ~/.hazlie/features.json.
 async function withHome(fn, serverOpts = {}) {
+  const { features, ...startOpts } = serverOpts;
   const home = mkdtempSync(join(tmpdir(), 'relmem-home-'));
   mkdirSync(join(home, '.hazlie', 'connectors'), { recursive: true });
   const previousHome = process.env.HOME;
   const previousFeatures = process.env.HAZLIE_FEATURES_OVERRIDE;
   process.env.HOME = home;
-  process.env.HAZLIE_FEATURES_OVERRIDE = 'none';
+  if (features === undefined) {
+    process.env.HAZLIE_FEATURES_OVERRIDE = 'none';
+  } else {
+    const featuresDir = mkdtempSync(join(tmpdir(), 'relmem-features-'));
+    const featuresPath = join(featuresDir, 'features.json');
+    writeFileSync(featuresPath, JSON.stringify(features));
+    process.env.HAZLIE_FEATURES_OVERRIDE = featuresPath;
+  }
   const dir = mkdtempSync(join(tmpdir(), 'relmem-db-'));
   const dbPath = join(dir, 'context.db');
   const server = await start({
@@ -188,7 +204,7 @@ async function withHome(fn, serverOpts = {}) {
     llamaApiKey: 'd'.repeat(64),
     bearerToken: TOKEN,
     peopleProjectionAutoRebuild: false,
-    ...serverOpts,
+    ...startOpts,
   });
   const base = `http://127.0.0.1:${server.port}`;
   const call = (method, path, body, headers = {}) => fetch(base + path, {
@@ -387,7 +403,7 @@ test('a fresh reader reports the persisted mode, with no batch to recover it fro
     assert.equal(out.card, null, 'nothing has been produced, which is the state under test');
     assert.equal(out.mode, 'founder',
       'the peek must answer the mode on disk, not null -- null is what repaints "anyone"');
-  });
+  }, { features: { timeline: true } });
 });
 
 // The same read on the branch a genuinely fresh install hits FIRST: no cap has
@@ -400,7 +416,7 @@ test('the no-cap answer still carries the mode, because that is the fresh-instal
     const out = await (await call('GET', '/admin/relationship/card?peek=1')).json();
     assert.equal(out.reason, 'no-cap-configured', 'the branch under test');
     assert.equal(out.mode, 'investor');
-  });
+  }, { features: { timeline: true } });
 });
 
 // THE SEAM HAS TO BE THE SAME SEAM ON BOTH SIDES (round-4 finding 6).
@@ -431,7 +447,7 @@ test('the config readers honour ownerConfigPath, not homedir', async () => {
     assert.equal(out.mode, 'founder', 'the mode came from the seam, not from $HOME');
     assert.notEqual(out.reason, 'no-cap-configured',
       'and so did the cap: $HOME records none, the seam records three');
-  }, { ownerConfigPath: seamPath });
+  }, { ownerConfigPath: seamPath, features: { timeline: true } });
 });
 
 // THE ORDINARY PRE-PROJECTION STATE IS NOT A WARNING (round-4 finding 9).
@@ -536,5 +552,5 @@ test('a config rewritten under the running server is seen by the very next reque
     const gone = await (await call('GET', '/admin/relationship/card?peek=1')).json();
     assert.equal(gone.reason, 'no-cap-configured');
     assert.equal(gone.mode, 'any');
-  });
+  }, { features: { timeline: true } });
 });
