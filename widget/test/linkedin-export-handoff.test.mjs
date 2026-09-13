@@ -446,7 +446,7 @@ test('the card drops the hold line as soon as the file lands', () => {
   // for and what this test is about. The pin holds the call, not the identity.
   const hook = /window\.__hzReconnectShow = ([\s\S]*?);\n/u.exec(reconnectJs)?.[1] ?? '';
   assert.ok(hook, '__hzReconnectShow is not assigned at all');
-  assert.match(hook, /pull\(\)|^pull$/u, 'the re-show has to reach pull()');
+  assert.match(hook, /pull\(\)|\bpull\b/u, 'the re-show has to reach pull()');
 });
 
 test('screen 6 asks again too, if the flow is still open', () => {

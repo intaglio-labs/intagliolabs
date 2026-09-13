@@ -276,21 +276,31 @@ window.__hzOnboardingReset = () => {
 // 2026-09-13): reconnect serves whoever is quiet. Everything behind it is still
 // here and comes back together under that one flag. hzFeatures fails closed, so
 // a page that cannot ask the registry draws the screen without the row rather
-// than with it. See modesOn.
-hzFeatures().then((set) => {
+// than with it.
+//
+// THE TWO THINGS THIS CALLBACK TOUCHES ARE DECLARED ABOVE IT, not down in
+// screen 1's own section where they were. The callback is a microtask and ran
+// after module evaluation either way -- but that is the only reason it worked,
+// and a prefs path that ever resolved synchronously would turn it into a TDZ
+// ReferenceError taking the `chat` flow selection on the same line down with it.
+// A closure that reads a `const` declared below it is a hazard whether or not
+// today's scheduling hides it.
+const modeBlock = document.getElementById('modeBlock');
+
+// False until the registry says otherwise, and the block ships `hidden`, so the
+// row is revealed and never drawn. `modesReady` is how every OTHER reader waits
+// for the same answer rather than racing it -- see enterWelcome.
+let modesOn = false;
+
+const modesReady = hzFeatures().then((set) => {
   if (hzFeatureOn(set, 'chat')) flow = FULL_ORDER;
   modesOn = hzFeatureOn(set, 'timeline');
   if (modesOn) modeBlock.hidden = false;
 }).catch(() => {});
 
 // ---------------- 1: who this is for ----------------
-const modeBlock = document.getElementById('modeBlock');
 const modesEl = document.getElementById('modes');
 const modeNote = document.getElementById('modeNote');
-
-// See the hzFeatures call above. False until the registry says otherwise, and
-// the block ships `hidden`, so the row is revealed and never drawn.
-let modesOn = false;
 
 function paintMode(mode) {
   for (const b of modesEl.querySelectorAll('.ob-mode')) {
@@ -313,10 +323,18 @@ function enterWelcome() {
   // nothing, so this costs nothing either way — but a request whose only
   // purpose is to light a chip nobody can see is a request this screen should
   // not make.
-  if (!modesOn) return;
-  hzPost('relCardPeek')
-    .then((out) => { if (out && typeof out.mode === 'string') paintMode(out.mode); })
-    .catch(() => {});
+  //
+  // ASKED AFTER THE REGISTRY HAS ANSWERED, never beside it. This screen is the
+  // first thing the page draws, so a synchronous read of `modesOn` here is a
+  // race the flag loses roughly whenever the registry is slow — and losing it
+  // means a replay on a machine where the owner deliberately chose "founders"
+  // redraws as "anyone", which is the exact failure the peek exists to prevent.
+  modesReady.then(() => {
+    if (!modesOn) return;
+    hzPost('relCardPeek')
+      .then((out) => { if (out && typeof out.mode === 'string') paintMode(out.mode); })
+      .catch(() => {});
+  });
 }
 
 // AND THE ROUTE'S ANSWER IS READ, because it is the only thing that knows.

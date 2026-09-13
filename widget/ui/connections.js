@@ -195,7 +195,13 @@ const settings = document.getElementById('settings');
 // serves one person a day and there is no group to change, so a hover pointing
 // at three chips would send the owner looking for controls that are not on the
 // card. The chips come back with the flag, and so does the sentence about them.
-const CARD_HELP = 'one person a day, whoever has gone quiet — dismiss a card to ask for another.';
+// ~~"one person a day, …"~~ NAMES A NUMBER THIS SENTENCE DOES NOT READ. Six
+// lines below is the comment that deleted the previous hard-coded "one" from
+// this very row, for this very reason -- it read as a hard-coded one to an owner
+// whose config says 50 -- and the replacement put it straight back in the hover.
+// The digit is the row's own job and it comes from the config; the hover says
+// what the card IS, which is true at any cadence.
+const CARD_HELP = 'whoever has gone quiet — dismiss a card to ask for another.';
 const CARD_HELP_MODES = 'change who it looks for on the card itself — the three chips at the top.';
 const SOUNDS_HELP = 'presses, sending and replies make a sound.';
 const MOTION_HELP = 'reduce motion is on for this Mac. this puts back only this app\u2019s own movement.';

@@ -61,17 +61,19 @@ function lift() {
     /const reachedHermes = [^\n]*;/u,
     /const REJECTIONS = new Set\([^\n]*\);/u,
     /const PULLS_DONE = [^\n]*;/u,
+    /const CAP_WITH_PULLS = [^\n]*;/u,
   ]) {
     const found = decl.exec(reconnectJs)?.[0];
     assert.ok(found, `a declaration the lifted functions read was not found: ${decl}`);
     parts.push(found);
   }
-  for (const name of ['verdictNext', 'pullPanel', 'pullsLeftFrom', 'afterRejection']) {
+  for (const name of ['verdictNext', 'pullPanel', 'pullsLeftFrom', 'afterRejection', 'emptyPanel']) {
     parts.push(bodyOf(reconnectJs, name));
   }
   // eslint-disable-next-line no-new-func
   return new Function(
-    `${parts.join('\n')}\nreturn { verdictNext, pullPanel, pullsLeftFrom, afterRejection, EMPTY_REASONS, PULLS_DONE };`
+    `${parts.join('\n')}\nreturn { verdictNext, pullPanel, pullsLeftFrom, afterRejection, emptyPanel,`
+    + ` EMPTY_REASONS, PULLS_DONE, CAP_WITH_PULLS };`
   )();
 }
 
@@ -155,36 +157,130 @@ test('the budget is read from whichever reply knows it', () => {
   }
 });
 
-test('a rejection with no budget left says so without a press', () => {
-  // The answer to "is there another one" was on the reply that delivered the
-  // card, so offering a button whose only possible answer is `pulls-exhausted`
-  // asks the owner to press it to be told something already known here.
-  const spent = fns().afterRejection({ pullsLeft: 0 }, { pullsLeft: 3 });
-  assert.equal(spent.button, false);
-  assert.equal(spent.msg, fns().PULLS_DONE,
-    'and it is the same sentence the route gives, not a second wording for it');
-  // ...and the served reply answers when the verdict reply cannot.
-  assert.equal(fns().afterRejection({ ok: true }, { pullsLeft: 0 }).button, false);
+test('a spent budget hands the question to the route, and never calls the day over', () => {
+  // THE INPUT THE OLD VERSION GOT WRONG: `capPerDay: 50`, accept card 1 in the
+  // morning, dismiss card 2 in the afternoon. The accept alone zeroes
+  // `pullsLeft`, while the frequency cap -- a separate gate, consulted first --
+  // is wide open at 2 of 50. Saying "that's enough for today" there was a
+  // sentence the very next poll contradicted by serving card 3.
+  //
+  // The page cannot see the cap, so it stops claiming to. Zero falls through to
+  // an ordinary pull() and whatever hermes answers is the truth: `cap` if the
+  // day really is done, a card if it is not. A refused serve spends nothing, so
+  // asking costs nothing either.
+  assert.deepEqual(fns().afterRejection({ pullsLeft: 0 }, { pullsLeft: 3 }), { panel: 'pull' });
+  assert.deepEqual(fns().afterRejection({ ok: true }, { pullsLeft: 0 }), { panel: 'pull' },
+    'the served reply answers when the verdict reply cannot');
 
   // FAIL OPEN IN THE OTHER DIRECTION. One left, three left, or nobody said: the
-  // button is offered, because the press is answered by hermes, which is the
+  // button is offered, because the press is settled by hermes, which is the
   // authority, and the worst case is the honest sentence one press later.
   for (const pair of [[{ pullsLeft: 1 }, {}], [{ pullsLeft: 3 }, {}], [{}, {}], [null, null]]) {
     const next = fns().afterRejection(...pair);
+    assert.equal(next.panel, 'another', JSON.stringify(pair));
     assert.equal(next.button, true, JSON.stringify(pair));
     assert.equal(next.msg, 'noted.');
   }
 });
 
-test('the budget belongs to the card that was served, and dies with it', () => {
+test('a spent cap with pulls still owed is a pause, not a verdict', () => {
+  // THE INPUT: capPerDay 1, the day's card served and dismissed, then the page
+  // reaches pull() with no pause on screen -- a reload, a webview teardown, or
+  // simply a second visit. hermes answers {reason:'cap', pullsLeft:3} and the
+  // page drew "that's all for today" with no button, putting the three cards
+  // the owner was owed out of reach until tomorrow: the only door to ?pull=1
+  // was the in-session pause drawn straight after a rejection.
+  const owed = fns().emptyPanel({ reason: 'cap', pullsLeft: 3 });
+  assert.equal(owed.panel, 'another');
+  assert.equal(owed.button, true);
+  assert.equal(owed.msg, fns().CAP_WITH_PULLS);
+  assert.notEqual(owed.msg, fns().EMPTY_REASONS.cap, 'the day is not over and must not read as over');
+
+  // ...and a cap with nothing owed is the empty state it always was.
+  assert.equal(fns().emptyPanel({ reason: 'cap', pullsLeft: 0 }).panel, 'empty');
+  assert.equal(fns().emptyPanel({ reason: 'cap' }).panel, 'empty',
+    'a reader that does not send the field has not said the owner is owed anything');
+});
+
+test('the pause is offered only where the queue would actually serve', () => {
+  // A BUTTON THAT CANNOT CHANGE THE SCREEN IT IS ON IS WORSE THAN NO BUTTON --
+  // screen 6 already carries that lesson. A pull goes through the same queue, so
+  // for every reason but `cap` the answer to pressing it is the sentence that is
+  // already up: nobody qualifies yet, or the owner's own controls are refusing
+  // what is there.
+  for (const reason of ['queue-empty', 'pool-exhausted', 'muted', 'suppressed',
+    'quote-gone', 'claim-gone', 'claim-rejected', 'no-cap-configured', 'unreachable']) {
+    assert.equal(fns().emptyPanel({ reason, pullsLeft: 3 }).panel, 'empty', reason);
+  }
+});
+
+test('no sentence on either surface asserts a cadence it has not read', () => {
+  // ~~"one nudge a day, on purpose"~~ and ~~"one person a day, whoever has gone
+  // quiet"~~. `relationshipMemory.capPerDay` is the owner's, and this row had
+  // the identical defect corrected once already -- a spelled-out "one" beside a
+  // config that says 50. The digit is the row's own job.
+  assert.doesNotMatch(fns().EMPTY_REASONS.cap, /one nudge a day/u);
+  assert.doesNotMatch(fns().EMPTY_REASONS.cap, /\bone\b/u);
+  const help = /const CARD_HELP = '([^']*)'/u.exec(connectionsJs)?.[1] ?? '';
+  assert.ok(help, 'CARD_HELP not found');
+  assert.doesNotMatch(help, /\bone\b|\ba day\b/u, 'the hover must not name a cadence');
+  // The number itself still comes from the config, on the row.
+  assert.match(code(connectionsJs), /bits\.push\(`\$\{cfg\.capPerDay\} a day`\)/u);
+});
+
+test('the budget and the card chrome belong to the served card, and die with it', () => {
   const src = code(reconnectJs);
   assert.match(code(bodyOf(reconnectJs, 'renderServed')), /servedPullsLeft = pullsLeftFrom\(out\);/u,
     'remembered from the reply that carried this card, and only that one');
   // Cleared by both panels that replace a card, so a budget can never be read
   // against a serve it did not describe.
   assert.match(code(bodyOf(reconnectJs, 'showAnother')), /servedPullsLeft = null;/u);
+  // ...and so is the card's chrome. verdict() disables the five buttons before
+  // it posts and the pause branch returns without re-enabling them, and the
+  // "why?" the owner typed about one person stayed in the box. Invisible only
+  // because #rcCard is hidden -- one `hidden = false` from dead buttons and a
+  // note about somebody else.
+  const pause = code(bodyOf(reconnectJs, 'showAnother'));
+  assert.match(pause, /setVerdictButtonsDisabled\(false\);/u);
+  assert.match(pause, /el\('rcFeedback'\)\.value = '';/u);
+  assert.match(pause, /el\('rcActionsError'\)\.hidden = true;/u);
   assert.match(code(bodyOf(reconnectJs, 'renderEmpty')), /servedPullsLeft = null;/u);
   assert.match(src, /let servedPullsLeft = null;/u);
+});
+
+test('nothing reads the flag before the registry has answered', () => {
+  // The first pull used to be fired synchronously beside the feature read, so
+  // the two raced: a card reply that won found `modesOn` still false,
+  // adoptServerMode returned early, and the first card's server mode was never
+  // taken up. Flag-ON-only, which is the condition under which it is hardest to
+  // find -- nothing is visible until `timeline` comes back.
+  const src = code(reconnectJs);
+  assert.match(src, /const modesReady = hzFeatures\(\)/u);
+  assert.doesNotMatch(src, /^pull\(\);$/mu, 'the first pull must not be fired beside the read');
+  assert.match(src, /modesReady\.then\(pull\);/u);
+  // ...and the re-show hook goes through the same gate, because the first
+  // re-show may arrive before the answer too.
+  const hook = /window\.__hzReconnectShow = \(\) => \{([\s\S]*?)\n\};/u.exec(reconnectJs)?.[1] ?? '';
+  assert.match(code(hook), /modesReady\.then\(pull\)/u);
+
+  // Same shape on the setup flow, where screen 1 is the first thing drawn.
+  const ob = code(onboardingJs);
+  assert.match(ob, /const modesReady = hzFeatures\(\)/u);
+  assert.match(code(bodyOf(onboardingJs, 'enterWelcome')), /modesReady\.then\(\(\) => \{/u);
+});
+
+test('the setup flow declares what its feature callback closes over, above it', () => {
+  // The callback is a microtask and ran after module evaluation, which is the
+  // ONLY reason reading a `const` declared below it worked. A prefs path that
+  // ever resolved synchronously turns it into a TDZ ReferenceError that takes
+  // the `chat` flow selection on the same line down with it.
+  const ob = code(onboardingJs);
+  const callAt = ob.indexOf('const modesReady = hzFeatures()');
+  assert.ok(callAt > -1);
+  for (const decl of ['const modeBlock =', 'let modesOn = false;']) {
+    const at = ob.indexOf(decl);
+    assert.ok(at > -1 && at < callAt, `${decl} must be declared above the callback that reads it`);
+  }
 });
 
 // --------------------------------------------- the page asks for the pull
@@ -214,8 +310,13 @@ test('the verdict no longer fetches the next card by itself', () => {
   // the card. The sentence and the button are afterRejection's to choose.
   assert.match(verdict, /afterRejection\(out, \{ pullsLeft: servedPullsLeft \}\)/u,
     'the verdict reply is the fresher answer and must be asked first');
-  assert.match(verdict, /showAnother\(next\.msg, next\.button\)/u,
+  assert.match(verdict, /if \(next\.panel === 'another'\) \{ showAnother\(next\.msg, next\.button\); return; \}/u,
     'the pause offers the one thing the owner might still want');
+  // ...and anything else falls through to the ordinary pull below it, which is
+  // how a spent budget stops being a claim about the day.
+  const branchAt = verdict.indexOf("next.panel === 'another'");
+  const pullAt = verdict.indexOf('await pull();');
+  assert.ok(branchAt > -1 && pullAt > branchAt, 'the fall-through has to reach pull()');
   // The button and its panel exist on the page at all.
   assert.match(reconnectHtml, /id="rcAnother"/u);
   assert.match(reconnectHtml, /id="rcAnotherBtn">show me another</u);
@@ -229,7 +330,7 @@ test('the pause survives the panel being hidden and shown again', () => {
   const hook = /window\.__hzReconnectShow = \(\) => \{([\s\S]*?)\n\};/u.exec(reconnectJs)?.[1];
   assert.ok(hook, '__hzReconnectShow is not a wrapper any more');
   assert.match(code(hook), /if \(awaitingPull\) \{[^}]*return; \}/u);
-  assert.match(code(hook), /pull\(\);/u, 'every other state still refetches');
+  assert.match(code(hook), /modesReady\.then\(pull\)/u, 'every other state still refetches');
   // Set only where the button is actually offered, and cleared by both of the
   // panels that replace it.
   assert.match(code(bodyOf(reconnectJs, 'showAnother')), /awaitingPull = button;/u);

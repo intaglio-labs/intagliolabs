@@ -181,7 +181,12 @@ function fit() {
 // it. An unrecognized reason falls back to the original line rather than
 // rendering a raw token.
 const EMPTY_REASONS = {
-  cap: "that's all for today — one nudge a day, on purpose.",
+  // ~~"one nudge a day, on purpose"~~ ASSERTED A NUMBER THIS PAGE NEVER READ.
+  // `relationshipMemory.capPerDay` is the owner's, and the settings row already
+  // had this exact defect corrected once ("it read as a hard-coded 'one' to an
+  // owner whose config says 50"). What is true whatever the cap holds is that
+  // the cap is spent and it was set deliberately, so that is what it says.
+  cap: "that's all for today — the cap is spent, on purpose.",
   muted: 'everyone queued up right now is muted. they will come back when the mute expires.',
   suppressed: 'everyone queued up right now is hidden.',
   'quote-gone': 'the messages behind the queued cards are gone, so the cards went with them.',
@@ -207,6 +212,31 @@ const EMPTY_REASONS = {
   unreachable: 'i cannot reach the part of me that does the reading. it may still be starting up.',
 };
 const EMPTY_DEFAULT = 'nothing to review — the orb will light up when there is.';
+
+// THE DAY'S CARD IS SPENT AND THE PULLS ARE NOT. The two facts arrive on one
+// reply -- `{reason:'cap', pullsLeft:3}` -- and the page used to read only the
+// first of them and draw "that's all for today", with no button, for a reader
+// that had just said the owner was owed three more cards. The only door to
+// ?pull=1 was the in-session pause drawn straight after a rejection, so a page
+// reload, a webview teardown, or simply reaching this function once put those
+// three cards out of reach until tomorrow.
+//
+// SCOPED TO `cap`, deliberately, and not to "any reply with pullsLeft on it".
+// Every other empty reason is a queue that has nothing to give: 'queue-empty'
+// and 'pool-exhausted' mean nobody qualifies yet, 'muted' and 'suppressed' mean
+// the owner's own controls are refusing what is there, and a pull goes through
+// the same queue and comes back with the same sentence. A button that cannot
+// change the screen it is on is worse than no button -- the lesson screen 6
+// already carries -- and only `cap` names a queue that would serve if asked.
+const CAP_WITH_PULLS = "that's the one for today.";
+
+function emptyPanel(out) {
+  const left = pullsLeftFrom(out);
+  if (out?.reason === 'cap' && left !== null && left > 0) {
+    return { panel: 'another', msg: CAP_WITH_PULLS, button: true };
+  }
+  return { panel: 'empty', msg: '', button: false };
+}
 
 // The one reason whose sentence depends on what is on the screen. Everything
 // else in the table is true either way.
@@ -772,18 +802,31 @@ function pullsLeftFrom(...replies) {
   return null;
 }
 
-// What the panel says after a rejection. Zero left is the same sentence a spent
-// pull gets from the route, arrived at one press earlier: the budget is known
-// here, so offering a button whose only possible answer is `pulls-exhausted`
-// would be asking the owner to press it to be told something already on screen.
+// What the panel does after a rejection.
+//
+// ~~zero left meant "the day is over", said here.~~ IT DOES NOT MEAN THAT, AND
+// THIS PAGE CANNOT KNOW WHETHER IT DOES. `pullsLeft` is zeroed by an accept
+// earlier in the day as well as by three spent pulls, while the frequency cap
+// is a separate gate that is consulted first -- so on `capPerDay: 50`, accept
+// card 1 in the morning and dismiss card 2 in the afternoon and the panel said
+// "that's enough for today — more tomorrow" over a route that would have served
+// card 3 to the very next poll. The sentence was contradicted within one poll,
+// by the same app.
+//
+// So zero hands the question back: an ordinary pull(), with no flag on it, and
+// whatever hermes answers is the truth of the matter. If the cap is also spent
+// that answer is `cap` and the empty state says so, at no cost -- a refused
+// serve spends nothing. If the cap is open, the owner gets the card they are
+// entitled to, as the interruption it is.
 //
 // Anything else -- one left, three left, or nobody said -- offers the button.
-// Fail-open is right in that direction: the press is answered by hermes, which
-// is the authority, and the worst case is the honest sentence one press later.
+// Fail-open is right in that direction too: the press is settled by hermes,
+// which is the authority, and the worst case is the honest sentence one press
+// later. NULL IS NOT ZERO here either; see pullsLeftFrom.
 function afterRejection(verdictReply, served) {
   return pullsLeftFrom(verdictReply, served) === 0
-    ? { msg: PULLS_DONE, button: false }
-    : { msg: 'noted.', button: true };
+    ? { panel: 'pull' }
+    : { panel: 'another', msg: 'noted.', button: true };
 }
 
 function pullPanel(out) {
@@ -804,6 +847,16 @@ function showAnother(msg, button) {
   card = null;
   // With it, because it describes that card's serve and nothing else.
   servedPullsLeft = null;
+  // THE CARD'S CHROME IS RESET HERE, NOT ONLY WHERE THE NEXT CARD ARRIVES.
+  // verdict() disables the five buttons before it posts and this branch returns
+  // without re-enabling them, and the "why?" the owner typed about one person
+  // stayed in the box. Both were invisible only because #rcCard is hidden --
+  // one `hidden = false` away from a panel whose buttons are dead, and a note
+  // about somebody else already in the field.
+  setVerdictButtonsDisabled(false);
+  el('rcFeedback').value = '';
+  el('rcActionsError').hidden = true;
+  el('rcActionsError').textContent = '';
   el('rcCard').hidden = true;
   el('rcEmpty').hidden = true;
   el('rcAnother').hidden = false;
@@ -818,6 +871,16 @@ function showAnother(msg, button) {
 // per snapshot SERVER-side (a re-show of the same pending card used to post
 // another, and openRate = opened/shown climbed past 1), so this can stay
 // unconditional.
+// EVERY CARD-LESS REPLY GOES THROUGH ONE DOOR, so the decision in emptyPanel
+// cannot be reached on one path and missed on the other. The two synthetic
+// `unreachable` calls stay on renderEmpty: they are the page's own answer, not
+// the reader's, and carry no budget to read.
+function renderCardless(out) {
+  const next = emptyPanel(out);
+  if (next.panel === 'another') { showAnother(next.msg, next.button); return; }
+  renderEmpty(out);
+}
+
 function renderServed(out) {
   // Remembered before the card is drawn, and only ever from the reply that
   // carried this card: render() is the one place a card replaces a card, so
@@ -841,7 +904,7 @@ async function pull() {
     // of a fallback card and of an empty answer under the same standing pick.
     showModeFallback(out);
     if (out?.card) renderServed(out);
-    else renderEmpty(out);
+    else renderCardless(out);
   } catch {
     // Kept for the one failure that IS a throw: a webview torn down mid-message.
     // The reachable path is the state check above.
@@ -866,7 +929,7 @@ async function pullAnother() {
   const next = pullPanel(out);
   btn.disabled = false;
   if (next.panel === 'card') { renderServed(out); return; }
-  if (next.panel === 'empty') { renderEmpty(out); return; }
+  if (next.panel === 'empty') { renderCardless(out); return; }
   showAnother(next.msg, next.button);
 }
 
@@ -905,9 +968,10 @@ async function verdict(event, extra = {}) {
       // THE BUDGET IS ALREADY KNOWN HERE. `out` is the verdict reply, which has
       // seen this rejection; `servedPullsLeft` is what the reply that delivered
       // the card said, for a reader that answers the verdict without the field.
+      // A spent budget is not a finished day, so it falls through to the pull
+      // below and lets hermes answer -- see afterRejection.
       const next = afterRejection(out, { pullsLeft: servedPullsLeft });
-      showAnother(next.msg, next.button);
-      return;
+      if (next.panel === 'another') { showAnother(next.msg, next.button); return; }
     }
     await pull(); // next card, or the empty state -- clears the error on success
   } catch {
@@ -966,7 +1030,15 @@ el('rcModeInvestor').addEventListener('click', () => selectMode('investor'));
 // THE ROW IS REVEALED, NEVER DRAWN. It ships `hidden` in the markup, so a page
 // that cannot reach the registry — or one the registry says no to — never
 // flashes three chips and then takes them away.
-hzFeatures()
+//
+// AND NOTHING READS `modesOn` BEFORE IT HAS AN ANSWER. The first pull used to
+// be fired synchronously beside this, so the two raced: a card reply that won
+// found `modesOn` still false, adoptServerMode returned early, and the first
+// card's server mode was never taken up -- invisible until `timeline` comes
+// back, which is the condition under which it is hardest to find. Waiting costs
+// one `prefs` round trip on a page that is about to make a slower one, and it
+// makes the flag's value a fact rather than a race.
+const modesReady = hzFeatures()
   .then((set) => {
     modesOn = hzFeatureOn(set, 'timeline');
     if (!modesOn) return;
@@ -987,6 +1059,8 @@ hzFeatures()
 // still refetches, which is what this hook is for.
 window.__hzReconnectShow = () => {
   if (awaitingPull) { fit(); return; }
-  pull();
+  // Later re-shows are long past the registry's answer; the first one may not
+  // be, and it goes through the same gate for the same reason.
+  modesReady.then(pull);
 };
-pull();
+modesReady.then(pull);
