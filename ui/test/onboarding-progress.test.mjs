@@ -697,11 +697,12 @@ test('the progress route answers counts and state, and no content', async () => 
       // linkedinExportReady: a timestamp or null, saying when LinkedIn mailed
       // to tell the owner their archive is downloadable, so the shelf can badge
       // the tile and say "open the email" instead of repeating "needs your data
-      // export". NEVER the subject of that mail -- the marker it comes from
-      // holds one, and this route does not relay it (connectors/lib/
-      // linkedinExport.mjs). `modeFallback` is the other new key and is absent
-      // here on purpose: it rides the reply only while an investor or founder
-      // pick is being held for an export that has not arrived.
+      // export". Never the subject of that mail, nor anything else out of it --
+      // the marker holds one number (connectors/lib/linkedinExport.mjs).
+      // `modeFallback` and `heldSince` are the other two keys this route can
+      // carry, and both are absent here on purpose: they ride the reply only
+      // while an investor or founder pick is being held for an export that has
+      // not arrived. relationship-linkedin-pending.test.mjs pins them.
       assert.deepEqual(
         Object.keys(body).sort(),
         ['daemonLastRunTs', 'dormant', 'linkedinExportReady', 'projection', 'runs', 'sources', 'state']

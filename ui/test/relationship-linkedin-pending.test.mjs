@@ -83,17 +83,19 @@ function seedCandidate(db, key, name, now, subRoles = []) {
 }
 
 // WHAT "LINKEDIN HAS CONTRIBUTED SOMEBODY" IS, on disk: a person_event_link
-// whose source is the export. A Connections.csv row is entirely role='profile'
-// — nobody authors a connection — which is exactly the shape that made an
-// authored-count test of this question answer "no" forever.
-function insertLinkedinPerson(db, key, now) {
+// whose source is the export and whose role is 'profile'. A Connections.csv row
+// is entirely role='profile' — nobody authors a connection — which is exactly
+// the shape that made an authored-count test of this question answer "no"
+// forever. messages.csv from the same export writes ordinary counterparty
+// links, which carry nothing about who anybody is.
+function insertLinkedinPerson(db, key, now, role = 'profile') {
   const ctxId = Number(db.prepare(
-    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'linkedin', 'profile', '{}')"
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'linkedin', 'hi', '{}')"
   ).run(now - 5 * DAY).lastInsertRowid);
   db.prepare(
     'INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, '
-    + "confidence, conversation_key) VALUES (?, ?, 'linkedin', 'profile', 0, 0, 0, 1, 'linkedin')"
-  ).run(key, ctxId);
+    + "confidence, conversation_key) VALUES (?, ?, 'linkedin', ?, 0, 0, 0, 1, 'linkedin')"
+  ).run(key, ctxId, role);
 }
 
 // --- THE HOLD ---------------------------------------------------------------
@@ -238,6 +240,102 @@ test('the matcher path is never held, because nothing there is produced per mode
     assert.equal(out.mode, 'investor');
     assert.equal(out.modeFallback, undefined);
   }, { relationshipProducerConfig: { producer: 'matcher', mode: 'investor' } });
+});
+
+test('a linkedin message row is not a profile row, and does not lift the hold', async () => {
+  await withServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedCandidate(db, 'name:investor one', 'Investor One', now, ['investor']);
+    // The export's other file. messages.csv writes counterparty links, and
+    // nothing in them says who anybody is — people.sub_roles, which is what an
+    // investor pool is filtered on, comes from Connections.csv. Releasing the
+    // hold here would flip the screen from "investor cards start when your
+    // export lands" straight back to "nobody qualifies yet".
+    insertLinkedinPerson(db, 'name:investor one', now, 'counterparty');
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+
+    const still = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(still.modeFallback, 'linkedin-pending');
+
+    insertLinkedinPerson(db, 'name:investor one', now, 'profile');
+    const after = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(after.modeFallback, undefined, 'the connections file is what ends the wait');
+  });
+});
+
+// --- HOW LONG IT HAS BEEN HELD ----------------------------------------------
+//
+// The surfaces say "investor cards start WHEN your linkedin export lands". For
+// an owner who pressed `later` and never imports, "when" is a word that never
+// comes due, and a page can only say something else after a while if something
+// counted the while.
+
+test('heldSince rides the fallback, holds still across polls, and survives a restart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-linkedin-held-'));
+  const opts = {
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
+    relationshipCap: CAP,
+    relationshipProducerConfig: { producer: 'eligibility', mode: 'investor' },
+    peopleProjectionAutoRebuild: false,
+    ownerConfigPath: join(dir, 'config.json'),
+  };
+  const get = async (server, path) => (await fetch(`http://127.0.0.1:${server.port}${path}`, {
+    headers: { Authorization: `Bearer ${TOKEN}` },
+  })).json();
+
+  const first = await start(opts);
+  let since;
+  try {
+    const one = await get(first, '/admin/relationship/card');
+    assert.equal(one.modeFallback, 'linkedin-pending');
+    assert.ok(Number.isInteger(one.heldSince), 'a clock, in milliseconds');
+    since = one.heldSince;
+    const two = await get(first, '/admin/relationship/card');
+    assert.equal(two.heldSince, since, 'a poll is not a new wait');
+    const progress = await get(first, '/admin/onboarding/progress');
+    assert.equal(progress.heldSince, since, 'and the setup screen is told the same number');
+  } finally {
+    await first.close();
+  }
+
+  // THE RESTART IS THE WHOLE POINT. A counter living in the process is reset by
+  // every relaunch, which is exactly the install where "your export never
+  // arrived" needs to be sayable.
+  const second = await start(opts);
+  try {
+    const after = await get(second, '/admin/relationship/card');
+    assert.equal(after.heldSince, since, 'the wait is one stretch, not one per process');
+  } finally {
+    await second.close();
+  }
+});
+
+test('the clock is dropped the moment the hold is, so it can only describe an unbroken wait', async () => {
+  await withServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedCandidate(db, 'name:investor one', 'Investor One', now, ['investor']);
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+    assert.ok((await (await call('GET', '/admin/relationship/card')).json()).heldSince);
+    assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM rm_mode_hold').get().n), 1);
+
+    insertLinkedinPerson(db, 'name:investor one', now);
+    const after = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(after.heldSince, undefined, 'nothing is being held, so there is nothing to date');
+    assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM rm_mode_hold').get().n), 0,
+      'and the clock is gone rather than left to be read as a live wait');
+  });
+});
+
+test('switching between sub-role picks is the same wait, because the export is what is waited on', async () => {
+  await withServer(async ({ call }) => {
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+    const asInvestor = await (await call('GET', '/admin/relationship/card')).json();
+    await call('POST', '/admin/relationship/mode', { mode: 'founder' });
+    const asFounder = await (await call('GET', '/admin/relationship/card')).json();
+    assert.ok(Number.isInteger(asInvestor.heldSince), 'both picks are held, and both are dated');
+    assert.equal(asFounder.heldSince, asInvestor.heldSince,
+      'changing which cards you want does not restart the archive LinkedIn is building');
+  });
 });
 
 // --- THE RELAY --------------------------------------------------------------

@@ -1271,6 +1271,28 @@ CREATE TRIGGER IF NOT EXISTS rm_card_draft_no_delete
 BEFORE DELETE ON rm_card_draft BEGIN
   SELECT RAISE(ABORT, 'a drafted suggestion is append-only: deleting it is how the 24h cache would lie');
 END;
+
+/* SINCE WHEN HAS THE OWNER'S PICK BEEN HELD for a LinkedIn export that has not
+   arrived (see linkedinPendingFallback). ONE ROW, and it is a clock rather
+   than a flag: the state itself is derived per request from the projection, so
+   what cannot be derived is how long it has been true.
+
+   WHY IT IS DURABLE. The surfaces promise "investor cards start WHEN your
+   linkedin export lands", and for an owner who pressed 'later' and never
+   imports, "when" is a word that never comes due. A page can only say
+   something else after a while if something counted the while -- and a counter
+   in the process is reset by every restart, which is precisely the install
+   where this matters. Not the owner's config: that file is a record of
+   DECISIONS, and this is an observation.
+
+   NOT KEYED BY MODE, deliberately. Switching investor -> founder is not a new
+   wait; the thing being waited on is the export, and the clock belongs to it.
+   Deleted the moment the hold does not apply, so it can only ever describe an
+   unbroken stretch. */
+CREATE TABLE IF NOT EXISTS rm_mode_hold(
+  id    INTEGER PRIMARY KEY CHECK (id = 1),
+  since INTEGER NOT NULL
+);
 `;
 
 // Bumped only when a migration must run at open. Version history:
@@ -3421,6 +3443,28 @@ function relationshipMode(rel, policy) {
   return rel.mode ?? relationshipProducerConfig(policy).mode;
 }
 
+// PREPARED ONCE PER DATABASE, NOT PER REQUEST (review finding 19).
+//
+// The statements below sit on two POLLED routes -- the card route the panel
+// polls and the progress route screen 6 polls -- and node:sqlite compiles the
+// SQL on every prepare(). Keyed weakly by the handle, so a closed database's
+// statements go with it; a prepare that THROWS is not cached, so a table
+// created later (or dropped by a test) is re-prepared on the next call rather
+// than being remembered as broken.
+const statementCache = new WeakMap();
+function cachedStatement(db, sql) {
+  let byDb = statementCache.get(db);
+  if (byDb === undefined) {
+    byDb = new Map();
+    statementCache.set(db, byDb);
+  }
+  const hit = byDb.get(sql);
+  if (hit !== undefined) return hit;
+  const stmt = db.prepare(sql);
+  byDb.set(sql, stmt);
+  return stmt;
+}
+
 // HAS LINKEDIN PUT ANYBODY IN THE HOUSE YET?
 //
 // The sub-role modes are a LinkedIn question. `people.sub_roles` -- what
@@ -3435,10 +3479,20 @@ function relationshipMode(rel, policy) {
 // route counts DISTINCT person_key over person_event_links where source =
 // 'linkedin' and role = 'profile', because it draws that number. Nothing here
 // draws a number -- the question is has-any -- so this is an existence check
-// against the same rows, on the (source, role, context_id) index, and it stops
-// at the first one. `role` is deliberately not in the predicate: a person
-// LinkedIn contributed any way at all is a person the sub-role modes can see,
-// and this asks the wider question on purpose.
+// against the same rows, on the (source, role, ...) indexes, stopping at the
+// first one.
+//
+// PROFILE ROWS, NOT ANY LINKEDIN ROW (review finding 15). ~~`role` is
+// deliberately not in the predicate.~~ The thing the sub-role modes actually
+// filter on is `people.sub_roles`, and Connections.csv -- role 'profile' -- is
+// what carries it; messages.csv contributes ordinary counterparty links that
+// say nothing about who anybody is. Releasing the hold on one of those would
+// flip the screen from "investor cards start when your export lands" straight
+// back to "nobody qualifies yet", which is the sentence the hold exists to
+// stop. replaceProjection writes insertPeople (sub_roles) and insertEventLinks
+// inside ONE transaction, so there is no window where the links are visible and
+// the sub-roles are not; that ordering is load-bearing here and is stated so a
+// future split has something to break.
 //
 // A TABLE THAT DOES NOT EXIST YET IS NOT A LINKEDIN ROW. The projection builds
 // person_event_links lazily, so a fresh install throws `no such table` here --
@@ -3448,11 +3502,36 @@ function relationshipMode(rel, policy) {
 // why that direction is the safe one.
 function linkedinHasPeople(db) {
   try {
-    return db.prepare(
-      "SELECT 1 FROM person_event_links WHERE source = 'linkedin' LIMIT 1"
+    return cachedStatement(
+      db, "SELECT 1 FROM person_event_links WHERE source = 'linkedin' AND role = 'profile' LIMIT 1"
     ).get() !== undefined;
   } catch {
     return false;
+  }
+}
+
+// THE CLOCK ON THE HOLD (review finding 14). Returns when this stretch of
+// holding began, or null when it cannot be said.
+//
+// `start` false is the ordinary case -- most installs are not held -- so the
+// read comes first and the DELETE only runs when there is something to delete.
+// A held request reads one row and writes nothing after the first.
+//
+// A clock that cannot be read is not a clock of zero: null means the reply
+// simply carries no heldSince, and the surfaces say the sentence they said
+// before it existed. Absence of a claim is not a claim.
+function modeHoldSince(db, { start, now }) {
+  try {
+    const row = cachedStatement(db, 'SELECT since FROM rm_mode_hold WHERE id = 1').get();
+    if (!start) {
+      if (row !== undefined) db.prepare('DELETE FROM rm_mode_hold WHERE id = 1').run();
+      return null;
+    }
+    if (row !== undefined) return Number(row.since);
+    db.prepare('INSERT OR IGNORE INTO rm_mode_hold(id, since) VALUES (1, ?)').run(now);
+    return now;
+  } catch {
+    return null;
   }
 }
 
@@ -3479,11 +3558,17 @@ function linkedinHasPeople(db) {
 // ONE FUNCTION, TWO CALLERS. The card route decides this and the onboarding
 // progress route relays it; two screens deriving it separately is two screens
 // that can disagree about whether the owner's pick is being served, so every
-// clause of the rule lives here rather than at the call sites.
-function linkedinPendingFallback(db, policy, pick) {
-  if (pick !== 'investor' && pick !== 'founder') return null;
-  if (relationshipProducerConfig(policy).producer !== 'eligibility') return null;
-  return linkedinHasPeople(db) ? null : 'linkedin-pending';
+// clause of the rule lives here rather than at the call sites. It is also the
+// one place that starts and stops the clock, for the same reason.
+//
+// `{ reason, since }` while the pick is held, else null. `since` may itself be
+// null -- see modeHoldSince.
+function linkedinPendingFallback(db, policy, pick, now = Date.now()) {
+  const held = (pick === 'investor' || pick === 'founder')
+    && relationshipProducerConfig(policy).producer === 'eligibility'
+    && !linkedinHasPeople(db);
+  const since = modeHoldSince(db, { start: held, now });
+  return held ? { reason: 'linkedin-pending', since } : null;
 }
 
 // The engine person-page building uses, same seam discipline as
@@ -3982,13 +4067,21 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
   //                        two screens that can disagree about it. Absent when
   //                        the pick is being served normally.
   if (req.method === 'GET' && url.pathname === '/admin/onboarding/progress') {
-    const modeFallback = linkedinPendingFallback(
-      db, policy, relationshipMode(relationshipState(db, policy), policy)
-    );
+    // THE PICK WITHOUT BUILDING THE SERVICE (review finding 19). This route is
+    // polled for as long as screen 6 is open, and relationshipState() opens the
+    // connectors' state.db, the resolutions database and the whole relationship
+    // service on first call. The card route is what legitimately builds that;
+    // here the running pick is READ if it has been built and the persisted
+    // config answers otherwise -- which is exactly what relationshipMode does
+    // with a holder in hand, and exactly what it falls back to without one.
+    const built = (policy.relationshipHolder ?? policy).__relationship ?? {};
+    const held = linkedinPendingFallback(db, policy, relationshipMode(built, policy));
     send(res, 200, {
       ...cachedOnboardingProgress(db, policy),
       linkedinExportReady: exportReadyAt(installHome(policy)),
-      ...(modeFallback === null ? {} : { modeFallback }),
+      ...(held === null
+        ? {}
+        : { modeFallback: held.reason, ...(held.since === null ? {} : { heldSince: held.since }) }),
     }, cors);
     return;
   }
@@ -4141,15 +4234,24 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // request's decision, and `oneOff` is how the reply says so.
     const producerConfig = relationshipProducerConfig(policy);
     const pick = relationshipMode(rel, policy);
-    const modeFallback = askedMode === null ? linkedinPendingFallback(db, policy, pick) : null;
+    const held = askedMode === null ? linkedinPendingFallback(db, policy, pick) : null;
+    const modeFallback = held?.reason ?? null;
+    // WHAT EVERY BRANCH BELOW CARRIES BESIDE `mode`. `heldSince` is how long
+    // this stretch of holding has run (review finding 14): the surfaces say
+    // "investor cards start WHEN your linkedin export lands", and an owner who
+    // never imports needs that sentence to be able to become a different one.
+    // Omitted rather than nulled when the clock could not be read -- a page
+    // that sees no heldSince says what it said before there was one.
+    const heldFields = held === null
+      ? {}
+      : { modeFallback: held.reason, ...(held.since === null ? {} : { heldSince: held.since }) };
     const cap = relationshipCap(policy);
     // WITH THE MODE, like every other answer this route gives. A fresh
     // install has no cap until onboarding's card-config POST lands, so this
     // is the FIRST branch a replayed onboarding hits -- and a reply with no
     // mode in it is what repainted "anyone" over the owner's pick.
     if (!cap) {
-      send(res, 200, { card: null, reason: 'no-cap-configured', mode: pick,
-        ...(modeFallback === null ? {} : { modeFallback }) }, cors);
+      send(res, 200, { card: null, reason: 'no-cap-configured', mode: pick, ...heldFields }, cors);
       return;
     }
 
@@ -4299,7 +4401,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         reason: modeEmpty !== null && modeEmpty.mode === 0 ? 'pool-exhausted-mode' : 'pool-exhausted',
         retryAfterMs,
         mode: pick,
-        ...(modeFallback === null ? {} : { modeFallback }),
+        ...heldFields,
         ...(modeEmpty === null ? {} : { counts: modeEmpty }),
         ...(askedMode === null ? {} : { oneOff: true }),
         ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
@@ -4462,7 +4564,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         // The tease only: who and why-in-numbers, never the receipt. The
         // widget renders name plus quiet/overdue days on the orb's title.
         send(res, 200, { peek: true, mode: pick,
-          ...(modeFallback === null ? {} : { modeFallback }),
+          ...heldFields,
           // WHERE THE TEASED CARD CAME FROM, on the peek as on the serve
           // (round-8 finding 1). The panel's one-off hand-off reads exactly
           // this field off exactly this reply -- the peek is what the widen
@@ -4591,7 +4693,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         // one that means "what the owner is on", and it keeps the fallback.
         servedMode: card.kind === 'reconnect' ? (card.evidence?.mode ?? null) : null,
         mode: pick,
-        ...(modeFallback === null ? {} : { modeFallback }),
+        ...heldFields,
         // The card asked for is gone; this is the next one. A reason BESIDE a
         // non-null card, which no other branch of this route produces.
         ...(expectSuperseded ? { expectSuperseded: true, reason: 'expect-superseded' } : {}),
@@ -4617,7 +4719,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // carrying cap/blocked/queue-empty, which the panel needs more. The flag
     // is on every branch so there is one field to test regardless.
     send(res, 200, { card: null, reason, mode: pick,
-      ...(modeFallback === null ? {} : { modeFallback }),
+      ...heldFields,
       ...(askedMode === null ? {} : { oneOff: true }),
       ...(expectSuperseded ? { expectSuperseded: true } : {}),
       ...(rel.refreshing ? { refreshing: true } : {}),
