@@ -51,6 +51,26 @@ async function withCardServer(fn, opts = {}) {
     ownerConfigPath: join(dir, 'config.json'),
     ...opts,
   });
+  // THE LINKEDIN EXPORT HAS LANDED. hermes HOLDS an investor or founder pick
+  // while LinkedIn has contributed nobody -- the sub-role modes are a LinkedIn
+  // question (people.sub_roles comes from the export), so until it arrives the
+  // cards come from 'any' and the reply carries modeFallback. The mode tests
+  // below are about queues and page passes rather than that hold, which is
+  // pinned in relationship-linkedin-pending.test.mjs.
+  //
+  // This link puts nobody in a pool: it needs a `people` row to point at
+  // (foreign key), and eligiblePool drops a candidate with no active day
+  // before it looks at anything else.
+  const exportNow = Date.now();
+  insertPersonRow(server.db, { key: 'name:linkedin listed', name: 'LinkedIn Listed', sent: 0, received: 0 }, exportNow);
+  const exportCtxId = Number(server.db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'linkedin', 'profile', '{}')"
+  ).run(exportNow).lastInsertRowid);
+  server.db.prepare(
+    'INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, '
+    + 'room, confidence, conversation_key) '
+    + "VALUES ('name:linkedin listed', ?, 'linkedin', 'profile', 0, 0, 0, 1, 'linkedin')"
+  ).run(exportCtxId);
   const base = `http://127.0.0.1:${server.port}`;
   const call = (method, path, body) => fetch(base + path, {
     method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },

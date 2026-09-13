@@ -134,7 +134,10 @@ import { connectorsDisabledBy, readFeatureRegistry, readFeatures } from '../../c
 // is how the onboarding table and the reader come to disagree about whether a
 // source is connected, which is the exact failure below.
 import { GMAIL_SCOPE, accountsWithScopeIncludingStale } from '../../connectors/lib/googleAccounts.mjs';
-import { defaultImportDir as linkedinImportDir } from '../../connectors/sources/linkedin.mjs';
+// The LinkedIn export's own module rather than the connector that polls it:
+// the import folder, whether Connections.csv is in it, and the marker the mail
+// connector leaves when LinkedIn mails to say the archive is downloadable.
+import { exportInstalled, exportReadyAt } from '../../connectors/lib/linkedinExport.mjs';
 import { dropCachedDistillates } from './memory/cache.mjs';
 import { validToFor } from './memory/validity.mjs';
 import {
@@ -3418,6 +3421,71 @@ function relationshipMode(rel, policy) {
   return rel.mode ?? relationshipProducerConfig(policy).mode;
 }
 
+// HAS LINKEDIN PUT ANYBODY IN THE HOUSE YET?
+//
+// The sub-role modes are a LinkedIn question. `people.sub_roles` -- what
+// producer.mjs filters an investor or founder pool on -- is derived from what
+// somebody's profile says they do, and on a household Mac the export is the
+// only thing that says it. So between the owner picking "investors" on
+// onboarding's first screen and their archive arriving days later, the
+// investor pool is empty for a structural reason: not "nobody has gone quiet",
+// but "nothing here knows who is an investor yet".
+//
+// THE CHEAP, CORRECT SIGNAL IS A LINK, NOT A COUNT. The onboarding progress
+// route counts DISTINCT person_key over person_event_links where source =
+// 'linkedin' and role = 'profile', because it draws that number. Nothing here
+// draws a number -- the question is has-any -- so this is an existence check
+// against the same rows, on the (source, role, context_id) index, and it stops
+// at the first one. `role` is deliberately not in the predicate: a person
+// LinkedIn contributed any way at all is a person the sub-role modes can see,
+// and this asks the wider question on purpose.
+//
+// A TABLE THAT DOES NOT EXIST YET IS NOT A LINKEDIN ROW. The projection builds
+// person_event_links lazily, so a fresh install throws `no such table` here --
+// and the honest answer to "has LinkedIn contributed anybody" on a machine with
+// no projection is no. The same catch swallows a transient read error, which
+// costs one request its pick and nothing durable; see the fallback below for
+// why that direction is the safe one.
+function linkedinHasPeople(db) {
+  try {
+    return db.prepare(
+      "SELECT 1 FROM person_event_links WHERE source = 'linkedin' LIMIT 1"
+    ).get() !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+// "REQUEST NOW, IMPORT LATER" -- WHAT THE CARD ROUTE SERVES IN BETWEEN.
+//
+// The owner picks investors or founders, asks LinkedIn for their data, and
+// waits. Serving their pick honestly for those days means serving nothing at
+// all, which is the screen saying "nobody qualifies yet" about a house full of
+// people it simply cannot sort. So the pick is HELD and the cards come from
+// 'any' until LinkedIn has contributed somebody -- and the reply says so
+// (`modeFallback: 'linkedin-pending'`), because a picker that reads "investors"
+// beside a card that is not one has to be able to explain itself.
+//
+// PER REQUEST, NEVER CACHED. The moment the export lands and the projection
+// picks it up, the very next card is the owner's own pick -- no restart, no
+// TTL to wait out. That is one indexed existence check per request; see
+// linkedinHasPeople.
+//
+// 'any' IS NEVER FLAGGED: it has nothing to fall back from. Neither is the
+// MATCHER path: it does not produce per mode and its cards carry no
+// evidence.mode, so nothing there is being held from anybody -- a flag on that
+// path would announce a hold that is not happening.
+//
+// ONE FUNCTION, TWO CALLERS. The card route decides this and the onboarding
+// progress route relays it; two screens deriving it separately is two screens
+// that can disagree about whether the owner's pick is being served, so every
+// clause of the rule lives here rather than at the call sites.
+function linkedinPendingFallback(db, policy, pick) {
+  if (pick !== 'investor' && pick !== 'founder') return null;
+  if (relationshipProducerConfig(policy).producer !== 'eligibility') return null;
+  return linkedinHasPeople(db) ? null : 'linkedin-pending';
+}
+
 // The engine person-page building uses, same seam discipline as
 // relationshipCap/relationshipProducerConfig: a start()-time override
 // (`policy.relationshipMemoryEngine`, a pre-built `{name, complete}`) wins
@@ -3897,8 +3965,31 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
   //             is absent from PERSON_SOURCE_POLICY. A row fed from `context`
   //             shows 0/0 forever. Counted from state.db's contact_ids and
   //             labelled peopleKind:'names'.
+  //
+  // AND TWO FACTS ABOUT LINKEDIN THAT RIDE ALONG BUT ARE NOT CACHED WITH THE
+  // REST, because the body below is held for five seconds and these two are
+  // the screen's answer to "what is happening right now":
+  //
+  //   linkedinExportReady  when LinkedIn mailed to say the archive is
+  //                        downloadable (the mail connector's marker, see
+  //                        connectors/lib/linkedinExport.mjs), so the shelf can
+  //                        badge the tile and say "open the email" instead of
+  //                        repeating "needs your data export". A timestamp or
+  //                        null, never the subject.
+  //   modeFallback         the same answer the card route gives, RELAYED
+  //                        rather than re-derived -- two screens deciding
+  //                        separately whether the owner's pick is being held is
+  //                        two screens that can disagree about it. Absent when
+  //                        the pick is being served normally.
   if (req.method === 'GET' && url.pathname === '/admin/onboarding/progress') {
-    send(res, 200, cachedOnboardingProgress(db, policy), cors);
+    const modeFallback = linkedinPendingFallback(
+      db, policy, relationshipMode(relationshipState(db, policy), policy)
+    );
+    send(res, 200, {
+      ...cachedOnboardingProgress(db, policy),
+      linkedinExportReady: exportReadyAt(installHome(policy)),
+      ...(modeFallback === null ? {} : { modeFallback }),
+    }, cors);
     return;
   }
 
@@ -4038,13 +4129,27 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     const expectRaw = url.searchParams.get('expect');
     const expect = expectRaw !== null && /^\d+$/u.test(expectRaw) ? Number(expectRaw) : null;
     const rel = relationshipState(db, policy);
+    // THE OWNER'S STANDING PICK, ONCE, and whether this install can serve it
+    // yet. Every branch below reports `mode` as this value -- it is what the
+    // owner is ON -- and `modeFallback` beside it when the pick is being held
+    // for a LinkedIn export that has not arrived (see linkedinPendingFallback).
+    //
+    // NOT WHILE A MODE IS NAMED IN THE QUERY. `?mode=` is the owner asking for
+    // one specific look, and answering a request that named 'founder' with
+    // 'any' would defeat the one-off entirely -- including the panel's own
+    // widen button, which is a one-off ask for 'any'. A named mode is the
+    // request's decision, and `oneOff` is how the reply says so.
+    const producerConfig = relationshipProducerConfig(policy);
+    const pick = relationshipMode(rel, policy);
+    const modeFallback = askedMode === null ? linkedinPendingFallback(db, policy, pick) : null;
     const cap = relationshipCap(policy);
     // WITH THE MODE, like every other answer this route gives. A fresh
     // install has no cap until onboarding's card-config POST lands, so this
     // is the FIRST branch a replayed onboarding hits -- and a reply with no
     // mode in it is what repainted "anyone" over the owner's pick.
     if (!cap) {
-      send(res, 200, { card: null, reason: 'no-cap-configured', mode: relationshipMode(rel, policy) }, cors);
+      send(res, 200, { card: null, reason: 'no-cap-configured', mode: pick,
+        ...(modeFallback === null ? {} : { modeFallback }) }, cors);
       return;
     }
 
@@ -4062,8 +4167,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     //
     // `servingKind` names which producer's kind this request is serving from
     // (daily.mjs's alternation decision) -- null means "serve from the whole
-    // queue, unfiltered", the matcher path's only mode.
-    const producerConfig = relationshipProducerConfig(policy);
+    // queue, unfiltered", the matcher path's only mode. producerConfig is read
+    // at the top of this route, beside the pick it also decides.
     let refillThrottled = false;
     let retryAfterMs = 0;
     // Set only when the MODE is what is empty -- see modeEmptyCounts.
@@ -4091,7 +4196,13 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       }
       // The request's own mode wins for THIS request only (see askedMode
       // above); absent one, the process pick, then the persisted config.
-      const reconnectMode = askedMode ?? rel.mode ?? producerConfig.mode;
+      // WHICH MODE THIS REQUEST PRODUCES AND SERVES UNDER. The held pick
+      // resolves to 'any' here and nowhere else: rel.mode and the owner's
+      // config are untouched, so the moment LinkedIn lands the next request
+      // produces under the pick again with nothing to undo.
+      const reconnectMode = modeFallback !== null
+        ? 'any'
+        : (askedMode ?? rel.mode ?? producerConfig.mode);
       const refillRetryMs = refillRetryMsFor(db);
       // The cross-kind exclusion, narrowed to the queue THIS route would
       // serve from -- daily.mjs's one LIVE definition, same five clauses as
@@ -4156,7 +4267,17 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
           );
           retryAfterMs = Math.max(0, refillRetryMs - (now - at));
           // AND WHETHER IT IS THE MODE THAT IS EMPTY, rather than the house.
-          modeEmpty = modeEmptyCounts(db, rel, reconnectMode, reconnectRefillKey(reconnectMode), now);
+          //
+          // NEVER WHILE THE PICK IS HELD. 'pool-exhausted-mode' exists so the
+          // panel can offer to widen to 'any' -- and under the fallback the
+          // widening has already happened, so the offer would ask the owner to
+          // choose what they are already being served. reconnectMode is 'any'
+          // on that path and modeEmptyCounts answers null for 'any' anyway;
+          // this says it rather than leaning on it, because the reason is the
+          // fallback and not the mode's name.
+          modeEmpty = modeFallback !== null
+            ? null
+            : modeEmptyCounts(db, rel, reconnectMode, reconnectRefillKey(reconnectMode), now);
         } else {
           servingKind = decision.servingKind;
         }
@@ -4177,7 +4298,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         // telling the owner to come back later.
         reason: modeEmpty !== null && modeEmpty.mode === 0 ? 'pool-exhausted-mode' : 'pool-exhausted',
         retryAfterMs,
-        mode: relationshipMode(rel, policy),
+        mode: pick,
+        ...(modeFallback === null ? {} : { modeFallback }),
         ...(modeEmpty === null ? {} : { counts: modeEmpty }),
         ...(askedMode === null ? {} : { oneOff: true }),
         ...(rel.pagesBuilding ? { pagesBuilding: rel.pagesBuilding } : {}) }, cors);
@@ -4196,7 +4318,7 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // askedMode first, for the same reason the refill used it: a card produced
     // under a one-off mode has that mode in its evidence, and filtering the
     // queue by rel.mode here would drop the very card this request just made.
-    const serveMode = askedMode ?? rel.mode;
+    const serveMode = modeFallback !== null ? 'any' : (askedMode ?? rel.mode);
     const servingQueue = (servingKind === null ? rel.cards : rel.cards.filter((c) => c.kind === servingKind))
       .filter((c) => c.kind !== 'reconnect' || serveMode == null || c.evidence?.mode === serveMode);
 
@@ -4339,7 +4461,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       if (peek) {
         // The tease only: who and why-in-numbers, never the receipt. The
         // widget renders name plus quiet/overdue days on the orb's title.
-        send(res, 200, { peek: true, mode: relationshipMode(rel, policy),
+        send(res, 200, { peek: true, mode: pick,
+          ...(modeFallback === null ? {} : { modeFallback }),
           // WHERE THE TEASED CARD CAME FROM, on the peek as on the serve
           // (round-8 finding 1). The panel's one-off hand-off reads exactly
           // this field off exactly this reply -- the peek is what the widen
@@ -4467,7 +4590,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
         // conclude the card already matches. `mode` on the next line is the
         // one that means "what the owner is on", and it keeps the fallback.
         servedMode: card.kind === 'reconnect' ? (card.evidence?.mode ?? null) : null,
-        mode: relationshipMode(rel, policy),
+        mode: pick,
+        ...(modeFallback === null ? {} : { modeFallback }),
         // The card asked for is gone; this is the next one. A reason BESIDE a
         // non-null card, which no other branch of this route produces.
         ...(expectSuperseded ? { expectSuperseded: true, reason: 'expect-superseded' } : {}),
@@ -4492,7 +4616,8 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
     // rather than as `reason`, because on THIS branch `reason` is already
     // carrying cap/blocked/queue-empty, which the panel needs more. The flag
     // is on every branch so there is one field to test regardless.
-    send(res, 200, { card: null, reason, mode: relationshipMode(rel, policy),
+    send(res, 200, { card: null, reason, mode: pick,
+      ...(modeFallback === null ? {} : { modeFallback }),
       ...(askedMode === null ? {} : { oneOff: true }),
       ...(expectSuperseded ? { expectSuperseded: true } : {}),
       ...(rel.refreshing ? { refreshing: true } : {}),
@@ -5806,7 +5931,7 @@ function connectedWithoutRows(home) {
     // table had before and is safe to fall back to.
   }
   try {
-    if (existsSync(join(linkedinImportDir(home), 'Connections.csv'))) out.push('linkedin');
+    if (exportInstalled(home)) out.push('linkedin');
   } catch {}
   return out;
 }

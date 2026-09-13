@@ -694,9 +694,17 @@ test('the progress route answers counts and state, and no content', async () => 
       assert.ok(!raw.includes('Friend'), 'no display names');
       assert.ok(!raw.includes('imessage:friend0'), 'no person keys');
       const body = JSON.parse(raw);
+      // linkedinExportReady: a timestamp or null, saying when LinkedIn mailed
+      // to tell the owner their archive is downloadable, so the shelf can badge
+      // the tile and say "open the email" instead of repeating "needs your data
+      // export". NEVER the subject of that mail -- the marker it comes from
+      // holds one, and this route does not relay it (connectors/lib/
+      // linkedinExport.mjs). `modeFallback` is the other new key and is absent
+      // here on purpose: it rides the reply only while an investor or founder
+      // pick is being held for an export that has not arrived.
       assert.deepEqual(
         Object.keys(body).sort(),
-        ['daemonLastRunTs', 'dormant', 'projection', 'runs', 'sources', 'state']
+        ['daemonLastRunTs', 'dormant', 'linkedinExportReady', 'projection', 'runs', 'sources', 'state']
       );
       for (const source of body.sources) {
         assert.deepEqual(

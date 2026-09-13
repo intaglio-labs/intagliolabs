@@ -1,0 +1,261 @@
+// "REQUEST NOW, IMPORT LATER" — the card half.
+//
+// The sub-role modes are a LinkedIn question. `people.sub_roles`, which the
+// eligibility producer filters an investor or founder pool on, is derived from
+// what a profile says somebody does, and on a household Mac the data export is
+// the only thing that says it. So for the days between the owner picking
+// "investors" on onboarding's first screen and their archive arriving, the
+// investor pool is empty for a structural reason — not "nobody has gone quiet"
+// but "nothing here knows who is an investor yet" — and the screen said the
+// first of those about a house full of people.
+//
+// The pick is therefore HELD, not overwritten: cards come from 'any' and the
+// reply says why. What is pinned here is that the hold is real, that it is
+// announced, that it ends the moment LinkedIn contributes somebody (no
+// restart), and that it never touches what the owner is ON.
+//
+// Fixtures write people/person_event_links directly, same discipline as
+// relationship-routes.test.mjs. Every one of them synthetic.
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { start } from '../server/hermes.mjs';
+
+const TOKEN = 'e'.repeat(64);
+const CAP = { max: 5, windowMs: 86_400_000 };
+const DAY = 86_400_000;
+
+async function withServer(fn, opts = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'rel-linkedin-pending-'));
+  const server = await start({
+    port: 0, dbPath: join(dir, 'context.db'), llamaApiKey: 'd'.repeat(64), bearerToken: TOKEN,
+    relationshipCap: CAP,
+    relationshipProducerConfig: { producer: 'eligibility', mode: 'any' },
+    peopleProjectionAutoRebuild: false,
+    // The mode route writes this file, and the readers read it: without the
+    // seam every mode post below would edit the developer's own config.
+    ownerConfigPath: join(dir, 'config.json'),
+    ...opts,
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const call = (method, path, body) => fetch(base + path, {
+    method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  try {
+    await fn({ call, db: server.db, configPath: join(dir, 'config.json') });
+  } finally {
+    await server.close();
+  }
+}
+
+function insertPersonRow(db, { key, name, subRoles = [], sent = 20, received = 20 }, now) {
+  db.prepare(
+    `INSERT INTO people(person_key, display_name, first_seen, last_seen, last_from_them, last_from_owner,
+       sent, received, met_in_person, room_messages, direct_messages, meeting_notes, role, roles_by_year,
+       linkedin, built_at, sub_roles)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).run(key, name, now - 400 * DAY, now - 10 * DAY, now - 10 * DAY, now - 10 * DAY,
+    sent, received, 0, 0, sent + received, 0, 'friend', '{}', null, now, JSON.stringify(subRoles));
+}
+
+function insertMessage(db, key, ts) {
+  const ctxId = Number(db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'imessage', 'hi', '{}')"
+  ).run(ts).lastInsertRowid);
+  db.prepare(
+    'INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, '
+    + "confidence, conversation_key) VALUES (?, ?, 'imessage', 'counterparty', 1, 0, 0, 1, 'conv')"
+  ).run(key, ctxId);
+}
+
+// Reconnect-eligible under producer.mjs's own gates: two-way history, authored,
+// quiet for 200 days.
+function seedCandidate(db, key, name, now, subRoles = []) {
+  insertPersonRow(db, { key, name, subRoles }, now);
+  insertMessage(db, key, now - 200 * DAY);
+  db.prepare('INSERT OR IGNORE INTO person_active_days(person_key, day) VALUES (?, ?)')
+    .run(key, new Date(now - 200 * DAY).toISOString().slice(0, 10));
+}
+
+// WHAT "LINKEDIN HAS CONTRIBUTED SOMEBODY" IS, on disk: a person_event_link
+// whose source is the export. A Connections.csv row is entirely role='profile'
+// — nobody authors a connection — which is exactly the shape that made an
+// authored-count test of this question answer "no" forever.
+function insertLinkedinPerson(db, key, now) {
+  const ctxId = Number(db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'linkedin', 'profile', '{}')"
+  ).run(now - 5 * DAY).lastInsertRowid);
+  db.prepare(
+    'INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, '
+    + "confidence, conversation_key) VALUES (?, ?, 'linkedin', 'profile', 0, 0, 0, 1, 'linkedin')"
+  ).run(key, ctxId);
+}
+
+// --- THE HOLD ---------------------------------------------------------------
+
+test('investors picked, no LinkedIn yet: the card comes from anyone, and the reply says why', async () => {
+  await withServer(async ({ call, db, configPath }) => {
+    const now = Date.now();
+    // Two people worth reconnecting with, neither of them sortable into a
+    // sub-role: this is every fresh Mac before the export lands.
+    seedCandidate(db, 'name:quiet one', 'Quiet One', now);
+    seedCandidate(db, 'name:quiet two', 'Quiet Two', now);
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.ok(out.card, 'a house full of people must not read as an empty one');
+    assert.equal(out.mode, 'investor', 'the pick is what the owner is ON, and it has not moved');
+    assert.equal(out.servedMode, 'any', 'the card in hand was produced under anyone');
+    assert.equal(out.modeFallback, 'linkedin-pending', 'and the reply explains the disagreement');
+    assert.equal(out.oneOff, undefined, 'nobody asked for a one-off look; this is the standing pick held');
+
+    // THE HOLD IS NOT A NEW PICK. The config is what the next process reads,
+    // and an owner who chose investors must still be on investors after a
+    // restart — the fallback lives entirely inside one request.
+    assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).relationshipMemory.mode, 'investor');
+  });
+});
+
+test('the same hold rides the empty answer, and pool-exhausted-mode is never it', async () => {
+  await withServer(async ({ call }) => {
+    // Nobody anywhere. The panel must still be told the pick is being held,
+    // and must NOT be offered "widen to anyone" — it is already being served
+    // anyone, so the offer would ask the owner to choose what they have.
+    await call('POST', '/admin/relationship/mode', { mode: 'founder' });
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(out.card, null);
+    assert.equal(out.mode, 'founder');
+    assert.equal(out.modeFallback, 'linkedin-pending');
+    assert.notEqual(out.reason, 'pool-exhausted-mode', 'the fallback IS the answer to that question');
+    assert.equal(out.reason, 'pool-exhausted');
+    assert.equal(out.counts, undefined, 'no offer to widen, because the widening already happened');
+  });
+});
+
+test('a peek carries the hold too, so the orb and the panel agree about the card', async () => {
+  await withServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedCandidate(db, 'name:quiet one', 'Quiet One', now);
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+
+    const peek = await (await call('GET', '/admin/relationship/card?peek=1')).json();
+    assert.equal(peek.peek, true);
+    assert.equal(peek.mode, 'investor');
+    assert.equal(peek.servedMode, 'any');
+    assert.equal(peek.modeFallback, 'linkedin-pending',
+      'the panel opens off this reply; a peek that hid the hold would filter its own card out');
+  });
+});
+
+// --- THE END OF THE HOLD ----------------------------------------------------
+
+test('the moment LinkedIn contributes somebody the pick takes over, with no restart', async () => {
+  await withServer(async ({ call, db }) => {
+    const now = Date.now();
+    // One investor and one person who is nobody in particular. While the hold
+    // is on, either may be served; once it lifts, only the investor may.
+    seedCandidate(db, 'name:investor one', 'Investor One', now, ['investor']);
+    seedCandidate(db, 'name:quiet one', 'Quiet One', now);
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+
+    const held = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(held.modeFallback, 'linkedin-pending');
+    assert.equal(held.servedMode, 'any');
+
+    // The export lands and the projection picks it up. No restart, no refresh
+    // call, no config write — the next request is checked afresh.
+    insertLinkedinPerson(db, 'name:investor one', now);
+
+    const after = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(after.modeFallback, undefined, 'the hold is over and the reply stops claiming it');
+    assert.equal(after.mode, 'investor');
+    if (after.card !== null) {
+      assert.equal(after.servedMode, 'investor', 'cards are the owner\'s own pick again');
+      assert.equal(after.card.personKey, 'name:investor one',
+        'and a person with no sub-role is not one of them');
+    }
+  });
+});
+
+test('LinkedIn already in the house: the pick is served from the start, unflagged', async () => {
+  await withServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedCandidate(db, 'name:investor one', 'Investor One', now, ['investor']);
+    insertLinkedinPerson(db, 'name:investor one', now);
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(out.mode, 'investor');
+    assert.equal(out.modeFallback, undefined, 'nothing is being held: LinkedIn has already spoken');
+    if (out.card !== null) assert.equal(out.servedMode, 'investor');
+  });
+});
+
+test('anyone is never held, because there is nothing to hold it from', async () => {
+  await withServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedCandidate(db, 'name:quiet one', 'Quiet One', now);
+    await call('POST', '/admin/relationship/mode', { mode: 'any' });
+
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(out.mode, 'any');
+    assert.equal(out.modeFallback, undefined);
+    assert.equal(out.servedMode ?? 'any', 'any');
+  });
+});
+
+test('a one-off look is the request\'s own decision, and the hold does not overrule it', async () => {
+  await withServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedCandidate(db, 'name:investor one', 'Investor One', now, ['investor']);
+    await call('POST', '/admin/relationship/mode', { mode: 'any' });
+
+    // ?mode= is the owner asking for one specific look — including the panel's
+    // own widen button, which is a one-off ask for 'any'. Answering a named
+    // mode with a different one would defeat the whole mechanism.
+    const out = await (await call('GET', '/admin/relationship/card?mode=investor')).json();
+    assert.equal(out.oneOff, true);
+    assert.equal(out.mode, 'any', 'the standing pick, unchanged');
+    assert.equal(out.modeFallback, undefined, 'a named mode is not a held one');
+    if (out.card !== null) assert.equal(out.servedMode, 'investor');
+  });
+});
+
+test('the matcher path is never held, because nothing there is produced per mode', async () => {
+  await withServer(async ({ call }) => {
+    // The matcher does not produce per mode and its cards carry no
+    // evidence.mode, so there is no pick to hold and no pool to widen to. A
+    // flag here would announce a hold that is not happening — and narrowing
+    // the serve filter to 'any' on its behalf would drop every unlabelled card
+    // the matcher has.
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+    const out = await (await call('GET', '/admin/relationship/card')).json();
+    assert.equal(out.mode, 'investor');
+    assert.equal(out.modeFallback, undefined);
+  }, { relationshipProducerConfig: { producer: 'matcher', mode: 'investor' } });
+});
+
+// --- THE RELAY --------------------------------------------------------------
+
+test('the setup screen relays the hold rather than deciding it a second time', async () => {
+  await withServer(async ({ call, db }) => {
+    const now = Date.now();
+    seedCandidate(db, 'name:investor one', 'Investor One', now, ['investor']);
+    await call('POST', '/admin/relationship/mode', { mode: 'investor' });
+
+    const held = await (await call('GET', '/admin/onboarding/progress')).json();
+    assert.equal(held.modeFallback, 'linkedin-pending',
+      'one answer, two screens: a setup page deciding this for itself is a page that can disagree');
+    assert.equal(held.linkedinExportReady, null, 'nothing has said the export is ready');
+
+    insertLinkedinPerson(db, 'name:investor one', now);
+    const after = await (await call('GET', '/admin/onboarding/progress')).json();
+    assert.equal(after.modeFallback, undefined,
+      'and it is not held behind the five-second body cache, either');
+  });
+});

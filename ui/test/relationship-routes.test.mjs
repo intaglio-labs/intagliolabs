@@ -471,6 +471,20 @@ async function withEligibilityServer(fn, opts = {}) {
     ownerConfigPath: join(dir, 'config.json'),
     ...opts,
   });
+  // THE LINKEDIN EXPORT HAS LANDED, for every test in this file.
+  //
+  // hermes HOLDS an investor or founder pick while LinkedIn has contributed
+  // nobody -- "request now, import later": the sub-role modes are a LinkedIn
+  // question (people.sub_roles comes from the export), so until it arrives the
+  // cards come from 'any' and the reply carries modeFallback. Every test below
+  // that picks a sub-role mode is about something else -- mode queues,
+  // servedMode provenance, the mode-empty counts -- and without this line it
+  // would be testing the hold instead.
+  //
+  // ONE LINK, AND IT PUTS NOBODY IN A POOL: see seedLinkedinArrived.
+  const exportNow = Date.now();
+  insertPersonRow(server.db, { key: 'name:linkedin listed', name: 'LinkedIn Listed', sent: 0, received: 0 }, exportNow);
+  seedLinkedinArrived(server.db, 'name:linkedin listed', exportNow);
   const base = `http://127.0.0.1:${server.port}`;
   const call = (method, path, body) => fetch(base + path, {
     method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
@@ -508,6 +522,31 @@ function insertMessage(db, key, { ts, text = 'hi', authored = 0, ownerAuthored =
      VALUES (?, ?, 'imessage', 'counterparty', ?, ?, ?, 1, 'conv')`
   ).run(key, ctxId, authored ? 1 : 0, ownerAuthored ? 1 : 0, room ? 1 : 0);
   return ctxId;
+}
+
+// THE LINKEDIN EXPORT HAS LANDED — one person_event_link from it.
+//
+// hermes HOLDS an investor or founder pick while LinkedIn has contributed
+// nobody ("request now, import later": the sub-role modes are a LinkedIn
+// question, because people.sub_roles comes from the export, so until it
+// arrives the cards come from 'any' and the reply carries modeFallback). Every
+// test here that picks a sub-role mode is about something else — mode queues,
+// servedMode provenance, the mode-empty counts — and without this it would be
+// testing the hold instead.
+//
+// It puts nobody in a pool: a link needs a `people` row to point at (foreign
+// key), and eligiblePool drops a candidate with no active day before it looks
+// at anything else. The hold itself is pinned in
+// relationship-linkedin-pending.test.mjs.
+function seedLinkedinArrived(db, key, now) {
+  const ctxId = Number(db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'linkedin', 'profile', '{}')"
+  ).run(now).lastInsertRowid);
+  db.prepare(
+    'INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, '
+    + 'room, confidence, conversation_key) '
+    + "VALUES (?, ?, 'linkedin', 'profile', 0, 0, 0, 1, 'linkedin')"
+  ).run(key, ctxId);
 }
 
 // Seeds a reconnect-eligible person (producer.mjs's own gates: two-way
@@ -907,6 +946,8 @@ test('hydrate restores all three reconnect modes plus Owe after a restart', asyn
     seedReconnectCandidateMode(db, 'name:hydrate any', 'Hydrate Any', now, []);
     seedReconnectCandidateMode(db, 'name:hydrate founder', 'Hydrate Founder', now, ['founder']);
     seedReconnectCandidateMode(db, 'name:hydrate investor', 'Hydrate Investor', now, ['investor']);
+    // This test builds its own servers, so it seeds its own landed export.
+    seedLinkedinArrived(db, 'name:hydrate founder', now);
 
     produceBatch(db, { mode: 'founder', now });
     produceBatch(db, { mode: 'investor', now: now + 1000 });

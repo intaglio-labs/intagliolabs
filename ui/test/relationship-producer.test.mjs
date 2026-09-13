@@ -69,6 +69,23 @@ function insertAuthored(db, key, { ts = NOW - 200 * DAY, room = 0 } = {}) {
   ).run(key, ctxId, room ? 1 : 0);
 }
 
+// THE LINKEDIN EXPORT HAS LANDED — one profile link from it.
+//
+// The card route HOLDS an investor or founder pick while LinkedIn has
+// contributed nobody ("request now, import later": people.sub_roles comes from
+// the export, so until it arrives the cards come from 'any' and the reply
+// carries modeFallback). A route test about a founder batch has to say the
+// archive is in; the hold is pinned in relationship-linkedin-pending.test.mjs.
+function insertLinkedinProfile(db, key) {
+  const ctxId = Number(db.prepare(
+    "INSERT INTO context(ts, source, text, meta) VALUES (?, 'linkedin', 'profile', '{}')"
+  ).run(NOW - 5 * DAY).lastInsertRowid);
+  db.prepare(
+    `INSERT INTO person_event_links(person_key, context_id, source, role, authored, owner_authored, room, confidence, conversation_key)
+     VALUES (?, ?, 'linkedin', 'profile', 0, 0, 0, 1, 'linkedin')`
+  ).run(key, ctxId);
+}
+
 // A cc row: present in the projection, never authored. Mirrors what an
 // owner-cc'd or cc'd-by-someone-else mail participant actually gets.
 function insertCcOnly(db, key) {
@@ -397,6 +414,7 @@ test('produceBatch writes a batch + snapshot in the shape hydrateCards reads', a
     insertPerson(db, { key: 'name:frank founder', name: 'Frank Founder', subRoles: ['founder'], sent: 10, received: 10 });
     insertAuthored(db, 'name:frank founder', { ts: NOW - 200 * DAY });
     insertActiveDay(db, 'name:frank founder', day(190));
+    insertLinkedinProfile(db, 'name:frank founder');
 
     const base = `http://127.0.0.1:${server.port}`;
     const call = (method, path, body) => fetch(base + path, {
