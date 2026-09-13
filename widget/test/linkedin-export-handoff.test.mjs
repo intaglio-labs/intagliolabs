@@ -162,6 +162,88 @@ test('screen 4 says the three things that decide when the file arrives', () => {
   assert.match(visible, /id="linkedInSkip">later</u);
 });
 
+// LINKEDIN DOES NOT ALWAYS OFFER THE CONNECTIONS BOX.
+//
+// Walked live on the owner's own account (2026-09-13): the "Want something in
+// particular?" list on the download page offered Articles, Invitations, Profile,
+// Recommendations and Registration, and NO Connections. The only route to the
+// file was the larger archive, the one described as "including connections".
+//
+// So step 1 cannot say "tick Connections" and stop. An owner who does not see
+// that box, follows the instruction literally and finds nothing has been told
+// something false by the screen that is asking them for the file — and the
+// remedy (take the big one instead) is not guessable from the sentence.
+//
+// The same fact has to be on every surface that gives the instruction, because
+// an owner meets them in any order and two of them contradicting is worse than
+// either being silent.
+test('the guidance covers a download page with no Connections box', () => {
+  const screen = /<div class="ob-screen" id="screenLinkedIn"([\s\S]*?)<\/div>\n\n  <!--/u
+    .exec(onboardingHtml)?.[1] ?? '';
+  const steps = [...screen.replace(/<!--[\s\S]*?-->/gu, '')
+    .matchAll(/<li>([\s\S]*?)<\/li>/gu)].map((m) => m[1]);
+  assert.equal(steps.length, 3);
+  assert.match(steps[0], /if it\s+is(?:n.t| not)\s+(?:there|offered)/u,
+    'step 1 has to survive a page that does not offer the box');
+  assert.match(steps[0], /archive/u, 'and name the larger archive as the way round it');
+  // WHICH ONE IS SLOW, because the two routes do not take the same time and the
+  // owner has just been told to consider both.
+  assert.match(steps[2], /ten\s+minutes/u);
+  assert.match(steps[2], /day/u);
+  assert.match(steps[2], /archive/u,
+    'the day belongs to the archive, and step 1 may now have sent them to it');
+});
+
+test('the settings surfaces give the same instruction, not a different one', () => {
+  // An owner meets these in any order. Two surfaces contradicting each other
+  // about what to tick is worse than either of them being silent.
+  const hint = /'linkedin-export': \{([\s\S]*?)\n {2}\},/u.exec(connectionsJs)?.[1] ?? '';
+  const hintText = hint.replace(/\/\/[^\n]*/gu, '');
+  assert.match(hintText, /if it\s+is(?:n.t| not)\s+(?:there|offered)/u,
+    'the shelf card still tells the owner to tick a box that may not exist');
+  assert.match(hintText, /archive/u);
+  // ...and the row's hover, which is the only explanation that row has room for.
+  const help = /const LINKEDIN_HELP = ([\s\S]*?);\n/u.exec(connectionsJs)?.[1] ?? '';
+  assert.match(help, /if it\s+is(?:n.t| not)\s+(?:there|offered)/u);
+  assert.match(help, /archive/u);
+});
+
+test('the nested Connections.csv the larger archive carries is importable', () => {
+  // Step 1 can now send the owner to the Complete archive, which nests
+  // everything under its own folder -- so the claim the screen is making
+  // depends on the chooser reaching a nested entry. That rule is exercised
+  // against a real archive further down ("a real LinkedIn-shaped archive");
+  // this is the line that ties the COPY to it.
+  assert.match(bridge, /static func connectionsEntry\(among entries: \[String\]\)/u);
+  assert.match(bridge, /lastPathComponent == "Connections\.csv"/u,
+    'basename at any depth, or the archive step 1 recommends cannot be imported');
+});
+
+// -------------------------------------------------- when macOS asks
+
+test('notifications are asked for when there is news, never at launch', () => {
+  // The owner met the notification prompt right after pressing "request a copy",
+  // which is the right moment: they have just asked for a file and been told the
+  // app will offer to take it when it lands. Nothing about that is true at
+  // launch, and an app that asks to send notifications before it has ever had
+  // news is asking on spec.
+  const modelSetup = read('widget/src/ModelSetup.swift');
+  assert.match(modelSetup, /center\.requestAuthorization/u);
+  for (const [name, src] of [['Bridge.swift', bridge], ['main.swift', mainSwift],
+    ['ExportWatch.swift', watch]]) {
+    assert.doesNotMatch(code(src), /requestAuthorization/u,
+      `${name} asks for notifications outside the one place that has something to say`);
+  }
+  // Arming the watcher is not news. begin() installs the delegate and the
+  // category -- neither of which prompts -- and the prompt comes with the first
+  // offer, which is the scan finding something.
+  const begin = /func begin\(bridge: Bridge\) \{([\s\S]*?)\n  \}/u.exec(watch)?.[1] ?? '';
+  assert.ok(begin, 'ExportWatch.begin not found');
+  assert.doesNotMatch(code(begin), /requestAuthorization|ModelSetup\.notify/u,
+    'arming the watcher must not spend the notification prompt on its own');
+  assert.match(code(begin), /center\.setNotificationCategories/u);
+});
+
 // -------------------------------------------------- (2) the file finds you
 
 test('the watcher does not run for a Mac that already has an export', () => {

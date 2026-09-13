@@ -368,8 +368,16 @@ function cardConfigRow(configPromise) {
 // drop the file on this panel, which native takes and imports through the same
 // path (ClickThroughWebView.onFileDrop). Every explanation, refusals included,
 // is the row's hover.
-const LINKEDIN_HELP = 'linkedin will not let anything read your connections, so you ask '
-  + 'them for a copy and hand the file over. it is what tells a founder from an investor.';
+// THE HOVER IS THE ONLY EXPLANATION THIS ROW HAS ROOM FOR, so it carries the
+// same instruction screen 4 gives — including the half that only turned up when
+// the page was walked live (2026-09-13): the Connections box is not always on
+// LinkedIn's download page, and the larger archive is the way round it. An owner
+// meets these two surfaces in either order, and one of them telling them to tick
+// a box that is not there is worse than its saying nothing.
+const LINKEDIN_HELP = 'linkedin will not let anything read your connections, so you ask them '
+  + 'for a copy and hand the file over. tick connections if linkedin offers it; '
+  + 'if it is not there, choose the larger archive, which includes them. '
+  + 'it is what tells a founder from an investor.';
 const LINKEDIN_WAITING = 'waiting for your file · drop it here';
 // ...and what the same row says once LinkedIn has mailed to say the archive is
 // downloadable. "waiting for your file" is still true there and no longer
@@ -1306,9 +1314,14 @@ const HINTS = {
     // do by hand the job the picker on it had just been taught to do, and
     // contradicting that picker's own message ("choose the zip LinkedIn sent
     // you") on the same install (review finding 9).
-    text: 'On LinkedIn: Settings → Data privacy → Get a copy of your data → tick "Connections" → '
-      + 'Request archive. It arrives by email, usually in ten minutes — hand me the zip and '
-      + 'I will take it from there.',
+    // ~~'tick "Connections" → Request archive'~~ assumed a box that is not always
+    // on the page: walked live on the owner's account (2026-09-13), the "Want
+    // something in particular?" list offered no Connections at all and the
+    // larger archive was the only route to the file.
+    text: 'On LinkedIn: Settings → Data privacy → Get a copy of your data. Tick "Connections" '
+      + 'if it is offered; if it is not there, request the larger archive, which includes them. '
+      + 'It arrives by email — about ten minutes for connections alone, up to a day for the '
+      + 'archive. Hand me the zip and I will take it from there.',
     url: 'https://www.linkedin.com/mypreferences/d/download-my-data',
     link: 'linkedin.com · get a copy of your data',
     // One export folder per Mac, so no "+ add account" once it is imported.
