@@ -329,6 +329,55 @@ enum Permissions {
     try? data.write(to: logs.appendingPathComponent("permissions.json"))
   }
 
+  /// The `fda` row of an ALREADY-BUILT map. Never a second probe: every one of
+  /// those is a real protected read, and on a denied Mac a tccd denial event.
+  static func fullDiskStatus(mapped: [String: String]) -> Status {
+    Status(rawValue: mapped["fda"] ?? "") ?? .denied
+  }
+
+  /// WHICH APP THE SWITCH BELONGS TO — ASKED, NOT ANNOUNCED.
+  ///
+  /// The August rename left com.hazlie.widget allowed in Full Disk Access and
+  /// io.intaglio.widget denied, so the owner could be looking at a Settings row
+  /// labelled "Intaglio Labs" with its switch ON while this process read denied.
+  /// Naming the bundle identifier answered that — and put a bundle identifier
+  /// on the second screen of a consumer flow for every owner who has no such
+  /// problem, which is nearly all of them.
+  ///
+  /// So it is a probe now. It returns the PREVIOUS identifier only when both
+  /// halves of that trap are present: this process cannot read, AND this Mac
+  /// carries the marks of an install from before the rename. nil otherwise, and
+  /// the screen says nothing.
+  ///
+  /// WHY NOT READ TCC.db: it is itself protected by Full Disk Access, so on the
+  /// one machine where the answer matters we are the process that cannot read
+  /// it. The marks below are what is legible without the grant.
+  static func staleGrantBundle(disk: Status) -> String? {
+    guard disk != .granted else { return nil }
+    let previous = DefaultsMigration.previousBundleID
+    let fm = FileManager.default
+    let home = fm.homeDirectoryForCurrentUser
+
+    // 1. The old defaults domain. UserDefaults is keyed on the bundle id, so a
+    //    value under the old one is an install that ran before the rename.
+    if let old = UserDefaults(suiteName: previous),
+       DefaultsMigration.carried.contains(where: { old.object(forKey: $0) != nil }) {
+      return previous
+    }
+    // 2. A pre-rename launch agent, which the old install is what wrote.
+    let agents = home.appendingPathComponent("Library/LaunchAgents")
+    if let names = try? fm.contentsOfDirectory(atPath: agents.path),
+       names.contains(where: { $0.hasPrefix("com.hazlie.") && $0.hasSuffix(".plist") }) {
+      return previous
+    }
+    // 3. The pre-rename app itself, still installed under its old name.
+    for path in ["\(home.path)/Applications/Hazlie.app", "/Applications/Hazlie.app"]
+    where fm.fileExists(atPath: path) {
+      return previous
+    }
+    return nil
+  }
+
   /// ONE DISK PROBE PER MAP. `photos()` is derived from the same answer the
   /// `fda` row reports, so reading it twice was two protected reads for one
   /// fact — and this map is what a live screen polls.

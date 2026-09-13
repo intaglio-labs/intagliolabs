@@ -70,7 +70,11 @@ test('the dormant line does not call a photo library "switched off"', () => {
   assert.ok(line, 'the dormant sentence was not found');
   assert.doesNotMatch(line, /switched[- ]off/u,
     'nothing switched the photo library off; the owner would go looking for the switch');
-  assert.match(line, /sources this install does not read people from/u);
+  // ~~"sources this install does not read people from"~~ — "rows" and "sources"
+  // both went with the load table's console vocabulary (2026-09-13). The
+  // sentence still has to say the SAME thing: these are places people do not
+  // come from, not sources somebody turned off.
+  assert.match(line, /places i do not look for people in/u);
 
   // And the claim behind the copy: at least one dormant source is dormant
   // because of what it IS, not because of a flag.

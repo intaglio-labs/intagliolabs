@@ -456,9 +456,15 @@ test('the two screens that write something slowly say so', () => {
   // instant while a build is in flight is the one kind of lie this screen
   // cannot afford, so the screen says what it does.
   const welcome = html.slice(html.indexOf('id="modes"'), html.indexOf('id="cta"'));
-  assert.match(welcome, /kept by the reader/u, 'screen 1 says when the mode lands');
+  assert.match(welcome, /kept on this Mac/u, 'screen 1 says the mode is kept');
+  // \s+ because the sentence wraps in the source and the line break lands
+  // inside it — the screen sees one sentence either way.
+  assert.match(welcome, /may take a\s+moment to land/u, 'and that a first run is slower');
   const engine = html.slice(html.indexOf('id="engineToggleRow"'), html.indexOf('id="engineModel"'));
-  assert.match(engine, /applies to the next page it builds/u,
+  // ~~"the next page it builds"~~: "page" meant a person dossier, on the one
+  // screen that is about sending excerpts to anthropic — where the other
+  // reading of the word is a web page. Same promise, plain noun.
+  assert.match(engine, /applies to the next person it reads about/u,
     'screen 5 says the switch is not retroactive');
 });
 

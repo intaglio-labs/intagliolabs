@@ -170,8 +170,18 @@ test('screen 1 still says the number the press records', () => {
 test('the mode row still promises the choice is kept', () => {
   // The other half of the same screen: POST /admin/relationship/mode now
   // persists relationshipMemory.mode because this sentence says it does.
-  assert.match(html, /your choice is kept by the reader/u,
+  // ~~"your choice is kept by the reader"~~ — "the reader" is an internal
+  // component name and it was on the first screen a new owner sees. The
+  // PROMISE is what this test is about, and it is unchanged: the choice is
+  // kept, which is why hermes persists relationshipMemory.mode.
+  assert.match(html, /your choice is kept on this Mac/u,
     'the note under the mode row must still promise the choice survives a restart');
+  // Comments stripped: the note above the markup records the old wording as
+  // struck-through prose, and matching that would make this permanently red
+  // for explaining itself.
+  const visible = html.replace(/<!--[\s\S]*?-->/gu, '');
+  assert.doesNotMatch(visible, /kept by the reader/u,
+    'and must not promise it in the vocabulary of the thing doing the keeping');
   assert.match(swift, /relHermes\("POST", "admin\/relationship\/mode"/u,
     'the mode row must still reach hermes, which is what writes it down');
 });

@@ -445,6 +445,27 @@ permsEl.addEventListener('click', async (e) => {
   if (map[which] === 'granted') startedSources();
 });
 
+// ~~"granting to: io.intaglio.widget"~~ ON EVERY MAC. A bundle identifier on
+// the second screen of a consumer flow, explaining a problem almost nobody
+// looking at it has: the August rename left one identifier allowed in Full Disk
+// Access and the other denied, and the line existed so the owner could tell
+// which Settings row was the live one.
+//
+// Native probes for that now (Permissions.staleGrantBundle) and answers
+// `staleBundle` only when this process cannot read AND this Mac carries the
+// marks of a pre-rename install. With no mismatch there is nothing to say, and
+// the screen says nothing — which is every ordinary install.
+function paintBundleNote(res) {
+  const stale = typeof res?.staleBundle === 'string' ? res.staleBundle : '';
+  const mine = typeof res?.bundle === 'string' ? res.bundle : '';
+  if (!stale || !mine) {
+    permBundle.textContent = '';
+    return;
+  }
+  permBundle.textContent = `you may see two rows in that list: an older copy of me (${stale}) `
+    + `and this one (${mine}). the switch has to be on for this one.`;
+}
+
 // LIVE PERMISSION POLLING, which is what makes this feel like it is watching.
 //
 // Full Disk Access has no query API and no callback, so the only way to know is
@@ -470,9 +491,7 @@ function startPermPolling() {
     if (currentScreen !== '2') return;
     const res = await hzPost('permissionState').catch(() => null);
     if (!res || !res.permissions) return;
-    if (typeof res.bundle === 'string' && res.bundle) {
-      permBundle.textContent = `granting to: ${res.bundle}`;
-    }
+    paintBundleNote(res);
     const prev = lastPerms || {};
     const next = { ...res.permissions };
     // Keep the more precise word: the poll only ever reports denied, and
@@ -511,9 +530,7 @@ function enterPerms() {
   // moment this screen opens, and the moment a prompt has been answered.
   hzPost('permissionState', { diagnostic: true }).then((res) => {
     if (!res) return;
-    if (typeof res.bundle === 'string' && res.bundle) {
-      permBundle.textContent = `granting to: ${res.bundle}`;
-    }
+    paintBundleNote(res);
     lastPerms = res.permissions || null;
     paintPerms(lastPerms);
   }).catch(() => {});
@@ -1230,6 +1247,11 @@ const SOURCE_NAMES = {
 // the ones who were in the room — nobody authors an invitation.
 const PEOPLE_SUFFIX = {
   listed: 'in your export', names: 'in your address book', met: 'you met',
+  // The ordinary case, and it used to live in the column header ("people who
+  // wrote to you"). The header is one word now, so the qualifier carries it —
+  // and every row says which kind of people it is counting rather than three
+  // of the four rows correcting a heading.
+  authors: 'who wrote to you',
 };
 
 const STATUS_COPY = {
@@ -1262,8 +1284,14 @@ function statusCell(row) {
   cell.textContent = row.status === 'ok'
     ? `${row.people.toLocaleString()} found`
     : STATUS_COPY[row.status] || 'reading';
+  // ~~`not reading (ERR_SQLITE_ERROR: ...)`~~ THE RAW ERROR IS NOT FOR THIS
+  // SCREEN. Every other line in this flow is hand-written, and an internal
+  // error string in the middle of them reads as the app breaking in front of
+  // the owner. It is not thrown away — it goes in the cell's tooltip, which is
+  // where somebody debugging will look and nobody else will.
   if (row.status === 'failing' && row.lastError) {
-    cell.textContent = `${STATUS_COPY.failing} (${row.lastError})`;
+    cell.textContent = `${STATUS_COPY.failing} — i will keep trying`;
+    cell.title = String(row.lastError);
   }
   return cell;
 }
@@ -1315,6 +1343,17 @@ function paintLoad(out) {
     return tr;
   }));
 
+  // THERE IS AN EXIT AS SOON AS THERE IS ANYTHING TO LEAVE.
+  //
+  // "finish anyway" used to appear only after ten minutes on this screen, or on
+  // `no-cap-configured`. Every other unrecognised reason lands on "no card yet"
+  // — the state in the run-5 screenshot — and the owner's only way out was an
+  // undocumented Escape. A table with rows in it means the reading has started
+  // and this screen is now a thing to watch rather than a gate to pass, so the
+  // button is offered. The ten-minute timer below still covers a table that
+  // never fills.
+  if (rows.length > 0) loadFinish.hidden = false;
+
   // BELOW THE TABLE, AND ONLY WHEN THERE IS SOMETHING TO SAY. Silent at zero:
   // a fresh install has no legacy rows, and a sentence about none of them is
   // one more thing to read on the screen that is already asking for patience.
@@ -1326,8 +1365,9 @@ function paintLoad(out) {
     // never going to mint a person at all (photos, notes, files, web, seed,
     // hazlie_digest). Nothing switched photos off; calling it switched off
     // sends the owner looking for a switch that does not exist.
+    // "rows" is a database word, like the column header this used to sit under.
     loadDormant.textContent =
-      `${dormantRows.toLocaleString()} rows are kept from sources this install does not read people from`;
+      `${dormantRows.toLocaleString()} more are kept from places i do not look for people in`;
   }
 
   // ABOVE THE TABLE, NOT IN IT. The daemon holding a stale lock, or exiting on
@@ -1369,7 +1409,10 @@ function paintLoad(out) {
   const projection = out.projection;
   if (projection && projection.lastRebuildError) {
     loadStatus.classList.add('bad');
-    loadStatus.textContent = `i could not read those rows — ${projection.lastRebuildError}`;
+    // Same rule as statusCell above: the sentence is written, the raw text is
+    // carried in the tooltip rather than put in front of a new owner.
+    loadStatus.textContent = 'something went wrong putting that together. it will try again.';
+    loadStatus.title = String(projection.lastRebuildError);
   }
 }
 
@@ -1505,7 +1548,10 @@ function peekCard(out, { fromOneOff = false } = {}) {
     return;
   }
   if (out.reason === 'no-cap-configured') {
-    loadStatus.textContent = 'the daily card is switched off in your config.';
+    // ~~"the daily card is switched off in your config."~~ named a file the
+    // owner cannot open and offered no way out of the sentence. The fact is
+    // the same and the remedy is the button below it.
+    loadStatus.textContent = 'one card a day is switched off, so there is nothing to show yet.';
     loadFinish.hidden = false;
     return;
   }

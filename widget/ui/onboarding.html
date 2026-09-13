@@ -50,9 +50,15 @@
     </div>
     <!-- The write goes to the reader, which may still be starting up on a
          first launch. Saying so beats a row that shows a choice the reader
-         never received and silently redraws as the old one on the way back. -->
-    <p class="ob-note">your choice is kept by the reader, so on a first run it lands once the
-      reader is up. you can change it on the card whenever you like.</p>
+         never received and silently redraws as the old one on the way back.
+         ~~"your choice is kept by the reader, so on a first run it lands once
+         the reader is up"~~ said it with an internal component name, on the
+         very first screen a new owner sees. The promise is the same one — it
+         is kept, it may take a moment on a first run, it can be changed later
+         — in words that name nothing they cannot see. sprintSentence() in
+         onboarding.js already avoids the word; this is that voice. -->
+    <p class="ob-note">your choice is kept on this Mac — on a first run it may take a
+      moment to land. you can change it later on the card.</p>
     <!-- AND WHEN THE SENTENCE ABOVE TURNS OUT NOT TO BE TRUE. The mode route
          answers 200 with persisted:false when its config write fails, because
          the choice IS live in that reader; what did not happen is the writing
@@ -155,8 +161,11 @@
              STARTS a page. It does not reach into one already running, and a
              privacy switch that looks instant while a build is in flight is
              the one kind of lie this screen cannot afford. -->
-        <p class="ob-note">turning it off applies to the next page it builds &#8212; a page
-          already being written finishes with what it started.</p>
+        <!-- ~~"the next page it builds — a page already being written"~~: "page"
+             here means a person dossier, not a web page, on the one screen
+             that is about sending excerpts to anthropic. -->
+        <p class="ob-note">turning it off applies to the next person it reads about &#8212;
+          one already being written finishes with what it started.</p>
       </div>
     </div>
     <!-- The local model download, for a Mac with no claude on it. No question
@@ -182,7 +191,13 @@
     <p class="ob-banner" id="loadBanner" hidden></p>
     <table class="ob-table" id="loadTable">
       <thead>
-        <tr><th>source</th><th>rows</th><th id="loadPeopleHead">people who wrote to you</th><th>status</th></tr>
+        <!-- WORDS A PERSON WOULD USE. ~~source | rows | people who wrote to you |
+             status~~ read like a database console on the one screen that is
+             otherwise hand-written: "rows" is a database word, "source" and
+             "status" are ours. The per-row qualifier under the people column
+             (PEOPLE_SUFFIX in onboarding.js) says which kind of people each
+             line counts, so the header no longer has to. -->
+        <tr><th>what</th><th>read so far</th><th id="loadPeopleHead">people</th><th>where it stands</th></tr>
       </thead>
       <tbody id="loadBody"></tbody>
     </table>

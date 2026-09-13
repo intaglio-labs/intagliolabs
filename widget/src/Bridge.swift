@@ -1850,20 +1850,32 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUI
       // read the file.
       let permissions = Permissions.all
       if payload["diagnostic"] as? Bool == true { Permissions.writeDiagnostic(mapped: permissions) }
-      // WHICH APP THE GRANT WOULD LAND ON, said out loud.
+      // WHICH APP THE GRANT WOULD LAND ON — AND ONLY WHEN THAT IS A REAL
+      // QUESTION ON THIS MAC.
       //
       // The 30 August rename left com.hazlie.widget allowed in Full Disk
       // Access and io.intaglio.widget denied. fullDisk() probes from THIS
       // process, so it reported denied correctly — but the owner was looking
       // at a Settings list holding a row labelled "intaglio labs" with its
       // switch ON, and the screen stayed red with nothing to explain the
-      // contradiction. writeDiagnostic() has recorded `bundle` and `path` to
-      // a log file the whole time; the screen is where it is actually needed.
-      reply(webView, id, [
+      // contradiction. So the screen named the identifier.
+      //
+      // It named it to EVERYONE, including the great majority who have never
+      // had a pre-rename install — a bundle identifier on the second screen of
+      // a consumer flow, explaining a developer's problem. `staleBundle` is the
+      // probe's answer instead: present only when this process cannot read AND
+      // this Mac carries the marks of an install from before the rename. The
+      // page says nothing unless it is there. `bundle` stays on the reply for
+      // the sentence to name and for the diagnostic to keep recording.
+      var permReply: [String: Any] = [
         "state": "ok",
         "permissions": permissions,
         "bundle": Bundle.main.bundleIdentifier ?? "?",
-      ])
+      ]
+      if let stale = Permissions.staleGrantBundle(disk: Permissions.fullDiskStatus(mapped: permissions)) {
+        permReply["staleBundle"] = stale
+      }
+      reply(webView, id, permReply)
 
     case "requestPermission":
       // A real system prompt, in context, naming this app. macOS shows it once
