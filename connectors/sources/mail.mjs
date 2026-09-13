@@ -61,7 +61,7 @@ import { homedir } from 'node:os';
 import { createGmailClient } from '../lib/gmailClient.mjs';
 import { GMAIL_SCOPE, accountsWithScope } from '../lib/googleAccounts.mjs';
 import { DEFAULT_MAX_BODY_BYTES, messageToRow, parseAddressHeader } from '../lib/mailRows.mjs';
-import { EXPORT_READY_MAX_AGE_MS, noteExportReady } from '../lib/linkedinExport.mjs';
+import { EXPORT_READY_MAX_AGE_MS, noteExportReady, sweepExportReady } from '../lib/linkedinExport.mjs';
 
 const DEFAULT_BACKFILL_DAYS = 30;
 // Forward scans stay bounded so a first run cannot monopolize the daemon.
@@ -410,10 +410,21 @@ export function createMailSource({
       // stopped answering for anyway (EXPORT_READY_MAX_AGE_MS). See
       // FIRST_PASS_KEY, and lib/linkedinExport.mjs for the age bound's other
       // half, which is the load-bearing one.
+      // THE INSTANT THIS PASS STARTED, by the wall clock, written before a
+      // single message is read -- so the floor can never be derived from the
+      // window being scanned, and a pass that dies mid-scan still leaves the
+      // anchor behind for the next one.
       const firstPassRaw = Number(state.getCursor(FIRST_PASS_KEY));
       const firstPassAt = Number.isFinite(firstPassRaw) && firstPassRaw > 0 ? firstPassRaw : now();
       if (firstPassAt !== firstPassRaw) state.setCursor(FIRST_PASS_KEY, String(firstPassAt));
       const exportReadyFloor = Math.max(firstPassAt, now() - EXPORT_READY_MAX_AGE_MS);
+      // AND THE SAME FLOOR APPLIED TO WHAT IS ALREADY ON DISK. A marker this
+      // install would not write is one it should not be standing on: a build
+      // that had no floor wrote some, and a purge or a re-install moves the
+      // anchor forward under markers that predate it. Checked here rather than
+      // at the surfaces, because the writer owns the file -- a reader that
+      // merely declines to answer leaves it there for the next reader.
+      sweepExportReady(home, { floor: exportReadyFloor, now });
       const failures = [];
       const yearly = ctx.history === true && ctx.historyWindow?.year ? ctx.historyWindow : null;
       let historyDone = true;

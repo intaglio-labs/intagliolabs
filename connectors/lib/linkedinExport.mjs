@@ -139,6 +139,37 @@ export function noteExportReady(home, { at } = {}, { now = Date.now } = {}) {
   }
 }
 
+// RE-VALIDATES THE FILE AGAINST THE RULE THAT WOULD HAVE WRITTEN IT, and
+// deletes it when it does not hold up. Returns true when it deleted one.
+//
+// The writer owns this file, so the writer is what has to retire it. A marker
+// is checked on the way IN against the pass's floor and the age bound, and
+// until now nothing checked it again afterwards -- so a marker left by a build
+// that had no floor, or one that outlived a purge or a re-install, was believed
+// for as long as its own timestamp stayed inside the age bound. The reader
+// refusing to answer for it is not enough: the file is still there, and the
+// next reader to relax anything starts believing it again.
+//
+// Run once per pass, BEFORE the scan, so a marker this install would not have
+// written is gone whether or not this pass finds a mail of its own. An
+// unparseable file goes the same way: nothing can be said for it either.
+export function sweepExportReady(home, { floor = Number.NEGATIVE_INFINITY, now = Date.now } = {}) {
+  const at = usableHome(home);
+  if (at === null) return false;
+  let text;
+  try {
+    text = readFileSync(markerPath(at), 'utf8');
+  } catch {
+    return false; // no file, or none this process can read: nothing to retire
+  }
+  let ts = Number.NaN;
+  try {
+    ts = Number(JSON.parse(text)?.at);
+  } catch {}
+  const stands = Number.isFinite(ts) && ts >= floor && now() - ts <= EXPORT_READY_MAX_AGE_MS;
+  return stands ? false : clearExportReady(at);
+}
+
 // Drops the note. Absent is the desired state, so an absent file is a success.
 export function clearExportReady(home) {
   const at = usableHome(home);

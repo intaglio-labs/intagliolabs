@@ -232,6 +232,58 @@ test('a first pass reads a month back and badges none of it', async (t) => {
   assert.equal(existsSync(markerPath(home)), false);
 });
 
+test('a mail two days old is still not news when the install is one day old', async (t) => {
+  const home = tempHome(t);
+  // INSIDE THE AGE BOUND AND STILL NOT OURS. The fortnight is the outer bound;
+  // the anchor is the real one. A "your data is ready" from the day before this
+  // Mac started reading is about an export the owner requested before Hazlie
+  // existed — dealt with already, or dead.
+  const state = memoryState({ 'mail:first-pass-at': NOW - DAY });
+  await runMail(home, [ready('m1', NOW - 2 * DAY)], { state });
+  assert.equal(existsSync(markerPath(home)), false, 'nothing from before the anchor is news');
+  assert.equal(exportReadyAt(home, { now: () => NOW }), null);
+
+  // And the same mailbox one mail later, this one genuinely new.
+  await runMail(home, [ready('m1', NOW - 2 * DAY), ready('m2', NOW - 3_600_000)], { state });
+  assert.equal(exportReadyAt(home, { now: () => NOW }), NOW - 3_600_000);
+});
+
+test('a marker this install would not have written is retired by the next pass', async (t) => {
+  const home = tempHome(t);
+  // The state a build without a floor left behind, or a purge left standing:
+  // a marker inside the fortnight, about a mail older than this install. The
+  // reader already declines to answer once it ages out — but until then the
+  // file is believed, so the writer that owns it has to take it back.
+  mkdirSync(join(home, '.hazlie', 'imports', 'linkedin'), { recursive: true });
+  writeFileSync(markerPath(home), JSON.stringify({ at: NOW - 7 * DAY }));
+  const state = memoryState({ 'mail:first-pass-at': NOW - DAY });
+
+  await runMail(home, [chatter('m0', NOW - 60_000)], { state });
+  assert.equal(existsSync(markerPath(home)), false,
+    'a pass that would not write it does not leave it standing either');
+  assert.equal(exportReadyAt(home, { now: () => NOW }), null);
+});
+
+test('an unparseable marker is taken back rather than left to be believed later', async (t) => {
+  const home = tempHome(t);
+  mkdirSync(join(home, '.hazlie', 'imports', 'linkedin'), { recursive: true });
+  writeFileSync(markerPath(home), 'not json at all');
+  await runMail(home, [chatter('m0', NOW - 60_000)], { state: memoryState() });
+  assert.equal(existsSync(markerPath(home)), false);
+});
+
+test('a marker still inside both bounds is left exactly where it is', async (t) => {
+  const home = tempHome(t);
+  mkdirSync(join(home, '.hazlie', 'imports', 'linkedin'), { recursive: true });
+  const at = NOW - 2 * 3_600_000;
+  writeFileSync(markerPath(home), JSON.stringify({ at }));
+  const state = memoryState({ 'mail:first-pass-at': NOW - DAY });
+
+  await runMail(home, [chatter('m0', NOW - 60_000)], { state });
+  assert.equal(exportReadyAt(home, { now: () => NOW }), at,
+    'the sweep retires what this install would not have written, and nothing else');
+});
+
 test('a mail older than the age bound is never recorded, even on a long-running install', async (t) => {
   const home = tempHome(t);
   // An install that has been reading for two months, so the first-pass floor is
