@@ -277,7 +277,8 @@ export function latestAuthoredContextId(db, personKey) {
 // broken, so this walks back through their last QUOTE_LOOKBACK authored
 // direct rows and takes the newest one with substance; when none of them has
 // any, it returns null and the page hides the quote row, which is strictly
-// better than quoting an emoji.
+// better than quoting an emoji. What counts as substance is spelled out at
+// isSubstantiveQuote below.
 //
 // Deliberately NOT folded into latestAuthoredContextId: owe.mjs's open-loop
 // candidate asks that function for THE newest authored row precisely so it
@@ -285,12 +286,33 @@ export function latestAuthoredContextId(db, personKey) {
 // substance filter there would walk past a closing "ok" and reopen a loop
 // the "ok" closed.
 const QUOTE_LOOKBACK = 12;
-const QUOTE_MIN_CHARS = 24;
 
-// A bare acknowledgement is not a quote. Matched against the whole message
-// once punctuation, emoji and whitespace are gone, so "ok!!", "ok ok thanks
-// haha 👍" and "Sounds good, thanks!" are all still acknowledgements while
-// "sounds good, i will send the deck on friday" is not.
+// THE FLOOR, AND WHY IT IS NOT 24 CHARACTERS (polish review finding 13). It
+// was, and "Can you send the deck?" is 22 characters while "yes, let's do
+// tuesday" is 21 -- both rejected before the acknowledgement test they would
+// have passed, and both better cards than no quote at all. A character count
+// was standing in for the test that actually matters, which is whether the
+// message SAYS anything: three words carries a subject and a verb, and twelve
+// characters is only there to stop three one-letter tokens from clearing it.
+const QUOTE_MIN_WORDS = 3;
+const QUOTE_MIN_CHARS = 12;
+
+// A bare acknowledgement is not a quote -- and this test applies ONLY to a
+// SHORT WHOLE MESSAGE made of nothing else (polish review finding 14). The
+// words below are not banned words: several of them ("got", "it", "sounds",
+// "good", "done", "right") are ordinary content words, and the rule has
+// always required EVERY word to be one of them, so an ack word beside real
+// content was never the problem. What was unbounded is the other direction --
+// a message of any length built solely from listed words was unquotable, with
+// nothing anywhere saying why.
+//
+// The bound is on DISTINCT words, not on the word count, because repetition
+// does not make a message: "ok ok thanks thanks haha haha sure sure" is eight
+// words and five ideas, all of them "yes", and a raw count of six would have
+// let it through while a card quoted it. Past this many distinct
+// acknowledgements somebody is saying something, whatever the vocabulary.
+const QUOTE_MAX_ACK_WORDS = 6;
+
 const ACK_WORDS = new Set([
   'ok', 'okay', 'k', 'kk', 'okey', 'okie', 'yes', 'yep', 'yeah', 'yup', 'ya', 'no', 'nope',
   'thanks', 'thank', 'you', 'thx', 'ty', 'tysm', 'cheers', 'lol', 'lmao', 'haha', 'hah',
@@ -298,8 +320,6 @@ const ACK_WORDS = new Set([
   'nice', 'cool', 'perfect', 'awesome', 'sure', 'np', 'nvm', 'done', 'same', 'true', 'word',
   'agreed', 'congrats', 'congratulations', 'wow', 'omg', 'bye', 'gotcha', 'right', 'exactly',
   'amazing', 'welcome', 'anytime', 'definitely', 'absolutely', 'totally', 'indeed',
-  // Intensifiers and interjections, so a garland of them around an ack
-  // ("THANKS SO MUCH, GOT IT!!!! haha") is still an ack.
   'so', 'much', 'very', 'really', 'too', 'oh', 'ah', 'aw', 'hmm', 'mm', 'yay', 'ha',
 ]);
 
@@ -313,12 +333,16 @@ export function isSubstantiveQuote(text) {
 
   // A line that is nothing but a link says nothing on a card. Stripping the
   // urls first also stops a long url from carrying an otherwise empty
-  // message past the length floor above via its own letters.
+  // message past the floors via its own letters.
   const withoutUrls = trimmed.replace(URL_RE, ' ');
   const words = withoutUrls.toLowerCase().match(WORD_RE) ?? [];
-  if (words.length === 0) return false; // url-only, or only emoji/punctuation
+  // Fewer than three words, or none at all (url-only, emoji-only,
+  // punctuation-only): nothing a card can quote. "Heyo 100%!" is two.
+  if (words.length < QUOTE_MIN_WORDS) return false;
 
-  return words.some((w) => !ACK_WORDS.has(w));
+  const distinct = new Set(words);
+  if (distinct.size <= QUOTE_MAX_ACK_WORDS && words.every((w) => ACK_WORDS.has(w))) return false;
+  return true;
 }
 
 // The newest authored direct row that clears isSubstantiveQuote, looking

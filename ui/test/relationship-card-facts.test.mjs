@@ -128,31 +128,43 @@ test('the card reply carries who they are, who wrote last, and when they last me
     db.prepare('INSERT OR IGNORE INTO person_identifiers(identifier, person_key) VALUES (?, ?)')
       .run('facts@example.com', key);
 
+    // THE PEEK IS A TEASE, AND STAYS ONE (polish review finding 10). Its
+    // caller is the always-on orb, which asks whether a card exists and draws
+    // a name. This person's job title, employer, profile url and three
+    // contact timestamps have no business on a card the owner has not opened.
     const peek = await get('/admin/relationship/card?peek=1');
     assert.equal(peek.card.personKey, key);
+    assert.equal(peek.card.person, undefined, 'no person facts on a tease');
+    assert.equal(peek.card.lastFromThem, undefined);
+    assert.equal(peek.card.lastSeen, undefined);
+    assert.equal(peek.card.lastMeetingAt, undefined);
+    assert.equal(peek.card.lastMeetingDaysAgo, undefined);
+    assert.equal(peek.card.quote, undefined, 'and still no receipt');
+
+    const served = await get('/admin/relationship/card');
+    assert.equal(served.card.personKey, key);
     assert.deepEqual(
-      { ...peek.card.person, connectedOn: undefined },
+      { ...served.card.person, connectedOn: undefined },
       {
         title: 'Partner', company: 'Sequoia', industry: 'Venture Capital',
         url: 'https://www.linkedin.com/in/partner', connectedOn: undefined,
       },
-      'the tease knows who they are too -- and never carries their email'
+      'the serve knows who they are -- and never carries their email'
     );
     // A ms epoch like every other date on the card, not the csv's own string,
     // and asserted by the date it lands on rather than by a literal number so
     // the test does not depend on the machine's timezone.
-    assert.equal(typeof peek.card.person.connectedOn, 'number');
-    const connected = new Date(peek.card.person.connectedOn);
+    assert.equal(typeof served.card.person.connectedOn, 'number');
+    const connected = new Date(served.card.person.connectedOn);
     assert.deepEqual([connected.getFullYear(), connected.getMonth(), connected.getDate()], [2020, 5, 1]);
-    assert.equal(peek.card.quote, undefined, 'a peek still carries no receipt');
-    assert.equal(peek.card.lastMeetingDaysAgo, 300);
 
-    const served = await get('/admin/relationship/card');
-    assert.equal(served.card.personKey, key);
-    assert.deepEqual(served.card.person, peek.card.person, 'one shape, both replies');
     assert.equal(served.card.lastFromThem, now - 200 * DAY);
     assert.equal(served.card.lastFromOwner, now - 230 * DAY);
     assert.equal(served.card.lastSeen, now - 200 * DAY);
+    // AN INSTANT, so a card served days after it was produced cannot read
+    // fresher than the truth. The day count rides along for one release and
+    // is derived from this same instant, so the two cannot disagree.
+    assert.equal(served.card.lastMeetingAt, now - 300 * DAY);
     assert.equal(served.card.lastMeetingDaysAgo, 300);
     assert.ok(served.card.lastFromThem > served.card.lastFromOwner,
       'the strongest reconnect signal: they wrote last, and the card can now say so');
@@ -184,8 +196,9 @@ test('a person with no LinkedIn row and no meeting answers with nulls, not missi
     assert.deepEqual(served.card.person,
       { title: null, company: null, industry: null, connectedOn: null, url: null });
     assert.equal(served.card.lastFromOwner, null);
+    assert.equal(served.card.lastMeetingAt, null);
     assert.equal(served.card.lastMeetingDaysAgo, null);
-    assert.ok('lastMeetingDaysAgo' in served.card, 'null, never absent');
+    assert.ok('lastMeetingAt' in served.card, 'null, never absent');
     assert.equal(served.card.changed, null);
   });
 });
@@ -200,12 +213,14 @@ test('a big invite is not a meeting: the last-meeting date uses the same gate as
     daysAgo: 30,
     attendees: Array.from({ length: 40 }, (_, i) => ({ email: i === 0 ? 'invite@example.com' : `a${i}@example.com` })),
   });
-  assert.equal(personCardFacts(db, key, { now: NOW }).lastMeetingDaysAgo, null,
+  assert.equal(personCardFacts(db, key, { now: NOW }).lastMeetingAt, null,
     'a 40-person invite is not the two of you in a room');
+  assert.equal(personCardFacts(db, key, { now: NOW }).lastMeetingDaysAgo, null);
 
   insertPastMeeting(db, key, 'invite@example.com', { daysAgo: 120 });
-  assert.equal(personCardFacts(db, key, { now: NOW }).lastMeetingDaysAgo, 120,
+  assert.equal(personCardFacts(db, key, { now: NOW }).lastMeetingAt, NOW - 120 * DAY,
     'the small one counts, even though it is older');
+  assert.equal(personCardFacts(db, key, { now: NOW }).lastMeetingDaysAgo, 120);
 });
 
 test('a declined invite is not a meeting either', () => {
@@ -216,7 +231,28 @@ test('a declined invite is not a meeting either', () => {
     daysAgo: 20,
     attendees: [{ email: 'declined@example.com', response: 'declined' }, { email: 'owner@example.com' }],
   });
-  assert.equal(personCardFacts(db, key, { now: NOW }).lastMeetingDaysAgo, null);
+  assert.equal(personCardFacts(db, key, { now: NOW }).lastMeetingAt, null);
+});
+
+// The number a snapshot was PRODUCED with is not what the card ships: it was
+// computed against the producer's clock and rendered against the reader's, so
+// a queued card read fresher the longer it waited. The instant is asked of
+// the calendar at serve time, and the day count is derived from it.
+test('the meeting date is asked of the calendar now, not carried from produce time', () => {
+  const db = freshDb();
+  const key = 'name:stale evidence';
+  seedEligible(db, key, 'Stale Evidence');
+  insertPastMeeting(db, key, 'stale@example.com', { daysAgo: 300 });
+
+  const fresh = personCardFacts(db, key, { now: NOW });
+  assert.equal(fresh.lastMeetingAt, NOW - 300 * DAY);
+  assert.equal(fresh.lastMeetingDaysAgo, 300);
+
+  // The same snapshot read ten days later: the instant does not move and the
+  // distance grows, which is what a reader is entitled to.
+  const later = personCardFacts(db, key, { now: NOW + 10 * DAY });
+  assert.equal(later.lastMeetingAt, fresh.lastMeetingAt, 'an instant does not age');
+  assert.equal(later.lastMeetingDaysAgo, 310);
 });
 
 test('personFacts: the csv date becomes an epoch, and anything unreadable becomes null', () => {
@@ -249,6 +285,11 @@ test('changedForCard counts its sources and drops a change with nothing to say',
     sources: [{ url: 'https://a.example' }, { url: 'https://b.example' }], corroboration: 2,
   });
   assert.equal(out.sources, 2, 'a count, which is what the card renders');
+  // A hand-altered or pre-migration corroboration column used to reach
+  // Number() directly; the NaN that produces only reads as null because
+  // JSON.stringify emits one, and nothing on the wire should rest on that.
+  assert.equal(changedForCard({ text: 'Moved.', corroboration: 'two', sources: [] }).corroboration, null);
+  assert.equal(changedForCard({ text: 'Moved.', at: 'whenever', sources: [] }).at, null);
   assert.equal(out.at, 1_700_000_000_000);
   assert.deepEqual(out.sourceUrls, ['https://a.example', 'https://b.example']);
 });

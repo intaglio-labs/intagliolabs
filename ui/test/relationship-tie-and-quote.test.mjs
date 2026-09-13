@@ -110,7 +110,7 @@ test('a bare acknowledgement is never the quote when something older has substan
   const ack = insertAuthored(db, key, { ts: NOW - 230 * DAY, text: 'Heyo 100%!' });
   insertAuthored(db, key, { ts: NOW - 220 * DAY, text: '👍👍👍👍👍👍👍👍👍👍👍👍👍' });
   insertAuthored(db, key, { ts: NOW - 210 * DAY, text: 'https://example.com/a/rather/long/article/path' });
-  insertAuthored(db, key, { ts: NOW - 200 * DAY, text: 'ok ok thanks thanks haha haha sure sure 👍' });
+  insertAuthored(db, key, { ts: NOW - 200 * DAY, text: 'ok ok thanks thanks haha 👍' });
 
   assert.equal(substantiveQuoteContextId(db, key), real,
     'the newest row WITH substance, not the newest row');
@@ -148,18 +148,59 @@ test('the lookback is bounded: a real message further back than N authored rows 
   assert.equal(substantiveQuoteContextId(db, key, { lookback: 40 }), buried, 'and the bound is the only reason');
 });
 
-test('the substance test: length, emoji, urls, acknowledgements', () => {
-  assert.equal(isSubstantiveQuote('Heyo 100%!'), false, 'the run-3 quote');
+test('the substance test: words, emoji, urls, acknowledgements', () => {
+  assert.equal(isSubstantiveQuote('Heyo 100%!'), false, 'the run-3 quote: two words');
   assert.equal(isSubstantiveQuote('ok'), false);
   assert.equal(isSubstantiveQuote('   short   '), false, 'trimmed before measuring');
   assert.equal(isSubstantiveQuote('👍👍👍👍👍👍👍👍👍👍👍👍👍👍'), false, 'long enough, says nothing');
   assert.equal(isSubstantiveQuote('!!!!!!!!!!!!!!!!!!!!!!!!!!!!'), false);
   assert.equal(isSubstantiveQuote('https://example.com/a/very/long/path/indeed'), false, 'a url is not a quote');
-  assert.equal(isSubstantiveQuote('ok ok thanks thanks haha haha sure 👍'), false, 'acks all the way down');
   assert.equal(isSubstantiveQuote('THANKS SO MUCH, GOT IT!!!! haha'), false, 'case does not rescue an ack');
+  assert.equal(isSubstantiveQuote('got it sounds good'), false);
   assert.equal(isSubstantiveQuote(null), false);
   assert.equal(isSubstantiveQuote('sounds good, i will send the deck friday'), true,
     'an ack word beside real content is real content');
   assert.equal(isSubstantiveQuote('congrats on the raise — see https://x.example'), true);
+});
+
+// THE FLOOR IS WORDS, NOT CHARACTERS (polish review finding 13). It was 24
+// characters, which threw away ordinary short messages -- better cards than
+// no card -- before the acknowledgement test they would have passed.
+test('an ordinary short line is quotable; the floor counts words, not characters', () => {
+  assert.equal(isSubstantiveQuote('Can you send the deck?'), true, '22 characters, and a real ask');
+  assert.equal(isSubstantiveQuote("yes, let's do tuesday"), true, '21 characters, and a real answer');
+
+  // What the floor is actually for: too few words to say anything, however
+  // the characters are arranged.
+  assert.equal(isSubstantiveQuote('congratulations!!!'), false, 'one word is not a quote');
+  assert.equal(isSubstantiveQuote('absolutely enormous'), false, 'two words either');
+  assert.equal(isSubstantiveQuote('a b c'), false, 'three tokens, nothing said');
+});
+
+// THE ACK LIST IS NOT A LIST OF BANNED WORDS (polish review finding 14).
+// Several entries -- got, it, sounds, good, done, right -- are ordinary
+// content words. The rule has always required EVERY word to be a listed one,
+// so an ack word beside content was never rejected; what was unbounded is a
+// message of ANY length built solely from listed words.
+test('an ack word beside real content is content, at any length', () => {
+  assert.equal(isSubstantiveQuote('i got it done, and it is really very good'), true);
+  assert.equal(isSubstantiveQuote('thanks, that is really good news about the round'), true);
+  assert.equal(isSubstantiveQuote('sounds good, i will send the deck friday'), true);
+});
+
+// The bound is on DISTINCT words, not on the word count: repetition does not
+// make a message. Eight words and five ideas, all of them "yes", is still an
+// acknowledgement -- a plain count of six would have let it through and a
+// card would have quoted it.
+test('the acknowledgement rule is bounded by how much is said, not how long it is', () => {
+  assert.equal(isSubstantiveQuote('ok ok thanks thanks haha haha sure sure'), false,
+    'eight words, five of them repeats');
+  assert.equal(isSubstantiveQuote('yeah sure sounds good'), false);
+
+  // Past the bound the rule lets go, which is the narrowing: seven different
+  // acknowledgements in a row is somebody saying something, and the list is
+  // not there to decide that it is not.
+  assert.equal(isSubstantiveQuote('sounds good got it done thanks so much'), true,
+    'seven distinct words is past where a word list gets to judge');
 });
 

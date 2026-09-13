@@ -4354,16 +4354,17 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
           card: {
             personKey: card.personKey, name: card.name, kind: card.kind,
             snapshot_id: card.snapshot_id,
-            // THE SAME PERSON FACTS THE SERVE CARRIES (surface review C
-            // findings 13/14/15), and for the same reason they are safe on a
-            // tease: they are counts and dates, never message text. The page
-            // reads one set of field names whether it drew the card from a
-            // peek or from a serve, so the tease cannot render thinner than
-            // the thing it is teasing.
-            ...personCardFacts(db, card.personKey, {
-              now: nowForLive,
-              evidenceLastMeetingDaysAgo: card.evidence?.lastMeetingDaysAgo ?? null,
-            }),
+            // NO PERSON FACTS HERE, DELIBERATELY (polish review finding 10).
+            // They were briefly spread onto the peek too, on the theory that
+            // one set of field names should answer both replies. The consumer
+            // settles it: the peek's caller is the always-on orb, which asks
+            // only whether a card exists and renders a name and a day count.
+            // Shipping this person's job title, employer, profile url and
+            // three contact timestamps to a card the owner has not opened --
+            // and may never open -- buys nothing the orb can draw, and the
+            // tease could never render as the serve anyway (it carries no
+            // evidence.messages or meetings either). The serve is where the
+            // card is actually read, and the serve is where the facts go.
             evidence: {
               dormancyDays: card.evidence?.dormancyDays ?? null,
               overdueDays: card.evidence?.overdueDays ?? null,
@@ -4449,13 +4450,11 @@ async function handleAdmin(db, req, res, cors, url, channel, policy) {
       } catch {
         drafts = [];
       }
-      // The person facts, on the serve exactly as on the peek above. Spread
-      // AFTER `...card` so a producer that one day puts its own
-      // lastMeetingDaysAgo on the card object cannot shadow the pinned shape.
-      const facts = personCardFacts(db, card.personKey, {
-        now: nowForLive,
-        evidenceLastMeetingDaysAgo: card.evidence?.lastMeetingDaysAgo ?? null,
-      });
+      // The person facts, on the SERVE only -- the peek above carries none of
+      // them, deliberately. Spread AFTER `...card` so a producer that one day
+      // puts its own lastMeetingAt on the card object cannot shadow the
+      // pinned shape.
+      const facts = personCardFacts(db, card.personKey, { now: nowForLive });
       send(res, 200, { card: { ...card, quote, sentence, left, leftTone, who: page.sections.who?.text ?? null, page,
         changed: changedForCard(changed), drafts, ...facts },
         // PROVENANCE, NOT POLICY (round-5 finding 10). `servedMode` answers

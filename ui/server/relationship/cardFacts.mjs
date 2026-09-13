@@ -85,7 +85,7 @@ const LAST_MEETING_SQL = `
     AND COALESCE(lower(json_extract(je.value, '$.response')), '') != 'declined'
 `;
 
-export function lastMeetingDaysAgo(db, personKey, { now = Date.now() } = {}) {
+export function lastMeetingAt(db, personKey, { now = Date.now() } = {}) {
   let row = null;
   try {
     row = db.prepare(LAST_MEETING_SQL).get(now, personKey, CAL_GATES.maxAttendees);
@@ -94,21 +94,30 @@ export function lastMeetingDaysAgo(db, personKey, { now = Date.now() } = {}) {
     // person_identifiers: an unanswerable question, not a broken card.
     return null;
   }
-  const lastMet = asMs(row?.lastMet);
-  if (lastMet === null) return null;
-  const days = Math.floor((now - lastMet) / DAY);
-  return Number.isFinite(days) && days >= 0 ? days : null;
+  return asMs(row?.lastMet);
 }
 
-// THE PINNED SHAPE. Every field is present on every card reply; a fact this
+// THE PINNED SHAPE. Every field is present on every serve; a fact this
 // corpus cannot answer is null, never absent, so the page never has to tell
-// "no meeting" from "this build does not send meetings".
+// "no meeting" from "this build does not send meetings". The peek gets none
+// of it -- see the card route's own note at the peek branch.
 //
-// `evidenceLastMeetingDaysAgo` is matcher.mjs's own already-computed value
-// (matcher.mjs:339, carried in evidence): it is the same question asked of
-// the same calendar, so an answer that already travelled with the card is
-// preferred over asking again.
-export function personCardFacts(db, personKey, { now = Date.now(), evidenceLastMeetingDaysAgo = null } = {}) {
+// A TIMESTAMP, NOT A DAY COUNT (polish review finding 11). This used to
+// prefer matcher.mjs's `evidence.lastMeetingDaysAgo`, a number computed when
+// the batch was PRODUCED and rendered as a distance from now when the card
+// was SERVED -- so a snapshot served a week after it was produced read a week
+// fresher than the truth, silently, and worse the longer a queue backed up.
+// `lastMeetingAt` is an instant, which cannot go stale between the two, and
+// the page subtracts it from its own clock.
+//
+// The produce-time evidence value is not consulted at all now, not even as a
+// fallback for a corpus the live query cannot answer: a number wrong by an
+// unknown amount is not a better answer than "we do not know when".
+//
+// `lastMeetingDaysAgo` stays on the wire for ONE RELEASE while the page moves
+// to `lastMeetingAt`, derived from the same live instant right here so the
+// two can never name different meetings. Delete it after that.
+export function personCardFacts(db, personKey, { now = Date.now() } = {}) {
   let row;
   try {
     row = db.prepare(
@@ -117,15 +126,14 @@ export function personCardFacts(db, personKey, { now = Date.now(), evidenceLastM
   } catch {
     row = undefined;
   }
-  // asMs, not Number.isFinite(Number(x)): Number(null) is 0, so the obvious
-  // spelling would turn "this producer computed nothing" into "you met today".
-  const fromEvidence = asMs(evidenceLastMeetingDaysAgo);
+  const metAt = lastMeetingAt(db, personKey, { now });
   return {
     person: personFacts(row?.linkedin ?? null),
     lastFromThem: asMs(row?.last_from_them),
     lastFromOwner: asMs(row?.last_from_owner),
     lastSeen: asMs(row?.last_seen),
-    lastMeetingDaysAgo: fromEvidence ?? lastMeetingDaysAgo(db, personKey, { now }),
+    lastMeetingAt: metAt,
+    lastMeetingDaysAgo: metAt === null ? null : Math.max(0, Math.floor((now - metAt) / DAY)),
   };
 }
 
@@ -160,7 +168,11 @@ export function changedForCard(changed) {
     kind: asText(changed.kind),
     quote: asText(changed.quote),
     date: asText(changed.date),
-    corroboration: changed.corroboration === null || changed.corroboration === undefined
-      ? null : Number(changed.corroboration),
+    // asMs, like every other number here (polish review finding 19): a
+    // hand-altered or pre-migration corroboration column reached Number()
+    // directly, and the NaN that produces leaves this function as `null` only
+    // because JSON.stringify happens to emit one. Nothing on the wire should
+    // rest on that.
+    corroboration: asMs(changed.corroboration),
   };
 }
