@@ -190,7 +190,13 @@ const settings = document.getElementById('settings');
 //
 // The one exception is uninstall, which keeps a single short line on the
 // surface: it is the one press here that cannot be taken back.
-const CARD_HELP = 'change who it looks for on the card itself — the three chips at the top.';
+// TWO SENTENCES, BECAUSE THERE ARE TWO PRODUCTS BEHIND THIS ROW. With
+// `timeline` off (the default since the owner's 2026-09-13 decision) reconnect
+// serves one person a day and there is no group to change, so a hover pointing
+// at three chips would send the owner looking for controls that are not on the
+// card. The chips come back with the flag, and so does the sentence about them.
+const CARD_HELP = 'one person a day, whoever has gone quiet — dismiss a card to ask for another.';
+const CARD_HELP_MODES = 'change who it looks for on the card itself — the three chips at the top.';
 const SOUNDS_HELP = 'presses, sending and replies make a sound.';
 const MOTION_HELP = 'reduce motion is on for this Mac. this puts back only this app\u2019s own movement.';
 const AWAKE_HELP = 'Keeps imports and local indexing moving while you step away, so they finish sooner. It still allows manual sleep and lid-close.';
@@ -298,10 +304,17 @@ function configEngine(cfg) {
 function cardConfigRow(configPromise) {
   const el = document.createElement('div');
   el.className = 'setting';
-  // The picker is NOT duplicated here, deliberately: it lives on the card,
-  // which is where you change your mind about it. This row exists because a
-  // new owner reading settings saw no sign the product had modes at all — and
-  // saying so takes a hover, not four lines of the column.
+  // WHAT THIS ROW IS FOR NOW. ~~"a new owner reading settings saw no sign the
+  // product had modes at all"~~ — there are no modes to see any more, and the
+  // picker this sentence pointed at is off the card. What is left is the one
+  // number an owner may want to check without opening the panel: how often the
+  // card comes. The hover says what the card IS, and names the groups again
+  // only where the groups exist.
+  // Asked, not assumed: hzFeatures caches per page load and fails closed, and
+  // this row may be built before the shelf's own refresh has read the registry.
+  const modesPromise = hzFeatures()
+    .then((set) => hzFeatureOn(set, 'timeline'))
+    .catch(() => false);
   el.title = CARD_HELP;
   const label = document.createElement('span');
   label.className = 'setting-name';
@@ -323,9 +336,15 @@ function cardConfigRow(configPromise) {
   // nowrap and right-aligned, and the label ellipsizes before either wraps.
   el.append(label, said);
 
-  configPromise.then((cfg) => {
+  Promise.all([configPromise, modesPromise]).then(([cfg, modesOn]) => {
+    const help = modesOn ? CARD_HELP_MODES : CARD_HELP;
+    el.title = help;
     const bits = [];
-    if (typeof cfg?.mode === 'string' && cfg.mode) bits.push(cfg.mode);
+    // THE MODE WORD ONLY WHERE THE MODE IS A THING. hermes answers `mode` on
+    // this route whatever the flag says — it is a config key, and it is still
+    // read when `timeline` is on — so the row saying "any · 1 a day" with no
+    // chips anywhere would be naming a setting the owner cannot see or change.
+    if (modesOn && typeof cfg?.mode === 'string' && cfg.mode) bits.push(cfg.mode);
     // THE REAL NUMBER, ALWAYS. ~~`n === 1 ? 'one card a day' : ...`~~ — the
     // singular was a word where every other reading of this row is a digit,
     // and it read as a hard-coded "one" to an owner whose config says 50.
@@ -347,7 +366,7 @@ function cardConfigRow(configPromise) {
     // a reply that never came is unknown, and that is `cfg` itself being null.
     if (cfg) {
       const engine = configEngine(cfg) === 'claude-cli' ? 'reading with claude' : 'reading on this Mac';
-      el.title = `${CARD_HELP} ${engine}.`;
+      el.title = `${help} ${engine}.`;
     }
     fitConnections();
   });

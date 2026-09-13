@@ -173,7 +173,14 @@ test('the daily-card row reads the config, and asserts nothing when it cannot', 
   // not as a third clause on a line that is already a mode and a number.
   assert.match(row, /configEngine\(cfg\) === 'claude-cli' \? 'reading with claude' : 'reading on this Mac'/u,
     'the row says which way the engine is set, for an owner who cannot see the switch');
-  assert.match(row, /el\.title = `\$\{CARD_HELP\} \$\{engine\}\.`/u,
+  // ~~`el.title = `${CARD_HELP} ${engine}.``~~ — the help sentence has two forms
+  // since the group picker went behind `timeline` (2026-09-13): one that names
+  // the chips on the card, for the flag, and one that does not, for the product
+  // as it ships. `help` is whichever of the two this render chose, and the pin
+  // is unchanged in what it is about — the engine rides the hover, where it
+  // costs the column no height.
+  assert.match(row, /const help = modesOn \? CARD_HELP_MODES : CARD_HELP;/u);
+  assert.match(row, /el\.title = `\$\{help\} \$\{engine\}\.`/u,
     'and it says it on the hover, where it costs the column no height');
   // ABSENT IS NOT UNKNOWN: the route sends `engine: null` for a key that has
   // never been written, and an absent key IS the loopback model (engines.mjs).

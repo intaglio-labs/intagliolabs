@@ -270,13 +270,27 @@ window.__hzOnboardingReset = () => {
 // The optional scenes, resolved once. hzFeatures() caches per page load and
 // fails closed, so no answer means the setup sequence — which is the sequence
 // that contains every actual check.
+//
+// AND `timeline` DECIDES THE GROUPS. Screen 1's group row, screen 6's shortfall
+// line and its widen button are one idea, and the idea is off (owner,
+// 2026-09-13): reconnect serves whoever is quiet. Everything behind it is still
+// here and comes back together under that one flag. hzFeatures fails closed, so
+// a page that cannot ask the registry draws the screen without the row rather
+// than with it. See modesOn.
 hzFeatures().then((set) => {
   if (hzFeatureOn(set, 'chat')) flow = FULL_ORDER;
+  modesOn = hzFeatureOn(set, 'timeline');
+  if (modesOn) modeBlock.hidden = false;
 }).catch(() => {});
 
 // ---------------- 1: who this is for ----------------
+const modeBlock = document.getElementById('modeBlock');
 const modesEl = document.getElementById('modes');
 const modeNote = document.getElementById('modeNote');
+
+// See the hzFeatures call above. False until the registry says otherwise, and
+// the block ships `hidden`, so the row is revealed and never drawn.
+let modesOn = false;
 
 function paintMode(mode) {
   for (const b of modesEl.querySelectorAll('.ob-mode')) {
@@ -295,6 +309,11 @@ function enterWelcome() {
   // survived every later showing of this screen -- including one where the
   // choice had since landed.
   modeNote.textContent = '';
+  // AND WITH THE ROW HIDDEN THERE IS NOTHING TO READ IT FOR. The peek records
+  // nothing, so this costs nothing either way — but a request whose only
+  // purpose is to light a chip nobody can see is a request this screen should
+  // not make.
+  if (!modesOn) return;
   hzPost('relCardPeek')
     .then((out) => { if (out && typeof out.mode === 'string') paintMode(out.mode); })
     .catch(() => {});
@@ -336,8 +355,12 @@ function writeMode(mode, retried) {
     .catch(() => {});
 }
 
-// Only an actual click writes. See above.
+// Only an actual click writes -- and with `timeline` off there is no click to
+// have: the row is hidden rather than removed, so the listener stays attached
+// to buttons nobody can reach, and the guard is what makes "this page does not
+// post the mode" a property of the code and not of the markup.
 modesEl.addEventListener('click', (e) => {
+  if (!modesOn) return;
   const btn = e.target.closest('.ob-mode');
   if (!btn) return;
   paintMode(btn.dataset.mode);
@@ -1370,7 +1393,12 @@ const linkedInPending = (out) =>
   && typeof out?.mode === 'string' && out.mode.length > 0
   && out.mode !== 'any';
 
+// SILENT WHERE THERE ARE NO GROUPS. Every sentence below describes a choice
+// the owner was never offered once screen 1's row is hidden, and the button
+// under them offers to undo it. Both come back with `timeline`; until then this
+// screen says only what the reader is doing. See modesOn.
 function paintModeShortfall(out) {
+  if (!modesOn) { hideModeShortfall(); return; }
   if (linkedInPending(out)) {
     loadMode.textContent = hzModeHoldLine(out.mode, out.heldSince);
     loadMode.hidden = false;
@@ -1716,7 +1744,11 @@ function peekCard(out, { fromOneOff = false } = {}) {
     // The mode this card was produced under, when it was not the owner's own.
     // `mode` on a one-off reply is still the standing pick, so servedMode is
     // what the panel has to ask for to see this card.
-    finishedOnOneOff = out.oneOff === true && typeof out.servedMode === 'string'
+    // ...and never when there are no groups: a widening the owner could not
+    // have asked for is not one to carry across the hand-off. hermes does not
+    // send `oneOff` on this path today; this is the page refusing to act on it
+    // if an older one does.
+    finishedOnOneOff = modesOn && out.oneOff === true && typeof out.servedMode === 'string'
       ? out.servedMode
       : null;
     // A real card is waiting. The table has done its job; hand over to the

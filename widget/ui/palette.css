@@ -3178,6 +3178,11 @@ body.connections .tile-tip.on { opacity: 1; }
 
 /* The mode row. Three words, one on, and the one that is on is stated by
    weight and a filled pill rather than by colour alone. */
+/* The block the group row and its two notes live in, so the three hide as one.
+   Its own [hidden] rule on the lesson recorded twice already in this file: a
+   class that sets `display` out-specifies the attribute, and .ob-mode-block is
+   one edit away from being such a class. */
+.ob-mode-block[hidden] { display: none; }
 .ob-modes { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
 .ob-mode {
   font: inherit; font-size: 12.5px;
